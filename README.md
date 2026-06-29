@@ -28,31 +28,79 @@ tmux-backed, so they survive disconnects. A **Skills** page distributes reusable
 ## Run your own (private) instance
 
 **Option A — one click:** press **⋮ → Duplicate this Space** at the top of this
-page. Keep visibility **Private**. That's it.
-
-**Option B — one command** (needs `pip install huggingface_hub` and `hf auth login`):
+page. Keep visibility **Private**. Then create a private Storage Bucket and mount
+it at `/data` before logging in:
 
 ```python
-from huggingface_hub import duplicate_space
-duplicate_space("lvwerra/agent-manager-template", private=True)
+from huggingface_hub import HfApi, Volume, create_bucket
+
+api = HfApi()
+space_id = "your-username/agent-manager"
+bucket_id = "your-username/agent-manager-data"
+
+create_bucket(bucket_id, private=True, exist_ok=True)
+api.set_space_volumes(
+    space_id,
+    volumes=[
+        Volume(type="bucket", source=bucket_id, mount_path="/data"),
+    ],
+)
+api.restart_space(space_id)
+```
+
+**Option B — one script** (needs `pip install -U huggingface_hub` and
+`hf auth login`):
+
+```python
+from huggingface_hub import HfApi, Volume, create_bucket
+
+api = HfApi()
+space_id = "your-username/agent-manager"
+bucket_id = "your-username/agent-manager-data"
+
+create_bucket(bucket_id, private=True, exist_ok=True)
+api.duplicate_repo(
+    from_id="lvwerra/agent-manager-template",
+    to_id=space_id,
+    repo_type="space",
+    private=True,
+    space_volumes=[
+        Volume(type="bucket", source=bucket_id, mount_path="/data"),
+    ],
+)
 ```
 
 Then open your new private Space and **log in to each agent inside its terminal**
-(run `claude`, `codex`, etc. and follow the prompt) — credentials persist (see
-below). You can also set provider keys as Space **secrets** (`ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, …) instead of logging in interactively.
+(run `claude`, `codex`, etc. and follow the prompt). You can also set provider
+keys as Space **secrets** (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) instead of
+logging in interactively.
 
-## Persistence (optional — no bucket required)
+## Storage bucket (required for real use)
 
-The Space runs fine with **no storage at all**: it falls back to ephemeral disk,
-so you can try it immediately — but sessions, logins, and history reset whenever
-the Space sleeps or rebuilds.
+Agent Manager expects a private Storage Bucket mounted read-write at `/data`.
+That bucket stores your sessions, workspaces, skills, CLI credentials, and
+history. Without the bucket mount, the Space can still boot for preview, but it
+falls back to ephemeral disk: sessions, logins, and history reset whenever the
+Space sleeps or rebuilds.
 
-For durability, pick one (the app uses `/data` automatically either way):
+If you duplicated first, you can add or replace the mount later:
 
-- **Persistent Storage** *(easiest)* — Space **Settings → Persistent Storage**,
-  pick a tier. It mounts a real disk at `/data`. Done.
-- **Private bucket** — attach a private data source mounted at `/data`.
+```python
+from huggingface_hub import HfApi, Volume, create_bucket
+
+api = HfApi()
+space_id = "your-username/agent-manager"
+bucket_id = "your-username/agent-manager-data"
+
+create_bucket(bucket_id, private=True, exist_ok=True)
+api.set_space_volumes(
+    space_id,
+    volumes=[
+        Volume(type="bucket", source=bucket_id, mount_path="/data"),
+    ],
+)
+api.restart_space(space_id)
+```
 
 Everything durable lives under `/data`: `sessions.json`, `groups.json`,
 `workspaces/<folder>/` (per-agent working dirs + shared `skills/`), and each
@@ -80,7 +128,7 @@ sessions are pinned to a stable per-session id so grouped agents don't collide).
 | Var | Default | Purpose |
 |---|---|---|
 | `PORT` | `7860` | HTTP + WS port (HF `app_port`) |
-| `DATA_DIR` | `/data` | Durable root (Persistent Storage or bucket mount) |
+| `DATA_DIR` | `/data` | Durable root (mounted private Storage Bucket) |
 | `USE_TMUX` | auto | `1`/`0` to force tmux on/off (off = direct PTY, no persistence) |
 | `ANTHROPIC_API_KEY` | — | Claude Code / opencode / Hermes (Space **secret**) |
 | `OPENAI_API_KEY` / `CODEX_API_KEY` | — | Codex (Space secret) |

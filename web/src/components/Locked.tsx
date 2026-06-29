@@ -4,7 +4,22 @@ import { useState } from 'react';
 // disabled server-side; this explains how to run a private copy or relock.
 export default function Locked({ spaceId }: { spaceId?: string | null }) {
   const id = spaceId || 'owner/space-name';
-  const cmd = `from huggingface_hub import duplicate_space\nduplicate_space("${id}", private=True)`;
+  const cmd = `from huggingface_hub import HfApi, Volume, create_bucket
+
+api = HfApi()
+space_id = "your-username/agent-manager"
+bucket_id = "your-username/agent-manager-data"
+
+create_bucket(bucket_id, private=True, exist_ok=True)
+api.duplicate_repo(
+    from_id="${id}",
+    to_id=space_id,
+    repo_type="space",
+    private=True,
+    space_volumes=[
+        Volume(type="bucket", source=bucket_id, mount_path="/data"),
+    ],
+)`;
   const [copied, setCopied] = useState(false);
   const copy = () => {
     navigator.clipboard?.writeText(cmd).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {});
@@ -22,7 +37,7 @@ export default function Locked({ spaceId }: { spaceId?: string | null }) {
 
         <h3>Run your own private copy</h3>
         <p className="locked-sub">
-          Press <b>⋮ → Duplicate this Space</b> above and keep it <b>Private</b>, or run:
+          Create a private Storage Bucket mounted at <b>/data</b>, then duplicate this Space:
         </p>
         <div className="locked-cmd">
           <pre><code>{cmd}</code></pre>

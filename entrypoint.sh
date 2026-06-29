@@ -4,8 +4,7 @@
 DATA_DIR="${DATA_DIR:-/data}"
 if ! mkdir -p "$DATA_DIR/workspaces" 2>/dev/null; then
   echo "WARN: $DATA_DIR is not writable — running EPHEMERAL (sessions/logins reset on restart)."
-  echo "      For durability, enable Persistent Storage in the Space settings (mounts at /data),"
-  echo "      or attach a private bucket at /data."
+  echo "      For durability, attach a private Storage Bucket mounted read-write at /data."
   DATA_DIR="$HOME/data"
   mkdir -p "$DATA_DIR/workspaces"
 fi
