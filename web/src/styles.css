@@ -138,15 +138,17 @@ body {
 
 /* public-space locked screen */
 .locked { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; background: var(--bg); }
-.locked-card { max-width: 540px; width: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 32px 34px; box-shadow: 0 12px 40px rgba(0,0,0,0.22); }
+.locked-card { max-width: 920px; width: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 32px 34px; box-shadow: 0 12px 40px rgba(0,0,0,0.22); }
 .locked-emoji { font-size: 34px; }
 .locked-card h1 { margin: 8px 0 4px; font-size: 22px; }
 .locked-card h3 { margin: 22px 0 6px; font-size: 14px; }
 .locked-lead { color: var(--text); font-size: 14px; line-height: 1.55; }
 .locked-sub { color: var(--muted); font-size: 13px; line-height: 1.5; }
-.locked-cmd { display: flex; align-items: stretch; gap: 8px; margin-top: 8px; }
-.locked-cmd pre { flex: 1; margin: 0; overflow-x: auto; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.5; }
-.locked-cmd .btn-ghost { flex: none; align-self: flex-start; }
+.locked-cmd { position: relative; margin-top: 8px; }
+.locked-cmd pre { margin: 0; overflow-x: hidden; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 42px 14px 14px; font-size: 12px; line-height: 1.5; }
+.locked-copy { position: absolute; top: 10px; right: 10px; width: 30px; height: 30px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--muted); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.locked-copy:hover { color: var(--text); border-color: var(--border-strong); }
+.locked-copy svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
 
 /* terminal "process exited" overlay */
 /* Non-blocking banner so the agent's last output (e.g. a login error) stays readable. */

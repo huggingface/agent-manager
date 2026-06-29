@@ -17,7 +17,11 @@ api.duplicate_repo(
     repo_type="space",
     private=True,
     space_volumes=[
-        Volume(type="bucket", source=bucket_id, mount_path="/data"),
+        Volume(
+            type="bucket",
+            source=bucket_id,
+            mount_path="/data",
+        ),
     ],
 )`;
   const [copied, setCopied] = useState(false);
@@ -41,7 +45,12 @@ api.duplicate_repo(
         </p>
         <div className="locked-cmd">
           <pre><code>{cmd}</code></pre>
-          <button className="btn-ghost" onClick={copy}>{copied ? '✓ Copied' : 'Copy'}</button>
+          <button className="locked-copy" onClick={copy} aria-label="Copy setup code" title={copied ? 'Copied' : 'Copy'}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="8" width="10" height="12" rx="2" />
+              <path d="M6 16H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          </button>
         </div>
 
         <h3>Is this your Space?</h3>
