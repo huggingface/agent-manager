@@ -1,0 +1,87 @@
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import { SESSIONS_FILE, allocFolder } from './config.js';
+
+let sessions = [];
+
+function load() {
+  try {
+    sessions = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+    if (!Array.isArray(sessions)) sessions = [];
+  } catch {
+    sessions = [];
+  }
+}
+
+function persist() {
+  const tmp = `${SESSIONS_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(sessions, null, 2));
+  fs.renameSync(tmp, SESSIONS_FILE);
+}
+
+function slugify(name) {
+  return (
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 32) || 'session'
+  );
+}
+
+export function init() {
+  load();
+  // Backfill: older sessions had no explicit folder — their dir is workspaces/<id>.
+  let changed = false;
+  for (const s of sessions) {
+    if (!s.folder) { s.folder = s.id; changed = true; }
+    if (!s.sessionUuid) { s.sessionUuid = crypto.randomUUID(); changed = true; }
+  }
+  if (changed) persist();
+}
+
+export function list() {
+  return sessions.slice();
+}
+
+export function get(id) {
+  return sessions.find((s) => s.id === id) || null;
+}
+
+export function create({ name, cli }) {
+  const cleanName = (name || '').trim() || 'session';
+  const id = `${slugify(cleanName)}-${crypto.randomBytes(3).toString('hex')}`;
+  // The Files agent has no folder of its own — it browses the whole workspace.
+  const folder = cli === 'files' ? null : allocFolder(cleanName);
+  const session = {
+    id,
+    name: cleanName,
+    cli,
+    folder,
+    // Stable per-session conversation id. Lets agents that share a folder (a
+    // group) each resume their OWN conversation instead of all latching onto
+    // the most-recent one in that directory.
+    sessionUuid: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    everStarted: false,
+  };
+  sessions.push(session);
+  persist();
+  return session;
+}
+
+export function update(id, patch) {
+  const s = get(id);
+  if (!s) return null;
+  Object.assign(s, patch);
+  persist();
+  return s;
+}
+
+export function remove(id) {
+  const before = sessions.length;
+  sessions = sessions.filter((s) => s.id !== id);
+  if (sessions.length !== before) persist();
+  // NOTE: the working directory under DATA_DIR/workspaces/<id> is intentionally
+  // left on disk so a delete never destroys the user's files.
+}
