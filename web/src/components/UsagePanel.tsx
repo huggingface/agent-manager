@@ -43,10 +43,14 @@ export default function UsagePanel() {
   const [u, setU] = useState<Usage | null>(null);
   const [err, setErr] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [fetchedAt, setFetchedAt] = useState<number | null>(null);
 
   const load = () => {
     setBusy(true);
-    return api.getUsage().then((d) => { setU(d); setErr(false); }).catch(() => setErr(true)).finally(() => setBusy(false));
+    return api.getUsage()
+      .then((d) => { setU(d); setErr(false); setFetchedAt(Date.now()); })
+      .catch(() => setErr(true))
+      .finally(() => setBusy(false));
   };
   // Refresh on open, on a timer, and when the tab regains focus — the underlying
   // numbers only change when an agent runs, so this just keeps the view current.
@@ -64,9 +68,11 @@ export default function UsagePanel() {
   return (
     <div className="usage">
       <div className="usage-top">
-        <span className="s-muted">Auto-refreshes every 30s</span>
+        <span className="s-muted">
+          {fetchedAt ? `Fetched ${new Date(fetchedAt).toLocaleTimeString()}` : 'Loading…'} · auto every 30s
+        </span>
         <span className="spacer" />
-        <button className="btn-ghost" onClick={load} disabled={busy}>{busy ? '…' : '↻ Refresh'}</button>
+        <button className="btn-ghost" onClick={load} disabled={busy}>{busy ? 'Fetching…' : '↻ Refresh'}</button>
       </div>
       {PROVS.map((p) => {
         const d = u.providers[p.id] || {};
