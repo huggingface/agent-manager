@@ -12,7 +12,6 @@ const fmtSize = (n: number) => {
 };
 
 const join = (a: string, b: string) => (a ? `${a}/${b}` : b);
-
 const sortEntries = (es: FileEntry[]) =>
   [...es].sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
 
@@ -22,11 +21,22 @@ const triggerDownload = (url: string, name: string) => {
   document.body.appendChild(a); a.click(); a.remove();
 };
 
-// Lazily-loaded contents of one directory; recurses through FolderNode. Nesting
-// is structural (each level wrapped in .tree-children) so the indent guide lines
-// come for free.
-function DirContents({ sessionId, path, onOpen }: {
-  sessionId: string; path: string; onOpen: (p: string) => void;
+// ASCII-tree rails: one cell per ancestor (vertical line if that ancestor has
+// more siblings below) plus the elbow cell for this row (├ normally, └ if last).
+// `prefix[i]` = "draw a continuation line at ancestor column i".
+function Rails({ prefix, isLast }: { prefix: boolean[]; isLast: boolean }) {
+  return (
+    <span className="rails" aria-hidden>
+      {prefix.map((cont, i) => <span key={i} className={`rail${cont ? ' v' : ''}`} />)}
+      <span className={`rail elbow${isLast ? ' last' : ''}`} />
+    </span>
+  );
+}
+const padFor = (prefix: boolean[]) => ({ paddingLeft: `${(prefix.length + 1) * 1.1}em` });
+
+// Lazily-loaded contents of one directory; recurses through FolderNode.
+function DirContents({ sessionId, path, prefix, onOpen }: {
+  sessionId: string; path: string; prefix: boolean[]; onOpen: (p: string) => void;
 }) {
   const [entries, setEntries] = useState<FileEntry[] | null>(null);
   const [err, setErr] = useState(false);
@@ -38,35 +48,41 @@ function DirContents({ sessionId, path, onOpen }: {
     return () => { alive = false; };
   }, [sessionId, path]);
 
-  if (err) return <div className="tree-msg">can't read folder</div>;
-  if (!entries) return <div className="tree-msg">…</div>;
-  if (entries.length === 0) return <div className="tree-msg">empty</div>;
+  if (err) return <div className="tree-msg" style={padFor(prefix)}>can't read folder</div>;
+  if (!entries) return <div className="tree-msg" style={padFor(prefix)}>…</div>;
+  if (entries.length === 0) return <div className="tree-msg" style={padFor(prefix)}>empty</div>;
 
+  const arr = sortEntries(entries);
   return (
     <>
-      {sortEntries(entries).map((e) => (e.dir ? (
-        <FolderNode key={e.name} sessionId={sessionId} path={join(path, e.name)} name={e.name} onOpen={onOpen} />
-      ) : (
-        <div
-          key={e.name}
-          className="tree-row file"
-          onDoubleClick={() => triggerDownload(api.downloadUrl(sessionId, join(path, e.name)), e.name)}
-          title="Double-click to download"
-        >
-          <span className="tw-caret" />
-          <FileGlyph className="tw-ico" />
-          <span className="tw-name">{e.name}</span>
-          <span className="tw-size">{fmtSize(e.size)}</span>
-        </div>
-      )))}
+      {arr.map((e, i) => {
+        const isLast = i === arr.length - 1;
+        const p = join(path, e.name);
+        return e.dir ? (
+          <FolderNode key={e.name} sessionId={sessionId} path={p} name={e.name} prefix={prefix} isLast={isLast} onOpen={onOpen} />
+        ) : (
+          <div
+            key={e.name}
+            className="tree-row file"
+            style={padFor(prefix)}
+            onDoubleClick={() => triggerDownload(api.downloadUrl(sessionId, p), e.name)}
+            title="Double-click to download"
+          >
+            <Rails prefix={prefix} isLast={isLast} />
+            <FileGlyph className="tw-ico" />
+            <span className="tw-name">{e.name}</span>
+            <span className="tw-size">{fmtSize(e.size)}</span>
+          </div>
+        );
+      })}
     </>
   );
 }
 
 // A folder row: single click toggles inline expand, double click opens it as the
-// new tree root (breadcrumb navigation). A short timer disambiguates the two.
-function FolderNode({ sessionId, path, name, onOpen }: {
-  sessionId: string; path: string; name: string; onOpen: (p: string) => void;
+// new tree root. A short timer disambiguates the two.
+function FolderNode({ sessionId, path, name, prefix, isLast, onOpen }: {
+  sessionId: string; path: string; name: string; prefix: boolean[]; isLast: boolean; onOpen: (p: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -80,14 +96,12 @@ function FolderNode({ sessionId, path, name, onOpen }: {
   };
   return (
     <>
-      <div className="tree-row folder" onClick={onClick} onDoubleClick={onDoubleClick} title="Click to expand · double-click to open">
-        <span className={`tw-caret${open ? ' open' : ''}`}>
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M6 4l4 4-4 4" /></svg>
-        </span>
-        <FolderGlyph className="tw-ico" />
+      <div className="tree-row folder" style={padFor(prefix)} onClick={onClick} onDoubleClick={onDoubleClick} title="Click to expand · double-click to open">
+        <Rails prefix={prefix} isLast={isLast} />
+        <FolderGlyph className="tw-ico" open={open} />
         <span className="tw-name">{name}</span>
       </div>
-      {open && <div className="tree-children"><DirContents sessionId={sessionId} path={path} onOpen={onOpen} /></div>}
+      {open && <DirContents sessionId={sessionId} path={path} prefix={[...prefix, !isLast]} onOpen={onOpen} />}
     </>
   );
 }
@@ -156,7 +170,7 @@ export default function FilesPane({
         onDragLeave={() => setDragOver(false)}
         onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files.length) upload(e.dataTransfer.files); }}
       >
-        <DirContents key={`${root}:${reloadKey}`} sessionId={session.id} path={root} onOpen={setRoot} />
+        <DirContents key={`${root}:${reloadKey}`} sessionId={session.id} path={root} prefix={[]} onOpen={setRoot} />
         {busy && <div className="tree-msg">Uploading…</div>}
       </div>
 

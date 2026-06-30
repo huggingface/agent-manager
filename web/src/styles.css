@@ -204,24 +204,23 @@ body {
 .file-row .fsize { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .files-empty { color: var(--muted); font-size: 13px; padding: 22px; text-align: center; }
 
-/* tree file viewer (font-size set inline from the shared zoom; children use em) */
+/* tree file viewer — ASCII-style rails (font-size set inline from shared zoom) */
 .files-body.tree { padding: 6px 8px; font-size: 13px; }
-.tree-row { display: flex; align-items: center; gap: 0.4em; padding: 0.2em 0.4em; border-radius: 6px; cursor: pointer; text-decoration: none; color: var(--text); white-space: nowrap; user-select: none; font-size: 1em; }
+.tree-row { position: relative; display: flex; align-items: center; gap: 0.4em; padding: 0.15em 0.5em 0.15em 0; border-radius: 6px; cursor: pointer; text-decoration: none; color: var(--text); white-space: nowrap; user-select: none; font-size: 1em; }
 .tree-row:hover { background: var(--panel-2); }
-/* nested levels: structural indent with a continuous vertical guide line and a
-   short branch tick from it to each child row */
-.tree-children { position: relative; margin-left: 0.75em; padding-left: 0.95em; border-left: 1px solid var(--border); }
-.tree-children > .tree-row, .tree-children > * > .tree-row { position: relative; }
-.tree-children .tree-row::before {
-  content: ''; position: absolute; top: 50%; left: -0.95em; width: 0.6em; height: 1px; background: var(--border);
-}
-.tw-caret { width: 0.9em; height: 0.9em; flex: none; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); transition: transform 0.12s ease; }
-.tw-caret svg { width: 100%; height: 100%; }
-.tw-caret.open { transform: rotate(90deg); }
+
+/* one fixed-width cell per depth; lines drawn with pseudo-elements */
+.rails { position: absolute; left: 0; top: 0; bottom: 0; display: flex; pointer-events: none; }
+.rail { position: relative; width: 1.1em; flex: none; }
+.rail.v::before,                                   /* ancestor continuation: full-height │ */
+.rail.elbow::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; border-left: 1px solid var(--border); }
+.rail.elbow.last::before { bottom: 50%; }          /* last child: line stops at the branch (└) */
+.rail.elbow::after { content: ''; position: absolute; left: 50%; top: 50%; width: 50%; border-top: 1px solid var(--border); } /* ── branch */
+
 .tw-ico { flex: none; width: 1.1em; height: 1.1em; color: color-mix(in srgb, var(--accent) 65%, var(--muted)); }
 .tw-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .tw-size { color: var(--muted); font-size: 0.8em; flex: none; padding-left: 0.6em; font-variant-numeric: tabular-nums; }
-.tree-msg { color: var(--muted); font-size: 0.85em; padding: 0.15em 0.5em; }
+.tree-msg { color: var(--muted); font-size: 0.85em; padding: 0.15em 0; }
 .files-hint { flex: none; padding: 5px 10px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* settings */
