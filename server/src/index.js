@@ -78,7 +78,10 @@ app.get('/api/health', (_req, res) =>
 
 app.get('/api/clis', (_req, res) => res.json(cliCatalog()));
 
-app.get('/api/usage', (req, res) => res.json(buildUsage(req.query.debug === '1')));
+app.get('/api/usage', async (req, res) => {
+  try { res.json(await buildUsage(req.query.debug === '1')); }
+  catch { res.status(500).json({ error: 'usage' }); }
+});
 
 app.get('/api/info', (_req, res) => res.json({
   dataDir: DATA_DIR,

@@ -92,7 +92,9 @@ export default function UsagePanel() {
                 <Bar label="5-hour" q={q.fiveHour} />
                 <Bar label="Weekly" q={q.weekly} />
                 {!q.fiveHour && !q.weekly && <div className="s-help">No quota snapshot yet — run a session to populate.</div>}
-                {q.updatedAt && <div className="s-help">Snapshot {agoStr(q.updatedAt)} — refreshes when {p.label} runs.</div>}
+                {q.source === 'live'
+                  ? <div className="s-help">● Live</div>
+                  : q.updatedAt && <div className="s-help">Snapshot {agoStr(q.updatedAt)} — refreshes when {p.label} runs.</div>}
               </div>
             ) : p.id === 'gemini' ? (
               <div className="s-help">No quota (consumer tier deprecated — uses an API key).</div>
@@ -103,7 +105,7 @@ export default function UsagePanel() {
         );
       })}
       <div className="s-help">
-        Tokens/cost are read from local logs; cost is an <em>estimated API-equivalent</em> (subscriptions are flat-fee). Quota % is a <em>snapshot</em> captured the last time each agent ran (Claude via its status line, Codex from its logs) — it won't reflect an external reset until you run that agent again.
+        Tokens/cost are read from local logs; cost is an <em>estimated API-equivalent</em> (subscriptions are flat-fee). Claude quota is fetched <em>live</em> from your account; Codex quota is a snapshot from its logs (updates when Codex runs).
       </div>
     </div>
   );
