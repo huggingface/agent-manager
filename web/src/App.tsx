@@ -69,7 +69,7 @@ export default function App() {
   );
   const visibleSessions = activeGroup ? groupSessions : activeSingle ? [activeSingle] : [];
   const visibleIds = visibleSessions.map((s) => s.id).join(',');
-  const showZoom = visibleSessions.some((s) => s.cli !== 'files');
+  const showZoom = visibleSessions.length > 0;
 
   // Keep a focused pane within the visible set.
   useEffect(() => {
@@ -124,6 +124,7 @@ export default function App() {
         <FilesPane
           key={s.id}
           session={s}
+          zoom={zoom}
           focused={sessions.length > 1 && s.id === focusedId}
           onFocus={() => setFocusedId(s.id)}
           onClose={() => closePane(s.id)}
