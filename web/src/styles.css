@@ -59,6 +59,8 @@ body {
 /* transparent CLI logos; invert the mostly-black ones in dark mode */
 .cli-logo { flex: none; display: inline-flex; align-items: center; justify-content: center; }
 .cli-logo img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.cli-logo svg { width: 100%; height: 100%; display: block; }
+.cli-logo.files-glyph { color: color-mix(in srgb, var(--accent) 65%, var(--muted)); }
 [data-theme='dark'] .cli-logo.inv-dark img { filter: invert(1); }
 [data-theme='light'] .cli-logo.inv-light img { filter: invert(1); }
 
@@ -206,13 +208,17 @@ body {
 .files-body.tree { padding: 6px 8px; font-size: 13px; }
 .tree-row { display: flex; align-items: center; gap: 0.4em; padding: 0.2em 0.4em; border-radius: 6px; cursor: pointer; text-decoration: none; color: var(--text); white-space: nowrap; user-select: none; font-size: 1em; }
 .tree-row:hover { background: var(--panel-2); }
-/* nested levels: structural indent + a subtle vertical guide line */
-.tree-children { margin-left: 0.85em; padding-left: 0.5em; border-left: 1px solid var(--border); }
+/* nested levels: structural indent with a continuous vertical guide line and a
+   short branch tick from it to each child row */
+.tree-children { position: relative; margin-left: 0.75em; padding-left: 0.95em; border-left: 1px solid var(--border); }
+.tree-children > .tree-row, .tree-children > * > .tree-row { position: relative; }
+.tree-children .tree-row::before {
+  content: ''; position: absolute; top: 50%; left: -0.95em; width: 0.6em; height: 1px; background: var(--border);
+}
 .tw-caret { width: 0.9em; height: 0.9em; flex: none; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); transition: transform 0.12s ease; }
 .tw-caret svg { width: 100%; height: 100%; }
 .tw-caret.open { transform: rotate(90deg); }
-.tw-ico { flex: none; width: 1.1em; height: 1.1em; color: var(--muted); }
-.tree-row.folder .tw-ico { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
+.tw-ico { flex: none; width: 1.1em; height: 1.1em; color: color-mix(in srgb, var(--accent) 65%, var(--muted)); }
 .tw-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .tw-size { color: var(--muted); font-size: 0.8em; flex: none; padding-left: 0.6em; font-variant-numeric: tabular-nums; }
 .tree-msg { color: var(--muted); font-size: 0.85em; padding: 0.15em 0.5em; }

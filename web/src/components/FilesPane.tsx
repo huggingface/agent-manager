@@ -3,6 +3,7 @@ import type { Session } from '../types';
 import * as api from '../api';
 import type { FileEntry } from '../api';
 import Logo from './Logo';
+import { FolderGlyph, FileGlyph } from './icons';
 
 const fmtSize = (n: number) => {
   if (n < 1024) return `${n} B`;
@@ -20,18 +21,6 @@ const triggerDownload = (url: string, name: string) => {
   a.href = url; a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
 };
-
-const FolderIcon = () => (
-  <svg className="tw-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round">
-    <path d="M1.75 4.25a1 1 0 0 1 1-1h3.1a1 1 0 0 1 .7.3l.9.9h5.1a1 1 0 0 1 1 1v6.1a1 1 0 0 1-1 1h-10.8a1 1 0 0 1-1-1z" />
-  </svg>
-);
-const FileIcon = () => (
-  <svg className="tw-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round">
-    <path d="M4 1.75h5L12.25 5v8.25a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V2.75a1 1 0 0 1 1-1z" />
-    <path d="M8.75 1.9V5.25h3.35" />
-  </svg>
-);
 
 // Lazily-loaded contents of one directory; recurses through FolderNode. Nesting
 // is structural (each level wrapped in .tree-children) so the indent guide lines
@@ -65,7 +54,7 @@ function DirContents({ sessionId, path, onOpen }: {
           title="Double-click to download"
         >
           <span className="tw-caret" />
-          <FileIcon />
+          <FileGlyph className="tw-ico" />
           <span className="tw-name">{e.name}</span>
           <span className="tw-size">{fmtSize(e.size)}</span>
         </div>
@@ -95,7 +84,7 @@ function FolderNode({ sessionId, path, name, onOpen }: {
         <span className={`tw-caret${open ? ' open' : ''}`}>
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M6 4l4 4-4 4" /></svg>
         </span>
-        <FolderIcon />
+        <FolderGlyph className="tw-ico" />
         <span className="tw-name">{name}</span>
       </div>
       {open && <div className="tree-children"><DirContents sessionId={sessionId} path={path} onOpen={onOpen} /></div>}
