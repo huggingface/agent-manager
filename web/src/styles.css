@@ -203,16 +203,20 @@ body {
 .files-empty { color: var(--muted); font-size: 13px; padding: 22px; text-align: center; }
 
 /* tree file viewer (font-size set inline from the shared zoom; children use em) */
-.files-body.tree { padding: 4px 0; font-size: 13px; }
-.tree-row { display: flex; align-items: center; gap: 0.45em; padding: 0.18em 0.7em 0.18em 0; cursor: pointer; text-decoration: none; color: var(--text); white-space: nowrap; user-select: none; font-size: 1em; }
+.files-body.tree { padding: 6px 8px; font-size: 13px; }
+.tree-row { display: flex; align-items: center; gap: 0.4em; padding: 0.2em 0.4em; border-radius: 6px; cursor: pointer; text-decoration: none; color: var(--text); white-space: nowrap; user-select: none; font-size: 1em; }
 .tree-row:hover { background: var(--panel-2); }
-.tree-row.file { cursor: default; }
-.tw-caret { width: 1em; flex: none; text-align: center; color: var(--muted); font-size: 0.8em; transition: transform 0.12s ease; }
+/* nested levels: structural indent + a subtle vertical guide line */
+.tree-children { margin-left: 0.85em; padding-left: 0.5em; border-left: 1px solid var(--border); }
+.tw-caret { width: 0.9em; height: 0.9em; flex: none; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); transition: transform 0.12s ease; }
+.tw-caret svg { width: 100%; height: 100%; }
 .tw-caret.open { transform: rotate(90deg); }
-.tw-ico { flex: none; width: 1.3em; text-align: center; font-size: 0.95em; }
+.tw-ico { flex: none; width: 1.1em; height: 1.1em; color: var(--muted); }
+.tree-row.folder .tw-ico { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
 .tw-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .tw-size { color: var(--muted); font-size: 0.8em; flex: none; padding-left: 0.6em; font-variant-numeric: tabular-nums; }
-.tree-msg { color: var(--muted); font-size: 0.85em; padding: 0.15em 0.7em; }
+.tree-msg { color: var(--muted); font-size: 0.85em; padding: 0.15em 0.5em; }
+.files-hint { flex: none; padding: 5px 10px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* settings */
 .settings-nav { padding: 10px; display: flex; flex-direction: column; gap: 4px; }

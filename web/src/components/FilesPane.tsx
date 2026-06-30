@@ -11,14 +11,33 @@ const fmtSize = (n: number) => {
 };
 
 const join = (a: string, b: string) => (a ? `${a}/${b}` : b);
-const indent = (depth: number) => `${0.4 + depth * 1.1}em`;
 
 const sortEntries = (es: FileEntry[]) =>
   [...es].sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : a.dir ? -1 : 1));
 
-// Lazily-loaded contents of one directory; recurses through FolderNode.
-function DirContents({ sessionId, path, depth, onOpen }: {
-  sessionId: string; path: string; depth: number; onOpen: (p: string) => void;
+const triggerDownload = (url: string, name: string) => {
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+};
+
+const FolderIcon = () => (
+  <svg className="tw-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round">
+    <path d="M1.75 4.25a1 1 0 0 1 1-1h3.1a1 1 0 0 1 .7.3l.9.9h5.1a1 1 0 0 1 1 1v6.1a1 1 0 0 1-1 1h-10.8a1 1 0 0 1-1-1z" />
+  </svg>
+);
+const FileIcon = () => (
+  <svg className="tw-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round">
+    <path d="M4 1.75h5L12.25 5v8.25a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V2.75a1 1 0 0 1 1-1z" />
+    <path d="M8.75 1.9V5.25h3.35" />
+  </svg>
+);
+
+// Lazily-loaded contents of one directory; recurses through FolderNode. Nesting
+// is structural (each level wrapped in .tree-children) so the indent guide lines
+// come for free.
+function DirContents({ sessionId, path, onOpen }: {
+  sessionId: string; path: string; onOpen: (p: string) => void;
 }) {
   const [entries, setEntries] = useState<FileEntry[] | null>(null);
   const [err, setErr] = useState(false);
@@ -30,28 +49,26 @@ function DirContents({ sessionId, path, depth, onOpen }: {
     return () => { alive = false; };
   }, [sessionId, path]);
 
-  if (err) return <div className="tree-msg" style={{ paddingLeft: indent(depth) }}>can't read folder</div>;
-  if (!entries) return <div className="tree-msg" style={{ paddingLeft: indent(depth) }}>…</div>;
-  if (entries.length === 0) return <div className="tree-msg" style={{ paddingLeft: indent(depth) }}>empty</div>;
+  if (err) return <div className="tree-msg">can't read folder</div>;
+  if (!entries) return <div className="tree-msg">…</div>;
+  if (entries.length === 0) return <div className="tree-msg">empty</div>;
 
   return (
     <>
       {sortEntries(entries).map((e) => (e.dir ? (
-        <FolderNode key={e.name} sessionId={sessionId} path={join(path, e.name)} name={e.name} depth={depth} onOpen={onOpen} />
+        <FolderNode key={e.name} sessionId={sessionId} path={join(path, e.name)} name={e.name} onOpen={onOpen} />
       ) : (
-        <a
+        <div
           key={e.name}
           className="tree-row file"
-          style={{ paddingLeft: indent(depth) }}
-          href={api.downloadUrl(sessionId, join(path, e.name))}
-          download
-          title="Download"
+          onDoubleClick={() => triggerDownload(api.downloadUrl(sessionId, join(path, e.name)), e.name)}
+          title="Double-click to download"
         >
           <span className="tw-caret" />
-          <span className="tw-ico">·</span>
+          <FileIcon />
           <span className="tw-name">{e.name}</span>
           <span className="tw-size">{fmtSize(e.size)}</span>
-        </a>
+        </div>
       )))}
     </>
   );
@@ -59,8 +76,8 @@ function DirContents({ sessionId, path, depth, onOpen }: {
 
 // A folder row: single click toggles inline expand, double click opens it as the
 // new tree root (breadcrumb navigation). A short timer disambiguates the two.
-function FolderNode({ sessionId, path, name, depth, onOpen }: {
-  sessionId: string; path: string; name: string; depth: number; onOpen: (p: string) => void;
+function FolderNode({ sessionId, path, name, onOpen }: {
+  sessionId: string; path: string; name: string; onOpen: (p: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -74,18 +91,14 @@ function FolderNode({ sessionId, path, name, depth, onOpen }: {
   };
   return (
     <>
-      <div
-        className="tree-row folder"
-        style={{ paddingLeft: indent(depth) }}
-        onClick={onClick}
-        onDoubleClick={onDoubleClick}
-        title="Click to expand · double-click to open"
-      >
-        <span className={`tw-caret${open ? ' open' : ''}`}>▸</span>
-        <span className="tw-ico">{open ? '📂' : '📁'}</span>
+      <div className="tree-row folder" onClick={onClick} onDoubleClick={onDoubleClick} title="Click to expand · double-click to open">
+        <span className={`tw-caret${open ? ' open' : ''}`}>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M6 4l4 4-4 4" /></svg>
+        </span>
+        <FolderIcon />
         <span className="tw-name">{name}</span>
       </div>
-      {open && <DirContents sessionId={sessionId} path={path} depth={depth + 1} onOpen={onOpen} />}
+      {open && <div className="tree-children"><DirContents sessionId={sessionId} path={path} onOpen={onOpen} /></div>}
     </>
   );
 }
@@ -154,9 +167,11 @@ export default function FilesPane({
         onDragLeave={() => setDragOver(false)}
         onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files.length) upload(e.dataTransfer.files); }}
       >
-        <DirContents key={`${root}:${reloadKey}`} sessionId={session.id} path={root} depth={0} onOpen={setRoot} />
+        <DirContents key={`${root}:${reloadKey}`} sessionId={session.id} path={root} onOpen={setRoot} />
         {busy && <div className="tree-msg">Uploading…</div>}
       </div>
+
+      <div className="files-hint">Click a folder to expand · double-click to open it · double-click a file to download</div>
     </div>
   );
 }
