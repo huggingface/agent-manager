@@ -278,6 +278,10 @@ body {
 
 /* usage page */
 .usage { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.usage-top { display: flex; align-items: center; gap: 8px; }
+.usage-top .spacer { flex: 1; }
+.usage-top .s-muted { font-size: 12px; }
+.usage-top .btn-ghost { padding: 5px 10px; font-size: 12px; }
 .usage-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
 .usage-head { display: flex; align-items: center; gap: 9px; font-size: 14px; }
 .usage-head .spacer { flex: 1; }

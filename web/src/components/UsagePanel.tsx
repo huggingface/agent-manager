@@ -18,6 +18,14 @@ const resetStr = (s?: number) => {
   if (mins < 60) return `resets in ${mins}m`;
   return `resets in ${Math.floor(mins / 60)}h ${mins % 60}m`;
 };
+const agoStr = (ms?: number) => {
+  if (!ms) return '';
+  const m = Math.round((Date.now() - ms) / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
+};
 
 function Bar({ label, q }: { label: string; q?: QuotaWindow }) {
   if (!q || q.usedPercent == null) return null;
@@ -34,13 +42,32 @@ function Bar({ label, q }: { label: string; q?: QuotaWindow }) {
 export default function UsagePanel() {
   const [u, setU] = useState<Usage | null>(null);
   const [err, setErr] = useState(false);
-  useEffect(() => { api.getUsage().then(setU).catch(() => setErr(true)); }, []);
+  const [busy, setBusy] = useState(false);
+
+  const load = () => {
+    setBusy(true);
+    return api.getUsage().then((d) => { setU(d); setErr(false); }).catch(() => setErr(true)).finally(() => setBusy(false));
+  };
+  // Refresh on open, on a timer, and when the tab regains focus — the underlying
+  // numbers only change when an agent runs, so this just keeps the view current.
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 30_000);
+    const onFocus = () => load();
+    window.addEventListener('focus', onFocus);
+    return () => { clearInterval(t); window.removeEventListener('focus', onFocus); };
+  }, []);
 
   if (err) return <div className="placeholder"><p>Usage data unavailable (is <span className="mono">ccusage</span> installed?).</p></div>;
   if (!u) return <div className="placeholder"><p>Loading…</p></div>;
 
   return (
     <div className="usage">
+      <div className="usage-top">
+        <span className="s-muted">Auto-refreshes every 30s</span>
+        <span className="spacer" />
+        <button className="btn-ghost" onClick={load} disabled={busy}>{busy ? '…' : '↻ Refresh'}</button>
+      </div>
       {PROVS.map((p) => {
         const d = u.providers[p.id] || {};
         const q = d.quota;
@@ -59,6 +86,7 @@ export default function UsagePanel() {
                 <Bar label="5-hour" q={q.fiveHour} />
                 <Bar label="Weekly" q={q.weekly} />
                 {!q.fiveHour && !q.weekly && <div className="s-help">No quota snapshot yet — run a session to populate.</div>}
+                {q.updatedAt && <div className="s-help">Snapshot {agoStr(q.updatedAt)} — refreshes when {p.label} runs.</div>}
               </div>
             ) : p.id === 'gemini' ? (
               <div className="s-help">No quota (consumer tier deprecated — uses an API key).</div>
@@ -69,7 +97,7 @@ export default function UsagePanel() {
         );
       })}
       <div className="s-help">
-        Tokens/cost are read from local logs; cost is an <em>estimated API-equivalent</em> (subscriptions are flat-fee). Quota % is the live 5-hour / weekly window where the agent exposes it.
+        Tokens/cost are read from local logs; cost is an <em>estimated API-equivalent</em> (subscriptions are flat-fee). Quota % is a <em>snapshot</em> captured the last time each agent ran (Claude via its status line, Codex from its logs) — it won't reflect an external reset until you run that agent again.
       </div>
     </div>
   );

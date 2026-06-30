@@ -38,7 +38,7 @@ export const getInfo = () => fetch('/api/info').then(json);
 export interface QuotaWindow { usedPercent?: number; resetsAt?: number; windowMinutes?: number; }
 export interface ProviderUsage {
   tokensToday?: number; costToday?: number; tokensWeek?: number; costWeek?: number; totalCost?: number;
-  quota?: { fiveHour?: QuotaWindow; weekly?: QuotaWindow; opus?: QuotaWindow } | null;
+  quota?: { fiveHour?: QuotaWindow; weekly?: QuotaWindow; opus?: QuotaWindow; updatedAt?: number } | null;
 }
 export interface Usage { providers: Record<string, ProviderUsage>; generatedAt: string; }
 export const getUsage = (): Promise<Usage> => fetch('/api/usage').then(json);
