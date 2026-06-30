@@ -120,9 +120,10 @@ function codexQuota() {
   });
 }
 
-// Snapshot fallback: the statusline hook (claude-statusline.mjs) writes the last
-// rate_limits Claude rendered. Only as fresh as the last Claude session.
-function claudeSnapshotQuota() {
+// Claude quota is written by our statusline hook (see claude-statusline.mjs):
+// it captures the rate_limits Claude reports, so it's as fresh as the last time
+// a Claude session made a model call on the Space.
+function claudeQuota() {
   try {
     const cfg = process.env.CLAUDE_CONFIG_DIR;
     if (!cfg) return null;
@@ -132,51 +133,8 @@ function claudeSnapshotQuota() {
     const rl = j.rate_limits;
     if (!rl) return null;
     const w = (x) => (x ? { usedPercent: x.used_percentage ?? x.used_percent, resetsAt: x.resets_at } : null);
-    return { fiveHour: w(rl.five_hour), weekly: w(rl.seven_day), opus: w(rl.seven_day_opus), updatedAt: j.ts || null, source: 'snapshot' };
+    return { fiveHour: w(rl.five_hour), weekly: w(rl.seven_day), opus: w(rl.seven_day_opus), updatedAt: j.ts || null };
   } catch { return null; }
-}
-
-// Live quota from the same first-party account-usage endpoint Claude Code's
-// `fetchUtilization` uses — no inference call, no token cost. Undocumented, so
-// we treat any failure (expired/absent token, network, shape change) as "fall
-// back to the statusline snapshot". Cached briefly so polling can't hammer it.
-let liveCache = { ts: 0, val: null };
-async function claudeLiveQuota() {
-  if (Date.now() - liveCache.ts < 20_000) return liveCache.val;
-  let val = null;
-  try {
-    const cfg = process.env.CLAUDE_CONFIG_DIR;
-    const cred = cfg && JSON.parse(fs.readFileSync(path.join(cfg, '.credentials.json'), 'utf8'));
-    const token = cred && cred.claudeAiOauth && cred.claudeAiOauth.accessToken;
-    if (token) {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 6_000);
-      let r;
-      try {
-        r = await fetch('https://api.anthropic.com/api/oauth/usage', {
-          headers: { authorization: `Bearer ${token}`, 'anthropic-version': '2023-06-01' },
-          signal: ctrl.signal,
-        });
-      } finally { clearTimeout(timer); }
-      if (r && r.ok) {
-        const j = await r.json();
-        const win = (x) => (x && typeof x.utilization === 'number'
-          ? { usedPercent: x.utilization, resetsAt: x.resets_at ? Math.floor(Date.parse(x.resets_at) / 1000) : undefined }
-          : null);
-        const fiveHour = win(j.five_hour);
-        const weekly = win(j.seven_day);
-        if (fiveHour || weekly) {
-          val = { fiveHour, weekly, opus: win(j.seven_day_opus), updatedAt: Date.now(), source: 'live' };
-        }
-      }
-    }
-  } catch { val = null; }
-  liveCache = { ts: Date.now(), val };
-  return val;
-}
-
-async function claudeQuota() {
-  return (await claudeLiveQuota()) || claudeSnapshotQuota();
 }
 
 // Diagnostics: where might Claude transcripts live, and does ccusage see them?
@@ -213,10 +171,10 @@ function debugInfo() {
   };
 }
 
-export async function buildUsage(debug = false) {
+export function buildUsage(debug = false) {
   const out = {
     providers: {
-      claude: { ...(providerUsage('claude') || {}), quota: await claudeQuota() },
+      claude: { ...(providerUsage('claude') || {}), quota: claudeQuota() },
       codex: { ...(providerUsage('codex') || {}), quota: codexQuota() },
       gemini: { ...(providerUsage('gemini') || {}), quota: null },
     },

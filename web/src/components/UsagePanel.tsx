@@ -10,21 +10,12 @@ const PROVS = [
 
 const fmtTok = (n = 0) =>
   n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n);
-const fmtCost = (n = 0) => `$${n.toFixed(2)}`;
 const resetStr = (s?: number) => {
   if (!s) return '';
   const mins = Math.round((s * 1000 - Date.now()) / 60000);
   if (mins <= 0) return 'resetting';
   if (mins < 60) return `resets in ${mins}m`;
   return `resets in ${Math.floor(mins / 60)}h ${mins % 60}m`;
-};
-const agoStr = (ms?: number) => {
-  if (!ms) return '';
-  const m = Math.round((Date.now() - ms) / 60000);
-  if (m < 1) return 'just now';
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  return h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`;
 };
 
 function Bar({ label, q }: { label: string; q?: QuotaWindow }) {
@@ -42,38 +33,13 @@ function Bar({ label, q }: { label: string; q?: QuotaWindow }) {
 export default function UsagePanel() {
   const [u, setU] = useState<Usage | null>(null);
   const [err, setErr] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [fetchedAt, setFetchedAt] = useState<number | null>(null);
-
-  const load = () => {
-    setBusy(true);
-    return api.getUsage()
-      .then((d) => { setU(d); setErr(false); setFetchedAt(Date.now()); })
-      .catch(() => setErr(true))
-      .finally(() => setBusy(false));
-  };
-  // Refresh on open, on a timer, and when the tab regains focus — the underlying
-  // numbers only change when an agent runs, so this just keeps the view current.
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 30_000);
-    const onFocus = () => load();
-    window.addEventListener('focus', onFocus);
-    return () => { clearInterval(t); window.removeEventListener('focus', onFocus); };
-  }, []);
+  useEffect(() => { api.getUsage().then(setU).catch(() => setErr(true)); }, []);
 
   if (err) return <div className="placeholder"><p>Usage data unavailable (is <span className="mono">ccusage</span> installed?).</p></div>;
   if (!u) return <div className="placeholder"><p>Loading…</p></div>;
 
   return (
     <div className="usage">
-      <div className="usage-top">
-        <span className="s-muted">
-          {fetchedAt ? `Fetched ${new Date(fetchedAt).toLocaleTimeString()}` : 'Loading…'} · auto every 30s
-        </span>
-        <span className="spacer" />
-        <button className="btn-ghost" onClick={load} disabled={busy}>{busy ? 'Fetching…' : '↻ Refresh'}</button>
-      </div>
       {PROVS.map((p) => {
         const d = u.providers[p.id] || {};
         const q = d.quota;
@@ -84,17 +50,14 @@ export default function UsagePanel() {
               <b>{p.label}</b>
             </div>
             <div className="usage-stats">
-              <div><span className="s-muted">Today</span><b>{fmtTok(d.tokensToday)} tok{d.costToday ? ` · ${fmtCost(d.costToday)}` : ''}</b></div>
-              <div><span className="s-muted">This week</span><b>{fmtTok(d.tokensWeek)} tok{d.costWeek ? ` · ${fmtCost(d.costWeek)} est` : ''}</b></div>
+              <div><span className="s-muted">Today</span><b>{fmtTok(d.tokensToday)} tok</b></div>
+              <div><span className="s-muted">This week</span><b>{fmtTok(d.tokensWeek)} tok</b></div>
             </div>
             {q ? (
               <div className="usage-quota">
                 <Bar label="5-hour" q={q.fiveHour} />
                 <Bar label="Weekly" q={q.weekly} />
-                {!q.fiveHour && !q.weekly && <div className="s-help">No quota snapshot yet — run a session to populate.</div>}
-                {q.source === 'live'
-                  ? <div className="s-help">● Live</div>
-                  : q.updatedAt && <div className="s-help">Snapshot {agoStr(q.updatedAt)} — refreshes when {p.label} runs.</div>}
+                {!q.fiveHour && !q.weekly && <div className="s-help">No quota yet — run a session to populate.</div>}
               </div>
             ) : p.id === 'gemini' ? (
               <div className="s-help">No quota (consumer tier deprecated — uses an API key).</div>
@@ -105,7 +68,7 @@ export default function UsagePanel() {
         );
       })}
       <div className="s-help">
-        Tokens/cost are read from local logs; cost is an <em>estimated API-equivalent</em> (subscriptions are flat-fee). Claude quota is fetched <em>live</em> from your account; Codex quota is a snapshot from its logs (updates when Codex runs).
+        Token counts and quota are read from each agent's local logs on the Space. They reflect the state as of that agent's <em>last model call here</em> — running a session updates them; activity outside the Space won't.
       </div>
     </div>
   );
