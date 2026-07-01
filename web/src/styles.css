@@ -97,6 +97,7 @@ body {
 .agent-picks { display: flex; flex-direction: column; gap: 4px; }
 .agent-pick { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font: inherit; font-size: 13px; cursor: pointer; text-align: left; }
 .agent-pick:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+.agent-pick.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); font-weight: 600; }
 
 /* new-group: per-agent quantity cart */
 .cart { display: flex; flex-direction: column; gap: 4px; }

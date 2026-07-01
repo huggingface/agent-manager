@@ -10,7 +10,10 @@ export default function NewSession({
   onCancel?: () => void;
 }) {
   const [name, setName] = useState('');
-  const pick = (c: Cli) => { onCreate(name.trim() || c.label, c.id); setName(''); };
+  const avail = clis.filter((c) => c.available);
+  const [cli, setCli] = useState(avail[0]?.id || 'shell');
+  const sel = avail.find((c) => c.id === cli) || avail[0];
+  const submit = () => { if (!sel) return; onCreate(name.trim() || sel.label, sel.id); setName(''); };
 
   return (
     <div className="widget">
@@ -19,17 +22,23 @@ export default function NewSession({
         placeholder="Agent name (optional)"
         value={name}
         onChange={(e) => setName(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Escape') onCancel?.(); }}
+        onKeyDown={(e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') onCancel?.(); }}
       />
       <div className="agent-picks">
-        {clis.filter((c) => c.available).map((c) => (
-          <button key={c.id} className="agent-pick" title={`New ${c.label}`} onClick={() => pick(c)}>
+        {avail.map((c) => (
+          <button
+            key={c.id}
+            className={`agent-pick${cli === c.id ? ' on' : ''}`}
+            onClick={() => setCli(c.id)}
+          >
             <Logo cli={c.id} size={16} />
             <span>{c.label}</span>
           </button>
         ))}
       </div>
-      {onCancel && <button className="btn-ghost" onClick={onCancel}>Cancel</button>}
+      <div className="widget-actions">
+        <button className="btn-primary" onClick={submit} disabled={!sel}>Create</button>
+      </div>
     </div>
   );
 }
