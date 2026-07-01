@@ -16,6 +16,7 @@ export interface Cli {
   color: string;
   available: boolean;
   ready?: boolean;
+  version?: string | null;
 }
 
 export interface Group {

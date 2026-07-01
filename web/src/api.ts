@@ -35,6 +35,9 @@ export const move = (ref: string, to: MoveTarget) =>
 
 export const getInfo = () => fetch('/api/info').then(json);
 
+export const relaunchSpace = (): Promise<{ ok: boolean; reason?: string }> =>
+  fetch('/api/relaunch', { method: 'POST' }).then(json);
+
 export interface QuotaWindow { usedPercent?: number; resetsAt?: number; windowMinutes?: number; }
 export interface ProviderUsage {
   tokensToday?: number; costToday?: number; tokensWeek?: number; costWeek?: number; totalCost?: number;

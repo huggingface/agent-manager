@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import type { Cli } from '../types';
+import * as api from '../api';
 import SkillsEditor from './SkillsEditor';
 import UsagePanel from './UsagePanel';
 
@@ -9,7 +11,7 @@ const PAGES: { id: Page; label: string }[] = [
   { id: 'skills', label: 'Skills' },
 ];
 
-interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; tmux?: boolean; }
+interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; tmux?: boolean; canRelaunch?: boolean; }
 
 export default function SettingsView({
   page, onPage, onClose, theme, onToggleTheme, clis, info,
@@ -22,6 +24,16 @@ export default function SettingsView({
   clis: Cli[];
   info: Info | null;
 }) {
+  const [relaunch, setRelaunch] = useState<{ busy?: boolean; msg?: string; confirm?: boolean }>({});
+  const doRelaunch = async () => {
+    setRelaunch({ busy: true });
+    try {
+      const r = await api.relaunchSpace();
+      if (r.ok) setRelaunch({ msg: 'Rebuilding — the Space will restart in ~1–2 min. Reload once it\'s back.' });
+      else if (r.reason === 'no-token') setRelaunch({ msg: 'Add an HF_TOKEN secret (write access) to the Space to enable one-click relaunch, or use ⋮ → Factory reboot.' });
+      else setRelaunch({ msg: `Couldn't relaunch (${r.reason}).` });
+    } catch { setRelaunch({ msg: 'Request failed.' }); }
+  };
   return (
     <div className="app">
       <aside className="sidebar">
@@ -62,11 +74,29 @@ export default function SettingsView({
                         : { background: 'var(--muted)', opacity: 0.4 }}
                     />
                     <span>{c.label}</span>
-                    <span className="s-muted">{!c.available ? 'unavailable' : ready ? 'ready' : 'needs setup'}</span>
+                    {c.available && c.version && <span className="s-muted mono chip-ver">v{c.version}</span>}
+                    <span className="s-muted chip-state">{!c.available ? 'unavailable' : ready ? 'ready' : 'needs setup'}</span>
                   </div>
                 );
               })}
             </div>
+
+            <div className="setting-row" style={{ marginTop: 12 }}>
+              <div>
+                <div className="s-label">Update CLIs</div>
+                <div className="s-help">Factory-reboots the Space to reinstall every CLI at its latest version and relaunch. Sessions survive on the bucket.</div>
+              </div>
+              {relaunch.confirm ? (
+                <span className="confirm-del">
+                  <span className="s-muted">Rebuild now?</span>
+                  <button className="btn-primary" disabled={relaunch.busy} onClick={doRelaunch}>{relaunch.busy ? '…' : 'Relaunch'}</button>
+                  <button className="btn-ghost" onClick={() => setRelaunch({})}>Cancel</button>
+                </span>
+              ) : (
+                <button className="btn-ghost" onClick={() => setRelaunch({ confirm: true })}>↻ Relaunch &amp; update</button>
+              )}
+            </div>
+            {relaunch.msg && <div className="s-help" style={{ marginTop: 6 }}>{relaunch.msg}</div>}
 
             <h3>Space</h3>
             <div className="kv">

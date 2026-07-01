@@ -7,7 +7,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import {
   PORT, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR, USE_TMUX, TMUX_AVAILABLE,
-  ensureDirs, cliCatalog, cliById, slugify, renameFolderTo, workspacePath,
+  ensureDirs, cliCatalog, cliById, slugify, renameFolderTo, workspacePath, refreshVersions,
 } from './config.js';
 import * as store from './sessions.js';
 import * as groups from './groups.js';
@@ -17,6 +17,7 @@ import { buildUsage } from './usage.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 
 ensureDirs();
+refreshVersions();
 store.init();
 groups.init();
 order.init();
@@ -80,6 +81,8 @@ app.get('/api/clis', (_req, res) => res.json(cliCatalog()));
 
 app.get('/api/usage', (req, res) => res.json(buildUsage(req.query.debug === '1')));
 
+const hfToken = () => process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN || process.env.HF_API_TOKEN || null;
+
 app.get('/api/info', (_req, res) => res.json({
   dataDir: DATA_DIR,
   home: process.env.HOME || null,
@@ -87,7 +90,25 @@ app.get('/api/info', (_req, res) => res.json({
   spaceHost: process.env.SPACE_HOST || null,
   tmux: USE_TMUX,
   locked: isPublic(),
+  canRelaunch: !!(process.env.SPACE_ID && hfToken()),
 }));
+
+// Factory-reboot the Space: rebuilds the image (reinstalling the CLIs at their
+// latest published versions, per the Dockerfile) and relaunches everything.
+// Needs an HF token with write access set as a Space secret (HF_TOKEN).
+app.post('/api/relaunch', async (_req, res) => {
+  const id = process.env.SPACE_ID;
+  const token = hfToken();
+  if (!id) return res.json({ ok: false, reason: 'no-space' });
+  if (!token) return res.json({ ok: false, reason: 'no-token' });
+  try {
+    const r = await fetch(`https://huggingface.co/api/spaces/${id}/restart?factory=true`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}` },
+    });
+    if (!r.ok) return res.json({ ok: false, reason: `http-${r.status}` });
+    return res.json({ ok: true });
+  } catch (e) { return res.json({ ok: false, reason: String(e.message || e) }); }
+});
 
 // ---------- skills (markdown/text files in the workspace) ----------
 const SKILL_RE = /^[\w.\- ]{1,80}$/;

@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execSync, execFile } from 'node:child_process';
 
 export const PORT = parseInt(process.env.PORT || '7860', 10);
 export const DATA_DIR = process.env.DATA_DIR || path.resolve(process.cwd(), 'data');
@@ -18,6 +18,22 @@ function commandExists(cmd) {
     return true;
   } catch {
     return false;
+  }
+}
+
+// Installed CLI versions, resolved asynchronously (a few `--version` calls) and
+// cached so /api/clis stays fast. Refreshed at startup; versions only change on
+// a rebuild (new process → fresh cache).
+const versionCache = new Map();
+export function refreshVersions() {
+  for (const c of CLIS) {
+    if (!c.bin || !commandExists(c.bin)) continue;
+    execFile(c.bin, ['--version'], { timeout: 8000 }, (err, stdout = '') => {
+      if (err) return;
+      const s = String(stdout);
+      const m = s.match(/\d+\.\d+\.\d+[\w.-]*/);
+      versionCache.set(c.id, m ? m[0] : s.trim().split('\n')[0].slice(0, 40));
+    });
   }
 }
 
@@ -82,6 +98,7 @@ export function cliCatalog() {
     color: c.color,
     available: c.bin ? commandExists(c.bin) : true, // no binary (shell/files) = always available
     ready: (c.bin ? commandExists(c.bin) : true) && isConfigured(c.id),
+    version: versionCache.get(c.id) || null,
   }));
 }
 

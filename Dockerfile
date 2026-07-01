@@ -18,11 +18,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV LANG=C.UTF-8
 
 # AI coding CLIs available to every session (installed globally, on PATH for all users).
-RUN npm install -g @anthropic-ai/claude-code @openai/codex
+# Pinned to @latest so a factory reboot (no-cache rebuild) reinstalls the newest
+# published versions — that's what the "Relaunch & update" button triggers.
+RUN npm install -g @anthropic-ai/claude-code@latest @openai/codex@latest
 # Newer agents, best-effort so a publish hiccup can't break the image build;
 # the app marks any missing binary "unavailable" gracefully.
-RUN npm install -g @google/gemini-cli || echo "gemini-cli install failed"
-RUN npm install -g opencode-ai || echo "opencode install failed"
+RUN npm install -g @google/gemini-cli@latest || echo "gemini-cli install failed"
+RUN npm install -g opencode-ai@latest || echo "opencode install failed"
 # ccusage powers the Usage page (token/cost aggregation across agents). Its
 # platform binary ships without an execute bit and the package tries to chmod
 # itself on first run — which fails with EPERM at runtime as the non-root user.

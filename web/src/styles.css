@@ -238,7 +238,9 @@ body {
 .s-muted { color: var(--muted); }
 .agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; margin-top: 8px; }
 .agent-chip { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; font-size: 13px; }
-.agent-chip .s-muted { margin-left: auto; font-size: 11px; }
+.agent-chip .s-muted { font-size: 11px; }
+.agent-chip .chip-ver { margin-left: 6px; opacity: 0.8; }
+.agent-chip .chip-state { margin-left: auto; }
 .kv { display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-top: 8px; }
 .kv > div { display: flex; justify-content: space-between; gap: 16px; padding: 11px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
 .kv > div:last-child { border-bottom: none; }
