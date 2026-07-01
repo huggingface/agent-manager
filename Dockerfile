@@ -61,5 +61,11 @@ ENV PORT=7860 \
     PUBLIC_DIR=/app/public \
     DISABLE_AUTOUPDATER=1
 
+# Snapshot the env var NAMES present at build time. HF injects Space secrets and
+# variables only at runtime, so anything in the runtime env that's absent here
+# was injected by the platform — that's how the app detects which secrets exist
+# (names only; values are never recorded).
+RUN env | sed 's/=.*//' | sort -u > /app/build-env-keys.txt
+
 EXPOSE 7860
 CMD ["sh", "/app/entrypoint.sh"]

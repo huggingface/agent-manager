@@ -11,7 +11,7 @@ const PAGES: { id: Page; label: string }[] = [
   { id: 'skills', label: 'Skills' },
 ];
 
-interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; tmux?: boolean; canRelaunch?: boolean; }
+interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; tmux?: boolean; canRelaunch?: boolean; secrets?: string[]; }
 
 export default function SettingsView({
   page, onPage, onClose, theme, onToggleTheme, clis, info,
@@ -109,6 +109,14 @@ export default function SettingsView({
               <div><span>Durable storage</span><b className="mono">{info?.dataDir || '—'}</b></div>
               <div><span>Home</span><b className="mono">{info?.home || '—'}</b></div>
               <div><span>tmux</span><b>{info?.tmux ? 'on' : 'off'}</b></div>
+            </div>
+
+            <h3>Secrets &amp; variables</h3>
+            <div className="s-help">Detected by diffing the runtime environment against a build-time snapshot — names only, never values. Includes both Secrets and Variables set in the Space settings.</div>
+            <div className="secret-chips">
+              {info?.secrets && info.secrets.length > 0
+                ? info.secrets.map((k) => <span key={k} className="secret-chip mono">{k}</span>)
+                : <span className="s-muted">none detected</span>}
             </div>
           </div>
         )}

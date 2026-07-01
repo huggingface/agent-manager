@@ -99,6 +99,10 @@ body {
 .agent-pick:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
 .agent-pick.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); font-weight: 600; }
 
+/* detected secrets/variables */
+.secret-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.secret-chip { padding: 3px 8px; font-size: 12px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; }
+
 /* new-group: per-agent quantity cart */
 .cart { display: flex; flex-direction: column; gap: 4px; }
 .cart-row { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 8px; font-size: 13px; }

@@ -83,6 +83,23 @@ app.get('/api/usage', (req, res) => res.json(buildUsage(req.query.debug === '1')
 
 const hfToken = () => process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN || process.env.HF_API_TOKEN || null;
 
+// Env var names that existed at build time (baked in by the Dockerfile). Names
+// present at runtime but NOT here were injected by HF → the Space's secrets and
+// variables. We never read their values, only report the names.
+const BUILD_ENV_KEYS = (() => {
+  try {
+    return new Set(fs.readFileSync('/app/build-env-keys.txt', 'utf8').split('\n').map((s) => s.trim()).filter(Boolean));
+  } catch { return null; }
+})();
+// Platform/runtime vars that aren't user secrets (set by HF or our entrypoint).
+const NON_SECRET = new Set(['HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'NPM_CONFIG_PREFIX', 'PWD', 'OLDPWD', 'SHLVL', '_', 'HOSTNAME']);
+function injectedEnvKeys() {
+  if (!BUILD_ENV_KEYS) return [];
+  return Object.keys(process.env)
+    .filter((k) => !BUILD_ENV_KEYS.has(k) && !NON_SECRET.has(k) && !k.startsWith('SPACE_'))
+    .sort();
+}
+
 app.get('/api/info', (_req, res) => res.json({
   dataDir: DATA_DIR,
   home: process.env.HOME || null,
@@ -91,6 +108,7 @@ app.get('/api/info', (_req, res) => res.json({
   tmux: USE_TMUX,
   locked: isPublic(),
   canRelaunch: !!(process.env.SPACE_ID && hfToken()),
+  secrets: injectedEnvKeys(),
 }));
 
 // Factory-reboot the Space: rebuilds the image (reinstalling the CLIs at their
