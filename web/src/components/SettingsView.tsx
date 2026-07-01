@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Cli } from '../types';
 import * as api from '../api';
 import SkillsEditor from './SkillsEditor';
@@ -25,6 +25,17 @@ export default function SettingsView({
   info: Info | null;
 }) {
   const [relaunch, setRelaunch] = useState<{ busy?: boolean; msg?: string; confirm?: boolean }>({});
+  const [secretKeys, setSecretKeys] = useState<string[]>([]);
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const [secretsSaved, setSecretsSaved] = useState<'idle' | 'saving' | 'saved'>('idle');
+  useEffect(() => {
+    api.getSecrets().then((d) => { setSecretKeys(d.detected); setNotes(d.notes || {}); }).catch(() => {});
+  }, []);
+  const saveNotes = async () => {
+    setSecretsSaved('saving');
+    try { await api.saveSecrets(notes); setSecretsSaved('saved'); setTimeout(() => setSecretsSaved('idle'), 1800); }
+    catch { setSecretsSaved('idle'); }
+  };
   const doRelaunch = async () => {
     setRelaunch({ busy: true });
     try {
@@ -112,12 +123,31 @@ export default function SettingsView({
             </div>
 
             <h3>Secrets &amp; variables</h3>
-            <div className="s-help">Detected by diffing the runtime environment against a build-time snapshot — names only, never values. Includes both Secrets and Variables set in the Space settings.</div>
-            <div className="secret-chips">
-              {info?.secrets && info.secrets.length > 0
-                ? info.secrets.map((k) => <span key={k} className="secret-chip mono">{k}</span>)
-                : <span className="s-muted">none detected</span>}
-            </div>
+            <div className="s-help">Detected by diffing the runtime environment against a build-time snapshot — names only, never values. Describe what each is for; saving publishes an <span className="mono">environment</span> skill so every agent knows what's available.</div>
+            {secretKeys.length === 0 ? (
+              <div className="s-muted" style={{ marginTop: 8 }}>None detected.</div>
+            ) : (
+              <>
+                <div className="secret-list">
+                  {secretKeys.map((k) => (
+                    <div key={k} className="secret-row">
+                      <span className="secret-chip mono">{k}</span>
+                      <input
+                        className="secret-desc"
+                        placeholder="What is this used for?"
+                        value={notes[k] || ''}
+                        onChange={(e) => setNotes((n) => ({ ...n, [k]: e.target.value }))}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="widget-actions" style={{ marginTop: 8, maxWidth: 260 }}>
+                  <button className="btn-primary" onClick={saveNotes} disabled={secretsSaved === 'saving'}>
+                    {secretsSaved === 'saving' ? 'Saving…' : secretsSaved === 'saved' ? '✓ Saved' : 'Save descriptions'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
 

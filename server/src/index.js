@@ -91,12 +91,16 @@ const BUILD_ENV_KEYS = (() => {
     return new Set(fs.readFileSync('/app/build-env-keys.txt', 'utf8').split('\n').map((s) => s.trim()).filter(Boolean));
   } catch { return null; }
 })();
-// Platform/runtime vars that aren't user secrets (set by HF or our entrypoint).
-const NON_SECRET = new Set(['HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'NPM_CONFIG_PREFIX', 'PWD', 'OLDPWD', 'SHLVL', '_', 'HOSTNAME']);
+// Platform/runtime vars that aren't user secrets (set by HF / k8s / our entrypoint).
+const NON_SECRET = new Set([
+  'HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'NPM_CONFIG_PREFIX', 'PWD', 'OLDPWD', 'SHLVL', '_', 'HOSTNAME',
+  'ACCELERATOR', 'COMMIT_SHA', 'CPU_CORES', 'HF_DATASETS_TRUST_REMOTE_CODE', 'IMAGE_SHA', 'MEMORY', 'OMP_NUM_THREADS',
+]);
+const NON_SECRET_PREFIX = ['SPACE_', 'KUBERNETES_', 'NVIDIA_', 'CUDA_', 'NV_'];
 function injectedEnvKeys() {
   if (!BUILD_ENV_KEYS) return [];
   return Object.keys(process.env)
-    .filter((k) => !BUILD_ENV_KEYS.has(k) && !NON_SECRET.has(k) && !k.startsWith('SPACE_'))
+    .filter((k) => !BUILD_ENV_KEYS.has(k) && !NON_SECRET.has(k) && !NON_SECRET_PREFIX.some((p) => k.startsWith(p)))
     .sort();
 }
 
@@ -126,6 +130,42 @@ app.post('/api/relaunch', async (_req, res) => {
     if (!r.ok) return res.json({ ok: false, reason: `http-${r.status}` });
     return res.json({ ok: true });
   } catch (e) { return res.json({ ok: false, reason: String(e.message || e) }); }
+});
+
+// ---------- secrets: describe each injected secret/variable, feed a skill ----------
+const SECRET_NOTES_FILE = path.join(DATA_DIR, 'secret-notes.json');
+function loadSecretNotes() {
+  try { return JSON.parse(fs.readFileSync(SECRET_NOTES_FILE, 'utf8')); } catch { return {}; }
+}
+// (Re)build the "environment" skill so every agent knows which env vars exist
+// and what they're for. Values are never written — only names + descriptions.
+function generateEnvSkill(notes) {
+  const keys = injectedEnvKeys();
+  if (!keys.length) { undistributeSkill('environment.md'); try { fs.rmSync(skillPath('environment.md')); } catch {} return; }
+  const lines = keys.map((k) => `- \`${k}\`${notes[k] ? ` — ${notes[k]}` : ''}`);
+  const content = `---
+name: environment
+description: "Environment variables configured in this Space and what they're for."
+---
+
+# Available environment variables
+
+These are set in the Space and available to every agent here. Read a value from
+the environment when you need it (e.g. \`$NAME\`); never print secret values.
+
+${lines.join('\n')}
+`;
+  const p = skillPath('environment.md');
+  if (p) { try { fs.mkdirSync(SKILLS_DIR, { recursive: true }); fs.writeFileSync(p, content); } catch {} }
+  distributeSkill('environment.md', content);
+}
+
+app.get('/api/secrets', (_req, res) => res.json({ detected: injectedEnvKeys(), notes: loadSecretNotes() }));
+app.put('/api/secrets', (req, res) => {
+  const notes = (req.body && req.body.notes && typeof req.body.notes === 'object') ? req.body.notes : {};
+  try { fs.writeFileSync(SECRET_NOTES_FILE, JSON.stringify(notes, null, 2)); } catch {}
+  generateEnvSkill(notes);
+  res.json({ ok: true });
 });
 
 // ---------- skills (markdown/text files in the workspace) ----------
@@ -489,6 +529,8 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => handle.kill());
 });
+
+generateEnvSkill(loadSecretNotes()); // keep the environment skill current on boot
 
 server.listen(PORT, () => {
   console.log(`Agent Manager :${PORT}  tmux=${USE_TMUX}  data=${DATA_DIR}`);

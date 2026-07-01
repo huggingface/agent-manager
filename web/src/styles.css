@@ -100,8 +100,11 @@ body {
 .agent-pick.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); font-weight: 600; }
 
 /* detected secrets/variables */
-.secret-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.secret-chip { padding: 3px 8px; font-size: 12px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; }
+.secret-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.secret-row { display: flex; align-items: center; gap: 8px; }
+.secret-chip { padding: 4px 8px; font-size: 12px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; white-space: nowrap; flex: none; min-width: 140px; }
+.secret-desc { flex: 1; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text); font: inherit; font-size: 13px; }
+.secret-desc:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
 
 /* new-group: per-agent quantity cart */
 .cart { display: flex; flex-direction: column; gap: 4px; }

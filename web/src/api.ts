@@ -38,6 +38,11 @@ export const getInfo = () => fetch('/api/info').then(json);
 export const relaunchSpace = (): Promise<{ ok: boolean; reason?: string }> =>
   fetch('/api/relaunch', { method: 'POST' }).then(json);
 
+export interface SecretsData { detected: string[]; notes: Record<string, string>; }
+export const getSecrets = (): Promise<SecretsData> => fetch('/api/secrets').then(json);
+export const saveSecrets = (notes: Record<string, string>) =>
+  fetch('/api/secrets', { method: 'PUT', headers: HEADERS, body: JSON.stringify({ notes }) }).then(json);
+
 export interface QuotaWindow { usedPercent?: number; resetsAt?: number; windowMinutes?: number; }
 export interface ProviderUsage {
   tokensToday?: number; costToday?: number; tokensWeek?: number; costWeek?: number; totalCost?: number;
