@@ -3,6 +3,18 @@ import { marked } from 'marked';
 import * as api from '../api';
 import type { SkillFile } from '../api';
 
+// Split YAML-ish frontmatter (name/description) from the markdown body.
+function parseFront(md: string): { meta: Record<string, string> | null; body: string } {
+  const m = md.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (!m) return { meta: null, body: md };
+  const meta: Record<string, string> = {};
+  for (const line of m[1].split('\n')) {
+    const kv = line.match(/^(\w[\w-]*):\s*(.*)$/);
+    if (kv) meta[kv[1]] = kv[2].trim().replace(/^["']|["']$/g, '');
+  }
+  return { meta, body: m[2] };
+}
+
 export default function SkillsEditor() {
   const [skills, setSkills] = useState<SkillFile[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -103,9 +115,20 @@ export default function SkillsEditor() {
                 <button className="btn-ghost danger" title="Delete skill" onClick={() => setConfirmDel(true)}>🗑 Delete</button>
               )}
             </div>
-            {mode === 'view' ? (
-              <div className="markdown" dangerouslySetInnerHTML={{ __html: marked.parse(content) as string }} />
-            ) : (
+            {mode === 'view' ? (() => {
+              const { meta, body } = parseFront(content);
+              return (
+                <div className="skill-view">
+                  {meta && (meta.name || meta.description) && (
+                    <div className="skill-meta">
+                      {meta.name && <div className="skill-meta-name mono">{meta.name}</div>}
+                      {meta.description && <div className="skill-meta-desc">{meta.description}</div>}
+                    </div>
+                  )}
+                  <div className="markdown" dangerouslySetInnerHTML={{ __html: marked.parse(body) as string }} />
+                </div>
+              );
+            })() : (
               <textarea className="skill-text" value={content} onChange={(e) => setContent(e.target.value)} spellCheck={false} />
             )}
           </>

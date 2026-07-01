@@ -141,19 +141,51 @@ function loadSecretNotes() {
 // and what they're for. Values are never written — only names + descriptions.
 function generateEnvSkill(notes) {
   const keys = injectedEnvKeys();
-  if (!keys.length) { undistributeSkill('environment.md'); try { fs.rmSync(skillPath('environment.md')); } catch {} return; }
-  const lines = keys.map((k) => `- \`${k}\`${notes[k] ? ` — ${notes[k]}` : ''}`);
+  const envLines = keys.length
+    ? keys.map((k) => `- \`${k}\`${notes[k] ? ` — ${notes[k]}` : ''}`).join('\n')
+    : '_None configured yet._';
   const content = `---
 name: environment
-description: "Environment variables configured in this Space and what they're for."
+description: "How this Agent Manager workspace works — files, persistence, other agents — and the environment variables available."
 ---
 
-# Available environment variables
+# Your environment: Agent Manager
 
-These are set in the Space and available to every agent here. Read a value from
-the environment when you need it (e.g. \`$NAME\`); never print secret values.
+You are running as a terminal session inside **Agent Manager**, a private cloud
+workspace (a Hugging Face Space) operated by a single user. Several AI coding
+CLIs run here side by side — Claude Code, Codex, Gemini CLI, opencode, and
+Hermes — alongside plain shells and a file browser.
 
-${lines.join('\n')}
+## Where you are
+- Your working directory is a **workspace folder** under \`/data/workspaces/\`. Everything you create here is saved.
+- Your home is \`/data/home\` (\`$HOME\`): config, credentials, and shell history persist across restarts.
+- \`$AM_SESSION\` is your workspace folder name; \`$AM_USER\` is the operator.
+
+## What persists (and what doesn't)
+- \`/data\` is **durable storage** (a mounted bucket). Files under \`/data/workspaces/…\` and \`/data/home/…\` survive restarts and sleep.
+- **Empty directories are not persisted** — only files. If a folder must exist, keep a file in it.
+- Sessions are **tmux-backed**: they keep running when the browser disconnects and can be resumed after the Space sleeps.
+
+## You may not be alone
+- Other agents run in **sibling folders** under \`/data/workspaces/\`, and you may be **grouped** to share a single folder with other agents.
+- Be a good neighbor: stay within your task, and never delete or \`rm -rf\` a folder that isn't yours.
+
+## Shared skills
+- Reusable skills (like this one) live in \`/data/workspaces/skills/\` and are published into every agent's skills directory automatically. Read them for project conventions and recurring tasks.
+
+## Tooling
+- A full Linux shell with \`git\`, \`ripgrep\` (\`rg\`), \`node\`, and \`python3\`, plus build tools. Reach for \`rg\` for fast search.
+- Network access is available; API keys are provided via the environment (below) or your home config.
+
+## Working well here
+- Keep work inside your workspace folder; use absolute paths under \`/data/workspaces/\` when in doubt.
+- Prefer small, verifiable steps and leave the workspace tidy — the operator browses these files directly in the file viewer.
+
+## Environment variables
+These are configured in the Space and available to every agent. Read a value
+from the environment when you need it (e.g. \`$NAME\`); never print secret values.
+
+${envLines}
 `;
   const p = skillPath('environment.md');
   if (p) { try { fs.mkdirSync(SKILLS_DIR, { recursive: true }); fs.writeFileSync(p, content); } catch {} }
