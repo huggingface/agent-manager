@@ -32,8 +32,7 @@ export NPM_CONFIG_PREFIX="$AM_LOCAL/npm"       # npm install -g → local, no ro
 export PATH="$AM_LOCAL/py/bin:$AM_LOCAL/npm/bin:$AM_LOCAL/bin:$HOME/.local/bin:$PATH"
 
 # Durable, user-editable setup script. Runs on EVERY start (keep it idempotent);
-# seed a template on first boot. Backgrounded so a long install can't hold up the
-# Space coming online — progress/errors go to $DATA_DIR/install.log.
+# seed a template on first boot.
 if [ ! -f "$DATA_DIR/install.sh" ]; then
   cat > "$DATA_DIR/install.sh" <<'EOF'
 #!/bin/sh
@@ -56,6 +55,18 @@ if [ ! -f "$DATA_DIR/install.sh" ]; then
 # -----------------------------------------------------------------------------
 EOF
 fi
-( sh "$DATA_DIR/install.sh" > "$DATA_DIR/install.log" 2>&1; echo "[install.sh finished $(date -u)]" >> "$DATA_DIR/install.log" ) &
+# Run it BLOCKING so custom tools/envs are ready before any session starts.
+# Log to a file and echo to the Space logs; capture the real exit code; continue
+# regardless so a failing install still leaves a working UI to fix it.
+echo "Running $DATA_DIR/install.sh (blocking)…"
+sh "$DATA_DIR/install.sh" > "$DATA_DIR/install.log" 2>&1
+INSTALL_CODE=$?
+cat "$DATA_DIR/install.log"
+if [ "$INSTALL_CODE" -eq 0 ]; then
+  echo "[install.sh OK]"
+else
+  echo "[install.sh FAILED (exit $INSTALL_CODE) — starting anyway; fix it via the Files browser, see $DATA_DIR/install.log]"
+fi
+echo "[install.sh finished $(date -u) exit=$INSTALL_CODE]" >> "$DATA_DIR/install.log"
 
 exec node /app/server/src/index.js
