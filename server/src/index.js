@@ -181,6 +181,12 @@ Hermes — alongside plain shells and a file browser.
 - Keep work inside your workspace folder; use absolute paths under \`/data/workspaces/\` when in doubt.
 - Prefer small, verifiable steps and leave the workspace tidy — the operator browses these files directly in the file viewer.
 
+## Custom tools & Python environments
+- Custom tools are installed at startup by \`/data/install.sh\` (edit it to add packages; it re-runs on every restart). Progress/errors: \`/data/install.log\`.
+- \`$AM_LOCAL\` is a **fast local disk** for tools, envs, and caches. Build Python envs there, **never** as a \`.venv\` on the \`/data\` bucket (object storage is slow and can't lock/mmap well). From a workspace:
+  \`UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/<name>" uv sync\`
+- Keep \`pyproject.toml\` / \`uv.lock\` / \`requirements.txt\` in the workspace — they're the durable source of truth; the env rebuilds from them in seconds after a restart.
+
 ## Environment variables
 These are configured in the Space and available to every agent. Read a value
 from the environment when you need it (e.g. \`$NAME\`); never print secret values.

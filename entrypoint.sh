@@ -19,4 +19,43 @@ export CLAUDE_CONFIG_DIR="$DATA_DIR/state/claude"
 export CODEX_HOME="$DATA_DIR/state/codex"
 mkdir -p "$CLAUDE_CONFIG_DIR" "$CODEX_HOME"
 
+# Fast, EPHEMERAL local area for tools / Python envs / package caches. Never the
+# /data bucket — object storage is slow for many-small-files and can't mmap or
+# lock well, so running libraries from it is painful. These reinstall on demand.
+export AM_LOCAL="/home/node/local"
+if ! mkdir -p "$AM_LOCAL/bin" 2>/dev/null; then AM_LOCAL="$DATA_DIR/.local-cache"; mkdir -p "$AM_LOCAL/bin"; fi
+export UV_CACHE_DIR="$AM_LOCAL/uv-cache"
+export PIP_CACHE_DIR="$AM_LOCAL/pip-cache"
+export PYTHONPYCACHEPREFIX="$AM_LOCAL/pycache"
+export PYTHONUSERBASE="$AM_LOCAL/py"          # pip install --user → local, fast
+export NPM_CONFIG_PREFIX="$AM_LOCAL/npm"       # npm install -g → local, no root needed
+export PATH="$AM_LOCAL/py/bin:$AM_LOCAL/npm/bin:$AM_LOCAL/bin:$HOME/.local/bin:$PATH"
+
+# Durable, user-editable setup script. Runs on EVERY start (keep it idempotent);
+# seed a template on first boot. Backgrounded so a long install can't hold up the
+# Space coming online — progress/errors go to $DATA_DIR/install.log.
+if [ ! -f "$DATA_DIR/install.sh" ]; then
+  cat > "$DATA_DIR/install.sh" <<'EOF'
+#!/bin/sh
+# Runs at Space startup on the fast LOCAL disk (not the /data bucket). Re-runs on
+# every restart, so keep it idempotent. Log: /data/install.log
+#
+# Platform-provided vars: $AM_LOCAL (fast ephemeral root for tools/envs/caches),
+# $UV_CACHE_DIR, $PIP_CACHE_DIR.
+#
+# Examples --------------------------------------------------------------------
+# CLI tools (land on PATH, local + fast):
+#   uv tool install ruff
+#   pip install --user httpie
+#   npm install -g prettier
+#
+# A project's Python env — build it on LOCAL disk from the workspace lockfile
+# (never a .venv on the bucket). pyproject.toml/uv.lock stay in the workspace:
+#   UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/myproj" \
+#     sh -c 'cd /data/workspaces/myproj && uv sync'
+# -----------------------------------------------------------------------------
+EOF
+fi
+( sh "$DATA_DIR/install.sh" > "$DATA_DIR/install.log" 2>&1; echo "[install.sh finished $(date -u)]" >> "$DATA_DIR/install.log" ) &
+
 exec node /app/server/src/index.js

@@ -32,6 +32,10 @@ RUN npm install -g opencode-ai@latest || echo "opencode install failed"
 RUN npm install -g ccusage \
       && find "$(npm root -g)/ccusage" -type f -name ccusage -exec chmod a+rx {} + \
       || echo "ccusage install failed"
+# uv: fast Python package/env manager agents use to (re)build project envs from
+# their lockfiles on local disk. Installed to /usr/local/bin (on PATH for all).
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
+      || echo "uv install failed"
 
 # Non-root user: the node base image already ships uid 1000 as "node" (HF runs as uid 1000).
 ENV HOME=/home/node
