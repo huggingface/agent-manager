@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Cli } from '../types';
+import Logo from './Logo';
 
 export default function NewSession({
   clis, onCreate, onCancel,
@@ -9,30 +10,26 @@ export default function NewSession({
   onCancel?: () => void;
 }) {
   const [name, setName] = useState('');
-  const firstAvail = clis.find((c) => c.available)?.id || 'shell';
-  const [cli, setCli] = useState(firstAvail);
-  const submit = () => { onCreate(name.trim(), cli); setName(''); };
+  const pick = (c: Cli) => { onCreate(name.trim() || c.label, c.id); setName(''); };
 
   return (
     <div className="widget">
       <input
         autoFocus
-        placeholder="Agent name (e.g. refactor-api)"
+        placeholder="Agent name (optional)"
         value={name}
         onChange={(e) => setName(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') onCancel?.(); }}
+        onKeyDown={(e) => { if (e.key === 'Escape') onCancel?.(); }}
       />
-      <select value={cli} onChange={(e) => setCli(e.target.value)}>
-        {clis.map((c) => (
-          <option key={c.id} value={c.id} disabled={!c.available}>
-            {c.label}{c.available ? '' : ' — unavailable'}
-          </option>
+      <div className="agent-picks">
+        {clis.filter((c) => c.available).map((c) => (
+          <button key={c.id} className="agent-pick" title={`New ${c.label}`} onClick={() => pick(c)}>
+            <Logo cli={c.id} size={16} />
+            <span>{c.label}</span>
+          </button>
         ))}
-      </select>
-      <div className="widget-actions">
-        <button className="btn-primary" onClick={submit}>Create agent</button>
-        {onCancel && <button className="btn-ghost" onClick={onCancel}>Cancel</button>}
       </div>
+      {onCancel && <button className="btn-ghost" onClick={onCancel}>Cancel</button>}
     </div>
   );
 }

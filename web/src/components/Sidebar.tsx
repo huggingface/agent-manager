@@ -19,7 +19,7 @@ export default function Sidebar({
   onOpenSession: (sessionId: string, groupId?: string) => void;
   onOpenSettings: () => void;
   onNewSession: (name: string, cli: string) => void;
-  onNewGroup: (name: string) => void;
+  onNewGroup: (name: string, cart?: { cli: string; count: number }[]) => void;
   onRenameGroup: (id: string, name: string) => void;
   onRenameSession: (id: string, name: string) => void;
   onDeleteGroup: (id: string) => void;
@@ -31,6 +31,7 @@ export default function Sidebar({
 }) {
   const [panel, setPanel] = useState<'none' | 'session' | 'group'>('none');
   const [groupName, setGroupName] = useState('');
+  const [cart, setCart] = useState<Record<string, number>>({});
   const [editRef, setEditRef] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -41,7 +42,12 @@ export default function Sidebar({
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
 
   const clearDrag = () => { setDragRef(null); setDrop(null); };
-  const submitGroup = () => { onNewGroup(groupName.trim()); setGroupName(''); setPanel('none'); };
+  const bump = (id: string, d: number) => setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
+  const submitGroup = () => {
+    const items = Object.entries(cart).filter(([, n]) => n > 0).map(([cli, count]) => ({ cli, count }));
+    onNewGroup(groupName.trim() || 'Group', items);
+    setGroupName(''); setCart({}); setPanel('none');
+  };
   const startEdit = (ref: string, name: string) => { setEditRef(ref); setEditName(name); };
   const commitEdit = () => {
     if (editRef) {
@@ -186,9 +192,25 @@ export default function Sidebar({
             <input autoFocus placeholder="Group name" value={groupName}
               onChange={(e) => setGroupName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') submitGroup(); if (e.key === 'Escape') setPanel('none'); }} />
+            <div className="cart">
+              {clis.filter((c) => c.available).map((c) => {
+                const n = cart[c.id] || 0;
+                return (
+                  <div key={c.id} className={`cart-row${n > 0 ? ' has' : ''}`}>
+                    <div className="stepper">
+                      <button onClick={() => bump(c.id, -1)} disabled={n === 0} aria-label="Fewer">−</button>
+                      <span className="stepper-n">{n}</span>
+                      <button onClick={() => bump(c.id, 1)} aria-label="More">+</button>
+                    </div>
+                    <Logo cli={c.id} size={16} />
+                    <span className="cart-name">{c.label}</span>
+                  </div>
+                );
+              })}
+            </div>
             <div className="widget-actions">
               <button className="btn-primary" onClick={submitGroup}>Create group</button>
-              <button className="btn-ghost" onClick={() => setPanel('none')}>Cancel</button>
+              <button className="btn-ghost" onClick={() => { setCart({}); setPanel('none'); }}>Cancel</button>
             </div>
           </div>
         )}

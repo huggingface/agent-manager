@@ -83,8 +83,14 @@ export default function App() {
     await refresh();
     setActiveRef(`s:${s.id}`);
   };
-  const newGroup = async (name: string) => {
+  const newGroup = async (name: string, cart?: { cli: string; count: number }[]) => {
     const g = await api.createGroup(name);
+    for (const { cli, count } of cart || []) {
+      const base = cliMap[cli]?.label || cli;
+      for (let i = 0; i < count; i++) {
+        await api.createSession(count > 1 ? `${base} ${i + 1}` : base, cli, g.id);
+      }
+    }
     await refresh();
     setActiveRef(`g:${g.id}`);
   };
