@@ -84,9 +84,14 @@ export default function SettingsView({
             <div className="setting-row" style={{ marginTop: 12 }}>
               <div>
                 <div className="s-label">Update CLIs</div>
-                <div className="s-help">Factory-reboots the Space to reinstall every CLI at its latest version and relaunch. Sessions survive on the bucket.</div>
+                <div className="s-help">
+                  Factory-reboots the Space to reinstall every CLI at its latest version and relaunch. Sessions survive on the bucket.
+                  {!info?.canRelaunch && ' Needs a write-scoped HF_TOKEN set as a Space secret.'}
+                </div>
               </div>
-              {relaunch.confirm ? (
+              {!info?.canRelaunch ? (
+                <button className="btn-ghost" disabled title="Add a write-scoped HF_TOKEN secret to the Space to enable">↻ Relaunch &amp; update</button>
+              ) : relaunch.confirm ? (
                 <span className="confirm-del">
                   <span className="s-muted">Rebuild now?</span>
                   <button className="btn-primary" disabled={relaunch.busy} onClick={doRelaunch}>{relaunch.busy ? '…' : 'Relaunch'}</button>

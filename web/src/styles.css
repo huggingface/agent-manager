@@ -78,6 +78,8 @@ body {
 .add-row .btn-ghost { flex: 1; }
 .btn-ghost { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer; }
 .btn-ghost:hover { border-color: var(--border-strong); }
+.btn-ghost:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-ghost:disabled:hover { border-color: var(--border); }
 .btn-ghost.on { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .btn-primary { background: var(--accent); color: var(--accent-fg); border: none; border-radius: 8px; padding: 9px 12px; font-size: 13px; font-weight: 600; cursor: pointer; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
