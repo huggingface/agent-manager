@@ -308,9 +308,9 @@ body {
 
 .brand-actions { display: flex; gap: 6px; }
 
-/* files pane */
-.files-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
-.files-bar .spacer { flex: 1; }
+/* files pane — one compact header bar (logo · nav · upload · close) */
+.pane-head.files-head { display: flex; align-items: center; gap: 7px; }
+.files-head .spacer { flex: 1; }
 .crumbs { display: flex; align-items: center; gap: 1px; overflow: hidden; white-space: nowrap; }
 .crumb { background: none; border: none; color: var(--accent); cursor: pointer; font: inherit; font-size: 12px; padding: 1px 4px; border-radius: var(--r-sm); }
 .crumb:hover { background: var(--panel-2); }
@@ -446,6 +446,20 @@ body {
 
 /* usage page */
 .usage { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.usage-msg { color: var(--muted); font-size: 12.5px; padding: 14px 2px; }
+.usage-msg .et-cursor { height: 12px; width: 6px; margin-left: 6px; }
+.usage h3 { margin: 14px 0 0; font-size: 14px; }
+
+/* trace analytics: hairline rows, mono numbers, no card-cage */
+.traces-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.traces-table th { text-align: right; font-weight: 500; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.traces-table th:first-child { text-align: left; }
+.traces-table td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.traces-table tbody tr:hover { background: var(--panel-2); }
+.traces-table .tr-agent { text-align: left; display: flex; align-items: center; gap: 7px; overflow: hidden; }
+.traces-table .tr-agent span { overflow: hidden; text-overflow: ellipsis; }
+.traces-table .tr-when { color: var(--muted); font-size: 11px; }
+.traces-table .tr-total td { font-weight: 600; border-top: 1px solid var(--border-strong); border-bottom: none; }
 .usage-top { display: flex; align-items: center; gap: 8px; }
 .usage-top .spacer { flex: 1; }
 .usage-top .s-muted { font-size: 12px; }

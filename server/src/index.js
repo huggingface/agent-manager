@@ -14,6 +14,7 @@ import * as groups from './groups.js';
 import * as order from './order.js';
 import { attach, agentInfo, deriveState, stop } from './runner.js';
 import { buildUsage } from './usage.js';
+import { buildTraces } from './traces.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 
 ensureDirs();
@@ -89,6 +90,8 @@ app.get('/api/health', (_req, res) =>
 app.get('/api/clis', (_req, res) => res.json(cliCatalog()));
 
 app.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.debug === '1')));
+
+app.get('/api/traces', async (_req, res) => res.json(await buildTraces()));
 
 const hfToken = () => process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN || process.env.HF_API_TOKEN || null;
 

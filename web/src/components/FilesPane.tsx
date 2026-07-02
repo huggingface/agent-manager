@@ -139,21 +139,14 @@ export default function FilesPane({
 
   return (
     <div className={`slot${focused ? ' focused' : ''}`} onMouseDown={onFocus}>
+      {/* One compact bar: logo, navigation, upload, close — no title. */}
       <div
-        className={`pane-head${dragId ? ' draggable' : ''}`}
+        className={`pane-head files-head${dragId ? ' draggable' : ''}`}
         draggable={!!dragId}
         onDragStart={dragId ? (e) => { e.dataTransfer.setData('text/plain', dragId); e.dataTransfer.effectAllowed = 'move'; onDragActive?.(true); } : undefined}
         onDragEnd={dragId ? () => onDragActive?.(false) : undefined}
       >
-        <div className="ph-left">
-          <Logo cli="files" size={16} tint="#d99a2b" />
-          <span className="status idle" />
-        </div>
-        <span className="ph-title">{session.name}</span>
-        <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
-      </div>
-
-      <div className="files-bar">
+        <Logo cli="files" size={16} tint="#d99a2b" />
         <button className="mini-btn" title="Up" disabled={!root} onClick={up}><UpGlyph /></button>
         <div className="crumbs">
           {crumbs.map((c, i) => (
@@ -168,6 +161,7 @@ export default function FilesPane({
           <UploadGlyph /> Upload
           <input type="file" multiple hidden onChange={(e) => { if (e.target.files) upload(e.target.files); e.target.value = ''; }} />
         </label>
+        <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
       </div>
 
       <div

@@ -60,6 +60,16 @@ export interface ProviderUsage {
 export interface Usage { providers: Record<string, ProviderUsage>; generatedAt: string; }
 export const getUsage = (): Promise<Usage> => fetch('/api/usage').then(json);
 
+// ---- trace analytics ----
+export interface TraceStats {
+  turns: number; prompts: number; toolCalls: number; tools: Record<string, number>;
+  web: number; tokensIn: number; tokensOut: number; cacheRead: number;
+  firstTs: number; lastTs: number; files: number;
+}
+export interface SessionTraces extends TraceStats { id: string; name: string; cli: string; path: string | null; }
+export interface Traces { sessions: SessionTraces[]; other: TraceStats | null; totals: TraceStats; generatedAt: string; }
+export const getTraces = (): Promise<Traces> => fetch('/api/traces').then(json);
+
 // ---- files ----
 export interface FileEntry { name: string; dir: boolean; size: number; }
 export interface FileListing { path: string; root: string; entries: FileEntry[]; }

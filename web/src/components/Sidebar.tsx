@@ -4,7 +4,7 @@ import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
-import { SlidersGlyph, SunGlyph, MoonGlyph, TrashGlyph, PencilGlyph, StopGlyph } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph } from './icons';
 
 type Zone = 'before' | 'after' | 'on';
 
@@ -132,7 +132,7 @@ export default function Sidebar({
         <Logo cli={s.cli} size={11} tint={colorOf[s.cli]} />
         <span className="row-actions">
           {s.running && <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}><StopGlyph /></button>}
-          <button className="mini-btn" title="Delete" onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><TrashGlyph /></button>
+          <button className="mini-btn" title="Delete" onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><CloseGlyph /></button>
         </span>
       </div>
     );
@@ -167,7 +167,7 @@ export default function Sidebar({
               <span className="count">{g.sessionIds.length}</span>
               <span className="row-actions">
                 <button className="mini-btn" title="Rename" onClick={(e) => { e.stopPropagation(); startEdit(ref, g.name); }}><PencilGlyph /></button>
-                <button className="mini-btn" title="Delete group" onClick={(e) => { e.stopPropagation(); onDeleteGroup(g.id); }}><TrashGlyph /></button>
+                <button className="mini-btn" title="Delete group" onClick={(e) => { e.stopPropagation(); onDeleteGroup(g.id); }}><CloseGlyph /></button>
               </span>
             </>
           )}
