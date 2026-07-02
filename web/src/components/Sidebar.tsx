@@ -11,7 +11,7 @@ type Zone = 'before' | 'after' | 'on';
 export default function Sidebar({
   clis, tree, activeRef, focusedId, defaultPath,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
-  onStopSession, onDeleteSession, onMove, onOpenSettings, theme, onToggleTheme,
+  onStopSession, onDeleteSession, onMove, onDragState, onOpenSettings, theme, onToggleTheme,
 }: {
   clis: Cli[];
   tree: Tree;
@@ -29,6 +29,7 @@ export default function Sidebar({
   onStopSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
   onMove: (ref: string, to: MoveTarget) => void;
+  onDragState?: (ref: string | null) => void; // lets the stage offer per-tile drop targets
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
 }) {
@@ -49,7 +50,7 @@ export default function Sidebar({
   const agg = tree.sessions.some((s) => s.state === 'working') ? 'working'
     : tree.sessions.some((s) => s.state === 'waiting') ? 'waiting' : 'idle';
 
-  const clearDrag = () => { setDragRef(null); setDrop(null); };
+  const clearDrag = () => { setDragRef(null); setDrop(null); onDragState?.(null); };
   const bump = (id: string, d: number) => setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
   const submitGroup = () => {
     const items = Object.entries(cart).filter(([, n]) => n > 0).map(([cli, count]) => ({ cli, count }));
@@ -69,7 +70,7 @@ export default function Sidebar({
   // shared drag-and-drop wiring for any row
   const dndProps = (ref: string, kind: 'group' | 'session', nested: boolean) => ({
     draggable: editRef !== ref,
-    onDragStart: (e: React.DragEvent) => { e.dataTransfer.setData('text/plain', ref); e.dataTransfer.effectAllowed = 'move'; setDragRef(ref); },
+    onDragStart: (e: React.DragEvent) => { e.dataTransfer.setData('text/plain', ref); e.dataTransfer.effectAllowed = 'move'; setDragRef(ref); onDragState?.(ref); },
     onDragEnd: clearDrag,
     onDragOver: (e: React.DragEvent) => {
       if (!dragRef || dragRef === ref) return;

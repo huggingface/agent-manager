@@ -109,6 +109,10 @@ export default function App() {
   // Pane rearrangement (drag a pane header onto another tile).
   const [paneDrag, setPaneDrag] = useState(false);
   const [overTile, setOverTile] = useState<number | null>(null);
+  // A sidebar row being dragged ("s:<id>" / "g:<id>") — the stage shows
+  // per-cell drop targets for sessions instead of one big outline.
+  const [sessionDrag, setSessionDrag] = useState<string | null>(null);
+  const sessionDragActive = !!sessionDrag?.startsWith('s:');
 
   // Keep a focused pane within the visible set.
   useEffect(() => {
@@ -205,13 +209,17 @@ export default function App() {
     setDropMain(false);
   };
 
-  // One grid cell. Empty cells become visible drop targets while a pane drags.
-  const tileDnd = (i: number) => ({
-    onDragOver: (e: React.DragEvent) => { if (paneDrag) { e.preventDefault(); e.stopPropagation(); setOverTile(i); } },
+  // One grid cell. Empty cells become visible drop targets while a pane drags
+  // (rearrange) or a sidebar session drags over the group (join at that spot).
+  const tileDnd = (i: number, occupied: boolean) => ({
+    onDragOver: (e: React.DragEvent) => {
+      if (paneDrag || (sessionDragActive && !occupied)) { e.preventDefault(); e.stopPropagation(); setOverTile(i); }
+    },
     onDragLeave: () => setOverTile((t) => (t === i ? null : t)),
     onDrop: (e: React.DragEvent) => {
       const d = e.dataTransfer.getData('text/plain');
       if (d.startsWith('p:')) { e.preventDefault(); e.stopPropagation(); movePane(d.slice(2), page * cap + i); }
+      else if (d.startsWith('s:') && activeGroup) { e.preventDefault(); e.stopPropagation(); doMove(d, { kind: 'into', groupId: activeGroup.id }); }
       setOverTile(null);
     },
   });
@@ -220,9 +228,12 @@ export default function App() {
     const slotCount = activeGroup ? g.cols * g.rows : sessions.length;
     const slots = Array.from({ length: slotCount }, (_, i) => sessions[i] ?? null);
     const canDrag = !!activeGroup && groupSessions.length > 1;
+    // A sidebar session hovering a full grid still needs somewhere to land:
+    // offer a ghost strip appended below the tiles.
+    const ghost = sessionDragActive && !!activeGroup;
     return (
       <div
-        className={`tiles${dropMain ? ' drop-over' : ''}${paneDrag ? ' pane-dragging' : ''}`}
+        className={`tiles${paneDrag ? ' pane-dragging' : ''}${sessionDragActive && activeGroup ? ' session-dragging' : ''}`}
         style={{ gridTemplateColumns: `repeat(${g.cols}, 1fr)`, gridTemplateRows: `repeat(${g.rows}, minmax(0, 1fr))` }}
         onDragOver={activeGroup ? allowDrop : undefined}
         onDragLeave={() => setDropMain(false)}
@@ -231,8 +242,8 @@ export default function App() {
         {slots.map((s, i) => (
           <div
             key={s ? s.id : `empty-${i}`}
-            className={`tile${s ? '' : ' tile-empty'}${paneDrag && overTile === i ? ' tile-over' : ''}`}
-            {...(activeGroup ? tileDnd(i) : {})}
+            className={`tile${s ? '' : ' tile-empty'}${(paneDrag || sessionDragActive) && overTile === i ? ' tile-over' : ''}`}
+            {...(activeGroup ? tileDnd(i, !!s) : {})}
           >
             {s && (s.cli === 'files' ? (
               <FilesPane
@@ -261,6 +272,14 @@ export default function App() {
             ))}
           </div>
         ))}
+        {ghost && (
+          <div
+            className={`tile tile-ghost${overTile === slots.length ? ' tile-over' : ''}`}
+            {...tileDnd(slots.length, false)}
+          >
+            drop to add to {activeGroup!.name}
+          </div>
+        )}
       </div>
     );
   };
@@ -299,6 +318,7 @@ export default function App() {
         onStopSession={stopSession}
         onDeleteSession={deleteSession}
         onMove={doMove}
+        onDragState={setSessionDrag}
         onOpenSettings={() => setSettingsOpen(true)}
         theme={theme}
         onToggleTheme={toggleTheme}
