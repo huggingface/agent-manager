@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import * as api from '../api';
+import { FolderGlyph } from './icons';
 
 const join = (a: string, b: string) => (a ? `${a}/${b}` : b);
 // Folder names are typed freely; just strip separators and traversal.
@@ -63,6 +64,7 @@ function Level({ path, depth, value, onPick }: {
                 aria-label={expanded ? 'Collapse' : 'Expand'}
                 onClick={() => setOpen((s) => { const n = new Set(s); n.has(f) ? n.delete(f) : n.add(f); return n; })}
               >{expanded ? '▾' : '▸'}</button>
+              <FolderGlyph className="fp-ico" open={expanded} />
               <button className="fp-name" onClick={() => onPick(p)}>{f}</button>
             </div>
             {expanded && <Level path={p} depth={depth + 1} value={value} onPick={onPick} />}
@@ -89,7 +91,7 @@ export default function FolderPicker({ value, autoLabel, onChange }: {
   return (
     <div className="fp">
       <button className="fp-current" onClick={() => setOpen((o) => !o)} title="Choose where this agent runs">
-        <span className="fp-ico">📁</span>
+        <FolderGlyph className="fp-ico" open={open} />
         <span className="fp-path">{value || autoLabel}</span>
         <span className="fp-toggle">{open ? '▾' : '▸'}</span>
       </button>

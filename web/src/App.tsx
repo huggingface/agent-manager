@@ -221,7 +221,7 @@ export default function App() {
                 <div className="empty-card">
                   <h2>{activeGroup.name}</h2>
                   <p>Create an agent here, or drag one in from the sidebar.</p>
-                  <NewSession clis={clis} defaultPath={lastPath} onCreate={newSession} />
+                  <NewSession clis={clis} sessions={tree.sessions} defaultPath={lastPath} onCreate={newSession} />
                   <div className="dropline">⤓ drop an agent to add it to this group</div>
                 </div>
               </div>

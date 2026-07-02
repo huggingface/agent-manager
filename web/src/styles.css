@@ -109,11 +109,14 @@ body {
 .secret-desc:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
 
 /* new-group: per-agent quantity cart */
+.widget-sep { height: 1px; background: var(--border); margin: 1px 0; flex: none; }
+
 /* folder location picker (in the create widgets) */
 .fp { display: flex; flex-direction: column; gap: 4px; }
 .fp-current { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; text-align: left; }
 .fp-current:hover { border-color: var(--border-strong); }
-.fp-ico { flex: none; font-size: 12px; }
+.fp-ico { flex: none; width: 14px; height: 14px; color: var(--muted); }
+.fp-row .fp-ico { width: 13px; height: 13px; margin-right: 4px; }
 .fp-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 11.5px; }
 .fp-toggle { flex: none; color: var(--muted); font-size: 10px; }
 .fp-tree { max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 3px 0; display: flex; flex-direction: column; }
@@ -178,6 +181,10 @@ body {
 .status.waiting { background: #e0a948; box-shadow: 0 0 6px color-mix(in srgb, #e0a948 55%, transparent); }
 .status.idle { background: var(--muted); opacity: 0.5; }
 .status.stopped { background: transparent; border: 1.5px solid var(--muted); opacity: 0.5; }
+
+/* quick-add utilities (shell / files) pinned above the legend */
+.quick-add { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--border); }
+.quick-add .btn-ghost { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 6px 8px; font-size: 12.5px; }
 
 .legend { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 10px 16px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--muted); }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }

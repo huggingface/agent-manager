@@ -188,7 +188,7 @@ export default function Sidebar({
           <button className={`btn-ghost${panel === 'group' ? ' on' : ''}`} onClick={() => setPanel(panel === 'group' ? 'none' : 'group')}>+ Group</button>
         </div>
         {panel === 'session' && (
-          <NewSession clis={clis} defaultPath={defaultPath} onCreate={(n, c, p) => { onNewSession(n, c, p); setPanel('none'); }} onCancel={() => setPanel('none')} />
+          <NewSession clis={clis} sessions={tree.sessions} defaultPath={defaultPath} onCreate={(n, c, p) => { onNewSession(n, c, p); setPanel('none'); }} onCancel={() => setPanel('none')} />
         )}
         {panel === 'group' && (
           <div className="widget">
@@ -227,6 +227,18 @@ export default function Sidebar({
         {tree.order.map((ref) => (ref.startsWith('s:')
           ? (sessById[ref.slice(2)] ? SessionRow(sessById[ref.slice(2)]) : null)
           : (groupById[ref.slice(2)] ? GroupBlock(groupById[ref.slice(2)]) : null)))}
+      </div>
+
+      {/* Quick-add utilities: created instantly with a default name (double-
+          click to rename afterwards). Shell opens in the last-used folder;
+          Files browses the whole workspace. */}
+      <div className="quick-add">
+        <button className="btn-ghost" title="New shell in the last-used folder" onClick={() => onNewSession('', 'shell', defaultPath)}>
+          <Logo cli="shell" size={14} /> Shell
+        </button>
+        <button className="btn-ghost" title="New file browser (whole workspace)" onClick={() => onNewSession('', 'files', '')}>
+          <Logo cli="files" size={14} /> Files
+        </button>
       </div>
 
       <div className="legend">
