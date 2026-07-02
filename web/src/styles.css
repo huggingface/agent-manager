@@ -372,7 +372,7 @@ body {
 
 /* pane layout picker + pager (in the zoombar) */
 .lp { position: relative; display: inline-flex; }
-.lp-btn { width: auto; padding: 0 8px; gap: 6px; }
+.zbtn.lp-btn { width: auto; height: 22px; padding: 0 8px; gap: 6px; }
 .lp-ico { width: 13px; height: 13px; display: block; flex: none; }
 .lp-lbl { font-size: 11px; white-space: nowrap; }
 .lp-pop { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 30; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 8px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25); animation: rise-in 0.14s ease-out; }
