@@ -93,12 +93,18 @@ export default function App() {
   }, [visibleIds, focusedId]);
 
   // actions
-  const newSession = async (name: string, cli: string, path: string) => {
-    const s = await api.createSession(name, cli, activeGroup?.id, path);
+  const createSession = async (name: string, cli: string, path: string, groupId?: string) => {
+    const s = await api.createSession(name, cli, groupId, path);
     rememberPath(s.path);
     await refresh();
-    setActiveRef(`s:${s.id}`);
+    if (groupId) { setActiveRef(`g:${groupId}`); setFocusedId(s.id); }
+    else setActiveRef(`s:${s.id}`);
   };
+  // Sidebar + quick-add creations always land loose at the top of the list —
+  // never in a group just because one happens to be selected.
+  const newSession = (name: string, cli: string, path: string) => createSession(name, cli, path);
+  // The empty-group card explicitly creates "an agent here".
+  const newSessionHere = (name: string, cli: string, path: string) => createSession(name, cli, path, activeGroup?.id);
   const newGroup = async (name: string, cart?: { cli: string; count: number }[], path = '') => {
     const g = await api.createGroup(name);
     for (const { cli, count } of cart || []) {
@@ -221,7 +227,7 @@ export default function App() {
                 <div className="empty-card">
                   <h2>{activeGroup.name}</h2>
                   <p>Create an agent here, or drag one in from the sidebar.</p>
-                  <NewSession clis={clis} sessions={tree.sessions} defaultPath={lastPath} onCreate={newSession} />
+                  <NewSession clis={clis} sessions={tree.sessions} defaultPath={lastPath} onCreate={newSessionHere} />
                   <div className="dropline">⤓ drop an agent to add it to this group</div>
                 </div>
               </div>

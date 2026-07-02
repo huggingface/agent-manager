@@ -247,11 +247,12 @@ export function attach(session, cols, rows) {
       '-e', `AM_SESSION=${folder}`,
       '-e', `AM_NAME=${session.name}`,
       '-e', `AM_USER=${AM_USER}`,
+      '-e', `AM_ROOT=${WORKSPACES_DIR}`, // prompt shows $PWD relative to this
       'sh', '-lc', full,
     );
     term = pty.spawn('tmux', args, { name: 'xterm-256color', cols, rows, cwd: workdir, env: TERM_ENV });
   } else {
-    const env = { ...TERM_ENV, AM_SESSION: folder, AM_NAME: session.name, AM_USER };
+    const env = { ...TERM_ENV, AM_SESSION: folder, AM_NAME: session.name, AM_USER, AM_ROOT: WORKSPACES_DIR };
     term = pty.spawn('bash', ['-lc', full], { name: 'xterm-256color', cols, rows, cwd: workdir, env });
   }
 
