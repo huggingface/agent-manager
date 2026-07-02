@@ -4,6 +4,7 @@ import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
+import { SlidersGlyph, SunGlyph, MoonGlyph, TrashGlyph, PencilGlyph, StopGlyph } from './icons';
 
 type Zone = 'before' | 'after' | 'on';
 
@@ -43,6 +44,10 @@ export default function Sidebar({
 
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
+  const colorOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c.color])), [clis]);
+  // Brand dot doubles as aggregate status: any agent working > any waiting > rest.
+  const agg = tree.sessions.some((s) => s.state === 'working') ? 'working'
+    : tree.sessions.some((s) => s.state === 'waiting') ? 'waiting' : 'idle';
 
   const clearDrag = () => { setDragRef(null); setDrop(null); };
   const bump = (id: string, d: number) => setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
@@ -123,10 +128,10 @@ export default function Sidebar({
         ) : (
           <span className="name">{s.name}</span>
         )}
-        <Logo cli={s.cli} size={13} />
+        <Logo cli={s.cli} size={11} tint={colorOf[s.cli]} />
         <span className="row-actions">
-          {s.running && <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}>■</button>}
-          <button className="mini-btn" title="Delete" onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}>🗑</button>
+          {s.running && <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}><StopGlyph /></button>}
+          <button className="mini-btn" title="Delete" onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><TrashGlyph /></button>
         </span>
       </div>
     );
@@ -160,8 +165,8 @@ export default function Sidebar({
               <span className="name">{g.name}</span>
               <span className="count">{g.sessionIds.length}</span>
               <span className="row-actions">
-                <button className="mini-btn" title="Rename" onClick={(e) => { e.stopPropagation(); startEdit(ref, g.name); }}>✎</button>
-                <button className="mini-btn" title="Delete group" onClick={(e) => { e.stopPropagation(); onDeleteGroup(g.id); }}>🗑</button>
+                <button className="mini-btn" title="Rename" onClick={(e) => { e.stopPropagation(); startEdit(ref, g.name); }}><PencilGlyph /></button>
+                <button className="mini-btn" title="Delete group" onClick={(e) => { e.stopPropagation(); onDeleteGroup(g.id); }}><TrashGlyph /></button>
               </span>
             </>
           )}
@@ -175,10 +180,13 @@ export default function Sidebar({
   return (
     <aside className="sidebar">
       <div className="brand">
-        <div className="logo"><span className="dot" /><h1>Agent Manager</h1></div>
+        <div className="logo">
+          <span className={`dot agg-${agg}`} title={agg === 'working' ? 'agents working' : agg === 'waiting' ? 'an agent needs you' : 'all quiet'} />
+          <h1>Agent Manager</h1>
+        </div>
         <div className="brand-actions">
-          <button className="icon-btn" onClick={onOpenSettings} title="Settings">⚙</button>
-          <button className="icon-btn" onClick={onToggleTheme} title="Toggle light / dark">{theme === 'dark' ? '☾' : '☀'}</button>
+          <button className="icon-btn" onClick={onOpenSettings} title="Settings"><SlidersGlyph /></button>
+          <button className="icon-btn" onClick={onToggleTheme} title="Toggle light / dark">{theme === 'dark' ? <MoonGlyph /> : <SunGlyph />}</button>
         </div>
       </div>
 

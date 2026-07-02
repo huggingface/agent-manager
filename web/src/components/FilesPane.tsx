@@ -3,7 +3,7 @@ import type { Session } from '../types';
 import * as api from '../api';
 import type { FileEntry } from '../api';
 import Logo from './Logo';
-import { FolderGlyph, FileGlyph } from './icons';
+import { FolderGlyph, FileGlyph, CloseGlyph, UpGlyph, UploadGlyph } from './icons';
 
 const fmtSize = (n: number) => {
   if (n < 1024) return `${n} B`;
@@ -139,15 +139,15 @@ export default function FilesPane({
     <div className={`slot${focused ? ' focused' : ''}`} onMouseDown={onFocus}>
       <div className="pane-head">
         <div className="ph-left">
-          <Logo cli="files" size={20} />
+          <Logo cli="files" size={16} tint="#d99a2b" />
           <span className="status idle" />
         </div>
         <span className="ph-title">{session.name}</span>
-        <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}>✕</button>
+        <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
       </div>
 
       <div className="files-bar">
-        <button className="mini-btn" title="Up" disabled={!root} onClick={up}>↑</button>
+        <button className="mini-btn" title="Up" disabled={!root} onClick={up}><UpGlyph /></button>
         <div className="crumbs">
           {crumbs.map((c, i) => (
             <span key={c || 'root'}>
@@ -158,7 +158,7 @@ export default function FilesPane({
         </div>
         <span className="spacer" />
         <label className="mini-btn upload-btn" title="Upload files">
-          ↥ Upload
+          <UploadGlyph /> Upload
           <input type="file" multiple hidden onChange={(e) => { if (e.target.files) upload(e.target.files); e.target.value = ''; }} />
         </label>
       </div>

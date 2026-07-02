@@ -3,6 +3,7 @@ import type { Cli } from '../types';
 import * as api from '../api';
 import SkillsEditor from './SkillsEditor';
 import UsagePanel from './UsagePanel';
+import { SunGlyph, MoonGlyph, RefreshGlyph } from './icons';
 
 type Page = 'general' | 'usage' | 'skills';
 const PAGES: { id: Page; label: string }[] = [
@@ -68,7 +69,7 @@ export default function SettingsView({
 
             <div className="setting-row">
               <div><div className="s-label">Theme</div><div className="s-help">Defaults to your system setting.</div></div>
-              <button className="btn-ghost" onClick={onToggleTheme}>{theme === 'dark' ? '☾ Dark' : '☀ Light'}</button>
+              <button className="btn-ghost" onClick={onToggleTheme}>{theme === 'dark' ? <><MoonGlyph /> Dark</> : <><SunGlyph /> Light</>}</button>
             </div>
 
             <h3>Agents</h3>
@@ -101,7 +102,7 @@ export default function SettingsView({
                 </div>
               </div>
               {!info?.canRelaunch ? (
-                <button className="btn-ghost" disabled title="Add a write-scoped HF_TOKEN secret to the Space to enable">↻ Relaunch &amp; update</button>
+                <button className="btn-ghost" disabled title="Add a write-scoped HF_TOKEN secret to the Space to enable"><RefreshGlyph /> Relaunch &amp; update</button>
               ) : relaunch.confirm ? (
                 <span className="confirm-del">
                   <span className="s-muted">Rebuild now?</span>
@@ -109,7 +110,7 @@ export default function SettingsView({
                   <button className="btn-ghost" onClick={() => setRelaunch({})}>Cancel</button>
                 </span>
               ) : (
-                <button className="btn-ghost" onClick={() => setRelaunch({ confirm: true })}>↻ Relaunch &amp; update</button>
+                <button className="btn-ghost" onClick={() => setRelaunch({ confirm: true })}><RefreshGlyph /> Relaunch &amp; update</button>
               )}
             </div>
             {relaunch.msg && <div className="s-help" style={{ marginTop: 6 }}>{relaunch.msg}</div>}

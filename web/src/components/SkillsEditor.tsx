@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { marked } from 'marked';
 import * as api from '../api';
 import type { SkillFile } from '../api';
+import { TrashGlyph } from './icons';
 
 // Split YAML-ish frontmatter (name/description) from the markdown body.
 function parseFront(md: string): { meta: Record<string, string> | null; body: string } {
@@ -112,7 +113,7 @@ export default function SkillsEditor() {
                   <button className="btn-ghost" onClick={() => setConfirmDel(false)}>Cancel</button>
                 </span>
               ) : (
-                <button className="btn-ghost danger" title="Delete skill" onClick={() => setConfirmDel(true)}>🗑 Delete</button>
+                <button className="btn-ghost danger" title="Delete skill" onClick={() => setConfirmDel(true)}><TrashGlyph /> Delete</button>
               )}
             </div>
             {mode === 'view' ? (() => {

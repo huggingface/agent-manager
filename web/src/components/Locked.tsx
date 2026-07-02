@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { LockGlyph } from './icons';
 
 // Shown when the server reports the Space is public. The terminal backend is
 // disabled server-side; this explains how to run a private copy or relock.
@@ -31,7 +32,7 @@ api.duplicate_repo(
   return (
     <div className="locked">
       <div className="locked-card">
-        <div className="locked-emoji">🔒</div>
+        <div className="locked-emoji"><LockGlyph /></div>
         <h1>Agent Manager</h1>
         <p className="locked-lead">
           This Space is <b>public</b>, so the terminal manager is disabled. It has

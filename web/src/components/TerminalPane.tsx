@@ -6,6 +6,7 @@ import '@xterm/xterm/css/xterm.css';
 import type { Cli, Session } from '../types';
 import { STATE_LABEL } from '../types';
 import Logo from './Logo';
+import { CloseGlyph, RefreshGlyph } from './icons';
 
 const THEMES: Record<'light' | 'dark', ITheme> = {
   dark: {
@@ -90,7 +91,7 @@ function writeClipboard(text: string) {
 }
 
 export default function TerminalPane({
-  session, theme, focused, active, zoom = 100, onFocus, onRename, onClose,
+  session, cli, theme, focused, active, zoom = 100, onFocus, onRename, onClose,
 }: {
   session: Session;
   cli?: Cli;
@@ -250,13 +251,23 @@ export default function TerminalPane({
     return () => clearTimeout(t);
   }, [active]);
 
+  // Focused panes tint toward THEIR agent's brand color, not the app accent.
+  const tint = cli?.color;
   return (
-    <div className={`slot${focused ? ' focused' : ''}`} onMouseDown={() => onFocus?.()}>
+    <div
+      className={`slot${focused ? ' focused' : ''}`}
+      style={focused && tint ? { borderColor: `color-mix(in srgb, ${tint} 45%, var(--border))` } : undefined}
+      onMouseDown={() => onFocus?.()}
+    >
       {/* preventDefault so clicking the (non-focusable) header keeps keyboard
           focus in the terminal instead of the browser blurring it. */}
-      <div className="pane-head" onMouseDown={(e) => { e.preventDefault(); onFocus?.(); termRef.current?.focus(); }}>
+      <div
+        className="pane-head"
+        style={focused && tint ? { background: `color-mix(in srgb, ${tint} 8%, var(--panel))` } : undefined}
+        onMouseDown={(e) => { e.preventDefault(); onFocus?.(); termRef.current?.focus(); }}
+      >
         <div className="ph-left">
-          <Logo cli={session.cli} size={20} />
+          <Logo cli={session.cli} size={16} tint={tint} />
           <span className={`status ${session.state}`} title={`${STATE_LABEL[session.state]} · ${conn}`} />
         </div>
         {editing ? (
@@ -270,7 +281,7 @@ export default function TerminalPane({
         ) : (
           <span className="ph-title" title="Double-click to rename" onDoubleClick={() => { setDraft(session.name); setEditing(true); }}>{session.name}</span>
         )}
-        <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}>✕</button>
+        <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
       </div>
       <div className="term-host" ref={hostRef} />
       {conn === 'exited' && (
@@ -284,7 +295,7 @@ export default function TerminalPane({
               className="btn-ghost"
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => { e.stopPropagation(); reconnectRef.current(); }}
-            >↻ Restart</button>
+            ><RefreshGlyph /> Restart</button>
           </div>
         </div>
       )}

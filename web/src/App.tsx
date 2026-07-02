@@ -133,6 +133,21 @@ export default function App() {
     else setActiveRef(null);
   };
 
+  const promptUser = info?.spaceId?.split('/')[0] || 'you';
+  // Empty states speak the app's native language: a prompt, waiting.
+  const EmptyPrompt = ({ path, hints }: { path: string; hints: string[] }) => (
+    <div className="empty-term">
+      <div className="et-prompt mono">
+        <span className="et-user">{promptUser}</span>
+        <span className="et-dim">/</span>
+        <span className="et-path">{path}</span>
+        <span className="et-dim"> $</span>
+        <span className="et-cursor" />
+      </div>
+      {hints.map((h) => <p key={h} className="et-hint">{h}</p>)}
+    </div>
+  );
+
   const allowDrop = (e: React.DragEvent) => { e.preventDefault(); setDropMain(true); };
   const onDropMain = (e: React.DragEvent) => {
     e.preventDefault();
@@ -225,10 +240,9 @@ export default function App() {
                 onDrop={onDropMain}
               >
                 <div className="empty-card">
-                  <h2>{activeGroup.name}</h2>
-                  <p>Create an agent here, or drag one in from the sidebar.</p>
+                  <EmptyPrompt path={activeGroup.name} hints={['create an agent here, or drag one in from the sidebar']} />
                   <NewSession clis={clis} sessions={tree.sessions} defaultPath={lastPath} onCreate={newSessionHere} />
-                  <div className="dropline">⤓ drop an agent to add it to this group</div>
+                  <div className="dropline">drop an agent here to add it to this group</div>
                 </div>
               </div>
             ) : renderTiles(groupSessions)
@@ -236,10 +250,10 @@ export default function App() {
             renderTiles([activeSingle])
           ) : (
             <div className="empty-group">
-              <div className="empty-card">
-                <h2>Welcome to Agent Manager</h2>
-                <p>Add an agent or a group from the sidebar. Drag an agent onto another to group them.</p>
-              </div>
+              <EmptyPrompt
+                path="workspaces"
+                hints={['create an agent or a group from the sidebar', 'drag an agent onto another to group them']}
+              />
             </div>
           )}
         </div>
