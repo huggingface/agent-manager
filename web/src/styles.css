@@ -235,8 +235,16 @@ body {
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
 
 /* main: tiles */
-.tiles { height: 100%; display: grid; gap: 12px; grid-auto-rows: minmax(0, 1fr); }
+.tiles { height: 100%; display: grid; gap: 12px; }
 .tiles.drop-over { outline: 2px dashed var(--accent); outline-offset: -6px; border-radius: var(--r-xl); }
+.tile { display: flex; min-width: 0; min-height: 0; border-radius: var(--r-xl); }
+.tile > .slot { flex: 1; min-width: 0; min-height: 0; }
+/* empty cells surface as drop targets only while a pane is being dragged */
+.tile-empty { border: 1px dashed transparent; transition: border-color 0.12s ease-out; }
+.tiles.pane-dragging .tile-empty { border-color: var(--border-strong); }
+.tile.tile-over { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.pane-head.draggable { cursor: grab; }
+.pane-head.draggable:active { cursor: grabbing; }
 .slot { position: relative; min-width: 0; min-height: 0; border-radius: var(--r-xl); overflow: hidden; border: 1px solid var(--border); background: var(--term-bg); display: flex; flex-direction: column; }
 
 /* public-space locked screen */
@@ -361,6 +369,23 @@ body {
 .kv b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 65%; }
 .placeholder { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 20px; }
 .placeholder p { margin: 0 0 8px; }
+
+/* pane layout picker + pager (in the zoombar) */
+.lp { position: relative; display: inline-flex; }
+.lp-btn { width: auto; padding: 0 8px; gap: 6px; }
+.lp-ico { width: 13px; height: 13px; display: block; flex: none; }
+.lp-lbl { font-size: 11px; white-space: nowrap; }
+.lp-pop { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 30; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 8px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25); animation: rise-in 0.14s ease-out; }
+.lp-auto { background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-md); padding: 6px 10px; font: inherit; font-size: 12px; color: var(--text); cursor: pointer; white-space: nowrap; }
+.lp-auto:hover { border-color: var(--border-strong); }
+.lp-auto.on { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.lp-grid { display: grid; grid-template-columns: repeat(3, 36px); gap: 5px; }
+.lp-opt { height: 32px; display: inline-flex; align-items: center; justify-content: center; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-md); color: var(--muted); cursor: pointer; }
+.lp-opt:hover { border-color: var(--accent); color: var(--text); }
+.lp-opt.on { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.lp-opt .lp-ico { width: 16px; height: 16px; }
+.pager { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; }
+.plbl { font-size: 11px; color: var(--muted); min-width: 28px; text-align: center; font-variant-numeric: tabular-nums; }
 
 /* terminal zoom bar */
 .pane-foot { display: flex; align-items: center; gap: 4px; padding: 3px 8px; background: var(--panel); border-top: 1px solid var(--border); flex: none; }

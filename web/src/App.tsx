@@ -4,9 +4,19 @@ import TerminalPane from './components/TerminalPane';
 import FilesPane from './components/FilesPane';
 import SettingsView from './components/SettingsView';
 import NewSession from './components/NewSession';
+import LayoutPicker from './components/LayoutPicker';
 import Locked from './components/Locked';
 import * as api from './api';
-import type { Cli, MoveTarget, Session, Tree } from './types';
+import type { Cli, GridSpec, MoveTarget, Session, Tree } from './types';
+
+// Auto layout: the grid grows to fit however many agents the group has.
+function autoGrid(n: number): GridSpec {
+  if (n <= 1) return { cols: 1, rows: 1 };
+  if (n === 2) return { cols: 2, rows: 1 };
+  if (n <= 4) return { cols: 2, rows: 2 };
+  if (n <= 6) return { cols: 3, rows: 2 };
+  return { cols: 3, rows: 3 };
+}
 
 type SettingsPage = 'general' | 'usage' | 'skills';
 
@@ -82,9 +92,23 @@ export default function App() {
     () => (activeGroup ? activeGroup.sessionIds.map((id) => sessById[id]).filter(Boolean) as Session[] : []),
     [activeGroup, sessById],
   );
-  const visibleSessions = activeGroup ? groupSessions : activeSingle ? [activeSingle] : [];
+
+  // Tile grid for the active group: the chosen layout, or auto (fit the count).
+  const grid: GridSpec = activeGroup ? (activeGroup.layout ?? autoGrid(groupSessions.length)) : { cols: 1, rows: 1 };
+  const cap = grid.cols * grid.rows;
+  const pageCount = Math.max(1, Math.ceil(groupSessions.length / cap));
+  const [pageRaw, setPage] = useState(0);
+  const page = Math.min(pageRaw, pageCount - 1); // clamp when agents/layout change
+  useEffect(() => { setPage(0); }, [activeRef]);
+  const pageSessions = activeGroup ? groupSessions.slice(page * cap, (page + 1) * cap) : [];
+
+  const visibleSessions = activeGroup ? pageSessions : activeSingle ? [activeSingle] : [];
   const visibleIds = visibleSessions.map((s) => s.id).join(',');
   const showZoom = visibleSessions.length > 0;
+
+  // Pane rearrangement (drag a pane header onto another tile).
+  const [paneDrag, setPaneDrag] = useState(false);
+  const [overTile, setOverTile] = useState<number | null>(null);
 
   // Keep a focused pane within the visible set.
   useEffect(() => {
@@ -132,6 +156,31 @@ export default function App() {
     if (activeGroup) doMove(`s:${sid}`, { kind: 'after', ref: activeRef! });
     else setActiveRef(null);
   };
+  const setLayout = async (l: GridSpec | null) => {
+    if (!activeGroup) return;
+    await api.updateGroup(activeGroup.id, { layout: l });
+    refresh();
+  };
+  // Drop pane `paneId` on the tile showing position `targetIdx` (absolute index
+  // into the group's order): occupied tile → swap places; empty tile → move to
+  // the end.
+  const movePane = async (paneId: string, targetIdx: number) => {
+    if (!activeGroup) return;
+    const ids = activeGroup.sessionIds.slice();
+    const from = ids.indexOf(paneId);
+    if (from < 0) return;
+    const target = groupSessions[targetIdx];
+    if (target && target.id !== paneId) {
+      const ti = ids.indexOf(target.id);
+      ids[from] = ids[ti];
+      ids[ti] = paneId;
+    } else if (!target) {
+      ids.splice(from, 1);
+      ids.push(paneId);
+    } else return;
+    await api.updateGroup(activeGroup.id, { sessionIds: ids });
+    refresh();
+  };
 
   const promptUser = info?.spaceId?.split('/')[0] || 'you';
   // Empty states speak the app's native language: a prompt, waiting.
@@ -148,7 +197,7 @@ export default function App() {
     </div>
   );
 
-  const allowDrop = (e: React.DragEvent) => { e.preventDefault(); setDropMain(true); };
+  const allowDrop = (e: React.DragEvent) => { if (paneDrag) return; e.preventDefault(); setDropMain(true); };
   const onDropMain = (e: React.DragEvent) => {
     e.preventDefault();
     const ref = e.dataTransfer.getData('text/plain');
@@ -156,39 +205,65 @@ export default function App() {
     setDropMain(false);
   };
 
-  const renderTiles = (sessions: Session[]) => (
-    <div
-      className={`tiles${dropMain ? ' drop-over' : ''}`}
-      style={{ gridTemplateColumns: sessions.length <= 1 ? '1fr' : '1fr 1fr' }}
-      onDragOver={activeGroup ? allowDrop : undefined}
-      onDragLeave={() => setDropMain(false)}
-      onDrop={activeGroup ? onDropMain : undefined}
-    >
-      {sessions.map((s) => (s.cli === 'files' ? (
-        <FilesPane
-          key={s.id}
-          session={s}
-          zoom={zoom}
-          focused={sessions.length > 1 && s.id === focusedId}
-          onFocus={() => setFocusedId(s.id)}
-          onClose={() => closePane(s.id)}
-        />
-      ) : (
-        <TerminalPane
-          key={s.id}
-          session={s}
-          cli={cliMap[s.cli]}
-          theme={theme}
-          zoom={zoom}
-          focused={sessions.length > 1 && s.id === focusedId}
-          active={s.id === focusedId}
-          onFocus={() => setFocusedId(s.id)}
-          onRename={(name) => renameSession(s.id, name)}
-          onClose={() => closePane(s.id)}
-        />
-      )))}
-    </div>
-  );
+  // One grid cell. Empty cells become visible drop targets while a pane drags.
+  const tileDnd = (i: number) => ({
+    onDragOver: (e: React.DragEvent) => { if (paneDrag) { e.preventDefault(); e.stopPropagation(); setOverTile(i); } },
+    onDragLeave: () => setOverTile((t) => (t === i ? null : t)),
+    onDrop: (e: React.DragEvent) => {
+      const d = e.dataTransfer.getData('text/plain');
+      if (d.startsWith('p:')) { e.preventDefault(); e.stopPropagation(); movePane(d.slice(2), page * cap + i); }
+      setOverTile(null);
+    },
+  });
+
+  const renderTiles = (sessions: Session[], g: GridSpec) => {
+    const slotCount = activeGroup ? g.cols * g.rows : sessions.length;
+    const slots = Array.from({ length: slotCount }, (_, i) => sessions[i] ?? null);
+    const canDrag = !!activeGroup && groupSessions.length > 1;
+    return (
+      <div
+        className={`tiles${dropMain ? ' drop-over' : ''}${paneDrag ? ' pane-dragging' : ''}`}
+        style={{ gridTemplateColumns: `repeat(${g.cols}, 1fr)`, gridTemplateRows: `repeat(${g.rows}, minmax(0, 1fr))` }}
+        onDragOver={activeGroup ? allowDrop : undefined}
+        onDragLeave={() => setDropMain(false)}
+        onDrop={activeGroup ? onDropMain : undefined}
+      >
+        {slots.map((s, i) => (
+          <div
+            key={s ? s.id : `empty-${i}`}
+            className={`tile${s ? '' : ' tile-empty'}${paneDrag && overTile === i ? ' tile-over' : ''}`}
+            {...(activeGroup ? tileDnd(i) : {})}
+          >
+            {s && (s.cli === 'files' ? (
+              <FilesPane
+                session={s}
+                zoom={zoom}
+                focused={visibleSessions.length > 1 && s.id === focusedId}
+                dragId={canDrag ? `p:${s.id}` : undefined}
+                onDragActive={setPaneDrag}
+                onFocus={() => setFocusedId(s.id)}
+                onClose={() => closePane(s.id)}
+              />
+            ) : (
+              <TerminalPane
+                session={s}
+                cli={cliMap[s.cli]}
+                theme={theme}
+                zoom={zoom}
+                focused={visibleSessions.length > 1 && s.id === focusedId}
+                active={s.id === focusedId}
+                dragId={canDrag ? `p:${s.id}` : undefined}
+                onDragActive={setPaneDrag}
+                onFocus={() => setFocusedId(s.id)}
+                onRename={(name) => renameSession(s.id, name)}
+                onClose={() => closePane(s.id)}
+              />
+            ))}
+          </div>
+        ))}
+      </div>
+    );
+  };
 
   if (info?.locked) return <Locked spaceId={info.spaceId} />;
 
@@ -245,9 +320,9 @@ export default function App() {
                   <div className="dropline">drop an agent here to add it to this group</div>
                 </div>
               </div>
-            ) : renderTiles(groupSessions)
+            ) : renderTiles(pageSessions, grid)
           ) : activeSingle ? (
-            renderTiles([activeSingle])
+            renderTiles([activeSingle], { cols: 1, rows: 1 })
           ) : (
             <div className="empty-group">
               <EmptyPrompt
@@ -259,6 +334,16 @@ export default function App() {
         </div>
         {showZoom && (
           <div className="zoombar">
+            {activeGroup && groupSessions.length > 0 && (
+              <LayoutPicker grid={grid} isAuto={!activeGroup.layout} onPick={setLayout} />
+            )}
+            {activeGroup && pageCount > 1 && (
+              <span className="pager">
+                <button className="zbtn" title="Previous panes" disabled={page === 0} onClick={() => setPage(page - 1)}>‹</button>
+                <span className="plbl mono">{page + 1}/{pageCount}</span>
+                <button className="zbtn" title="Next panes" disabled={page >= pageCount - 1} onClick={() => setPage(page + 1)}>›</button>
+              </span>
+            )}
             <span className="spacer" />
             <button className="zbtn" title="Zoom out" onClick={() => setZoom((z) => Math.max(50, z - 10))}>−</button>
             <button className="zlvl" title="Reset to 100%" onClick={() => setZoom(100)}>{zoom}%</button>

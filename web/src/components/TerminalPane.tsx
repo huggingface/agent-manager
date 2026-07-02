@@ -91,7 +91,7 @@ function writeClipboard(text: string) {
 }
 
 export default function TerminalPane({
-  session, cli, theme, focused, active, zoom = 100, onFocus, onRename, onClose,
+  session, cli, theme, focused, active, zoom = 100, dragId, onDragActive, onFocus, onRename, onClose,
 }: {
   session: Session;
   cli?: Cli;
@@ -99,6 +99,8 @@ export default function TerminalPane({
   focused?: boolean;
   active?: boolean;
   zoom?: number;
+  dragId?: string;          // set when the pane can be rearranged (group view)
+  onDragActive?: (dragging: boolean) => void;
   onFocus?: () => void;
   onRename?: (name: string) => void;
   onClose: () => void;
@@ -260,11 +262,15 @@ export default function TerminalPane({
       onMouseDown={() => onFocus?.()}
     >
       {/* preventDefault so clicking the (non-focusable) header keeps keyboard
-          focus in the terminal instead of the browser blurring it. */}
+          focus in the terminal instead of the browser blurring it — except when
+          the header doubles as a drag handle, where it would block dragstart. */}
       <div
-        className="pane-head"
+        className={`pane-head${dragId ? ' draggable' : ''}`}
         style={focused && tint ? { background: `color-mix(in srgb, ${tint} 8%, var(--panel))` } : undefined}
-        onMouseDown={(e) => { e.preventDefault(); onFocus?.(); termRef.current?.focus(); }}
+        draggable={!!dragId}
+        onDragStart={dragId ? (e) => { e.dataTransfer.setData('text/plain', dragId); e.dataTransfer.effectAllowed = 'move'; onDragActive?.(true); } : undefined}
+        onDragEnd={dragId ? () => onDragActive?.(false) : undefined}
+        onMouseDown={(e) => { if (!dragId) e.preventDefault(); onFocus?.(); termRef.current?.focus(); }}
       >
         <div className="ph-left">
           <Logo cli={session.cli} size={16} tint={tint} />

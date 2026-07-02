@@ -22,10 +22,14 @@ export interface Cli {
   version?: string | null;
 }
 
+// Pane arrangement for a group's tiles. Absent/null = auto (grow with agents).
+export interface GridSpec { cols: number; rows: number }
+
 export interface Group {
   id: string;
   name: string;
   sessionIds: string[];
+  layout?: GridSpec | null;
   createdAt?: string;
 }
 

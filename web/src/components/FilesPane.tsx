@@ -107,11 +107,13 @@ function FolderNode({ sessionId, path, name, prefix, isLast, onOpen }: {
 }
 
 export default function FilesPane({
-  session, focused, zoom = 100, onFocus, onClose,
+  session, focused, zoom = 100, dragId, onDragActive, onFocus, onClose,
 }: {
   session: Session;
   focused?: boolean;
   zoom?: number;
+  dragId?: string;
+  onDragActive?: (dragging: boolean) => void;
   onFocus?: () => void;
   onClose: () => void;
 }) {
@@ -137,7 +139,12 @@ export default function FilesPane({
 
   return (
     <div className={`slot${focused ? ' focused' : ''}`} onMouseDown={onFocus}>
-      <div className="pane-head">
+      <div
+        className={`pane-head${dragId ? ' draggable' : ''}`}
+        draggable={!!dragId}
+        onDragStart={dragId ? (e) => { e.dataTransfer.setData('text/plain', dragId); e.dataTransfer.effectAllowed = 'move'; onDragActive?.(true); } : undefined}
+        onDragEnd={dragId ? () => onDragActive?.(false) : undefined}
+      >
         <div className="ph-left">
           <Logo cli="files" size={16} tint="#d99a2b" />
           <span className="status idle" />

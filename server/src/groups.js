@@ -46,10 +46,17 @@ export function create(name) {
   return g;
 }
 
-export function update(id, { name, sessionIds }) {
+export function update(id, { name, sessionIds, layout }) {
   const g = get(id);
   if (!g) return null;
   if (typeof name === 'string' && name.trim()) g.name = name.trim();
+  // Tile layout: {cols, rows} each 1..3; anything else (incl. null) = auto.
+  if (layout !== undefined) {
+    const ok = layout && Number.isInteger(layout.cols) && Number.isInteger(layout.rows)
+      && layout.cols >= 1 && layout.cols <= 3 && layout.rows >= 1 && layout.rows <= 3;
+    if (ok) g.layout = { cols: layout.cols, rows: layout.rows };
+    else delete g.layout;
+  }
   if (Array.isArray(sessionIds)) {
     // Enforce single-group membership: drop these ids from every other group.
     const set = new Set(sessionIds);

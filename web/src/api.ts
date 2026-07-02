@@ -32,6 +32,10 @@ export const createGroup = (name: string): Promise<Group> =>
 export const renameGroup = (id: string, name: string) =>
   fetch(`/api/groups/${id}`, { method: 'PUT', headers: HEADERS, body: JSON.stringify({ name }) }).then(json);
 
+// Generic group patch: pane order (sessionIds) and/or tile layout (null = auto).
+export const updateGroup = (id: string, patch: { sessionIds?: string[]; layout?: { cols: number; rows: number } | null }) =>
+  fetch(`/api/groups/${id}`, { method: 'PUT', headers: HEADERS, body: JSON.stringify(patch) }).then(json);
+
 export const deleteGroup = (id: string) =>
   fetch(`/api/groups/${id}`, { method: 'DELETE' }).then(json);
 
