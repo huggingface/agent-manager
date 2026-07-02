@@ -201,8 +201,13 @@ body {
 .row.group-head .name { font-family: var(--font-sans); font-size: 13px; font-weight: 600; }
 .row .count { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
 .caret { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; width: 16px; padding: 0; flex: none; }
-.row .row-actions { display: flex; gap: 2px; opacity: 0; pointer-events: none; transition: opacity 0.12s ease-out; }
+/* Actions overlay the row's right edge on hover (swapping in over the logo /
+   count) instead of reserving flow space — otherwise rows with different
+   action counts push their logos to ragged x-positions. */
+.row .row-actions { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: flex; gap: 2px; opacity: 0; pointer-events: none; transition: opacity 0.12s ease-out; }
 .row:hover .row-actions, .row:focus-within .row-actions { opacity: 1; pointer-events: auto; }
+.row .cli-logo, .row .count { transition: opacity 0.12s ease-out; }
+.row:hover .cli-logo, .row:hover .count { opacity: 0; }
 .mini-btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px; border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; padding: 3px 6px; border-radius: var(--r-sm); }
 .mini-btn:hover { color: var(--text); background: var(--border); }
 
@@ -211,7 +216,8 @@ body {
 .group.active .group-head { background: color-mix(in srgb, var(--accent) 10%, transparent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
 .group.drop-into { background: var(--drop); outline: 1px dashed var(--accent); border-radius: var(--r-md); }
 .row.nested { margin-left: 21px; }
-.row.nested::before { content: ''; position: absolute; left: -11px; top: -2px; bottom: -2px; border-left: 1px solid var(--border); }
+/* rail sits on the group caret's center line (head pad 8px + half the 16px caret) */
+.row.nested::before { content: ''; position: absolute; left: -5px; top: 0; bottom: 0; border-left: 1px solid var(--border); }
 .group.active .row.nested::before { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 
 /* status dots */
