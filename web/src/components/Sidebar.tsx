@@ -238,10 +238,9 @@ export default function Sidebar({
       </div>
 
       {/* Quick-add utilities: created instantly with a default name (double-
-          click to rename afterwards). Shell opens in the last-used folder;
-          Files browses the whole workspace. */}
+          click to rename afterwards). Both open at the workspaces root. */}
       <div className="quick-add">
-        <button className="btn-ghost" title="New shell in the last-used folder" onClick={() => onNewSession('', 'shell', defaultPath)}>
+        <button className="btn-ghost" title="New shell at the workspaces root" onClick={() => onNewSession('', 'shell', '.')}>
           <Logo cli="shell" size={14} /> Shell
         </button>
         <button className="btn-ghost" title="New file browser (whole workspace)" onClick={() => onNewSession('', 'files', '')}>

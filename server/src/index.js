@@ -314,7 +314,8 @@ app.delete('/api/skills/:name', (req, res) => {
 function folderPathOf(session) {
   // A Files agent without a chosen location browses the whole workspace root.
   if (session.cli === 'files' && !session.path) return WORKSPACES_DIR;
-  return workspacePath(session.path || session.id);
+  // '' = the workspaces root itself (?? so it isn't mistaken for "unset").
+  return workspacePath(session.path ?? session.id);
 }
 function resolveSafe(root, rel) {
   const p = path.resolve(root, rel || '.');
@@ -438,15 +439,13 @@ app.post('/api/sessions', (req, res) => {
   const { name, cli, groupId, path: reqPath } = req.body || {};
   if (!cli || !cliById(cli)) return res.status(400).json({ error: 'unknown cli' });
   const finalName = name && name.trim() ? name.trim() : nextName(cli);
-  // Location: an explicit workspace-relative path if given ('' = workspaces
-  // root, only meaningful for Files agents); otherwise sessions.create defaults
-  // to a fresh folder named after the agent.
+  // Location: an explicit workspace-relative path if given. cleanRelPath('.')
+  // → '' = the workspaces ROOT (used by the Shell quick-add). Omitted path →
+  // sessions.create defaults: fresh auto-named folder (CLIs) / root (Files).
   let chosen;
-  if (reqPath !== undefined && reqPath !== null && reqPath !== '') {
+  if (typeof reqPath === 'string' && reqPath !== '') {
     chosen = cleanRelPath(reqPath);
-    if (chosen === null || chosen === '') return res.status(400).json({ error: 'bad path' });
-  } else if (reqPath === '' && cli === 'files') {
-    chosen = null; // Files agent scoped to the workspace root
+    if (chosen === null) return res.status(400).json({ error: 'bad path' });
   }
   const s = store.create({ name: finalName, cli, path: chosen });
   if (s.path) { try { fs.mkdirSync(workspacePath(s.path), { recursive: true }); } catch {} }

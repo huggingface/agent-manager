@@ -226,9 +226,10 @@ function commandFor(session) {
 
 /** Attach a new PTY client to the session (creating the tmux session if needed). */
 export function attach(session, cols, rows) {
-  // The recorded workspace-relative path. If the folder was deleted or moved,
-  // mkdir simply recreates it empty — no tracking, no magic.
-  const folder = session.path || session.id;
+  // The recorded workspace-relative path ('' = the workspaces root itself).
+  // If the folder was deleted or moved, mkdir simply recreates it empty — no
+  // tracking, no magic.
+  const folder = session.path ?? session.id;
   const workdir = path.join(WORKSPACES_DIR, folder);
   fs.mkdirSync(workdir, { recursive: true });
   const full = commandFor(session);
