@@ -3,11 +3,12 @@ import type { Cli, MoveTarget, Group, Session, Tree } from '../types';
 import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
+import FolderPicker from './FolderPicker';
 
 type Zone = 'before' | 'after' | 'on';
 
 export default function Sidebar({
-  clis, tree, activeRef, focusedId,
+  clis, tree, activeRef, focusedId, defaultPath,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
   onStopSession, onDeleteSession, onMove, onOpenSettings, theme, onToggleTheme,
 }: {
@@ -15,11 +16,12 @@ export default function Sidebar({
   tree: Tree;
   activeRef: string | null;
   focusedId: string | null;
+  defaultPath: string;
   onActivate: (ref: string) => void;
   onOpenSession: (sessionId: string, groupId?: string) => void;
   onOpenSettings: () => void;
-  onNewSession: (name: string, cli: string) => void;
-  onNewGroup: (name: string, cart?: { cli: string; count: number }[]) => void;
+  onNewSession: (name: string, cli: string, path: string) => void;
+  onNewGroup: (name: string, cart?: { cli: string; count: number }[], path?: string) => void;
   onRenameGroup: (id: string, name: string) => void;
   onRenameSession: (id: string, name: string) => void;
   onDeleteGroup: (id: string) => void;
@@ -31,6 +33,7 @@ export default function Sidebar({
 }) {
   const [panel, setPanel] = useState<'none' | 'session' | 'group'>('none');
   const [groupName, setGroupName] = useState('');
+  const [groupLoc, setGroupLoc] = useState(defaultPath);
   const [cart, setCart] = useState<Record<string, number>>({});
   const [editRef, setEditRef] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
@@ -45,7 +48,7 @@ export default function Sidebar({
   const bump = (id: string, d: number) => setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
   const submitGroup = () => {
     const items = Object.entries(cart).filter(([, n]) => n > 0).map(([cli, count]) => ({ cli, count }));
-    onNewGroup(groupName.trim() || 'Group', items);
+    onNewGroup(groupName.trim() || 'Group', items, groupLoc);
     setGroupName(''); setCart({}); setPanel('none');
   };
   const startEdit = (ref: string, name: string) => { setEditRef(ref); setEditName(name); };
@@ -106,7 +109,7 @@ export default function Sidebar({
         onDragStart={dnd.onDragStart} onDragEnd={dnd.onDragEnd} onDragOver={dnd.onDragOver} onDrop={dnd.onDrop}
         onClick={() => onOpenSession(s.id, groupId)}
         onDoubleClick={(e) => { e.stopPropagation(); startEdit(ref, s.name); }}
-        title={s.id}
+        title={s.path ? `${s.name} · ${s.path}` : s.name}
       >
         <span className={`status ${s.state}`} title={STATE_LABEL[s.state]} />
         {editing ? (
@@ -185,13 +188,14 @@ export default function Sidebar({
           <button className={`btn-ghost${panel === 'group' ? ' on' : ''}`} onClick={() => setPanel(panel === 'group' ? 'none' : 'group')}>+ Group</button>
         </div>
         {panel === 'session' && (
-          <NewSession clis={clis} onCreate={(n, c) => { onNewSession(n, c); setPanel('none'); }} onCancel={() => setPanel('none')} />
+          <NewSession clis={clis} defaultPath={defaultPath} onCreate={(n, c, p) => { onNewSession(n, c, p); setPanel('none'); }} onCancel={() => setPanel('none')} />
         )}
         {panel === 'group' && (
           <div className="widget">
             <input autoFocus placeholder="Group name" value={groupName}
               onChange={(e) => setGroupName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') submitGroup(); if (e.key === 'Escape') setPanel('none'); }} />
+            <FolderPicker value={groupLoc} autoLabel="new folder per agent (auto)" onChange={setGroupLoc} />
             <div className="cart">
               {clis.filter((c) => c.available).map((c) => {
                 const n = cart[c.id] || 0;
@@ -227,6 +231,7 @@ export default function Sidebar({
 
       <div className="legend">
         <span><span className="status working" /> working</span>
+        <span><span className="status waiting" /> your turn</span>
         <span><span className="status idle" /> idle</span>
         <span><span className="status stopped" /> stopped</span>
       </div>

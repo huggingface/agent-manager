@@ -4,6 +4,9 @@ export interface Session {
   id: string;
   name: string;
   cli: string;
+  // Workspace-relative folder the agent runs in. Independent of `name` —
+  // renaming never moves anything on disk. null = the workspace root (Files).
+  path: string | null;
   createdAt: string;
   everStarted: boolean;
   running: boolean;
@@ -32,10 +35,9 @@ export interface Tree {
   sessions: Session[];
 }
 
-// "waiting" and "idle" are shown identically (grey, "idle").
 export const STATE_LABEL: Record<SessionState, string> = {
   working: 'working',
-  waiting: 'idle',
+  waiting: 'your turn',
   idle: 'idle',
   stopped: 'stopped',
 };

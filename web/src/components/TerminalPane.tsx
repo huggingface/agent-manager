@@ -161,6 +161,9 @@ export default function TerminalPane({
     let ws: WebSocket | null = null;
     let closedByUs = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
+    // Reconnect with backoff: a sleeping/unreachable Space shouldn't be hammered
+    // every second by every open pane. Reset once a connection succeeds.
+    let retryDelay = 1200;
 
     const send = (o: unknown) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o));
@@ -174,6 +177,7 @@ export default function TerminalPane({
       ws.binaryType = 'arraybuffer';
       ws.onopen = () => {
         setConn('connected');
+        retryDelay = 1200;
         try { fit.fit(); } catch { /* ignore */ }
         send({ t: 'r', cols: term.cols, rows: term.rows });
       };
@@ -185,11 +189,14 @@ export default function TerminalPane({
         // reattach to the still-running tmux session.
         if (e.code === EXIT_CODE) { setConn('exited'); return; }
         setConn('closed');
-        if (!closedByUs) retry = setTimeout(connect, 1200);
+        if (!closedByUs) {
+          retry = setTimeout(connect, retryDelay);
+          retryDelay = Math.min(retryDelay * 1.7, 15_000);
+        }
       };
       ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
     };
-    reconnectRef.current = () => { if (retry) clearTimeout(retry); connect(); };
+    reconnectRef.current = () => { if (retry) clearTimeout(retry); retryDelay = 1200; connect(); };
 
     // Re-fit and tell the server our size. With tmux window-size=latest this
     // makes the focused window own the size, so a duplicate window open at a

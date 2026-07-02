@@ -1,16 +1,33 @@
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFile as execFileCb } from 'node:child_process';
+import { promisify } from 'node:util';
 
-const cache = new Map(); // key -> { ts, val }
+const execFile = promisify(execFileCb);
+
+// Cache stores the in-flight/settled PROMISE, so concurrent requests share one
+// underlying ccusage run / file scan instead of piling up.
+const cache = new Map(); // key -> { ts, val: Promise }
 const TTL = 60_000;
 function cached(key, fn) {
   const c = cache.get(key);
   if (c && Date.now() - c.ts < TTL) return c.val;
-  let val = null;
-  try { val = fn(); } catch { val = null; }
+  const val = Promise.resolve().then(fn).catch(() => null);
   cache.set(key, { ts: Date.now(), val });
   return val;
+}
+
+// Normalize a reset timestamp to unix SECONDS. Providers disagree: some report
+// epoch seconds, some epoch millis, Claude's statusline payload uses an ISO
+// string. The frontend assumes seconds.
+function toEpochSec(v) {
+  if (typeof v === 'number' && Number.isFinite(v)) return v > 1e12 ? Math.floor(v / 1000) : v;
+  if (typeof v === 'string') {
+    const ms = Date.parse(v);
+    if (!Number.isNaN(ms)) return Math.floor(ms / 1000);
+  }
+  return undefined;
 }
 
 function dateOf(entry) {
@@ -37,11 +54,11 @@ function claudeEnv() {
 
 // Tokens + (estimated) cost for a provider, via `ccusage <provider> daily --json`.
 function providerUsage(prov) {
-  return cached(`u:${prov}`, () => {
+  return cached(`u:${prov}`, async () => {
     const env = prov === 'claude' ? claudeEnv() : process.env;
     let out;
     try {
-      out = execFileSync('ccusage', [prov, 'daily', '--json'], { encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'ignore'], env });
+      ({ stdout: out } = await execFile('ccusage', [prov, 'daily', '--json'], { encoding: 'utf8', timeout: 20_000, maxBuffer: 16 * 1024 * 1024, env }));
     } catch { return null; }
     let data;
     try { data = JSON.parse(out); } catch { return null; }
@@ -80,34 +97,33 @@ function findRateLimits(obj) {
 // just the newest file's, because a freshly-started session's rollout has no
 // rate_limits yet (it only appears after a request), which would otherwise make
 // the quota look "gone" right after a restart until you run something.
-function codexRollouts() {
+async function codexRollouts() {
   const home = process.env.CODEX_HOME || path.join(process.env.HOME || '', '.codex');
   const root = path.join(home, 'sessions');
   const files = [];
-  if (!fs.existsSync(root)) return files;
-  const walk = (dir, depth) => {
+  const walk = async (dir, depth) => {
     if (depth > 5) return;
     let ents = [];
-    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
     for (const e of ents) {
       const p = path.join(dir, e.name);
-      if (e.isDirectory()) walk(p, depth + 1);
+      if (e.isDirectory()) await walk(p, depth + 1);
       else if (e.name.startsWith('rollout-') && e.name.endsWith('.jsonl')) {
-        try { files.push({ p, m: fs.statSync(p).mtimeMs }); } catch {}
+        try { files.push({ p, m: (await fsp.stat(p)).mtimeMs }); } catch {}
       }
     }
   };
-  walk(root, 0);
+  await walk(root, 0);
   return files.sort((a, b) => b.m - a.m);
 }
 
 function codexQuota() {
-  return cached('codexq', () => {
-    const win = (w) => (w ? { usedPercent: w.used_percent, windowMinutes: w.window_minutes, resetsAt: w.resets_at } : null);
-    for (const f of codexRollouts()) {
+  return cached('codexq', async () => {
+    const win = (w) => (w ? { usedPercent: w.used_percent, windowMinutes: w.window_minutes, resetsAt: toEpochSec(w.resets_at) } : null);
+    for (const f of await codexRollouts()) {
       let rl = null;
       let lines;
-      try { lines = fs.readFileSync(f.p, 'utf8').split('\n'); } catch { continue; }
+      try { lines = (await fsp.readFile(f.p, 'utf8')).split('\n'); } catch { continue; }
       for (const ln of lines) {
         if (!ln) continue;
         let j; try { j = JSON.parse(ln); } catch { continue; }
@@ -123,16 +139,15 @@ function codexQuota() {
 // Claude quota is written by our statusline hook (see claude-statusline.mjs):
 // it captures the rate_limits Claude reports, so it's as fresh as the last time
 // a Claude session made a model call on the Space.
-function claudeQuota() {
+async function claudeQuota() {
   try {
     const cfg = process.env.CLAUDE_CONFIG_DIR;
     if (!cfg) return null;
     const p = path.join(cfg, 'usage.json');
-    if (!fs.existsSync(p)) return null;
-    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const j = JSON.parse(await fsp.readFile(p, 'utf8'));
     const rl = j.rate_limits;
     if (!rl) return null;
-    const w = (x) => (x ? { usedPercent: x.used_percentage ?? x.used_percent, resetsAt: x.resets_at } : null);
+    const w = (x) => (x ? { usedPercent: x.used_percentage ?? x.used_percent, resetsAt: toEpochSec(x.resets_at) } : null);
     return { fiveHour: w(rl.five_hour), weekly: w(rl.seven_day), opus: w(rl.seven_day_opus), updatedAt: j.ts || null };
   } catch { return null; }
 }
@@ -151,35 +166,39 @@ function countJsonl(dir, depth = 0) {
   return n;
 }
 
-function debugInfo() {
+async function debugInfo() {
   const home = process.env.HOME || '';
   let ccusage = null;
-  try { ccusage = execFileSync('ccusage', ['--version'], { encoding: 'utf8', timeout: 10_000 }).trim(); } catch (e) { ccusage = `MISSING (${e.code || e.message})`; }
+  try { ccusage = (await execFile('ccusage', ['--version'], { encoding: 'utf8', timeout: 10_000 })).stdout.trim(); } catch (e) { ccusage = `MISSING (${e.code || e.message})`; }
   const claudeDirs = [process.env.CLAUDE_CONFIG_DIR, path.join(home, '.claude'), path.join(home, '.config', 'claude')]
     .filter(Boolean)
     .map((d) => {
       const proj = path.join(d, 'projects');
       return { dir: d, projectsExists: fs.existsSync(proj), jsonl: fs.existsSync(proj) ? countJsonl(proj) : 0 };
     });
-  const raw = (prov) => { const u = providerUsage(prov); return u ? { tokensWeek: u.tokensWeek, costWeek: u.costWeek } : null; };
+  const raw = async (prov) => { const u = await providerUsage(prov); return u ? { tokensWeek: u.tokensWeek, costWeek: u.costWeek } : null; };
   return {
     env: { HOME: home, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR || null, CODEX_HOME: process.env.CODEX_HOME || null },
     ccusage,
     claudeDirs,
-    codexRolloutFiles: codexRollouts().length,
-    raw: { claude: raw('claude'), codex: raw('codex'), gemini: raw('gemini') },
+    codexRolloutFiles: (await codexRollouts()).length,
+    raw: { claude: await raw('claude'), codex: await raw('codex'), gemini: await raw('gemini') },
   };
 }
 
-export function buildUsage(debug = false) {
+export async function buildUsage(debug = false) {
+  const [uClaude, uCodex, uGemini, qClaude, qCodex] = await Promise.all([
+    providerUsage('claude'), providerUsage('codex'), providerUsage('gemini'),
+    claudeQuota(), codexQuota(),
+  ]);
   const out = {
     providers: {
-      claude: { ...(providerUsage('claude') || {}), quota: claudeQuota() },
-      codex: { ...(providerUsage('codex') || {}), quota: codexQuota() },
-      gemini: { ...(providerUsage('gemini') || {}), quota: null },
+      claude: { ...(uClaude || {}), quota: qClaude },
+      codex: { ...(uCodex || {}), quota: qCodex },
+      gemini: { ...(uGemini || {}), quota: null },
     },
     generatedAt: new Date().toISOString(),
   };
-  if (debug) out._debug = debugInfo();
+  if (debug) out._debug = await debugInfo();
   return out;
 }

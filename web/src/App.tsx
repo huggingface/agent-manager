@@ -30,14 +30,26 @@ export default function App() {
     return Number.isFinite(z) ? z : 100;
   });
   const [info, setInfo] = useState<Awaited<ReturnType<typeof api.getInfo>> | null>(null);
+  // Default location for the next agent = where the last one was created.
+  const [lastPath, setLastPath] = useState(() => localStorage.getItem('am-last-path') || '');
   const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
+  const rememberPath = (p?: string | null) => {
+    if (p) { setLastPath(p); localStorage.setItem('am-last-path', p); }
+  };
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('am-theme', theme);
   }, [theme]);
 
-  useEffect(() => { api.getInfo().then(setInfo).catch(() => {}); }, []);
+  // Refresh info while locked so flipping the Space to Private unlocks the UI
+  // without a manual reload (the server re-checks visibility every minute).
+  useEffect(() => {
+    api.getInfo().then(setInfo).catch(() => {});
+    if (!info?.locked) return;
+    const t = setInterval(() => api.getInfo().then(setInfo).catch(() => {}), 15_000);
+    return () => clearInterval(t);
+  }, [info?.locked]);
   useEffect(() => { localStorage.setItem('am-zoom', String(zoom)); }, [zoom]);
 
   const refresh = useCallback(async () => {
@@ -47,8 +59,11 @@ export default function App() {
   useEffect(() => {
     api.getClis().then(setClis).catch(() => {});
     refresh();
-    const t = setInterval(refresh, 2500);
-    return () => clearInterval(t);
+    // Skip polling while the tab is hidden; catch up immediately on return.
+    const t = setInterval(() => { if (!document.hidden) refresh(); }, 2500);
+    const onVisible = () => { if (!document.hidden) refresh(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVisible); };
   }, [refresh]);
 
   const cliMap = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c])), [clis]);
@@ -78,17 +93,19 @@ export default function App() {
   }, [visibleIds, focusedId]);
 
   // actions
-  const newSession = async (name: string, cli: string) => {
-    const s = await api.createSession(name, cli, activeGroup?.id);
+  const newSession = async (name: string, cli: string, path: string) => {
+    const s = await api.createSession(name, cli, activeGroup?.id, path);
+    rememberPath(s.path);
     await refresh();
     setActiveRef(`s:${s.id}`);
   };
-  const newGroup = async (name: string, cart?: { cli: string; count: number }[]) => {
+  const newGroup = async (name: string, cart?: { cli: string; count: number }[], path = '') => {
     const g = await api.createGroup(name);
     for (const { cli, count } of cart || []) {
       const base = cliMap[cli]?.label || cli;
       for (let i = 0; i < count; i++) {
-        await api.createSession(count > 1 ? `${base} ${i + 1}` : base, cli, g.id);
+        const s = await api.createSession(count > 1 ? `${base} ${i + 1}` : base, cli, g.id, path);
+        rememberPath(s.path);
       }
     }
     await refresh();
@@ -114,7 +131,7 @@ export default function App() {
   const onDropMain = (e: React.DragEvent) => {
     e.preventDefault();
     const ref = e.dataTransfer.getData('text/plain');
-    if (ref?.startsWith('s:') && activeGroup) doMove(ref, { kind: 'group', groupId: activeGroup.id });
+    if (ref?.startsWith('s:') && activeGroup) doMove(ref, { kind: 'into', groupId: activeGroup.id });
     setDropMain(false);
   };
 
@@ -175,6 +192,7 @@ export default function App() {
         tree={tree}
         activeRef={activeRef}
         focusedId={focusedId}
+        defaultPath={lastPath}
         onActivate={setActiveRef}
         onOpenSession={openSession}
         onNewSession={newSession}
@@ -203,7 +221,7 @@ export default function App() {
                 <div className="empty-card">
                   <h2>{activeGroup.name}</h2>
                   <p>Create an agent here, or drag one in from the sidebar.</p>
-                  <NewSession clis={clis} onCreate={newSession} />
+                  <NewSession clis={clis} defaultPath={lastPath} onCreate={newSession} />
                   <div className="dropline">⤓ drop an agent to add it to this group</div>
                 </div>
               </div>

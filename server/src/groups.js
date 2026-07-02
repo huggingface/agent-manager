@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DATA_DIR, allocFolder } from './config.js';
+import { DATA_DIR } from './config.js';
 
 const GROUPS_FILE = path.join(DATA_DIR, 'groups.json');
 let groups = [];
@@ -12,6 +12,10 @@ function persist() {
   fs.renameSync(tmp, GROUPS_FILE);
 }
 
+// Groups are purely VISUAL: sidebar organization + tiling. They own no folder —
+// each session records its own `path`. (Old groups.json entries may still carry
+// a `folder` key; it's kept for the one-time path migration in index.js and
+// otherwise ignored.)
 export function init() {
   try {
     groups = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8'));
@@ -19,12 +23,6 @@ export function init() {
   } catch {
     groups = [];
   }
-  // Backfill: groups now own a shared workspace folder.
-  let changed = false;
-  for (const g of groups) {
-    if (!g.folder) { g.folder = allocFolder(g.name); changed = true; }
-  }
-  if (changed) persist();
 }
 
 export function list() {
@@ -41,7 +39,6 @@ export function create(name) {
     id: `g-${crypto.randomBytes(3).toString('hex')}`,
     name: clean,
     sessionIds: [],
-    folder: allocFolder(clean),
     createdAt: new Date().toISOString(),
   };
   groups.push(g);
@@ -49,11 +46,10 @@ export function create(name) {
   return g;
 }
 
-export function update(id, { name, sessionIds, folder }) {
+export function update(id, { name, sessionIds }) {
   const g = get(id);
   if (!g) return null;
   if (typeof name === 'string' && name.trim()) g.name = name.trim();
-  if (typeof folder === 'string' && folder) g.folder = folder;
   if (Array.isArray(sessionIds)) {
     // Enforce single-group membership: drop these ids from every other group.
     const set = new Set(sessionIds);

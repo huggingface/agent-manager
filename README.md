@@ -13,8 +13,11 @@ short_description: Private cloud manager for AI coding CLI sessions
 
 A private, single-user cloud terminal manager for AI coding CLIs — **Claude Code**,
 **Codex**, **Gemini CLI**, **opencode**, and **Hermes** — plus a plain shell and a
-file browser, all in your browser. Each agent runs in its own workspace folder;
-group agents to share a folder and tile them side by side. Sessions are
+file browser, all in your browser. Each agent runs in a workspace folder you
+pick at creation (defaulting to where the last agent was created) — names are
+just labels, independent of folders, and several agents can share a folder.
+Groups are visual: they organize the sidebar and tile agents side by side.
+Sessions are
 tmux-backed, so they survive disconnects. A **Skills** page distributes reusable
 `SKILL.md` files to every agent, and a **Usage** page shows tokens/cost and your
 5-hour / weekly quota.
@@ -103,7 +106,7 @@ api.restart_space(space_id)
 ```
 
 Everything durable lives under `/data`: `sessions.json`, `groups.json`,
-`workspaces/<folder>/` (per-agent working dirs + shared `skills/`), and each
+`workspaces/<path>/` (agent working dirs + shared `skills/`), and each
 CLI's config/credentials/history (`HOME=/data/home`, plus `CLAUDE_CONFIG_DIR`
 and `CODEX_HOME` under `/data/state`).
 
@@ -120,8 +123,11 @@ browser (xterm.js panes)
 Each agent is a long-lived `tmux` session (`am-<id>`) that survives browser
 disconnects and in-Space server restarts. It does not survive a Space
 sleep/rebuild (the container is torn down), but with storage the working dir and
-CLI state persist, so a re-opened session resumes its own conversation (Claude
-sessions are pinned to a stable per-session id so grouped agents don't collide).
+CLI state persist, so a re-opened session resumes its own conversation. Claude
+sessions are pinned to a per-session conversation id at creation; Codex sessions
+are pinned right after first launch (the id is captured from the rollout file
+Codex creates) — so agents sharing a folder never resume each other's
+conversations.
 
 ## Configuration (env)
 

@@ -109,6 +109,26 @@ body {
 .secret-desc:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
 
 /* new-group: per-agent quantity cart */
+/* folder location picker (in the create widgets) */
+.fp { display: flex; flex-direction: column; gap: 4px; }
+.fp-current { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; text-align: left; }
+.fp-current:hover { border-color: var(--border-strong); }
+.fp-ico { flex: none; font-size: 12px; }
+.fp-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 11.5px; }
+.fp-toggle { flex: none; color: var(--muted); font-size: 10px; }
+.fp-tree { max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 3px 0; display: flex; flex-direction: column; }
+.fp-row { display: flex; align-items: center; gap: 2px; padding: 2px 8px; font-size: 12.5px; color: var(--text); background: transparent; border: none; cursor: pointer; text-align: left; width: 100%; font-family: inherit; }
+.fp-row.picked { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+.fp-row:hover:not(.picked) { background: var(--panel-2); }
+.fp-caret { flex: none; width: 18px; background: transparent; border: none; color: var(--muted); font-size: 9px; cursor: pointer; padding: 2px 0; }
+.fp-name { flex: 1; background: transparent; border: none; color: inherit; font: inherit; cursor: pointer; text-align: left; padding: 3px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-root { padding: 4px 10px; color: var(--muted); font-style: italic; }
+.fp-root.picked { color: var(--accent); }
+.fp-new { color: var(--muted); font-size: 12px; padding-top: 3px; padding-bottom: 3px; }
+.fp-new:hover { color: var(--accent); }
+.fp-msg { color: var(--muted); cursor: default; }
+.fp-input { flex: 1; padding: 3px 8px !important; font-size: 12px !important; }
+
 .cart { display: flex; flex-direction: column; gap: 4px; }
 .cart-row { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 8px; font-size: 13px; }
 .cart-row.has { background: color-mix(in srgb, var(--accent) 8%, transparent); }
@@ -155,7 +175,8 @@ body {
 /* status dots */
 .status { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
 .status.working { background: var(--accent); box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 55%, transparent); }
-.status.waiting, .status.idle { background: var(--muted); opacity: 0.5; }
+.status.waiting { background: #e0a948; box-shadow: 0 0 6px color-mix(in srgb, #e0a948 55%, transparent); }
+.status.idle { background: var(--muted); opacity: 0.5; }
 .status.stopped { background: transparent; border: 1.5px solid var(--muted); opacity: 0.5; }
 
 .legend { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 10px 16px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--muted); }

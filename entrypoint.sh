@@ -19,6 +19,10 @@ export CLAUDE_CONFIG_DIR="$DATA_DIR/state/claude"
 export CODEX_HOME="$DATA_DIR/state/codex"
 mkdir -p "$CLAUDE_CONFIG_DIR" "$CODEX_HOME"
 
+# NOTE: every var exported below must be listed in NON_SECRET (server/src/
+# index.js) — this script runs after the build-time env snapshot, so anything
+# exported here would otherwise show up as a detected "secret" in Settings.
+
 # Fast, EPHEMERAL local area for tools / Python envs / package caches. Never the
 # /data bucket — object storage is slow for many-small-files and can't mmap or
 # lock well, so running libraries from it is painful. These reinstall on demand.
@@ -55,15 +59,19 @@ if [ ! -f "$DATA_DIR/install.sh" ]; then
 # -----------------------------------------------------------------------------
 EOF
 fi
-# Run it BLOCKING so custom tools/envs are ready before any session starts.
-# Log to a file and echo to the Space logs; capture the real exit code; continue
-# regardless so a failing install still leaves a working UI to fix it.
-echo "Running $DATA_DIR/install.sh (blocking)…"
-sh "$DATA_DIR/install.sh" > "$DATA_DIR/install.log" 2>&1
+# Run it BLOCKING so custom tools/envs are ready before any session starts —
+# but bounded: a hung install (e.g. curl to a dead host) must not brick the
+# Space with no UI to fix it. Log to a file and echo to the Space logs; capture
+# the real exit code; continue regardless.
+INSTALL_TIMEOUT="${INSTALL_TIMEOUT:-600}"
+echo "Running $DATA_DIR/install.sh (blocking, ${INSTALL_TIMEOUT}s limit)…"
+timeout "$INSTALL_TIMEOUT" sh "$DATA_DIR/install.sh" > "$DATA_DIR/install.log" 2>&1
 INSTALL_CODE=$?
 cat "$DATA_DIR/install.log"
 if [ "$INSTALL_CODE" -eq 0 ]; then
   echo "[install.sh OK]"
+elif [ "$INSTALL_CODE" -eq 124 ]; then
+  echo "[install.sh TIMED OUT after ${INSTALL_TIMEOUT}s — starting anyway; fix it via the Files browser, see $DATA_DIR/install.log]"
 else
   echo "[install.sh FAILED (exit $INSTALL_CODE) — starting anyway; fix it via the Files browser, see $DATA_DIR/install.log]"
 fi

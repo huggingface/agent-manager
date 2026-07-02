@@ -31,13 +31,13 @@ function slugify(name) {
 
 export function init() {
   load();
-  // Backfill: older sessions had no explicit folder — their dir is workspaces/<id>.
   let changed = false;
   for (const s of sessions) {
-    if (!s.folder) { s.folder = s.id; changed = true; }
     if (!s.sessionUuid) { s.sessionUuid = crypto.randomUUID(); changed = true; }
   }
   if (changed) persist();
+  // NOTE: `path` migration from the old folder/group-folder model happens in
+  // index.js (it needs the groups store).
 }
 
 export function list() {
@@ -48,16 +48,19 @@ export function get(id) {
   return sessions.find((s) => s.id === id) || null;
 }
 
-export function create({ name, cli }) {
+export function create({ name, cli, path }) {
   const cleanName = (name || '').trim() || 'session';
   const id = `${slugify(cleanName)}-${crypto.randomBytes(3).toString('hex')}`;
-  // The Files agent has no folder of its own — it browses the whole workspace.
-  const folder = cli === 'files' ? null : allocFolder(cleanName);
+  // `path` is the workspace-relative folder the agent runs in, chosen at
+  // creation (or defaulted by the caller). It is a plain recorded value — the
+  // display name can change freely without touching disk, and nothing tracks
+  // the folder afterwards (deleted/moved folders are simply re-created empty on
+  // next start). Files agents may use null = browse the whole workspace root.
   const session = {
     id,
     name: cleanName,
     cli,
-    folder,
+    path: path ?? (cli === 'files' ? null : allocFolder(cleanName)),
     // Stable per-session conversation id. Lets agents that share a folder (a
     // group) each resume their OWN conversation instead of all latching onto
     // the most-recent one in that directory.

@@ -1,19 +1,25 @@
 import { useState } from 'react';
 import type { Cli } from '../types';
 import Logo from './Logo';
+import FolderPicker from './FolderPicker';
 
 export default function NewSession({
-  clis, onCreate, onCancel,
+  clis, defaultPath = '', onCreate, onCancel,
 }: {
   clis: Cli[];
-  onCreate: (name: string, cli: string) => void;
+  defaultPath?: string;
+  onCreate: (name: string, cli: string, path: string) => void;
   onCancel?: () => void;
 }) {
   const [name, setName] = useState('');
   const avail = clis.filter((c) => c.available);
   const [cli, setCli] = useState(avail[0]?.id || 'shell');
+  const [loc, setLoc] = useState(defaultPath);
   const sel = avail.find((c) => c.id === cli) || avail[0];
-  const submit = () => { if (!sel) return; onCreate(name.trim() || sel.label, sel.id); setName(''); };
+  const submit = () => { if (!sel) return; onCreate(name.trim() || sel.label, sel.id, loc); setName(''); };
+  // '' = no explicit location: a fresh auto-named folder, or — for the Files
+  // agent, which has no folder of its own — the whole workspace root.
+  const autoLabel = sel?.id === 'files' ? 'everything (workspace root)' : 'new folder (auto)';
 
   return (
     <div className="widget">
@@ -36,6 +42,7 @@ export default function NewSession({
           </button>
         ))}
       </div>
+      <FolderPicker value={loc} autoLabel={autoLabel} onChange={setLoc} />
       <div className="widget-actions">
         <button className="btn-primary" onClick={submit} disabled={!sel}>Create</button>
       </div>

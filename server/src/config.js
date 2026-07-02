@@ -112,34 +112,15 @@ export function slugify(s) {
   return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
 }
 
-// A unique workspace folder name derived from `base` (keeping `keep` if unchanged).
-function uniqueFolderName(base, keep) {
+// A fresh workspace folder named after `base` (suffixed if taken). Used as the
+// default location when an agent is created without an explicit path.
+export function allocFolder(base) {
   const b = slugify(base) || 'workspace';
   let name = b;
   let n = 1;
-  while (name !== keep && fs.existsSync(path.join(WORKSPACES_DIR, name))) { n++; name = `${b}-${n}`; }
-  return name;
-}
-
-export function allocFolder(base) {
-  const name = uniqueFolderName(base);
+  while (fs.existsSync(path.join(WORKSPACES_DIR, name))) { n++; name = `${b}-${n}`; }
   fs.mkdirSync(path.join(WORKSPACES_DIR, name), { recursive: true });
   return name;
-}
-
-// Rename a folder on disk to a fresh unique name derived from `base`; returns the new name.
-export function renameFolderTo(oldName, base) {
-  const target = uniqueFolderName(base, oldName);
-  if (target === oldName) return oldName;
-  const oldP = path.join(WORKSPACES_DIR, oldName);
-  const newP = path.join(WORKSPACES_DIR, target);
-  try {
-    if (fs.existsSync(oldP)) fs.renameSync(oldP, newP);
-    else fs.mkdirSync(newP, { recursive: true });
-    return target;
-  } catch {
-    return oldName;
-  }
 }
 
 export function workspacePath(folder) {

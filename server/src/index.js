@@ -7,7 +7,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import {
   PORT, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR, USE_TMUX, TMUX_AVAILABLE,
-  ensureDirs, cliCatalog, cliById, slugify, renameFolderTo, workspacePath, refreshVersions,
+  ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions,
 } from './config.js';
 import * as store from './sessions.js';
 import * as groups from './groups.js';
@@ -22,18 +22,24 @@ store.init();
 groups.init();
 order.init();
 
+// One-time migration to the explicit-path model: sessions used to own a folder
+// named after them (renamed along with them), or inherit their group's shared
+// folder. Now each session simply records `path` — names and folders are
+// independent, and groups are visual only.
+for (const s of store.list()) {
+  if (s.path === undefined) {
+    const g = groups.groupOf(s.id);
+    const path = s.cli === 'files' ? null : ((g && g.folder) || s.folder || s.id);
+    store.update(s.id, { path, folder: undefined });
+  }
+}
+
 // Empty dirs don't reliably persist on the bucket (object storage) across
-// restarts, so re-create every agent/group workspace folder on the mount so the
+// restarts, so re-create every recorded workspace path on the mount so the
 // Files agent always sees them.
 function ensureWorkspaceFolders() {
-  for (const g of groups.list()) {
-    if (g.folder) fs.mkdirSync(workspacePath(g.folder), { recursive: true });
-  }
-  const grouped = new Set(groups.list().flatMap((g) => g.sessionIds));
   for (const s of store.list()) {
-    if (s.folder && s.cli !== 'files' && !grouped.has(s.id)) {
-      fs.mkdirSync(workspacePath(s.folder), { recursive: true });
-    }
+    if (s.path) { try { fs.mkdirSync(workspacePath(s.path), { recursive: true }); } catch {} }
   }
 }
 ensureWorkspaceFolders();
@@ -56,7 +62,10 @@ function ensureClaudeStatusline() {
 }
 ensureClaudeStatusline();
 
-startVisibilityWatch();
+// Wait for the visibility verdict before serving: isPublic() fails closed on a
+// Space until the first successful check, so this avoids a locked-UI flash on
+// every boot of a private Space.
+await startVisibilityWatch();
 
 const app = express();
 app.use(express.json());
@@ -79,7 +88,7 @@ app.get('/api/health', (_req, res) =>
 
 app.get('/api/clis', (_req, res) => res.json(cliCatalog()));
 
-app.get('/api/usage', (req, res) => res.json(buildUsage(req.query.debug === '1')));
+app.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.debug === '1')));
 
 const hfToken = () => process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN || process.env.HF_API_TOKEN || null;
 
@@ -91,12 +100,16 @@ const BUILD_ENV_KEYS = (() => {
     return new Set(fs.readFileSync('/app/build-env-keys.txt', 'utf8').split('\n').map((s) => s.trim()).filter(Boolean));
   } catch { return null; }
 })();
-// Platform/runtime vars that aren't user secrets (set by HF / k8s / our entrypoint).
+// Platform/runtime vars that aren't user secrets (set by HF / k8s / our
+// entrypoint). NOTE: anything entrypoint.sh `export`s lands here too — it runs
+// after the build-time snapshot, so its vars would otherwise be misdetected as
+// injected secrets. Keep this list in sync with entrypoint.sh.
 const NON_SECRET = new Set([
   'HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'NPM_CONFIG_PREFIX', 'PWD', 'OLDPWD', 'SHLVL', '_', 'HOSTNAME',
   'ACCELERATOR', 'COMMIT_SHA', 'CPU_CORES', 'HF_DATASETS_TRUST_REMOTE_CODE', 'IMAGE_SHA', 'MEMORY', 'OMP_NUM_THREADS',
+  'UV_CACHE_DIR', 'PIP_CACHE_DIR', 'PYTHONPYCACHEPREFIX', 'PYTHONUSERBASE',
 ]);
-const NON_SECRET_PREFIX = ['SPACE_', 'KUBERNETES_', 'NVIDIA_', 'CUDA_', 'NV_'];
+const NON_SECRET_PREFIX = ['SPACE_', 'KUBERNETES_', 'NVIDIA_', 'CUDA_', 'NV_', 'AM_'];
 function injectedEnvKeys() {
   if (!BUILD_ENV_KEYS) return [];
   return Object.keys(process.env)
@@ -112,7 +125,9 @@ app.get('/api/info', (_req, res) => res.json({
   tmux: USE_TMUX,
   locked: isPublic(),
   canRelaunch: !!(process.env.SPACE_ID && hfToken()),
-  secrets: injectedEnvKeys(),
+  // While public, /api/info stays reachable (the Locked page needs it) — don't
+  // advertise which credentials exist to the whole internet.
+  secrets: isPublic() ? [] : injectedEnvKeys(),
 }));
 
 // Factory-reboot the Space: rebuilds the image (reinstalling the CLIs at their
@@ -159,7 +174,7 @@ Hermes — alongside plain shells and a file browser.
 ## Where you are
 - Your working directory is a **workspace folder** under \`/data/workspaces/\`. Everything you create here is saved.
 - Your home is \`/data/home\` (\`$HOME\`): config, credentials, and shell history persist across restarts.
-- \`$AM_SESSION\` is your workspace folder name; \`$AM_USER\` is the operator.
+- \`$AM_SESSION\` is your workspace folder (path relative to \`/data/workspaces\`); \`$AM_NAME\` is your display name in the manager; \`$AM_USER\` is the operator.
 
 ## What persists (and what doesn't)
 - \`/data\` is **durable storage** (a mounted bucket). Files under \`/data/workspaces/…\` and \`/data/home/…\` survive restarts and sleep.
@@ -297,10 +312,9 @@ app.delete('/api/skills/:name', (req, res) => {
 
 // ---------- file browser (for the Files agent) ----------
 function folderPathOf(session) {
-  // The Files agent browses the whole workspace root (every agent's folder).
-  if (session.cli === 'files') return WORKSPACES_DIR;
-  const g = groups.groupOf(session.id);
-  return workspacePath((g ? g.folder : session.folder) || session.id);
+  // A Files agent without a chosen location browses the whole workspace root.
+  if (session.cli === 'files' && !session.path) return WORKSPACES_DIR;
+  return workspacePath(session.path || session.id);
 }
 function resolveSafe(root, rel) {
   const p = path.resolve(root, rel || '.');
@@ -332,19 +346,55 @@ app.get('/api/files/:id/download', (req, res) => {
   res.download(f);
 });
 
-app.post('/api/files/:id/upload', express.raw({ type: '*/*', limit: '500mb' }), (req, res) => {
+// Stream uploads straight to disk — a big drag-drop must not be buffered in the
+// RAM of the process that's also pumping every terminal's PTY data.
+app.post('/api/files/:id/upload', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const dir = resolveSafe(folderPathOf(s), req.query.path);
   const name = String(req.query.name || '');
   if (!dir || !name || name.includes('/') || name.includes('..')) return res.status(400).json({ error: 'bad path' });
+  const dest = path.join(dir, name);
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { return res.status(500).json({ error: e.message }); }
+  const out = fs.createWriteStream(dest);
+  const fail = (e) => {
+    out.destroy();
+    fs.unlink(dest, () => {}); // don't leave a truncated file behind
+    if (!res.headersSent) res.status(500).json({ error: String(e && e.message || e) });
+  };
+  out.on('error', fail);
+  req.on('error', fail);
+  req.on('aborted', () => fail(new Error('upload aborted')));
+  out.on('finish', () => res.json({ ok: true }));
+  req.pipe(out);
+});
+
+// Sanitize a client-supplied workspace-relative path: no '..', no absolute
+// paths, must resolve under WORKSPACES_DIR. Returns the normalized relative
+// path ('' = the workspaces root), or null if invalid.
+function cleanRelPath(p) {
+  if (typeof p !== 'string') return null;
+  const parts = p.split('/').map((s) => s.trim()).filter((s) => s && s !== '.');
+  if (parts.some((s) => s === '..')) return null;
+  const rel = parts.join('/');
+  const abs = path.resolve(WORKSPACES_DIR, rel);
+  if (abs !== WORKSPACES_DIR && !abs.startsWith(WORKSPACES_DIR + path.sep)) return null;
+  return rel;
+}
+
+// Folder listing for the location picker (subfolders of one level).
+app.get('/api/folders', (req, res) => {
+  const rel = cleanRelPath(req.query.path || '');
+  if (rel === null) return res.status(400).json({ error: 'bad path' });
+  const dir = workspacePath(rel);
+  let folders = [];
   try {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, name), req.body);
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+    folders = fs.readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b));
+  } catch {}
+  res.json({ path: rel, folders });
 });
 
 function sessionsWithState() {
@@ -385,25 +435,33 @@ function nextName(cli) {
 }
 
 app.post('/api/sessions', (req, res) => {
-  const { name, cli, groupId } = req.body || {};
+  const { name, cli, groupId, path: reqPath } = req.body || {};
   if (!cli || !cliById(cli)) return res.status(400).json({ error: 'unknown cli' });
   const finalName = name && name.trim() ? name.trim() : nextName(cli);
-  const s = store.create({ name: finalName, cli });
+  // Location: an explicit workspace-relative path if given ('' = workspaces
+  // root, only meaningful for Files agents); otherwise sessions.create defaults
+  // to a fresh folder named after the agent.
+  let chosen;
+  if (reqPath !== undefined && reqPath !== null && reqPath !== '') {
+    chosen = cleanRelPath(reqPath);
+    if (chosen === null || chosen === '') return res.status(400).json({ error: 'bad path' });
+  } else if (reqPath === '' && cli === 'files') {
+    chosen = null; // Files agent scoped to the workspace root
+  }
+  const s = store.create({ name: finalName, cli, path: chosen });
+  if (s.path) { try { fs.mkdirSync(workspacePath(s.path), { recursive: true }); } catch {} }
   if (groupId && groups.get(groupId)) groups.attach(groupId, s.id);
   else order.prepend(`s:${s.id}`);
   res.status(201).json({ ...s, running: false, state: 'stopped' });
 });
 
+// Rename = display label only. Folders are never renamed or moved.
 app.put('/api/sessions/:id', (req, res) => {
   const name = (req.body || {}).name;
   if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'bad name' });
   const existing = store.get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'not found' });
-  const patch = { name: name.trim() };
-  // A loose agent owns its folder, so rename it to match. (Grouped agents share
-  // the group's folder, which is renamed with the group instead.)
-  if (!groups.groupOf(existing.id)) patch.folder = renameFolderTo(existing.folder, name.trim());
-  res.json(store.update(existing.id, patch));
+  res.json(store.update(existing.id, { name: name.trim() }));
 });
 
 app.post('/api/sessions/:id/stop', (req, res) => {
@@ -432,12 +490,7 @@ app.post('/api/groups', (req, res) => {
 app.put('/api/groups/:id', (req, res) => {
   const existing = groups.get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'not found' });
-  const patch = { ...(req.body || {}) };
-  // Rename the group's shared folder to match a new name.
-  if (typeof patch.name === 'string' && patch.name.trim() && patch.name.trim() !== existing.name) {
-    patch.folder = renameFolderTo(existing.folder, patch.name.trim());
-  }
-  res.json(groups.update(existing.id, patch));
+  res.json(groups.update(existing.id, { ...(req.body || {}) }));
 });
 
 app.delete('/api/groups/:id', (req, res) => {
@@ -521,7 +574,24 @@ if (fs.existsSync(PUBLIC_DIR)) {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
+// Only accept WebSockets from our own page. WS handshakes skip CORS entirely
+// and the browser attaches cookies, so without this check any website could try
+// a cross-site `new WebSocket('wss://<space>/ws')` and reach a shell with the
+// visitor's HF credentials. No Origin header (curl, native clients) is allowed —
+// those carry no ambient browser credentials.
+function originAllowed(origin) {
+  if (!origin) return true;
+  let host;
+  try { host = new URL(origin).hostname; } catch { return false; }
+  if (process.env.SPACE_HOST) return host === process.env.SPACE_HOST;
+  return host === 'localhost' || host === '127.0.0.1'; // local dev
+}
+
 wss.on('connection', (ws, req) => {
+  if (!originAllowed(req.headers.origin)) {
+    ws.close(1008, 'bad origin');
+    return;
+  }
   if (isPublic()) {
     try { ws.send('\r\n[locked: this Space is public — make it private to use the terminals]\r\n'); } catch {}
     ws.close();

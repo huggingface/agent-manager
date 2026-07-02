@@ -4,8 +4,7 @@ import pty from 'node-pty';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { USE_TMUX, cliById, WORKSPACES_DIR } from './config.js';
-import * as groups from './groups.js';
-import { update } from './sessions.js';
+import { update, list } from './sessions.js';
 
 const TERM_ENV = {
   ...process.env,
@@ -67,8 +66,14 @@ export function isRunning(id) {
  * elapsed-time counters (their text changes). Returns Map id -> { age } where
  * age is seconds since the pane text last changed.
  */
+let infoMemo = { ts: 0, map: new Map() };
+
 export function agentInfo() {
+  // The sweep shells out to tmux once per session, synchronously. Memoize it
+  // briefly so N browser tabs polling /api/tree don't multiply that cost.
+  if (Date.now() - infoMemo.ts < 1500) return infoMemo.map;
   const map = new Map();
+  infoMemo = { ts: Date.now(), map };
   if (!USE_TMUX) return map;
   let list;
   try {
@@ -109,6 +114,80 @@ export function deriveState(session, info) {
   return session.cli === 'shell' ? 'idle' : 'waiting';
 }
 
+// ---------- Codex conversation pinning ----------
+// Codex picks its own conversation id at launch and doesn't accept one up
+// front — but it announces the pick immediately: a rollout file named
+// rollout-<ts>-<id>.jsonl appears under $CODEX_HOME/sessions with the cwd in
+// its first line. Capture that id shortly after launch and pin it on the
+// session, so restarts resume THIS agent's conversation — `resume --last`
+// would grab whichever Codex agent in the same folder ran last.
+const codexCapturing = new Set(); // session ids with a capture in flight
+
+function codexSessionsRoot() {
+  const home = process.env.CODEX_HOME || path.join(process.env.HOME || os.homedir(), '.codex');
+  return path.join(home, 'sessions');
+}
+
+// Rollout files touched since `sinceMs`, newest first.
+function codexRolloutsSince(sinceMs) {
+  const out = [];
+  const walk = (dir, depth) => {
+    if (depth > 5) return;
+    let ents = [];
+    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p, depth + 1);
+      else if (e.name.startsWith('rollout-') && e.name.endsWith('.jsonl')) {
+        try { const m = fs.statSync(p).mtimeMs; if (m >= sinceMs) out.push({ p, m }); } catch {}
+      }
+    }
+  };
+  walk(codexSessionsRoot(), 0);
+  return out.sort((a, b) => b.m - a.m);
+}
+
+// First line of a (potentially large) file without reading all of it.
+function firstLine(p) {
+  const fd = fs.openSync(p, 'r');
+  try {
+    const buf = Buffer.alloc(8192);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    return buf.toString('utf8', 0, n).split('\n', 1)[0];
+  } finally { fs.closeSync(fd); }
+}
+
+function tryCaptureCodexId(sessionId, workdir, sinceMs) {
+  const claimed = new Set(list().filter((s) => s.id !== sessionId && s.codexSessionId).map((s) => s.codexSessionId));
+  for (const c of codexRolloutsSince(sinceMs)) {
+    const m = c.p.match(/rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/);
+    if (!m || claimed.has(m[1])) continue;
+    let meta;
+    try { meta = JSON.parse(firstLine(c.p)); } catch { continue; }
+    if ((meta && meta.payload && meta.payload.cwd) !== workdir) continue;
+    update(sessionId, { codexSessionId: m[1], codexRollout: c.p });
+    return true;
+  }
+  return false;
+}
+
+function scheduleCodexCapture(session, workdir) {
+  if (session.codexSessionId || codexCapturing.has(session.id)) return;
+  codexCapturing.add(session.id);
+  const since = Date.now() - 2000;
+  const delays = [5000, 15000, 45000]; // rollout appears ~instantly; retries cover slow starts
+  const attempt = (i) => {
+    if (tryCaptureCodexId(session.id, workdir, since) || i + 1 >= delays.length) {
+      codexCapturing.delete(session.id);
+      return;
+    }
+    const t = setTimeout(() => attempt(i + 1), delays[i + 1] - delays[i]);
+    if (t.unref) t.unref();
+  };
+  const t0 = setTimeout(() => attempt(0), delays[0]);
+  if (t0.unref) t0.unref();
+}
+
 function commandFor(session) {
   const cli = cliById(session.cli) || cliById('shell');
   if (cli.id === 'shell') return bashLaunch;
@@ -116,14 +195,26 @@ function commandFor(session) {
   // Claude keys conversations by working directory, so grouped sessions sharing
   // a folder would all `--continue` onto the SAME most-recent conversation. Pin
   // each session to its own conversation id instead: create it with
-  // --session-id, resume it with --resume. The `|| …` chain self-heals when
-  // there's nothing to resume yet (first-run setup) or the flag is unsupported,
-  // so a failed resume can never exit/restart-loop the session.
+  // --session-id, resume it with --resume. Decide resume-vs-fresh by whether the
+  // transcript exists on disk (NOT via `resume || fresh`: that chain also fired
+  // when claude itself exited non-zero, silently respawning a crashed session
+  // as a fresh conversation and eating the pane's "done" signal). The fresh
+  // branch keeps `|| exec claude` as a last resort for an unsupported flag.
   if (cli.id === 'claude' && session.sessionUuid) {
-    const fresh = `claude --session-id ${session.sessionUuid}`;
-    return session.everStarted
-      ? `claude --resume ${session.sessionUuid} || ${fresh} || exec claude`
-      : `${fresh} || exec claude`;
+    const fresh = `claude --session-id ${session.sessionUuid} || exec claude`;
+    if (!session.everStarted) return fresh;
+    const projects = '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"';
+    const hasTranscript = `[ -n "$(find ${projects} -name '${session.sessionUuid}*' -print -quit 2>/dev/null)" ]`;
+    return `if ${hasTranscript}; then exec claude --resume ${session.sessionUuid}; else ${fresh}; fi`;
+  }
+
+  // Codex: resume this agent's pinned conversation (captured from its rollout
+  // file after launch — see scheduleCodexCapture). Existence-checked like
+  // Claude, so a purged rollout starts fresh honestly and a crash ends the
+  // pane instead of respawning. Unpinned sessions fall through to the generic
+  // `resume --last` below (correct while the agent has its folder to itself).
+  if (cli.id === 'codex' && session.codexSessionId && session.codexRollout) {
+    return `if [ -f '${session.codexRollout}' ]; then exec codex resume ${session.codexSessionId}; else exec codex; fi`;
   }
 
   // Other agents: resume when one likely exists, else a fresh launch. `exec` so
@@ -133,15 +224,11 @@ function commandFor(session) {
   return `exec ${cli.run}`;
 }
 
-// The folder an agent runs in: its group's shared folder if grouped, else its own.
-function effectiveFolder(session) {
-  const g = groups.groupOf(session.id);
-  return (g ? g.folder : session.folder) || session.id;
-}
-
 /** Attach a new PTY client to the session (creating the tmux session if needed). */
 export function attach(session, cols, rows) {
-  const folder = effectiveFolder(session);
+  // The recorded workspace-relative path. If the folder was deleted or moved,
+  // mkdir simply recreates it empty — no tracking, no magic.
+  const folder = session.path || session.id;
   const workdir = path.join(WORKSPACES_DIR, folder);
   fs.mkdirSync(workdir, { recursive: true });
   const full = commandFor(session);
@@ -158,16 +245,18 @@ export function attach(session, cols, rows) {
       // makes the focused window fit exactly.
       'new-session', '-A', '-s', tmuxName(session.id), '-c', workdir,
       '-e', `AM_SESSION=${folder}`,
+      '-e', `AM_NAME=${session.name}`,
       '-e', `AM_USER=${AM_USER}`,
       'sh', '-lc', full,
     );
     term = pty.spawn('tmux', args, { name: 'xterm-256color', cols, rows, cwd: workdir, env: TERM_ENV });
   } else {
-    const env = { ...TERM_ENV, AM_SESSION: folder, AM_USER };
+    const env = { ...TERM_ENV, AM_SESSION: folder, AM_NAME: session.name, AM_USER };
     term = pty.spawn('bash', ['-lc', full], { name: 'xterm-256color', cols, rows, cwd: workdir, env });
   }
 
   if (!session.everStarted) update(session.id, { everStarted: true });
+  if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
 
   const handle = {
     onData: (cb) => term.onData(cb),

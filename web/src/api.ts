@@ -1,4 +1,4 @@
-import type { Cli, Group, MoveTarget, Tree } from './types';
+import type { Cli, Group, MoveTarget, Session, Tree } from './types';
 
 const HEADERS = { 'content-type': 'application/json' };
 const json = (r: Response) => {
@@ -9,8 +9,11 @@ const json = (r: Response) => {
 export const getClis = (): Promise<Cli[]> => fetch('/api/clis').then(json);
 export const getTree = (): Promise<Tree> => fetch('/api/tree').then(json);
 
-export const createSession = (name: string, cli: string, groupId?: string) =>
-  fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ name, cli, groupId }) }).then(json);
+export const createSession = (name: string, cli: string, groupId?: string, path?: string): Promise<Session> =>
+  fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ name, cli, groupId, path }) }).then(json);
+
+export const listFolders = (p = ''): Promise<{ path: string; folders: string[] }> =>
+  fetch(`/api/folders?path=${encodeURIComponent(p)}`).then(json);
 
 export const stopSession = (id: string) =>
   fetch(`/api/sessions/${id}/stop`, { method: 'POST' }).then(json);

@@ -36,11 +36,17 @@ async function check() {
   return state;
 }
 
-export function isPublic() { return state.public; }
+// Fail CLOSED while unknown: on a Space, stay locked until the first check
+// succeeds, so a boot-time network blip can never leave a public Space serving
+// shells. (Locally — no SPACE_ID — `known` is set immediately and never locks.)
+export function isPublic() { return state.public || (!!SPACE_ID && !state.known); }
 export function visibility() { return state; }
 
+// Returns the first check's promise so startup can await a verdict before
+// accepting connections.
 export function startVisibilityWatch() {
-  check();
+  const first = check();
   const t = setInterval(check, 60_000);
   if (t.unref) t.unref();
+  return first;
 }
