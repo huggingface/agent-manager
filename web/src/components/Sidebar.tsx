@@ -4,7 +4,7 @@ import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PulseGlyph } from './icons';
 
 type Zone = 'before' | 'after' | 'on';
 
@@ -227,6 +227,17 @@ export default function Sidebar({
             </div>
           </div>
         )}
+      </div>
+
+      {/* Overview: pinned above the session tree, selectable like a session */}
+      <div className="ov-fixed">
+        <div
+          className={`row ov-row${activeRef === 'overview' ? ' active' : ''}`}
+          onClick={() => onActivate('overview')}
+        >
+          <PulseGlyph className="ov-row-ico" />
+          <span className="name">Overview</span>
+        </div>
       </div>
 
       <div className="tree" onDragEnd={clearDrag}>

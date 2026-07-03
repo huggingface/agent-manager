@@ -12,9 +12,9 @@ import {
 import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
-import { attach, agentInfo, deriveState, stop } from './runner.js';
+import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput } from './runner.js';
 import { buildUsage } from './usage.js';
-import { buildTraces } from './traces.js';
+import { buildTraces, traceDigests } from './traces.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 
 ensureDirs();
@@ -92,6 +92,38 @@ app.get('/api/clis', (_req, res) => res.json(cliCatalog()));
 app.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.debug === '1')));
 
 app.get('/api/traces', async (_req, res) => res.json(await buildTraces()));
+
+// Overview cards: every agent's state + what it did since your last prompt.
+app.get('/api/meta', async (_req, res) => {
+  const digests = await traceDigests();
+  const sessions = sessionsWithState()
+    .filter((s) => s.cli !== 'files')
+    .map((s) => {
+      const d = digests.get(s.id);
+      if (d) { const { _ts, ...digest } = d; return { ...s, digest }; }
+      return { ...s, digest: null };
+    });
+  res.json({ sessions, generatedAt: new Date().toISOString() });
+});
+
+// Type a prompt into a session's terminal from the Overview — no pane needed.
+// If the agent is stopped, wake it first (detached tmux + resume) and give the
+// CLI a moment to boot before the keystrokes land.
+app.post('/api/sessions/:id/input', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  if (s.cli === 'files') return res.status(400).json({ error: 'files pane takes no input' });
+  const text = typeof (req.body || {}).text === 'string' ? req.body.text.trim() : '';
+  if (!text) return res.status(400).json({ error: 'empty' });
+  try {
+    const started = ensureRunning(s);
+    if (started) await new Promise((r) => setTimeout(r, 3500));
+    sendInput(s.id, text);
+    res.json({ ok: true, started });
+  } catch (e) {
+    res.status(409).json({ error: String(e.message || e) });
+  }
+});
 
 const hfToken = () => process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN || process.env.HF_API_TOKEN || null;
 

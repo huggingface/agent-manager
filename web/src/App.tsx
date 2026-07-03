@@ -6,6 +6,7 @@ import SettingsView from './components/SettingsView';
 import NewSession from './components/NewSession';
 import LayoutPicker from './components/LayoutPicker';
 import Logo from './components/Logo';
+import Overview from './components/Overview';
 import Locked from './components/Locked';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, Session, Tree } from './types';
@@ -97,9 +98,10 @@ export default function App() {
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
 
-  // Keep a valid selection.
+  // Keep a valid selection ('overview' is always valid).
   useEffect(() => {
-    const ok = activeRef && (activeRef.startsWith('g:') ? groupById[activeRef.slice(2)] : sessById[activeRef.slice(2)]);
+    const ok = activeRef && (activeRef === 'overview'
+      || (activeRef.startsWith('g:') ? groupById[activeRef.slice(2)] : sessById[activeRef.slice(2)]));
     if (!ok) setActiveRef(tree.order[0] ?? null);
   }, [tree.order, groupById, sessById, activeRef]);
 
@@ -377,7 +379,15 @@ export default function App() {
           </div>
         )}
         <div className="stage">
-          {activeGroup ? (
+          {activeRef === 'overview' ? (
+            <Overview
+              clis={clis}
+              onOpen={(sid) => {
+                const g = tree.groups.find((x) => x.sessionIds.includes(sid));
+                openSession(sid, g?.id);
+              }}
+            />
+          ) : activeGroup ? (
             groupSessions.length === 0 ? (
               <div
                 className={`empty-group${dropMain ? ' drop-over' : ''}`}

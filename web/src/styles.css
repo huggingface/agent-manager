@@ -176,6 +176,32 @@ body {
 .stepper button:disabled { opacity: 0.35; cursor: not-allowed; }
 .stepper-n { min-width: 20px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
 
+/* overview: pinned sidebar row + cards view */
+.ov-fixed { padding: 6px 8px 0; }
+.ov-row .name { font-family: var(--font-sans); font-size: 13px; font-weight: 600; }
+.ov-row-ico { width: 14px; height: 14px; color: var(--accent); flex: none; }
+.ov-wrap { height: 100%; overflow-y: auto; }
+.ov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; align-items: start; }
+.ov-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; }
+.ov-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ov-head .spacer { flex: 1; }
+.ov-name { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-path { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-state { font-size: 11px; color: var(--muted); flex: none; }
+.ov-lbl { flex: none; font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 5px; margin-top: 1px; }
+.ov-you { display: flex; gap: 7px; align-items: baseline; font-size: 12.5px; min-width: 0; }
+.ov-you-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-ago { flex: none; font-size: 10.5px; color: var(--muted); }
+.ov-digest { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-last { display: flex; gap: 7px; align-items: baseline; font-size: 12.5px; line-height: 1.45; }
+.ov-last-text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.ov-none { font-size: 12px; color: var(--muted); font-style: italic; }
+.ov-reply { display: flex; gap: 6px; }
+.ov-reply input { flex: 1; min-width: 0; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel-2); color: var(--text); font-size: 13px; font-family: inherit; }
+.ov-reply input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
+.ov-reply .btn-ghost { flex: none; padding: 6px 12px; font-size: 12px; }
+.ov-note { font-size: 11px; color: var(--muted); }
+
 /* tree */
 .tree { flex: 1; overflow-y: auto; padding: 6px 8px 10px; }
 .empty-hint { color: var(--muted); font-size: 12px; padding: 12px 10px; line-height: 1.5; }
@@ -505,7 +531,8 @@ body {
   .row .cli-logo, .row .count { opacity: 1 !important; }
   .caret { width: 22px; font-size: 15px; }
   /* 16px inputs stop iOS zoom-on-focus */
-  .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input { font-size: 16px; }
+  .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input, .ov-reply input { font-size: 16px; }
+  .ov-grid { grid-template-columns: 1fr; }
   /* settings stacks vertically */
   .app.settings { flex-direction: column; }
   .app.settings .sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }

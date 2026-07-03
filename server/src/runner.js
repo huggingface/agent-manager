@@ -272,6 +272,46 @@ export function attach(session, cols, rows) {
   return handle;
 }
 
+/**
+ * Make sure the session's tmux process exists WITHOUT a browser pane attached
+ * (used by the Overview reply box to wake a stopped agent). Returns true if it
+ * had to spawn. Direct-PTY mode has no detached equivalent — throws if dead.
+ */
+export function ensureRunning(session) {
+  if (isRunning(session.id)) return false;
+  if (!USE_TMUX) throw new Error('session is not running');
+  const folder = session.path ?? session.id;
+  const workdir = path.join(WORKSPACES_DIR, folder);
+  fs.mkdirSync(workdir, { recursive: true });
+  const args = [];
+  if (fs.existsSync(TMUX_CONF)) args.push('-f', TMUX_CONF);
+  args.push(
+    'new-session', '-d', '-s', tmuxName(session.id), '-c', workdir,
+    '-x', '200', '-y', '50', // sane size until a client attaches (window-size=latest)
+    '-e', `AM_SESSION=${folder}`,
+    '-e', `AM_NAME=${session.name}`,
+    '-e', `AM_USER=${AM_USER}`,
+    '-e', `AM_ROOT=${WORKSPACES_DIR}`,
+    'sh', '-lc', commandFor(session),
+  );
+  execFileSync('tmux', args, { stdio: 'ignore', env: TERM_ENV });
+  if (!session.everStarted) update(session.id, { everStarted: true });
+  if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
+  return true;
+}
+
+/** Type a line into the session's terminal (works with no browser attached). */
+export function sendInput(id, text) {
+  if (USE_TMUX) {
+    execFileSync('tmux', ['send-keys', '-t', tmuxName(id), '-l', '--', text], { stdio: 'ignore' });
+    execFileSync('tmux', ['send-keys', '-t', tmuxName(id), 'Enter'], { stdio: 'ignore' });
+    return;
+  }
+  const set = live.get(id);
+  if (!set || !set.size) throw new Error('session is not running');
+  set.values().next().value.write(`${text}\r`);
+}
+
 /** Stop a session entirely (kills the tmux session / the running process). */
 export function stop(id) {
   if (USE_TMUX) {

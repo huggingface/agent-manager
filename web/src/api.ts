@@ -60,6 +60,18 @@ export interface ProviderUsage {
 export interface Usage { providers: Record<string, ProviderUsage>; generatedAt: string; }
 export const getUsage = (): Promise<Usage> => fetch('/api/usage').then(json);
 
+// ---- overview (meta) ----
+export interface MetaDigest {
+  lastPromptText: string; lastPromptTs: number;
+  lastAssistantText: string; lastAssistantTs: number;
+  sinceTurns: number; sinceToolCalls: number; sinceTools: Record<string, number>; sinceFiles: string[];
+}
+export interface MetaSession extends Session { digest: MetaDigest | null }
+export const getMeta = (): Promise<{ sessions: MetaSession[]; generatedAt: string }> =>
+  fetch('/api/meta').then(json);
+export const sendInput = (id: string, text: string): Promise<{ ok: boolean; started?: boolean }> =>
+  fetch(`/api/sessions/${id}/input`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ text }) }).then(json);
+
 // ---- trace analytics ----
 export interface TraceStats {
   turns: number; prompts: number; toolCalls: number; tools: Record<string, number>;

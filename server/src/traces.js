@@ -12,9 +12,9 @@ import * as store from './sessions.js';
 // Parsing is memoized per file by (mtime, size), so repeat calls only re-read
 // files that actually changed — important on the bucket mount.
 
-const fileCache = new Map(); // path -> { key, stats }
+const fileCache = new Map(); // path -> { key, parsed: { stats, digest } }
 let resultMemo = { ts: 0, val: null };
-const TTL = 30_000;
+const TTL = 5_000; // Overview polls; per-file mtime caching keeps re-scans cheap
 
 function emptyStats() {
   return { turns: 0, prompts: 0, toolCalls: 0, tools: {}, web: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, firstTs: 0, lastTs: 0, files: 0 };
@@ -35,12 +35,30 @@ function mergeInto(a, b) {
   if (b.lastTs > a.lastTs) a.lastTs = b.lastTs;
 }
 
+// ---------- "since your last prompt" digest (for the Overview cards) ----------
+// Built in the same parse pass: every real user prompt resets the segment, so
+// whatever accumulated by EOF is the activity since the last thing you said.
+function emptyDigest() {
+  return { lastPromptText: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [] };
+}
+const clip = (s, n = 280) => { const t = (s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
+function digestPrompt(d, text, ts) {
+  d.lastPromptText = clip(text); d.lastPromptTs = Date.parse(ts) || 0;
+  d.sinceTurns = 0; d.sinceToolCalls = 0; d.sinceTools = {}; d.sinceFiles = [];
+}
+function digestTool(d, name, file) {
+  d.sinceToolCalls++;
+  d.sinceTools[name] = (d.sinceTools[name] || 0) + 1;
+  if (file && !d.sinceFiles.includes(file) && d.sinceFiles.length < 12) d.sinceFiles.push(file);
+}
+
 // ---------- Claude transcripts (CLAUDE_CONFIG_DIR/projects/**/<uuid>.jsonl) ----------
 // Multi-block assistant messages repeat the same message.id AND usage across
 // several lines — dedupe both turns/usage (by message id) and tool_use blocks
 // (by block id) or everything double-counts.
 function parseClaude(txt) {
   const st = emptyStats();
+  const dg = emptyDigest();
   st.files = 1;
   const seenMsg = new Set();
   const seenTool = new Set();
@@ -54,6 +72,7 @@ function parseClaude(txt) {
       if (!seenMsg.has(id)) {
         seenMsg.add(id);
         st.turns++;
+        dg.sinceTurns++;
         const u = m.usage;
         if (u) {
           st.tokensIn += (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0);
@@ -65,25 +84,39 @@ function parseClaude(txt) {
       }
       if (Array.isArray(m.content)) {
         for (const c of m.content) {
-          if (c && c.type === 'tool_use' && !seenTool.has(c.id)) {
+          if (!c) continue;
+          if (c.type === 'tool_use' && !seenTool.has(c.id)) {
             seenTool.add(c.id);
             st.toolCalls++;
             const name = c.name || 'tool';
             st.tools[name] = (st.tools[name] || 0) + 1;
             if (/^web(search|fetch)$/i.test(name)) st.web++;
+            const file = /^(Edit|Write|MultiEdit|NotebookEdit)$/.test(name) && c.input && c.input.file_path;
+            digestTool(dg, name, file || null);
+          } else if (c.type === 'text' && c.text && c.text.trim()) {
+            dg.lastAssistantText = clip(c.text);
+            dg.lastAssistantTs = Date.parse(j.timestamp) || dg.lastAssistantTs;
           }
         }
       }
     } else if (j.type === 'user' && !j.toolUseResult) {
       st.prompts++;
+      const mc = j.message && j.message.content;
+      const text = typeof mc === 'string' ? mc
+        : Array.isArray(mc) ? mc.filter((c) => c && c.type === 'text').map((c) => c.text).join(' ') : '';
+      // Skip harness noise (slash-command wrappers, attachments) as "prompts".
+      if (text.trim() && !text.trim().startsWith('<')) digestPrompt(dg, text, j.timestamp);
     }
   }
-  return st;
+  return { stats: st, digest: dg };
 }
 
 // ---------- Codex rollouts (CODEX_HOME/sessions/**/rollout-*-<uuid>.jsonl) ----------
+const codexText = (p) => (Array.isArray(p.content) ? p.content.map((c) => (c && c.text) || '').join(' ') : '');
+
 function parseCodex(txt) {
   const st = emptyStats();
+  const dg = emptyDigest();
   st.files = 1;
   let tok = null; // token_count events are cumulative per run — keep the last
   for (const line of txt.split('\n')) {
@@ -94,8 +127,17 @@ function parseCodex(txt) {
     if (j.type === 'response_item') {
       switch (p.type) {
         case 'message':
-          if (p.role === 'assistant') st.turns++;
-          else if (p.role === 'user') st.prompts++;
+          if (p.role === 'assistant') {
+            st.turns++;
+            dg.sinceTurns++;
+            const t = codexText(p);
+            if (t.trim()) { dg.lastAssistantText = clip(t); dg.lastAssistantTs = Date.parse(j.timestamp) || dg.lastAssistantTs; }
+          } else if (p.role === 'user') {
+            st.prompts++;
+            const t = codexText(p);
+            // Codex wraps environment/instructions as user items — skip those.
+            if (t.trim() && !t.trim().startsWith('<')) digestPrompt(dg, t, j.timestamp);
+          }
           break;
         case 'function_call':
         case 'custom_tool_call':
@@ -103,6 +145,13 @@ function parseCodex(txt) {
           st.toolCalls++;
           const name = p.name || p.type;
           st.tools[name] = (st.tools[name] || 0) + 1;
+          // apply_patch arguments carry the touched files in the patch header
+          let file = null;
+          if (name === 'apply_patch' && typeof p.arguments === 'string') {
+            const m = p.arguments.match(/\*\*\* (?:Update|Add|Delete) File: ([^\\\n"]+)/);
+            if (m) file = m[1].trim();
+          }
+          digestTool(dg, name, file);
           break;
         }
         case 'web_search_call':
@@ -120,7 +169,7 @@ function parseCodex(txt) {
     st.cacheRead = cached;
     st.tokensOut = tok.output_tokens || 0;
   }
-  return st;
+  return { stats: st, digest: dg };
 }
 
 async function statsFor(p, parser) {
@@ -128,11 +177,11 @@ async function statsFor(p, parser) {
   try { m = await fsp.stat(p); } catch { return null; }
   const key = `${m.mtimeMs}:${m.size}`;
   const c = fileCache.get(p);
-  if (c && c.key === key) return c.stats;
-  let stats;
-  try { stats = parser(await fsp.readFile(p, 'utf8')); } catch { return null; }
-  fileCache.set(p, { key, stats });
-  return stats;
+  if (c && c.key === key) return c.parsed;
+  let parsed;
+  try { parsed = parser(await fsp.readFile(p, 'utf8')); } catch { return null; }
+  fileCache.set(p, { key, parsed });
+  return parsed;
 }
 
 async function claudeFiles() {
@@ -179,16 +228,20 @@ async function build() {
   const byClaudeUuid = new Map(sessions.filter((s) => s.cli === 'claude' && s.sessionUuid).map((s) => [s.sessionUuid, s]));
   const byCodexId = new Map(sessions.filter((s) => s.codexSessionId).map((s) => [s.codexSessionId, s]));
 
-  const perSession = new Map(); // session id -> stats
+  const perSession = new Map(); // session id -> aggregate stats
+  const digests = new Map();    // session id -> digest of the freshest file
   const other = emptyStats();
   const totals = emptyStats();
 
-  const attribute = (session, stats) => {
-    if (!stats) return;
+  const attribute = (session, parsed) => {
+    if (!parsed) return;
+    const { stats, digest } = parsed;
     mergeInto(totals, stats);
     if (session) {
       if (!perSession.has(session.id)) perSession.set(session.id, emptyStats());
       mergeInto(perSession.get(session.id), stats);
+      const prev = digests.get(session.id);
+      if (!prev || stats.lastTs > prev._ts) digests.set(session.id, { ...digest, _ts: stats.lastTs });
     } else {
       mergeInto(other, stats);
     }
@@ -203,6 +256,18 @@ async function build() {
     attribute(m ? byCodexId.get(m[1]) : null, await statsFor(p, parseCodex));
   }
 
+  return { perSession, digests, other, totals, sessions };
+}
+
+function memoized() {
+  if (resultMemo.val && Date.now() - resultMemo.ts < TTL) return resultMemo.val;
+  const val = build().catch(() => ({ perSession: new Map(), digests: new Map(), other: emptyStats(), totals: emptyStats(), sessions: store.list() }));
+  resultMemo = { ts: Date.now(), val };
+  return val;
+}
+
+export async function buildTraces() {
+  const { perSession, other, totals, sessions } = await memoized();
   return {
     sessions: sessions
       .filter((s) => perSession.has(s.id))
@@ -214,9 +279,8 @@ async function build() {
   };
 }
 
-export function buildTraces() {
-  if (resultMemo.val && Date.now() - resultMemo.ts < TTL) return resultMemo.val;
-  const val = build().catch(() => ({ sessions: [], other: null, totals: emptyStats(), generatedAt: new Date().toISOString() }));
-  resultMemo = { ts: Date.now(), val };
-  return val;
+/** Per-session "since your last prompt" digests, keyed by session id. */
+export async function traceDigests() {
+  const { digests } = await memoized();
+  return digests;
 }

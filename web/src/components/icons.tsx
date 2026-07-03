@@ -92,6 +92,12 @@ export const RefreshGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+export const PulseGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M1.5 8.2h2.8l1.6-4.4 3.4 8.4 1.7-4h3.5" />
+  </G>
+);
+
 export const LockGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <path d="M5.4 7V5.1a2.6 2.6 0 0 1 5.2 0V7" />
