@@ -43,12 +43,19 @@ export PATH="$AM_LOCAL/py/bin:$AM_LOCAL/npm/bin:$AM_LOCAL/bin:$HOME/.local/bin:$
 export OPENCLAW_STATE_DIR="$AM_LOCAL/openclaw"
 OPENCLAW_BACKUP="$DATA_DIR/state/openclaw-backup"
 mkdir -p "$OPENCLAW_STATE_DIR" "$OPENCLAW_BACKUP"
+# seed local state from the durable backup
 if [ -n "$(ls -A "$OPENCLAW_BACKUP" 2>/dev/null)" ]; then
   cp -a "$OPENCLAW_BACKUP/." "$OPENCLAW_STATE_DIR/" 2>/dev/null || true
-elif [ -d "$HOME/.openclaw" ]; then
-  # one-time migration from the old bucket location (kept in place untouched)
-  cp -a "$HOME/.openclaw/." "$OPENCLAW_STATE_DIR/" 2>/dev/null || true
 fi
+# The embedded runtime ignores OPENCLAW_STATE_DIR and resolves ~/.openclaw
+# directly, so ~/.openclaw becomes a SYMLINK to the local dir. If a real dir
+# is there (first boot, or written by an older build), merge its contents
+# (newer than the backup) and park it as .openclaw.pre-symlink.
+if [ -d "$HOME/.openclaw" ] && [ ! -L "$HOME/.openclaw" ]; then
+  cp -a "$HOME/.openclaw/." "$OPENCLAW_STATE_DIR/" 2>/dev/null || true
+  mv "$HOME/.openclaw" "$HOME/.openclaw.pre-symlink" 2>/dev/null || true
+fi
+[ -L "$HOME/.openclaw" ] || ln -s "$OPENCLAW_STATE_DIR" "$HOME/.openclaw" 2>/dev/null || true
 ( while :; do
     sleep 60
     rsync -a --delete "$OPENCLAW_STATE_DIR/" "$OPENCLAW_BACKUP/" 2>/dev/null || true
