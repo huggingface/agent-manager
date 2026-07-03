@@ -13,7 +13,7 @@ FROM node:22-bookworm AS runtime
 # System deps: tmux (session durability), git, build tools (node-pty native build),
 # ripgrep (used by the coding CLIs), curl/ca-certs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      tmux git ca-certificates curl python3 make g++ ripgrep bubblewrap \
+      tmux git ca-certificates curl python3 make g++ ripgrep bubblewrap rsync \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LANG=C.UTF-8

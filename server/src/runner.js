@@ -212,7 +212,7 @@ function commandFor(session) {
   // config exists, go straight to the TUI. Decided by config-file existence —
   // same honest pattern as the Claude transcript check.
   if (cli.id === 'openclaw') {
-    const cfg = '"${OPENCLAW_CONFIG_PATH:-$HOME/.openclaw/openclaw.json}"';
+    const cfg = '"${OPENCLAW_CONFIG_PATH:-${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/openclaw.json}"';
     return `if [ -s ${cfg} ]; then exec openclaw chat; else openclaw onboard && exec openclaw chat; fi`;
   }
 

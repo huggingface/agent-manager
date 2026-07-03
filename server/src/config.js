@@ -89,7 +89,7 @@ function isConfigured(id) {
         || fileOk(path.join(home, '.hermes', '.env'));
     case 'openclaw':
       return hasEnv('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY')
-        || fileOk(path.join(home, '.openclaw', 'openclaw.json'));
+        || fileOk(path.join(env.OPENCLAW_STATE_DIR || path.join(home, '.openclaw'), 'openclaw.json'));
     default:
       return true; // shell / files need no auth
   }

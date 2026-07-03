@@ -35,6 +35,25 @@ export PYTHONUSERBASE="$AM_LOCAL/py"          # pip install --user → local, fa
 export NPM_CONFIG_PREFIX="$AM_LOCAL/npm"       # npm install -g → local, no root needed
 export PATH="$AM_LOCAL/py/bin:$AM_LOCAL/npm/bin:$AM_LOCAL/bin:$HOME/.local/bin:$PATH"
 
+# OpenClaw: its session engine fingerprints file metadata at nanosecond
+# precision and false-positives on the FUSE bucket ("session file changed while
+# embedded prompt lock was released"). Its state therefore lives on LOCAL disk,
+# with a durable copy on the bucket: restored on boot, synced back every 60s.
+# Worst case on an unclean stop: the last minute of chat history.
+export OPENCLAW_STATE_DIR="$AM_LOCAL/openclaw"
+OPENCLAW_BACKUP="$DATA_DIR/state/openclaw-backup"
+mkdir -p "$OPENCLAW_STATE_DIR" "$OPENCLAW_BACKUP"
+if [ -n "$(ls -A "$OPENCLAW_BACKUP" 2>/dev/null)" ]; then
+  cp -a "$OPENCLAW_BACKUP/." "$OPENCLAW_STATE_DIR/" 2>/dev/null || true
+elif [ -d "$HOME/.openclaw" ]; then
+  # one-time migration from the old bucket location (kept in place untouched)
+  cp -a "$HOME/.openclaw/." "$OPENCLAW_STATE_DIR/" 2>/dev/null || true
+fi
+( while :; do
+    sleep 60
+    rsync -a --delete "$OPENCLAW_STATE_DIR/" "$OPENCLAW_BACKUP/" 2>/dev/null || true
+  done ) &
+
 # Durable, user-editable setup script. Runs on EVERY start (keep it idempotent);
 # seed a template on first boot.
 if [ ! -f "$DATA_DIR/install.sh" ]; then
