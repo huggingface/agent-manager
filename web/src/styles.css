@@ -347,10 +347,11 @@ body {
 .install-code summary { cursor: pointer; list-style: none; }
 .install-code summary::-webkit-details-marker { display: none; }
 .install-code summary .step-n { border-radius: var(--r-sm); font-size: 9px; letter-spacing: 0.02em; }
-.install-code .install-code-caret { margin-left: auto; color: var(--muted); font-size: 11px; transition: transform 0.15s ease-out; display: inline-block; }
-.install-code[open] .install-code-caret { transform: rotate(90deg); }
+.install-code .install-code-caret { margin-left: auto; width: 12px; height: 12px; color: var(--muted); transition: transform 0.15s ease-out; transform: rotate(-90deg); transform-origin: 50% 50%; flex: none; }
+.install-code[open] .install-code-caret { transform: rotate(0deg); }
+.install-code summary:hover .install-code-caret { color: var(--text); }
 .install-code[open] summary { margin-bottom: 4px; }
-.install-relock { border-top: 1px solid var(--border); padding-top: 14px; }
+.install-relock { border-bottom: 1px solid var(--border); padding-bottom: 16px; }
 .locked-cmd { position: relative; margin-top: 8px; }
 .locked-cmd pre { margin: 0; overflow-x: hidden; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-md); padding: 42px 14px 14px; font-size: 12px; line-height: 1.5; }
 .locked-copy { position: absolute; top: 10px; right: 10px; width: 30px; height: 30px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--muted); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }

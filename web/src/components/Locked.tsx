@@ -150,6 +150,10 @@ api.duplicate_repo(
             This copy is <b>public</b>, so its terminals are disabled: the app has no login of its
             own — a public instance would hand anyone a shell. Your duplicate stays private and unlocks itself.
           </p>
+          <p className="locked-sub install-relock">
+            <b>Is this your Space?</b> Set it back to <b>Private</b> in Settings → Change visibility —
+            it unlocks automatically within a minute.
+          </p>
 
           <div className="step">
             <div className="step-head"><span className="step-n mono">1</span><h3>Duplicate this Space</h3></div>
@@ -176,7 +180,7 @@ api.duplicate_repo(
             <summary className="step-head">
               <span className="step-n mono">&gt;_</span>
               <h3>Prefer code? Both steps in one script</h3>
-              <span className="install-code-caret">▸</span>
+              <svg className="install-code-caret" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.8 3.2h6.4L5 7.4z" fill="currentColor" /></svg>
             </summary>
             <div className="locked-cmd">
               <pre><code>{cmd}</code></pre>
@@ -188,11 +192,6 @@ api.duplicate_repo(
               </button>
             </div>
           </details>
-
-          <p className="locked-sub install-relock">
-            <b>Is this your Space?</b> Set it back to <b>Private</b> in Settings → Change visibility —
-            it unlocks automatically within a minute.
-          </p>
         </div>
       </div>
     </div>
