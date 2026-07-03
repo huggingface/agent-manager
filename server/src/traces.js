@@ -188,6 +188,71 @@ function parseCodex(txt) {
   return { stats: st, digest: dg };
 }
 
+// ---------- OpenClaw sessions (~/.openclaw/agents/*/sessions/<uuid>.jsonl) ----------
+// Line shape: { type: 'message', timestamp, message: { role, content: [{type:'text',text}],
+// usage: { input, output, cacheRead, ... } } } — other line types are metadata.
+const ocText = (m) => Array.isArray(m.content)
+  ? m.content.filter((c) => c && c.type === 'text' && c.text).map((c) => c.text).join(' ')
+  : (typeof m.content === 'string' ? m.content : '');
+
+function parseOpenClaw(txt) {
+  const st = emptyStats();
+  const dg = emptyDigest();
+  st.files = 1;
+  for (const line of txt.split('\n')) {
+    if (!line) continue;
+    let j; try { j = JSON.parse(line); } catch { continue; }
+    if (j.timestamp) addTs(st, j.timestamp);
+    if (j.type !== 'message' || !j.message) continue;
+    const m = j.message;
+    const text = ocText(m);
+    if (m.role === 'user') {
+      st.prompts++;
+      if (text.trim() && !text.trim().startsWith('<')) digestPrompt(dg, text, j.timestamp);
+    } else if (m.role === 'assistant') {
+      st.turns++;
+      dg.sinceTurns++;
+      if (text.trim()) digestAssistant(dg, text, j.timestamp);
+      const u = m.usage;
+      if (u) {
+        const cached = u.cacheRead || 0;
+        st.tokensIn += Math.max(0, (u.input || 0) - cached);
+        st.cacheRead += cached;
+        st.tokensOut += u.output || 0;
+        dg.sinceTokens += (u.input || 0) + (u.output || 0);
+      }
+      if (Array.isArray(m.content)) {
+        for (const cb of m.content) {
+          if (cb && typeof cb.type === 'string' && /tool/i.test(cb.type)) {
+            st.toolCalls++;
+            const name = cb.name || cb.toolName || 'tool';
+            st.tools[name] = (st.tools[name] || 0) + 1;
+            digestTool(dg, name, null);
+          }
+        }
+      }
+    }
+  }
+  return { stats: st, digest: dg };
+}
+
+async function openclawFiles() {
+  const root = path.join(process.env.OPENCLAW_STATE_DIR || path.join(process.env.HOME || '', '.openclaw'), 'agents');
+  const out = [];
+  let agents = [];
+  try { agents = await fsp.readdir(root, { withFileTypes: true }); } catch { return out; }
+  for (const a of agents) {
+    if (!a.isDirectory()) continue;
+    const dir = path.join(root, a.name, 'sessions');
+    let files = [];
+    try { files = await fsp.readdir(dir); } catch { continue; }
+    for (const f of files) {
+      if (f.endsWith('.jsonl') && !f.includes('.trajectory')) out.push(path.join(dir, f));
+    }
+  }
+  return out;
+}
+
 async function statsFor(p, parser) {
   let m;
   try { m = await fsp.stat(p); } catch { return null; }
@@ -284,6 +349,14 @@ async function build() {
       if (hit && hit !== 'ambiguous') session = hit;
     }
     attribute(session, parsed);
+  }
+
+  // OpenClaw: every pane shares the ONE embedded agent (agent "main"), so its
+  // traces belong to the single OpenClaw session when unambiguous, else other.
+  const ocSessions = sessions.filter((s) => s.cli === 'openclaw');
+  const ocOwner = ocSessions.length === 1 ? ocSessions[0] : null;
+  for (const p of await openclawFiles()) {
+    attribute(ocOwner, await statsFor(p, parseOpenClaw));
   }
 
   return { perSession, digests, other, totals, sessions };

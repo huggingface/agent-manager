@@ -219,6 +219,8 @@ body {
 .ov-card:hover .ov-go, .ov-id:focus-visible .ov-go { opacity: 1; }
 
 .ov-prompt { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+/* nothing between prompt and reply → one hairline, not two */
+.ov-prompt + .ov-ghost, .ov-prompt + .ov-live { border-top: none; }
 .ov-prompt::before { content: '❯ '; color: var(--accent); font-weight: 700; }
 .ov-prompt-none { font-style: italic; }
 .ov-prompt-none::before { color: var(--border-strong); }
