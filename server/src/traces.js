@@ -40,14 +40,14 @@ function mergeInto(a, b) {
 // Built in the same parse pass: every real user prompt resets the segment, so
 // whatever accumulated by EOF is the activity since the last thing you said.
 function emptyDigest() {
-  return { lastPromptText: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantMd: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [] };
+  return { lastPromptText: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantMd: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [], sinceTokens: 0 };
 }
 const clip = (s, n = 280) => { const t = (s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 // Markdown-preserving variant (keeps newlines) for the expandable card view.
 const clipRaw = (s, n = 6000) => { const t = (s || '').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 function digestPrompt(d, text, ts) {
   d.lastPromptText = clip(text); d.lastPromptTs = Date.parse(ts) || 0;
-  d.sinceTurns = 0; d.sinceToolCalls = 0; d.sinceTools = {}; d.sinceFiles = [];
+  d.sinceTurns = 0; d.sinceToolCalls = 0; d.sinceTools = {}; d.sinceFiles = []; d.sinceTokens = 0;
   // The previous answer belongs to the previous prompt — never show it as "LAST".
   d.lastAssistantText = ''; d.lastAssistantMd = ''; d.lastAssistantTs = 0;
 }
@@ -88,6 +88,7 @@ function parseClaude(txt) {
           st.tokensIn += (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0);
           st.cacheRead += u.cache_read_input_tokens || 0;
           st.tokensOut += u.output_tokens || 0;
+          dg.sinceTokens += (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.output_tokens || 0);
           const w = u.server_tool_use;
           if (w) st.web += (w.web_search_requests || 0) + (w.web_fetch_requests || 0);
         }
@@ -128,6 +129,7 @@ function parseCodex(txt) {
   const dg = emptyDigest();
   st.files = 1;
   let tok = null; // token_count events are cumulative per run — keep the last
+  let tokAtPrompt = 0; // cumulative total when you last prompted (for sinceTokens)
   for (const line of txt.split('\n')) {
     if (!line) continue;
     let j; try { j = JSON.parse(line); } catch { continue; }
@@ -146,7 +148,10 @@ function parseCodex(txt) {
             st.prompts++;
             const t = codexText(p);
             // Codex wraps environment/instructions as user items — skip those.
-            if (t.trim() && !t.trim().startsWith('<')) digestPrompt(dg, t, j.timestamp);
+            if (t.trim() && !t.trim().startsWith('<')) {
+              digestPrompt(dg, t, j.timestamp);
+              tokAtPrompt = tok ? (tok.total_tokens || 0) : 0;
+            }
           }
           break;
         case 'function_call':
@@ -178,6 +183,7 @@ function parseCodex(txt) {
     st.tokensIn = Math.max(0, (tok.input_tokens || 0) - cached); // align with Claude: fresh input only
     st.cacheRead = cached;
     st.tokensOut = tok.output_tokens || 0;
+    dg.sinceTokens = Math.max(0, (tok.total_tokens || 0) - tokAtPrompt);
   }
   return { stats: st, digest: dg };
 }

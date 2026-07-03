@@ -65,6 +65,7 @@ export interface MetaDigest {
   lastPromptText: string; lastPromptTs: number;
   lastAssistantText: string; lastAssistantMd: string; lastAssistantTs: number;
   sinceTurns: number; sinceToolCalls: number; sinceTools: Record<string, number>; sinceFiles: string[];
+  sinceTokens: number;
 }
 export interface MetaSession extends Session { digest: MetaDigest | null }
 export const getMeta = (): Promise<{ sessions: MetaSession[]; generatedAt: string }> =>

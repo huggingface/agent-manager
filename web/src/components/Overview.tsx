@@ -1,124 +1,153 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { marked } from 'marked';
 import * as api from '../api';
 import type { MetaSession } from '../api';
-import type { Cli, Session, Tree } from '../types';
-import { STATE_LABEL } from '../types';
+import type { Cli, Session, SessionState, Tree } from '../types';
 import Logo from './Logo';
+
+type Filter = 'all' | 'waiting' | 'working' | 'quiet';
 
 const fmtAgo = (ts: number) => {
   if (!ts) return '';
   const m = Math.round((Date.now() - ts) / 60000);
   if (m < 1) return 'now';
-  if (m < 60) return `${m}m ago`;
-  if (m < 48 * 60) return `${Math.round(m / 60)}h ago`;
-  return `${Math.round(m / 1440)}d ago`;
+  if (m < 60) return `${m}m`;
+  if (m < 48 * 60) return `${Math.round(m / 60)}h`;
+  return `${Math.round(m / 1440)}d`;
 };
+const fmtTok = (n = 0) =>
+  n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n);
 const base = (p: string) => p.split('/').pop() || p;
 const eligible = (s: Session) => s.cli !== 'shell' && s.cli !== 'files';
+const bucket = (state: SessionState): Filter =>
+  state === 'working' ? 'working' : state === 'waiting' ? 'waiting' : 'quiet';
 
-function Card({ s, color, onOpen }: { s: MetaSession; color?: string; onOpen: (sid: string) => void }) {
-  const [draft, setDraft] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState('');
-  const [expanded, setExpanded] = useState(false);
-  const [sentAt, setSentAt] = useState(0);
+const Caret = () => (
+  <svg className="ov-caret" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.8 3.2h6.4L5 7.4z" fill="currentColor" /></svg>
+);
+
+function Card({ s, color, autoLive, onOpen }: {
+  s: MetaSession;
+  color?: string;
+  autoLive?: boolean; // expanded dormant row: open straight into the input
+  onOpen: (sid: string) => void;
+}) {
   const d = s.digest;
+  const [draft, setDraft] = useState('');
+  const [live, setLive] = useState(!!autoLive);
+  const [sending, setSending] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [sentAt, setSentAt] = useState(0);
+  const [expanded, setExpanded] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (live) inputRef.current?.focus(); }, [live]);
 
   // After you send (or when the transcript shows a prompt newer than the last
-  // answer), the old answer is stale — show a working indicator instead.
+  // answer), the old answer is stale — a spinner takes its place.
   const digestCaughtUp = !!d && d.lastPromptTs >= sentAt - 60_000;
   if (sentAt && digestCaughtUp) setSentAt(0);
   const awaiting = (sentAt && !digestCaughtUp) || (!!d && !!d.lastPromptText && d.lastPromptTs > d.lastAssistantTs);
 
   const send = async () => {
     const text = draft.trim();
-    if (!text || busy) return;
-    setBusy(true);
-    setNote('');
+    if (!text || sending) return;
+    setSending(true);
+    setFailed(false);
     try {
-      const r = await api.sendInput(s.id, text);
+      await api.sendInput(s.id, text);
       setDraft('');
       setSentAt(Date.now());
-      setNote(r.started ? 'agent started' : '');
+      setLive(false);
     } catch {
-      setNote('failed to reach the agent');
+      setFailed(true);
+      setTimeout(() => setFailed(false), 4000);
     }
-    setBusy(false);
-    setTimeout(() => setNote(''), 4000);
+    setSending(false);
   };
 
-  const digestLine = d && (d.sinceTurns || d.sinceToolCalls)
-    ? `${d.sinceTurns} turn${d.sinceTurns === 1 ? '' : 's'} · ${d.sinceToolCalls} tool call${d.sinceToolCalls === 1 ? '' : 's'}${d.sinceFiles.length ? ` · ${d.sinceFiles.map(base).join(', ')}` : ''}`
-    : null;
-  const hasAnswer = !!d && !!d.lastAssistantText && !awaiting;
+  const ago = fmtAgo(Math.max(d?.lastAssistantTs || 0, d?.lastPromptTs || 0) || Date.parse(s.createdAt) || 0);
+  const metaBits: string[] = [];
+  if (d && (d.sinceTurns || d.sinceToolCalls)) {
+    metaBits.push(`${d.sinceTurns} turn${d.sinceTurns === 1 ? '' : 's'}`, `${d.sinceToolCalls} tool${d.sinceToolCalls === 1 ? '' : 's'}`);
+    if (d.sinceFiles.length) metaBits.push(d.sinceFiles.map(base).join(', '));
+    if (d.sinceTokens > 0) metaBits.push(`${fmtTok(d.sinceTokens)} tok`);
+  }
+  const ghostLabel = awaiting || s.state === 'working' ? 'reply — queues while it works'
+    : s.state === 'waiting' ? 'waiting for your input…'
+    : s.state === 'stopped' ? 'prompt (wakes the agent)…'
+    : 'reply…';
+  const attn = s.state === 'waiting' && !awaiting;
 
   return (
     <div className="ov-card">
-      <div className="ov-head">
-        <Logo cli={s.cli} size={13} tint={color} />
-        <span className="ov-name mono">{s.name}</span>
-        {s.path && <span className="ov-path mono">{s.path}</span>}
-        <span className="spacer" />
+      <div className="ov-id" onClick={() => onOpen(s.id)} title="Open pane">
         <span className={`status ${s.state}`} />
-        <span className="ov-state">{STATE_LABEL[s.state]}</span>
-        <button className="mini-btn" title="Open pane" onClick={() => onOpen(s.id)}>open</button>
+        <Logo cli={s.cli} size={12} tint={color} />
+        <span className="ov-name mono">{s.name}</span>
+        {ago && <span className="ov-ago">· {ago}</span>}
+        <span className="spacer" />
+        <span className="ov-go">open ↗</span>
       </div>
 
       {d && d.lastPromptText ? (
-        <div className="ov-you">
-          <span className="ov-lbl">you</span>
-          <span className="ov-you-text" title={d.lastPromptText}>{d.lastPromptText}</span>
-          <span className="ov-ago">{fmtAgo(d.lastPromptTs)}</span>
+        <div className="ov-prompt mono" title={d.lastPromptText}>{d.lastPromptText}</div>
+      ) : (
+        <div className="ov-prompt ov-prompt-none mono">no prompt yet</div>
+      )}
+      {metaBits.length > 0 && <div className="ov-meta mono">{metaBits.join(' · ')}</div>}
+
+      {awaiting ? (
+        <div className="ov-busy mono">working</div>
+      ) : d && d.lastAssistantText ? (
+        <div className="ov-answer-wrap">
+          {expanded ? (
+            <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: marked.parse(d.lastAssistantMd || d.lastAssistantText) as string }} />
+          ) : (
+            <div className="ov-answer">{d.lastAssistantText}</div>
+          )}
+          <button className="ov-more" onClick={() => setExpanded((e) => !e)}>{expanded ? 'less' : 'more'}</button>
+        </div>
+      ) : null}
+
+      {live ? (
+        <div className="ov-live">
+          <span className="ov-p mono">❯</span>
+          <input
+            ref={inputRef}
+            value={draft}
+            disabled={sending}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            enterKeyHint="send"
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={() => { if (!draft.trim()) setLive(false); }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') send();
+              if (e.key === 'Escape') { setDraft(''); setLive(false); }
+            }}
+          />
+          <span className="ov-hint">{sending ? 'sending…' : '↵ send'}</span>
         </div>
       ) : (
-        <div className="ov-none">{d ? 'no prompt yet' : 'no trace yet'}</div>
+        <button className={`ov-ghost${attn ? ' attn' : ''}`} onClick={() => setLive(true)}>{ghostLabel}</button>
       )}
-      {digestLine && !awaiting && <div className="ov-digest mono">{digestLine}</div>}
-
-      {awaiting && (
-        <div className="ov-working mono">working<span className="et-cursor" /></div>
-      )}
-      {hasAnswer && (
-        <div className="ov-last">
-          <span className="ov-lbl">last</span>
-          <div className="ov-last-body">
-            {expanded ? (
-              <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: marked.parse(d!.lastAssistantMd || d!.lastAssistantText) as string }} />
-            ) : (
-              <div className="ov-last-text">{d!.lastAssistantText}</div>
-            )}
-            <button className="ov-more" onClick={() => setExpanded((e) => !e)}>{expanded ? 'collapse' : 'expand'}</button>
-          </div>
-        </div>
-      )}
-
-      <div className="ov-reply">
-        <input
-          value={draft}
-          placeholder={s.running ? 'reply…' : 'prompt (wakes the agent)…'}
-          disabled={busy}
-          autoComplete="off"
-          autoCorrect="off"
-          autoCapitalize="off"
-          spellCheck={false}
-          enterKeyHint="send"
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') send(); }}
-        />
-        <button className="btn-ghost" disabled={busy || !draft.trim()} onClick={send}>{busy ? '…' : 'send'}</button>
-      </div>
-      {note && <div className="ov-note">{note}</div>}
+      {failed && <div className="ov-note">failed to reach the agent</div>}
     </div>
   );
 }
 
-/** Mission control: agents arranged like the sidebar (groups collapsible),
- *  each card showing state, the since-your-last-prompt digest, and a reply box. */
+/** Mission control: one reading column — group capsules with their agents as
+ *  slabs, loose agents as standalone panels, dormant agents as one-liners. */
 export default function Overview({ clis, tree, onOpen }: { clis: Cli[]; tree: Tree; onOpen: (sid: string) => void }) {
   const [meta, setMeta] = useState<Record<string, MetaSession> | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [durs, setDurs] = useState<Record<string, number>>({});
+  const [woken, setWoken] = useState<Set<string>>(new Set()); // dormant rows expanded by tap
+  const [filter, setFilter] = useState<Filter>('all');
+
   useEffect(() => {
     let alive = true;
     const load = () => api.getMeta()
@@ -134,56 +163,104 @@ export default function Overview({ clis, tree, onOpen }: { clis: Cli[]; tree: Tr
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
   const dataFor = (s: Session): MetaSession => meta?.[s.id] ?? { ...s, digest: null };
 
-  if (!meta) return <div className="ov-wrap"><div className="usage-msg mono">reading traces…<span className="et-cursor" /></div></div>;
+  if (!meta) return <div className="ov-wrap"><div className="ov-feed"><div className="usage-msg mono">reading traces…<span className="et-cursor" /></div></div></div>;
 
-  // Follow the sidebar's order: groups as collapsible sections, loose agents inline.
-  const blocks: ReactNode[] = [];
-  let loose: Session[] = [];
-  const flushLoose = () => {
-    if (!loose.length) return;
-    blocks.push(
-      <div key={`loose-${blocks.length}`} className="ov-grid">
-        {loose.map((s) => <Card key={s.id} s={dataFor(s)} color={colorOf[s.cli]} onOpen={onOpen} />)}
-      </div>,
-    );
-    loose = [];
+  const visible = (s: MetaSession) => filter === 'all' || bucket(s.state) === filter;
+  // Nothing to say and nothing running → a one-line row until tapped.
+  const isDormant = (s: MetaSession) =>
+    !woken.has(s.id)
+    && (s.state === 'stopped' || s.state === 'idle')
+    && (!s.digest || (!s.digest.lastPromptText && !s.digest.lastAssistantText));
+
+  // Collapse at constant velocity: duration follows the group's height.
+  const toggleGroup = (gid: string, el: HTMLElement) => {
+    const inner = el.closest('.ov-sec')?.querySelector('.ov-drawer-in') as HTMLElement | null;
+    const h = inner?.scrollHeight || 180;
+    setDurs((prev) => ({ ...prev, [gid]: Math.min(460, Math.max(170, Math.round(h * 1.4))) }));
+    setCollapsed((c) => { const n = new Set(c); n.has(gid) ? n.delete(gid) : n.add(gid); return n; });
   };
+
+  const renderItem = (s: Session) => {
+    const m = dataFor(s);
+    if (!visible(m)) return null;
+    if (isDormant(m)) {
+      return (
+        <div
+          key={s.id}
+          className="ov-panel ov-dormant"
+          role="button"
+          tabIndex={0}
+          onClick={() => setWoken((w) => new Set(w).add(s.id))}
+          onKeyDown={(e) => { if (e.key === 'Enter') setWoken((w) => new Set(w).add(s.id)); }}
+        >
+          <span className={`status ${m.state}`} />
+          <Logo cli={s.cli} size={12} tint={colorOf[s.cli]} />
+          <span className="ov-name mono">{s.name}</span>
+          <span className="ov-ago">· {fmtAgo(Date.parse(s.createdAt) || 0)}</span>
+          <span className="spacer" />
+          <span className="ov-chev">▸</span>
+        </div>
+      );
+    }
+    return (
+      <div key={s.id} className="ov-panel">
+        <Card s={m} color={colorOf[s.cli]} autoLive={woken.has(s.id)} onOpen={onOpen} />
+      </div>
+    );
+  };
+
+  const blocks: ReactNode[] = [];
   for (const ref of tree.order) {
     if (ref.startsWith('s:')) {
       const s = sessById[ref.slice(2)];
-      if (s && eligible(s)) loose.push(s);
+      if (s && eligible(s)) {
+        const el = renderItem(s);
+        if (el) blocks.push(el);
+      }
     } else {
       const g = groupById[ref.slice(2)];
       if (!g) continue;
       const members = g.sessionIds.map((id) => sessById[id]).filter(Boolean).filter(eligible) as Session[];
-      if (!members.length) continue;
-      flushLoose();
+      const shown = members.map((s) => ({ s, el: renderItem(s) })).filter((x) => x.el);
+      if (!shown.length) continue;
       const open = !collapsed.has(g.id);
       blocks.push(
-        <div key={g.id} className="ov-sec">
-          <button
-            className="ov-sec-head"
-            onClick={() => setCollapsed((c) => { const n = new Set(c); n.has(g.id) ? n.delete(g.id) : n.add(g.id); return n; })}
-          >
-            <span className="caret">{open ? '▾' : '▸'}</span>
-            <span className="ov-sec-title">{g.name}</span>
-            <span className="ov-sec-count">{members.length}</span>
+        <div key={g.id} className={`ov-sec${open ? '' : ' closed'}`} style={{ '--dur': `${durs[g.id] ?? 360}ms` } as CSSProperties}>
+          <button className="ov-sechead" onClick={(e) => toggleGroup(g.id, e.currentTarget)}>
+            <Caret />
+            <span className="ov-sectitle">{g.name}</span>
+            <span className="ov-secn mono">{shown.length}</span>
+            <span className="ov-peek">
+              {shown.map(({ s }) => <span key={s.id} className={`status ${dataFor(s).state}`} />)}
+            </span>
           </button>
-          {open && (
-            <div className="ov-grid">
-              {members.map((s) => <Card key={s.id} s={dataFor(s)} color={colorOf[s.cli]} onOpen={onOpen} />)}
-            </div>
-          )}
+          <div className="ov-drawer"><div className="ov-drawer-in">
+            <div className="ov-secbody">{shown.map(({ el }) => el)}</div>
+          </div></div>
+          <div className="ov-foot" />
         </div>,
       );
     }
   }
-  flushLoose();
 
   return (
     <div className="ov-wrap">
-      {blocks.length === 0 && <div className="usage-msg mono">no agents yet — shells and file panes don't appear here.</div>}
-      {blocks}
+      <div className="ov-feed">
+        <div className="ov-headrow">
+          <h1 className="ov-title">Overview</h1>
+          <span className="spacer" />
+          <div className="ov-filters">
+            {(['all', 'waiting', 'working', 'quiet'] as Filter[]).map((f) => (
+              <button key={f} className={`ov-fchip${filter === f ? ' on' : ''}`} onClick={() => setFilter(f)}>
+                {f !== 'all' && <span className={`status ${f === 'quiet' ? 'idle' : f}`} />}
+                {f === 'waiting' ? 'your turn' : f}
+              </button>
+            ))}
+          </div>
+        </div>
+        {blocks.length === 0 && <div className="usage-msg mono">{filter === 'all' ? 'no agents yet — shells and file panes don’t appear here.' : 'nothing in this state.'}</div>}
+        {blocks}
+      </div>
     </div>
   );
 }

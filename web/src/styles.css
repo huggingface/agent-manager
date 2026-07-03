@@ -185,37 +185,84 @@ body {
 .ov-fixed { padding: 6px 8px 0; }
 .ov-row .name { font-family: var(--font-sans); font-size: 13px; font-weight: 600; }
 .ov-row-ico { width: 14px; height: 14px; color: var(--accent); flex: none; }
-.ov-wrap { height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
-.ov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; align-items: start; }
-.ov-sec { display: flex; flex-direction: column; gap: 8px; }
-.ov-sec-head { display: flex; align-items: center; gap: 6px; background: none; border: none; padding: 2px 2px; font: inherit; color: var(--text); cursor: pointer; text-align: left; }
-.ov-sec-title { font-size: 13.5px; font-weight: 600; }
-.ov-sec-count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.ov-working { font-size: 12px; color: var(--muted); }
-.ov-working .et-cursor { height: 12px; width: 6px; margin-left: 6px; }
-.ov-last-body { flex: 1; min-width: 0; }
-.ov-more { display: block; background: none; border: none; padding: 2px 0 0; font: inherit; font-size: 11px; color: var(--accent); cursor: pointer; }
-.ov-md { max-height: 420px; overflow-y: auto; border: none; padding: 0; background: none; font-size: 12.5px; line-height: 1.55; }
+/* ---- Overview: one reading column of capsules (design mock v4.12) ---- */
+.ov-wrap { height: 100%; overflow-y: auto; }
+.ov-feed { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; padding: 2px 2px 40px; }
+.ov-headrow { display: flex; align-items: center; gap: 10px; padding: 0 2px; }
+.ov-headrow .spacer { flex: 1; }
+.ov-title { font-size: 14px; margin: 0; letter-spacing: -0.01em; }
+.ov-filters { display: inline-flex; gap: 4px; }
+.ov-fchip { display: inline-flex; align-items: center; gap: 5px; background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 11.5px; color: var(--muted); cursor: pointer; }
+.ov-fchip .status { width: 6px; height: 6px; }
+.ov-fchip:hover { border-color: var(--border-strong); color: var(--text); }
+.ov-fchip.on { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--panel)); }
+
+.ov-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); }
+
+/* group capsule: header bar / spaced flat slabs / footer strip that merges away */
+.ov-sec { display: flex; flex-direction: column; }
+.ov-sechead { display: flex; align-items: center; gap: 7px; width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-xl) var(--r-xl) 0 0; padding: 8px 14px; font: inherit; color: var(--text); cursor: pointer; text-align: left; transition: border-radius var(--dur, 0.36s) ease; }
+.ov-sec.closed .ov-sechead { border-radius: var(--r-xl); }
+.ov-caret { width: 10px; height: 10px; flex: none; color: var(--muted); transition: transform var(--dur, 0.36s) ease; transform-origin: 50% 50%; display: block; }
+.ov-sec.closed .ov-caret { transform: rotate(-90deg); }
+.ov-sectitle { font-size: 13px; font-weight: 600; }
+.ov-secn { font-size: 11px; color: var(--muted); }
+.ov-peek { margin-left: auto; display: inline-flex; gap: 5px; align-items: center; }
+.ov-drawer { display: grid; grid-template-rows: 1fr; transition: grid-template-rows var(--dur, 0.36s) ease; }
+.ov-drawer-in { overflow: hidden; min-height: 0; display: flex; flex-direction: column; justify-content: flex-end; }
+.ov-sec.closed .ov-drawer { grid-template-rows: 0fr; }
+.ov-secbody { display: flex; flex-direction: column; gap: 6px; padding: 6px 0; }
+.ov-secbody .ov-panel { border-radius: 0; }
+.ov-foot { height: 9px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 0 0 var(--r-xl) var(--r-xl); transition: height var(--dur, 0.36s) ease, border-top-width var(--dur, 0.36s) ease, border-bottom-width var(--dur, 0.36s) ease, opacity calc(var(--dur, 0.36s) * 0.8) ease; }
+.ov-sec.closed .ov-foot { height: 0; border-top-width: 0; border-bottom-width: 0; opacity: 0; }
+
+/* card content */
+.ov-card { padding: 11px 14px 10px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ov-id { display: flex; align-items: center; gap: 8px; cursor: pointer; min-width: 0; }
+.ov-id .spacer { flex: 1; }
+.ov-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-ago { font-size: 11px; color: var(--muted); flex: none; }
+.ov-go { color: var(--muted); font-size: 12px; opacity: 0; transition: opacity 0.12s ease-out; flex: none; }
+.ov-card:hover .ov-go, .ov-id:focus-visible .ov-go { opacity: 1; }
+
+.ov-prompt { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.ov-prompt::before { content: '❯ '; color: var(--accent); font-weight: 700; }
+.ov-prompt-none { font-style: italic; }
+.ov-prompt-none::before { color: var(--border-strong); }
+.ov-meta { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: -2px; }
+
+.ov-answer-wrap { min-width: 0; }
+.ov-answer { font-size: 13px; line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.ov-more { background: none; border: none; padding: 3px 0 0; font: inherit; font-size: 11px; color: var(--muted); cursor: pointer; display: block; }
+.ov-more:hover { color: var(--accent); }
+.ov-md { max-height: 440px; overflow-y: auto; font-size: 12.5px; }
 .ov-md pre { font-size: 11.5px; }
-.ov-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; }
-.ov-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.ov-head .spacer { flex: 1; }
-.ov-name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ov-path { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ov-state { font-size: 11px; color: var(--muted); flex: none; }
-.ov-lbl { flex: none; font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 5px; margin-top: 1px; }
-.ov-you { display: flex; gap: 7px; align-items: baseline; font-size: 12.5px; min-width: 0; }
-.ov-you-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ov-ago { flex: none; font-size: 10.5px; color: var(--muted); }
-.ov-digest { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ov-last { display: flex; gap: 7px; align-items: baseline; font-size: 12.5px; line-height: 1.45; }
-.ov-last-text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-.ov-none { font-size: 12px; color: var(--muted); font-style: italic; }
-.ov-reply { display: flex; gap: 6px; }
-.ov-reply input { flex: 1; min-width: 0; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel-2); color: var(--text); font-size: 13px; font-family: inherit; }
-.ov-reply input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
-.ov-reply .btn-ghost { flex: none; padding: 6px 12px; font-size: 12px; }
-.ov-note { font-size: 11px; color: var(--muted); }
+
+/* braille spinner: unmistakably a process, never an input line */
+.ov-busy { font-size: 12.5px; color: var(--muted); }
+.ov-busy::before { content: '⠋'; display: inline-block; width: 1.2em; color: var(--accent); animation: ov-spin 0.9s steps(1) infinite; }
+@keyframes ov-spin {
+  0% { content: '⠋'; } 12.5% { content: '⠙'; } 25% { content: '⠹'; } 37.5% { content: '⠸'; }
+  50% { content: '⠼'; } 62.5% { content: '⠴'; } 75% { content: '⠦'; } 87.5% { content: '⠧'; }
+}
+
+/* reply: a ghost line that becomes a bare ❯ input */
+.ov-ghost { border: none; background: none; padding: 7px 0 2px; font: inherit; font-size: 12.5px; color: var(--muted); text-align: left; cursor: text; border-top: 1px solid var(--border); width: 100%; }
+.ov-ghost::before { content: '❯ '; font-family: var(--font-mono); color: var(--border-strong); font-weight: 700; }
+.ov-ghost:hover { color: var(--text); }
+.ov-ghost.attn { color: color-mix(in srgb, var(--amber) 55%, var(--muted)); }
+.ov-ghost.attn::before { color: var(--amber); }
+.ov-ghost.attn:hover { color: var(--text); }
+.ov-live { display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--border); padding-top: 7px; }
+.ov-live .ov-p { color: var(--accent); font-weight: 700; }
+.ov-live input { flex: 1; min-width: 0; border: none; background: none; font: inherit; font-size: 13px; color: var(--text); outline: none; padding: 2px 0; }
+.ov-hint { font-size: 10.5px; color: var(--muted); flex: none; }
+.ov-note { font-size: 11px; color: var(--danger); }
+
+/* dormant agents: one-line panels until tapped */
+.ov-dormant { display: flex; align-items: center; gap: 8px; padding: 8px 14px; cursor: pointer; }
+.ov-dormant:hover { border-color: var(--border-strong); }
+.ov-chev { color: var(--muted); font-size: 10px; }
 
 /* tree */
 .tree { flex: 1; overflow-y: auto; padding: 6px 8px 10px; }
@@ -550,8 +597,8 @@ body {
   .row .cli-logo, .row .count { opacity: 1 !important; }
   .caret { width: 22px; font-size: 15px; }
   /* 16px inputs stop iOS zoom-on-focus */
-  .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input, .ov-reply input { font-size: 16px; }
-  .ov-grid { grid-template-columns: 1fr; }
+  .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input, .ov-live input { font-size: 16px; }
+  .ov-headrow { flex-wrap: wrap; }
   /* settings stacks vertically */
   .app.settings { flex-direction: column; }
   .app.settings .sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
