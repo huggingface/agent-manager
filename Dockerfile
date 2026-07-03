@@ -1,5 +1,5 @@
 # ---------- build the frontend ----------
-FROM node:20-bookworm AS web
+FROM node:22-bookworm AS web
 WORKDIR /web
 COPY web/package.json ./
 RUN npm install
@@ -7,7 +7,8 @@ COPY web/ ./
 RUN npm run build
 
 # ---------- runtime ----------
-FROM node:20-bookworm AS runtime
+# Node 22+: required by OpenClaw (22.19+); everything else is version-agnostic.
+FROM node:22-bookworm AS runtime
 
 # System deps: tmux (session durability), git, build tools (node-pty native build),
 # ripgrep (used by the coding CLIs), curl/ca-certs.
@@ -25,6 +26,7 @@ RUN npm install -g @anthropic-ai/claude-code@latest @openai/codex@latest
 # the app marks any missing binary "unavailable" gracefully.
 RUN npm install -g @google/gemini-cli@latest || echo "gemini-cli install failed"
 RUN npm install -g opencode-ai@latest || echo "opencode install failed"
+RUN npm install -g openclaw@latest || echo "openclaw install failed"
 # ccusage powers the Usage page (token/cost aggregation across agents). Its
 # platform binary ships without an execute bit and the package tries to chmod
 # itself on first run — which fails with EPERM at runtime as the non-root user.

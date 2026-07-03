@@ -56,6 +56,8 @@ export const CLIS = [
   { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', run: 'gemini',         cont: null },
   { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: null },
   { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', run: 'hermes',         cont: 'hermes -c' },
+  // `chat` = TUI in --local mode: embedded agent, no gateway/daemon needed.
+  { id: 'openclaw', label: 'OpenClaw',    bin: 'openclaw', color: '#c83636', run: 'openclaw chat',  cont: null },
 ];
 
 export function cliById(id) {
@@ -85,6 +87,9 @@ function isConfigured(id) {
     case 'hermes':
       return hasEnv('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY')
         || fileOk(path.join(home, '.hermes', '.env'));
+    case 'openclaw':
+      return hasEnv('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY')
+        || fileOk(path.join(home, '.openclaw', 'openclaw.json'));
     default:
       return true; // shell / files need no auth
   }
