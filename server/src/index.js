@@ -180,7 +180,7 @@ const BUILD_ENV_KEYS = (() => {
 const NON_SECRET = new Set([
   'HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'NPM_CONFIG_PREFIX', 'PWD', 'OLDPWD', 'SHLVL', '_', 'HOSTNAME',
   'ACCELERATOR', 'COMMIT_SHA', 'CPU_CORES', 'HF_DATASETS_TRUST_REMOTE_CODE', 'IMAGE_SHA', 'MEMORY', 'OMP_NUM_THREADS',
-  'UV_CACHE_DIR', 'PIP_CACHE_DIR', 'PYTHONPYCACHEPREFIX', 'PYTHONUSERBASE', 'OPENCLAW_STATE_DIR',
+  'UV_CACHE_DIR', 'PIP_CACHE_DIR', 'PYTHONPYCACHEPREFIX', 'PYTHONUSERBASE', 'OPENCLAW_STATE_DIR', 'OPENCLAW_HOME',
 ]);
 const NON_SECRET_PREFIX = ['SPACE_', 'KUBERNETES_', 'NVIDIA_', 'CUDA_', 'NV_', 'AM_'];
 function injectedEnvKeys() {
@@ -255,7 +255,7 @@ Hermes — alongside plain shells and a file browser.
 - \`/data\` is **durable storage** (a mounted bucket). Files under \`/data/workspaces/…\` and \`/data/home/…\` survive restarts and sleep.
 - **Empty directories are not persisted** — only files. If a folder must exist, keep a file in it.
 - Sessions are **tmux-backed**: they keep running when the browser disconnects and can be resumed after the Space sleeps.
-- Exception: OpenClaw's state (\`$OPENCLAW_STATE_DIR\`) lives on local disk for filesystem compatibility and is backed up to the bucket every minute.
+- Exception: OpenClaw runs with its own \`$HOME\` on local disk for filesystem compatibility; that state is backed up to the bucket every minute.
 
 ## You may not be alone
 - Other agents run in **sibling folders** under \`/data/workspaces/\`, and you may be **grouped** to share a single folder with other agents.

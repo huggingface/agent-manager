@@ -40,25 +40,30 @@ export PATH="$AM_LOCAL/py/bin:$AM_LOCAL/npm/bin:$AM_LOCAL/bin:$HOME/.local/bin:$
 # embedded prompt lock was released"). Its state therefore lives on LOCAL disk,
 # with a durable copy on the bucket: restored on boot, synced back every 60s.
 # Worst case on an unclean stop: the last minute of chat history.
-export OPENCLAW_STATE_DIR="$AM_LOCAL/openclaw"
-OPENCLAW_BACKUP="$DATA_DIR/state/openclaw-backup"
-mkdir -p "$OPENCLAW_STATE_DIR" "$OPENCLAW_BACKUP"
-# seed local state from the durable backup
-if [ -n "$(ls -A "$OPENCLAW_BACKUP" 2>/dev/null)" ]; then
-  cp -a "$OPENCLAW_BACKUP/." "$OPENCLAW_STATE_DIR/" 2>/dev/null || true
-fi
-# The embedded runtime ignores OPENCLAW_STATE_DIR and resolves ~/.openclaw
-# directly, so ~/.openclaw becomes a SYMLINK to the local dir. If a real dir
-# is there (first boot, or written by an older build), merge its contents
-# (newer than the backup) and park it as .openclaw.pre-symlink.
-if [ -d "$HOME/.openclaw" ] && [ ! -L "$HOME/.openclaw" ]; then
-  cp -a "$HOME/.openclaw/." "$OPENCLAW_STATE_DIR/" 2>/dev/null || true
-  mv "$HOME/.openclaw" "$HOME/.openclaw.pre-symlink" 2>/dev/null || true
-fi
-[ -L "$HOME/.openclaw" ] || ln -s "$OPENCLAW_STATE_DIR" "$HOME/.openclaw" 2>/dev/null || true
+# OpenClaw can't run its state on the FUSE bucket (its session fence
+# false-positives on unstable metadata) and it REJECTS symlinked paths (the
+# workspace boundary check). No symlinks, no env overrides — OpenClaw simply
+# gets its OWN HOME on local disk: a real, ordinary install from its point of
+# view. Durable copy on the bucket: restored on boot, synced back every 60s.
+# Worst case on an unclean stop: the last minute of claw state.
+export OPENCLAW_HOME="$AM_LOCAL/oc-home"                # runner launches openclaw with HOME=$OPENCLAW_HOME
+export OPENCLAW_STATE_DIR="$OPENCLAW_HOME/.openclaw"    # where the server finds its config/traces
+OC_BACKUP="$DATA_DIR/state/openclaw-backup"
+mkdir -p "$OPENCLAW_STATE_DIR" "$OC_BACKUP"
+# heal from the earlier symlink experiment
+[ -L "$HOME/.openclaw" ] && rm "$HOME/.openclaw"
+# seed local state: backup (freshest) first, then legacy dirs fill gaps (--update: never clobber newer)
+[ -n "$(ls -A "$OC_BACKUP" 2>/dev/null)" ] && rsync -a "$OC_BACKUP/" "$OPENCLAW_STATE_DIR/" 2>/dev/null
+for legacy in "$HOME/.openclaw.pre-symlink" "$HOME/.openclaw"; do
+  if [ -d "$legacy" ] && [ ! -L "$legacy" ]; then
+    rsync -a --update "$legacy/" "$OPENCLAW_STATE_DIR/" 2>/dev/null || true
+  fi
+done
+# small comforts in the private HOME (harmless if missing)
+cp "$HOME/.gitconfig" "$OPENCLAW_HOME/.gitconfig" 2>/dev/null || true
 ( while :; do
     sleep 60
-    rsync -a --delete "$OPENCLAW_STATE_DIR/" "$OPENCLAW_BACKUP/" 2>/dev/null || true
+    rsync -a --delete "$OPENCLAW_STATE_DIR/" "$OC_BACKUP/" 2>/dev/null || true
   done ) &
 
 # Durable, user-editable setup script. Runs on EVERY start (keep it idempotent);

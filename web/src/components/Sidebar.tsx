@@ -229,14 +229,18 @@ export default function Sidebar({
         )}
       </div>
 
-      {/* Overview: pinned above the session tree, selectable like a session */}
+      {/* Overview: pinned above the tree, styled EXACTLY like a session row
+          (dot · mono name · glyph) so it reads as clickable — its dot is the
+          aggregate of every agent's state. */}
       <div className="ov-fixed">
         <div
-          className={`row ov-row${activeRef === 'overview' ? ' active' : ''}`}
+          className={`row session ov-row${activeRef === 'overview' ? ' active' : ''}`}
           onClick={() => onActivate('overview')}
+          title="All agents: digests, states, replies"
         >
+          <span className={`status ${agg}`} />
+          <span className="name">overview</span>
           <PulseGlyph className="ov-row-ico" />
-          <span className="name">Overview</span>
         </div>
       </div>
 

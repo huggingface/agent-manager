@@ -181,10 +181,10 @@ body {
 .stepper button:disabled { opacity: 0.35; cursor: not-allowed; }
 .stepper-n { min-width: 20px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
 
-/* overview: pinned sidebar row + cards view */
+/* overview: pinned sidebar row (session-row anatomy) + cards view */
 .ov-fixed { padding: 6px 8px 0; }
-.ov-row .name { font-family: var(--font-sans); font-size: 13px; font-weight: 600; }
-.ov-row-ico { width: 14px; height: 14px; color: var(--accent); flex: none; }
+.ov-row { cursor: pointer; }
+.ov-row-ico { width: 13px; height: 13px; color: var(--accent); flex: none; }
 /* ---- Overview: one reading column of capsules (design mock v4.12) ---- */
 .ov-wrap { height: 100%; overflow-y: auto; }
 .ov-feed { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; padding: 2px 2px 40px; }

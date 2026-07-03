@@ -212,8 +212,12 @@ function commandFor(session) {
   // config exists, go straight to the TUI. Decided by config-file existence —
   // same honest pattern as the Claude transcript check.
   if (cli.id === 'openclaw') {
-    const cfg = '"${OPENCLAW_CONFIG_PATH:-${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/openclaw.json}"';
-    return `if [ -s ${cfg} ]; then exec openclaw chat; else openclaw onboard && exec openclaw chat; fi`;
+    // OpenClaw runs with its own HOME on local disk (see entrypoint.sh): its
+    // state can't live on the FUSE bucket and it rejects symlinked paths.
+    // Locally (no OPENCLAW_HOME) the real HOME is used unchanged.
+    return 'HOME="${OPENCLAW_HOME:-$HOME}"; export HOME; '
+      + 'if [ -s "$HOME/.openclaw/openclaw.json" ]; then exec openclaw chat; '
+      + 'else openclaw onboard && exec openclaw chat; fi';
   }
 
   // Codex: resume this agent's pinned conversation (captured from its rollout
