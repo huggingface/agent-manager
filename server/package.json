@@ -11,6 +11,7 @@
   "dependencies": {
     "express": "^4.19.2",
     "node-pty": "^1.0.0",
+    "web-push": "^3.6.7",
     "ws": "^8.18.0"
   }
 }

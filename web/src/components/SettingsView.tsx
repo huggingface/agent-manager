@@ -15,6 +15,98 @@ const PAGES: { id: Page; label: string }[] = [
 
 interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; tmux?: boolean; canRelaunch?: boolean; secrets?: string[]; }
 
+function urlBase64ToUint8Array(base64: string) {
+  const padding = '='.repeat((4 - (base64.length % 4)) % 4);
+  const raw = atob((base64 + padding).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+type PushState = 'checking' | 'unsupported' | 'denied' | 'off' | 'on' | 'busy';
+
+// "Enable notifications" for THIS device: agents can then message the operator
+// (only when explicitly asked to — see the environment skill).
+function PushRow() {
+  const [state, setState] = useState<PushState>('checking');
+  const [note, setNote] = useState('');
+  useEffect(() => {
+    (async () => {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) return setState('unsupported');
+      if (Notification.permission === 'denied') return setState('denied');
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        setState((await reg.pushManager.getSubscription()) ? 'on' : 'off');
+      } catch { setState('unsupported'); }
+    })();
+  }, []);
+
+  const enable = async () => {
+    setState('busy');
+    setNote('');
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') { setState(perm === 'denied' ? 'denied' : 'off'); return; }
+      const { publicKey } = await api.getPushKey();
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey) });
+      await api.subscribePush(sub);
+      setState('on');
+      setNote('This device will receive agent notifications.');
+    } catch {
+      setState('off');
+      setNote('Could not subscribe — on iPhone, add the app to your Home Screen first.');
+    }
+    setTimeout(() => setNote(''), 6000);
+  };
+
+  const disable = async () => {
+    setState('busy');
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) { await api.unsubscribePush(sub.endpoint); await sub.unsubscribe(); }
+    } catch { /* ignore */ }
+    setState('off');
+  };
+
+  const test = async () => {
+    setNote('');
+    try {
+      const r = await api.sendTestNotification();
+      setNote(r.sent > 0 ? 'Sent — check your notifications.' : 'No delivery — is this device subscribed?');
+    } catch { setNote('Failed to send.'); }
+    setTimeout(() => setNote(''), 6000);
+  };
+
+  return (
+    <>
+      <div className="setting-row" style={{ marginTop: 12 }}>
+        <div>
+          <div className="s-label">Notifications</div>
+          <div className="s-help">
+            Agents can message this device when you explicitly ask them to ("notify me when the tests pass").
+            On iPhone: add the app to your Home Screen first, then enable here.
+          </div>
+          {note && <div className="s-help" style={{ marginTop: 6 }}>{note}</div>}
+        </div>
+        {state === 'unsupported' ? (
+          <span className="s-muted">not supported here</span>
+        ) : state === 'denied' ? (
+          <span className="s-muted">blocked in browser settings</span>
+        ) : state === 'on' ? (
+          <span className="confirm-del">
+            <button className="btn-ghost" onClick={test}>Send test</button>
+            <button className="btn-ghost" onClick={disable}>Disable</button>
+          </span>
+        ) : (
+          <button className="btn-ghost" disabled={state === 'busy' || state === 'checking'} onClick={enable}>
+            {state === 'busy' ? '…' : 'Enable on this device'}
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
 export default function SettingsView({
   page, onPage, onClose, theme, onToggleTheme, clis, info,
 }: {
@@ -95,6 +187,8 @@ export default function SettingsView({
                 );
               })}
             </div>
+
+            <PushRow />
 
             <div className="setting-row" style={{ marginTop: 12 }}>
               <div>

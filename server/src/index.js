@@ -15,6 +15,7 @@ import * as order from './order.js';
 import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput } from './runner.js';
 import { buildUsage } from './usage.js';
 import { buildTraces, traceDigests } from './traces.js';
+import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 
 ensureDirs();
@@ -62,6 +63,7 @@ function ensureClaudeStatusline() {
   } catch {}
 }
 ensureClaudeStatusline();
+initPush();
 
 // Wait for the visibility verdict before serving: isPublic() fails closed on a
 // Space until the first successful check, so this avoids a locked-UI flash on
@@ -92,6 +94,39 @@ app.get('/api/clis', (_req, res) => res.json(cliCatalog()));
 app.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.debug === '1')));
 
 app.get('/api/traces', async (_req, res) => res.json(await buildTraces()));
+
+// ---------- push notifications (agent-initiated, on explicit request) ----------
+app.get('/api/push/key', (_req, res) => res.json({ publicKey: publicKey(), devices: deviceCount() }));
+
+app.post('/api/push/subscribe', (req, res) => {
+  const ok = addSubscription((req.body || {}).subscription, req.headers['user-agent']);
+  if (!ok) return res.status(400).json({ error: 'bad subscription' });
+  res.json({ ok: true, devices: deviceCount() });
+});
+
+app.post('/api/push/unsubscribe', (req, res) => {
+  removeSubscription((req.body || {}).endpoint);
+  res.json({ ok: true, devices: deviceCount() });
+});
+
+// Agents (and the Settings test button) call this from inside the container.
+// Rate-limited as a backstop: a confused agent must not buzz a phone in a loop.
+const notifyLog = [];
+app.post('/api/notify', async (req, res) => {
+  const { title, body, url } = req.body || {};
+  const text = typeof body === 'string' ? body.trim().slice(0, 500) : '';
+  if (!text) return res.status(400).json({ error: 'body required' });
+  const now = Date.now();
+  while (notifyLog.length && now - notifyLog[0] > 60_000) notifyLog.shift();
+  if (notifyLog.length >= 6) return res.status(429).json({ error: 'rate limited — max 6 notifications per minute' });
+  notifyLog.push(now);
+  const r = await sendToAll({
+    title: typeof title === 'string' && title.trim() ? title.trim().slice(0, 80) : 'Agent Manager',
+    body: text,
+    url: typeof url === 'string' ? url.slice(0, 200) : '/',
+  });
+  res.json({ ok: r.sent > 0 || r.devices === 0, ...r });
+});
 
 // Overview cards: every agent's state + what it did since your last prompt.
 app.get('/api/meta', async (_req, res) => {
@@ -232,6 +267,20 @@ Hermes — alongside plain shells and a file browser.
 ## Working well here
 - Keep work inside your workspace folder; use absolute paths under \`/data/workspaces/\` when in doubt.
 - Prefer small, verifiable steps and leave the workspace tidy — the operator browses these files directly in the file viewer.
+
+## Notifying the operator
+The operator's devices receive push notifications. Use this ONLY when the
+operator explicitly asked for it in their prompt (e.g. "notify me when the
+tests pass") — send exactly ONE message when that condition is met:
+
+\`\`\`sh
+curl -s -X POST http://localhost:${PORT}/api/notify \\
+  -H 'content-type: application/json' \\
+  -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"<one-line outcome>\\"}"
+\`\`\`
+
+Never notify unprompted, never in loops, never for progress updates — one
+message per requested event, with a short concrete outcome as the body.
 
 ## Custom tools & Python environments
 - Custom tools are installed at startup by \`/data/install.sh\` (edit it to add packages; it re-runs on every restart). Progress/errors: \`/data/install.log\`.

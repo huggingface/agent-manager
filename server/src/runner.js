@@ -255,13 +255,14 @@ export function attach(session, cols, rows) {
       'new-session', '-A', '-s', tmuxName(session.id), '-c', workdir,
       '-e', `AM_SESSION=${folder}`,
       '-e', `AM_NAME=${session.name}`,
+      '-e', `AM_ID=${session.id}`,
       '-e', `AM_USER=${AM_USER}`,
       '-e', `AM_ROOT=${WORKSPACES_DIR}`, // prompt shows $PWD relative to this
       'sh', '-lc', full,
     );
     term = pty.spawn('tmux', args, { name: 'xterm-256color', cols, rows, cwd: workdir, env: TERM_ENV });
   } else {
-    const env = { ...TERM_ENV, AM_SESSION: folder, AM_NAME: session.name, AM_USER, AM_ROOT: WORKSPACES_DIR };
+    const env = { ...TERM_ENV, AM_SESSION: folder, AM_NAME: session.name, AM_ID: session.id, AM_USER, AM_ROOT: WORKSPACES_DIR };
     term = pty.spawn('bash', ['-lc', full], { name: 'xterm-256color', cols, rows, cwd: workdir, env });
   }
 
@@ -298,6 +299,7 @@ export function ensureRunning(session) {
     '-x', '200', '-y', '50', // sane size until a client attaches (window-size=latest)
     '-e', `AM_SESSION=${folder}`,
     '-e', `AM_NAME=${session.name}`,
+    '-e', `AM_ID=${session.id}`,
     '-e', `AM_USER=${AM_USER}`,
     '-e', `AM_ROOT=${WORKSPACES_DIR}`,
     'sh', '-lc', commandFor(session),

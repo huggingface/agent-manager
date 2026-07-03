@@ -73,6 +73,16 @@ export const getMeta = (): Promise<{ sessions: MetaSession[]; generatedAt: strin
 export const sendInput = (id: string, text: string): Promise<{ ok: boolean; started?: boolean }> =>
   fetch(`/api/sessions/${id}/input`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ text }) }).then(json);
 
+// ---- push notifications ----
+export const getPushKey = (): Promise<{ publicKey: string; devices: number }> =>
+  fetch('/api/push/key').then(json);
+export const subscribePush = (subscription: PushSubscription) =>
+  fetch('/api/push/subscribe', { method: 'POST', headers: HEADERS, body: JSON.stringify({ subscription }) }).then(json);
+export const unsubscribePush = (endpoint: string) =>
+  fetch('/api/push/unsubscribe', { method: 'POST', headers: HEADERS, body: JSON.stringify({ endpoint }) }).then(json);
+export const sendTestNotification = (): Promise<{ ok: boolean; sent: number; devices: number }> =>
+  fetch('/api/notify', { method: 'POST', headers: HEADERS, body: JSON.stringify({ title: 'Agent Manager', body: 'Test notification — agents can reach this device.' }) }).then(json);
+
 // ---- trace analytics ----
 export interface TraceStats {
   turns: number; prompts: number; toolCalls: number; tools: Record<string, number>;
