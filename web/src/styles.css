@@ -89,7 +89,7 @@ body {
 /* The brand dot is live: it aggregates every agent's state. */
 .brand .dot { width: 9px; height: 9px; border-radius: 50%; transition: background 0.25s, box-shadow 0.25s, opacity 0.25s; }
 .brand .dot.agg-working { background: var(--accent); animation: breathe 2.4s ease-in-out infinite; }
-.brand .dot.agg-waiting { background: var(--amber); }
+.brand .dot.agg-waiting { background: transparent; border: 1.5px solid var(--accent); }
 .brand .dot.agg-idle { background: var(--muted); opacity: 0.5; }
 .icon-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: var(--r-md); width: 32px; height: 30px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
 .icon-btn:hover { color: var(--text); border-color: var(--border-strong); }
@@ -301,7 +301,8 @@ body {
 /* status dots */
 .status { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; transition: background 0.2s, box-shadow 0.2s, opacity 0.2s; }
 .status.working { background: var(--accent); animation: breathe 2.2s ease-in-out infinite; }
-.status.waiting { background: var(--amber); }
+/* your turn: hollow ring in the primary color — "paused, waiting on you" */
+.status.waiting { background: transparent; border: 1.5px solid var(--accent); }
 .status.idle { background: var(--muted); opacity: 0.5; }
 .status.stopped { background: transparent; border: 1.5px solid var(--muted); opacity: 0.5; }
 

@@ -54,7 +54,7 @@ export const CLIS = [
   { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue' },
   { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: 'codex',          cont: 'codex resume --last' },
   { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', run: 'gemini',         cont: null },
-  { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: null },
+  { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: 'opencode --continue' },
   { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', run: 'hermes',         cont: 'hermes -c' },
   // `chat` = TUI in --local mode: embedded agent, no gateway/daemon needed.
   { id: 'openclaw', label: 'OpenClaw',    bin: 'openclaw', color: '#c83636', run: 'openclaw chat',  cont: null },
