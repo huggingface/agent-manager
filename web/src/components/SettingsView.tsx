@@ -21,7 +21,7 @@ function urlBase64ToUint8Array(base64: string) {
   return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
 }
 
-type PushState = 'checking' | 'unsupported' | 'denied' | 'off' | 'on' | 'busy';
+type PushState = 'checking' | 'unsupported' | 'framed' | 'denied' | 'off' | 'on' | 'busy';
 
 // "Enable notifications" for THIS device: agents can then message the operator
 // (only when explicitly asked to — see the environment skill).
@@ -30,10 +30,18 @@ function PushRow() {
   const [note, setNote] = useState('');
   useEffect(() => {
     (async () => {
+      // Inside the huggingface.co iframe the browser blocks notification
+      // permission + push — only the Space's direct URL works.
+      if (window.top !== window.self) return setState('framed');
       if (!('serviceWorker' in navigator) || !('PushManager' in window)) return setState('unsupported');
       if (Notification.permission === 'denied') return setState('denied');
       try {
-        const reg = await navigator.serviceWorker.ready;
+        // `ready` can hang in odd contexts — don't leave the row stuck forever.
+        const reg = await Promise.race([
+          navigator.serviceWorker.ready,
+          new Promise<null>((r) => setTimeout(() => r(null), 4000)),
+        ]);
+        if (!reg) return setState('unsupported');
         setState((await reg.pushManager.getSubscription()) ? 'on' : 'off');
       } catch { setState('unsupported'); }
     })();
@@ -88,7 +96,9 @@ function PushRow() {
           </div>
           {note && <div className="s-help" style={{ marginTop: 6 }}>{note}</div>}
         </div>
-        {state === 'unsupported' ? (
+        {state === 'framed' ? (
+          <a className="btn-ghost" href={window.location.href} target="_blank" rel="noreferrer">Open directly to enable ↗</a>
+        ) : state === 'unsupported' ? (
           <span className="s-muted">not supported here</span>
         ) : state === 'denied' ? (
           <span className="s-muted">blocked in browser settings</span>

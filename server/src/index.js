@@ -125,7 +125,10 @@ app.post('/api/notify', async (req, res) => {
     body: text,
     url: typeof url === 'string' ? url.slice(0, 200) : '/',
   });
-  res.json({ ok: r.sent > 0 || r.devices === 0, ...r });
+  if (r.devices === 0) {
+    return res.json({ ok: false, ...r, note: 'no subscribed devices — the operator must enable notifications in Settings first' });
+  }
+  res.json({ ok: r.sent > 0, ...r });
 });
 
 // Overview cards: every agent's state + what it did since your last prompt.
