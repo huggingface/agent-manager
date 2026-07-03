@@ -47,7 +47,7 @@ export default function SettingsView({
     } catch { setRelaunch({ msg: 'Request failed.' }); }
   };
   return (
-    <div className="app">
+    <div className="app settings">
       <aside className="sidebar">
         <div className="brand">
           <button className="icon-btn" onClick={onClose} title="Back">←</button>

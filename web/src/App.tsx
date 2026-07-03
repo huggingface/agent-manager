@@ -5,9 +5,22 @@ import FilesPane from './components/FilesPane';
 import SettingsView from './components/SettingsView';
 import NewSession from './components/NewSession';
 import LayoutPicker from './components/LayoutPicker';
+import Logo from './components/Logo';
 import Locked from './components/Locked';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, Session, Tree } from './types';
+
+// Phone-sized viewport: the app becomes two full-screen views (list ⇄ pane).
+function useIsMobile() {
+  const [m, setM] = useState(() => window.matchMedia('(max-width: 768px)').matches);
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 768px)');
+    const h = (e: MediaQueryListEvent) => setM(e.matches);
+    mq.addEventListener('change', h);
+    return () => mq.removeEventListener('change', h);
+  }, []);
+  return m;
+}
 
 // Auto layout: the grid grows to fit however many agents the group has.
 function autoGrid(n: number): GridSpec {
@@ -42,6 +55,10 @@ export default function App() {
   const [info, setInfo] = useState<Awaited<ReturnType<typeof api.getInfo>> | null>(null);
   // Default location for the next agent = where the last one was created.
   const [lastPath, setLastPath] = useState(() => localStorage.getItem('am-last-path') || '');
+  // Mobile navigation: false = the sidebar is the (full-screen) home view,
+  // true = the selected session/group fills the screen. Desktop ignores this.
+  const isMobile = useIsMobile();
+  const [mobileStage, setMobileStage] = useState(false);
   const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
   const rememberPath = (p?: string | null) => {
     if (p) { setLastPath(p); localStorage.setItem('am-last-path', p); }
@@ -94,12 +111,14 @@ export default function App() {
   );
 
   // Tile grid for the active group: the chosen layout, or auto (fit the count).
-  const grid: GridSpec = activeGroup ? (activeGroup.layout ?? autoGrid(groupSessions.length)) : { cols: 1, rows: 1 };
+  // On mobile it's always a single pane — the chip strip switches between them.
+  const grid: GridSpec = activeGroup && !isMobile ? (activeGroup.layout ?? autoGrid(groupSessions.length)) : { cols: 1, rows: 1 };
   const cap = grid.cols * grid.rows;
   const pageCount = Math.max(1, Math.ceil(groupSessions.length / cap));
+  // Page resets happen explicitly in the navigation handlers (an effect on
+  // activeRef would clobber openSession's "land on this agent's pane").
   const [pageRaw, setPage] = useState(0);
   const page = Math.min(pageRaw, pageCount - 1); // clamp when agents/layout change
-  useEffect(() => { setPage(0); }, [activeRef]);
   const pageSessions = activeGroup ? groupSessions.slice(page * cap, (page + 1) * cap) : [];
 
   const visibleSessions = activeGroup ? pageSessions : activeSingle ? [activeSingle] : [];
@@ -153,10 +172,25 @@ export default function App() {
   const deleteSession = async (id: string) => { await api.deleteSession(id); if (activeRef === `s:${id}`) setActiveRef(null); refresh(); };
   // Clicking a session: nested → open its group with that pane focused; loose → solo view.
   const openSession = (sid: string, groupId?: string) => {
-    if (groupId) { setActiveRef(`g:${groupId}`); setFocusedId(sid); }
-    else setActiveRef(`s:${sid}`);
+    if (groupId) {
+      setActiveRef(`g:${groupId}`);
+      setFocusedId(sid);
+      const idx = groupById[groupId]?.sessionIds.indexOf(sid) ?? -1;
+      setPage(isMobile && idx >= 0 ? idx : 0); // mobile: land on that agent's pane
+    } else {
+      setActiveRef(`s:${sid}`);
+      setPage(0);
+    }
+    if (isMobile) setMobileStage(true);
+  };
+  const activate = (ref: string) => {
+    setActiveRef(ref);
+    setPage(0);
+    if (isMobile) setMobileStage(true);
   };
   const closePane = (sid: string) => {
+    // On mobile ✕ just returns to the list — never the desktop ungroup gesture.
+    if (isMobile) { setMobileStage(false); return; }
     if (activeGroup) doMove(`s:${sid}`, { kind: 'after', ref: activeRef! });
     else setActiveRef(null);
   };
@@ -301,14 +335,14 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
       <Sidebar
         clis={clis}
         tree={tree}
         activeRef={activeRef}
         focusedId={focusedId}
         defaultPath={lastPath}
-        onActivate={setActiveRef}
+        onActivate={activate}
         onOpenSession={openSession}
         onNewSession={newSession}
         onNewGroup={newGroup}
@@ -325,6 +359,23 @@ export default function App() {
       />
 
       <div className="main">
+        {isMobile && mobileStage && (
+          <div className="mbar">
+            <button className="icon-btn mback" onClick={() => setMobileStage(false)} title="Back to list">‹</button>
+            {activeGroup ? (
+              <div className="mchips">
+                {groupSessions.map((s, i) => (
+                  <button key={s.id} className={`mchip${i === page ? ' on' : ''}`} title={s.name} onClick={() => setPage(i)}>
+                    <Logo cli={s.cli} size={13} tint={cliMap[s.cli]?.color} />
+                    <span className={`status ${s.state}`} />
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <span className="mtitle mono">{activeSingle?.name}</span>
+            )}
+          </div>
+        )}
         <div className="stage">
           {activeGroup ? (
             groupSessions.length === 0 ? (
@@ -354,10 +405,10 @@ export default function App() {
         </div>
         {showZoom && (
           <div className="zoombar">
-            {activeGroup && groupSessions.length > 0 && (
+            {!isMobile && activeGroup && groupSessions.length > 0 && (
               <LayoutPicker grid={grid} isAuto={!activeGroup.layout} onPick={setLayout} />
             )}
-            {activeGroup && pageCount > 1 && (
+            {!isMobile && activeGroup && pageCount > 1 && (
               <span className="pager">
                 <button className="zbtn" title="Previous panes" disabled={page === 0} onClick={() => setPage(page - 1)}>‹</button>
                 <span className="plbl mono">{page + 1}/{pageCount}</span>

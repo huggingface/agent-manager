@@ -479,7 +479,37 @@ body {
 .qfill { height: 100%; background: var(--accent); border-radius: 999px; }
 .qpct { width: 130px; text-align: right; flex: none; font-variant-numeric: tabular-nums; }
 
-@media (max-width: 820px) {
+/* narrow desktop */
+@media (min-width: 769px) and (max-width: 900px) {
   .sidebar { width: 230px; }
-  .tiles { grid-template-columns: 1fr !important; }
+}
+
+/* mobile stage top bar (back + agent chips) — rendered only on mobile */
+.mbar { display: flex; align-items: center; gap: 8px; padding: 0 0 8px; flex: none; }
+.mback { flex: none; font-size: 19px; padding-bottom: 3px; }
+.mtitle { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mchips { display: flex; gap: 6px; overflow-x: auto; flex: 1; padding: 2px; }
+.mchip { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; flex: none; }
+.mchip.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+
+/* phones: two full-screen views — the sidebar list, or the selected pane */
+@media (max-width: 768px) {
+  .app { height: 100dvh; }
+  .app.m-home .main { display: none; }
+  .app.m-home .sidebar { width: 100%; border-right: none; }
+  .app.m-stage .sidebar { display: none; }
+  .app.m-stage .main { padding: 8px; }
+  /* comfortable touch targets */
+  .row { padding: 9px 10px; }
+  .row .row-actions { opacity: 1; pointer-events: auto; position: static; transform: none; margin-left: 4px; }
+  .row .cli-logo, .row .count { opacity: 1 !important; }
+  .caret { width: 22px; font-size: 15px; }
+  /* 16px inputs stop iOS zoom-on-focus */
+  .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input { font-size: 16px; }
+  /* settings stacks vertically */
+  .app.settings { flex-direction: column; }
+  .app.settings .sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
+  .app.settings .settings-nav { flex-direction: row; gap: 6px; padding: 8px 10px; }
+  .app.settings .settings-main { flex: 1; }
+  .settings-page { padding: 6px 12px 30px; }
 }

@@ -232,8 +232,11 @@ function skillPath(name) {
 }
 
 // Fan skills out as SKILL.md into the dirs every agent auto-reads, so a saved
-// skill is available to all of them in every new session.
+// skill is available to all of them in every new session. Gated to real Space
+// deployments (or explicit opt-in): on a dev laptop these paths are the
+// developer's OWN ~/.claude etc. — local test runs must not write there.
 function skillTargetDirs() {
+  if (!process.env.SPACE_ID && process.env.AM_DISTRIBUTE_SKILLS !== '1') return [];
   const home = process.env.HOME || os.homedir();
   const claudeCfg = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
   return [
