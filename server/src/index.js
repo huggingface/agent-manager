@@ -336,11 +336,16 @@ function skillTargetDirs() {
   if (!process.env.SPACE_ID && process.env.AM_DISTRIBUTE_SKILLS !== '1') return [];
   const home = process.env.HOME || os.homedir();
   const claudeCfg = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
-  return [
+  const dirs = [
     path.join(home, '.agents', 'skills'),   // Codex, Gemini, opencode
     path.join(claudeCfg, 'skills'),          // Claude Code
     path.join(home, '.hermes', 'skills'),    // Hermes
   ];
+  // OpenClaw runs with its own HOME (see entrypoint.sh) and reads managed
+  // skills from ~/.agents/skills resolved against THAT home. Recreated on
+  // every boot, so it needs no backup coverage.
+  if (process.env.OPENCLAW_HOME) dirs.push(path.join(process.env.OPENCLAW_HOME, '.agents', 'skills'));
+  return dirs;
 }
 function parseSkillFile(filename, content) {
   const name = slugify(path.basename(filename).replace(/\.[^.]+$/, '')) || 'skill';
