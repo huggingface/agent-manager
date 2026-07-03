@@ -253,6 +253,89 @@ async function openclawFiles() {
   return out;
 }
 
+// ---------- opencode (SQLite: ~/.local/share/opencode/opencode.db) ----------
+// v1.x keeps conversations in SQLite (session/message/part with JSON payloads).
+// Read-only via node:sqlite (node >= 22.5; degrades to "no digest" elsewhere).
+let DatabaseSync = null;
+try { ({ DatabaseSync } = await import('node:sqlite')); } catch { /* older node: skip opencode */ }
+
+function opencodeDbPath() {
+  const xdgData = process.env.XDG_DATA_HOME || path.join(process.env.HOME || '', '.local', 'share');
+  return path.join(xdgData, 'opencode', 'opencode.db');
+}
+
+let ocMemo = { key: '', rows: [] };
+
+function readOpencode() {
+  if (!DatabaseSync) return [];
+  const p = opencodeDbPath();
+  let m;
+  try { m = fs.statSync(p); } catch { return []; }
+  const key = `${m.mtimeMs}:${m.size}`;
+  if (ocMemo.key === key) return ocMemo.rows;
+  // actively written db on the FUSE mount: serve the previous read (first read allowed)
+  if (ocMemo.key && Date.now() - m.mtimeMs < 15_000) return ocMemo.rows;
+  let db;
+  try { db = new DatabaseSync(p, { readOnly: true }); } catch { return ocMemo.rows; }
+  const rows = [];
+  try {
+    const sessions = db.prepare('select * from session').all();
+    const qLastUser = db.prepare("select id, time_created from message where session_id = ? and json_extract(data,'$.role') = 'user' order by time_created desc limit 1");
+    const qPromptText = db.prepare("select json_extract(data,'$.text') t from part where message_id = ? and json_extract(data,'$.type') = 'text' order by time_created");
+    const qCount = db.prepare("select count(*) c from message where session_id = ? and time_created > ? and json_extract(data,'$.role') = ?");
+    const qTools = db.prepare("select json_extract(data,'$.tool') tool, count(*) c from part where session_id = ? and time_created > ? and json_extract(data,'$.type') = 'tool' group by 1");
+    const qSinceTok = db.prepare("select coalesce(sum(json_extract(data,'$.tokens.total')), 0) t from part where session_id = ? and time_created > ? and json_extract(data,'$.type') = 'step-finish'");
+    const qLastAssistant = db.prepare("select json_extract(p.data,'$.text') t, p.time_created ts from part p join message m on m.id = p.message_id where p.session_id = ? and p.time_created > ? and json_extract(p.data,'$.type') = 'text' and json_extract(m.data,'$.role') = 'assistant' order by p.time_created desc limit 1");
+    for (const s of sessions) {
+      const st = emptyStats();
+      const dg = emptyDigest();
+      st.files = 1;
+      st.cwd = s.directory || null;
+      st.tokensIn = s.tokens_input || 0;
+      st.tokensOut = s.tokens_output || 0;
+      st.cacheRead = s.tokens_cache_read || 0;
+      st.firstTs = Number(s.time_created) || 0;
+      st.lastTs = Number(s.time_updated) || st.firstTs;
+      st.prompts = qCount.get(s.id, 0, 'user').c;
+      st.turns = qCount.get(s.id, 0, 'assistant').c;
+      for (const t of qTools.all(s.id, 0)) {
+        const name = t.tool || 'tool';
+        st.tools[name] = (st.tools[name] || 0) + t.c;
+        st.toolCalls += t.c;
+        if (/web/i.test(name)) st.web += t.c;
+      }
+      const lastU = qLastUser.get(s.id);
+      const t0 = lastU ? Number(lastU.time_created) || 0 : 0;
+      if (lastU) {
+        const text = qPromptText.all(lastU.id).map((r) => r.t).filter(Boolean).join(' ');
+        if (text.trim() && !text.trim().startsWith('<')) {
+          dg.lastPromptText = clip(text);
+          dg.lastPromptTs = t0;
+        }
+        dg.sinceTurns = qCount.get(s.id, t0, 'assistant').c;
+        for (const t of qTools.all(s.id, t0)) {
+          const name = t.tool || 'tool';
+          dg.sinceTools[name] = (dg.sinceTools[name] || 0) + t.c;
+          dg.sinceToolCalls += t.c;
+        }
+        dg.sinceTokens = qSinceTok.get(s.id, t0).t || 0;
+      }
+      // Only an answer NEWER than the prompt counts — a stale one means "working".
+      const lastA = qLastAssistant.get(s.id, t0);
+      if (lastA && lastA.t) {
+        dg.lastAssistantText = clip(lastA.t);
+        dg.lastAssistantMd = clipRaw(lastA.t);
+        dg.lastAssistantTs = Number(lastA.ts) || 0;
+      }
+      rows.push({ directory: s.directory || null, parsed: { stats: st, digest: dg } });
+    }
+  } catch { /* torn read / schema drift: keep previous */ } finally {
+    try { db.close(); } catch {}
+  }
+  ocMemo = { key, rows };
+  return rows;
+}
+
 async function statsFor(p, parser, quietMs = 0) {
   let m;
   try { m = await fsp.stat(p); } catch { return null; }
@@ -362,6 +445,17 @@ async function build() {
   const ocOwner = ocSessions.length === 1 ? ocSessions[0] : null;
   for (const p of await openclawFiles()) {
     attribute(ocOwner, await statsFor(p, parseOpenClaw, 30_000)); // fence-sensitive: read only when quiet
+  }
+
+  // opencode: sessions attribute by their recorded directory (like codex cwd).
+  const opencodeByDir = new Map();
+  for (const s of sessions.filter((x) => x.cli === 'opencode')) {
+    const key = path.resolve(WORKSPACES_DIR, s.path ?? s.id);
+    opencodeByDir.set(key, opencodeByDir.has(key) ? 'ambiguous' : s);
+  }
+  for (const { directory, parsed } of readOpencode()) {
+    const hit = directory ? opencodeByDir.get(path.resolve(directory)) : null;
+    attribute(hit && hit !== 'ambiguous' ? hit : null, parsed);
   }
 
   return { perSession, digests, other, totals, sessions };

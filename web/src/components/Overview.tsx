@@ -70,11 +70,8 @@ function Card({ s, color, onOpen }: {
     if (d.sinceFiles.length) metaBits.push(d.sinceFiles.map(base).join(', '));
     if (d.sinceTokens > 0) metaBits.push(`${fmtTok(d.sinceTokens)} tok`);
   }
-  const ghostLabel = awaiting || s.state === 'working' ? 'reply — queues while it works'
-    : s.state === 'waiting' ? 'waiting for your input…'
-    : s.state === 'stopped' ? 'prompt (wakes the agent)…'
-    : 'reply…';
-  const attn = s.state === 'waiting' && !awaiting;
+  // One reply line for every state — same words, same accent voice.
+  const ghostLabel = 'waiting for your input…';
 
   return (
     <div className="ov-card">
@@ -132,7 +129,7 @@ function Card({ s, color, onOpen }: {
           <span className="ov-hint">{sending ? 'sending…' : '↵ send'}</span>
         </div>
       ) : (
-        <button className={`ov-ghost${attn ? ' attn' : ''}`} onClick={() => setLive(true)}>{ghostLabel}</button>
+        <button className="ov-ghost attn" onClick={() => setLive(true)}>{ghostLabel}</button>
       )}
       {failed && <div className="ov-note">failed to reach the agent</div>}
     </div>
