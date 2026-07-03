@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { LockGlyph, SlidersGlyph, SunGlyph, PulseGlyph } from './icons';
+import { SlidersGlyph, SunGlyph, PulseGlyph } from './icons';
 import Logo from './Logo';
 
 // A frozen, slightly dimmed replica of the real sidebar so the install page
@@ -73,9 +73,14 @@ function MockSidebar() {
   );
 }
 
-// Shown when the server reports the Space is public: the terminal backend is
-// disabled server-side and this page explains how to run a private copy.
-export default function Locked({ spaceId }: { spaceId?: string | null }) {
+// Shown when the server locks itself: either the Space is public (visitors get
+// the install guide) or the owner's bucket is public (they get a warning — a
+// public bucket exposes everything the agents saved, credentials included).
+export default function Locked({ spaceId, reason, bucket }: {
+  spaceId?: string | null;
+  reason?: string | null;
+  bucket?: string | null;
+}) {
   const id = spaceId || 'owner/space-name';
   const cmd = `from huggingface_hub import HfApi, Volume, create_bucket
 
@@ -102,20 +107,44 @@ api.duplicate_repo(
     navigator.clipboard?.writeText(cmd).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {});
   };
 
+  if (reason === 'public-bucket') {
+    return (
+      <div className="app locked-app">
+        <MockSidebar />
+        <div className="main locked-main">
+          <div className="install">
+            <h1>Your storage bucket is public</h1>
+            <p className="locked-lead">
+              The bucket mounted at <span className="mono">/data</span>
+              {bucket ? <> (<span className="mono">{bucket}</span>)</> : null} is <b>public</b> —
+              everything your agents saved is readable by anyone, including credentials and
+              shell history. The terminals stay disabled until it's private.
+            </p>
+            <div className="step">
+              <div className="step-head"><span className="step-n mono">!</span><h3>Make the bucket private</h3></div>
+              <p className="locked-sub">
+                Open <b>{bucket ? <a href={`https://huggingface.co/buckets/${bucket}/settings`} target="_blank" rel="noreferrer">the bucket's settings</a> : 'the bucket’s settings on Hugging Face'}</b> and
+                switch its visibility to <b>Private</b>. This page unlocks automatically within a minute —
+                and consider rotating any credentials that were stored while it was public.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app locked-app">
       <MockSidebar />
       <div className="main locked-main">
         <div className="install">
-          <div className="install-head">
-            <span className="install-lock"><LockGlyph /></span>
-            <div>
-              <h1>Your own Agent Manager, in two steps</h1>
-              <p className="locked-lead">
-                A private cloud workspace for Claude Code, Codex, Gemini CLI and friends —
-                dispatch agents from anywhere, they keep working when you close the tab.
-              </p>
-            </div>
+          <div>
+            <h1>Set up the Agent Manager in two steps</h1>
+            <p className="locked-lead">
+              A private cloud workspace for Claude Code, Codex, Gemini CLI and friends —
+              dispatch agents from anywhere, they keep working when you close the tab.
+            </p>
           </div>
           <p className="locked-sub">
             This copy is <b>public</b>, so its terminals are disabled: the app has no login of its
@@ -140,10 +169,15 @@ api.duplicate_repo(
               agents' work, logins and history survive rebuilds and sleep.
             </p>
             <img src="/install/mount-bucket.png" alt="The Mount a bucket dialog: private bucket, mount path /data, read & write" />
+            <p className="install-done">That's it — the Space restarts, unlocks itself, and you're ready to go. Open it and spawn your first agent.</p>
           </div>
 
-          <details className="install-code">
-            <summary>Prefer code? Duplicate + bucket in one script</summary>
+          <details className="install-code step">
+            <summary className="step-head">
+              <span className="step-n mono">&gt;_</span>
+              <h3>Prefer code? Both steps in one script</h3>
+              <span className="install-code-caret">▸</span>
+            </summary>
             <div className="locked-cmd">
               <pre><code>{cmd}</code></pre>
               <button className="locked-copy" onClick={copy} aria-label="Copy setup code" title={copied ? 'Copied' : 'Copy'}>

@@ -4,6 +4,7 @@ import * as api from '../api';
 import SkillsEditor from './SkillsEditor';
 import UsagePanel from './UsagePanel';
 import { SunGlyph, MoonGlyph, RefreshGlyph } from './icons';
+import Logo from './Logo';
 
 type Page = 'general' | 'usage' | 'skills';
 const PAGES: { id: Page; label: string }[] = [
@@ -74,20 +75,22 @@ export default function SettingsView({
 
             <h3>Agents</h3>
             <div className="s-help">A coloured dot means the agent is configured and ready. Log in once inside a session (or set a key as a Space secret) — credentials persist on the bucket across restarts and all sessions.</div>
-            <div className="agent-grid">
+            <div className="agent-rows">
               {clis.filter((c) => c.id !== 'shell' && c.id !== 'files').map((c) => {
                 const ready = c.available && c.ready;
                 return (
-                  <div key={c.id} className="agent-chip">
+                  <div key={c.id} className="agent-row">
                     <span
                       className="status"
                       style={ready
                         ? { background: c.color }
                         : { background: 'var(--muted)', opacity: 0.4 }}
                     />
-                    <span>{c.label}</span>
-                    {c.available && c.version && <span className="s-muted mono chip-ver">v{c.version}</span>}
-                    <span className="s-muted chip-state">{!c.available ? 'unavailable' : ready ? 'ready' : 'needs setup'}</span>
+                    <Logo cli={c.id} size={14} tint={c.color} />
+                    <span className="ar-name">{c.label}</span>
+                    <span className="spacer" />
+                    {c.available && c.version && <span className="ar-ver mono">v{c.version}</span>}
+                    <span className={`ar-state${ready ? ' ok' : ''}`}>{!c.available ? 'unavailable' : ready ? 'ready' : 'needs setup'}</span>
                   </div>
                 );
               })}
@@ -98,8 +101,14 @@ export default function SettingsView({
                 <div className="s-label">Update CLIs</div>
                 <div className="s-help">
                   Factory-reboots the Space to reinstall every CLI at its latest version and relaunch. Sessions survive on the bucket.
-                  {!info?.canRelaunch && ' Needs a write-scoped HF_TOKEN set as a Space secret.'}
                 </div>
+                {!info?.canRelaunch && (
+                  <div className="s-help" style={{ marginTop: 6 }}>
+                    This button needs a write-scoped <span className="mono">HF_TOKEN</span> Space secret. Without one,
+                    update manually: open your Space's <b>Settings</b> tab on Hugging Face and press{' '}
+                    <b>Factory reboot</b> — same effect.
+                  </div>
+                )}
               </div>
               {!info?.canRelaunch ? (
                 <button className="btn-ghost" disabled title="Add a write-scoped HF_TOKEN secret to the Space to enable"><RefreshGlyph /> Relaunch &amp; update</button>

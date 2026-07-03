@@ -159,6 +159,8 @@ app.get('/api/info', (_req, res) => res.json({
   spaceHost: process.env.SPACE_HOST || null,
   tmux: USE_TMUX,
   locked: isPublic(),
+  lockReason: visibility().reason,
+  lockBucket: visibility().bucket,
   canRelaunch: !!(process.env.SPACE_ID && hfToken()),
   // While public, /api/info stays reachable (the Locked page needs it) — don't
   // advertise which credentials exist to the whole internet.

@@ -208,6 +208,14 @@ function commandFor(session) {
     return `if ${hasTranscript}; then exec claude --resume ${session.sessionUuid}; else ${fresh}; fi`;
   }
 
+  // OpenClaw: first run needs its onboarding wizard (keys, workspace); once the
+  // config exists, go straight to the TUI. Decided by config-file existence —
+  // same honest pattern as the Claude transcript check.
+  if (cli.id === 'openclaw') {
+    const cfg = '"${OPENCLAW_CONFIG_PATH:-$HOME/.openclaw/openclaw.json}"';
+    return `if [ -s ${cfg} ]; then exec openclaw chat; else openclaw onboard && exec openclaw chat; fi`;
+  }
+
   // Codex: resume this agent's pinned conversation (captured from its rollout
   // file after launch — see scheduleCodexCapture). Existence-checked like
   // Claude, so a purged rollout starts fresh honestly and a crash ends the

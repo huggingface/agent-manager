@@ -324,7 +324,7 @@ export default function App() {
     );
   };
 
-  if (info?.locked) return <Locked spaceId={info.spaceId} />;
+  if (info?.locked) return <Locked spaceId={info.spaceId} reason={info.lockReason} bucket={info.lockBucket} />;
 
   if (settingsOpen) {
     return (
