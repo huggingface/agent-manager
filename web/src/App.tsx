@@ -9,7 +9,7 @@ import Logo from './components/Logo';
 import Overview from './components/Overview';
 import Locked from './components/Locked';
 import * as api from './api';
-import type { Cli, GridSpec, MoveTarget, Session, Tree } from './types';
+import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
 
 // Phone-sized viewport: the app becomes two full-screen views (list ⇄ pane).
 function useIsMobile() {
@@ -60,6 +60,7 @@ export default function App() {
   // true = the selected session/group fills the screen. Desktop ignores this.
   const isMobile = useIsMobile();
   const [mobileStage, setMobileStage] = useState(false);
+  const [ovFilter, setOvFilter] = useState<OverviewFilter>('all');
   const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
   const rememberPath = (p?: string | null) => {
     if (p) { setLastPath(p); localStorage.setItem('am-last-path', p); }
@@ -377,7 +378,7 @@ export default function App() {
                 ))}
               </div>
             ) : (
-              <span className="mtitle mono">{activeSingle?.name}</span>
+              <span className="mtitle mono">{activeRef === 'overview' ? 'Overview' : activeSingle?.name}</span>
             )}
           </div>
         )}
@@ -386,6 +387,7 @@ export default function App() {
             <Overview
               clis={clis}
               tree={tree}
+              filter={ovFilter}
               onOpen={(sid) => {
                 const g = tree.groups.find((x) => x.sessionIds.includes(sid));
                 openSession(sid, g?.id);
@@ -417,6 +419,18 @@ export default function App() {
             </div>
           )}
         </div>
+        {activeRef === 'overview' && (
+          <div className="zoombar">
+            <div className="seg ov-seg">
+              {(['all', 'waiting', 'working', 'quiet'] as OverviewFilter[]).map((f) => (
+                <button key={f} className={ovFilter === f ? 'on' : ''} onClick={() => setOvFilter(f)}>
+                  {f === 'waiting' ? 'your turn' : f}
+                </button>
+              ))}
+            </div>
+            <span className="spacer" />
+          </div>
+        )}
         {showZoom && (
           <div className="zoombar">
             {!isMobile && activeGroup && groupSessions.length > 0 && (

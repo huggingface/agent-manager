@@ -46,6 +46,8 @@ export const STATE_LABEL: Record<SessionState, string> = {
   stopped: 'stopped',
 };
 
+export type OverviewFilter = 'all' | 'waiting' | 'working' | 'quiet';
+
 export type MoveTarget =
   | { kind: 'into'; groupId: string }
   | { kind: 'pair'; sessionId: string }

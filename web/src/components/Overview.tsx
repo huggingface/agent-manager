@@ -3,10 +3,8 @@ import type { CSSProperties, ReactNode } from 'react';
 import { marked } from 'marked';
 import * as api from '../api';
 import type { MetaSession } from '../api';
-import type { Cli, Session, SessionState, Tree } from '../types';
+import type { Cli, OverviewFilter, Session, SessionState, Tree } from '../types';
 import Logo from './Logo';
-
-type Filter = 'all' | 'waiting' | 'working' | 'quiet';
 
 const fmtAgo = (ts: number) => {
   if (!ts) return '';
@@ -20,22 +18,21 @@ const fmtTok = (n = 0) =>
   n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n);
 const base = (p: string) => p.split('/').pop() || p;
 const eligible = (s: Session) => s.cli !== 'shell' && s.cli !== 'files';
-const bucket = (state: SessionState): Filter =>
+const bucket = (state: SessionState): OverviewFilter =>
   state === 'working' ? 'working' : state === 'waiting' ? 'waiting' : 'quiet';
 
 const Caret = () => (
   <svg className="ov-caret" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.8 3.2h6.4L5 7.4z" fill="currentColor" /></svg>
 );
 
-function Card({ s, color, autoLive, onOpen }: {
+function Card({ s, color, onOpen }: {
   s: MetaSession;
   color?: string;
-  autoLive?: boolean; // expanded dormant row: open straight into the input
   onOpen: (sid: string) => void;
 }) {
   const d = s.digest;
   const [draft, setDraft] = useState('');
-  const [live, setLive] = useState(!!autoLive);
+  const [live, setLive] = useState(false);
   const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState(false);
   const [sentAt, setSentAt] = useState(0);
@@ -140,13 +137,16 @@ function Card({ s, color, autoLive, onOpen }: {
 }
 
 /** Mission control: one reading column — group capsules with their agents as
- *  slabs, loose agents as standalone panels, dormant agents as one-liners. */
-export default function Overview({ clis, tree, onOpen }: { clis: Cli[]; tree: Tree; onOpen: (sid: string) => void }) {
+ *  slabs, loose agents as standalone panels. */
+export default function Overview({ clis, tree, filter, onOpen }: {
+  clis: Cli[];
+  tree: Tree;
+  filter: OverviewFilter; // controlled by the bottom bar in App
+  onOpen: (sid: string) => void;
+}) {
   const [meta, setMeta] = useState<Record<string, MetaSession> | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [durs, setDurs] = useState<Record<string, number>>({});
-  const [woken, setWoken] = useState<Set<string>>(new Set()); // dormant rows expanded by tap
-  const [filter, setFilter] = useState<Filter>('all');
 
   useEffect(() => {
     let alive = true;
@@ -166,11 +166,6 @@ export default function Overview({ clis, tree, onOpen }: { clis: Cli[]; tree: Tr
   if (!meta) return <div className="ov-wrap"><div className="ov-feed"><div className="usage-msg mono">reading traces…<span className="et-cursor" /></div></div></div>;
 
   const visible = (s: MetaSession) => filter === 'all' || bucket(s.state) === filter;
-  // Nothing to say and nothing running → a one-line row until tapped.
-  const isDormant = (s: MetaSession) =>
-    !woken.has(s.id)
-    && (s.state === 'stopped' || s.state === 'idle')
-    && (!s.digest || (!s.digest.lastPromptText && !s.digest.lastAssistantText));
 
   // Collapse at constant velocity: duration follows the group's height.
   const toggleGroup = (gid: string, el: HTMLElement) => {
@@ -183,28 +178,9 @@ export default function Overview({ clis, tree, onOpen }: { clis: Cli[]; tree: Tr
   const renderItem = (s: Session) => {
     const m = dataFor(s);
     if (!visible(m)) return null;
-    if (isDormant(m)) {
-      return (
-        <div
-          key={s.id}
-          className="ov-panel ov-dormant"
-          role="button"
-          tabIndex={0}
-          onClick={() => setWoken((w) => new Set(w).add(s.id))}
-          onKeyDown={(e) => { if (e.key === 'Enter') setWoken((w) => new Set(w).add(s.id)); }}
-        >
-          <span className={`status ${m.state}`} />
-          <Logo cli={s.cli} size={12} tint={colorOf[s.cli]} />
-          <span className="ov-name mono">{s.name}</span>
-          <span className="ov-ago">· {fmtAgo(Date.parse(s.createdAt) || 0)}</span>
-          <span className="spacer" />
-          <span className="ov-chev">▸</span>
-        </div>
-      );
-    }
     return (
       <div key={s.id} className="ov-panel">
-        <Card s={m} color={colorOf[s.cli]} autoLive={woken.has(s.id)} onOpen={onOpen} />
+        <Card s={m} color={colorOf[s.cli]} onOpen={onOpen} />
       </div>
     );
   };
@@ -246,18 +222,6 @@ export default function Overview({ clis, tree, onOpen }: { clis: Cli[]; tree: Tr
   return (
     <div className="ov-wrap">
       <div className="ov-feed">
-        <div className="ov-headrow">
-          <h1 className="ov-title">Overview</h1>
-          <span className="spacer" />
-          <div className="ov-filters">
-            {(['all', 'waiting', 'working', 'quiet'] as Filter[]).map((f) => (
-              <button key={f} className={`ov-fchip${filter === f ? ' on' : ''}`} onClick={() => setFilter(f)}>
-                {f !== 'all' && <span className={`status ${f === 'quiet' ? 'idle' : f}`} />}
-                {f === 'waiting' ? 'your turn' : f}
-              </button>
-            ))}
-          </div>
-        </div>
         {blocks.length === 0 && <div className="usage-msg mono">{filter === 'all' ? 'no agents yet — shells and file panes don’t appear here.' : 'nothing in this state.'}</div>}
         {blocks}
       </div>
