@@ -253,12 +253,17 @@ async function openclawFiles() {
   return out;
 }
 
-async function statsFor(p, parser) {
+async function statsFor(p, parser, quietMs = 0) {
   let m;
   try { m = await fsp.stat(p); } catch { return null; }
   const key = `${m.mtimeMs}:${m.size}`;
   const c = fileCache.get(p);
   if (c && c.key === key) return c.parsed;
+  // Don't read a file its owner is actively writing. OpenClaw's session fence
+  // fingerprints metadata at nanosecond precision, and on the FUSE bucket our
+  // reads can disturb what it sees — so while a fence-sensitive file is hot,
+  // serve the previous parse and re-read once writes have gone quiet.
+  if (quietMs && c && Date.now() - m.mtimeMs < quietMs) return c.parsed;
   let parsed;
   try { parsed = parser(await fsp.readFile(p, 'utf8')); } catch { return null; }
   fileCache.set(p, { key, parsed });
@@ -356,7 +361,7 @@ async function build() {
   const ocSessions = sessions.filter((s) => s.cli === 'openclaw');
   const ocOwner = ocSessions.length === 1 ? ocSessions[0] : null;
   for (const p of await openclawFiles()) {
-    attribute(ocOwner, await statsFor(p, parseOpenClaw));
+    attribute(ocOwner, await statsFor(p, parseOpenClaw, 30_000)); // fence-sensitive: read only when quiet
   }
 
   return { perSession, digests, other, totals, sessions };

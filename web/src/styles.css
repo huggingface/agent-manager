@@ -603,8 +603,10 @@ body {
   .app.m-home .sidebar { width: 100%; border-right: none; }
   .app.m-stage .sidebar { display: none; }
   .app.m-stage .main { padding: 8px; }
-  /* comfortable touch targets */
-  .row { padding: 9px 10px; }
+  /* touch-friendly but not airy */
+  .row { padding: 6px 10px; }
+  .tree { padding-top: 2px; }
+  .group { margin: 2px 0; }
   .row .row-actions { opacity: 1; pointer-events: auto; position: static; transform: none; margin-left: 4px; }
   .row .cli-logo, .row .count { opacity: 1 !important; }
   .caret { width: 22px; font-size: 15px; }
