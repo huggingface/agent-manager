@@ -120,6 +120,9 @@ function Card({ s, color, onOpen }: {
             spellCheck={false}
             enterKeyHint="send"
             onChange={(e) => setDraft(e.target.value)}
+            // iOS doesn't resize the layout for the keyboard — scroll the
+            // input into view once the keyboard has animated in.
+            onFocus={(e) => { const el = e.currentTarget; setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300); }}
             onBlur={() => { if (!draft.trim()) setLive(false); }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') send();

@@ -9,7 +9,6 @@
   --r-md: 6px;   /* buttons, inputs, rows */
   --r-lg: 8px;   /* widgets, cards */
   --r-xl: 10px;  /* panes, tiles */
-  --amber: #e0a948;
   --accent: #0e7c86;
   --accent-fg: #ffffff;
   --go: #1c8c57;
@@ -230,8 +229,9 @@ body {
 .ov-answer { font-size: 13px; line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .ov-more { background: none; border: none; padding: 3px 0 0; font: inherit; font-size: 11px; color: var(--muted); cursor: pointer; display: block; }
 .ov-more:hover { color: var(--accent); }
-.ov-md { max-height: 440px; overflow-y: auto; font-size: 12.5px; }
-.ov-md pre { font-size: 11.5px; }
+/* expanded answer: flows in the card — no box-in-box, slightly smaller type */
+.markdown.ov-md { max-height: 440px; overflow-y: auto; border: none; background: none; padding: 0; font-size: 12.5px; }
+.ov-md pre { font-size: 11px; }
 
 /* braille spinner: unmistakably a process, never an input line */
 .ov-busy { font-size: 12.5px; color: var(--muted); }
@@ -245,8 +245,9 @@ body {
 .ov-ghost { border: none; background: none; padding: 7px 0 2px; font: inherit; font-size: 12.5px; color: var(--muted); text-align: left; cursor: text; border-top: 1px solid var(--border); width: 100%; }
 .ov-ghost::before { content: '❯ '; font-family: var(--font-mono); color: var(--border-strong); font-weight: 700; }
 .ov-ghost:hover { color: var(--text); }
-.ov-ghost.attn { color: color-mix(in srgb, var(--amber) 55%, var(--muted)); }
-.ov-ghost.attn::before { color: var(--amber); }
+/* waiting: full-accent arrow, accent-tinted text — matches the hollow dot */
+.ov-ghost.attn { color: color-mix(in srgb, var(--accent) 45%, var(--muted)); }
+.ov-ghost.attn::before { color: var(--accent); }
 .ov-ghost.attn:hover { color: var(--text); }
 .ov-live { display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--border); padding-top: 7px; }
 .ov-live .ov-p { color: var(--accent); font-weight: 700; }
