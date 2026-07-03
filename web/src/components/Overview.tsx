@@ -1,11 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
+import { marked } from 'marked';
 import * as api from '../api';
 import type { MetaSession } from '../api';
-import type { Cli, SessionState } from '../types';
+import type { Cli, Session, Tree } from '../types';
 import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 
-const RANK: Record<SessionState, number> = { working: 0, waiting: 1, idle: 2, stopped: 3 };
 const fmtAgo = (ts: number) => {
   if (!ts) return '';
   const m = Math.round((Date.now() - ts) / 60000);
@@ -15,12 +16,22 @@ const fmtAgo = (ts: number) => {
   return `${Math.round(m / 1440)}d ago`;
 };
 const base = (p: string) => p.split('/').pop() || p;
+const eligible = (s: Session) => s.cli !== 'shell' && s.cli !== 'files';
 
 function Card({ s, color, onOpen }: { s: MetaSession; color?: string; onOpen: (sid: string) => void }) {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
+  const [expanded, setExpanded] = useState(false);
+  const [sentAt, setSentAt] = useState(0);
   const d = s.digest;
+
+  // After you send (or when the transcript shows a prompt newer than the last
+  // answer), the old answer is stale — show a working indicator instead.
+  const digestCaughtUp = !!d && d.lastPromptTs >= sentAt - 60_000;
+  if (sentAt && digestCaughtUp) setSentAt(0);
+  const awaiting = (sentAt && !digestCaughtUp) || (!!d && !!d.lastPromptText && d.lastPromptTs > d.lastAssistantTs);
+
   const send = async () => {
     const text = draft.trim();
     if (!text || busy) return;
@@ -29,16 +40,19 @@ function Card({ s, color, onOpen }: { s: MetaSession; color?: string; onOpen: (s
     try {
       const r = await api.sendInput(s.id, text);
       setDraft('');
-      setNote(r.started ? 'started + sent' : 'sent');
+      setSentAt(Date.now());
+      setNote(r.started ? 'agent started' : '');
     } catch {
-      setNote('failed — is the agent running?');
+      setNote('failed to reach the agent');
     }
     setBusy(false);
     setTimeout(() => setNote(''), 4000);
   };
+
   const digestLine = d && (d.sinceTurns || d.sinceToolCalls)
     ? `${d.sinceTurns} turn${d.sinceTurns === 1 ? '' : 's'} · ${d.sinceToolCalls} tool call${d.sinceToolCalls === 1 ? '' : 's'}${d.sinceFiles.length ? ` · ${d.sinceFiles.map(base).join(', ')}` : ''}`
     : null;
+  const hasAnswer = !!d && !!d.lastAssistantText && !awaiting;
 
   return (
     <div className="ov-card">
@@ -55,17 +69,28 @@ function Card({ s, color, onOpen }: { s: MetaSession; color?: string; onOpen: (s
       {d && d.lastPromptText ? (
         <div className="ov-you">
           <span className="ov-lbl">you</span>
-          <span className="ov-you-text">{d.lastPromptText}</span>
+          <span className="ov-you-text" title={d.lastPromptText}>{d.lastPromptText}</span>
           <span className="ov-ago">{fmtAgo(d.lastPromptTs)}</span>
         </div>
       ) : (
-        <div className="ov-none">{d ? 'no prompt yet' : 'no trace digest for this CLI'}</div>
+        <div className="ov-none">{d ? 'no prompt yet' : 'no trace yet'}</div>
       )}
-      {digestLine && <div className="ov-digest mono">{digestLine}</div>}
-      {d && d.lastAssistantText && (
+      {digestLine && !awaiting && <div className="ov-digest mono">{digestLine}</div>}
+
+      {awaiting && (
+        <div className="ov-working mono">working<span className="et-cursor" /></div>
+      )}
+      {hasAnswer && (
         <div className="ov-last">
           <span className="ov-lbl">last</span>
-          <span className="ov-last-text">{d.lastAssistantText}</span>
+          <div className="ov-last-body">
+            {expanded ? (
+              <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: marked.parse(d!.lastAssistantMd || d!.lastAssistantText) as string }} />
+            ) : (
+              <div className="ov-last-text">{d!.lastAssistantText}</div>
+            )}
+            <button className="ov-more" onClick={() => setExpanded((e) => !e)}>{expanded ? 'collapse' : 'expand'}</button>
+          </div>
         </div>
       )}
 
@@ -74,6 +99,11 @@ function Card({ s, color, onOpen }: { s: MetaSession; color?: string; onOpen: (s
           value={draft}
           placeholder={s.running ? 'reply…' : 'prompt (wakes the agent)…'}
           disabled={busy}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          enterKeyHint="send"
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') send(); }}
         />
@@ -84,29 +114,76 @@ function Card({ s, color, onOpen }: { s: MetaSession; color?: string; onOpen: (s
   );
 }
 
-/** Mission control: one card per agent — state, what happened since your last
- *  prompt, and a reply box that reaches the terminal directly. */
-export default function Overview({ clis, onOpen }: { clis: Cli[]; onOpen: (sid: string) => void }) {
-  const [sessions, setSessions] = useState<MetaSession[] | null>(null);
+/** Mission control: agents arranged like the sidebar (groups collapsible),
+ *  each card showing state, the since-your-last-prompt digest, and a reply box. */
+export default function Overview({ clis, tree, onOpen }: { clis: Cli[]; tree: Tree; onOpen: (sid: string) => void }) {
+  const [meta, setMeta] = useState<Record<string, MetaSession> | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   useEffect(() => {
     let alive = true;
-    const load = () => api.getMeta().then((r) => { if (alive) setSessions(r.sessions); }).catch(() => {});
+    const load = () => api.getMeta()
+      .then((r) => { if (alive) setMeta(Object.fromEntries(r.sessions.map((s) => [s.id, s]))); })
+      .catch(() => {});
     load();
     const t = setInterval(() => { if (!document.hidden) load(); }, 4000);
     return () => { alive = false; clearInterval(t); };
   }, []);
-  const colorOf = Object.fromEntries(clis.map((c) => [c.id, c.color]));
 
-  if (!sessions) return <div className="ov-wrap"><div className="usage-msg mono">reading traces…<span className="et-cursor" /></div></div>;
-  const ordered = [...sessions].sort((a, b) =>
-    RANK[a.state] - RANK[b.state] || (b.digest?.lastAssistantTs || 0) - (a.digest?.lastAssistantTs || 0));
+  const colorOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c.color])), [clis]);
+  const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
+  const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
+  const dataFor = (s: Session): MetaSession => meta?.[s.id] ?? { ...s, digest: null };
+
+  if (!meta) return <div className="ov-wrap"><div className="usage-msg mono">reading traces…<span className="et-cursor" /></div></div>;
+
+  // Follow the sidebar's order: groups as collapsible sections, loose agents inline.
+  const blocks: ReactNode[] = [];
+  let loose: Session[] = [];
+  const flushLoose = () => {
+    if (!loose.length) return;
+    blocks.push(
+      <div key={`loose-${blocks.length}`} className="ov-grid">
+        {loose.map((s) => <Card key={s.id} s={dataFor(s)} color={colorOf[s.cli]} onOpen={onOpen} />)}
+      </div>,
+    );
+    loose = [];
+  };
+  for (const ref of tree.order) {
+    if (ref.startsWith('s:')) {
+      const s = sessById[ref.slice(2)];
+      if (s && eligible(s)) loose.push(s);
+    } else {
+      const g = groupById[ref.slice(2)];
+      if (!g) continue;
+      const members = g.sessionIds.map((id) => sessById[id]).filter(Boolean).filter(eligible) as Session[];
+      if (!members.length) continue;
+      flushLoose();
+      const open = !collapsed.has(g.id);
+      blocks.push(
+        <div key={g.id} className="ov-sec">
+          <button
+            className="ov-sec-head"
+            onClick={() => setCollapsed((c) => { const n = new Set(c); n.has(g.id) ? n.delete(g.id) : n.add(g.id); return n; })}
+          >
+            <span className="caret">{open ? '▾' : '▸'}</span>
+            <span className="ov-sec-title">{g.name}</span>
+            <span className="ov-sec-count">{members.length}</span>
+          </button>
+          {open && (
+            <div className="ov-grid">
+              {members.map((s) => <Card key={s.id} s={dataFor(s)} color={colorOf[s.cli]} onOpen={onOpen} />)}
+            </div>
+          )}
+        </div>,
+      );
+    }
+  }
+  flushLoose();
 
   return (
     <div className="ov-wrap">
-      {ordered.length === 0 && <div className="usage-msg mono">no agents yet.</div>}
-      <div className="ov-grid">
-        {ordered.map((s) => <Card key={s.id} s={s} color={colorOf[s.cli]} onOpen={onOpen} />)}
-      </div>
+      {blocks.length === 0 && <div className="usage-msg mono">no agents yet — shells and file panes don't appear here.</div>}
+      {blocks}
     </div>
   );
 }

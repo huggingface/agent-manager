@@ -110,6 +110,10 @@ export default function TerminalPane({
   const resyncRef = useRef<() => void>(() => {});
   const reconnectRef = useRef<() => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
+  // "starting…" cover while the CLI boots into an empty pane (attach on the
+  // Space can take seconds). Cleared once real output lands (or shortly after
+  // the first bytes, for quiet programs like a bare shell prompt).
+  const [booting, setBooting] = useState(true);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.name);
   const commitName = () => {
@@ -172,8 +176,13 @@ export default function TerminalPane({
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o));
     };
 
+    let bootBytes = 0;
+    let bootTimer: ReturnType<typeof setTimeout> | null = null;
     const connect = () => {
       setConn('connecting');
+      setBooting(true);
+      bootBytes = 0;
+      if (bootTimer) { clearTimeout(bootTimer); bootTimer = null; }
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const url = `${proto}://${location.host}/ws?session=${encodeURIComponent(session.id)}&cols=${term.cols}&rows=${term.rows}`;
       ws = new WebSocket(url);
@@ -184,12 +193,20 @@ export default function TerminalPane({
         try { fit.fit(); } catch { /* ignore */ }
         send({ t: 'r', cols: term.cols, rows: term.rows });
       };
-      ws.onmessage = (e) =>
-        term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data as ArrayBuffer));
+      ws.onmessage = (e) => {
+        const d = typeof e.data === 'string' ? e.data : new Uint8Array(e.data as ArrayBuffer);
+        term.write(d);
+        if (bootBytes >= 0) {
+          bootBytes += typeof d === 'string' ? d.length : d.byteLength;
+          if (bootBytes > 800) { setBooting(false); bootBytes = -1; }
+          else if (!bootTimer) bootTimer = setTimeout(() => setBooting(false), 1500);
+        }
+      };
       ws.onclose = (e) => {
         // A real process exit: stop here and let the user relaunch. Anything
         // else is a transient drop (sleep/wake, network) → auto-reconnect and
         // reattach to the still-running tmux session.
+        setBooting(false);
         if (e.code === EXIT_CODE) { setConn('exited'); return; }
         setConn('closed');
         if (!closedByUs) {
@@ -216,13 +233,46 @@ export default function TerminalPane({
     window.addEventListener('focus', resync);
     document.addEventListener('visibilitychange', onVisible);
 
+    // Touch scrolling: xterm doesn't translate touch gestures for applications
+    // that grabbed the mouse (tmux always does here), so swipes did nothing on
+    // phones. Convert drags into wheel steps: SGR mouse-wheel sequences when
+    // the app tracks the mouse (tmux scrolls its history), local scrollLines
+    // otherwise.
+    let touchY: number | null = null;
+    const onTouchStart = (e: TouchEvent) => { touchY = e.touches[0].clientY; };
+    const onTouchMove = (e: TouchEvent) => {
+      if (touchY == null) return;
+      const y = e.touches[0].clientY;
+      const dy = y - touchY;
+      const steps = Math.trunc(dy / 24); // ~one wheel notch per 24px of drag
+      if (steps !== 0) {
+        touchY = y;
+        let tracking = false;
+        try { tracking = ((term as unknown as { modes?: { mouseTrackingMode?: string } }).modes?.mouseTrackingMode ?? 'none') !== 'none'; } catch { /* older xterm */ }
+        const btn = steps > 0 ? 64 : 65; // drag down reveals earlier output = wheel up
+        for (let i = 0; i < Math.abs(steps); i++) {
+          if (tracking) send({ t: 'i', d: `\x1b[<${btn};${Math.max(1, Math.floor(term.cols / 2))};${Math.max(1, Math.floor(term.rows / 2))}M` });
+          else term.scrollLines(steps > 0 ? -1 : 1);
+        }
+      }
+      if (Math.abs(dy) > 4) e.preventDefault(); // keep the page from rubber-banding
+    };
+    const onTouchEnd = () => { touchY = null; };
+    host.addEventListener('touchstart', onTouchStart, { passive: true });
+    host.addEventListener('touchmove', onTouchMove, { passive: false });
+    host.addEventListener('touchend', onTouchEnd);
+
     connect();
 
     return () => {
       closedByUs = true;
       if (retry) clearTimeout(retry);
+      if (bootTimer) clearTimeout(bootTimer);
       ro.disconnect();
       host.removeEventListener('mouseup', onMouseUp);
+      host.removeEventListener('touchstart', onTouchStart);
+      host.removeEventListener('touchmove', onTouchMove);
+      host.removeEventListener('touchend', onTouchEnd);
       window.removeEventListener('focus', resync);
       document.removeEventListener('visibilitychange', onVisible);
       dataSub.dispose();
@@ -290,6 +340,11 @@ export default function TerminalPane({
         <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
       </div>
       <div className="term-host" ref={hostRef} />
+      {booting && conn !== 'exited' && (
+        <div className="term-boot mono">
+          {conn === 'connecting' ? 'connecting' : `starting ${cli?.label || session.cli}`}<span className="et-cursor" />
+        </div>
+      )}
       {conn === 'exited' && (
         <div className="term-overlay">
           <div className="term-overlay-card">

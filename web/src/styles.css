@@ -88,8 +88,8 @@ body {
 .brand h1 { font-size: 15px; margin: 0; letter-spacing: -0.01em; }
 /* The brand dot is live: it aggregates every agent's state. */
 .brand .dot { width: 9px; height: 9px; border-radius: 50%; transition: background 0.25s, box-shadow 0.25s, opacity 0.25s; }
-.brand .dot.agg-working { background: var(--accent); box-shadow: 0 0 10px var(--accent); animation: breathe 2.4s ease-in-out infinite; }
-.brand .dot.agg-waiting { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
+.brand .dot.agg-working { background: var(--accent); animation: breathe 2.4s ease-in-out infinite; }
+.brand .dot.agg-waiting { background: var(--amber); }
 .brand .dot.agg-idle { background: var(--muted); opacity: 0.5; }
 .icon-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: var(--r-md); width: 32px; height: 30px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
 .icon-btn:hover { color: var(--text); border-color: var(--border-strong); }
@@ -145,13 +145,18 @@ body {
 /* new-group: per-agent quantity cart */
 .widget-sep { height: 1px; background: var(--border); margin: 1px 0; flex: none; }
 
+/* labelled widget fields, uniform control sizing */
+.w-field { display: flex; flex-direction: column; gap: 4px; }
+.w-label { font-size: 10px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding-left: 1px; }
+.agent-pick, .widget input, .fp-current { min-height: 32px; font-size: 13px; }
+
 /* folder location picker (in the create widgets) */
 .fp { display: flex; flex-direction: column; gap: 4px; }
 .fp-current { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; text-align: left; }
 .fp-current:hover { border-color: var(--border-strong); }
 .fp-ico { flex: none; width: 14px; height: 14px; color: var(--muted); }
 .fp-row .fp-ico { width: 13px; height: 13px; margin-right: 4px; }
-.fp-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'Geist Mono', ui-monospace, monospace; font-size: 11.5px; }
+.fp-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .fp-toggle { flex: none; color: var(--muted); font-size: 10px; }
 .fp-tree { max-height: 180px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); padding: 3px 0; display: flex; flex-direction: column; animation: rise-in 0.14s ease-out; }
 .fp-row { display: flex; align-items: center; gap: 2px; padding: 2px 8px; font-size: 12.5px; color: var(--text); background: transparent; border: none; cursor: pointer; text-align: left; width: 100%; font-family: inherit; }
@@ -180,12 +185,22 @@ body {
 .ov-fixed { padding: 6px 8px 0; }
 .ov-row .name { font-family: var(--font-sans); font-size: 13px; font-weight: 600; }
 .ov-row-ico { width: 14px; height: 14px; color: var(--accent); flex: none; }
-.ov-wrap { height: 100%; overflow-y: auto; }
+.ov-wrap { height: 100%; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
 .ov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; align-items: start; }
+.ov-sec { display: flex; flex-direction: column; gap: 8px; }
+.ov-sec-head { display: flex; align-items: center; gap: 6px; background: none; border: none; padding: 2px 2px; font: inherit; color: var(--text); cursor: pointer; text-align: left; }
+.ov-sec-title { font-size: 13.5px; font-weight: 600; }
+.ov-sec-count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ov-working { font-size: 12px; color: var(--muted); }
+.ov-working .et-cursor { height: 12px; width: 6px; margin-left: 6px; }
+.ov-last-body { flex: 1; min-width: 0; }
+.ov-more { display: block; background: none; border: none; padding: 2px 0 0; font: inherit; font-size: 11px; color: var(--accent); cursor: pointer; }
+.ov-md { max-height: 420px; overflow-y: auto; border: none; padding: 0; background: none; font-size: 12.5px; line-height: 1.55; }
+.ov-md pre { font-size: 11.5px; }
 .ov-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; }
 .ov-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .ov-head .spacer { flex: 1; }
-.ov-name { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ov-path { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ov-state { font-size: 11px; color: var(--muted); flex: none; }
 .ov-lbl { flex: none; font-size: 9.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 5px; margin-top: 1px; }
@@ -248,8 +263,8 @@ body {
 
 /* status dots */
 .status { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; transition: background 0.2s, box-shadow 0.2s, opacity 0.2s; }
-.status.working { background: var(--accent); box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 55%, transparent); animation: breathe 2.2s ease-in-out infinite; }
-.status.waiting { background: var(--amber); box-shadow: 0 0 6px color-mix(in srgb, var(--amber) 55%, transparent); }
+.status.working { background: var(--accent); animation: breathe 2.2s ease-in-out infinite; }
+.status.waiting { background: var(--amber); }
 .status.idle { background: var(--muted); opacity: 0.5; }
 .status.stopped { background: transparent; border: 1.5px solid var(--muted); opacity: 0.5; }
 
@@ -289,6 +304,10 @@ body {
 .locked-copy { position: absolute; top: 10px; right: 10px; width: 30px; height: 30px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--muted); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
 .locked-copy:hover { color: var(--text); border-color: var(--border-strong); }
 .locked-copy svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
+
+/* terminal boot cover ("connecting… / starting claude…") */
+.term-boot { position: absolute; inset: 0; top: 34px; display: flex; align-items: center; justify-content: center; background: var(--term-bg); color: var(--muted); font-size: 12.5px; z-index: 4; pointer-events: none; }
+.term-boot .et-cursor { height: 13px; width: 7px; margin-left: 7px; }
 
 /* terminal "process exited" overlay */
 /* Non-blocking banner so the agent's last output (e.g. a login error) stays readable. */

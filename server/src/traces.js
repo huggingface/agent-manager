@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import * as store from './sessions.js';
+import { WORKSPACES_DIR } from './config.js';
 
 // Workspace-wide trace analytics: parse every Claude transcript and Codex
 // rollout on the Space into per-conversation stats (turns, tool calls, web
@@ -39,12 +40,21 @@ function mergeInto(a, b) {
 // Built in the same parse pass: every real user prompt resets the segment, so
 // whatever accumulated by EOF is the activity since the last thing you said.
 function emptyDigest() {
-  return { lastPromptText: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [] };
+  return { lastPromptText: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantMd: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [] };
 }
 const clip = (s, n = 280) => { const t = (s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
+// Markdown-preserving variant (keeps newlines) for the expandable card view.
+const clipRaw = (s, n = 6000) => { const t = (s || '').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 function digestPrompt(d, text, ts) {
   d.lastPromptText = clip(text); d.lastPromptTs = Date.parse(ts) || 0;
   d.sinceTurns = 0; d.sinceToolCalls = 0; d.sinceTools = {}; d.sinceFiles = [];
+  // The previous answer belongs to the previous prompt — never show it as "LAST".
+  d.lastAssistantText = ''; d.lastAssistantMd = ''; d.lastAssistantTs = 0;
+}
+function digestAssistant(d, text, ts) {
+  d.lastAssistantText = clip(text);
+  d.lastAssistantMd = clipRaw(text);
+  d.lastAssistantTs = Date.parse(ts) || d.lastAssistantTs;
 }
 function digestTool(d, name, file) {
   d.sinceToolCalls++;
@@ -94,8 +104,7 @@ function parseClaude(txt) {
             const file = /^(Edit|Write|MultiEdit|NotebookEdit)$/.test(name) && c.input && c.input.file_path;
             digestTool(dg, name, file || null);
           } else if (c.type === 'text' && c.text && c.text.trim()) {
-            dg.lastAssistantText = clip(c.text);
-            dg.lastAssistantTs = Date.parse(j.timestamp) || dg.lastAssistantTs;
+            digestAssistant(dg, c.text, j.timestamp);
           }
         }
       }
@@ -124,6 +133,7 @@ function parseCodex(txt) {
     let j; try { j = JSON.parse(line); } catch { continue; }
     if (j.timestamp) addTs(st, j.timestamp);
     const p = j.payload || {};
+    if (j.type === 'session_meta' && p.cwd) st.cwd = p.cwd; // for cwd-fallback attribution
     if (j.type === 'response_item') {
       switch (p.type) {
         case 'message':
@@ -131,7 +141,7 @@ function parseCodex(txt) {
             st.turns++;
             dg.sinceTurns++;
             const t = codexText(p);
-            if (t.trim()) { dg.lastAssistantText = clip(t); dg.lastAssistantTs = Date.parse(j.timestamp) || dg.lastAssistantTs; }
+            if (t.trim()) digestAssistant(dg, t, j.timestamp);
           } else if (p.role === 'user') {
             st.prompts++;
             const t = codexText(p);
@@ -251,9 +261,23 @@ async function build() {
     const m = path.basename(p).match(UUID_RE);
     attribute(m ? byClaudeUuid.get(m[1]) : null, await statsFor(p, parseClaude));
   }
+  // Codex fallback: sessions created before capture-and-pin have no
+  // codexSessionId — attribute their rollouts by cwd when it's unambiguous.
+  const byCodexCwd = new Map();
+  for (const s of sessions.filter((x) => x.cli === 'codex')) {
+    const key = path.resolve(WORKSPACES_DIR, s.path ?? s.id);
+    byCodexCwd.set(key, byCodexCwd.has(key) ? 'ambiguous' : s);
+  }
   for (const p of await codexFiles()) {
+    const parsed = await statsFor(p, parseCodex);
+    if (!parsed) continue;
     const m = path.basename(p).match(UUID_RE);
-    attribute(m ? byCodexId.get(m[1]) : null, await statsFor(p, parseCodex));
+    let session = m ? byCodexId.get(m[1]) : null;
+    if (!session && parsed.stats.cwd) {
+      const hit = byCodexCwd.get(parsed.stats.cwd);
+      if (hit && hit !== 'ambiguous') session = hit;
+    }
+    attribute(session, parsed);
   }
 
   return { perSession, digests, other, totals, sessions };

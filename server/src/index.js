@@ -97,7 +97,7 @@ app.get('/api/traces', async (_req, res) => res.json(await buildTraces()));
 app.get('/api/meta', async (_req, res) => {
   const digests = await traceDigests();
   const sessions = sessionsWithState()
-    .filter((s) => s.cli !== 'files')
+    .filter((s) => s.cli !== 'files' && s.cli !== 'shell')
     .map((s) => {
       const d = digests.get(s.id);
       if (d) { const { _ts, ...digest } = d; return { ...s, digest }; }

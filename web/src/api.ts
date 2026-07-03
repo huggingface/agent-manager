@@ -63,7 +63,7 @@ export const getUsage = (): Promise<Usage> => fetch('/api/usage').then(json);
 // ---- overview (meta) ----
 export interface MetaDigest {
   lastPromptText: string; lastPromptTs: number;
-  lastAssistantText: string; lastAssistantTs: number;
+  lastAssistantText: string; lastAssistantMd: string; lastAssistantTs: number;
   sinceTurns: number; sinceToolCalls: number; sinceTools: Record<string, number>; sinceFiles: string[];
 }
 export interface MetaSession extends Session { digest: MetaDigest | null }

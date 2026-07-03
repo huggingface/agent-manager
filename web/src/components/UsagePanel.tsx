@@ -80,7 +80,7 @@ export default function UsagePanel() {
         return (
           <div key={p.id} className="usage-card">
             <div className="usage-head">
-              <span className="status" style={{ background: p.color, boxShadow: `0 0 6px ${p.color}` }} />
+              <span className="status" style={{ background: p.color }} />
               <b>{p.label}</b>
             </div>
             <div className="usage-stats">

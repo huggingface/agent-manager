@@ -45,27 +45,35 @@ export default function NewSession({
 
   return (
     <div className="widget">
-      <div className="agent-picks">
-        {agents.map((c) => (
-          <button
-            key={c.id}
-            className={`agent-pick${cli === c.id ? ' on' : ''}`}
-            onClick={() => pick(c)}
-          >
-            <Logo cli={c.id} size={16} />
-            <span>{c.label}</span>
-          </button>
-        ))}
+      <div className="w-field">
+        <span className="w-label">Agent</span>
+        <div className="agent-picks">
+          {agents.map((c) => (
+            <button
+              key={c.id}
+              className={`agent-pick${cli === c.id ? ' on' : ''}`}
+              onClick={() => pick(c)}
+            >
+              <Logo cli={c.id} size={16} />
+              <span>{c.label}</span>
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="widget-sep" />
-      <input
-        autoFocus
-        placeholder="Agent name"
-        value={name}
-        onChange={(e) => { setName(e.target.value); setNameDirty(e.target.value.trim() !== ''); }}
-        onKeyDown={(e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') onCancel?.(); }}
-      />
-      <FolderPicker value={loc} autoLabel="new folder (auto)" onChange={setLoc} />
+      <div className="w-field">
+        <span className="w-label">Name</span>
+        <input
+          autoFocus
+          placeholder="Agent name"
+          value={name}
+          onChange={(e) => { setName(e.target.value); setNameDirty(e.target.value.trim() !== ''); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') onCancel?.(); }}
+        />
+      </div>
+      <div className="w-field">
+        <span className="w-label">Folder</span>
+        <FolderPicker value={loc} autoLabel="new folder (auto)" onChange={setLoc} />
+      </div>
       <div className="widget-actions">
         <button className="btn-primary" onClick={submit} disabled={!sel}>Create</button>
       </div>

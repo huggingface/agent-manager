@@ -177,8 +177,11 @@ export default function App() {
     if (groupId) {
       setActiveRef(`g:${groupId}`);
       setFocusedId(sid);
-      const idx = groupById[groupId]?.sessionIds.indexOf(sid) ?? -1;
-      setPage(isMobile && idx >= 0 ? idx : 0); // mobile: land on that agent's pane
+      // Land on the page that actually contains this agent's pane.
+      const g = groupById[groupId];
+      const idx = g?.sessionIds.indexOf(sid) ?? -1;
+      const gg = isMobile ? { cols: 1, rows: 1 } : (g?.layout ?? autoGrid(g?.sessionIds.length ?? 1));
+      setPage(idx >= 0 ? Math.floor(idx / (gg.cols * gg.rows)) : 0);
     } else {
       setActiveRef(`s:${sid}`);
       setPage(0);
@@ -382,6 +385,7 @@ export default function App() {
           {activeRef === 'overview' ? (
             <Overview
               clis={clis}
+              tree={tree}
               onOpen={(sid) => {
                 const g = tree.groups.find((x) => x.sessionIds.includes(sid));
                 openSession(sid, g?.id);

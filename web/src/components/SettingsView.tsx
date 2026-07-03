@@ -82,7 +82,7 @@ export default function SettingsView({
                     <span
                       className="status"
                       style={ready
-                        ? { background: c.color, boxShadow: `0 0 6px ${c.color}` }
+                        ? { background: c.color }
                         : { background: 'var(--muted)', opacity: 0.4 }}
                     />
                     <span>{c.label}</span>
