@@ -285,6 +285,16 @@ curl -s -X POST http://localhost:${PORT}/api/notify \\
 Never notify unprompted, never in loops, never for progress updates — one
 message per requested event, with a short concrete outcome as the body.
 
+For DELAYED notifications ("notify me in 10 minutes"), do not block on a long
+\`sleep\` — run the delay in the background so your tool call returns
+immediately (long-running foreground execs can destabilize some sessions):
+
+\`\`\`sh
+(sleep 600 && curl -s -X POST http://localhost:${PORT}/api/notify \\
+  -H 'content-type: application/json' \\
+  -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"reminder\\"}") >/dev/null 2>&1 &
+\`\`\`
+
 ## Custom tools & Python environments
 - Custom tools are installed at startup by \`/data/install.sh\` (edit it to add packages; it re-runs on every restart). Progress/errors: \`/data/install.log\`.
 - \`$AM_LOCAL\` is a **fast local disk** for tools, envs, and caches. Build Python envs there, **never** as a \`.venv\` on the \`/data\` bucket (object storage is slow and can't lock/mmap well). From a workspace:
