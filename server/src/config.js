@@ -81,9 +81,13 @@ function isConfigured(id) {
     case 'gemini':
       return hasEnv('GEMINI_API_KEY', 'GOOGLE_API_KEY')
         || fileOk(path.join(home, '.gemini', 'oauth_creds.json'));
-    case 'opencode':
+    case 'opencode': {
+      const xdgConfig = env.XDG_CONFIG_HOME || path.join(home, '.config');
       return hasEnv('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY')
-        || fileOk(path.join(home, '.local', 'share', 'opencode', 'auth.json'));
+        || fileOk(path.join(home, '.local', 'share', 'opencode', 'auth.json')) // pre-1.x
+        || fileOk(path.join(xdgConfig, 'opencode', 'opencode.jsonc'))          // 1.x user config
+        || fileOk(path.join(xdgConfig, 'opencode', 'opencode.json'));
+    }
     case 'hermes':
       return hasEnv('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY')
         || fileOk(path.join(home, '.hermes', '.env'));
