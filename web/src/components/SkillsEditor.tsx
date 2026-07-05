@@ -122,8 +122,18 @@ export default function SkillsEditor() {
                 <div className="skill-view">
                   {meta && (meta.name || meta.description) && (
                     <div className="skill-meta">
-                      {meta.name && <div className="skill-meta-name mono">{meta.name}</div>}
-                      {meta.description && <div className="skill-meta-desc">{meta.description}</div>}
+                      {meta.name && (
+                        <div className="skill-meta-row">
+                          <span className="skill-meta-k">title</span>
+                          <span className="skill-meta-v mono">{meta.name}</span>
+                        </div>
+                      )}
+                      {meta.description && (
+                        <div className="skill-meta-row">
+                          <span className="skill-meta-k">description</span>
+                          <span className="skill-meta-v">{meta.description}</span>
+                        </div>
+                      )}
                     </div>
                   )}
                   <div className="markdown" dangerouslySetInnerHTML={{ __html: marked.parse(body) as string }} />

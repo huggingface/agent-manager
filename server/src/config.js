@@ -22,13 +22,15 @@ function commandExists(cmd) {
 }
 
 // Installed CLI versions, resolved asynchronously (a few `--version` calls) and
-// cached so /api/clis stays fast. Refreshed at startup; versions only change on
-// a rebuild (new process → fresh cache).
+// cached so /api/clis stays fast. Slow starters (hermes = python venv, gemini)
+// can miss the boot-time pass — cliCatalog re-runs it for the gaps, throttled.
 const versionCache = new Map();
+let versionsAttemptedAt = 0;
 export function refreshVersions() {
+  versionsAttemptedAt = Date.now();
   for (const c of CLIS) {
-    if (!c.bin || !commandExists(c.bin)) continue;
-    execFile(c.bin, ['--version'], { timeout: 8000 }, (err, stdout = '') => {
+    if (!c.bin || versionCache.has(c.id) || !commandExists(c.bin)) continue;
+    execFile(c.bin, ['--version'], { timeout: 30000 }, (err, stdout = '') => {
       if (err) return;
       const s = String(stdout);
       const m = s.match(/\d+\.\d+\.\d+[\w.-]*/);
@@ -113,6 +115,11 @@ function isConfigured(id) {
 
 /** CLI catalog enriched with runtime availability + configured (credential present). */
 export function cliCatalog() {
+  // Fill version gaps left by the boot-time pass (results land for the next poll).
+  if (Date.now() - versionsAttemptedAt > 60_000
+      && CLIS.some((c) => c.bin && !versionCache.has(c.id) && commandExists(c.bin))) {
+    refreshVersions();
+  }
   return CLIS.map((c) => ({
     id: c.id,
     label: c.label,

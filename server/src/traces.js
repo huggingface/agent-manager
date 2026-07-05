@@ -566,13 +566,14 @@ function memoized() {
 }
 
 export async function buildTraces() {
-  const { perSession, other, totals, sessions } = await memoized();
+  const { perSession, totals, sessions } = await memoized();
+  // Every agent session gets a row, traced or not; files that belong to no
+  // live session (deleted panes, ambiguous attribution) only show in totals.
   return {
     sessions: sessions
-      .filter((s) => perSession.has(s.id))
-      .map((s) => ({ id: s.id, name: s.name, cli: s.cli, path: s.path, ...perSession.get(s.id) }))
+      .filter((s) => s.cli !== 'shell' && s.cli !== 'files')
+      .map((s) => ({ id: s.id, name: s.name, cli: s.cli, path: s.path, ...(perSession.get(s.id) || emptyStats()) }))
       .sort((a, b) => b.lastTs - a.lastTs),
-    other: other.files ? other : null,
     totals,
     generatedAt: new Date().toISOString(),
   };

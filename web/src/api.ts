@@ -90,7 +90,7 @@ export interface TraceStats {
   firstTs: number; lastTs: number; files: number;
 }
 export interface SessionTraces extends TraceStats { id: string; name: string; cli: string; path: string | null; }
-export interface Traces { sessions: SessionTraces[]; other: TraceStats | null; totals: TraceStats; generatedAt: string; }
+export interface Traces { sessions: SessionTraces[]; totals: TraceStats; generatedAt: string; }
 export const getTraces = (): Promise<Traces> => fetch('/api/traces').then(json);
 
 // ---- files ----

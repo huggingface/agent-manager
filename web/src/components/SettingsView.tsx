@@ -143,11 +143,16 @@ export default function SettingsView({
   useEffect(() => {
     document.querySelectorAll<HTMLTextAreaElement>('textarea.secret-desc').forEach(grow);
   }, [secretKeys]);
-  const saveNotes = async () => {
-    setSecretsSaved('saving');
-    try { await api.saveSecrets(notes); setSavedNotes({ ...notes }); setSecretsSaved('saved'); setTimeout(() => setSecretsSaved('idle'), 1800); }
-    catch { setSecretsSaved('idle'); }
-  };
+  // Autosave: settle for a moment after the last keystroke, then persist.
+  useEffect(() => {
+    if (!notesDirty) return;
+    const t = setTimeout(async () => {
+      setSecretsSaved('saving');
+      try { await api.saveSecrets(notes); setSavedNotes({ ...notes }); setSecretsSaved('saved'); setTimeout(() => setSecretsSaved('idle'), 1800); }
+      catch { setSecretsSaved('idle'); }
+    }, 900);
+    return () => clearTimeout(t);
+  }, [notes, notesDirty]);
   const doRelaunch = async () => {
     setRelaunch({ busy: true });
     try {
@@ -212,33 +217,26 @@ export default function SettingsView({
               })}
             </div>
 
-            <h3>Secrets &amp; variables</h3>
-            <div className="s-help">Detected by diffing the runtime environment against a build-time snapshot — names only, never values. Describe what each is for; saving publishes an <span className="mono">environment</span> skill so every agent knows what's available.</div>
+            <h3>Secrets &amp; variables{secretsSaved !== 'idle' && <span className="save-flag">{secretsSaved === 'saving' ? 'saving…' : 'saved ✓'}</span>}</h3>
+            <div className="s-help">Detected by diffing the runtime environment against a build-time snapshot — names only, never values. Describe what each is for (saved automatically); this publishes an <span className="mono">environment</span> skill so every agent knows what's available.</div>
             {secretKeys.length === 0 ? (
               <div className="s-muted" style={{ marginTop: 8 }}>None detected.</div>
             ) : (
-              <>
-                <div className="secret-list">
-                  {secretKeys.map((k) => (
-                    <div key={k} className="secret-row">
-                      <div className="secret-name mono">{k}</div>
-                      <textarea
-                        className="secret-desc"
-                        placeholder="What is this used for?"
-                        rows={1}
-                        value={notes[k] || ''}
-                        ref={growRef}
-                        onChange={(e) => { setNotes((n) => ({ ...n, [k]: e.target.value })); grow(e.currentTarget); }}
-                      />
-                    </div>
-                  ))}
-                </div>
-                <div className="widget-actions" style={{ margin: '8px 0 12px', maxWidth: 260 }}>
-                  <button className="btn-primary" onClick={saveNotes} disabled={secretsSaved === 'saving' || !notesDirty}>
-                    {secretsSaved === 'saving' ? 'Saving…' : secretsSaved === 'saved' ? '✓ Saved' : 'Save descriptions'}
-                  </button>
-                </div>
-              </>
+              <div className="secret-list">
+                {secretKeys.map((k) => (
+                  <div key={k} className="secret-row">
+                    <div className="secret-name mono">{k}</div>
+                    <textarea
+                      className="secret-desc"
+                      placeholder="What is this used for?"
+                      rows={1}
+                      value={notes[k] || ''}
+                      ref={growRef}
+                      onChange={(e) => { setNotes((n) => ({ ...n, [k]: e.target.value })); grow(e.currentTarget); }}
+                    />
+                  </div>
+                ))}
+              </div>
             )}
 
             <PushRow />

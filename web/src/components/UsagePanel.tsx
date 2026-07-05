@@ -104,24 +104,24 @@ export default function UsagePanel() {
 
       <h3>Traces</h3>
       <div className="s-help">
-        Parsed from every Claude Code transcript and Codex rollout stored on this Space —
-        hover the tools count for the breakdown, tokens-in for the cache share.
+        Parsed from every agent transcript stored on this Space (Claude, Codex, opencode, Hermes, OpenClaw) —
+        hover the tools count for the breakdown, tokens-in for the cache share. The total also counts
+        traces of deleted agents.
       </div>
       {!t ? (
         <div className="usage-msg mono">analyzing traces…<span className="et-cursor" /></div>
-      ) : t.totals.files === 0 ? (
-        <div className="usage-msg mono">no traces yet — run a Claude or Codex session.</div>
       ) : (
-        <table className="traces-table">
-          <thead>
-            <tr><th>agent</th><th>turns</th><th>prompts</th><th>tools</th><th>web</th><th>tok in</th><th>tok out</th><th>last active</th></tr>
-          </thead>
-          <tbody>
-            {t.sessions.map((s) => <TraceRow key={s.id} label={s.name} cli={s.cli} path={s.path} st={s} />)}
-            {t.other && <TraceRow label={`other traces (${t.other.files} files)`} st={t.other} />}
-            <TraceRow label={`total (${t.totals.files} files)`} st={t.totals} strong />
-          </tbody>
-        </table>
+        <div className="table-scroll">
+          <table className="traces-table">
+            <thead>
+              <tr><th>agent</th><th>turns</th><th>prompts</th><th>tools</th><th>web</th><th>tok in</th><th>tok out</th><th>last active</th></tr>
+            </thead>
+            <tbody>
+              {t.sessions.map((s) => <TraceRow key={s.id} label={s.name} cli={s.cli} path={s.path} st={s} />)}
+              <TraceRow label={`total (${t.totals.files} files)`} st={t.totals} strong />
+            </tbody>
+          </table>
+        </div>
       )}
 
       <div className="s-help">
