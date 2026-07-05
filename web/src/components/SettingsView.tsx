@@ -193,9 +193,12 @@ export default function SettingsView({
                     <span className="spacer" />
                     {c.available && c.version && <span className="ar-ver mono">v{c.version}</span>}
                     <span className={`ar-state${ready ? ' ok' : ''}`}>{!c.available ? 'unavailable' : ready ? 'ready' : 'needs setup'}</span>
-                    {c.available && !ready && c.setup && (
-                      <span className="tip" tabIndex={0} data-tip={c.setup}><InfoGlyph className="tip-i" /></span>
-                    )}
+                    {/* fixed slot so version/state columns align across rows */}
+                    <span className="ar-info">
+                      {c.available && !ready && c.setup && (
+                        <span className="tip" tabIndex={0} data-tip={c.setup}><InfoGlyph className="tip-i" /></span>
+                      )}
+                    </span>
                   </div>
                 );
               })}

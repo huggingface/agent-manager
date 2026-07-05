@@ -472,6 +472,8 @@ body {
 .ar-ver { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .ar-state { flex: none; width: 88px; text-align: right; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 .ar-state.ok { color: var(--go); }
+/* reserved (i) slot: same width on every row, snug against the state text */
+.ar-info { flex: none; width: 13px; height: 13px; margin-left: -5px; display: inline-flex; align-items: center; }
 /* (i) hover hint — a small explainer card (hover or keyboard focus) */
 .tip { position: relative; display: inline-flex; color: var(--muted); cursor: help; outline: none; }
 .tip-i { width: 13px; height: 13px; }

@@ -45,6 +45,15 @@ RUN env UV_TOOL_BIN_DIR=/usr/local/bin UV_TOOL_DIR=/opt/uv-tools \
       uv tool install --python /usr/bin/python3 "huggingface_hub[cli]" \
       || echo "hf cli install failed"
 
+# Login shells source /etc/profile, which RESETS PATH — dropping the build-time
+# ~/.local/bin and the user-install dirs under $AM_LOCAL (pip --user, npm
+# prefix). profile.d runs after that reset, so restore them here.
+RUN printf '%s\n' \
+      'PATH="/home/node/.local/bin:$PATH"' \
+      '[ -n "$AM_LOCAL" ] && PATH="$AM_LOCAL/py/bin:$AM_LOCAL/npm/bin:$AM_LOCAL/bin:$PATH"' \
+      'export PATH' \
+      > /etc/profile.d/agent-manager.sh
+
 # Non-root user: the node base image already ships uid 1000 as "node" (HF runs as uid 1000).
 ENV HOME=/home/node
 ENV PATH=/home/node/.local/bin:$PATH
@@ -61,6 +70,13 @@ RUN cd server && npm install --omit=dev
 RUN (curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/h.sh \
       && timeout 180 bash /tmp/h.sh </dev/null) \
       || echo "hermes not installed — will show as unavailable"
+# Its installer only drops a shim in ~/.local/bin — expose it globally in
+# /usr/local/bin like every other CLI.
+USER root
+RUN [ -x /home/node/.local/bin/hermes ] \
+      && ln -sf /home/node/.local/bin/hermes /usr/local/bin/hermes \
+      || true
+USER node
 
 # App code + built frontend + runtime config (tmux + prompt rcfile).
 COPY --chown=node:node server/ server/

@@ -48,22 +48,26 @@ export const USE_TMUX = process.env.USE_TMUX
  *  - `run`  : command run inside the session shell on first launch
  *  - `cont` : command used to resume a prior conversation (null = no resume)
  */
+// One setup story for every agent; only the accepted secret names differ.
+const setupHint = (...keys) =>
+  `Launch it once — the first run walks you through sign-in. Or add ${keys.join(' / ')} as a Space secret.`;
+
 export const CLIS = [
   { id: 'shell',    label: 'Shell',       bin: 'bash',     color: '#8aa0ad', run: 'exec bash -il',  cont: null },
   { id: 'files',    label: 'Files',       bin: null,       color: '#d99a2b', run: null,             cont: null },
   { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue',
-    setup: 'Create a Claude Code agent — it walks you through login on first launch (subscription or API key). Or add ANTHROPIC_API_KEY as a Space secret.' },
+    setup: setupHint('ANTHROPIC_API_KEY') },
   { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: 'codex',          cont: 'codex resume --last',
-    setup: 'Create a Codex agent and complete the sign-in it offers (ChatGPT account or API key). Or add OPENAI_API_KEY as a Space secret.' },
+    setup: setupHint('OPENAI_API_KEY') },
   { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', run: 'gemini',         cont: null,
-    setup: 'Create a Gemini agent and sign in with Google when prompted. Or add GEMINI_API_KEY as a Space secret.' },
+    setup: setupHint('GEMINI_API_KEY') },
   { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: 'opencode --continue',
-    setup: 'Run `opencode auth login` in any shell to connect a provider. Or add ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY as a Space secret.' },
+    setup: setupHint('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY') },
   { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', run: 'hermes',         cont: 'hermes -c',
-    setup: 'Create a Hermes agent — first launch walks through its setup. Or add NOUS_API_KEY as a Space secret.' },
+    setup: setupHint('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY') },
   // `chat` = TUI in --local mode: embedded agent, no gateway/daemon needed.
   { id: 'openclaw', label: 'OpenClaw',    bin: 'openclaw', color: '#c83636', run: 'openclaw chat',  cont: null,
-    setup: 'Create an OpenClaw agent — onboarding runs automatically on first launch. Or add ANTHROPIC_API_KEY as a Space secret.' },
+    setup: setupHint('ANTHROPIC_API_KEY') },
 ];
 
 export function cliById(id) {
