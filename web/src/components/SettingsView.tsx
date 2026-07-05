@@ -3,7 +3,7 @@ import type { Cli } from '../types';
 import * as api from '../api';
 import SkillsEditor from './SkillsEditor';
 import UsagePanel from './UsagePanel';
-import { SunGlyph, MoonGlyph, RefreshGlyph } from './icons';
+import { SunGlyph, MoonGlyph, RefreshGlyph, InfoGlyph } from './icons';
 import Logo from './Logo';
 
 type Page = 'general' | 'usage' | 'skills';
@@ -193,6 +193,9 @@ export default function SettingsView({
                     <span className="spacer" />
                     {c.available && c.version && <span className="ar-ver mono">v{c.version}</span>}
                     <span className={`ar-state${ready ? ' ok' : ''}`}>{!c.available ? 'unavailable' : ready ? 'ready' : 'needs setup'}</span>
+                    {c.available && !ready && c.setup && (
+                      <span className="tip" tabIndex={0} data-tip={c.setup}><InfoGlyph className="tip-i" /></span>
+                    )}
                   </div>
                 );
               })}

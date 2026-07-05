@@ -98,6 +98,14 @@ export const PulseGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+export const InfoGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <circle cx="8" cy="8" r="6.2" />
+    <path d="M8 7.4v3.4" />
+    <circle cx="8" cy="5.1" r="0.4" fill="currentColor" stroke="none" />
+  </G>
+);
+
 export const LockGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <path d="M5.4 7V5.1a2.6 2.6 0 0 1 5.2 0V7" />

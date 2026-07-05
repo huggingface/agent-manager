@@ -51,13 +51,19 @@ export const USE_TMUX = process.env.USE_TMUX
 export const CLIS = [
   { id: 'shell',    label: 'Shell',       bin: 'bash',     color: '#8aa0ad', run: 'exec bash -il',  cont: null },
   { id: 'files',    label: 'Files',       bin: null,       color: '#d99a2b', run: null,             cont: null },
-  { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue' },
-  { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: 'codex',          cont: 'codex resume --last' },
-  { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', run: 'gemini',         cont: null },
-  { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: 'opencode --continue' },
-  { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', run: 'hermes',         cont: 'hermes -c' },
+  { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue',
+    setup: 'Create a Claude Code agent — it walks you through login on first launch (subscription or API key). Or add ANTHROPIC_API_KEY as a Space secret.' },
+  { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: 'codex',          cont: 'codex resume --last',
+    setup: 'Create a Codex agent and complete the sign-in it offers (ChatGPT account or API key). Or add OPENAI_API_KEY as a Space secret.' },
+  { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', run: 'gemini',         cont: null,
+    setup: 'Create a Gemini agent and sign in with Google when prompted. Or add GEMINI_API_KEY as a Space secret.' },
+  { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: 'opencode --continue',
+    setup: 'Run `opencode auth login` in any shell to connect a provider. Or add ANTHROPIC_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY as a Space secret.' },
+  { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', run: 'hermes',         cont: 'hermes -c',
+    setup: 'Create a Hermes agent — first launch walks through its setup. Or add NOUS_API_KEY as a Space secret.' },
   // `chat` = TUI in --local mode: embedded agent, no gateway/daemon needed.
-  { id: 'openclaw', label: 'OpenClaw',    bin: 'openclaw', color: '#c83636', run: 'openclaw chat',  cont: null },
+  { id: 'openclaw', label: 'OpenClaw',    bin: 'openclaw', color: '#c83636', run: 'openclaw chat',  cont: null,
+    setup: 'Create an OpenClaw agent — onboarding runs automatically on first launch. Or add ANTHROPIC_API_KEY as a Space secret.' },
 ];
 
 export function cliById(id) {
@@ -108,6 +114,7 @@ export function cliCatalog() {
     available: c.bin ? commandExists(c.bin) : true, // no binary (shell/files) = always available
     ready: (c.bin ? commandExists(c.bin) : true) && isConfigured(c.id),
     version: versionCache.get(c.id) || null,
+    setup: c.setup || null,
   }));
 }
 

@@ -38,6 +38,12 @@ RUN npm install -g ccusage \
 # their lockfiles on local disk. Installed to /usr/local/bin (on PATH for all).
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh \
       || echo "uv install failed"
+# hf: the Hugging Face CLI (auth, hub up/downloads). Installed as a uv tool into
+# a world-readable dir with its shim on the global PATH; picks up an HF_TOKEN
+# Space secret automatically.
+RUN env UV_TOOL_BIN_DIR=/usr/local/bin UV_TOOL_DIR=/opt/uv-tools \
+      uv tool install --python /usr/bin/python3 "huggingface_hub[cli]" \
+      || echo "hf cli install failed"
 
 # Non-root user: the node base image already ships uid 1000 as "node" (HF runs as uid 1000).
 ENV HOME=/home/node

@@ -20,6 +20,7 @@ export interface Cli {
   available: boolean;
   ready?: boolean;
   version?: string | null;
+  setup?: string | null; // how to configure it (shown on the "needs setup" hint)
 }
 
 // Pane arrangement for a group's tiles. Absent/null = auto (grow with agents).
