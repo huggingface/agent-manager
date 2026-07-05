@@ -131,10 +131,12 @@ export default function SettingsView({
   const [relaunch, setRelaunch] = useState<{ busy?: boolean; msg?: string; confirm?: boolean }>({});
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
   const [notes, setNotes] = useState<Record<string, string>>({});
+  const [savedNotes, setSavedNotes] = useState<Record<string, string>>({});
   const [secretsSaved, setSecretsSaved] = useState<'idle' | 'saving' | 'saved'>('idle');
   useEffect(() => {
-    api.getSecrets().then((d) => { setSecretKeys(d.detected); setNotes(d.notes || {}); }).catch(() => {});
+    api.getSecrets().then((d) => { setSecretKeys(d.detected); setNotes(d.notes || {}); setSavedNotes(d.notes || {}); }).catch(() => {});
   }, []);
+  const notesDirty = secretKeys.some((k) => (notes[k] || '') !== (savedNotes[k] || ''));
   // One-line textareas that grow with their content.
   const grow = (el: HTMLTextAreaElement) => { el.style.height = 'auto'; el.style.height = `${el.scrollHeight}px`; };
   const growRef = (el: HTMLTextAreaElement | null) => { if (el) grow(el); };
@@ -143,7 +145,7 @@ export default function SettingsView({
   }, [secretKeys]);
   const saveNotes = async () => {
     setSecretsSaved('saving');
-    try { await api.saveSecrets(notes); setSecretsSaved('saved'); setTimeout(() => setSecretsSaved('idle'), 1800); }
+    try { await api.saveSecrets(notes); setSavedNotes({ ...notes }); setSecretsSaved('saved'); setTimeout(() => setSecretsSaved('idle'), 1800); }
     catch { setSecretsSaved('idle'); }
   };
   const doRelaunch = async () => {
@@ -231,8 +233,8 @@ export default function SettingsView({
                     </div>
                   ))}
                 </div>
-                <div className="widget-actions" style={{ marginTop: 8, maxWidth: 260 }}>
-                  <button className="btn-primary" onClick={saveNotes} disabled={secretsSaved === 'saving'}>
+                <div className="widget-actions" style={{ margin: '8px 0 12px', maxWidth: 260 }}>
+                  <button className="btn-primary" onClick={saveNotes} disabled={secretsSaved === 'saving' || !notesDirty}>
                     {secretsSaved === 'saving' ? 'Saving…' : secretsSaved === 'saved' ? '✓ Saved' : 'Save descriptions'}
                   </button>
                 </div>
