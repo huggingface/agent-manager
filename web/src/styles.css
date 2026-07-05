@@ -134,12 +134,14 @@ body {
 .agent-pick:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
 .agent-pick.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); font-weight: 600; }
 
-/* detected secrets/variables: name as a small header over a growing textarea */
-.secret-list { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
-.secret-row { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
-.secret-name { font-size: 12px; color: var(--muted); }
-.secret-desc { display: block; width: 100%; resize: none; overflow: hidden; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--text); font: inherit; font-size: 13px; line-height: 1.45; }
-.secret-desc:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
+/* detected secrets/variables: overview-style cards — name on top, hairline,
+   description written directly below (borderless growing textarea) */
+.secret-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.secret-row { display: flex; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 10px 13px 9px; }
+.secret-name { font-size: 12.5px; font-weight: 600; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.secret-desc { display: block; width: 100%; resize: none; overflow: hidden; padding: 0; border: none; background: transparent; color: var(--text); font: inherit; font-size: 13px; line-height: 1.45; }
+.secret-desc:focus { outline: none; }
+.secret-desc::placeholder { font-style: italic; }
 
 /* new-group: per-agent quantity cart */
 .widget-sep { height: 1px; background: var(--border); margin: 1px 0; flex: none; }
