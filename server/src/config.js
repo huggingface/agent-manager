@@ -64,7 +64,7 @@ export const CLIS = [
   { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: 'opencode --continue',
     setup: setupHint('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY') },
   { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', run: 'hermes',         cont: 'hermes -c',
-    setup: setupHint('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY') },
+    setup: setupHint('HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY') },
   // `chat` = TUI in --local mode: embedded agent, no gateway/daemon needed.
   { id: 'openclaw', label: 'OpenClaw',    bin: 'openclaw', color: '#c83636', run: 'openclaw chat',  cont: null,
     setup: setupHint('ANTHROPIC_API_KEY') },
@@ -99,8 +99,10 @@ function isConfigured(id) {
         || fileOk(path.join(xdgConfig, 'opencode', 'opencode.json'));
     }
     case 'hermes':
-      return hasEnv('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY')
-        || fileOk(path.join(home, '.hermes', '.env'));
+      // HF_TOKEN: hermes has a huggingface provider (HF router models).
+      return hasEnv('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY', 'HF_TOKEN')
+        || fileOk(path.join(home, '.hermes', '.env'))
+        || fileOk(path.join(home, '.hermes', 'auth.json'));
     case 'openclaw':
       return hasEnv('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY')
         || fileOk(path.join(env.OPENCLAW_STATE_DIR || path.join(home, '.openclaw'), 'openclaw.json'));

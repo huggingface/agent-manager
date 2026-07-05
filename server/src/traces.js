@@ -264,17 +264,30 @@ function opencodeDbPath() {
   return path.join(xdgData, 'opencode', 'opencode.db');
 }
 
+// WAL mode appends to <db>-wal without touching the main file's mtime — the
+// change key and the hot-file check must look at both.
+function dbChangeKey(p) {
+  let m;
+  try { m = fs.statSync(p); } catch { return null; }
+  let w = null;
+  try { w = fs.statSync(`${p}-wal`); } catch {}
+  return {
+    key: `${m.mtimeMs}:${m.size}:${w?.mtimeMs || 0}:${w?.size || 0}`,
+    hotMs: Math.max(m.mtimeMs, w?.mtimeMs || 0),
+  };
+}
+
 let ocMemo = { key: '', rows: [] };
 
 function readOpencode() {
   if (!DatabaseSync) return [];
   const p = opencodeDbPath();
-  let m;
-  try { m = fs.statSync(p); } catch { return []; }
-  const key = `${m.mtimeMs}:${m.size}`;
-  if (ocMemo.key === key) return ocMemo.rows;
+  const ck = dbChangeKey(p);
+  if (!ck) return [];
+  if (ocMemo.key === ck.key) return ocMemo.rows;
   // actively written db on the FUSE mount: serve the previous read (first read allowed)
-  if (ocMemo.key && Date.now() - m.mtimeMs < 15_000) return ocMemo.rows;
+  if (ocMemo.key && Date.now() - ck.hotMs < 15_000) return ocMemo.rows;
+  const key = ck.key;
   let db;
   try { db = new DatabaseSync(p, { readOnly: true }); } catch { return ocMemo.rows; }
   const rows = [];
@@ -333,6 +346,79 @@ function readOpencode() {
     try { db.close(); } catch {}
   }
   ocMemo = { key, rows };
+  return rows;
+}
+
+// ---------- Hermes (SQLite: ~/.hermes/state.db, WAL) ----------
+// sessions carry cwd + token totals; messages carry role/content/tool_name.
+// Timestamps are float SECONDS — converted to ms for digest fields.
+let hermesMemo = { key: '', rows: [] };
+
+function readHermes() {
+  if (!DatabaseSync) return [];
+  const p = path.join(process.env.HOME || '', '.hermes', 'state.db');
+  const ck = dbChangeKey(p);
+  if (!ck) return [];
+  if (hermesMemo.key === ck.key) return hermesMemo.rows;
+  if (hermesMemo.key && Date.now() - ck.hotMs < 15_000) return hermesMemo.rows;
+  let db;
+  try { db = new DatabaseSync(p, { readOnly: true }); } catch { return hermesMemo.rows; }
+  const rows = [];
+  try {
+    const sessions = db.prepare('select * from sessions').all();
+    const qLastUser = db.prepare("select content, timestamp from messages where session_id = ? and role = 'user' and active = 1 order by timestamp desc limit 1");
+    const qRole = db.prepare("select count(*) c from messages where session_id = ? and timestamp > ? and role = ?");
+    const qTools = db.prepare("select tool_name, count(*) c from messages where session_id = ? and timestamp > ? and tool_name is not null group by 1");
+    const qTok = db.prepare("select coalesce(sum(token_count), 0) t from messages where session_id = ? and timestamp > ?");
+    const qLastAssistant = db.prepare("select content, timestamp from messages where session_id = ? and role = 'assistant' and content is not null and content != '' and timestamp > ? order by timestamp desc limit 1");
+    const qMaxTs = db.prepare('select max(timestamp) t from messages where session_id = ?');
+    for (const s of sessions) {
+      const st = emptyStats();
+      const dg = emptyDigest();
+      st.files = 1;
+      st.cwd = s.cwd || null;
+      st.tokensIn = s.input_tokens || 0;
+      st.tokensOut = s.output_tokens || 0;
+      st.cacheRead = s.cache_read_tokens || 0;
+      st.firstTs = Math.round((Number(s.started_at) || 0) * 1000);
+      const maxTs = qMaxTs.get(s.id)?.t;
+      st.lastTs = maxTs ? Math.round(Number(maxTs) * 1000) : st.firstTs;
+      st.prompts = qRole.get(s.id, 0, 'user').c;
+      st.turns = qRole.get(s.id, 0, 'assistant').c;
+      for (const t of qTools.all(s.id, 0)) {
+        const name = t.tool_name || 'tool';
+        st.tools[name] = (st.tools[name] || 0) + t.c;
+        st.toolCalls += t.c;
+        if (/web|search/i.test(name)) st.web += t.c;
+      }
+      const lastU = qLastUser.get(s.id);
+      const t0 = lastU ? Number(lastU.timestamp) || 0 : 0; // seconds, for queries
+      if (lastU) {
+        const text = String(lastU.content || '');
+        if (text.trim() && !text.trim().startsWith('<')) {
+          dg.lastPromptText = clip(text);
+          dg.lastPromptTs = Math.round(t0 * 1000);
+        }
+        dg.sinceTurns = qRole.get(s.id, t0, 'assistant').c;
+        for (const t of qTools.all(s.id, t0)) {
+          const name = t.tool_name || 'tool';
+          dg.sinceTools[name] = (dg.sinceTools[name] || 0) + t.c;
+          dg.sinceToolCalls += t.c;
+        }
+        dg.sinceTokens = qTok.get(s.id, t0).t || 0;
+      }
+      const lastA = qLastAssistant.get(s.id, t0);
+      if (lastA && lastA.content) {
+        dg.lastAssistantText = clip(lastA.content);
+        dg.lastAssistantMd = clipRaw(lastA.content);
+        dg.lastAssistantTs = Math.round((Number(lastA.timestamp) || 0) * 1000);
+      }
+      rows.push({ directory: s.cwd || null, parsed: { stats: st, digest: dg } });
+    }
+  } catch { /* torn read / schema drift: keep previous */ } finally {
+    try { db.close(); } catch {}
+  }
+  hermesMemo = { key: ck.key, rows };
   return rows;
 }
 
@@ -455,6 +541,17 @@ async function build() {
   }
   for (const { directory, parsed } of readOpencode()) {
     const hit = directory ? opencodeByDir.get(path.resolve(directory)) : null;
+    attribute(hit && hit !== 'ambiguous' ? hit : null, parsed);
+  }
+
+  // Hermes: same story — sessions record their cwd.
+  const hermesByDir = new Map();
+  for (const s of sessions.filter((x) => x.cli === 'hermes')) {
+    const key = path.resolve(WORKSPACES_DIR, s.path ?? s.id);
+    hermesByDir.set(key, hermesByDir.has(key) ? 'ambiguous' : s);
+  }
+  for (const { directory, parsed } of readHermes()) {
+    const hit = directory ? hermesByDir.get(path.resolve(directory)) : null;
     attribute(hit && hit !== 'ambiguous' ? hit : null, parsed);
   }
 

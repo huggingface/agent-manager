@@ -135,6 +135,12 @@ export default function SettingsView({
   useEffect(() => {
     api.getSecrets().then((d) => { setSecretKeys(d.detected); setNotes(d.notes || {}); }).catch(() => {});
   }, []);
+  // One-line textareas that grow with their content.
+  const grow = (el: HTMLTextAreaElement) => { el.style.height = 'auto'; el.style.height = `${el.scrollHeight}px`; };
+  const growRef = (el: HTMLTextAreaElement | null) => { if (el) grow(el); };
+  useEffect(() => {
+    document.querySelectorAll<HTMLTextAreaElement>('textarea.secret-desc').forEach(grow);
+  }, [secretKeys]);
   const saveNotes = async () => {
     setSecretsSaved('saving');
     try { await api.saveSecrets(notes); setSecretsSaved('saved'); setTimeout(() => setSecretsSaved('idle'), 1800); }
@@ -204,6 +210,35 @@ export default function SettingsView({
               })}
             </div>
 
+            <h3>Secrets &amp; variables</h3>
+            <div className="s-help">Detected by diffing the runtime environment against a build-time snapshot — names only, never values. Describe what each is for; saving publishes an <span className="mono">environment</span> skill so every agent knows what's available.</div>
+            {secretKeys.length === 0 ? (
+              <div className="s-muted" style={{ marginTop: 8 }}>None detected.</div>
+            ) : (
+              <>
+                <div className="secret-list">
+                  {secretKeys.map((k) => (
+                    <div key={k} className="secret-row">
+                      <div className="secret-name mono">{k}</div>
+                      <textarea
+                        className="secret-desc"
+                        placeholder="What is this used for?"
+                        rows={1}
+                        value={notes[k] || ''}
+                        ref={growRef}
+                        onChange={(e) => { setNotes((n) => ({ ...n, [k]: e.target.value })); grow(e.currentTarget); }}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="widget-actions" style={{ marginTop: 8, maxWidth: 260 }}>
+                  <button className="btn-primary" onClick={saveNotes} disabled={secretsSaved === 'saving'}>
+                    {secretsSaved === 'saving' ? 'Saving…' : secretsSaved === 'saved' ? '✓ Saved' : 'Save descriptions'}
+                  </button>
+                </div>
+              </>
+            )}
+
             <PushRow />
 
             <div className="setting-row" style={{ marginTop: 12 }}>
@@ -242,32 +277,6 @@ export default function SettingsView({
               <div><span>tmux</span><b>{info?.tmux ? 'on' : 'off'}</b></div>
             </div>
 
-            <h3>Secrets &amp; variables</h3>
-            <div className="s-help">Detected by diffing the runtime environment against a build-time snapshot — names only, never values. Describe what each is for; saving publishes an <span className="mono">environment</span> skill so every agent knows what's available.</div>
-            {secretKeys.length === 0 ? (
-              <div className="s-muted" style={{ marginTop: 8 }}>None detected.</div>
-            ) : (
-              <>
-                <div className="secret-list">
-                  {secretKeys.map((k) => (
-                    <div key={k} className="secret-row">
-                      <span className="secret-chip mono">{k}</span>
-                      <input
-                        className="secret-desc"
-                        placeholder="What is this used for?"
-                        value={notes[k] || ''}
-                        onChange={(e) => setNotes((n) => ({ ...n, [k]: e.target.value }))}
-                      />
-                    </div>
-                  ))}
-                </div>
-                <div className="widget-actions" style={{ marginTop: 8, maxWidth: 260 }}>
-                  <button className="btn-primary" onClick={saveNotes} disabled={secretsSaved === 'saving'}>
-                    {secretsSaved === 'saving' ? 'Saving…' : secretsSaved === 'saved' ? '✓ Saved' : 'Save descriptions'}
-                  </button>
-                </div>
-              </>
-            )}
           </div>
         )}
 
