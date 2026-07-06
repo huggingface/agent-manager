@@ -111,9 +111,11 @@ export default function TerminalPane({
   const reconnectRef = useRef<() => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
   // "starting…" cover while the CLI boots into an empty pane (attach on the
-  // Space can take seconds). Cleared once real output lands (or shortly after
-  // the first bytes, for quiet programs like a bare shell prompt).
+  // Space can take seconds). Agents keep it until their TUI actually paints
+  // (a real burst of output — tmux's initial blank screen doesn't count);
+  // quiet programs like a bare shell drop it shortly after the first bytes.
   const [booting, setBooting] = useState(true);
+  const isAgent = session.cli !== 'shell' && session.cli !== 'files';
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.name);
   const commitName = () => {
@@ -199,7 +201,9 @@ export default function TerminalPane({
         if (bootBytes >= 0) {
           bootBytes += typeof d === 'string' ? d.length : d.byteLength;
           if (bootBytes > 800) { setBooting(false); bootBytes = -1; }
-          else if (!bootTimer) bootTimer = setTimeout(() => setBooting(false), 1500);
+          // Agents: wait for the real paint (long safety cap only). Shells: a
+          // bare prompt is all that ever comes — drop the cover quickly.
+          else if (!bootTimer) bootTimer = setTimeout(() => setBooting(false), isAgent ? 20_000 : 1500);
         }
       };
       ws.onclose = (e) => {
@@ -227,7 +231,8 @@ export default function TerminalPane({
     const onVisible = () => { if (!document.hidden) resync(); };
     resyncRef.current = resync; // so the zoom control can refit
 
-    const dataSub = term.onData((d) => send({ t: 'i', d }));
+    // Typing means the user sees enough to interact — drop the boot cover.
+    const dataSub = term.onData((d) => { setBooting(false); send({ t: 'i', d }); });
     const ro = new ResizeObserver(resync);
     ro.observe(hostRef.current!);
     window.addEventListener('focus', resync);
@@ -346,18 +351,13 @@ export default function TerminalPane({
         </div>
       )}
       {conn === 'exited' && (
-        <div className="term-overlay">
-          <div className="term-overlay-card">
-            <div className="to-text">
-              <span className="to-title">Process exited</span>
-              <span className="to-help">Output above is preserved.</span>
-            </div>
-            <button
-              className="btn-ghost"
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={(e) => { e.stopPropagation(); reconnectRef.current(); }}
-            ><RefreshGlyph /> Restart</button>
-          </div>
+        <div className="term-exit mono">
+          <span>{cli?.label || session.cli} stopped · output preserved</span>
+          <button
+            className="tx-btn"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.stopPropagation(); reconnectRef.current(); }}
+          ><RefreshGlyph /> restart</button>
         </div>
       )}
     </div>

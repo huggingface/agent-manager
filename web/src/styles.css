@@ -370,12 +370,11 @@ body {
 
 /* terminal "process exited" overlay */
 /* Non-blocking banner so the agent's last output (e.g. a login error) stays readable. */
-.term-overlay { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: center; padding: 12px; z-index: 5; pointer-events: none; }
-.term-overlay-card { pointer-events: auto; display: flex; align-items: center; gap: 12px; padding: 9px 9px 9px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: 0 8px 28px rgba(0,0,0,0.28); }
-.term-overlay-card .to-text { display: flex; flex-direction: column; gap: 1px; }
-.term-overlay-card .to-title { font-size: 13px; font-weight: 600; }
-.term-overlay-card .to-help { font-size: 11px; color: var(--muted); }
-.term-overlay-card .btn-ghost { flex: none; }
+/* stopped state: a quiet strip in the boot-cover's voice, not a card */
+.term-exit { position: absolute; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: center; gap: 16px; padding: 9px 12px; z-index: 5; background: color-mix(in srgb, var(--term-bg) 90%, transparent); backdrop-filter: blur(2px); color: var(--muted); font-size: 12.5px; pointer-events: none; }
+.term-exit .tx-btn { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px; background: none; border: none; padding: 2px 4px; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; }
+.term-exit .tx-btn svg { width: 13px; height: 13px; }
+.term-exit .tx-btn:hover { text-decoration: underline; }
 
 .pane-head { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 9px; padding: 7px 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
 .pane-head .ph-left { display: inline-flex; align-items: center; gap: 7px; }

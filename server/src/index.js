@@ -725,10 +725,16 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  handle.onData((d) => { if (ws.readyState === ws.OPEN) ws.send(d); });
+  // tmux prints a bare "[exited]" line as its parting output — strip it (the
+  // client shows a styled stopped-state instead) but pass everything else.
+  const stripExit = (d) => (typeof d === 'string' ? d.replace(/(\r?\n)?\[exited\](\r?\n)?$/, '') : d);
+  handle.onData((d) => {
+    if (ws.readyState !== ws.OPEN) return;
+    const out = stripExit(d);
+    if (out.length) ws.send(out);
+  });
   handle.onExit(() => {
     if (ws.readyState === ws.OPEN) {
-      ws.send('\r\n[process exited]\r\n');
       // 4000 = real process exit. The client uses this to NOT auto-reconnect
       // (which would respawn the agent in a loop); it offers a Restart instead.
       try { ws.close(4000, 'exited'); } catch { ws.close(); }
