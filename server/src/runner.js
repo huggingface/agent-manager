@@ -229,15 +229,18 @@ function commandFor(session) {
     return `if [ -f '${session.codexRollout}' ]; then exec codex resume ${session.codexSessionId}; else exec codex; fi`;
   }
 
-  // opencode (seen on 1.17.13): on exit it leaves a DIRECTORY named
-  // opencode.json at its own config path; the next launch then dies reading it
-  // (EISDIR → "Unexpected server error" → instant pane exit). Clear a
-  // directory-shaped config entry before starting — a real config FILE there is
-  // left untouched.
+  // opencode (seen on 1.17.13): at startup it creates a DIRECTORY named
+  // opencode.json at its own config path, then every message dies re-reading
+  // it (EISDIR → the model silently never responds; the next launch exits
+  // instantly). Clear a directory-shaped entry AND occupy the path with a real
+  // config file — copied from opencode.jsonc when one exists — so the bug
+  // can't re-trigger mid-session. An existing config FILE is left untouched.
   if (cli.id === 'opencode') {
-    const guard = 'G="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"; [ -d "$G" ] && rm -rf "$G";';
+    const guard = 'G="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"; '
+      + 'mkdir -p "$(dirname "$G")"; [ -d "$G" ] && rm -rf "$G"; '
+      + '[ -e "$G" ] || { [ -f "${G}c" ] && cp "${G}c" "$G" || echo "{}" > "$G"; }; ';
     const base = session.everStarted && cli.cont ? `${cli.cont} || exec ${cli.run}` : `exec ${cli.run}`;
-    return `${guard} ${base}`;
+    return `${guard}${base}`;
   }
 
   // Other agents: resume when one likely exists, else a fresh launch. `exec` so
