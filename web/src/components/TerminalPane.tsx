@@ -111,11 +111,10 @@ export default function TerminalPane({
   const reconnectRef = useRef<() => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
   // "starting…" cover while the CLI boots into an empty pane (attach on the
-  // Space can take seconds). Agents keep it until their TUI actually paints
-  // (a real burst of output — tmux's initial blank screen doesn't count);
-  // quiet programs like a bare shell drop it shortly after the first bytes.
+  // Space can take seconds). Hidden only when the screen actually SHOWS
+  // something — byte counts lie, because tmux's attach repaint of a blank
+  // 200×50 screen is already kilobytes of escapes.
   const [booting, setBooting] = useState(true);
-  const isAgent = session.cli !== 'shell' && session.cli !== 'files';
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.name);
   const commitName = () => {
@@ -178,13 +177,32 @@ export default function TerminalPane({
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o));
     };
 
-    let bootBytes = 0;
-    let bootTimer: ReturnType<typeof setTimeout> | null = null;
+    // Does the visible screen contain real text (≥2 non-space chars on a row)?
+    const screenHasContent = () => {
+      try {
+        const buf = term.buffer.active;
+        for (let y = 0; y < term.rows; y++) {
+          const line = buf.getLine(buf.baseY + y);
+          if (line && line.translateToString(true).trim().length >= 2) return true;
+        }
+      } catch { return true; } // never trap the cover on an internal error
+      return false;
+    };
+    let bootLive = false;
+    let bootTimer: ReturnType<typeof setTimeout> | null = null;   // safety cap
+    let bootCheck: ReturnType<typeof setTimeout> | null = null;   // throttled content probe
+    const endBoot = () => {
+      bootLive = false;
+      if (bootTimer) { clearTimeout(bootTimer); bootTimer = null; }
+      if (bootCheck) { clearTimeout(bootCheck); bootCheck = null; }
+      setBooting(false);
+    };
     const connect = () => {
       setConn('connecting');
       setBooting(true);
-      bootBytes = 0;
-      if (bootTimer) { clearTimeout(bootTimer); bootTimer = null; }
+      bootLive = true;
+      if (bootTimer) clearTimeout(bootTimer);
+      bootTimer = setTimeout(endBoot, 20_000);
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const url = `${proto}://${location.host}/ws?session=${encodeURIComponent(session.id)}&cols=${term.cols}&rows=${term.rows}`;
       ws = new WebSocket(url);
@@ -198,19 +216,19 @@ export default function TerminalPane({
       ws.onmessage = (e) => {
         const d = typeof e.data === 'string' ? e.data : new Uint8Array(e.data as ArrayBuffer);
         term.write(d);
-        if (bootBytes >= 0) {
-          bootBytes += typeof d === 'string' ? d.length : d.byteLength;
-          if (bootBytes > 800) { setBooting(false); bootBytes = -1; }
-          // Agents: wait for the real paint (long safety cap only). Shells: a
-          // bare prompt is all that ever comes — drop the cover quickly.
-          else if (!bootTimer) bootTimer = setTimeout(() => setBooting(false), isAgent ? 20_000 : 1500);
+        // Probe shortly after each burst (throttled; write() is async).
+        if (bootLive && !bootCheck) {
+          bootCheck = setTimeout(() => {
+            bootCheck = null;
+            if (bootLive && screenHasContent()) endBoot();
+          }, 150);
         }
       };
       ws.onclose = (e) => {
         // A real process exit: stop here and let the user relaunch. Anything
         // else is a transient drop (sleep/wake, network) → auto-reconnect and
         // reattach to the still-running tmux session.
-        setBooting(false);
+        endBoot();
         if (e.code === EXIT_CODE) { setConn('exited'); return; }
         setConn('closed');
         if (!closedByUs) {
@@ -220,7 +238,9 @@ export default function TerminalPane({
       };
       ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
     };
-    reconnectRef.current = () => { if (retry) clearTimeout(retry); retryDelay = 1200; connect(); };
+    // Manual restart: clear the dead run's screen so the content probe watches
+    // the NEW process paint, not leftovers (tmux repaints the live screen).
+    reconnectRef.current = () => { if (retry) clearTimeout(retry); retryDelay = 1200; try { term.reset(); } catch { /* ignore */ } connect(); };
 
     // Re-fit and tell the server our size. With tmux window-size=latest this
     // makes the focused window own the size, so a duplicate window open at a
@@ -232,7 +252,7 @@ export default function TerminalPane({
     resyncRef.current = resync; // so the zoom control can refit
 
     // Typing means the user sees enough to interact — drop the boot cover.
-    const dataSub = term.onData((d) => { setBooting(false); send({ t: 'i', d }); });
+    const dataSub = term.onData((d) => { endBoot(); send({ t: 'i', d }); });
     const ro = new ResizeObserver(resync);
     ro.observe(hostRef.current!);
     window.addEventListener('focus', resync);
@@ -273,6 +293,7 @@ export default function TerminalPane({
       closedByUs = true;
       if (retry) clearTimeout(retry);
       if (bootTimer) clearTimeout(bootTimer);
+      if (bootCheck) clearTimeout(bootCheck);
       ro.disconnect();
       host.removeEventListener('mouseup', onMouseUp);
       host.removeEventListener('touchstart', onTouchStart);
@@ -352,12 +373,14 @@ export default function TerminalPane({
       )}
       {conn === 'exited' && (
         <div className="term-exit mono">
-          <span>{cli?.label || session.cli} stopped · output preserved</span>
-          <button
-            className="tx-btn"
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => { e.stopPropagation(); reconnectRef.current(); }}
-          ><RefreshGlyph /> restart</button>
+          <div className="tx-row">
+            <span>{cli?.label || session.cli} stopped · output preserved</span>
+            <button
+              className="tx-btn"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); reconnectRef.current(); }}
+            ><RefreshGlyph /> restart</button>
+          </div>
         </div>
       )}
     </div>
