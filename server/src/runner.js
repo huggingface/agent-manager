@@ -229,6 +229,17 @@ function commandFor(session) {
     return `if [ -f '${session.codexRollout}' ]; then exec codex resume ${session.codexSessionId}; else exec codex; fi`;
   }
 
+  // opencode (seen on 1.17.13): on exit it leaves a DIRECTORY named
+  // opencode.json at its own config path; the next launch then dies reading it
+  // (EISDIR → "Unexpected server error" → instant pane exit). Clear a
+  // directory-shaped config entry before starting — a real config FILE there is
+  // left untouched.
+  if (cli.id === 'opencode') {
+    const guard = 'G="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"; [ -d "$G" ] && rm -rf "$G";';
+    const base = session.everStarted && cli.cont ? `${cli.cont} || exec ${cli.run}` : `exec ${cli.run}`;
+    return `${guard} ${base}`;
+  }
+
   // Other agents: resume when one likely exists, else a fresh launch. `exec` so
   // the agent is the pane's foreground process; when it exits the tmux session
   // ends — a clear "done" signal — and the fallback preserves that.
