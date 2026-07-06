@@ -177,11 +177,15 @@ export default function TerminalPane({
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o));
     };
 
-    // Does the visible screen contain real text (≥2 non-space chars on a row)?
+    // Does the visible screen show real text in its UPPER two-thirds? Agent
+    // TUIs paint their bottom input bar first and load the actual content
+    // (banner, resumed history) seconds later — only the upper region tells us
+    // the pane is genuinely ready. Shell prompts paint at the top anyway.
     const screenHasContent = () => {
       try {
         const buf = term.buffer.active;
-        for (let y = 0; y < term.rows; y++) {
+        const upper = Math.max(2, Math.floor(term.rows * 2 / 3));
+        for (let y = 0; y < upper; y++) {
           const line = buf.getLine(buf.baseY + y);
           if (line && line.translateToString(true).trim().length >= 2) return true;
         }
