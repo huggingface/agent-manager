@@ -256,7 +256,11 @@ export default function TerminalPane({
     resyncRef.current = resync; // so the zoom control can refit
 
     // Typing means the user sees enough to interact — drop the boot cover.
-    const dataSub = term.onData((d) => { endBoot(); send({ t: 'i', d }); });
+    // Real keystrokes only (onKey): onData ALSO fires for xterm's automatic
+    // replies to the TUI's terminal queries (DA/CPR), which arrive instantly
+    // on attach and must not count as "the user typed".
+    const keySub = term.onKey(() => endBoot());
+    const dataSub = term.onData((d) => send({ t: 'i', d }));
     const ro = new ResizeObserver(resync);
     ro.observe(hostRef.current!);
     window.addEventListener('focus', resync);
@@ -306,6 +310,7 @@ export default function TerminalPane({
       window.removeEventListener('focus', resync);
       document.removeEventListener('visibilitychange', onVisible);
       dataSub.dispose();
+      keySub.dispose();
       try { ws?.close(); } catch { /* ignore */ }
       term.dispose();
       termRef.current = null;
