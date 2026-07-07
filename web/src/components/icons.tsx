@@ -67,6 +67,12 @@ export const CloseGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+export const PlayGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M5.6 3.9v8.2L12.4 8z" />
+  </G>
+);
+
 export const StopGlyph = ({ className }: { className?: string }) => (
   <svg className={className} viewBox="0 0 16 16" fill="currentColor">
     <rect x="4.4" y="4.4" width="7.2" height="7.2" rx="1.4" />
@@ -98,18 +104,27 @@ export const PulseGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+// Overview: four panes at a glance — what the page literally is.
+export const GridGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <rect x="2.2" y="2.2" width="4.8" height="4.8" rx="0.8" />
+    <rect x="9" y="2.2" width="4.8" height="4.8" rx="0.8" />
+    <rect x="2.2" y="9" width="4.8" height="4.8" rx="0.8" />
+    <rect x="9" y="9" width="4.8" height="4.8" rx="0.8" />
+  </G>
+);
+
 export const PlusGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <path d="M8 3.2v9.6M3.2 8h9.6" />
   </G>
 );
 
-// The AM monogram: rectangular A (two verticals, top bar, crossbar) and
-// M (three verticals joined at the top). One 4-unit stroke, 4-unit counters.
+// The AM ligature: rectangular A and M sharing their middle stroke under one
+// continuous roof. One 4-unit stroke, 4-unit counters.
 export const AmMark = ({ className }: { className?: string }) => (
-  <svg className={className} viewBox="0 0 38 24" fill="currentColor" aria-label="Agent Manager">
-    <path fillRule="evenodd" d="M0 0H12V24H8V14H4V24H0ZM4 4H8V10H4Z" />
-    <path d="M18 0H38V24H34V4H30V24H26V4H22V24H18Z" />
+  <svg className={className} viewBox="0 0 28 24" fill="currentColor" aria-label="Agent Manager">
+    <path fillRule="evenodd" d="M0 0H28V24H24V4H20V24H16V4H12V24H8V14H4V24H0ZM4 4H8V10H4Z" />
   </svg>
 );
 

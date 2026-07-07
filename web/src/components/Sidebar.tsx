@@ -4,7 +4,7 @@ import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PulseGlyph, PlusGlyph, AmMark } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
 
 type Zone = 'before' | 'after' | 'on';
 
@@ -149,7 +149,9 @@ export default function Sidebar({
         )}
         <span className="age">{fmtAgo(ages?.[s.id])}</span>
         <span className="row-actions">
-          {s.running && <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}><StopGlyph /></button>}
+          {s.running
+            ? <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}><StopGlyph /></button>
+            : <button className="mini-btn" title="Start" onClick={(e) => { e.stopPropagation(); onOpenSession(s.id, groupId); }}><PlayGlyph /></button>}
           <button className="mini-btn" title="Delete" onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><CloseGlyph /></button>
         </span>
       </div>
@@ -183,7 +185,7 @@ export default function Sidebar({
           ) : (
             <>
               <span className="name">{g.name}</span>
-              <span className="count">{g.sessionIds.length}</span>
+              {!open && <span className="count">{g.sessionIds.length}</span>}
               <span className="row-actions">
                 <button className="mini-btn" title="Rename" onClick={(e) => { e.stopPropagation(); startEdit(ref, g.name); }}><PencilGlyph /></button>
                 <button className="mini-btn" title="Delete group" onClick={(e) => { e.stopPropagation(); onDeleteGroup(g.id); }}><CloseGlyph /></button>
@@ -274,7 +276,7 @@ export default function Sidebar({
           title="All agents: digests, states, replies"
         >
           <span className="status ov-spacer" />
-          <span className="ov-tile"><PulseGlyph /></span>
+          <span className="ov-tile"><GridGlyph /></span>
           <span className="name">overview</span>
           {waiting > 0 && <span className="ov-wait">{waiting} waiting</span>}
         </div>

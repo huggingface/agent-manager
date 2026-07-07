@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { SlidersGlyph, SunGlyph, PulseGlyph, PlusGlyph, AmMark } from './icons';
+import { SlidersGlyph, SunGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
 import Logo from './Logo';
 
 // A frozen, slightly dimmed replica of the real sidebar so the install page
@@ -40,7 +40,7 @@ function MockSidebar() {
       <div className="ov-fixed">
         <div className="row ov-row">
           <span className="status ov-spacer" />
-          <span className="ov-tile"><PulseGlyph /></span>
+          <span className="ov-tile"><GridGlyph /></span>
           <span className="name">overview</span>
         </div>
       </div>
