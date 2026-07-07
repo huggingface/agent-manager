@@ -82,14 +82,14 @@ body {
 [data-theme='light'] .cli-logo.inv-light img { filter: invert(1); }
 
 /* header */
-.brand { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
-.brand .logo { display: flex; align-items: center; gap: 9px; }
-.brand h1 { font-size: 15px; margin: 0; letter-spacing: -0.01em; }
-/* The brand dot is live: it aggregates every agent's state. */
-.brand .dot { width: 9px; height: 9px; border-radius: 50%; transition: background 0.25s, box-shadow 0.25s, opacity 0.25s; }
-.brand .dot.agg-working { background: var(--accent); animation: breathe 2.4s ease-in-out infinite; }
-.brand .dot.agg-waiting { background: transparent; border: 1.5px solid var(--accent); }
-.brand .dot.agg-idle { background: var(--muted); opacity: 0.5; }
+.brand { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 13px 14px; border-bottom: 1px solid var(--border); }
+.brand .logo { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.brand h1 { font-size: 14px; margin: 0; letter-spacing: -0.01em; white-space: nowrap; }
+.brand .brand-actions { display: flex; gap: 4px; flex: none; }
+/* AM monogram — the brand mark */
+.am-mark { width: 21px; height: 13px; color: var(--accent); flex: none; display: block; }
+.icon-btn.add-btn { color: var(--accent); }
+.icon-btn.add-btn:hover, .icon-btn.add-btn.on { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
 .icon-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: var(--r-md); width: 32px; height: 30px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
 .icon-btn:hover { color: var(--text); border-color: var(--border-strong); }
 
@@ -101,10 +101,11 @@ body {
 @keyframes breathe { 50% { opacity: 0.55; } }
 @keyframes rise-in { from { opacity: 0; transform: translateY(-3px); } }
 
-/* controls */
-.controls { padding: 12px 12px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); }
-.add-row { display: flex; gap: 8px; }
-.add-row .btn-ghost { flex: 1; }
+/* controls (the create panel, opened from the brand's +) */
+.controls { padding: 12px 12px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); animation: rise-in 0.14s ease-out; }
+.create-seg { align-self: stretch; display: flex; }
+.create-seg button { flex: 1; }
+.create-hint { font-size: 11px; color: var(--accent); padding: 0 2px; }
 /* one shared button box so every button lines up (same height/padding/font) */
 .btn-ghost, .btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 12px; font-size: 13px; font-weight: 600; line-height: 1.25; border: 1px solid transparent; border-radius: var(--r-md); cursor: pointer; }
 .btn-ghost { background: var(--panel-2); color: var(--text); border-color: var(--border); }
@@ -183,9 +184,13 @@ body {
 .stepper-n { min-width: 20px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
 
 /* overview: pinned sidebar row (session-row anatomy) + cards view */
-.ov-fixed { padding: 6px 8px 0; }
-.ov-row { cursor: pointer; }
-.ov-row-ico { width: 13px; height: 13px; color: var(--accent); flex: none; }
+.ov-fixed { padding: 5px 8px 6px; border-bottom: 1px solid var(--border); }
+.ov-row { cursor: pointer; padding-top: 6px; padding-bottom: 6px; }
+.ov-row .status.ov-spacer { visibility: hidden; }
+.ov-tile { flex: none; width: 12px; height: 12px; padding: 3px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; }
+.ov-tile svg { width: 100%; height: 100%; display: block; }
+.ov-row .name { color: var(--text); }
+.ov-wait { flex: none; font-family: var(--font-mono); font-size: 10px; color: var(--accent); }
 /* ---- Overview: one reading column of capsules (design mock v4.12) ---- */
 .ov-wrap { height: 100%; overflow-y: auto; }
 .ov-feed { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; padding: 2px 2px 40px; }
@@ -266,9 +271,8 @@ body {
 .gap.over { position: relative; }
 .gap.over::after { content: ''; position: absolute; left: 8px; right: 8px; top: 3px; height: 2px; border-radius: 2px; background: var(--accent); }
 
-.row { position: relative; display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: var(--r-md); cursor: pointer; border: 1px solid transparent; }
+.row { position: relative; display: flex; align-items: center; gap: 7px; padding: 3.5px 8px; border-radius: var(--r-sm); cursor: pointer; border: 1px solid transparent; }
 .row.session { cursor: grab; }
-.row.nested { margin-left: 16px; }
 .row:hover { background: var(--panel-2); }
 .row.active { background: color-mix(in srgb, var(--accent) 10%, transparent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
 .row.dragging { opacity: 0.4; }
@@ -276,30 +280,42 @@ body {
 .row.drop-before::after { top: -1px; }
 .row.drop-after::after { bottom: -1px; }
 .row.drop-on { background: var(--drop); outline: 1px solid var(--accent); outline-offset: -1px; }
-/* mono for THINGS (session names, counts), sans for commentary */
-.row .name { flex: 1; font-family: var(--font-mono); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.row .rename { flex: 1; font: inherit; font-family: var(--font-mono); font-size: 12.5px; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
-.row.group-head .name { font-family: var(--font-sans); font-size: 13px; font-weight: 600; }
-.row .count { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
-.caret { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; width: 16px; padding: 0; flex: none; }
-/* Actions overlay the row's right edge on hover (swapping in over the logo /
-   count) instead of reserving flow space — otherwise rows with different
-   action counts push their logos to ragged x-positions. */
-.row .row-actions { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: flex; gap: 2px; opacity: 0; pointer-events: none; transition: opacity 0.12s ease-out; }
+/* the dot column is a size down from the app-wide 8px dots */
+.row .status { width: 6px; height: 6px; }
+/* mono for THINGS (session names, counts), sans for commentary. Member names
+   speak in the muted voice — state (dot) and place (frame) carry the color. */
+.row .name { flex: 1; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row.active .name, .row:hover .name { color: var(--text); }
+.row .rename { flex: 1; font: inherit; font-family: var(--font-mono); font-size: 11.5px; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
+.row .age { flex: none; font-family: var(--font-mono); font-size: 10px; color: var(--muted); transition: opacity 0.12s ease-out; }
+.row .count { font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); }
+.caret { background: transparent; border: none; color: var(--muted); cursor: pointer; font-size: 10px; line-height: 1; width: 13px; padding: 0; flex: none; }
+/* Actions overlay the row's right edge on hover (swapping in over the age)
+   instead of reserving flow space. */
+.row .row-actions { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: flex; gap: 2px; opacity: 0; pointer-events: none; transition: opacity 0.12s ease-out; background: var(--panel-2); border-radius: var(--r-sm); }
 .row:hover .row-actions, .row:focus-within .row-actions { opacity: 1; pointer-events: auto; }
-.row .cli-logo, .row .count { transition: opacity 0.12s ease-out; }
-.row:hover .cli-logo, .row:hover .count { opacity: 0; }
+.row:hover .age { opacity: 0; }
 .mini-btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px; border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; padding: 3px 6px; border-radius: var(--r-sm); }
 .mini-btn:hover { color: var(--text); background: var(--border); }
 
-/* groups: no box — nested rows hang off an indent rail, like the file tree */
-.group { margin: 3px 0; }
-.group.active .group-head { background: color-mix(in srgb, var(--accent) 10%, transparent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
-.group.drop-into { background: var(--drop); outline: 1px dashed var(--accent); border-radius: var(--r-md); }
-.row.nested { margin-left: 21px; }
-/* rail sits on the group caret's center line (head pad 8px + half the 16px caret) */
-.row.nested::before { content: ''; position: absolute; left: -5px; top: 0; bottom: 0; border-left: 1px solid var(--border); }
-.group.active .row.nested::before { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+/* groups: a labeled frame — the name rides the top border */
+.group { position: relative; margin: 13px 1px 5px; border: 1px solid var(--border); border-radius: var(--r-sm); padding: 7px 3px 3px; }
+.group.closed { padding: 6px 3px; }
+.group.active { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.group.drop-into { background: var(--drop); outline: 1px dashed var(--accent); }
+.row.group-head { position: absolute; top: -10px; left: 8px; max-width: calc(100% - 52px); padding: 0 6px 0 3px; gap: 4px; background: var(--panel); border: none; border-radius: 0; cursor: pointer; z-index: 1; }
+.row.group-head:hover, .group.active .row.group-head { background: var(--panel); }
+.row.group-head .name { flex: initial; font-size: 11.5px; font-weight: 400; color: var(--text); }
+.row.group-head:hover .name { color: var(--accent); }
+.row.group-head .rename { width: 130px; flex: none; }
+.row.group-head .row-actions { position: static; transform: none; background: var(--panel); }
+.row.group-head:hover .count { display: none; }
+/* per-group + on the frame line, revealed on hover */
+.g-add { position: absolute; top: -9px; right: 8px; background: var(--panel); border: none; color: var(--muted); padding: 0 4px; cursor: pointer; opacity: 0; transition: opacity 0.12s; z-index: 1; }
+.group:hover .g-add { opacity: 1; }
+.g-add:hover { color: var(--accent); }
+.g-add svg { width: 11px; height: 11px; display: block; }
+.row.nested { margin-left: 0; padding-left: 8px; }
 
 /* status dots */
 .status { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; transition: background 0.2s, box-shadow 0.2s, opacity 0.2s; }
@@ -640,8 +656,10 @@ a.btn-ghost { text-decoration: none; }
   .row { padding: 6px 10px; }
   .tree { padding-top: 2px; }
   .group { margin: 2px 0; }
-  .row .row-actions { opacity: 1; pointer-events: auto; position: static; transform: none; margin-left: 4px; }
+  .row .row-actions { opacity: 1; pointer-events: auto; position: static; transform: none; margin-left: 4px; background: transparent; }
   .row .cli-logo, .row .count { opacity: 1 !important; }
+  .row .age { display: none; } /* actions are always visible on touch — no room */
+  .g-add { opacity: 1; }
   .caret { width: 22px; font-size: 15px; }
   /* 16px inputs stop iOS zoom-on-focus */
   .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input, .ov-live input { font-size: 16px; }

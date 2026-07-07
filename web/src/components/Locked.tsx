@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { SlidersGlyph, SunGlyph, PulseGlyph } from './icons';
+import { SlidersGlyph, SunGlyph, PulseGlyph, PlusGlyph, AmMark } from './icons';
 import Logo from './Logo';
 
 // A frozen, slightly dimmed replica of the real sidebar so the install page
@@ -20,8 +20,8 @@ function MockRow({ s, nested }: { s: MockSession; nested?: boolean }) {
   return (
     <div className={`row session${nested ? ' nested' : ''}`}>
       <span className={`status ${s.state}`} />
+      <Logo cli={s.cli} size={12} tint={s.tint} />
       <span className="name">{s.name}</span>
-      <Logo cli={s.cli} size={11} tint={s.tint} />
     </div>
   );
 }
@@ -30,20 +30,19 @@ function MockSidebar() {
   return (
     <aside className="sidebar mock-side" aria-hidden="true">
       <div className="brand">
-        <div className="logo"><span className="dot agg-working" /><h1>Agent Manager</h1></div>
+        <div className="logo"><AmMark className="am-mark" /><h1>Agent Manager</h1></div>
         <div className="brand-actions">
+          <span className="icon-btn add-btn"><PlusGlyph /></span>
           <span className="icon-btn"><SlidersGlyph /></span>
           <span className="icon-btn"><SunGlyph /></span>
         </div>
       </div>
-      <div className="controls">
-        <div className="add-row">
-          <span className="btn-ghost">+ Agent</span>
-          <span className="btn-ghost">+ Group</span>
-        </div>
-      </div>
       <div className="ov-fixed">
-        <div className="row ov-row"><PulseGlyph className="ov-row-ico" /><span className="name">Overview</span></div>
+        <div className="row ov-row">
+          <span className="status ov-spacer" />
+          <span className="ov-tile"><PulseGlyph /></span>
+          <span className="name">overview</span>
+        </div>
       </div>
       <div className="tree">
         {MOCK.map((item) => 'group' in item ? (

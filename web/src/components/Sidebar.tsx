@@ -4,12 +4,21 @@ import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PulseGlyph } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PulseGlyph, PlusGlyph, AmMark } from './icons';
 
 type Zone = 'before' | 'after' | 'on';
 
+const fmtAgo = (ts?: number) => {
+  if (!ts) return '';
+  const m = Math.round((Date.now() - ts) / 60000);
+  if (m < 1) return 'now';
+  if (m < 60) return `${m}m`;
+  if (m < 48 * 60) return `${Math.round(m / 60)}h`;
+  return `${Math.round(m / 1440)}d`;
+};
+
 export default function Sidebar({
-  clis, tree, activeRef, focusedId, defaultPath,
+  clis, tree, activeRef, focusedId, defaultPath, ages,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
   onStopSession, onDeleteSession, onMove, onDragState, onOpenSettings, theme, onToggleTheme,
 }: {
@@ -18,10 +27,11 @@ export default function Sidebar({
   activeRef: string | null;
   focusedId: string | null;
   defaultPath: string;
+  ages?: Record<string, number>; // session id -> last activity ts (ms)
   onActivate: (ref: string) => void;
   onOpenSession: (sessionId: string, groupId?: string) => void;
   onOpenSettings: () => void;
-  onNewSession: (name: string, cli: string, path: string) => void;
+  onNewSession: (name: string, cli: string, path: string, groupId?: string) => void;
   onNewGroup: (name: string, cart?: { cli: string; count: number }[], path?: string) => void;
   onRenameGroup: (id: string, name: string) => void;
   onRenameSession: (id: string, name: string) => void;
@@ -33,7 +43,10 @@ export default function Sidebar({
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
 }) {
-  const [panel, setPanel] = useState<'none' | 'session' | 'group'>('none');
+  const [panel, setPanel] = useState<'none' | 'create'>('none');
+  const [createTab, setCreateTab] = useState<'agent' | 'group'>('agent');
+  // When creation was launched from a group's + the new agent lands there.
+  const [createTarget, setCreateTarget] = useState<string | null>(null);
   const [groupName, setGroupName] = useState('');
   const [groupLoc, setGroupLoc] = useState(defaultPath);
   const [cart, setCart] = useState<Record<string, number>>({});
@@ -46,16 +59,20 @@ export default function Sidebar({
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
   const colorOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c.color])), [clis]);
-  // Brand dot doubles as aggregate status: any agent working > any waiting > rest.
-  const agg = tree.sessions.some((s) => s.state === 'working') ? 'working'
-    : tree.sessions.some((s) => s.state === 'waiting') ? 'waiting' : 'idle';
+  const waiting = tree.sessions.filter((s) => s.state === 'waiting').length;
 
   const clearDrag = () => { setDragRef(null); setDrop(null); onDragState?.(null); };
   const bump = (id: string, d: number) => setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
+  const closePanel = () => { setPanel('none'); setCreateTarget(null); };
+  const openCreate = (tab: 'agent' | 'group', target: string | null = null) => {
+    setCreateTab(tab);
+    setCreateTarget(target);
+    setPanel('create');
+  };
   const submitGroup = () => {
     const items = Object.entries(cart).filter(([, n]) => n > 0).map(([cli, count]) => ({ cli, count }));
     onNewGroup(groupName.trim() || 'Group', items, groupLoc);
-    setGroupName(''); setCart({}); setPanel('none');
+    setGroupName(''); setCart({}); closePanel();
   };
   const startEdit = (ref: string, name: string) => { setEditRef(ref); setEditName(name); };
   const commitEdit = () => {
@@ -118,6 +135,7 @@ export default function Sidebar({
         title={s.path ? `${s.name} · ${s.path}` : s.name}
       >
         <span className={`status ${s.state}`} title={STATE_LABEL[s.state]} />
+        <Logo cli={s.cli} size={12} tint={colorOf[s.cli]} />
         {editing ? (
           <input
             autoFocus className="rename" value={editName}
@@ -129,7 +147,7 @@ export default function Sidebar({
         ) : (
           <span className="name">{s.name}</span>
         )}
-        <Logo cli={s.cli} size={11} tint={colorOf[s.cli]} />
+        <span className="age">{fmtAgo(ages?.[s.id])}</span>
         <span className="row-actions">
           {s.running && <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}><StopGlyph /></button>}
           <button className="mini-btn" title="Delete" onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><CloseGlyph /></button>
@@ -144,7 +162,8 @@ export default function Sidebar({
     const open = !collapsed.has(g.id);
     const editing = editRef === ref;
     return (
-      <div key={g.id} className={`group${activeRef === ref ? ' active' : ''}${drop && drop.ref === ref && drop.zone === 'on' ? ' drop-into' : ''}`}>
+      <div key={g.id} className={`group${activeRef === ref ? ' active' : ''}${!open ? ' closed' : ''}${drop && drop.ref === ref && drop.zone === 'on' ? ' drop-into' : ''}`}>
+        {/* the group's name rides its frame — still the drag handle / click target */}
         <div
           className={`row group-head${dragRef === ref ? ' dragging' : ''}${dnd.className}`}
           draggable={dnd.draggable}
@@ -172,6 +191,7 @@ export default function Sidebar({
             </>
           )}
         </div>
+        <button className="g-add" title={`New agent in ${g.name}`} onClick={(e) => { e.stopPropagation(); openCreate('agent', g.id); }}><PlusGlyph /></button>
         {open && g.sessionIds.map((sid) => sessById[sid]).filter(Boolean).map((s) => SessionRow(s as Session, g.id))}
         {open && g.sessionIds.length === 0 && <div className="empty-hint nested">Drag agents here</div>}
       </div>
@@ -182,71 +202,87 @@ export default function Sidebar({
     <aside className="sidebar">
       <div className="brand">
         <div className="logo">
-          <span className={`dot agg-${agg}`} title={agg === 'working' ? 'agents working' : agg === 'waiting' ? 'an agent needs you' : 'all quiet'} />
+          <AmMark className="am-mark" />
           <h1>Agent Manager</h1>
         </div>
         <div className="brand-actions">
+          <button
+            className={`icon-btn add-btn${panel === 'create' ? ' on' : ''}`}
+            onClick={() => (panel === 'create' ? closePanel() : openCreate('agent'))}
+            title="New agent or group"
+          ><PlusGlyph /></button>
           <button className="icon-btn" onClick={onOpenSettings} title="Settings"><SlidersGlyph /></button>
           <button className="icon-btn" onClick={onToggleTheme} title="Toggle light / dark">{theme === 'dark' ? <MoonGlyph /> : <SunGlyph />}</button>
         </div>
       </div>
 
-      <div className="controls">
-        <div className="add-row">
-          <button className={`btn-ghost${panel === 'session' ? ' on' : ''}`} onClick={() => setPanel(panel === 'session' ? 'none' : 'session')}>+ Agent</button>
-          <button className={`btn-ghost${panel === 'group' ? ' on' : ''}`} onClick={() => setPanel(panel === 'group' ? 'none' : 'group')}>+ Group</button>
-        </div>
-        {panel === 'session' && (
-          <NewSession clis={clis} sessions={tree.sessions} defaultPath={defaultPath} onCreate={(n, c, p) => { onNewSession(n, c, p); setPanel('none'); }} onCancel={() => setPanel('none')} />
-        )}
-        {panel === 'group' && (
-          <div className="widget">
-            <input autoFocus placeholder="Group name" value={groupName}
-              onChange={(e) => setGroupName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') submitGroup(); if (e.key === 'Escape') setPanel('none'); }} />
-            <FolderPicker value={groupLoc} autoLabel="new folder per agent (auto)" onChange={setGroupLoc} />
-            <div className="cart">
-              {clis.filter((c) => c.available).map((c) => {
-                const n = cart[c.id] || 0;
-                return (
-                  <div key={c.id} className={`cart-row${n > 0 ? ' has' : ''}`}>
-                    <div className="stepper">
-                      <button onClick={() => bump(c.id, -1)} disabled={n === 0} aria-label="Fewer">−</button>
-                      <span className="stepper-n">{n}</span>
-                      <button onClick={() => bump(c.id, 1)} aria-label="More">+</button>
-                    </div>
-                    <Logo cli={c.id} size={16} />
-                    <span className="cart-name">{c.label}</span>
-                  </div>
-                );
-              })}
-            </div>
-            <div className="widget-actions">
-              <button className="btn-primary" onClick={submitGroup}>Create group</button>
-              <button className="btn-ghost" onClick={() => { setCart({}); setPanel('none'); }}>Cancel</button>
-            </div>
+      {panel === 'create' && (
+        <div className="controls">
+          <div className="seg create-seg">
+            <button className={createTab === 'agent' ? 'on' : ''} onClick={() => setCreateTab('agent')}>Agent</button>
+            <button className={createTab === 'group' ? 'on' : ''} onClick={() => { setCreateTab('group'); setCreateTarget(null); }}>Group</button>
           </div>
-        )}
-      </div>
+          {createTab === 'agent' && createTarget && groupById[createTarget] && (
+            <div className="create-hint mono">into {groupById[createTarget].name}</div>
+          )}
+          {createTab === 'agent' ? (
+            <NewSession
+              clis={clis}
+              sessions={tree.sessions}
+              defaultPath={defaultPath}
+              onCreate={(n, c, p) => { onNewSession(n, c, p, createTarget ?? undefined); closePanel(); }}
+              onCancel={closePanel}
+            />
+          ) : (
+            <div className="widget">
+              <input autoFocus placeholder="Group name" value={groupName}
+                onChange={(e) => setGroupName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') submitGroup(); if (e.key === 'Escape') closePanel(); }} />
+              <FolderPicker value={groupLoc} autoLabel="new folder per agent (auto)" onChange={setGroupLoc} />
+              <div className="cart">
+                {clis.filter((c) => c.available).map((c) => {
+                  const n = cart[c.id] || 0;
+                  return (
+                    <div key={c.id} className={`cart-row${n > 0 ? ' has' : ''}`}>
+                      <div className="stepper">
+                        <button onClick={() => bump(c.id, -1)} disabled={n === 0} aria-label="Fewer">−</button>
+                        <span className="stepper-n">{n}</span>
+                        <button onClick={() => bump(c.id, 1)} aria-label="More">+</button>
+                      </div>
+                      <Logo cli={c.id} size={16} />
+                      <span className="cart-name">{c.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="widget-actions">
+                <button className="btn-primary" onClick={submitGroup}>Create group</button>
+                <button className="btn-ghost" onClick={() => { setCart({}); closePanel(); }}>Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
-      {/* Overview: pinned above the tree, styled EXACTLY like a session row
-          (dot · mono name · glyph) so it reads as clickable — its dot is the
-          aggregate of every agent's state. */}
+      {/* Overview: pinned above the tree with the row anatomy (tile · name ·
+          right slot) so it reads as clickable; the right slot counts agents
+          waiting on you. */}
       <div className="ov-fixed">
         <div
           className={`row session ov-row${activeRef === 'overview' ? ' active' : ''}`}
           onClick={() => onActivate('overview')}
           title="All agents: digests, states, replies"
         >
-          <span className={`status ${agg}`} />
+          <span className="status ov-spacer" />
+          <span className="ov-tile"><PulseGlyph /></span>
           <span className="name">overview</span>
-          <PulseGlyph className="ov-row-ico" />
+          {waiting > 0 && <span className="ov-wait">{waiting} waiting</span>}
         </div>
       </div>
 
       <div className="tree" onDragEnd={clearDrag}>
         {tree.order.length === 0 && (
-          <div className="empty-hint">Nothing yet. Add an agent or a group above.<br />Drag an agent onto another to group them.</div>
+          <div className="empty-hint">Nothing yet. Add an agent with the + above.<br />Drag an agent onto another to group them.</div>
         )}
         {tree.order.map((ref) => (ref.startsWith('s:')
           ? (sessById[ref.slice(2)] ? SessionRow(sessById[ref.slice(2)]) : null)

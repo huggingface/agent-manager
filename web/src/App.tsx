@@ -95,6 +95,24 @@ export default function App() {
     return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVisible); };
   }, [refresh]);
 
+  // Last-activity ages for the sidebar clock column (from the trace digests;
+  // low-frequency — the Overview does its own faster polling when open).
+  const [ages, setAges] = useState<Record<string, number>>({});
+  useEffect(() => {
+    let alive = true;
+    const load = () => api.getMeta()
+      .then((r) => {
+        if (!alive) return;
+        setAges(Object.fromEntries(r.sessions.map((s) => [
+          s.id, Math.max(s.digest?.lastAssistantTs || 0, s.digest?.lastPromptTs || 0),
+        ])));
+      })
+      .catch(() => {});
+    load();
+    const t = setInterval(() => { if (!document.hidden) load(); }, 20_000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+
   const cliMap = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c])), [clis]);
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
@@ -150,8 +168,10 @@ export default function App() {
     if (groupId) { setActiveRef(`g:${groupId}`); setFocusedId(s.id); }
     else setActiveRef(`s:${s.id}`);
   };
-  // Creations land in the group you're currently looking at; loose otherwise.
-  const newSession = (name: string, cli: string, path: string) => createSession(name, cli, path, activeGroup?.id);
+  // Creations land in an explicitly targeted group (the group's + button),
+  // else the group you're currently looking at; loose otherwise.
+  const newSession = (name: string, cli: string, path: string, groupId?: string) =>
+    createSession(name, cli, path, groupId ?? activeGroup?.id);
   const newGroup = async (name: string, cart?: { cli: string; count: number }[], path = '') => {
     const g = await api.createGroup(name);
     for (const { cli, count } of cart || []) {
@@ -345,6 +365,7 @@ export default function App() {
         activeRef={activeRef}
         focusedId={focusedId}
         defaultPath={lastPath}
+        ages={ages}
         onActivate={activate}
         onOpenSession={openSession}
         onNewSession={newSession}

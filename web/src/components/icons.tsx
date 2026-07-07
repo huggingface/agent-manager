@@ -98,6 +98,21 @@ export const PulseGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+export const PlusGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M8 3.2v9.6M3.2 8h9.6" />
+  </G>
+);
+
+// The AM monogram: rectangular A (two verticals, top bar, crossbar) and
+// M (three verticals joined at the top). One 4-unit stroke, 4-unit counters.
+export const AmMark = ({ className }: { className?: string }) => (
+  <svg className={className} viewBox="0 0 38 24" fill="currentColor" aria-label="Agent Manager">
+    <path fillRule="evenodd" d="M0 0H12V24H8V14H4V24H0ZM4 4H8V10H4Z" />
+    <path d="M18 0H38V24H34V4H30V24H26V4H22V24H18Z" />
+  </svg>
+);
+
 export const InfoGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <circle cx="8" cy="8" r="6.2" />
