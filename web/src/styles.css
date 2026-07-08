@@ -102,10 +102,10 @@ body {
 @keyframes rise-in { from { opacity: 0; transform: translateY(-3px); } }
 
 /* controls (the create panel, opened from the brand's +) */
-.controls { padding: 12px 12px; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); animation: rise-in 0.14s ease-out; }
+.controls { padding: 9px 10px; display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--border); animation: rise-in 0.14s ease-out; }
 .create-seg { align-self: stretch; display: flex; }
 .create-seg button { flex: 1; }
-.create-hint { font-size: 11px; color: var(--accent); padding: 0 2px; }
+.create-hint { font-size: 10.5px; color: var(--accent); padding: 0 2px; }
 /* one shared button box so every button lines up (same height/padding/font) */
 .btn-ghost, .btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 12px; font-size: 13px; font-weight: 600; line-height: 1.25; border: 1px solid transparent; border-radius: var(--r-md); cursor: pointer; }
 .btn-ghost { background: var(--panel-2); color: var(--text); border-color: var(--border); }
@@ -166,7 +166,7 @@ body {
 .fp-row:hover:not(.picked) { background: var(--panel-2); }
 .fp-caret { flex: none; width: 18px; background: transparent; border: none; color: var(--muted); font-size: 9px; cursor: pointer; padding: 2px 0; }
 .fp-name { flex: 1; background: transparent; border: none; color: inherit; font: inherit; cursor: pointer; text-align: left; padding: 3px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fp-root { padding: 4px 10px; color: var(--muted); font-style: italic; }
+.fp-root { padding: 3px 8px; color: var(--text); }
 .fp-root.picked { color: var(--accent); }
 .fp-new { color: var(--muted); font-size: 12px; padding-top: 3px; padding-bottom: 3px; }
 .fp-new:hover { color: var(--accent); }
@@ -187,7 +187,7 @@ body {
 .ov-fixed { padding: 5px 8px 6px; border-bottom: 1px solid var(--border); }
 .ov-row { cursor: pointer; padding-top: 6px; padding-bottom: 6px; }
 .ov-row .status.ov-spacer { visibility: hidden; }
-.ov-tile { flex: none; width: 12px; height: 12px; padding: 3px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; }
+.ov-tile { flex: none; box-sizing: content-box; width: 12px; height: 12px; padding: 3px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; }
 .ov-tile svg { width: 100%; height: 100%; display: block; }
 .ov-row .name { color: var(--text); }
 .ov-wait { flex: none; font-family: var(--font-mono); font-size: 10px; color: var(--accent); }
@@ -332,9 +332,19 @@ body {
 .quick-add { display: flex; gap: 6px; padding: 10px 10px; border-top: 1px solid var(--border); }
 .quick-add .btn-ghost { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 5.5px 8px; font-family: var(--font-mono); font-size: 12px; font-weight: 500; border-radius: var(--r-sm); }
 /* the create panel speaks the same dense mono voice as the rows */
-.controls .btn-primary, .controls .btn-ghost { font-family: var(--font-mono); font-size: 12px; font-weight: 500; padding: 6px 10px; border-radius: var(--r-sm); }
-.controls .widget input, .controls .widget select, .controls .agent-pick, .controls .fp-current { font-size: 12.5px; }
-.controls .seg button { font-family: var(--font-mono); }
+.controls .widget { gap: 6px; padding: 8px; border-radius: var(--r-md); }
+.controls .w-field { gap: 3px; }
+.controls .w-label { font-size: 9.5px; letter-spacing: 0.055em; }
+.controls .agent-picks, .controls .cart { gap: 3px; }
+.controls .agent-pick { min-height: 27px; gap: 7px; padding: 4px 7px; border-radius: var(--r-sm); }
+.controls .cart-row { gap: 7px; padding: 2px 3px; font-size: 12px; }
+.controls .stepper button { width: 22px; height: 22px; font-size: 14px; }
+.controls .stepper-n { min-width: 18px; font-size: 11.5px; }
+.controls .btn-primary, .controls .btn-ghost { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; padding: 5px 8px; border-radius: var(--r-sm); }
+.controls .widget input, .controls .widget select, .controls .agent-pick, .controls .fp-current { min-height: 28px; font-size: 12px; }
+.controls .fp-current { padding: 5px 8px; }
+.controls .fp-path { font-size: 12px; }
+.controls .seg button { font-family: var(--font-mono); font-size: 11.5px; padding: 4px 8px; }
 
 .legend { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 10px 16px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--muted); }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
@@ -400,9 +410,11 @@ body {
 .term-exit .tx-btn svg { width: 13px; height: 13px; }
 .term-exit .tx-btn:hover { text-decoration: underline; }
 
-.pane-head { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 9px; padding: 7px 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
-.pane-head .ph-left { display: inline-flex; align-items: center; gap: 7px; }
-.pane-head .ph-title { text-align: center; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+.pane-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr); align-items: center; gap: 9px; padding: 7px 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
+.pane-head .ph-left { grid-column: 1; justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
+.pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; text-align: center; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+.pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; }
+.pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }
 .slot { transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out; }

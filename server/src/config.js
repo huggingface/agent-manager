@@ -141,17 +141,6 @@ export function slugify(s) {
   return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
 }
 
-// A fresh workspace folder named after `base` (suffixed if taken). Used as the
-// default location when an agent is created without an explicit path.
-export function allocFolder(base) {
-  const b = slugify(base) || 'workspace';
-  let name = b;
-  let n = 1;
-  while (fs.existsSync(path.join(WORKSPACES_DIR, name))) { n++; name = `${b}-${n}`; }
-  fs.mkdirSync(path.join(WORKSPACES_DIR, name), { recursive: true });
-  return name;
-}
-
 export function workspacePath(folder) {
   return path.join(WORKSPACES_DIR, folder);
 }

@@ -9,10 +9,10 @@ const json = (r: Response) => {
 export const getClis = (): Promise<Cli[]> => fetch('/api/clis').then(json);
 export const getTree = (): Promise<Tree> => fetch('/api/tree').then(json);
 
-// path: '' = "no preference" (server default: auto folder / files root);
-// '.' = explicitly the workspaces root; anything else a workspace-relative dir.
+// path: '.' = the workspaces root; anything else is a workspace-relative dir.
+const normalizePath = (path?: string) => (path && path.trim() ? path : '.');
 export const createSession = (name: string, cli: string, groupId?: string, path?: string): Promise<Session> =>
-  fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ name, cli, groupId, path: path || undefined }) }).then(json);
+  fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ name, cli, groupId, path: normalizePath(path) }) }).then(json);
 
 export const listFolders = (p = ''): Promise<{ path: string; folders: string[] }> =>
   fetch(`/api/folders?path=${encodeURIComponent(p)}`).then(json);

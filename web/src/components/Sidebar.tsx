@@ -48,7 +48,7 @@ export default function Sidebar({
   // When creation was launched from a group's + the new agent lands there.
   const [createTarget, setCreateTarget] = useState<string | null>(null);
   const [groupName, setGroupName] = useState('');
-  const [groupLoc, setGroupLoc] = useState(defaultPath);
+  const [groupLoc, setGroupLoc] = useState(defaultPath || '.');
   const [cart, setCart] = useState<Record<string, number>>({});
   const [editRef, setEditRef] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
@@ -67,6 +67,7 @@ export default function Sidebar({
   const openCreate = (tab: 'agent' | 'group', target: string | null = null) => {
     setCreateTab(tab);
     setCreateTarget(target);
+    setGroupLoc(defaultPath || '.');
     setPanel('create');
   };
   const submitGroup = () => {
@@ -240,7 +241,7 @@ export default function Sidebar({
               <input autoFocus placeholder="Group name" value={groupName}
                 onChange={(e) => setGroupName(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') submitGroup(); if (e.key === 'Escape') closePanel(); }} />
-              <FolderPicker value={groupLoc} autoLabel="new folder per agent (auto)" onChange={setGroupLoc} />
+              <FolderPicker value={groupLoc} onChange={setGroupLoc} />
               <div className="cart">
                 {clis.filter((c) => c.available).map((c) => {
                   const n = cart[c.id] || 0;
@@ -251,7 +252,7 @@ export default function Sidebar({
                         <span className="stepper-n">{n}</span>
                         <button onClick={() => bump(c.id, 1)} aria-label="More">+</button>
                       </div>
-                      <Logo cli={c.id} size={16} />
+                      <Logo cli={c.id} size={13} />
                       <span className="cart-name">{c.label}</span>
                     </div>
                   );
@@ -297,7 +298,7 @@ export default function Sidebar({
         <button className="btn-ghost" title="New shell at the workspaces root" onClick={() => onNewSession('', 'shell', '.')}>
           <Logo cli="shell" size={14} /> Shell
         </button>
-        <button className="btn-ghost" title="New file browser (whole workspace)" onClick={() => onNewSession('', 'files', '')}>
+        <button className="btn-ghost" title="New file browser (whole workspace)" onClick={() => onNewSession('', 'files', '.')}>
           <Logo cli="files" size={14} /> Files
         </button>
       </div>

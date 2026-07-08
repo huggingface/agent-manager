@@ -21,7 +21,7 @@ function defaultName(c: Cli, sessions: Session[]) {
 // Creation widget for AI agents. Shell and Files are created via the quick-add
 // buttons at the bottom of the sidebar instead (rename after creation).
 export default function NewSession({
-  clis, sessions, defaultPath = '', onCreate, onCancel,
+  clis, sessions, defaultPath = '.', onCreate, onCancel,
 }: {
   clis: Cli[];
   sessions: Session[];
@@ -34,14 +34,14 @@ export default function NewSession({
   const [name, setName] = useState(() => (agents[0] ? defaultName(agents[0], sessions) : ''));
   // Prepopulated values follow the selected agent until the user types.
   const [nameDirty, setNameDirty] = useState(false);
-  const [loc, setLoc] = useState(defaultPath);
+  const [loc, setLoc] = useState(defaultPath || '.');
   const sel = agents.find((c) => c.id === cli) || agents[0];
 
   const pick = (c: Cli) => {
     setCli(c.id);
     if (!nameDirty) setName(defaultName(c, sessions));
   };
-  const submit = () => { if (sel) onCreate(name.trim() || sel.label, sel.id, loc); };
+  const submit = () => { if (sel) onCreate(name.trim() || sel.label, sel.id, loc || '.'); };
 
   return (
     <div className="widget">
@@ -54,7 +54,7 @@ export default function NewSession({
               className={`agent-pick${cli === c.id ? ' on' : ''}`}
               onClick={() => pick(c)}
             >
-              <Logo cli={c.id} size={16} />
+              <Logo cli={c.id} size={13} />
               <span>{c.label}</span>
             </button>
           ))}
@@ -72,7 +72,7 @@ export default function NewSession({
       </div>
       <div className="w-field">
         <span className="w-label">Folder</span>
-        <FolderPicker value={loc} autoLabel="new folder (auto)" onChange={setLoc} />
+        <FolderPicker value={loc} onChange={setLoc} />
       </div>
       <div className="widget-actions">
         <button className="btn-primary" onClick={submit} disabled={!sel}>Create</button>

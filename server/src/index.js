@@ -547,14 +547,11 @@ app.post('/api/sessions', (req, res) => {
   const { name, cli, groupId, path: reqPath } = req.body || {};
   if (!cli || !cliById(cli)) return res.status(400).json({ error: 'unknown cli' });
   const finalName = name && name.trim() ? name.trim() : nextName(cli);
-  // Location: an explicit workspace-relative path if given. cleanRelPath('.')
-  // → '' = the workspaces ROOT (used by the Shell quick-add). Omitted path →
-  // sessions.create defaults: fresh auto-named folder (CLIs) / root (Files).
-  let chosen;
-  if (typeof reqPath === 'string' && reqPath !== '') {
-    chosen = cleanRelPath(reqPath);
-    if (chosen === null) return res.status(400).json({ error: 'bad path' });
-  }
+  // Location: an explicit workspace-relative path. cleanRelPath('.') → '' =
+  // the workspaces root. Omitted/blank paths also land at the root; folder
+  // creation is explicit through the picker, not automatic.
+  const chosen = cleanRelPath(typeof reqPath === 'string' && reqPath.trim() ? reqPath : '.');
+  if (chosen === null) return res.status(400).json({ error: 'bad path' });
   const s = store.create({ name: finalName, cli, path: chosen });
   if (s.path) { try { fs.mkdirSync(workspacePath(s.path), { recursive: true }); } catch {} }
   if (groupId && groups.get(groupId)) groups.attach(groupId, s.id);

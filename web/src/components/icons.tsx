@@ -107,10 +107,10 @@ export const PulseGlyph = ({ className }: { className?: string }) => (
 // Overview: four panes at a glance — what the page literally is.
 export const GridGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
-    <rect x="2.2" y="2.2" width="4.8" height="4.8" rx="0.8" />
+    <rect x="2.2" y="2.2" width="4.8" height="4.8" rx="0.8" fill="currentColor" />
     <rect x="9" y="2.2" width="4.8" height="4.8" rx="0.8" />
     <rect x="2.2" y="9" width="4.8" height="4.8" rx="0.8" />
-    <rect x="9" y="9" width="4.8" height="4.8" rx="0.8" />
+    <rect x="9" y="9" width="4.8" height="4.8" rx="0.8" fill="currentColor" />
   </G>
 );
 

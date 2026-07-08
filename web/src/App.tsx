@@ -33,6 +33,8 @@ function autoGrid(n: number): GridSpec {
 }
 
 type SettingsPage = 'general' | 'usage' | 'skills';
+const ROOT_PATH = '.';
+const normalizePath = (p?: string | null) => (p && p.trim() ? p : ROOT_PATH);
 
 function initialTheme(): 'light' | 'dark' {
   const stored = localStorage.getItem('am-theme');
@@ -54,8 +56,9 @@ export default function App() {
     return Number.isFinite(z) ? z : 100;
   });
   const [info, setInfo] = useState<Awaited<ReturnType<typeof api.getInfo>> | null>(null);
-  // Default location for the next agent = where the last one was created.
-  const [lastPath, setLastPath] = useState(() => localStorage.getItem('am-last-path') || '');
+  // Default location for the next agent = where the last one was created,
+  // falling back to the workspaces root.
+  const [lastPath, setLastPath] = useState(() => normalizePath(localStorage.getItem('am-last-path')));
   // Mobile navigation: false = the sidebar is the (full-screen) home view,
   // true = the selected session/group fills the screen. Desktop ignores this.
   const isMobile = useIsMobile();
@@ -63,7 +66,9 @@ export default function App() {
   const [ovFilter, setOvFilter] = useState<OverviewFilter>('all');
   const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
   const rememberPath = (p?: string | null) => {
-    if (p) { setLastPath(p); localStorage.setItem('am-last-path', p); }
+    const next = normalizePath(p);
+    setLastPath(next);
+    localStorage.setItem('am-last-path', next);
   };
 
   useEffect(() => {
@@ -172,7 +177,7 @@ export default function App() {
   // else the group you're currently looking at; loose otherwise.
   const newSession = (name: string, cli: string, path: string, groupId?: string) =>
     createSession(name, cli, path, groupId ?? activeGroup?.id);
-  const newGroup = async (name: string, cart?: { cli: string; count: number }[], path = '') => {
+  const newGroup = async (name: string, cart?: { cli: string; count: number }[], path = ROOT_PATH) => {
     const g = await api.createGroup(name);
     for (const { cli, count } of cart || []) {
       const base = cliMap[cli]?.label || cli;

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { SESSIONS_FILE, allocFolder } from './config.js';
+import { SESSIONS_FILE } from './config.js';
 
 let sessions = [];
 
@@ -60,7 +60,7 @@ export function create({ name, cli, path }) {
     id,
     name: cleanName,
     cli,
-    path: path ?? (cli === 'files' ? null : allocFolder(cleanName)),
+    path: path ?? (cli === 'files' ? null : ''),
     // Stable per-session conversation id. Lets agents that share a folder (a
     // group) each resume their OWN conversation instead of all latching onto
     // the most-recent one in that directory.

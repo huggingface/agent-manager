@@ -38,6 +38,11 @@ type ConnState = 'connecting' | 'connected' | 'closed' | 'exited';
 // respawn the agent in a loop and trample an in-progress login flow.
 const EXIT_CODE = 4000;
 
+function workspaceLabel(p: string | null) {
+  const rel = (p || '').replace(/^\.\/?/, '').replace(/^\/+|\/+$/g, '');
+  return rel ? `workspace/${rel}/` : 'workspace/';
+}
+
 // Serialize the current selection, joining soft-wrapped rows instead of
 // emitting a newline per visual row. tmux repaints with explicit cursor moves,
 // so a wrapped logical line arrives as separate full-width rows that xterm's
@@ -501,6 +506,7 @@ export default function TerminalPane({
 
   // Focused panes tint toward THEIR agent's brand color, not the app accent.
   const tint = cli?.color;
+  const pathLabel = workspaceLabel(session.path);
   return (
     <div
       className={`slot${focused ? ' focused' : ''}`}
@@ -533,7 +539,10 @@ export default function TerminalPane({
         ) : (
           <span className="ph-title" title="Double-click to rename" onDoubleClick={() => { setDraft(session.name); setEditing(true); }}>{session.name}</span>
         )}
+        <div className="ph-right">
+          <span className="ph-path" title={pathLabel}>{pathLabel}</span>
         <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
+        </div>
       </div>
       <div className="term-host" ref={hostRef} />
       {booting && conn !== 'exited' && (

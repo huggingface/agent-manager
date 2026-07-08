@@ -3,6 +3,8 @@ import * as api from '../api';
 import { FolderGlyph } from './icons';
 
 const join = (a: string, b: string) => (a ? `${a}/${b}` : b);
+const ROOT = '.';
+const isRoot = (p: string) => p === '' || p === ROOT;
 // Folder names are typed freely; just strip separators and traversal.
 const cleanName = (s: string) => s.replace(/[/\\]/g, '').replace(/\.\./g, '').trim();
 
@@ -77,30 +79,30 @@ function Level({ path, depth, value, onPick }: {
 }
 
 /**
- * Workspace location picker. `value` is a workspace-relative path; '' means
- * the default (a fresh auto-named folder — or the workspace root for a Files
- * agent). Picking a not-yet-existing folder is fine: the server creates it
- * when the agent is created.
+ * Workspace location picker. `value` is a workspace-relative path; '.' is the
+ * workspace root. Picking a not-yet-existing folder is fine: the server
+ * creates it when the agent is created.
  */
-export default function FolderPicker({ value, autoLabel, onChange }: {
+export default function FolderPicker({ value, onChange }: {
   value: string;
-  autoLabel: string;
   onChange: (p: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const root = isRoot(value);
   return (
     <div className="fp">
       <button className="fp-current" onClick={() => setOpen((o) => !o)} title="Choose where this agent runs">
-        <FolderGlyph className="fp-ico" open={open} />
-        <span className="fp-path">{value || autoLabel}</span>
+        <FolderGlyph className="fp-ico" open={open || root} />
+        <span className="fp-path">{root ? 'workspaces' : value}</span>
         <span className="fp-toggle">{open ? '▾' : '▸'}</span>
       </button>
       {open && (
         <div className="fp-tree">
-          <button className={`fp-row fp-root${value === '' ? ' picked' : ''}`} onClick={() => onChange('')}>
-            {autoLabel}
+          <button className={`fp-row fp-root${root ? ' picked' : ''}`} onClick={() => onChange(ROOT)}>
+            <FolderGlyph className="fp-ico" open />
+            <span>workspaces</span>
           </button>
-          <Level path="" depth={1} value={value} onPick={(p) => { onChange(p); }} />
+          <Level path="" depth={0} value={root ? ROOT : value} onPick={(p) => { onChange(p); }} />
         </div>
       )}
     </div>

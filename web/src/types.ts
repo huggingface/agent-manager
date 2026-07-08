@@ -5,7 +5,7 @@ export interface Session {
   name: string;
   cli: string;
   // Workspace-relative folder the agent runs in. Independent of `name` —
-  // renaming never moves anything on disk. null = the workspace root (Files).
+  // renaming never moves anything on disk. ''/null = the workspace root.
   path: string | null;
   createdAt: string;
   everStarted: boolean;
