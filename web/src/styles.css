@@ -83,8 +83,8 @@ body {
 
 /* header */
 .brand { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 13px 14px; border-bottom: 1px solid var(--border); }
-.brand .logo { display: flex; align-items: center; gap: 9px; min-width: 0; }
-.brand h1 { font-size: 14px; margin: 0; letter-spacing: -0.01em; white-space: nowrap; }
+.brand .logo { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; }
+.brand h1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 14px; margin: 0; letter-spacing: -0.01em; white-space: nowrap; }
 .brand .brand-actions { display: flex; gap: 4px; flex: none; }
 /* AM monogram — the brand mark */
 .am-mark { width: 16px; height: 13.7px; color: var(--accent); flex: none; display: block; }
@@ -410,13 +410,16 @@ body {
 .term-exit .tx-btn svg { width: 13px; height: 13px; }
 .term-exit .tx-btn:hover { text-decoration: underline; }
 
-.pane-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr); align-items: center; gap: 9px; padding: 7px 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
+.pane-head { container-type: inline-size; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr); align-items: center; gap: 9px; padding: 7px 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
 .pane-head .ph-left { grid-column: 1; justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
 .pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; text-align: center; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
 .pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; }
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }
+@container (max-width: 520px) {
+  .pane-head .ph-path { display: none; }
+}
 .slot { transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out; }
 /* fallback focus tint (terminal panes override with their agent's color inline) */
 .slot.focused { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: 0 4px 18px -10px rgba(0, 0, 0, 0.35); }
@@ -651,11 +654,6 @@ a.btn-ghost { text-decoration: none; }
 .qfill { height: 100%; background: var(--accent); border-radius: 999px; }
 .qpct { width: 130px; text-align: right; flex: none; font-variant-numeric: tabular-nums; }
 
-/* narrow desktop */
-@media (min-width: 769px) and (max-width: 900px) {
-  .sidebar { width: 230px; }
-}
-
 /* mobile stage top bar (back + agent chips) — rendered only on mobile */
 .mbar { display: flex; align-items: center; gap: 8px; padding: 0 0 8px; flex: none; }
 .mback { flex: none; font-size: 19px; padding-bottom: 3px; }
@@ -665,7 +663,7 @@ a.btn-ghost { text-decoration: none; }
 .mchip.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 
 /* phones: two full-screen views — the sidebar list, or the selected pane */
-@media (max-width: 768px) {
+@media (max-width: 720px) {
   .app { height: 100dvh; }
   .app.m-home .main { display: none; }
   .app.m-home .sidebar { width: 100%; border-right: none; }
@@ -673,8 +671,8 @@ a.btn-ghost { text-decoration: none; }
   .app.m-stage .main { padding: 8px; }
   /* touch-friendly but not airy */
   .row { padding: 6px 10px; }
-  .tree { padding-top: 2px; }
-  .group { margin: 2px 0; }
+  .tree { padding-top: 6px; }
+  .group { margin: 13px 0 5px; }
   .row .row-actions { opacity: 1; pointer-events: auto; position: static; transform: none; margin-left: 4px; background: transparent; }
   .row .cli-logo, .row .count { opacity: 1 !important; }
   .row .age { display: none; } /* actions are always visible on touch — no room */

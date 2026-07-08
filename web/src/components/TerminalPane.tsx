@@ -537,11 +537,11 @@ export default function TerminalPane({
             onKeyDown={(e) => { if (e.key === 'Enter') commitName(); if (e.key === 'Escape') setEditing(false); }}
           />
         ) : (
-          <span className="ph-title" title="Double-click to rename" onDoubleClick={() => { setDraft(session.name); setEditing(true); }}>{session.name}</span>
+          <span className="ph-title" title={`${pathLabel} · double-click to rename`} onDoubleClick={() => { setDraft(session.name); setEditing(true); }}>{session.name}</span>
         )}
         <div className="ph-right">
           <span className="ph-path" title={pathLabel}>{pathLabel}</span>
-        <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
+          <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
       <div className="term-host" ref={hostRef} />

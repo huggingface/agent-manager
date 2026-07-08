@@ -13,9 +13,9 @@ import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from '.
 
 // Phone-sized viewport: the app becomes two full-screen views (list ⇄ pane).
 function useIsMobile() {
-  const [m, setM] = useState(() => window.matchMedia('(max-width: 768px)').matches);
+  const [m, setM] = useState(() => window.matchMedia('(max-width: 720px)').matches);
   useEffect(() => {
-    const mq = window.matchMedia('(max-width: 768px)');
+    const mq = window.matchMedia('(max-width: 720px)');
     const h = (e: MediaQueryListEvent) => setM(e.matches);
     mq.addEventListener('change', h);
     return () => mq.removeEventListener('change', h);
