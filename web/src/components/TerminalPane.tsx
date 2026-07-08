@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { ClipboardAddon } from '@xterm/addon-clipboard';
+import { ClipboardAddon, Base64 } from '@xterm/addon-clipboard';
 import '@xterm/xterm/css/xterm.css';
 import type { Cli, Session } from '../types';
 import { STATE_LABEL } from '../types';
@@ -70,24 +70,53 @@ function selectionText(term: Terminal): string {
   }
 }
 
-// Write to the system clipboard, falling back to the legacy execCommand path
-// when the async Clipboard API is unavailable or blocked (e.g. lost activation).
-function writeClipboard(text: string) {
+// Copying to the system clipboard has to survive three hostile conditions on
+// the Space: the app is usually embedded in Hugging Face's cross-origin iframe
+// (which blocks the async Clipboard API entirely), the tab is often unfocused,
+// and agent copies (OSC 52) arrive with no user gesture at all. So we layer:
+//   1. execCommand('copy') via a hidden textarea — the ONLY path that works
+//      inside the iframe, and it works during any user gesture.
+//   2. navigator.clipboard.writeText — the modern path (focused, top-level).
+//   3. if both fail (an agent copied while we couldn't write), stash briefly
+//      and flush on the user's next click, so the copy lands when they return.
+// It must run synchronously inside the triggering event — deferring to a
+// setTimeout loses the activation that execCommand needs.
+function legacyCopy(text: string): boolean {
+  const prev = document.activeElement as HTMLElement | null;
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    prev?.focus?.(); // don't steal focus from the terminal
+    return ok;
+  } catch { return false; }
+}
+
+let clipStash: { text: string; at: number } | null = null;
+function copyText(text: string) {
   if (!text) return;
-  const fallback = () => {
-    try {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-    } catch { /* ignore */ }
-  };
-  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).catch(fallback);
-  else fallback();
+  if (legacyCopy(text)) { clipStash = null; return; }
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(() => { clipStash = null; }).catch(() => { clipStash = { text, at: Date.now() }; });
+  } else {
+    clipStash = { text, at: Date.now() };
+  }
+}
+// A copy we couldn't complete (typically an agent's OSC 52 with no gesture and
+// no focus) lands on the next real interaction — bounded so a stale copy can't
+// clobber the clipboard much later.
+if (typeof window !== 'undefined') {
+  window.addEventListener('pointerdown', () => {
+    if (clipStash && Date.now() - clipStash.at < 8000) legacyCopy(clipStash.text);
+    clipStash = null;
+  }, true);
 }
 
 export default function TerminalPane({
@@ -136,18 +165,29 @@ export default function TerminalPane({
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    term.loadAddon(new ClipboardAddon()); // honour OSC 52 → system clipboard
+    // OSC 52 (agent / tmux) → system clipboard, routed through the layered
+    // writer so it survives the iframe / no-gesture case (the stock provider
+    // only tries navigator.clipboard and drops the copy silently there).
+    const clipboardProvider = {
+      readText: (sel: string) => (sel === 'c' && navigator.clipboard?.readText ? navigator.clipboard.readText().catch(() => '') : ''),
+      writeText: (sel: string, data: string) => { if (sel === 'c') copyText(data); },
+    };
+    // addon-clipboard@0.1.0 has a (base64, provider) runtime constructor but
+    // types it as (provider) — construct positionally to match the runtime.
+    term.loadAddon(new (ClipboardAddon as unknown as new (b: Base64, p: typeof clipboardProvider) => ClipboardAddon)(new Base64(), clipboardProvider));
     term.open(hostRef.current!);
     termRef.current = term;
 
-    // Copy any selection to the system clipboard. Selections happen via the
-    // local-selection gesture above (any pane) or tmux drag-select (shell pane,
-    // which also fires OSC 52 handled by the ClipboardAddon).
+    // Track the committed selection as it changes so mouseup can copy it
+    // SYNCHRONOUSLY — deferring (setTimeout) would break execCommand's gesture.
+    let lastSelection = '';
+    const selSub = term.onSelectionChange(() => { lastSelection = term.hasSelection() ? selectionText(term) : ''; });
     const copySelection = () => {
-      if (term.hasSelection()) writeClipboard(selectionText(term));
+      const text = term.hasSelection() ? selectionText(term) : lastSelection;
+      if (text) copyText(text);
     };
     const host = hostRef.current!;
-    const onMouseUp = () => setTimeout(copySelection, 0);
+    const onMouseUp = () => { if (lastSelection) copyText(lastSelection); };
     host.addEventListener('mouseup', onMouseUp);
 
     // ⌘/Ctrl+C copies the selection (and swallows the keystroke) only when text
@@ -311,6 +351,7 @@ export default function TerminalPane({
       document.removeEventListener('visibilitychange', onVisible);
       dataSub.dispose();
       keySub.dispose();
+      selSub.dispose();
       try { ws?.close(); } catch { /* ignore */ }
       term.dispose();
       termRef.current = null;
