@@ -12,7 +12,7 @@ import {
 import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
-import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput } from './runner.js';
+import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection } from './runner.js';
 import { buildUsage } from './usage.js';
 import { buildTraces, traceDigests } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
@@ -746,6 +746,10 @@ wss.on('connection', (ws, req) => {
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.t === 'i') handle.write(msg.d);
     else if (msg.t === 'r') handle.resize(msg.cols, msg.rows);
+    else if (msg.t === 'copy') {
+      const osc52 = copySelection(session.id);
+      if (osc52 && ws.readyState === ws.OPEN) ws.send(osc52);
+    }
   });
 
   ws.on('close', () => handle.kill());

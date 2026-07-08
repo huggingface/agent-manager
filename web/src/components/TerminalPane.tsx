@@ -70,17 +70,46 @@ function selectionText(term: Terminal): string {
   }
 }
 
-// Copying to the system clipboard has to survive three hostile conditions on
-// the Space: the app is usually embedded in Hugging Face's cross-origin iframe
-// (which blocks the async Clipboard API entirely), the tab is often unfocused,
-// and agent copies (OSC 52) arrive with no user gesture at all. So we layer:
+// Copying to the system clipboard has to survive two hostile conditions on the
+// Space: the app is usually embedded in Hugging Face's cross-origin iframe
+// (which blocks the async Clipboard API entirely), and the tab is often
+// unfocused. So explicit user copies layer:
 //   1. execCommand('copy') via a hidden textarea — the ONLY path that works
 //      inside the iframe, and it works during any user gesture.
 //   2. navigator.clipboard.writeText — the modern path (focused, top-level).
-//   3. if both fail (an agent copied while we couldn't write), stash briefly
+//   3. if both fail (a requested copy couldn't write), stash briefly
 //      and flush on the user's next click, so the copy lands when they return.
 // It must run synchronously inside the triggering event — deferring to a
 // setTimeout loses the activation that execCommand needs.
+// Temporary on-screen diagnostics (enable with ?clipdebug in the URL). Prints
+// each clipboard step so we can see, in a real browser, exactly where copy
+// fails. Never active without the flag.
+const CLIP_DEBUG = typeof location !== 'undefined' && location.search.includes('clipdebug');
+const OSC52_COPY_WINDOW_MS = 1500;
+let osc52CopyAllowedUntil = 0;
+function clipDebug(msg: string) {
+  if (!CLIP_DEBUG) return;
+  let el = document.getElementById('clip-debug');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'clip-debug';
+    el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99999;max-width:520px;max-height:40vh;overflow:auto;background:#000c;color:#5fe0a0;font:11px ui-monospace,monospace;padding:8px 10px;border:1px solid #2fb7c1;border-radius:6px;white-space:pre-wrap;pointer-events:none';
+    document.body.appendChild(el);
+  }
+  const t = new Date().toLocaleTimeString();
+  el.textContent = `${t}  ${msg}\n${el.textContent}`.split('\n').slice(0, 20).join('\n');
+}
+
+function allowNextOsc52Copy() {
+  osc52CopyAllowedUntil = Date.now() + OSC52_COPY_WINDOW_MS;
+}
+
+function consumeOsc52CopyPermission(): boolean {
+  if (Date.now() > osc52CopyAllowedUntil) return false;
+  osc52CopyAllowedUntil = 0;
+  return true;
+}
+
 function legacyCopy(text: string): boolean {
   const prev = document.activeElement as HTMLElement | null;
   try {
@@ -95,23 +124,27 @@ function legacyCopy(text: string): boolean {
     const ok = document.execCommand('copy');
     document.body.removeChild(ta);
     prev?.focus?.(); // don't steal focus from the terminal
+    clipDebug(`execCommand copy -> ${ok}`);
     return ok;
-  } catch { return false; }
+  } catch (e) { clipDebug(`execCommand threw: ${(e as Error).message}`); return false; }
 }
 
 let clipStash: { text: string; at: number } | null = null;
 function copyText(text: string) {
   if (!text) return;
+  clipDebug(`copyText(${JSON.stringify(text.slice(0, 30))}${text.length > 30 ? '…' : ''}) len=${text.length}`);
   if (legacyCopy(text)) { clipStash = null; return; }
   if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text).then(() => { clipStash = null; }).catch(() => { clipStash = { text, at: Date.now() }; });
+    navigator.clipboard.writeText(text)
+      .then(() => { clipStash = null; clipDebug('navigator.clipboard.writeText -> OK'); })
+      .catch((e) => { clipStash = { text, at: Date.now() }; clipDebug(`writeText REJECT: ${e.name} (stashed)`); });
   } else {
     clipStash = { text, at: Date.now() };
+    clipDebug('no navigator.clipboard (stashed)');
   }
 }
-// A copy we couldn't complete (typically an agent's OSC 52 with no gesture and
-// no focus) lands on the next real interaction — bounded so a stale copy can't
-// clobber the clipboard much later.
+// A user-requested copy we couldn't complete lands on the next real interaction
+// — bounded so a stale copy can't clobber the clipboard much later.
 if (typeof window !== 'undefined') {
   window.addEventListener('pointerdown', () => {
     if (clipStash && Date.now() - clipStash.at < 8000) legacyCopy(clipStash.text);
@@ -165,12 +198,26 @@ export default function TerminalPane({
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
-    // OSC 52 (agent / tmux) → system clipboard, routed through the layered
-    // writer so it survives the iframe / no-gesture case (the stock provider
-    // only tries navigator.clipboard and drops the copy silently there).
+
+    let lastSelection = '';
+    let tmuxSelectionPending = false;
+    let tmuxSelectionText = '';
+    let tmuxSelectionAt = 0;
+
+    // tmux emits OSC 52 when copy-mode commits a mouse selection. Do not write
+    // the system clipboard there; stash the decoded text and wait for Cmd/C.
     const clipboardProvider = {
-      readText: (sel: string) => (sel === 'c' && navigator.clipboard?.readText ? navigator.clipboard.readText().catch(() => '') : ''),
-      writeText: (sel: string, data: string) => { if (sel === 'c') copyText(data); },
+      readText: (sel: string) => (sel !== 'p' && navigator.clipboard?.readText ? navigator.clipboard.readText().catch(() => '') : ''),
+      writeText: (sel: string, data: string) => {
+        const allowed = sel !== 'p' && consumeOsc52CopyPermission();
+        if (sel !== 'p') {
+          tmuxSelectionText = data;
+          tmuxSelectionAt = Date.now();
+          tmuxSelectionPending = true;
+        }
+        clipDebug(`OSC52 received (sel=${sel || '∅'}, ${data.length} chars, ${allowed ? 'copy' : 'stashed'})`);
+        if (allowed) copyText(data);
+      },
     };
     // addon-clipboard@0.1.0 has a (base64, provider) runtime constructor but
     // types it as (provider) — construct positionally to match the runtime.
@@ -178,44 +225,112 @@ export default function TerminalPane({
     term.open(hostRef.current!);
     termRef.current = term;
 
-    // Track the committed selection as it changes so mouseup can copy it
-    // SYNCHRONOUSLY — deferring (setTimeout) would break execCommand's gesture.
-    let lastSelection = '';
-    const selSub = term.onSelectionChange(() => { lastSelection = term.hasSelection() ? selectionText(term) : ''; });
+    // Track the committed local xterm selection so Cmd/Ctrl+C can copy it
+    // synchronously — deferring (setTimeout) would break execCommand's gesture.
+    const selSub = term.onSelectionChange(() => {
+      lastSelection = term.hasSelection() ? selectionText(term) : '';
+      if (lastSelection) tmuxSelectionPending = false;
+      clipDebug(`onSelectionChange: hasSelection=${term.hasSelection()} len=${lastSelection.length}`);
+    });
     const copySelection = () => {
       const text = term.hasSelection() ? selectionText(term) : lastSelection;
       if (text) copyText(text);
     };
+    const copyTmuxSelection = (e?: ClipboardEvent): boolean => {
+      const fresh = tmuxSelectionText && Date.now() - tmuxSelectionAt < 120_000;
+      if (!tmuxSelectionPending || !fresh) return false;
+      if (e?.clipboardData) {
+        e.clipboardData.setData('text/plain', tmuxSelectionText);
+        e.preventDefault();
+        e.stopPropagation();
+        clipDebug(`browser copy event wrote tmux selection len=${tmuxSelectionText.length}`);
+      } else {
+        copyText(tmuxSelectionText);
+        clipDebug(`copied stashed tmux selection len=${tmuxSelectionText.length}`);
+      }
+      return true;
+    };
     const host = hostRef.current!;
-    const onMouseUp = () => { if (lastSelection) copyText(lastSelection); };
-    host.addEventListener('mouseup', onMouseUp);
+    let mouseDragStart: { x: number; y: number } | null = null;
+    let mouseDragged = false;
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.pointerType !== 'mouse' || e.button !== 0) return;
+      mouseDragStart = { x: e.clientX, y: e.clientY };
+      mouseDragged = false;
+    };
+    const onPointerMove = (e: PointerEvent) => {
+      if (!mouseDragStart || (e.buttons & 1) === 0) return;
+      if (Math.abs(e.clientX - mouseDragStart.x) > 3 || Math.abs(e.clientY - mouseDragStart.y) > 3) mouseDragged = true;
+    };
+    const onPointerUp = (e: PointerEvent) => {
+      if (e.pointerType !== 'mouse' || e.button !== 0) return;
+      if (mouseDragged && !term.hasSelection()) {
+        tmuxSelectionPending = true;
+        clipDebug('tmux mouse selection pending');
+      } else if (!term.hasSelection()) {
+        tmuxSelectionPending = false;
+      }
+      mouseDragStart = null;
+      mouseDragged = false;
+    };
+    const onClick = (e: MouseEvent) => {
+      if (e.detail >= 2 && !term.hasSelection()) {
+        tmuxSelectionPending = true;
+        clipDebug('tmux click selection pending');
+      }
+    };
+    host.addEventListener('pointerdown', onPointerDown, true);
+    host.addEventListener('pointermove', onPointerMove, true);
+    host.addEventListener('pointerup', onPointerUp, true);
+    host.addEventListener('click', onClick, true);
 
-    // ⌘/Ctrl+C copies the selection (and swallows the keystroke) only when text
-    // is selected; otherwise it falls through as the usual interrupt. Paste is
-    // left to xterm's native handler so bracketed-paste framing is preserved.
+    const onDocumentPointerDown = (e: PointerEvent) => {
+      if (!host.contains(e.target as Node)) tmuxSelectionPending = false;
+    };
+    const onCopy = (e: ClipboardEvent) => {
+      copyTmuxSelection(e);
+    };
+    document.addEventListener('pointerdown', onDocumentPointerDown, true);
+    document.addEventListener('copy', onCopy, true);
+
+    let ws: WebSocket | null = null;
+    const send = (o: unknown) => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o));
+    };
+
+    // ⌘/Ctrl+C copies selected text. With a tmux mouse selection, ask the server
+    // to run tmux's copy command; the resulting OSC 52 is accepted only because
+    // it follows this key gesture. Paste is left to xterm's native handler so
+    // bracketed-paste framing is preserved.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
       if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C') && term.hasSelection()) {
         copySelection();
         term.clearSelection();
+        tmuxSelectionPending = false;
         return false;
       }
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C') && tmuxSelectionPending) {
+        if (!copyTmuxSelection()) {
+          allowNextOsc52Copy();
+          send({ t: 'copy' });
+          clipDebug('Cmd/Ctrl+C requested tmux copy fallback');
+        }
+        return false;
+      }
+      if (e.metaKey && (e.key === 'c' || e.key === 'C')) return false;
+      if (e.key === 'Escape') tmuxSelectionPending = false;
       return true;
     });
     try { fit.fit(); } catch { /* layout not ready yet */ }
     // Re-measure once the webfont is ready (glyph width changes vs the fallback).
     document.fonts?.ready.then(() => { try { fit.fit(); } catch { /* ignore */ } });
 
-    let ws: WebSocket | null = null;
     let closedByUs = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
     // Reconnect with backoff: a sleeping/unreachable Space shouldn't be hammered
     // every second by every open pane. Reset once a connection succeeds.
     let retryDelay = 1200;
-
-    const send = (o: unknown) => {
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o));
-    };
 
     // Does the visible screen show real text in its UPPER two-thirds? Agent
     // TUIs paint their bottom input bar first and load the actual content
@@ -343,7 +458,12 @@ export default function TerminalPane({
       if (bootTimer) clearTimeout(bootTimer);
       if (bootCheck) clearTimeout(bootCheck);
       ro.disconnect();
-      host.removeEventListener('mouseup', onMouseUp);
+      host.removeEventListener('pointerdown', onPointerDown, true);
+      host.removeEventListener('pointermove', onPointerMove, true);
+      host.removeEventListener('pointerup', onPointerUp, true);
+      host.removeEventListener('click', onClick, true);
+      document.removeEventListener('pointerdown', onDocumentPointerDown, true);
+      document.removeEventListener('copy', onCopy, true);
       host.removeEventListener('touchstart', onTouchStart);
       host.removeEventListener('touchmove', onTouchMove);
       host.removeEventListener('touchend', onTouchEnd);

@@ -340,6 +340,24 @@ export function sendInput(id, text) {
   set.values().next().value.write(`${text}\r`);
 }
 
+/** Return the last mouse selection for this session as a browser-consumable OSC 52. */
+export function copySelection(id) {
+  if (!USE_TMUX) return null;
+  const bufferName = `am-copy-${tmuxName(id)}`;
+  let text = '';
+  try {
+    text = execFileSync('tmux', ['save-buffer', '-b', bufferName, '-'], { encoding: 'utf8', env: TERM_ENV });
+  } catch {
+    try {
+      text = execFileSync('tmux', ['save-buffer', '-'], { encoding: 'utf8', env: TERM_ENV });
+    } catch {
+      return null;
+    }
+  }
+  if (!text) return null;
+  return `\x1b]52;c;${Buffer.from(text, 'utf8').toString('base64')}\x07`;
+}
+
 /** Stop a session entirely (kills the tmux session / the running process). */
 export function stop(id) {
   if (USE_TMUX) {
