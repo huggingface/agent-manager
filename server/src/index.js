@@ -203,7 +203,20 @@ app.get('/api/info', (_req, res) => res.json({
   // While public, /api/info stays reachable (the Locked page needs it) — don't
   // advertise which credentials exist to the whole internet.
   secrets: isPublic() ? [] : injectedEnvKeys(),
+  // First-run welcome: shown once per Space (flag persists on the bucket).
+  welcomeSeen: welcomeSeen(),
 }));
+
+// First-run welcome flag, persisted on the bucket so it's once-per-Space, not
+// once-per-browser.
+const WELCOME_FILE = path.join(DATA_DIR, 'welcome-seen.json');
+function welcomeSeen() {
+  try { return !!JSON.parse(fs.readFileSync(WELCOME_FILE, 'utf8')).seen; } catch { return false; }
+}
+app.post('/api/welcome/seen', (_req, res) => {
+  try { fs.writeFileSync(WELCOME_FILE, JSON.stringify({ seen: true, at: new Date().toISOString() })); } catch {}
+  res.json({ ok: true });
+});
 
 // Factory-reboot the Space: rebuilds the image (reinstalling the CLIs at their
 // latest published versions, per the Dockerfile) and relaunches everything.

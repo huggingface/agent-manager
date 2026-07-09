@@ -44,6 +44,8 @@ export const move = (ref: string, to: MoveTarget) =>
 
 export const getInfo = () => fetch('/api/info').then(json);
 
+export const dismissWelcome = () => fetch('/api/welcome/seen', { method: 'POST' }).then(json);
+
 export const relaunchSpace = (): Promise<{ ok: boolean; reason?: string }> =>
   fetch('/api/relaunch', { method: 'POST' }).then(json);
 

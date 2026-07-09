@@ -118,7 +118,7 @@ function PushRow() {
 }
 
 export default function SettingsView({
-  page, onPage, onClose, theme, onToggleTheme, clis, info,
+  page, onPage, onClose, theme, onToggleTheme, clis, info, onShowWelcome,
 }: {
   page: Page;
   onPage: (p: Page) => void;
@@ -127,6 +127,7 @@ export default function SettingsView({
   onToggleTheme: () => void;
   clis: Cli[];
   info: Info | null;
+  onShowWelcome?: () => void;
 }) {
   const [relaunch, setRelaunch] = useState<{ busy?: boolean; msg?: string; confirm?: boolean }>({});
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
@@ -187,6 +188,13 @@ export default function SettingsView({
               <div><div className="s-label">Theme</div><div className="s-help">Defaults to your system setting.</div></div>
               <button className="btn-ghost" onClick={onToggleTheme}>{theme === 'dark' ? <><MoonGlyph /> Dark</> : <><SunGlyph /> Light</>}</button>
             </div>
+
+            {onShowWelcome && (
+              <div className="setting-row">
+                <div><div className="s-label">Welcome guide</div><div className="s-help">A quick tour of how the tool works.</div></div>
+                <button className="btn-ghost" onClick={onShowWelcome}>Show guide</button>
+              </div>
+            )}
 
             <h3>Agents</h3>
             <div className="s-help">A coloured dot means the agent is configured and ready. Log in once inside a session (or set a key as a Space secret) — credentials persist on the bucket across restarts and all sessions.</div>

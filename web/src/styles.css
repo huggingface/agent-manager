@@ -410,6 +410,25 @@ body {
 .term-exit .tx-btn svg { width: 13px; height: 13px; }
 .term-exit .tx-btn:hover { text-decoration: underline; }
 
+/* first-run welcome card */
+.welcome-backdrop { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center; padding: 20px; background: color-mix(in srgb, #000 55%, transparent); backdrop-filter: blur(3px); animation: rise-in 0.16s ease-out; }
+.welcome-card { width: 100%; max-width: 460px; max-height: 88vh; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 22px; box-shadow: 0 24px 60px rgb(0 0 0 / 0.35); }
+.welcome-head { display: flex; align-items: flex-start; gap: 13px; }
+.welcome-mark { flex: none; width: 34px; height: 34px; border-radius: var(--r-lg); background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; }
+.welcome-mark svg { width: 20px; height: auto; }
+.welcome-head h2 { margin: 0; font-size: 17px; }
+.welcome-head p { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.welcome-items { display: flex; flex-direction: column; gap: 14px; }
+.welcome-item { display: flex; gap: 12px; }
+.welcome-ico { flex: none; width: 22px; height: 22px; border-radius: var(--r-md); background: var(--panel-2); border: 1px solid var(--border); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; margin-top: 1px; }
+.welcome-ico svg { width: 14px; height: 14px; }
+.welcome-item-title { font-size: 13.5px; font-weight: 600; margin-bottom: 2px; }
+.welcome-item-body { font-size: 12.5px; color: var(--muted); line-height: 1.55; }
+.welcome-item-body b { color: var(--text); font-weight: 600; }
+.welcome-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 2px; }
+.welcome-reopen { font-size: 11px; color: var(--muted); }
+.welcome-foot .btn-primary { flex: none; padding: 8px 18px; }
+
 .pane-head { container-type: inline-size; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr); align-items: center; gap: 9px; padding: 7px 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
 .pane-head .ph-left { grid-column: 1; justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
 .pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; text-align: center; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }

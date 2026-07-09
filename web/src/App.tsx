@@ -8,6 +8,7 @@ import LayoutPicker from './components/LayoutPicker';
 import Logo from './components/Logo';
 import Overview from './components/Overview';
 import Locked from './components/Locked';
+import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
 
@@ -51,6 +52,8 @@ export default function App() {
   const [dropMain, setDropMain] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsPage, setSettingsPage] = useState<SettingsPage>('general');
+  // First-run welcome: null until /api/info loads; true when reopened manually.
+  const [showWelcome, setShowWelcome] = useState(false);
   const [zoom, setZoom] = useState<number>(() => {
     const z = parseInt(localStorage.getItem('am-zoom') || '100', 10);
     return Number.isFinite(z) ? z : 100;
@@ -85,6 +88,17 @@ export default function App() {
     return () => clearInterval(t);
   }, [info?.locked]);
   useEffect(() => { localStorage.setItem('am-zoom', String(zoom)); }, [zoom]);
+
+  // Show the first-run welcome once /api/info reports it hasn't been seen.
+  useEffect(() => {
+    if (info && !info.locked && info.welcomeSeen === false) setShowWelcome(true);
+  }, [info?.welcomeSeen, info?.locked]);
+  const dismissWelcome = () => {
+    setShowWelcome(false);
+    setInfo((i) => (i ? { ...i, welcomeSeen: true } : i));
+    api.dismissWelcome().catch(() => {});
+  };
+  const openWelcome = () => { setSettingsOpen(false); setShowWelcome(true); };
 
   const refresh = useCallback(async () => {
     try { setTree(await api.getTree()); } catch { /* offline */ }
@@ -358,12 +372,14 @@ export default function App() {
         onToggleTheme={toggleTheme}
         clis={clis}
         info={info}
+        onShowWelcome={openWelcome}
       />
     );
   }
 
   return (
     <div className={`app${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
+      {showWelcome && <Welcome onClose={dismissWelcome} />}
       <Sidebar
         clis={clis}
         tree={tree}

@@ -128,6 +128,19 @@ export const AmMark = ({ className }: { className?: string }) => (
   </svg>
 );
 
+export const KeyGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <circle cx="5.4" cy="5.4" r="2.9" />
+    <path d="M7.5 7.5l5 5M11 11l1.4-1.4M9.4 9.4l1.4-1.4" />
+  </G>
+);
+
+export const BellGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M4 11.2V7.2a4 4 0 0 1 8 0v4M2.8 11.2h10.4M6.6 13.4a1.6 1.6 0 0 0 2.8 0" />
+  </G>
+);
+
 export const InfoGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <circle cx="8" cy="8" r="6.2" />
