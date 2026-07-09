@@ -135,7 +135,14 @@ function parseCodex(txt) {
     let j; try { j = JSON.parse(line); } catch { continue; }
     if (j.timestamp) addTs(st, j.timestamp);
     const p = j.payload || {};
-    if (j.type === 'session_meta' && p.cwd) st.cwd = p.cwd; // for cwd-fallback attribution
+    if (j.type === 'session_meta') {
+      if (p.cwd) st.cwd = p.cwd; // for cwd-fallback attribution
+      // Codex >=0.142 spawns internal "guardian" safety-judge subagents whose
+      // rollouts share the session's cwd. They aren't the user's conversation —
+      // flag them so build() skips attribution (they'd otherwise pollute or
+      // blank out the Overview digest).
+      if (p.thread_source === 'subagent' || (p.source && p.source.subagent)) st.subagent = true;
+    }
     if (j.type === 'response_item') {
       switch (p.type) {
         case 'message':
@@ -537,6 +544,7 @@ async function build() {
     seenFiles.add(p);
     const parsed = await statsFor(p, parseCodex);
     if (!parsed) continue;
+    if (parsed.stats.subagent) continue; // Codex guardian subagent — not the user's thread
     const m = path.basename(p).match(UUID_RE);
     let session = m ? byCodexId.get(m[1]) : null;
     if (!session && parsed.stats.cwd) {

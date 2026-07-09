@@ -164,14 +164,35 @@ function tryCaptureCodexId(sessionId, workdir, sinceMs) {
     if (!m || claimed.has(m[1])) continue;
     let meta;
     try { meta = JSON.parse(firstLine(c.p)); } catch { continue; }
-    if ((meta && meta.payload && meta.payload.cwd) !== workdir) continue;
+    const mp = (meta && meta.payload) || {};
+    if (mp.cwd !== workdir) continue;
+    // Skip Codex's internal guardian/subagent rollouts — they share the cwd but
+    // aren't this agent's conversation, so pinning one would break resume and
+    // the Overview digest.
+    if (mp.thread_source === 'subagent' || (mp.source && mp.source.subagent)) continue;
     update(sessionId, { codexSessionId: m[1], codexRollout: c.p });
     return true;
   }
   return false;
 }
 
+// A pin captured before subagents were filtered out (or one whose rollout was
+// rotated away) may point at a guardian/missing rollout — clear it so we
+// re-capture the real conversation on this launch.
+function pinIsStale(session) {
+  if (!session.codexSessionId) return false;
+  const p = session.codexRollout;
+  if (!p || !fs.existsSync(p)) return true;
+  try {
+    const mp = (JSON.parse(firstLine(p)) || {}).payload || {};
+    return mp.thread_source === 'subagent' || !!(mp.source && mp.source.subagent);
+  } catch { return false; }
+}
+
 function scheduleCodexCapture(session, workdir) {
+  if (session.codexSessionId && pinIsStale(session)) {
+    session = update(session.id, { codexSessionId: undefined, codexRollout: undefined }) || session;
+  }
   if (session.codexSessionId || codexCapturing.has(session.id)) return;
   codexCapturing.add(session.id);
   const since = Date.now() - 2000;
