@@ -12,6 +12,7 @@ import {
 import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
+import * as demo from './demo.js';
 import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection } from './runner.js';
 import { buildUsage } from './usage.js';
 import { buildTraces, traceDigests } from './traces.js';
@@ -23,6 +24,7 @@ refreshVersions();
 store.init();
 groups.init();
 order.init();
+demo.init();
 
 // One-time migration to the explicit-path model: sessions used to own a folder
 // named after them (renamed along with them), or inherit their group's shared
@@ -141,8 +143,10 @@ app.post('/api/notify', async (req, res) => {
 // Overview cards: every agent's state + what it did since your last prompt.
 app.get('/api/meta', async (_req, res) => {
   const digests = await traceDigests();
+  const hs = demo.active() ? demo.hiddenSessions() : null;
   const sessions = sessionsWithState()
     .filter((s) => s.cli !== 'files' && s.cli !== 'shell')
+    .filter((s) => !hs || !hs.has(s.id))
     .map((s) => {
       const d = digests.get(s.id);
       if (d) { const { _ts, ...digest } = d; return { ...s, digest }; }
@@ -215,7 +219,18 @@ app.get('/api/info', (_req, res) => res.json({
   bucketUnverified: !isPublic() && !!visibility().bucketUnverified,
   // First-run welcome: shown once per Space (flag persists on the bucket).
   welcomeSeen: welcomeSeen(),
+  // Demo mode: current sessions hidden from view; forces the welcome to show.
+  demoMode: demo.active(),
 }));
+
+// Demo mode toggle. Activating snapshots the current sessions/groups as the
+// hidden set; deactivating clears it. Nothing is deleted either way.
+app.post('/api/demo', (req, res) => {
+  const on = !!(req.body || {}).active;
+  if (on) demo.activate(store.list().map((s) => s.id), groups.list().map((g) => g.id));
+  else demo.deactivate();
+  res.json({ ok: true, active: demo.active() });
+});
 
 // First-run welcome flag, persisted on the bucket so it's once-per-Space, not
 // once-per-browser.
@@ -554,8 +569,8 @@ function sessionsWithState() {
 
 // The whole sidebar tree in one call: ordered refs + groups + sessions(+state).
 app.get('/api/tree', (_req, res) => {
-  const sessions = sessionsWithState();
-  const groupList = groups.list();
+  let sessions = sessionsWithState();
+  let groupList = groups.list();
   const groupedIds = new Set(groupList.flatMap((g) => g.sessionIds));
   const loose = store.list().filter((s) => !groupedIds.has(s.id));
   const refsMeta = [
@@ -563,7 +578,19 @@ app.get('/api/tree', (_req, res) => {
     ...loose.map((s) => ({ ref: `s:${s.id}`, t: s.createdAt })),
   ].sort((a, b) => (a.t < b.t ? 1 : a.t > b.t ? -1 : 0)); // newest first
   order.normalize(refsMeta.map((x) => x.ref));
-  res.json({ order: order.list(), groups: groupList, sessions });
+  let orderList = order.list();
+  // Demo mode hides the snapshotted sessions/groups from the view (sessions
+  // created after activation aren't in the snapshot, so they show through).
+  if (demo.active()) {
+    const hs = demo.hiddenSessions(), hg = demo.hiddenGroups();
+    sessions = sessions.filter((s) => !hs.has(s.id));
+    groupList = groupList
+      .map((g) => ({ ...g, sessionIds: g.sessionIds.filter((id) => !hs.has(id)) }))
+      .filter((g) => !hg.has(g.id));
+    orderList = orderList.filter((ref) =>
+      ref.startsWith('g:') ? !hg.has(ref.slice(2)) : !hs.has(ref.slice(2)));
+  }
+  res.json({ order: orderList, groups: groupList, sessions });
 });
 
 // Backwards-compatible flat list (used by probes/tests).

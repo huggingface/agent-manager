@@ -118,7 +118,7 @@ function PushRow() {
 }
 
 export default function SettingsView({
-  page, onPage, onClose, theme, onToggleTheme, clis, info, onShowWelcome,
+  page, onPage, onClose, theme, onToggleTheme, clis, info, onShowWelcome, demoMode, onToggleDemo,
 }: {
   page: Page;
   onPage: (p: Page) => void;
@@ -128,6 +128,8 @@ export default function SettingsView({
   clis: Cli[];
   info: Info | null;
   onShowWelcome?: () => void;
+  demoMode?: boolean;
+  onToggleDemo?: () => void;
 }) {
   const [relaunch, setRelaunch] = useState<{ busy?: boolean; msg?: string; confirm?: boolean }>({});
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
@@ -193,6 +195,18 @@ export default function SettingsView({
               <div className="setting-row">
                 <div><div className="s-label">Welcome guide</div><div className="s-help">A quick tour of how the tool works.</div></div>
                 <button className="btn-ghost" onClick={onShowWelcome}>Show guide</button>
+              </div>
+            )}
+
+            {onToggleDemo && (
+              <div className="setting-row">
+                <div>
+                  <div className="s-label">Demo mode{demoMode && <span className="save-flag">on</span>}</div>
+                  <div className="s-help">Hides your current sessions from the sidebar so the Space looks fresh. Nothing is deleted, logins and secrets stay valid, and anything you start while it's on stays visible. Turn it off to bring everything back.</div>
+                </div>
+                <button className={demoMode ? 'btn-primary' : 'btn-ghost'} onClick={onToggleDemo}>
+                  {demoMode ? 'Deactivate demo mode' : 'Start demo mode'}
+                </button>
               </div>
             )}
 

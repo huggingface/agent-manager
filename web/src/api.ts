@@ -46,6 +46,9 @@ export const getInfo = () => fetch('/api/info').then(json);
 
 export const dismissWelcome = () => fetch('/api/welcome/seen', { method: 'POST' }).then(json);
 
+export const setDemo = (active: boolean): Promise<{ ok: boolean; active: boolean }> =>
+  fetch('/api/demo', { method: 'POST', headers: HEADERS, body: JSON.stringify({ active }) }).then(json);
+
 export const relaunchSpace = (): Promise<{ ok: boolean; reason?: string }> =>
   fetch('/api/relaunch', { method: 'POST' }).then(json);
 

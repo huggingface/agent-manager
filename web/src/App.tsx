@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
 import FilesPane from './components/FilesPane';
@@ -92,16 +92,33 @@ export default function App() {
   }, [info?.locked]);
   useEffect(() => { localStorage.setItem('am-zoom', String(zoom)); }, [zoom]);
 
-  // Show the first-run welcome once /api/info reports it hasn't been seen.
+  // Show the welcome once, when /api/info first loads: on first run (never seen)
+  // or whenever demo mode is active (so the Space reads like a fresh install).
+  // Fires once so dismissing it during a demo doesn't make it re-pop.
+  const welcomeBoot = useRef(false);
   useEffect(() => {
-    if (info && !info.locked && info.welcomeSeen === false) setShowWelcome(true);
-  }, [info?.welcomeSeen, info?.locked]);
+    if (!info || welcomeBoot.current) return;
+    welcomeBoot.current = true;
+    if (!info.locked && (info.welcomeSeen === false || info.demoMode)) setShowWelcome(true);
+  }, [info]);
   const dismissWelcome = () => {
     setShowWelcome(false);
     setInfo((i) => (i ? { ...i, welcomeSeen: true } : i));
     api.dismissWelcome().catch(() => {});
   };
   const openWelcome = () => { setSettingsOpen(false); setShowWelcome(true); };
+  // Demo mode: hide current sessions from view (nothing is deleted). Toggling
+  // off restores the full sidebar. Turning it on shows the welcome; off hides it.
+  const toggleDemo = async () => {
+    const next = !info?.demoMode;
+    try {
+      const r = await api.setDemo(next);
+      setInfo((i) => (i ? { ...i, demoMode: r.active } : i));
+      setSettingsOpen(false);
+      await refresh();
+      setShowWelcome(next);
+    } catch (e) { showErr('Couldn’t toggle demo mode')(e); }
+  };
 
   const refresh = useCallback(async () => {
     try { setTree(await api.getTree()); } catch { /* offline */ }
@@ -380,6 +397,8 @@ export default function App() {
         clis={clis}
         info={info}
         onShowWelcome={openWelcome}
+        demoMode={!!info?.demoMode}
+        onToggleDemo={toggleDemo}
       />
     );
   }
