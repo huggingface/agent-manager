@@ -418,7 +418,25 @@ body {
 
 /* first-run welcome card */
 .welcome-backdrop { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center; padding: 20px; background: color-mix(in srgb, #000 55%, transparent); backdrop-filter: blur(3px); animation: rise-in 0.16s ease-out; }
-.welcome-card { width: 100%; max-width: 460px; max-height: 88vh; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 22px; box-shadow: 0 24px 60px rgb(0 0 0 / 0.35); }
+.welcome-card { width: 100%; max-width: 560px; max-height: 88vh; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 22px; box-shadow: 0 24px 60px rgb(0 0 0 / 0.35); }
+
+/* how-it-connects diagram (hidden on narrow screens where labels get too small) */
+.welcome-diagram { width: 100%; margin: 2px 0; }
+.welcome-diagram svg { width: 100%; height: auto; display: block; }
+.wd-zone { fill: var(--muted); font: 600 9px var(--font-sans); letter-spacing: 0.13em; text-transform: uppercase; }
+.wd-lbl { fill: var(--text); font: 600 11px var(--font-sans); }
+.wd-lbl-sm { fill: var(--muted); font: 10px var(--font-mono); }
+.wd-hlbl { fill: var(--text); font: 600 11px var(--font-sans); }
+.wd-node { fill: var(--panel-2); stroke: var(--border-strong); stroke-width: 1; }
+.wd-hub { fill: color-mix(in srgb, var(--accent) 12%, var(--panel-2)); stroke: color-mix(in srgb, var(--accent) 55%, var(--border)); stroke-width: 1.5; }
+.wd-am { fill: var(--accent); }
+.wd-link { fill: none; stroke: color-mix(in srgb, var(--accent) 50%, var(--border-strong)); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.wd-dev { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-linecap: round; }
+.wd-screen { fill: color-mix(in srgb, var(--accent) 16%, var(--panel-2)); stroke: color-mix(in srgb, var(--accent) 32%, var(--border-strong)); }
+.wd-glyph { fill: var(--muted); }
+[data-theme="dark"] .welcome-diagram image.wd-inv-dark { filter: invert(1); }
+[data-theme="light"] .welcome-diagram image.wd-inv-light { filter: invert(1); }
+@media (max-width: 560px) { .welcome-diagram { display: none; } }
 .welcome-head { display: flex; align-items: flex-start; gap: 13px; }
 .welcome-mark { flex: none; width: 34px; height: 34px; border-radius: var(--r-lg); background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; }
 .welcome-mark svg { width: 20px; height: auto; }

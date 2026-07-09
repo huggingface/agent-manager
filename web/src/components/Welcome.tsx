@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { AmMark, PlusGlyph, PulseGlyph, KeyGlyph, GridGlyph, BellGlyph, LockGlyph } from './icons';
+import WelcomeDiagram from './WelcomeDiagram';
 
 // First-run welcome: one scrollable card covering the things a newcomer can't
 // guess. Shown once per Space (server-flagged) and reopenable from Settings.
@@ -66,6 +67,7 @@ export default function Welcome({ onClose }: { onClose: () => void }) {
             <p>Run a fleet of AI coding agents from one place. Always on, always yours.</p>
           </div>
         </div>
+        <WelcomeDiagram />
         <div className="welcome-items">
           {ITEMS.map((it) => (
             <div key={it.title} className="welcome-item">
