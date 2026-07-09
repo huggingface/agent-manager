@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { AmMark, PlusGlyph, PulseGlyph, KeyGlyph, GridGlyph, BellGlyph, LockGlyph } from './icons';
 
@@ -37,13 +38,31 @@ const ITEMS: { icon: ReactNode; title: string; body: ReactNode }[] = [
 ];
 
 export default function Welcome({ onClose }: { onClose: () => void }) {
+  const cardRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  // Accessible dialog: focus into it on open, close on Escape, and trap Tab so
+  // focus can't wander to the (invisible) page behind the modal.
+  useEffect(() => {
+    closeRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); onClose(); return; }
+      if (e.key !== 'Tab' || !cardRef.current) return;
+      const f = cardRef.current.querySelectorAll<HTMLElement>('button, [href], input, [tabindex]:not([tabindex="-1"])');
+      if (!f.length) return;
+      const first = f[0]; const last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [onClose]);
   return (
     <div className="welcome-backdrop" onClick={onClose}>
-      <div className="welcome-card" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+      <div className="welcome-card" role="dialog" aria-modal="true" aria-labelledby="welcome-title" ref={cardRef} onClick={(e) => e.stopPropagation()}>
         <div className="welcome-head">
           <span className="welcome-mark"><AmMark /></span>
           <div>
-            <h2>Welcome to Agent Manager</h2>
+            <h2 id="welcome-title">Welcome to Agent Manager</h2>
             <p>Run a fleet of AI coding agents from one place. Always on, always yours.</p>
           </div>
         </div>
@@ -60,7 +79,7 @@ export default function Welcome({ onClose }: { onClose: () => void }) {
         </div>
         <div className="welcome-foot">
           <span className="welcome-reopen mono">reopen anytime from Settings</span>
-          <button className="btn-primary" onClick={onClose}>Get started</button>
+          <button className="btn-primary" ref={closeRef} onClick={onClose}>Get started</button>
         </div>
       </div>
     </div>

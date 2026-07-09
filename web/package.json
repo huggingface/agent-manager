@@ -2,6 +2,12 @@
   "name": "agent-manager-web",
   "private": true,
   "version": "0.1.0",
+  "description": "Agent Manager web frontend (Vite + React + xterm.js)",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/huggingface/agent-manager"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,11 +19,13 @@
     "@xterm/addon-clipboard": "^0.1.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
+    "dompurify": "^3.4.11",
     "marked": "^14.1.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@types/dompurify": "^3.0.5",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",

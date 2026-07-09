@@ -12,13 +12,20 @@ export const SKILLS_DIR = path.join(WORKSPACES_DIR, 'skills');
 export const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 export const PUBLIC_DIR = process.env.PUBLIC_DIR || path.resolve(process.cwd(), '..', 'web', 'dist');
 
+// A CLI's presence on PATH doesn't change while the process runs, but
+// cliCatalog() (called on every /api/clis) probed every CLI each time — ~16
+// synchronous `command -v` subprocess spawns per request, blocking the event
+// loop that also pumps the terminals. Memoize per command.
+const cmdExistsCache = new Map();
 function commandExists(cmd) {
+  if (cmdExistsCache.has(cmd)) return cmdExistsCache.get(cmd);
+  let ok = false;
   try {
     execSync(`command -v ${cmd}`, { stdio: 'ignore', shell: '/bin/sh' });
-    return true;
-  } catch {
-    return false;
-  }
+    ok = true;
+  } catch { ok = false; }
+  cmdExistsCache.set(cmd, ok);
+  return ok;
 }
 
 // Installed CLI versions, resolved asynchronously (a few `--version` calls) and

@@ -15,9 +15,11 @@ let keys = null;
 let subs = []; // [{ subscription, ua, createdAt }]
 
 function persistSubs() {
-  const tmp = `${SUBS_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(subs, null, 2));
-  fs.renameSync(tmp, SUBS_FILE);
+  try {
+    const tmp = `${SUBS_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(subs, null, 2));
+    fs.renameSync(tmp, SUBS_FILE);
+  } catch (e) { console.error('[push.persistSubs]', e && e.message); }
 }
 
 export function initPush() {

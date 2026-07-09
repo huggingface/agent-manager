@@ -13,7 +13,7 @@ const PAGES: { id: Page; label: string }[] = [
   { id: 'skills', label: 'Skills' },
 ];
 
-interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; tmux?: boolean; canRelaunch?: boolean; secrets?: string[]; }
+interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; tmux?: boolean; canRelaunch?: boolean; secrets?: string[]; bucketUnverified?: boolean; }
 
 function urlBase64ToUint8Array(base64: string) {
   const padding = '='.repeat((4 - (base64.length % 4)) % 4);
@@ -278,6 +278,13 @@ export default function SettingsView({
             {relaunch.msg && <div className="s-help" style={{ marginTop: 6 }}>{relaunch.msg}</div>}
 
             <h3>Space</h3>
+            {info?.bucketUnverified && (
+              <div className="s-warn">
+                Can’t verify your storage bucket is private — without a write-scoped <span className="mono">HF_TOKEN</span> the
+                app can’t discover which bucket is mounted. A public bucket exposes everything agents saved (including
+                credentials). Double-check the bucket is <b>Private</b>, or add an <span className="mono">HF_TOKEN</span> secret to enable the automatic check.
+              </div>
+            )}
             <div className="kv">
               <div><span>Space</span><b>{info?.spaceId || '—'}</b></div>
               <div><span>Durable storage</span><b className="mono">{info?.dataDir || '—'}</b></div>

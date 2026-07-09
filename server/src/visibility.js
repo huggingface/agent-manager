@@ -17,7 +17,12 @@
 const SPACE_ID = process.env.SPACE_ID || null;
 const hfToken = () => process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN || process.env.HF_API_TOKEN || null;
 
-let state = { spaceId: SPACE_ID, public: false, known: false, checkedAt: 0, reason: null, bucket: null, buckets: [] };
+// `bucketUnverified` is true when the Space is private but we couldn't check
+// its mounted bucket's visibility (no HF_TOKEN → the bucket id can't be
+// discovered; HF doesn't expose it to the container). We DON'T lock in that
+// case — a public Space is already caught tokenless, and the bucket defaults
+// private — but we surface a warning so the operator can verify or add a token.
+let state = { spaceId: SPACE_ID, public: false, known: false, checkedAt: 0, reason: null, bucket: null, buckets: [], bucketUnverified: false };
 let volumes = null; // bucket ids mounted on this Space; discovered once (fixed until restart)
 
 const HEADERS = { 'user-agent': 'agent-manager' };
@@ -57,6 +62,11 @@ async function check() {
     // Not publicly visible (401/404) → the Space is private. Now the bucket(s).
     const buckets = await discoverBuckets();
     if (buckets === null) { state = { ...state, checkedAt: Date.now() }; return state; } // keep last verdict
+    // No token → buckets couldn't be discovered → we can't verify the bucket.
+    if (!hfToken()) {
+      state = { spaceId: SPACE_ID, public: false, known: true, checkedAt: Date.now(), reason: null, bucket: null, buckets: [], bucketUnverified: true };
+      return state;
+    }
     for (const id of buckets) {
       try {
         const b = await fetch(`https://huggingface.co/api/buckets/${id}`, { headers: HEADERS });
@@ -70,7 +80,7 @@ async function check() {
         // 401/404 → bucket is private → safe.
       } catch { state = { ...state, checkedAt: Date.now() }; return state; } // blip: keep last verdict
     }
-    state = { spaceId: SPACE_ID, public: false, known: true, checkedAt: Date.now(), reason: null, bucket: null, buckets };
+    state = { spaceId: SPACE_ID, public: false, known: true, checkedAt: Date.now(), reason: null, bucket: null, buckets, bucketUnverified: false };
   } catch {
     // Network blip: keep the last known verdict rather than flapping.
     state = { ...state, checkedAt: Date.now() };

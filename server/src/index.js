@@ -70,6 +70,13 @@ initPush();
 // every boot of a private Space.
 await startVisibilityWatch();
 
+// Crash backstops: this is a single long-running process pumping every
+// terminal. An unhandled rejection from an async route, or an error emitted by
+// a dropped socket, would otherwise take the whole thing down. Log and keep
+// running instead of exiting.
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
+process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
+
 const app = express();
 app.use(express.json());
 
@@ -203,6 +210,9 @@ app.get('/api/info', (_req, res) => res.json({
   // While public, /api/info stays reachable (the Locked page needs it) — don't
   // advertise which credentials exist to the whole internet.
   secrets: isPublic() ? [] : injectedEnvKeys(),
+  // True when the Space is private but we couldn't verify its bucket is private
+  // (no HF_TOKEN to discover the bucket). Non-blocking; the UI shows a warning.
+  bucketUnverified: !isPublic() && !!visibility().bucketUnverified,
   // First-run welcome: shown once per Space (flag persists on the bucket).
   welcomeSeen: welcomeSeen(),
 }));
@@ -221,11 +231,15 @@ app.post('/api/welcome/seen', (_req, res) => {
 // Factory-reboot the Space: rebuilds the image (reinstalling the CLIs at their
 // latest published versions, per the Dockerfile) and relaunches everything.
 // Needs an HF token with write access set as a Space secret (HF_TOKEN).
+let lastRelaunchAt = 0;
 app.post('/api/relaunch', async (_req, res) => {
   const id = process.env.SPACE_ID;
   const token = hfToken();
   if (!id) return res.json({ ok: false, reason: 'no-space' });
   if (!token) return res.json({ ok: false, reason: 'no-token' });
+  // Cooldown so a confused/looping agent (or double-click) can't reboot-storm.
+  if (Date.now() - lastRelaunchAt < 60_000) return res.json({ ok: false, reason: 'cooldown' });
+  lastRelaunchAt = Date.now();
   try {
     const r = await fetch(`https://huggingface.co/api/spaces/${id}/restart?factory=true`, {
       method: 'POST', headers: { authorization: `Bearer ${token}` },
@@ -440,7 +454,18 @@ function folderPathOf(session) {
 }
 function resolveSafe(root, rel) {
   const p = path.resolve(root, rel || '.');
-  return (p === root || p.startsWith(root + path.sep)) ? p : null;
+  if (p !== root && !p.startsWith(root + path.sep)) return null; // lexical check
+  // Symlink-safe: the REAL path of the deepest existing ancestor must still be
+  // inside the real root, so a symlink planted in a workspace can't read out
+  // (e.g. a link to /data/state credentials or /etc).
+  try {
+    const realRoot = fs.realpathSync(root);
+    let anc = p;
+    while (!fs.existsSync(anc) && path.dirname(anc) !== anc) anc = path.dirname(anc);
+    const real = fs.realpathSync(anc);
+    if (real !== realRoot && !real.startsWith(realRoot + path.sep)) return null;
+    return p;
+  } catch { return null; }
 }
 
 app.get('/api/files/:id', (req, res) => {
@@ -690,6 +715,10 @@ if (fs.existsSync(PUBLIC_DIR)) {
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
+// Without these listeners a transport error (client reset, listen failure)
+// throws out of the EventEmitter and crashes the process.
+wss.on('error', (e) => console.error('[wss error]', e.message));
+server.on('error', (e) => console.error('[server error]', e.message));
 
 // Only accept WebSockets from our own page. WS handshakes skip CORS entirely
 // and the browser attaches cookies, so without this check any website could try
@@ -705,6 +734,7 @@ function originAllowed(origin) {
 }
 
 wss.on('connection', (ws, req) => {
+  ws.on('error', (e) => console.error('[ws error]', e && e.message)); // a client reset must not crash us
   if (!originAllowed(req.headers.origin)) {
     ws.close(1008, 'bad origin');
     return;

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { marked } from 'marked';
 import * as api from '../api';
 import type { SkillFile } from '../api';
+import { renderMarkdown } from '../lib/markdown';
 import { TrashGlyph } from './icons';
 
 // Split YAML-ish frontmatter (name/description) from the markdown body.
@@ -136,7 +136,7 @@ export default function SkillsEditor() {
                       )}
                     </div>
                   )}
-                  <div className="markdown" dangerouslySetInnerHTML={{ __html: marked.parse(body) as string }} />
+                  <div className="markdown" dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }} />
                 </div>
               );
             })() : (

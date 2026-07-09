@@ -102,8 +102,22 @@ api.duplicate_repo(
     ],
 )`;
   const [copied, setCopied] = useState(false);
+  const flash = () => { setCopied(true); setTimeout(() => setCopied(false), 1500); };
+  // The Locked page is shown to embedded (HF App-tab) visitors, where the async
+  // Clipboard API is blocked — fall back to execCommand within the click gesture.
+  const legacyCopy = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = cmd; ta.style.position = 'fixed'; ta.style.top = '-9999px';
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch { return false; }
+  };
   const copy = () => {
-    navigator.clipboard?.writeText(cmd).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => {});
+    if (legacyCopy()) { flash(); return; }
+    navigator.clipboard?.writeText(cmd).then(flash).catch(() => {});
   };
 
   if (reason === 'public-bucket') {

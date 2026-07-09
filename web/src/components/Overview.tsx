@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
-import { marked } from 'marked';
 import * as api from '../api';
 import type { MetaSession } from '../api';
 import type { Cli, OverviewFilter, Session, SessionState, Tree } from '../types';
+import { renderMarkdown } from '../lib/markdown';
 import Logo from './Logo';
 
 const fmtAgo = (ts: number) => {
@@ -96,7 +96,7 @@ function Card({ s, color, onOpen }: {
       ) : d && d.lastAssistantText ? (
         <div className="ov-answer-wrap">
           {expanded ? (
-            <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: marked.parse(d.lastAssistantMd || d.lastAssistantText) as string }} />
+            <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(d.lastAssistantMd || d.lastAssistantText) }} />
           ) : (
             <div className="ov-answer">{d.lastAssistantText}</div>
           )}

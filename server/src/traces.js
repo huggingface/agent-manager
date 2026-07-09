@@ -422,6 +422,24 @@ function readHermes() {
   return rows;
 }
 
+// Cap how much of a transcript we load. A long-running agent's .jsonl can grow
+// to hundreds of MB; reading it whole (and splitting into a line array) can OOM
+// the single process. Above the cap we read only the tail (dropping the partial
+// first line), which keeps the "since your last prompt" digest accurate while
+// bounding memory — older cumulative totals for that one file become approximate.
+const MAX_TRACE_BYTES = 40 * 1024 * 1024;
+async function readTraceFile(p, size) {
+  if (size <= MAX_TRACE_BYTES) return fsp.readFile(p, 'utf8');
+  const fh = await fsp.open(p, 'r');
+  try {
+    const buf = Buffer.alloc(MAX_TRACE_BYTES);
+    await fh.read(buf, 0, MAX_TRACE_BYTES, size - MAX_TRACE_BYTES);
+    const s = buf.toString('utf8');
+    const nl = s.indexOf('\n');
+    return nl >= 0 ? s.slice(nl + 1) : s;
+  } finally { await fh.close(); }
+}
+
 async function statsFor(p, parser, quietMs = 0) {
   let m;
   try { m = await fsp.stat(p); } catch { return null; }
@@ -434,7 +452,7 @@ async function statsFor(p, parser, quietMs = 0) {
   // serve the previous parse and re-read once writes have gone quiet.
   if (quietMs && c && Date.now() - m.mtimeMs < quietMs) return c.parsed;
   let parsed;
-  try { parsed = parser(await fsp.readFile(p, 'utf8')); } catch { return null; }
+  try { parsed = parser(await readTraceFile(p, m.size)); } catch { return null; }
   fileCache.set(p, { key, parsed });
   return parsed;
 }
@@ -502,7 +520,9 @@ async function build() {
     }
   };
 
+  const seenFiles = new Set(); // for fileCache eviction (rotated/deleted transcripts)
   for (const p of await claudeFiles()) {
+    seenFiles.add(p);
     const m = path.basename(p).match(UUID_RE);
     attribute(m ? byClaudeUuid.get(m[1]) : null, await statsFor(p, parseClaude));
   }
@@ -514,6 +534,7 @@ async function build() {
     byCodexCwd.set(key, byCodexCwd.has(key) ? 'ambiguous' : s);
   }
   for (const p of await codexFiles()) {
+    seenFiles.add(p);
     const parsed = await statsFor(p, parseCodex);
     if (!parsed) continue;
     const m = path.basename(p).match(UUID_RE);
@@ -530,8 +551,12 @@ async function build() {
   const ocSessions = sessions.filter((s) => s.cli === 'openclaw');
   const ocOwner = ocSessions.length === 1 ? ocSessions[0] : null;
   for (const p of await openclawFiles()) {
+    seenFiles.add(p);
     attribute(ocOwner, await statsFor(p, parseOpenClaw, 30_000)); // fence-sensitive: read only when quiet
   }
+  // Evict cache entries for files that no longer exist (rotated Codex rollouts,
+  // deleted transcripts) so fileCache doesn't grow unbounded on a long-lived Space.
+  for (const k of fileCache.keys()) if (!seenFiles.has(k)) fileCache.delete(k);
 
   // opencode: sessions attribute by their recorded directory (like codex cwd).
   const opencodeByDir = new Map();

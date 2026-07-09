@@ -54,6 +54,9 @@ export default function App() {
   const [settingsPage, setSettingsPage] = useState<SettingsPage>('general');
   // First-run welcome: null until /api/info loads; true when reopened manually.
   const [showWelcome, setShowWelcome] = useState(false);
+  // Transient error toast for failed mutations (create/delete/move/…).
+  const [toast, setToast] = useState<string | null>(null);
+  const showErr = (msg: string) => (e: unknown) => { console.error(msg, e); setToast(msg); window.setTimeout(() => setToast(null), 4000); };
   const [zoom, setZoom] = useState<number>(() => {
     const z = parseInt(localStorage.getItem('am-zoom') || '100', 10);
     return Number.isFinite(z) ? z : 100;
@@ -181,34 +184,38 @@ export default function App() {
 
   // actions
   const createSession = async (name: string, cli: string, path: string, groupId?: string) => {
-    const s = await api.createSession(name, cli, groupId, path);
-    rememberPath(s.path);
-    await refresh();
-    if (groupId) { setActiveRef(`g:${groupId}`); setFocusedId(s.id); }
-    else setActiveRef(`s:${s.id}`);
+    try {
+      const s = await api.createSession(name, cli, groupId, path);
+      rememberPath(s.path);
+      await refresh();
+      if (groupId) { setActiveRef(`g:${groupId}`); setFocusedId(s.id); }
+      else setActiveRef(`s:${s.id}`);
+    } catch (e) { showErr('Couldn’t create the agent')(e); }
   };
   // Creations land in an explicitly targeted group (the group's + button),
   // else the group you're currently looking at; loose otherwise.
   const newSession = (name: string, cli: string, path: string, groupId?: string) =>
     createSession(name, cli, path, groupId ?? activeGroup?.id);
   const newGroup = async (name: string, cart?: { cli: string; count: number }[], path = ROOT_PATH) => {
-    const g = await api.createGroup(name);
-    for (const { cli, count } of cart || []) {
-      const base = cliMap[cli]?.label || cli;
-      for (let i = 0; i < count; i++) {
-        const s = await api.createSession(count > 1 ? `${base} ${i + 1}` : base, cli, g.id, path);
-        rememberPath(s.path);
+    try {
+      const g = await api.createGroup(name);
+      for (const { cli, count } of cart || []) {
+        const base = cliMap[cli]?.label || cli;
+        for (let i = 0; i < count; i++) {
+          const s = await api.createSession(count > 1 ? `${base} ${i + 1}` : base, cli, g.id, path);
+          rememberPath(s.path);
+        }
       }
-    }
-    await refresh();
-    setActiveRef(`g:${g.id}`);
+      await refresh();
+      setActiveRef(`g:${g.id}`);
+    } catch (e) { showErr('Couldn’t create the group')(e); }
   };
-  const doMove = async (ref: string, to: MoveTarget) => { await api.move(ref, to); refresh(); };
-  const renameGroup = async (id: string, name: string) => { await api.renameGroup(id, name); refresh(); };
-  const renameSession = async (id: string, name: string) => { if (name.trim()) await api.renameSession(id, name.trim()); refresh(); };
-  const deleteGroup = async (id: string) => { await api.deleteGroup(id); if (activeRef === `g:${id}`) setActiveRef(null); refresh(); };
-  const stopSession = async (id: string) => { await api.stopSession(id); refresh(); };
-  const deleteSession = async (id: string) => { await api.deleteSession(id); if (activeRef === `s:${id}`) setActiveRef(null); refresh(); };
+  const doMove = (ref: string, to: MoveTarget) => api.move(ref, to).then(refresh).catch(showErr('Couldn’t move that'));
+  const renameGroup = (id: string, name: string) => api.renameGroup(id, name).then(refresh).catch(showErr('Couldn’t rename'));
+  const renameSession = (id: string, name: string) => { if (name.trim()) api.renameSession(id, name.trim()).then(refresh).catch(showErr('Couldn’t rename')); };
+  const deleteGroup = (id: string) => api.deleteGroup(id).then(() => { if (activeRef === `g:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the group'));
+  const stopSession = (id: string) => api.stopSession(id).then(refresh).catch(showErr('Couldn’t stop the agent'));
+  const deleteSession = (id: string) => api.deleteSession(id).then(() => { if (activeRef === `s:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the agent'));
   // Clicking a session: nested → open its group with that pane focused; loose → solo view.
   const openSession = (sid: string, groupId?: string) => {
     if (groupId) {
@@ -380,6 +387,7 @@ export default function App() {
   return (
     <div className={`app${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
       {showWelcome && <Welcome onClose={dismissWelcome} />}
+      {toast && <div className="toast mono" role="alert">{toast}</div>}
       <Sidebar
         clis={clis}
         tree={tree}

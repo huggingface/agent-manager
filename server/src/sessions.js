@@ -14,9 +14,12 @@ function load() {
 }
 
 function persist() {
-  const tmp = `${SESSIONS_FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(sessions, null, 2));
-  fs.renameSync(tmp, SESSIONS_FILE);
+  // A FUSE write hiccup must not throw out of a timer/handler and crash us.
+  try {
+    const tmp = `${SESSIONS_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(sessions, null, 2));
+    fs.renameSync(tmp, SESSIONS_FILE);
+  } catch (e) { console.error('[sessions.persist]', e && e.message); }
 }
 
 function slugify(name) {

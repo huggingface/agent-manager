@@ -86,24 +86,8 @@ function selectionText(term: Terminal): string {
 //      and flush on the user's next click, so the copy lands when they return.
 // It must run synchronously inside the triggering event — deferring to a
 // setTimeout loses the activation that execCommand needs.
-// Temporary on-screen diagnostics (enable with ?clipdebug in the URL). Prints
-// each clipboard step so we can see, in a real browser, exactly where copy
-// fails. Never active without the flag.
-const CLIP_DEBUG = typeof location !== 'undefined' && location.search.includes('clipdebug');
 const OSC52_COPY_WINDOW_MS = 1500;
 let osc52CopyAllowedUntil = 0;
-function clipDebug(msg: string) {
-  if (!CLIP_DEBUG) return;
-  let el = document.getElementById('clip-debug');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'clip-debug';
-    el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99999;max-width:520px;max-height:40vh;overflow:auto;background:#000c;color:#5fe0a0;font:11px ui-monospace,monospace;padding:8px 10px;border:1px solid #2fb7c1;border-radius:6px;white-space:pre-wrap;pointer-events:none';
-    document.body.appendChild(el);
-  }
-  const t = new Date().toLocaleTimeString();
-  el.textContent = `${t}  ${msg}\n${el.textContent}`.split('\n').slice(0, 20).join('\n');
-}
 
 function allowNextOsc52Copy() {
   osc52CopyAllowedUntil = Date.now() + OSC52_COPY_WINDOW_MS;
@@ -129,23 +113,20 @@ function legacyCopy(text: string): boolean {
     const ok = document.execCommand('copy');
     document.body.removeChild(ta);
     prev?.focus?.(); // don't steal focus from the terminal
-    clipDebug(`execCommand copy -> ${ok}`);
     return ok;
-  } catch (e) { clipDebug(`execCommand threw: ${(e as Error).message}`); return false; }
+  } catch { return false; }
 }
 
 let clipStash: { text: string; at: number } | null = null;
 function copyText(text: string) {
   if (!text) return;
-  clipDebug(`copyText(${JSON.stringify(text.slice(0, 30))}${text.length > 30 ? '…' : ''}) len=${text.length}`);
   if (legacyCopy(text)) { clipStash = null; return; }
   if (navigator.clipboard?.writeText) {
     navigator.clipboard.writeText(text)
-      .then(() => { clipStash = null; clipDebug('navigator.clipboard.writeText -> OK'); })
-      .catch((e) => { clipStash = { text, at: Date.now() }; clipDebug(`writeText REJECT: ${e.name} (stashed)`); });
+      .then(() => { clipStash = null; })
+      .catch(() => { clipStash = { text, at: Date.now() }; });
   } else {
     clipStash = { text, at: Date.now() };
-    clipDebug('no navigator.clipboard (stashed)');
   }
 }
 // A user-requested copy we couldn't complete lands on the next real interaction
@@ -220,7 +201,6 @@ export default function TerminalPane({
           tmuxSelectionAt = Date.now();
           tmuxSelectionPending = true;
         }
-        clipDebug(`OSC52 received (sel=${sel || '∅'}, ${data.length} chars, ${allowed ? 'copy' : 'stashed'})`);
         if (allowed) copyText(data);
       },
     };
@@ -235,7 +215,6 @@ export default function TerminalPane({
     const selSub = term.onSelectionChange(() => {
       lastSelection = term.hasSelection() ? selectionText(term) : '';
       if (lastSelection) tmuxSelectionPending = false;
-      clipDebug(`onSelectionChange: hasSelection=${term.hasSelection()} len=${lastSelection.length}`);
     });
     const copySelection = () => {
       const text = term.hasSelection() ? selectionText(term) : lastSelection;
@@ -248,10 +227,8 @@ export default function TerminalPane({
         e.clipboardData.setData('text/plain', tmuxSelectionText);
         e.preventDefault();
         e.stopPropagation();
-        clipDebug(`browser copy event wrote tmux selection len=${tmuxSelectionText.length}`);
       } else {
         copyText(tmuxSelectionText);
-        clipDebug(`copied stashed tmux selection len=${tmuxSelectionText.length}`);
       }
       return true;
     };
@@ -271,7 +248,6 @@ export default function TerminalPane({
       if (e.pointerType !== 'mouse' || e.button !== 0) return;
       if (mouseDragged && !term.hasSelection()) {
         tmuxSelectionPending = true;
-        clipDebug('tmux mouse selection pending');
       } else if (!term.hasSelection()) {
         tmuxSelectionPending = false;
       }
@@ -281,7 +257,6 @@ export default function TerminalPane({
     const onClick = (e: MouseEvent) => {
       if (e.detail >= 2 && !term.hasSelection()) {
         tmuxSelectionPending = true;
-        clipDebug('tmux click selection pending');
       }
     };
     host.addEventListener('pointerdown', onPointerDown, true);
@@ -319,7 +294,6 @@ export default function TerminalPane({
         if (!copyTmuxSelection()) {
           allowNextOsc52Copy();
           send({ t: 'copy' });
-          clipDebug('Cmd/Ctrl+C requested tmux copy fallback');
         }
         return false;
       }

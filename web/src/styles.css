@@ -410,6 +410,12 @@ body {
 .term-exit .tx-btn svg { width: 13px; height: 13px; }
 .term-exit .tx-btn:hover { text-decoration: underline; }
 
+/* settings inline warning (e.g. unverifiable bucket) */
+.s-warn { margin: 6px 0 2px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); background: color-mix(in srgb, var(--danger) 10%, transparent); border-radius: var(--r-md); font-size: 12px; line-height: 1.5; color: var(--text); }
+
+/* transient error toast */
+.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 300; max-width: 90vw; padding: 9px 14px; background: color-mix(in srgb, var(--danger) 92%, #000); color: #fff; border-radius: var(--r-md); font-size: 12.5px; box-shadow: 0 8px 28px rgb(0 0 0 / 0.3); animation: rise-in 0.16s ease-out; }
+
 /* first-run welcome card */
 .welcome-backdrop { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center; padding: 20px; background: color-mix(in srgb, #000 55%, transparent); backdrop-filter: blur(3px); animation: rise-in 0.16s ease-out; }
 .welcome-card { width: 100%; max-width: 460px; max-height: 88vh; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 22px; box-shadow: 0 24px 60px rgb(0 0 0 / 0.35); }
