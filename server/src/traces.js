@@ -15,7 +15,7 @@ import { WORKSPACES_DIR } from './config.js';
 
 const fileCache = new Map(); // path -> { key, parsed: { stats, digest } }
 let resultMemo = { ts: 0, val: null };
-const TTL = 5_000; // Overview polls; per-file mtime caching keeps re-scans cheap
+const TTL = 400; // Overview polls at ~1Hz; per-file mtime caching keeps re-scans cheap
 
 function emptyStats() {
   return { turns: 0, prompts: 0, toolCalls: 0, tools: {}, web: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, firstTs: 0, lastTs: 0, files: 0 };
@@ -293,7 +293,7 @@ function readOpencode() {
   if (!ck) return [];
   if (ocMemo.key === ck.key) return ocMemo.rows;
   // actively written db on the FUSE mount: serve the previous read (first read allowed)
-  if (ocMemo.key && Date.now() - ck.hotMs < 15_000) return ocMemo.rows;
+  if (ocMemo.key && Date.now() - ck.hotMs < 8_000) return ocMemo.rows;
   const key = ck.key;
   let db;
   try { db = new DatabaseSync(p, { readOnly: true }); } catch { return ocMemo.rows; }
@@ -367,7 +367,7 @@ function readHermes() {
   const ck = dbChangeKey(p);
   if (!ck) return [];
   if (hermesMemo.key === ck.key) return hermesMemo.rows;
-  if (hermesMemo.key && Date.now() - ck.hotMs < 15_000) return hermesMemo.rows;
+  if (hermesMemo.key && Date.now() - ck.hotMs < 8_000) return hermesMemo.rows;
   let db;
   try { db = new DatabaseSync(p, { readOnly: true }); } catch { return hermesMemo.rows; }
   const rows = [];
@@ -560,7 +560,10 @@ async function build() {
   const ocOwner = ocSessions.length === 1 ? ocSessions[0] : null;
   for (const p of await openclawFiles()) {
     seenFiles.add(p);
-    attribute(ocOwner, await statsFor(p, parseOpenClaw, 30_000)); // fence-sensitive: read only when quiet
+    // OpenClaw state lives on LOCAL disk now (see entrypoint.sh), so reads no
+    // longer risk tripping its metadata fence like on FUSE — keep a small
+    // quiet margin anyway since its session fence is unusually touchy.
+    attribute(ocOwner, await statsFor(p, parseOpenClaw, 10_000));
   }
   // Evict cache entries for files that no longer exist (rotated Codex rollouts,
   // deleted transcripts) so fileCache doesn't grow unbounded on a long-lived Space.

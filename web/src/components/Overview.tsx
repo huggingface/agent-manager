@@ -154,7 +154,7 @@ export default function Overview({ clis, tree, filter, onOpen }: {
       .then((r) => { if (alive) setMeta(Object.fromEntries(r.sessions.map((s) => [s.id, s]))); })
       .catch(() => {});
     load();
-    const t = setInterval(() => { if (!document.hidden) load(); }, 4000);
+    const t = setInterval(() => { if (!document.hidden) load(); }, 1000);
     return () => { alive = false; clearInterval(t); };
   }, []);
 
