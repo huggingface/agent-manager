@@ -147,13 +147,24 @@ function codexRolloutsSince(sinceMs) {
   return out.sort((a, b) => b.m - a.m);
 }
 
-// First line of a (potentially large) file without reading all of it.
+// First line of a (potentially large) file without reading all of it. Codex's
+// session_meta line carries the full embedded instruction text (~22KB as of
+// 0.142), so read in chunks until the newline — a fixed small buffer would
+// truncate the JSON and make every capture silently fail.
 function firstLine(p) {
   const fd = fs.openSync(p, 'r');
   try {
-    const buf = Buffer.alloc(8192);
-    const n = fs.readSync(fd, buf, 0, buf.length, 0);
-    return buf.toString('utf8', 0, n).split('\n', 1)[0];
+    const CHUNK = 65536, MAX = 1024 * 1024;
+    let buf = Buffer.alloc(0);
+    for (let pos = 0; pos < MAX; pos += CHUNK) {
+      const b = Buffer.alloc(CHUNK);
+      const n = fs.readSync(fd, b, 0, CHUNK, pos);
+      buf = Buffer.concat([buf, b.subarray(0, n)]);
+      const nl = buf.indexOf(0x0a);
+      if (nl >= 0) return buf.toString('utf8', 0, nl);
+      if (n < CHUNK) break; // EOF
+    }
+    return buf.toString('utf8');
   } finally { fs.closeSync(fd); }
 }
 
