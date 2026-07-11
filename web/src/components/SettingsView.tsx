@@ -156,6 +156,27 @@ export default function SettingsView({
     }, 900);
     return () => clearTimeout(t);
   }, [notes, notesDirty]);
+  // Operator config (artifacts hub, jobs policy): load once, autosave on edit.
+  const [cfg, setCfg] = useState<api.AmConfig | null>(null);
+  const [savedCfg, setSavedCfg] = useState('');
+  const [cfgSaved, setCfgSaved] = useState<'idle' | 'saving' | 'saved'>('idle');
+  useEffect(() => {
+    api.getConfig().then((c) => { setCfg(c); setSavedCfg(JSON.stringify(c)); }).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (!cfg || JSON.stringify(cfg) === savedCfg) return;
+    const t = setTimeout(async () => {
+      setCfgSaved('saving');
+      try {
+        await api.saveConfig(cfg);
+        setSavedCfg(JSON.stringify(cfg));
+        setCfgSaved('saved');
+        setTimeout(() => setCfgSaved('idle'), 1800);
+      } catch { setCfgSaved('idle'); }
+    }, 900);
+    return () => clearTimeout(t);
+  }, [cfg, savedCfg]);
+
   const doRelaunch = async () => {
     setRelaunch({ busy: true });
     try {
@@ -259,6 +280,68 @@ export default function SettingsView({
                   </div>
                 ))}
               </div>
+            )}
+
+            <h3>Agent output &amp; compute{cfgSaved !== 'idle' && <span className="save-flag">{cfgSaved === 'saving' ? 'saving…' : 'saved ✓'}</span>}</h3>
+            <div className="s-help">Both policies are published to agents through the <span className="mono">environment</span> skill.</div>
+            {cfg && (
+              <>
+                <div className="setting-row">
+                  <div>
+                    <div className="s-label">Web artifacts</div>
+                    <div className="s-help">Agents render rich results (reports, dashboards, visualizations) as HTML pages and publish them to a central artifacts Space with an index and direct links per page.</div>
+                  </div>
+                  <span className="cfg-ctl">
+                    <div className="seg cfg-seg">
+                      <button className={cfg.artifacts.enabled ? 'on' : ''} onClick={() => setCfg({ ...cfg, artifacts: { ...cfg.artifacts, enabled: true } })}>on</button>
+                      <button className={!cfg.artifacts.enabled ? 'on' : ''} onClick={() => setCfg({ ...cfg, artifacts: { ...cfg.artifacts, enabled: false } })}>off</button>
+                    </div>
+                  </span>
+                </div>
+                <div className={cfg.artifacts.enabled ? undefined : 'cfg-off'}>
+                  <div className="setting-row">
+                    <div>
+                      <div className="s-label">Artifacts Space</div>
+                      <div className="s-help">Created by the first agent that needs it.</div>
+                    </div>
+                    <span className="cfg-ctl">
+                      <input
+                        className="cfg-input mono"
+                        placeholder={cfg.defaultArtifactsSpace || 'user/agent-artifacts'}
+                        value={cfg.artifacts.space}
+                        onChange={(e) => setCfg({ ...cfg, artifacts: { ...cfg.artifacts, space: e.target.value } })}
+                      />
+                    </span>
+                  </div>
+                  <div className="setting-row">
+                    <div>
+                      <div className="s-label">Default visibility</div>
+                      <div className="s-help">Whether new artifact pages are visible to anyone with the link.</div>
+                    </div>
+                    <span className="cfg-ctl">
+                      <div className="seg cfg-seg">
+                        <button className={cfg.artifacts.visibility === 'public' ? 'on' : ''} onClick={() => setCfg({ ...cfg, artifacts: { ...cfg.artifacts, visibility: 'public' } })}>public</button>
+                        <button className={cfg.artifacts.visibility === 'private' ? 'on' : ''} onClick={() => setCfg({ ...cfg, artifacts: { ...cfg.artifacts, visibility: 'private' } })}>private</button>
+                      </div>
+                    </span>
+                  </div>
+                </div>
+                <div className="setting-row">
+                  <div>
+                    <div className="s-label">Ask before HF Jobs above</div>
+                    <div className="s-help">Agents run expensive compute (GPU, long batch work) as HF Jobs. Above this estimated cost they must ask you first. 0 means always ask.</div>
+                  </div>
+                  <span className="cfg-ctl">
+                    <span className="mono cfg-usd">$</span>
+                    <input
+                      className="cfg-input cfg-num mono"
+                      type="number" min={0} step={1}
+                      value={cfg.jobs.askAboveUsd}
+                      onChange={(e) => setCfg({ ...cfg, jobs: { askAboveUsd: Math.max(0, Number(e.target.value) || 0) } })}
+                    />
+                  </span>
+                </div>
+              </>
             )}
 
             <PushRow />

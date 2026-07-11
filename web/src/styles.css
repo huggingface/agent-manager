@@ -559,6 +559,17 @@ body {
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 2px; }
 /* right-side controls share one width so the column reads as one rail */
 .setting-row > .btn-ghost, .setting-row .confirm-del { flex: none; }
+/* operator config (artifacts, jobs): every control sits in the same-width
+   right-hand slot so the column lines up */
+.cfg-ctl { flex: none; width: 232px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.cfg-seg { display: flex; width: 100%; }
+.cfg-seg button { flex: 1; padding: 6px 0; }
+.cfg-input { width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--text); font-size: 12.5px; }
+.cfg-input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
+.cfg-usd { color: var(--muted); }
+.cfg-num { width: 90px; flex: none; text-align: right; }
+/* artifacts sub-settings stay visible when off, just clearly inert */
+.cfg-off { opacity: 0.45; pointer-events: none; }
 .setting-row > .btn-ghost, .setting-row > a.btn-ghost { min-width: 180px; white-space: nowrap; }
 a.btn-ghost { text-decoration: none; }
 .s-label { font-weight: 600; font-size: 14px; }

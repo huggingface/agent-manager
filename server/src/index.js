@@ -269,16 +269,100 @@ const SECRET_NOTES_FILE = path.join(DATA_DIR, 'secret-notes.json');
 function loadSecretNotes() {
   try { return JSON.parse(fs.readFileSync(SECRET_NOTES_FILE, 'utf8')); } catch { return {}; }
 }
+// ---------- operator config (artifacts hub, jobs policy) ----------
+const AM_CONFIG_FILE = path.join(DATA_DIR, 'am-config.json');
+const spaceNamespace = () => (process.env.SPACE_ID || '').split('/')[0] || '';
+const defaultArtifactsSpace = () => (spaceNamespace() ? `${spaceNamespace()}/agent-artifacts` : '');
+function loadAmConfig() {
+  let saved = {};
+  try { saved = JSON.parse(fs.readFileSync(AM_CONFIG_FILE, 'utf8')); } catch {}
+  return {
+    artifacts: {
+      enabled: saved.artifacts?.enabled !== false,
+      space: (saved.artifacts?.space || '').trim() || defaultArtifactsSpace(),
+      visibility: saved.artifacts?.visibility === 'public' ? 'public' : 'private',
+    },
+    jobs: {
+      // Estimated USD above which agents must ask before launching an HF Job.
+      // 0 = always ask first.
+      askAboveUsd: Number.isFinite(saved.jobs?.askAboveUsd) ? Math.max(0, saved.jobs.askAboveUsd) : 0,
+    },
+  };
+}
+app.get('/api/config', (_req, res) => res.json({ ...loadAmConfig(), defaultArtifactsSpace: defaultArtifactsSpace() }));
+app.put('/api/config', (req, res) => {
+  const b = req.body || {};
+  const cfg = {
+    artifacts: {
+      enabled: !!(b.artifacts?.enabled ?? true),
+      space: typeof b.artifacts?.space === 'string' ? b.artifacts.space.trim() : '',
+      visibility: b.artifacts?.visibility === 'public' ? 'public' : 'private',
+    },
+    jobs: { askAboveUsd: Math.max(0, Number(b.jobs?.askAboveUsd) || 0) },
+  };
+  try { fs.writeFileSync(AM_CONFIG_FILE, JSON.stringify(cfg, null, 2)); } catch {}
+  generateEnvSkill(loadSecretNotes());
+  res.json({ ok: true });
+});
+
+// The artifacts section teaches agents to publish rich HTML results to a
+// central static Space instead of dumping walls of text in the terminal.
+function artifactsSection(cfg) {
+  if (!cfg.artifacts.enabled || !cfg.artifacts.space) return '';
+  const space = cfg.artifacts.space;
+  const priv = cfg.artifacts.visibility === 'private';
+  const host = `${space.replace('/', '-').toLowerCase()}.static.hf.space`;
+  return `
+## Publishing results as web pages (artifacts)
+When a result is easier to READ than raw terminal text — reports, comparisons,
+benchmarks, dashboards, visualizations — render it as a **beautiful,
+self-contained HTML page** (inline CSS/JS, no external requests) and publish it
+to the operator's artifacts Space: \`${space}\` (${priv ? 'private' : 'public'}, static).
+
+- First use only — create the Space if it doesn't exist:
+  \`hf repo create ${space} --repo-type space --space-sdk static${priv ? ' --private' : ''}\`
+- Publish or update a page:
+  \`hf upload ${space} ./report.html report.html --repo-type space\`
+- Keep an \`index.html\` at the Space root that links every page: download it
+  (\`hf download ${space} index.html --repo-type space --local-dir .\`), add your
+  entry, re-upload. Create it on first use.
+- Every page gets a direct link: \`https://${host}/<name>.html\` — put that link
+  in your final answer so the operator can open or share it.
+- For interactive demos beyond a static page, create a separate Space (e.g.
+  \`--space-sdk gradio\`) under the same namespace and link it from the index.
+`;
+}
+
+function jobsSection(cfg) {
+  const limit = cfg.jobs.askAboveUsd;
+  const policy = limit > 0
+    ? `If the estimated cost exceeds **$${limit}**, STOP and ask the operator first`
+    : 'ALWAYS ask the operator before launching a job';
+  return `
+## Heavy compute: Hugging Face Jobs
+This Space runs on a small CPU. For expensive work — training, large batch
+inference, anything wanting a GPU or hours of compute — run a **HF Job** on
+dedicated hardware instead of grinding here:
+\`hf jobs run --flavor a10g-small <image-or-script> …\` (see \`hf jobs run --help\`; results go to the Hub or the bucket).
+Cost policy: ${policy} — show the command, the flavor, and your time/cost
+estimate, then wait for approval.
+`;
+}
+
 // (Re)build the "environment" skill so every agent knows which env vars exist
 // and what they're for. Values are never written — only names + descriptions.
 function generateEnvSkill(notes) {
+  const amCfg = loadAmConfig();
+  return generateEnvSkillInner(notes, amCfg);
+}
+function generateEnvSkillInner(notes, amCfg) {
   const keys = injectedEnvKeys();
   const envLines = keys.length
     ? keys.map((k) => `- \`${k}\`${notes[k] ? ` — ${notes[k]}` : ''}`).join('\n')
     : '_None configured yet._';
   const content = `---
 name: environment
-description: "How this Agent Manager workspace works — files, persistence, other agents — and the environment variables available."
+description: "READ THIS BEFORE STARTING ANY WORK. How this workspace actually behaves: what persists where, other agents sharing it, publishing results as web pages, running heavy compute as HF Jobs, notifying the operator, and which API keys are available."
 ---
 
 # Your environment: Agent Manager
@@ -343,7 +427,7 @@ immediately (long-running foreground execs can destabilize some sessions):
 - \`$AM_LOCAL\` is a **fast local disk** for tools, envs, and caches. Build Python envs there, **never** as a \`.venv\` on the \`/data\` bucket (object storage is slow and can't lock/mmap well). From a workspace:
   \`UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/<name>" uv sync\`
 - Keep \`pyproject.toml\` / \`uv.lock\` / \`requirements.txt\` in the workspace — they're the durable source of truth; the env rebuilds from them in seconds after a restart.
-
+${artifactsSection(amCfg)}${jobsSection(amCfg)}
 ## Environment variables
 These are configured in the Space and available to every agent. Read a value
 from the environment when you need it (e.g. \`$NAME\`); never print secret values.

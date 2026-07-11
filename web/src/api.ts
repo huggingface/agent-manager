@@ -57,6 +57,15 @@ export const setDemo = (active: boolean): Promise<{ ok: boolean; active: boolean
 export const relaunchSpace = (): Promise<{ ok: boolean; reason?: string }> =>
   fetch('/api/relaunch', { method: 'POST' }).then(json);
 
+export interface AmConfig {
+  artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
+  jobs: { askAboveUsd: number };
+  defaultArtifactsSpace?: string;
+}
+export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
+export const saveConfig = (c: AmConfig) =>
+  fetch('/api/config', { method: 'PUT', headers: HEADERS, body: JSON.stringify(c) }).then(json);
+
 export interface SecretsData { detected: string[]; notes: Record<string, string>; }
 export const getSecrets = (): Promise<SecretsData> => fetch('/api/secrets').then(json);
 export const saveSecrets = (notes: Record<string, string>) =>
