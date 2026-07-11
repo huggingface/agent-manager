@@ -4,7 +4,7 @@ import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, BoltGlyph, AmMark } from './icons';
 
 type Zone = 'before' | 'after' | 'on';
 
@@ -20,7 +20,7 @@ const fmtAgo = (ts?: number) => {
 export default function Sidebar({
   clis, tree, activeRef, focusedId, defaultPath, ages,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
-  onStopSession, onDeleteSession, onMove, onDragState, onOpenSettings, theme, onToggleTheme,
+  onStopSession, onDeleteSession, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
 }: {
   clis: Cli[];
   tree: Tree;
@@ -42,8 +42,11 @@ export default function Sidebar({
   onDragState?: (ref: string | null) => void; // lets the stage offer per-tile drop targets
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
+  onQuickStart: (cli: string, prompt: string) => void;
 }) {
-  const [panel, setPanel] = useState<'none' | 'create'>('none');
+  const [panel, setPanel] = useState<'none' | 'create' | 'quick'>('none');
+  const [quickCli, setQuickCli] = useState<string | null>(null);
+  const [quickPrompt, setQuickPrompt] = useState('');
   const [createTab, setCreateTab] = useState<'agent' | 'group'>('agent');
   // When creation was launched from a group's + the new agent lands there.
   const [createTarget, setCreateTarget] = useState<string | null>(null);
@@ -69,6 +72,20 @@ export default function Sidebar({
     setCreateTarget(target);
     setGroupLoc(defaultPath || '.');
     setPanel('create');
+  };
+  // Quickstart: one harness pick + one prompt, agent launches in workspace/.
+  // Every agent harness is shown; ones not installed here are greyed out.
+  const quickable = clis.filter((c) => c.id !== 'shell' && c.id !== 'files');
+  const openQuick = () => {
+    setQuickCli((q) => q ?? (quickable.find((c) => c.available && c.ready)?.id || quickable.find((c) => c.available)?.id || null));
+    setPanel('quick');
+  };
+  const submitQuick = () => {
+    const p = quickPrompt.trim();
+    if (!p || !quickCli) return;
+    onQuickStart(quickCli, p);
+    setQuickPrompt('');
+    closePanel();
   };
   const submitGroup = () => {
     const items = Object.entries(cart).filter(([, n]) => n > 0).map(([cli, count]) => ({ cli, count }));
@@ -214,10 +231,47 @@ export default function Sidebar({
             onClick={() => (panel === 'create' ? closePanel() : openCreate('agent'))}
             title="New agent or group"
           ><PlusGlyph /></button>
+          <button
+            className={`icon-btn bolt-btn${panel === 'quick' ? ' on' : ''}`}
+            onClick={() => (panel === 'quick' ? closePanel() : openQuick())}
+            title="Quickstart: pick an agent, type a prompt, go"
+          ><BoltGlyph /></button>
           <button className="icon-btn" onClick={onOpenSettings} title="Settings"><SlidersGlyph /></button>
           <button className="icon-btn" onClick={onToggleTheme} title="Toggle light / dark">{theme === 'dark' ? <MoonGlyph /> : <SunGlyph />}</button>
         </div>
       </div>
+
+      {panel === 'quick' && (
+        <div className="controls">
+          <div className="widget quick">
+            <div className="quick-clis">
+              {quickable.map((c) => (
+                <button
+                  key={c.id}
+                  className={`quick-cli${quickCli === c.id ? ' on' : ''}${c.available ? '' : ' off'}`}
+                  title={c.available ? c.label : `${c.label} (not installed)`}
+                  disabled={!c.available}
+                  style={quickCli === c.id ? { borderColor: c.color } : undefined}
+                  onClick={() => setQuickCli(c.id)}
+                ><Logo cli={c.id} size={16} /></button>
+              ))}
+            </div>
+            <textarea
+              autoFocus
+              rows={1}
+              className="quick-prompt"
+              placeholder={quickCli ? `prompt for ${clis.find((c) => c.id === quickCli)?.label ?? quickCli}…` : 'prompt…'}
+              value={quickPrompt}
+              onChange={(e) => { setQuickPrompt(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitQuick(); }
+                if (e.key === 'Escape') closePanel();
+              }}
+            />
+            <div className="quick-hint mono">↵ launches in workspace/ · shift+↵ newline</div>
+          </div>
+        </div>
+      )}
 
       {panel === 'create' && (
         <div className="controls">

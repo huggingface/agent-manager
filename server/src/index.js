@@ -609,7 +609,7 @@ function nextName(cli) {
 }
 
 app.post('/api/sessions', (req, res) => {
-  const { name, cli, groupId, path: reqPath } = req.body || {};
+  const { name, cli, groupId, path: reqPath, prompt } = req.body || {};
   if (!cli || !cliById(cli)) return res.status(400).json({ error: 'unknown cli' });
   const finalName = name && name.trim() ? name.trim() : nextName(cli);
   // Location: an explicit workspace-relative path. cleanRelPath('.') → '' =
@@ -621,6 +621,17 @@ app.post('/api/sessions', (req, res) => {
   if (s.path) { try { fs.mkdirSync(workspacePath(s.path), { recursive: true }); } catch {} }
   if (groupId && groups.get(groupId)) groups.attach(groupId, s.id);
   else order.prepend(`s:${s.id}`);
+  // Quickstart: launch the CLI and type the first prompt once it has booted —
+  // fire-and-forget so the response (and the opening pane) aren't held up.
+  if (typeof prompt === 'string' && prompt.trim()) {
+    (async () => {
+      try {
+        ensureRunning(s);
+        await new Promise((r) => setTimeout(r, 4000));
+        sendInput(s.id, prompt.trim());
+      } catch (e) { console.error('[quickstart]', e && e.message); }
+    })();
+  }
   res.status(201).json({ ...s, running: false, state: 'stopped' });
 });
 

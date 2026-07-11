@@ -11,6 +11,11 @@ export const getTree = (): Promise<Tree> => fetch('/api/tree').then(json);
 
 // path: '.' = the workspaces root; anything else is a workspace-relative dir.
 const normalizePath = (path?: string) => (path && path.trim() ? path : '.');
+// Quickstart: create at the workspaces root, boot the CLI, and type the prompt
+// as soon as it's up — all server-side, no waiting in the UI.
+export const quickStart = (cli: string, prompt: string): Promise<Session> =>
+  fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ cli, path: '.', prompt }) }).then(json);
+
 export const createSession = (name: string, cli: string, groupId?: string, path?: string): Promise<Session> =>
   fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ name, cli, groupId, path: normalizePath(path) }) }).then(json);
 

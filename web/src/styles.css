@@ -129,6 +129,16 @@ body {
 .widget-actions { display: flex; gap: 8px; }
 .widget-actions .btn-primary { flex: 1; }
 
+/* quickstart: one row of harnesses, one prompt, go */
+.quick-clis { display: flex; gap: 6px; flex-wrap: wrap; }
+.quick-cli { width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; padding: 0; opacity: 0.65; }
+.quick-cli:hover:not(:disabled) { opacity: 1; border-color: var(--border-strong); }
+.quick-cli.on { opacity: 1; border-width: 1.5px; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
+.quick-cli.off { opacity: 0.25; cursor: default; }
+.quick-prompt { width: 100%; resize: none; overflow: hidden; min-height: 34px; max-height: 160px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--text); font: inherit; font-size: 13px; line-height: 1.45; }
+.quick-prompt:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
+.quick-hint { font-size: 10.5px; color: var(--muted); }
+
 /* new-agent: logo buttons */
 .agent-picks { display: flex; flex-direction: column; gap: 4px; }
 .agent-pick { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); color: var(--text); font: inherit; font-size: 13px; cursor: pointer; text-align: left; }

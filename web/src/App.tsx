@@ -209,6 +209,15 @@ export default function App() {
       else setActiveRef(`s:${s.id}`);
     } catch (e) { showErr('Couldn’t create the agent')(e); }
   };
+  // Quickstart: server boots the agent and types the prompt; we jump straight
+  // to the new pane so you watch it happen.
+  const quickStart = async (cli: string, prompt: string) => {
+    try {
+      const s = await api.quickStart(cli, prompt);
+      await refresh();
+      setActiveRef(`s:${s.id}`);
+    } catch (e) { showErr('Couldn’t quickstart the agent')(e); }
+  };
   // Creations land in an explicitly targeted group (the group's + button),
   // else the group you're currently looking at; loose otherwise.
   const newSession = (name: string, cli: string, path: string, groupId?: string) =>
@@ -428,6 +437,7 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         theme={theme}
         onToggleTheme={toggleTheme}
+        onQuickStart={quickStart}
       />
 
       <div className="main">

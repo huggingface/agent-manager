@@ -35,6 +35,12 @@ export const SlidersGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+export const BoltGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M8.9 1.6 3.9 8.9h3.2l-1 5.5 5-7.3H7.9l1-5.5z" strokeLinejoin="round" />
+  </G>
+);
+
 export const SunGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <circle cx="8" cy="8" r="3" />

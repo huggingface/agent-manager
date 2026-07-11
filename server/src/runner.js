@@ -362,14 +362,17 @@ export function ensureRunning(session) {
 
 /** Type a line into the session's terminal (works with no browser attached). */
 export function sendInput(id, text) {
+  // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
+  // the inner newlines as soft line breaks instead of submitting early.
+  const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
   if (USE_TMUX) {
-    execFileSync('tmux', ['send-keys', '-t', tmuxName(id), '-l', '--', text], { stdio: 'ignore' });
+    execFileSync('tmux', ['send-keys', '-t', tmuxName(id), '-l', '--', payload], { stdio: 'ignore' });
     execFileSync('tmux', ['send-keys', '-t', tmuxName(id), 'Enter'], { stdio: 'ignore' });
     return;
   }
   const set = live.get(id);
   if (!set || !set.size) throw new Error('session is not running');
-  set.values().next().value.write(`${text}\r`);
+  set.values().next().value.write(`${payload}\r`);
 }
 
 /** Return the last mouse selection for this session as a browser-consumable OSC 52. */
