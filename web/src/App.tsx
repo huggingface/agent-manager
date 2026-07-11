@@ -490,7 +490,7 @@ export default function App() {
             <div className="seg ov-seg">
               {(['all', 'waiting', 'working', 'quiet'] as OverviewFilter[]).map((f) => (
                 <button key={f} className={ovFilter === f ? 'on' : ''} onClick={() => setOvFilter(f)}>
-                  {f === 'waiting' ? 'your turn' : f}
+                  {f === 'waiting' ? 'done' : f === 'working' ? 'running' : f === 'quiet' ? 'stopped' : 'all'}
                 </button>
               ))}
             </div>

@@ -224,16 +224,26 @@ body {
 .ov-go { color: var(--muted); font-size: 12px; opacity: 0; transition: opacity 0.12s ease-out; flex: none; }
 .ov-card:hover .ov-go, .ov-id:focus-visible .ov-go { opacity: 1; }
 
-.ov-prompt { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.ov-prompt { font-size: 13px; font-weight: 550; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
 /* nothing between prompt and reply → one hairline, not two */
-.ov-prompt + .ov-ghost, .ov-prompt + .ov-live { border-top: none; }
-.ov-prompt::before { content: '❯ '; color: var(--accent); font-weight: 700; }
-.ov-prompt-none { font-style: italic; }
+.ov-prompt + .ov-live { border-top: none; }
+.ov-prompt::before { content: '❯ '; font-family: var(--font-mono); color: var(--accent); font-weight: 700; }
+.ov-prompt-none { font-style: italic; font-weight: 400; color: var(--muted); }
 .ov-prompt-none::before { color: var(--border-strong); }
-.ov-meta { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: -2px; }
+.ov-meta { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; margin-top: -2px; display: flex; align-items: center; gap: 6px; }
+.ov-meta .spacer { flex: 1; }
+.ov-meta-bits { overflow: hidden; text-overflow: ellipsis; }
+/* turn history: step back through earlier exchanges */
+.ov-nav { display: inline-flex; align-items: center; gap: 3px; flex: none; }
+.ov-nav-pos { color: var(--accent); margin-right: 3px; }
+.ov-nav-btn { background: none; border: 1px solid var(--border); border-radius: 5px; width: 20px; height: 17px; padding: 0; font: inherit; font-size: 10.5px; line-height: 1; color: var(--muted); cursor: pointer; }
+.ov-nav-btn:hover:not(:disabled) { color: var(--text); border-color: var(--border-strong); }
+.ov-nav-btn:disabled { opacity: 0.35; cursor: default; }
 
 .ov-answer-wrap { min-width: 0; }
 .ov-answer { font-size: 13px; line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+/* live progress while running: present but clearly not the final word */
+.ov-answer-dim { color: var(--muted); margin-bottom: 5px; -webkit-line-clamp: 2; }
 .ov-more { background: none; border: none; padding: 3px 0 0; font: inherit; font-size: 11px; color: var(--muted); cursor: pointer; display: block; }
 .ov-more:hover { color: var(--accent); }
 /* expanded answer: flows in the card — no box-in-box, slightly smaller type */
@@ -248,17 +258,11 @@ body {
   50% { content: '⠼'; } 62.5% { content: '⠴'; } 75% { content: '⠦'; } 87.5% { content: '⠧'; }
 }
 
-/* reply: a ghost line that becomes a bare ❯ input */
-.ov-ghost { border: none; background: none; padding: 7px 0 2px; font: inherit; font-size: 12.5px; color: var(--muted); text-align: left; cursor: text; border-top: 1px solid var(--border); width: 100%; }
-.ov-ghost::before { content: '❯ '; font-family: var(--font-mono); color: var(--border-strong); font-weight: 700; }
-.ov-ghost:hover { color: var(--text); }
-/* waiting: full-accent arrow, accent-tinted text — matches the hollow dot */
-.ov-ghost.attn { color: color-mix(in srgb, var(--accent) 45%, var(--muted)); }
-.ov-ghost.attn::before { color: var(--accent); }
-.ov-ghost.attn:hover { color: var(--text); }
-.ov-live { display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--border); padding-top: 7px; }
-.ov-live .ov-p { color: var(--accent); font-weight: 700; }
+/* reply: a quiet, always-there input line — its ❯ mirrors the prompt's */
+.ov-live { display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--border); padding-top: 7px; font-size: 13px; }
+.ov-live .ov-p { color: var(--accent); font-weight: 700; font-size: 13px; }
 .ov-live input { flex: 1; min-width: 0; border: none; background: none; font: inherit; font-size: 13px; color: var(--text); outline: none; padding: 2px 0; }
+.ov-live input::placeholder { color: var(--muted); opacity: 0.7; }
 .ov-hint { font-size: 10.5px; color: var(--muted); flex: none; }
 .ov-note { font-size: 11px; color: var(--danger); }
 
@@ -721,8 +725,11 @@ a.btn-ghost { text-decoration: none; }
   .row .age { display: none; } /* actions are always visible on touch — no room */
   .g-add { opacity: 1; }
   .caret { width: 22px; font-size: 15px; }
-  /* 16px inputs stop iOS zoom-on-focus */
-  .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input, .ov-live input { font-size: 16px; }
+  /* 16px inputs stop iOS zoom-on-focus — touch devices only, so a narrow
+     DESKTOP window keeps the reply line at card size */
+  @media (pointer: coarse) {
+    .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input, .ov-live input { font-size: 16px; }
+  }
   .ov-headrow { flex-wrap: wrap; }
   /* install page: the decorative sidebar makes no sense on a phone */
   .locked-app .mock-side { display: none; }

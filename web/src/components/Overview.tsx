@@ -32,19 +32,25 @@ function Card({ s, color, onOpen }: {
 }) {
   const d = s.digest;
   const [draft, setDraft] = useState('');
-  const [live, setLive] = useState(false);
   const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState(false);
   const [sentAt, setSentAt] = useState(0);
   const [expanded, setExpanded] = useState(false);
+  const [histIdx, setHistIdx] = useState(0); // 0 = live view, n = n-th exchange back
   const inputRef = useRef<HTMLInputElement>(null);
-  useEffect(() => { if (live) inputRef.current?.focus(); }, [live]);
 
   // After you send (or when the transcript shows a prompt newer than the last
   // answer), the old answer is stale — a spinner takes its place.
   const digestCaughtUp = !!d && d.lastPromptTs >= sentAt - 60_000;
   if (sentAt && digestCaughtUp) setSentAt(0);
-  const awaiting = (sentAt && !digestCaughtUp) || (!!d && !!d.lastPromptText && d.lastPromptTs > d.lastAssistantTs);
+  // Running: the agent's own task lifecycle when the transcript provides one
+  // (codex task_started/complete), else the terminal-derived state.
+  const running = !!d?.running || s.state === 'working';
+  const awaiting = (!!sentAt && !digestCaughtUp) || (!!d && !!d.lastPromptText && d.lastPromptTs > d.lastAssistantTs && running);
+
+  const hist = d?.turnsLog ?? [];
+  const idx = Math.min(histIdx, hist.length);
+  const entry = idx > 0 ? hist[idx - 1] : null;
 
   const send = async () => {
     const text = draft.trim();
@@ -55,7 +61,8 @@ function Card({ s, color, onOpen }: {
       await api.sendInput(s.id, text);
       setDraft('');
       setSentAt(Date.now());
-      setLive(false);
+      setHistIdx(0);
+      inputRef.current?.blur();
     } catch {
       setFailed(true);
       setTimeout(() => setFailed(false), 4000);
@@ -64,14 +71,18 @@ function Card({ s, color, onOpen }: {
   };
 
   const ago = fmtAgo(Math.max(d?.lastAssistantTs || 0, d?.lastPromptTs || 0) || Date.parse(s.createdAt) || 0);
+  const promptText = d?.lastPromptText || '';
+  const answerText = entry ? entry.answer : d?.lastAssistantText || '';
+  const answerMd = entry ? entry.answerMd : d?.lastAssistantMd || '';
+  // Chronological position: hist is newest-first, live text is the newest turn.
+  const totalTurns = hist.length + (d?.lastAssistantText ? 1 : 0);
   const metaBits: string[] = [];
   if (d && (d.sinceTurns || d.sinceToolCalls)) {
     metaBits.push(`${d.sinceTurns} turn${d.sinceTurns === 1 ? '' : 's'}`, `${d.sinceToolCalls} tool${d.sinceToolCalls === 1 ? '' : 's'}`);
     if (d.sinceFiles.length) metaBits.push(d.sinceFiles.map(base).join(', '));
     if (d.sinceTokens > 0) metaBits.push(`${fmtTok(d.sinceTokens)} tok`);
   }
-  // One reply line for every state — same words, same accent voice.
-  const ghostLabel = 'waiting for your input…';
+  const showLiveProgress = !entry && (running || awaiting);
 
   return (
     <div className="ov-card">
@@ -84,53 +95,72 @@ function Card({ s, color, onOpen }: {
         <span className="ov-go">open ↗</span>
       </div>
 
-      {d && d.lastPromptText ? (
-        <div className="ov-prompt mono" title={d.lastPromptText}>{d.lastPromptText}</div>
+      {promptText ? (
+        <div className="ov-prompt" title={promptText}>{promptText}</div>
       ) : (
-        <div className="ov-prompt ov-prompt-none mono">no prompt yet</div>
+        <div className="ov-prompt ov-prompt-none">no prompt yet</div>
       )}
-      {metaBits.length > 0 && <div className="ov-meta mono">{metaBits.join(' · ')}</div>}
+      {(metaBits.length > 0 || hist.length > 0) && (
+        <div className="ov-meta mono">
+          <span className="ov-meta-bits">{metaBits.join(' · ')}</span>
+          <span className="spacer" />
+          {hist.length > 0 && (
+            <span className="ov-nav">
+              {idx > 0 && <span className="ov-nav-pos">turn {totalTurns - idx}/{totalTurns}</span>}
+              <button
+                className="ov-nav-btn" title="Earlier turn" disabled={idx >= hist.length}
+                onClick={() => { setHistIdx(Math.min(idx + 1, hist.length)); setExpanded(false); }}
+              >↑</button>
+              <button
+                className="ov-nav-btn" title="Later turn" disabled={idx === 0}
+                onClick={() => { setHistIdx(Math.max(idx - 1, 0)); setExpanded(false); }}
+              >↓</button>
+            </span>
+          )}
+        </div>
+      )}
 
-      {awaiting ? (
-        <div className="ov-busy mono">working</div>
-      ) : d && d.lastAssistantText ? (
+      {showLiveProgress ? (
+        <div className="ov-answer-wrap">
+          {answerText && d && d.lastAssistantTs >= d.lastPromptTs && (
+            <div className="ov-answer ov-answer-dim">{answerText}</div>
+          )}
+          <div className="ov-busy mono">running</div>
+        </div>
+      ) : answerText ? (
         <div className="ov-answer-wrap">
           {expanded ? (
-            <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(d.lastAssistantMd || d.lastAssistantText) }} />
+            <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(answerMd || answerText) }} />
           ) : (
-            <div className="ov-answer">{d.lastAssistantText}</div>
+            <div className="ov-answer">{answerText}</div>
           )}
           <button className="ov-more" onClick={() => setExpanded((e) => !e)}>{expanded ? 'less' : 'more'}</button>
         </div>
       ) : null}
 
-      {live ? (
-        <div className="ov-live">
-          <span className="ov-p mono">❯</span>
-          <input
-            ref={inputRef}
-            value={draft}
-            disabled={sending}
-            autoComplete="off"
-            autoCorrect="off"
-            autoCapitalize="off"
-            spellCheck={false}
-            enterKeyHint="send"
-            onChange={(e) => setDraft(e.target.value)}
-            // iOS doesn't resize the layout for the keyboard — scroll the
-            // input into view once the keyboard has animated in.
-            onFocus={(e) => { const el = e.currentTarget; setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300); }}
-            onBlur={() => { if (!draft.trim()) setLive(false); }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') send();
-              if (e.key === 'Escape') { setDraft(''); setLive(false); }
-            }}
-          />
-          <span className="ov-hint">{sending ? 'sending…' : '↵ send'}</span>
-        </div>
-      ) : (
-        <button className="ov-ghost attn" onClick={() => setLive(true)}>{ghostLabel}</button>
-      )}
+      <div className="ov-live">
+        <span className="ov-p mono">❯</span>
+        <input
+          ref={inputRef}
+          value={draft}
+          disabled={sending}
+          placeholder={sending ? 'sending…' : 'reply…'}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          enterKeyHint="send"
+          onChange={(e) => setDraft(e.target.value)}
+          // iOS doesn't resize the layout for the keyboard — scroll the
+          // input into view once the keyboard has animated in.
+          onFocus={(e) => { const el = e.currentTarget; setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300); }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') send();
+            if (e.key === 'Escape') { setDraft(''); inputRef.current?.blur(); }
+          }}
+        />
+        {draft.trim() && <span className="ov-hint">↵ send</span>}
+      </div>
       {failed && <div className="ov-note">failed to reach the agent</div>}
     </div>
   );

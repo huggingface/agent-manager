@@ -40,19 +40,33 @@ function mergeInto(a, b) {
 // Built in the same parse pass: every real user prompt resets the segment, so
 // whatever accumulated by EOF is the activity since the last thing you said.
 function emptyDigest() {
-  return { lastPromptText: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantMd: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [], sinceTokens: 0 };
+  return { lastPromptText: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantMd: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [], sinceTokens: 0, running: false, turnsLog: [] };
 }
 const clip = (s, n = 280) => { const t = (s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 // Markdown-preserving variant (keeps newlines) for the expandable card view.
 const clipRaw = (s, n = 6000) => { const t = (s || '').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
+// turnsLog: the model's intermediate turns WITHIN the current request (newest
+// first) so the Overview can page through them. Each new assistant text pushes
+// the previous one into the log; a new user prompt clears it.
+const MAX_TURNS_LOG = 24;
 function digestPrompt(d, text, ts) {
   d.lastPromptText = clip(text); d.lastPromptTs = Date.parse(ts) || 0;
   d.sinceTurns = 0; d.sinceToolCalls = 0; d.sinceTools = {}; d.sinceFiles = []; d.sinceTokens = 0;
+  d.turnsLog = []; // arrows only walk the current request's turns
   // The previous answer belongs to the previous prompt — never show it as "LAST".
   d.lastAssistantText = ''; d.lastAssistantMd = ''; d.lastAssistantTs = 0;
 }
 function digestAssistant(d, text, ts) {
-  d.lastAssistantText = clip(text);
+  const clipped = clip(text);
+  // Same text again (codex mirrors agent_message/response_item/task_complete):
+  // refresh metadata only, don't log a phantom turn.
+  if (clipped !== d.lastAssistantText) {
+    if (d.lastAssistantText) {
+      d.turnsLog.unshift({ answer: d.lastAssistantText, answerMd: d.lastAssistantMd, ts: d.lastAssistantTs });
+      if (d.turnsLog.length > MAX_TURNS_LOG) d.turnsLog.pop();
+    }
+    d.lastAssistantText = clipped;
+  }
   d.lastAssistantMd = clipRaw(text);
   d.lastAssistantTs = Date.parse(ts) || d.lastAssistantTs;
 }
@@ -178,11 +192,33 @@ function parseCodex(txt) {
         }
         case 'web_search_call':
           st.web++;
+          st.toolCalls++;
+          st.tools.web_search = (st.tools.web_search || 0) + 1;
+          digestTool(dg, 'web_search', null);
           break;
         default:
       }
-    } else if (j.type === 'event_msg' && p.type === 'token_count' && p.info && p.info.total_token_usage) {
-      tok = p.info.total_token_usage;
+    } else if (j.type === 'event_msg') {
+      // Task lifecycle: Codex runs one task per user prompt, made of several
+      // model turns. task_started/task_complete bracket it — that (not "an
+      // assistant message appeared") is the real running/done signal, and
+      // task_complete carries the authoritative final answer.
+      switch (p.type) {
+        case 'token_count':
+          if (p.info && p.info.total_token_usage) tok = p.info.total_token_usage;
+          break;
+        case 'task_started':
+          dg.running = true;
+          break;
+        case 'agent_message':
+          if (p.message) digestAssistant(dg, p.message, j.timestamp); // live progress text
+          break;
+        case 'task_complete':
+          dg.running = false;
+          if (p.last_agent_message) digestAssistant(dg, p.last_agent_message, j.timestamp);
+          break;
+        default:
+      }
     }
   }
   if (tok) {
