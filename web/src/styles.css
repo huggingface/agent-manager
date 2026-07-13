@@ -133,15 +133,27 @@ body {
 .widget-actions { display: flex; gap: 8px; }
 .widget-actions .btn-primary { flex: 1; }
 
-/* quickstart: one row of harnesses, one prompt, go */
-.quick-clis { display: flex; gap: 6px; flex-wrap: wrap; }
-.quick-cli { width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; padding: 0; opacity: 0.65; }
+/* quickstart: one row of harnesses (+ the group tile), one prompt, go */
+.quick-clis { display: flex; gap: 5px; align-items: center; }
+.quick-cli { width: 28px; height: 28px; flex: none; display: inline-flex; align-items: center; justify-content: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; padding: 0; opacity: 0.65; }
 .quick-cli:hover:not(:disabled) { opacity: 1; border-color: var(--border-strong); }
 .quick-cli.on { opacity: 1; border-width: 1.5px; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
 .quick-cli.off { opacity: 0.25; cursor: default; }
+/* group tile: a miniature 2x2 of agents — same visual weight as the logos */
+.grp-mini { display: grid; grid-template-columns: repeat(2, auto); gap: 2px; }
+.grp-mini .cli-logo { width: 8px; height: 8px; }
 .quick-prompt { width: 100%; resize: none; overflow: hidden; min-height: 34px; max-height: 160px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--text); font: inherit; font-size: 13px; line-height: 1.45; }
 .quick-prompt:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
 .quick-hint { font-size: 10.5px; color: var(--muted); }
+/* the group tile sits apart from the harnesses behind a hairline */
+.quick-sep { width: 1px; align-self: stretch; background: var(--border); margin: 3px 2px; }
+.quick-grp { color: var(--muted); }
+.quick-grp.on { color: var(--accent); border-color: var(--accent) !important; }
+.quick-foot { display: flex; align-items: center; gap: 8px; }
+.quick-foot .quick-hint { margin-left: auto; white-space: nowrap; }
+.quick-more { background: none; border: none; padding: 0; font: inherit; font-size: 10.5px; font-weight: 600; color: var(--accent); cursor: pointer; white-space: nowrap; }
+.quick-more:hover { text-decoration: underline; }
+.cart-row.off { opacity: 0.45; }
 
 /* new-agent: logo buttons */
 .agent-picks { display: flex; flex-direction: column; gap: 4px; }

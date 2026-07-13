@@ -82,16 +82,22 @@ export default function Sidebar({
   };
   // Quickstart: one harness pick + one prompt, agent launches in workspace/.
   // Every agent harness is shown; ones not installed here are greyed out.
+  // "More options" adds a name + folder; the group tile flips to group creation.
   const quickable = clis.filter((c) => c.id !== 'shell' && c.id !== 'files');
   const openQuick = () => {
     setQuickCli((q) => q ?? (quickable.find((c) => c.available && c.ready)?.id || quickable.find((c) => c.available)?.id || null));
+    setQuickMode('agent');
+    setQuickLoc(defaultPath || '.');
+    setGroupLoc(defaultPath || '.');
     setPanel('quick');
   };
   const submitQuick = () => {
     const p = quickPrompt.trim();
-    if (!p || !quickCli) return;
-    onQuickStart(quickCli, p);
+    if (!quickCli) return;
+    if (!p && !quickMore) return; // the bare quick path needs a prompt
+    onQuickStart(quickCli, p, quickMore ? quickName.trim() : '', quickMore ? quickLoc : '.');
     setQuickPrompt('');
+    setQuickName('');
     closePanel();
   };
   const submitGroup = () => {
@@ -218,8 +224,8 @@ export default function Sidebar({
             </>
           )}
         </div>
-        <button className="g-add" title={`New agent in ${g.name}`} onClick={(e) => { e.stopPropagation(); openCreate('agent', g.id); }}><PlusGlyph /></button>
-        {open && g.sessionIds.map((sid) => sessById[sid]).filter(Boolean).map((s) => SessionRow(s as Session, g.id))}
+        <button className="g-add" title={`New agent in ${g.name}`} onClick={(e) => { e.stopPropagation(); openCreate(g.id); }}><PlusGlyph /></button>
+        {open && g.sessionIds.map((sid) => sessById[sid]).filter(Boolean).filter((s) => !isHidden((s as Session).id)).map((s) => SessionRow(s as Session, g.id))}
         {open && g.sessionIds.length === 0 && <div className="empty-hint nested">Drag agents here</div>}
       </div>
     );
@@ -234,14 +240,9 @@ export default function Sidebar({
         </div>
         <div className="brand-actions">
           <button
-            className={`icon-btn add-btn${panel === 'create' ? ' on' : ''}`}
-            onClick={() => (panel === 'create' ? closePanel() : openCreate('agent'))}
-            title="New agent or group"
-          ><PlusGlyph /></button>
-          <button
             className={`icon-btn bolt-btn${panel === 'quick' ? ' on' : ''}`}
             onClick={() => (panel === 'quick' ? closePanel() : openQuick())}
-            title="Quickstart: pick an agent, type a prompt, go"
+            title="New agent or group"
           ><BoltGlyph /></button>
           <button className="icon-btn" onClick={onOpenSettings} title="Settings"><SlidersGlyph /></button>
           <button className="icon-btn" onClick={onToggleTheme} title="Toggle light / dark">{theme === 'dark' ? <MoonGlyph /> : <SunGlyph />}</button>
@@ -255,76 +256,108 @@ export default function Sidebar({
               {quickable.map((c) => (
                 <button
                   key={c.id}
-                  className={`quick-cli${quickCli === c.id ? ' on' : ''}${c.available ? '' : ' off'}`}
+                  className={`quick-cli${quickMode === 'agent' && quickCli === c.id ? ' on' : ''}${c.available ? '' : ' off'}`}
                   title={c.available ? c.label : `${c.label} (not installed)`}
                   disabled={!c.available}
-                  style={quickCli === c.id ? { borderColor: c.color } : undefined}
-                  onClick={() => setQuickCli(c.id)}
-                ><Logo cli={c.id} size={16} /></button>
+                  style={quickMode === 'agent' && quickCli === c.id ? { borderColor: c.color } : undefined}
+                  onClick={() => { setQuickMode('agent'); setQuickCli(c.id); }}
+                ><Logo cli={c.id} size={14} /></button>
               ))}
+              <span className="quick-sep" />
+              <button
+                className={`quick-cli quick-grp${quickMode === 'group' ? ' on' : ''}`}
+                title="New group"
+                onClick={() => setQuickMode('group')}
+              >
+                <span className="grp-mini">
+                  <Logo cli="claude" size={8} />
+                  <Logo cli="codex" size={8} />
+                  <Logo cli="hermes" size={8} />
+                  <Logo cli="openclaw" size={8} />
+                </span>
+              </button>
             </div>
-            <textarea
-              autoFocus
-              rows={1}
-              className="quick-prompt"
-              placeholder={quickCli ? `prompt for ${clis.find((c) => c.id === quickCli)?.label ?? quickCli}…` : 'prompt…'}
-              value={quickPrompt}
-              onChange={(e) => { setQuickPrompt(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitQuick(); }
-                if (e.key === 'Escape') closePanel();
-              }}
-            />
-            <div className="quick-hint mono">↵ launches in workspace/ · shift+↵ newline</div>
+
+            {quickMode === 'agent' ? (
+              <>
+                <textarea
+                  autoFocus
+                  rows={1}
+                  className="quick-prompt"
+                  placeholder={quickCli ? `prompt for ${clis.find((c) => c.id === quickCli)?.label ?? quickCli}…` : 'prompt…'}
+                  value={quickPrompt}
+                  onChange={(e) => { setQuickPrompt(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitQuick(); }
+                    if (e.key === 'Escape') closePanel();
+                  }}
+                />
+                {quickMore && (
+                  <>
+                    <input
+                      placeholder="Name (optional)"
+                      value={quickName}
+                      onChange={(e) => setQuickName(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') submitQuick(); if (e.key === 'Escape') closePanel(); }}
+                    />
+                    <FolderPicker value={quickLoc} onChange={setQuickLoc} />
+                    <div className="widget-actions">
+                      <button className="btn-primary" onClick={submitQuick}>Create{quickPrompt.trim() ? ' & send' : ''}</button>
+                      <button className="btn-ghost" onClick={closePanel}>Cancel</button>
+                    </div>
+                  </>
+                )}
+                <div className="quick-foot">
+                  <button className="quick-more" onClick={() => setQuickMore((v) => !v)}>{quickMore ? '▴ less' : '▾ more options'}</button>
+                  <span className="quick-hint mono">↵ launch · ⇧↵ newline</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <input autoFocus placeholder="Group name" value={groupName}
+                  onChange={(e) => setGroupName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') submitGroup(); if (e.key === 'Escape') closePanel(); }} />
+                <FolderPicker value={groupLoc} onChange={setGroupLoc} />
+                <div className="cart">
+                  {/* every agent harness is offered; uninstalled ones are inert */}
+                  {clis.filter((c) => c.available || (c.id !== 'shell' && c.id !== 'files')).map((c) => {
+                    const n = cart[c.id] || 0;
+                    return (
+                      <div key={c.id} className={`cart-row${n > 0 ? ' has' : ''}${c.available ? '' : ' off'}`} title={c.available ? c.label : `${c.label} (not installed)`}>
+                        <div className="stepper">
+                          <button onClick={() => bump(c.id, -1)} disabled={n === 0} aria-label="Fewer">−</button>
+                          <span className="stepper-n">{n}</span>
+                          <button onClick={() => bump(c.id, 1)} disabled={!c.available} aria-label="More">+</button>
+                        </div>
+                        <Logo cli={c.id} size={13} />
+                        <span className="cart-name">{c.label}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="widget-actions">
+                  <button className="btn-primary" onClick={submitGroup}>Create group</button>
+                  <button className="btn-ghost" onClick={() => { setCart({}); closePanel(); }}>Cancel</button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
 
+      {/* contextual creation into a specific group (a group row's + button) */}
       {panel === 'create' && (
         <div className="controls">
-          <div className="seg create-seg">
-            <button className={createTab === 'agent' ? 'on' : ''} onClick={() => setCreateTab('agent')}>Agent</button>
-            <button className={createTab === 'group' ? 'on' : ''} onClick={() => { setCreateTab('group'); setCreateTarget(null); }}>Group</button>
-          </div>
-          {createTab === 'agent' && createTarget && groupById[createTarget] && (
+          {createTarget && groupById[createTarget] && (
             <div className="create-hint mono">into {groupById[createTarget].name}</div>
           )}
-          {createTab === 'agent' ? (
-            <NewSession
-              clis={clis}
-              sessions={tree.sessions}
-              defaultPath={defaultPath}
-              onCreate={(n, c, p) => { onNewSession(n, c, p, createTarget ?? undefined); closePanel(); }}
-              onCancel={closePanel}
-            />
-          ) : (
-            <div className="widget">
-              <input autoFocus placeholder="Group name" value={groupName}
-                onChange={(e) => setGroupName(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') submitGroup(); if (e.key === 'Escape') closePanel(); }} />
-              <FolderPicker value={groupLoc} onChange={setGroupLoc} />
-              <div className="cart">
-                {clis.filter((c) => c.available).map((c) => {
-                  const n = cart[c.id] || 0;
-                  return (
-                    <div key={c.id} className={`cart-row${n > 0 ? ' has' : ''}`}>
-                      <div className="stepper">
-                        <button onClick={() => bump(c.id, -1)} disabled={n === 0} aria-label="Fewer">−</button>
-                        <span className="stepper-n">{n}</span>
-                        <button onClick={() => bump(c.id, 1)} aria-label="More">+</button>
-                      </div>
-                      <Logo cli={c.id} size={13} />
-                      <span className="cart-name">{c.label}</span>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="widget-actions">
-                <button className="btn-primary" onClick={submitGroup}>Create group</button>
-                <button className="btn-ghost" onClick={() => { setCart({}); closePanel(); }}>Cancel</button>
-              </div>
-            </div>
-          )}
+          <NewSession
+            clis={clis}
+            sessions={tree.sessions}
+            defaultPath={defaultPath}
+            onCreate={(n, c, p) => { onNewSession(n, c, p, createTarget ?? undefined); closePanel(); }}
+            onCancel={closePanel}
+          />
         </div>
       )}
 

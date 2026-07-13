@@ -240,9 +240,10 @@ export default function App() {
   };
   // Quickstart: server boots the agent and types the prompt; we jump straight
   // to the new pane so you watch it happen.
-  const quickStart = async (cli: string, prompt: string) => {
+  const quickStart = async (cli: string, prompt: string, name = '', path = '.') => {
     try {
-      const s = await api.quickStart(cli, prompt);
+      const s = await api.quickStart(cli, prompt, name, path);
+      rememberPath(s.path);
       await refresh();
       setActiveRef(`s:${s.id}`);
     } catch (e) { showErr('Couldn’t quickstart the agent')(e); }
