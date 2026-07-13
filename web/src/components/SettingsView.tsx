@@ -341,6 +341,22 @@ export default function SettingsView({
                     />
                   </span>
                 </div>
+
+                <div className="setting-row">
+                  <div>
+                    <div className="s-label">Archive inactive sessions</div>
+                    <div className="s-help">Sessions with no activity beyond this window disappear from the sidebar and overview. Nothing is deleted; the "archived" checkbox in the sidebar brings them back.</div>
+                  </div>
+                  <span className="cfg-ctl">
+                    <div className="seg cfg-seg">
+                      {(['week', 'month', 'never'] as const).map((a) => (
+                        <button key={a} className={cfg.archive.after === a ? 'on' : ''} onClick={() => setCfg({ ...cfg, archive: { after: a } })}>
+                          {a === 'week' ? '1 week' : a === 'month' ? '1 month' : 'never'}
+                        </button>
+                      ))}
+                    </div>
+                  </span>
+                </div>
               </>
             )}
 

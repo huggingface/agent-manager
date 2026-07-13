@@ -60,6 +60,7 @@ export const relaunchSpace = (): Promise<{ ok: boolean; reason?: string }> =>
 export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
   jobs: { askAboveUsd: number };
+  archive: { after: 'week' | 'month' | 'never' };
   defaultArtifactsSpace?: string;
 }
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);

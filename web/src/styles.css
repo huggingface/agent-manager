@@ -72,6 +72,10 @@ body {
 .stage { flex: 1; min-height: 0; }
 .zoombar { display: flex; align-items: center; gap: 4px; padding: 4px 8px; margin-top: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); flex: none; }
 .zoombar .spacer { flex: 1; }
+/* overview bottom bar: filter + view segments, centered */
+.zoombar.ov-bar { justify-content: center; gap: 8px; }
+.ov-viewseg button { display: inline-flex; align-items: center; padding: 4.5px 9px; }
+.ov-viewseg svg { width: 13px; height: 13px; }
 
 /* transparent CLI logos; invert the mostly-black ones in dark mode */
 .cli-logo { flex: none; display: inline-flex; align-items: center; justify-content: center; }
@@ -268,16 +272,44 @@ body {
   50% { content: '⠼'; } 62.5% { content: '⠴'; } 75% { content: '⠦'; } 87.5% { content: '⠧'; }
 }
 
+/* ---- overview tile view: compact grid, groups outlined fieldset-style ---- */
+.ovt-feed { gap: 16px; }
+.ovt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(225px, 1fr)); gap: 10px; }
+.ovt-tile { background: var(--panel); border: 1px solid var(--border); border-radius: 11px; padding: 10px 12px 9px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; min-width: 0; transition: border-color 0.12s, transform 0.12s; }
+.ovt-tile:hover { border-color: var(--border-strong); transform: translateY(-1px); }
+.ovt-tile.attn { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent); }
+.ovt-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.ovt-name { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ovt-ago { color: var(--muted); font-size: 11px; flex: none; margin-left: auto; }
+.ovt-prompt { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ovt-prompt::before { content: '❯ '; font-family: var(--font-mono); color: var(--accent); font-weight: 700; }
+.ovt-prompt.none { color: var(--muted); font-style: italic; }
+.ovt-prompt.none::before { color: var(--border-strong); }
+.ovt-state { font-size: 10.5px; color: var(--muted); }
+.ovt-state.running { color: var(--accent); }
+.ovt-state.running::before { content: '⠋ '; display: inline-block; animation: ov-spin 0.9s steps(1) infinite; }
+.ovt-state.stopped { opacity: 0.7; }
+.ovt-group { position: relative; border: 1px solid var(--border); border-radius: 13px; padding: 12px 10px 10px; margin-top: 6px; }
+.ovt-glabel { position: absolute; top: -8px; left: 14px; background: var(--bg); padding: 0 7px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; color: var(--muted); }
+.ovt-gn { color: var(--border-strong); }
+/* conversation window: the full card, centered over the grid */
+.ovw-backdrop { position: fixed; inset: 0; z-index: 120; display: flex; align-items: flex-start; justify-content: center; padding: 7vh 20px 20px; background: color-mix(in srgb, #000 52%, transparent); backdrop-filter: blur(3px); animation: rise-in 0.15s ease-out; }
+.ovw-win { width: 100%; max-width: 640px; max-height: 82vh; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 13px; box-shadow: 0 24px 60px rgb(0 0 0 / 0.4); }
+.ovw-win .ov-card { padding: 14px 17px 12px; }
+.ov-x { background: none; border: none; color: var(--muted); font-size: 13px; cursor: pointer; padding: 0 2px 0 8px; flex: none; }
+.ov-x:hover { color: var(--text); }
+
 /* reply: a quiet, always-there input line — its ❯ mirrors the prompt's */
 .ov-live { display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--border); padding-top: 7px; font-size: 13px; }
 .ov-live .ov-p { color: var(--accent); font-weight: 700; font-size: 13px; }
-.ov-live input { flex: 1; min-width: 0; border: none; background: none; font: inherit; font-size: 13px; color: var(--text); outline: none; padding: 2px 0; }
-.ov-live input::placeholder { color: var(--muted); opacity: 0.7; }
+.ov-live textarea { flex: 1; min-width: 0; border: none; background: none; font: inherit; font-size: 13px; line-height: 1.45; color: var(--text); outline: none; padding: 2px 0; resize: none; overflow: hidden; max-height: 140px; }
+.ov-live textarea::placeholder { color: var(--muted); opacity: 0.7; }
 .ov-hint { font-size: 10.5px; color: var(--muted); flex: none; }
 .ov-note { font-size: 11px; color: var(--danger); }
 
 /* tree */
-.tree { flex: 1; overflow-y: auto; padding: 6px 8px 10px; }
+.tree { flex: 1; overflow-y: auto; padding: 6px 8px 10px; display: flex; flex-direction: column; }
+.tree > * { flex: none; } /* rows keep their natural height; the arch-note's margin-top:auto sinks it */
 .empty-hint { color: var(--muted); font-size: 12px; padding: 12px 10px; line-height: 1.5; }
 .empty-hint.nested { padding: 6px 10px 8px 38px; font-size: 11.5px; }
 
@@ -360,8 +392,19 @@ body {
 .controls .fp-path { font-size: 12px; }
 .controls .seg button { font-family: var(--font-mono); font-size: 11.5px; padding: 4px 8px; }
 
-.legend { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 10px 16px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 16px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--muted); }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
+/* archived toggle: a quiet custom checkbox speaking the app's language */
+.legend-arch { position: relative; display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.legend-arch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.legend-arch .lbox { width: 11px; height: 11px; flex: none; border: 1px solid var(--border-strong); border-radius: 3.5px; background: var(--panel-2); display: inline-flex; align-items: center; justify-content: center; transition: background 0.12s, border-color 0.12s; }
+.legend-arch:hover .lbox { border-color: var(--muted); }
+.legend-arch input:checked ~ .lbox { background: var(--accent); border-color: var(--accent); }
+.legend-arch input:checked ~ .lbox::after { content: ''; width: 5px; height: 2.5px; border-left: 1.5px solid var(--accent-fg); border-bottom: 1.5px solid var(--accent-fg); transform: rotate(-45deg) translateY(-1px); }
+/* archived rows/tiles: present but visibly parked */
+.row.archived .name, .row.archived .cli-logo { opacity: 0.45; }
+.ovt-tile.archived .ovt-head { opacity: 0.55; }
+.arch-note { font-size: 10.5px; color: var(--muted); font-style: italic; text-align: center; padding: 14px 12px 4px; margin-top: auto; }
 
 /* main: tiles */
 .tiles { height: 100%; display: grid; gap: 12px; }
@@ -749,7 +792,7 @@ a.btn-ghost { text-decoration: none; }
   /* 16px inputs stop iOS zoom-on-focus — touch devices only, so a narrow
      DESKTOP window keeps the reply line at card size */
   @media (pointer: coarse) {
-    .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input, .ov-live input { font-size: 16px; }
+    .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input, .ov-live textarea { font-size: 16px; }
   }
   .ov-headrow { flex-wrap: wrap; }
   /* install page: the decorative sidebar makes no sense on a phone */

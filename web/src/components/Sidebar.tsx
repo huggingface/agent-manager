@@ -21,6 +21,7 @@ export default function Sidebar({
   clis, tree, activeRef, focusedId, defaultPath, ages,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
   onStopSession, onDeleteSession, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
+  archived, showArchived, onToggleArchived,
 }: {
   clis: Cli[];
   tree: Tree;
@@ -42,12 +43,18 @@ export default function Sidebar({
   onDragState?: (ref: string | null) => void; // lets the stage offer per-tile drop targets
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
-  onQuickStart: (cli: string, prompt: string) => void;
+  onQuickStart: (cli: string, prompt: string, name?: string, path?: string) => void;
+  archived: Set<string>;
+  showArchived: boolean;
+  onToggleArchived: () => void;
 }) {
   const [panel, setPanel] = useState<'none' | 'create' | 'quick'>('none');
+  const [quickMode, setQuickMode] = useState<'agent' | 'group'>('agent');
   const [quickCli, setQuickCli] = useState<string | null>(null);
   const [quickPrompt, setQuickPrompt] = useState('');
-  const [createTab, setCreateTab] = useState<'agent' | 'group'>('agent');
+  const [quickMore, setQuickMore] = useState(false); // reveals name + folder
+  const [quickName, setQuickName] = useState('');
+  const [quickLoc, setQuickLoc] = useState('.');
   // When creation was launched from a group's + the new agent lands there.
   const [createTarget, setCreateTarget] = useState<string | null>(null);
   const [groupName, setGroupName] = useState('');
@@ -65,12 +72,12 @@ export default function Sidebar({
   const waiting = tree.sessions.filter((s) => s.state === 'waiting').length;
 
   const clearDrag = () => { setDragRef(null); setDrop(null); onDragState?.(null); };
+  // Archived sessions vanish from the tree unless the legend checkbox is on.
+  const isHidden = (id: string) => !showArchived && archived.has(id);
   const bump = (id: string, d: number) => setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
   const closePanel = () => { setPanel('none'); setCreateTarget(null); };
-  const openCreate = (tab: 'agent' | 'group', target: string | null = null) => {
-    setCreateTab(tab);
+  const openCreate = (target: string | null = null) => {
     setCreateTarget(target);
-    setGroupLoc(defaultPath || '.');
     setPanel('create');
   };
   // Quickstart: one harness pick + one prompt, agent launches in workspace/.
@@ -145,7 +152,7 @@ export default function Sidebar({
     return (
       <div
         key={s.id}
-        className={`row session${active ? ' active' : ''}${nested ? ' nested' : ''}${dragRef === ref ? ' dragging' : ''}${dnd.className}`}
+        className={`row session${active ? ' active' : ''}${nested ? ' nested' : ''}${archived.has(s.id) ? ' archived' : ''}${dragRef === ref ? ' dragging' : ''}${dnd.className}`}
         draggable={dnd.draggable}
         onDragStart={dnd.onDragStart} onDragEnd={dnd.onDragEnd} onDragOver={dnd.onDragOver} onDrop={dnd.onDrop}
         onClick={() => onOpenSession(s.id, groupId)}
@@ -341,9 +348,20 @@ export default function Sidebar({
         {tree.order.length === 0 && (
           <div className="empty-hint">Nothing yet. Add an agent with the + above.<br />Drag an agent onto another to group them.</div>
         )}
-        {tree.order.map((ref) => (ref.startsWith('s:')
-          ? (sessById[ref.slice(2)] ? SessionRow(sessById[ref.slice(2)]) : null)
-          : (groupById[ref.slice(2)] ? GroupBlock(groupById[ref.slice(2)]) : null)))}
+        {tree.order.map((ref) => {
+          if (ref.startsWith('s:')) {
+            const s = sessById[ref.slice(2)];
+            return s && !isHidden(s.id) ? SessionRow(s) : null;
+          }
+          const g = groupById[ref.slice(2)];
+          if (!g) return null;
+          // a group whose members are ALL archived disappears with them
+          const anyVisible = g.sessionIds.length === 0 || g.sessionIds.some((sid) => sessById[sid] && !isHidden(sid));
+          return anyVisible ? GroupBlock(g) : null;
+        })}
+        {!showArchived && archived.size > 0 && (
+          <div className="arch-note">not showing {archived.size} archived session{archived.size === 1 ? '' : 's'}</div>
+        )}
       </div>
 
       {/* Quick-add utilities: created instantly with a default name (double-
@@ -359,9 +377,15 @@ export default function Sidebar({
 
       <div className="legend">
         <span><span className="status working" /> working</span>
-        <span><span className="status waiting" /> your turn</span>
-        <span><span className="status idle" /> idle</span>
+        <span><span className="status waiting" /> idle</span>
         <span><span className="status stopped" /> stopped</span>
+        {archived.size > 0 && (
+          <label className="legend-arch" title="Sessions with no activity beyond the archive window (Settings)">
+            <input type="checkbox" checked={showArchived} onChange={onToggleArchived} />
+            <span className="lbox" />
+            archived
+          </label>
+        )}
       </div>
     </aside>
   );

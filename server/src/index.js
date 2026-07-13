@@ -329,6 +329,11 @@ function loadAmConfig() {
       // 0 = always ask first.
       askAboveUsd: Number.isFinite(saved.jobs?.askAboveUsd) ? Math.max(0, saved.jobs.askAboveUsd) : 0,
     },
+    // Sessions with no activity beyond this window are hidden from the sidebar
+    // and overview (derived client-side; nothing is deleted).
+    archive: {
+      after: ['week', 'month', 'never'].includes(saved.archive?.after) ? saved.archive.after : 'month',
+    },
   };
 }
 app.get('/api/config', (_req, res) => res.json({ ...loadAmConfig(), defaultArtifactsSpace: defaultArtifactsSpace() }));
@@ -341,6 +346,7 @@ app.put('/api/config', (req, res) => {
       visibility: b.artifacts?.visibility === 'public' ? 'public' : 'private',
     },
     jobs: { askAboveUsd: Math.max(0, Number(b.jobs?.askAboveUsd) || 0) },
+    archive: { after: ['week', 'month', 'never'].includes(b.archive?.after) ? b.archive.after : 'month' },
   };
   try { fs.writeFileSync(AM_CONFIG_FILE, JSON.stringify(cfg, null, 2)); } catch {}
   generateEnvSkill(loadSecretNotes());

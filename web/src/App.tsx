@@ -11,6 +11,7 @@ import Locked from './components/Locked';
 import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
+import { GridGlyph, ListGlyph } from './components/icons';
 
 // Phone-sized viewport: the app becomes two full-screen views (list ⇄ pane).
 function useIsMobile() {
@@ -57,6 +58,15 @@ export default function App() {
   // Transient error toast for failed mutations (create/delete/move/…).
   const [toast, setToast] = useState<string | null>(null);
   const showErr = (msg: string) => (e: unknown) => { console.error(msg, e); setToast(msg); window.setTimeout(() => setToast(null), 4000); };
+  // Overview presentation: tiles (default) or the classic list.
+  const [ovView, setOvViewRaw] = useState<'tiles' | 'list'>(() =>
+    (localStorage.getItem('am-ov-view') === 'list' ? 'list' : 'tiles'));
+  const setOvView = (v: 'tiles' | 'list') => { setOvViewRaw(v); localStorage.setItem('am-ov-view', v); };
+  // Archiving: sessions quiet for longer than the configured window are hidden
+  // from the sidebar and overview unless "archived" is checked. Derived, never
+  // stored — flipping the setting instantly (un)archives.
+  const [showArchived, setShowArchived] = useState(false);
+  const [archiveAfter, setArchiveAfter] = useState<'week' | 'month' | 'never'>('month');
   const [zoom, setZoom] = useState<number>(() => {
     const z = parseInt(localStorage.getItem('am-zoom') || '100', 10);
     return Number.isFinite(z) ? z : 100;
@@ -151,6 +161,25 @@ export default function App() {
     const t = setInterval(() => { if (!document.hidden) load(); }, 20_000);
     return () => { alive = false; clearInterval(t); };
   }, []);
+
+  // Archive threshold from the operator config; refresh when settings closes
+  // (that's where it's edited).
+  useEffect(() => {
+    if (settingsOpen) return;
+    api.getConfig().then((c) => setArchiveAfter(c.archive?.after ?? 'month')).catch(() => {});
+  }, [settingsOpen]);
+  const archivedIds = useMemo(() => {
+    const out = new Set<string>();
+    if (archiveAfter === 'never') return out;
+    const cut = Date.now() - (archiveAfter === 'week' ? 7 : 30) * 864e5;
+    for (const s of tree.sessions) {
+      // Shells and file panes have no trace clock — never archive them.
+      if (s.cli === 'shell' || s.cli === 'files' || s.state === 'working') continue;
+      const last = ages[s.id] || Date.parse(s.createdAt) || 0;
+      if (last && last < cut) out.add(s.id);
+    }
+    return out;
+  }, [tree.sessions, ages, archiveAfter]);
 
   const cliMap = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c])), [clis]);
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
@@ -438,6 +467,9 @@ export default function App() {
         theme={theme}
         onToggleTheme={toggleTheme}
         onQuickStart={quickStart}
+        archived={archivedIds}
+        showArchived={showArchived}
+        onToggleArchived={() => setShowArchived((v) => !v)}
       />
 
       <div className="main">
@@ -464,6 +496,9 @@ export default function App() {
               clis={clis}
               tree={tree}
               filter={ovFilter}
+              view={ovView}
+              archived={archivedIds}
+              showArchived={showArchived}
               onOpen={(sid) => {
                 const g = tree.groups.find((x) => x.sessionIds.includes(sid));
                 openSession(sid, g?.id);
@@ -496,7 +531,7 @@ export default function App() {
           )}
         </div>
         {activeRef === 'overview' && (
-          <div className="zoombar">
+          <div className="zoombar ov-bar">
             <div className="seg ov-seg">
               {(['all', 'waiting', 'working', 'quiet'] as OverviewFilter[]).map((f) => (
                 <button key={f} className={ovFilter === f ? 'on' : ''} onClick={() => setOvFilter(f)}>
@@ -504,7 +539,10 @@ export default function App() {
                 </button>
               ))}
             </div>
-            <span className="spacer" />
+            <div className="seg ov-seg ov-viewseg">
+              <button className={ovView === 'tiles' ? 'on' : ''} title="Tiles" onClick={() => setOvView('tiles')}><GridGlyph /></button>
+              <button className={ovView === 'list' ? 'on' : ''} title="List" onClick={() => setOvView('list')}><ListGlyph /></button>
+            </div>
           </div>
         )}
         {showZoom && (

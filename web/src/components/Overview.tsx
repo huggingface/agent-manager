@@ -25,10 +25,11 @@ const Caret = () => (
   <svg className="ov-caret" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.8 3.2h6.4L5 7.4z" fill="currentColor" /></svg>
 );
 
-function Card({ s, color, onOpen }: {
+function Card({ s, color, onOpen, onClose }: {
   s: MetaSession;
   color?: string;
   onOpen: (sid: string) => void;
+  onClose?: () => void; // present when the card lives in the conversation window
 }) {
   const d = s.digest;
   const [draft, setDraft] = useState('');
@@ -37,7 +38,7 @@ function Card({ s, color, onOpen }: {
   const [sentAt, setSentAt] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const [histIdx, setHistIdx] = useState(0); // 0 = live view, n = n-th exchange back
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // After you send (or when the transcript shows a prompt newer than the last
   // answer), the old answer is stale — a spinner takes its place.
@@ -62,7 +63,7 @@ function Card({ s, color, onOpen }: {
       setDraft('');
       setSentAt(Date.now());
       setHistIdx(0);
-      inputRef.current?.blur();
+      if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     } catch {
       setFailed(true);
       setTimeout(() => setFailed(false), 4000);
@@ -93,6 +94,7 @@ function Card({ s, color, onOpen }: {
         {ago && <span className="ov-ago">· {ago}</span>}
         <span className="spacer" />
         <span className="ov-go">open ↗</span>
+        {onClose && <button className="ov-x" onClick={(e) => { e.stopPropagation(); onClose(); }} title="Close">✕</button>}
       </div>
 
       {promptText ? (
@@ -140,8 +142,9 @@ function Card({ s, color, onOpen }: {
 
       <div className="ov-live">
         <span className="ov-p mono">❯</span>
-        <input
+        <textarea
           ref={inputRef}
+          rows={1}
           value={draft}
           disabled={sending}
           placeholder={sending ? 'sending…' : 'reply…'}
@@ -149,34 +152,73 @@ function Card({ s, color, onOpen }: {
           autoCorrect="off"
           autoCapitalize="off"
           spellCheck={false}
-          enterKeyHint="send"
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => { setDraft(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
           // iOS doesn't resize the layout for the keyboard — scroll the
           // input into view once the keyboard has animated in.
           onFocus={(e) => { const el = e.currentTarget; setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300); }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') send();
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
             if (e.key === 'Escape') { setDraft(''); inputRef.current?.blur(); }
           }}
         />
-        {draft.trim() && <span className="ov-hint">↵ send</span>}
+        {draft.trim() && <span className="ov-hint">↵ send · ⇧↵ newline</span>}
       </div>
       {failed && <div className="ov-note">failed to reach the agent</div>}
     </div>
   );
 }
 
+/** Compact tile: status + prompt + state; click opens the conversation window. */
+function Tile({ s, color, dim, onOpen }: { s: MetaSession; color?: string; dim?: boolean; onOpen: () => void }) {
+  const d = s.digest;
+  const running = !!d?.running || s.state === 'working';
+  const last = Math.max(d?.lastAssistantTs || 0, d?.lastPromptTs || 0) || Date.parse(s.createdAt) || 0;
+  // ring = waiting on you AND recent — a fleet where everything is "waiting
+  // since last week" shouldn't glow everywhere
+  const fresh = s.state === 'waiting' && Date.now() - last < 24 * 3600e3;
+  return (
+    <div className={`ovt-tile${fresh ? ' attn' : ''}${dim ? ' archived' : ''}`} onClick={onOpen}>
+      <div className="ovt-head">
+        <span className={`status ${s.state}`} />
+        <Logo cli={s.cli} size={12} tint={color} />
+        <span className="ovt-name mono">{s.name}</span>
+        <span className="ovt-ago">{fmtAgo(last)}</span>
+      </div>
+      {d?.lastPromptText
+        ? <div className="ovt-prompt" title={d.lastPromptText}>{d.lastPromptText}</div>
+        : <div className="ovt-prompt none">no prompt yet</div>}
+      {running
+        ? <div className="ovt-state running mono">running</div>
+        : s.state === 'stopped'
+          ? <div className="ovt-state stopped mono">stopped</div>
+          : d?.lastAssistantText
+            ? <div className="ovt-state done mono">✓ done</div>
+            : <div className="ovt-state idle mono">idle</div>}
+    </div>
+  );
+}
+
 /** Mission control: one reading column — group capsules with their agents as
  *  slabs, loose agents as standalone panels. */
-export default function Overview({ clis, tree, filter, onOpen }: {
+export default function Overview({ clis, tree, filter, view, archived, showArchived, onOpen }: {
   clis: Cli[];
   tree: Tree;
   filter: OverviewFilter; // controlled by the bottom bar in App
+  view: 'tiles' | 'list'; // controlled by the bottom bar in App
+  archived: Set<string>;
+  showArchived: boolean;
   onOpen: (sid: string) => void;
 }) {
   const [meta, setMeta] = useState<Record<string, MetaSession> | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [durs, setDurs] = useState<Record<string, number>>({});
+  const [openId, setOpenId] = useState<string | null>(null); // conversation window
+  useEffect(() => {
+    if (!openId) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpenId(null); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [openId]);
 
   useEffect(() => {
     let alive = true;
@@ -195,7 +237,8 @@ export default function Overview({ clis, tree, filter, onOpen }: {
 
   if (!meta) return <div className="ov-wrap"><div className="ov-feed"><div className="usage-msg mono">reading traces…<span className="et-cursor" /></div></div></div>;
 
-  const visible = (s: MetaSession) => filter === 'all' || bucket(s.state) === filter;
+  const visible = (s: MetaSession) =>
+    (filter === 'all' || bucket(s.state) === filter) && (showArchived || !archived.has(s.id));
 
   // Collapse at constant velocity: duration follows the group's height.
   const toggleGroup = (gid: string, el: HTMLElement) => {
@@ -214,6 +257,60 @@ export default function Overview({ clis, tree, filter, onOpen }: {
       </div>
     );
   };
+
+  // ---- tile view: loose sessions pack into grids, groups get a fine outline ----
+  const tileFor = (s: Session) => {
+    const m = dataFor(s);
+    if (!visible(m)) return null;
+    return <Tile key={s.id} s={m} color={colorOf[s.cli]} dim={archived.has(s.id)} onOpen={() => setOpenId(s.id)} />;
+  };
+  const tileBlocks: ReactNode[] = [];
+  let looseTiles: ReactNode[] = [];
+  const flushLoose = () => {
+    if (looseTiles.length) tileBlocks.push(<div className="ovt-grid" key={`loose-${tileBlocks.length}`}>{looseTiles}</div>);
+    looseTiles = [];
+  };
+  for (const ref of tree.order) {
+    if (ref.startsWith('s:')) {
+      const s = sessById[ref.slice(2)];
+      if (s && eligible(s)) { const t = tileFor(s); if (t) looseTiles.push(t); }
+    } else {
+      const g = groupById[ref.slice(2)];
+      if (!g) continue;
+      const members = g.sessionIds.map((id) => sessById[id]).filter(Boolean).filter(eligible) as Session[];
+      const shown = members.map(tileFor).filter(Boolean);
+      if (!shown.length) continue;
+      flushLoose();
+      tileBlocks.push(
+        <div key={g.id} className="ovt-group">
+          <span className="ovt-glabel mono">{g.name}<span className="ovt-gn"> {shown.length}</span></span>
+          <div className="ovt-grid">{shown}</div>
+        </div>,
+      );
+    }
+  }
+  flushLoose();
+
+  const openSess = openId ? sessById[openId] : null;
+  const windowEl = openSess && (
+    <div className="ovw-backdrop" onClick={() => setOpenId(null)}>
+      <div className="ovw-win" onClick={(e) => e.stopPropagation()}>
+        <Card s={dataFor(openSess)} color={colorOf[openSess.cli]} onOpen={onOpen} onClose={() => setOpenId(null)} />
+      </div>
+    </div>
+  );
+
+  if (view === 'tiles') {
+    return (
+      <div className="ov-wrap">
+        <div className="ov-feed ovt-feed">
+          {tileBlocks.length === 0 && <div className="usage-msg mono">{filter === 'all' ? 'no agents yet — shells and file panes don’t appear here.' : 'nothing in this state.'}</div>}
+          {tileBlocks}
+        </div>
+        {windowEl}
+      </div>
+    );
+  }
 
   const blocks: ReactNode[] = [];
   for (const ref of tree.order) {
