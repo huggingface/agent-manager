@@ -388,8 +388,12 @@ export default function Sidebar({
           }
           const g = groupById[ref.slice(2)];
           if (!g) return null;
-          // a group whose members are ALL archived disappears with them
-          const anyVisible = g.sessionIds.length === 0 || g.sessionIds.some((sid) => sessById[sid] && !isHidden(sid));
+          // A group whose AGENTS are all archived disappears with them — a
+          // leftover shell/file viewer alone doesn't keep it on screen.
+          // Groups with no agent members at all (pure utility) stay.
+          const members = g.sessionIds.map((sid) => sessById[sid]).filter(Boolean) as Session[];
+          const agents = members.filter((s) => s.cli !== 'shell' && s.cli !== 'files');
+          const anyVisible = agents.length === 0 || agents.some((s) => !isHidden(s.id));
           return anyVisible ? GroupBlock(g) : null;
         })}
         {!showArchived && archived.size > 0 && (
