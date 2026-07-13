@@ -37,6 +37,7 @@ function Card({ s, color, onOpen, onClose }: {
   const [failed, setFailed] = useState(false);
   const [sentAt, setSentAt] = useState(0);
   const [expanded, setExpanded] = useState(false);
+  const [promptOpen, setPromptOpen] = useState(false); // click the prompt to read it fully
   const [histIdx, setHistIdx] = useState(0); // 0 = live view, n = n-th exchange back
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -98,7 +99,11 @@ function Card({ s, color, onOpen, onClose }: {
       </div>
 
       {promptText ? (
-        <div className="ov-prompt" title={promptText}>{promptText}</div>
+        <div
+          className={`ov-prompt${promptOpen ? ' open' : ''}`}
+          title={promptOpen ? 'Collapse' : 'Show the full prompt'}
+          onClick={() => setPromptOpen((v) => !v)}
+        >{promptOpen ? (d?.lastPromptRaw || promptText) : promptText}</div>
       ) : (
         <div className="ov-prompt ov-prompt-none">no prompt yet</div>
       )}

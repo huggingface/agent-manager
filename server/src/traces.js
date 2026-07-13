@@ -40,7 +40,7 @@ function mergeInto(a, b) {
 // Built in the same parse pass: every real user prompt resets the segment, so
 // whatever accumulated by EOF is the activity since the last thing you said.
 function emptyDigest() {
-  return { lastPromptText: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantMd: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [], sinceTokens: 0, running: false, turnsLog: [] };
+  return { lastPromptText: '', lastPromptRaw: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantMd: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [], sinceTokens: 0, running: false, turnsLog: [] };
 }
 const clip = (s, n = 280) => { const t = (s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 // Markdown-preserving variant (keeps newlines) for the expandable card view.
@@ -50,7 +50,7 @@ const clipRaw = (s, n = 6000) => { const t = (s || '').trim(); return t.length >
 // the previous one into the log; a new user prompt clears it.
 const MAX_TURNS_LOG = 24;
 function digestPrompt(d, text, ts) {
-  d.lastPromptText = clip(text); d.lastPromptTs = Date.parse(ts) || 0;
+  d.lastPromptText = clip(text); d.lastPromptRaw = clipRaw(text); d.lastPromptTs = Date.parse(ts) || 0;
   d.sinceTurns = 0; d.sinceToolCalls = 0; d.sinceTools = {}; d.sinceFiles = []; d.sinceTokens = 0;
   d.turnsLog = []; // arrows only walk the current request's turns
   // The previous answer belongs to the previous prompt — never show it as "LAST".
@@ -366,6 +366,7 @@ function readOpencode() {
         const text = qPromptText.all(lastU.id).map((r) => r.t).filter(Boolean).join(' ');
         if (text.trim() && !text.trim().startsWith('<')) {
           dg.lastPromptText = clip(text);
+          dg.lastPromptRaw = clipRaw(text);
           dg.lastPromptTs = t0;
         }
         dg.sinceTurns = qCount.get(s.id, t0, 'assistant').c;
@@ -440,6 +441,7 @@ function readHermes() {
         const text = String(lastU.content || '');
         if (text.trim() && !text.trim().startsWith('<')) {
           dg.lastPromptText = clip(text);
+          dg.lastPromptRaw = clipRaw(text);
           dg.lastPromptTs = Math.round(t0 * 1000);
         }
         dg.sinceTurns = qRole.get(s.id, t0, 'assistant').c;

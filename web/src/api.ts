@@ -83,7 +83,7 @@ export const getUsage = (): Promise<Usage> => fetch('/api/usage').then(json);
 // ---- overview (meta) ----
 export interface TurnEntry { answer: string; answerMd: string; ts: number; }
 export interface MetaDigest {
-  lastPromptText: string; lastPromptTs: number;
+  lastPromptText: string; lastPromptRaw?: string; lastPromptTs: number;
   lastAssistantText: string; lastAssistantMd: string; lastAssistantTs: number;
   sinceTurns: number; sinceToolCalls: number; sinceTools: Record<string, number>; sinceFiles: string[];
   sinceTokens: number;

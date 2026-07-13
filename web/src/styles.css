@@ -250,7 +250,9 @@ body {
 .ov-go { color: var(--muted); font-size: 12px; opacity: 0; transition: opacity 0.12s ease-out; flex: none; }
 .ov-card:hover .ov-go, .ov-id:focus-visible .ov-go { opacity: 1; }
 
-.ov-prompt { font-size: 13px; font-weight: 550; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.ov-prompt { font-size: 13px; font-weight: 550; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-bottom: 8px; border-bottom: 1px solid var(--border); cursor: pointer; }
+/* click to read the whole prompt */
+.ov-prompt.open { white-space: pre-wrap; overflow-wrap: break-word; max-height: 300px; overflow-y: auto; }
 /* nothing between prompt and reply → one hairline, not two */
 .ov-prompt + .ov-live { border-top: none; }
 .ov-prompt::before { content: '❯ '; font-family: var(--font-mono); color: var(--accent); font-weight: 700; }
