@@ -25,9 +25,10 @@ const Caret = () => (
   <svg className="ov-caret" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.8 3.2h6.4L5 7.4z" fill="currentColor" /></svg>
 );
 
-function Card({ s, color, onOpen, onClose }: {
+function Card({ s, color, pending, onOpen, onClose }: {
   s: MetaSession;
   color?: string;
+  pending?: boolean; // digest still loading — show a shimmer instead of "no prompt yet"
   onOpen: (sid: string) => void;
   onClose?: () => void; // present when the card lives in the conversation window
 }) {
@@ -104,6 +105,8 @@ function Card({ s, color, onOpen, onClose }: {
           title={promptOpen ? 'Collapse' : 'Show the full prompt'}
           onClick={() => setPromptOpen((v) => !v)}
         >{promptOpen ? (d?.lastPromptRaw || promptText) : promptText}</div>
+      ) : pending ? (
+        <div className="ov-prompt-skel"><span className="skel" style={{ width: '70%' }} /></div>
       ) : (
         <div className="ov-prompt ov-prompt-none">no prompt yet</div>
       )}
@@ -174,7 +177,7 @@ function Card({ s, color, onOpen, onClose }: {
 }
 
 /** Compact tile: status + prompt + state; click opens the conversation window. */
-function Tile({ s, color, dim, onOpen }: { s: MetaSession; color?: string; dim?: boolean; onOpen: () => void }) {
+function Tile({ s, color, dim, pending, onOpen }: { s: MetaSession; color?: string; dim?: boolean; pending?: boolean; onOpen: () => void }) {
   const d = s.digest;
   const running = !!d?.running || s.state === 'working';
   const last = Math.max(d?.lastAssistantTs || 0, d?.lastPromptTs || 0) || Date.parse(s.createdAt) || 0;
@@ -187,18 +190,27 @@ function Tile({ s, color, dim, onOpen }: { s: MetaSession; color?: string; dim?:
         <span className={`status ${s.state}`} />
         <Logo cli={s.cli} size={12} tint={color} />
         <span className="ovt-name mono">{s.name}</span>
-        <span className="ovt-ago">{fmtAgo(last)}</span>
+        <span className="ovt-ago">{pending ? '' : fmtAgo(last)}</span>
       </div>
-      {d?.lastPromptText
-        ? <div className="ovt-prompt" title={d.lastPromptText}>{d.lastPromptText}</div>
-        : <div className="ovt-prompt none">no prompt yet</div>}
-      {running
-        ? <div className="ovt-state running mono">running</div>
-        : s.state === 'stopped'
-          ? <div className="ovt-state stopped mono">stopped</div>
-          : d?.lastAssistantText
-            ? <div className="ovt-state done mono">✓ done</div>
-            : <div className="ovt-state idle mono">idle</div>}
+      {pending ? (
+        <>
+          <span className="skel" style={{ width: '82%' }} />
+          <span className="skel" style={{ width: '38%', height: 7 }} />
+        </>
+      ) : (
+        <>
+          {d?.lastPromptText
+            ? <div className="ovt-prompt" title={d.lastPromptText}>{d.lastPromptText}</div>
+            : <div className="ovt-prompt none">no prompt yet</div>}
+          {running
+            ? <div className="ovt-state running mono">running</div>
+            : s.state === 'stopped'
+              ? <div className="ovt-state stopped mono">stopped</div>
+              : d?.lastAssistantText
+                ? <div className="ovt-state done mono">✓ done</div>
+                : <div className="ovt-state idle mono">idle</div>}
+        </>
+      )}
     </div>
   );
 }
@@ -214,7 +226,12 @@ export default function Overview({ clis, tree, filter, view, archived, showArchi
   showArchived: boolean;
   onOpen: (sid: string) => void;
 }) {
-  const [meta, setMeta] = useState<Record<string, MetaSession> | null>(null);
+  const [meta, setMeta] = useState<Record<string, MetaSession>>({});
+  // Progressive load: the layout renders immediately from the tree; digests
+  // stream in per session (newest first) until the bulk pass lands and marks
+  // everything loaded. A tile shows a shimmer until its id is in `loaded`.
+  const [loaded, setLoaded] = useState<Set<string>>(new Set());
+  const bulkDone = useRef(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [durs, setDurs] = useState<Record<string, number>>({});
   const [openId, setOpenId] = useState<string | null>(null); // conversation window
@@ -228,19 +245,54 @@ export default function Overview({ clis, tree, filter, view, archived, showArchi
   useEffect(() => {
     let alive = true;
     const load = () => api.getMeta()
-      .then((r) => { if (alive) setMeta(Object.fromEntries(r.sessions.map((s) => [s.id, s]))); })
+      .then((r) => {
+        if (!alive) return;
+        bulkDone.current = true;
+        setMeta(Object.fromEntries(r.sessions.map((s) => [s.id, s])));
+        setLoaded(new Set(r.sessions.map((s) => s.id)));
+      })
       .catch(() => {});
     load();
     const t = setInterval(() => { if (!document.hidden) load(); }, 1000);
     return () => { alive = false; clearInterval(t); };
   }, []);
 
+  // Per-session digests while the bulk build is still running, top of the
+  // feed first, a few in flight at a time.
+  const progressive = useRef(false);
+  useEffect(() => {
+    if (progressive.current || bulkDone.current || !tree.sessions.length) return;
+    progressive.current = true;
+    let alive = true;
+    const ids: string[] = [];
+    for (const ref of tree.order) {
+      if (ref.startsWith('s:')) { const s = tree.sessions.find((x) => x.id === ref.slice(2)); if (s && eligible(s)) ids.push(s.id); }
+      else { const g = tree.groups.find((x) => x.id === ref.slice(2)); if (g) for (const sid of g.sessionIds) { const s = tree.sessions.find((x) => x.id === sid); if (s && eligible(s)) ids.push(s.id); } }
+    }
+    const queue = [...ids];
+    const worker = async () => {
+      while (alive && !bulkDone.current && queue.length) {
+        const id = queue.shift()!;
+        try {
+          const r = await api.getMetaOne(id);
+          if (!alive || bulkDone.current) return;
+          if (r.digest) {
+            const s = tree.sessions.find((x) => x.id === id);
+            if (s) setMeta((m) => ({ ...m, [id]: { ...s, digest: r.digest } }));
+            setLoaded((l) => new Set(l).add(id));
+          }
+        } catch { /* bulk will cover it */ }
+      }
+    };
+    Promise.all([worker(), worker(), worker()]).catch(() => {});
+    return () => { alive = false; };
+  }, [tree]);
+
   const colorOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c.color])), [clis]);
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
-  const dataFor = (s: Session): MetaSession => meta?.[s.id] ?? { ...s, digest: null };
-
-  if (!meta) return <div className="ov-wrap"><div className="ov-feed"><div className="usage-msg mono">reading traces…<span className="et-cursor" /></div></div></div>;
+  const dataFor = (s: Session): MetaSession => meta[s.id] ?? { ...s, digest: null };
+  const pending = (id: string) => !loaded.has(id); // digest not in yet — shimmer
 
   const visible = (s: MetaSession) =>
     (filter === 'all' || bucket(s.state) === filter) && (showArchived || !archived.has(s.id));
@@ -258,7 +310,7 @@ export default function Overview({ clis, tree, filter, view, archived, showArchi
     if (!visible(m)) return null;
     return (
       <div key={s.id} className="ov-panel">
-        <Card s={m} color={colorOf[s.cli]} onOpen={onOpen} />
+        <Card s={m} color={colorOf[s.cli]} pending={pending(s.id)} onOpen={onOpen} />
       </div>
     );
   };
@@ -267,7 +319,7 @@ export default function Overview({ clis, tree, filter, view, archived, showArchi
   const tileFor = (s: Session) => {
     const m = dataFor(s);
     if (!visible(m)) return null;
-    return <Tile key={s.id} s={m} color={colorOf[s.cli]} dim={archived.has(s.id)} onOpen={() => setOpenId(s.id)} />;
+    return <Tile key={s.id} s={m} color={colorOf[s.cli]} dim={archived.has(s.id)} pending={pending(s.id)} onOpen={() => setOpenId(s.id)} />;
   };
   const tileBlocks: ReactNode[] = [];
   let looseTiles: ReactNode[] = [];
@@ -300,7 +352,7 @@ export default function Overview({ clis, tree, filter, view, archived, showArchi
   const windowEl = openSess && (
     <div className="ovw-backdrop" onClick={() => setOpenId(null)}>
       <div className="ovw-win" onClick={(e) => e.stopPropagation()}>
-        <Card s={dataFor(openSess)} color={colorOf[openSess.cli]} onOpen={onOpen} onClose={() => setOpenId(null)} />
+        <Card s={dataFor(openSess)} color={colorOf[openSess.cli]} pending={pending(openSess.id)} onOpen={onOpen} onClose={() => setOpenId(null)} />
       </div>
     </div>
   );

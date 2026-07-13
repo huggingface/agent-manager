@@ -15,7 +15,7 @@ import * as order from './order.js';
 import * as demo from './demo.js';
 import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection } from './runner.js';
 import { buildUsage } from './usage.js';
-import { buildTraces, traceDigests } from './traces.js';
+import { buildTraces, traceDigests, digestFor } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 
@@ -142,7 +142,7 @@ app.get('/api/health', (_req, res) =>
 
 app.get('/api/clis', (_req, res) => res.json(cliCatalog()));
 
-app.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.debug === '1')));
+app.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.debug === '1', req.query.provider || null)));
 
 app.get('/api/traces', async (_req, res) => res.json(await buildTraces()));
 
@@ -183,6 +183,15 @@ app.post('/api/notify', async (req, res) => {
 });
 
 // Overview cards: every agent's state + what it did since your last prompt.
+// Targeted digest for one session — lets the Overview fill tiles one by one
+// while the bulk build (below) is still chewing through the bucket.
+app.get('/api/meta/:id', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const digest = await digestFor(s);
+  res.json({ id: s.id, digest });
+});
+
 app.get('/api/meta', async (_req, res) => {
   const digests = await traceDigests();
   const hs = demo.active() ? demo.hiddenSessions() : null;
@@ -966,6 +975,11 @@ wss.on('connection', (ws, req) => {
 });
 
 generateEnvSkill(loadSecretNotes()); // keep the environment skill current on boot
+
+// Warm the trace cache in the background: the first build parses every
+// transcript on the bucket (seconds), so do it now rather than when the
+// operator opens the Overview.
+traceDigests().catch(() => {});
 
 server.listen(PORT, () => {
   console.log(`Agent Manager :${PORT}  tmux=${USE_TMUX}  data=${DATA_DIR}`);

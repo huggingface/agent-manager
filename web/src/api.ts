@@ -78,7 +78,7 @@ export interface ProviderUsage {
   quota?: { fiveHour?: QuotaWindow; weekly?: QuotaWindow; opus?: QuotaWindow; updatedAt?: number; source?: 'live' | 'snapshot' } | null;
 }
 export interface Usage { providers: Record<string, ProviderUsage>; generatedAt: string; }
-export const getUsage = (): Promise<Usage> => fetch('/api/usage').then(json);
+export const getUsage = (provider?: string): Promise<Usage> => fetch(provider ? `/api/usage?provider=${provider}` : '/api/usage').then(json);
 
 // ---- overview (meta) ----
 export interface TurnEntry { answer: string; answerMd: string; ts: number; }
@@ -93,6 +93,10 @@ export interface MetaDigest {
 export interface MetaSession extends Session { digest: MetaDigest | null }
 export const getMeta = (): Promise<{ sessions: MetaSession[]; generatedAt: string }> =>
   fetch('/api/meta').then(json);
+// Targeted digest for one session (progressive tile fill); digest is null when
+// this CLI only resolves through the bulk pass.
+export const getMetaOne = (id: string): Promise<{ id: string; digest: MetaDigest | null }> =>
+  fetch(`/api/meta/${id}`).then(json);
 export const sendInput = (id: string, text: string): Promise<{ ok: boolean; started?: boolean }> =>
   fetch(`/api/sessions/${id}/input`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ text }) }).then(json);
 

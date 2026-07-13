@@ -186,19 +186,23 @@ async function debugInfo() {
   };
 }
 
-export async function buildUsage(debug = false) {
+export async function buildUsage(debug = false, only = null) {
+  // `only` narrows to one provider so the Usage page can fetch each in
+  // parallel and render whichever answers first — one slow/hung provider
+  // (ccusage has a 20s timeout) no longer blocks the rest.
+  const wants = (p) => !only || only === p;
   const [uClaude, uCodex, uGemini, qClaude, qCodex] = await Promise.all([
-    providerUsage('claude'), providerUsage('codex'), providerUsage('gemini'),
-    claudeQuota(), codexQuota(),
+    wants('claude') ? providerUsage('claude') : null,
+    wants('codex') ? providerUsage('codex') : null,
+    wants('gemini') ? providerUsage('gemini') : null,
+    wants('claude') ? claudeQuota() : null,
+    wants('codex') ? codexQuota() : null,
   ]);
-  const out = {
-    providers: {
-      claude: { ...(uClaude || {}), quota: qClaude },
-      codex: { ...(uCodex || {}), quota: qCodex },
-      gemini: { ...(uGemini || {}), quota: null },
-    },
-    generatedAt: new Date().toISOString(),
-  };
+  const providers = {};
+  if (wants('claude')) providers.claude = { ...(uClaude || {}), quota: qClaude };
+  if (wants('codex')) providers.codex = { ...(uCodex || {}), quota: qCodex };
+  if (wants('gemini')) providers.gemini = { ...(uGemini || {}), quota: null };
+  const out = { providers, generatedAt: new Date().toISOString() };
   if (debug) out._debug = await debugInfo();
   return out;
 }

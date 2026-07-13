@@ -286,6 +286,12 @@ body {
   50% { content: '⠼'; } 62.5% { content: '⠴'; } 75% { content: '⠦'; } 87.5% { content: '⠧'; }
 }
 
+/* shimmer placeholder while a session's digest loads */
+.skel { display: block; height: 9px; border-radius: 5px; background: linear-gradient(90deg, var(--panel-2) 25%, color-mix(in srgb, var(--border) 70%, var(--panel-2)) 50%, var(--panel-2) 75%); background-size: 200% 100%; animation: skel 1.2s ease-in-out infinite; }
+@keyframes skel { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.ovt-tile .skel { margin: 5px 0 2px; }
+.ov-prompt-skel { padding: 5px 0 12px; border-bottom: 1px solid var(--border); }
+
 /* ---- overview tile view: compact grid, groups outlined fieldset-style ---- */
 /* tiles use the full stage width — the grid decides how many columns fit */
 .ovt-feed { max-width: none; gap: 16px; }

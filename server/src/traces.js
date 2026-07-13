@@ -658,3 +658,27 @@ export async function traceDigests() {
   const { digests } = await memoized();
   return digests;
 }
+
+/** Targeted digest for ONE session — parses only its own transcript files so
+ *  the Overview can fill tiles progressively instead of waiting for the full
+ *  build. Cheap for Claude (transcript filename == sessionUuid) and Codex (the
+ *  pinned rollout); db-backed CLIs return null and ride the bulk pass. Parsed
+ *  files land in the shared per-file cache, so nothing is read twice. */
+export async function digestFor(s) {
+  try {
+    if (s.cli === 'claude' && s.sessionUuid) {
+      let best = null;
+      for (const p of await claudeFiles()) {
+        if (!path.basename(p).includes(s.sessionUuid)) continue;
+        const parsed = await statsFor(p, parseClaude);
+        if (parsed && (!best || parsed.stats.lastTs > best.stats.lastTs)) best = parsed;
+      }
+      return best ? best.digest : null;
+    }
+    if (s.cli === 'codex' && s.codexRollout && fs.existsSync(s.codexRollout)) {
+      const parsed = await statsFor(s.codexRollout, parseCodex);
+      if (parsed && !parsed.stats.subagent) return parsed.digest;
+    }
+  } catch { /* fall through to the bulk pass */ }
+  return null;
+}

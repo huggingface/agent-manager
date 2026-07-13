@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import * as api from '../api';
-import type { Usage, QuotaWindow, Traces, TraceStats } from '../api';
+import type { ProviderUsage, QuotaWindow, Traces, TraceStats } from '../api';
 import Logo from './Logo';
 
 const PROVS = [
@@ -61,42 +61,61 @@ function TraceRow({ label, cli, path, st, strong }: { label: string; cli?: strin
 }
 
 export default function UsagePanel() {
-  const [u, setU] = useState<Usage | null>(null);
+  // Each provider loads independently (undefined = loading, null = failed), so
+  // the page frame paints immediately and cards fill in as answers arrive —
+  // one hung provider no longer blanks the whole page.
+  const [prov, setProv] = useState<Record<string, ProviderUsage | null | undefined>>({});
   const [t, setT] = useState<Traces | null>(null);
-  const [err, setErr] = useState(false);
   useEffect(() => {
-    api.getUsage().then(setU).catch(() => setErr(true));
-    api.getTraces().then(setT).catch(() => {});
+    let alive = true;
+    for (const p of PROVS) {
+      api.getUsage(p.id)
+        .then((r) => { if (alive) setProv((m) => ({ ...m, [p.id]: r.providers[p.id] || {} })); })
+        .catch(() => { if (alive) setProv((m) => ({ ...m, [p.id]: null })); });
+    }
+    api.getTraces().then((r) => { if (alive) setT(r); }).catch(() => {});
+    return () => { alive = false; };
   }, []);
-
-  if (err) return <div className="usage-msg mono">usage unavailable — is ccusage installed?</div>;
-  if (!u) return <div className="usage-msg mono">reading usage…<span className="et-cursor" /></div>;
 
   return (
     <div className="usage">
       {PROVS.map((p) => {
-        const d = u.providers[p.id] || {};
-        const q = d.quota;
+        const d = prov[p.id];
+        const q = d?.quota;
         return (
           <div key={p.id} className="usage-card">
             <div className="usage-head">
               <span className="status" style={{ background: p.color }} />
               <b>{p.label}</b>
             </div>
-            <div className="usage-stats">
-              <div><span className="s-muted">Today</span><b>{fmtTok(d.tokensToday)} tok</b></div>
-              <div><span className="s-muted">This week</span><b>{fmtTok(d.tokensWeek)} tok</b></div>
-            </div>
-            {q ? (
-              <div className="usage-quota">
-                <Bar label="5-hour" q={q.fiveHour} />
-                <Bar label="Weekly" q={q.weekly} />
-                {!q.fiveHour && !q.weekly && <div className="s-help">No quota yet — run a session to populate.</div>}
-              </div>
-            ) : p.id === 'gemini' ? (
-              <div className="s-help">No quota (consumer tier deprecated — uses an API key).</div>
+            {d === undefined ? (
+              <>
+                <div className="usage-stats">
+                  <div><span className="s-muted">Today</span><span className="skel" style={{ width: 64, height: 12, marginTop: 4 }} /></div>
+                  <div><span className="s-muted">This week</span><span className="skel" style={{ width: 64, height: 12, marginTop: 4 }} /></div>
+                </div>
+                <div className="usage-quota"><span className="skel" style={{ width: '78%' }} /></div>
+              </>
+            ) : d === null ? (
+              <div className="s-help">unavailable — is ccusage installed?</div>
             ) : (
-              <div className="s-help">No quota yet — run a session to populate.</div>
+              <>
+                <div className="usage-stats">
+                  <div><span className="s-muted">Today</span><b>{fmtTok(d.tokensToday)} tok</b></div>
+                  <div><span className="s-muted">This week</span><b>{fmtTok(d.tokensWeek)} tok</b></div>
+                </div>
+                {q ? (
+                  <div className="usage-quota">
+                    <Bar label="5-hour" q={q.fiveHour} />
+                    <Bar label="Weekly" q={q.weekly} />
+                    {!q.fiveHour && !q.weekly && <div className="s-help">No quota yet — run a session to populate.</div>}
+                  </div>
+                ) : p.id === 'gemini' ? (
+                  <div className="s-help">No quota (consumer tier deprecated — uses an API key).</div>
+                ) : (
+                  <div className="s-help">No quota yet — run a session to populate.</div>
+                )}
+              </>
             )}
           </div>
         );
@@ -108,21 +127,25 @@ export default function UsagePanel() {
         hover the tools count for the breakdown, tokens-in for the cache share. The total also counts
         traces of deleted agents.
       </div>
-      {!t ? (
-        <div className="usage-msg mono">analyzing traces…<span className="et-cursor" /></div>
-      ) : (
-        <div className="table-scroll">
-          <table className="traces-table">
-            <thead>
-              <tr><th>agent</th><th>turns</th><th>prompts</th><th>tools</th><th>web</th><th>tok in</th><th>tok out</th><th>last active</th></tr>
-            </thead>
-            <tbody>
-              {t.sessions.map((s) => <TraceRow key={s.id} label={s.name} cli={s.cli} path={s.path} st={s} />)}
-              <TraceRow label={`total (${t.totals.files} files)`} st={t.totals} strong />
-            </tbody>
-          </table>
-        </div>
-      )}
+      <div className="table-scroll">
+        <table className="traces-table">
+          <thead>
+            <tr><th>agent</th><th>turns</th><th>prompts</th><th>tools</th><th>web</th><th>tok in</th><th>tok out</th><th>last active</th></tr>
+          </thead>
+          <tbody>
+            {!t ? (
+              [0, 1, 2].map((i) => (
+                <tr key={i}><td colSpan={8}><span className="skel" style={{ width: `${86 - i * 14}%` }} /></td></tr>
+              ))
+            ) : (
+              <>
+                {t.sessions.map((s) => <TraceRow key={s.id} label={s.name} cli={s.cli} path={s.path} st={s} />)}
+                <TraceRow label={`total (${t.totals.files} files)`} st={t.totals} strong />
+              </>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       <div className="s-help">
         Token counts and quota are read from each agent's local logs on the Space. They reflect the state as of that agent's <em>last model call here</em> — running a session updates them; activity outside the Space won't.
