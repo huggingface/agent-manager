@@ -4,7 +4,7 @@ import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, BoltGlyph, AmMark } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
 
 type Zone = 'before' | 'after' | 'on';
 
@@ -240,10 +240,10 @@ export default function Sidebar({
         </div>
         <div className="brand-actions">
           <button
-            className={`icon-btn bolt-btn${panel === 'quick' ? ' on' : ''}`}
+            className={`icon-btn add-btn bolt-btn${panel === 'quick' ? ' on' : ''}`}
             onClick={() => (panel === 'quick' ? closePanel() : openQuick())}
             title="New agent or group"
-          ><BoltGlyph /></button>
+          ><PlusGlyph /></button>
           <button className="icon-btn" onClick={onOpenSettings} title="Settings"><SlidersGlyph /></button>
           <button className="icon-btn" onClick={onToggleTheme} title="Toggle light / dark">{theme === 'dark' ? <MoonGlyph /> : <SunGlyph />}</button>
         </div>
