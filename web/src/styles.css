@@ -285,7 +285,8 @@ body {
 }
 
 /* ---- overview tile view: compact grid, groups outlined fieldset-style ---- */
-.ovt-feed { gap: 16px; }
+/* tiles use the full stage width — the grid decides how many columns fit */
+.ovt-feed { max-width: none; gap: 16px; }
 .ovt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(225px, 1fr)); gap: 10px; }
 .ovt-tile { background: var(--panel); border: 1px solid var(--border); border-radius: 11px; padding: 10px 12px 9px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; min-width: 0; transition: border-color 0.12s, transform 0.12s; }
 .ovt-tile:hover { border-color: var(--border-strong); transform: translateY(-1px); }
