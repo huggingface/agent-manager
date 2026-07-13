@@ -65,6 +65,48 @@ function ensureClaudeStatusline() {
   } catch {}
 }
 ensureClaudeStatusline();
+
+// Seed autonomous defaults so agents don't stop to ask for routine commands:
+// the private Space container is itself the sandbox, so in-CLI permission
+// prompts add friction without adding safety. Gated to Space deployments via
+// the entrypoint-set env vars (same idiom as the statusline hook), and only
+// fills in what the operator hasn't set — existing values are never touched.
+function ensureAutonomyDefaults() {
+  // Codex: approval_policy + sandbox_mode in $CODEX_HOME/config.toml. Codex's
+  // Linux sandbox needs Landlock, which the Space container doesn't provide,
+  // so full access with no approvals is the working configuration. Missing
+  // keys are PREPENDED: top-level toml keys must precede any [section].
+  try {
+    const home = process.env.CODEX_HOME;
+    if (home) {
+      fs.mkdirSync(home, { recursive: true });
+      const p = path.join(home, 'config.toml');
+      let txt = '';
+      try { txt = fs.readFileSync(p, 'utf8'); } catch {}
+      const missing = [];
+      if (!/^\s*approval_policy\s*=/m.test(txt)) missing.push('approval_policy = "never"');
+      if (!/^\s*sandbox_mode\s*=/m.test(txt)) missing.push('sandbox_mode = "danger-full-access" # the Space container is the sandbox');
+      if (missing.length) fs.writeFileSync(p, `${missing.join('\n')}\n${txt}`);
+    }
+  } catch (e) { console.error('[autonomy codex]', e && e.message); }
+  // Claude Code: permissions.defaultMode in settings.json — every session
+  // starts in bypassPermissions (what shift+tab toggles per conversation).
+  try {
+    const cfg = process.env.CLAUDE_CONFIG_DIR;
+    if (cfg) {
+      fs.mkdirSync(cfg, { recursive: true });
+      const p = path.join(cfg, 'settings.json');
+      let s = {};
+      try { s = JSON.parse(fs.readFileSync(p, 'utf8')); } catch {}
+      s.permissions = s.permissions || {};
+      if (!s.permissions.defaultMode) {
+        s.permissions.defaultMode = 'bypassPermissions';
+        fs.writeFileSync(p, JSON.stringify(s, null, 2));
+      }
+    }
+  } catch (e) { console.error('[autonomy claude]', e && e.message); }
+}
+ensureAutonomyDefaults();
 initPush();
 
 // Wait for the visibility verdict before serving: isPublic() fails closed on a
