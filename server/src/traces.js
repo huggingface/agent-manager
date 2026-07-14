@@ -472,7 +472,7 @@ function readHermes() {
 // the single process. Above the cap we read only the tail (dropping the partial
 // first line), which keeps the "since your last prompt" digest accurate while
 // bounding memory — older cumulative totals for that one file become approximate.
-const MAX_TRACE_BYTES = 40 * 1024 * 1024;
+const MAX_TRACE_BYTES = 12 * 1024 * 1024;
 async function readTraceFile(p, size) {
   if (size <= MAX_TRACE_BYTES) return fsp.readFile(p, 'utf8');
   const fh = await fsp.open(p, 'r');
@@ -496,9 +496,15 @@ async function statsFor(p, parser, quietMs = 0) {
   // reads can disturb what it sees — so while a fence-sensitive file is hot,
   // serve the previous parse and re-read once writes have gone quiet.
   if (quietMs && c && Date.now() - m.mtimeMs < quietMs) return c.parsed;
+  // Parsing is synchronous CPU on THE event loop. A big transcript being
+  // actively written changes every poll; re-parsing tens of MB once a second
+  // starves every other request (blank app). Heavy files therefore re-parse
+  // on a duty cycle: at most ~10% of wall time, capped at one parse per 10s.
+  if (c && c.cost > 150 && Date.now() - c.at < Math.min(10_000, c.cost * 10)) return c.parsed;
   let parsed;
+  const t0 = Date.now();
   try { parsed = parser(await readTraceFile(p, m.size)); } catch { return null; }
-  fileCache.set(p, { key, parsed });
+  fileCache.set(p, { key, parsed, cost: Date.now() - t0, at: t0 });
   return parsed;
 }
 
