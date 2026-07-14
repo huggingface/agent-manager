@@ -36,7 +36,10 @@ function Card({ s, color, pending, onOpen, onClose }: {
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState(false);
-  const [sentAt, setSentAt] = useState(0);
+  // Optimistic echo: the sent text becomes the prompt line the moment the
+  // send succeeds — the digest round-trip (CLI writes transcript → rebuild →
+  // poll) can take seconds, and a frozen card reads as "did that get lost?".
+  const [sent, setSent] = useState<{ text: string; at: number } | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false); // click the prompt to read it fully
   const [histIdx, setHistIdx] = useState(0); // 0 = live view, n = n-th exchange back
@@ -44,12 +47,12 @@ function Card({ s, color, pending, onOpen, onClose }: {
 
   // After you send (or when the transcript shows a prompt newer than the last
   // answer), the old answer is stale — a spinner takes its place.
-  const digestCaughtUp = !!d && d.lastPromptTs >= sentAt - 60_000;
-  if (sentAt && digestCaughtUp) setSentAt(0);
+  const digestCaughtUp = !!d && !!sent && d.lastPromptTs >= sent.at - 60_000;
+  if (sent && digestCaughtUp) setSent(null);
   // Running: the agent's own task lifecycle when the transcript provides one
   // (codex task_started/complete), else the terminal-derived state.
   const running = !!d?.running || s.state === 'working';
-  const awaiting = (!!sentAt && !digestCaughtUp) || (!!d && !!d.lastPromptText && d.lastPromptTs > d.lastAssistantTs && running);
+  const awaiting = (!!sent && !digestCaughtUp) || (!!d && !!d.lastPromptText && d.lastPromptTs > d.lastAssistantTs && running);
 
   const hist = d?.turnsLog ?? [];
   const idx = Math.min(histIdx, hist.length);
@@ -63,8 +66,9 @@ function Card({ s, color, pending, onOpen, onClose }: {
     try {
       await api.sendInput(s.id, text);
       setDraft('');
-      setSentAt(Date.now());
+      setSent({ text, at: Date.now() });
       setHistIdx(0);
+      setPromptOpen(false);
       if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     } catch {
       setFailed(true);
@@ -74,7 +78,7 @@ function Card({ s, color, pending, onOpen, onClose }: {
   };
 
   const ago = fmtAgo(Math.max(d?.lastAssistantTs || 0, d?.lastPromptTs || 0) || Date.parse(s.createdAt) || 0);
-  const promptText = d?.lastPromptText || '';
+  const promptText = sent ? sent.text : d?.lastPromptText || '';
   const answerText = entry ? entry.answer : d?.lastAssistantText || '';
   const answerMd = entry ? entry.answerMd : d?.lastAssistantMd || '';
   // Chronological position: hist is newest-first, live text is the newest turn.
@@ -104,7 +108,7 @@ function Card({ s, color, pending, onOpen, onClose }: {
           className={`ov-prompt${promptOpen ? ' open' : ''}`}
           title={promptOpen ? 'Collapse' : 'Show the full prompt'}
           onClick={() => setPromptOpen((v) => !v)}
-        >{promptOpen ? (d?.lastPromptRaw || promptText) : promptText}</div>
+        >{promptOpen ? (sent ? sent.text : (d?.lastPromptRaw || promptText)) : promptText}</div>
       ) : pending ? (
         <div className="ov-prompt-skel"><span className="skel" style={{ width: '70%' }} /></div>
       ) : (
