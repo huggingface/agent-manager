@@ -177,6 +177,11 @@ function tryCaptureCodexId(sessionId, workdir, sinceMs) {
     try { meta = JSON.parse(firstLine(c.p)); } catch { continue; }
     const mp = (meta && meta.payload) || {};
     if (mp.cwd !== workdir) continue;
+    // A sibling's ongoing conversation in the same folder gets fresh writes
+    // (mtime) during our capture window — require the rollout to have been
+    // CREATED after this launch so we never claim someone else's thread.
+    const created = Date.parse(mp.timestamp || meta.timestamp || '') || 0;
+    if (created && created < sinceMs - 15_000) continue;
     // Skip Codex's internal guardian/subagent rollouts — they share the cwd but
     // aren't this agent's conversation, so pinning one would break resume and
     // the Overview digest.
@@ -282,6 +287,16 @@ function commandFor(session) {
       ? `${cli.cont} || exec ${cli.run}`
       : `exec ${q0 && cli.withPrompt ? cli.withPrompt(q0) : cli.run}`;
     return `${guard}${base}`;
+  }
+
+  // codex without a pinned conversation: `resume --last` scopes to the cwd,
+  // so in a SHARED folder it can resume a SIBLING's conversation (cross-talk).
+  // Only resume when this session has the folder to itself; otherwise start
+  // fresh — capture pins the new conversation right away.
+  if (cli.id === 'codex' && session.everStarted) {
+    const folder = session.path ?? session.id;
+    const shared = list().some((o) => o.id !== session.id && o.cli === 'codex' && (o.path ?? o.id) === folder);
+    if (shared) return `exec ${cli.run}`;
   }
 
   // Other agents: resume when one likely exists, else a fresh launch. `exec` so
