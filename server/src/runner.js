@@ -220,9 +220,16 @@ function scheduleCodexCapture(session, workdir) {
   if (t0.unref) t0.unref();
 }
 
+// Single-quote a string for embedding in an `sh -lc` command line.
+const shq = (t) => `'${String(t).replace(/'/g, `'\\''`)}'`;
+
 function commandFor(session) {
   const cli = cliById(session.cli) || cliById('shell');
   if (cli.id === 'shell') return bashLaunch;
+  // Quickstart: a prompt queued at creation rides the FIRST launch command
+  // (claude 'p', codex 'p', gemini -i 'p', opencode --prompt 'p') — the CLI
+  // starts already working on it, no typing race against a booting TUI.
+  const q0 = !session.everStarted && session.pendingPrompt ? shq(session.pendingPrompt) : '';
 
   // Claude keys conversations by working directory, so grouped sessions sharing
   // a folder would all `--continue` onto the SAME most-recent conversation. Pin
@@ -233,7 +240,7 @@ function commandFor(session) {
   // as a fresh conversation and eating the pane's "done" signal). The fresh
   // branch keeps `|| exec claude` as a last resort for an unsupported flag.
   if (cli.id === 'claude' && session.sessionUuid) {
-    const fresh = `claude --session-id ${session.sessionUuid} || exec claude`;
+    const fresh = `claude --session-id ${session.sessionUuid}${q0 ? ` ${q0}` : ''} || exec claude`;
     if (!session.everStarted) return fresh;
     const projects = '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"';
     const hasTranscript = `[ -n "$(find ${projects} -name '${session.sessionUuid}*' -print -quit 2>/dev/null)" ]`;
@@ -271,7 +278,9 @@ function commandFor(session) {
     const guard = 'G="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"; '
       + 'mkdir -p "$(dirname "$G")"; [ -d "$G" ] && rm -rf "$G"; '
       + '[ -e "$G" ] || { [ -f "${G}c" ] && cp "${G}c" "$G" || echo "{}" > "$G"; }; ';
-    const base = session.everStarted && cli.cont ? `${cli.cont} || exec ${cli.run}` : `exec ${cli.run}`;
+    const base = session.everStarted && cli.cont
+      ? `${cli.cont} || exec ${cli.run}`
+      : `exec ${q0 && cli.withPrompt ? cli.withPrompt(q0) : cli.run}`;
     return `${guard}${base}`;
   }
 
@@ -279,6 +288,7 @@ function commandFor(session) {
   // the agent is the pane's foreground process; when it exits the tmux session
   // ends — a clear "done" signal — and the fallback preserves that.
   if (session.everStarted && cli.cont) return `${cli.cont} || exec ${cli.run}`;
+  if (q0 && cli.withPrompt) return `exec ${cli.withPrompt(q0)}`;
   return `exec ${cli.run}`;
 }
 
@@ -316,7 +326,7 @@ export function attach(session, cols, rows) {
     term = pty.spawn('bash', ['-lc', full], { name: 'xterm-256color', cols, rows, cwd: workdir, env });
   }
 
-  if (!session.everStarted) update(session.id, { everStarted: true });
+  if (!session.everStarted) update(session.id, { everStarted: true, pendingPrompt: undefined });
   if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
 
   const handle = {
@@ -355,7 +365,7 @@ export function ensureRunning(session) {
     'sh', '-lc', commandFor(session),
   );
   execFileSync('tmux', args, { stdio: 'ignore', env: TERM_ENV });
-  if (!session.everStarted) update(session.id, { everStarted: true });
+  if (!session.everStarted) update(session.id, { everStarted: true, pendingPrompt: undefined });
   if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
   return true;
 }

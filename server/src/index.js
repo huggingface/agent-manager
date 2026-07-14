@@ -762,16 +762,24 @@ app.post('/api/sessions', (req, res) => {
   if (s.path) { try { fs.mkdirSync(workspacePath(s.path), { recursive: true }); } catch {} }
   if (groupId && groups.get(groupId)) groups.attach(groupId, s.id);
   else order.prepend(`s:${s.id}`);
-  // Quickstart: launch the CLI and type the first prompt once it has booted —
-  // fire-and-forget so the response (and the opening pane) aren't held up.
+  // Quickstart: the prompt rides the CLI's launch command itself (claude 'p',
+  // codex 'p', …) so the agent starts already working on it — typing into a
+  // booting TUI was a race that quietly lost. CLIs without an initial-prompt
+  // flag keep the boot-then-type fallback.
   if (typeof prompt === 'string' && prompt.trim()) {
-    (async () => {
-      try {
-        ensureRunning(s);
-        await new Promise((r) => setTimeout(r, 4000));
-        sendInput(s.id, prompt.trim());
-      } catch (e) { console.error('[quickstart]', e && e.message); }
-    })();
+    const text = prompt.trim();
+    if (cliById(cli).withPrompt || cli === 'claude') {
+      store.update(s.id, { pendingPrompt: text });
+      try { ensureRunning(store.get(s.id) || s); } catch (e) { console.error('[quickstart]', e && e.message); }
+    } else {
+      (async () => {
+        try {
+          ensureRunning(s);
+          await new Promise((r) => setTimeout(r, 4000));
+          sendInput(s.id, text);
+        } catch (e) { console.error('[quickstart]', e && e.message); }
+      })();
+    }
   }
   res.status(201).json({ ...s, running: false, state: 'stopped' });
 });
