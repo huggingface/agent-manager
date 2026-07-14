@@ -311,6 +311,9 @@ body {
 .ovt-state.running::before { content: '⠋ '; display: inline-block; animation: ov-spin 0.9s steps(1) infinite; }
 .ovt-state.stopped { opacity: 0.7; }
 .ovt-group { position: relative; border: 1px solid var(--border); border-radius: 13px; padding: 12px 10px 10px; margin-top: 6px; }
+/* loose tiles align with tiles INSIDE group boxes (1px border + 10px padding),
+   not with the box edge */
+.ovt-feed > .ovt-grid { margin: 0 11px; }
 .ovt-glabel { position: absolute; top: -8px; left: 14px; background: var(--bg); padding: 0 7px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; color: var(--muted); }
 .ovt-gn { color: var(--border-strong); }
 /* conversation window: the full card, centered over the grid */

@@ -242,12 +242,18 @@ export default function Overview({ clis, tree, filter, view, archived, showArchi
     return () => document.removeEventListener('keydown', onKey);
   }, [openId]);
 
+  // Skip the setState when the poll returns byte-identical data — otherwise
+  // every tick re-renders every tile (and the conversation window) for nothing.
+  const lastPayload = useRef('');
   useEffect(() => {
     let alive = true;
     const load = () => api.getMeta()
       .then((r) => {
         if (!alive) return;
         bulkDone.current = true;
+        const payload = JSON.stringify(r.sessions);
+        if (payload === lastPayload.current) return;
+        lastPayload.current = payload;
         setMeta(Object.fromEntries(r.sessions.map((s) => [s.id, s])));
         setLoaded(new Set(r.sessions.map((s) => s.id)));
       })
