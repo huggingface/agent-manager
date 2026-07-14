@@ -218,7 +218,7 @@ app.post('/api/sessions/:id/input', async (req, res) => {
   try {
     const started = ensureRunning(s);
     if (started) await new Promise((r) => setTimeout(r, 3500));
-    sendInput(s.id, text);
+    await sendInput(s.id, text);
     res.json({ ok: true, started });
   } catch (e) {
     res.status(409).json({ error: String(e.message || e) });
@@ -776,7 +776,7 @@ app.post('/api/sessions', (req, res) => {
         try {
           ensureRunning(s);
           await new Promise((r) => setTimeout(r, 4000));
-          sendInput(s.id, text);
+          await sendInput(s.id, text);
         } catch (e) { console.error('[quickstart]', e && e.message); }
       })();
     }

@@ -386,18 +386,26 @@ export function ensureRunning(session) {
 }
 
 /** Type a line into the session's terminal (works with no browser attached). */
-export function sendInput(id, text) {
+export async function sendInput(id, text) {
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
   // the inner newlines as soft line breaks instead of submitting early.
   const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
+  // The Enter must arrive as its OWN keypress: TUIs (codex) detect rapid input
+  // bursts as a paste, and a CR inside the burst becomes a newline in the
+  // composer instead of a submit. A short gap breaks the burst.
+  const gap = () => new Promise((r) => setTimeout(r, 300));
   if (USE_TMUX) {
     execFileSync('tmux', ['send-keys', '-t', tmuxName(id), '-l', '--', payload], { stdio: 'ignore' });
+    await gap();
     execFileSync('tmux', ['send-keys', '-t', tmuxName(id), 'Enter'], { stdio: 'ignore' });
     return;
   }
   const set = live.get(id);
   if (!set || !set.size) throw new Error('session is not running');
-  set.values().next().value.write(`${payload}\r`);
+  const h = set.values().next().value;
+  h.write(payload);
+  await gap();
+  h.write('\r');
 }
 
 /** Return the last mouse selection for this session as a browser-consumable OSC 52. */
