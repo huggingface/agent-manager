@@ -13,9 +13,18 @@ const TTL = 60_000;
 function cached(key, fn) {
   const c = cache.get(key);
   if (c && Date.now() - c.ts < TTL) return c.val;
-  const val = Promise.resolve().then(fn).catch(() => null);
-  cache.set(key, { ts: Date.now(), val });
-  return val;
+  // Stale-while-revalidate with last-good fallback: a cold ccusage scan can
+  // take tens of seconds, and a timed-out scan used to surface as "0 tok".
+  // Serve the previous answer immediately while refreshing, and keep it when
+  // the refresh fails or comes back empty.
+  const next = (async () => {
+    let v = null;
+    try { v = await fn(); } catch { /* keep previous */ }
+    if (v == null && c) return c.val;
+    return v;
+  })();
+  cache.set(key, { ts: Date.now(), val: next });
+  return c ? c.val : next;
 }
 
 // Normalize a reset timestamp to unix SECONDS. Providers disagree: some report
@@ -58,7 +67,7 @@ function providerUsage(prov) {
     const env = prov === 'claude' ? claudeEnv() : process.env;
     let out;
     try {
-      ({ stdout: out } = await execFile('ccusage', [prov, 'daily', '--json'], { encoding: 'utf8', timeout: 20_000, maxBuffer: 16 * 1024 * 1024, env }));
+      ({ stdout: out } = await execFile('ccusage', [prov, 'daily', '--json'], { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024, env }));
     } catch { return null; }
     let data;
     try { data = JSON.parse(out); } catch { return null; }

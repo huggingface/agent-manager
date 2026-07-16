@@ -101,8 +101,8 @@ export default function UsagePanel() {
             ) : (
               <>
                 <div className="usage-stats">
-                  <div><span className="s-muted">Today</span><b>{fmtTok(d.tokensToday)} tok</b></div>
-                  <div><span className="s-muted">This week</span><b>{fmtTok(d.tokensWeek)} tok</b></div>
+                  <div><span className="s-muted">Today</span><b>{d.tokensToday == null ? '—' : `${fmtTok(d.tokensToday)} tok`}</b></div>
+                  <div><span className="s-muted">This week</span><b>{d.tokensWeek == null ? '—' : `${fmtTok(d.tokensWeek)} tok`}</b></div>
                 </div>
                 {q ? (
                   <div className="usage-quota">

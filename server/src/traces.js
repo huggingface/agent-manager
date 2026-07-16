@@ -279,7 +279,10 @@ function parseOpenClaw(txt) {
   return { stats: st, digest: dg };
 }
 
-async function openclawFiles() {
+function openclawFiles() {
+  return memoList('openclaw', openclawFilesUncached);
+}
+async function openclawFilesUncached() {
   const root = path.join(process.env.OPENCLAW_STATE_DIR || path.join(process.env.HOME || '', '.openclaw'), 'agents');
   const out = [];
   let agents = [];
@@ -486,11 +489,16 @@ async function readTraceFile(p, size) {
 }
 
 async function statsFor(p, parser, quietMs = 0) {
+  const c = fileCache.get(p);
+  const now = Date.now();
+  // Dormant transcripts (untouched for a day) skip the stat entirely for a
+  // minute at a time: hundreds of FUSE getattr round-trips per rebuild were
+  // most of the Overview's first-open wait.
+  if (c && c.statAt && now - c.statAt < 60_000 && c.mtimeMs && now - c.mtimeMs > 86_400_000) return c.parsed;
   let m;
   try { m = await fsp.stat(p); } catch { return null; }
   const key = `${m.mtimeMs}:${m.size}`;
-  const c = fileCache.get(p);
-  if (c && c.key === key) return c.parsed;
+  if (c && c.key === key) { c.statAt = now; c.mtimeMs = m.mtimeMs; return c.parsed; }
   // Don't read a file its owner is actively writing. OpenClaw's session fence
   // fingerprints metadata at nanosecond precision, and on the FUSE bucket our
   // reads can disturb what it sees — so while a fence-sensitive file is hot,
@@ -504,11 +512,25 @@ async function statsFor(p, parser, quietMs = 0) {
   let parsed;
   const t0 = Date.now();
   try { parsed = parser(await readTraceFile(p, m.size)); } catch { return null; }
-  fileCache.set(p, { key, parsed, cost: Date.now() - t0, at: t0 });
+  fileCache.set(p, { key, parsed, cost: Date.now() - t0, at: t0, statAt: now, mtimeMs: m.mtimeMs });
   return parsed;
 }
 
-async function claudeFiles() {
+// Directory walks (readdir over FUSE) also add up when repeated per rebuild —
+// remember each file list briefly. New transcript files appear within 5s.
+const listMemo = new Map(); // key -> { ts, val: Promise<string[]> }
+function memoList(key, fn) {
+  const c = listMemo.get(key);
+  if (c && Date.now() - c.ts < 5_000) return c.val;
+  const val = fn();
+  listMemo.set(key, { ts: Date.now(), val });
+  return val;
+}
+
+function claudeFiles() {
+  return memoList('claude', claudeFilesUncached);
+}
+async function claudeFilesUncached() {
   const home = process.env.HOME || '';
   const dirs = [process.env.CLAUDE_CONFIG_DIR, path.join(home, '.claude'), path.join(home, '.config', 'claude')]
     .filter(Boolean).filter((d, i, a) => a.indexOf(d) === i);
@@ -527,7 +549,10 @@ async function claudeFiles() {
   return out;
 }
 
-async function codexFiles() {
+function codexFiles() {
+  return memoList('codex', codexFilesUncached);
+}
+async function codexFilesUncached() {
   const home = process.env.CODEX_HOME || path.join(process.env.HOME || '', '.codex');
   const root = path.join(home, 'sessions');
   const out = [];

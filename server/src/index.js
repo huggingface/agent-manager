@@ -984,10 +984,11 @@ wss.on('connection', (ws, req) => {
 
 generateEnvSkill(loadSecretNotes()); // keep the environment skill current on boot
 
-// Warm the trace cache in the background: the first build parses every
-// transcript on the bucket (seconds), so do it now rather than when the
-// operator opens the Overview.
+// Warm the trace and usage caches in the background: the first build parses
+// every transcript on the bucket and the first ccusage run scans them all
+// again (tens of seconds) — pay both now, not when the operator opens a page.
 traceDigests().catch(() => {});
+buildUsage().catch(() => {});
 
 server.listen(PORT, () => {
   console.log(`Agent Manager :${PORT}  tmux=${USE_TMUX}  data=${DATA_DIR}`);
