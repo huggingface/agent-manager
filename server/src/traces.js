@@ -14,6 +14,10 @@ import { WORKSPACES_DIR } from './config.js';
 // files that actually changed — important on the bucket mount.
 
 const fileCache = new Map(); // path -> { key, parsed: { stats, digest } }
+// Parsing is synchronous CPU; between files we hand the event loop back so a
+// cold build (boot warmup after a rebuild) doesn't freeze every request for
+// minutes. Worst blocking stretch becomes one file (~1s), not the whole scan.
+const yieldLoop = () => new Promise((r) => setImmediate(r));
 let resultMemo = { ts: 0, val: null };
 const TTL = 400; // Overview polls at ~1Hz; per-file mtime caching keeps re-scans cheap
 
@@ -601,6 +605,7 @@ async function build() {
     seenFiles.add(p);
     const m = path.basename(p).match(UUID_RE);
     attribute(m ? byClaudeUuid.get(m[1]) : null, await statsFor(p, parseClaude));
+    await yieldLoop();
   }
   // Codex fallback: sessions created before capture-and-pin have no
   // codexSessionId — attribute their rollouts by cwd when it's unambiguous.
@@ -612,6 +617,7 @@ async function build() {
   for (const p of await codexFiles()) {
     seenFiles.add(p);
     const parsed = await statsFor(p, parseCodex);
+    await yieldLoop();
     if (!parsed) continue;
     if (parsed.stats.subagent) continue; // Codex guardian subagent — not the user's thread
     const m = path.basename(p).match(UUID_RE);
@@ -633,6 +639,7 @@ async function build() {
     // longer risk tripping its metadata fence like on FUSE — keep a small
     // quiet margin anyway since its session fence is unusually touchy.
     attribute(ocOwner, await statsFor(p, parseOpenClaw, 10_000));
+    await yieldLoop();
   }
   // Evict cache entries for files that no longer exist (rotated Codex rollouts,
   // deleted transcripts) so fileCache doesn't grow unbounded on a long-lived Space.

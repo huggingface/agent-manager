@@ -987,8 +987,7 @@ generateEnvSkill(loadSecretNotes()); // keep the environment skill current on bo
 // Warm the trace and usage caches in the background: the first build parses
 // every transcript on the bucket and the first ccusage run scans them all
 // again (tens of seconds) — pay both now, not when the operator opens a page.
-traceDigests().catch(() => {});
-buildUsage().catch(() => {});
+setTimeout(() => { traceDigests().catch(() => {}); buildUsage().catch(() => {}); }, 3000);
 
 server.listen(PORT, () => {
   console.log(`Agent Manager :${PORT}  tmux=${USE_TMUX}  data=${DATA_DIR}`);
