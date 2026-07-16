@@ -117,20 +117,37 @@ async function codexRollouts() {
   return files.sort((a, b) => b.m - a.m);
 }
 
+// Just the tail of a file, aligned to a line start. The newest rate-limit
+// snapshot rides the most recent token_count event — at the END of the
+// rollout. Reading whole multi-hundred-MB rollouts here parsed every line on
+// the event loop: the entire app froze whenever the Usage tab opened.
+async function tailOf(p, bytes = 262_144) {
+  const fh = await fsp.open(p, 'r');
+  try {
+    const size = (await fh.stat()).size;
+    const start = Math.max(0, size - bytes);
+    const buf = Buffer.alloc(size - start);
+    await fh.read(buf, 0, buf.length, start);
+    const s = buf.toString('utf8');
+    const nl = s.indexOf('\n');
+    return start > 0 && nl >= 0 ? s.slice(nl + 1) : s;
+  } finally { await fh.close(); }
+}
+
 function codexQuota() {
   return cached('codexq', async () => {
     const win = (w) => (w ? { usedPercent: w.used_percent, windowMinutes: w.window_minutes, resetsAt: toEpochSec(w.resets_at) } : null);
-    for (const f of await codexRollouts()) {
-      let rl = null;
+    // newest files first, newest lines first, bounded work per file
+    for (const f of (await codexRollouts()).slice(0, 20)) {
       let lines;
-      try { lines = (await fsp.readFile(f.p, 'utf8')).split('\n'); } catch { continue; }
-      for (const ln of lines) {
+      try { lines = (await tailOf(f.p)).split('\n'); } catch { continue; }
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const ln = lines[i];
         if (!ln) continue;
         let j; try { j = JSON.parse(ln); } catch { continue; }
         const r = findRateLimits(j);
-        if (r) rl = r;
+        if (r) return { fiveHour: win(r.primary), weekly: win(r.secondary) };
       }
-      if (rl) return { fiveHour: win(rl.primary), weekly: win(rl.secondary) };
     }
     return null;
   });
