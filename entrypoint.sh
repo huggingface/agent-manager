@@ -29,6 +29,18 @@ mkdir -p "$CLAUDE_CONFIG_DIR" "$CODEX_HOME"
 export AM_LOCAL="/home/node/local"
 if ! mkdir -p "$AM_LOCAL/bin" 2>/dev/null; then AM_LOCAL="$DATA_DIR/.local-cache"; mkdir -p "$AM_LOCAL/bin"; fi
 export UV_CACHE_DIR="$AM_LOCAL/uv-cache"
+
+# Codex keeps a local SQLite database (logs_2.sqlite) in CODEX_HOME. SQLite on
+# the FUSE bucket corrupts (object storage can't lock/mmap properly) — codex
+# then reports "file is not a database" on startup. The DB is a rebuildable
+# cache derived from the rollouts, so it needs speed, not durability: point it
+# at local disk via symlink. When the local file vanishes on restart, codex
+# simply rebuilds it.
+mkdir -p "$AM_LOCAL/codex-db"
+if [ ! -L "$CODEX_HOME/logs_2.sqlite" ]; then
+  rm -f "$CODEX_HOME/logs_2.sqlite" "$CODEX_HOME/logs_2.sqlite-wal" "$CODEX_HOME/logs_2.sqlite-shm" 2>/dev/null || true
+  ln -s "$AM_LOCAL/codex-db/logs_2.sqlite" "$CODEX_HOME/logs_2.sqlite"
+fi
 export PIP_CACHE_DIR="$AM_LOCAL/pip-cache"
 export PYTHONPYCACHEPREFIX="$AM_LOCAL/pycache"
 export PYTHONUSERBASE="$AM_LOCAL/py"          # pip install --user → local, fast
