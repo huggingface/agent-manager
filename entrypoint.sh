@@ -14,10 +14,10 @@ export DATA_DIR
 # restarts (gemini ~/.gemini, opencode ~/.local/share, hermes ~/.hermes, etc.).
 export HOME="$DATA_DIR/home"
 mkdir -p "$HOME"
-# Claude/Codex keep their established dirs (so existing logins keep working).
+# Claude keeps its established dir (so existing logins keep working). Codex's
+# home moves to local disk below (its SQLite databases corrupt on the bucket).
 export CLAUDE_CONFIG_DIR="$DATA_DIR/state/claude"
-export CODEX_HOME="$DATA_DIR/state/codex"
-mkdir -p "$CLAUDE_CONFIG_DIR" "$CODEX_HOME"
+mkdir -p "$CLAUDE_CONFIG_DIR"
 
 # NOTE: every var exported below must be listed in NON_SECRET (server/src/
 # index.js) — this script runs after the build-time env snapshot, so anything
@@ -30,17 +30,32 @@ export AM_LOCAL="/home/node/local"
 if ! mkdir -p "$AM_LOCAL/bin" 2>/dev/null; then AM_LOCAL="$DATA_DIR/.local-cache"; mkdir -p "$AM_LOCAL/bin"; fi
 export UV_CACHE_DIR="$AM_LOCAL/uv-cache"
 
-# Codex keeps a local SQLite database (logs_2.sqlite) in CODEX_HOME. SQLite on
-# the FUSE bucket corrupts (object storage can't lock/mmap properly) — codex
-# then reports "file is not a database" on startup. The DB is a rebuildable
-# cache derived from the rollouts, so it needs speed, not durability: point it
-# at local disk via symlink. When the local file vanishes on restart, codex
-# simply rebuilds it.
-mkdir -p "$AM_LOCAL/codex-db"
-if [ ! -L "$CODEX_HOME/logs_2.sqlite" ]; then
-  rm -f "$CODEX_HOME/logs_2.sqlite" "$CODEX_HOME/logs_2.sqlite-wal" "$CODEX_HOME/logs_2.sqlite-shm" 2>/dev/null || true
-  ln -s "$AM_LOCAL/codex-db/logs_2.sqlite" "$CODEX_HOME/logs_2.sqlite"
-fi
+# Codex keeps a growing family of SQLite databases (logs_2, goals_1, memories_1
+# plus mmap'd -shm siblings) that corrupt on the FUSE bucket: SQLite needs real
+# locking/mmap. Same cure as OpenClaw — codex's HOME lives on LOCAL disk. The
+# heavyweight append-only rollouts stay on the bucket via one symlink (plain
+# files never corrupted there, and pinned rollout paths keep working); the
+# small durable state (auth, config, history) restores at boot and syncs back
+# every 60s; the SQLite caches are purely local, rebuilt from rollouts when
+# the disk resets.
+CODEX_DURABLE="$DATA_DIR/state/codex"
+export CODEX_HOME="$AM_LOCAL/codex-home"
+mkdir -p "$CODEX_HOME" "$CODEX_DURABLE/sessions" "$CODEX_DURABLE/db-backups"
+# quarantine sqlite remnants on the bucket (incl. the earlier symlink attempt)
+mkdir -p "$CODEX_DURABLE/db-backups/am-quarantine"
+for f in "$CODEX_DURABLE"/logs_2.sqlite* "$CODEX_DURABLE"/goals_1.sqlite* "$CODEX_DURABLE"/memories_1.sqlite*; do
+  [ -e "$f" ] || [ -L "$f" ] && mv "$f" "$CODEX_DURABLE/db-backups/am-quarantine/" 2>/dev/null || true
+done
+rsync -a --exclude 'sessions' --exclude '*.sqlite*' --exclude 'db-backups' \
+  --exclude 'cache' --exclude '.tmp' --exclude 'mcp-oauth-locks' \
+  "$CODEX_DURABLE/" "$CODEX_HOME/" 2>/dev/null || true
+ln -sfn "$CODEX_DURABLE/sessions" "$CODEX_HOME/sessions"
+( while :; do
+    sleep 60
+    rsync -a --exclude 'sessions' --exclude '*.sqlite*' --exclude 'db-backups' \
+      --exclude 'cache' --exclude '.tmp' --exclude 'mcp-oauth-locks' \
+      "$CODEX_HOME/" "$CODEX_DURABLE/" 2>/dev/null || true
+  done ) &
 export PIP_CACHE_DIR="$AM_LOCAL/pip-cache"
 export PYTHONPYCACHEPREFIX="$AM_LOCAL/pycache"
 export PYTHONUSERBASE="$AM_LOCAL/py"          # pip install --user → local, fast
