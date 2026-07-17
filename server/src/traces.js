@@ -127,13 +127,17 @@ function parseClaude(txt) {
           }
         }
       }
-    } else if (j.type === 'user' && !j.toolUseResult) {
+    } else if (j.type === 'user' && !j.toolUseResult && !j.isMeta && !j.sourceToolUseID) {
+      // isMeta/sourceToolUseID mark harness-injected "user" lines (skill
+      // payloads, attached context) — not something the operator typed.
       st.prompts++;
       const mc = j.message && j.message.content;
       const text = typeof mc === 'string' ? mc
         : Array.isArray(mc) ? mc.filter((c) => c && c.type === 'text').map((c) => c.text).join(' ') : '';
-      // Skip harness noise (slash-command wrappers, attachments) as "prompts".
-      if (text.trim() && !text.trim().startsWith('<')) digestPrompt(dg, text, j.timestamp);
+      // Skip harness noise (slash-command wrappers, attachments, interrupt
+      // markers) as "prompts".
+      const t = text.trim();
+      if (t && !t.startsWith('<') && !t.startsWith('[Request interrupted')) digestPrompt(dg, text, j.timestamp);
     }
   }
   return { stats: st, digest: dg };
