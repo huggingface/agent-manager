@@ -57,6 +57,15 @@ export const setDemo = (active: boolean): Promise<{ ok: boolean; active: boolean
 export const relaunchSpace = (): Promise<{ ok: boolean; reason?: string }> =>
   fetch('/api/relaunch', { method: 'POST' }).then(json);
 
+// ---- app self-update from the template ----
+export interface UpdateCheck {
+  ok: boolean; reason?: string; template?: string;
+  current?: string | null; latest?: string | null; behind?: boolean; canUpdate?: boolean;
+}
+export const checkUpdate = (): Promise<UpdateCheck> => fetch('/api/update/check').then(json);
+export const runUpdate = (): Promise<{ ok: boolean; reason?: string; upToDate?: boolean }> =>
+  fetch('/api/update', { method: 'POST' }).then(json);
+
 export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
   jobs: { askAboveUsd: number };

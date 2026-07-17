@@ -177,6 +177,21 @@ export default function SettingsView({
     return () => clearTimeout(t);
   }, [cfg, savedCfg]);
 
+  // App self-update: version check on open, update on confirm.
+  const [upd, setUpd] = useState<api.UpdateCheck | null>(null);
+  const [updState, setUpdState] = useState<{ busy?: boolean; msg?: string; confirm?: boolean }>({});
+  useEffect(() => { api.checkUpdate().then(setUpd).catch(() => {}); }, []);
+  const doUpdate = async () => {
+    setUpdState({ busy: true });
+    try {
+      const r = await api.runUpdate();
+      if (r.ok && r.upToDate) setUpdState({ msg: 'Already up to date.' });
+      else if (r.ok) setUpdState({ msg: 'Update pushed. The Space rebuilds now (1 to 2 min); reload once it is back.' });
+      else if (r.reason === 'no-token') setUpdState({ msg: 'Add a write-scoped HF_TOKEN secret to the Space to enable updates.' });
+      else setUpdState({ msg: `Update failed (${r.reason}).` });
+    } catch { setUpdState({ msg: 'Request failed.' }); }
+  };
+
   const doRelaunch = async () => {
     setRelaunch({ busy: true });
     try {
@@ -389,6 +404,32 @@ export default function SettingsView({
               )}
             </div>
             {relaunch.msg && <div className="s-help" style={{ marginTop: 6 }}>{relaunch.msg}</div>}
+
+            <div className="setting-row">
+              <div>
+                <div className="s-label">Update Agent Manager</div>
+                <div className="s-help">
+                  Pulls the latest app version from the template ({upd?.template || 'the template'}) into this
+                  Space and rebuilds. Your agents, logins, and files live on the bucket and are untouched.
+                  {upd?.ok && !upd.behind && <> Currently up to date <span className="mono">({(upd.current || '').slice(0, 7)})</span>.</>}
+                  {upd?.ok && upd.behind && <> Update available: <span className="mono">{(upd.current || '').slice(0, 7)} → {(upd.latest || '').slice(0, 7)}</span>.</>}
+                </div>
+              </div>
+              {!upd?.ok || !upd.canUpdate ? (
+                <button className="btn-ghost" disabled title="Needs a write-scoped HF_TOKEN Space secret"><RefreshGlyph /> Update app</button>
+              ) : !upd.behind ? (
+                <button className="btn-ghost" disabled><RefreshGlyph /> Up to date</button>
+              ) : updState.confirm ? (
+                <span className="confirm-del">
+                  <span className="s-muted">Replace app code and rebuild?</span>
+                  <button className="btn-primary" disabled={updState.busy} onClick={doUpdate}>{updState.busy ? '…' : 'Update'}</button>
+                  <button className="btn-ghost" onClick={() => setUpdState({})}>Cancel</button>
+                </span>
+              ) : (
+                <button className="btn-primary" onClick={() => setUpdState({ confirm: true })}><RefreshGlyph /> Update app</button>
+              )}
+            </div>
+            {updState.msg && <div className="s-help" style={{ marginTop: 6 }}>{updState.msg}</div>}
 
             <h3>Space</h3>
             {info?.bucketUnverified && (

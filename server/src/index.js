@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import { URL, fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import {
@@ -315,6 +316,69 @@ app.post('/api/relaunch', async (_req, res) => {
   } catch (e) { return res.json({ ok: false, reason: String(e.message || e) }); }
 });
 
+// ---------- self-update: pull the latest app from the template ----------
+// Duplicated Spaces never get app updates. This compares the Space repo's sha
+// to the template's and, on request, force-pushes the template's main onto the
+// Space repo (HF rebuilds automatically). Agents, logins, and files live on
+// the bucket, so replacing the app code is safe; any manual edits to the
+// Space's own repo are overwritten.
+const TEMPLATE_SPACE = 'lvwerra/agent-manager-template';
+async function updateSource() {
+  const own = process.env.SPACE_ID;
+  const token = hfToken();
+  const headers = token ? { authorization: `Bearer ${token}` } : {};
+  const info = await (await fetch(`https://huggingface.co/api/spaces/${own}`, { headers })).json();
+  // Prefer the recorded origin for real duplicates; fall back to the canonical
+  // template (also correct for the original development Space).
+  const template = (typeof info.duplicated_from === 'string' && info.duplicated_from) || TEMPLATE_SPACE;
+  const tInfo = await (await fetch(`https://huggingface.co/api/spaces/${template}`)).json();
+  return { own, ownSha: info.sha || null, template, templateSha: tInfo.sha || null };
+}
+
+app.get('/api/update/check', async (_req, res) => {
+  if (!process.env.SPACE_ID) return res.json({ ok: false, reason: 'no-space' });
+  try {
+    const src = await updateSource();
+    res.json({
+      ok: true,
+      template: src.template,
+      current: src.ownSha,
+      latest: src.templateSha,
+      behind: !!(src.ownSha && src.templateSha && src.ownSha !== src.templateSha),
+      canUpdate: !!hfToken(),
+    });
+  } catch (e) { res.json({ ok: false, reason: String(e.message || e) }); }
+});
+
+let updateBusy = false;
+app.post('/api/update', async (_req, res) => {
+  const token = hfToken();
+  if (!process.env.SPACE_ID) return res.json({ ok: false, reason: 'no-space' });
+  if (!token) return res.json({ ok: false, reason: 'no-token' });
+  if (updateBusy) return res.json({ ok: false, reason: 'busy' });
+  updateBusy = true;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'am-update-'));
+  const git = (args, cwd) => new Promise((resolve, reject) => {
+    execFile('git', args, { cwd, timeout: 180_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
+      (err, stdout, stderr) => (err ? reject(new Error(String(stderr || err.message).replace(token, '***'))) : resolve(stdout)));
+  });
+  try {
+    const src = await updateSource();
+    if (src.ownSha && src.templateSha && src.ownSha === src.templateSha) {
+      return res.json({ ok: true, upToDate: true });
+    }
+    await git(['clone', '--quiet', `https://huggingface.co/spaces/${src.template}`, dir]);
+    await git(['remote', 'add', 'own', `https://user:${token}@huggingface.co/spaces/${src.own}`], dir);
+    await git(['push', '--force', 'own', 'main'], dir);
+    res.json({ ok: true, from: src.ownSha, to: src.templateSha });
+  } catch (e) {
+    res.json({ ok: false, reason: String(e.message || e).slice(0, 300) });
+  } finally {
+    updateBusy = false;
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  }
+});
+
 // ---------- secrets: describe each injected secret/variable, feed a skill ----------
 const SECRET_NOTES_FILE = path.join(DATA_DIR, 'secret-notes.json');
 function loadSecretNotes() {
@@ -449,6 +513,9 @@ Hermes — alongside plain shells and a file browser.
 
 ## Tooling
 - A full Linux shell with \`git\`, \`ripgrep\` (\`rg\`), \`node\`, and \`python3\`, plus build tools. Reach for \`rg\` for fast search.
+- Preinstalled utilities: \`jq\`, \`htop\`, \`lsof\`, \`tree\`, \`ncdu\`, \`sqlite3\`, \`vim\`/\`nano\`, \`zip\`/\`unzip\`, \`ffmpeg\`, \`imagemagick\`, \`gh\` (GitHub CLI; auths from \`$GH_TOKEN\`), \`git-lfs\`, \`hf\` (Hugging Face CLI).
+- **Headless Chromium for Playwright is baked in** (\`PLAYWRIGHT_BROWSERS_PATH\`): node and python playwright work immediately, no browser download. Use it to screenshot or test web work.
+- The default \`python3\` ships \`numpy\`, \`pandas\`, \`matplotlib\` (\`MPLBACKEND=Agg\`), \`seaborn\`, \`requests\`, \`pillow\`, \`huggingface_hub\`, \`ipython\` — fine for one-off scripts; build real project envs with uv on \`$AM_LOCAL\` (below).
 - Network access is available; API keys are provided via the environment (below) or your home config.
 
 ## Working well here
