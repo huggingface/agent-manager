@@ -11,10 +11,32 @@ RUN npm run build
 FROM node:22-bookworm AS runtime
 
 # System deps: tmux (session durability), git, build tools (node-pty native build),
-# ripgrep (used by the coding CLIs), curl/ca-certs.
+# ripgrep (used by the coding CLIs), curl/ca-certs — plus everyday QoL tools
+# agents and humans reach for (jq/htop/sqlite3/editors/media, fonts so headless
+# Chromium screenshots don't render tofu).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      tmux git ca-certificates curl python3 make g++ ripgrep bubblewrap rsync \
-    && rm -rf /var/lib/apt/lists/*
+      tmux git git-lfs ca-certificates curl python3 make g++ ripgrep bubblewrap rsync \
+      jq htop lsof tree ncdu sqlite3 vim nano zip unzip file procps less \
+      ffmpeg imagemagick fonts-liberation fonts-noto-color-emoji \
+    && rm -rf /var/lib/apt/lists/* \
+    && git lfs install --system
+
+# Git defaults every agent benefits from: the FUSE bucket trips "dubious
+# ownership" without safe.directory, and commits die without an identity —
+# these are SYSTEM level, so anything the operator sets globally still wins.
+RUN git config --system safe.directory '*' \
+    && git config --system init.defaultBranch main \
+    && git config --system user.name 'Agent Manager' \
+    && git config --system user.email 'agents@agent-manager.local'
+
+# GitHub CLI (auths from a GH_TOKEN Space secret automatically).
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/* \
+    || echo "gh install failed"
 
 ENV LANG=C.UTF-8
 
@@ -45,18 +67,36 @@ RUN env UV_TOOL_BIN_DIR=/usr/local/bin UV_TOOL_DIR=/opt/uv-tools \
       uv tool install --python /usr/bin/python3 "huggingface_hub[cli]" \
       || echo "hf cli install failed"
 
+# Headless Chromium for Playwright, shared by every agent and both language
+# bindings via PLAYWRIGHT_BROWSERS_PATH (world-writable so a binding pinned to
+# a different build can add its revision without root).
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN npx -y playwright install --with-deps chromium \
+      && chmod -R a+rwX /opt/pw-browsers \
+      || echo "playwright chromium install failed"
+
+# Batteries-included default python: a dedicated venv first on PATH (system
+# python stays apt-owned/PEP-668 clean). One-off scripts get the data stack
+# without setup; real projects still build their own uv env on $AM_LOCAL.
+RUN uv venv /opt/py \
+      && uv pip install --python /opt/py/bin/python \
+           numpy pandas matplotlib seaborn requests pillow huggingface_hub ipython \
+      && chmod -R a+rX /opt/py \
+      || echo "python stack install failed"
+ENV MPLBACKEND=Agg
+
 # Login shells source /etc/profile, which RESETS PATH — dropping the build-time
 # ~/.local/bin and the user-install dirs under $AM_LOCAL (pip --user, npm
 # prefix). profile.d runs after that reset, so restore them here.
 RUN printf '%s\n' \
-      'PATH="/home/node/.local/bin:$PATH"' \
+      'PATH="/home/node/.local/bin:/opt/py/bin:$PATH"' \
       '[ -n "$AM_LOCAL" ] && PATH="$AM_LOCAL/py/bin:$AM_LOCAL/npm/bin:$AM_LOCAL/bin:$PATH"' \
       'export PATH' \
       > /etc/profile.d/agent-manager.sh
 
 # Non-root user: the node base image already ships uid 1000 as "node" (HF runs as uid 1000).
 ENV HOME=/home/node
-ENV PATH=/home/node/.local/bin:$PATH
+ENV PATH=/home/node/.local/bin:/opt/py/bin:$PATH
 WORKDIR /app
 RUN chown node:node /app
 
