@@ -26,13 +26,17 @@ let state = { spaceId: SPACE_ID, public: false, known: false, checkedAt: 0, reas
 let volumes = null; // bucket ids mounted on this Space; discovered once (fixed until restart)
 
 const HEADERS = { 'user-agent': 'agent-manager' };
+// Every HF API call is bounded: a hung request must never wedge the boot
+// (server.listen used to wait on the first check) or a poll cycle.
+const HF_TIMEOUT_MS = 8000;
+const hfFetch = (url, opts = {}) => fetch(url, { ...opts, signal: AbortSignal.timeout(HF_TIMEOUT_MS) });
 
 async function discoverBuckets() {
   if (volumes !== null) return volumes;
   const token = hfToken();
   if (!token) { volumes = []; return volumes; } // can't inspect a private Space without a token
   try {
-    const r = await fetch(`https://huggingface.co/api/spaces/${SPACE_ID}`, {
+    const r = await hfFetch(`https://huggingface.co/api/spaces/${SPACE_ID}`, {
       headers: { ...HEADERS, authorization: `Bearer ${token}` },
     });
     if (!r.ok) return null; // transient — retry next cycle
@@ -51,7 +55,7 @@ async function check() {
     return state;
   }
   try {
-    const r = await fetch(`https://huggingface.co/api/spaces/${SPACE_ID}`, { headers: HEADERS });
+    const r = await hfFetch(`https://huggingface.co/api/spaces/${SPACE_ID}`, { headers: HEADERS });
     if (r.ok) {
       const j = await r.json();
       if (j.private === false) {
@@ -69,7 +73,7 @@ async function check() {
     }
     for (const id of buckets) {
       try {
-        const b = await fetch(`https://huggingface.co/api/buckets/${id}`, { headers: HEADERS });
+        const b = await hfFetch(`https://huggingface.co/api/buckets/${id}`, { headers: HEADERS });
         if (b.ok) {
           const bj = await b.json();
           if (bj.private === false) {

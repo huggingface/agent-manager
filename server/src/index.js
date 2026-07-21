@@ -110,10 +110,15 @@ function ensureAutonomyDefaults() {
 ensureAutonomyDefaults();
 initPush();
 
-// Wait for the visibility verdict before serving: isPublic() fails closed on a
-// Space until the first successful check, so this avoids a locked-UI flash on
-// every boot of a private Space.
-await startVisibilityWatch();
+// Wait for the visibility verdict before serving so isPublic() (which fails
+// closed until the first successful check) doesn't flash the locked UI on a
+// private Space's boot — but bound the wait: a hung HF API must NEVER stop the
+// server from listening. If the check is slow, we serve anyway (briefly locked)
+// and the 60s interval check unlocks once it lands.
+await Promise.race([
+  startVisibilityWatch(),
+  new Promise((r) => setTimeout(r, 9000)),
+]);
 
 // Crash backstops: this is a single long-running process pumping every
 // terminal. An unhandled rejection from an async route, or an error emitted by
@@ -1085,10 +1090,13 @@ function pollModes() {
 
 generateEnvSkill(loadSecretNotes()); // keep the environment skill current on boot
 
-// Warm the trace and usage caches in the background: the first build parses
-// every transcript on the bucket and the first ccusage run scans them all
-// again (tens of seconds) — pay both now, not when the operator opens a page.
-setTimeout(() => { traceDigests().catch(() => {}); buildUsage().catch(() => {}); }, 3000);
+// Warm ONLY the trace cache in the background (bounded: mtime-cached, tail-
+// capped, yields between files). The usage warmup is deliberately NOT run at
+// boot: buildUsage() spawns concurrent ccusage scans over the whole transcript
+// history, and with large migrated transcripts that memory/CPU spike could
+// destabilize a fresh container. The Usage page fetches per-provider on open
+// (skeletons + stale-while-revalidate), so nothing is lost but the boot risk.
+setTimeout(() => { traceDigests().catch(() => {}); }, 4000);
 
 server.listen(PORT, () => {
   console.log(`Agent Manager :${PORT}  tmux=${USE_TMUX}  data=${DATA_DIR}`);
