@@ -146,17 +146,27 @@ async function tailOf(p, bytes = 262_144) {
 function codexQuota() {
   return cached('codexq', async () => {
     const win = (w) => (w ? { usedPercent: w.used_percent, windowMinutes: w.window_minutes, resetsAt: toEpochSec(w.resets_at) } : null);
-    // newest files first, newest lines first, bounded work per file
+    // Classify each window by its length, NOT by primary/secondary position:
+    // codex doesn't always report the 5-hour window first, so trusting the
+    // slot mislabeled the weekly as "5-hour" (and hid the real 5-hour). A
+    // window <= 6h is the 5-hour bucket; anything longer is the weekly.
+    let fiveHour = null, weekly = null;
     for (const f of (await codexRollouts()).slice(0, 20)) {
       let lines;
       try { lines = (await tailOf(f.p)).split('\n'); } catch { continue; }
-      for (let i = lines.length - 1; i >= 0; i--) {
+      for (let i = lines.length - 1; i >= 0 && !(fiveHour && weekly); i--) {
         const ln = lines[i];
         if (!ln) continue;
         let j; try { j = JSON.parse(ln); } catch { continue; }
         const r = findRateLimits(j);
-        if (r) return { fiveHour: win(r.primary), weekly: win(r.secondary) };
+        if (!r) continue;
+        for (const w of [r.primary, r.secondary]) {
+          if (!w || w.window_minutes == null) continue;
+          if (w.window_minutes <= 360) { if (!fiveHour) fiveHour = win(w); }
+          else if (!weekly) weekly = win(w);
+        }
       }
+      if (fiveHour || weekly) return { fiveHour, weekly };
     }
     return null;
   });
