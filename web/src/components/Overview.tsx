@@ -40,8 +40,6 @@ function Card({ s, color, pending, onOpen, onClose }: {
   // send succeeds — the digest round-trip (CLI writes transcript → rebuild →
   // poll) can take seconds, and a frozen card reads as "did that get lost?".
   const [sent, setSent] = useState<{ text: string; at: number } | null>(null);
-  const [expanded, setExpanded] = useState(false);
-  const [promptOpen, setPromptOpen] = useState(false); // click the prompt to read it fully
   const [histIdx, setHistIdx] = useState(0); // 0 = live view, n = n-th exchange back
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -68,7 +66,6 @@ function Card({ s, color, pending, onOpen, onClose }: {
       setDraft('');
       setSent({ text, at: Date.now() });
       setHistIdx(0);
-      setPromptOpen(false);
       if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     } catch {
       setFailed(true);
@@ -104,11 +101,7 @@ function Card({ s, color, pending, onOpen, onClose }: {
       </div>
 
       {promptText ? (
-        <div
-          className={`ov-prompt${promptOpen ? ' open' : ''}`}
-          title={promptOpen ? 'Collapse' : 'Show the full prompt'}
-          onClick={() => setPromptOpen((v) => !v)}
-        >{promptOpen ? (sent ? sent.text : (d?.lastPromptRaw || promptText)) : promptText}</div>
+        <div className="ov-prompt">{sent ? sent.text : (d?.lastPromptRaw || promptText)}</div>
       ) : pending ? (
         <div className="ov-prompt-skel"><span className="skel" style={{ width: '70%' }} /></div>
       ) : (
@@ -123,11 +116,11 @@ function Card({ s, color, pending, onOpen, onClose }: {
               {idx > 0 && <span className="ov-nav-pos">turn {totalTurns - idx}/{totalTurns}</span>}
               <button
                 className="ov-nav-btn" title="Earlier turn" disabled={idx >= hist.length}
-                onClick={() => { setHistIdx(Math.min(idx + 1, hist.length)); setExpanded(false); }}
+                onClick={() => setHistIdx(Math.min(idx + 1, hist.length))}
               >↑</button>
               <button
                 className="ov-nav-btn" title="Later turn" disabled={idx === 0}
-                onClick={() => { setHistIdx(Math.max(idx - 1, 0)); setExpanded(false); }}
+                onClick={() => setHistIdx(Math.max(idx - 1, 0))}
               >↓</button>
             </span>
           )}
@@ -143,12 +136,7 @@ function Card({ s, color, pending, onOpen, onClose }: {
         </div>
       ) : answerText ? (
         <div className="ov-answer-wrap">
-          {expanded ? (
-            <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(answerMd || answerText) }} />
-          ) : (
-            <div className="ov-answer">{answerText}</div>
-          )}
-          <button className="ov-more" onClick={() => setExpanded((e) => !e)}>{expanded ? 'less' : 'more'}</button>
+          <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(answerMd || answerText) }} />
         </div>
       ) : null}
 
