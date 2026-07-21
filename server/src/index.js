@@ -14,7 +14,7 @@ import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
 import * as demo from './demo.js';
-import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection } from './runner.js';
+import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection, paneModes } from './runner.js';
 import { buildUsage } from './usage.js';
 import { buildTraces, traceDigests, digestFor } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
@@ -1046,8 +1046,42 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  ws.on('close', () => handle.kill());
+  // Register for copy-mode notifications (the frontend shows an overlay hint).
+  registerModeClient(session.id, ws);
+  ws.on('close', () => { handle.kill(); unregisterModeClient(session.id, ws); });
 });
+
+// Copy-mode indicator: tmux owns the mode (users scroll into it and find the
+// keyboard "dead"), so poll it — one call for all panes — and push changes to
+// attached clients as a control frame the terminal distinguishes from raw
+// output by its leading NUL sentinel. Only polls while clients are attached.
+const MODE_CTRL = '\x00\x00AM:'; // pty output never leads with this
+const modeClients = new Map(); // sessionId -> Set(ws)
+const lastMode = new Map();     // sessionId -> boolean
+let modeTimer = null;
+function registerModeClient(id, ws) {
+  if (!USE_TMUX) return;
+  if (!modeClients.has(id)) modeClients.set(id, new Set());
+  modeClients.get(id).add(ws);
+  // Send current state immediately so a client attaching mid-copy-mode is right.
+  try { ws.send(MODE_CTRL + JSON.stringify({ t: 'mode', copy: !!lastMode.get(id) })); } catch {}
+  if (!modeTimer) modeTimer = setInterval(pollModes, 350);
+}
+function unregisterModeClient(id, ws) {
+  const set = modeClients.get(id);
+  if (set) { set.delete(ws); if (!set.size) { modeClients.delete(id); lastMode.delete(id); } }
+  if (!modeClients.size && modeTimer) { clearInterval(modeTimer); modeTimer = null; }
+}
+function pollModes() {
+  const modes = paneModes();
+  for (const [id, set] of modeClients) {
+    const now = !!modes[id];
+    if (lastMode.get(id) === now) continue;
+    lastMode.set(id, now);
+    const frame = MODE_CTRL + JSON.stringify({ t: 'mode', copy: now });
+    for (const ws of set) if (ws.readyState === ws.OPEN) { try { ws.send(frame); } catch {} }
+  }
+}
 
 generateEnvSkill(loadSecretNotes()); // keep the environment skill current on boot
 

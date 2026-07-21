@@ -59,6 +59,29 @@ export function isRunning(id) {
   return live.has(id);
 }
 
+// Which sessions have a pane in copy mode right now — one tmux call covers all
+// panes, so the server can push a copy-mode hint to attached clients cheaply.
+export function paneModes() {
+  const modes = {};
+  if (!USE_TMUX) return modes;
+  let out = '';
+  try {
+    // Mode first (a single 0/1), then the session name — which is `am-<id>`
+    // and never contains a space, so splitting on the first space is safe.
+    out = execFileSync('tmux', ['list-panes', '-a', '-F', '#{pane_in_mode} #{session_name}'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch { return modes; } // no tmux server yet
+  for (const line of out.split('\n')) {
+    const sp = line.indexOf(' ');
+    if (sp < 0) continue;
+    const name = line.slice(sp + 1);
+    if (!name.startsWith('am-')) continue;
+    const id = name.slice(3);
+    modes[id] = modes[id] || line.slice(0, sp) === '1';
+  }
+  return modes;
+}
+
 /**
  * Detect activity by DIFFING each pane's rendered text between polls. This
  * ignores colour-only animations (e.g. Codex's shimmering banner) that fooled a
