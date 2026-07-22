@@ -9,7 +9,11 @@ const execFile = promisify(execFileCb);
 // Cache stores the in-flight/settled PROMISE, so concurrent requests share one
 // underlying ccusage run / file scan instead of piling up.
 const cache = new Map(); // key -> { ts, val: Promise }
-const TTL = 60_000;
+// Usage/cost barely changes minute to minute, and the scan is expensive on a
+// large history — refresh at most every 5 min. Combined with the
+// stale-while-revalidate below, the operator sees the last value instantly and
+// the costly ccusage run happens rarely and in the background.
+const TTL = 300_000;
 function cached(key, fn) {
   const c = cache.get(key);
   if (c && Date.now() - c.ts < TTL) return c.val;
@@ -61,13 +65,26 @@ function claudeEnv() {
   return { ...process.env, CLAUDE_CONFIG_DIR: dirs.join(',') };
 }
 
+// YYYYMMDD a few days back — the widest window the card shows is "this week",
+// so ccusage never needs to aggregate the whole (possibly huge) history.
+function sinceArg(days = 9) {
+  return new Date(Date.now() - days * 864e5).toISOString().slice(0, 10).replace(/-/g, '');
+}
+
 // Tokens + (estimated) cost for a provider, via `ccusage <provider> daily --json`.
+// Bounded for a Space with large transcript history: --since limits the window,
+// --single-thread caps peak memory (parallel loading of a multi-hundred-MB
+// transcript could make the whole container unresponsive), and --offline skips
+// the model-pricing network fetch (a real source of multi-second hangs).
 function providerUsage(prov) {
   return cached(`u:${prov}`, async () => {
     const env = prov === 'claude' ? claudeEnv() : process.env;
     let out;
     try {
-      ({ stdout: out } = await execFile('ccusage', [prov, 'daily', '--json'], { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024, env }));
+      ({ stdout: out } = await execFile(
+        'ccusage', [prov, 'daily', '--json', '--offline', '--single-thread', '--since', sinceArg()],
+        { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024, env },
+      ));
     } catch { return null; }
     let data;
     try { data = JSON.parse(out); } catch { return null; }
