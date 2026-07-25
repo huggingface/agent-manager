@@ -142,7 +142,7 @@ if (typeof window !== 'undefined') {
 }
 
 export default function TerminalPane({
-  session, cli, theme, focused, active, zoom = 100, dragId, onDragActive, onFocus, onRename, onClose,
+  session, cli, theme, focused, active, zoom = 100, dragId, isMobile, onDragActive, onFocus, onRename, onClose,
 }: {
   session: Session;
   cli?: Cli;
@@ -151,6 +151,7 @@ export default function TerminalPane({
   active?: boolean;
   zoom?: number;
   dragId?: string;          // set when the pane can be rearranged (group view)
+  isMobile?: boolean;       // show the on-screen control-key bar
   onDragActive?: (dragging: boolean) => void;
   onFocus?: () => void;
   onRename?: (name: string) => void;
@@ -160,6 +161,8 @@ export default function TerminalPane({
   const termRef = useRef<Terminal | null>(null);
   const resyncRef = useRef<() => void>(() => {});
   const reconnectRef = useRef<() => void>(() => {});
+  // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
+  const sendKeyRef = useRef<(d: string) => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
   // "starting…" cover while the CLI boots into an empty pane (attach on the
   // Space can take seconds). Hidden only when the screen actually SHOWS
@@ -281,6 +284,8 @@ export default function TerminalPane({
     const send = (o: unknown) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o));
     };
+    // The mobile key-bar sends control sequences the on-screen keyboard can't.
+    sendKeyRef.current = (d: string) => { send({ t: 'i', d }); endBoot(); };
 
     // ⌘/Ctrl+C copies selected text. With a tmux mouse selection, ask the server
     // to run tmux's copy command; the resulting OSC 52 is accepted only because
@@ -531,6 +536,24 @@ export default function TerminalPane({
       <div className="term-host" ref={hostRef} />
       {copyMode && (
         <div className="term-copy-hint mono">copy mode · scroll to read, press Esc or type to return</div>
+      )}
+      {isMobile && conn === 'connected' && (
+        // Control keys the phone keyboard lacks — needed for TUI menus (model
+        // pickers, etc.). preventDefault keeps terminal focus so the keyboard
+        // stays up; the send also refocuses the terminal.
+        <div className="term-keybar mono" onPointerDown={(e) => e.preventDefault()}>
+          {([
+            ['esc', '\x1b'], ['tab', '\t'],
+            ['←', '\x1b[D'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['→', '\x1b[C'],
+            ['⏎', '\r'], ['^C', '\x03'],
+          ] as [string, string][]).map(([label, seq]) => (
+            <button
+              key={label}
+              className="tk-btn"
+              onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); sendKeyRef.current(seq); termRef.current?.focus(); }}
+            >{label}</button>
+          ))}
+        </div>
       )}
       {booting && conn !== 'exited' && (
         <div className="term-boot mono">
