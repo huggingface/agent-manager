@@ -243,6 +243,7 @@ body {
 
 /* card content */
 .ov-card { padding: 11px 14px 10px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ov-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .ov-id { display: flex; align-items: center; gap: 8px; cursor: pointer; min-width: 0; }
 .ov-id .spacer { flex: 1; }
 .ov-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -250,8 +251,8 @@ body {
 .ov-go { color: var(--muted); font-size: 12px; opacity: 0; transition: opacity 0.12s ease-out; flex: none; }
 .ov-card:hover .ov-go, .ov-id:focus-visible .ov-go { opacity: 1; }
 
-/* full prompt, wrapped, scrolls past a few lines */
-.ov-prompt { font-size: 13px; font-weight: 550; color: var(--text); white-space: pre-wrap; overflow-wrap: break-word; max-height: 160px; overflow-y: auto; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+/* full prompt, wrapped — the card body scrolls, so no inner scroll here */
+.ov-prompt { font-size: 13px; font-weight: 550; color: var(--text); white-space: pre-wrap; overflow-wrap: break-word; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
 /* nothing between prompt and reply → one hairline, not two */
 .ov-prompt + .ov-live { border-top: none; }
 .ov-prompt::before { content: '❯ '; font-family: var(--font-mono); color: var(--accent); font-weight: 700; }
@@ -271,8 +272,9 @@ body {
 .ov-answer { font-size: 13px; line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 /* live progress while running: present but clearly not the final word */
 .ov-answer-dim { color: var(--muted); margin-bottom: 5px; -webkit-line-clamp: 2; }
-/* answer flows in the card — no box-in-box, scrolls past a comfortable height */
-.markdown.ov-md { max-height: 440px; overflow-y: auto; border: none; background: none; padding: 0; font-size: 12.5px; }
+/* answer flows in the card at natural height — the window body is the single
+   scroll region, so no inner scrollbar here */
+.markdown.ov-md { border: none; background: none; padding: 0; font-size: 12.5px; }
 .ov-md pre { font-size: 11px; }
 
 /* braille spinner: unmistakably a process, never an input line */
@@ -315,8 +317,12 @@ body {
 .ovt-gn { color: var(--border-strong); }
 /* conversation window: the full card, centered over the grid */
 .ovw-backdrop { position: fixed; inset: 0; z-index: 120; display: flex; align-items: flex-start; justify-content: center; padding: 7vh 20px 20px; background: color-mix(in srgb, #000 52%, transparent); backdrop-filter: blur(3px); animation: rise-in 0.15s ease-out; }
-.ovw-win { width: 100%; max-width: 640px; max-height: 82vh; overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 13px; box-shadow: 0 24px 60px rgb(0 0 0 / 0.4); }
-.ovw-win .ov-card { padding: 14px 17px 12px; }
+/* window is a flex column: header + scrolling body + fixed input. Only the
+   body scrolls (one scrollbar), the reply input stays put at the bottom. */
+.ovw-win { width: 100%; max-width: 640px; max-height: 85vh; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 13px; box-shadow: 0 24px 60px rgb(0 0 0 / 0.4); overflow: hidden; }
+.ovw-win .ov-card { flex: 1; min-height: 0; padding: 14px 17px 12px; }
+.ovw-win .ov-body { flex: 1; min-height: 0; overflow-y: auto; }
+.ovw-win .ov-live { flex: none; }
 .ov-x { background: none; border: none; color: var(--muted); font-size: 13px; cursor: pointer; padding: 0 2px 0 8px; flex: none; }
 .ov-x:hover { color: var(--text); }
 
@@ -326,6 +332,9 @@ body {
 .ov-live textarea { flex: 1; min-width: 0; border: none; background: none; font: inherit; font-size: 13px; line-height: 1.45; color: var(--text); outline: none; padding: 2px 0; resize: none; overflow: hidden; max-height: 140px; }
 .ov-live textarea::placeholder { color: var(--muted); opacity: 0.7; }
 .ov-hint { font-size: 10.5px; color: var(--muted); flex: none; }
+/* send button — essential on mobile (no Shift+Enter), handy on desktop */
+.ov-send { flex: none; width: 26px; height: 26px; border: none; border-radius: 999px; background: var(--accent); color: var(--accent-fg); font-size: 14px; line-height: 1; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.ov-send:disabled { opacity: 0.5; cursor: default; }
 .ov-note { font-size: 11px; color: var(--danger); }
 
 /* tree */
@@ -553,6 +562,11 @@ body {
 .slot.focused .pane-head { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
 
 .term-host { flex: 1; min-height: 0; padding: 10px 8px 8px 12px; background: var(--term-bg); }
+/* mobile control-key bar: the keys a phone keyboard lacks, pinned below the
+   terminal so it rides just above the on-screen keyboard */
+.term-keybar { flex: none; display: flex; gap: 5px; padding: 5px 6px; background: var(--panel); border-top: 1px solid var(--border); overflow-x: auto; }
+.tk-btn { flex: 1 0 auto; min-width: 34px; height: 30px; border: 1px solid var(--border-strong); border-radius: var(--r-md); background: var(--panel-2); color: var(--text); font-size: 13px; line-height: 1; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+.tk-btn:active { background: color-mix(in srgb, var(--accent) 22%, var(--panel-2)); border-color: var(--accent); }
 .term-host .xterm { height: 100%; }
 .xterm .xterm-viewport { scrollbar-width: none; }
 .xterm .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; display: none; }
@@ -802,7 +816,10 @@ a.btn-ghost { text-decoration: none; }
 
 /* phones: two full-screen views — the sidebar list, or the selected pane */
 @media (max-width: 720px) {
-  .app { height: 100dvh; }
+  /* Height follows the VISUAL viewport (set by App from window.visualViewport):
+     when the on-screen keyboard opens it shrinks the app so the terminal +
+     control bar stay above the keyboard instead of hiding behind it. */
+  .app { height: var(--vvh, 100dvh); overflow: hidden; }
   .app.m-home .main { display: none; }
   .app.m-home .sidebar { width: 100%; border-right: none; }
   .app.m-stage .sidebar { display: none; }
