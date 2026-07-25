@@ -25,10 +25,11 @@ const Caret = () => (
   <svg className="ov-caret" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.8 3.2h6.4L5 7.4z" fill="currentColor" /></svg>
 );
 
-function Card({ s, color, pending, onOpen, onClose }: {
+function Card({ s, color, pending, isMobile, onOpen, onClose }: {
   s: MetaSession;
   color?: string;
   pending?: boolean; // digest still loading — show a shimmer instead of "no prompt yet"
+  isMobile?: boolean;
   onOpen: (sid: string) => void;
   onClose?: () => void; // present when the card lives in the conversation window
 }) {
@@ -88,6 +89,14 @@ function Card({ s, color, pending, onOpen, onClose }: {
   }
   const showLiveProgress = !entry && (running || awaiting);
 
+  // Latest answer as markdown, live or final. While running we only show it
+  // once there's a partial answer NEWER than the current prompt — so a stale
+  // previous answer doesn't sit under a just-sent prompt.
+  const justSent = !!sent && !digestCaughtUp;
+  const answerFresh = !!d && d.lastAssistantTs >= d.lastPromptTs && !justSent;
+  const showAnswer = entry ? !!answerText : (!!answerText && (answerFresh || !running));
+  const answerHtml = showAnswer ? renderMarkdown(answerMd || answerText) : '';
+
   return (
     <div className="ov-card">
       <div className="ov-id" onClick={() => onOpen(s.id)} title="Open pane">
@@ -100,45 +109,42 @@ function Card({ s, color, pending, onOpen, onClose }: {
         {onClose && <button className="ov-x" onClick={(e) => { e.stopPropagation(); onClose(); }} title="Close">✕</button>}
       </div>
 
-      {promptText ? (
-        <div className="ov-prompt">{sent ? sent.text : (d?.lastPromptRaw || promptText)}</div>
-      ) : pending ? (
-        <div className="ov-prompt-skel"><span className="skel" style={{ width: '70%' }} /></div>
-      ) : (
-        <div className="ov-prompt ov-prompt-none">no prompt yet</div>
-      )}
-      {(metaBits.length > 0 || hist.length > 0) && (
-        <div className="ov-meta mono">
-          <span className="ov-meta-bits">{metaBits.join(' · ')}</span>
-          <span className="spacer" />
-          {hist.length > 0 && (
-            <span className="ov-nav">
-              {idx > 0 && <span className="ov-nav-pos">turn {totalTurns - idx}/{totalTurns}</span>}
-              <button
-                className="ov-nav-btn" title="Earlier turn" disabled={idx >= hist.length}
-                onClick={() => setHistIdx(Math.min(idx + 1, hist.length))}
-              >↑</button>
-              <button
-                className="ov-nav-btn" title="Later turn" disabled={idx === 0}
-                onClick={() => setHistIdx(Math.max(idx - 1, 0))}
-              >↓</button>
-            </span>
-          )}
-        </div>
-      )}
+      {/* the card body is the ONLY scroll region (window mode); input stays put */}
+      <div className="ov-body">
+        {promptText ? (
+          <div className="ov-prompt">{sent ? sent.text : (d?.lastPromptRaw || promptText)}</div>
+        ) : pending ? (
+          <div className="ov-prompt-skel"><span className="skel" style={{ width: '70%' }} /></div>
+        ) : (
+          <div className="ov-prompt ov-prompt-none">no prompt yet</div>
+        )}
+        {(metaBits.length > 0 || hist.length > 0) && (
+          <div className="ov-meta mono">
+            <span className="ov-meta-bits">{metaBits.join(' · ')}</span>
+            <span className="spacer" />
+            {hist.length > 0 && (
+              <span className="ov-nav">
+                {idx > 0 && <span className="ov-nav-pos">turn {totalTurns - idx}/{totalTurns}</span>}
+                <button
+                  className="ov-nav-btn" title="Earlier turn" disabled={idx >= hist.length}
+                  onClick={() => setHistIdx(Math.min(idx + 1, hist.length))}
+                >↑</button>
+                <button
+                  className="ov-nav-btn" title="Later turn" disabled={idx === 0}
+                  onClick={() => setHistIdx(Math.max(idx - 1, 0))}
+                >↓</button>
+              </span>
+            )}
+          </div>
+        )}
 
-      {showLiveProgress ? (
-        <div className="ov-answer-wrap">
-          {answerText && d && d.lastAssistantTs >= d.lastPromptTs && (
-            <div className="ov-answer ov-answer-dim">{answerText}</div>
-          )}
-          <div className="ov-busy mono">running</div>
-        </div>
-      ) : answerText ? (
-        <div className="ov-answer-wrap">
-          <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(answerMd || answerText) }} />
-        </div>
-      ) : null}
+        {answerHtml && (
+          <div className="ov-answer-wrap">
+            <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: answerHtml }} />
+          </div>
+        )}
+        {showLiveProgress && <div className="ov-busy mono">running</div>}
+      </div>
 
       <div className="ov-live">
         <span className="ov-p mono">❯</span>
@@ -157,11 +163,14 @@ function Card({ s, color, pending, onOpen, onClose }: {
           // input into view once the keyboard has animated in.
           onFocus={(e) => { const el = e.currentTarget; setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300); }}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+            // Desktop: Enter sends, Shift+Enter newlines. Mobile keyboards can't
+            // do Shift+Enter, so Enter always newlines there and the button sends.
+            if (e.key === 'Enter' && !e.shiftKey && !isMobile) { e.preventDefault(); send(); }
             if (e.key === 'Escape') { setDraft(''); inputRef.current?.blur(); }
           }}
         />
-        {draft.trim() && <span className="ov-hint">↵ send · ⇧↵ newline</span>}
+        {draft.trim() && <button className="ov-send" title="Send" onClick={send} disabled={sending}>↑</button>}
+        {draft.trim() && !isMobile && <span className="ov-hint">↵ send · ⇧↵ newline</span>}
       </div>
       {failed && <div className="ov-note">failed to reach the agent</div>}
     </div>
@@ -209,21 +218,18 @@ function Tile({ s, color, dim, pending, onOpen }: { s: MetaSession; color?: stri
 
 /** Mission control: one reading column — group capsules with their agents as
  *  slabs, loose agents as standalone panels. */
-export default function Overview({ clis, tree, filter, view, archived, showArchived, onOpen }: {
+export default function Overview({ clis, tree, filter, view, archived, showArchived, meta, metaReady, isMobile, onOpen }: {
   clis: Cli[];
   tree: Tree;
   filter: OverviewFilter; // controlled by the bottom bar in App
   view: 'tiles' | 'list'; // controlled by the bottom bar in App
   archived: Set<string>;
   showArchived: boolean;
+  meta: Record<string, MetaSession>; // continuously polled in App; instant on open
+  metaReady: boolean;                // false until the first poll lands
+  isMobile: boolean;
   onOpen: (sid: string) => void;
 }) {
-  const [meta, setMeta] = useState<Record<string, MetaSession>>({});
-  // Progressive load: the layout renders immediately from the tree; digests
-  // stream in per session (newest first) until the bulk pass lands and marks
-  // everything loaded. A tile shows a shimmer until its id is in `loaded`.
-  const [loaded, setLoaded] = useState<Set<string>>(new Set());
-  const bulkDone = useRef(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [durs, setDurs] = useState<Record<string, number>>({});
   const [openId, setOpenId] = useState<string | null>(null); // conversation window
@@ -234,63 +240,13 @@ export default function Overview({ clis, tree, filter, view, archived, showArchi
     return () => document.removeEventListener('keydown', onKey);
   }, [openId]);
 
-  // Skip the setState when the poll returns byte-identical data — otherwise
-  // every tick re-renders every tile (and the conversation window) for nothing.
-  const lastPayload = useRef('');
-  useEffect(() => {
-    let alive = true;
-    const load = () => api.getMeta()
-      .then((r) => {
-        if (!alive) return;
-        bulkDone.current = true;
-        const payload = JSON.stringify(r.sessions);
-        if (payload === lastPayload.current) return;
-        lastPayload.current = payload;
-        setMeta(Object.fromEntries(r.sessions.map((s) => [s.id, s])));
-        setLoaded(new Set(r.sessions.map((s) => s.id)));
-      })
-      .catch(() => {});
-    load();
-    const t = setInterval(() => { if (!document.hidden) load(); }, 1000);
-    return () => { alive = false; clearInterval(t); };
-  }, []);
-
-  // Per-session digests while the bulk build is still running, top of the
-  // feed first, a few in flight at a time.
-  const progressive = useRef(false);
-  useEffect(() => {
-    if (progressive.current || bulkDone.current || !tree.sessions.length) return;
-    progressive.current = true;
-    let alive = true;
-    const ids: string[] = [];
-    for (const ref of tree.order) {
-      if (ref.startsWith('s:')) { const s = tree.sessions.find((x) => x.id === ref.slice(2)); if (s && eligible(s)) ids.push(s.id); }
-      else { const g = tree.groups.find((x) => x.id === ref.slice(2)); if (g) for (const sid of g.sessionIds) { const s = tree.sessions.find((x) => x.id === sid); if (s && eligible(s)) ids.push(s.id); } }
-    }
-    const queue = [...ids];
-    const worker = async () => {
-      while (alive && !bulkDone.current && queue.length) {
-        const id = queue.shift()!;
-        try {
-          const r = await api.getMetaOne(id);
-          if (!alive || bulkDone.current) return;
-          if (r.digest) {
-            const s = tree.sessions.find((x) => x.id === id);
-            if (s) setMeta((m) => ({ ...m, [id]: { ...s, digest: r.digest } }));
-            setLoaded((l) => new Set(l).add(id));
-          }
-        } catch { /* bulk will cover it */ }
-      }
-    };
-    Promise.all([worker(), worker(), worker()]).catch(() => {});
-    return () => { alive = false; };
-  }, [tree]);
-
   const colorOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c.color])), [clis]);
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
   const dataFor = (s: Session): MetaSession => meta[s.id] ?? { ...s, digest: null };
-  const pending = (id: string) => !loaded.has(id); // digest not in yet — shimmer
+  // A tile shimmers only until the first background poll lands; after that the
+  // session is in `meta` (or genuinely has no digest).
+  const pending = (id: string) => !metaReady && !meta[id];
 
   const visible = (s: MetaSession) =>
     (filter === 'all' || bucket(s.state) === filter) && (showArchived || !archived.has(s.id));
@@ -308,7 +264,7 @@ export default function Overview({ clis, tree, filter, view, archived, showArchi
     if (!visible(m)) return null;
     return (
       <div key={s.id} className="ov-panel">
-        <Card s={m} color={colorOf[s.cli]} pending={pending(s.id)} onOpen={onOpen} />
+        <Card s={m} color={colorOf[s.cli]} pending={pending(s.id)} isMobile={isMobile} onOpen={onOpen} />
       </div>
     );
   };
@@ -350,7 +306,7 @@ export default function Overview({ clis, tree, filter, view, archived, showArchi
   const windowEl = openSess && (
     <div className="ovw-backdrop" onClick={() => setOpenId(null)}>
       <div className="ovw-win" onClick={(e) => e.stopPropagation()}>
-        <Card s={dataFor(openSess)} color={colorOf[openSess.cli]} pending={pending(openSess.id)} onOpen={onOpen} onClose={() => setOpenId(null)} />
+        <Card s={dataFor(openSess)} color={colorOf[openSess.cli]} pending={pending(openSess.id)} isMobile={isMobile} onOpen={onOpen} onClose={() => setOpenId(null)} />
       </div>
     </div>
   );
