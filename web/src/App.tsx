@@ -92,6 +92,19 @@ export default function App() {
     localStorage.setItem('am-theme', theme);
   }, [theme]);
 
+  // Track the visual viewport so the mobile layout can sit above the on-screen
+  // keyboard (which shrinks visualViewport but not the layout viewport on iOS).
+  // --vvh drives the mobile app height (see styles.css).
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const apply = () => document.documentElement.style.setProperty('--vvh', `${Math.round(vv.height)}px`);
+    apply();
+    vv.addEventListener('resize', apply);
+    vv.addEventListener('scroll', apply);
+    return () => { vv.removeEventListener('resize', apply); vv.removeEventListener('scroll', apply); };
+  }, []);
+
   // Refresh info while locked so flipping the Space to Private unlocks the UI
   // without a manual reload (the server re-checks visibility every minute).
   useEffect(() => {
@@ -144,22 +157,42 @@ export default function App() {
     return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVisible); };
   }, [refresh]);
 
-  // Last-activity ages for the sidebar clock column (from the trace digests;
-  // low-frequency — the Overview does its own faster polling when open).
+  // Live per-session digests, polled CONTINUOUSLY in the background (not only
+  // while the Overview is open) so opening it is instant. Faster cadence when
+  // the Overview is the active view; slow heartbeat otherwise. `ages` (sidebar
+  // clock) is derived from the same fetch. Payload-diffed to avoid needless
+  // re-renders.
+  const [meta, setMeta] = useState<Record<string, api.MetaSession>>({});
+  const [metaReady, setMetaReady] = useState(false);
   const [ages, setAges] = useState<Record<string, number>>({});
+  const overviewActiveRef = useRef(false);
+  overviewActiveRef.current = activeRef === 'overview';
   useEffect(() => {
     let alive = true;
+    let lastPayload = '';
     const load = () => api.getMeta()
       .then((r) => {
         if (!alive) return;
+        setMetaReady(true);
+        const payload = JSON.stringify(r.sessions);
+        if (payload === lastPayload) return;
+        lastPayload = payload;
+        setMeta(Object.fromEntries(r.sessions.map((s) => [s.id, s])));
         setAges(Object.fromEntries(r.sessions.map((s) => [
           s.id, Math.max(s.digest?.lastAssistantTs || 0, s.digest?.lastPromptTs || 0),
         ])));
       })
       .catch(() => {});
     load();
-    const t = setInterval(() => { if (!document.hidden) load(); }, 20_000);
-    return () => { alive = false; clearInterval(t); };
+    // One self-scheduling timer whose delay adapts to the active view, so we
+    // never tear down / recreate the loop when navigating.
+    let t: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      if (!document.hidden) load();
+      t = setTimeout(tick, overviewActiveRef.current ? 1500 : 8000);
+    };
+    t = setTimeout(tick, 1500);
+    return () => { alive = false; clearTimeout(t); };
   }, []);
 
   // Archive threshold from the operator config; refresh when settings closes
@@ -403,6 +436,7 @@ export default function App() {
                 focused={visibleSessions.length > 1 && s.id === focusedId}
                 active={s.id === focusedId}
                 dragId={canDrag ? `p:${s.id}` : undefined}
+                isMobile={isMobile}
                 onDragActive={setPaneDrag}
                 onFocus={() => setFocusedId(s.id)}
                 onRename={(name) => renameSession(s.id, name)}
@@ -500,6 +534,9 @@ export default function App() {
               view={ovView}
               archived={archivedIds}
               showArchived={showArchived}
+              meta={meta}
+              metaReady={metaReady}
+              isMobile={isMobile}
               onOpen={(sid) => {
                 const g = tree.groups.find((x) => x.sessionIds.includes(sid));
                 openSession(sid, g?.id);
