@@ -674,11 +674,22 @@ async function build() {
   return { perSession, digests, other, totals, sessions };
 }
 
+// Stale-while-revalidate: a build over a large transcript history can take
+// longer than the poll interval. Serve the last result INSTANTLY and refresh
+// in the background, and never run two builds at once — otherwise every poll
+// kicked off a fresh overlapping build and pinned the event loop (the Overview
+// lag). The first-ever call (no cached value) awaits the build once.
+let building = null;
 function memoized() {
-  if (resultMemo.val && Date.now() - resultMemo.ts < TTL) return resultMemo.val;
-  const val = build().catch(() => ({ perSession: new Map(), digests: new Map(), other: emptyStats(), totals: emptyStats(), sessions: store.list() }));
-  resultMemo = { ts: Date.now(), val };
-  return val;
+  const fresh = resultMemo.val && Date.now() - resultMemo.ts < TTL;
+  if (fresh) return resultMemo.val;
+  if (!building) {
+    building = build()
+      .then((v) => { resultMemo = { ts: Date.now(), val: Promise.resolve(v) }; return v; })
+      .catch(() => resultMemo.val || Promise.resolve({ perSession: new Map(), digests: new Map(), other: emptyStats(), totals: emptyStats(), sessions: store.list() }))
+      .finally(() => { building = null; });
+  }
+  return resultMemo.val || building;
 }
 
 export async function buildTraces() {
