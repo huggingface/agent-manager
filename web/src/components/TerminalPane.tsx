@@ -31,12 +31,18 @@ const THEMES: Record<'light' | 'dark', ITheme> = {
   },
 };
 
-type ConnState = 'connecting' | 'connected' | 'closed' | 'exited';
+type ConnState = 'connecting' | 'connected' | 'closed' | 'exited' | 'handedoff';
 
 // Close code the server uses when the session's process exited for real (vs a
 // transient drop). The client must NOT auto-reconnect on this, or it would
 // respawn the agent in a loop and trample an in-progress login flow.
 const EXIT_CODE = 4000;
+
+// Close code for "another device took this session over" (tmux attaches with
+// -D, so only one client drives a session at a time). The session is still
+// running: we must not reconnect on a timer, or this pane and the phone would
+// pull the session back and forth. We wait for the user to come back here.
+const HANDOFF_CODE = 4001;
 
 function workspaceLabel(p: string | null) {
   const rel = (p || '').replace(/^\.\/?/, '').replace(/^\/+|\/+$/g, '');
@@ -161,6 +167,8 @@ export default function TerminalPane({
   const termRef = useRef<Terminal | null>(null);
   const resyncRef = useRef<() => void>(() => {});
   const reconnectRef = useRef<() => void>(() => {});
+  // Take a handed-off session back (bound inside the connection effect).
+  const resumeRef = useRef<() => void>(() => {});
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
   const sendKeyRef = useRef<(d: string) => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
@@ -243,6 +251,7 @@ export default function TerminalPane({
     let mouseDragStart: { x: number; y: number } | null = null;
     let mouseDragged = false;
     const onPointerDown = (e: PointerEvent) => {
+      takeBack(); // clicking into a handed-off pane means "I'm working here now"
       if (e.pointerType !== 'mouse' || e.button !== 0) return;
       mouseDragStart = { x: e.clientX, y: e.clientY };
       mouseDragged = false;
@@ -315,6 +324,7 @@ export default function TerminalPane({
     document.fonts?.ready.then(() => { try { fit.fit(); } catch { /* ignore */ } });
 
     let closedByUs = false;
+    let handedOff = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
     // Reconnect with backoff: a sleeping/unreachable Space shouldn't be hammered
     // every second by every open pane. Reset once a connection succeeds.
@@ -383,6 +393,9 @@ export default function TerminalPane({
         // reattach to the still-running tmux session.
         endBoot();
         if (e.code === EXIT_CODE) { setConn('exited'); return; }
+        // Another device took over: stay detached (no retry timer) until the
+        // user deliberately comes back to this pane — see takeBack().
+        if (e.code === HANDOFF_CODE) { handedOff = true; setConn('handedoff'); return; }
         setConn('closed');
         if (!closedByUs) {
           retry = setTimeout(connect, retryDelay);
@@ -395,13 +408,33 @@ export default function TerminalPane({
     // the NEW process paint, not leftovers (tmux repaints the live screen).
     reconnectRef.current = () => { if (retry) clearTimeout(retry); retryDelay = 1200; try { term.reset(); } catch { /* ignore */ } connect(); };
 
-    // Re-fit and tell the server our size. With tmux window-size=latest this
-    // makes the focused window own the size, so a duplicate window open at a
-    // different size doesn't leave us with tmux's "dots" filler.
+    // Take the session back from whichever device holds it now. Called ONLY for
+    // a deliberate return to this pane — the tab regaining focus/visibility, or
+    // a tap/click in the terminal — never on a timer, so the phone we just put
+    // down keeps the session while it sits in the background. Reattaching sizes
+    // tmux to this device, which is the point: each device gets a window that
+    // fits it, at the cost of one reflow per handover instead of per glance.
+    const takeBack = () => {
+      if (!handedOff || document.hidden) return false;
+      handedOff = false;
+      connect();
+      return true;
+    };
+    resumeRef.current = () => { takeBack(); };
+
+    // Re-fit and tell the server our size. The attached client owns the tmux
+    // window, so this keeps it fitting this device exactly instead of leaving
+    // tmux's "dots" filler. Never reconnects: a layout change (another pane
+    // opening, the sidebar toggling) is not a reason to pull a session off the
+    // device the user is actually holding.
     const resync = () => {
+      if (handedOff) return;
       try { fit.fit(); send({ t: 'r', cols: term.cols, rows: term.rows }); } catch { /* ignore */ }
     };
-    const onVisible = () => { if (!document.hidden) resync(); };
+    // Returning to this tab IS deliberate — take the session back, or just
+    // re-sync the size if we still hold it.
+    const onReturn = () => { if (!takeBack()) resync(); };
+    const onVisible = () => { if (!document.hidden) onReturn(); };
     resyncRef.current = resync; // so the zoom control can refit
 
     // Typing means the user sees enough to interact — drop the boot cover.
@@ -412,7 +445,7 @@ export default function TerminalPane({
     const dataSub = term.onData((d) => send({ t: 'i', d }));
     const ro = new ResizeObserver(resync);
     ro.observe(hostRef.current!);
-    window.addEventListener('focus', resync);
+    window.addEventListener('focus', onReturn);
     document.addEventListener('visibilitychange', onVisible);
 
     // Touch scrolling: xterm doesn't translate touch gestures for applications
@@ -421,7 +454,7 @@ export default function TerminalPane({
     // the app tracks the mouse (tmux scrolls its history), local scrollLines
     // otherwise.
     let touchY: number | null = null;
-    const onTouchStart = (e: TouchEvent) => { touchY = e.touches[0].clientY; };
+    const onTouchStart = (e: TouchEvent) => { takeBack(); touchY = e.touches[0].clientY; };
     const onTouchMove = (e: TouchEvent) => {
       if (touchY == null) return;
       const y = e.touches[0].clientY;
@@ -461,7 +494,7 @@ export default function TerminalPane({
       host.removeEventListener('touchstart', onTouchStart);
       host.removeEventListener('touchmove', onTouchMove);
       host.removeEventListener('touchend', onTouchEnd);
-      window.removeEventListener('focus', resync);
+      window.removeEventListener('focus', onReturn);
       document.removeEventListener('visibilitychange', onVisible);
       dataSub.dispose();
       keySub.dispose();
@@ -555,7 +588,21 @@ export default function TerminalPane({
           ))}
         </div>
       )}
-      {booting && conn !== 'exited' && (
+      {conn === 'handedoff' && (
+        // The session is running elsewhere, not stopped — say so, and make the
+        // way back obvious (clicking the terminal works too).
+        <div className="term-exit mono">
+          <div className="tx-row">
+            <span>open on another device · still running</span>
+            <button
+              className="tx-btn"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); resumeRef.current(); }}
+            ><RefreshGlyph /> resume here</button>
+          </div>
+        </div>
+      )}
+      {booting && conn !== 'exited' && conn !== 'handedoff' && (
         <div className="term-boot mono">
           {conn === 'connecting' ? 'connecting' : `starting ${cli?.label || session.cli}`}<span className="et-cursor" />
         </div>

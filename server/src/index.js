@@ -14,7 +14,7 @@ import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
 import * as demo from './demo.js';
-import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection, paneModes } from './runner.js';
+import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection, paneModes, isRunning } from './runner.js';
 import { buildUsage } from './usage.js';
 import { buildTraces, traceDigests, digestFor } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
@@ -1034,9 +1034,17 @@ wss.on('connection', (ws, req) => {
   });
   handle.onExit(() => {
     if (ws.readyState === ws.OPEN) {
-      // 4000 = real process exit. The client uses this to NOT auto-reconnect
-      // (which would respawn the agent in a loop); it offers a Restart instead.
-      try { ws.close(4000, 'exited'); } catch { ws.close(); }
+      // Our tmux client can die for two very different reasons, and the browser
+      // must react differently to each:
+      //   4001 = another device attached and tmux's -D detached us. The session
+      //          is alive and now belongs to that device, so this client goes
+      //          quiet instead of reconnecting (that would be a tug-of-war).
+      //   4000 = the agent process itself exited. Do NOT auto-reconnect (it
+      //          would respawn the agent in a loop); offer a Restart instead.
+      const handedOff = USE_TMUX && isRunning(session.id);
+      try {
+        ws.close(handedOff ? 4001 : 4000, handedOff ? 'handedoff' : 'exited');
+      } catch { ws.close(); }
     }
   });
 
