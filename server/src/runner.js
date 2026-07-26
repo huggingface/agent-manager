@@ -345,12 +345,16 @@ export function attach(session, cols, rows) {
     const args = [];
     if (fs.existsSync(TMUX_CONF)) args.push('-f', TMUX_CONF);
     args.push(
-      // -A: attach if it exists, else create. We deliberately do NOT pass -D
-      // (detach others): the same session may be open in two browser windows,
-      // and -D + auto-reconnect would make them fight. Instead each client
-      // re-syncs its size on focus (see TerminalPane), and window-size=latest
-      // makes the focused window fit exactly.
-      'new-session', '-A', '-s', tmuxName(session.id), '-c', workdir,
+      // -A: attach if it exists, else create. -D: detach any other client, so
+      // exactly ONE device drives the session at a time. Sharing it was worse:
+      // window-size=latest resized the shared window to whoever spoke last, and
+      // agent TUIs (which paint into the normal buffer, not the alt screen)
+      // re-emit their frame with erase math computed at the OLD width — so every
+      // phone/desktop flip left another copy of the same text in the scrollback,
+      // wrapped at the other device's width. The handover is sequential instead:
+      // the detached client is told the session lives on (close code 4001) and
+      // waits for a deliberate return before taking it back (see TerminalPane).
+      'new-session', '-A', '-D', '-s', tmuxName(session.id), '-c', workdir,
       '-e', `AM_SESSION=${folder}`,
       '-e', `AM_NAME=${session.name}`,
       '-e', `AM_ID=${session.id}`,
