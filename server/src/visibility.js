@@ -24,6 +24,13 @@ const hfToken = () => process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN
 // private — but we surface a warning so the operator can verify or add a token.
 let state = { spaceId: SPACE_ID, public: false, known: false, checkedAt: 0, reason: null, bucket: null, buckets: [], bucketUnverified: false };
 let volumes = null; // bucket ids mounted on this Space; discovered once (fixed until restart)
+// Failure counter for the authed volumes call. A transient network blip
+// should retry; a permanently bad token (e.g. a stale HF_TOKEN carried over
+// when a Space was duplicated) must NOT wedge the Space forever. After this
+// many consecutive failures we give up, treat the bucket as undiscoverable,
+// and unlock with a `bucketUnverified` warning instead of staying closed.
+let bucketDiscoverFails = 0;
+const BUCKET_DISCOVER_MAX_FAILS = 3;
 
 const HEADERS = { 'user-agent': 'agent-manager' };
 // Every HF API call is bounded: a hung request must never wedge the boot
@@ -31,6 +38,11 @@ const HEADERS = { 'user-agent': 'agent-manager' };
 const HF_TIMEOUT_MS = 8000;
 const hfFetch = (url, opts = {}) => fetch(url, { ...opts, signal: AbortSignal.timeout(HF_TIMEOUT_MS) });
 
+// Returns:
+//   - an array of bucket ids (may be empty) once discovery has succeeded OR
+//     has been given up on (so the Space can unlock with a warning).
+//   - null only for a TRULY transient failure (first/short retry window) so
+//     the caller keeps the last verdict and tries again next cycle.
 async function discoverBuckets() {
   if (volumes !== null) return volumes;
   const token = hfToken();
@@ -39,12 +51,24 @@ async function discoverBuckets() {
     const r = await hfFetch(`https://huggingface.co/api/spaces/${SPACE_ID}`, {
       headers: { ...HEADERS, authorization: `Bearer ${token}` },
     });
-    if (!r.ok) return null; // transient — retry next cycle
+    if (!r.ok) {
+      // 401/403 → the token is bad/expired. A network blip would have thrown.
+      // Retry a couple of times in case HF is having a moment, then give up
+      // so we don't wedge a confirmed-private Space forever.
+      if (++bucketDiscoverFails >= BUCKET_DISCOVER_MAX_FAILS) {
+        console.warn(`[visibility] authed /api/spaces returned ${r.status} ${bucketDiscoverFails}x — giving up on bucket discovery; unlocking with bucketUnverified (check the Space's HF_TOKEN secret)`);
+        volumes = []; return volumes;
+      }
+      return null; // transient — retry next cycle
+    }
     const j = await r.json();
     volumes = ((j.runtime && j.runtime.volumes) || [])
       .filter((v) => v && v.type === 'bucket' && v.source)
       .map((v) => v.source);
-  } catch { return null; }
+  } catch {
+    // Thrown (DNS/timeout/network) → genuinely transient, don't burn the counter.
+    return null;
+  }
   return volumes;
 }
 
@@ -66,8 +90,12 @@ async function check() {
     // Not publicly visible (401/404) → the Space is private. Now the bucket(s).
     const buckets = await discoverBuckets();
     if (buckets === null) { state = { ...state, checkedAt: Date.now() }; return state; } // keep last verdict
-    // No token → buckets couldn't be discovered → we can't verify the bucket.
-    if (!hfToken()) {
+    // Treat the give-up path the same as having no token: the bucket is
+    // unverifiable, NOT public. Unlock the Space with a warning rather than
+    // wedging it closed forever (a bad/stale HF_TOKEN must never brick a
+    // confirmed-private Space).
+    const bucketUnverified = !hfToken() || bucketDiscoverFails >= BUCKET_DISCOVER_MAX_FAILS;
+    if (bucketUnverified) {
       state = { spaceId: SPACE_ID, public: false, known: true, checkedAt: Date.now(), reason: null, bucket: null, buckets: [], bucketUnverified: true };
       return state;
     }
