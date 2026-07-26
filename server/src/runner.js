@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { USE_TMUX, cliById, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
+import { captureOpencodeSession } from './traces.js';
 
 const TERM_ENV = {
   ...process.env,
@@ -248,6 +249,29 @@ function scheduleCodexCapture(session, workdir) {
   if (t0.unref) t0.unref();
 }
 
+// opencode has no per-conversation handle we can pass on launch, so we can't
+// mint an id like Claude's --session-id. Instead, capture the ses_ row opencode
+// writes to its db and pin it — mirrors the codex approach. The row appears
+// only once the conversation has content (the user's first message), so retry
+// on a longer, sparser schedule than codex.
+const opencodeCapturing = new Set();
+function scheduleOpencodeCapture(session, workdir) {
+  if (session.opencodeSessionId || opencodeCapturing.has(session.id)) return;
+  opencodeCapturing.add(session.id);
+  const since = Date.now() - 2000;
+  const delays = [3000, 8000, 20000, 45000, 90000];
+  const attempt = (i) => {
+    const claimed = new Set(list().filter((s) => s.id !== session.id && s.opencodeSessionId).map((s) => s.opencodeSessionId));
+    const hit = captureOpencodeSession(workdir, since, claimed);
+    if (hit) { update(session.id, { opencodeSessionId: hit.id }); opencodeCapturing.delete(session.id); return; }
+    if (i + 1 >= delays.length) { opencodeCapturing.delete(session.id); return; }
+    const t = setTimeout(() => attempt(i + 1), delays[i + 1] - delays[i]);
+    if (t.unref) t.unref();
+  };
+  const t0 = setTimeout(() => attempt(0), delays[0]);
+  if (t0.unref) t0.unref();
+}
+
 // Single-quote a string for embedding in an `sh -lc` command line.
 const shq = (t) => `'${String(t).replace(/'/g, `'\\''`)}'`;
 
@@ -306,7 +330,14 @@ function commandFor(session) {
     const guard = 'G="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"; '
       + 'mkdir -p "$(dirname "$G")"; [ -d "$G" ] && rm -rf "$G"; '
       + '[ -e "$G" ] || { [ -f "${G}c" ] && cp "${G}c" "$G" || echo "{}" > "$G"; }; ';
-    const base = session.everStarted && cli.cont
+    // `--continue` resumes the most-recent conversation in the CWD, so two
+    // opencode agents sharing a folder would resume onto the SAME conversation
+    // (cross-talk) — same hazard as codex `resume --last`. Only continue when
+    // this session holds its folder alone; otherwise start fresh, and capture
+    // pins the new conversation right away (see scheduleOpencodeCapture).
+    const folder = session.path ?? session.id;
+    const shared = list().some((o) => o.id !== session.id && o.cli === 'opencode' && (o.path ?? o.id) === folder);
+    const base = session.everStarted && cli.cont && !shared
       ? `${cli.cont} || exec ${cli.run}`
       : `exec ${q0 && cli.withPrompt ? cli.withPrompt(q0) : cli.run}`;
     return `${guard}${base}`;
@@ -366,6 +397,7 @@ export function attach(session, cols, rows) {
 
   if (!session.everStarted) update(session.id, { everStarted: true, pendingPrompt: undefined });
   if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
+  if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
 
   const handle = {
     onData: (cb) => term.onData(cb),
@@ -405,6 +437,7 @@ export function ensureRunning(session) {
   execFileSync('tmux', args, { stdio: 'ignore', env: TERM_ENV });
   if (!session.everStarted) update(session.id, { everStarted: true, pendingPrompt: undefined });
   if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
+  if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
   return true;
 }
 

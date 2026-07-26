@@ -395,13 +395,32 @@ function readOpencode() {
         dg.lastAssistantMd = clipRaw(lastA.t);
         dg.lastAssistantTs = Number(lastA.ts) || 0;
       }
-      rows.push({ directory: s.directory || null, parsed: { stats: st, digest: dg } });
+      rows.push({ sessionId: s.id, timeCreated: Number(s.time_created) || 0, directory: s.directory || null, parsed: { stats: st, digest: dg } });
     }
   } catch { /* torn read / schema drift: keep previous */ } finally {
     try { db.close(); } catch {}
   }
   ocMemo = { key, rows };
   return rows;
+}
+
+// Newest opencode conversation in `directory` created at/after `sinceMs` and
+// not already claimed by another session. The runner calls this shortly after
+// launch to PIN a session to its own `ses_…` id — opencode has no
+// per-conversation handle of its own (unlike codex's rollout uuid), so two
+// agents sharing a folder would otherwise cross-attribute. Read straight from
+// the db (not the memoized rows) so a just-created session is seen immediately.
+export function captureOpencodeSession(directory, sinceMs, claimed) {
+  if (!DatabaseSync || !directory) return null;
+  let db;
+  try { db = new DatabaseSync(opencodeDbPath(), { readOnly: true }); } catch { return null; }
+  try {
+    const rows = db.prepare(
+      'select id, time_created from session where directory = ? and time_created >= ? order by time_created desc',
+    ).all(directory, sinceMs);
+    for (const r of rows) if (!claimed || !claimed.has(r.id)) return { id: r.id, timeCreated: Number(r.time_created) || 0 };
+    return null;
+  } catch { return null; } finally { try { db.close(); } catch {} }
 }
 
 // ---------- Hermes (SQLite: ~/.hermes/state.db, WAL) ----------
@@ -649,15 +668,29 @@ async function build() {
   // deleted transcripts) so fileCache doesn't grow unbounded on a long-lived Space.
   for (const k of fileCache.keys()) if (!seenFiles.has(k)) fileCache.delete(k);
 
-  // opencode: sessions attribute by their recorded directory (like codex cwd).
+  // opencode: attribute by the PINNED ses_ id first (the runner captures it at
+  // launch — see scheduleOpencodeCapture). Two agents in one folder are
+  // otherwise indistinguishable: opencode has no per-conversation handle, so a
+  // bare directory match marks a shared folder 'ambiguous' and shows nothing.
+  // Directory is kept only as a fallback for UNPINNED sessions that hold their
+  // folder alone (legacy sessions, dedicated folders).
+  const ocRows = readOpencode();
+  const ocById = new Map(ocRows.map((r) => [r.sessionId, r]));
+  const pinnedIds = new Set(sessions.filter((s) => s.cli === 'opencode' && s.opencodeSessionId).map((s) => s.opencodeSessionId));
+  const attributed = new Set();
+  for (const s of sessions.filter((x) => x.cli === 'opencode' && x.opencodeSessionId)) {
+    const r = ocById.get(s.opencodeSessionId);
+    if (r) { attribute(s, r.parsed); attributed.add(r.sessionId); }
+  }
   const opencodeByDir = new Map();
-  for (const s of sessions.filter((x) => x.cli === 'opencode')) {
+  for (const s of sessions.filter((x) => x.cli === 'opencode' && !x.opencodeSessionId)) {
     const key = path.resolve(WORKSPACES_DIR, s.path ?? s.id);
     opencodeByDir.set(key, opencodeByDir.has(key) ? 'ambiguous' : s);
   }
-  for (const { directory, parsed } of readOpencode()) {
-    const hit = directory ? opencodeByDir.get(path.resolve(directory)) : null;
-    attribute(hit && hit !== 'ambiguous' ? hit : null, parsed);
+  for (const r of ocRows) {
+    if (attributed.has(r.sessionId) || pinnedIds.has(r.sessionId)) continue; // placed by pin, or reserved for one
+    const hit = r.directory ? opencodeByDir.get(path.resolve(r.directory)) : null;
+    attribute(hit && hit !== 'ambiguous' ? hit : null, r.parsed);
   }
 
   // Hermes: same story — sessions record their cwd.

@@ -11,7 +11,9 @@ fi
 export DATA_DIR
 
 # Put HOME on the durable bucket so EVERY agent's logins/config persist across
-# restarts (gemini ~/.gemini, opencode ~/.local/share, hermes ~/.hermes, etc.).
+# restarts (gemini ~/.gemini, etc.). Agents whose SQLite state can't live on the
+# FUSE bucket (codex, openclaw, opencode, hermes) are relocated to local disk
+# below, each with its own durable copy on the bucket.
 export HOME="$DATA_DIR/home"
 mkdir -p "$HOME"
 # Claude keeps its established dir (so existing logins keep working). Codex's
@@ -91,6 +93,39 @@ cp "$HOME/.gitconfig" "$OPENCLAW_HOME/.gitconfig" 2>/dev/null || true
 ( while :; do
     sleep 60
     rsync -a --delete "$OPENCLAW_STATE_DIR/" "$OC_BACKUP/" 2>/dev/null || true
+  done ) &
+
+# opencode + hermes keep their conversation history in SQLite (opencode at
+# ~/.local/share/opencode, hermes at ~/.hermes). SQLite on the FUSE bucket
+# corrupts, and worse: a SYNCHRONOUS read can STALL on FUSE and wedge the
+# server's event loop — the Overview reads these dbs on every poll, so one
+# stalled read takes the whole Space down. The live data therefore lives on
+# LOCAL disk, exposed at the well-known path via a symlink, with a durable copy
+# on the bucket: restored on boot, synced back every 60s. Unlike codex these
+# dbs ARE the source of truth (no rollout files to rebuild from), so the
+# sync-back INCLUDES the sqlite. Worst case on an unclean stop: the last minute
+# of chat history.
+OC_LIVE="$AM_LOCAL/opencode-share"; OC_DURABLE="$DATA_DIR/state/opencode"; OC_LINK="$HOME/.local/share/opencode"
+HERMES_LIVE="$AM_LOCAL/hermes"; HERMES_DURABLE="$DATA_DIR/state/hermes"; HERMES_LINK="$HOME/.hermes"
+mkdir -p "$OC_LIVE" "$OC_DURABLE" "$(dirname "$OC_LINK")" "$HERMES_LIVE" "$HERMES_DURABLE"
+# One-time migration: existing history is a REAL dir at the well-known path on
+# the bucket. Fold it into the durable store BEFORE the path becomes a symlink,
+# so no conversation is stranded on the bucket or lost.
+for pair in "$OC_LINK|$OC_DURABLE" "$HERMES_LINK|$HERMES_DURABLE"; do
+  lnk="${pair%%|*}"; dur="${pair##*|}"
+  if [ -e "$lnk" ] && [ ! -L "$lnk" ]; then
+    rsync -a "$lnk/" "$dur/" 2>/dev/null || true
+    rm -rf "$lnk" 2>/dev/null || true
+  fi
+done
+rsync -a "$OC_DURABLE/" "$OC_LIVE/" 2>/dev/null || true       # restore durable → live (local disk is wiped each boot)
+rsync -a "$HERMES_DURABLE/" "$HERMES_LIVE/" 2>/dev/null || true
+ln -sfn "$OC_LIVE" "$OC_LINK"
+ln -sfn "$HERMES_LIVE" "$HERMES_LINK"
+( while :; do
+    sleep 60
+    rsync -a "$OC_LIVE/" "$OC_DURABLE/" 2>/dev/null || true
+    rsync -a "$HERMES_LIVE/" "$HERMES_DURABLE/" 2>/dev/null || true
   done ) &
 
 # Durable, user-editable setup script. Runs on EVERY start (keep it idempotent);
