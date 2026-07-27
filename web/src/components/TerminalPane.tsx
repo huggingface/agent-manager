@@ -44,6 +44,13 @@ const EXIT_CODE = 4000;
 // pull the session back and forth. We wait for the user to come back here.
 const HANDOFF_CODE = 4001;
 
+// How long the pane box must hold still before we resize tmux to it. A layout
+// change (switching the tile grid, toggling the sidebar, the mobile keyboard) is
+// several box changes in quick succession, plus the ResizeObserver echo of our
+// own fit — long enough to collapse those into one resize, short enough that a
+// deliberate resize still feels immediate.
+const RESIZE_SETTLE_MS = 180;
+
 function workspaceLabel(p: string | null) {
   const rel = (p || '').replace(/^\.\/?/, '').replace(/^\/+|\/+$/g, '');
   return rel ? `workspace/${rel}/` : 'workspace/';
@@ -320,12 +327,14 @@ export default function TerminalPane({
       return true;
     });
     try { fit.fit(); } catch { /* layout not ready yet */ }
-    // Re-measure once the webfont is ready (glyph width changes vs the fallback).
-    document.fonts?.ready.then(() => { try { fit.fit(); } catch { /* ignore */ } });
 
     let closedByUs = false;
     let handedOff = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
+    // The size tmux is currently at, so we never re-send one it already has.
+    let sentCols = 0;
+    let sentRows = 0;
+    let resizeSettle: ReturnType<typeof setTimeout> | null = null;
     // Reconnect with backoff: a sleeping/unreachable Space shouldn't be hammered
     // every second by every open pane. Reset once a connection succeeds.
     let retryDelay = 1200;
@@ -367,8 +376,12 @@ export default function TerminalPane({
       ws.onopen = () => {
         setConn('connected');
         retryDelay = 1200;
-        try { fit.fit(); } catch { /* ignore */ }
-        send({ t: 'r', cols: term.cols, rows: term.rows });
+        // The attach already sized tmux — the URL carried cols/rows — so record
+        // that as the size tmux has rather than re-sending it. resync() corrects
+        // it, once, only if the box settled somewhere else while we connected.
+        sentCols = term.cols;
+        sentRows = term.rows;
+        resync();
       };
       ws.onmessage = (e) => {
         const d = typeof e.data === 'string' ? e.data : new Uint8Array(e.data as ArrayBuffer);
@@ -417,6 +430,10 @@ export default function TerminalPane({
     const takeBack = () => {
       if (!handedOff || document.hidden) return false;
       handedOff = false;
+      // Measure first: resync() is a no-op while handed off, so the box may have
+      // changed since we last held the session. Without this the attach would
+      // use a stale size and then correct itself — two reflows, not one.
+      try { fit.fit(); } catch { /* ignore */ }
       connect();
       return true;
     };
@@ -427,9 +444,30 @@ export default function TerminalPane({
     // tmux's "dots" filler. Never reconnects: a layout change (another pane
     // opening, the sidebar toggling) is not a reason to pull a session off the
     // device the user is actually holding.
+    //
+    // Every WIDTH change costs history. Agent TUIs paint into the normal buffer,
+    // so on SIGWINCH they re-emit their frame with erase math computed at the old
+    // width and the rows they miss stay behind: measured against a real agent
+    // TUI, one orphan row per width change, and after a few flips whole lines of
+    // real text are gone. Height changes are free (same measurement: four of them
+    // left the scrollback byte-identical). So the size we push is the size that
+    // SETTLED, sent only when it differs from what tmux already has — a layout
+    // switch costs one reflow, and the churn that used to ride along with it
+    // (the fit's own ResizeObserver echo, a tab regaining focus, a font swap)
+    // costs none.
+    const pushSize = () => {
+      resizeSettle = null;
+      if (handedOff) return;
+      try { fit.fit(); } catch { return; } // layout not measurable right now
+      if (term.cols === sentCols && term.rows === sentRows) return;
+      sentCols = term.cols;
+      sentRows = term.rows;
+      send({ t: 'r', cols: term.cols, rows: term.rows });
+    };
     const resync = () => {
       if (handedOff) return;
-      try { fit.fit(); send({ t: 'r', cols: term.cols, rows: term.rows }); } catch { /* ignore */ }
+      if (resizeSettle) clearTimeout(resizeSettle);
+      resizeSettle = setTimeout(pushSize, RESIZE_SETTLE_MS);
     };
     // Returning to this tab IS deliberate — take the session back, or just
     // re-sync the size if we still hold it.
@@ -477,11 +515,32 @@ export default function TerminalPane({
     host.addEventListener('touchmove', onTouchMove, { passive: false });
     host.addEventListener('touchend', onTouchEnd);
 
-    connect();
+    // Attach at the size the real font gives us. xterm measures the cell from
+    // whatever font is live, and Geist Mono is font-display:swap — so on a cold
+    // load the first fit uses the fallback's metrics, and attaching there would
+    // spend a width change (and the history of a session that has been running
+    // all along) just to correct a glyph-width guess. Warm loads have the font
+    // cached and go straight through; the cap keeps a font that never arrives
+    // from holding the session hostage.
+    const fontsSettled = !document.fonts || document.fonts.status === 'loaded'
+      ? null
+      : Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 400))]);
+    if (!fontsSettled) connect();
+    else fontsSettled.then(() => {
+      if (closedByUs) return; // unmounted while we waited
+      try { fit.fit(); } catch { /* ignore */ }
+      connect();
+      // If the cap won that race, the font is still coming and our cell width is
+      // the fallback's. Reconcile when it lands — a bare refit would leave xterm
+      // and tmux disagreeing about the width, which is its own kind of broken
+      // wrapping. resync() drops this when the metrics turn out to match.
+      document.fonts.ready.then(() => { if (!closedByUs) resync(); });
+    });
 
     return () => {
       closedByUs = true;
       if (retry) clearTimeout(retry);
+      if (resizeSettle) clearTimeout(resizeSettle);
       if (bootTimer) clearTimeout(bootTimer);
       if (bootCheck) clearTimeout(bootCheck);
       ro.disconnect();
