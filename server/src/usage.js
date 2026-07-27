@@ -3,6 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
+import { tracked, PHASE } from './watchdog.js';
 
 const execFile = promisify(execFileCb);
 
@@ -239,7 +240,11 @@ async function debugInfo() {
   };
 }
 
-export async function buildUsage(debug = false, only = null) {
+export function buildUsage(debug = false, only = null) {
+  return tracked(PHASE.buildUsage, () => buildUsageImpl(debug, only));
+}
+
+async function buildUsageImpl(debug = false, only = null) {
   // `only` narrows to one provider so the Usage page can fetch each in
   // parallel and render whichever answers first — one slow/hung provider
   // (ccusage has a 20s timeout) no longer blocks the rest.

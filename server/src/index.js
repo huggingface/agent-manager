@@ -19,6 +19,7 @@ import { buildUsage } from './usage.js';
 import { buildTraces, traceDigests, digestFor } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
+import { startWatchdog } from './watchdog.js';
 
 ensureDirs();
 refreshVersions();
@@ -1105,6 +1106,10 @@ generateEnvSkill(loadSecretNotes()); // keep the environment skill current on bo
 // destabilize a fresh container. The Usage page fetches per-provider on open
 // (skeletons + stale-while-revalidate), so nothing is lost but the boot risk.
 setTimeout(() => { traceDigests().catch(() => {}); }, 4000);
+
+// Off-thread stall detector — must start early so it's watching before the
+// first heavy build. Logs any event-loop wedge to the run logs (see watchdog.js).
+startWatchdog();
 
 server.listen(PORT, () => {
   console.log(`Agent Manager :${PORT}  tmux=${USE_TMUX}  data=${DATA_DIR}`);

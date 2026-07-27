@@ -3,6 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import * as store from './sessions.js';
 import { WORKSPACES_DIR } from './config.js';
+import { mark, tracked, PHASE } from './watchdog.js';
 
 // Workspace-wide trace analytics: parse every Claude transcript and Codex
 // rollout on the Space into per-conversation stats (turns, tool calls, web
@@ -343,7 +344,10 @@ function readOpencode() {
   if (ocMemo.key && Date.now() - ck.hotMs < 8_000) return ocMemo.rows;
   const key = ck.key;
   let db;
-  try { db = new DatabaseSync(p, { readOnly: true }); } catch { return ocMemo.rows; }
+  // Synchronous DB read — the historically wedge-prone spot. Breadcrumb it so a
+  // stall while it runs is attributed (see watchdog.js).
+  const ocPhase = mark(PHASE.readOpencode);
+  try { db = new DatabaseSync(p, { readOnly: true }); } catch { mark(ocPhase); return ocMemo.rows; }
   const rows = [];
   try {
     const sessions = db.prepare('select * from session').all();
@@ -399,6 +403,7 @@ function readOpencode() {
     }
   } catch { /* torn read / schema drift: keep previous */ } finally {
     try { db.close(); } catch {}
+    mark(ocPhase);
   }
   ocMemo = { key, rows };
   return rows;
@@ -436,7 +441,8 @@ function readHermes() {
   if (hermesMemo.key === ck.key) return hermesMemo.rows;
   if (hermesMemo.key && Date.now() - ck.hotMs < 8_000) return hermesMemo.rows;
   let db;
-  try { db = new DatabaseSync(p, { readOnly: true }); } catch { return hermesMemo.rows; }
+  const hermesPhase = mark(PHASE.readHermes);
+  try { db = new DatabaseSync(p, { readOnly: true }); } catch { mark(hermesPhase); return hermesMemo.rows; }
   const rows = [];
   try {
     const sessions = db.prepare('select * from sessions').all();
@@ -492,6 +498,7 @@ function readHermes() {
     }
   } catch { /* torn read / schema drift: keep previous */ } finally {
     try { db.close(); } catch {}
+    mark(hermesPhase);
   }
   hermesMemo = { key: ck.key, rows };
   return rows;
@@ -599,7 +606,12 @@ async function codexFilesUncached() {
 
 const UUID_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\.jsonl)?$/;
 
-async function build() {
+// Breadcrumb the whole build so a wedge anywhere in it is attributed to
+// 'buildTraces' (the db reads narrow it further to their own phase). tracked()
+// restores the prior breadcrumb even if the build throws.
+function build() { return tracked(PHASE.buildTraces, buildImpl); }
+
+async function buildImpl() {
   const sessions = store.list();
   const byClaudeUuid = new Map(sessions.filter((s) => s.cli === 'claude' && s.sessionUuid).map((s) => [s.sessionUuid, s]));
   const byCodexId = new Map(sessions.filter((s) => s.codexSessionId).map((s) => [s.codexSessionId, s]));
