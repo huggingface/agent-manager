@@ -4,7 +4,7 @@ import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph } from './icons';
 
 type Zone = 'before' | 'after' | 'on';
 
@@ -20,7 +20,7 @@ const fmtAgo = (ts?: number) => {
 export default function Sidebar({
   clis, tree, activeRef, focusedId, defaultPath, ages,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
-  onStopSession, onDeleteSession, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
+  onStopSession, onDeleteSession, onShareSession, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
   archived, showArchived, onToggleArchived,
 }: {
   clis: Cli[];
@@ -39,6 +39,7 @@ export default function Sidebar({
   onDeleteGroup: (id: string) => void;
   onStopSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
+  onShareSession: (id: string) => void;
   onMove: (ref: string, to: MoveTarget) => void;
   onDragState?: (ref: string | null) => void; // lets the stage offer per-tile drop targets
   theme: 'light' | 'dark';
@@ -183,6 +184,9 @@ export default function Sidebar({
           {s.running
             ? <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}><StopGlyph /></button>
             : <button className="mini-btn" title="Start" onClick={(e) => { e.stopPropagation(); onOpenSession(s.id, groupId); }}><PlayGlyph /></button>}
+          {s.cli === 'claude' && (
+            <button className="mini-btn" title="Share this session" onClick={(e) => { e.stopPropagation(); onShareSession(s.id); }}><ShareGlyph /></button>
+          )}
           <button className="mini-btn" title="Delete" onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><CloseGlyph /></button>
         </span>
       </div>

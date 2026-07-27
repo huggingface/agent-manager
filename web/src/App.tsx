@@ -5,6 +5,7 @@ import FilesPane from './components/FilesPane';
 import SettingsView from './components/SettingsView';
 import NewSession from './components/NewSession';
 import LayoutPicker from './components/LayoutPicker';
+import ShareDialog from './components/ShareDialog';
 import Logo from './components/Logo';
 import Overview from './components/Overview';
 import Locked from './components/Locked';
@@ -57,6 +58,8 @@ export default function App() {
   const [showWelcome, setShowWelcome] = useState(false);
   // Transient error toast for failed mutations (create/delete/move/…).
   const [toast, setToast] = useState<string | null>(null);
+  // Session id whose share dialog is open (null = closed).
+  const [shareId, setShareId] = useState<string | null>(null);
   const showErr = (msg: string) => (e: unknown) => { console.error(msg, e); setToast(msg); window.setTimeout(() => setToast(null), 4000); };
   // Overview presentation: tiles (default) or the classic list.
   const [ovView, setOvViewRaw] = useState<'tiles' | 'list'>(() =>
@@ -480,6 +483,12 @@ export default function App() {
     <div className={`app${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
       {showWelcome && <Welcome onClose={dismissWelcome} />}
       {toast && <div className="toast mono" role="alert">{toast}</div>}
+      {shareId && sessById[shareId] && (
+        <ShareDialog
+          session={sessById[shareId]}
+          onClose={() => { setShareId(null); refresh(); }}
+        />
+      )}
       <Sidebar
         clis={clis}
         tree={tree}
@@ -490,6 +499,7 @@ export default function App() {
         onActivate={activate}
         onOpenSession={openSession}
         onNewSession={newSession}
+        onShareSession={setShareId}
         onNewGroup={newGroup}
         onRenameGroup={renameGroup}
         onRenameSession={renameSession}

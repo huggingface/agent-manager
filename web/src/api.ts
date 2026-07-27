@@ -144,6 +144,57 @@ export const uploadFile = (id: string, p: string, file: File) =>
 export const downloadUrl = (id: string, p: string) =>
   `/api/files/${id}/download?path=${encodeURIComponent(p)}`;
 
+// ---- session sharing (docs/session-sharing.md) ----
+export interface ShareInfo {
+  namespace: string | null;
+  canShare: boolean;
+  reason: 'no-hf-token' | 'unsupported-cli' | 'no-transcript' | null;
+  lastShare: { repo: string; sha: string | null; visibility: string; at: string } | null;
+}
+export interface ShareResult {
+  repo: string;
+  visibility: 'public' | 'gated';
+  url: string;
+  sha: string | null;
+  trace: string;
+  stats: { prompts: number; turns: number; toolCalls: number };
+  redaction: Record<string, number>;
+  dropped: Record<string, number>;
+  granted: string[];
+  grantErrors: { user: string; error: string }[];
+}
+// Thrown when the redaction gate refuses a public share (HTTP 409). Carries the
+// rule names so the dialog can say exactly what tripped instead of "failed".
+export class RedactionBlocked extends Error {
+  hits: Record<string, number>;
+  constructor(message: string, hits: Record<string, number>) {
+    super(message);
+    this.name = 'RedactionBlocked';
+    this.hits = hits;
+  }
+}
+
+export const getShareInfo = (id: string): Promise<ShareInfo> => fetch(`/api/sessions/${id}/share`).then(json);
+
+export const shareSession = async (
+  id: string,
+  body: { visibility: 'public' | 'gated'; name?: string; grantTo?: string[] },
+): Promise<ShareResult> => {
+  const r = await fetch(`/api/sessions/${id}/share`, { method: 'POST', headers: HEADERS, body: JSON.stringify(body) });
+  if (r.status === 409) {
+    const d = await r.json().catch(() => ({}));
+    throw new RedactionBlocked(d.error || 'blocked by the redaction gate', d.hits || {});
+  }
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
+  return r.json();
+};
+
+export interface ShareAccess { accepted: string[]; pending: string[] }
+export const getShareAccess = (repo: string): Promise<ShareAccess> =>
+  fetch(`/api/share/access?repo=${encodeURIComponent(repo)}`).then(json);
+export const updateShareAccess = (repo: string, patch: { grant?: string[]; revoke?: string[] }): Promise<ShareAccess> =>
+  fetch('/api/share/access', { method: 'POST', headers: HEADERS, body: JSON.stringify({ repo, ...patch }) }).then(json);
+
 // ---- skills ----
 export interface SkillFile { name: string; size: number; }
 export const listSkills = (): Promise<SkillFile[]> => fetch('/api/skills').then(json);

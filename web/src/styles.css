@@ -854,3 +854,29 @@ a.btn-ghost { text-decoration: none; }
   .skills-toolbar { flex-wrap: wrap; }
   .setting-row > .btn-ghost, .setting-row > a.btn-ghost { min-width: 0; }
 }
+
+/* ---- share dialog (docs/session-sharing.md) ---- */
+.share-card { max-width: 480px; gap: 13px; }
+.share-sub { margin: 3px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+.share-modes { display: flex; gap: 7px; }
+.share-modes .btn-ghost { flex: 1; }
+.share-field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; }
+.share-field > span { font-weight: 600; }
+.share-field input, .share-linkrow input {
+  padding: 7px 9px; font-size: 13px; color: var(--text); background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+}
+.share-field input:focus, .share-linkrow input:focus { outline: none; border-color: var(--accent); }
+.share-field small, .share-dest { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.share-note { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.share-warn, .share-blocked {
+  margin: 0; padding: 9px 11px; font-size: 12.5px; line-height: 1.5; border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 38%, transparent);
+}
+.share-ok { margin: 0; font-size: 13px; font-weight: 600; }
+.share-linkrow { display: flex; gap: 7px; }
+.share-linkrow input { flex: 1; min-width: 0; font-family: var(--mono, monospace); font-size: 12px; }
+.share-facts { margin: 0; padding-left: 17px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+.share-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.share-actions .btn-primary { text-decoration: none; }
