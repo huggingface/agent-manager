@@ -20,6 +20,7 @@ import { buildTraces, traceDigests, digestFor } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 import { startWatchdog } from './watchdog.js';
+import { shareSession, shareNamespace, findTranscript, shareAccess, grantAccess, revokeAccess } from './share.js';
 
 ensureDirs();
 refreshVersions();
@@ -871,6 +872,77 @@ app.post('/api/sessions/:id/stop', (req, res) => {
   if (!s) return res.status(404).json({ error: 'not found' });
   stop(s.id);
   res.json({ ok: true });
+});
+
+// ---------- session sharing (docs/session-sharing.md) ----------
+// Publish one session's trace as a Hub dataset: public, or gated with named
+// users pre-authorized. The heavy part (redaction over a multi-MB transcript)
+// runs in a child process inside share.js, so this route never stalls the loop.
+//
+// Only Claude sessions for now — the other harnesses need their converters
+// (§13 phase 5). Say so plainly rather than producing a broken bundle.
+app.post('/api/sessions/:id/share', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  if (s.cli !== 'claude') {
+    return res.status(400).json({ error: `sharing supports Claude sessions so far, not '${s.cli}'` });
+  }
+  const b = req.body || {};
+  const visibility = b.visibility === 'gated' ? 'gated' : 'public';
+  const grantTo = Array.isArray(b.grantTo)
+    ? b.grantTo.map((u) => String(u).trim()).filter(Boolean).slice(0, 50)
+    : [];
+  try {
+    const out = await shareSession(s, { visibility, name: b.name, grantTo });
+    // Remember the last share so the UI can offer "open" / "manage access"
+    // without re-publishing.
+    store.update(s.id, { lastShare: { repo: out.repo, sha: out.sha, visibility, at: new Date().toISOString() } });
+    res.json(out);
+  } catch (e) {
+    // The redaction gate is a refusal, not a failure — give the UI enough to
+    // explain exactly what tripped.
+    if (e.code === 'redaction-blocked') {
+      return res.status(409).json({ error: e.message, code: e.code, hits: e.hits });
+    }
+    console.error('[share]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'share failed' });
+  }
+});
+
+// Can this session be shared at all, and where would it go? Lets the dialog
+// open in a truthful state instead of failing on submit.
+app.get('/api/sessions/:id/share', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const [namespace, transcript] = await Promise.all([shareNamespace(), findTranscript(s)]);
+  res.json({
+    namespace,
+    canShare: !!namespace && !!transcript && s.cli === 'claude',
+    reason: !namespace ? 'no-hf-token' : s.cli !== 'claude' ? 'unsupported-cli' : !transcript ? 'no-transcript' : null,
+    lastShare: s.lastShare || null,
+  });
+});
+
+// Who can see an existing gated share.
+app.get('/api/share/access', async (req, res) => {
+  const repo = String(req.query.repo || '');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return res.status(400).json({ error: 'bad repo' });
+  try { res.json(await shareAccess(repo)); }
+  catch (e) { res.status(500).json({ error: (e && e.message) || 'failed' }); }
+});
+
+app.post('/api/share/access', async (req, res) => {
+  const b = req.body || {};
+  const repo = String(b.repo || '');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return res.status(400).json({ error: 'bad repo' });
+  const list = (v) => (Array.isArray(v) ? v.map((u) => String(u).trim()).filter(Boolean).slice(0, 50) : []);
+  try {
+    const granted = await grantAccess(repo, list(b.grant));
+    const revoked = await revokeAccess(repo, list(b.revoke));
+    res.json({ granted, revoked, ...(await shareAccess(repo)) });
+  } catch (e) {
+    res.status(500).json({ error: (e && e.message) || 'failed' });
+  }
 });
 
 app.delete('/api/sessions/:id', (req, res) => {
