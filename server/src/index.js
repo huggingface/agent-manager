@@ -893,7 +893,7 @@ app.post('/api/sessions/:id/share', async (req, res) => {
     ? b.grantTo.map((u) => String(u).trim()).filter(Boolean).slice(0, 50)
     : [];
   try {
-    const out = await shareSession(s, { visibility, name: b.name, grantTo });
+    const out = await shareSession(s, { visibility, name: b.name, grantTo, allSessions: store.list() });
     // Remember the last share so the UI can offer "open" / "manage access"
     // without re-publishing.
     store.update(s.id, { lastShare: { repo: out.repo, sha: out.sha, visibility, at: new Date().toISOString() } });
@@ -914,7 +914,7 @@ app.post('/api/sessions/:id/share', async (req, res) => {
 app.get('/api/sessions/:id/share', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  const [namespace, transcript] = await Promise.all([shareNamespace(), findTranscript(s)]);
+  const [namespace, transcript] = await Promise.all([shareNamespace(), findTranscript(s, store.list())]);
   res.json({
     namespace,
     canShare: !!namespace && !!transcript && s.cli === 'claude',

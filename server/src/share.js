@@ -21,6 +21,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { WORKSPACES_DIR } from './config.js';
 
 const HF = 'https://huggingface.co';
 const hfToken = () =>
@@ -94,26 +95,91 @@ export async function shareNamespace() {
  * moves the file rather than forking it, but if both ever exist the newest is
  * the live one, so pick by mtime instead of trusting directory order.
  */
-export async function findTranscript(session) {
-  if (!session.sessionUuid) return null;
+/** Every Claude transcript on disk. Mirrors claudeFiles() in traces.js. */
+async function claudeTranscripts() {
   const home = process.env.HOME || '';
   const roots = [process.env.CLAUDE_CONFIG_DIR, path.join(home, '.claude'), path.join(home, '.config', 'claude')]
     .filter(Boolean)
     .filter((d, i, a) => a.indexOf(d) === i);
-  const wanted = `${session.sessionUuid}.jsonl`;
-  let best = null;
+  const out = [];
   for (const root of roots) {
     const proj = path.join(root, 'projects');
     let entries = [];
     try { entries = await fsp.readdir(proj, { withFileTypes: true }); } catch { continue; }
     for (const e of entries) {
       if (!e.isDirectory()) continue;
-      const p = path.join(proj, e.name, wanted);
+      let files = [];
+      try { files = await fsp.readdir(path.join(proj, e.name)); } catch { continue; }
+      for (const f of files) if (f.endsWith('.jsonl')) out.push(path.join(proj, e.name, f));
+    }
+  }
+  return out;
+}
+
+/** The `cwd` a transcript records, read from its first line without slurping the file. */
+async function transcriptCwd(p) {
+  let fh;
+  try {
+    fh = await fsp.open(p, 'r');
+    const buf = Buffer.alloc(65536);
+    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+    const nl = buf.indexOf(0x0a);
+    const line = buf.toString('utf8', 0, nl >= 0 ? nl : bytesRead);
+    return JSON.parse(line).cwd || null;
+  } catch {
+    return null;
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+}
+
+/**
+ * Locate a Claude session's transcript.
+ *
+ * Normally the filename IS the session id. Two things stop that being enough:
+ *
+ *  - Claude keys its project dir on the working directory, so one session id can
+ *    appear under several of them (resuming from a different cwd, e.g. after
+ *    moving into a git worktree, relocates it). Pick the newest by mtime.
+ *  - The pin can be WRONG. runner.js launches `claude --session-id <uuid> ||
+ *    exec claude`; when the first invocation exits non-zero (onboarding on a
+ *    fresh install does this), the fallback starts Claude with an id of its own
+ *    and the session's sessionUuid matches nothing on disk. Observed live.
+ *
+ * So fall back to attributing by working directory — the same approach traces.js
+ * already uses for codex/hermes/opencode, including the ambiguity guard: only
+ * claim a transcript by cwd when this session has that folder to itself.
+ */
+export async function findTranscript(session, allSessions = []) {
+  const files = await claudeTranscripts();
+
+  // 1. By pinned id. `startsWith` rather than an exact name, matching the
+  //    `<uuid>*` glob runner.js uses for its own transcript check.
+  if (session.sessionUuid) {
+    let best = null;
+    for (const p of files) {
+      if (!path.basename(p).startsWith(session.sessionUuid)) continue;
       try {
         const st = await fsp.stat(p);
-        if (st.isFile() && (!best || st.mtimeMs > best.mtimeMs)) best = { p, mtimeMs: st.mtimeMs };
-      } catch { /* not in this project dir */ }
+        if (!best || st.mtimeMs > best.mtimeMs) best = { p, mtimeMs: st.mtimeMs };
+      } catch { /* raced away */ }
     }
+    if (best) return best.p;
+  }
+
+  // 2. By working directory, only if unambiguous.
+  const folder = session.path ?? session.id;
+  const workdir = path.join(WORKSPACES_DIR, folder);
+  const rivals = allSessions.filter((o) => o.id !== session.id && o.cli === 'claude' && (o.path ?? o.id) === folder);
+  if (rivals.length) return null; // shared folder — refuse to guess
+
+  let best = null;
+  for (const p of files) {
+    if (await transcriptCwd(p) !== workdir) continue;
+    try {
+      const st = await fsp.stat(p);
+      if (!best || st.mtimeMs > best.mtimeMs) best = { p, mtimeMs: st.mtimeMs };
+    } catch { /* raced away */ }
   }
   return best && best.p;
 }
@@ -189,8 +255,8 @@ Traces can still contain local paths and command output. Review before relying o
  * child process (see rule 1 at the top of this file).
  * Returns { dir, report } where report is the exporter's JSON summary.
  */
-export async function buildBundle(session, { title, visibility }) {
-  const transcript = await findTranscript(session);
+export async function buildBundle(session, { title, visibility, allSessions = [] }) {
+  const transcript = await findTranscript(session, allSessions);
   if (!transcript) throw new Error('no transcript on disk for this session yet — run it first');
 
   // The exporter must be present in the image (Dockerfile copies scripts/).
@@ -235,7 +301,7 @@ export async function buildBundle(session, { title, visibility }) {
  * @param name             optional repo name (namespace is this token's user)
  * @param grantTo          usernames to pre-authorize (gated only)
  */
-export async function shareSession(session, { visibility = 'public', name, grantTo = [] } = {}) {
+export async function shareSession(session, { visibility = 'public', name, grantTo = [], allSessions = [] } = {}) {
   if (!['public', 'gated'].includes(visibility)) throw new Error(`bad visibility: ${visibility}`);
   const ns = await shareNamespace();
   if (!ns) throw new Error('cannot resolve the Hub namespace — check HF_TOKEN');
@@ -245,7 +311,7 @@ export async function shareSession(session, { visibility = 'public', name, grant
   const repo = `${ns}/am-session-${slug}-${(session.sessionUuid || '').slice(0, 6)}`;
 
   const title = `Agent Manager session — ${session.name || slug}`;
-  const { dir, report } = await buildBundle(session, { title, visibility });
+  const { dir, report } = await buildBundle(session, { title, visibility, allSessions });
 
   try {
     // Redaction gate. A public share must not go out with a credential in it,
