@@ -612,6 +612,50 @@ export async function notifyRecipients(users, { repo, sha, visibility, from }) {
   return { notified, notifyErrors };
 }
 
+
+/**
+ * The inbox repo is the opt-in for receiving traces (§5): with none, the Hub
+ * itself refuses every delivery, so there is nothing for us to enforce. Reported
+ * as state rather than a stored flag — the Hub is the source of truth, and a repo
+ * deleted from the website must not leave a setting claiming otherwise.
+ */
+export async function inboxState() {
+  const ns = await shareNamespace();
+  if (!ns) return { namespace: null, repo: null, enabled: false, reason: 'no-hf-token' };
+  const repo = `${ns}/am-inbox`;
+  try {
+    await hfApi(`/api/datasets/${repo}`);
+    return { namespace: ns, repo, enabled: true, url: `${HF}/datasets/${repo}` };
+  } catch (e) {
+    if (e.status === 401 || e.status === 404) return { namespace: ns, repo, enabled: false };
+    throw e;
+  }
+}
+
+/**
+ * Turn receiving on or off by creating or deleting that repo.
+ *
+ * Deleting throws away any pending delivery PRs with it, which is the honest
+ * meaning of "stop accepting traces" — but it is destructive, so the caller has
+ * to have meant it. Kept public: senders must be able to open a PR without being
+ * granted write access, and that is only possible on a repo they can see.
+ */
+export async function setInbox(enabled) {
+  const state = await inboxState();
+  if (!state.namespace) throw new Error('no HF_TOKEN — cannot manage the inbox');
+  if (enabled === state.enabled) return state;
+  if (enabled) {
+    await hfApi('/api/repos/create', {
+      method: 'POST',
+      body: { type: 'dataset', name: 'am-inbox', organization: state.namespace, private: false },
+    });
+  } else {
+    await hfApi('/api/repos/delete', { method: 'DELETE',
+      body: { type: 'dataset', name: 'am-inbox', organization: state.namespace } });
+  }
+  return inboxState();
+}
+
 /** Current access state of a share, for a "who can see this" panel. */
 export async function shareAccess(repo) {
   const [accepted, pending] = await Promise.all([

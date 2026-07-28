@@ -70,6 +70,7 @@ export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
   jobs: { askAboveUsd: number };
   archive: { after: 'week' | 'month' | 'never' };
+  sharing: { receive: 'whitelist' | 'everyone'; allow: string[] };
   defaultArtifactsSpace?: string;
 }
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
@@ -190,6 +191,11 @@ export const shareSession = async (
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
   return r.json();
 };
+
+export interface InboxState { namespace: string | null; repo: string | null; enabled: boolean; url?: string; reason?: string }
+export const getInbox = (): Promise<InboxState> => fetch('/api/share/inbox').then(json);
+export const setInbox = (enabled: boolean): Promise<InboxState> =>
+  fetch('/api/share/inbox', { method: 'POST', headers: HEADERS, body: JSON.stringify({ enabled }) }).then(json);
 
 export interface ShareAccess { accepted: string[]; pending: string[] }
 export const getShareAccess = (repo: string): Promise<ShareAccess> =>
