@@ -10,12 +10,47 @@ if ! mkdir -p "$DATA_DIR/workspaces" 2>/dev/null; then
 fi
 export DATA_DIR
 
+# Empty directories do NOT persist on the bucket — there is no backing object
+# key, so a dir created empty is gone after a restart, and anything pointing at
+# it (a symlink, a config path) breaks. `keepdir` occupies the path with a real
+# file so it survives. Use it for every bucket-backed dir created empty.
+#   Seen in the wild: $CODEX_DURABLE/sessions vanished, leaving
+#   $CODEX_HOME/sessions dangling -> codex "thread-store internal error:
+#   File exists (os error 17)" and every transcript lost.
+keepdir() {
+  for d in "$@"; do
+    mkdir -p "$d" 2>/dev/null || continue
+    [ -e "$d/.keep" ] || echo "keep marker: empty dirs are not persisted on the /data bucket" > "$d/.keep" 2>/dev/null || true
+  done
+}
+
+# Occupy a config path with a real file when nothing lives there. Two bugs need
+# this. (1) A tool that writes atomically (temp + rename) can leave the temp
+# behind and never land the target. (2) The bucket tree API then matches
+# `<path>` against the leftover `<path>.<uuid>.tmp` by RAW STRING PREFIX, and
+# hf-mount reads a non-empty listing as proof the path is a DIRECTORY — so the
+# missing file materializes as a phantom dir and readers die with EISDIR.
+# A real file short-circuits it: the HEAD succeeds, so the listing fallback that
+# synthesizes the directory never runs. See docs/fuse-phantom-directories.md.
+occupy_file() {
+  path="$1"; default="$2"
+  mkdir -p "$(dirname "$path")" 2>/dev/null || return 0
+  [ -d "$path" ] && rm -rf "$path" 2>/dev/null
+  [ -e "$path" ] || printf '%s\n' "$default" > "$path" 2>/dev/null || true
+}
+
 # Put HOME on the durable bucket so EVERY agent's logins/config persist across
 # restarts (gemini ~/.gemini, etc.). Agents whose SQLite state can't live on the
 # FUSE bucket (codex, openclaw, opencode, hermes) are relocated to local disk
 # below, each with its own durable copy on the bucket.
 export HOME="$DATA_DIR/home"
 mkdir -p "$HOME"
+# Gemini writes its project registry atomically and the rename can fail on the
+# bucket, leaving projects.json.<uuid>.tmp orphans and no projects.json — after
+# which the prefix bug above turns projects.json into a directory and the CLI
+# dies with `EISDIR: illegal operation on a directory, read`. Keep a real file
+# there. Same class as the opencode.json guard in server/src/runner.js.
+occupy_file "$HOME/.gemini/projects.json" '{"projects": {}}'
 # Claude keeps its established dir (so existing logins keep working). Codex's
 # home moves to local disk below (its SQLite databases corrupt on the bucket).
 export CLAUDE_CONFIG_DIR="$DATA_DIR/state/claude"
@@ -42,9 +77,12 @@ export UV_CACHE_DIR="$AM_LOCAL/uv-cache"
 # the disk resets.
 CODEX_DURABLE="$DATA_DIR/state/codex"
 export CODEX_HOME="$AM_LOCAL/codex-home"
-mkdir -p "$CODEX_HOME" "$CODEX_DURABLE/sessions" "$CODEX_DURABLE/db-backups"
+mkdir -p "$CODEX_HOME"
+# keepdir, not mkdir: `sessions` is the symlink target below, and an empty dir
+# on the bucket disappears — which is exactly how codex lost its thread store.
+keepdir "$CODEX_DURABLE/sessions" "$CODEX_DURABLE/db-backups"
 # quarantine sqlite remnants on the bucket (incl. the earlier symlink attempt)
-mkdir -p "$CODEX_DURABLE/db-backups/am-quarantine"
+keepdir "$CODEX_DURABLE/db-backups/am-quarantine"
 for f in "$CODEX_DURABLE"/logs_2.sqlite* "$CODEX_DURABLE"/goals_1.sqlite* "$CODEX_DURABLE"/memories_1.sqlite*; do
   [ -e "$f" ] || [ -L "$f" ] && mv "$f" "$CODEX_DURABLE/db-backups/am-quarantine/" 2>/dev/null || true
 done
@@ -107,7 +145,8 @@ cp "$HOME/.gitconfig" "$OPENCLAW_HOME/.gitconfig" 2>/dev/null || true
 # of chat history.
 OC_LIVE="$AM_LOCAL/opencode-share"; OC_DURABLE="$DATA_DIR/state/opencode"; OC_LINK="$HOME/.local/share/opencode"
 HERMES_LIVE="$AM_LOCAL/hermes"; HERMES_DURABLE="$DATA_DIR/state/hermes"; HERMES_LINK="$HOME/.hermes"
-mkdir -p "$OC_LIVE" "$OC_DURABLE" "$(dirname "$OC_LINK")" "$HERMES_LIVE" "$HERMES_DURABLE"
+mkdir -p "$OC_LIVE" "$HERMES_LIVE" "$(dirname "$OC_LINK")"
+keepdir "$OC_DURABLE" "$HERMES_DURABLE"
 # One-time migration: existing history is a REAL dir at the well-known path on
 # the bucket. Fold it into the durable store BEFORE the path becomes a symlink,
 # so no conversation is stranded on the bucket or lost.
