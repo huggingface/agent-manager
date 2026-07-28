@@ -120,6 +120,9 @@ USER node
 
 # App code + built frontend + runtime config (tmux + prompt rcfile).
 COPY --chown=node:node server/ server/
+# scripts/ is not developer-only: share.js runs scripts/share-session.mjs as a
+# child process to build a share bundle off the event loop, so it must ship.
+COPY --chown=node:node scripts/ scripts/
 COPY --chown=node:node --from=web /web/dist /app/public
 COPY --chown=node:node entrypoint.sh /app/entrypoint.sh
 COPY --chown=node:node tmux.conf session.bashrc /app/

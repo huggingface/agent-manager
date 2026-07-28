@@ -193,6 +193,10 @@ export async function buildBundle(session, { title, visibility }) {
   const transcript = await findTranscript(session);
   if (!transcript) throw new Error('no transcript on disk for this session yet — run it first');
 
+  // The exporter must be present in the image (Dockerfile copies scripts/).
+  // Fail with the actual cause rather than an unparseable-output error.
+  if (!fs.existsSync(EXPORTER)) throw new Error(`exporter missing at ${EXPORTER} — scripts/ was not deployed`);
+
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'am-share-'));
   const { stdout } = await run(process.execPath, [EXPORTER, transcript, dir], {
     // The exporter matches env-var VALUES against the trace, so it needs the
