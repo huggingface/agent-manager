@@ -64,6 +64,9 @@ const setupHint = (...keys) =>
 export const CLIS = [
   { id: 'shell',    label: 'Shell',       bin: 'bash',     color: '#8aa0ad', run: 'exec bash -il',  cont: null },
   { id: 'files',    label: 'Files',       bin: null,       color: '#d99a2b', run: null,             cont: null },
+  // A received trace, rendered read-only. Like 'files' it is a passive panel
+  // rather than a process, so it has no binary and never launches anything.
+  { id: 'trace',    label: 'Trace',       bin: null,       color: '#7c8cf8', run: null,             cont: null },
   { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue',
     withPrompt: (q) => `claude ${q}`,
     setup: setupHint('ANTHROPIC_API_KEY') },

@@ -132,7 +132,7 @@ export function agentInfo() {
  *   stopped  — no live session
  */
 export function deriveState(session, info) {
-  if (session.cli === 'files') return 'idle'; // passive panel, not a process
+  if (session.cli === 'files' || session.cli === 'trace') return 'idle'; // passive panels, not processes
   if (!info) return isRunning(session.id) ? 'idle' : 'stopped';
   if (info.age <= BUSY_SECS) return 'working';
   return session.cli === 'shell' ? 'idle' : 'waiting';
