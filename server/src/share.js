@@ -246,15 +246,98 @@ async function firstLineOf(p) {
   }
 }
 
-/** The trace file for any supported harness. */
-export async function findTrace(session, allSessions = []) {
-  if (session.cli === 'claude') return findTranscript(session, allSessions);
-  if (session.cli === 'codex') return findRollout(session, allSessions);
+const opencodeDbPath = () =>
+  path.join(process.env.XDG_DATA_HOME || path.join(process.env.HOME || '', '.local', 'share'), 'opencode', 'opencode.db');
+const hermesDbPath = () => path.join(process.env.HOME || '', '.hermes', 'state.db');
+
+/**
+ * SQLite-backed harnesses. The trace is a QUERY, not a file, so what we locate
+ * is (db path, session id). Never the db itself — opencode's holds OAuth tokens
+ * (§2), which is why the exporter selects one conversation rather than copying.
+ *
+ * opencode carries a pin (runner.js captures opencodeSessionId); hermes has none,
+ * so it is attributed by recorded cwd, with the usual ambiguity guard.
+ */
+async function findDbSession(session, allSessions) {
+  const folder = session.path ?? session.id;
+  const workdir = path.join(WORKSPACES_DIR, folder);
+  const rivals = allSessions.some((o) => o.id !== session.id && o.cli === session.cli && (o.path ?? o.id) === folder);
+
+  if (session.cli === 'opencode') {
+    const db = opencodeDbPath();
+    if (!fs.existsSync(db)) return null;
+    if (session.opencodeSessionId) return { db, sessionId: session.opencodeSessionId };
+    if (rivals) return null;
+    const id = await queryNewest(db, 'select id from session where directory = ? order by time_updated desc limit 1', workdir);
+    return id && { db, sessionId: id };
+  }
+  if (session.cli === 'hermes') {
+    const db = hermesDbPath();
+    if (!fs.existsSync(db)) return null;
+    if (rivals) return null;
+    const id = await queryNewest(db, 'select id from sessions where cwd = ? order by started_at desc limit 1', workdir);
+    return id && { db, sessionId: String(id) };
+  }
   return null;
 }
 
-export const SHAREABLE_CLIS = ['claude', 'codex'];
-const HARNESS_LABEL = { claude: 'Claude Code', codex: 'Codex' };
+// One tiny read-only query, off the request path (share runs async) and never on
+// a hot loop — these dbs are the wedge-prone ones (traces.js, watchdog.js).
+async function queryNewest(dbPath, sql, arg) {
+  let DatabaseSync;
+  try { ({ DatabaseSync } = await import('node:sqlite')); } catch { return null; }
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const row = db.prepare(sql).get(arg);
+    return (row && row.id) || null;
+  } catch { return null; } finally { try { db?.close(); } catch {} }
+}
+
+/** OpenClaw writes one JSONL per session under agents/<agent>/sessions/. */
+async function findOpenClaw(session, allSessions) {
+  const folder = session.path ?? session.id;
+  if (allSessions.some((o) => o.id !== session.id && o.cli === 'openclaw' && (o.path ?? o.id) === folder)) return null;
+  const home = process.env.OPENCLAW_HOME || process.env.HOME || '';
+  const agents = path.join(home, '.openclaw', 'agents');
+  let best = null;
+  const walk = async (dir, depth) => {
+    if (depth > 4) return;
+    let ents = [];
+    try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) await walk(p, depth + 1);
+      else if (e.name.endsWith('.jsonl')) {
+        try { const st = await fsp.stat(p); if (!best || st.mtimeMs > best.mtimeMs) best = { p, mtimeMs: st.mtimeMs }; } catch {}
+      }
+    }
+  };
+  await walk(agents, 0);
+  return best && best.p;
+}
+
+/**
+ * The trace for any supported harness, as { src, sessionId } — sessionId is only
+ * meaningful for the db-backed ones, where it selects the conversation.
+ */
+export async function findTrace(session, allSessions = []) {
+  switch (session.cli) {
+    case 'claude': { const p = await findTranscript(session, allSessions); return p && { src: p }; }
+    case 'codex': { const p = await findRollout(session, allSessions); return p && { src: p }; }
+    case 'openclaw': { const p = await findOpenClaw(session, allSessions); return p && { src: p }; }
+    case 'opencode':
+    case 'hermes': {
+      const hit = await findDbSession(session, allSessions);
+      return hit && { src: hit.db, sessionId: hit.sessionId };
+    }
+    default: return null;
+  }
+}
+
+export const SHAREABLE_CLIS = ['claude', 'codex', 'hermes', 'opencode', 'openclaw'];
+const HARNESS_LABEL = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes',
+                        opencode: 'opencode', openclaw: 'OpenClaw' };
 
 /** Dataset card. `configs` pins the data file so meta/ can't collide on schema (§4). */
 function datasetCard({ title, visibility, traceName, stats, redaction, harnessLabel }) {
@@ -328,15 +411,15 @@ Traces can still contain local paths and command output. Review before relying o
  * Returns { dir, report } where report is the exporter's JSON summary.
  */
 export async function buildBundle(session, { title, visibility, allSessions = [] }) {
-  const transcript = await findTrace(session, allSessions);
-  if (!transcript) throw new Error('no transcript on disk for this session yet — run it first');
+  const hit = await findTrace(session, allSessions);
+  if (!hit) throw new Error('no transcript on disk for this session yet — run it first');
 
   // The exporter must be present in the image (Dockerfile copies scripts/).
   // Fail with the actual cause rather than an unparseable-output error.
   if (!fs.existsSync(EXPORTER)) throw new Error(`exporter missing at ${EXPORTER} — scripts/ was not deployed`);
 
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'am-share-'));
-  const { stdout } = await run(process.execPath, [EXPORTER, transcript, dir, session.cli], {
+  const { stdout } = await run(process.execPath, [EXPORTER, hit.src, dir, session.cli, hit.sessionId || '-'], {
     // The exporter matches env-var VALUES against the trace, so it needs the
     // same environment we have — that is the point of the value rules.
     env: process.env,

@@ -11,7 +11,7 @@ type Zone = 'before' | 'after' | 'on';
 // Harnesses whose traces the Hub renders natively, so a share ships the file
 // verbatim (mirrors SHAREABLE_CLIS in server/src/share.js). The others need
 // converters first, and a button that always fails is worse than no button.
-const SHAREABLE_CLIS = ['claude', 'codex'];
+const SHAREABLE_CLIS = ['claude', 'codex', 'hermes', 'opencode', 'openclaw'];
 
 const fmtAgo = (ts?: number) => {
   if (!ts) return '';

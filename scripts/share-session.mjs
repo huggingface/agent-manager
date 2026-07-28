@@ -2,12 +2,20 @@
 // docs/session-sharing.md §6: locate -> redact -> assemble.
 // Trace only; publishing is a separate step (server/src/share.js).
 //
-// Usage: node scripts/share-session.mjs <transcript.jsonl> <outdir> [harness]
-//        harness: claude (default) | codex
+// Usage: node scripts/share-session.mjs <src> <outdir> [harness] [sessionId]
+//        harness: claude (default) | codex | hermes | opencode | openclaw
 //
-// Both formats are Hub-native, so the trace ships VERBATIM either way -- only
-// the stats/briefing extraction differs. The redaction pass is format-agnostic:
-// it works on each serialized line, so it needs no per-harness knowledge.
+// Claude and Codex are Hub-native, so their trace ships VERBATIM. The other
+// three are converted to the Hub's documented Session Trace Simple Format
+// (STS): a `{type:"session"}` header then `{type:"message"}` lines. Converting
+// to STS rather than hand-rolling Claude JSONL is deliberate -- it is the
+// documented path for a custom harness and a far smaller target.
+//
+// For hermes/opencode, <src> is the SQLite path and <sessionId> selects the
+// conversation. For claude/codex/openclaw it is the trace file itself.
+//
+// The redaction pass is format-agnostic: it works on each serialized line, so
+// it needs no per-harness knowledge and covers converted output too.
 //
 // Produces the share bundle described in §4:
 //   <outdir>/<native-name>.jsonl    the trace, in its original format
@@ -20,14 +28,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-const [src, outdir, harnessArg] = process.argv.slice(2);
+const [src, outdir, harnessArg, sessionArg] = process.argv.slice(2);
 const HARNESS = harnessArg || 'claude';
-if (!['claude', 'codex'].includes(HARNESS)) {
+const NATIVE = ['claude', 'codex'];              // Hub reads these as-is
+const CONVERTED = ['hermes', 'opencode', 'openclaw']; // emitted as STS
+if (![...NATIVE, ...CONVERTED].includes(HARNESS)) {
   console.error(`unsupported harness: ${HARNESS}`);
   process.exit(1);
 }
 if (!src || !outdir) {
-  console.error('usage: share-session.mjs <transcript.jsonl> <outdir> [claude|codex]');
+  console.error('usage: share-session.mjs <src> <outdir> [claude|codex|hermes|opencode|openclaw] [sessionId]');
   process.exit(1);
 }
 
@@ -77,14 +87,150 @@ function redact(text) {
 const codexText = (p) => (Array.isArray(p.content) ? p.content.map((c) => (c && c.text) || '').join(' ') : '');
 let codexTok = null; // token_count events are CUMULATIVE per run, so keep the last
 
+
+// ---------- STS conversion for harnesses the Hub does not read natively ----------
+// Session Trace Simple Format: one `{type:"session"}` header, then
+// `{type:"message"}` lines. Tool calls ride on an assistant message and results
+// come back as a `role:"tool"` message carrying the matching toolCallId.
+const stsMsg = (role, content, extra = {}) => ({ type: 'message', message: { role, content: content || '', ...extra } });
+
+let DatabaseSync = null;
+try { ({ DatabaseSync } = await import('node:sqlite')); } catch { /* older node */ }
+
+function openDb(p) {
+  if (!DatabaseSync) throw new Error('node:sqlite unavailable — cannot read this harness');
+  return new DatabaseSync(p, { readOnly: true });
+}
+
+// opencode: session / message / part tables, payloads in JSON `data` columns.
+// Mirrors the queries readOpencode() in traces.js uses.
+function fromOpencode(dbPath, sessionId) {
+  const db = openDb(dbPath);
+  try {
+    const s = db.prepare('select * from session where id = ?').get(sessionId);
+    if (!s) throw new Error(`opencode session ${sessionId} not found`);
+    stats.cwd = s.directory || null;
+    stats.tokensIn = s.tokens_input || 0;
+    stats.tokensOut = s.tokens_output || 0;
+    stats.cacheRead = s.tokens_cache_read || 0;
+    const out = [{ type: 'session', harness: 'opencode', id: s.id, name: s.title || 'opencode session' }];
+    const msgs = db.prepare('select * from message where session_id = ? order by time_created').all(sessionId);
+    const qParts = db.prepare('select * from part where message_id = ? order by time_created');
+    for (const m of msgs) {
+      let md = {}; try { md = JSON.parse(m.data || '{}'); } catch {}
+      const role = md.role === 'assistant' ? 'assistant' : 'user';
+      const texts = [];
+      const toolCalls = [];
+      const results = [];
+      for (const part of qParts.all(m.id)) {
+        let pd = {}; try { pd = JSON.parse(part.data || '{}'); } catch {}
+        if (pd.type === 'text' && pd.text) texts.push(pd.text);
+        else if (pd.type === 'tool') {
+          const id = part.id || `t${toolCalls.length}`;
+          toolCalls.push({ id, function: { name: pd.tool || 'tool', arguments: JSON.stringify(pd.state?.input ?? pd.input ?? {}) } });
+          const res = pd.state?.output ?? pd.output;
+          if (res != null) results.push({ id, text: typeof res === 'string' ? res : JSON.stringify(res) });
+        }
+      }
+      const ts = Number(m.time_created) || undefined;
+      if (role === 'user') { stats.prompts++; if (texts.join(' ').trim()) prompts.push(texts.join(' ').replace(/\s+/g, ' ').slice(0, 300)); }
+      else stats.turns++;
+      const extra = { timestamp: ts };
+      if (toolCalls.length) {
+        extra.toolCalls = toolCalls;
+        for (const t of toolCalls) { stats.toolCalls++; const n = t.function.name; stats.tools[n] = (stats.tools[n] || 0) + 1; }
+      }
+      out.push(stsMsg(role, texts.join('\n'), extra));
+      for (const r of results) out.push(stsMsg('tool', r.text, { toolCallId: r.id }));
+      if (ts) { if (!stats.firstTs || ts < stats.firstTs) stats.firstTs = ts; if (ts > stats.lastTs) stats.lastTs = ts; }
+    }
+    return out;
+  } finally { try { db.close(); } catch {} }
+}
+
+// hermes: sessions / messages tables, flat content + tool_name columns.
+function fromHermes(dbPath, sessionId) {
+  const db = openDb(dbPath);
+  try {
+    const s = db.prepare('select * from sessions where id = ?').get(sessionId);
+    if (!s) throw new Error(`hermes session ${sessionId} not found`);
+    stats.cwd = s.cwd || null;
+    stats.tokensIn = s.input_tokens || 0;
+    stats.tokensOut = s.output_tokens || 0;
+    stats.cacheRead = s.cache_read_tokens || 0;
+    const out = [{ type: 'session', harness: 'hermes', id: String(s.id), name: s.title || 'hermes session' }];
+    const msgs = db.prepare('select * from messages where session_id = ? order by timestamp').all(sessionId);
+    for (const m of msgs) {
+      const ts = m.timestamp != null ? Math.round(Number(m.timestamp) * 1000) : undefined;
+      if (ts) { if (!stats.firstTs || ts < stats.firstTs) stats.firstTs = ts; if (ts > stats.lastTs) stats.lastTs = ts; }
+      if (m.tool_name) {
+        stats.toolCalls++;
+        stats.tools[m.tool_name] = (stats.tools[m.tool_name] || 0) + 1;
+        out.push(stsMsg('assistant', '', { timestamp: ts, toolCalls: [{ id: `t${m.id}`, function: { name: m.tool_name, arguments: '{}' } }] }));
+        out.push(stsMsg('tool', String(m.content || ''), { toolCallId: `t${m.id}` }));
+        continue;
+      }
+      const role = m.role === 'assistant' ? 'assistant' : m.role === 'system' ? 'system' : 'user';
+      if (role === 'user') { stats.prompts++; const t = String(m.content || '').trim(); if (t) prompts.push(t.replace(/\s+/g, ' ').slice(0, 300)); }
+      else if (role === 'assistant') stats.turns++;
+      out.push(stsMsg(role, String(m.content || ''), { timestamp: ts }));
+    }
+    return out;
+  } finally { try { db.close(); } catch {} }
+}
+
+// OpenClaw already writes `{type:"message", message:{role,content,usage}}` lines,
+// so this is mostly a header plus flattening content blocks to text.
+function fromOpenClaw(file) {
+  const out = [{ type: 'session', harness: 'openclaw', id: path.basename(file, '.jsonl'), name: 'openclaw session' }];
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line) continue;
+    let j; try { j = JSON.parse(line); } catch { bump('unparseable-line'); continue; }
+    if (j.type !== 'message' || !j.message) continue;
+    const m = j.message;
+    const ts = j.timestamp ? Date.parse(j.timestamp) || undefined : undefined;
+    if (ts) { if (!stats.firstTs || ts < stats.firstTs) stats.firstTs = ts; if (ts > stats.lastTs) stats.lastTs = ts; }
+    const blocks = Array.isArray(m.content) ? m.content : [];
+    const text = typeof m.content === 'string' ? m.content : blocks.map((c) => (c && c.text) || '').join(' ');
+    const toolCalls = [];
+    for (const cb of blocks) {
+      if (cb && typeof cb.type === 'string' && /tool/i.test(cb.type)) {
+        const name = cb.name || cb.toolName || 'tool';
+        stats.toolCalls++;
+        stats.tools[name] = (stats.tools[name] || 0) + 1;
+        toolCalls.push({ id: cb.id || `t${toolCalls.length}`, function: { name, arguments: JSON.stringify(cb.input ?? {}) } });
+      }
+    }
+    if (m.role === 'user') { stats.prompts++; if (text.trim() && !text.trim().startsWith('<')) prompts.push(text.replace(/\s+/g, ' ').slice(0, 300)); }
+    else if (m.role === 'assistant') {
+      stats.turns++;
+      const u = m.usage;
+      if (u) { const cached = u.cacheRead || 0; stats.tokensIn += Math.max(0, (u.input || 0) - cached); stats.cacheRead += cached; stats.tokensOut += u.output || 0; }
+    }
+    out.push(stsMsg(m.role === 'assistant' ? 'assistant' : m.role === 'system' ? 'system' : 'user', text,
+      { timestamp: ts, ...(toolCalls.length ? { toolCalls } : {}) }));
+  }
+  return out;
+}
+
 // ---------- pass 1: filter + redact, and collect stats ----------
-const lines = fs.readFileSync(src, 'utf8').split('\n').filter(Boolean);
+// Accumulators FIRST: the converters below fill them as they walk a session, and
+// they run while `lines` is being built. (const has no hoisting, so declaring
+// them after would be a temporal-dead-zone error.)
 const kept = [];
 const stats = { turns: 0, prompts: 0, toolCalls: 0, tools: {}, tokensIn: 0, tokensOut: 0,
                 cacheRead: 0, firstTs: 0, lastTs: 0, dropped: {} };
 const prompts = [];
 const filesTouched = new Set();
 const seenMsg = new Set(), seenTool = new Set();
+
+// Native harnesses: the file's own lines, verbatim. Converted harnesses: STS
+// objects, whose builders also fill in the stats as they go.
+const lines = CONVERTED.includes(HARNESS)
+  ? (HARNESS === 'opencode' ? fromOpencode(src, sessionArg)
+    : HARNESS === 'hermes' ? fromHermes(src, sessionArg)
+    : fromOpenClaw(src)).map((o) => JSON.stringify(o))
+  : fs.readFileSync(src, 'utf8').split('\n').filter(Boolean);
 
 for (const line of lines) {
   let j;
@@ -106,7 +252,8 @@ for (const line of lines) {
   }
 
   if (HARNESS === 'claude') claudeLine(j);
-  else codexLine(j);
+  else if (HARNESS === 'codex') codexLine(j);
+  // converted harnesses filled stats during conversion — just redact here
 
   kept.push(redact(JSON.stringify(j)));
 }
@@ -214,7 +361,9 @@ if (stats.subagent) {
 // rollout-<ts>-<uuid>.jsonl for codex. The Hub's trace detection and every
 // working trace dataset in the wild use the native name, and it is the only
 // place the session id survives if the manifest is lost (§4).
-const traceName = path.basename(src);
+const traceName = CONVERTED.includes(HARNESS)
+  ? `${(sessionArg || path.basename(src, '.jsonl')).replace(/[^\w.-]/g, '_')}.jsonl`
+  : path.basename(src);
 const uuid = HARNESS === 'codex'
   ? (traceName.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/) || [])[1] || traceName.replace(/\.jsonl$/, '')
   : traceName.replace(/\.jsonl$/, '');
@@ -225,20 +374,23 @@ const sha256 = crypto.createHash('sha256').update(trace).digest('hex');
 
 const cwdSlug = path.basename(path.dirname(src));
 const iso = (ms) => (ms ? new Date(ms).toISOString() : null);
-const HARNESS_NAME = { claude: 'Claude Code', codex: 'Codex' }[HARNESS];
+const HARNESS_NAME = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes',
+                       opencode: 'opencode', openclaw: 'OpenClaw' }[HARNESS];
 
 // Where the file belongs in the target harness's store, so an import is
 // mechanical. Codex shards by date: sessions/YYYY/MM/DD/rollout-*.jsonl.
 const nativePath = HARNESS === 'codex'
   ? path.join('sessions', ...src.split(path.sep).slice(-4))
-  : path.join('projects', cwdSlug, traceName);
+  : HARNESS === 'claude' ? path.join('projects', cwdSlug, traceName)
+  : null; // converted: no native file to put back, the source is a db or foreign format
 
 const manifest = {
   schema: 'am-session-share/1',
   harness: { id: HARNESS, name: HARNESS_NAME, version: null },
   session: { id: process.env.AM_ID || null, uuid, name: process.env.AM_NAME || null },
   origin: { user: process.env.AM_USER || null, workspace: process.env.AM_SESSION || null, cwdSlug },
-  trace: { path: traceName, nativePath, sha256, lines: kept.length, converted: false },
+  trace: { path: traceName, nativePath, sha256, lines: kept.length,
+           converted: CONVERTED.includes(HARNESS), format: CONVERTED.includes(HARNESS) ? 'sts' : HARNESS },
   stats: { ...stats, firstTs: iso(stats.firstTs), lastTs: iso(stats.lastTs) },
   redaction: { ruleset: '1', hits, blocked: false },
   lineage: { parent: null },

@@ -11,6 +11,7 @@ then *fork* it into their own Agent Manager and keep working.
 |---|---|
 | Share unit | **One HF dataset repo per session.** |
 | Payload | **Trace only.** No workspace files, no harness context (skills/CLAUDE.md/MCP) in phase 1. |
+| Harnesses | **All five.** Claude Code and Codex ship *verbatim* (Hub-native). Hermes, opencode and OpenClaw are converted to the Hub's documented **STS-Format**. |
 | **Transport** | **Hub-mediated mailbox.** Delivery is a pull request on the recipient's public `am-inbox` dataset. Direct Space→Space HTTP is ruled out — see §5. |
 | **Access control** | **One code path.** Always a payload dataset; `public` or `gated` is a flag. Gated + `grant_access` is the ACL for private shares. |
 | **Sender allowlist** | **Whitelist, empty by default.** Nobody can send you anything until you add them. |
@@ -516,8 +517,14 @@ PR, server-side poll, banner, whitelist settings, accept/decline.
 **Phase 4 — fork and handoff** from the panel. Path rewriting, session creation pinned to
 the imported uuid, briefing generator on the existing digest code, envelope framing.
 
-**Phase 5 — the other harnesses.** Codex (verbatim + `codex fork`), Hermes (`--format
-trace`), then the converters for opencode and OpenClaw.
+**Phase 5 — the other harnesses.** ✅ **Done, all five.** Claude and Codex ship verbatim.
+Hermes, opencode and OpenClaw are converted to
+[STS-Format](https://huggingface.co/docs/hub/session-traces-format) — the documented path
+for a custom harness, and a much smaller target than hand-rolling Claude JSONL. The two
+SQLite harnesses are read by selecting **one conversation**, never by copying the db
+(opencode's holds OAuth tokens, §2). Hermes has no per-session pin, so it is attributed by
+recorded cwd with the usual ambiguity guard; opencode uses the `opencodeSessionId` pin
+runner.js captures, falling back to cwd.
 
 Phases 1 and 2 are each shippable alone. Phase 3 is the one that needs Phase 0 to pass.
 

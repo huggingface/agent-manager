@@ -70,7 +70,7 @@ export default function ShareDialog({ session, onClose }: { session: Session; on
         {info && !info.canShare && (
           <p className="share-warn">
             {info.reason === 'no-hf-token' && 'No HF_TOKEN on this Space — add it as a secret to share sessions.'}
-            {info.reason === 'unsupported-cli' && `Sharing supports Claude Code and Codex sessions so far, not ${session.cli}.`}
+            {info.reason === 'unsupported-cli' && `Sharing doesn't support ${session.cli} sessions.`}
             {info.reason === 'no-transcript' && 'This session hasn’t written a transcript yet — run it first.'}
           </p>
         )}

@@ -915,11 +915,11 @@ app.post('/api/sessions/:id/share', async (req, res) => {
 app.get('/api/sessions/:id/share', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  const [namespace, transcript] = await Promise.all([shareNamespace(), findTrace(s, store.list())]);
+  const [namespace, hit] = await Promise.all([shareNamespace(), findTrace(s, store.list())]);
   res.json({
     namespace,
-    canShare: !!namespace && !!transcript && SHAREABLE_CLIS.includes(s.cli),
-    reason: !namespace ? 'no-hf-token' : !SHAREABLE_CLIS.includes(s.cli) ? 'unsupported-cli' : !transcript ? 'no-transcript' : null,
+    canShare: !!namespace && !!hit && SHAREABLE_CLIS.includes(s.cli),
+    reason: !namespace ? 'no-hf-token' : !SHAREABLE_CLIS.includes(s.cli) ? 'unsupported-cli' : !hit ? 'no-transcript' : null,
     lastShare: s.lastShare || null,
   });
 });
