@@ -8,6 +8,11 @@ import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, 
 
 type Zone = 'before' | 'after' | 'on';
 
+// Harnesses whose traces the Hub renders natively, so a share ships the file
+// verbatim (mirrors SHAREABLE_CLIS in server/src/share.js). The others need
+// converters first, and a button that always fails is worse than no button.
+const SHAREABLE_CLIS = ['claude', 'codex'];
+
 const fmtAgo = (ts?: number) => {
   if (!ts) return '';
   const m = Math.round((Date.now() - ts) / 60000);
@@ -184,7 +189,7 @@ export default function Sidebar({
           {s.running
             ? <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}><StopGlyph /></button>
             : <button className="mini-btn" title="Start" onClick={(e) => { e.stopPropagation(); onOpenSession(s.id, groupId); }}><PlayGlyph /></button>}
-          {s.cli === 'claude' && (
+          {SHAREABLE_CLIS.includes(s.cli) && (
             <button className="mini-btn" title="Share this session" onClick={(e) => { e.stopPropagation(); onShareSession(s.id); }}><ShareGlyph /></button>
           )}
           <button className="mini-btn" title="Delete" onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><CloseGlyph /></button>

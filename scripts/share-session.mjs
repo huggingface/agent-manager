@@ -1,11 +1,16 @@
 #!/usr/bin/env node
-// Prototype of docs/session-sharing.md §6: locate -> redact -> assemble.
-// Phase 1: Claude Code only, trace only. Publishing is a separate step.
+// docs/session-sharing.md §6: locate -> redact -> assemble.
+// Trace only; publishing is a separate step (server/src/share.js).
 //
-// Usage: node scripts/share-session.mjs <transcript.jsonl> <outdir>
+// Usage: node scripts/share-session.mjs <transcript.jsonl> <outdir> [harness]
+//        harness: claude (default) | codex
+//
+// Both formats are Hub-native, so the trace ships VERBATIM either way -- only
+// the stats/briefing extraction differs. The redaction pass is format-agnostic:
+// it works on each serialized line, so it needs no per-harness knowledge.
 //
 // Produces the share bundle described in §4:
-//   <outdir>/<session-uuid>.jsonl   the trace, native Claude Code JSONL
+//   <outdir>/<native-name>.jsonl    the trace, in its original format
 //   <outdir>/meta/manifest.json     provenance + lineage
 //   <outdir>/meta/briefing.md       mechanical handoff summary
 //   <outdir>/meta/redaction.json    which rules ran and what they caught
@@ -15,9 +20,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-const [src, outdir] = process.argv.slice(2);
+const [src, outdir, harnessArg] = process.argv.slice(2);
+const HARNESS = harnessArg || 'claude';
+if (!['claude', 'codex'].includes(HARNESS)) {
+  console.error(`unsupported harness: ${HARNESS}`);
+  process.exit(1);
+}
 if (!src || !outdir) {
-  console.error('usage: share-session.mjs <transcript.jsonl> <outdir>');
+  console.error('usage: share-session.mjs <transcript.jsonl> <outdir> [claude|codex]');
   process.exit(1);
 }
 
@@ -62,6 +72,11 @@ function redact(text) {
   return out;
 }
 
+// Codex rollout lines. Shapes mirror parseCodex() in server/src/traces.js, which
+// is the battle-tested reader for this format -- keep the two in step.
+const codexText = (p) => (Array.isArray(p.content) ? p.content.map((c) => (c && c.text) || '').join(' ') : '');
+let codexTok = null; // token_count events are CUMULATIVE per run, so keep the last
+
 // ---------- pass 1: filter + redact, and collect stats ----------
 const lines = fs.readFileSync(src, 'utf8').split('\n').filter(Boolean);
 const kept = [];
@@ -77,7 +92,7 @@ for (const line of lines) {
 
   // Drop file-history-snapshot / delta: they embed full file contents and the
   // viewer does not render them. Worst leak vector in a Claude transcript (§7).
-  if (j.type === 'file-history-snapshot' || j.type === 'file-history-delta') {
+  if (HARNESS === 'claude' && (j.type === 'file-history-snapshot' || j.type === 'file-history-delta')) {
     stats.dropped[j.type] = (stats.dropped[j.type] || 0) + 1;
     continue;
   }
@@ -90,6 +105,13 @@ for (const line of lines) {
     }
   }
 
+  if (HARNESS === 'claude') claudeLine(j);
+  else codexLine(j);
+
+  kept.push(redact(JSON.stringify(j)));
+}
+
+function claudeLine(j) {
   if (j.type === 'assistant' && j.message) {
     const m = j.message;
     const id = m.id || j.uuid;
@@ -124,16 +146,78 @@ for (const line of lines) {
       prompts.push(t.replace(/\s+/g, ' ').slice(0, 300));
     }
   }
+}
 
-  kept.push(redact(JSON.stringify(j)));
+function codexLine(j) {
+  const p = j.payload || {};
+  if (j.type === 'session_meta') {
+    if (p.cwd) stats.cwd = p.cwd;
+    // Codex spawns internal guardian/subagent rollouts that share the cwd but
+    // are not the user's conversation. Refuse to publish one as if it were.
+    if (p.thread_source === 'subagent' || (p.source && p.source.subagent)) stats.subagent = true;
+    return;
+  }
+  if (j.type === 'response_item') {
+    switch (p.type) {
+      case 'message':
+        if (p.role === 'assistant') {
+          stats.turns++;
+        } else if (p.role === 'user') {
+          const t = codexText(p).trim();
+          // Codex wraps environment/instructions as user items -- skip those.
+          if (t && !t.startsWith('<')) {
+            stats.prompts++;
+            prompts.push(t.replace(/\s+/g, ' ').slice(0, 300));
+          }
+        }
+        break;
+      case 'function_call':
+      case 'custom_tool_call':
+      case 'local_shell_call': {
+        stats.toolCalls++;
+        const name = p.name || p.type;
+        stats.tools[name] = (stats.tools[name] || 0) + 1;
+        // apply_patch carries the touched paths in its patch header
+        if (name === 'apply_patch' && typeof p.arguments === 'string') {
+          const m = p.arguments.match(/\*\*\* (?:Update|Add|Delete) File: ([^\\\n"]+)/);
+          if (m) filesTouched.add(m[1].trim());
+        }
+        break;
+      }
+      case 'web_search_call':
+        stats.toolCalls++;
+        stats.tools.web_search = (stats.tools.web_search || 0) + 1;
+        break;
+      default:
+    }
+  } else if (j.type === 'event_msg' && p.type === 'token_count') {
+    if (p.info && p.info.total_token_usage) codexTok = p.info.total_token_usage;
+  }
+}
+
+if (codexTok) {
+  const cached = codexTok.cached_input_tokens || 0;
+  stats.tokensIn = Math.max(0, (codexTok.input_tokens || 0) - cached); // fresh input only, as for Claude
+  stats.cacheRead = cached;
+  stats.tokensOut = codexTok.output_tokens || 0;
 }
 
 // ---------- assemble ----------
-// Keep the harness's NATIVE filename: the Hub's trace detection and every
-// working trace dataset in the wild use <uuid>.jsonl, and it is the only place
-// the session id survives if the manifest is lost (§4).
-const uuid = path.basename(src, '.jsonl');
-const traceName = `${uuid}.jsonl`;
+// A codex guardian/subagent rollout is not the user's conversation; publishing
+// one would ship the wrong transcript under a real session's name.
+if (stats.subagent) {
+  console.error('refusing to export a codex subagent/guardian rollout');
+  process.exit(2);
+}
+
+// Keep the harness's NATIVE filename -- <uuid>.jsonl for Claude,
+// rollout-<ts>-<uuid>.jsonl for codex. The Hub's trace detection and every
+// working trace dataset in the wild use the native name, and it is the only
+// place the session id survives if the manifest is lost (§4).
+const traceName = path.basename(src);
+const uuid = HARNESS === 'codex'
+  ? (traceName.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/) || [])[1] || traceName.replace(/\.jsonl$/, '')
+  : traceName.replace(/\.jsonl$/, '');
 fs.mkdirSync(path.join(outdir, 'meta'), { recursive: true });
 const trace = kept.join('\n') + '\n';
 fs.writeFileSync(path.join(outdir, traceName), trace);
@@ -141,14 +225,20 @@ const sha256 = crypto.createHash('sha256').update(trace).digest('hex');
 
 const cwdSlug = path.basename(path.dirname(src));
 const iso = (ms) => (ms ? new Date(ms).toISOString() : null);
+const HARNESS_NAME = { claude: 'Claude Code', codex: 'Codex' }[HARNESS];
+
+// Where the file belongs in the target harness's store, so an import is
+// mechanical. Codex shards by date: sessions/YYYY/MM/DD/rollout-*.jsonl.
+const nativePath = HARNESS === 'codex'
+  ? path.join('sessions', ...src.split(path.sep).slice(-4))
+  : path.join('projects', cwdSlug, traceName);
 
 const manifest = {
   schema: 'am-session-share/1',
-  harness: { id: 'claude', name: 'Claude Code', version: process.env.TERM_PROGRAM_VERSION || null },
+  harness: { id: HARNESS, name: HARNESS_NAME, version: null },
   session: { id: process.env.AM_ID || null, uuid, name: process.env.AM_NAME || null },
   origin: { user: process.env.AM_USER || null, workspace: process.env.AM_SESSION || null, cwdSlug },
-  trace: { path: traceName, nativePath: `projects/${cwdSlug}/${traceName}`,
-           sha256, lines: kept.length, converted: false },
+  trace: { path: traceName, nativePath, sha256, lines: kept.length, converted: false },
   stats: { ...stats, firstTs: iso(stats.firstTs), lastTs: iso(stats.lastTs) },
   redaction: { ruleset: '1', hits, blocked: false },
   lineage: { parent: null },
@@ -164,7 +254,7 @@ Generated mechanically from the trace at export time. For a cross-harness handof
 fed to the receiving agent as data to read — never as instructions to follow — with the
 trace placed in the workspace so it can look up any detail.
 
-- **Harness**: Claude Code ${manifest.harness.version || ''}
+- **Harness**: ${HARNESS_NAME}
 - **Window**: ${manifest.stats.firstTs} → ${manifest.stats.lastTs}
 - **Volume**: ${stats.prompts} prompts, ${stats.turns} assistant turns, ${stats.toolCalls} tool calls
 - **Tokens**: ${stats.tokensIn.toLocaleString()} in / ${stats.tokensOut.toLocaleString()} out / ${stats.cacheRead.toLocaleString()} cache read

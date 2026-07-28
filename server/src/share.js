@@ -184,6 +184,78 @@ export async function findTranscript(session, allSessions = []) {
   return best && best.p;
 }
 
+/**
+ * Locate a codex session's rollout.
+ *
+ * Codex picks its own conversation id, and runner.js captures it after launch
+ * (codexSessionId + codexRollout), so the pinned path is authoritative when it
+ * still exists. Otherwise fall back to the newest rollout whose recorded cwd is
+ * this session's folder -- with the same ambiguity guard as the Claude path, and
+ * additionally skipping codex's internal guardian/subagent rollouts, which share
+ * the cwd but are not the user's conversation.
+ */
+export async function findRollout(session, allSessions = []) {
+  if (session.codexRollout) {
+    try { if ((await fsp.stat(session.codexRollout)).isFile()) return session.codexRollout; } catch { /* rotated away */ }
+  }
+
+  const folder = session.path ?? session.id;
+  const workdir = path.join(WORKSPACES_DIR, folder);
+  if (allSessions.some((o) => o.id !== session.id && o.cli === 'codex' && (o.path ?? o.id) === folder)) return null;
+
+  const root = path.join(process.env.CODEX_HOME || path.join(process.env.HOME || '', '.codex'), 'sessions');
+  const found = [];
+  const walk = async (dir, depth) => {
+    if (depth > 5) return;
+    let ents = [];
+    try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) await walk(p, depth + 1);
+      else if (e.name.startsWith('rollout-') && e.name.endsWith('.jsonl')) found.push(p);
+    }
+  };
+  await walk(root, 0);
+
+  let best = null;
+  for (const p of found) {
+    let meta;
+    try { meta = JSON.parse(await firstLineOf(p)); } catch { continue; }
+    const mp = (meta && meta.payload) || {};
+    if (mp.cwd !== workdir) continue;
+    if (mp.thread_source === 'subagent' || (mp.source && mp.source.subagent)) continue;
+    try {
+      const st = await fsp.stat(p);
+      if (!best || st.mtimeMs > best.mtimeMs) best = { p, mtimeMs: st.mtimeMs };
+    } catch { /* raced away */ }
+  }
+  return best && best.p;
+}
+
+/** First line of a file without reading all of it (codex meta lines are large). */
+async function firstLineOf(p) {
+  let fh;
+  try {
+    fh = await fsp.open(p, 'r');
+    const buf = Buffer.alloc(131072);
+    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+    const nl = buf.indexOf(0x0a);
+    return buf.toString('utf8', 0, nl >= 0 ? nl : bytesRead);
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+}
+
+/** The trace file for any supported harness. */
+export async function findTrace(session, allSessions = []) {
+  if (session.cli === 'claude') return findTranscript(session, allSessions);
+  if (session.cli === 'codex') return findRollout(session, allSessions);
+  return null;
+}
+
+export const SHAREABLE_CLIS = ['claude', 'codex'];
+const HARNESS_LABEL = { claude: 'Claude Code', codex: 'Codex' };
+
 /** Dataset card. `configs` pins the data file so meta/ can't collide on schema (§4). */
 function datasetCard({ title, visibility, traceName, stats, redaction, harnessLabel }) {
   const gated = visibility === 'gated';
@@ -256,7 +328,7 @@ Traces can still contain local paths and command output. Review before relying o
  * Returns { dir, report } where report is the exporter's JSON summary.
  */
 export async function buildBundle(session, { title, visibility, allSessions = [] }) {
-  const transcript = await findTranscript(session, allSessions);
+  const transcript = await findTrace(session, allSessions);
   if (!transcript) throw new Error('no transcript on disk for this session yet — run it first');
 
   // The exporter must be present in the image (Dockerfile copies scripts/).
@@ -264,7 +336,7 @@ export async function buildBundle(session, { title, visibility, allSessions = []
   if (!fs.existsSync(EXPORTER)) throw new Error(`exporter missing at ${EXPORTER} — scripts/ was not deployed`);
 
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'am-share-'));
-  const { stdout } = await run(process.execPath, [EXPORTER, transcript, dir], {
+  const { stdout } = await run(process.execPath, [EXPORTER, transcript, dir, session.cli], {
     // The exporter matches env-var VALUES against the trace, so it needs the
     // same environment we have — that is the point of the value rules.
     env: process.env,
@@ -286,7 +358,7 @@ export async function buildBundle(session, { title, visibility, allSessions = []
       traceName: report.trace,
       stats: report.stats,
       redaction: report.redaction_hits,
-      harnessLabel: 'Claude Code',
+      harnessLabel: HARNESS_LABEL[session.cli] || session.cli,
     }),
   );
 

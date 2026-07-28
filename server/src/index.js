@@ -20,7 +20,7 @@ import { buildTraces, traceDigests, digestFor } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 import { startWatchdog } from './watchdog.js';
-import { shareSession, shareNamespace, findTranscript, shareAccess, grantAccess, revokeAccess } from './share.js';
+import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess, SHAREABLE_CLIS } from './share.js';
 
 ensureDirs();
 refreshVersions();
@@ -879,13 +879,14 @@ app.post('/api/sessions/:id/stop', (req, res) => {
 // users pre-authorized. The heavy part (redaction over a multi-MB transcript)
 // runs in a child process inside share.js, so this route never stalls the loop.
 //
-// Only Claude sessions for now — the other harnesses need their converters
-// (§13 phase 5). Say so plainly rather than producing a broken bundle.
+// Claude and Codex: both write JSONL the Hub renders natively, so the trace
+// ships verbatim. The remaining harnesses need converters (§13 phase 5) — say so
+// plainly rather than producing a broken bundle.
 app.post('/api/sessions/:id/share', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  if (s.cli !== 'claude') {
-    return res.status(400).json({ error: `sharing supports Claude sessions so far, not '${s.cli}'` });
+  if (!SHAREABLE_CLIS.includes(s.cli)) {
+    return res.status(400).json({ error: `sharing supports ${SHAREABLE_CLIS.join(' and ')} sessions so far, not '${s.cli}'` });
   }
   const b = req.body || {};
   const visibility = b.visibility === 'gated' ? 'gated' : 'public';
@@ -914,11 +915,11 @@ app.post('/api/sessions/:id/share', async (req, res) => {
 app.get('/api/sessions/:id/share', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  const [namespace, transcript] = await Promise.all([shareNamespace(), findTranscript(s, store.list())]);
+  const [namespace, transcript] = await Promise.all([shareNamespace(), findTrace(s, store.list())]);
   res.json({
     namespace,
-    canShare: !!namespace && !!transcript && s.cli === 'claude',
-    reason: !namespace ? 'no-hf-token' : s.cli !== 'claude' ? 'unsupported-cli' : !transcript ? 'no-transcript' : null,
+    canShare: !!namespace && !!transcript && SHAREABLE_CLIS.includes(s.cli),
+    reason: !namespace ? 'no-hf-token' : !SHAREABLE_CLIS.includes(s.cli) ? 'unsupported-cli' : !transcript ? 'no-transcript' : null,
     lastShare: s.lastShare || null,
   });
 });
