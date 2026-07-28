@@ -35,7 +35,11 @@ export default function ShareDialog({ session, onClose }: { session: Session; on
   const publish = async () => {
     setBusy(true); setError(null); setBlocked(null);
     try {
-      setResult(await api.shareSession(session.id, { visibility, grantTo: visibility === 'gated' ? users : [] }));
+      setResult(await api.shareSession(session.id, {
+        visibility,
+        grantTo: visibility === 'gated' ? users : [],
+        notify: visibility === 'public' ? users : [],
+      }));
     } catch (e) {
       if (e instanceof api.RedactionBlocked) setBlocked({ message: e.message, hits: e.hits });
       else setError((e as Error).message || 'share failed');
@@ -92,26 +96,31 @@ export default function ShareDialog({ session, onClose }: { session: Session; on
               </button>
             </div>
 
-            {visibility === 'gated' ? (
-              <label className="share-field">
-                <span>Hugging Face usernames</span>
-                <input
-                  value={recipients}
-                  onChange={(e) => setRecipients(e.target.value)}
-                  placeholder="alice, bob"
-                  autoFocus
-                />
-                <small>
-                  Published as a gated dataset and each person is granted access directly — they don’t
-                  have to request it. You can change who has access afterwards.
-                </small>
-              </label>
-            ) : (
+            {visibility === 'public' && (
               <p className="share-note">
                 Anyone with the link can read it. A public share is <strong>refused</strong> if the
                 transcript contains anything credential-shaped.
               </p>
             )}
+
+            {/* Recipients apply to BOTH modes, but mean different things: for a
+                gated share they are granted access; for a public one there is
+                nothing to grant, so they are only told about it. */}
+            <label className="share-field">
+              <span>{visibility === 'gated' ? 'Share with' : 'Notify'}</span>
+              <input
+                value={recipients}
+                onChange={(e) => setRecipients(e.target.value)}
+                placeholder="alice, bob"
+                autoFocus
+              />
+              <small>
+                {visibility === 'gated'
+                  ? 'Hugging Face usernames. Published as a gated dataset and each person is granted access directly — they don’t have to request it.'
+                  : 'Hugging Face usernames to tell about it. Public needs no access grant, so this only sends them the link.'}
+                {' '}Optional{visibility === 'gated' ? ' — leave empty to publish with nobody granted yet' : ''}.
+              </small>
+            </label>
 
             {blocked && (
               <div className="share-blocked">
@@ -125,7 +134,7 @@ export default function ShareDialog({ session, onClose }: { session: Session; on
               <button className="btn-ghost" onClick={onClose}>Cancel</button>
               <button
                 className="btn-primary"
-                disabled={busy || !info?.canShare || (visibility === 'gated' && !users.length)}
+                disabled={busy || !info?.canShare}
                 onClick={publish}
               >
                 {busy ? 'Publishing…' : 'Publish'}
@@ -149,6 +158,7 @@ export default function ShareDialog({ session, onClose }: { session: Session; on
                   // Gated with nobody granted: the repo exists but is unreadable by
                   // anyone else, so say that rather than implying it was delivered.
                   : 'Published as a gated dataset — nobody has access yet.'}
+              {!!result.notified?.length && ` Notified ${result.notified.join(', ')}.`}
             </p>
             <div className="share-linkrow">
               <input readOnly value={result.url} onFocus={(e) => e.currentTarget.select()} />

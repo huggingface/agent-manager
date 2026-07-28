@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { WORKSPACES_DIR } from './config.js';
 
@@ -456,7 +457,7 @@ export async function buildBundle(session, { title, visibility, allSessions = []
  * @param name             optional repo name (namespace is this token's user)
  * @param grantTo          usernames to pre-authorize (gated only)
  */
-export async function shareSession(session, { visibility = 'public', name, grantTo = [], allSessions = [] } = {}) {
+export async function shareSession(session, { visibility = 'public', name, grantTo = [], notify = [], allSessions = [] } = {}) {
   if (!['public', 'gated'].includes(visibility)) throw new Error(`bad visibility: ${visibility}`);
   const ns = await shareNamespace();
   if (!ns) throw new Error('cannot resolve the Hub namespace — check HF_TOKEN');
@@ -515,23 +516,100 @@ export async function shareSession(session, { visibility = 'public', name, grant
     }
 
     const info = await hfApi(`/api/datasets/${repo}`).catch(() => null);
+    const sha = (info && info.sha) || null;
+
+    // Recipients of a PUBLIC share can't be granted anything — there is nothing
+    // to grant — so tell them instead. Gated shares grant AND tell.
+    const tell = [...new Set([...notify, ...(visibility === 'gated' ? granted : [])])];
+    const { notified, notifyErrors } = tell.length
+      ? await notifyRecipients(tell, { repo, sha, visibility, from: process.env.SPACE_AUTHOR_NAME || ns })
+      : { notified: [], notifyErrors: [] };
 
     return {
       repo,
       visibility,
       url: `${HF}/datasets/${repo}`,
-      sha: (info && info.sha) || null,
+      sha,
       trace: report.trace,
       stats: report.stats,
       redaction: report.redaction_hits,
       dropped: report.dropped,
       granted,
       grantErrors,
+      notified,
+      notifyErrors,
     };
   } finally {
     // The bundle is a copy; the session's own transcript is untouched.
     fs.rm(dir, { recursive: true, force: true }, () => {});
   }
+}
+
+
+/**
+ * Notify recipients by opening a PULL REQUEST on their `am-inbox` dataset that
+ * adds `incoming/<envelope-id>.json` (§5). No inbound connectivity is involved:
+ * both sides only make outbound calls to the Hub, which is all a private Space
+ * can do. A non-collaborator can open a PR, which is what makes this work
+ * without the recipient granting anyone write access.
+ *
+ * A PR rather than a plain discussion because merging IS accepting: the envelope
+ * lands in the inbox as a file, and closing the PR is a decline. The recipient's
+ * poll reads open PRs and matches authors against their whitelist.
+ *
+ * The inbox repo's EXISTENCE is the opt-in — if a user has none they have not
+ * enabled receiving, and we say so rather than creating one on their behalf.
+ *
+ * The envelope stays minimal because the inbox is public: who, when, and where
+ * to fetch. Nothing about what the session contains (§5, Q5).
+ */
+export async function notifyRecipients(users, { repo, sha, visibility, from }) {
+  const notified = [];
+  const notifyErrors = [];
+  for (const user of users) {
+    const inbox = `${user}/am-inbox`;
+    let info;
+    try {
+      info = await hfApi(`/api/datasets/${inbox}`);
+    } catch (e) {
+      notifyErrors.push({ user, error: e.status === 401 || e.status === 404
+        ? 'no am-inbox repo — they have not enabled receiving'
+        : e.message });
+      continue;
+    }
+    const id = crypto.randomUUID();
+    const envelope = { v: 1, kind: 'trace', id, from, ts: new Date().toISOString(), repo, sha, visibility };
+    // NDJSON commit payload: a header line then one line per file operation.
+    const body = [
+      JSON.stringify({ key: 'header', value: {
+        summary: `Trace from ${from}`,
+        description: `${from} shared an agent session. Merge to accept, close to decline.`,
+      } }),
+      JSON.stringify({ key: 'file', value: {
+        path: `incoming/${id}.json`,
+        encoding: 'base64',
+        content: Buffer.from(JSON.stringify(envelope, null, 2) + '\n', 'utf8').toString('base64'),
+      } }),
+    ].join('\n') + '\n';
+    try {
+      const r = await fetch(`${HF}/api/datasets/${inbox}/commit/main?create_pr=1`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${hfToken()}`,
+          'content-type': 'application/x-ndjson',
+          'user-agent': 'agent-manager',
+        },
+        body,
+        signal: AbortSignal.timeout(30_000),
+      });
+      const text = await r.text();
+      if (!r.ok) throw new Error(`HF ${r.status}: ${text.slice(0, 160)}`);
+      notified.push(user);
+    } catch (e) {
+      notifyErrors.push({ user, error: e.message });
+    }
+  }
+  return { notified, notifyErrors };
 }
 
 /** Current access state of a share, for a "who can see this" panel. */

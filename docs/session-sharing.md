@@ -189,13 +189,17 @@ sides only ever talk to huggingface.co.
 | Piece | What it is |
 |---|---|
 | **Inbox** | `<recipient>/am-inbox`, a small **public** dataset. Its existence *is* the opt-in — no repo, nobody can send you anything, enforced by the Hub. |
-| **Delivery** | The sender opens a **pull request** adding `incoming/<envelope-id>.json`. Anyone HF-authenticated can open a PR without write access; the author is Hub-authenticated identity that cannot be forged. |
+| **Delivery** | The sender opens a **pull request** adding `incoming/<envelope-id>.json`. Anyone HF-authenticated can open a PR without write access; the author is Hub-authenticated identity that cannot be forged. ✅ **Implemented** — `notifyRecipients()` in `share.js`, via `POST /api/datasets/<inbox>/commit/main?create_pr=1` with an NDJSON body. Verified end to end. |
 | **Accept** | `merge_pull_request` |
 | **Decline** | `change_discussion_status(..., 'closed')` with a comment |
 | **Payload** | A separate dataset owned by the **sender**, `public` or `gated`. |
 
 The recipient polls `get_repo_discussions(repo_id, discussion_type='pull_request',
 discussion_status='open')` and matches authors against the whitelist.
+
+Recipients apply to **both** visibilities, meaning different things: a gated share grants
+them access *and* notifies; a public share has nothing to grant, so it only notifies. That
+is why the username box stays visible in public mode.
 
 **Envelope metadata is minimized** because the inbox is public: sender, timestamp, payload
 repo id, size, and `kind`. No session title, no stats, no prompts — those live inside the

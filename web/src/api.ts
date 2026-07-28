@@ -162,6 +162,8 @@ export interface ShareResult {
   dropped: Record<string, number>;
   granted: string[];
   grantErrors: { user: string; error: string }[];
+  notified?: string[];
+  notifyErrors?: { user: string; error: string }[];
 }
 // Thrown when the redaction gate refuses a public share (HTTP 409). Carries the
 // rule names so the dialog can say exactly what tripped instead of "failed".
@@ -178,7 +180,7 @@ export const getShareInfo = (id: string): Promise<ShareInfo> => fetch(`/api/sess
 
 export const shareSession = async (
   id: string,
-  body: { visibility: 'public' | 'gated'; name?: string; grantTo?: string[] },
+  body: { visibility: 'public' | 'gated'; name?: string; grantTo?: string[]; notify?: string[] },
 ): Promise<ShareResult> => {
   const r = await fetch(`/api/sessions/${id}/share`, { method: 'POST', headers: HEADERS, body: JSON.stringify(body) });
   if (r.status === 409) {

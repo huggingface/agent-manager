@@ -890,11 +890,11 @@ app.post('/api/sessions/:id/share', async (req, res) => {
   }
   const b = req.body || {};
   const visibility = b.visibility === 'gated' ? 'gated' : 'public';
-  const grantTo = Array.isArray(b.grantTo)
-    ? b.grantTo.map((u) => String(u).trim()).filter(Boolean).slice(0, 50)
-    : [];
+  const names = (v) => (Array.isArray(v) ? v.map((u) => String(u).trim().replace(/^@/, '')).filter(Boolean).slice(0, 50) : []);
+  const grantTo = names(b.grantTo);
+  const notify = names(b.notify);
   try {
-    const out = await shareSession(s, { visibility, name: b.name, grantTo, allSessions: store.list() });
+    const out = await shareSession(s, { visibility, name: b.name, grantTo, notify, allSessions: store.list() });
     // Remember the last share so the UI can offer "open" / "manage access"
     // without re-publishing.
     store.update(s.id, { lastShare: { repo: out.repo, sha: out.sha, visibility, at: new Date().toISOString() } });
