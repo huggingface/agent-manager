@@ -40,6 +40,13 @@ const oneLine = (s: string, n = 90) => {
   const t = s.replace(/\s+/g, ' ').trim();
   return t.length > n ? `${t.slice(0, n)}…` : t;
 };
+// Harness context blobs announce themselves: <app-context>, <recommended_plugins>,
+// <environment_context>. Use that as the fold label so a collapsed row still says
+// what it is.
+const sysLabel = (text: string) => {
+  const tag = text.trimStart().match(/^<([a-zA-Z][\w -]{1,40})>/);
+  return tag ? tag[1].trim() : 'harness context';
+};
 const moreLabel = (more?: number) => (more ? ` +${more > 1024 ? `${Math.round(more / 1024)} KB` : `${more} chars`} not retained` : '');
 
 // ---------- blocks ----------
@@ -139,7 +146,18 @@ function Blocks({ turn }: { turn: TraceTurn }) {
     } else if (b.type === 'image') {
       out.push(<img key={i} className="tv-img" src={b.src} alt="" />);
     } else if (b.type === 'text') {
-      out.push(<TextBlock key={i} text={b.text} more={b.more} markdown={turn.role !== 'system'} />);
+      // System rows are the harness talking to the model — instructions, skills,
+      // environment. One of them here is 27 KB, so expanded they bury the
+      // conversation before it starts. Collapsed, and never as markdown.
+      if (turn.role === 'system') {
+        out.push(
+          <Collapsible key={i} label={sysLabel(b.text)} preview={oneLine(b.text)}>
+            <TextBlock text={b.text} more={b.more} markdown={false} />
+          </Collapsible>,
+        );
+      } else {
+        out.push(<TextBlock key={i} text={b.text} more={b.more} markdown />);
+      }
     }
   }
   return <>{out}</>;
@@ -348,6 +366,9 @@ export default function TracePane({
 
         {!error && head && !matches && (
           <>
+            {/* State the gaps up front: a reader who can't see the model's
+                reasoning should know it was withheld, not that there was none. */}
+            {head.note && <div className="tv-msg">{head.note}</div>}
             <div style={{ height: offsets[range.start] || 0 }} />
             {rows}
             <div style={{ height: Math.max(0, (offsets[n] || 0) - (offsets[Math.min(range.end, n)] || 0)) }} />

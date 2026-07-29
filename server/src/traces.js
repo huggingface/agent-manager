@@ -965,13 +965,43 @@ async function normalizeClaude(file, out) {
 }
 
 // Codex — $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
-// Everything under `payload`. token_count is CUMULATIVE per run, so it is
-// attached to the session header, not to a turn. `task_complete` carries the
-// authoritative final answer, and response_item messages are intermediate:
-// that distinction is `kind: 'final' | 'update'` (the Hub calls it
-// assistantKind and greys out non-final assistant text).
+// Everything is under `payload`, and the same content appears in TWO streams:
+// `response_item` (what was sent to/from the model) and `event_msg` (what the TUI
+// showed). Reading both naively double-counts; reading only one loses content.
+// Verified against a real 393-line rollout:
+//
+//   - every `event_msg/task_complete.last_agent_message` was byte-identical to
+//     the preceding `response_item` assistant message. It is a POINTER to the
+//     final answer, not an extra one — so it marks a message, never emits one.
+//   - `event_msg/agent_message` (27) duplicated the assistant `response_item`s
+//     exactly: ignored.
+//   - `event_msg/agent_reasoning` held 4 readable texts that appear NOWHERE in
+//     the `response_item` reasoning summaries, so both are read and deduped.
+//     49 of 56 reasoning items carry only `encrypted_content` and no readable
+//     summary at all; those are counted, not invented.
+//   - web searches exist only as `event_msg/web_search_end` (no
+//     `web_search_call` response item), so that is where they are read from.
+//   - `info.last_token_usage` is PER TURN; `total_token_usage` is cumulative.
+//     Both are used: the turn gets its own, the session header gets the total.
+//   - the model is in `turn_context.model`, not in `session_meta`.
+//
+// GROUPING: an assistant TEXT opens a turn, and the tool calls that follow
+// attach to it — so one row reads "text + 16 tool calls (exec_command,
+// apply_patch, write_stdin)" the way the Hub's own viewer shows it, instead of
+// 17 separate rows.
 async function normalizeCodex(file, out) {
   const stitch = makeStitcher();
+  const seenThinking = new Set();
+  let cur = null;      // the assistant turn being built
+  let encrypted = 0;   // reasoning items with no readable summary
+
+  // Blocks attach to the open assistant turn; a user/system message closes it.
+  const assistant = (ts) => {
+    if (!cur) { cur = { role: 'assistant', ts, blocks: [] }; out.push(cur); }
+    return cur;
+  };
+  const hasText = (m) => !!m && m.blocks.some((b) => b.type === 'text');
+
   for await (const j of jsonLines(file)) {
     const p = j.payload || {};
     const ts = j.timestamp ? Date.parse(j.timestamp) || undefined : undefined;
@@ -986,52 +1016,120 @@ async function normalizeCodex(file, out) {
       continue;
     }
 
+    // One per user turn, and the only place the model is named.
+    if (j.type === 'turn_context') {
+      if (p.model) out.model = p.model;
+      out.cwd = out.cwd || p.cwd || null;
+      continue;
+    }
+
     if (j.type === 'response_item') {
       if (p.type === 'message') {
         const text = Array.isArray(p.content) ? p.content.map((c) => (c && c.text) || '').join('') : '';
         if (!text.trim()) continue;
-        // codex wraps environment/instruction blobs as role:'user' items whose
-        // text starts with '<'.
-        const isEnv = p.role === 'user' && text.trim().startsWith('<');
-        out.push({
-          role: isEnv ? 'system' : p.role === 'assistant' ? 'assistant' : 'user',
-          kind: p.role === 'assistant' ? 'update' : undefined,
-          ts, blocks: [textBlock('text', text)],
-        });
+        if (p.role === 'assistant') {
+          // A second text block means a new step, not an addition to this one.
+          if (hasText(cur)) cur = null;
+          assistant(ts).blocks.push(textBlock('text', text));
+          continue;
+        }
+        // `developer` is the harness talking to the model (app context, skills,
+        // permissions) — system, not something the operator typed. Codex also
+        // wraps environment blobs as role:'user' text starting with '<'.
+        const isEnv = p.role === 'developer' || text.trim().startsWith('<');
+        cur = null;
+        out.push({ role: isEnv ? 'system' : 'user', ts, blocks: [textBlock('text', text)] });
       } else if (p.type === 'reasoning') {
-        const text = Array.isArray(p.summary) ? p.summary.map((s) => (s && s.text) || '').join('\n') : String(p.text || '');
-        if (text.trim()) out.push({ role: 'assistant', kind: 'update', ts, blocks: [textBlock('thinking', text)] });
+        // One block per summary ENTRY, not the entries joined. The same texts
+        // arrive as individual `agent_reasoning` events first, and a joined
+        // string would never dedupe against them — this session had 11 distinct
+        // reasoning texts and naive joining showed 16.
+        const parts = Array.isArray(p.summary)
+          ? p.summary.map((x) => String((x && x.text) || '')).filter((t) => t.trim())
+          : [String(p.text || '')].filter((t) => t.trim());
+        if (!parts.length) { encrypted++; continue; }
+        for (const text of parts) {
+          if (seenThinking.has(text.trim())) continue;
+          seenThinking.add(text.trim());
+          assistant(ts).blocks.push(textBlock('thinking', text));
+        }
       } else if (['function_call', 'custom_tool_call', 'local_shell_call', 'web_search_call'].includes(p.type)) {
-        // Codex writes a call and its output as two separate top-level items, so
-        // without stitching every call and every result becomes its own row and
-        // nothing ever folds into a "2 tool calls (shell)" group.
         const use = { type: 'tool_use', id: p.call_id || p.id, name: p.name || p.type, ...capText(p.arguments ?? p.input) };
-        const msg = { role: 'assistant', ts, blocks: [use] };
-        out.push(msg);
+        const msg = assistant(ts);
+        msg.blocks.push(use);
         stitch.register(use, msg);
       } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
         const res = { type: 'tool_result', id: p.call_id, ...capText(flattenToolContent(p.output)) };
-        if (!stitch.file(res.id, res)) out.push({ role: 'assistant', ts, blocks: [res] });
+        if (!stitch.file(res.id, res)) assistant(ts).blocks.push(res);
       }
       continue;
     }
 
     if (j.type === 'event_msg') {
       if (p.type === 'token_count') {
-        const u = p.info?.total_token_usage;
-        if (u) {
+        const info = p.info || {};
+        const tot = info.total_token_usage;
+        if (tot) {
           out.usage = {
-            in: Math.max(0, (u.input_tokens || 0) - (u.cached_input_tokens || 0)),
-            out: u.output_tokens || 0,
-            cacheRead: u.cached_input_tokens || 0,
+            in: Math.max(0, (tot.input_tokens || 0) - (tot.cached_input_tokens || 0)),
+            out: tot.output_tokens || 0,
+            cacheRead: tot.cached_input_tokens || 0,
           };
         }
-      } else if (p.type === 'task_complete' && String(p.last_agent_message || '').trim()) {
-        out.push({ role: 'assistant', kind: 'final', ts, blocks: [textBlock('text', p.last_agent_message)] });
+        // Per-turn cost belongs on the turn it paid for.
+        const last = info.last_token_usage;
+        if (last && cur && !cur.usage) {
+          cur.usage = {
+            in: Math.max(0, (last.input_tokens || 0) - (last.cached_input_tokens || 0)),
+            out: last.output_tokens || 0,
+            cacheRead: last.cached_input_tokens || 0,
+          };
+        }
+      } else if (p.type === 'agent_reasoning') {
+        // Readable reasoning the response_item stream encrypted away.
+        const text = String(p.text || p.message || '');
+        if (text.trim() && !seenThinking.has(text.trim())) {
+          seenThinking.add(text.trim());
+          assistant(ts).blocks.push(textBlock('thinking', text));
+        }
+      } else if (p.type === 'web_search_end') {
+        // The only record of a web search in this format.
+        const msg = assistant(ts);
+        const use = { type: 'tool_use', id: p.call_id, name: 'web_search', ...capText(p.query || (p.action && p.action.url) || '') };
+        msg.blocks.push(use);
+        stitch.register(use, msg);
+        const res = { type: 'tool_result', id: p.call_id, ...capText(p.results) };
+        if (!stitch.file(res.id, res)) msg.blocks.push(res);
+      } else if (p.type === 'task_complete') {
+        // In every task of the rollout I checked, `last_agent_message` was
+        // byte-identical to the preceding assistant message — a POINTER to the
+        // final answer, so marking it is right and emitting it would duplicate.
+        // But don't bet the content on that: if it genuinely differs, it is an
+        // answer we have not shown, so show it.
+        const text = String(p.last_agent_message || '').trim();
+        if (text) {
+          let marked = null;
+          for (let i = out.messages.length - 1; i >= 0; i--) {
+            const m = out.messages[i];
+            if (m.role === 'assistant' && hasText(m)) { marked = m; break; }
+          }
+          const shown = marked ? marked.blocks.filter((b) => b.type === 'text').map((b) => b.text.trim()) : [];
+          // A capped block only holds a prefix, so compare as a prefix there.
+          if (marked && shown.some((t) => t === text || (t.length >= VIEW_BLOCK_CAP && text.startsWith(t)))) {
+            marked.kind = 'final';
+          } else {
+            cur = null;
+            out.push({ role: 'assistant', kind: 'final', ts, blocks: [textBlock('text', text)] });
+          }
+        }
+        cur = null;
+      } else if (p.type === 'turn_aborted' || p.type === 'thread_rolled_back') {
+        cur = null;
       }
       continue;
     }
   }
+  if (encrypted) out.note = `${encrypted} reasoning step${encrypted === 1 ? '' : 's'} were encrypted by the model and carry no readable text`;
 }
 
 // OpenClaw — already close to STS: {type:'message', message:{role,content,usage}}
@@ -1215,7 +1313,7 @@ async function sniffHarness(file) {
 function newTrace(harness) {
   const t = {
     harness, harnessLabel: HARNESS_LABEL[harness] || harness, sessionId: null, title: '', model: null, cwd: null,
-    firstTs: 0, lastTs: 0, usage: null, usageSum: null, source: null, sharedBy: null, messages: [],
+    firstTs: 0, lastTs: 0, usage: null, usageSum: null, source: null, sharedBy: null, note: null, messages: [],
     push(msg) {
       if (this.messages.length >= VIEW_MAX_MESSAGES) { this.truncated = true; return; }
       if (msg.ts) {
@@ -1263,7 +1361,7 @@ function pageOf(parsed, offset, limit) {
     harness: parsed.harness, harnessLabel: parsed.harnessLabel, sessionId: parsed.sessionId,
     title: parsed.title, model: parsed.model, cwd: parsed.cwd,
     firstTs: parsed.firstTs, lastTs: parsed.lastTs, usage: parsed.usage,
-    source: parsed.source, sharedBy: parsed.sharedBy,
+    source: parsed.source, sharedBy: parsed.sharedBy, note: parsed.note || null,
     total, offset: from, limit: to - from, truncated: !!parsed.truncated,
     turns: parsed.messages.slice(from, to),
   };

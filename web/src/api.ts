@@ -237,6 +237,9 @@ export interface TracePage {
   // Bundles only: where this trace came from, and who shared it.
   source?: { repo: string | null; url: string | null; importedAt: string | null } | null;
   sharedBy?: string | null;
+  // Something true about this trace that isn't a turn — e.g. reasoning the model
+  // encrypted, which is absent rather than empty.
+  note?: string | null;
   total: number;
   offset: number;
   limit: number;
