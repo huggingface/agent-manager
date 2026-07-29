@@ -1,9 +1,13 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import readline from 'node:readline';
 import * as store from './sessions.js';
-import { WORKSPACES_DIR } from './config.js';
+import { WORKSPACES_DIR, PASSIVE_CLIS } from './config.js';
 import { mark, tracked, PHASE } from './watchdog.js';
+// The trace panel reader (bottom of this file) locates its file with the same
+// resolver sharing uses. share.js does not import traces.js, so no cycle.
+import { findTrace, HARNESS_LABEL } from './share.js';
 
 // Workspace-wide trace analytics: parse every Claude transcript and Codex
 // rollout on the Space into per-conversation stats (turns, tool calls, web
@@ -743,7 +747,7 @@ export async function buildTraces() {
   // live session (deleted panes, ambiguous attribution) only show in totals.
   return {
     sessions: sessions
-      .filter((s) => s.cli !== 'shell' && s.cli !== 'files')
+      .filter((s) => s.cli !== 'shell' && !PASSIVE_CLIS.includes(s.cli))
       .map((s) => ({ id: s.id, name: s.name, cli: s.cli, path: s.path, ...(perSession.get(s.id) || emptyStats()) }))
       .sort((a, b) => b.lastTs - a.lastTs),
     totals,
@@ -803,4 +807,684 @@ export async function traceLocation(s) {
     }
   } catch {}
   return null;
+}
+
+// ---------- Trace panel: ONE session, read in full, on demand ----------
+// Deliberately NOT part of buildTraces()/traceDigests(): those walk every
+// session on a ~1Hz poll and memoize per file, so making them retain turns
+// would balloon memory across the whole Space (spec §2). This path is only
+// entered when a Trace panel is open, and it memoizes exactly ONE session.
+//
+// Shape borrowed from the Hub's trace viewer (moon-landing
+// server/lib/datasets/trace/): every harness normalizes into the same
+// `{ role, blocks[] }` message, and the renderer only ever knows about block
+// types — never about harnesses. Adding a harness = one normalizer, zero UI
+// changes. See the notes on `stitchTool` below for why results are blocks
+// inside a message rather than a `toolResult` field on the turn.
+//
+// Message = {
+//   role: 'user' | 'assistant' | 'system',
+//   kind?: 'final' | 'update',            // codex: only 'final' is the answer
+//   ts?: number,                          // epoch ms
+//   model?: string,
+//   usage?: { in, out, cacheRead },
+//   blocks: Block[],
+// }
+// Block =
+//   | { type:'text',        text, more? }
+//   | { type:'thinking',    text, more? }
+//   | { type:'tool_use',    id?, name, text, more? }    // text = serialized args
+//   | { type:'tool_result', id?, text, more?, failed? }
+//   | { type:'shell',       command, stdout?, stderr?, exitCode? }
+//   | { type:'image',       src, mediaType? }
+//   | { type:'compaction',  text }
+//
+// `more` = number of characters dropped, so the UI can say "+412 KB more"
+// instead of pretending it has the whole thing.
+
+const VIEW_BLOCK_CAP = 20_000;      // chars retained per block (spec §10 Q3)
+const VIEW_MAX_MESSAGES = 20_000;   // hard stop; a 6 MB session is ~40k lines
+const VIEW_YIELD_LINES = 2_000;     // hand the loop back every N lines
+let viewMemo = { key: '', val: null }; // exactly one session at a time
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function capText(value, cap = VIEW_BLOCK_CAP) {
+  const t = typeof value === 'string' ? value : JSON.stringify(value ?? null, null, 2) || '';
+  return t.length <= cap ? { text: t } : { text: t.slice(0, cap), more: t.length - cap };
+}
+const textBlock = (type, value) => ({ type, ...capText(value) });
+
+// The bucket mount serves stale directory listings: a file written seconds ago
+// can read as absent (spec §2). Retry before believing it.
+async function statRetry(p, tries = 3) {
+  for (let i = 0; i < tries; i++) {
+    try { return await fsp.stat(p); } catch { if (i < tries - 1) await sleep(150); }
+  }
+  return null;
+}
+
+// ---------- tool-result stitching ----------
+// Parallel tool calls finish out of order, so a result can arrive several lines
+// after a *later* call was already recorded — and in Claude transcripts results
+// arrive on a different line (a `type:'user'` line) entirely. Keying results by
+// tool_use_id and inserting them next to their call is what makes the collapsed
+// "3 tool calls (Bash, Read)" group renderable at all. This is the single most
+// valuable thing to copy from the Hub viewer (ToolResultStitcher in
+// lib/datasets/trace/utils.ts); a `toolResult` field on the turn cannot express
+// it.
+function makeStitcher() {
+  const byId = new Map(); // toolCallId -> { msg, useBlock }
+  return {
+    register(useBlock, msg) { if (useBlock.id) byId.set(useBlock.id, { msg, useBlock }); },
+    /** true if filed next to its call; false if the call was never seen. */
+    file(id, resultBlock) {
+      const hit = id ? byId.get(id) : null;
+      if (!hit) return false;
+      const at = hit.msg.blocks.indexOf(hit.useBlock);
+      if (at === -1) { hit.msg.blocks.push(resultBlock); return true; }
+      let i = at + 1;
+      while (i < hit.msg.blocks.length && hit.msg.blocks[i].type === 'tool_result') i++;
+      hit.msg.blocks.splice(i, 0, resultBlock);
+      return true;
+    },
+  };
+}
+
+// ---------- line-oriented harnesses ----------
+async function* jsonLines(file) {
+  const rl = readline.createInterface({
+    input: fs.createReadStream(file, { encoding: 'utf8' }),
+    crlfDelay: Infinity,
+  });
+  let n = 0;
+  try {
+    for await (const line of rl) {
+      if (!line.trim()) continue;
+      let j; try { j = JSON.parse(line); } catch { continue; }
+      yield j;
+      // readline is stream-driven so the loop already breathes, but a long run
+      // of tiny lines can still hog a tick.
+      if (++n % VIEW_YIELD_LINES === 0) await yieldLoop();
+    }
+  } finally { rl.close(); }
+}
+
+// Claude Code — $CLAUDE_CONFIG_DIR/projects/<slug>/<uuid>.jsonl
+// Streaming writes the SAME message.id across several lines, each carrying the
+// same usage. parseClaude() above dedupes by dropping repeats; a viewer must
+// instead MERGE them, or half the assistant text disappears. So: first line for
+// an id creates the message and owns the usage, later lines append blocks.
+async function normalizeClaude(file, out) {
+  const stitch = makeStitcher();
+  const byMsgId = new Map();
+  for await (const j of jsonLines(file)) {
+    // These embed whole file contents; share.js drops them and so do we.
+    if (j.type === 'file-history-snapshot' || j.type === 'file-history-delta') continue;
+    if (j.isMeta || j.sourceToolUseID) continue;
+    if (j.type !== 'user' && j.type !== 'assistant') continue;
+
+    const m = j.message;
+    if (!m) continue;
+    const ts = j.timestamp ? Date.parse(j.timestamp) || undefined : undefined;
+    if (!out.cwd && j.cwd) out.cwd = j.cwd;
+
+    const id = j.type === 'assistant' ? m.id || j.uuid : null;
+    let msg = id ? byMsgId.get(id) : undefined;
+    const fresh = !msg;
+    if (!msg) {
+      msg = { role: j.type, ts, blocks: [] };
+      if (j.type === 'assistant') {
+        if (m.model) { msg.model = m.model; out.model = m.model; }
+        const u = m.usage;
+        if (u) {
+          msg.usage = {
+            in: (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0),
+            out: u.output_tokens || 0,
+            cacheRead: u.cache_read_input_tokens || 0,
+          };
+        }
+      }
+    }
+
+    const content = m.content;
+    const items = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? content : [];
+    for (const c of items) {
+      if (!c || typeof c !== 'object') continue;
+      if (c.type === 'text') {
+        const t = String(c.text || '');
+        if (!t.trim()) continue;
+        // Injected environment/reminder blobs are not prompts — show them, but
+        // as system so the conversation reads correctly (same rule the digest
+        // uses to avoid counting them).
+        if (j.type === 'user' && (t.startsWith('<') || t.startsWith('[Request interrupted'))) {
+          out.push({ role: 'system', ts, blocks: [textBlock('text', t)] });
+          continue;
+        }
+        msg.blocks.push(textBlock('text', t));
+      } else if (c.type === 'thinking' && String(c.thinking || '').trim()) {
+        msg.blocks.push(textBlock('thinking', c.thinking));
+      } else if (c.type === 'tool_use') {
+        const use = { type: 'tool_use', id: c.id, name: c.name || 'tool', ...capText(c.input) };
+        msg.blocks.push(use);
+        stitch.register(use, msg);
+      } else if (c.type === 'tool_result') {
+        const res = {
+          type: 'tool_result', id: c.tool_use_id,
+          failed: !!c.is_error,
+          ...capText(flattenToolContent(c.content)),
+        };
+        if (!stitch.file(c.tool_use_id, res)) msg.blocks.push(res);
+      } else if (c.type === 'image' && c.source?.data) {
+        msg.blocks.push({ type: 'image', src: dataUrl(c.source.data, c.source.media_type), mediaType: c.source.media_type });
+      }
+    }
+
+    if (!msg.blocks.length) continue;
+    if (fresh) {
+      out.push(msg);
+      if (id) byMsgId.set(id, msg);
+    }
+  }
+}
+
+// Codex — $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
+// Everything is under `payload`, and the same content appears in TWO streams:
+// `response_item` (what was sent to/from the model) and `event_msg` (what the TUI
+// showed). Reading both naively double-counts; reading only one loses content.
+// Verified against a real 393-line rollout:
+//
+//   - every `event_msg/task_complete.last_agent_message` was byte-identical to
+//     the preceding `response_item` assistant message. It is a POINTER to the
+//     final answer, not an extra one — so it marks a message, never emits one.
+//   - `event_msg/agent_message` (27) duplicated the assistant `response_item`s
+//     exactly: ignored.
+//   - `event_msg/agent_reasoning` held 4 readable texts that appear NOWHERE in
+//     the `response_item` reasoning summaries, so both are read and deduped.
+//     49 of 56 reasoning items carry only `encrypted_content` and no readable
+//     summary at all; those are counted, not invented.
+//   - web searches exist only as `event_msg/web_search_end` (no
+//     `web_search_call` response item), so that is where they are read from.
+//   - `info.last_token_usage` is PER TURN; `total_token_usage` is cumulative.
+//     Both are used: the turn gets its own, the session header gets the total.
+//   - the model is in `turn_context.model`, not in `session_meta`.
+//
+// GROUPING: an assistant TEXT opens a turn, and the tool calls that follow
+// attach to it — so one row reads "text + 16 tool calls (exec_command,
+// apply_patch, write_stdin)" the way the Hub's own viewer shows it, instead of
+// 17 separate rows.
+async function normalizeCodex(file, out) {
+  const stitch = makeStitcher();
+  const seenThinking = new Set();
+  let cur = null;      // the assistant turn being built
+  let encrypted = 0;   // reasoning items with no readable summary
+
+  // Blocks attach to the open assistant turn; a user/system message closes it.
+  const assistant = (ts) => {
+    if (!cur) { cur = { role: 'assistant', ts, blocks: [] }; out.push(cur); }
+    return cur;
+  };
+  const hasText = (m) => !!m && m.blocks.some((b) => b.type === 'text');
+
+  for await (const j of jsonLines(file)) {
+    const p = j.payload || {};
+    const ts = j.timestamp ? Date.parse(j.timestamp) || undefined : undefined;
+
+    if (j.type === 'session_meta') {
+      if (p.thread_source === 'subagent' || p.source?.subagent) {
+        const err = new Error('this rollout is an internal guardian/subagent thread, not the session');
+        err.code = 'trace-not-user-conversation';
+        throw err;
+      }
+      out.cwd = p.cwd || out.cwd;
+      continue;
+    }
+
+    // One per user turn, and the only place the model is named.
+    if (j.type === 'turn_context') {
+      if (p.model) out.model = p.model;
+      out.cwd = out.cwd || p.cwd || null;
+      continue;
+    }
+
+    if (j.type === 'response_item') {
+      if (p.type === 'message') {
+        const text = Array.isArray(p.content) ? p.content.map((c) => (c && c.text) || '').join('') : '';
+        if (!text.trim()) continue;
+        if (p.role === 'assistant') {
+          // A second text block means a new step, not an addition to this one.
+          if (hasText(cur)) cur = null;
+          assistant(ts).blocks.push(textBlock('text', text));
+          continue;
+        }
+        // `developer` is the harness talking to the model (app context, skills,
+        // permissions) — system, not something the operator typed. Codex also
+        // wraps environment blobs as role:'user' text starting with '<'.
+        const isEnv = p.role === 'developer' || text.trim().startsWith('<');
+        cur = null;
+        out.push({ role: isEnv ? 'system' : 'user', ts, blocks: [textBlock('text', text)] });
+      } else if (p.type === 'reasoning') {
+        // One block per summary ENTRY, not the entries joined. The same texts
+        // arrive as individual `agent_reasoning` events first, and a joined
+        // string would never dedupe against them — this session had 11 distinct
+        // reasoning texts and naive joining showed 16.
+        const parts = Array.isArray(p.summary)
+          ? p.summary.map((x) => String((x && x.text) || '')).filter((t) => t.trim())
+          : [String(p.text || '')].filter((t) => t.trim());
+        if (!parts.length) { encrypted++; continue; }
+        for (const text of parts) {
+          if (seenThinking.has(text.trim())) continue;
+          seenThinking.add(text.trim());
+          assistant(ts).blocks.push(textBlock('thinking', text));
+        }
+      } else if (['function_call', 'custom_tool_call', 'local_shell_call', 'web_search_call'].includes(p.type)) {
+        const use = { type: 'tool_use', id: p.call_id || p.id, name: p.name || p.type, ...capText(p.arguments ?? p.input) };
+        const msg = assistant(ts);
+        msg.blocks.push(use);
+        stitch.register(use, msg);
+      } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
+        const res = { type: 'tool_result', id: p.call_id, ...capText(flattenToolContent(p.output)) };
+        if (!stitch.file(res.id, res)) assistant(ts).blocks.push(res);
+      }
+      continue;
+    }
+
+    if (j.type === 'event_msg') {
+      if (p.type === 'token_count') {
+        const info = p.info || {};
+        const tot = info.total_token_usage;
+        if (tot) {
+          out.usage = {
+            in: Math.max(0, (tot.input_tokens || 0) - (tot.cached_input_tokens || 0)),
+            out: tot.output_tokens || 0,
+            cacheRead: tot.cached_input_tokens || 0,
+          };
+        }
+        // Per-turn cost belongs on the turn it paid for.
+        const last = info.last_token_usage;
+        if (last && cur && !cur.usage) {
+          cur.usage = {
+            in: Math.max(0, (last.input_tokens || 0) - (last.cached_input_tokens || 0)),
+            out: last.output_tokens || 0,
+            cacheRead: last.cached_input_tokens || 0,
+          };
+        }
+      } else if (p.type === 'agent_reasoning') {
+        // Readable reasoning the response_item stream encrypted away.
+        const text = String(p.text || p.message || '');
+        if (text.trim() && !seenThinking.has(text.trim())) {
+          seenThinking.add(text.trim());
+          assistant(ts).blocks.push(textBlock('thinking', text));
+        }
+      } else if (p.type === 'web_search_end') {
+        // The only record of a web search in this format.
+        const msg = assistant(ts);
+        const use = { type: 'tool_use', id: p.call_id, name: 'web_search', ...capText(p.query || (p.action && p.action.url) || '') };
+        msg.blocks.push(use);
+        stitch.register(use, msg);
+        const res = { type: 'tool_result', id: p.call_id, ...capText(p.results) };
+        if (!stitch.file(res.id, res)) msg.blocks.push(res);
+      } else if (p.type === 'task_complete') {
+        // In every task of the rollout I checked, `last_agent_message` was
+        // byte-identical to the preceding assistant message — a POINTER to the
+        // final answer, so marking it is right and emitting it would duplicate.
+        // But don't bet the content on that: if it genuinely differs, it is an
+        // answer we have not shown, so show it.
+        const text = String(p.last_agent_message || '').trim();
+        if (text) {
+          let marked = null;
+          for (let i = out.messages.length - 1; i >= 0; i--) {
+            const m = out.messages[i];
+            if (m.role === 'assistant' && hasText(m)) { marked = m; break; }
+          }
+          const shown = marked ? marked.blocks.filter((b) => b.type === 'text').map((b) => b.text.trim()) : [];
+          // A capped block only holds a prefix, so compare as a prefix there.
+          if (marked && shown.some((t) => t === text || (t.length >= VIEW_BLOCK_CAP && text.startsWith(t)))) {
+            marked.kind = 'final';
+          } else {
+            cur = null;
+            out.push({ role: 'assistant', kind: 'final', ts, blocks: [textBlock('text', text)] });
+          }
+        }
+        cur = null;
+      } else if (p.type === 'turn_aborted' || p.type === 'thread_rolled_back') {
+        cur = null;
+      }
+      continue;
+    }
+  }
+  if (encrypted) out.note = `${encrypted} reasoning step${encrypted === 1 ? '' : 's'} were encrypted by the model and carry no readable text`;
+}
+
+// OpenClaw — already close to STS: {type:'message', message:{role,content,usage}}
+async function normalizeOpenClaw(file, out) {
+  const stitch = makeStitcher();
+  for await (const j of jsonLines(file)) {
+    if (j.type !== 'message' || !j.message) continue;
+    const m = j.message;
+    const ts = j.timestamp ? Date.parse(j.timestamp) || undefined : undefined;
+    const msg = { role: m.role === 'assistant' ? 'assistant' : m.role === 'system' ? 'system' : 'user', ts, blocks: [] };
+    const u = m.usage;
+    if (u) msg.usage = { in: Math.max(0, (u.input || 0) - (u.cacheRead || 0)), out: u.output || 0, cacheRead: u.cacheRead || 0 };
+
+    if (typeof m.content === 'string') {
+      if (m.content.trim()) msg.blocks.push(textBlock('text', m.content));
+    } else if (Array.isArray(m.content)) {
+      for (const c of m.content) {
+        if (!c || typeof c !== 'object') continue;
+        if (typeof c.type === 'string' && /tool/i.test(c.type)) {
+          if (/result|output/i.test(c.type)) {
+            const res = { type: 'tool_result', id: c.toolCallId || c.id, ...capText(flattenToolContent(c.output ?? c.content ?? c.text)) };
+            if (!stitch.file(res.id, res)) msg.blocks.push(res);
+          } else {
+            const use = { type: 'tool_use', id: c.id, name: c.name || c.toolName || 'tool', ...capText(c.input) };
+            msg.blocks.push(use);
+            stitch.register(use, msg);
+          }
+        } else if (c.type === 'thinking' && String(c.thinking || c.text || '').trim()) {
+          msg.blocks.push(textBlock('thinking', c.thinking || c.text));
+        } else if (c.text) {
+          msg.blocks.push(textBlock('text', c.text));
+        }
+      }
+    }
+    if (msg.blocks.length) out.push(msg);
+  }
+}
+
+// STS (Session Trace Simple Format) — what share-session.mjs emits for the
+// converted harnesses, so accepted bundles from hermes/opencode/openclaw come
+// back through this one reader.
+async function normalizeSts(file, out) {
+  const stitch = makeStitcher();
+  for await (const j of jsonLines(file)) {
+    if (j.type === 'session') {
+      out.harnessLabel = label(j.harness) || out.harnessLabel;
+      out.sessionId = j.id || out.sessionId;
+      out.title = j.name || out.title; // the sender's name for the session
+      continue;
+    }
+    if (j.type !== 'message' || !j.message) continue;
+    const m = j.message;
+    const msg = {
+      role: m.role === 'assistant' ? 'assistant' : m.role === 'system' ? 'system' : m.role === 'tool' ? 'assistant' : 'user',
+      ts: typeof m.timestamp === 'number' ? m.timestamp : undefined,
+      blocks: [],
+    };
+    if (m.role === 'tool') {
+      const res = { type: 'tool_result', id: m.toolCallId, ...capText(m.content) };
+      if (stitch.file(m.toolCallId, res)) continue;
+      msg.blocks.push(res);
+    } else if (String(m.content || '').trim()) {
+      msg.blocks.push(textBlock('text', m.content));
+    }
+    for (const t of m.toolCalls || []) {
+      const use = { type: 'tool_use', id: t.id, name: t.function?.name || 'tool', ...capText(t.function?.arguments) };
+      msg.blocks.push(use);
+      stitch.register(use, msg);
+    }
+    if (msg.blocks.length) out.push(msg);
+  }
+}
+
+// ---------- SQLite harnesses ----------
+// One conversation, selected by id. NEVER copy the db: opencode's holds
+// account.access_token / refresh_token (spec §6). Read-only, off the hot path.
+function normalizeOpencodeDb(dbPath, sessionId, out) {
+  if (!DatabaseSync) { const e = new Error('node:sqlite unavailable'); e.code = 'unsupported-harness'; throw e; }
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const s = db.prepare('select * from session where id = ?').get(sessionId);
+    if (!s) return;
+    out.cwd = s.directory || null;
+    out.usage = { in: s.tokens_input || 0, out: s.tokens_output || 0, cacheRead: s.tokens_cache_read || 0 };
+    out.title = s.title || out.title;
+    // `model` is a JSON blob ({id, providerID, variant}), not a string — the id
+    // is what belongs on the header chip.
+    try { const mm = JSON.parse(s.model || 'null'); out.model = (mm && mm.id) || (typeof s.model === 'string' ? s.model : null); } catch { out.model = s.model || null; }
+    const parts = db.prepare('select * from part where message_id = ? order by time_created');
+    for (const m of db.prepare('select * from message where session_id = ? order by time_created').all(sessionId)) {
+      let md = {}; try { md = JSON.parse(m.data || '{}'); } catch {}
+      const msg = { role: md.role === 'assistant' ? 'assistant' : 'user', ts: Number(m.time_created) || undefined, blocks: [] };
+      for (const part of parts.all(m.id)) {
+        let pd = {}; try { pd = JSON.parse(part.data || '{}'); } catch {}
+        if (pd.type === 'text' && pd.text) msg.blocks.push(textBlock('text', pd.text));
+        else if (pd.type === 'reasoning' && (pd.text || pd.reasoning)) msg.blocks.push(textBlock('thinking', pd.text || pd.reasoning));
+        else if (pd.type === 'tool') {
+          const id = part.id;
+          msg.blocks.push({ type: 'tool_use', id, name: pd.tool || 'tool', ...capText(pd.state?.input ?? pd.input) });
+          const res = pd.state?.output ?? pd.output;
+          if (res != null) msg.blocks.push({ type: 'tool_result', id, ...capText(res) });
+        }
+      }
+      if (msg.blocks.length) out.push(msg);
+    }
+  } finally { try { db.close(); } catch {} }
+}
+
+// hermes — flat content; `timestamp` is SECONDS. A row with tool_name set is a
+// tool interaction, which we render as a call + its result so it collapses into
+// the same tool group as every other harness.
+function normalizeHermesDb(dbPath, sessionId, out) {
+  if (!DatabaseSync) { const e = new Error('node:sqlite unavailable'); e.code = 'unsupported-harness'; throw e; }
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const s = db.prepare('select * from sessions where id = ?').get(sessionId);
+    if (!s) return;
+    out.cwd = s.cwd || null;
+    out.title = s.title || out.title;
+    out.usage = { in: s.input_tokens || 0, out: s.output_tokens || 0, cacheRead: s.cache_read_tokens || 0 };
+    const rows = db.prepare('select * from messages where session_id = ? order by timestamp').all(sessionId);
+    for (const m of rows) {
+      const ts = m.timestamp != null ? Math.round(Number(m.timestamp) * 1000) : undefined;
+      if (m.tool_name) {
+        out.push({
+          role: 'assistant', ts,
+          blocks: [
+            { type: 'tool_use', id: `t${m.id}`, name: m.tool_name, ...capText('{}') },
+            { type: 'tool_result', id: `t${m.id}`, ...capText(m.content) },
+          ],
+        });
+        continue;
+      }
+      const text = String(m.content || '');
+      if (!text.trim()) continue;
+      out.push({
+        role: m.role === 'assistant' ? 'assistant' : m.role === 'system' ? 'system' : 'user',
+        ts, blocks: [textBlock('text', text)],
+      });
+    }
+  } finally { try { db.close(); } catch {} }
+}
+
+// ---------- shared helpers ----------
+const dataUrl = (b64, mediaType) => `data:${mediaType || 'image/png'};base64,${b64}`;
+
+// "harness" is a bare string on an STS session line but an OBJECT
+// ({id,name,version}) in a bundle manifest. Both reach harnessLabel, which the
+// pane header renders directly — and React throws on an object child. Coerce.
+function label(v) {
+  if (!v) return null;
+  if (typeof v === 'string') return v;
+  return v.name || v.id || null;
+}
+
+// Tool results arrive as a string, a content-block array, or an object.
+function flattenToolContent(value) {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    return value.map((c) => (typeof c === 'string' ? c : c && typeof c.text === 'string' ? c.text : JSON.stringify(c))).join('\n');
+  }
+  if (typeof value === 'object' && typeof value.text === 'string') return value.text;
+  return JSON.stringify(value, null, 2);
+}
+
+// Bundles have no session record telling us the harness, so sniff the first
+// lines — same trick as the Hub's detect.ts / sniffTraceHarness.
+async function sniffHarness(file) {
+  let n = 0;
+  for await (const j of jsonLines(file)) {
+    if (j.type === 'session' && j.harness) return 'sts';
+    if (j.type === 'session_meta' || j.payload) return 'codex';
+    if (j.type === 'file-history-snapshot' || ((j.type === 'user' || j.type === 'assistant') && j.message)) return 'claude';
+    if (j.type === 'message' && j.message) return 'openclaw';
+    if (++n >= 8) break;
+  }
+  return null;
+}
+
+function newTrace(harness) {
+  const t = {
+    harness, harnessLabel: HARNESS_LABEL[harness] || harness, sessionId: null, title: '', model: null, cwd: null,
+    firstTs: 0, lastTs: 0, usage: null, usageSum: null, source: null, sharedBy: null, note: null, messages: [],
+    push(msg) {
+      if (this.messages.length >= VIEW_MAX_MESSAGES) { this.truncated = true; return; }
+      if (msg.ts) {
+        if (!this.firstTs || msg.ts < this.firstTs) this.firstTs = msg.ts;
+        if (msg.ts > this.lastTs) this.lastTs = msg.ts;
+      }
+      // Claude and OpenClaw record usage per assistant message and nowhere else,
+      // so the session total has to be summed here. Safe against the duplicate
+      // message.id lines because usage lands only on the first one.
+      const u = msg.usage;
+      if (u) {
+        const s = this.usageSum || (this.usageSum = { in: 0, out: 0, cacheRead: 0 });
+        s.in += u.in || 0; s.out += u.out || 0; s.cacheRead += u.cacheRead || 0;
+      }
+      this.messages.push(msg);
+    },
+  };
+  return t;
+}
+
+/**
+ * Mark the last assistant turn before each user turn as the answer to it.
+ *
+ * The Hub's viewer draws this one differently — an accent rule down its left
+ * edge — because in a long agent turn it is the only message written FOR the
+ * reader; the rest are the agent narrating its way there. Codex names it itself
+ * (`task_complete`), but the rule generalises to every harness, so it is derived
+ * here rather than per-format. One reverse pass: an assistant text turn is final
+ * if no later assistant text turn precedes the next user turn.
+ */
+function markFinalTurns(out) {
+  const ms = out.messages;
+  let laterAnswer = false;
+  for (let i = ms.length - 1; i >= 0; i--) {
+    const m = ms[i];
+    if (m.role === 'user') { laterAnswer = false; continue; }
+    if (m.role !== 'assistant') continue;
+    if (!m.blocks.some((b) => b.type === 'text')) continue;
+    if (!laterAnswer) m.kind = 'final';
+    laterAnswer = true;
+  }
+}
+
+async function parseTraceFile(harness, file, sessionId) {
+  const out = newTrace(harness);
+  out.sessionId = sessionId || null;
+  switch (harness) {
+    case 'claude': await normalizeClaude(file, out); break;
+    case 'codex': await normalizeCodex(file, out); break;
+    case 'openclaw': await normalizeOpenClaw(file, out); break;
+    case 'sts': await normalizeSts(file, out); break;
+    case 'opencode': normalizeOpencodeDb(file, sessionId, out); break;
+    case 'hermes': normalizeHermesDb(file, sessionId, out); break;
+    default: { const e = new Error(`no trace reader for '${harness}'`); e.code = 'unsupported-harness'; throw e; }
+  }
+  // A harness that reports its own session total (codex's cumulative
+  // token_count, the db-backed session rows) wins; otherwise use the sum of the
+  // per-turn numbers.
+  if (!out.usage) out.usage = out.usageSum;
+  markFinalTurns(out);
+  return out;
+}
+
+function pageOf(parsed, offset, limit) {
+  const total = parsed.messages.length;
+  // Indices of the operator's own prompts, for the pane's prompt navigator.
+  // Sent whole rather than per page: jumping to the next prompt must work
+  // before the page holding it has been fetched.
+  const userTurns = [];
+  for (let i = 0; i < total; i++) if (parsed.messages[i].role === 'user') userTurns.push(i);
+  const from = Math.max(0, Math.min(offset | 0, total));
+  const to = Math.min(total, from + Math.max(1, Math.min(limit | 0 || 200, 500)));
+  return {
+    harness: parsed.harness, harnessLabel: parsed.harnessLabel, sessionId: parsed.sessionId,
+    title: parsed.title, model: parsed.model, cwd: parsed.cwd,
+    firstTs: parsed.firstTs, lastTs: parsed.lastTs, usage: parsed.usage,
+    source: parsed.source, sharedBy: parsed.sharedBy, note: parsed.note || null,
+    total, offset: from, limit: to - from, truncated: !!parsed.truncated,
+    userTurns,
+    turns: parsed.messages.slice(from, to),
+  };
+}
+
+/**
+ * Read one session's trace, paginated. `session` is an Agent Manager session
+ * record; locating the file is delegated to findTrace() in share.js, which
+ * already handles all five harnesses, per-session pins, cwd attribution,
+ * ambiguity refusal and codex subagent rollouts. Do not reimplement it.
+ */
+export async function readTrace(session, { offset = 0, limit = 200 } = {}) {
+  const hit = await findTrace(session, store.list());
+  if (!hit) { const e = new Error('no trace found for this session'); e.code = 'no-trace'; throw e; }
+
+  const st = await statRetry(hit.src);
+  if (!st) { const e = new Error(`trace file unreadable: ${hit.src}`); e.code = 'no-trace'; throw e; }
+
+  const key = `s:${session.id}:${hit.src}:${hit.sessionId || ''}:${st.mtimeMs}:${st.size}`;
+  if (viewMemo.key !== key) {
+    const parsed = await tracked(PHASE.readTrace, () =>
+      parseTraceFile(session.cli, hit.src, hit.sessionId || session.sessionUuid || null));
+    viewMemo = { key, val: parsed };
+  }
+  return pageOf(viewMemo.val, offset, limit);
+}
+
+/**
+ * Read an accepted incoming bundle: DATA_DIR/traces/<envelopeId>/<name>.jsonl
+ * plus meta/. The harness is sniffed from the file, since a bundle carries
+ * whatever format the sender's harness ships.
+ */
+export async function readTraceBundle(dir, { offset = 0, limit = 200 } = {}) {
+  const names = (await fsp.readdir(dir).catch(() => [])).filter((n) => n.endsWith('.jsonl'));
+  if (!names.length) { const e = new Error('bundle has no trace file'); e.code = 'no-trace'; throw e; }
+  const file = path.join(dir, names[0]);
+  const st = await statRetry(file);
+  if (!st) { const e = new Error('bundle trace unreadable'); e.code = 'no-trace'; throw e; }
+
+  const key = `b:${file}:${st.mtimeMs}:${st.size}`;
+  if (viewMemo.key !== key) {
+    const harness = await sniffHarness(file);
+    if (!harness) { const e = new Error('unrecognized trace format'); e.code = 'unsupported-harness'; throw e; }
+    const parsed = await tracked(PHASE.readTrace, () => parseTraceFile(harness, file, null));
+    let manifest = null;
+    try { manifest = JSON.parse(await fsp.readFile(path.join(dir, 'meta', 'manifest.json'), 'utf8')); } catch {}
+    // The manifest is the sender's own description of the bundle
+    // (scripts/share-session.mjs writes it) and knows things the trace lines
+    // don't: which harness produced it, what the sender called the session, the
+    // working directory, and the session totals. Field names follow that
+    // manifest, not this reader's shape — `harness` is an object there.
+    if (manifest) {
+      parsed.harnessLabel = label(manifest.harness) || parsed.harnessLabel;
+      parsed.title = (manifest.session && manifest.session.name) || parsed.title;
+      parsed.sessionId = parsed.sessionId || (manifest.session && manifest.session.uuid) || null;
+      const s = manifest.stats || {};
+      parsed.cwd = parsed.cwd || s.cwd || null;
+      if (!parsed.usage && (s.tokensIn || s.tokensOut || s.cacheRead)) {
+        parsed.usage = { in: s.tokensIn || 0, out: s.tokensOut || 0, cacheRead: s.cacheRead || 0 };
+      }
+      parsed.sharedBy = (manifest.origin && manifest.origin.user) || null;
+    }
+    // Provenance, written by importBundle: a received trace that can't say whose
+    // it is has lost what makes it trustworthy.
+    try {
+      const src = JSON.parse(await fsp.readFile(path.join(dir, 'meta', 'source.json'), 'utf8'));
+      parsed.source = { repo: src.repo || null, url: src.url || null, importedAt: src.importedAt || null };
+    } catch { /* hand-placed bundle, or an older import */ }
+    viewMemo = { key, val: parsed };
+  }
+  return pageOf(viewMemo.val, offset, limit);
 }

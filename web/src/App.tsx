@@ -2,15 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
 import FilesPane from './components/FilesPane';
+import TracePane from './components/TracePane';
 import SettingsView from './components/SettingsView';
 import NewSession from './components/NewSession';
 import LayoutPicker from './components/LayoutPicker';
+import ShareDialog from './components/ShareDialog';
 import Logo from './components/Logo';
 import Overview from './components/Overview';
 import Locked from './components/Locked';
 import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
+import { isPassive } from './types';
 import { GridGlyph, ListGlyph } from './components/icons';
 
 // Phone-sized viewport: the app becomes two full-screen views (list ⇄ pane).
@@ -57,6 +60,8 @@ export default function App() {
   const [showWelcome, setShowWelcome] = useState(false);
   // Transient error toast for failed mutations (create/delete/move/…).
   const [toast, setToast] = useState<string | null>(null);
+  // Session id whose share dialog is open (null = closed).
+  const [shareId, setShareId] = useState<string | null>(null);
   const showErr = (msg: string) => (e: unknown) => { console.error(msg, e); setToast(msg); window.setTimeout(() => setToast(null), 4000); };
   // Overview presentation: tiles (default) or the classic list.
   const [ovView, setOvViewRaw] = useState<'tiles' | 'list'>(() =>
@@ -206,8 +211,8 @@ export default function App() {
     if (archiveAfter === 'never') return out;
     const cut = Date.now() - (archiveAfter === 'week' ? 7 : 30) * 864e5;
     for (const s of tree.sessions) {
-      // Shells and file panes have no trace clock — never archive them.
-      if (s.cli === 'shell' || s.cli === 'files' || s.state === 'working') continue;
+      // Shells and passive panels have no trace clock — never archive them.
+      if (s.cli === 'shell' || isPassive(s.cli) || s.state === 'working') continue;
       const last = ages[s.id] || Date.parse(s.createdAt) || 0;
       if (last && last < cut) out.add(s.id);
     }
@@ -326,6 +331,46 @@ export default function App() {
     setPage(0);
     if (isMobile) setMobileStage(true);
   };
+  // Read an agent's own transcript in a read-only trace pane. The pane is a
+  // session record like any other (so it survives reload, tiles, and drag), and
+  // it's REUSED per source — clicking Trace twice reopens the same pane instead
+  // of littering the sidebar with duplicates.
+  const openTrace = async (sid: string) => {
+    const src = sessById[sid];
+    if (!src) return;
+    const existing = tree.sessions.find((p) => p.cli === 'trace' && p.traceSource?.kind === 'session' && p.traceSource.ref === sid);
+    if (existing) { openSession(existing.id, tree.groups.find((g) => g.sessionIds.includes(existing.id))?.id); return; }
+    try {
+      // '.' = the workspaces root: a trace pane reads a transcript, so it owns no
+      // folder and must not create one.
+      const pane = await api.createSession(`Trace: ${src.name}`, 'trace', undefined, '.');
+      await api.setTraceSource(pane.id, 'session', sid);
+      await refresh();
+      setActiveRef(`s:${pane.id}`);
+      setPage(0);
+      if (isMobile) setMobileStage(true);
+    } catch (e) { showErr('Couldn’t open the trace')(e); }
+  };
+  // Someone shared a session as a Hub dataset: pull it down, then open a pane on
+  // it. Errors propagate so the sidebar can show the server's own reason inline
+  // (wrong id, no access, not a share) instead of a generic toast.
+  const openSharedTrace = async (repo: string) => {
+    const bundle = await api.importTraceBundle(repo);
+    const existing = tree.sessions.find((p) => p.cli === 'trace' && p.traceSource?.kind === 'bundle' && p.traceSource.ref === bundle.ref);
+    const label = bundle.manifest?.session?.name || bundle.repo.split('/').pop() || 'shared trace';
+    const pane = existing || await api.createSession(`Trace: ${label}`, 'trace', undefined, '.');
+    if (!existing) await api.setTraceSource(pane.id, 'bundle', bundle.ref);
+    // A reused pane may carry a name from a source it no longer points at (the
+    // source can be repointed). Correct it — but never overwrite a name the user
+    // chose themselves, which is any name we didn't generate.
+    else if (pane.name.startsWith('Trace: ') && pane.name !== `Trace: ${label}`) {
+      await api.renameSession(pane.id, `Trace: ${label}`);
+    }
+    await refresh();
+    setActiveRef(`s:${pane.id}`);
+    setPage(0);
+    if (isMobile) setMobileStage(true);
+  };
   const closePane = (sid: string) => {
     // On mobile ✕ just returns to the list — never the desktop ungroup gesture.
     if (isMobile) { setMobileStage(false); return; }
@@ -427,6 +472,16 @@ export default function App() {
                 onFocus={() => setFocusedId(s.id)}
                 onClose={() => closePane(s.id)}
               />
+            ) : s.cli === 'trace' ? (
+              <TracePane
+                session={s}
+                zoom={zoom}
+                focused={visibleSessions.length > 1 && s.id === focusedId}
+                dragId={canDrag ? `p:${s.id}` : undefined}
+                onDragActive={setPaneDrag}
+                onFocus={() => setFocusedId(s.id)}
+                onClose={() => closePane(s.id)}
+              />
             ) : (
               <TerminalPane
                 session={s}
@@ -480,6 +535,12 @@ export default function App() {
     <div className={`app${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
       {showWelcome && <Welcome onClose={dismissWelcome} />}
       {toast && <div className="toast mono" role="alert">{toast}</div>}
+      {shareId && sessById[shareId] && (
+        <ShareDialog
+          session={sessById[shareId]}
+          onClose={() => { setShareId(null); refresh(); }}
+        />
+      )}
       <Sidebar
         clis={clis}
         tree={tree}
@@ -490,6 +551,9 @@ export default function App() {
         onActivate={activate}
         onOpenSession={openSession}
         onNewSession={newSession}
+        onShareSession={setShareId}
+        onOpenTrace={openTrace}
+        onOpenSharedTrace={openSharedTrace}
         onNewGroup={newGroup}
         onRenameGroup={renameGroup}
         onRenameSession={renameSession}

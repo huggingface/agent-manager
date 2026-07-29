@@ -132,7 +132,7 @@ export function agentInfo() {
  *   stopped  — no live session
  */
 export function deriveState(session, info) {
-  if (session.cli === 'files') return 'idle'; // passive panel, not a process
+  if (session.cli === 'files' || session.cli === 'trace') return 'idle'; // passive panels, not processes
   if (!info) return isRunning(session.id) ? 'idle' : 'stopped';
   if (info.age <= BUSY_SECS) return 'working';
   return session.cli === 'shell' ? 'idle' : 'waiting';
@@ -175,6 +175,39 @@ function codexRolloutsSince(sinceMs) {
 // session_meta line carries the full embedded instruction text (~22KB as of
 // 0.142), so read in chunks until the newline — a fixed small buffer would
 // truncate the JSON and make every capture silently fail.
+// The first line of a transcript that records a `cwd`, with its timestamp.
+// Bounded on lines AND bytes: a file-history-snapshot line can be megabytes.
+function transcriptHead(p) {
+  // openSync INSIDE the try: on the bucket mount a transcript can rotate away
+  // between the stat that found it and this open, and the only caller runs in a
+  // setTimeout where a throw is unhandled.
+  let fd = null;
+  try {
+    fd = fs.openSync(p, 'r');
+    const CHUNK = 65536, MAX_BYTES = 512 * 1024, MAX_LINES = 64;
+    let carry = '', pos = 0, lines = 0;
+    while (pos < MAX_BYTES && lines < MAX_LINES) {
+      const b = Buffer.alloc(Math.min(CHUNK, MAX_BYTES - pos));
+      const n = fs.readSync(fd, b, 0, b.length, pos);
+      if (!n) break;
+      pos += n;
+      carry += b.toString('utf8', 0, n);
+      let nl;
+      while ((nl = carry.indexOf('\n')) >= 0 && lines < MAX_LINES) {
+        const line = carry.slice(0, nl);
+        carry = carry.slice(nl + 1);
+        lines++;
+        if (!line.trim()) continue;
+        let j;
+        try { j = JSON.parse(line); } catch { continue; }
+        if (j && j.cwd) return { cwd: j.cwd, timestamp: j.timestamp || null };
+      }
+      if (n < b.length) break; // EOF
+    }
+    return null;
+  } catch { return null; } finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } }
+}
+
 function firstLine(p) {
   const fd = fs.openSync(p, 'r');
   try {
@@ -254,6 +287,93 @@ function scheduleCodexCapture(session, workdir) {
 // writes to its db and pin it — mirrors the codex approach. The row appears
 // only once the conversation has content (the user's first message), so retry
 // on a longer, sparser schedule than codex.
+// ---------- Claude conversation re-pinning ----------
+// We ASK for a conversation id up front (`claude --session-id <uuid>`), which
+// normally makes the transcript filename equal session.sessionUuid. But the
+// launch line ends in `|| exec claude`, and when the first invocation exits
+// non-zero — a fresh install running its onboarding does exactly that — Claude
+// starts again and picks an id of its OWN. The pin then matches nothing on disk,
+// forever: the Overview shows no digest, `--resume` can't find the transcript so
+// the session silently starts fresh every launch, and sharing can't locate it.
+//
+// So verify the pin after launch the same way codex/opencode capture theirs, and
+// re-pin to the transcript Claude actually wrote. Observed live on a test Space:
+// session pinned 4efced14…, transcript on disk cb22b656….
+const claudeCapturing = new Set();
+
+function claudeProjectDirs() {
+  const home = process.env.HOME || '';
+  return [process.env.CLAUDE_CONFIG_DIR, path.join(home, '.claude'), path.join(home, '.config', 'claude')]
+    .filter(Boolean).filter((d, i, a) => a.indexOf(d) === i)
+    .map((d) => path.join(d, 'projects'));
+}
+
+// Every transcript, newest first, touched since `sinceMs`.
+function claudeTranscriptsSince(sinceMs) {
+  const out = [];
+  for (const proj of claudeProjectDirs()) {
+    let dirs = [];
+    try { dirs = fs.readdirSync(proj, { withFileTypes: true }); } catch { continue; }
+    for (const d of dirs) {
+      if (!d.isDirectory()) continue;
+      let files = [];
+      try { files = fs.readdirSync(path.join(proj, d.name)); } catch { continue; }
+      for (const f of files) {
+        if (!f.endsWith('.jsonl')) continue;
+        const p = path.join(proj, d.name, f);
+        try { const st = fs.statSync(p); if (st.mtimeMs >= sinceMs) out.push({ p, m: st.mtimeMs }); } catch {}
+      }
+    }
+  }
+  return out.sort((a, b) => b.m - a.m);
+}
+
+const transcriptExists = (uuid) =>
+  !!uuid && claudeProjectDirs().some((proj) => {
+    let dirs = [];
+    try { dirs = fs.readdirSync(proj, { withFileTypes: true }); } catch { return false; }
+    return dirs.some((d) => {
+      if (!d.isDirectory()) return false;
+      try { return fs.readdirSync(path.join(proj, d.name)).some((f) => f.startsWith(uuid)); } catch { return false; }
+    });
+  });
+
+function scheduleClaudeCapture(session, workdir) {
+  if (claudeCapturing.has(session.id)) return;
+  claudeCapturing.add(session.id);
+  const since = Date.now() - 2000;
+  const delays = [5000, 15000, 45000, 90000];
+  const attempt = (i) => {
+    // The pin is fine as soon as a matching transcript exists — the common case.
+    if (transcriptExists(session.sessionUuid)) { claudeCapturing.delete(session.id); return; }
+
+    const claimed = new Set(list().filter((s) => s.id !== session.id && s.sessionUuid).map((s) => s.sessionUuid));
+    for (const c of claudeTranscriptsSince(since)) {
+      const uuid = path.basename(c.p).replace(/\.jsonl$/, '');
+      if (claimed.has(uuid)) continue;
+      // The cwd is NOT on the first line: a transcript opens with metadata lines
+      // (mode, permission-mode, file-history-snapshot, ai-title, worktree-state)
+      // that have no cwd, and only the conversation lines carry one — line 4 or 5
+      // in every real transcript measured. Reading line 1 made this check always
+      // fail, so the re-pin could never actually claim anything.
+      const head = transcriptHead(c.p);
+      // Only claim a conversation started in THIS session's folder.
+      if (!head || head.cwd !== workdir) continue;
+      const created = Date.parse(head.timestamp || '') || 0;
+      if (created && created < since - 15_000) continue; // someone else's older thread
+      console.warn(`[claude] re-pinning ${session.id}: ${session.sessionUuid} -> ${uuid} (--session-id was not honoured)`);
+      update(session.id, { sessionUuid: uuid });
+      claudeCapturing.delete(session.id);
+      return;
+    }
+    if (i + 1 >= delays.length) { claudeCapturing.delete(session.id); return; }
+    const t = setTimeout(() => attempt(i + 1), delays[i + 1] - delays[i]);
+    if (t.unref) t.unref();
+  };
+  const t0 = setTimeout(() => attempt(0), delays[0]);
+  if (t0.unref) t0.unref();
+}
+
 const opencodeCapturing = new Set();
 function scheduleOpencodeCapture(session, workdir) {
   if (session.opencodeSessionId || opencodeCapturing.has(session.id)) return;
@@ -402,6 +522,7 @@ export function attach(session, cols, rows) {
   if (!session.everStarted) update(session.id, { everStarted: true, pendingPrompt: undefined });
   if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
   if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
+  if (session.cli === 'claude') scheduleClaudeCapture(session, workdir);
 
   const handle = {
     onData: (cb) => term.onData(cb),
@@ -442,6 +563,7 @@ export function ensureRunning(session) {
   if (!session.everStarted) update(session.id, { everStarted: true, pendingPrompt: undefined });
   if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
   if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
+  if (session.cli === 'claude') scheduleClaudeCapture(session, workdir);
   return true;
 }
 

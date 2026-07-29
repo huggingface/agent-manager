@@ -144,6 +144,146 @@ export const uploadFile = (id: string, p: string, file: File) =>
 export const downloadUrl = (id: string, p: string) =>
   `/api/files/${id}/download?path=${encodeURIComponent(p)}`;
 
+// ---- session sharing (docs/session-sharing.md) ----
+export interface ShareInfo {
+  namespace: string | null;
+  canShare: boolean;
+  reason: 'no-hf-token' | 'unsupported-cli' | 'no-transcript' | null;
+  lastShare: { repo: string; sha: string | null; visibility: string; at: string } | null;
+}
+export interface ShareResult {
+  repo: string;
+  visibility: 'public' | 'gated';
+  url: string;
+  sha: string | null;
+  trace: string;
+  stats: { prompts: number; turns: number; toolCalls: number };
+  redaction: Record<string, number>;
+  dropped: Record<string, number>;
+  granted: string[];
+  grantErrors: { user: string; error: string }[];
+}
+// Thrown when the redaction gate refuses a public share (HTTP 409). Carries the
+// rule names so the dialog can say exactly what tripped instead of "failed".
+export class RedactionBlocked extends Error {
+  hits: Record<string, number>;
+  constructor(message: string, hits: Record<string, number>) {
+    super(message);
+    this.name = 'RedactionBlocked';
+    this.hits = hits;
+  }
+}
+
+export const getShareInfo = (id: string): Promise<ShareInfo> => fetch(`/api/sessions/${id}/share`).then(json);
+
+export const shareSession = async (
+  id: string,
+  body: { visibility: 'public' | 'gated'; name?: string; grantTo?: string[] },
+): Promise<ShareResult> => {
+  const r = await fetch(`/api/sessions/${id}/share`, { method: 'POST', headers: HEADERS, body: JSON.stringify(body) });
+  if (r.status === 409) {
+    const d = await r.json().catch(() => ({}));
+    throw new RedactionBlocked(d.error || 'blocked by the redaction gate', d.hits || {});
+  }
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
+  return r.json();
+};
+
+export interface ShareAccess { accepted: string[]; pending: string[] }
+export const getShareAccess = (repo: string): Promise<ShareAccess> =>
+  fetch(`/api/share/access?repo=${encodeURIComponent(repo)}`).then(json);
+export const updateShareAccess = (repo: string, patch: { grant?: string[]; revoke?: string[] }): Promise<ShareAccess> =>
+  fetch('/api/share/access', { method: 'POST', headers: HEADERS, body: JSON.stringify({ repo, ...patch }) }).then(json);
+
+// ---- trace panel (docs/trace-panel-spec.md) ----
+// Blocks, not fields: one renderer handles every harness, and a tool result can
+// be filed next to its call even when parallel tools finish out of order.
+export type TraceBlock =
+  | { type: 'text'; text: string; more?: number }
+  | { type: 'thinking'; text: string; more?: number }
+  | { type: 'tool_use'; id?: string; name: string; text: string; more?: number }
+  | { type: 'tool_result'; id?: string; text: string; more?: number; failed?: boolean }
+  | { type: 'shell'; command: string; stdout?: string; stderr?: string; exitCode?: number }
+  | { type: 'image'; src: string; mediaType?: string }
+  | { type: 'compaction'; text: string };
+
+export interface TraceTurn {
+  role: 'user' | 'assistant' | 'system';
+  kind?: 'final' | 'update';
+  ts?: number;
+  model?: string;
+  usage?: { in: number; out: number; cacheRead?: number };
+  blocks: TraceBlock[];
+}
+
+export interface TracePage {
+  harness: string;
+  harnessLabel: string;
+  sessionId: string | null;
+  title: string;
+  model: string | null;
+  cwd: string | null;
+  firstTs: number;
+  lastTs: number;
+  usage: { in: number; out: number; cacheRead?: number } | null;
+  // Bundles only: where this trace came from, and who shared it.
+  source?: { repo: string | null; url: string | null; importedAt: string | null } | null;
+  sharedBy?: string | null;
+  // Something true about this trace that isn't a turn — e.g. reasoning the model
+  // encrypted, which is absent rather than empty.
+  note?: string | null;
+  total: number;
+  offset: number;
+  limit: number;
+  truncated: boolean;
+  // Indices of the operator's prompts across the WHOLE session, so the pane can
+  // jump to one that hasn't been fetched yet.
+  userTurns: number[];
+  turns: TraceTurn[];
+}
+
+// A 404 here is an expected state (no transcript yet, unsupported CLI, a codex
+// guardian rollout), so the reason travels with it for the pane to render.
+export class TraceUnavailable extends Error {
+  code: string;
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = 'TraceUnavailable';
+    this.code = code;
+  }
+}
+
+export const getTracePage = async (id: string, offset = 0, limit = 200): Promise<TracePage> => {
+  const r = await fetch(`/api/trace/${id}?offset=${offset}&limit=${limit}`);
+  if (r.status === 404) {
+    const d = await r.json().catch(() => ({}));
+    throw new TraceUnavailable(d.error || 'no trace for this session yet', d.code || 'no-trace');
+  }
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
+  return r.json();
+};
+
+// Receiving: pull a shared trace off the Hub so a pane can render it. Accepts a
+// bare dataset id or a pasted dataset URL (the server normalizes).
+export interface ImportedBundle {
+  ref: string; repo: string; sha: string; files: string[]; bytes: number;
+  manifest?: { harness?: { name?: string; id?: string }; session?: { name?: string }; origin?: { user?: string } } | null;
+}
+export const importTraceBundle = async (repo: string): Promise<ImportedBundle> => {
+  const r = await fetch('/api/trace/import', { method: 'POST', headers: HEADERS, body: JSON.stringify({ repo }) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
+  return r.json();
+};
+
+export interface BundleEntry {
+  ref: string; repo: string | null; url: string | null; importedAt: string | null;
+  harness: string | null; name: string | null; from: string | null;
+}
+export const listTraceBundles = (): Promise<{ bundles: BundleEntry[] }> => fetch('/api/trace/bundles').then(json);
+
+export const setTraceSource = (id: string, kind: 'session' | 'bundle', ref: string) =>
+  fetch(`/api/trace/${id}/source`, { method: 'PUT', headers: HEADERS, body: JSON.stringify({ kind, ref }) }).then(json);
+
 // ---- skills ----
 export interface SkillFile { name: string; size: number; }
 export const listSkills = (): Promise<SkillFile[]> => fetch('/api/skills').then(json);

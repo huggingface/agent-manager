@@ -1,12 +1,17 @@
 import { useMemo, useState } from 'react';
 import type { Cli, MoveTarget, Group, Session, Tree } from '../types';
-import { STATE_LABEL } from '../types';
+import { STATE_LABEL, isPassive } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph, ListGlyph } from './icons';
 
 type Zone = 'before' | 'after' | 'on';
+
+// Harnesses whose traces the Hub renders natively, so a share ships the file
+// verbatim (mirrors SHAREABLE_CLIS in server/src/share.js). The others need
+// converters first, and a button that always fails is worse than no button.
+const SHAREABLE_CLIS = ['claude', 'codex', 'hermes', 'opencode', 'openclaw'];
 
 const fmtAgo = (ts?: number) => {
   if (!ts) return '';
@@ -20,7 +25,7 @@ const fmtAgo = (ts?: number) => {
 export default function Sidebar({
   clis, tree, activeRef, focusedId, defaultPath, ages,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
-  onStopSession, onDeleteSession, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
+  onStopSession, onDeleteSession, onShareSession, onOpenTrace, onOpenSharedTrace, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
   archived, showArchived, onToggleArchived,
 }: {
   clis: Cli[];
@@ -39,6 +44,9 @@ export default function Sidebar({
   onDeleteGroup: (id: string) => void;
   onStopSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
+  onShareSession: (id: string) => void;
+  onOpenTrace: (id: string) => void;
+  onOpenSharedTrace: (repo: string) => Promise<void>;
   onMove: (ref: string, to: MoveTarget) => void;
   onDragState?: (ref: string | null) => void; // lets the stage offer per-tile drop targets
   theme: 'light' | 'dark';
@@ -65,6 +73,10 @@ export default function Sidebar({
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [dragRef, setDragRef] = useState<string | null>(null);
   const [drop, setDrop] = useState<{ ref: string; zone: Zone } | null>(null);
+  // "Open a shared trace": paste a dataset id/URL, we pull it and show it.
+  const [openTraceRepo, setOpenTraceRepo] = useState<string | null>(null);
+  const [openTraceBusy, setOpenTraceBusy] = useState(false);
+  const [openTraceErr, setOpenTraceErr] = useState<string | null>(null);
 
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
@@ -72,6 +84,23 @@ export default function Sidebar({
   const waiting = tree.sessions.filter((s) => s.state === 'waiting').length;
 
   const clearDrag = () => { setDragRef(null); setDrop(null); onDragState?.(null); };
+  // Failures here are ordinary and specific (no access, not a share, no token) —
+  // show what the server said rather than a generic toast, since the fix is
+  // usually to paste a different id.
+  const submitSharedTrace = async () => {
+    const repo = (openTraceRepo || '').trim();
+    if (!repo) return;
+    setOpenTraceBusy(true);
+    setOpenTraceErr(null);
+    try {
+      await onOpenSharedTrace(repo);
+      setOpenTraceRepo(null);
+    } catch (e) {
+      setOpenTraceErr(e instanceof Error ? e.message : 'could not open that trace');
+    } finally {
+      setOpenTraceBusy(false);
+    }
+  };
   // Archived sessions vanish from the tree unless the legend checkbox is on.
   const isHidden = (id: string) => !showArchived && archived.has(id);
   const bump = (id: string, d: number) => setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
@@ -83,7 +112,7 @@ export default function Sidebar({
   // Quickstart: one harness pick + one prompt, agent launches in workspace/.
   // Every agent harness is shown; ones not installed here are greyed out.
   // "More options" adds a name + folder; the group tile flips to group creation.
-  const quickable = clis.filter((c) => c.id !== 'shell' && c.id !== 'files');
+  const quickable = clis.filter((c) => c.id !== 'shell' && !isPassive(c.id));
   const openQuick = () => {
     setQuickCli((q) => q ?? (quickable.find((c) => c.available && c.ready)?.id || quickable.find((c) => c.available)?.id || null));
     setQuickMode('agent');
@@ -183,6 +212,12 @@ export default function Sidebar({
           {s.running
             ? <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}><StopGlyph /></button>
             : <button className="mini-btn" title="Start" onClick={(e) => { e.stopPropagation(); onOpenSession(s.id, groupId); }}><PlayGlyph /></button>}
+          {SHAREABLE_CLIS.includes(s.cli) && (
+            <>
+              <button className="mini-btn" title="Read this session's trace" onClick={(e) => { e.stopPropagation(); onOpenTrace(s.id); }}><ListGlyph /></button>
+              <button className="mini-btn" title="Share this session" onClick={(e) => { e.stopPropagation(); onShareSession(s.id); }}><ShareGlyph /></button>
+            </>
+          )}
           <button className="mini-btn" title="Delete" onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><CloseGlyph /></button>
         </span>
       </div>
@@ -320,7 +355,10 @@ export default function Sidebar({
                 <FolderPicker value={groupLoc} onChange={setGroupLoc} />
                 <div className="cart">
                   {/* every agent harness is offered; uninstalled ones are inert */}
-                  {clis.filter((c) => c.available || (c.id !== 'shell' && c.id !== 'files')).map((c) => {
+                  {/* Shell and Files stay on offer — a group may legitimately want
+                      one. Trace does not: a trace pane with no source shows nothing,
+                      so it's only ever created from a session's Trace button. */}
+                  {clis.filter((c) => (c.available || (c.id !== 'shell' && c.id !== 'files')) && c.id !== 'trace').map((c) => {
                     const n = cart[c.id] || 0;
                     return (
                       <div key={c.id} className={`cart-row${n > 0 ? ' has' : ''}${c.available ? '' : ' off'}`} title={c.available ? c.label : `${c.label} (not installed)`}>
@@ -392,7 +430,7 @@ export default function Sidebar({
           // leftover shell/file viewer alone doesn't keep it on screen.
           // Groups with no agent members at all (pure utility) stay.
           const members = g.sessionIds.map((sid) => sessById[sid]).filter(Boolean) as Session[];
-          const agents = members.filter((s) => s.cli !== 'shell' && s.cli !== 'files');
+          const agents = members.filter((s) => s.cli !== 'shell' && !isPassive(s.cli));
           const anyVisible = agents.length === 0 || agents.some((s) => !isHidden(s.id));
           return anyVisible ? GroupBlock(g) : null;
         })}
@@ -410,7 +448,39 @@ export default function Sidebar({
         <button className="btn-ghost" title="New file browser (whole workspace)" onClick={() => onNewSession('', 'files', '.')}>
           <Logo cli="files" size={14} /> Files
         </button>
+        {/* A trace pane can't be created blank, so it isn't a quick-add: this
+            asks WHICH shared trace, then opens the pane on it. */}
+        <button className="btn-ghost" title="Open a session someone shared with you"
+          onClick={() => { setOpenTraceRepo(openTraceRepo === null ? '' : null); setOpenTraceErr(null); }}>
+          <Logo cli="trace" size={14} /> Trace
+        </button>
       </div>
+
+      {openTraceRepo !== null && (
+        <div className="widget open-trace">
+          <div className="w-field">
+            <span className="w-label">Dataset</span>
+            <input
+              autoFocus
+              placeholder="user/session-name — or paste the dataset URL"
+              value={openTraceRepo}
+              disabled={openTraceBusy}
+              onChange={(e) => setOpenTraceRepo(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') submitSharedTrace(); if (e.key === 'Escape') setOpenTraceRepo(null); }}
+            />
+          </div>
+          {openTraceErr && <div className="open-trace-err">{openTraceErr}</div>}
+          <div className="quick-hint">
+            Private and gated shares work too — this Space downloads with its own token.
+          </div>
+          <div className="widget-actions">
+            <button className="btn-ghost" onClick={() => setOpenTraceRepo(null)} disabled={openTraceBusy}>Cancel</button>
+            <button className="btn-primary" onClick={submitSharedTrace} disabled={openTraceBusy || !openTraceRepo.trim()}>
+              {openTraceBusy ? 'Fetching…' : 'Open'}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="legend">
         <span><span className="status working" /> working</span>

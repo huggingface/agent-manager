@@ -8,7 +8,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import {
   PORT, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR, USE_TMUX, TMUX_AVAILABLE,
-  ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions,
+  ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions, PASSIVE_CLIS,
 } from './config.js';
 import * as store from './sessions.js';
 import * as groups from './groups.js';
@@ -16,10 +16,12 @@ import * as order from './order.js';
 import * as demo from './demo.js';
 import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection, paneModes, isRunning, capturePane } from './runner.js';
 import { buildUsage } from './usage.js';
-import { buildTraces, traceDigests, digestFor, traceLocation } from './traces.js';
+import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 import { startWatchdog } from './watchdog.js';
+import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
+         importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 
 ensureDirs();
 refreshVersions();
@@ -203,7 +205,7 @@ app.get('/api/meta', async (_req, res) => {
   const digests = await traceDigests();
   const hs = demo.active() ? demo.hiddenSessions() : null;
   const sessions = sessionsWithState()
-    .filter((s) => s.cli !== 'files' && s.cli !== 'shell')
+    .filter((s) => s.cli !== 'shell' && !PASSIVE_CLIS.includes(s.cli))
     .filter((s) => !hs || !hs.has(s.id))
     .map((s) => {
       const d = digests.get(s.id);
@@ -219,7 +221,7 @@ app.get('/api/meta', async (_req, res) => {
 app.post('/api/sessions/:id/input', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  if (s.cli === 'files') return res.status(400).json({ error: 'files pane takes no input' });
+  if (PASSIVE_CLIS.includes(s.cli)) return res.status(400).json({ error: `${s.cli} pane takes no input` });
   const text = typeof (req.body || {}).text === 'string' ? req.body.text.trim() : '';
   if (!text) return res.status(400).json({ error: 'empty' });
   try {
@@ -243,9 +245,10 @@ app.post('/api/sessions/:id/input', async (req, res) => {
 // someone unasked, don't spawn armies) is TAUGHT in that skill rather than
 // enforced here: an agent that understands why is better than a 429 it has to
 // guess its way around. Only two rules are structural, because prose can't hold
-// them: nobody may prompt or stop ITSELF (an instant self-loop), and shell/files
-// panes take no prompts.
-const promptable = (s) => s.cli !== 'shell' && s.cli !== 'files';
+// them: nobody may prompt or stop ITSELF (an instant self-loop), and shell and
+// the passive panes take no prompts.
+const isAgentCli = (cli) => cli !== 'shell' && !PASSIVE_CLIS.includes(cli);
+const promptable = (s) => isAgentCli(s.cli);
 const clamp = (n, lo, hi, dflt) => (Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : dflt);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -329,7 +332,7 @@ app.get('/api/agents', async (req, res) => {
   res.json({
     agents,
     // Which CLIs a spawn can ask for. `ready` = a credential was found.
-    clis: cliCatalog().filter((c) => c.id !== 'shell' && c.id !== 'files' && c.available)
+    clis: cliCatalog().filter((c) => isAgentCli(c.id) && c.available)
       .map((c) => ({ id: c.id, label: c.label, ready: c.ready })),
     generatedAt: new Date().toISOString(),
   });
@@ -1190,6 +1193,162 @@ app.post('/api/sessions/:id/stop', (req, res) => {
   if (!s) return res.status(404).json({ error: 'not found' });
   stop(s.id);
   res.json({ ok: true });
+});
+
+// ---------- session sharing (docs/session-sharing.md) ----------
+// Publish one session's trace as a Hub dataset: public, or gated with named
+// users pre-authorized. The heavy part (redaction over a multi-MB transcript)
+// runs in a child process inside share.js, so this route never stalls the loop.
+//
+// Claude and Codex: both write JSONL the Hub renders natively, so the trace
+// ships verbatim. The remaining harnesses need converters (§13 phase 5) — say so
+// plainly rather than producing a broken bundle.
+app.post('/api/sessions/:id/share', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  if (!SHAREABLE_CLIS.includes(s.cli)) {
+    return res.status(400).json({ error: `sharing supports ${SHAREABLE_CLIS.join(' and ')} sessions so far, not '${s.cli}'` });
+  }
+  const b = req.body || {};
+  const visibility = b.visibility === 'gated' ? 'gated' : 'public';
+  const names = (v) => (Array.isArray(v) ? v.map((u) => String(u).trim().replace(/^@/, '')).filter(Boolean).slice(0, 50) : []);
+  const grantTo = names(b.grantTo);
+  try {
+    const out = await shareSession(s, { visibility, name: b.name, grantTo, allSessions: store.list() });
+    // Remember the last share so the UI can offer "open" / "manage access"
+    // without re-publishing.
+    store.update(s.id, { lastShare: { repo: out.repo, sha: out.sha, visibility, at: new Date().toISOString() } });
+    res.json(out);
+  } catch (e) {
+    // The redaction gate is a refusal, not a failure — give the UI enough to
+    // explain exactly what tripped.
+    if (e.code === 'redaction-blocked') {
+      return res.status(409).json({ error: e.message, code: e.code, hits: e.hits });
+    }
+    console.error('[share]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'share failed' });
+  }
+});
+
+// Can this session be shared at all, and where would it go? Lets the dialog
+// open in a truthful state instead of failing on submit.
+app.get('/api/sessions/:id/share', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const [namespace, hit] = await Promise.all([shareNamespace(), findTrace(s, store.list())]);
+  res.json({
+    namespace,
+    canShare: !!namespace && !!hit && SHAREABLE_CLIS.includes(s.cli),
+    reason: !namespace ? 'no-hf-token' : !SHAREABLE_CLIS.includes(s.cli) ? 'unsupported-cli' : !hit ? 'no-transcript' : null,
+    lastShare: s.lastShare || null,
+  });
+});
+
+// Who can see an existing gated share.
+app.get('/api/share/access', async (req, res) => {
+  const repo = String(req.query.repo || '');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return res.status(400).json({ error: 'bad repo' });
+  try { res.json(await shareAccess(repo)); }
+  catch (e) { res.status(500).json({ error: (e && e.message) || 'failed' }); }
+});
+
+app.post('/api/share/access', async (req, res) => {
+  const b = req.body || {};
+  const repo = String(b.repo || '');
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return res.status(400).json({ error: 'bad repo' });
+  const list = (v) => (Array.isArray(v) ? v.map((u) => String(u).trim()).filter(Boolean).slice(0, 50) : []);
+  try {
+    const granted = await grantAccess(repo, list(b.grant));
+    const revoked = await revokeAccess(repo, list(b.revoke));
+    res.json({ granted, revoked, ...(await shareAccess(repo)) });
+  } catch (e) {
+    res.status(500).json({ error: (e && e.message) || 'failed' });
+  }
+});
+
+// ---------- trace panel (docs/trace-panel-spec.md) ----------
+// `session.traceSource` decides what a `trace` pane points at:
+//   { kind: 'session', ref: <sessionId> }   a live session on this Space
+//   { kind: 'bundle',  ref: <bundle ref> }  a shared trace pulled off the Hub
+// A plain non-trace session (claude/codex/…) reads its own trace, so
+// "open trace" on a session row needs no new record at all.
+//
+// NOTE ON ORDER: /api/trace/bundles must be registered BEFORE /api/trace/:id, or
+// the parameterised route swallows it and "bundles" is looked up as a session id.
+
+// Pull a shared trace off the Hub into DATA_DIR/traces/<ref>/ so a trace pane can
+// render it. This is the manual half of receiving — the same materialisation step
+// accepting an inbox delivery will perform. Works for a private/gated repo: the
+// viewer is blocked there, authenticated download is not.
+app.post('/api/trace/import', async (req, res) => {
+  const repo = String((req.body || {}).repo || '')
+    .trim()
+    // Accept a pasted dataset URL as readily as a bare id — that is what people
+    // have in their clipboard.
+    .replace(/^https?:\/\/huggingface\.co\/datasets\//, '')
+    .replace(/\/(tree|blob)\/.*$/, '')
+    .replace(/\/+$/, '');
+  try {
+    const out = await importBundle(repo);
+    res.json(out);
+  } catch (e) {
+    if (['bad-repo', 'not-a-bundle'].includes(e && e.code)) return res.status(400).json({ error: e.message, code: e.code });
+    if (['no-access', 'no-hf-token'].includes(e && e.code)) return res.status(403).json({ error: e.message, code: e.code });
+    console.error('[trace-import]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'import failed' });
+  }
+});
+
+app.get('/api/trace/bundles', async (_req, res) => {
+  try { res.json({ bundles: await listBundles() }); }
+  catch (e) { res.status(500).json({ error: (e && e.message) || 'failed' }); }
+});
+
+// Paginated on purpose: a single session here is 6.15 MB and the panel only ever
+// shows a window of it. `limit` is clamped in readTrace().
+app.get('/api/trace/:id', async (req, res) => {
+  const pane = store.get(req.params.id);
+  if (!pane) return res.status(404).json({ error: 'not found' });
+
+  const source = pane.traceSource || { kind: 'session', ref: pane.id };
+  const offset = Number(req.query.offset) || 0;
+  const limit = Number(req.query.limit) || 200;
+
+  try {
+    if (source.kind === 'bundle') {
+      if (!/^[\w.-]+$/.test(String(source.ref))) return res.status(400).json({ error: 'bad bundle ref' });
+      return res.json(await readTraceBundle(path.join(DATA_DIR, 'traces', source.ref), { offset, limit }));
+    }
+    const target = store.get(source.ref);
+    if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
+    res.json(await readTrace(target, { offset, limit }));
+  } catch (e) {
+    // These are expected states, not failures: no transcript yet, an
+    // unsupported CLI, or a codex guardian rollout. The pane renders the reason.
+    if (['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(e && e.code)) {
+      return res.status(404).json({ error: e.message, code: e.code });
+    }
+    console.error('[trace]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'trace read failed' });
+  }
+});
+
+// Point a trace pane at a source (used by the "Trace" button on a session row).
+// Creating the pane goes through the normal POST /api/sessions with cli:'trace';
+// this only records what it should show.
+app.put('/api/trace/:id/source', (req, res) => {
+  const pane = store.get(req.params.id);
+  if (!pane || pane.cli !== 'trace') return res.status(404).json({ error: 'not a trace pane' });
+  const b = req.body || {};
+  const kind = b.kind === 'bundle' ? 'bundle' : 'session';
+  const ref = String(b.ref || '');
+  if (!ref) return res.status(400).json({ error: 'ref required' });
+  // A bundle ref becomes a path segment under DATA_DIR/traces — validate it here
+  // too, so a traversal attempt never gets persisted in the session record.
+  if (kind === 'bundle' && !/^[\w.-]+$/.test(ref)) return res.status(400).json({ error: 'bad bundle ref' });
+  if (kind === 'session' && !store.get(ref)) return res.status(404).json({ error: 'no such session' });
+  store.update(pane.id, { traceSource: { kind, ref } });
+  res.json({ ok: true, traceSource: { kind, ref } });
 });
 
 app.delete('/api/sessions/:id', (req, res) => {

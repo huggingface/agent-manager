@@ -1,4 +1,4 @@
-import { FolderGlyph } from './icons';
+import { FolderGlyph, ListGlyph } from './icons';
 
 // Black logos invert on the dark theme; white logos invert on the light theme.
 const INVERT_DARK = new Set(['shell', 'opencode']);
@@ -17,6 +17,15 @@ export default function Logo({ cli, size = 18, tint }: { cli: string; size?: num
     return (
       <span className="cli-logo files-glyph" style={{ width: size, height: size, boxSizing: 'content-box', ...tile }}>
         <FolderGlyph />
+      </span>
+    );
+  }
+  // Trace is a panel, not a vendor — a glyph, not a logo. (Without this it would
+  // request /logos/trace.png and land on the shell fallback.)
+  if (cli === 'trace') {
+    return (
+      <span className="cli-logo files-glyph" style={{ width: size, height: size, boxSizing: 'content-box', ...tile }}>
+        <ListGlyph />
       </span>
     );
   }

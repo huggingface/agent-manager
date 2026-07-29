@@ -854,3 +854,124 @@ a.btn-ghost { text-decoration: none; }
   .skills-toolbar { flex-wrap: wrap; }
   .setting-row > .btn-ghost, .setting-row > a.btn-ghost { min-width: 0; }
 }
+
+/* ---- share dialog (docs/session-sharing.md) ---- */
+.share-card { max-width: 480px; gap: 13px; }
+.share-sub { margin: 3px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.45; }
+.share-modes { display: flex; gap: 7px; }
+.share-modes .btn-ghost { flex: 1; }
+.share-field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; }
+.share-field > span { font-weight: 600; }
+.share-field input, .share-linkrow input {
+  padding: 7px 9px; font-size: 13px; color: var(--text); background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: var(--r-md);
+}
+.share-field input:focus, .share-linkrow input:focus { outline: none; border-color: var(--accent); }
+.share-field small, .share-dest { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.share-note { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.share-warn, .share-blocked {
+  margin: 0; padding: 9px 11px; font-size: 12.5px; line-height: 1.5; border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 38%, transparent);
+}
+.share-ok { margin: 0; font-size: 13px; font-weight: 600; }
+.share-linkrow { display: flex; gap: 7px; }
+.share-linkrow input { flex: 1; min-width: 0; font-family: var(--mono, monospace); font-size: 12px; }
+.share-facts { margin: 0; padding-left: 17px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+.share-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.share-actions .btn-primary { text-decoration: none; }
+
+
+/* ---------- trace pane (docs/trace-panel-spec.md) ---------- */
+/* Read-only session view. Laid out like .files-* (the other passive pane) and
+   themed with the app's variables, so it follows light/dark like everything else
+   rather than assuming a dark background. */
+.pane-head.trace-head { display: flex; align-items: center; gap: 7px; }
+.trace-head .spacer { flex: 1; }
+.trace-head .tv-title { font-weight: 600; white-space: nowrap; }
+.trace-head .tv-count, .trace-head .tv-tokens { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.tv-search { width: 9rem; min-width: 0; padding: 2px 6px; font: inherit; font-size: 11.5px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-sm); }
+
+.trace-body { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 9px; background: var(--term-bg); }
+.trace-hint { flex: none; padding: 5px 10px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 11px; font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.tv-msg { color: var(--muted); font-size: 0.85em; padding: 0.3em 0.1em; }
+
+.tv-row { padding: 5px 0; border-bottom: 1px solid var(--border); }
+.tv-row.placeholder { opacity: 0.25; }
+/* Injected reminders and codex's intermediate (non-final) answers are context,
+   not the conversation — present but visibly secondary. */
+.tv-row.muted { opacity: 0.6; }
+
+.tv-meta { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); }
+.tv-spacer { flex: 1; }
+.tv-badge { text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; padding: 0 4px; border-radius: var(--r-sm); color: var(--text); background: var(--border); }
+.tv-badge.user { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.tv-badge.assistant { color: #4a9d7a; background: color-mix(in srgb, #4a9d7a 16%, transparent); }
+.tv-badge.system { color: #b08650; background: color-mix(in srgb, #b08650 16%, transparent); }
+.tv-chip { padding: 0 4px; border-radius: var(--r-sm); border: 1px solid var(--border); font-family: var(--font-mono); }
+.tv-tokens { font-variant-numeric: tabular-nums; }
+.tv-ts { font-variant-numeric: tabular-nums; }
+
+.tv-body { margin-top: 3px; font-size: 0.95em; line-height: 1.5; }
+/* A prompt or answer is a turn in a conversation, not a document: keep its
+   markdown headings close to body size so one '# Heading' can't dominate the
+   pane the way it did on the first real trace. */
+.tv-md h1, .tv-md h2, .tv-md h3, .tv-md h4, .tv-md h5, .tv-md h6 {
+  font-size: 1em; font-weight: 700; margin: 0.5em 0 0.2em;
+}
+.tv-md h1 { font-size: 1.12em; }
+.tv-md h2 { font-size: 1.06em; }
+.tv-md p, .tv-md ul, .tv-md ol { margin: 0.35em 0; }
+.tv-md ul, .tv-md ol { padding-left: 1.3em; }
+.tv-md > :first-child { margin-top: 0; }
+.tv-md > :last-child { margin-bottom: 0; }
+.tv-md table { border-collapse: collapse; }
+.tv-md table td, .tv-md table th { border: 1px solid var(--border); padding: 1px 5px; }
+.tv-md pre, .tv-pre { white-space: pre-wrap; word-break: break-word; margin: 3px 0; padding: 5px 7px; background: var(--panel-2); border-radius: var(--r-sm); font-family: var(--font-mono); }
+/* Tool arguments and output are reference material: readable, capped, scrollable
+   in place so one 20k-char result can't own the whole pane. */
+.tv-pre.small { font-size: 0.85em; max-height: 22rem; overflow: auto; }
+.tv-img { max-width: 100%; max-height: 20rem; border-radius: var(--r-sm); }
+
+.tv-fold { margin: 2px 0; }
+.tv-fold-head { display: flex; align-items: center; gap: 5px; width: 100%; min-width: 0; background: none; border: 0; padding: 1px 3px; font: inherit; font-size: 0.85em; color: var(--muted); cursor: pointer; text-align: left; border-radius: var(--r-sm); }
+.tv-fold-head:hover { color: var(--text); background: var(--border); }
+.tv-caret { flex: none; width: 0.7em; }
+.tv-fold-label { flex: none; font-weight: 600; white-space: nowrap; font-family: var(--font-mono); }
+.tv-fold-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tv-fold.think .tv-fold-label { color: #8b73c4; }
+.tv-fold.failed .tv-fold-label { color: var(--danger, #c05353); }
+.tv-fold-body { padding-left: 1em; margin-left: 3px; border-left: 1px solid var(--border); }
+
+.tv-tool-name { font-size: 0.8em; font-weight: 600; font-family: var(--font-mono); color: var(--muted); }
+.tv-tool-res.failed .tv-pre { border-left: 2px solid var(--danger, #c05353); }
+.tv-matches .tv-row:first-of-type { border-top: 1px solid var(--border); }
+
+/* "Open a shared trace" — the sidebar widget that pulls a bundle off the Hub. */
+.widget.open-trace { margin: 0 8px 8px; }
+.open-trace-err { color: var(--danger); font-size: 11.5px; line-height: 1.4; }
+.trace-hint a { color: inherit; text-decoration: underline; text-decoration-style: dotted; }
+.trace-hint a:hover { color: var(--accent); }
+
+/* Prompt navigator in the trace header. */
+.tv-nav { display: inline-flex; gap: 1px; flex: none; }
+.tv-nav .mini-btn { padding: 1px 5px; font-size: 10px; line-height: 1.2; }
+.tv-nav .mini-btn:disabled { opacity: 0.35; cursor: default; }
+.tv-nav .mini-btn:disabled:hover { background: none; color: var(--muted); }
+
+/* The answer to a prompt, as opposed to the agent narrating its way there: an
+   accent rule down the left edge, the way the Hub's own viewer marks it. In a
+   turn that ran for thirty rows this is the one written for the reader. */
+.tv-row.assistant.final {
+  border-left: 2px solid color-mix(in srgb, #4a9d7a 70%, transparent);
+  background: color-mix(in srgb, #4a9d7a 5%, transparent);
+  padding-left: 8px; margin-left: -10px; padding-right: 8px;
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+.tv-row.user {
+  border-left: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  padding-left: 8px; margin-left: -10px; padding-right: 8px;
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}

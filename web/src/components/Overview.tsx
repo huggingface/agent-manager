@@ -3,6 +3,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import * as api from '../api';
 import type { MetaSession } from '../api';
 import type { Cli, OverviewFilter, Session, SessionState, Tree } from '../types';
+import { isPassive } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import Logo from './Logo';
 
@@ -17,7 +18,7 @@ const fmtAgo = (ts: number) => {
 const fmtTok = (n = 0) =>
   n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n);
 const base = (p: string) => p.split('/').pop() || p;
-const eligible = (s: Session) => s.cli !== 'shell' && s.cli !== 'files';
+const eligible = (s: Session) => s.cli !== 'shell' && !isPassive(s.cli);
 const bucket = (state: SessionState): OverviewFilter =>
   state === 'working' ? 'working' : state === 'waiting' ? 'waiting' : 'quiet';
 
