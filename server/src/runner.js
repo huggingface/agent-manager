@@ -175,6 +175,39 @@ function codexRolloutsSince(sinceMs) {
 // session_meta line carries the full embedded instruction text (~22KB as of
 // 0.142), so read in chunks until the newline — a fixed small buffer would
 // truncate the JSON and make every capture silently fail.
+// The first line of a transcript that records a `cwd`, with its timestamp.
+// Bounded on lines AND bytes: a file-history-snapshot line can be megabytes.
+function transcriptHead(p) {
+  // openSync INSIDE the try: on the bucket mount a transcript can rotate away
+  // between the stat that found it and this open, and the only caller runs in a
+  // setTimeout where a throw is unhandled.
+  let fd = null;
+  try {
+    fd = fs.openSync(p, 'r');
+    const CHUNK = 65536, MAX_BYTES = 512 * 1024, MAX_LINES = 64;
+    let carry = '', pos = 0, lines = 0;
+    while (pos < MAX_BYTES && lines < MAX_LINES) {
+      const b = Buffer.alloc(Math.min(CHUNK, MAX_BYTES - pos));
+      const n = fs.readSync(fd, b, 0, b.length, pos);
+      if (!n) break;
+      pos += n;
+      carry += b.toString('utf8', 0, n);
+      let nl;
+      while ((nl = carry.indexOf('\n')) >= 0 && lines < MAX_LINES) {
+        const line = carry.slice(0, nl);
+        carry = carry.slice(nl + 1);
+        lines++;
+        if (!line.trim()) continue;
+        let j;
+        try { j = JSON.parse(line); } catch { continue; }
+        if (j && j.cwd) return { cwd: j.cwd, timestamp: j.timestamp || null };
+      }
+      if (n < b.length) break; // EOF
+    }
+    return null;
+  } catch { return null; } finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } }
+}
+
 function firstLine(p) {
   const fd = fs.openSync(p, 'r');
   try {
@@ -318,12 +351,15 @@ function scheduleClaudeCapture(session, workdir) {
     for (const c of claudeTranscriptsSince(since)) {
       const uuid = path.basename(c.p).replace(/\.jsonl$/, '');
       if (claimed.has(uuid)) continue;
-      let first;
-      try { first = JSON.parse(firstLine(c.p)); } catch { continue; }
-      // Claude records the working directory on every line; only claim a
-      // conversation started in THIS session's folder.
-      if (!first || first.cwd !== workdir) continue;
-      const created = Date.parse(first.timestamp || '') || 0;
+      // The cwd is NOT on the first line: a transcript opens with metadata lines
+      // (mode, permission-mode, file-history-snapshot, ai-title, worktree-state)
+      // that have no cwd, and only the conversation lines carry one — line 4 or 5
+      // in every real transcript measured. Reading line 1 made this check always
+      // fail, so the re-pin could never actually claim anything.
+      const head = transcriptHead(c.p);
+      // Only claim a conversation started in THIS session's folder.
+      if (!head || head.cwd !== workdir) continue;
+      const created = Date.parse(head.timestamp || '') || 0;
       if (created && created < since - 15_000) continue; // someone else's older thread
       console.warn(`[claude] re-pinning ${session.id}: ${session.sessionUuid} -> ${uuid} (--session-id was not honoured)`);
       update(session.id, { sessionUuid: uuid });

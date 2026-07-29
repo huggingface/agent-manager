@@ -117,21 +117,57 @@ async function claudeTranscripts() {
   return out;
 }
 
-/** The `cwd` a transcript records, read from its first line without slurping the file. */
-async function transcriptCwd(p) {
+/**
+ * The `cwd` a transcript records, without slurping the file.
+ *
+ * NOT the first line. A transcript opens with metadata lines that carry no cwd
+ * at all — `mode`, `permission-mode`, `file-history-snapshot`, `ai-title`,
+ * `worktree-state` — and only the conversation lines have it. Measured across
+ * ten real transcripts: the first line with a cwd is line 4 or 5 every time.
+ * Reading line 1 alone always returned null, which silently disabled the
+ * cwd-attribution fallback below for its whole existence.
+ *
+ * Bounded on both axes: a `file-history-snapshot` line can be megabytes, so cap
+ * bytes as well as lines rather than trusting either alone.
+ */
+const CWD_SCAN_LINES = 64;
+const CWD_SCAN_BYTES = 512 * 1024;
+
+async function transcriptHead(p) {
   let fh;
   try {
     fh = await fsp.open(p, 'r');
-    const buf = Buffer.alloc(65536);
-    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
-    const nl = buf.indexOf(0x0a);
-    const line = buf.toString('utf8', 0, nl >= 0 ? nl : bytesRead);
-    return JSON.parse(line).cwd || null;
+    let carry = '';
+    let read = 0;
+    let lines = 0;
+    while (read < CWD_SCAN_BYTES && lines < CWD_SCAN_LINES) {
+      const buf = Buffer.alloc(Math.min(65536, CWD_SCAN_BYTES - read));
+      const { bytesRead } = await fh.read(buf, 0, buf.length, read);
+      if (!bytesRead) break;
+      read += bytesRead;
+      carry += buf.toString('utf8', 0, bytesRead);
+      let nl;
+      while ((nl = carry.indexOf('\n')) >= 0 && lines < CWD_SCAN_LINES) {
+        const line = carry.slice(0, nl);
+        carry = carry.slice(nl + 1);
+        lines++;
+        if (!line.trim()) continue;
+        let j;
+        try { j = JSON.parse(line); } catch { continue; }
+        if (j && j.cwd) return { cwd: j.cwd, timestamp: j.timestamp || null };
+      }
+    }
+    return null;
   } catch {
     return null;
   } finally {
     await fh?.close().catch(() => {});
   }
+}
+
+async function transcriptCwd(p) {
+  const head = await transcriptHead(p);
+  return (head && head.cwd) || null;
 }
 
 /**
