@@ -1,12 +1,25 @@
 import os from 'node:os';
 import path from 'node:path';
 import pty from 'node-pty';
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import { USE_TMUX, cliById, WORKSPACES_DIR, isRemote } from './config.js';
+import { remoteState, setPaused } from './remote.js';
+import { cliById, WORKSPACES_DIR, isRemote } from './config.js';
 import { update, list } from './sessions.js';
 import { captureOpencodeSession } from './traces.js';
-import { remoteState, setPaused } from './remote.js';
+import { buildPaletteIndex, snapshotToAnsi } from './snapshot.js';
+
+// libghostty-vt ships prebuilts for linux x64/arm64 and macOS arm64. Loading it
+// is guarded so a platform without a prebuilt still boots and says so, rather
+// than taking the whole app down.
+let ghostty = null;
+export let ghosttyError = null;
+try {
+  ghostty = await import('@coder/libghostty-vt-node');
+  buildPaletteIndex(ghostty.createTerminal);
+} catch (err) {
+  ghosttyError = String(err && err.message ? err.message : err);
+  console.error('[runner] libghostty-vt unavailable:', ghosttyError);
+}
 
 const TERM_ENV = {
   ...process.env,
@@ -16,18 +29,39 @@ const TERM_ENV = {
 };
 
 const BASHRC = process.env.AM_BASHRC || '/app/session.bashrc';
-const TMUX_CONF = process.env.TMUX_CONF || '/app/tmux.conf';
 const AM_USER = process.env.SPACE_AUTHOR_NAME || process.env.AM_USER || os.userInfo().username || 'user';
 
 // Interactive bash that loads our prompt rcfile (bash ignores a missing rcfile,
 // so this is safe in local dev where /app/session.bashrc doesn't exist).
 const bashLaunch = `exec bash --rcfile ${BASHRC} -i`;
 
-const tmuxName = (id) => `am-${id}`;
+// ---------- session hosts (what replaced tmux) ----------
+//
+// Every session is one PTY held by THIS process, with a libghostty-vt terminal
+// fed from its output. That terminal is the authoritative screen, so:
+//
+//   * a browser attaching gets a snapshot repaint plus replayed scrollback,
+//     instead of asking tmux to redraw and hoping the agent's TUI cooperates;
+//   * several browsers can watch and drive the same session at once, so the old
+//     one-device-at-a-time handover is gone;
+//   * agent state is a property read rather than a `tmux capture-pane`
+//     subprocess per session per poll.
+//
+// What we gave up is tmux outliving this process. On a Space that only ever
+// bridged a node restart (a rebuild or a sleep takes the whole container), and
+// each CLI resumes its own conversation on relaunch.
 
-// If the rendered pane text hasn't changed for this long, it's not working.
+// Rendered text unchanged for this long means the agent isn't working.
 const BUSY_SECS = 4;
-const paneSig = new Map(); // id -> { sig, changedAt } (changedAt in unix seconds)
+// Re-rendering the grid to text on every chunk during a burst is wasteful.
+const SAMPLE_THROTTLE_MS = 250;
+// Scrollback replayed to a reattaching browser, as raw PTY bytes. snapshot()
+// returns history as plain LINES, so replaying that would hand back colourless
+// scrollback under a fully styled screen.
+const REPLAY_BYTES = Number(process.env.AM_REPLAY_BYTES || 256 * 1024);
+const SCROLLBACK_LINES = Number(process.env.AM_SCROLLBACK || 20000);
+
+const hosts = new Map(); // session id -> host
 
 function djb2(s) {
   let h = 5381;
@@ -35,108 +69,46 @@ function djb2(s) {
   return h;
 }
 
-// In direct-PTY (no-tmux) mode we track live handles to report running status.
-const live = new Map(); // id -> Set(handle)
-const track = (id, h) => {
-  if (!live.has(id)) live.set(id, new Set());
-  live.get(id).add(h);
-};
-const untrack = (id, h) => {
-  const s = live.get(id);
-  if (s) {
-    s.delete(h);
-    if (!s.size) live.delete(id);
-  }
-};
-
 export function isRunning(id) {
-  if (USE_TMUX) {
-    try {
-      execFileSync('tmux', ['has-session', '-t', tmuxName(id)], { stdio: 'ignore' });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  return live.has(id);
+  return hosts.has(id);
 }
 
-// Which sessions have a pane in copy mode right now — one tmux call covers all
-// panes, so the server can push a copy-mode hint to attached clients cheaply.
-export function paneModes() {
-  const modes = {};
-  if (!USE_TMUX) return modes;
-  let out = '';
-  try {
-    // Mode first (a single 0/1), then the session name — which is `am-<id>`
-    // and never contains a space, so splitting on the first space is safe.
-    out = execFileSync('tmux', ['list-panes', '-a', '-F', '#{pane_in_mode} #{session_name}'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch { return modes; } // no tmux server yet
-  for (const line of out.split('\n')) {
-    const sp = line.indexOf(' ');
-    if (sp < 0) continue;
-    const name = line.slice(sp + 1);
-    if (!name.startsWith('am-')) continue;
-    const id = name.slice(3);
-    modes[id] = modes[id] || line.slice(0, sp) === '1';
+export function ghosttyReady() {
+  return !!ghostty;
+}
+
+/** Sample the grid's rendered text and record when it last changed. */
+function sampleScreen(host) {
+  const now = Date.now();
+  if (host.lastSampleAt && now - host.lastSampleAt < SAMPLE_THROTTLE_MS) return;
+  host.lastSampleAt = now;
+  let text = '';
+  try { text = host.vt.getVisibleText(); } catch { return; }
+  const sig = djb2(text);
+  if (host.screenSig !== sig) {
+    host.screenSig = sig;
+    host.screenChangedAt = now;
   }
-  return modes;
 }
 
 /**
- * Detect activity by DIFFING each pane's rendered text between polls. This
- * ignores colour-only animations (e.g. Codex's shimmering banner) that fooled a
- * raw output-activity check, while still catching spinners, streaming output and
- * elapsed-time counters (their text changes). Returns Map id -> { age } where
- * age is seconds since the pane text last changed.
+ * Activity per session, keyed like the old tmux sweep so callers don't change.
+ * No subprocess and no memo: the grid is already current, so this is a map build
+ * over held sessions.
  */
-let infoMemo = { ts: 0, map: new Map() };
-
 export function agentInfo() {
-  // The sweep shells out to tmux once per session, synchronously. Memoize it
-  // briefly so N browser tabs polling /api/tree don't multiply that cost.
-  if (Date.now() - infoMemo.ts < 1500) return infoMemo.map;
   const map = new Map();
-  infoMemo = { ts: Date.now(), map };
-  if (!USE_TMUX) return map;
-  let list;
-  try {
-    // stderr is dropped on every tmux call that already handles its own
-    // failure: with no server running (fresh container, or after the last
-    // session ends) tmux prints "error connecting to /tmp/tmux-1000/default"
-    // and the catch below treats that as "no sessions" — so the message is
-    // pure noise that made a healthy Space look broken in the log.
-    list = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch {
-    paneSig.clear();
-    return map; // no server / no sessions
+  const now = Date.now();
+  for (const [id, host] of hosts) {
+    const changedAt = host.screenChangedAt || host.startedAt;
+    map.set(id, { age: Math.round((now - changedAt) / 1000), bells: host.bells || 0 });
   }
-  const now = Math.floor(Date.now() / 1000);
-  const live = new Set();
-  for (const name of list.split('\n')) {
-    if (!name.startsWith('am-')) continue;
-    const id = name.slice(3);
-    live.add(id);
-    let text = '';
-    try {
-      text = execFileSync('tmux', ['capture-pane', '-p', '-t', name],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    } catch {}
-    const sig = djb2(text);
-    const prev = paneSig.get(id);
-    const changedAt = !prev || prev.sig !== sig ? now : prev.changedAt;
-    paneSig.set(id, { sig, changedAt });
-    map.set(id, { age: now - changedAt });
-  }
-  for (const id of [...paneSig.keys()]) if (!live.has(id)) paneSig.delete(id);
   return map;
 }
 
 /**
  * Map activity + the session's known CLI into a UI state:
- *   working  — pane text is actively changing (thinking / streaming / a command)
+ *   working  — screen text is actively changing (thinking / streaming / a command)
  *   waiting  — agent alive but its screen is static → it's your turn
  *   idle     — a plain shell sitting at its prompt
  *   stopped  — no live session
@@ -149,6 +121,43 @@ export function deriveState(session, info) {
   if (!info) return isRunning(session.id) ? 'idle' : 'stopped';
   if (info.age <= BUSY_SECS) return 'working';
   return session.cli === 'shell' ? 'idle' : 'waiting';
+}
+
+/** The visible screen as text, with no browser attached. */
+export function peek(id) {
+  const host = hosts.get(id);
+  if (!host) return null;
+  try { return host.vt.getVisibleText(); } catch { return null; }
+}
+
+// ---------- the shared grid ----------
+//
+// One session, one grid, however many viewers. A client may REQUEST a size but
+// never imposes one: letting each client size itself is what garbles a second
+// device, because the phone resizes the PTY while the laptop keeps drawing into
+// its old geometry. The grid follows the smallest attached viewer so the content
+// fits everywhere, and grows back as viewers leave.
+
+function effectiveGrid(host) {
+  if (!host.sizes.size) return { cols: host.cols, rows: host.rows };
+  let cols = Infinity;
+  let rows = Infinity;
+  for (const s of host.sizes.values()) {
+    cols = Math.min(cols, s.cols);
+    rows = Math.min(rows, s.rows);
+  }
+  return { cols, rows };
+}
+
+function applyGrid(host) {
+  const { cols, rows } = effectiveGrid(host);
+  if (cols === host.cols && rows === host.rows) return false;
+  host.cols = cols;
+  host.rows = rows;
+  try { host.pty.resize(cols, rows); } catch {}
+  try { host.vt.resize(cols, rows); } catch {}
+  for (const sub of host.subs) sub.onGrid(cols, rows, host.subs.size > 1, host.subs.size);
+  return true;
 }
 
 // ---------- Codex conversation pinning ----------
@@ -598,18 +607,28 @@ function commandFor(session) {
   }
 
   // Other agents: resume when one likely exists, else a fresh launch. `exec` so
-  // the agent is the pane's foreground process; when it exits the tmux session
-  // ends — a clear "done" signal — and the fallback preserves that.
+  // the agent is the PTY's foreground process; when it exits the session ends —
+  // a clear "done" signal — and the fallback preserves that.
   if (session.everStarted && cli.cont) return `${cli.cont} || exec ${cli.run}`;
   if (q0 && cli.withPrompt) return `exec ${cli.withPrompt(q0)}`;
   return `exec ${cli.run}`;
 }
 
-/** Attach a new PTY client to the session (creating the tmux session if needed). */
-export function attach(session, cols, rows) {
-  // A remote agent has no terminal here by design — its harness runs on another
-  // machine. /ws catches this and says so in the pane.
-  if (isRemote(session.cli)) throw new Error('this pane has no terminal — it talks to an agent elsewhere');
+/**
+ * Start the session's PTY and its grid, without any browser attached. Returns
+ * true if it had to spawn. This is now the ONLY way a session starts, so the
+ * Overview reply box waking a stopped agent and a browser opening a pane take
+ * exactly the same path.
+ */
+export function ensureRunning(session, cols = 120, rows = 34) {
+  // Nothing to start: a remote agent starts itself, on its own machine. Both
+  // callers guard this too; keep the refusal here so no future one can spawn
+  // a PTY for a pane that can never use it.
+  if (isRemote(session.cli)) throw new Error('a remote agent runs on its own machine — nothing to start here');
+  const existing = hosts.get(session.id);
+  if (existing) return false;
+  if (!ghostty) throw new Error(`libghostty-vt unavailable: ${ghosttyError}`);
+
   // The recorded workspace-relative path ('' = the workspaces root itself).
   // If the folder was deleted or moved, mkdir simply recreates it empty — no
   // tracking, no magic.
@@ -618,78 +637,63 @@ export function attach(session, cols, rows) {
   fs.mkdirSync(workdir, { recursive: true });
   const full = commandFor(session);
 
-  let term;
-  if (USE_TMUX) {
-    const args = [];
-    if (fs.existsSync(TMUX_CONF)) args.push('-f', TMUX_CONF);
-    args.push(
-      // -A: attach if it exists, else create. -D: detach any other client, so
-      // exactly ONE device drives the session at a time. Sharing it was worse:
-      // window-size=latest resized the shared window to whoever spoke last, and
-      // agent TUIs (which paint into the normal buffer, not the alt screen)
-      // re-emit their frame with erase math computed at the OLD width — so every
-      // phone/desktop flip left another copy of the same text in the scrollback,
-      // wrapped at the other device's width. The handover is sequential instead:
-      // the detached client is told the session lives on (close code 4001) and
-      // waits for a deliberate return before taking it back (see TerminalPane).
-      'new-session', '-A', '-D', '-s', tmuxName(session.id), '-c', workdir,
-      '-e', `AM_SESSION=${folder}`,
-      '-e', `AM_NAME=${session.name}`,
-      '-e', `AM_ID=${session.id}`,
-      '-e', `AM_USER=${AM_USER}`,
-      '-e', `AM_ROOT=${WORKSPACES_DIR}`, // prompt shows $PWD relative to this
-      'sh', '-lc', full,
-    );
-    term = pty.spawn('tmux', args, { name: 'xterm-256color', cols, rows, cwd: workdir, env: TERM_ENV });
-  } else {
-    const env = { ...TERM_ENV, AM_SESSION: folder, AM_NAME: session.name, AM_ID: session.id, AM_USER, AM_ROOT: WORKSPACES_DIR };
-    term = pty.spawn('bash', ['-lc', full], { name: 'xterm-256color', cols, rows, cwd: workdir, env });
-  }
-
-  if (!session.everStarted) update(session.id, { everStarted: true, pendingPrompt: undefined });
-  if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
-  if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
-  if (session.cli === 'claude') scheduleClaudeCapture(session, workdir);
-
-  const handle = {
-    onData: (cb) => term.onData(cb),
-    onExit: (cb) => term.onExit(cb),
-    write: (d) => { try { term.write(d); } catch {} },
-    resize: (c, r) => { try { term.resize(c, r); } catch {} },
-    kill: () => { try { term.kill(); } catch {} },
+  const env = {
+    ...TERM_ENV,
+    AM_SESSION: folder,
+    AM_NAME: session.name,
+    AM_ID: session.id,
+    AM_USER,
+    AM_ROOT: WORKSPACES_DIR, // prompt shows $PWD relative to this
   };
-  track(session.id, handle);
-  term.onExit(() => untrack(session.id, handle));
-  return handle;
-}
+  const term = pty.spawn('bash', ['-lc', full], {
+    name: 'xterm-256color', cols, rows, cwd: workdir, env,
+  });
+  const vt = ghostty.createTerminal({ cols, rows, scrollbackLimit: SCROLLBACK_LINES });
 
-/**
- * Make sure the session's tmux process exists WITHOUT a browser pane attached
- * (used by the Overview reply box to wake a stopped agent). Returns true if it
- * had to spawn. Direct-PTY mode has no detached equivalent — throws if dead.
- */
-export function ensureRunning(session) {
-  // Nothing to start: a remote agent starts itself, elsewhere. Callers that
-  // might see one must go through deliver() (index.js) instead of assuming a PTY.
-  if (isRemote(session.cli)) throw new Error('a remote agent runs on its own machine — nothing to start here');
-  if (isRunning(session.id)) return false;
-  if (!USE_TMUX) throw new Error('session is not running');
-  const folder = session.path ?? session.id;
-  const workdir = path.join(WORKSPACES_DIR, folder);
-  fs.mkdirSync(workdir, { recursive: true });
-  const args = [];
-  if (fs.existsSync(TMUX_CONF)) args.push('-f', TMUX_CONF);
-  args.push(
-    'new-session', '-d', '-s', tmuxName(session.id), '-c', workdir,
-    '-x', '200', '-y', '50', // sane size until a client attaches (window-size=latest)
-    '-e', `AM_SESSION=${folder}`,
-    '-e', `AM_NAME=${session.name}`,
-    '-e', `AM_ID=${session.id}`,
-    '-e', `AM_USER=${AM_USER}`,
-    '-e', `AM_ROOT=${WORKSPACES_DIR}`,
-    'sh', '-lc', commandFor(session),
-  );
-  execFileSync('tmux', args, { stdio: 'ignore', env: TERM_ENV });
+  const host = {
+    id: session.id,
+    pty: term,
+    vt,
+    cols,
+    rows,
+    subs: new Set(),
+    sizes: new Map(), // sub -> the grid that viewer can display
+    history: [],
+    historyBytes: 0,
+    historyDropped: false,
+    startedAt: Date.now(),
+    screenChangedAt: Date.now(),
+    bells: 0,
+  };
+
+  term.onData((chunk) => {
+    try { vt.feed(chunk); } catch (e) { console.error('[runner] vt.feed', e && e.message); }
+
+    // State detection rides the feed path: the grid is already current, so there
+    // is nothing to poll and no subprocess to spawn.
+    sampleScreen(host);
+    for (let i = 0; i < chunk.length; i++) {
+      if (chunk.charCodeAt(i) === 7) { host.bells++; host.lastBellAt = Date.now(); }
+    }
+
+    host.history.push(chunk);
+    host.historyBytes += chunk.length;
+    while (host.historyBytes > REPLAY_BYTES && host.history.length > 1) {
+      host.historyBytes -= host.history.shift().length;
+      host.historyDropped = true;
+    }
+
+    for (const sub of host.subs) sub.onData(chunk);
+  });
+
+  term.onExit(() => {
+    hosts.delete(session.id);
+    try { vt.dispose(); } catch {}
+    for (const sub of host.subs) sub.onExit();
+    host.subs.clear();
+  });
+
+  hosts.set(session.id, host);
   if (!session.everStarted) update(session.id, { everStarted: true, pendingPrompt: undefined });
   if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
   if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
@@ -697,80 +701,120 @@ export function ensureRunning(session) {
   return true;
 }
 
+/**
+ * The bytes to replay for scrollback. A ring that has wrapped almost certainly
+ * starts mid-escape-sequence, so drop everything before the first newline — the
+ * repaint that follows is the authority for the visible screen either way.
+ */
+function replayBytes(host) {
+  const joined = host.history.join('');
+  if (!host.historyDropped) return joined;
+  const nl = joined.indexOf('\n');
+  return nl >= 0 ? joined.slice(nl + 1) : joined;
+}
+
+/**
+ * Subscribe a viewer to a session, starting it if needed.
+ *
+ * Unlike the tmux version this does NOT spawn anything per viewer, and
+ * `handle.kill()` only unsubscribes — closing a tab must never stop an agent.
+ * `handle.restore()` returns the bytes that rebuild the screen: replayed
+ * scrollback first, then a snapshot repaint on top as the authority.
+ */
+export function attach(session, cols, rows) {
+  ensureRunning(session, cols, rows);
+  const host = hosts.get(session.id);
+  if (!host) throw new Error('session failed to start');
+
+  const sub = {
+    onData: () => {},
+    onExit: () => {},
+    onGrid: () => {},
+  };
+  host.subs.add(sub);
+
+  return {
+    onData: (cb) => { sub.onData = (d) => { try { cb(d); } catch {} }; },
+    onExit: (cb) => { sub.onExit = () => { try { cb(); } catch {} }; },
+    onGrid: (cb) => { sub.onGrid = (c, r, shared, viewers) => { try { cb(c, r, shared, viewers); } catch {} }; },
+    write: (d) => { try { host.pty.write(d); } catch {} },
+    // A request, not a command: the shared grid is recomputed from all viewers.
+    resize: (c, r) => {
+      if (!Number.isFinite(c) || !Number.isFinite(r)) return;
+      host.sizes.set(sub, { cols: Math.max(20, Math.min(400, Math.round(c))), rows: Math.max(5, Math.min(200, Math.round(r))) });
+      if (!applyGrid(host)) sub.onGrid(host.cols, host.rows, host.subs.size > 1, host.subs.size);
+    },
+    restore: () => {
+      let snap;
+      try { snap = host.vt.snapshot({ includeCells: true }); } catch { return null; }
+      return {
+        replay: replayBytes(host),
+        ansi: snapshotToAnsi(snap),
+        cols: snap.cols,
+        rows: snap.rows,
+        viewers: host.subs.size,
+        shared: host.sizes.size > 1,
+      };
+    },
+    // Detach this viewer only. The session, its grid and its scrollback stay.
+    kill: () => {
+      host.subs.delete(sub);
+      host.sizes.delete(sub);
+      applyGrid(host); // the grid grows back for whoever is left
+    },
+  };
+}
+
 /** Type a line into the session's terminal (works with no browser attached). */
 export async function sendInput(id, text) {
+  const host = hosts.get(id);
+  if (!host) throw new Error('session is not running');
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
   // the inner newlines as soft line breaks instead of submitting early.
   const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
   // The Enter must arrive as its OWN keypress: TUIs (codex) detect rapid input
   // bursts as a paste, and a CR inside the burst becomes a newline in the
   // composer instead of a submit. A short gap breaks the burst.
-  const gap = () => new Promise((r) => setTimeout(r, 300));
-  if (USE_TMUX) {
-    execFileSync('tmux', ['send-keys', '-t', tmuxName(id), '-l', '--', payload], { stdio: 'ignore' });
-    await gap();
-    execFileSync('tmux', ['send-keys', '-t', tmuxName(id), 'Enter'], { stdio: 'ignore' });
-    return;
-  }
-  const set = live.get(id);
-  if (!set || !set.size) throw new Error('session is not running');
-  const h = set.values().next().value;
-  h.write(payload);
-  await gap();
-  h.write('\r');
+  host.pty.write(payload);
+  await new Promise((r) => setTimeout(r, 300));
+  host.pty.write('\r');
 }
 
 /**
  * The session's rendered screen plus `lines` of scrollback above it — what a
  * human would see in the pane. Used by the agent API so one agent can watch
  * another's progress instead of spending a turn asking.
+ *
+ * Reads the grid we already hold, so it costs no subprocess. snapshot() returns
+ * history as plain text, which is exactly what the tmux `capture-pane -p` this
+ * replaced produced, so callers see the same shape.
  */
 export function capturePane(id, lines = 80) {
-  if (!USE_TMUX) return null;
+  const host = hosts.get(id);
+  if (!host) return null; // stopped
   const n = Math.max(0, Math.min(2000, lines));
-  let out;
-  try {
-    out = execFileSync('tmux', ['capture-pane', '-p', '-S', `-${n}`, '-t', tmuxName(id)],
-      { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch { return null; } // no such session (stopped)
-  // capture-pane pads the pane to its full height with blank lines; drop them so
-  // a short screen doesn't arrive as 50 lines of nothing. -S already bounds the
-  // scrollback, so the caller decides whether to trim the visible screen too.
-  return out.replace(/\s+$/, '');
+  let snap;
+  try { snap = host.vt.snapshot({ includeScrollback: n > 0 }); } catch { return null; }
+  const history = (snap.scrollbackLines || []).slice(-n).map((l) => l.text);
+  const visible = (snap.visibleLines || []).map((l) => l.text);
+  // Trailing blank rows are padding, not content: a short screen should not
+  // arrive as 50 lines of nothing.
+  return [...history, ...visible].join('\n').replace(/\s+$/, '');
 }
 
-/** Return the last mouse selection for this session as a browser-consumable OSC 52. */
-export function copySelection(id) {
-  if (!USE_TMUX) return null;
-  const bufferName = `am-copy-${tmuxName(id)}`;
-  let text = '';
-  try {
-    text = execFileSync('tmux', ['save-buffer', '-b', bufferName, '-'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: TERM_ENV });
-  } catch {
-    try {
-      text = execFileSync('tmux', ['save-buffer', '-'],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: TERM_ENV });
-    } catch {
-      return null;
-    }
-  }
-  if (!text) return null;
-  return `\x1b]52;c;${Buffer.from(text, 'utf8').toString('base64')}\x07`;
-}
-
-/** Stop a session entirely (kills the tmux session / the running process). */
+/** Stop a session entirely (kills the process; viewers get an exit close code). */
 export function stop(id) {
-  // A remote agent has no process to kill — "stopped" means disconnected, so the
-  // same button pauses it and closes its open polls.
-  const s = list().find((x) => x.id === id);
-  if (s && isRemote(s.cli)) { setPaused(s, true, 'stopped from the manager'); return; }
-  if (USE_TMUX) {
-    try {
-      execFileSync('tmux', ['kill-session', '-t', tmuxName(id)], { stdio: 'ignore' });
-    } catch {}
-  } else {
-    const s = live.get(id);
-    if (s) for (const h of s) h.kill();
+  const host = hosts.get(id);
+  if (!host) return;
+  try { host.pty.kill(); } catch {}
+}
+
+/**
+ * Kill every session. Without tmux nothing outlives this process, so a clean
+ * shutdown should not leave orphaned PTYs behind holding the workspace.
+ */
+export function stopAll() {
+  for (const host of hosts.values()) {
+    try { host.pty.kill(); } catch {}
   }
 }

@@ -46,10 +46,8 @@ export function refreshVersions() {
   }
 }
 
-export const TMUX_AVAILABLE = commandExists('tmux');
-export const USE_TMUX = process.env.USE_TMUX
-  ? process.env.USE_TMUX === '1'
-  : TMUX_AVAILABLE;
+// tmux is no longer part of the terminal path: sessions are PTYs held by this
+// process with a libghostty-vt grid as the authoritative screen (see runner.js).
 
 /**
  * CLI catalog.

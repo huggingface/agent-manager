@@ -92,20 +92,17 @@ function selectionText(term: Terminal): string {
 //      and flush on the user's next click, so the copy lands when they return.
 // It must run synchronously inside the triggering event — deferring to a
 // setTimeout loses the activation that execCommand needs.
-const OSC52_COPY_WINDOW_MS = 1500;
-// Server → client control frames (copy-mode state) ride the terminal socket
-// with this leading NUL sentinel, which real pty output never begins with.
+// Server → client control frames (restore, shared-grid size) ride the terminal
+// socket with this leading NUL sentinel, which real pty output never begins with.
 const MODE_CTRL = '\x00\x00AM:';
-let osc52CopyAllowedUntil = 0;
 
-function allowNextOsc52Copy() {
-  osc52CopyAllowedUntil = Date.now() + OSC52_COPY_WINDOW_MS;
-}
-
+// OSC 52 used to arrive constantly, because tmux emitted it for every mouse
+// selection in copy mode — hence a gate that only let a write through right
+// after a real Cmd/Ctrl+C. With tmux gone the only source is the AGENT itself
+// deliberately writing the clipboard, and nothing grants that permission
+// automatically: the text is stashed and the user's next Cmd+C copies it.
 function consumeOsc52CopyPermission(): boolean {
-  if (Date.now() > osc52CopyAllowedUntil) return false;
-  osc52CopyAllowedUntil = 0;
-  return true;
+  return false;
 }
 
 function legacyCopy(text: string): boolean {
@@ -177,7 +174,10 @@ export default function TerminalPane({
   // something — byte counts lie, because tmux's attach repaint of a blank
   // 200×50 screen is already kilobytes of escapes.
   const [booting, setBooting] = useState(true);
-  const [copyMode, setCopyMode] = useState(false); // tmux copy/scrollback mode
+  const [copyMode, setCopyMode] = useState(false); // legacy tmux copy-mode hint
+  // How many browsers share this session's grid. >1 means the size is a
+  // compromise, which is worth showing rather than leaving as a mystery.
+  const [viewers, setViewers] = useState(0);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.name);
   // Fallback paste sheet: shown only when we can't read the clipboard directly.
@@ -338,11 +338,10 @@ export default function TerminalPane({
         tmuxSelectionPending = false;
         return false;
       }
+      // There is no tmux copy-mode selection to fetch any more: scrollback is
+      // replayed into this terminal on attach, so every selection is local.
       if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C') && tmuxSelectionPending) {
-        if (!copyTmuxSelection()) {
-          allowNextOsc52Copy();
-          send({ t: 'copy' });
-        }
+        copyTmuxSelection();
         return false;
       }
       if (e.metaKey && (e.key === 'c' || e.key === 'C')) return false;
@@ -402,10 +401,23 @@ export default function TerminalPane({
       };
       ws.onmessage = (e) => {
         const d = typeof e.data === 'string' ? e.data : new Uint8Array(e.data as ArrayBuffer);
-        // Control frame (copy-mode changes): a leading NUL sentinel that raw
-        // pty output never produces — handle it instead of writing to the term.
+        // Control frame: a leading NUL sentinel that raw pty output never
+        // produces — handle it instead of writing to the term.
         if (typeof d === 'string' && d.startsWith(MODE_CTRL)) {
-          try { const m = JSON.parse(d.slice(MODE_CTRL.length)); if (m.t === 'mode') setCopyMode(!!m.copy); } catch { /* ignore */ }
+          try {
+            const m = JSON.parse(d.slice(MODE_CTRL.length));
+            if (m.t === 'mode') setCopyMode(!!m.copy);
+            // The server owns the grid and tells every viewer its size. Conform
+            // instead of assuming our own fit won: if a second device is
+            // attached the grid follows the smaller of us, and drawing into our
+            // own geometry instead would garble the screen.
+            else if (m.t === 'grid' || m.t === 'restore') {
+              if (m.cols > 0 && m.rows > 0 && (term.cols !== m.cols || term.rows !== m.rows)) {
+                try { term.resize(m.cols, m.rows); } catch { /* ignore */ }
+              }
+              setViewers(m.viewers > 1 ? m.viewers : 0);
+            }
+          } catch { /* ignore */ }
           return;
         }
         term.write(d);
