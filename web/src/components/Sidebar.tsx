@@ -25,7 +25,7 @@ const fmtAgo = (ts?: number) => {
 export default function Sidebar({
   clis, tree, activeRef, focusedId, defaultPath, ages,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
-  onStopSession, onDeleteSession, onShareSession, onOpenTrace, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
+  onStopSession, onDeleteSession, onShareSession, onOpenTrace, onOpenSharedTrace, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
   archived, showArchived, onToggleArchived,
 }: {
   clis: Cli[];
@@ -46,6 +46,7 @@ export default function Sidebar({
   onDeleteSession: (id: string) => void;
   onShareSession: (id: string) => void;
   onOpenTrace: (id: string) => void;
+  onOpenSharedTrace: (repo: string) => Promise<void>;
   onMove: (ref: string, to: MoveTarget) => void;
   onDragState?: (ref: string | null) => void; // lets the stage offer per-tile drop targets
   theme: 'light' | 'dark';
@@ -72,6 +73,10 @@ export default function Sidebar({
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [dragRef, setDragRef] = useState<string | null>(null);
   const [drop, setDrop] = useState<{ ref: string; zone: Zone } | null>(null);
+  // "Open a shared trace": paste a dataset id/URL, we pull it and show it.
+  const [openTraceRepo, setOpenTraceRepo] = useState<string | null>(null);
+  const [openTraceBusy, setOpenTraceBusy] = useState(false);
+  const [openTraceErr, setOpenTraceErr] = useState<string | null>(null);
 
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
@@ -79,6 +84,23 @@ export default function Sidebar({
   const waiting = tree.sessions.filter((s) => s.state === 'waiting').length;
 
   const clearDrag = () => { setDragRef(null); setDrop(null); onDragState?.(null); };
+  // Failures here are ordinary and specific (no access, not a share, no token) —
+  // show what the server said rather than a generic toast, since the fix is
+  // usually to paste a different id.
+  const submitSharedTrace = async () => {
+    const repo = (openTraceRepo || '').trim();
+    if (!repo) return;
+    setOpenTraceBusy(true);
+    setOpenTraceErr(null);
+    try {
+      await onOpenSharedTrace(repo);
+      setOpenTraceRepo(null);
+    } catch (e) {
+      setOpenTraceErr(e instanceof Error ? e.message : 'could not open that trace');
+    } finally {
+      setOpenTraceBusy(false);
+    }
+  };
   // Archived sessions vanish from the tree unless the legend checkbox is on.
   const isHidden = (id: string) => !showArchived && archived.has(id);
   const bump = (id: string, d: number) => setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
@@ -426,7 +448,39 @@ export default function Sidebar({
         <button className="btn-ghost" title="New file browser (whole workspace)" onClick={() => onNewSession('', 'files', '.')}>
           <Logo cli="files" size={14} /> Files
         </button>
+        {/* A trace pane can't be created blank, so it isn't a quick-add: this
+            asks WHICH shared trace, then opens the pane on it. */}
+        <button className="btn-ghost" title="Open a session someone shared with you"
+          onClick={() => { setOpenTraceRepo(openTraceRepo === null ? '' : null); setOpenTraceErr(null); }}>
+          <Logo cli="trace" size={14} /> Shared trace
+        </button>
       </div>
+
+      {openTraceRepo !== null && (
+        <div className="widget open-trace">
+          <div className="w-field">
+            <span className="w-label">Dataset</span>
+            <input
+              autoFocus
+              placeholder="user/session-name — or paste the dataset URL"
+              value={openTraceRepo}
+              disabled={openTraceBusy}
+              onChange={(e) => setOpenTraceRepo(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') submitSharedTrace(); if (e.key === 'Escape') setOpenTraceRepo(null); }}
+            />
+          </div>
+          {openTraceErr && <div className="open-trace-err">{openTraceErr}</div>}
+          <div className="quick-hint">
+            Private and gated shares work too — this Space downloads with its own token.
+          </div>
+          <div className="widget-actions">
+            <button className="btn-ghost" onClick={() => setOpenTraceRepo(null)} disabled={openTraceBusy}>Cancel</button>
+            <button className="btn-primary" onClick={submitSharedTrace} disabled={openTraceBusy || !openTraceRepo.trim()}>
+              {openTraceBusy ? 'Fetching…' : 'Open'}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="legend">
         <span><span className="status working" /> working</span>

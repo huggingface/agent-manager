@@ -21,7 +21,7 @@ import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, 
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 import { startWatchdog } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
-         inboxState, setInbox, SHAREABLE_CLIS } from './share.js';
+         inboxState, setInbox, importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 
 ensureDirs();
 refreshVersions();
@@ -977,14 +977,45 @@ app.post('/api/share/access', async (req, res) => {
 });
 
 // ---------- trace panel (docs/trace-panel-spec.md) ----------
-// Paginated on purpose: a single session here is 6.15 MB and the panel only
-// ever shows a window of it. `limit` is clamped in readTrace().
-//
 // `session.traceSource` decides what a `trace` pane points at:
 //   { kind: 'session', ref: <sessionId> }   a live session on this Space
-//   { kind: 'bundle',  ref: <envelopeId> }  an accepted incoming trace
+//   { kind: 'bundle',  ref: <bundle ref> }  a shared trace pulled off the Hub
 // A plain non-trace session (claude/codex/…) reads its own trace, so
 // "open trace" on a session row needs no new record at all.
+//
+// NOTE ON ORDER: /api/trace/bundles must be registered BEFORE /api/trace/:id, or
+// the parameterised route swallows it and "bundles" is looked up as a session id.
+
+// Pull a shared trace off the Hub into DATA_DIR/traces/<ref>/ so a trace pane can
+// render it. This is the manual half of receiving — the same materialisation step
+// accepting an inbox delivery will perform. Works for a private/gated repo: the
+// viewer is blocked there, authenticated download is not.
+app.post('/api/trace/import', async (req, res) => {
+  const repo = String((req.body || {}).repo || '')
+    .trim()
+    // Accept a pasted dataset URL as readily as a bare id — that is what people
+    // have in their clipboard.
+    .replace(/^https?:\/\/huggingface\.co\/datasets\//, '')
+    .replace(/\/(tree|blob)\/.*$/, '')
+    .replace(/\/+$/, '');
+  try {
+    const out = await importBundle(repo);
+    res.json(out);
+  } catch (e) {
+    if (['bad-repo', 'not-a-bundle'].includes(e && e.code)) return res.status(400).json({ error: e.message, code: e.code });
+    if (['no-access', 'no-hf-token'].includes(e && e.code)) return res.status(403).json({ error: e.message, code: e.code });
+    console.error('[trace-import]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'import failed' });
+  }
+});
+
+app.get('/api/trace/bundles', async (_req, res) => {
+  try { res.json({ bundles: await listBundles() }); }
+  catch (e) { res.status(500).json({ error: (e && e.message) || 'failed' }); }
+});
+
+// Paginated on purpose: a single session here is 6.15 MB and the panel only ever
+// shows a window of it. `limit` is clamped in readTrace().
 app.get('/api/trace/:id', async (req, res) => {
   const pane = store.get(req.params.id);
   if (!pane) return res.status(404).json({ error: 'not found' });

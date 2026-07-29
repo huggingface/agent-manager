@@ -1215,7 +1215,7 @@ async function sniffHarness(file) {
 function newTrace(harness) {
   const t = {
     harness, harnessLabel: HARNESS_LABEL[harness] || harness, sessionId: null, title: '', model: null, cwd: null,
-    firstTs: 0, lastTs: 0, usage: null, usageSum: null, messages: [],
+    firstTs: 0, lastTs: 0, usage: null, usageSum: null, source: null, sharedBy: null, messages: [],
     push(msg) {
       if (this.messages.length >= VIEW_MAX_MESSAGES) { this.truncated = true; return; }
       if (msg.ts) {
@@ -1263,6 +1263,7 @@ function pageOf(parsed, offset, limit) {
     harness: parsed.harness, harnessLabel: parsed.harnessLabel, sessionId: parsed.sessionId,
     title: parsed.title, model: parsed.model, cwd: parsed.cwd,
     firstTs: parsed.firstTs, lastTs: parsed.lastTs, usage: parsed.usage,
+    source: parsed.source, sharedBy: parsed.sharedBy,
     total, offset: from, limit: to - from, truncated: !!parsed.truncated,
     turns: parsed.messages.slice(from, to),
   };
@@ -1323,7 +1324,14 @@ export async function readTraceBundle(dir, { offset = 0, limit = 200 } = {}) {
       if (!parsed.usage && (s.tokensIn || s.tokensOut || s.cacheRead)) {
         parsed.usage = { in: s.tokensIn || 0, out: s.tokensOut || 0, cacheRead: s.cacheRead || 0 };
       }
+      parsed.sharedBy = (manifest.origin && manifest.origin.user) || null;
     }
+    // Provenance, written by importBundle: a received trace that can't say whose
+    // it is has lost what makes it trustworthy.
+    try {
+      const src = JSON.parse(await fsp.readFile(path.join(dir, 'meta', 'source.json'), 'utf8'));
+      parsed.source = { repo: src.repo || null, url: src.url || null, importedAt: src.importedAt || null };
+    } catch { /* hand-placed bundle, or an older import */ }
     viewMemo = { key, val: parsed };
   }
   return pageOf(viewMemo.val, offset, limit);

@@ -351,6 +351,26 @@ export default function App() {
       if (isMobile) setMobileStage(true);
     } catch (e) { showErr('Couldn’t open the trace')(e); }
   };
+  // Someone shared a session as a Hub dataset: pull it down, then open a pane on
+  // it. Errors propagate so the sidebar can show the server's own reason inline
+  // (wrong id, no access, not a share) instead of a generic toast.
+  const openSharedTrace = async (repo: string) => {
+    const bundle = await api.importTraceBundle(repo);
+    const existing = tree.sessions.find((p) => p.cli === 'trace' && p.traceSource?.kind === 'bundle' && p.traceSource.ref === bundle.ref);
+    const label = bundle.manifest?.session?.name || bundle.repo.split('/').pop() || 'shared trace';
+    const pane = existing || await api.createSession(`Trace: ${label}`, 'trace', undefined, '.');
+    if (!existing) await api.setTraceSource(pane.id, 'bundle', bundle.ref);
+    // A reused pane may carry a name from a source it no longer points at (the
+    // source can be repointed). Correct it — but never overwrite a name the user
+    // chose themselves, which is any name we didn't generate.
+    else if (pane.name.startsWith('Trace: ') && pane.name !== `Trace: ${label}`) {
+      await api.renameSession(pane.id, `Trace: ${label}`);
+    }
+    await refresh();
+    setActiveRef(`s:${pane.id}`);
+    setPage(0);
+    if (isMobile) setMobileStage(true);
+  };
   const closePane = (sid: string) => {
     // On mobile ✕ just returns to the list — never the desktop ungroup gesture.
     if (isMobile) { setMobileStage(false); return; }
@@ -533,6 +553,7 @@ export default function App() {
         onNewSession={newSession}
         onShareSession={setShareId}
         onOpenTrace={openTrace}
+        onOpenSharedTrace={openSharedTrace}
         onNewGroup={newGroup}
         onRenameGroup={renameGroup}
         onRenameSession={renameSession}

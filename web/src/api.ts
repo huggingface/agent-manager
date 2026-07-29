@@ -234,6 +234,9 @@ export interface TracePage {
   firstTs: number;
   lastTs: number;
   usage: { in: number; out: number; cacheRead?: number } | null;
+  // Bundles only: where this trace came from, and who shared it.
+  source?: { repo: string | null; url: string | null; importedAt: string | null } | null;
+  sharedBy?: string | null;
   total: number;
   offset: number;
   limit: number;
@@ -261,6 +264,24 @@ export const getTracePage = async (id: string, offset = 0, limit = 200): Promise
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
   return r.json();
 };
+
+// Receiving: pull a shared trace off the Hub so a pane can render it. Accepts a
+// bare dataset id or a pasted dataset URL (the server normalizes).
+export interface ImportedBundle {
+  ref: string; repo: string; sha: string; files: string[]; bytes: number;
+  manifest?: { harness?: { name?: string; id?: string }; session?: { name?: string }; origin?: { user?: string } } | null;
+}
+export const importTraceBundle = async (repo: string): Promise<ImportedBundle> => {
+  const r = await fetch('/api/trace/import', { method: 'POST', headers: HEADERS, body: JSON.stringify({ repo }) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
+  return r.json();
+};
+
+export interface BundleEntry {
+  ref: string; repo: string | null; url: string | null; importedAt: string | null;
+  harness: string | null; name: string | null; from: string | null;
+}
+export const listTraceBundles = (): Promise<{ bundles: BundleEntry[] }> => fetch('/api/trace/bundles').then(json);
 
 export const setTraceSource = (id: string, kind: 'session' | 'bundle', ref: string) =>
   fetch(`/api/trace/${id}/source`, { method: 'PUT', headers: HEADERS, body: JSON.stringify({ kind, ref }) }).then(json);

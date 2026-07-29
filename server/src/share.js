@@ -22,7 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { WORKSPACES_DIR } from './config.js';
+import { WORKSPACES_DIR, DATA_DIR } from './config.js';
 
 const HF = 'https://huggingface.co';
 const hfToken = () =>
@@ -691,4 +691,131 @@ export async function revokeAccess(repo, users) {
     revoked.push(user);
   }
   return revoked;
+}
+
+// ---------- receiving: materialise a shared trace on this Space ----------
+// A share bundle IS a dataset repo: one `<name>.jsonl` at the root plus `meta/`.
+// Pulling it into DATA_DIR/traces/<ref>/ is all a trace pane needs to render it
+// (traces.js readTraceBundle), and it is exactly the step the accept-a-delivery
+// flow will perform once the inbox side lands — so it lives here, not in a
+// one-off script.
+//
+// Works for a private repo because the request carries this Space's token: the
+// dataset viewer is blocked for a gated/private repo, authenticated download is
+// not (docs/session-sharing.md §5).
+
+export const TRACES_DIR = path.join(DATA_DIR, 'traces');
+
+// A local directory name for a repo id. Must satisfy the route's `[\w.-]+`
+// guard, so the namespace separator becomes '--'.
+export const bundleRef = (repo) => repo.replace(/\//g, '--');
+
+const MAX_TRACE_BYTES = 96 << 20; // a 6 MB session is normal; 96 MB is a mistake
+
+/** Stream one file out of a dataset repo to disk. Never buffers it in memory. */
+async function downloadTo(repo, rev, file, dest) {
+  const token = hfToken();
+  const url = `${HF}/datasets/${repo}/resolve/${encodeURIComponent(rev)}/${file.split('/').map(encodeURIComponent).join('/')}`;
+  const r = await fetch(url, {
+    headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), 'user-agent': 'agent-manager' },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(300_000),
+  });
+  if (!r.ok) throw new Error(`HF ${r.status} fetching ${file}`);
+  const declared = Number(r.headers.get('content-length') || 0);
+  if (declared > MAX_TRACE_BYTES) throw new Error(`${file} is ${Math.round(declared / 1e6)} MB — refusing to import`);
+  await fsp.mkdir(path.dirname(dest), { recursive: true });
+  const { Writable } = await import('node:stream');
+  const { pipeline } = await import('node:stream/promises');
+  const out = fs.createWriteStream(dest);
+  let bytes = 0;
+  await pipeline(
+    r.body,
+    new Writable({
+      write(chunk, _enc, cb) {
+        bytes += chunk.length;
+        if (bytes > MAX_TRACE_BYTES) return cb(new Error(`${file} exceeded ${MAX_TRACE_BYTES} bytes mid-download`));
+        out.write(chunk, cb);
+      },
+      final(cb) { out.end(cb); },
+      destroy(err, cb) { out.destroy(); cb(err); },
+    }),
+  );
+  return bytes;
+}
+
+/**
+ * Import a share bundle from a dataset repo into DATA_DIR/traces/<ref>/.
+ * Returns { ref, dir, repo, sha, files, bytes, manifest } — `ref` is what a
+ * trace pane's traceSource.ref should be set to.
+ */
+export async function importBundle(repo) {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw Object.assign(new Error('expected a dataset id like "user/name"'), { code: 'bad-repo' });
+  if (!hfToken()) throw Object.assign(new Error('no HF_TOKEN — add it as a Space secret to open shared traces'), { code: 'no-hf-token' });
+
+  let info;
+  try {
+    info = await hfApi(`/api/datasets/${repo}`);
+  } catch (e) {
+    // 401/403/404 all mean the same thing to the operator: this token can't read
+    // that repo. Say so, rather than leaking a status code into the UI.
+    if (e.status === 404 || e.status === 401 || e.status === 403) {
+      throw Object.assign(new Error(`can't read ${repo} — it doesn't exist, or this Space's token has no access`), { code: 'no-access' });
+    }
+    throw e;
+  }
+
+  const names = (info.siblings || []).map((s) => s.rfilename);
+  const traces = names.filter((n) => n.endsWith('.jsonl') && !n.includes('/'));
+  if (!traces.length) throw Object.assign(new Error(`${repo} has no trace file at its root — is it a session share?`), { code: 'not-a-bundle' });
+  // One session per repo is the share unit (§4). More than one means this is
+  // some other dataset that happens to hold jsonl; guessing would be wrong.
+  if (traces.length > 1) throw Object.assign(new Error(`${repo} holds ${traces.length} .jsonl files; a session share has exactly one`), { code: 'not-a-bundle' });
+
+  const wanted = [traces[0], ...names.filter((n) => n.startsWith('meta/'))];
+  const ref = bundleRef(repo);
+  const dir = path.join(TRACES_DIR, ref);
+  // Re-importing replaces: a bundle is a snapshot of a repo revision, and half
+  // of an old one mixed with half of a new one is worse than either.
+  await fsp.rm(dir, { recursive: true, force: true });
+  await fsp.mkdir(dir, { recursive: true });
+
+  const rev = info.sha || 'main';
+  let bytes = 0;
+  for (const file of wanted) bytes += await downloadTo(repo, rev, file, path.join(dir, file));
+
+  let manifest = null;
+  try { manifest = JSON.parse(await fsp.readFile(path.join(dir, 'meta', 'manifest.json'), 'utf8')); } catch { /* older bundle, or none */ }
+
+  // Provenance: where this came from and when. A received trace that can't say
+  // whose it is has lost the thing that makes it trustworthy.
+  await fsp.writeFile(path.join(dir, 'meta', 'source.json'), JSON.stringify({
+    repo, sha: rev, private: !!info.private, gated: info.gated || false,
+    author: info.author || null, importedAt: new Date().toISOString(),
+    url: `${HF}/datasets/${repo}`,
+  }, null, 2));
+
+  return { ref, dir, repo, sha: rev, files: wanted, bytes, manifest };
+}
+
+/** Bundles already on disk, newest import first. */
+export async function listBundles() {
+  const out = [];
+  for (const name of await fsp.readdir(TRACES_DIR).catch(() => [])) {
+    const dir = path.join(TRACES_DIR, name);
+    try { if (!(await fsp.stat(dir)).isDirectory()) continue; } catch { continue; }
+    let source = null, manifest = null;
+    try { source = JSON.parse(await fsp.readFile(path.join(dir, 'meta', 'source.json'), 'utf8')); } catch {}
+    try { manifest = JSON.parse(await fsp.readFile(path.join(dir, 'meta', 'manifest.json'), 'utf8')); } catch {}
+    out.push({
+      ref: name,
+      repo: (source && source.repo) || null,
+      url: (source && source.url) || null,
+      importedAt: (source && source.importedAt) || null,
+      harness: (manifest && manifest.harness && (manifest.harness.name || manifest.harness.id)) || null,
+      name: (manifest && manifest.session && manifest.session.name) || null,
+      from: (manifest && manifest.origin && manifest.origin.user) || null,
+    });
+  }
+  return out.sort((a, b) => String(b.importedAt || '').localeCompare(String(a.importedAt || '')));
 }

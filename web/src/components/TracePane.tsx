@@ -310,7 +310,10 @@ export default function TracePane({
         onDragEnd={dragId ? () => onDragActive?.(false) : undefined}
       >
         <Logo cli="trace" size={16} tint="#7c8cf8" />
-        <span className="tv-title">{head?.harnessLabel || 'trace'}</span>
+        {/* A received trace is identified by what it IS, not by which CLI wrote
+            it — so the session's own name leads, with the harness as a chip. */}
+        <span className="tv-title" title={head?.title || undefined}>{head?.title || head?.harnessLabel || 'trace'}</span>
+        {head?.title && head.harnessLabel && <span className="tv-chip">{head.harnessLabel}</span>}
         {head?.model && <span className="tv-chip">{head.model}</span>}
         {head && <span className="tv-count">{fmtNum(head.total)} turns</span>}
         {totalTokens && <span className="tv-tokens">{totalTokens}</span>}
@@ -353,7 +356,19 @@ export default function TracePane({
         )}
       </div>
 
-      {head?.cwd && <div className="trace-hint">{head.cwd}{head.firstTs ? ` · ${new Date(head.firstTs).toLocaleString()}` : ''}</div>}
+      {head && (head.source || head.cwd) && (
+        <div className="trace-hint">
+          {head.source?.repo && (
+            <>
+              {head.sharedBy ? `shared by ${head.sharedBy} · ` : ''}
+              <a href={head.source.url || `https://huggingface.co/datasets/${head.source.repo}`} target="_blank" rel="noreferrer">{head.source.repo}</a>
+              {' · '}
+            </>
+          )}
+          {head.cwd}
+          {head.firstTs ? ` · ${new Date(head.firstTs).toLocaleString()}` : ''}
+        </div>
+      )}
     </div>
   );
 }
