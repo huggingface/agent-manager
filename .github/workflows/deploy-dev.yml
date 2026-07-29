@@ -1,0 +1,36 @@
+name: Deploy dev Space
+
+# Put any branch on lvwerra/agent-manager-dev to try it live before merging.
+# Pick the branch in the "Run workflow" dropdown.
+#
+# Manual on purpose: a Space hosts exactly ONE live version, so an automatic
+# trigger would have concurrent branches fighting over the dev Space and
+# rebuilding it on every push. You can do the same thing locally with
+#   git push dev HEAD:main --force
+#
+# The equivalent local remote is `dev` (see DEVELOPMENT.md).
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Mirror this branch onto the dev Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          test -n "$HF_TOKEN" || { echo "::error::HF_TOKEN secret is not set"; exit 1; }
+          git lfs install --local
+          git push --force "https://user:$HF_TOKEN@huggingface.co/spaces/lvwerra/agent-manager-dev" HEAD:main
+          echo "Deployed ${{ github.ref_name }} → https://huggingface.co/spaces/lvwerra/agent-manager-dev"

@@ -1,0 +1,56 @@
+name: Deploy template Space
+
+# GitHub is the source of truth; the template Space is a build artifact of main.
+# Mirroring main onto lvwerra/agent-manager-template rebuilds the Space and
+# makes the new version available to duplicated Spaces through their in-app
+# update button (see /api/update in server/src/index.js).
+#
+# Deliberately MANUAL: publishing the template is what pushes an update to
+# everyone who duplicated the Space, so it's a decision, not a side effect of
+# merging. Run it from the Actions tab when you want to cut a release. To make
+# every merge publish instead, add:
+#   push:
+#     branches: [main]
+#
+# The push is a force-push: the Space repo's own history is disposable (it used
+# to be written by upload_folder, so it diverged from this one) and nothing of
+# value lives there. All state is on the Space's mounted bucket, never in git.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-template
+  cancel-in-progress: false # never abandon a half-finished push
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # mirror the real history, not a shallow clone
+          lfs: true # .gitattributes tracks web/public/install/*.png
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # Gate the deploy on a build. A type error reaches the Space as a FAILED
+      # image build (the Dockerfile runs this same `npm run build`), which leaves
+      # the template broken for everyone who updates.
+      - name: Build the frontend
+        run: cd web && npm ci && npm run build
+
+      - name: Check the server parses
+        run: for f in server/src/*.js; do node --check "$f"; done
+
+      - name: Mirror main onto the template Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          test -n "$HF_TOKEN" || { echo "::error::HF_TOKEN secret is not set"; exit 1; }
+          git lfs install --local # install the pre-push hook so LFS blobs upload
+          git push --force "https://user:$HF_TOKEN@huggingface.co/spaces/lvwerra/agent-manager-template" HEAD:main
