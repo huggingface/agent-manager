@@ -7,14 +7,19 @@ import { execFile } from 'node:child_process';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import {
-  PORT, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR, USE_TMUX, TMUX_AVAILABLE,
+  PORT, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR,
   ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions, PASSIVE_CLIS,
 } from './config.js';
 import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
 import * as demo from './demo.js';
-import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection, paneModes, isRunning, capturePane } from './runner.js';
+import { attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, isRunning, capturePane, ghosttyReady, ghosttyError } from './runner.js';
+
+// Control frames ride the terminal socket behind a leading NUL pair, which real
+// PTY output never begins with. Same sentinel the old copy-mode hint used, so the
+// frontend's framing is unchanged.
+const TERM_CTRL = '\x00\x00AM:';
 import { buildUsage } from './usage.js';
 import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
@@ -127,6 +132,12 @@ await Promise.race([
 // terminal. An unhandled rejection from an async route, or an error emitted by
 // a dropped socket, would otherwise take the whole thing down. Log and keep
 // running instead of exiting.
+// No tmux to outlive us any more: kill the PTYs we hold on the way out so a
+// restart can't leave orphaned agents writing into the workspace.
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => { try { stopAll(); } catch {} process.exit(0); });
+}
+
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
 process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
 
@@ -147,7 +158,7 @@ app.use((req, res, next) => {
 app.get('/api/visibility', (_req, res) => res.json(visibility()));
 
 app.get('/api/health', (_req, res) =>
-  res.json({ ok: true, tmux: USE_TMUX, tmuxAvailable: TMUX_AVAILABLE }));
+  res.json({ ok: true, engine: 'libghostty', ghostty: ghosttyReady(), ghosttyError }));
 
 app.get('/api/clis', (_req, res) => res.json(cliCatalog()));
 
@@ -494,7 +505,8 @@ app.get('/api/info', (_req, res) => res.json({
   home: process.env.HOME || null,
   spaceId: process.env.SPACE_ID || null,
   spaceHost: process.env.SPACE_HOST || null,
-  tmux: USE_TMUX,
+  engine: 'libghostty',
+  ghostty: ghosttyReady(),
   locked: isPublic(),
   lockReason: visibility().reason,
   lockBucket: visibility().bucket,
@@ -1550,77 +1562,53 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  // tmux prints a bare "[exited]" line as its parting output — strip it (the
-  // client shows a styled stopped-state instead) but pass everything else.
-  const stripExit = (d) => (typeof d === 'string' ? d.replace(/(\r?\n)?\[exited\](\r?\n)?$/, '') : d);
   handle.onData((d) => {
     if (ws.readyState !== ws.OPEN) return;
-    const out = stripExit(d);
-    if (out.length) ws.send(out);
+    if (d.length) ws.send(d);
   });
   handle.onExit(() => {
+    // Only ONE reason to close now: the agent process itself exited. There is no
+    // handover any more — the grid is shared, so a second device attaching does
+    // not take the session away from the first. Still no auto-reconnect on 4000,
+    // or we would respawn the agent in a loop.
     if (ws.readyState === ws.OPEN) {
-      // Our tmux client can die for two very different reasons, and the browser
-      // must react differently to each:
-      //   4001 = another device attached and tmux's -D detached us. The session
-      //          is alive and now belongs to that device, so this client goes
-      //          quiet instead of reconnecting (that would be a tug-of-war).
-      //   4000 = the agent process itself exited. Do NOT auto-reconnect (it
-      //          would respawn the agent in a loop); offer a Restart instead.
-      const handedOff = USE_TMUX && isRunning(session.id);
-      try {
-        ws.close(handedOff ? 4001 : 4000, handedOff ? 'handedoff' : 'exited');
-      } catch { ws.close(); }
+      try { ws.close(4000, 'exited'); } catch { ws.close(); }
     }
   });
+  // The shared grid moved (a viewer joined, left, or asked for a different size).
+  // Every viewer is told, so nobody keeps drawing into a stale geometry.
+  handle.onGrid((cols_, rows_, shared, viewers) => {
+    if (ws.readyState !== ws.OPEN) return;
+    try { ws.send(TERM_CTRL + JSON.stringify({ t: 'grid', cols: cols_, rows: rows_, shared, viewers })); } catch {}
+  });
+
+  // Hand the screen back immediately: replayed scrollback, then a snapshot
+  // repaint on top as the authority. No tmux redraw, and nothing is asked of the
+  // agent's TUI — which is why this works even while it sits idle.
+  const restore = handle.restore();
+  if (restore) {
+    try {
+      ws.send(TERM_CTRL + JSON.stringify({
+        t: 'restore', cols: restore.cols, rows: restore.rows,
+        viewers: restore.viewers, shared: restore.shared,
+      }));
+      if (restore.replay) ws.send(restore.replay);
+      ws.send(restore.ansi);
+    } catch {}
+  }
 
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.t === 'i') handle.write(msg.d);
     else if (msg.t === 'r') handle.resize(msg.cols, msg.rows);
-    else if (msg.t === 'copy') {
-      const osc52 = copySelection(session.id);
-      if (osc52 && ws.readyState === ws.OPEN) ws.send(osc52);
-    }
+    // 'copy' is gone: scrollback now lives in the browser (it is replayed on
+    // attach), so a selection is local and needs no round trip to tmux.
   });
 
-  // Register for copy-mode notifications (the frontend shows an overlay hint).
-  registerModeClient(session.id, ws);
-  ws.on('close', () => { handle.kill(); unregisterModeClient(session.id, ws); });
+  // Detaching a viewer, NOT stopping the session.
+  ws.on('close', () => handle.kill());
 });
-
-// Copy-mode indicator: tmux owns the mode (users scroll into it and find the
-// keyboard "dead"), so poll it — one call for all panes — and push changes to
-// attached clients as a control frame the terminal distinguishes from raw
-// output by its leading NUL sentinel. Only polls while clients are attached.
-const MODE_CTRL = '\x00\x00AM:'; // pty output never leads with this
-const modeClients = new Map(); // sessionId -> Set(ws)
-const lastMode = new Map();     // sessionId -> boolean
-let modeTimer = null;
-function registerModeClient(id, ws) {
-  if (!USE_TMUX) return;
-  if (!modeClients.has(id)) modeClients.set(id, new Set());
-  modeClients.get(id).add(ws);
-  // Send current state immediately so a client attaching mid-copy-mode is right.
-  try { ws.send(MODE_CTRL + JSON.stringify({ t: 'mode', copy: !!lastMode.get(id) })); } catch {}
-  if (!modeTimer) modeTimer = setInterval(pollModes, 350);
-}
-function unregisterModeClient(id, ws) {
-  const set = modeClients.get(id);
-  if (set) { set.delete(ws); if (!set.size) { modeClients.delete(id); lastMode.delete(id); } }
-  if (!modeClients.size && modeTimer) { clearInterval(modeTimer); modeTimer = null; }
-}
-function pollModes() {
-  const modes = paneModes();
-  for (const [id, set] of modeClients) {
-    const now = !!modes[id];
-    if (lastMode.get(id) === now) continue;
-    lastMode.set(id, now);
-    const frame = MODE_CTRL + JSON.stringify({ t: 'mode', copy: now });
-    for (const ws of set) if (ws.readyState === ws.OPEN) { try { ws.send(frame); } catch {} }
-  }
-}
 
 generateEnvSkill(loadSecretNotes()); // keep the environment skill current on boot
 
@@ -1637,7 +1625,7 @@ setTimeout(() => { traceDigests().catch(() => {}); }, 4000);
 startWatchdog();
 
 server.listen(PORT, () => {
-  console.log(`Agent Manager :${PORT}  tmux=${USE_TMUX}  data=${DATA_DIR}`);
+  console.log(`Agent Manager :${PORT}  engine=libghostty${ghosttyReady() ? '' : ' (UNAVAILABLE)'}  data=${DATA_DIR}`);
   console.log('⚠  No authentication: this app trusts whoever can reach it.');
   console.log('   Keep this Space PRIVATE — a public instance gives anyone a shell + your logged-in agents.');
 });
