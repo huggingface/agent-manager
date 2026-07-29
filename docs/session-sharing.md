@@ -1,9 +1,24 @@
 # Session sharing — design
 
-Status: **decisions locked, ready to build** · Scope: phase 1 = traces only · Last updated: 2026-07-26
+Status: **shipped, minus the receive half** · Scope: phase 1 = traces only · Last updated: 2026-07-29
 
-Share one agent session with a teammate: they get a banner, accept it, read it in a panel,
-then *fork* it into their own Agent Manager and keep working.
+Share one agent session with a teammate: they read it in a panel, then *fork* it into their
+own Agent Manager and keep working.
+
+> **Scope decision, 2026-07-29 — no in-app notification.** The banner, accept/decline, and
+> the sender allowlist described in §5 and §9 are **not built and not planned for now**. The
+> flow is simpler: share the session, send the person the dataset URL, and they open it with
+> the **Trace** button in their own Space. That path is built and tested end to end, works
+> for private and gated repos (the viewer is blocked there, an authenticated download is
+> not), and needs no polling, no consent UI and no second repo.
+>
+> What that leaves in the tree: `notifyRecipients()` still opens a pull request on a
+> recipient's `am-inbox` when usernames are given for a *public* share — a real Hub PR they
+> see by email, not an in-app banner, and the dialog now says so. `sharing: { receive, allow }`
+> still round-trips through `PUT /api/config` but **nothing reads it**; it is inert until
+> something polls an inbox. `POST /api/share/inbox` still creates and deletes the inbox repo,
+> API-only, with no settings UI. Sections 5 and 9 below are kept as the design for whenever
+> this is picked up, not as a description of the code.
 
 ## 1. Decisions (locked)
 
@@ -14,7 +29,7 @@ then *fork* it into their own Agent Manager and keep working.
 | Harnesses | **All five.** Claude Code and Codex ship *verbatim* (Hub-native). Hermes, opencode and OpenClaw are converted to the Hub's documented **STS-Format**. |
 | **Transport** | **Hub-mediated mailbox.** Delivery is a pull request on the recipient's public `am-inbox` dataset. Direct Space→Space HTTP is ruled out — see §5. |
 | **Access control** | **One code path.** Always a payload dataset; `public` or `gated` is a flag. Gated + `grant_access` is the ACL for private shares. |
-| **Sender allowlist** | **Whitelist, empty by default.** Nobody can send you anything until you add them. |
+| **Sender allowlist** | *Designed, not built* — see the scope note above. Whitelist, empty by default; nobody can send you anything until you add them. |
 | Viewer | **Our own trace panel** (`cli: 'trace'`), visually inspired by the Hub viewer, built on `traces.js`. *Reverses an earlier decision — see §5.* |
 | Cross-harness | **Briefing handoff**, not transcript translation, wrapped in a data envelope that is never auto-fed to an agent. |
 | Recipient | **A teammate with their own Agent Manager Space.** |

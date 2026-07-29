@@ -117,7 +117,7 @@ export default function ShareDialog({ session, onClose }: { session: Session; on
               <small>
                 {visibility === 'gated'
                   ? 'Hugging Face usernames. Published as a gated dataset and each person is granted access directly — they don’t have to request it.'
-                  : 'Hugging Face usernames to tell about it. Public needs no access grant, so this only sends them the link.'}
+                  : 'Hugging Face usernames. Public needs no access grant, so this only opens a pull request on their am-inbox dataset — they see it on the Hub, not inside Agent Manager. Sending them the dataset link works just as well.'}
                 {' '}Optional{visibility === 'gated' ? ' — leave empty to publish with nobody granted yet' : ''}.
               </small>
             </label>

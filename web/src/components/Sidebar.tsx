@@ -452,7 +452,7 @@ export default function Sidebar({
             asks WHICH shared trace, then opens the pane on it. */}
         <button className="btn-ghost" title="Open a session someone shared with you"
           onClick={() => { setOpenTraceRepo(openTraceRepo === null ? '' : null); setOpenTraceErr(null); }}>
-          <Logo cli="trace" size={14} /> Shared trace
+          <Logo cli="trace" size={14} /> Trace
         </button>
       </div>
 

@@ -335,8 +335,9 @@ group cart, and a group's agent count. Adding a third passive pane type now mean
   matching offsets — a small addition to `pageOf()`.
 - No `compaction` block is ever produced; Claude's `type:'summary'` / `system` lines and
   `attachment` lines are ignored. The block type exists for when that's wired up.
-- The incoming half (accept/decline on an inbox PR) is still the next piece of work, so the
-  `bundle` source has no way to be populated yet outside a test.
+- The incoming half (accept/decline on an inbox PR) is **out of scope** as of 2026-07-29 —
+  see the scope note at the top of `docs/session-sharing.md`. A `bundle` source is populated
+  by pasting a dataset URL into the sidebar's **Trace** button, which is the intended flow.
 
 ## 12. Comparison against the Hub's own viewer (2026-07-29)
 
