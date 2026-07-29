@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import '@xterm/xterm/css/xterm.css';
 import { CTRL, FONT_STACK, MARK_LABELS, MARK_ORDER, THEME, ms } from './lab';
-import type { FitMode, Marks, PanelInfo, ResizeStat, Run, ServerInfo } from './lab';
+import type { FitMode, Marks, PanelInfo, PanelState, ResizeStat, Run, ServerInfo } from './lab';
 
 // Engines load on demand so the landing page stays light and so the cost of
 // each one shows up in the numbers. ghostty-web inlines ~400KB of wasm, which is
@@ -35,6 +35,7 @@ type Engine = {
   open(el: HTMLElement): void;
   write(data: string, cb?: () => void): void;
   resize(cols: number, rows: number): void;
+  scrollLines(amount: number): void;
   onData(cb: (d: string) => void): unknown;
   onResize(cb: (size: { cols: number; rows: number }) => void): unknown;
   loadAddon(addon: Addon): void;
@@ -45,20 +46,34 @@ type Engine = {
   onBell?: (cb: () => void) => unknown;
 };
 
-// How long the output has to go quiet before a resize counts as settled.
+// Server close codes. A real process exit must NOT auto-reconnect, or we would
+// respawn the agent in a loop and trample an in-progress login.
+const EXIT_CODE = 4000;
+const FAILED_CODE = 4001;
+
 const SETTLE_QUIET_MS = 300;
 const REFLOW_FONT_SIZE = 13;
+const TOUCH_PX_PER_NOTCH = 24;
+
+// Control keys a phone keyboard doesn't have, which agent TUIs need for menus.
+const KEYBAR: [string, string][] = [
+  ['esc', '\x1b'], ['tab', '\t'],
+  ['←', '\x1b[D'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['→', '\x1b[C'],
+  ['⏎', '\r'], ['^C', '\x03'],
+];
 
 type Props = {
   panel: PanelInfo;
   cols: number;
   rows: number;
   fit: FitMode;
+  state?: PanelState;
   onRun: (run: Run) => void;
 };
 
-export default function Panel({ panel, cols, rows, fit, onRun }: Props) {
+export default function Panel({ panel, cols, rows, fit, state, onRun }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const sendKeyRef = useRef<(d: string) => void>(() => {});
   const [marks, setMarks] = useState<Marks>({});
   const [status, setStatus] = useState('opening');
   const [overlay, setOverlay] = useState<string | null>(null);
@@ -68,6 +83,7 @@ export default function Panel({ panel, cols, rows, fit, onRun }: Props) {
   const [viewers, setViewers] = useState<{ count: number; shared: boolean } | null>(null);
   const [resize, setResize] = useState<ResizeStat | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [touch] = useState(() => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches);
 
   // Held in a ref so a re-rendered parent can't retrigger the effect and
   // silently re-attach the panel mid-measurement.
@@ -81,6 +97,7 @@ export default function Panel({ panel, cols, rows, fit, onRun }: Props) {
     const t0 = performance.now();
     const collected: Marks = {};
     const pollers: number[] = [];
+    const observers: ResizeObserver[] = [];
     let reported = false;
     let serverInfo: ServerInfo | null = null;
 
@@ -97,7 +114,11 @@ export default function Panel({ panel, cols, rows, fit, onRun }: Props) {
     let disposed = false;
     let engine: Engine | null = null;
     let fitter: Fitter | null = null;
+    let ws: WebSocket | null = null;
     const queue: string[] = [];
+
+    const send = (d: string) => { if (ws && ws.readyState === 1) ws.send(d); };
+    sendKeyRef.current = (d) => { send(d); engine?.focus?.(); };
 
     // --- conforming to the server's grid ------------------------------------
     // The server owns the grid; a client may request a size but never imposes
@@ -123,19 +144,14 @@ export default function Panel({ panel, cols, rows, fit, onRun }: Props) {
       conforming = true;
       try {
         if (engine.cols !== c || engine.rows !== r) engine.resize(c, r);
-        // In fixed mode the grid is the constant and the font adapts to it.
         if (fit === 'fixed') fitFontToWidth(c);
       } finally {
-        // resize() fires onResize synchronously; release after that has run so
-        // conforming can't be mistaken for a user-driven resize request.
         setTimeout(() => { conforming = false; }, 0);
       }
       setSize({ cols: c, rows: r });
     };
 
     // --- resize measurement -------------------------------------------------
-    // A resize is "smooth" if the repaint it triggers is small and settles fast,
-    // so both are timed from the moment the new size goes out.
     let pending: { at: number; from: string; to: string; bytes: number; timer: number | null } | null = null;
 
     const noteOutput = (len: number) => {
@@ -150,16 +166,13 @@ export default function Panel({ panel, cols, rows, fit, onRun }: Props) {
     };
 
     const sendResize = (nextCols: number, nextRows: number, from: string) => {
-      if (ws.readyState !== 1) return;
-      const to = `${nextCols}×${nextRows}`;
+      if (!ws || ws.readyState !== 1) return;
       if (pending?.timer) clearTimeout(pending.timer);
-      pending = { at: performance.now(), from, to, bytes: 0, timer: null };
-      ws.send(`${CTRL}${JSON.stringify({ type: 'resize', cols: nextCols, rows: nextRows })}`);
+      pending = { at: performance.now(), from, to: `${nextCols}×${nextRows}`, bytes: 0, timer: null };
+      send(`${CTRL}${JSON.stringify({ type: 'resize', cols: nextCols, rows: nextRows })}`);
       setSize({ cols: nextCols, rows: nextRows });
-      noteOutput(0); // arm the quiet timer even if nothing repaints
+      noteOutput(0);
     };
-
-    // --- socket -------------------------------------------------------------
 
     const flush = () => {
       if (!engine || !queue.length) return;
@@ -172,54 +185,67 @@ export default function Panel({ panel, cols, rows, fit, onRun }: Props) {
       });
     };
 
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${location.host}/ws/${panel.id}`);
+    // --- connection, with backoff ------------------------------------------
+    let retry: number | null = null;
+    let retryDelay = 1200;
+    let closedByUs = false;
 
-    ws.onopen = () => { mark('ws'); setStatus('attached'); };
+    const connect = () => {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${location.host}/ws/${panel.id}`);
 
-    ws.onmessage = (ev) => {
-      const data = typeof ev.data === 'string' ? ev.data : '';
-      if (data.startsWith(CTRL)) {
-        let frame: any;
-        try { frame = JSON.parse(data.slice(CTRL.length)); } catch { return; }
-        if (frame.type === 'error') { setError(frame.message); setStatus('failed'); return; }
-        if (frame.type === 'grid') {
-          setViewers({ count: frame.viewers, shared: frame.shared });
-          conform(frame.cols, frame.rows);
+      ws.onopen = () => {
+        mark('ws');
+        setStatus('attached');
+        retryDelay = 1200; // a successful connection resets the backoff
+        if (fitter && engine) sendResize(engine.cols, engine.rows, `${engine.cols}×${engine.rows}`);
+      };
+
+      ws.onmessage = (ev) => {
+        const data = typeof ev.data === 'string' ? ev.data : '';
+        if (data.startsWith(CTRL)) {
+          let frame: any;
+          try { frame = JSON.parse(data.slice(CTRL.length)); } catch { return; }
+          if (frame.type === 'error') { setError(frame.message); setStatus('failed'); return; }
+          if (frame.type === 'grid') {
+            setViewers({ count: frame.viewers, shared: frame.shared });
+            conform(frame.cols, frame.rows);
+            return;
+          }
+          if (frame.type === 'restore') {
+            mark('first');
+            serverInfo = frame.server;
+            setServer(frame.server);
+            if (frame.html) { setOverlay(frame.html); mark('preview'); }
+            conform(frame.cols, frame.rows);
+            queue.push((frame.replay || '') + frame.ansi);
+            flush();
+          }
           return;
         }
-        if (frame.type === 'restore') {
-          mark('first');
-          serverInfo = frame.server;
-          setServer(frame.server);
-          // The server already knows the screen, so it can hand over a rendered
-          // preview that paints before the renderer exists. The classic path has
-          // nothing to offer here.
-          if (frame.html) { setOverlay(frame.html); mark('preview'); }
-          // Replayed bytes rebuild styled scrollback; the repaint that follows is
-          // the authority for the visible screen.
-          conform(frame.cols, frame.rows);
-          queue.push((frame.replay || '') + frame.ansi);
-          flush();
-        }
-        return;
-      }
-      mark('first');
-      noteOutput(data.length);
-      queue.push(data);
-      flush();
+        mark('first');
+        noteOutput(data.length);
+        queue.push(data);
+        flush();
+      };
+
+      ws.onerror = () => { try { ws?.close(); } catch {} };
+
+      ws.onclose = (ev) => {
+        if (disposed || closedByUs) return;
+        // A real exit or a hard server-side failure is terminal: retrying would
+        // respawn the agent in a loop.
+        if (ev.code === EXIT_CODE) { setStatus('session exited'); return; }
+        if (ev.code === FAILED_CODE) { setStatus('failed'); return; }
+        setStatus(`reconnecting in ${(retryDelay / 1000).toFixed(1)}s`);
+        retry = window.setTimeout(connect, retryDelay);
+        retryDelay = Math.min(retryDelay * 1.7, 15_000);
+      };
     };
 
-    ws.onerror = () => setStatus('socket error');
-    ws.onclose = (ev) => {
-      if (disposed) return;
-      setStatus(ev.code === 4000 ? 'session exited' : 'disconnected');
-    };
+    connect();
 
     // --- engine -------------------------------------------------------------
-    // In fixed mode the grid is pinned and the font scales to it, so the PTY is
-    // never resized. In reflow mode the font is pinned and the grid follows the
-    // container, which is what production does and what actually exercises reflow.
     const reflow = fit === 'reflow';
     const width = host.clientWidth || 640;
     const fontSize = reflow ? REFLOW_FONT_SIZE : Math.max(7, Math.min(15, Math.floor(width / (cols * 0.62))));
@@ -242,7 +268,7 @@ export default function Panel({ panel, cols, rows, fit, onRun }: Props) {
       created.open(host);
       mark('engine');
 
-      created.onData((d) => { if (ws.readyState === 1) ws.send(d); });
+      created.onData((d) => send(d));
       if (created.onBell) created.onBell(() => setSignals((s) => ({ ...s, bells: s.bells + 1 })));
 
       if (created.hasMouseTracking || created.hasBracketedPaste) {
@@ -259,20 +285,14 @@ export default function Panel({ panel, cols, rows, fit, onRun }: Props) {
 
       if (fitter) {
         created.loadAddon(fitter);
-        // Each engine measures its own cell metrics, so let its own fit addon
-        // decide what to ASK for rather than imposing one guess on both.
         let last = `${created.cols}×${created.rows}`;
         created.onResize(({ cols: c, rows: r }) => {
-          // Conforming to the server is not a user resize; echoing it back would
-          // ping-pong the grid between devices forever.
-          if (conforming) return;
+          if (conforming) return; // conforming is not a user resize
           sendResize(c, r, last);
           last = `${c}×${r}`;
         });
         try { fitter.fit(); } catch {}
         setSize({ cols: created.cols, rows: created.rows });
-        // fit() only emits onResize when the size actually changed, so state the
-        // starting request explicitly.
         sendResize(created.cols, created.rows, last);
         setResize(null);
 
@@ -281,13 +301,12 @@ export default function Panel({ panel, cols, rows, fit, onRun }: Props) {
           debounce = window.setTimeout(() => { try { fitter?.fit(); } catch {} }, 80);
         });
         observer.observe(host);
-        pollers.push(observer as unknown as number);
+        observers.push(observer);
       } else {
-        // Fixed grid: never request a size, just keep the font filling the panel.
         setSize({ cols: created.cols, rows: created.rows });
         fitFontToWidth(created.cols);
         // Rescaling the font changes what is drawn inside the box; only react to
-        // the box itself actually changing width, or this chases its own tail.
+        // the box itself changing width, or this chases its own tail.
         let lastWidth = host.clientWidth;
         const observer = new ResizeObserver(() => {
           if (host.clientWidth === lastWidth) return;
@@ -296,26 +315,63 @@ export default function Panel({ panel, cols, rows, fit, onRun }: Props) {
           debounce = window.setTimeout(() => { if (engine) fitFontToWidth(engine.cols); }, 80);
         });
         observer.observe(host);
-        pollers.push(observer as unknown as number);
+        observers.push(observer);
       }
 
-      // A grid frame that landed before the engine existed still applies.
       if (pendingGrid) { const g = pendingGrid; pendingGrid = null; conform(g.cols, g.rows); }
-
       flush();
     }).catch((err) => {
       setError(String(err && err.message ? err.message : err));
       setStatus('engine failed');
     });
 
+    // --- touch scrolling ----------------------------------------------------
+    // Neither renderer translates finger drags: xterm ignores touch for apps
+    // that grabbed the mouse, and ghostty-web only listens for `wheel`, which
+    // phones never emit for a drag. So convert drags into wheel notches here.
+    //
+    // Whether to scroll locally or forward the wheel depends on the app, and
+    // this is where holding the grid pays off: with no tmux in the way,
+    // hasMouseTracking() reports what the AGENT wants rather than tmux's
+    // permanent yes, so a normal-buffer agent scrolls the local scrollback.
+    let touchY: number | null = null;
+    const onTouchStart = (e: TouchEvent) => { touchY = e.touches[0].clientY; };
+    const onTouchMove = (e: TouchEvent) => {
+      if (touchY == null || !engine) return;
+      const y = e.touches[0].clientY;
+      const dy = y - touchY;
+      const steps = Math.trunc(dy / TOUCH_PX_PER_NOTCH);
+      if (steps !== 0) {
+        touchY = y;
+        const tracking = engine.hasMouseTracking
+          ? engine.hasMouseTracking()
+          : ((engine as unknown as { modes?: { mouseTrackingMode?: string } }).modes?.mouseTrackingMode ?? 'none') !== 'none';
+        const btn = steps > 0 ? 64 : 65; // dragging down reveals earlier output
+        const col = Math.max(1, Math.floor(engine.cols / 2));
+        const row = Math.max(1, Math.floor(engine.rows / 2));
+        for (let i = 0; i < Math.abs(steps); i++) {
+          if (tracking) send(`\x1b[<${btn};${col};${row}M`);
+          else engine.scrollLines(steps > 0 ? -1 : 1);
+        }
+      }
+      if (Math.abs(dy) > 4) e.preventDefault(); // stop the page rubber-banding
+    };
+    const onTouchEnd = () => { touchY = null; };
+    host.addEventListener('touchstart', onTouchStart, { passive: true });
+    host.addEventListener('touchmove', onTouchMove, { passive: false });
+    host.addEventListener('touchend', onTouchEnd);
+
     return () => {
       disposed = true;
+      closedByUs = true;
+      if (retry) clearTimeout(retry);
       if (pending?.timer) clearTimeout(pending.timer);
-      for (const p of pollers) {
-        if (typeof p === 'number') clearInterval(p);
-        else (p as unknown as ResizeObserver).disconnect();
-      }
-      try { ws.close(); } catch {}
+      for (const p of pollers) clearInterval(p);
+      for (const o of observers) o.disconnect();
+      host.removeEventListener('touchstart', onTouchStart);
+      host.removeEventListener('touchmove', onTouchMove);
+      host.removeEventListener('touchend', onTouchEnd);
+      try { ws?.close(); } catch {}
       try { fitter?.dispose(); } catch {}
       try { engine?.dispose(); } catch {}
     };
@@ -352,6 +408,19 @@ export default function Panel({ panel, cols, rows, fit, onRun }: Props) {
         {error && <div className="panel-error">{error}</div>}
       </div>
 
+      {touch && (
+        // preventDefault keeps terminal focus so the on-screen keyboard stays up.
+        <div className="term-keybar" onPointerDown={(e) => e.preventDefault()}>
+          {KEYBAR.map(([label, seq]) => (
+            <button
+              key={label}
+              className="tk-btn"
+              onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); sendKeyRef.current(seq); }}
+            >{label}</button>
+          ))}
+        </div>
+      )}
+
       <div className="panel-marks">
         {MARK_ORDER.map((key) => {
           const value = marks[key];
@@ -366,6 +435,17 @@ export default function Panel({ panel, cols, rows, fit, onRun }: Props) {
       </div>
 
       <div className="panel-foot">
+        {state && (
+          <div className="foot-row">
+            <span className="foot-k">agent state</span>
+            <span className="foot-v">
+              <span className={`sdot s-${state.state}`} /> {state.state}
+              {' · via '}{state.method}
+              {' · read '}{state.readMs < 0.01 ? '<0.01' : state.readMs}ms
+              {state.bells ? ` · ${state.bells} bells` : ''}
+            </span>
+          </div>
+        )}
         <div className="foot-row">
           <span className="foot-k">last resize</span>
           <span className="foot-v">

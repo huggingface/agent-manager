@@ -311,6 +311,43 @@ code, pre, .mono { font-family: var(--mono); }
   text-align: center;
 }
 
+/* Control keys phone keyboards lack. Shown only for coarse pointers. */
+.term-keybar {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--hair);
+  overflow-x: auto;
+}
+.tk-btn {
+  flex: 1 0 auto;
+  min-width: 40px;
+  min-height: 34px;
+  font-family: var(--mono);
+  font-size: 13px;
+  background: #1c242d;
+  color: var(--fg);
+  border: 1px solid var(--hair);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.tk-btn:active { background: #26313c; color: var(--accent); }
+
+.sdot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fg-dim);
+  vertical-align: middle;
+  margin-right: 4px;
+}
+.sdot.s-working { background: var(--accent); animation: breathe 1.8s ease-in-out infinite; }
+.sdot.s-waiting { background: none; box-shadow: inset 0 0 0 1.5px var(--accent-2); }
+.sdot.s-stopped { background: #3a444e; }
+@keyframes breathe { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .sdot.s-working { animation: none; } }
+
 .panel-marks {
   display: grid;
   grid-template-columns: repeat(5, 1fr);

@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 
 import { PANELS, COLS, ROWS, CTRL, SEED_PROMPT } from './panels.js';
 import { buildPaletteIndex, snapshotToAnsi } from './snapshot.js';
+import { gridState, noteBells, sampleScreen, tmuxState } from './state.js';
 
 // Scrollback restore comes from a ring of raw PTY bytes rather than from
 // snapshot(): snapshot returns history as plain LINES, not cells, so replaying
@@ -187,6 +188,11 @@ function ensureHolder(panel) {
     holder.bytes += chunk.length;
     holder.lastByteAt = Date.now();
 
+    // State detection rides the feed path: the grid is already up to date, so
+    // there is nothing to poll and no subprocess to spawn.
+    noteBells(holder, chunk);
+    sampleScreen(holder);
+
     holder.history.push(chunk);
     holder.historyBytes += chunk.length;
     while (holder.historyBytes > REPLAY_BYTES && holder.history.length > 1) {
@@ -357,6 +363,30 @@ app.get('/api/panels/:id/peek', (req, res) => {
   });
 });
 
+/**
+ * Agent state for both panels, with the cost of getting it.
+ *
+ * Panel A prices production's approach: a synchronous `tmux capture-pane` per
+ * session, per poll. Panel B reads the grid it already maintains. The `readMs`
+ * fields are the whole point of the endpoint.
+ */
+app.get('/api/state', (_req, res) => {
+  const out = {};
+  for (const panel of PANELS) {
+    if (panel.mode === 'ghostty') {
+      const holder = holders.get(panel.id);
+      out[panel.id] = holder
+        ? gridState(holder)
+        : { state: 'stopped', method: 'grid', readMs: 0 };
+    } else {
+      out[panel.id] = tmuxAlive(panel.id)
+        ? tmuxState(tmuxName(panel.id))
+        : { state: 'stopped', method: 'tmux capture-pane', readMs: 0 };
+    }
+  }
+  res.json(out);
+});
+
 /** Type a prompt into a session with no browser attached. */
 app.post('/api/panels/:id/prompt', async (req, res) => {
   const panel = PANELS.find((p) => p.id === req.params.id);
@@ -426,13 +456,36 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 // ---------- websockets ----------
 
 const wss = new WebSocketServer({ noServer: true });
+wss.on('error', (e) => console.error('[wss error]', e.message));
+server.on('error', (e) => console.error('[server error]', e.message));
+
+// Only accept WebSockets from our own page. WS handshakes skip CORS entirely and
+// the browser attaches cookies, so without this any website could open a
+// cross-site `wss://<space>/ws/...` and reach a live agent session with the
+// visitor's HF credentials. A missing Origin (curl, native clients) is allowed:
+// those carry no ambient browser credentials.
+function originAllowed(origin) {
+  if (!origin) return true;
+  let host;
+  try { host = new URL(origin).hostname; } catch { return false; }
+  if (process.env.SPACE_HOST) return host === process.env.SPACE_HOST;
+  return host === 'localhost' || host === '127.0.0.1';
+}
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, 'http://localhost');
   const m = url.pathname.match(/^\/ws\/([a-z]+)$/);
   const panel = m && PANELS.find((p) => p.id === m[1]);
   if (!panel) return socket.destroy();
-  wss.handleUpgrade(req, socket, head, (ws) => attachClient(ws, panel));
+  if (!originAllowed(req.headers.origin)) {
+    // Reject during the handshake so no session is ever spawned for the caller.
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    return socket.destroy();
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    ws.on('error', (e) => console.error('[ws error]', e && e.message));
+    attachClient(ws, panel);
+  });
 });
 
 const sendCtrl = (ws, obj) => {

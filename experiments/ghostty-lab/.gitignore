@@ -4,3 +4,4 @@ dist/
 .venv/
 *.log
 .DS_Store
+seed/memory/

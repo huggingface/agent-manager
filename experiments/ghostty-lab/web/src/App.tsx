@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Panel from './Panel';
 import { MARK_LABELS, MARK_ORDER, clearRuns, loadRuns, median, ms, saveRun } from './lab';
-import type { Config, FitMode, PanelInfo, Run } from './lab';
+import type { Config, FitMode, PanelInfo, PanelState, Run } from './lab';
 
 function useHash() {
   const [hash, setHash] = useState(() => location.hash.replace(/^#\/?/, ''));
@@ -185,6 +185,19 @@ function Lab({ config, onRun }: { config: Config; onRun: (r: Run) => void }) {
   const [prompt, setPrompt] = useState('');
   const [sending, setSending] = useState(false);
   const [fit, setFit] = useState<FitMode>('reflow');
+  // One poll for both panels. The endpoint prices each method: panel A shells out
+  // to tmux per poll, panel B reads the grid it already maintains.
+  const [states, setStates] = useState<Record<string, PanelState>>({});
+
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      fetch('/api/state').then((r) => r.json()).then((d) => { if (alive) setStates(d); }).catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 2000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
 
   const send = async () => {
     const text = prompt.trim();
@@ -225,7 +238,7 @@ function Lab({ config, onRun }: { config: Config; onRun: (r: Run) => void }) {
 
       <div className="panels">
         {config.panels.map((p) => (
-          <Panel key={`${p.id}-${fit}`} panel={p} cols={config.cols} rows={config.rows} fit={fit} onRun={onRun} />
+          <Panel key={`${p.id}-${fit}`} panel={p} cols={config.cols} rows={config.rows} fit={fit} state={states[p.id]} onRun={onRun} />
         ))}
       </div>
 

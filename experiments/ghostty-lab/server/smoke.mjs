@@ -175,6 +175,57 @@ try {
     grown && `${grown.cols}×${grown.rows}`);
   check('grid no longer flagged shared', !!grown && grown.shared === false);
   desktop.close();
+
+  // --- WS origin check --------------------------------------------------------
+  // A cross-site wss:// handshake skips CORS and carries browser cookies, so it
+  // must be refused before any session is touched.
+  const rejected = await new Promise((resolve) => {
+    const ws = new WebSocket(`ws://localhost:${PORT}/ws/ghostty`, { origin: 'https://evil.example' });
+    ws.on('open', () => { try { ws.close(); } catch {} resolve(false); });
+    ws.on('error', () => resolve(true));
+    setTimeout(() => resolve(false), 3000);
+  });
+  check('cross-site origin refused', rejected === true);
+  const sameSite = await new Promise((resolve) => {
+    const ws = new WebSocket(`ws://localhost:${PORT}/ws/ghostty`, { origin: `http://localhost:${PORT}` });
+    ws.on('open', () => { try { ws.close(); } catch {} resolve(true); });
+    ws.on('error', () => resolve(false));
+    setTimeout(() => resolve(false), 3000);
+  });
+  check('same-site origin accepted', sameSite === true);
+  const noOrigin = await new Promise((resolve) => {
+    const ws = new WebSocket(`ws://localhost:${PORT}/ws/ghostty`);
+    ws.on('open', () => { try { ws.close(); } catch {} resolve(true); });
+    ws.on('error', () => resolve(false));
+    setTimeout(() => resolve(false), 3000);
+  });
+  check('no-Origin client accepted (curl, native)', noOrigin === true);
+
+  // --- state detection, both methods ------------------------------------------
+  const st = await (await fetch(`${base}/api/state`)).json();
+  check('B reports state from the grid', st.ghostty && st.ghostty.method === 'grid'
+    && ['working', 'waiting', 'idle', 'stopped'].includes(st.ghostty.state), st.ghostty && `${st.ghostty.state}`);
+  check('A reports state via tmux capture-pane', st.classic && st.classic.method === 'tmux capture-pane',
+    st.classic && `${st.classic.state}`);
+  // The whole argument for holding the grid: same answer, no subprocess.
+  check('grid read is far cheaper than the tmux shell-out',
+    st.ghostty.readMs < st.classic.readMs,
+    `grid ${st.ghostty.readMs}ms vs tmux ${st.classic.readMs}ms`);
+  console.log(`      grid sampling cost: ${st.ghostty.avgSampleMs}ms avg over ${st.ghostty.samples} samples (on the feed path, no polling)`);
+
+  // A busy session must actually read as working.
+  await fetch(`${base}/api/panels/ghostty/prompt`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: 'for i in 1 2 3 4 5 6 7 8; do echo working $i; sleep 0.4; done' }),
+  });
+  await sleep(1800);
+  const busy = await (await fetch(`${base}/api/state`)).json();
+  check('B detects a busy session as working', busy.ghostty.state === 'working',
+    `${busy.ghostty.state}, text changed ${busy.ghostty.ageSecs}s ago`);
+  await sleep(5000);
+  const quiet = await (await fetch(`${base}/api/state`)).json();
+  check('B detects a finished session as your-turn', quiet.ghostty.state === 'waiting',
+    `${quiet.ghostty.state}, text changed ${quiet.ghostty.ageSecs}s ago`);
 } catch (err) {
   check('no exceptions', false, String(err.message || err));
 } finally {

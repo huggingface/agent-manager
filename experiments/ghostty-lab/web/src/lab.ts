@@ -27,6 +27,16 @@ export type Marks = Record<string, number>;
 // does today, and the only mode that actually exercises reflow.
 export type FitMode = 'fixed' | 'reflow';
 
+export type PanelState = {
+  state: 'working' | 'waiting' | 'idle' | 'stopped';
+  method: string;
+  readMs: number;
+  ageSecs?: number | null;
+  bells?: number;
+  avgSampleMs?: number;
+  samples?: number;
+};
+
 export type ResizeStat = {
   from: string;
   to: string;
