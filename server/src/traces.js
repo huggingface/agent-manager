@@ -785,6 +785,30 @@ export async function digestFor(s) {
   return null;
 }
 
+/** Where this session's raw conversation trace lives on disk, so an agent (or
+ *  the operator) can read it directly at whatever depth it wants instead of
+ *  asking us to summarize. Only the CLIs whose conversation we can pin down to
+ *  ONE session get a location; the rest return null rather than a path that
+ *  might belong to a sibling. */
+export async function traceLocation(s) {
+  try {
+    if (s.cli === 'claude' && s.sessionUuid) {
+      for (const p of await claudeFiles()) {
+        if (path.basename(p).includes(s.sessionUuid)) return { format: 'jsonl', path: p };
+      }
+      return null;
+    }
+    if (s.cli === 'codex' && s.codexRollout && fs.existsSync(s.codexRollout)) {
+      return { format: 'jsonl', path: s.codexRollout };
+    }
+    if (s.cli === 'opencode' && s.opencodeSessionId) {
+      const p = opencodeDbPath();
+      if (fs.existsSync(p)) return { format: 'sqlite', path: p, sessionId: s.opencodeSessionId };
+    }
+  } catch {}
+  return null;
+}
+
 // ---------- Trace panel: ONE session, read in full, on demand ----------
 // Deliberately NOT part of buildTraces()/traceDigests(): those walk every
 // session on a ~1Hz poll and memoize per file, so making them retain turns

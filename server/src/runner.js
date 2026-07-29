@@ -590,6 +590,25 @@ export async function sendInput(id, text) {
   h.write('\r');
 }
 
+/**
+ * The session's rendered screen plus `lines` of scrollback above it — what a
+ * human would see in the pane. Used by the agent API so one agent can watch
+ * another's progress instead of spending a turn asking.
+ */
+export function capturePane(id, lines = 80) {
+  if (!USE_TMUX) return null;
+  const n = Math.max(0, Math.min(2000, lines));
+  let out;
+  try {
+    out = execFileSync('tmux', ['capture-pane', '-p', '-S', `-${n}`, '-t', tmuxName(id)],
+      { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch { return null; } // no such session (stopped)
+  // capture-pane pads the pane to its full height with blank lines; drop them so
+  // a short screen doesn't arrive as 50 lines of nothing. -S already bounds the
+  // scrollback, so the caller decides whether to trim the visible screen too.
+  return out.replace(/\s+$/, '');
+}
+
 /** Return the last mouse selection for this session as a browser-consumable OSC 52. */
 export function copySelection(id) {
   if (!USE_TMUX) return null;
