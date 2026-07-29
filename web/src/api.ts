@@ -144,6 +144,25 @@ export const uploadFile = (id: string, p: string, file: File) =>
 export const downloadUrl = (id: string, p: string) =>
   `/api/files/${id}/download?path=${encodeURIComponent(p)}`;
 
+// Folder edits carry a reason when they fail ("already exists", "that folder is
+// …"), and the file browser shows it inline — so these use fileErr, not json.
+const fileErr = async (r: Response) => {
+  const body = await r.json().catch(() => null);
+  if (!r.ok) throw new Error((body && body.error) || `${r.status}`);
+  return body;
+};
+
+export const createFolder = (id: string, parent: string, name: string) =>
+  fetch(`/api/files/${id}/mkdir?path=${encodeURIComponent(parent)}&name=${encodeURIComponent(name)}`,
+    { method: 'POST' }).then(fileErr);
+
+export const renameEntry = (id: string, p: string, name: string) =>
+  fetch(`/api/files/${id}/rename?path=${encodeURIComponent(p)}&name=${encodeURIComponent(name)}`,
+    { method: 'POST' }).then(fileErr);
+
+export const deleteEntry = (id: string, p: string) =>
+  fetch(`/api/files/${id}/entry?path=${encodeURIComponent(p)}`, { method: 'DELETE' }).then(fileErr);
+
 // ---- session sharing (docs/session-sharing.md) ----
 export interface ShareInfo {
   namespace: string | null;

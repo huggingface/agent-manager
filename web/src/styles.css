@@ -628,7 +628,18 @@ body {
 .tw-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .tw-size { color: var(--muted); font-size: 0.8em; flex: none; padding-left: 0.6em; font-variant-numeric: tabular-nums; }
 .tree-msg { color: var(--muted); font-size: 0.85em; padding: 0.15em 0; }
+
+/* folder edits: rename/delete ride the row on hover, name field replaces it */
+.tw-actions { display: flex; align-items: center; gap: 2px; flex: none; opacity: 0; pointer-events: none; transition: opacity 0.12s ease-out; }
+.tree-row:hover .tw-actions, .tree-row:focus-within .tw-actions, .tw-actions.open { opacity: 1; pointer-events: auto; }
+.tw-actions .mini-btn { font-size: 0.8em; padding: 2px 5px; }
+.tw-actions .mini-btn svg { width: 1em; height: 1em; }
+.tw-actions .mini-btn.danger { color: var(--danger); }
+.tw-warn { color: var(--muted); font-size: 0.8em; padding-right: 0.2em; }
+.tw-input { flex: 1; min-width: 4em; background: var(--panel-2); border: 1px solid var(--accent); border-radius: var(--r-sm); color: var(--text); font: inherit; font-size: 1em; padding: 0 0.25em; outline: none; }
+
 .files-hint { flex: none; padding: 5px 10px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.files-hint.err { color: var(--danger); }
 
 /* settings */
 .settings-nav { padding: 10px; display: flex; flex-direction: column; gap: 4px; }
@@ -829,6 +840,7 @@ a.btn-ghost { text-decoration: none; }
   .tree { padding-top: 6px; }
   .group { margin: 13px 0 5px; }
   .row .row-actions { opacity: 1; pointer-events: auto; position: static; transform: none; margin-left: 4px; background: transparent; }
+  .tw-actions { opacity: 1; pointer-events: auto; } /* no hover on touch */
   .row .cli-logo, .row .count { opacity: 1 !important; }
   .row .age { display: none; } /* actions are always visible on touch — no room */
   .g-add { opacity: 1; }

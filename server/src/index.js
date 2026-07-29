@@ -1080,6 +1080,76 @@ app.post('/api/files/:id/upload', (req, res) => {
   req.pipe(out);
 });
 
+// One path segment, no traversal and no separator smuggling.
+const badSegment = (n) =>
+  !n || n === '.' || n === '..' || n.includes('/') || n.includes('\\') || n.includes('\0');
+
+// Folders something else depends on: an agent's own workspace and the shared
+// skills dir. Moving or deleting those out from under a running agent breaks
+// its cwd, so the browser refuses. Returns a label, or null if it's fair game.
+function dependedOnDir(abs) {
+  const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+  const target = real(abs);
+  if (target === real(SKILLS_DIR)) return 'the shared skills folder';
+  for (const s of store.list()) {
+    if (s.path && real(workspacePath(s.path)) === target) return `${s.name}'s workspace`;
+  }
+  return null;
+}
+
+// Resolve a browser request against one session's root: `rel` (the entry, or
+// its parent for mkdir) plus an optional new single-segment `name`.
+function browsePath(session, rel, name) {
+  const root = folderPathOf(session);
+  const target = resolveSafe(root, name ? path.join(rel || '.', name) : rel);
+  return { root, target };
+}
+
+app.post('/api/files/:id/mkdir', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const name = String(req.query.name || '').trim();
+  if (badSegment(name)) return res.status(400).json({ error: 'bad name' });
+  const rel = String(req.query.path || '');
+  const { root, target } = browsePath(s, rel, name);
+  const parent = resolveSafe(root, rel);
+  // One folder, in a parent that already exists — not a whole missing chain.
+  if (!target || !parent || !fs.existsSync(parent)) return res.status(400).json({ error: 'bad path' });
+  if (fs.existsSync(target)) return res.status(409).json({ error: 'already exists' });
+  try { fs.mkdirSync(target); } catch (e) { return res.status(500).json({ error: e.message }); }
+  res.json({ ok: true });
+});
+
+app.post('/api/files/:id/rename', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const name = String(req.query.name || '').trim();
+  if (badSegment(name)) return res.status(400).json({ error: 'bad name' });
+  const rel = String(req.query.path || '');
+  const { root, target: from } = browsePath(s, rel);
+  if (!from || from === root || !fs.existsSync(from)) return res.status(400).json({ error: 'bad path' });
+  const dep = dependedOnDir(from);
+  if (dep) return res.status(409).json({ error: `that folder is ${dep}` });
+  const { target: to } = browsePath(s, path.dirname(rel), name);
+  if (!to) return res.status(400).json({ error: 'bad path' });
+  if (to !== from && fs.existsSync(to)) return res.status(409).json({ error: 'already exists' });
+  try { fs.renameSync(from, to); } catch (e) { return res.status(500).json({ error: e.message }); }
+  res.json({ ok: true });
+});
+
+// Recursive: deleting a folder takes what's inside it with it. The UI asks
+// twice before calling this.
+app.delete('/api/files/:id/entry', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const { root, target } = browsePath(s, String(req.query.path || ''));
+  if (!target || target === root || !fs.existsSync(target)) return res.status(400).json({ error: 'bad path' });
+  const dep = dependedOnDir(target);
+  if (dep) return res.status(409).json({ error: `that folder is ${dep}` });
+  try { fs.rmSync(target, { recursive: true, force: true }); } catch (e) { return res.status(500).json({ error: e.message }); }
+  res.json({ ok: true });
+});
+
 // Sanitize a client-supplied workspace-relative path: no '..', no absolute
 // paths, must resolve under WORKSPACES_DIR. Returns the normalized relative
 // path ('' = the workspaces root), or null if invalid.
