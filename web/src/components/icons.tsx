@@ -177,3 +177,11 @@ export const ShareGlyph = ({ className }: { className?: string }) => (
     <line x1="8.6" y1="10.5" x2="15.4" y2="6.5" /><line x1="8.6" y1="13.5" x2="15.4" y2="17.5" />
   </svg>
 );
+
+// A conversation branching into its next agent: used for trace handover.
+export const HandoverGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M3 3.2v3.1A2.7 2.7 0 0 0 5.7 9h6.4" />
+    <path d="M8.9 5.8 12.1 9l-3.2 3.2" />
+  </G>
+);

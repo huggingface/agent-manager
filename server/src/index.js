@@ -1304,6 +1304,31 @@ app.get('/api/trace/bundles', async (_req, res) => {
   catch (e) { res.status(500).json({ error: (e && e.message) || 'failed' }); }
 });
 
+// Resolve the concrete local source behind a trace pane. Handover uses this to
+// seed the next agent with a path it can inspect directly, whether the pane
+// points at one of this Manager's sessions or at an imported Hub bundle.
+app.get('/api/trace/:id/location', async (req, res) => {
+  const pane = store.get(req.params.id);
+  if (!pane || pane.cli !== 'trace') return res.status(404).json({ error: 'not a trace pane' });
+  const source = pane.traceSource || { kind: 'session', ref: pane.id };
+  try {
+    if (source.kind === 'bundle') {
+      if (!/^[\w.-]+$/.test(String(source.ref))) return res.status(400).json({ error: 'bad bundle ref' });
+      const dir = path.join(DATA_DIR, 'traces', source.ref);
+      const names = (await fs.promises.readdir(dir)).filter((n) => n.endsWith('.jsonl'));
+      if (!names.length) return res.status(404).json({ error: 'bundle has no trace file', code: 'no-trace' });
+      return res.json({ path: path.join(dir, names[0]), source });
+    }
+    const target = store.get(source.ref);
+    if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
+    const hit = await findTrace(target, store.list());
+    if (!hit) return res.status(404).json({ error: 'no trace found for this session', code: 'no-trace' });
+    return res.json({ path: hit.src, sessionId: hit.sessionId || null, source });
+  } catch (e) {
+    res.status(500).json({ error: (e && e.message) || 'could not resolve trace path' });
+  }
+});
+
 // Paginated on purpose: a single session here is 6.15 MB and the panel only ever
 // shows a window of it. `limit` is clamped in readTrace().
 app.get('/api/trace/:id', async (req, res) => {

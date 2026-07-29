@@ -62,6 +62,9 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   // Session id whose share dialog is open (null = closed).
   const [shareId, setShareId] = useState<string | null>(null);
+  // Imported traces already live on the Hub; sharing them means handing on
+  // their original dataset link, not publishing a duplicate dataset.
+  const [traceShare, setTraceShare] = useState<{ title: string; url: string } | null>(null);
   const showErr = (msg: string) => (e: unknown) => { console.error(msg, e); setToast(msg); window.setTimeout(() => setToast(null), 4000); };
   // Overview presentation: tiles (default) or the classic list.
   const [ovView, setOvViewRaw] = useState<'tiles' | 'list'>(() =>
@@ -310,6 +313,27 @@ export default function App() {
   const deleteGroup = (id: string) => api.deleteGroup(id).then(() => { if (activeRef === `g:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the group'));
   const stopSession = (id: string) => api.stopSession(id).then(refresh).catch(showErr('Couldn’t stop the agent'));
   const deleteSession = (id: string) => api.deleteSession(id).then(() => { if (activeRef === `s:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the agent'));
+  const shareTrace = async (id: string) => {
+    const pane = sessById[id];
+    if (!pane || pane.cli !== 'trace') return;
+    const source = pane.traceSource;
+    // A local trace is only a view over its source session. Publish that source
+    // through the normal redaction/access dialog instead of duplicating it.
+    if (source?.kind === 'session' && sessById[source.ref]) {
+      setShareId(source.ref);
+      return;
+    }
+    try {
+      // An imported trace is already a shared Hub dataset. Re-share its
+      // provenance URL instead of creating a second, disconnected copy.
+      const trace = await api.getTracePage(id, 0, 1);
+      const url = trace.source?.url;
+      if (!url) throw new Error('this trace has no shareable source link');
+      setTraceShare({ title: pane.name, url });
+    } catch (e) {
+      showErr('Couldn’t share the trace')(e);
+    }
+  };
   // Clicking a session: nested → open its group with that pane focused; loose → solo view.
   const openSession = (sid: string, groupId?: string) => {
     if (groupId) {
@@ -541,6 +565,31 @@ export default function App() {
           onClose={() => { setShareId(null); refresh(); }}
         />
       )}
+      {traceShare && (
+        <div className="welcome-backdrop" onClick={() => setTraceShare(null)}>
+          <div className="welcome-card share-card" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
+            <div className="welcome-head">
+              <div>
+                <h2 style={{ margin: 0, fontSize: 16 }}>Share “{traceShare.title}”</h2>
+                <p className="share-sub">This imported trace already has a Hub dataset. Share its original link.</p>
+              </div>
+            </div>
+            <div className="share-linkrow">
+              <input readOnly value={traceShare.url} onFocus={(e) => e.currentTarget.select()} />
+              <button className="btn-ghost" onClick={() => {
+                navigator.clipboard?.writeText(traceShare.url).then(() => {
+                  setToast('Trace link copied');
+                  window.setTimeout(() => setToast(null), 2400);
+                }).catch(() => {});
+              }}>Copy</button>
+            </div>
+            <div className="share-actions">
+              <button className="btn-ghost" onClick={() => setTraceShare(null)}>Close</button>
+              <a className="btn-primary" href={traceShare.url} target="_blank" rel="noreferrer">Open dataset</a>
+            </div>
+          </div>
+        </div>
+      )}
       <Sidebar
         clis={clis}
         tree={tree}
@@ -552,6 +601,8 @@ export default function App() {
         onOpenSession={openSession}
         onNewSession={newSession}
         onShareSession={setShareId}
+        onShareTrace={shareTrace}
+        onTraceHandover={api.getTraceLocation}
         onOpenTrace={openTrace}
         onOpenSharedTrace={openSharedTrace}
         onNewGroup={newGroup}
