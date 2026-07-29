@@ -4,7 +4,7 @@ import { STATE_LABEL, isPassive } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph, ListGlyph } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph, HandoverGlyph, ListGlyph } from './icons';
 
 type Zone = 'before' | 'after' | 'on';
 
@@ -25,7 +25,7 @@ const fmtAgo = (ts?: number) => {
 export default function Sidebar({
   clis, tree, activeRef, focusedId, defaultPath, ages,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
-  onStopSession, onDeleteSession, onShareSession, onOpenTrace, onOpenSharedTrace, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
+  onStopSession, onDeleteSession, onShareSession, onShareTrace, onTraceHandover, onOpenTrace, onOpenSharedTrace, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
   archived, showArchived, onToggleArchived,
 }: {
   clis: Cli[];
@@ -45,6 +45,8 @@ export default function Sidebar({
   onStopSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
   onShareSession: (id: string) => void;
+  onShareTrace: (id: string) => void;
+  onTraceHandover: (id: string) => Promise<{ path: string; sessionId?: string | null }>;
   onOpenTrace: (id: string) => void;
   onOpenSharedTrace: (repo: string) => Promise<void>;
   onMove: (ref: string, to: MoveTarget) => void;
@@ -63,6 +65,7 @@ export default function Sidebar({
   const [quickMore, setQuickMore] = useState(false); // reveals name + folder
   const [quickName, setQuickName] = useState('');
   const [quickLoc, setQuickLoc] = useState('.');
+  const [quickError, setQuickError] = useState<string | null>(null);
   // When creation was launched from a group's + the new agent lands there.
   const [createTarget, setCreateTarget] = useState<string | null>(null);
   const [groupName, setGroupName] = useState('');
@@ -114,11 +117,31 @@ export default function Sidebar({
   // "More options" adds a name + folder; the group tile flips to group creation.
   const quickable = clis.filter((c) => c.id !== 'shell' && !isPassive(c.id));
   const openQuick = () => {
+    setQuickError(null);
     setQuickCli((q) => q ?? (quickable.find((c) => c.available && c.ready)?.id || quickable.find((c) => c.available)?.id || null));
     setQuickMode('agent');
     setQuickLoc(defaultPath || '.');
     setGroupLoc(defaultPath || '.');
     setPanel('quick');
+  };
+  const openHandover = async (s: Session) => {
+    try {
+      setQuickError(null);
+      const loc = await onTraceHandover(s.id);
+      const selected = quickable.find((c) => c.available && c.ready)
+        || quickable.find((c) => c.available);
+      setQuickCli(selected?.id || null);
+      setQuickMode('agent');
+      setQuickMore(false);
+      setQuickName('');
+      setQuickLoc(defaultPath || '.');
+      setQuickPrompt(`In this session we will continue from the session traces at ${loc.path}${loc.sessionId ? ` (session ${loc.sessionId})` : ''}`);
+      setPanel('quick');
+    } catch (e) {
+      setQuickError(e instanceof Error ? e.message : 'could not resolve that trace');
+      setQuickMode('agent');
+      setPanel('quick');
+    }
   };
   const submitQuick = () => {
     const p = quickPrompt.trim();
@@ -209,7 +232,12 @@ export default function Sidebar({
         )}
         <span className="age">{fmtAgo(ages?.[s.id])}</span>
         <span className="row-actions">
-          {s.running
+          {s.cli === 'trace' ? (
+            <>
+              <button className="mini-btn" title="Share this trace" onClick={(e) => { e.stopPropagation(); onShareTrace(s.id); }}><ShareGlyph /></button>
+              <button className="mini-btn" title="Continue from this trace in a new agent" onClick={(e) => { e.stopPropagation(); openHandover(s); }}><HandoverGlyph /></button>
+            </>
+          ) : s.running
             ? <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}><StopGlyph /></button>
             : <button className="mini-btn" title="Start" onClick={(e) => { e.stopPropagation(); onOpenSession(s.id, groupId); }}><PlayGlyph /></button>}
           {SHAREABLE_CLIS.includes(s.cli) && (
@@ -315,6 +343,7 @@ export default function Sidebar({
 
             {quickMode === 'agent' ? (
               <>
+                {quickError && <div className="open-trace-err">{quickError}</div>}
                 <textarea
                   autoFocus
                   rows={1}

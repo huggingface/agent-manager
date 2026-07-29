@@ -263,6 +263,17 @@ export const getTracePage = async (id: string, offset = 0, limit = 200): Promise
   return r.json();
 };
 
+export interface TraceLocation {
+  path: string;
+  sessionId?: string | null;
+  source: { kind: 'session' | 'bundle'; ref: string };
+}
+export const getTraceLocation = async (id: string): Promise<TraceLocation> => {
+  const r = await fetch(`/api/trace/${id}/location`);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
+  return r.json();
+};
+
 // Receiving: pull a shared trace off the Hub so a pane can render it. Accepts a
 // bare dataset id or a pasted dataset URL (the server normalizes).
 export interface ImportedBundle {
