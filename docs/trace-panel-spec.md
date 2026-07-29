@@ -261,15 +261,23 @@ Landed. Files: `server/src/traces.js` (reader appended at the bottom),
    `readTrace()` returns `{ role, kind?, ts?, model?, usage?, blocks: [...] }` with a
    `makeStitcher()` that files each result next to its own call by `tool_use_id` — which is
    also what makes the collapsed `3 tool calls (Bash, Read)` row possible at all.
-2. **`kind: 'final' | 'update'`** on assistant messages. Codex emits intermediate
-   `response_item` text *and* an authoritative `task_complete`; without the distinction a
-   codex session reads as ten answers. Non-final text renders dimmed.
+2. **`kind: 'final'`** on the last assistant turn before each prompt. **Corrected
+   2026-07-29:** the original claim here — that codex's `task_complete` is an authoritative
+   answer separate from the `response_item` text, and that non-final text should render
+   dimmed — was wrong on both counts. `task_complete.last_agent_message` is byte-identical
+   to the preceding assistant message in every task of the rollout checked, so treating it
+   as separate rendered all 8 answers twice; and the Hub *emphasises* the final turn with an
+   accent rule rather than dimming the others. `markFinalTurns()` now derives the final turn
+   for every harness in one reverse pass, and `task_complete` only marks it.
 3. **Codex gets a stitcher too.** Codex writes a call and its output as two separate
    top-level items, so before this every call and every result was its own row and nothing
    ever folded. Caught in testing: `0 paired, 1 standalone` → `1 paired, 0 standalone`.
-4. **Environment blobs become `role:'system'`, not dropped.** Claude's `<system-reminder>`
-   and codex's `<`-prefixed user items are context, not prompts; dimmed rather than hidden,
-   because removing them makes the conversation read wrong.
+4. **Environment blobs become `role:'system'`, not dropped.** Claude's `<system-reminder>`,
+   codex's `<`-prefixed user items, and codex's whole `role:'developer'` stream are context,
+   not prompts. Dimmed and collapsed behind their own tag name rather than hidden, because
+   removing them makes the conversation read wrong — but one of them here is 27 KB, so
+   expanded they bury the session before it starts. The Hub instead labels these "User" and
+   expands them, or omits them entirely; this is a deliberate divergence.
 
 ### The three open questions in §10, as answered
 
@@ -329,3 +337,34 @@ group cart, and a group's agent count. Adding a third passive pane type now mean
   `attachment` lines are ignored. The block type exists for when that's wired up.
 - The incoming half (accept/decline on an inbox PR) is still the next piece of work, so the
   `bundle` source has no way to be populated yet outside a test.
+
+## 12. Comparison against the Hub's own viewer (2026-07-29)
+
+Done on a real private share, `thomwolf/codex-session-019fac81`, by rendering the Hub's
+Trace tab in headless Chromium and scraping it in document order, then taking an
+independent census of the 393-line file so the arbiter was the data rather than either
+renderer. Reproduce with `Network.setExtraHTTPHeaders` carrying a bearer token — the Hub
+serves the blob page and its viewer with one.
+
+Findings are in §11's list and in commit `08714a5`. What is worth keeping here:
+
+**Both agree on totals, not on attribution.** The Hub's first assistant row claims
+`16 tool calls (exec_command, apply_patch, write_stdin)` and then exactly `1 tool call`
+for each of the next five turns. The file has 2, 2, 1, 3, 6, 7 between successive
+assistant texts. Both sum to 21, so nothing is lost — but the per-turn attribution
+differs, and the file backs ours. Its first row's token figure (`354↑`, `31,488 cached`)
+is likewise the *last* model call of that task shown on the task's *first* row.
+
+**The Hub has no System or Developer row type.** Measured: `System: 0, Developer: 0`
+across the rendered window. It shows `<recommended_plugins>` as a User turn, expanded as
+markdown, and omits codex's seven `role:'developer'` messages entirely.
+
+**Two streams, and the same content in both.** This is the single most important thing
+about the codex format and it is documented at `normalizeCodex` in `traces.js`:
+`response_item` is what went to and from the model, `event_msg` is what the TUI showed.
+`agent_message` duplicates the assistant `response_item`s exactly; `agent_reasoning`
+arrives *first* and repeats what a later `reasoning` item's summary entries contain, so
+dedupe per ENTRY, not per joined string; and web searches exist ONLY as `web_search_end`.
+
+**Encrypted reasoning is normal.** 49 of 56 reasoning items carried only
+`encrypted_content`. Say so in the UI; do not leave the impression the model didn't think.
