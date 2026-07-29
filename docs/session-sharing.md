@@ -12,13 +12,17 @@ own Agent Manager and keep working.
 > for private and gated repos (the viewer is blocked there, an authenticated download is
 > not), and needs no polling, no consent UI and no second repo.
 >
-> What that leaves in the tree: `notifyRecipients()` still opens a pull request on a
-> recipient's `am-inbox` when usernames are given for a *public* share — a real Hub PR they
-> see by email, not an in-app banner, and the dialog now says so. `sharing: { receive, allow }`
-> still round-trips through `PUT /api/config` but **nothing reads it**; it is inert until
-> something polls an inbox. `POST /api/share/inbox` still creates and deletes the inbox repo,
-> API-only, with no settings UI. Sections 5 and 9 below are kept as the design for whenever
-> this is picked up, not as a description of the code.
+> **Removed from the code on 2026-07-29**, not left inert: `notifyRecipients()`, the
+> `notify` parameter on the share route, `POST/GET /api/share/inbox`, `inboxState()`,
+> `setInbox()`, and the `sharing: { receive, allow }` config — about 130 lines. Dead
+> machinery for an unplanned feature is worse than no machinery, and it is all in git
+> history plus §5 below. Sections 5 and 9 are kept as the DESIGN for whenever this is picked
+> up; they do not describe the code.
+>
+> The visibility choice is now plainly **Private** or **Public**. Private is a gated dataset
+> with named users granted access directly, so the username box remains there — it *grants*
+> access, without which a gated dataset is readable by nobody. Public needs no names at all,
+> so that mode has no box: you send the link.
 
 ## 1. Decisions (locked)
 
@@ -204,7 +208,7 @@ sides only ever talk to huggingface.co.
 | Piece | What it is |
 |---|---|
 | **Inbox** | `<recipient>/am-inbox`, a small **public** dataset. Its existence *is* the opt-in — no repo, nobody can send you anything, enforced by the Hub. |
-| **Delivery** | The sender opens a **pull request** adding `incoming/<envelope-id>.json`. Anyone HF-authenticated can open a PR without write access; the author is Hub-authenticated identity that cannot be forged. ✅ **Implemented** — `notifyRecipients()` in `share.js`, via `POST /api/datasets/<inbox>/commit/main?create_pr=1` with an NDJSON body. Verified end to end. |
+| **Delivery** | The sender opens a **pull request** adding `incoming/<envelope-id>.json`. Anyone HF-authenticated can open a PR without write access; the author is Hub-authenticated identity that cannot be forged. ⛔ **Removed 2026-07-29** — was implemented as `notifyRecipients()` via `POST /api/datasets/<inbox>/commit/main?create_pr=1` with an NDJSON body, and verified sender-side only (never across two accounts). Recoverable from git if this is revived. |
 | **Accept** | `merge_pull_request` |
 | **Decline** | `change_discussion_status(..., 'closed')` with a comment |
 | **Payload** | A separate dataset owned by the **sender**, `public` or `gated`. |

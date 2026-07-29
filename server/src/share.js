@@ -1,9 +1,11 @@
 // Session sharing: publish one agent session's trace as a Hub dataset.
 // Design and rationale: docs/session-sharing.md (§4 bundle, §5 access, §6 pipeline).
 //
-// Phase 1 scope: Claude Code only, trace only, publish + optional per-user
-// access grants. Mailbox delivery (the PR on a recipient's am-inbox) is §5 and
-// lands separately.
+// Scope: trace only, publish + optional per-user access grants. Telling the
+// recipient is deliberately NOT here — the operator sends them the dataset link
+// and they open it with the Trace button in their own Space. The mailbox design
+// (a PR on a recipient's am-inbox) is kept in docs/session-sharing.md §5 for
+// whenever that is picked up; it is not in the code.
 //
 // Two hard rules this module exists to honour:
 //
@@ -493,7 +495,7 @@ export async function buildBundle(session, { title, visibility, allSessions = []
  * @param name             optional repo name (namespace is this token's user)
  * @param grantTo          usernames to pre-authorize (gated only)
  */
-export async function shareSession(session, { visibility = 'public', name, grantTo = [], notify = [], allSessions = [] } = {}) {
+export async function shareSession(session, { visibility = 'public', name, grantTo = [], allSessions = [] } = {}) {
   if (!['public', 'gated'].includes(visibility)) throw new Error(`bad visibility: ${visibility}`);
   const ns = await shareNamespace();
   if (!ns) throw new Error('cannot resolve the Hub namespace — check HF_TOKEN');
@@ -554,13 +556,7 @@ export async function shareSession(session, { visibility = 'public', name, grant
     const info = await hfApi(`/api/datasets/${repo}`).catch(() => null);
     const sha = (info && info.sha) || null;
 
-    // Recipients of a PUBLIC share can't be granted anything — there is nothing
-    // to grant — so tell them instead. Gated shares grant AND tell.
-    const tell = [...new Set([...notify, ...(visibility === 'gated' ? granted : [])])];
-    const { notified, notifyErrors } = tell.length
-      ? await notifyRecipients(tell, { repo, sha, visibility, from: process.env.SPACE_AUTHOR_NAME || ns })
-      : { notified: [], notifyErrors: [] };
-
+    // Telling the recipient is out of scope: the operator sends them the link.
     return {
       repo,
       visibility,
@@ -572,8 +568,6 @@ export async function shareSession(session, { visibility = 'public', name, grant
       dropped: report.dropped,
       granted,
       grantErrors,
-      notified,
-      notifyErrors,
     };
   } finally {
     // The bundle is a copy; the session's own transcript is untouched.
@@ -582,117 +576,6 @@ export async function shareSession(session, { visibility = 'public', name, grant
 }
 
 
-/**
- * Notify recipients by opening a PULL REQUEST on their `am-inbox` dataset that
- * adds `incoming/<envelope-id>.json` (§5). No inbound connectivity is involved:
- * both sides only make outbound calls to the Hub, which is all a private Space
- * can do. A non-collaborator can open a PR, which is what makes this work
- * without the recipient granting anyone write access.
- *
- * A PR rather than a plain discussion because merging IS accepting: the envelope
- * lands in the inbox as a file, and closing the PR is a decline. The recipient's
- * poll reads open PRs and matches authors against their whitelist.
- *
- * The inbox repo's EXISTENCE is the opt-in — if a user has none they have not
- * enabled receiving, and we say so rather than creating one on their behalf.
- *
- * The envelope stays minimal because the inbox is public: who, when, and where
- * to fetch. Nothing about what the session contains (§5, Q5).
- */
-export async function notifyRecipients(users, { repo, sha, visibility, from }) {
-  const notified = [];
-  const notifyErrors = [];
-  for (const user of users) {
-    const inbox = `${user}/am-inbox`;
-    let info;
-    try {
-      info = await hfApi(`/api/datasets/${inbox}`);
-    } catch (e) {
-      notifyErrors.push({ user, error: e.status === 401 || e.status === 404
-        ? 'no am-inbox repo — they have not enabled receiving'
-        : e.message });
-      continue;
-    }
-    const id = crypto.randomUUID();
-    const envelope = { v: 1, kind: 'trace', id, from, ts: new Date().toISOString(), repo, sha, visibility };
-    // NDJSON commit payload: a header line then one line per file operation.
-    const body = [
-      JSON.stringify({ key: 'header', value: {
-        summary: `Trace from ${from}`,
-        description: `${from} shared an agent session. Merge to accept, close to decline.`,
-      } }),
-      JSON.stringify({ key: 'file', value: {
-        path: `incoming/${id}.json`,
-        encoding: 'base64',
-        content: Buffer.from(JSON.stringify(envelope, null, 2) + '\n', 'utf8').toString('base64'),
-      } }),
-    ].join('\n') + '\n';
-    try {
-      const r = await fetch(`${HF}/api/datasets/${inbox}/commit/main?create_pr=1`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${hfToken()}`,
-          'content-type': 'application/x-ndjson',
-          'user-agent': 'agent-manager',
-        },
-        body,
-        signal: AbortSignal.timeout(30_000),
-      });
-      const text = await r.text();
-      if (!r.ok) throw new Error(`HF ${r.status}: ${text.slice(0, 160)}`);
-      notified.push(user);
-    } catch (e) {
-      notifyErrors.push({ user, error: e.message });
-    }
-  }
-  return { notified, notifyErrors };
-}
-
-
-/**
- * The inbox repo is the opt-in for receiving traces (§5): with none, the Hub
- * itself refuses every delivery, so there is nothing for us to enforce. Reported
- * as state rather than a stored flag — the Hub is the source of truth, and a repo
- * deleted from the website must not leave a setting claiming otherwise.
- */
-export async function inboxState() {
-  const ns = await shareNamespace();
-  if (!ns) return { namespace: null, repo: null, enabled: false, reason: 'no-hf-token' };
-  const repo = `${ns}/am-inbox`;
-  try {
-    await hfApi(`/api/datasets/${repo}`);
-    return { namespace: ns, repo, enabled: true, url: `${HF}/datasets/${repo}` };
-  } catch (e) {
-    if (e.status === 401 || e.status === 404) return { namespace: ns, repo, enabled: false };
-    throw e;
-  }
-}
-
-/**
- * Turn receiving on or off by creating or deleting that repo.
- *
- * Deleting throws away any pending delivery PRs with it, which is the honest
- * meaning of "stop accepting traces" — but it is destructive, so the caller has
- * to have meant it. Kept public: senders must be able to open a PR without being
- * granted write access, and that is only possible on a repo they can see.
- */
-export async function setInbox(enabled) {
-  const state = await inboxState();
-  if (!state.namespace) throw new Error('no HF_TOKEN — cannot manage the inbox');
-  if (enabled === state.enabled) return state;
-  if (enabled) {
-    await hfApi('/api/repos/create', {
-      method: 'POST',
-      body: { type: 'dataset', name: 'am-inbox', organization: state.namespace, private: false },
-    });
-  } else {
-    await hfApi('/api/repos/delete', { method: 'DELETE',
-      body: { type: 'dataset', name: 'am-inbox', organization: state.namespace } });
-  }
-  return inboxState();
-}
-
-/** Current access state of a share, for a "who can see this" panel. */
 export async function shareAccess(repo) {
   const [accepted, pending] = await Promise.all([
     hfApi(`/api/datasets/${repo}/user-access-request/accepted`).catch(() => []),

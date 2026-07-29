@@ -21,7 +21,7 @@ import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, 
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 import { startWatchdog } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
-         inboxState, setInbox, importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
+         importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 
 ensureDirs();
 refreshVersions();
@@ -415,15 +415,6 @@ function loadAmConfig() {
     archive: {
       after: ['week', 'month', 'never'].includes(saved.archive?.after) ? saved.archive.after : 'month',
     },
-    // Who may send you a trace (docs/session-sharing.md §5). Defaults to a
-    // whitelist that is empty, so nobody can reach you until you say so — an
-    // inbound trace ends up in front of a coding agent.
-    sharing: {
-      receive: saved.sharing?.receive === 'everyone' ? 'everyone' : 'whitelist',
-      allow: Array.isArray(saved.sharing?.allow)
-        ? saved.sharing.allow.map((u) => String(u).trim().replace(/^@/, '')).filter(Boolean).slice(0, 200)
-        : [],
-    },
   };
 }
 app.get('/api/config', (_req, res) => res.json({ ...loadAmConfig(), defaultArtifactsSpace: defaultArtifactsSpace() }));
@@ -437,12 +428,6 @@ app.put('/api/config', (req, res) => {
     },
     jobs: { askAboveUsd: Math.max(0, Number(b.jobs?.askAboveUsd) || 0) },
     archive: { after: ['week', 'month', 'never'].includes(b.archive?.after) ? b.archive.after : 'month' },
-    sharing: {
-      receive: b.sharing?.receive === 'everyone' ? 'everyone' : 'whitelist',
-      allow: Array.isArray(b.sharing?.allow)
-        ? b.sharing.allow.map((u) => String(u).trim().replace(/^@/, '')).filter(Boolean).slice(0, 200)
-        : [],
-    },
   };
   try { fs.writeFileSync(AM_CONFIG_FILE, JSON.stringify(cfg, null, 2)); } catch {}
   generateEnvSkill(loadSecretNotes());
@@ -908,9 +893,8 @@ app.post('/api/sessions/:id/share', async (req, res) => {
   const visibility = b.visibility === 'gated' ? 'gated' : 'public';
   const names = (v) => (Array.isArray(v) ? v.map((u) => String(u).trim().replace(/^@/, '')).filter(Boolean).slice(0, 50) : []);
   const grantTo = names(b.grantTo);
-  const notify = names(b.notify);
   try {
-    const out = await shareSession(s, { visibility, name: b.name, grantTo, notify, allSessions: store.list() });
+    const out = await shareSession(s, { visibility, name: b.name, grantTo, allSessions: store.list() });
     // Remember the last share so the UI can offer "open" / "manage access"
     // without re-publishing.
     store.update(s.id, { lastShare: { repo: out.repo, sha: out.sha, visibility, at: new Date().toISOString() } });
@@ -938,20 +922,6 @@ app.get('/api/sessions/:id/share', async (req, res) => {
     reason: !namespace ? 'no-hf-token' : !SHAREABLE_CLIS.includes(s.cli) ? 'unsupported-cli' : !hit ? 'no-transcript' : null,
     lastShare: s.lastShare || null,
   });
-});
-
-// Receiving traces is opt-in, and the opt-in IS the inbox repo: with no
-// <user>/am-inbox on the Hub nobody can deliver anything, enforced by the Hub
-// rather than by us. So the toggle creates and deletes that repo.
-app.get('/api/share/inbox', async (_req, res) => {
-  try { res.json(await inboxState()); }
-  catch (e) { res.status(500).json({ error: (e && e.message) || 'failed' }); }
-});
-
-app.post('/api/share/inbox', async (req, res) => {
-  const enabled = !!(req.body || {}).enabled;
-  try { res.json(await setInbox(enabled)); }
-  catch (e) { res.status(500).json({ error: (e && e.message) || 'failed' }); }
 });
 
 // Who can see an existing gated share.

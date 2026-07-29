@@ -70,7 +70,6 @@ export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
   jobs: { askAboveUsd: number };
   archive: { after: 'week' | 'month' | 'never' };
-  sharing: { receive: 'whitelist' | 'everyone'; allow: string[] };
   defaultArtifactsSpace?: string;
 }
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
@@ -163,8 +162,6 @@ export interface ShareResult {
   dropped: Record<string, number>;
   granted: string[];
   grantErrors: { user: string; error: string }[];
-  notified?: string[];
-  notifyErrors?: { user: string; error: string }[];
 }
 // Thrown when the redaction gate refuses a public share (HTTP 409). Carries the
 // rule names so the dialog can say exactly what tripped instead of "failed".
@@ -181,7 +178,7 @@ export const getShareInfo = (id: string): Promise<ShareInfo> => fetch(`/api/sess
 
 export const shareSession = async (
   id: string,
-  body: { visibility: 'public' | 'gated'; name?: string; grantTo?: string[]; notify?: string[] },
+  body: { visibility: 'public' | 'gated'; name?: string; grantTo?: string[] },
 ): Promise<ShareResult> => {
   const r = await fetch(`/api/sessions/${id}/share`, { method: 'POST', headers: HEADERS, body: JSON.stringify(body) });
   if (r.status === 409) {
@@ -191,11 +188,6 @@ export const shareSession = async (
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
   return r.json();
 };
-
-export interface InboxState { namespace: string | null; repo: string | null; enabled: boolean; url?: string; reason?: string }
-export const getInbox = (): Promise<InboxState> => fetch('/api/share/inbox').then(json);
-export const setInbox = (enabled: boolean): Promise<InboxState> =>
-  fetch('/api/share/inbox', { method: 'POST', headers: HEADERS, body: JSON.stringify({ enabled }) }).then(json);
 
 export interface ShareAccess { accepted: string[]; pending: string[] }
 export const getShareAccess = (repo: string): Promise<ShareAccess> =>

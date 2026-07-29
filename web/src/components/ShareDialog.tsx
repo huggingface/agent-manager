@@ -5,9 +5,10 @@ import { LockGlyph } from './icons';
 
 // Share one agent session as a Hub dataset (docs/session-sharing.md).
 //
-// Two modes, one code path on the server: public means public, and "just this
-// person" is a gated repo with the named users pre-authorized — the Hub lets us
-// grant access without them requesting it.
+// Private or public, one code path on the server: private is a gated repo with
+// the named users pre-authorized (the Hub lets us grant access without them
+// requesting it), public is public. Either way the outcome is a LINK the operator
+// sends to whoever should read it — there is no in-app notification, by design.
 //
 // The dialog's job beyond collecting two fields is to be honest about redaction:
 // a public share is REFUSED when a credential is found, and we show which rule
@@ -38,7 +39,6 @@ export default function ShareDialog({ session, onClose }: { session: Session; on
       setResult(await api.shareSession(session.id, {
         visibility,
         grantTo: visibility === 'gated' ? users : [],
-        notify: visibility === 'public' ? users : [],
       }));
     } catch (e) {
       if (e instanceof api.RedactionBlocked) setBlocked({ message: e.message, hits: e.hits });
@@ -86,41 +86,42 @@ export default function ShareDialog({ session, onClose }: { session: Session; on
                 className={`btn-ghost${visibility === 'gated' ? ' on' : ''}`}
                 onClick={() => setVisibility('gated')}
               >
-                Just these people
+                Private
               </button>
               <button
                 className={`btn-ghost${visibility === 'public' ? ' on' : ''}`}
                 onClick={() => setVisibility('public')}
               >
-                Anyone with the link
+                Public
               </button>
             </div>
 
             {visibility === 'public' && (
               <p className="share-note">
-                Anyone with the link can read it. A public share is <strong>refused</strong> if the
-                transcript contains anything credential-shaped.
+                Anyone with the link can read it, and it shows up in Hub search. A public share is{' '}
+                <strong>refused</strong> if the transcript contains anything credential-shaped.
               </p>
             )}
 
-            {/* Recipients apply to BOTH modes, but mean different things: for a
-                gated share they are granted access; for a public one there is
-                nothing to grant, so they are only told about it. */}
-            <label className="share-field">
-              <span>{visibility === 'gated' ? 'Share with' : 'Notify'}</span>
-              <input
-                value={recipients}
-                onChange={(e) => setRecipients(e.target.value)}
-                placeholder="alice, bob"
-                autoFocus
-              />
-              <small>
-                {visibility === 'gated'
-                  ? 'Hugging Face usernames. Published as a gated dataset and each person is granted access directly — they don’t have to request it.'
-                  : 'Hugging Face usernames. Public needs no access grant, so this only opens a pull request on their am-inbox dataset — they see it on the Hub, not inside Agent Manager. Sending them the dataset link works just as well.'}
-                {' '}Optional{visibility === 'gated' ? ' — leave empty to publish with nobody granted yet' : ''}.
-              </small>
-            </label>
+            {/* Only for a private share, and only because it GRANTS access —
+                without a named user a gated dataset is readable by nobody. A
+                public share needs no names: you just send the link. */}
+            {visibility === 'gated' && (
+              <label className="share-field">
+                <span>Give access to</span>
+                <input
+                  value={recipients}
+                  onChange={(e) => setRecipients(e.target.value)}
+                  placeholder="alice, bob"
+                  autoFocus
+                />
+                <small>
+                  Hugging Face usernames. Published as a gated dataset and each person is granted
+                  access directly — they don’t have to request it. Optional — leave empty to publish
+                  with nobody granted yet.
+                </small>
+              </label>
+            )}
 
             {blocked && (
               <div className="share-blocked">
@@ -158,12 +159,17 @@ export default function ShareDialog({ session, onClose }: { session: Session; on
                   // Gated with nobody granted: the repo exists but is unreadable by
                   // anyone else, so say that rather than implying it was delivered.
                   : 'Published as a gated dataset — nobody has access yet.'}
-              {!!result.notified?.length && ` Notified ${result.notified.join(', ')}.`}
             </p>
             <div className="share-linkrow">
               <input readOnly value={result.url} onFocus={(e) => e.currentTarget.select()} />
               <button className="btn-ghost" onClick={() => copy(result.url)}>{copied ? 'Copied' : 'Copy'}</button>
             </div>
+            {/* The link IS the handoff — nothing notifies them, so say what to do
+                with it and what they do at the other end. */}
+            <p className="share-note">
+              Send this link to whoever should read it. They paste it into <em>Trace</em> in their own
+              Agent Manager to open the session{result.visibility === 'public' ? '' : ' — a granted user can read it even though the dataset is gated'}.
+            </p>
             <ul className="share-facts">
               <li>{result.stats.prompts} prompts · {result.stats.turns} turns · {result.stats.toolCalls} tool calls</li>
               <li>
