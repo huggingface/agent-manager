@@ -409,8 +409,11 @@ export default function SettingsView({
               <div>
                 <div className="s-label">Update Agent Manager</div>
                 <div className="s-help">
-                  Pulls the latest app version from the template ({upd?.template || 'the template'}) into this
-                  Space and rebuilds. Your agents, logins, and files live on the bucket and are untouched.
+                  Pulls the latest app version from{' '}
+                  {upd?.sourceUrl
+                    ? <a href={upd.sourceUrl} target="_blank" rel="noreferrer">{upd.source}</a>
+                    : 'the upstream repo'}{' '}
+                  into this Space and rebuilds. Your agents, logins, and files live on the bucket and are untouched.
                   {upd?.ok && !upd.behind && <> Currently up to date <span className="mono">({(upd.current || '').slice(0, 7)})</span>.</>}
                   {upd?.ok && upd.behind && <> Update available: <span className="mono">{(upd.current || '').slice(0, 7)} → {(upd.latest || '').slice(0, 7)}</span>.</>}
                 </div>

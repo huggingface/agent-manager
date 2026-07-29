@@ -552,23 +552,41 @@ app.post('/api/relaunch', async (_req, res) => {
   } catch (e) { return res.json({ ok: false, reason: String(e.message || e) }); }
 });
 
-// ---------- self-update: pull the latest app from the template ----------
+// ---------- self-update: pull the latest app from the upstream repo ----------
 // Duplicated Spaces never get app updates. This compares the Space repo's sha
-// to the template's and, on request, force-pushes the template's main onto the
-// Space repo (HF rebuilds automatically). Agents, logins, and files live on
-// the bucket, so replacing the app code is safe; any manual edits to the
-// Space's own repo are overwritten.
-const TEMPLATE_SPACE = 'lvwerra/agent-manager-template';
+// to upstream's and, on request, force-pushes upstream's main onto the Space
+// repo (HF rebuilds automatically). Agents, logins, and files live on the
+// bucket, so replacing the app code is safe; any manual edits to the Space's
+// own repo are overwritten.
+//
+// Upstream is the GitHub repo — the single source of truth for every install,
+// including duplicates (a duplicate's `duplicated_from` Space is a snapshot of
+// this repo, not a place development happens, so following it would pin a
+// duplicate to whenever its origin was last synced).
+const SOURCE_URL = 'https://github.com/huggingface/agent-manager';
+const SOURCE_BRANCH = 'main';
+const SOURCE_SLUG = SOURCE_URL.replace(/^https:\/\/github\.com\//, '');
+
+// Ask git, not the GitHub API: ls-remote needs no token and no rate-limit
+// budget for an endpoint the Settings view hits on every open, and it reads the
+// same ref the update clones, so check and update can't disagree.
+function upstreamSha() {
+  return new Promise((resolve) => {
+    execFile('git', ['ls-remote', SOURCE_URL, SOURCE_BRANCH],
+      { timeout: 30_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
+      (err, stdout) => resolve(err ? null : (String(stdout).split(/\s/)[0] || null)));
+  });
+}
+
 async function updateSource() {
   const own = process.env.SPACE_ID;
   const token = hfToken();
   const headers = token ? { authorization: `Bearer ${token}` } : {};
-  const info = await (await fetch(`https://huggingface.co/api/spaces/${own}`, { headers })).json();
-  // Prefer the recorded origin for real duplicates; fall back to the canonical
-  // template (also correct for the original development Space).
-  const template = (typeof info.duplicated_from === 'string' && info.duplicated_from) || TEMPLATE_SPACE;
-  const tInfo = await (await fetch(`https://huggingface.co/api/spaces/${template}`)).json();
-  return { own, ownSha: info.sha || null, template, templateSha: tInfo.sha || null };
+  const [info, latest] = await Promise.all([
+    fetch(`https://huggingface.co/api/spaces/${own}`, { headers }).then((r) => r.json()),
+    upstreamSha(),
+  ]);
+  return { own, ownSha: info.sha || null, source: SOURCE_SLUG, sourceUrl: SOURCE_URL, latestSha: latest };
 }
 
 app.get('/api/update/check', async (_req, res) => {
@@ -577,10 +595,11 @@ app.get('/api/update/check', async (_req, res) => {
     const src = await updateSource();
     res.json({
       ok: true,
-      template: src.template,
+      source: src.source,
+      sourceUrl: src.sourceUrl,
       current: src.ownSha,
-      latest: src.templateSha,
-      behind: !!(src.ownSha && src.templateSha && src.ownSha !== src.templateSha),
+      latest: src.latestSha,
+      behind: !!(src.ownSha && src.latestSha && src.ownSha !== src.latestSha),
       canUpdate: !!hfToken(),
     });
   } catch (e) { res.json({ ok: false, reason: String(e.message || e) }); }
@@ -600,13 +619,16 @@ app.post('/api/update', async (_req, res) => {
   });
   try {
     const src = await updateSource();
-    if (src.ownSha && src.templateSha && src.ownSha === src.templateSha) {
+    if (!src.latestSha) return res.json({ ok: false, reason: 'upstream-unreachable' });
+    if (src.ownSha && src.ownSha === src.latestSha) {
       return res.json({ ok: true, upToDate: true });
     }
-    await git(['clone', '--quiet', `https://huggingface.co/spaces/${src.template}`, dir]);
+    // Clone upstream's branch, then force-push it onto the Space repo's main —
+    // HF only builds `main`, whatever upstream calls its default branch.
+    await git(['clone', '--quiet', '--branch', SOURCE_BRANCH, SOURCE_URL, dir]);
     await git(['remote', 'add', 'own', `https://user:${token}@huggingface.co/spaces/${src.own}`], dir);
-    await git(['push', '--force', 'own', 'main'], dir);
-    res.json({ ok: true, from: src.ownSha, to: src.templateSha });
+    await git(['push', '--force', 'own', 'HEAD:main'], dir);
+    res.json({ ok: true, from: src.ownSha, to: src.latestSha });
   } catch (e) {
     res.json({ ok: false, reason: String(e.message || e).slice(0, 300) });
   } finally {
