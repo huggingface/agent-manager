@@ -21,6 +21,7 @@ export const PHASE = {
   readOpencode: 2,
   readHermes: 3,
   buildUsage: 4,
+  readTrace: 5,
 };
 const PHASE_NAMES = Object.keys(PHASE);
 

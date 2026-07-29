@@ -8,7 +8,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import {
   PORT, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR, USE_TMUX, TMUX_AVAILABLE,
-  ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions,
+  ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions, PASSIVE_CLIS,
 } from './config.js';
 import * as store from './sessions.js';
 import * as groups from './groups.js';
@@ -16,7 +16,7 @@ import * as order from './order.js';
 import * as demo from './demo.js';
 import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection, paneModes, isRunning } from './runner.js';
 import { buildUsage } from './usage.js';
-import { buildTraces, traceDigests, digestFor } from './traces.js';
+import { buildTraces, traceDigests, digestFor, readTrace, readTraceBundle } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 import { startWatchdog } from './watchdog.js';
@@ -205,7 +205,7 @@ app.get('/api/meta', async (_req, res) => {
   const digests = await traceDigests();
   const hs = demo.active() ? demo.hiddenSessions() : null;
   const sessions = sessionsWithState()
-    .filter((s) => s.cli !== 'files' && s.cli !== 'shell')
+    .filter((s) => s.cli !== 'shell' && !PASSIVE_CLIS.includes(s.cli))
     .filter((s) => !hs || !hs.has(s.id))
     .map((s) => {
       const d = digests.get(s.id);
@@ -221,7 +221,7 @@ app.get('/api/meta', async (_req, res) => {
 app.post('/api/sessions/:id/input', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  if (s.cli === 'files') return res.status(400).json({ error: 'files pane takes no input' });
+  if (PASSIVE_CLIS.includes(s.cli)) return res.status(400).json({ error: `${s.cli} pane takes no input` });
   const text = typeof (req.body || {}).text === 'string' ? req.body.text.trim() : '';
   if (!text) return res.status(400).json({ error: 'empty' });
   try {
@@ -974,6 +974,60 @@ app.post('/api/share/access', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: (e && e.message) || 'failed' });
   }
+});
+
+// ---------- trace panel (docs/trace-panel-spec.md) ----------
+// Paginated on purpose: a single session here is 6.15 MB and the panel only
+// ever shows a window of it. `limit` is clamped in readTrace().
+//
+// `session.traceSource` decides what a `trace` pane points at:
+//   { kind: 'session', ref: <sessionId> }   a live session on this Space
+//   { kind: 'bundle',  ref: <envelopeId> }  an accepted incoming trace
+// A plain non-trace session (claude/codex/…) reads its own trace, so
+// "open trace" on a session row needs no new record at all.
+app.get('/api/trace/:id', async (req, res) => {
+  const pane = store.get(req.params.id);
+  if (!pane) return res.status(404).json({ error: 'not found' });
+
+  const source = pane.traceSource || { kind: 'session', ref: pane.id };
+  const offset = Number(req.query.offset) || 0;
+  const limit = Number(req.query.limit) || 200;
+
+  try {
+    if (source.kind === 'bundle') {
+      if (!/^[\w.-]+$/.test(String(source.ref))) return res.status(400).json({ error: 'bad bundle ref' });
+      return res.json(await readTraceBundle(path.join(DATA_DIR, 'traces', source.ref), { offset, limit }));
+    }
+    const target = store.get(source.ref);
+    if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
+    res.json(await readTrace(target, { offset, limit }));
+  } catch (e) {
+    // These are expected states, not failures: no transcript yet, an
+    // unsupported CLI, or a codex guardian rollout. The pane renders the reason.
+    if (['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(e && e.code)) {
+      return res.status(404).json({ error: e.message, code: e.code });
+    }
+    console.error('[trace]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'trace read failed' });
+  }
+});
+
+// Point a trace pane at a source (used by the "Trace" button on a session row).
+// Creating the pane goes through the normal POST /api/sessions with cli:'trace';
+// this only records what it should show.
+app.put('/api/trace/:id/source', (req, res) => {
+  const pane = store.get(req.params.id);
+  if (!pane || pane.cli !== 'trace') return res.status(404).json({ error: 'not a trace pane' });
+  const b = req.body || {};
+  const kind = b.kind === 'bundle' ? 'bundle' : 'session';
+  const ref = String(b.ref || '');
+  if (!ref) return res.status(400).json({ error: 'ref required' });
+  // A bundle ref becomes a path segment under DATA_DIR/traces — validate it here
+  // too, so a traversal attempt never gets persisted in the session record.
+  if (kind === 'bundle' && !/^[\w.-]+$/.test(ref)) return res.status(400).json({ error: 'bad bundle ref' });
+  if (kind === 'session' && !store.get(ref)) return res.status(404).json({ error: 'no such session' });
+  store.update(pane.id, { traceSource: { kind, ref } });
+  res.json({ ok: true, traceSource: { kind, ref } });
 });
 
 app.delete('/api/sessions/:id', (req, res) => {

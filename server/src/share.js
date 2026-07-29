@@ -337,8 +337,8 @@ export async function findTrace(session, allSessions = []) {
 }
 
 export const SHAREABLE_CLIS = ['claude', 'codex', 'hermes', 'opencode', 'openclaw'];
-const HARNESS_LABEL = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes',
-                        opencode: 'opencode', openclaw: 'OpenClaw' };
+export const HARNESS_LABEL = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes',
+                               opencode: 'opencode', openclaw: 'OpenClaw' };
 
 /** Dataset card. `configs` pins the data file so meta/ can't collide on schema (§4). */
 function datasetCard({ title, visibility, traceName, stats, redaction, harnessLabel }) {

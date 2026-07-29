@@ -11,6 +11,9 @@ export interface Session {
   everStarted: boolean;
   running: boolean;
   state: SessionState;
+  // Only on `cli: 'trace'` panes: what the read-only trace view is pointed at.
+  // A regular agent session needs no such record — it reads its own transcript.
+  traceSource?: { kind: 'session' | 'bundle'; ref: string } | null;
 }
 
 export interface Cli {
@@ -46,6 +49,11 @@ export const STATE_LABEL: Record<SessionState, string> = {
   idle: 'idle',
   stopped: 'stopped',
 };
+
+// Mirrors PASSIVE_CLIS in server/src/config.js: panels, not processes. They have
+// no trace clock, no Overview card, and never count as a group's agents.
+export const PASSIVE_CLIS = ['files', 'trace'];
+export const isPassive = (cli: string) => PASSIVE_CLIS.includes(cli);
 
 export type OverviewFilter = 'all' | 'waiting' | 'working' | 'quiet';
 

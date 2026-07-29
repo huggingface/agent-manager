@@ -1,10 +1,14 @@
 # Trace panel — implementation spec
 
-Status: **ready to build** · Branch: `worktree-session-sharing` · PR: huggingface/agent-manager#8
+Status: **built** (2026-07-29) · Branch: `worktree-session-sharing` · PR: huggingface/agent-manager#8
 
 A handoff document. Everything here was verified against this codebase and the live Hub on
 2026-07-27/28. Read `docs/session-sharing.md` for the wider design; this file is only the
 panel, and is written to be self-contained.
+
+**§11 records what actually shipped**, including four places where the implementation
+departed from this spec on purpose. Sections 1–10 are the brief as written; where they
+disagree with §11, §11 is the code.
 
 ## 1. What to build
 
@@ -241,3 +245,87 @@ Skip: statistics panels, prev/next row navigation, editing anything. The panel i
    means re-polling and appending; frozen is simpler and matches "trace".
 3. **How much tool output to retain in memory** once expanded — a single `Bash` result here
    can be hundreds of KB.
+
+## 11. As built (2026-07-29)
+
+Landed. Files: `server/src/traces.js` (reader appended at the bottom),
+`server/src/index.js` (two routes), `web/src/components/TracePane.tsx` (new),
+`web/src/api.ts`, `web/src/types.ts`, `web/src/styles.css`, plus the entry point in
+`App.tsx` / `Sidebar.tsx`.
+
+### Four deliberate departures from §5–§8
+
+1. **Blocks, not a `Turn` with a single `toolResult`.** §5's shape can't represent the
+   transcripts. Claude emits tool *results* on a separate `type:'user'` line, and parallel
+   calls finish out of order, so one `toolResult` slot per turn silently drops all but one.
+   `readTrace()` returns `{ role, kind?, ts?, model?, usage?, blocks: [...] }` with a
+   `makeStitcher()` that files each result next to its own call by `tool_use_id` — which is
+   also what makes the collapsed `3 tool calls (Bash, Read)` row possible at all.
+2. **`kind: 'final' | 'update'`** on assistant messages. Codex emits intermediate
+   `response_item` text *and* an authoritative `task_complete`; without the distinction a
+   codex session reads as ten answers. Non-final text renders dimmed.
+3. **Codex gets a stitcher too.** Codex writes a call and its output as two separate
+   top-level items, so before this every call and every result was its own row and nothing
+   ever folded. Caught in testing: `0 paired, 1 standalone` → `1 paired, 0 standalone`.
+4. **Environment blobs become `role:'system'`, not dropped.** Claude's `<system-reminder>`
+   and codex's `<`-prefixed user items are context, not prompts; dimmed rather than hidden,
+   because removing them makes the conversation read wrong.
+
+### The three open questions in §10, as answered
+
+1. **Entry point:** a Trace button on the session row, next to Share. `traceSource` was kept
+   verbatim, and is only needed for a pane pointed at something *else* — a plain agent
+   session reads its own transcript, so `GET /api/trace/<agent-session-id>` works with no new
+   record. Panes are reused per source rather than piling up.
+2. **Frozen per read**, cheap to follow: the memo key includes `mtimeMs`+`size`, so
+   re-requesting after the file grows reparses and `total` climbs. No incremental machinery.
+3. **Capped at parse time**, 20 000 chars per block, with `more` reported so the UI says
+   "+412 KB not retained" instead of pretending.
+
+### `trace` is a passive pane, like `files`
+
+`PASSIVE_CLIS = ['files', 'trace']` in `server/src/config.js`, mirrored as `isPassive()` in
+`web/src/types.ts`. It gates: the agent list in `/api/meta`, `buildTraces()`, the input route
+(a trace pane refuses keystrokes), the Overview cards, archiving, the quickstart picker, the
+group cart, and a group's agent count. Adding a third passive pane type now means one array.
+
+### Verified against real data
+
+- **9.46 MB live Claude transcript** (this session): 634 ms full parse, **worst event-loop
+  block 2 ms**, 82 MB RSS; second call 3 ms off the memo. Counts reconciled against an
+  independent pass over the raw file — 259 text blocks = 228 assistant + 28 prompts + 3
+  reminders, exactly; 466/467 tool results filed next to their call.
+- **Real opencode db** (3.4 MB): 79 turns, 57 thinking blocks, 98/101 results paired. The two
+  guesses flagged in the drop were both confirmed against the live schema (`state.input` /
+  `state.output`, `reasoning.text`) — and `session.model` is a JSON blob, not a string.
+- **A real STS bundle** produced by `scripts/share-session.mjs` and read back through
+  `readTraceBundle()` — which is how an accepted trace will arrive.
+- **codex / openclaw / hermes fixtures** built from the shapes in `parseCodex` and
+  `share-session.mjs`'s converters. Hermes's seconds-not-milliseconds timestamps render as
+  correct dates; codex guardian rollouts are refused with `trace-not-user-conversation`.
+- **Headless Chromium over CDP** (no playwright in this image) against the built bundle, for
+  each harness: pane mounts, header reads
+  `Claude Code | claude-opus-5 | 555 turns | 1,840,279↓ 398,440↑ (138,147,880 cached)`,
+  **14 rows in the DOM for 555 turns**, folds open, scrolling to 70 % pages in with no
+  placeholders left, search reports what it searched, zero JS exceptions.
+- Refusals render as sentences, not failures: an unsupported CLI, a missing transcript, a
+  guardian rollout, a missing bundle. Bad bundle refs are rejected at write *and* read.
+
+### Two bugs this testing caught that a curl check would not
+
+- A bundle manifest stores `harness` as an **object** (`{id,name,version}`) while an STS
+  session line stores a **string**. Both reach `harnessLabel`, which the header renders
+  directly — React throws on an object child. Hence `label()`.
+- Claude sessions had **no token total** in the header: usage is per-message there, so the
+  session sum has to be accumulated (`usageSum`), while codex and the db-backed harnesses
+  keep their own authoritative total.
+
+### Not done
+
+- Fork / Handoff are header slots only (design doc §8).
+- Search is client-side over fetched turns and says so; server-side wants a `?q=` returning
+  matching offsets — a small addition to `pageOf()`.
+- No `compaction` block is ever produced; Claude's `type:'summary'` / `system` lines and
+  `attachment` lines are ignored. The block type exists for when that's wired up.
+- The incoming half (accept/decline on an inbox PR) is still the next piece of work, so the
+  `bundle` source has no way to be populated yet outside a test.

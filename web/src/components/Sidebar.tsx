@@ -1,10 +1,10 @@
 import { useMemo, useState } from 'react';
 import type { Cli, MoveTarget, Group, Session, Tree } from '../types';
-import { STATE_LABEL } from '../types';
+import { STATE_LABEL, isPassive } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph, ListGlyph } from './icons';
 
 type Zone = 'before' | 'after' | 'on';
 
@@ -25,7 +25,7 @@ const fmtAgo = (ts?: number) => {
 export default function Sidebar({
   clis, tree, activeRef, focusedId, defaultPath, ages,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
-  onStopSession, onDeleteSession, onShareSession, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
+  onStopSession, onDeleteSession, onShareSession, onOpenTrace, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
   archived, showArchived, onToggleArchived,
 }: {
   clis: Cli[];
@@ -45,6 +45,7 @@ export default function Sidebar({
   onStopSession: (id: string) => void;
   onDeleteSession: (id: string) => void;
   onShareSession: (id: string) => void;
+  onOpenTrace: (id: string) => void;
   onMove: (ref: string, to: MoveTarget) => void;
   onDragState?: (ref: string | null) => void; // lets the stage offer per-tile drop targets
   theme: 'light' | 'dark';
@@ -89,7 +90,7 @@ export default function Sidebar({
   // Quickstart: one harness pick + one prompt, agent launches in workspace/.
   // Every agent harness is shown; ones not installed here are greyed out.
   // "More options" adds a name + folder; the group tile flips to group creation.
-  const quickable = clis.filter((c) => c.id !== 'shell' && c.id !== 'files');
+  const quickable = clis.filter((c) => c.id !== 'shell' && !isPassive(c.id));
   const openQuick = () => {
     setQuickCli((q) => q ?? (quickable.find((c) => c.available && c.ready)?.id || quickable.find((c) => c.available)?.id || null));
     setQuickMode('agent');
@@ -190,7 +191,10 @@ export default function Sidebar({
             ? <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}><StopGlyph /></button>
             : <button className="mini-btn" title="Start" onClick={(e) => { e.stopPropagation(); onOpenSession(s.id, groupId); }}><PlayGlyph /></button>}
           {SHAREABLE_CLIS.includes(s.cli) && (
-            <button className="mini-btn" title="Share this session" onClick={(e) => { e.stopPropagation(); onShareSession(s.id); }}><ShareGlyph /></button>
+            <>
+              <button className="mini-btn" title="Read this session's trace" onClick={(e) => { e.stopPropagation(); onOpenTrace(s.id); }}><ListGlyph /></button>
+              <button className="mini-btn" title="Share this session" onClick={(e) => { e.stopPropagation(); onShareSession(s.id); }}><ShareGlyph /></button>
+            </>
           )}
           <button className="mini-btn" title="Delete" onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><CloseGlyph /></button>
         </span>
@@ -329,7 +333,10 @@ export default function Sidebar({
                 <FolderPicker value={groupLoc} onChange={setGroupLoc} />
                 <div className="cart">
                   {/* every agent harness is offered; uninstalled ones are inert */}
-                  {clis.filter((c) => c.available || (c.id !== 'shell' && c.id !== 'files')).map((c) => {
+                  {/* Shell and Files stay on offer — a group may legitimately want
+                      one. Trace does not: a trace pane with no source shows nothing,
+                      so it's only ever created from a session's Trace button. */}
+                  {clis.filter((c) => (c.available || (c.id !== 'shell' && c.id !== 'files')) && c.id !== 'trace').map((c) => {
                     const n = cart[c.id] || 0;
                     return (
                       <div key={c.id} className={`cart-row${n > 0 ? ' has' : ''}${c.available ? '' : ' off'}`} title={c.available ? c.label : `${c.label} (not installed)`}>
@@ -401,7 +408,7 @@ export default function Sidebar({
           // leftover shell/file viewer alone doesn't keep it on screen.
           // Groups with no agent members at all (pure utility) stay.
           const members = g.sessionIds.map((sid) => sessById[sid]).filter(Boolean) as Session[];
-          const agents = members.filter((s) => s.cli !== 'shell' && s.cli !== 'files');
+          const agents = members.filter((s) => s.cli !== 'shell' && !isPassive(s.cli));
           const anyVisible = agents.length === 0 || agents.some((s) => !isHidden(s.id));
           return anyVisible ? GroupBlock(g) : null;
         })}

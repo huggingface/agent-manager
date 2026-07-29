@@ -61,6 +61,10 @@ export const USE_TMUX = process.env.USE_TMUX
 const setupHint = (...keys) =>
   `Launch it once — the first run walks you through sign-in. Or add ${keys.join(' / ')} as a Space secret.`;
 
+// Panels rather than processes: no binary, nothing to launch, no trace of their
+// own. Everywhere the app asks "is this an agent?" it means "not one of these".
+export const PASSIVE_CLIS = ['files', 'trace'];
+
 export const CLIS = [
   { id: 'shell',    label: 'Shell',       bin: 'bash',     color: '#8aa0ad', run: 'exec bash -il',  cont: null },
   { id: 'files',    label: 'Files',       bin: null,       color: '#d99a2b', run: null,             cont: null },

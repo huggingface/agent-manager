@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
 import FilesPane from './components/FilesPane';
+import TracePane from './components/TracePane';
 import SettingsView from './components/SettingsView';
 import NewSession from './components/NewSession';
 import LayoutPicker from './components/LayoutPicker';
@@ -12,6 +13,7 @@ import Locked from './components/Locked';
 import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
+import { isPassive } from './types';
 import { GridGlyph, ListGlyph } from './components/icons';
 
 // Phone-sized viewport: the app becomes two full-screen views (list ⇄ pane).
@@ -209,8 +211,8 @@ export default function App() {
     if (archiveAfter === 'never') return out;
     const cut = Date.now() - (archiveAfter === 'week' ? 7 : 30) * 864e5;
     for (const s of tree.sessions) {
-      // Shells and file panes have no trace clock — never archive them.
-      if (s.cli === 'shell' || s.cli === 'files' || s.state === 'working') continue;
+      // Shells and passive panels have no trace clock — never archive them.
+      if (s.cli === 'shell' || isPassive(s.cli) || s.state === 'working') continue;
       const last = ages[s.id] || Date.parse(s.createdAt) || 0;
       if (last && last < cut) out.add(s.id);
     }
@@ -329,6 +331,26 @@ export default function App() {
     setPage(0);
     if (isMobile) setMobileStage(true);
   };
+  // Read an agent's own transcript in a read-only trace pane. The pane is a
+  // session record like any other (so it survives reload, tiles, and drag), and
+  // it's REUSED per source — clicking Trace twice reopens the same pane instead
+  // of littering the sidebar with duplicates.
+  const openTrace = async (sid: string) => {
+    const src = sessById[sid];
+    if (!src) return;
+    const existing = tree.sessions.find((p) => p.cli === 'trace' && p.traceSource?.kind === 'session' && p.traceSource.ref === sid);
+    if (existing) { openSession(existing.id, tree.groups.find((g) => g.sessionIds.includes(existing.id))?.id); return; }
+    try {
+      // '.' = the workspaces root: a trace pane reads a transcript, so it owns no
+      // folder and must not create one.
+      const pane = await api.createSession(`Trace: ${src.name}`, 'trace', undefined, '.');
+      await api.setTraceSource(pane.id, 'session', sid);
+      await refresh();
+      setActiveRef(`s:${pane.id}`);
+      setPage(0);
+      if (isMobile) setMobileStage(true);
+    } catch (e) { showErr('Couldn’t open the trace')(e); }
+  };
   const closePane = (sid: string) => {
     // On mobile ✕ just returns to the list — never the desktop ungroup gesture.
     if (isMobile) { setMobileStage(false); return; }
@@ -430,6 +452,16 @@ export default function App() {
                 onFocus={() => setFocusedId(s.id)}
                 onClose={() => closePane(s.id)}
               />
+            ) : s.cli === 'trace' ? (
+              <TracePane
+                session={s}
+                zoom={zoom}
+                focused={visibleSessions.length > 1 && s.id === focusedId}
+                dragId={canDrag ? `p:${s.id}` : undefined}
+                onDragActive={setPaneDrag}
+                onFocus={() => setFocusedId(s.id)}
+                onClose={() => closePane(s.id)}
+              />
             ) : (
               <TerminalPane
                 session={s}
@@ -500,6 +532,7 @@ export default function App() {
         onOpenSession={openSession}
         onNewSession={newSession}
         onShareSession={setShareId}
+        onOpenTrace={openTrace}
         onNewGroup={newGroup}
         onRenameGroup={renameGroup}
         onRenameSession={renameSession}
