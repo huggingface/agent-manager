@@ -953,3 +953,25 @@ a.btn-ghost { text-decoration: none; }
 .open-trace-err { color: var(--danger); font-size: 11.5px; line-height: 1.4; }
 .trace-hint a { color: inherit; text-decoration: underline; text-decoration-style: dotted; }
 .trace-hint a:hover { color: var(--accent); }
+
+/* Prompt navigator in the trace header. */
+.tv-nav { display: inline-flex; gap: 1px; flex: none; }
+.tv-nav .mini-btn { padding: 1px 5px; font-size: 10px; line-height: 1.2; }
+.tv-nav .mini-btn:disabled { opacity: 0.35; cursor: default; }
+.tv-nav .mini-btn:disabled:hover { background: none; color: var(--muted); }
+
+/* The answer to a prompt, as opposed to the agent narrating its way there: an
+   accent rule down the left edge, the way the Hub's own viewer marks it. In a
+   turn that ran for thirty rows this is the one written for the reader. */
+.tv-row.assistant.final {
+  border-left: 2px solid color-mix(in srgb, #4a9d7a 70%, transparent);
+  background: color-mix(in srgb, #4a9d7a 5%, transparent);
+  padding-left: 8px; margin-left: -10px; padding-right: 8px;
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+.tv-row.user {
+  border-left: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  padding-left: 8px; margin-left: -10px; padding-right: 8px;
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}

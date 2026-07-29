@@ -166,7 +166,7 @@ function Blocks({ turn }: { turn: TraceTurn }) {
 function Row({ turn, index }: { turn: TraceTurn; index: number }) {
   const muted = turn.role === 'system' || turn.kind === 'update';
   return (
-    <div className={`tv-row ${turn.role}${muted ? ' muted' : ''}`} data-i={index}>
+    <div className={`tv-row ${turn.role}${turn.kind ? ` ${turn.kind}` : ''}${muted ? ' muted' : ''}`} data-i={index}>
       <div className="tv-meta">
         <span className={`tv-badge ${turn.role}`}>{turn.role}</span>
         {turn.model && <span className="tv-chip">{turn.model}</span>}
@@ -271,6 +271,56 @@ export default function TracePane({
 
   useEffect(() => { recompute(); }, [recompute, head]);
 
+  // ---- jump between prompts ----
+  // Landing exactly on a row is a two-step problem: the offsets are estimates
+  // until a row has been measured, so the first scroll is approximate and the
+  // real position is only known once the target has rendered. Remember the
+  // target and re-apply it as heights settle, giving up after a few passes so a
+  // row that keeps resizing can't hold the scroll position hostage.
+  const wanted = useRef<number | null>(null);
+  const tries = useRef(0);
+
+  const firstVisible = useCallback(() => {
+    const el = scroller.current;
+    const n = turns.current.length;
+    if (!el || !n) return 0;
+    const top = el.scrollTop + 1;
+    let lo = 0, hi = n;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (offsets[mid + 1] <= top) lo = mid + 1; else hi = mid; }
+    return lo;
+  }, [offsets]);
+
+  const goToTurn = useCallback((i: number) => {
+    const el = scroller.current;
+    if (!el) return;
+    wanted.current = i;
+    tries.current = 0;
+    el.scrollTop = offsets[i] || 0;
+    recompute();
+  }, [offsets, recompute]);
+
+  useEffect(() => {
+    const i = wanted.current;
+    const el = scroller.current;
+    if (i == null || !el) return;
+    const target = offsets[i] || 0;
+    if (Math.abs(el.scrollTop - target) > 2) el.scrollTop = target;
+    if (++tries.current > 8) wanted.current = null;
+  }, [offsets, heightsVersion, head]);
+
+  const prompts = head?.userTurns || [];
+  const goPrompt = (dir: -1 | 1) => {
+    if (!prompts.length) return;
+    const cur = firstVisible();
+    const next = dir < 0
+      ? prompts.filter((i) => i < cur).pop()
+      : prompts.find((i) => i > cur);
+    // Past the last prompt, the ends are the useful destinations.
+    if (next !== undefined) goToTurn(next);
+    else if (dir < 0) goToTurn(prompts[0]);
+    else if (scroller.current) { wanted.current = null; scroller.current.scrollTop = scroller.current.scrollHeight; }
+  };
+
   // Measure rendered rows (heights change when a fold is expanded).
   const rowRefs = useRef(new Map<number, HTMLElement>());
   useLayoutEffect(() => {
@@ -336,6 +386,14 @@ export default function TracePane({
         {head && <span className="tv-count">{fmtNum(head.total)} turns</span>}
         {totalTokens && <span className="tv-tokens">{totalTokens}</span>}
         <span className="spacer" />
+        {/* Prompt-to-prompt navigation: an agent turn can run for dozens of rows,
+            and what you usually want is the next thing YOU said. */}
+        <span className="tv-nav">
+          <button className="mini-btn" disabled={!prompts.length} onClick={() => goPrompt(-1)}
+            title={prompts.length ? `Previous prompt (${prompts.length} in this session)` : 'No prompts in this trace'}>▲</button>
+          <button className="mini-btn" disabled={!prompts.length} onClick={() => goPrompt(1)}
+            title={prompts.length ? `Next prompt (${prompts.length} in this session)` : 'No prompts in this trace'}>▼</button>
+        </span>
         <input
           className="tv-search"
           placeholder="Search…"
@@ -349,6 +407,10 @@ export default function TracePane({
         className="trace-body"
         ref={scroller}
         onScroll={recompute}
+        // Any deliberate scroll abandons a pending jump, so a row measuring
+        // itself a moment later can't yank the view back.
+        onWheel={() => { wanted.current = null; }}
+        onTouchStart={() => { wanted.current = null; }}
         style={{ fontSize: `${(13 * zoom) / 100}px` }}
       >
         {error && <div className="tv-msg">{error}</div>}

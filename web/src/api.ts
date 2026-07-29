@@ -244,6 +244,9 @@ export interface TracePage {
   offset: number;
   limit: number;
   truncated: boolean;
+  // Indices of the operator's prompts across the WHOLE session, so the pane can
+  // jump to one that hasn't been fetched yet.
+  userTurns: number[];
   turns: TraceTurn[];
 }
 

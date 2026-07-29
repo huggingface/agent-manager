@@ -1334,6 +1334,29 @@ function newTrace(harness) {
   return t;
 }
 
+/**
+ * Mark the last assistant turn before each user turn as the answer to it.
+ *
+ * The Hub's viewer draws this one differently — an accent rule down its left
+ * edge — because in a long agent turn it is the only message written FOR the
+ * reader; the rest are the agent narrating its way there. Codex names it itself
+ * (`task_complete`), but the rule generalises to every harness, so it is derived
+ * here rather than per-format. One reverse pass: an assistant text turn is final
+ * if no later assistant text turn precedes the next user turn.
+ */
+function markFinalTurns(out) {
+  const ms = out.messages;
+  let laterAnswer = false;
+  for (let i = ms.length - 1; i >= 0; i--) {
+    const m = ms[i];
+    if (m.role === 'user') { laterAnswer = false; continue; }
+    if (m.role !== 'assistant') continue;
+    if (!m.blocks.some((b) => b.type === 'text')) continue;
+    if (!laterAnswer) m.kind = 'final';
+    laterAnswer = true;
+  }
+}
+
 async function parseTraceFile(harness, file, sessionId) {
   const out = newTrace(harness);
   out.sessionId = sessionId || null;
@@ -1350,11 +1373,17 @@ async function parseTraceFile(harness, file, sessionId) {
   // token_count, the db-backed session rows) wins; otherwise use the sum of the
   // per-turn numbers.
   if (!out.usage) out.usage = out.usageSum;
+  markFinalTurns(out);
   return out;
 }
 
 function pageOf(parsed, offset, limit) {
   const total = parsed.messages.length;
+  // Indices of the operator's own prompts, for the pane's prompt navigator.
+  // Sent whole rather than per page: jumping to the next prompt must work
+  // before the page holding it has been fetched.
+  const userTurns = [];
+  for (let i = 0; i < total; i++) if (parsed.messages[i].role === 'user') userTurns.push(i);
   const from = Math.max(0, Math.min(offset | 0, total));
   const to = Math.min(total, from + Math.max(1, Math.min(limit | 0 || 200, 500)));
   return {
@@ -1363,6 +1392,7 @@ function pageOf(parsed, offset, limit) {
     firstTs: parsed.firstTs, lastTs: parsed.lastTs, usage: parsed.usage,
     source: parsed.source, sharedBy: parsed.sharedBy, note: parsed.note || null,
     total, offset: from, limit: to - from, truncated: !!parsed.truncated,
+    userTurns,
     turns: parsed.messages.slice(from, to),
   };
 }
