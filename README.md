@@ -127,7 +127,10 @@ from its output. That grid is the authoritative screen, so reopening a pane is a
 snapshot repaint plus replayed scrollback rather than a redraw, several browsers
 can watch and drive one session at once (they share one grid, sized to the
 smallest), and agent state is read from the grid instead of shelling out per
-session. Sessions survive browser disconnects but NOT a backend restart, and not
+session. A resize is a request too: the browser measures itself and asks, the
+backend applies the size once the asking stops and then repaints every viewer
+from the grid — so a window drag costs one PTY resize instead of one per frame,
+each of which would push another copy of a TUI's screen into the scrollback. Sessions survive browser disconnects but NOT a backend restart, and not
 a Space sleep/rebuild; with storage the working dir and CLI state persist, so a
 re-opened session resumes its own conversation. Claude
 sessions are pinned to a per-session conversation id at creation; Codex sessions
@@ -143,6 +146,7 @@ conversations.
 | `DATA_DIR` | `/data` | Durable root (mounted private Storage Bucket) |
 | `AM_SCROLLBACK` | `20000` | Scrollback lines kept per session grid |
 | `AM_REPLAY_BYTES` | `262144` | PTY bytes replayed to a reattaching browser |
+| `AM_RESIZE_SETTLE_MS` | `120` | Quiet period before a resize is applied to the PTY |
 | `ANTHROPIC_API_KEY` | — | Claude Code / opencode / Hermes (Space **secret**) |
 | `OPENAI_API_KEY` / `CODEX_API_KEY` | — | Codex (Space secret) |
 | `GEMINI_API_KEY` | — | Gemini CLI (Space secret) |

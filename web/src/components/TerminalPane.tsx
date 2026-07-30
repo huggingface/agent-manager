@@ -318,9 +318,12 @@ export default function TerminalPane({
       if (e.key === 'Escape') tmuxSelectionPending = false;
       return true;
     });
+    // The only local fit: this terminal is still empty, so there is no buffer to
+    // reflow, and it gives the initial size we open the socket with. Every later
+    // size change goes through resync() as a REQUEST — see there.
     try { fit.fit(); } catch { /* layout not ready yet */ }
     // Re-measure once the webfont is ready (glyph width changes vs the fallback).
-    document.fonts?.ready.then(() => { try { fit.fit(); } catch { /* ignore */ } });
+    document.fonts?.ready.then(() => resync());
 
     let closedByUs = false;
     let handedOff = false;
@@ -366,8 +369,7 @@ export default function TerminalPane({
       ws.onopen = () => {
         setConn('connected');
         retryDelay = 1200;
-        try { fit.fit(); } catch { /* ignore */ }
-        send({ t: 'r', cols: term.cols, rows: term.rows });
+        requestSize();
       };
       ws.onmessage = (e) => {
         const d = typeof e.data === 'string' ? e.data : new Uint8Array(e.data as ArrayBuffer);
@@ -434,14 +436,30 @@ export default function TerminalPane({
     };
     resumeRef.current = () => { takeBack(); };
 
-    // Re-fit and tell the server our size. The attached client owns the tmux
-    // window, so this keeps it fitting this device exactly instead of leaving
-    // tmux's "dots" filler. Never reconnects: a layout change (another pane
-    // opening, the sidebar toggling) is not a reason to pull a session off the
-    // device the user is actually holding.
-    const resync = () => {
+    // Measure this pane and REQUEST that size. Deliberately does not call
+    // fit.fit(): resizing ourselves reflows our buffer against a geometry the
+    // session may never adopt (the grid follows the smallest viewer), and the
+    // in-flight bytes were written for the size we just left — so the screen is
+    // drawn twice, at two widths, and the difference lands in the scrollback.
+    // The server owns the grid; we conform when it tells us what it applied.
+    let resyncTimer: ReturnType<typeof setTimeout> | null = null;
+    const requestSize = () => {
       if (handedOff) return;
-      try { fit.fit(); send({ t: 'r', cols: term.cols, rows: term.rows }); } catch { /* ignore */ }
+      // A collapsed or hidden pane measures as a couple of cells, and the grid
+      // follows the SMALLEST viewer — so asking from one would shrink the session
+      // for everybody actually looking at it.
+      const box = hostRef.current;
+      if (!box || box.clientWidth < 40 || box.clientHeight < 40) return;
+      try {
+        const d = fit.proposeDimensions();
+        if (d && d.cols > 0 && d.rows > 0) send({ t: 'r', cols: d.cols, rows: d.rows });
+      } catch { /* layout not ready */ }
+    };
+    // ResizeObserver fires every frame while a window is dragged or the sidebar
+    // animates. Ask once, when it stops.
+    const resync = () => {
+      if (resyncTimer) clearTimeout(resyncTimer);
+      resyncTimer = setTimeout(() => { resyncTimer = null; requestSize(); }, 80);
     };
     // Returning to this tab IS deliberate — take the session back, or just
     // re-sync the size if we still hold it.
@@ -496,6 +514,7 @@ export default function TerminalPane({
       if (retry) clearTimeout(retry);
       if (bootTimer) clearTimeout(bootTimer);
       if (bootCheck) clearTimeout(bootCheck);
+      if (resyncTimer) clearTimeout(resyncTimer);
       ro.disconnect();
       host.removeEventListener('pointerdown', onPointerDown, true);
       host.removeEventListener('pointermove', onPointerMove, true);
