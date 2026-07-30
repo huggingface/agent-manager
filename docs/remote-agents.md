@@ -63,6 +63,43 @@ Three constraints decide almost everything:
   300 s, so `/stream` needs `server.requestTimeout = 0` (with a comment saying why) or a `wait`
   cap under 300 s. Easy to miss; it would look like a flaky proxy.
 
+### Token scope — read is enough (measured)
+
+Nothing in this protocol writes to the Hub; the token exists only to get the request past HF's
+edge. So **read is enough**, and the recommendation is the narrowest thing that works:
+
+> A **fine-grained** token with **read access to this one Space repo** — `repo.content.read` and
+> `repo.access.read` on the Space's namespace, no write, nothing else. One token per machine, per
+> HF's own guidance ("one access token per app or usage"), so losing a laptop revokes one token.
+
+Measured against this deployment on 2026-07-30, using the four tokens that happen to sit in this
+Space's own environment:
+
+| Token | Scope | `GET /api/health` |
+|---|---|---|
+| `agent-manager-personal` | fine-grained, `repo.content.read` + `repo.access.read` (+write) on `lvwerra` | **200** |
+| `sair-collab`, `meccog-agents`, `agent-collab-rl-llm-wiki` | fine-grained on *other* namespaces, `[]` on `lvwerra` | **404** |
+| none / garbage | — | **404** |
+
+Two findings that matter more than the table:
+
+1. **Owning the Space is not enough.** All four tokens belong to `lvwerra`, who owns the Space, and
+   three of them are refused. The edge checks the *token's* permissions on the repo, not the
+   identity behind it. The operator has exactly these near-miss tokens lying around, so the prompt
+   must not say "use your HF token" and leave it there.
+2. **A refusal is an HTML 404, not a 401 or 403.** HF's edge answers with its own 404 page
+   (`content-type: text/html`) for a missing, garbage, or wrong-scope token — indistinguishable by
+   status code from a route that doesn't exist. Our app's own 404s are JSON (`{"error":"not
+   found"}`). So the contract for the copied prompt is **shape, not status**: *not JSON → your
+   token can't see this Space; JSON error → the pane name is wrong.* Without that distinction a
+   mis-scoped token reads as "no such agent" and sends the operator hunting in the wrong place.
+
+I could not isolate whether `repo.content.read` alone suffices or `repo.access.read` is also
+required — token creation is UI-only, so there was no way to mint a half-scoped token to test with.
+Both are one checkbox in the UI ("Read access to contents of selected repos"), so the distinction
+is academic for the operator; noted so nobody reads the table as more precise than it is. A classic
+`read`-role token should also work by the documented definition of that role, untested here.
+
 ## 3. What a remote agent is not
 
 Scope fence, so the first version stays small:
@@ -176,7 +213,10 @@ adds no auth, like every other route. Everything sits behind the public-Space lo
 ```
 
 The copied prompt runs this **first**, so a missing token or a wrong name fails loudly in one line
-instead of silently inside a poll loop. `404` for a name with no pane.
+instead of silently inside a poll loop. `404` (JSON) for a name with no pane — and note that a
+token problem *also* produces a 404, but an HTML one, from HF's edge before the request ever
+reaches us (§2, token scope). `/ping` is therefore specified to be checked by **shape**: any
+non-JSON response means the token, not the pane.
 
 ### 5.2 `POST /hello` — say where you are
 
@@ -417,17 +457,21 @@ in a terminal-style pane there and replies from it.
 You run on THIS machine, with your own tools and files. Agent Manager only carries
 the conversation — it cannot see anything here unless you tell it.
 
-Setup. The Space is private, so every call needs an HF token that has access to it;
-there is no separate key. You are identified by the name in the URL.
+Setup. The Space is private, so every call needs an HF token with READ access to the
+Space repo lvwerra/agent-manager. There is no separate key — you are identified by
+the name in the URL. Read access is all this needs; a write token buys nothing.
   export AM=https://lvwerra-agent-manager.hf.space/api/remote/laptop
-  export HF_TOKEN=<your HF token>          # or: hf auth token
+  export HF_TOKEN=<a token with read access to lvwerra/agent-manager>
   A() { curl -s -H "authorization: Bearer $HF_TOKEN" "$@"; }
 
 1. Check the connection before anything else:
      A "$AM/ping"
-   Expect {"ok":true,…}. A 404 means there is no pane with this name; anything HTML
-   means the token is missing or has no access to the Space. Either way STOP and tell
-   the user — do not retry in a loop.
+   Expect JSON: {"ok":true,…}. Judge the response by its SHAPE, not its status code:
+     - HTML back (a Hugging Face 404 page) → your token is missing, invalid, or not
+       scoped to this Space. Being the owner is NOT enough: a fine-grained token
+       scoped to other repos is refused exactly like no token at all.
+     - JSON with an error → the token is fine, but there is no pane called "laptop".
+   Either way STOP and tell the user which of the two it was. Do not retry in a loop.
 
 2. Say where you are (once):
      A -X POST "$AM/hello" -H 'content-type: application/json' \
