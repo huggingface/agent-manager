@@ -100,6 +100,14 @@ export const UploadGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+// Move: an arrow crossing into a folder mouth — the button form of a drag.
+export const MoveGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M1.5 4.75a1 1 0 0 1 1-1h2.6a1 1 0 0 1 .7.3l.9.9h5.8a1 1 0 0 1 1 1v5.3a1 1 0 0 1-1 1H2.5a1 1 0 0 1-1-1z" />
+    <path d="M5.4 8.9h4.4M8.1 7.2l1.9 1.7-1.9 1.7" />
+  </G>
+);
+
 export const UpGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <path d="M8 12.8V3.4M4.4 7L8 3.4 11.6 7" />

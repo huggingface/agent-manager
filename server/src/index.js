@@ -1137,6 +1137,35 @@ app.post('/api/files/:id/rename', (req, res) => {
   res.json({ ok: true });
 });
 
+// Move an entry into another folder under the same root, keeping its name —
+// the drag-and-drop half of rename. `to` is the destination FOLDER ('' = root).
+app.post('/api/files/:id/move', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const { root, target: from } = browsePath(s, String(req.query.path || ''));
+  if (!from || from === root || !fs.existsSync(from)) return res.status(400).json({ error: 'bad path' });
+  const dep = dependedOnDir(from);
+  if (dep) return res.status(409).json({ error: `that folder is ${dep}` });
+  const destDir = resolveSafe(root, String(req.query.to || ''));
+  if (!destDir || !fs.existsSync(destDir)) return res.status(400).json({ error: 'bad path' });
+  try { if (!fs.statSync(destDir).isDirectory()) return res.status(400).json({ error: 'not a folder' }); }
+  catch { return res.status(400).json({ error: 'bad path' }); }
+  // A folder can't land inside itself — compared on real paths, so a symlink in
+  // the destination chain can't smuggle the subtree past the check.
+  try {
+    const realFrom = fs.realpathSync(from);
+    const realDest = fs.realpathSync(destDir);
+    if (realDest === realFrom || realDest.startsWith(realFrom + path.sep)) {
+      return res.status(400).json({ error: "can't move a folder into itself" });
+    }
+  } catch { return res.status(400).json({ error: 'bad path' }); }
+  const to = path.join(destDir, path.basename(from));
+  if (to === from) return res.json({ ok: true }); // already where it was dropped
+  if (fs.existsSync(to)) return res.status(409).json({ error: 'already exists' });
+  try { fs.renameSync(from, to); } catch (e) { return res.status(500).json({ error: e.message }); }
+  res.json({ ok: true });
+});
+
 // Recursive: deleting a folder takes what's inside it with it. The UI asks
 // twice before calling this.
 app.delete('/api/files/:id/entry', (req, res) => {
