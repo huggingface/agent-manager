@@ -562,6 +562,14 @@ body {
 .slot.focused .pane-head { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
 
 .term-host { flex: 1; min-height: 0; padding: 10px 8px 8px 12px; background: var(--term-bg); }
+/* The terminal's own parent must carry NO padding. FitAddon sizes the grid from
+   getComputedStyle(parent).height, which under border-box INCLUDES padding — so
+   padding on the direct parent made it count one row (and one column) more than
+   fits, and the grid overflowed its clipped viewport: the bottom line rendered
+   sliced in half. Most visible with Codex, which paints its status line on the
+   very last row, where Claude leaves it blank. The frame keeps the padding; this
+   filler is the exact box the grid is measured against. */
+.term-fill { height: 100%; min-height: 0; }
 /* mobile control-key bar: the keys a phone keyboard lacks, pinned below the
    terminal so it rides just above the on-screen keyboard */
 .term-keybar { flex: none; display: flex; gap: 5px; padding: 5px 6px; background: var(--panel); border-top: 1px solid var(--border); overflow-x: auto; }
