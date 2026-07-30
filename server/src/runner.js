@@ -262,31 +262,62 @@ function pinIsStale(session) {
   } catch { return false; }
 }
 
+/**
+ * Poll until `attempt()` reports it has pinned the conversation.
+ *
+ * Both codex and opencode write NOTHING identifying to disk until the FIRST
+ * MESSAGE is submitted — measured on codex 0.146: an idle TUI left running for
+ * 60s+ produced no rollout file at all, and one appeared within 3s of pressing
+ * enter. A fixed burst of attempts (the old ladder gave up at 45s / 90s) could
+ * therefore only pin sessions whose first message arrived while it was still
+ * looking. A pane opened and typed into a minute later stayed unpinned FOREVER
+ * — nothing ever retried — and its next launch fell back to `codex resume
+ * --last`, which resolves through codex's own thread index (local disk, wiped
+ * on every Space restart) and silently starts a FRESH conversation when that
+ * comes up empty. It exits 0 while doing so, so even `|| exec codex` can't
+ * notice, and the pane comes back with its history gone.
+ *
+ * So keep looking for as long as the pane lives: the ladder covers a prompt
+ * typed straight away, then a steady beat catches the conversation whenever it
+ * actually begins — minutes or hours later.
+ *
+ * Cost per tick is one directory walk plus a `tmux has-session`; the pane-alive
+ * gate is what bounds it, and `agentInfo()` already shells out to tmux per
+ * session every 1.5s.
+ */
+function pollForPin(sessionId, inflight, attempt, ladder = [5000, 15000, 45000], steady = 60_000) {
+  inflight.add(sessionId);
+  const tick = (i) => {
+    // These run in a bare timer, so a throw here would take the process down.
+    let pinned = false;
+    try { pinned = attempt(); } catch {}
+    // Past the ladder, keep going only while the session is still up.
+    if (pinned || (i + 1 >= ladder.length && !isRunning(sessionId))) {
+      inflight.delete(sessionId);
+      return;
+    }
+    const wait = i + 1 < ladder.length ? ladder[i + 1] - ladder[i] : steady;
+    const t = setTimeout(() => tick(i + 1), wait);
+    if (t.unref) t.unref();
+  };
+  const t0 = setTimeout(() => tick(0), ladder[0]);
+  if (t0.unref) t0.unref();
+}
+
 function scheduleCodexCapture(session, workdir) {
   if (session.codexSessionId && pinIsStale(session)) {
     session = update(session.id, { codexSessionId: undefined, codexRollout: undefined }) || session;
   }
   if (session.codexSessionId || codexCapturing.has(session.id)) return;
-  codexCapturing.add(session.id);
   const since = Date.now() - 2000;
-  const delays = [5000, 15000, 45000]; // rollout appears ~instantly; retries cover slow starts
-  const attempt = (i) => {
-    if (tryCaptureCodexId(session.id, workdir, since) || i + 1 >= delays.length) {
-      codexCapturing.delete(session.id);
-      return;
-    }
-    const t = setTimeout(() => attempt(i + 1), delays[i + 1] - delays[i]);
-    if (t.unref) t.unref();
-  };
-  const t0 = setTimeout(() => attempt(0), delays[0]);
-  if (t0.unref) t0.unref();
+  pollForPin(session.id, codexCapturing, () => tryCaptureCodexId(session.id, workdir, since));
 }
 
 // opencode has no per-conversation handle we can pass on launch, so we can't
 // mint an id like Claude's --session-id. Instead, capture the ses_ row opencode
 // writes to its db and pin it — mirrors the codex approach. The row appears
-// only once the conversation has content (the user's first message), so retry
-// on a longer, sparser schedule than codex.
+// only once the conversation has content (the user's first message), so it gets
+// the same keep-looking treatment (see pollForPin).
 // ---------- Claude conversation re-pinning ----------
 // We ASK for a conversation id up front (`claude --session-id <uuid>`), which
 // normally makes the transcript filename equal session.sessionUuid. But the
@@ -377,19 +408,14 @@ function scheduleClaudeCapture(session, workdir) {
 const opencodeCapturing = new Set();
 function scheduleOpencodeCapture(session, workdir) {
   if (session.opencodeSessionId || opencodeCapturing.has(session.id)) return;
-  opencodeCapturing.add(session.id);
   const since = Date.now() - 2000;
-  const delays = [3000, 8000, 20000, 45000, 90000];
-  const attempt = (i) => {
+  pollForPin(session.id, opencodeCapturing, () => {
     const claimed = new Set(list().filter((s) => s.id !== session.id && s.opencodeSessionId).map((s) => s.opencodeSessionId));
     const hit = captureOpencodeSession(workdir, since, claimed);
-    if (hit) { update(session.id, { opencodeSessionId: hit.id }); opencodeCapturing.delete(session.id); return; }
-    if (i + 1 >= delays.length) { opencodeCapturing.delete(session.id); return; }
-    const t = setTimeout(() => attempt(i + 1), delays[i + 1] - delays[i]);
-    if (t.unref) t.unref();
-  };
-  const t0 = setTimeout(() => attempt(0), delays[0]);
-  if (t0.unref) t0.unref();
+    if (!hit) return false;
+    update(session.id, { opencodeSessionId: hit.id });
+    return true;
+  }, [3000, 8000, 20000, 45000]);
 }
 
 // Single-quote a string for embedding in an `sh -lc` command line.
