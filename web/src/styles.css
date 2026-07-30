@@ -588,10 +588,8 @@ body {
 .tk-paste { flex: 0 0 auto; padding: 0 10px; font-size: 12px; }
 /* fallback paste sheet — sits directly above the key-bar, i.e. right on top of
    the on-screen keyboard, so the field is visible while the OS menu is open */
-.term-paste { flex: none; position: relative; z-index: 6; display: flex; flex-direction: column; gap: 4px; padding: 6px; background: var(--panel); border-top: 1px solid var(--border); }
-.term-paste .tp-row { display: flex; align-items: center; justify-content: space-between; }
-.term-paste .tp-hint { font-size: 11px; color: var(--muted); }
-.term-paste .tp-x { background: none; border: none; padding: 0 2px; color: var(--accent); font: inherit; font-size: 11px; cursor: pointer; }
+.term-paste { flex: none; position: relative; z-index: 6; display: flex; align-items: center; gap: 8px; padding: 6px; background: var(--panel); border-top: 1px solid var(--border); }
+.term-paste .tp-x { flex: none; background: none; border: none; padding: 0 2px; color: var(--accent); font: inherit; font-size: 11px; cursor: pointer; }
 .term-paste .tp-input { width: 100%; box-sizing: border-box; resize: none; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: var(--r-md);
   background: var(--panel-2); color: var(--text); font-size: 13px; line-height: 1.35; }
 .term-paste .tp-input:focus { outline: none; border-color: var(--accent); }

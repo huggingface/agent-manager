@@ -633,15 +633,16 @@ export default function TerminalPane({
         // came back empty. The textarea is the whole point: long-press inside it
         // and the OS offers Paste, which fires a `paste` event we can read.
         <div className="term-paste" onPointerDown={(e) => e.stopPropagation()}>
-          <div className="tp-row">
-            <span className="tp-hint mono">long-press below → Paste</span>
-            <button className="tp-x" onClick={() => { setPasteOpen(false); termRef.current?.focus(); }}>cancel</button>
-          </div>
           <textarea
             className="tp-input mono"
             autoFocus
-            rows={2}
-            placeholder="paste here…"
+            rows={1}
+            // The instruction lives IN the field, because the field IS the
+            // target and a separate hint line only raised the question "below
+            // what?". Focusing it makes iOS/Android offer Paste on their own
+            // (that callout is what usually gets tapped); long-press is the
+            // manual backup when they don't.
+            placeholder="tap Paste — or long-press here"
             onPaste={(e) => {
               const text = e.clipboardData.getData('text/plain');
               if (text) { e.preventDefault(); commitPaste(text); }
@@ -656,6 +657,7 @@ export default function TerminalPane({
               }
             }}
           />
+          <button className="tp-x" onClick={() => { setPasteOpen(false); termRef.current?.focus(); }}>cancel</button>
         </div>
       )}
       {conn === 'handedoff' && (
