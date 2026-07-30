@@ -566,7 +566,9 @@ export default function TerminalPane({
           <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
-      <div className="term-host" ref={hostRef} />
+      <div className="term-host">
+        <div className="term-fill" ref={hostRef} />
+      </div>
       {copyMode && (
         <div className="term-copy-hint mono">copy mode · scroll to read, press Esc or type to return</div>
       )}
