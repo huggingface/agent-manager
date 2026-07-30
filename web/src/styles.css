@@ -983,3 +983,79 @@ a.btn-ghost { text-decoration: none; }
   padding-left: 8px; margin-left: -10px; padding-right: 8px;
   border-radius: 0 var(--r-sm) var(--r-sm) 0;
 }
+
+/* ---------- remote agent pane (docs/remote-agents.md §7) ----------
+   Wears the terminal's clothes without being one: same mono font and palette,
+   `❯` prompts, dim system lines — but it renders markdown messages, so code
+   blocks and tables come out properly and there is no emulator to fight on a
+   phone. */
+/* .pane-head is a 3-column grid for terminal panes; this is a single flex row
+   like the Files pane's header, so it needs the same override. */
+.pane-head.rp-head { display: flex; align-items: center; gap: 8px; }
+.rp-head .spacer { flex: 1; }
+.rp-head .rp-name { font-weight: 600; font-size: 12px; white-space: nowrap; }
+.rp-head .rp-where {
+  font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.rp-head .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+/* Reuse the sidebar's meaning of the three states rather than inventing colours. */
+.rp-head .dot.working { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+.rp-head .dot.waiting { background: none; border: 1.5px solid var(--accent); }
+.rp-head .dot.stopped, .rp-head .dot.idle { background: none; border: 1.5px solid var(--muted); }
+
+.rp-body {
+  flex: 1; min-height: 0; overflow-y: auto; background: var(--term-bg);
+  font-family: var(--font-mono); line-height: 1.5;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.rp-sys { color: var(--muted); font-size: 0.92em; opacity: 0.85; }
+.rp-user { display: flex; gap: 7px; align-items: baseline; }
+.rp-caret { color: var(--accent); font-weight: 700; flex: none; }
+.rp-user-text { white-space: pre-wrap; word-break: break-word; flex: 1; min-width: 0; }
+.rp-ack { color: var(--accent); flex: none; opacity: 0.75; font-size: 0.9em; }
+.rp-agent { padding-left: 15px; word-break: break-word; }
+/* Same treatment the trace pane gives agent markdown, so code, lists and tables
+   read the same wherever an agent's words are shown. */
+.rp-agent p { margin: 0 0 0.5em; }
+.rp-agent p:last-child { margin-bottom: 0; }
+.rp-agent pre {
+  white-space: pre-wrap; word-break: break-word; margin: 5px 0;
+  padding: 6px 8px; background: var(--panel-2); border-radius: var(--r-sm);
+  overflow-x: auto; font-family: var(--font-mono);
+}
+.rp-agent code { background: var(--panel-2); border-radius: 3px; padding: 0 3px; }
+.rp-agent pre code { background: none; padding: 0; }
+.rp-agent ul, .rp-agent ol { margin: 0.3em 0; padding-left: 1.4em; }
+.rp-agent table { border-collapse: collapse; margin: 0.4em 0; }
+.rp-agent th, .rp-agent td { border: 1px solid var(--border); padding: 2px 7px; text-align: left; }
+.rp-err { color: #d9534f; font-size: 0.92em; }
+
+/* The pairing state IS the pane — not a modal over it. */
+.rp-connect { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.rp-connect-head {
+  display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+  border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted);
+}
+.rp-prompt {
+  margin: 0; padding: 9px 10px; max-height: 15em; overflow: auto;
+  font-family: var(--font-mono); font-size: 0.86em; line-height: 1.45;
+  white-space: pre-wrap; word-break: break-word; color: var(--text);
+}
+.rp-connect-foot {
+  padding: 5px 8px; border-top: 1px solid var(--border);
+  font-size: 10.5px; color: var(--muted);
+}
+
+.rp-composer {
+  display: flex; gap: 8px; align-items: baseline;
+  border-top: 1px solid var(--border); padding: 7px 12px;
+  background: var(--term-bg); font-family: var(--font-mono);
+}
+.rp-input {
+  flex: 1; min-width: 0; border: none; background: none; font: inherit;
+  color: var(--text); outline: none; resize: none; overflow: hidden;
+  max-height: 140px; line-height: 1.5;
+}
+.rp-input::placeholder { color: var(--muted); opacity: 0.7; }
+.rp-hint { font-size: 10px; color: var(--muted); flex: none; opacity: 0.8; }

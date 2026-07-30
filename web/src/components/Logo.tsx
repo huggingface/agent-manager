@@ -1,4 +1,4 @@
-import { FolderGlyph, ListGlyph } from './icons';
+import { FolderGlyph, ListGlyph, RemoteGlyph } from './icons';
 
 // Black logos invert on the dark theme; white logos invert on the light theme.
 const INVERT_DARK = new Set(['shell', 'opencode']);
@@ -26,6 +26,15 @@ export default function Logo({ cli, size = 18, tint }: { cli: string; size?: num
     return (
       <span className="cli-logo files-glyph" style={{ width: size, height: size, boxSizing: 'content-box', ...tile }}>
         <ListGlyph />
+      </span>
+    );
+  }
+  // A remote agent is a place, not a vendor — the harness it happens to run
+  // (claude, codex, …) is shown as text in the pane header instead.
+  if (cli === 'remote') {
+    return (
+      <span className="cli-logo files-glyph" style={{ width: size, height: size, boxSizing: 'content-box', ...tile }}>
+        <RemoteGlyph />
       </span>
     );
   }

@@ -206,6 +206,8 @@ export function append(name, { role, text, from }) {
 export function forget(name) {
   logs.delete(name);
   rate.delete(name);
+  seen.delete(name);
+  delivered.delete(name);
   const set = streams.get(name);
   if (set) for (const s of [...set]) s.stop('this pane was deleted');
 }
@@ -214,10 +216,19 @@ export function forget(name) {
 
 const streams = new Map(); // name -> Set({ since, deliver, stop })
 const seen = new Map();    // name -> ms of the last poll we answered
+// Highest seq actually HANDED to a poll. The pane's ✓ is drawn from this and
+// nothing else, so the tick means "the agent has this", never "we hope so".
+const delivered = new Map();
 
 export function noteSeen(name) {
   seen.set(name, Date.now());
 }
+
+export function markDelivered(name, seq) {
+  if (seq > (delivered.get(name) || 0)) delivered.set(name, seq);
+}
+
+export const deliveredThrough = (name) => delivered.get(name) || 0;
 
 export function streamCount() {
   let n = 0;
@@ -261,7 +272,10 @@ function wake(name) {
   if (!set) return;
   for (const s of [...set]) {
     const pending = pendingFor(name, s.since);
-    if (pending.length) s.deliver(pending);
+    if (pending.length) {
+      markDelivered(name, pending[pending.length - 1].seq);
+      s.deliver(pending);
+    }
   }
 }
 
@@ -411,6 +425,7 @@ export function remoteInfo(session) {
     polls: streams.get(name)?.size || 0,
     lastSeenAt: seen.get(name) || null,
     seq: lastSeq(name),
+    deliveredThrough: deliveredThrough(name),
     state: remoteState(session),
   };
 }

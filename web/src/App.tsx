@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
 import FilesPane from './components/FilesPane';
 import TracePane from './components/TracePane';
+import RemotePane from './components/RemotePane';
 import SettingsView from './components/SettingsView';
 import NewSession from './components/NewSession';
 import LayoutPicker from './components/LayoutPicker';
@@ -312,6 +313,10 @@ export default function App() {
   const renameSession = (id: string, name: string) => { if (name.trim()) api.renameSession(id, name.trim()).then(refresh).catch(showErr('Couldn’t rename')); };
   const deleteGroup = (id: string) => api.deleteGroup(id).then(() => { if (activeRef === `g:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the group'));
   const stopSession = (id: string) => api.stopSession(id).then(refresh).catch(showErr('Couldn’t stop the agent'));
+  // A remote agent has no process: "stopped" is a closed connection, so the
+  // sidebar's stop/play pair disconnects and reconnects instead.
+  const setRemotePaused = (id: string, paused: boolean) =>
+    api.setRemotePaused(id, paused).then(refresh).catch(showErr(paused ? 'Couldn’t disconnect' : 'Couldn’t reconnect'));
   const deleteSession = (id: string) => api.deleteSession(id).then(() => { if (activeRef === `s:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the agent'));
   const shareTrace = async (id: string) => {
     const pane = sessById[id];
@@ -496,6 +501,17 @@ export default function App() {
                 onFocus={() => setFocusedId(s.id)}
                 onClose={() => closePane(s.id)}
               />
+            ) : s.cli === 'remote' ? (
+              <RemotePane
+                session={s}
+                zoom={zoom}
+                focused={visibleSessions.length > 1 && s.id === focusedId}
+                dragId={canDrag ? `p:${s.id}` : undefined}
+                onDragActive={setPaneDrag}
+                onFocus={() => setFocusedId(s.id)}
+                onRename={(name) => renameSession(s.id, name)}
+                onClose={() => closePane(s.id)}
+              />
             ) : s.cli === 'trace' ? (
               <TracePane
                 session={s}
@@ -609,6 +625,7 @@ export default function App() {
         onRenameGroup={renameGroup}
         onRenameSession={renameSession}
         onDeleteGroup={deleteGroup}
+        onSetRemotePaused={setRemotePaused}
         onStopSession={stopSession}
         onDeleteSession={deleteSession}
         onMove={doMove}

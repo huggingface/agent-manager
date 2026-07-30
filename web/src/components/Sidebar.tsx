@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { Cli, MoveTarget, Group, Session, Tree } from '../types';
-import { STATE_LABEL, isPassive } from '../types';
+import { STATE_LABEL, REMOTE_STATE_LABEL, isPassive, isRemote } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
@@ -25,7 +25,7 @@ const fmtAgo = (ts?: number) => {
 export default function Sidebar({
   clis, tree, activeRef, focusedId, defaultPath, ages,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
-  onStopSession, onDeleteSession, onShareSession, onShareTrace, onTraceHandover, onOpenTrace, onOpenSharedTrace, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
+  onStopSession, onSetRemotePaused, onDeleteSession, onShareSession, onShareTrace, onTraceHandover, onOpenTrace, onOpenSharedTrace, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
   archived, showArchived, onToggleArchived,
 }: {
   clis: Cli[];
@@ -43,6 +43,7 @@ export default function Sidebar({
   onRenameSession: (id: string, name: string) => void;
   onDeleteGroup: (id: string) => void;
   onStopSession: (id: string) => void;
+  onSetRemotePaused: (id: string, paused: boolean) => void;
   onDeleteSession: (id: string) => void;
   onShareSession: (id: string) => void;
   onShareTrace: (id: string) => void;
@@ -118,6 +119,7 @@ export default function Sidebar({
   const quickable = clis.filter((c) => c.id !== 'shell' && !isPassive(c.id));
   const openQuick = () => {
     setQuickError(null);
+    setQuickName('');
     setQuickCli((q) => q ?? (quickable.find((c) => c.available && c.ready)?.id || quickable.find((c) => c.available)?.id || null));
     setQuickMode('agent');
     setQuickLoc(defaultPath || '.');
@@ -146,6 +148,14 @@ export default function Sidebar({
   const submitQuick = () => {
     const p = quickPrompt.trim();
     if (!quickCli) return;
+    // A remote agent is addressed by its name, so it cannot be created unnamed —
+    // and its "location" is always its own message folder, never the picker's.
+    if (isRemote(quickCli)) {
+      if (!quickName.trim()) { setQuickError('a remote agent needs a name — it is the folder and the address'); return; }
+      onQuickStart(quickCli, p, quickName.trim(), '.');
+      setQuickPrompt(''); setQuickName(''); closePanel();
+      return;
+    }
     if (!p && !quickMore) return; // the bare quick path needs a prompt
     onQuickStart(quickCli, p, quickMore ? quickName.trim() : '', quickMore ? quickLoc : '.');
     setQuickPrompt('');
@@ -217,7 +227,9 @@ export default function Sidebar({
         onDoubleClick={(e) => { e.stopPropagation(); startEdit(ref, s.name); }}
         title={s.path ? `${s.name} · ${s.path}` : s.name}
       >
-        <span className={`status ${s.state}`} title={STATE_LABEL[s.state]} />
+        {/* The same three lights, but for a remote agent they mean connection,
+            not process: working / listening / not connected. */}
+        <span className={`status ${s.state}`} title={(isRemote(s.cli) ? REMOTE_STATE_LABEL : STATE_LABEL)[s.state]} />
         <Logo cli={s.cli} size={12} tint={colorOf[s.cli]} />
         {editing ? (
           <input
@@ -237,6 +249,12 @@ export default function Sidebar({
               <button className="mini-btn" title="Share this trace" onClick={(e) => { e.stopPropagation(); onShareTrace(s.id); }}><ShareGlyph /></button>
               <button className="mini-btn" title="Continue from this trace in a new agent" onClick={(e) => { e.stopPropagation(); openHandover(s); }}><HandoverGlyph /></button>
             </>
+          ) : isRemote(s.cli) ? (
+            // No process to kill: stop/play are disconnect/reconnect, and
+            // "reconnect" must not try to open a terminal for this pane.
+            s.remote?.paused
+              ? <button className="mini-btn" title="Reconnect" onClick={(e) => { e.stopPropagation(); onSetRemotePaused(s.id, false); }}><PlayGlyph /></button>
+              : <button className="mini-btn" title="Disconnect" onClick={(e) => { e.stopPropagation(); onSetRemotePaused(s.id, true); }}><StopGlyph /></button>
           ) : s.running
             ? <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}><StopGlyph /></button>
             : <button className="mini-btn" title="Start" onClick={(e) => { e.stopPropagation(); onOpenSession(s.id, groupId); }}><PlayGlyph /></button>}

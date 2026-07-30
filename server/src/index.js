@@ -604,7 +604,10 @@ app.get('/api/remote/:name/stream', (req, res) => {
     release();
   });
 
-  if (pending.length) finish({ messages: pending, seq: pending[pending.length - 1].seq });
+  if (pending.length) {
+    remote.markDelivered(name, pending[pending.length - 1].seq);
+    finish({ messages: pending, seq: pending[pending.length - 1].seq });
+  }
 });
 
 // The same thing without blocking: the short-polling fallback for a proxy that
@@ -620,6 +623,7 @@ app.get('/api/remote/:name/messages', (req, res) => {
   }
   const since = clamp(parseInt(req.query.since || '0', 10), 0, Number.MAX_SAFE_INTEGER, 0);
   const messages = agentSide ? remote.pendingFor(name, since) : remote.messagesSince(name, since);
+  if (agentSide && messages.length) remote.markDelivered(name, messages[messages.length - 1].seq);
   res.json({ messages, seq: remote.lastSeq(name) });
 });
 

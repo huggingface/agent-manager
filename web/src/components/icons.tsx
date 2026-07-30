@@ -44,6 +44,16 @@ export const ListGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+// A remote agent: broadcast arcs around a dot. Not a vendor, so it gets a glyph
+// like files/trace rather than a logo.
+export const RemoteGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none" />
+    <path d="M4.7 11.3a4.7 4.7 0 0 1 0-6.6M11.3 4.7a4.7 4.7 0 0 1 0 6.6" />
+    <path d="M2.4 13.6a8 8 0 0 1 0-11.2M13.6 2.4a8 8 0 0 1 0 11.2" opacity="0.45" />
+  </G>
+);
+
 export const BoltGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <path d="M8.9 1.6 3.9 8.9h3.2l-1 5.5 5-7.3H7.9l1-5.5z" strokeLinejoin="round" />
