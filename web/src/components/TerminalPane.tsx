@@ -415,13 +415,14 @@ export default function TerminalPane({
             // own geometry instead would garble the screen.
             else if (m.t === 'grid' || m.t === 'restore') {
               if (m.cols > 0 && m.rows > 0 && (term.cols !== m.cols || term.rows !== m.rows)) {
-                // m.clear: the backend cleared its screen before reflowing and a
-                // repaint is already on the wire, so clear ours too — xterm rewraps
-                // the outgoing screen into scrollback on resize (harder than the
-                // grid does: 119 lines against 80 over one drag), and that copy is
-                // the duplication. Resizing inside the write callback is what keeps
-                // it ordered against the repaint that follows.
-                if (m.clear) term.write('\x1b[H\x1b[2J', () => { try { term.resize(m.cols, m.rows); } catch { /* ignore */ } });
+                // m.clear: the backend already sent us the bytes that erase this
+                // screen and archive the rows about to fall off it, so skip our own
+                // reflow — xterm rewraps the outgoing screen into scrollback harder
+                // than the grid does (119 lines against 80 over one drag), and that
+                // copy is the duplication. The empty write is a barrier: writes are
+                // asynchronous, so resizing outside its callback would apply the new
+                // size to bytes that were written for the old one.
+                if (m.clear) term.write('', () => { try { term.resize(m.cols, m.rows); } catch { /* ignore */ } });
                 else try { term.resize(m.cols, m.rows); } catch { /* ignore */ }
               }
               setViewers(m.viewers > 1 ? m.viewers : 0);

@@ -6,7 +6,7 @@ import { remoteState, setPaused } from './remote.js';
 import { cliById, WORKSPACES_DIR, isRemote } from './config.js';
 import { update, list } from './sessions.js';
 import { captureOpencodeSession } from './traces.js';
-import { buildPaletteIndex, snapshotToAnsi } from './snapshot.js';
+import { buildPaletteIndex, rowsToAnsi, snapshotToAnsi } from './snapshot.js';
 
 // libghostty-vt ships prebuilts for linux x64/arm64 and macOS arm64. Loading it
 // is guarded so a platform without a prebuilt still boots and says so, rather
@@ -70,6 +70,9 @@ const RESIZE_SETTLE_MS = Number(process.env.AM_RESIZE_SETTLE_MS || 120);
 // plain terminal does, duplication and all. Kept because carrying the screen by
 // hand is the one part of a resize that makes an assumption about the app.
 const RESIZE_CARRY = process.env.AM_RESIZE_CARRY !== '0';
+// How long an app gets to answer SIGWINCH before the rows a shrink pushed off the
+// screen are treated as history rather than as a copy (see settleArchive).
+const ARCHIVE_SETTLE_MS = Number(process.env.AM_RESIZE_ARCHIVE_MS || 250);
 
 const hosts = new Map(); // session id -> host
 
@@ -163,8 +166,8 @@ function effectiveGrid(host) {
  * Re-frame a snapshot for a different geometry, so it can be painted into one.
  *
  * Bottom-anchored on a shrink, like a terminal: the cursor and the newest rows
- * are what a user is looking at. Rows that fall off the top are DROPPED rather
- * than archived — see carryScreen for why that is the point.
+ * are what a user is looking at. The rows that fall off the top are not in here
+ * at all — settleArchive decides what becomes of those.
  */
 function fitSnapshot(snap, cols, rows) {
   const drop = Math.max(0, snap.rows - rows);
@@ -191,18 +194,76 @@ function fitSnapshot(snap, cols, rows) {
  *
  * So the screen is cleared BEFORE the reflow, which leaves it nothing to archive,
  * and re-painted after: snapshotToAnsi positions every row absolutely and emits
- * no newline, so the paint itself cannot wrap or scroll either. Returns the ANSI
- * to feed after the resize, or null when reflow should be left alone (see
- * host.repaints).
+ * no newline, so the paint itself cannot wrap or scroll either.
+ *
+ * The rows that no longer fit cannot be settled here, which took two tries to
+ * see. Dropping them ate real history — a 40->24 shrink lost 16 lines a user
+ * could previously scroll back to. Archiving them brought the duplication
+ * straight back, because for a repainting TUI those rows ARE the screen it is
+ * about to reprint. Whether they are redundant depends on what the app does
+ * NEXT, so they are handed to settleArchive to decide once that is known.
+ *
+ * Returns { pre, ansi, dropped }: bytes for before the resize and after it (both
+ * of which every viewer needs too) plus the rows in limbo. Null when reflow
+ * should be left alone (see host.repaints).
  */
 function carryScreen(host, cols, rows) {
   if (!RESIZE_CARRY || !host.repaints) return null;
-  let ansi = null;
+  let snap;
+  let ansi;
   try {
-    ansi = snapshotToAnsi(fitSnapshot(host.vt.snapshot({ includeCells: true }), cols, rows));
+    snap = host.vt.snapshot({ includeCells: true });
+    ansi = snapshotToAnsi(fitSnapshot(snap, cols, rows));
   } catch { return null; }
-  try { host.vt.feed('\x1b[H\x1b[2J'); } catch { return null; }
-  return ansi;
+
+  const drop = Math.max(0, snap.rows - rows);
+  const pre = '\x1b[0m\x1b[H\x1b[2J';
+  try { host.vt.feed(pre); } catch { return null; }
+  return { pre, ansi, dropped: drop ? rowsToAnsi(snap, 0, drop) : [] };
+}
+
+/**
+ * Put lines into scrollback without disturbing the screen.
+ *
+ * Printing is the only way in — there is no API for "append to history" — so the
+ * lines are printed at the top and then pushed off it, and the screen is painted
+ * back from the grid afterwards. Costs one repaint, which is why it only happens
+ * when nothing else repainted.
+ */
+function archiveLines(host, lines) {
+  let restore;
+  try { restore = snapshotToAnsi(host.vt.snapshot({ includeCells: true })); } catch { return; }
+  let bytes = '\x1b[0m\x1b[H\x1b[2J\x1b[1;1H' + lines.join('\r\n');
+  // A newline on the LAST row is what moves a row into scrollback, and it moves
+  // the top row — not the one just printed. Enough of them to clear the screen
+  // archives every line, whether they all fitted on it or not.
+  bytes += `\x1b[0m\x1b[${host.rows};1H` + '\r\n'.repeat(Math.min(lines.length, host.rows));
+  bytes += restore;
+  try { host.vt.feed(bytes); } catch { return; }
+  for (const sub of host.subs) sub.onData(bytes);
+}
+
+/**
+ * Decide what the rows a shrink pushed off the screen were: a copy, or history.
+ *
+ * A screenful of output within the window means the app answered SIGWINCH by
+ * reprinting its screen, so those rows are about to appear again and archiving
+ * them is what filled the scrollback with duplicates. Silence means they were the
+ * only copy — a shell's log, a TUI that exited, an agent sitting idle — and
+ * dropping them is what stopped a pane from scrolling all the way up.
+ *
+ * Deciding afterwards is the point: at resize time this is not yet knowable, and
+ * both guesses are wrong for somebody. The verdict also updates host.repaints, so
+ * a session that stops repainting (its TUI exited) stops being treated as one.
+ */
+function settleArchive(host) {
+  host.archiveTimer = null;
+  const pending = host.pendingArchive;
+  host.pendingArchive = null;
+  if (!pending) return;
+  const repainted = host.resizeBytes > (host.cols * host.rows) / 4;
+  host.repaints = repainted;
+  if (!repainted && pending.length) archiveLines(host, pending);
 }
 
 /**
@@ -225,16 +286,28 @@ function applyGrid(host) {
   host.cols = cols;
   host.rows = rows;
   const carried = carryScreen(host, cols, rows);
+  // Viewers get the erase BEFORE they resize, in the same order the grid saw it,
+  // so their emulators skip the same reflow ours did.
+  if (carried) for (const sub of host.subs) sub.onData(carried.pre);
   try { host.vt.resize(cols, rows); } catch {}
   try { host.pty.resize(cols, rows); } catch {}
   host.resizedAt = Date.now();
   host.resizeBytes = 0;
-  let ansi = carried;
-  if (carried) { try { host.vt.feed(carried); } catch {} }
+  if (carried) {
+    // Oldest first: a second resize before the verdict lands adds to the same
+    // batch rather than replacing it.
+    host.pendingArchive = [...(host.pendingArchive || []), ...carried.dropped];
+    if (host.archiveTimer) clearTimeout(host.archiveTimer);
+    host.archiveTimer = setTimeout(() => settleArchive(host), ARCHIVE_SETTLE_MS);
+    if (host.archiveTimer.unref) host.archiveTimer.unref();
+  }
+  let ansi = carried ? carried.ansi : null;
+  if (carried) { try { host.vt.feed(carried.ansi); } catch {} }
   else { try { ansi = snapshotToAnsi(host.vt.snapshot({ includeCells: true })); } catch {} }
   for (const sub of host.subs) {
     // `carried` doubles as the flag: the viewer's own emulator has to skip its
-    // reflow exactly when we skipped ours, or it archives what we did not.
+    // reflow exactly when we skipped ours, or it archives what we did not — and it
+    // must not resize until the bytes above have been parsed at the OLD size.
     sub.onGrid(cols, rows, host.subs.size > 1, host.subs.size, !!carried);
     if (ansi) sub.onData(ansi);
   }
@@ -767,6 +840,8 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     repaints: !isShell,
     resizedAt: 0,
     resizeBytes: 0,
+    pendingArchive: null,
+    archiveTimer: null,
     subs: new Set(),
     sizes: new Map(), // sub -> the grid that viewer can display
     pendingSizes: new Set(), // subs whose request hasn't been answered yet
@@ -786,13 +861,15 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     // rewrapped copy reflow just archived was redundant. Latch that: the next
     // resize carries the screen across by hand instead (see carryScreen). This is
     // what catches `vim` or a hand-typed `claude` inside a shell session.
-    if (!host.repaints && host.resizedAt) {
-      if (Date.now() - host.resizedAt > 250) host.resizedAt = 0;
+    if (host.resizedAt) {
+      if (Date.now() - host.resizedAt > ARCHIVE_SETTLE_MS + 150) host.resizedAt = 0;
       else {
         host.resizeBytes += chunk.length;
         // A quarter screen of bytes is far more than a shell prompt redrawing
-        // itself and far less than a TUI frame.
-        if (host.resizeBytes > (host.cols * host.rows) / 4) { host.repaints = true; host.resizedAt = 0; }
+        // itself and far less than a TUI frame. For a session that reflowed
+        // plainly there is no verdict pending, so latch it here instead — this is
+        // what catches `vim` or a hand-typed `claude` in a shell pane.
+        if (!host.repaints && host.resizeBytes > (host.cols * host.rows) / 4) host.repaints = true;
       }
     }
 
@@ -816,6 +893,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   term.onExit(() => {
     hosts.delete(session.id);
     if (host.gridTimer) { clearTimeout(host.gridTimer); host.gridTimer = null; }
+    if (host.archiveTimer) { clearTimeout(host.archiveTimer); host.archiveTimer = null; }
     try { vt.dispose(); } catch {}
     for (const sub of host.subs) sub.onExit();
     host.subs.clear();
