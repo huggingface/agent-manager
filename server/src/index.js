@@ -2163,9 +2163,12 @@ wss.on('connection', (ws, req) => {
   });
   // The shared grid moved (a viewer joined, left, or asked for a different size).
   // Every viewer is told, so nobody keeps drawing into a stale geometry.
-  handle.onGrid((cols_, rows_, shared, viewers) => {
+  // `clear` says the backend cleared its screen before reflowing and is sending a
+  // repaint: the browser has to do the same, or its emulator archives a rewrapped
+  // copy of the screen that ours deliberately did not.
+  handle.onGrid((cols_, rows_, shared, viewers, clear) => {
     if (ws.readyState !== ws.OPEN) return;
-    try { ws.send(TERM_CTRL + JSON.stringify({ t: 'grid', cols: cols_, rows: rows_, shared, viewers })); } catch {}
+    try { ws.send(TERM_CTRL + JSON.stringify({ t: 'grid', cols: cols_, rows: rows_, shared, viewers, clear })); } catch {}
   });
 
   // Hand the screen back immediately: replayed scrollback, then a snapshot

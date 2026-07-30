@@ -61,11 +61,15 @@ const SAMPLE_THROTTLE_MS = 250;
 const REPLAY_BYTES = Number(process.env.AM_REPLAY_BYTES || 256 * 1024);
 const SCROLLBACK_LINES = Number(process.env.AM_SCROLLBACK || 20000);
 // A resize is only worth acting on once it stops changing. ResizeObserver fires
-// per animation frame while a window is dragged, and EVERY applied size costs a
-// full TUI repaint whose scrolled-off rows land in scrollback as a duplicate
-// copy (see applyGrid). Coalescing a drag into one resize is what keeps the
+// per animation frame while a window is dragged, and every applied size costs a
+// rewrap of the outgoing screen and a full TUI repaint (see carryScreen for what
+// that leaves behind). Coalescing a drag into one resize is what keeps the
 // scrollback from filling with the same screen re-wrapped a dozen ways.
 const RESIZE_SETTLE_MS = Number(process.env.AM_RESIZE_SETTLE_MS || 120);
+// Escape hatch for carryScreen: with AM_RESIZE_CARRY=0 a resize reflows the way a
+// plain terminal does, duplication and all. Kept because carrying the screen by
+// hand is the one part of a resize that makes an assumption about the app.
+const RESIZE_CARRY = process.env.AM_RESIZE_CARRY !== '0';
 
 const hosts = new Map(); // session id -> host
 
@@ -156,6 +160,52 @@ function effectiveGrid(host) {
 }
 
 /**
+ * Re-frame a snapshot for a different geometry, so it can be painted into one.
+ *
+ * Bottom-anchored on a shrink, like a terminal: the cursor and the newest rows
+ * are what a user is looking at. Rows that fall off the top are DROPPED rather
+ * than archived — see carryScreen for why that is the point.
+ */
+function fitSnapshot(snap, cols, rows) {
+  const drop = Math.max(0, snap.rows - rows);
+  return {
+    cols,
+    rows,
+    isAltScreen: snap.isAltScreen,
+    cursorRow: Math.max(0, Math.min(rows - 1, snap.cursorRow - drop)),
+    cursorCol: Math.max(0, Math.min(cols - 1, snap.cursorCol)),
+    cells: (snap.cells || [])
+      .filter((c) => c.row >= drop && c.row < drop + rows && c.col < cols)
+      .map((c) => (drop ? { ...c, row: c.row - drop } : c)),
+  };
+}
+
+/**
+ * Carry the current screen across a resize by hand, instead of letting reflow do
+ * it — the whole reason a resize duplicated scrollback.
+ *
+ * Reflow is not wrong, it is just redundant here: narrowing rewraps every row of
+ * the outgoing screen (a 119-column row becomes two at 110), which scrolls the
+ * excess up into scrollback — and then the app repaints that same screen, so the
+ * rewrapped copy is left above it forever. Six zoom clicks, six copies.
+ *
+ * So the screen is cleared BEFORE the reflow, which leaves it nothing to archive,
+ * and re-painted after: snapshotToAnsi positions every row absolutely and emits
+ * no newline, so the paint itself cannot wrap or scroll either. Returns the ANSI
+ * to feed after the resize, or null when reflow should be left alone (see
+ * host.repaints).
+ */
+function carryScreen(host, cols, rows) {
+  if (!RESIZE_CARRY || !host.repaints) return null;
+  let ansi = null;
+  try {
+    ansi = snapshotToAnsi(fitSnapshot(host.vt.snapshot({ includeCells: true }), cols, rows));
+  } catch { return null; }
+  try { host.vt.feed('\x1b[H\x1b[2J'); } catch { return null; }
+  return ansi;
+}
+
+/**
  * Move the session to the size its viewers imply.
  *
  * The grid is resized BEFORE the PTY: the app's SIGWINCH repaint then lands in a
@@ -174,12 +224,18 @@ function applyGrid(host) {
   if (cols === host.cols && rows === host.rows) return false;
   host.cols = cols;
   host.rows = rows;
+  const carried = carryScreen(host, cols, rows);
   try { host.vt.resize(cols, rows); } catch {}
   try { host.pty.resize(cols, rows); } catch {}
-  let ansi = null;
-  try { ansi = snapshotToAnsi(host.vt.snapshot({ includeCells: true })); } catch {}
+  host.resizedAt = Date.now();
+  host.resizeBytes = 0;
+  let ansi = carried;
+  if (carried) { try { host.vt.feed(carried); } catch {} }
+  else { try { ansi = snapshotToAnsi(host.vt.snapshot({ includeCells: true })); } catch {} }
   for (const sub of host.subs) {
-    sub.onGrid(cols, rows, host.subs.size > 1, host.subs.size);
+    // `carried` doubles as the flag: the viewer's own emulator has to skip its
+    // reflow exactly when we skipped ours, or it archives what we did not.
+    sub.onGrid(cols, rows, host.subs.size > 1, host.subs.size, !!carried);
     if (ansi) sub.onData(ansi);
   }
   return true;
@@ -695,6 +751,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     name: 'xterm-256color', cols, rows, cwd: workdir, env,
   });
   const vt = ghostty.createTerminal({ cols, rows, scrollbackLimit: SCROLLBACK_LINES });
+  const isShell = (cliById(session.cli) || cliById('shell')).id === 'shell';
 
   const host = {
     id: session.id,
@@ -702,6 +759,14 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     vt,
     cols,
     rows,
+    // Does this app reprint its screen after SIGWINCH? That decides whether the
+    // reflow on resize archives a duplicate of the screen or archives the log
+    // (see carryScreen). Every agent TUI repaints; a shell prompt does not, and
+    // its rewrapped scrollback is the real thing, not a copy. The guess is
+    // corrected below, because `vim` or a hand-typed `claude` breaks it.
+    repaints: !isShell,
+    resizedAt: 0,
+    resizeBytes: 0,
     subs: new Set(),
     sizes: new Map(), // sub -> the grid that viewer can display
     pendingSizes: new Set(), // subs whose request hasn't been answered yet
@@ -716,6 +781,20 @@ export function ensureRunning(session, cols = 120, rows = 34) {
 
   term.onData((chunk) => {
     try { vt.feed(chunk); } catch (e) { console.error('[runner] vt.feed', e && e.message); }
+
+    // A screenful arriving right after a resize means the app repainted, so the
+    // rewrapped copy reflow just archived was redundant. Latch that: the next
+    // resize carries the screen across by hand instead (see carryScreen). This is
+    // what catches `vim` or a hand-typed `claude` inside a shell session.
+    if (!host.repaints && host.resizedAt) {
+      if (Date.now() - host.resizedAt > 250) host.resizedAt = 0;
+      else {
+        host.resizeBytes += chunk.length;
+        // A quarter screen of bytes is far more than a shell prompt redrawing
+        // itself and far less than a TUI frame.
+        if (host.resizeBytes > (host.cols * host.rows) / 4) { host.repaints = true; host.resizedAt = 0; }
+      }
+    }
 
     // State detection rides the feed path: the grid is already current, so there
     // is nothing to poll and no subprocess to spawn.
@@ -785,7 +864,7 @@ export function attach(session, cols, rows) {
   return {
     onData: (cb) => { sub.onData = (d) => { try { cb(d); } catch {} }; },
     onExit: (cb) => { sub.onExit = () => { try { cb(); } catch {} }; },
-    onGrid: (cb) => { sub.onGrid = (c, r, shared, viewers) => { try { cb(c, r, shared, viewers); } catch {} }; },
+    onGrid: (cb) => { sub.onGrid = (c, r, shared, viewers, clear) => { try { cb(c, r, shared, viewers, clear); } catch {} }; },
     write: (d) => { try { host.pty.write(d); } catch {} },
     // A request, not a command: the shared grid is recomputed from all viewers,
     // and only once the requests settle.
