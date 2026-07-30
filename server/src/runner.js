@@ -60,6 +60,12 @@ const SAMPLE_THROTTLE_MS = 250;
 // scrollback under a fully styled screen.
 const REPLAY_BYTES = Number(process.env.AM_REPLAY_BYTES || 256 * 1024);
 const SCROLLBACK_LINES = Number(process.env.AM_SCROLLBACK || 20000);
+// A resize is only worth acting on once it stops changing. ResizeObserver fires
+// per animation frame while a window is dragged, and EVERY applied size costs a
+// full TUI repaint whose scrolled-off rows land in scrollback as a duplicate
+// copy (see applyGrid). Coalescing a drag into one resize is what keeps the
+// scrollback from filling with the same screen re-wrapped a dozen ways.
+const RESIZE_SETTLE_MS = Number(process.env.AM_RESIZE_SETTLE_MS || 120);
 
 const hosts = new Map(); // session id -> host
 
@@ -149,15 +155,55 @@ function effectiveGrid(host) {
   return { cols, rows };
 }
 
+/**
+ * Move the session to the size its viewers imply.
+ *
+ * The grid is resized BEFORE the PTY: the app's SIGWINCH repaint then lands in a
+ * grid that already has the new geometry, instead of one line of its frame being
+ * measured against the old one.
+ *
+ * Every viewer is then repainted from the grid. A resize is the one moment the
+ * browser's own reflow of its byte log is guaranteed to disagree with us, and an
+ * app that doesn't repaint on SIGWINCH at all (a bash prompt, an agent sitting
+ * idle) would otherwise leave that disagreement on screen until it next drew
+ * something. Repainting from the grid costs one screen of bytes and makes the
+ * pane authoritative again — the same argument as the repaint on attach.
+ */
 function applyGrid(host) {
   const { cols, rows } = effectiveGrid(host);
   if (cols === host.cols && rows === host.rows) return false;
   host.cols = cols;
   host.rows = rows;
-  try { host.pty.resize(cols, rows); } catch {}
   try { host.vt.resize(cols, rows); } catch {}
-  for (const sub of host.subs) sub.onGrid(cols, rows, host.subs.size > 1, host.subs.size);
+  try { host.pty.resize(cols, rows); } catch {}
+  let ansi = null;
+  try { ansi = snapshotToAnsi(host.vt.snapshot({ includeCells: true })); } catch {}
+  for (const sub of host.subs) {
+    sub.onGrid(cols, rows, host.subs.size > 1, host.subs.size);
+    if (ansi) sub.onData(ansi);
+  }
   return true;
+}
+
+/**
+ * Apply the grid once the requests stop arriving. The viewers that asked are
+ * remembered so a request the grid can't honour (a big laptop attached beside a
+ * phone) is still answered with the size that actually applies — a client that
+ * hears nothing back would sit there drawing into a geometry it doesn't have.
+ */
+function scheduleGrid(host, sub) {
+  if (sub) host.pendingSizes.add(sub);
+  if (host.gridTimer) clearTimeout(host.gridTimer);
+  host.gridTimer = setTimeout(() => {
+    host.gridTimer = null;
+    const pending = [...host.pendingSizes];
+    host.pendingSizes.clear();
+    if (applyGrid(host)) return; // applyGrid told everyone
+    for (const s of pending) {
+      if (host.subs.has(s)) s.onGrid(host.cols, host.rows, host.subs.size > 1, host.subs.size);
+    }
+  }, RESIZE_SETTLE_MS);
+  if (host.gridTimer.unref) host.gridTimer.unref();
 }
 
 // ---------- Codex conversation pinning ----------
@@ -658,6 +704,8 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     rows,
     subs: new Set(),
     sizes: new Map(), // sub -> the grid that viewer can display
+    pendingSizes: new Set(), // subs whose request hasn't been answered yet
+    gridTimer: null,
     history: [],
     historyBytes: 0,
     historyDropped: false,
@@ -688,6 +736,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
 
   term.onExit(() => {
     hosts.delete(session.id);
+    if (host.gridTimer) { clearTimeout(host.gridTimer); host.gridTimer = null; }
     try { vt.dispose(); } catch {}
     for (const sub of host.subs) sub.onExit();
     host.subs.clear();
@@ -738,11 +787,21 @@ export function attach(session, cols, rows) {
     onExit: (cb) => { sub.onExit = () => { try { cb(); } catch {} }; },
     onGrid: (cb) => { sub.onGrid = (c, r, shared, viewers) => { try { cb(c, r, shared, viewers); } catch {} }; },
     write: (d) => { try { host.pty.write(d); } catch {} },
-    // A request, not a command: the shared grid is recomputed from all viewers.
+    // A request, not a command: the shared grid is recomputed from all viewers,
+    // and only once the requests settle.
     resize: (c, r) => {
       if (!Number.isFinite(c) || !Number.isFinite(r)) return;
-      host.sizes.set(sub, { cols: Math.max(20, Math.min(400, Math.round(c))), rows: Math.max(5, Math.min(200, Math.round(r))) });
-      if (!applyGrid(host)) sub.onGrid(host.cols, host.rows, host.subs.size > 1, host.subs.size);
+      const want = {
+        cols: Math.max(20, Math.min(400, Math.round(c))),
+        rows: Math.max(5, Math.min(200, Math.round(r))),
+      };
+      const had = host.sizes.get(sub);
+      host.sizes.set(sub, want);
+      // A resync that changes nothing (tab focus, an unrelated pane opening) must
+      // not schedule anything — but the FIRST request from a viewer is always
+      // worth answering, so it learns the grid it joined.
+      if (had && had.cols === want.cols && had.rows === want.rows) return;
+      scheduleGrid(host, sub);
     },
     restore: () => {
       let snap;
@@ -753,14 +812,15 @@ export function attach(session, cols, rows) {
         cols: snap.cols,
         rows: snap.rows,
         viewers: host.subs.size,
-        shared: host.sizes.size > 1,
+        shared: host.subs.size > 1,
       };
     },
     // Detach this viewer only. The session, its grid and its scrollback stay.
     kill: () => {
       host.subs.delete(sub);
       host.sizes.delete(sub);
-      applyGrid(host); // the grid grows back for whoever is left
+      host.pendingSizes.delete(sub);
+      scheduleGrid(host); // the grid grows back for whoever is left
     },
   };
 }
