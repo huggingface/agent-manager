@@ -130,11 +130,22 @@ export interface Traces { sessions: SessionTraces[]; totals: TraceStats; generat
 export const getTraces = (): Promise<Traces> => fetch('/api/traces').then(json);
 
 // ---- files ----
-export interface FileEntry { name: string; dir: boolean; size: number; }
+export type FileKind = 'text' | 'markdown' | 'html' | 'image' | 'pdf' | 'binary';
+export interface FileEntry { name: string; dir: boolean; size: number; mtime: number; kind?: FileKind; }
 export interface FileListing { path: string; root: string; entries: FileEntry[]; }
+export interface FilePreview {
+  path: string; name: string; size: number; mtime: number; kind: FileKind; mime: string;
+  text?: string; truncated?: boolean; reason?: string;
+}
 
 export const listFiles = (id: string, p = ''): Promise<FileListing> =>
   fetch(`/api/files/${id}?path=${encodeURIComponent(p)}`).then(json);
+
+export const previewFile = (id: string, p: string): Promise<FilePreview> =>
+  fetch(`/api/files/${id}/preview?path=${encodeURIComponent(p)}`).then(json);
+
+export const rawUrl = (id: string, p: string) =>
+  `/api/files/${id}/raw?path=${encodeURIComponent(p)}`;
 
 export const uploadFile = (id: string, p: string, file: File) =>
   fetch(`/api/files/${id}/upload?path=${encodeURIComponent(p)}&name=${encodeURIComponent(file.name)}`, {

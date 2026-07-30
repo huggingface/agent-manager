@@ -106,6 +106,48 @@ export const UpGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+export const BackGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M12.8 8H3.4M7 4.4 3.4 8 7 11.6" />
+  </G>
+);
+
+export const DownloadGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M8 2.6v6.7M5.1 6.4 8 9.3l2.9-2.9M3 10.7v1.8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1.8" />
+  </G>
+);
+
+// File-kind glyphs: same 16px pen as FileGlyph, so a mixed listing reads as one
+// set rather than a sticker collection.
+export const ImageGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <rect x="2" y="3.2" width="12" height="9.6" rx="1" />
+    <circle cx="5.9" cy="6.6" r="1.1" />
+    <path d="M2.2 11.4l3.1-2.7 2.3 2 2.3-2.4 3.9 3.6" />
+  </G>
+);
+
+export const CodeGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M5.6 5.4 2.6 8l3 2.6M10.4 5.4 13.4 8l-3 2.6M9.1 3.6 7 12.4" />
+  </G>
+);
+
+export const DocGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M4 1.75h5L12.25 5v8.25a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V2.75a1 1 0 0 1 1-1z" />
+    <path d="M8.75 1.9V5.25h3.35M5.3 8h5.4M5.3 10.4h3.6" />
+  </G>
+);
+
+export const GlobeGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <circle cx="8" cy="8" r="6.2" />
+    <path d="M1.9 8h12.2M8 1.8c1.7 1.8 2.6 3.9 2.6 6.2S9.7 12.4 8 14.2C6.3 12.4 5.4 10.3 5.4 8S6.3 3.6 8 1.8z" />
+  </G>
+);
+
 export const RefreshGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <path d="M13.2 8A5.2 5.2 0 1 1 11 3.8" />
