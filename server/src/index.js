@@ -8,8 +8,9 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import {
   PORT, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR, USE_TMUX, TMUX_AVAILABLE,
-  ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions, PASSIVE_CLIS,
+  ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions, PASSIVE_CLIS, isRemote,
 } from './config.js';
+import * as remote from './remote.js';
 import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
@@ -208,12 +209,41 @@ app.get('/api/meta', async (_req, res) => {
     .filter((s) => s.cli !== 'shell' && !PASSIVE_CLIS.includes(s.cli))
     .filter((s) => !hs || !hs.has(s.id))
     .map((s) => {
+      // A remote agent's digest comes from its message folder, not the bulk
+      // transcript pass — which never sees it.
+      if (isRemote(s.cli)) return { ...s, digest: remote.remoteDigest(s), remote: remote.remoteInfo(s) };
       const d = digests.get(s.id);
       if (d) { const { _ts, ...digest } = d; return { ...s, digest }; }
       return { ...s, digest: null };
     });
   res.json({ sessions, generatedAt: new Date().toISOString() });
 });
+
+// Whose turn a `user` message is attributed to in a remote log. The Space owner
+// is the operator; falls back to a neutral label off-platform.
+const operatorName = () => process.env.SPACE_AUTHOR_NAME || process.env.AM_USER || 'operator';
+
+/**
+ * Give an agent something to do — tmux keystrokes for a local pane, a markdown
+ * message file for a remote one. Both callers (the Overview reply box and the
+ * agent-to-agent API) go through here, which is what makes remote agents
+ * reachable from everywhere the local ones are without duplicating either path.
+ */
+async function deliver(session, text, from) {
+  if (isRemote(session.cli)) {
+    const name = session.remote?.name;
+    if (!name) throw new Error('this remote pane has no name recorded');
+    // Delivery does NOT un-pause: a disconnected agent isn't listening, so the
+    // message waits in the folder and lands on its next poll — the same
+    // at-least-once guarantee a reconnect after a dropped socket gets.
+    remote.append(name, { role: 'user', from: from || operatorName(), text });
+    return false;
+  }
+  const started = ensureRunning(session);
+  if (started) await sleep(3500); // let the CLI boot before the keystrokes land
+  await sendInput(session.id, text);
+  return started;
+}
 
 // Type a prompt into a session's terminal from the Overview — no pane needed.
 // If the agent is stopped, wake it first (detached tmux + resume) and give the
@@ -225,9 +255,7 @@ app.post('/api/sessions/:id/input', async (req, res) => {
   const text = typeof (req.body || {}).text === 'string' ? req.body.text.trim() : '';
   if (!text) return res.status(400).json({ error: 'empty' });
   try {
-    const started = ensureRunning(s);
-    if (started) await new Promise((r) => setTimeout(r, 3500));
-    await sendInput(s.id, text);
+    const started = await deliver(s, text);
     res.json({ ok: true, started });
   } catch (e) {
     res.status(409).json({ error: String(e.message || e) });
@@ -332,7 +360,10 @@ app.get('/api/agents', async (req, res) => {
   res.json({
     agents,
     // Which CLIs a spawn can ask for. `ready` = a credential was found.
-    clis: cliCatalog().filter((c) => isAgentCli(c.id) && c.available)
+    // Remote agents are absent from the spawn list on purpose: creating one
+    // produces a pane waiting for a human to paste its prompt onto another
+    // machine, which an agent in here cannot do.
+    clis: cliCatalog().filter((c) => isAgentCli(c.id) && c.available && !isRemote(c.id))
       .map((c) => ({ id: c.id, label: c.label, ready: c.ready })),
     generatedAt: new Date().toISOString(),
   });
@@ -414,9 +445,11 @@ app.post('/api/agents/:id/prompt', promptBody, async (req, res) => {
   const text = bodyText(req, 'text');
   if (!text) return res.status(400).json({ error: 'empty prompt — send it as the request body' });
   try {
-    const started = ensureRunning(s);
-    if (started) await sleep(3500); // let the CLI boot before the keystrokes land
-    await sendInput(s.id, `[message from ${from.session.name}:] ${text}`);
+    // Remote agents come along for free here: the same call reaches an agent on
+    // the operator's laptop, and the [message from x:] prefix plus `from:` in
+    // the message's frontmatter is how it can tell a peer's request from the
+    // operator's.
+    const started = await deliver(s, `[message from ${from.session.name}:] ${text}`, from.session.name);
     res.json({ ok: true, id: s.id, name: s.name, started });
   } catch (e) {
     res.status(409).json({ error: String(e.message || e) });
@@ -431,6 +464,7 @@ app.post('/api/agents', promptBody, (req, res) => {
   const cli = String(q.cli || '').trim();
   const def = cliById(cli);
   if (!def || !promptable({ cli })) return res.status(400).json({ error: `unknown agent cli '${cli}' — see clis[] in GET /api/agents` });
+  if (isRemote(cli)) return res.status(400).json({ error: 'a remote agent has to be created by the operator — it needs its prompt pasted onto another machine. Message an existing one instead.' });
   const cat = cliCatalog().find((c) => c.id === cli);
   if (!cat.available) return res.status(400).json({ error: `${def.label} is not installed here` });
   const prompt = bodyText(req, 'prompt');
@@ -444,6 +478,7 @@ app.post('/api/agents', promptBody, (req, res) => {
     prompt: `[message from ${from.session.name}:] ${prompt}`,
   });
   if (!s) return res.status(400).json({ error: 'bad path' });
+  if (s.error) return res.status(400).json({ error: s.error });
   res.status(201).json({
     id: s.id, name: s.name, cli: s.cli, path: s.path, workdir: workspacePath(s.path),
     ...(cat.ready ? {} : { warning: `${def.label} has no credential configured — it may stop at a sign-in prompt` }),
@@ -460,6 +495,180 @@ app.post('/api/agents/:id/stop', promptBody, (req, res) => {
   if (s.id === from.session.id) return res.status(400).json({ error: 'cannot stop yourself' });
   stop(s.id);
   res.json({ ok: true, id: s.id, name: s.name });
+});
+
+// ---------- remote agents (/api/remote) — docs/remote-agents.md §5 ----------
+// The one INBOUND API: an agent on the operator's own laptop polls these to take
+// work and report back. There is no app-level credential here on purpose — the
+// Space is private, so HF's edge is the gate, and the name in the path is honest
+// labelling exactly like ?from= in the agent API above. Everything sits behind
+// the public-Space lock like every other route.
+//
+// Read §11 of the design before adding anything here: reaching this API at all
+// requires a token that can see the Space, and that token is equivalent to a
+// shell in this container. These routes are for the operator's own machines.
+
+const paneFor = (name) => store.list().find((s) => s.remote?.name === name) || null;
+
+// A remote pane that exists but is paused answers every agent-facing call with
+// this, so a disconnected loop ends instead of spinning.
+const STOP_PAUSED = { stop: true, reason: 'disconnected from the manager' };
+
+app.get('/api/remote/:name/ping', (req, res) => {
+  const name = req.params.name;
+  const s = paneFor(name);
+  // JSON, so the copied prompt can tell "wrong name" (this) from "your token
+  // cannot see this Space" (an HTML page from HF's edge, also a 404).
+  if (!s) return res.status(404).json({ error: `no remote agent named '${name}' in this Space`, hint: 'check the pane name; if you expected one, create it in the manager first' });
+  // Deliberately does NOT stamp liveness: a ping is a connectivity check the
+  // operator also runs by hand, and lighting the status lamp for it would show
+  // "connected" with nothing actually polling.
+  res.json({
+    ok: true,
+    name,
+    operator: operatorName(),
+    seq: remote.lastSeq(name),
+    paused: !!s.remote.paused,
+    waitMax: remote.WAIT_MAX,
+    waitDefault: remote.WAIT_DEFAULT,
+  });
+});
+
+app.post('/api/remote/:name/hello', express.json({ limit: '8kb' }), (req, res) => {
+  const name = req.params.name;
+  const s = paneFor(name);
+  if (!s) return res.status(404).json({ error: `no remote agent named '${name}' in this Space` });
+  const b = req.body || {};
+  const str = (v, n) => (typeof v === 'string' ? v.trim().slice(0, n) : '');
+  const peer = {
+    harness: str(b.harness, 40) || null,
+    cwd: str(b.cwd, 200) || null,
+    host: str(b.host, 80) || null,
+    at: new Date().toISOString(),
+  };
+  store.update(s.id, { remote: { ...s.remote, peer } });
+  remote.noteSeen(name);
+  const where = [peer.harness, peer.cwd, peer.host && `on ${peer.host}`].filter(Boolean).join(' · ');
+  remote.append(name, { role: 'system', from: name, text: `connected${where ? ` · ${where}` : ''}` });
+  res.json({ ok: true, name, seq: remote.lastSeq(name) });
+});
+
+// The one blocking call. Writes ':connected' immediately (which also flushes
+// headers through the edge), ':hb' every 25 s, then exactly one JSON line.
+app.get('/api/remote/:name/stream', (req, res) => {
+  const name = req.params.name;
+  const s = paneFor(name);
+  if (!s) return res.status(404).json({ error: `no remote agent named '${name}' in this Space` });
+  // A poll we REFUSE must not count as contact: the agent has been dismissed
+  // and is about to end its loop, so "not connected" is the honest light.
+  if (s.remote.paused) return res.json(STOP_PAUSED);
+  remote.noteSeen(name);
+
+  const since = clamp(parseInt(req.query.since || '0', 10), 0, Number.MAX_SAFE_INTEGER, 0);
+  const wait = clamp(parseInt(req.query.wait || String(remote.WAIT_DEFAULT), 10), remote.WAIT_MIN, remote.WAIT_MAX, remote.WAIT_DEFAULT);
+
+  res.setHeader('content-type', 'application/x-ndjson');
+  res.setHeader('cache-control', 'no-cache, no-transform');
+  res.setHeader('x-accel-buffering', 'no'); // don't let a proxy buffer the heartbeats
+  res.write(':connected\n');
+
+  let done = false;
+  const finish = (payload) => {
+    if (done) return;
+    done = true;
+    clearInterval(hb);
+    clearTimeout(timer);
+    release();
+    try { res.write(`${JSON.stringify(payload)}\n`); res.end(); } catch { /* client vanished */ }
+  };
+
+  // Anything already waiting is returned at once — that is what makes a
+  // reconnect after a dropped socket lossless.
+  const pending = remote.pendingFor(name, since);
+
+  const hb = setInterval(() => {
+    if (done) return;
+    try { res.write(':hb\n'); } catch { /* handled by the close listener */ }
+  }, remote.HEARTBEAT_MS);
+  const timer = setTimeout(() => finish({ messages: [], seq: remote.lastSeq(name) }), wait * 1000);
+  const release = remote.registerStream(name, {
+    since,
+    deliver: (msgs) => finish({ messages: msgs, seq: msgs[msgs.length - 1].seq }),
+    stop: (reason) => finish({ stop: true, reason: reason || 'disconnected from the manager' }),
+  });
+  res.on('close', () => {
+    if (done) return;
+    done = true;
+    clearInterval(hb);
+    clearTimeout(timer);
+    release();
+  });
+
+  if (pending.length) finish({ messages: pending, seq: pending[pending.length - 1].seq });
+});
+
+// The same thing without blocking: the short-polling fallback for a proxy that
+// kills long connections, and what the browser pane polls.
+app.get('/api/remote/:name/messages', (req, res) => {
+  const name = req.params.name;
+  const s = paneFor(name);
+  if (!s) return res.status(404).json({ error: `no remote agent named '${name}' in this Space` });
+  const agentSide = req.query.agent === '1';
+  if (agentSide) {
+    if (s.remote.paused) return res.json(STOP_PAUSED);
+    remote.noteSeen(name);
+  }
+  const since = clamp(parseInt(req.query.since || '0', 10), 0, Number.MAX_SAFE_INTEGER, 0);
+  const messages = agentSide ? remote.pendingFor(name, since) : remote.messagesSince(name, since);
+  res.json({ messages, seq: remote.lastSeq(name) });
+});
+
+// The agent speaks. text/plain markdown is the primary shape (a heredoc into
+// curl never trips over quoting), JSON {text} also accepted — same convention as
+// the agent-to-agent API.
+app.post('/api/remote/:name/messages', promptBody, (req, res) => {
+  const name = req.params.name;
+  const s = paneFor(name);
+  if (!s) return res.status(404).json({ error: `no remote agent named '${name}' in this Space` });
+  if (s.remote.paused) return res.status(409).json(STOP_PAUSED);
+  const text = bodyText(req, 'text');
+  if (!text) return res.status(400).json({ error: 'empty message — send the markdown as the request body' });
+  if (remote.rateLimited(name)) return res.status(429).json({ error: 'too many messages — slow down to under 60/min' });
+  remote.noteSeen(name);
+  const msg = remote.append(name, { role: 'agent', from: name, text: text.slice(0, remote.MAX_TEXT) });
+  res.json({ ok: true, seq: msg.seq, truncated: text.length > remote.MAX_TEXT });
+});
+
+// The thing the operator copies. Contains no secret — just a URL and a name.
+app.get('/api/remote/:name/prompt', (req, res) => {
+  const name = req.params.name;
+  if (!paneFor(name)) return res.status(404).json({ error: `no remote agent named '${name}' in this Space` });
+  const host = process.env.SPACE_HOST || req.headers.host || 'localhost:7860';
+  res.type('text/plain; charset=utf-8').send(remote.promptText(name, host, operatorName()));
+});
+
+// ---------- remote panes, addressed by session id (what the browser uses) ----------
+
+app.get('/api/sessions/:id/remote', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  if (!isRemote(s.cli)) return res.status(400).json({ error: 'not a remote agent' });
+  const since = clamp(parseInt(req.query.since || '0', 10), 0, Number.MAX_SAFE_INTEGER, 0);
+  res.json({
+    ...remote.remoteInfo(s),
+    // since=0 (a fresh pane) gets the tail; an incremental poll gets the delta.
+    messages: since ? remote.messagesSince(s.remote.name, since) : remote.allMessages(s.remote.name),
+  });
+});
+
+// Disconnect / reconnect — what the sidebar's stop and play buttons mean here.
+app.post('/api/sessions/:id/remote/paused', express.json({ limit: '4kb' }), (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  if (!isRemote(s.cli)) return res.status(400).json({ error: 'not a remote agent' });
+  const paused = !!(req.body || {}).paused;
+  const next = remote.setPaused(s, paused, paused ? 'disconnected from the manager' : undefined);
+  res.json({ ok: true, ...remote.remoteInfo(next) });
 });
 
 const hfToken = () => process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN || process.env.HF_API_TOKEN || null;
@@ -1162,12 +1371,28 @@ function nextName(cli) {
 // quickstart behaves identically whoever asked. Returns null for a bad path.
 function createSession({ name, cli, groupId, path: reqPath, prompt }) {
   const finalName = name && name.trim() ? name.trim() : nextName(cli);
+  // A remote agent's slug IS its folder and its API address, so it is minted
+  // here, from the name, and never changes afterwards — the display name stays
+  // freely renameable like every other session's.
+  const remoteSlug = isRemote(cli) ? (slugify(finalName) || 'remote') : null;
+  if (remoteSlug && store.list().some((s) => s.remote?.name === remoteSlug)) return { error: `a remote agent named '${remoteSlug}' already exists` };
   // Location: an explicit workspace-relative path. cleanRelPath('.') → '' =
   // the workspaces root. Omitted/blank paths also land at the root; folder
   // creation is explicit through the picker, not automatic.
-  const chosen = cleanRelPath(typeof reqPath === 'string' && reqPath.trim() ? reqPath : '.');
+  const chosen = remoteSlug
+    ? remote.relPathFor(remoteSlug)
+    : cleanRelPath(typeof reqPath === 'string' && reqPath.trim() ? reqPath : '.');
   if (chosen === null) return null;
+  // The message folders are ours to write; an ordinary agent running in there
+  // would be editing live conversations as if they were source files.
+  if (!remoteSlug && (chosen === remote.REMOTE_FOLDER || chosen.startsWith(`${remote.REMOTE_FOLDER}/`))) {
+    return { error: `${remote.REMOTE_FOLDER}/ holds remote agents' message logs — pick another folder` };
+  }
   const s = store.create({ name: finalName, cli, path: chosen });
+  if (remoteSlug) {
+    remote.ensureFolder(remoteSlug);
+    store.update(s.id, { remote: { name: remoteSlug, paused: false, peer: null } });
+  }
   if (s.path) { try { fs.mkdirSync(workspacePath(s.path), { recursive: true }); } catch {} }
   if (groupId && groups.get(groupId)) groups.attach(groupId, s.id);
   else order.prepend(`s:${s.id}`);
@@ -1177,7 +1402,12 @@ function createSession({ name, cli, groupId, path: reqPath, prompt }) {
   // flag keep the boot-then-type fallback.
   if (typeof prompt === 'string' && prompt.trim()) {
     const text = prompt.trim();
-    if (cliById(cli).withPrompt || cli === 'claude') {
+    // A remote agent has nothing to launch, so the prompt simply becomes the
+    // first message in the folder and waits there for whoever connects. This is
+    // what makes "name it, type the task, copy the prompt" work in one step.
+    if (remoteSlug) {
+      remote.append(remoteSlug, { role: 'user', from: operatorName(), text });
+    } else if (cliById(cli).withPrompt || cli === 'claude') {
       store.update(s.id, { pendingPrompt: text });
       try { ensureRunning(store.get(s.id) || s); } catch (e) { console.error('[quickstart]', e && e.message); }
     } else {
@@ -1196,8 +1426,12 @@ function createSession({ name, cli, groupId, path: reqPath, prompt }) {
 app.post('/api/sessions', (req, res) => {
   const { name, cli, groupId, path: reqPath, prompt } = req.body || {};
   if (!cli || !cliById(cli)) return res.status(400).json({ error: 'unknown cli' });
+  // A remote agent is addressed by its name, so it is the one kind that cannot
+  // be created unnamed.
+  if (isRemote(cli) && !(name && name.trim())) return res.status(400).json({ error: 'a remote agent needs a name — it is the folder and the address' });
   const s = createSession({ name, cli, groupId, path: reqPath, prompt });
   if (!s) return res.status(400).json({ error: 'bad path' });
+  if (s.error) return res.status(400).json({ error: s.error });
   res.status(201).json({ ...s, running: false, state: 'stopped' });
 });
 
@@ -1402,6 +1636,10 @@ app.delete('/api/sessions/:id', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   stop(s.id);
+  // Close the agent's poll and drop the in-memory log, so a pane later created
+  // with the same name reads the folder fresh instead of inheriting a ghost.
+  // The folder itself stays on disk, like every other session's files.
+  if (isRemote(s.cli) && s.remote?.name) remote.forget(s.remote.name);
   groups.detachSession(s.id);
   order.drop(`s:${s.id}`);
   store.remove(s.id);
@@ -1499,6 +1737,11 @@ if (fs.existsSync(PUBLIC_DIR)) {
 }
 
 const server = http.createServer(app);
+// Node kills any request still open at requestTimeout (default 300 s), which
+// would cut a remote agent's long poll off mid-wait and look exactly like a
+// flaky proxy. The poll's own `wait` clamp bounds it instead (remote.WAIT_MAX),
+// and every other route here answers in milliseconds.
+server.requestTimeout = 0;
 const wss = new WebSocketServer({ server, path: '/ws' });
 // Without these listeners a transport error (client reset, listen failure)
 // throws out of the EventEmitter and crashes the process.
@@ -1537,6 +1780,14 @@ wss.on('connection', (ws, req) => {
   const session = id && store.get(id);
   if (!session) {
     ws.send('\r\n[session not found]\r\n');
+    ws.close();
+    return;
+  }
+  // A remote agent has no PTY here by design: its harness runs on another
+  // machine and the pane is a message log, not a screen. Refuse before attach()
+  // rather than spawning tmux for a session that can never use it.
+  if (isRemote(session.cli)) {
+    ws.send('\r\n[this pane has no terminal — it talks to an agent elsewhere]\r\n');
     ws.close();
     return;
   }

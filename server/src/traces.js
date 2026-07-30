@@ -3,7 +3,8 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
 import * as store from './sessions.js';
-import { WORKSPACES_DIR, PASSIVE_CLIS } from './config.js';
+import { WORKSPACES_DIR, PASSIVE_CLIS, isRemote } from './config.js';
+import { remoteDigest } from './remote.js';
 import { mark, tracked, PHASE } from './watchdog.js';
 // The trace panel reader (bottom of this file) locates its file with the same
 // resolver sharing uses. share.js does not import traces.js, so no cycle.
@@ -747,7 +748,10 @@ export async function buildTraces() {
   // live session (deleted panes, ambiguous attribution) only show in totals.
   return {
     sessions: sessions
-      .filter((s) => s.cli !== 'shell' && !PASSIVE_CLIS.includes(s.cli))
+      // Remote agents are excluded on purpose: their tokens are spent by a
+      // harness on the operator's own machine, so counting them here would
+      // inflate this Space's usage with numbers we never paid and cannot see.
+      .filter((s) => s.cli !== 'shell' && !PASSIVE_CLIS.includes(s.cli) && !isRemote(s.cli))
       .map((s) => ({ id: s.id, name: s.name, cli: s.cli, path: s.path, ...(perSession.get(s.id) || emptyStats()) }))
       .sort((a, b) => b.lastTs - a.lastTs),
     totals,
@@ -768,6 +772,9 @@ export async function traceDigests() {
  *  files land in the shared per-file cache, so nothing is read twice. */
 export async function digestFor(s) {
   try {
+    // A remote agent's conversation IS its message folder — nothing to parse,
+    // and no transcript on this machine to find.
+    if (isRemote(s.cli)) return remoteDigest(s);
     if (s.cli === 'claude' && s.sessionUuid) {
       let best = null;
       for (const p of await claudeFiles()) {

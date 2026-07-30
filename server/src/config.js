@@ -65,12 +65,22 @@ const setupHint = (...keys) =>
 // own. Everywhere the app asks "is this an agent?" it means "not one of these".
 export const PASSIVE_CLIS = ['files', 'trace'];
 
+// A remote agent IS an agent (card, digest, status light) but has no process
+// here: its compute lives on the operator's own machine and it polls us. So it
+// is deliberately absent from PASSIVE_CLIS, and every "spawn / attach / type at
+// it" path has to route around it — see isRemote() callers.
+export const isRemote = (cli) => cli === 'remote';
+
 export const CLIS = [
   { id: 'shell',    label: 'Shell',       bin: 'bash',     color: '#8aa0ad', run: 'exec bash -il',  cont: null },
   { id: 'files',    label: 'Files',       bin: null,       color: '#d99a2b', run: null,             cont: null },
   // A received trace, rendered read-only. Like 'files' it is a passive panel
   // rather than a process, so it has no binary and never launches anything.
   { id: 'trace',    label: 'Trace',       bin: null,       color: '#7c8cf8', run: null,             cont: null },
+  // An agent somewhere else — the operator's laptop, a GPU box. No binary and
+  // nothing to launch HERE (that is the point), but unlike files/trace it holds
+  // a conversation, so it gets a light and a digest like any other agent.
+  { id: 'remote',   label: 'Remote agent', bin: null,      color: '#5ec2e0', run: null,             cont: null },
   { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue',
     withPrompt: (q) => `claude ${q}`,
     setup: setupHint('ANTHROPIC_API_KEY') },
@@ -127,7 +137,9 @@ function isConfigured(id) {
       return hasEnv('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY')
         || fileOk(path.join(env.OPENCLAW_STATE_DIR || path.join(home, '.openclaw'), 'openclaw.json'));
     default:
-      return true; // shell / files need no auth
+      // shell / files / trace need no auth, and a remote agent signs in on its
+      // own machine — there is nothing to configure on this side.
+      return true;
   }
 }
 
