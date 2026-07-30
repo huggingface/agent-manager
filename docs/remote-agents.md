@@ -1,7 +1,8 @@
 # Remote agents — design
 
-Status: **design only, nothing implemented** · Branch: `feat/remote-agents` · Written 2026-07-30
-(revised same day: markdown-folder store, no pane keys)
+Status: **phase 1 implemented** · Branch: `feat/remote-agents` · Written 2026-07-30
+(revised same day: markdown-folder store, no pane keys; then built, which changed
+four things — see §12)
 
 A fourth kind of pane. `shell` is a process, `files`/`trace` are panels, and a **remote agent**
 is a *conversation with an agent that runs somewhere else* — the operator's laptop, a GPU box,
@@ -19,7 +20,7 @@ derived from the poll itself rather than from a separate heartbeat.
 |---|---|
 | Pane kind | A new CLI id **`remote`** — an agent (Overview card, digest, status light), not a passive panel. |
 | Transport | **Agent → Space HTTP only.** The Space never dials out; it cannot reach a laptop behind NAT. |
-| Delivery | **One blocking NDJSON long-poll** with 25 s heartbeats, up to 30 min per call. |
+| Delivery | **One blocking NDJSON long-poll** with 25 s heartbeats. Default 300 s per call, ceiling 30 min — see §12.1. |
 | Auth | **The operator's HF token, and nothing else.** The Space is private, so HF's edge is the gate (verified below). |
 | Identity | **The agent's name, in the URL.** Labelling, not authentication — the same convention as `?from=` in the existing agent API. |
 | Storage | **A folder of markdown files**: `workspaces/remote-agents/<name>/00042-agent.md`. Frontmatter for metadata, body is the message. |
@@ -435,10 +436,10 @@ the folder and the address), so the create form asks for it rather than defaulti
 1. ~~**Whose machines?**~~ **Decided: your own machines only.** See §11 — this is a harder
    boundary than it first looked, and per-name keys would not have fixed it.
 2. **Colour.** `#5ec2e0` for the remote tint is a guess that avoids Codex's teal and Gemini's blue.
-3. **`wait` budget.** 30 min per call (cowrite uses ~50). Shorter is more robust, longer is
-   cheaper; both are one constant.
-4. **Does a remote pane archive?** It has no transcript clock, so it would archive on folder
-   activity. Probably right, worth confirming.
+3. ~~**`wait` budget.**~~ **Decided: 300 s default, 1800 s ceiling** — §12.1 explains why the
+   binding limit is the client's tool-call timeout, not the network.
+4. ~~**Does a remote pane archive?**~~ **Decided: yes, on folder activity** — no transcript
+   clock exists, and it makes the row behave like every other pane in the sidebar.
 
 ## 11. Your machines only — and why a token is not a scope
 
@@ -500,6 +501,69 @@ each collaborator brings their own agent. Reuse it rather than reinvent:
 
 Order of preference if it happens: Hub-repo queue → outbound mailbox relay → **never** an inbound
 proxy.
+
+## 12. What building it changed
+
+Four corrections, all found by running the thing rather than reading it. The 33-check
+protocol test that caught most of them is `server/test/remote-protocol.sh`.
+
+### 12.1 `wait` is 300 s, not 30 min — the ceiling is the client, not the network
+
+§2 worried about Node's `requestTimeout` and HF's edge. Both are real (`server.requestTimeout
+= 0` is set, with a comment). Neither binds. **The copied prompt is a `curl` loop run by a
+coding CLI as a tool call**, and those cap out: Claude Code's Bash tool defaults to 120 s and
+allows at most 600 s. A 30-minute poll cannot be expressed as one tool call, so every poll
+would return to the agent as a *timeout error* — indistinguishable from a broken endpoint, and
+enough to make an agent give up or thrash. 300 s fits inside one tool call with margin; the
+1800 s ceiling stays reachable for native or backgrounded clients that have no such cap.
+
+The edge's own limit is still unmeasured. cowrite's ~50 min is the only evidence, and the probe
+attempted here hit a Space running an older revision. Worth measuring once this deploys.
+
+### 12.2 §6.2's state machine did not close
+
+`working` was defined as *listening **and** the newest message is the human's*. But an agent
+that takes work **stops polling while it works** — that is the whole shape of a single-threaded
+CLI loop. So `working` was either unreachable, or reachable only by accident: the first
+implementation stamped liveness on `/ping`, which lit the lamp with nothing behind it.
+
+Liveness is now stamped **only by agent-side calls** (poll, post, hello — never `/ping`, which
+the operator also runs by hand), and there are **two windows**: 90 s of silence means gone when
+nothing is outstanding, but a pane with work outstanding gets 15 minutes, because "heads-down on
+another machine with no socket open" is exactly what working looks like from here.
+
+Two smaller consequences of the same confusion:
+- **A refused poll must not count as contact.** Disconnect tells the agent to end its loop; if
+  its rejected poll stamped liveness, a later reconnect showed `working` on the strength of a
+  poll from *before* we dismissed it.
+- **Pausing clears `seen`,** for the same reason.
+
+### 12.3 Disconnect closes open polls instead of waiting them out
+
+§5.6 said the next poll answers `{"stop":true}`. With a 300 s `wait` that makes the off switch
+take up to five minutes. `setPaused()` now closes every open poll immediately. This is what
+makes a longer `wait` safe to configure at all — the two decisions are linked.
+
+### 12.4 The ✓ needed a real signal
+
+§7 promised the tick "appears when a poll has returned that message — nothing more". The first
+attempt inferred it in the UI ("is there a later agent message?"), which would tick a message
+nobody had collected. The server now records the highest seq actually handed to a poll
+(`markDelivered` at both hand-over sites) and reports `deliveredThrough`; the pane draws the
+tick from that and nothing else.
+
+### 12.5 Smaller things worth recording
+
+- **`remote.lastSeq` is not persisted.** §4.4 listed it in the session record; the folder
+  already is that number, and storing it twice invites divergence. `lastSeq(name)` derives it.
+- **Remote panes are excluded from the token-usage table.** Their tokens are spent by a harness
+  on the operator's machine, so counting them here would inflate this Space's usage with numbers
+  we never paid and cannot see. They *do* appear in the Overview, with a folder-built digest.
+- **They are absent from the agent-API spawn catalog.** An agent in here cannot paste a connect
+  prompt onto a laptop, so offering it the option only produces dead panes.
+- **Two CSS/markup faults only a browser found:** `.pane-head` is a 3-column grid built for
+  terminal panes (a flat header needs the Files pane's flex override), and agent markdown
+  rendered as unstyled `<pre>`, so code blocks looked like prose. A typecheck cannot see either.
 
 ## Appendix — draft of the copied prompt
 

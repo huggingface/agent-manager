@@ -1062,6 +1062,34 @@ curl -s -X POST "http://localhost:${PORT}/api/agents/$ID/stop?from=$AM_ID"
 Files and conversation survive, and a later prompt resumes it, but work in
 flight is lost. Never stop an agent just because it looks busy or stuck.
 
+## Remote agents (\`cli: "remote"\`)
+Some panes here are agents running on the operator's **own machines** — a laptop,
+a GPU box — not in this container. They appear in the roster like anyone else and
+you message them the same way:
+
+\`\`\`sh
+curl -s -X POST "http://localhost:${PORT}/api/agents/$ID/prompt?from=$AM_ID" \\
+  -H 'content-type: text/plain' --data-binary 'can you check the tokenizer?'
+\`\`\`
+
+What is different about them:
+- **Their \`state\` means connection, not activity.** \`waiting\` = connected and
+  listening; \`working\` = it has your message and hasn't answered; \`stopped\` =
+  **not connected**, so a message you send waits in the log until it reconnects.
+  Do not read \`stopped\` as "crashed" or try to restart it — you cannot; it
+  starts on its machine, not here.
+- **Their conversation is readable as plain files** at
+  \`/data/workspaces/remote-agents/<name>/\`, one markdown file per message
+  (\`00042-agent.md\`). \`cat\` them to see what the laptop said — no HTTP needed.
+  Don't edit or delete them; the server holds the live log in memory and your
+  edits would only desync what is on disk from what the operator sees.
+- **They have no terminal here**, so \`/api/agents/$ID/tail\` returns nothing
+  useful and there is no pane to watch. Read the folder instead.
+- **You cannot spawn one.** Creating one requires a human to paste its connect
+  prompt onto another machine.
+- Replies can be slow in a way that is normal: the agent is on someone's laptop,
+  which sleeps, drops off wifi, and closes lids. Ask once and move on.
+
 ## Shared skills
 - Reusable skills (like this one) live in \`/data/workspaces/skills/\` and are published into every agent's skills directory automatically. Read them for project conventions and recurring tasks.
 
