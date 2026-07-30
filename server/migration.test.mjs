@@ -58,7 +58,10 @@ const stateOf = async (id) => {
 
 try {
   let up = false;
-  for (let i = 0; i < 80; i++) {
+  // Generous: importing the dependency tree off a cold FUSE-mounted workspace can
+  // take half a minute (express alone measured 32s), and a boot timeout looks
+  // exactly like a broken server.
+  for (let i = 0; i < 400; i++) {
     try { const r = await fetch(`${base}/api/health`); if (r.ok) { up = true; break; } } catch {}
     await sleep(250);
   }

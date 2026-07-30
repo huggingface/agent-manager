@@ -147,6 +147,7 @@ conversations.
 | `AM_SCROLLBACK` | `20000` | Scrollback lines kept per session grid |
 | `AM_REPLAY_BYTES` | `262144` | PTY bytes replayed to a reattaching browser |
 | `AM_RESIZE_SETTLE_MS` | `120` | Quiet period before a resize is applied to the PTY |
+| `AM_RESIZE_CARRY` | `1` | `0` reflows on resize like a plain terminal (duplicates scrollback) |
 | `ANTHROPIC_API_KEY` | — | Claude Code / opencode / Hermes (Space **secret**) |
 | `OPENAI_API_KEY` / `CODEX_API_KEY` | — | Codex (Space secret) |
 | `GEMINI_API_KEY` | — | Gemini CLI (Space secret) |
