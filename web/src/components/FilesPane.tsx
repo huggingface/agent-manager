@@ -55,6 +55,16 @@ interface TreeApi {
   picked: Moving | null;                   // move-by-button, awaiting a target
   pick: (m: Moving | null) => void;
   move: (m: Moving, destDir: string) => void;
+  // The folder the header bar works on. Clicking a folder makes it the
+  // destination for "+ Folder" and "Upload"; with nothing selected both fall
+  // back to the folder the tree is rooted at.
+  selected: string | null;
+  select: (p: string | null) => void;
+  // Which listing is currently showing the name field for a new folder, so the
+  // field appears *in* the folder it will create into rather than at the root.
+  creatingIn: string | null;
+  createFolder: (dir: string, name: string) => void;
+  cancelCreate: () => void;
 }
 const TreeCtx = createContext<TreeApi | null>(null);
 const useTree = () => useContext(TreeCtx)!;
@@ -103,7 +113,7 @@ function NameInput({ init, placeholder = 'folder name', onCommit, onCancel }: {
 // Lazily-loaded contents of one directory; recurses through EntryRow. Re-reads
 // when the pane's refresh bus names this path.
 function DirContents({ path, prefix }: { path: string; prefix: boolean[] }) {
-  const { sessionId, subscribe } = useTree();
+  const { sessionId, subscribe, creatingIn, createFolder, cancelCreate } = useTree();
   const [entries, setEntries] = useState<FileEntry[] | null>(null);
   const [err, setErr] = useState(false);
   const [nonce, setNonce] = useState(0);
@@ -116,13 +126,26 @@ function DirContents({ path, prefix }: { path: string; prefix: boolean[] }) {
     return () => { alive = false; };
   }, [sessionId, path, nonce]);
 
+  // Sits at the top of this listing, indented like the entries it joins — the
+  // folder is created here, so this is where its name is typed. A click inside
+  // must not reach the background, which would clear the destination.
+  const naming = creatingIn === path ? (
+    <div className="tree-row folder" style={padFor(prefix)} onClick={(e) => e.stopPropagation()}>
+      <Rails prefix={prefix} isLast={false} />
+      <FolderGlyph className="tw-ico" />
+      <NameInput init="" onCommit={(name) => createFolder(path, name)} onCancel={cancelCreate} />
+    </div>
+  ) : null;
+
   if (err) return <div className="tree-msg" style={padFor(prefix)}>can't read folder</div>;
-  if (!entries) return <div className="tree-msg" style={padFor(prefix)}>…</div>;
-  if (entries.length === 0) return <div className="tree-msg" style={padFor(prefix)}>empty</div>;
+  if (!entries) return <>{naming}<div className="tree-msg" style={padFor(prefix)}>…</div></>;
+  // An empty folder still says so, unless the thing about to fill it is on screen.
+  if (entries.length === 0) return naming ?? <div className="tree-msg" style={padFor(prefix)}>empty</div>;
 
   const arr = sortEntries(entries);
   return (
     <>
+      {naming}
       {arr.map((e, i) => (
         <EntryRow
           key={e.name} entry={e} path={join(path, e.name)} prefix={prefix} isLast={i === arr.length - 1}
@@ -147,12 +170,32 @@ function EntryRow({ entry, path, prefix, isLast }: {
   const [confirmDel, setConfirmDel] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Naming a new folder in here opens the listing it will appear in, so the
+  // field is on screen even if the folder was picked while collapsed. A click
+  // may have left a toggle pending — it would close the listing back up a
+  // moment after the field appeared, so it is dropped here.
+  useEffect(() => {
+    if (t.creatingIn !== path) return;
+    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+    setOpen(true);
+  }, [t.creatingIn, path]);
+
   // While a row is being renamed or is asking about a delete, its gestures are
   // off — a click near the buttons must not also expand or re-root the tree.
   const held = editing || confirmDel;
-  const onClick = () => {
+  // Clicking a folder also makes it the destination the header bar works on.
+  // Every row swallows its click: the background behind them clears that.
+  // Reaching for a folder opens it; only clicking the one already chosen
+  // folds it back up, so picking a destination never closes what you picked.
+  const onClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
     if (held || !dir || timer.current) return;
-    timer.current = setTimeout(() => { timer.current = null; setOpen((o) => !o); }, 200);
+    const reselecting = t.selected === path;
+    t.select(path);
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      setOpen((o) => (reselecting ? !o : true));
+    }, 200);
   };
   const onDoubleClick = () => {
     if (held) return;
@@ -164,8 +207,13 @@ function EntryRow({ entry, path, prefix, isLast }: {
   // The parent listing owns this row, so it's the one that has to re-read.
   const settle = (p: Promise<unknown>) =>
     p.then(() => { t.fail(''); t.refresh(parentOf(path)); }).catch((e) => t.fail(e.message));
-  const rename = (next: string) => { setEditing(false); settle(api.renameEntry(t.sessionId, path, next)); };
-  const remove = () => { setConfirmDel(false); settle(api.deleteEntry(t.sessionId, path)); };
+  // Renaming or deleting the destination leaves the header pointing at a path
+  // that no longer exists, so it falls back to the root.
+  const dropSelection = () => {
+    if (t.selected === path || t.selected?.startsWith(`${path}/`)) t.select(null);
+  };
+  const rename = (next: string) => { setEditing(false); dropSelection(); settle(api.renameEntry(t.sessionId, path, next)); };
+  const remove = () => { setConfirmDel(false); dropSelection(); settle(api.deleteEntry(t.sessionId, path)); };
 
   // Folders take drops: an entry from this tree moves into them, OS files
   // upload into them. A file row is not a container, so it lets the drag fall
@@ -196,7 +244,7 @@ function EntryRow({ entry, path, prefix, isLast }: {
   return (
     <>
       <div
-        className={`tree-row ${kind}${t.dropDir === path ? ' drop' : ''}${mine ? ' lifted' : ''}`}
+        className={`tree-row ${kind}${t.selected === path ? ' selected' : ''}${t.dropDir === path ? ' drop' : ''}${mine ? ' lifted' : ''}`}
         style={padFor(prefix)}
         draggable={!held}
         onDragStart={(e) => {
@@ -265,7 +313,8 @@ export default function FilesPane({
   const [root, setRoot] = useState('');
   const [rootLabel, setRootLabel] = useState('workspace');
   const [busy, setBusy] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [creatingIn, setCreatingIn] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
   const [err, setErr] = useState('');
   const [drag, setDrag] = useState<Moving | null>(null);
   const [dropDir, setDropDir] = useState<string | null>(null);
@@ -296,21 +345,26 @@ export default function FilesPane({
   const move = useCallback((m: Moving, destDir: string) => {
     setDrag(null); setDropDir(null); setPicked(null);
     if (!canDrop(m, destDir)) return;
+    // The destination travels with the folder, so following it would mean
+    // tracking a path that just changed; simpler to fall back to the root.
+    setSelected((s) => (s === m.path || s?.startsWith(`${m.path}/`) ? null : s));
     api.moveEntry(session.id, m.path, destDir)
       .then(() => { setErr(''); refresh(parentOf(m.path)); refresh(destDir); })
       .catch((e) => setErr(e.message));
   }, [session.id, refresh]);
 
-  // A new folder lands in whichever folder the tree is currently rooted at.
-  const createFolder = (name: string) => {
-    setCreating(false);
-    api.createFolder(session.id, root, name)
-      .then(() => { setErr(''); refresh(root); })
+  // A new folder lands in the selected folder, or — with nothing selected — in
+  // whichever folder the tree is currently rooted at.
+  const createFolder = useCallback((dir: string, name: string) => {
+    setCreatingIn(null);
+    api.createFolder(session.id, dir, name)
+      .then(() => { setErr(''); refresh(dir); })
       .catch((e) => setErr(e.message));
-  };
+  }, [session.id, refresh]);
 
-  // Navigating away drops a stale "already exists" / "that folder is …" notice.
-  const goto = (p: string) => { setErr(''); setCreating(false); setRoot(p); };
+  // Navigating away drops a stale "already exists" / "that folder is …" notice,
+  // and a selection that is no longer in view.
+  const goto = (p: string) => { setErr(''); setCreatingIn(null); setSelected(null); setRoot(p); };
   const up = () => goto(root.includes('/') ? root.slice(0, root.lastIndexOf('/')) : '');
   const crumbs = ['', ...root.split('/').filter(Boolean).map((_, i, arr) => arr.slice(0, i + 1).join('/'))];
   const here = root ? root.split('/').pop() : rootLabel;
@@ -327,9 +381,15 @@ export default function FilesPane({
     onDrop: (e: React.DragEvent) => { if (drag) { e.preventDefault(); move(drag, c); } },
   });
 
+  // What "+ Folder" and "Upload" act on: the folder you last clicked, else the
+  // folder the tree is rooted at.
+  const dest = selected ?? root;
+  const destLabel = selected ? selected.split('/').pop()! : here;
+
   const tree: TreeApi = {
     sessionId: session.id, open: goto, fail: setErr, refresh, subscribe, upload,
     drag, setDrag, dropDir, setDropDir, picked, pick: setPicked, move,
+    selected, select: setSelected, creatingIn, createFolder, cancelCreate: () => setCreatingIn(null),
   };
 
   return (
@@ -364,12 +424,12 @@ export default function FilesPane({
             <MoveGlyph /> Move here
           </button>
         )}
-        <button className="mini-btn" title={`New folder in ${here}`} onClick={(e) => { e.stopPropagation(); setCreating(true); }}>
+        <button className="mini-btn" title={`New folder in ${destLabel}`} onClick={(e) => { e.stopPropagation(); setCreatingIn(dest); }}>
           <PlusGlyph /> Folder
         </button>
-        <label className="mini-btn upload-btn" title={`Upload into ${here}`}>
+        <label className="mini-btn upload-btn" title={`Upload into ${destLabel}`}>
           <UploadGlyph /> Upload
-          <input type="file" multiple hidden onChange={(e) => { if (e.target.files) upload(root, e.target.files); e.target.value = ''; }} />
+          <input type="file" multiple hidden onChange={(e) => { if (e.target.files) upload(dest, e.target.files); e.target.value = ''; }} />
         </label>
         <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
       </div>
@@ -393,13 +453,9 @@ export default function FilesPane({
             if (drag) move(drag, root);
             else if (e.dataTransfer.files.length) upload(root, e.dataTransfer.files);
           }}
+          /* the background is the root: clicking it hands the header back */
+          onClick={() => setSelected(null)}
         >
-          {creating && (
-            <div className="tree-row folder" style={padFor([])}>
-              <FolderGlyph className="tw-ico" />
-              <NameInput init="" onCommit={createFolder} onCancel={() => setCreating(false)} />
-            </div>
-          )}
           <DirContents key={root} path={root} prefix={[]} />
           {busy && <div className="tree-msg">Uploading…</div>}
         </div>
@@ -410,6 +466,11 @@ export default function FilesPane({
           <div className="files-hint moving">
             <span>Moving <b>{picked.name}</b> — pick a destination folder</span>
             <button className="mini-btn" onClick={() => setPicked(null)}>Cancel</button>
+          </div>
+        ) : selected ? (
+          <div className="files-hint selected">
+            <span>New folders and uploads go into <b>{destLabel}</b></span>
+            <button className="mini-btn" onClick={() => setSelected(null)}>Clear</button>
           </div>
         ) : (
           <div className="files-hint">Click to expand · double-click to open or download · drag into a folder to move</div>

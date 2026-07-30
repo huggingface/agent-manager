@@ -636,6 +636,10 @@ body {
 .tw-actions .mini-btn svg { width: 1em; height: 1em; }
 .tw-actions .mini-btn.danger { color: var(--danger); }
 
+/* the folder the header bar acts on — marked down its edge, so a drop landing
+   on the same row still reads as the stronger, filled highlight */
+.tree-row.selected { background: color-mix(in srgb, var(--accent) 9%, transparent); box-shadow: inset 2px 0 0 var(--accent); }
+
 /* moving: the row being carried dims, the folder under the drag lights up */
 .tree-row.lifted { opacity: 0.5; }
 .tree-row.drop { background: color-mix(in srgb, var(--accent) 16%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent); }
@@ -651,6 +655,12 @@ body {
 .files-hint.moving { display: flex; align-items: center; gap: 8px; color: var(--accent); }
 .files-hint.moving span { overflow: hidden; text-overflow: ellipsis; }
 .files-hint.moving .mini-btn { flex: none; font-size: 10px; padding: 1px 5px; }
+/* same shape for the destination, in the quieter text — it is a standing state,
+   not something the pane is waiting on */
+.files-hint.selected { display: flex; align-items: center; gap: 8px; }
+.files-hint.selected span { overflow: hidden; text-overflow: ellipsis; }
+.files-hint.selected b { color: var(--text); font-weight: 600; }
+.files-hint.selected .mini-btn { flex: none; font-size: 10px; padding: 1px 5px; }
 
 /* settings */
 .settings-nav { padding: 10px; display: flex; flex-direction: column; gap: 4px; }
