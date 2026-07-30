@@ -91,7 +91,7 @@ function view(id, cols, rows, mirror = false) {
         v.frames.push(m);
         if (term && (m.t === 'grid' || m.t === 'restore') && m.cols > 0 && m.rows > 0
             && (term.cols !== m.cols || term.rows !== m.rows)) {
-          if (m.clear) term.write('\x1b[H\x1b[2J', () => term.resize(m.cols, m.rows));
+          if (m.clear) term.write('', () => term.resize(m.cols, m.rows));
           else term.resize(m.cols, m.rows);
         }
       } else {
@@ -257,6 +257,62 @@ try {
       `${v.term.cols}x${v.term.rows}`);
     // Ordering: if resize overtook the repaint, the screen would be torn or stale.
     check('the browser shows the fixture at the final size', seen.includes('[fixture 110x36]'));
+    v.close();
+    await fetch(`${base}/api/sessions/${id}/stop`, { method: 'POST' });
+  }
+
+  // --- scrolling back still reaches everything -----------------------------
+  // The first version of the carry cleared the screen and dropped the rows that
+  // no longer fitted, so every zoom-in quietly ate history: a 40->24 shrink took
+  // 16 lines with it and the pane could no longer scroll all the way up. Rows
+  // that fall off the top have to be ARCHIVED, not discarded.
+  if (!Headless) {
+    console.log('SKIP  scrollback checks (@xterm/headless not installed)');
+  } else {
+    const id = await session('resize history');
+    const v = await view(id, 120, 40, true);
+    v.resize(120, 40);
+    await sleep(900);
+    // Teach the host that this session repaints, so the carry path is the one
+    // under test, then leave a real log behind — that is what must survive.
+    v.type(`node ${FIXTURE}\r`);
+    await sleep(1500);
+    v.resize(118, 38);
+    await sleep(800);
+    v.type('\x03');
+    await sleep(800);
+    // The trailing blank lines are load-bearing. Bash redraws its prompt on every
+    // SIGWINCH and, when that prompt is wrapped, draws over the rows above it —
+    // verified identical with AM_RESIZE_CARRY=0, so it is bash's doing and not the
+    // resize path's. Without the padding this test would be asserting something no
+    // terminal delivers.
+    v.type('for i in $(seq 1 200); do echo "hist-$i"; done; echo; echo; echo\r');
+    await sleep(2000);
+
+    const missing = (text) => {
+      const gone = [];
+      for (let i = 1; i <= 200; i++) if (!new RegExp(`hist-${i}(?!\\d)`).test(text)) gone.push(i);
+      return gone;
+    };
+    const before = missing(await v.screenText());
+    check('the log is complete before zooming', before.length === 0, `${before.length} lines missing`);
+
+    for (const [c, r] of [[100, 30], [90, 24], [100, 30], [110, 34], [120, 40], [90, 24]]) {
+      v.resize(c, r);
+      await sleep(400);
+    }
+    await sleep(1200);
+    // The grid is the authority and has to be exact.
+    const gridGone = missing(await gridText(id));
+    check('zooming loses no scrollback in the grid', gridGone.length === 0,
+      gridGone.length ? `${gridGone.length} lines gone, e.g. hist-${gridGone.slice(0, 5).join(', hist-')}` : '');
+    // xterm's own reflow drops a couple of lines over a cycle this violent no
+    // matter what we do — AM_RESIZE_CARRY=0 loses three in the same run, from the
+    // same region — so this is a bound, not a promise. A reattach repaints the
+    // pane from the grid, which is why the grid check above is the strict one.
+    const after = missing(await v.screenText());
+    check('zooming loses no more browser scrollback than plain reflow does', after.length <= 4,
+      after.length ? `${after.length} lines gone, e.g. hist-${after.slice(0, 5).join(', hist-')}` : 'none');
     v.close();
     await fetch(`${base}/api/sessions/${id}/stop`, { method: 'POST' });
   }

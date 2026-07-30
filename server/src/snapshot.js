@@ -70,13 +70,69 @@ function sgrFor(cell) {
   return out;
 }
 
-export function snapshotToAnsi(snap) {
+/** Cells indexed by row, since snapshot() returns them as a flat sparse list. */
+function cellGrid(snap) {
   const grid = Array.from({ length: snap.rows }, () => new Array(snap.cols).fill(null));
   for (const cell of snap.cells || []) {
     if (cell.row >= 0 && cell.row < snap.rows && cell.col >= 0 && cell.col < snap.cols) {
       grid[cell.row][cell.col] = cell;
     }
   }
+  return grid;
+}
+
+/**
+ * One row as styled text, with no cursor positioning. Everything after the last
+ * drawn cell is dropped: trailing spaces are the bulk of a mostly-empty agent
+ * screen, and the caller has either just erased the line or is about to end it.
+ */
+function renderRow(cells, cols) {
+  let last = -1;
+  for (let col = cols - 1; col >= 0; col--) {
+    if (cells[col] && (cells[col].text !== ' ' || cells[col].background)) { last = col; break; }
+  }
+  if (last < 0) return '';
+
+  let out = '';
+  let style = '';
+  let col = 0;
+  while (col <= last) {
+    const cell = cells[col];
+    if (!cell) {
+      if (style) { out += '\x1b[0m'; style = ''; }
+      out += ' ';
+      col += 1;
+      continue;
+    }
+    const next = sgrFor(cell);
+    if (next !== style) {
+      out += '\x1b[0m' + next;
+      style = next;
+    }
+    out += cell.text;
+    col += Math.max(1, cell.width || 1);
+  }
+  if (style) out += '\x1b[0m';
+  return out;
+}
+
+/**
+ * Rows `from`..`to` as styled lines, ready to be PRINTED rather than placed —
+ * for putting rows into scrollback, where a line has to be written and scrolled
+ * off rather than positioned. Blank rows are kept as empty strings so the
+ * archived block keeps its shape.
+ */
+export function rowsToAnsi(snap, from, to) {
+  const grid = cellGrid(snap);
+  const out = [];
+  for (let row = Math.max(0, from); row < Math.min(snap.rows, to); row++) {
+    out.push(renderRow(grid[row], snap.cols));
+  }
+  return out;
+}
+
+export function snapshotToAnsi(snap) {
+  const grid = cellGrid(snap);
 
   // Normalise the buffer first: a byte replay can leave the receiver on the
   // alternate screen (or off it), and the repaint alone would then land on the
@@ -86,35 +142,8 @@ export function snapshotToAnsi(snap) {
   out += '\x1b[?25l\x1b[0m\x1b[H\x1b[2J';
 
   for (let row = 0; row < snap.rows; row++) {
-    const cells = grid[row];
-    // Everything after the last drawn cell is already blank from the erase, and
-    // trailing spaces are the bulk of a mostly-empty agent screen.
-    let last = -1;
-    for (let col = snap.cols - 1; col >= 0; col--) {
-      if (cells[col] && (cells[col].text !== ' ' || cells[col].background)) { last = col; break; }
-    }
-    if (last < 0) continue;
-
-    out += `\x1b[${row + 1};1H`;
-    let style = '';
-    let col = 0;
-    while (col <= last) {
-      const cell = cells[col];
-      if (!cell) {
-        if (style) { out += '\x1b[0m'; style = ''; }
-        out += ' ';
-        col += 1;
-        continue;
-      }
-      const next = sgrFor(cell);
-      if (next !== style) {
-        out += '\x1b[0m' + next;
-        style = next;
-      }
-      out += cell.text;
-      col += Math.max(1, cell.width || 1);
-    }
-    if (style) out += '\x1b[0m';
+    const line = renderRow(grid[row], snap.cols);
+    if (line) out += `\x1b[${row + 1};1H` + line;
   }
 
   out += `\x1b[0m\x1b[${snap.cursorRow + 1};${snap.cursorCol + 1}H`;
