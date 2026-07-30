@@ -180,10 +180,40 @@ export default function TerminalPane({
   const [copyMode, setCopyMode] = useState(false); // tmux copy/scrollback mode
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.name);
+  // Fallback paste sheet: shown only when we can't read the clipboard directly.
+  const [pasteOpen, setPasteOpen] = useState(false);
   const commitName = () => {
     const v = draft.trim();
     if (v && v !== session.name) onRename?.(v);
     setEditing(false);
+  };
+
+  // Hand text to xterm rather than the socket: paste() applies bracketed-paste
+  // framing and normalises newlines, so a multi-line paste arrives as one blob
+  // instead of a burst of Enters that submit half-typed prompts.
+  const commitPaste = (text: string) => {
+    if (!text) return;
+    setPasteOpen(false);
+    termRef.current?.paste(text);
+    termRef.current?.focus();
+  };
+
+  // Phones have no Ctrl+V, so the key-bar needs an explicit paste. Two paths,
+  // because the direct read is unavailable exactly where this app usually runs:
+  //   1. navigator.clipboard.readText() — works top-level (iOS shows its own
+  //      "Paste" confirmation). BLOCKED in Hugging Face's cross-origin iframe,
+  //      and absent on older mobile browsers.
+  //   2. a focused textarea the user pastes into with the OS long-press menu.
+  //      A `paste` event's clipboardData is always readable — it's user-driven,
+  //      not permissioned — so this works even when (1) is denied.
+  // execCommand('paste') is not an option: unlike 'copy' it's disabled for web
+  // content in every browser, so there is no synchronous legacy path.
+  const requestPaste = () => {
+    let p: Promise<string> | undefined;
+    try { p = navigator.clipboard?.readText?.(); } catch { p = undefined; }
+    if (!p) { setPasteOpen(true); return; }
+    p.then((text) => { if (text) commitPaste(text); else setPasteOpen(true); })
+      .catch(() => setPasteOpen(true));
   };
 
   useEffect(() => {
@@ -588,6 +618,44 @@ export default function TerminalPane({
               onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); sendKeyRef.current(seq); termRef.current?.focus(); }}
             >{label}</button>
           ))}
+          {/* Unlike the key buttons this must NOT preventDefault: the clipboard
+              read needs a real click gesture. stopPropagation keeps the bar's
+              own preventDefault (which preserves terminal focus) off this one. */}
+          <button
+            className="tk-btn tk-paste"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.stopPropagation(); requestPaste(); }}
+          >paste</button>
+        </div>
+      )}
+      {pasteOpen && (
+        // Reached when the clipboard read was blocked (cross-origin iframe) or
+        // came back empty. The textarea is the whole point: long-press inside it
+        // and the OS offers Paste, which fires a `paste` event we can read.
+        <div className="term-paste" onPointerDown={(e) => e.stopPropagation()}>
+          <div className="tp-row">
+            <span className="tp-hint mono">long-press below → Paste</span>
+            <button className="tp-x" onClick={() => { setPasteOpen(false); termRef.current?.focus(); }}>cancel</button>
+          </div>
+          <textarea
+            className="tp-input mono"
+            autoFocus
+            rows={2}
+            placeholder="paste here…"
+            onPaste={(e) => {
+              const text = e.clipboardData.getData('text/plain');
+              if (text) { e.preventDefault(); commitPaste(text); }
+            }}
+            // Typed text (or a paste some browsers deliver as plain input) still
+            // needs a way out; Enter sends, Shift+Enter keeps the newline.
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') { setPasteOpen(false); termRef.current?.focus(); }
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                commitPaste((e.target as HTMLTextAreaElement).value);
+              }
+            }}
+          />
         </div>
       )}
       {conn === 'handedoff' && (

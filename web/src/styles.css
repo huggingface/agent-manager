@@ -572,9 +572,29 @@ body {
 .term-fill { height: 100%; min-height: 0; }
 /* mobile control-key bar: the keys a phone keyboard lacks, pinned below the
    terminal so it rides just above the on-screen keyboard */
-.term-keybar { flex: none; display: flex; gap: 5px; padding: 5px 6px; background: var(--panel); border-top: 1px solid var(--border); overflow-x: auto; }
+/* position+z-index, or the bar stops responding to taps: .xterm-screen is
+   position:relative, so whenever the grid is taller than its box it paints AND
+   hit-tests over a statically-positioned sibling. Measured at 390px wide: at
+   844px tall (iPhone 12/13/14) the screen reaches 69px past the bar's top and
+   swallows every tap on it; at 851/860/873/880/896 it doesn't overlap at all.
+   Height-dependent, so it looks intermittent rather than broken. Separate from
+   the FitAddon padding fix — that one stopped the bottom row rendering sliced,
+   it does not stop the grid from covering what sits below it. */
+.term-keybar { flex: none; position: relative; z-index: 6; display: flex; gap: 5px; padding: 5px 6px; background: var(--panel); border-top: 1px solid var(--border); overflow-x: auto; }
 .tk-btn { flex: 1 0 auto; min-width: 34px; height: 30px; border: 1px solid var(--border-strong); border-radius: var(--r-md); background: var(--panel-2); color: var(--text); font-size: 13px; line-height: 1; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
 .tk-btn:active { background: color-mix(in srgb, var(--accent) 22%, var(--panel-2)); border-color: var(--accent); }
+/* wider than the key glyphs (word label) and last in the row, so keep it from
+   being squeezed by flex:1 on its siblings */
+.tk-paste { flex: 0 0 auto; padding: 0 10px; font-size: 12px; }
+/* fallback paste sheet — sits directly above the key-bar, i.e. right on top of
+   the on-screen keyboard, so the field is visible while the OS menu is open */
+.term-paste { flex: none; position: relative; z-index: 6; display: flex; flex-direction: column; gap: 4px; padding: 6px; background: var(--panel); border-top: 1px solid var(--border); }
+.term-paste .tp-row { display: flex; align-items: center; justify-content: space-between; }
+.term-paste .tp-hint { font-size: 11px; color: var(--muted); }
+.term-paste .tp-x { background: none; border: none; padding: 0 2px; color: var(--accent); font: inherit; font-size: 11px; cursor: pointer; }
+.term-paste .tp-input { width: 100%; box-sizing: border-box; resize: none; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: var(--r-md);
+  background: var(--panel-2); color: var(--text); font-size: 13px; line-height: 1.35; }
+.term-paste .tp-input:focus { outline: none; border-color: var(--accent); }
 .term-host .xterm { height: 100%; }
 .xterm .xterm-viewport { scrollbar-width: none; }
 .xterm .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; display: none; }
