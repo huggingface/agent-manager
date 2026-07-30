@@ -432,16 +432,74 @@ the folder and the address), so the create form asks for it rather than defaulti
 
 ## 10. Open questions for the operator
 
-1. **Whose machines?** This assumes **your own** — your HF token, your Space. A colleague's agent
-   works technically (they need a token with access), but with no per-name credential their agent
-   and yours are indistinguishable to the app, and either can post as the other. If that is in
-   scope, names need owners and we are back to per-name keys; if not, the current design is
-   simpler and honest about what it is.
+1. ~~**Whose machines?**~~ **Decided: your own machines only.** See §11 — this is a harder
+   boundary than it first looked, and per-name keys would not have fixed it.
 2. **Colour.** `#5ec2e0` for the remote tint is a guess that avoids Codex's teal and Gemini's blue.
 3. **`wait` budget.** 30 min per call (cowrite uses ~50). Shorter is more robust, longer is
    cheaper; both are one constant.
 4. **Does a remote pane archive?** It has no transcript clock, so it would archive on folder
    activity. Probably right, worth confirming.
+
+## 11. Your machines only — and why a token is not a scope
+
+The token in §3 gets a client past HF's edge. That is *all* it does. Past the edge the app
+authenticates nobody: `index.js:1641` says so in the boot banner — *"No authentication: this app
+trusts whoever can reach it."* So the token's Hub scope is not the app's scope, and a **read-only**
+token is not read-only access. Measured against this deployment:
+
+| With nothing but a read-scoped token | What it yields |
+| --- | --- |
+| `/api/meta`, `/api/trace/:id` | every session's prompts, answers, full transcripts |
+| `/api/secrets`, `/api/info` | secret **names** and the operator's notes on them |
+| `/api/files/:id/*` | all of `WORKSPACES_DIR` (`resolveSafe` does stop traversal out of it) |
+| `POST /api/sessions/:id/input`, `/api/agents/:id/prompt` | type into any agent |
+| `PUT /api/skills/:name` | inject a skill into **every** agent — persists across restarts |
+| `POST /api/sessions/:id/share` | publish any session as a public Hub dataset |
+| `POST /api/relaunch`, `/api/update` | factory reboot; force-push over the Space repo |
+| `wss://…/ws?session=…` | **an interactive shell in the container** |
+
+The last row is the boundary. The handshake is accepted with a read-scoped token and **no `Origin`
+header** — `originAllowed()` returns true when `Origin` is absent (`index.js:1514`), deliberately,
+so curl and native clients work. A shell means `/data` entire (not just workspaces), every agent's
+stored credentials (`.claude/.credentials.json`, `.codex/auth.json`), and every secret **value** in
+the environment — including `HF_TOKEN`, which is write-scoped on the whole namespace.
+
+**Therefore: Space membership is the security boundary, not the token.** Handing someone a token so
+their agent can connect hands them the container, the logged-in agents inside it, and a path to a
+write token. Per-name keys would not change this: the shell is reachable without ever touching a
+remote-agent route. Remote agents are **your machines in your trust domain**, and §5 stays
+credential-free on purpose.
+
+### 11.1 If other people's agents are ever in scope: a relay, polled outbound
+
+Not now, but the shape is known, because **cowrite already is this relay** — a public Space where
+each collaborator brings their own agent. Reuse it rather than reinvent:
+
+- **Direction matters most.** A relay that *proxies inbound* must hold a token for this private
+  Space — i.e. hold shell access — making it a confused deputy where any auth bug is total
+  compromise. Invert it: colleagues' agents `POST` to the relay, and **this manager polls the relay
+  outbound**. Then no credential to the private Space exists anywhere outside it, and a fully
+  compromised relay can only leak the queue and feed us bad messages.
+- **Messages are content, not commands.** The invite list authenticates *who*, never *what*. An
+  invited colleague's compromised agent is still an injection source; §6.3's delivery path must
+  treat remote text as untrusted either way.
+- **Auth: port `cowrite/server/auth.js`.** One middleware resolves session cookie, app-issued
+  `ak_` key (`ak_` + 24 random bytes, `store.js:207`), or raw HF token (`auth.js:73-88`). The
+  load-bearing part is `requireHuman` on mint/rotate/delete (`api.js:283-321`): a leaked agent key
+  can never mint another key. Scope each key to (person, thread); revocation is deleting a row.
+- **Invite-only is new code, not a port.** cowrite gates on `requireUser` (any signed-in HF user)
+  plus `isAdmin` = `SPACE_AUTHOR_NAME` (`auth.js:100-103`). There is no allowlist to copy — it is a
+  username set in a Space secret checked where `requireUser` passes today.
+- **The relay needs a persistent disk.** `agents.json` and `session-secret` live on `DATA_DIR`
+  (`store.js:11,13`); without persistence a restart wipes every agent key and invalidates every
+  cookie. Paid disk, or keep the key table in a private dataset repo.
+- **Cheapest variant: no relay app at all.** A private dataset repo as the queue — their agent
+  commits a message, we poll the repo. The Hub supplies authentication, per-person authorization,
+  revocation, and an audit trail in commit history for free. Cost: commit latency replaces §5.3's
+  long-poll, so `/stream` does not survive this variant.
+
+Order of preference if it happens: Hub-repo queue → outbound mailbox relay → **never** an inbound
+proxy.
 
 ## Appendix — draft of the copied prompt
 
