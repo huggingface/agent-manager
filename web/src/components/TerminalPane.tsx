@@ -145,7 +145,7 @@ export default function TerminalPane({
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
-  const localLayoutRef = useRef<() => void>(() => {});
+  const resyncRef = useRef<() => void>(() => {});
   const reconnectRef = useRef<() => void>(() => {});
   const controllerRef = useRef(false);
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
@@ -199,7 +199,9 @@ export default function TerminalPane({
   useEffect(() => {
     const term = new Terminal({
       fontFamily: "'Geist Mono', ui-monospace, 'SF Mono', Menlo, 'Cascadia Code', monospace",
-      fontSize: 13,
+      // Start at the requested zoom so attachment does not briefly create a
+      // 100% grid and then force an avoidable reflow as the session boots.
+      fontSize: Math.round((13 * zoom) / 100),
       cursorBlink: true,
       scrollback: 20000,
       theme: THEMES[theme],
@@ -299,25 +301,8 @@ export default function TerminalPane({
     // reflow, and it gives the initial size we open the socket with. Every later
     // size change goes through resync() as a REQUEST — see there.
     try { fit.fit(); } catch { /* layout not ready yet */ }
-    let layoutFrame = 0;
-    const syncLocalLayout = () => {
-      cancelAnimationFrame(layoutFrame);
-      layoutFrame = requestAnimationFrame(() => {
-        const box = hostRef.current;
-        const root = box?.querySelector<HTMLElement>('.xterm');
-        const screen = box?.querySelector<HTMLElement>('.xterm-screen');
-        if (!box || !root || !screen) return;
-        const style = getComputedStyle(box);
-        const innerWidth = box.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-        const innerHeight = box.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
-        root.style.width = `${Math.max(innerWidth, Math.ceil(screen.getBoundingClientRect().width))}px`;
-        root.style.height = `${Math.max(innerHeight, Math.ceil(screen.getBoundingClientRect().height))}px`;
-      });
-    };
-    localLayoutRef.current = syncLocalLayout;
-    syncLocalLayout();
     // Re-measure once the webfont is ready (glyph width changes vs the fallback).
-    document.fonts?.ready.then(() => { resync(); syncLocalLayout(); });
+    document.fonts?.ready.then(() => resync());
 
     let closedByUs = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
@@ -386,7 +371,6 @@ export default function TerminalPane({
                   if (m.cols > 0 && m.rows > 0 && (term.cols !== m.cols || term.rows !== m.rows)) {
                     term.resize(m.cols, m.rows);
                   }
-                  syncLocalLayout();
                 } catch { /* ignore */ }
               };
               // Writes are asynchronous. A queued empty write is a barrier so
@@ -435,11 +419,8 @@ export default function TerminalPane({
       if (!box || box.clientWidth < 40 || box.clientHeight < 40) return;
       try {
         const d = fit.proposeDimensions();
-        // Zoom is local presentation, not PTY geometry. Normalize the measured
-        // cells back to the 13px canonical font before sending a preference.
-        const scale = (Number(term.options.fontSize) || 13) / 13;
-        const cols = d ? Math.max(1, Math.floor(d.cols * scale)) : 0;
-        const rows = d ? Math.max(1, Math.floor(d.rows * scale)) : 0;
+        const cols = d ? Math.max(1, d.cols) : 0;
+        const rows = d ? Math.max(1, d.rows) : 0;
         if (cols > 0 && rows > 0) send({ t: 'r', cols, rows });
       } catch { /* layout not ready */ }
     };
@@ -449,6 +430,7 @@ export default function TerminalPane({
       if (resyncTimer) clearTimeout(resyncTimer);
       resyncTimer = setTimeout(() => { resyncTimer = null; requestSize(); }, 80);
     };
+    resyncRef.current = resync;
     const onReturn = () => resync();
     const onVisible = () => { if (!document.hidden) onReturn(); };
     // Typing means the user sees enough to interact — drop the boot cover.
@@ -504,7 +486,6 @@ export default function TerminalPane({
       if (bootTimer) clearTimeout(bootTimer);
       if (bootCheck) clearTimeout(bootCheck);
       if (resyncTimer) clearTimeout(resyncTimer);
-      cancelAnimationFrame(layoutFrame);
       ro.disconnect();
       host.removeEventListener('pointerdown', onPointerDown, true);
       host.removeEventListener('paste', onPaste, true);
@@ -520,7 +501,7 @@ export default function TerminalPane({
       try { ws?.close(); } catch { /* ignore */ }
       term.dispose();
       termRef.current = null;
-      localLayoutRef.current = () => {};
+      resyncRef.current = () => {};
     };
   }, [session.id]);
 
@@ -529,13 +510,14 @@ export default function TerminalPane({
     if (termRef.current) termRef.current.options.theme = THEMES[theme];
   }, [theme]);
 
-  // Zoom changes only this viewer. The canonical terminal rows/columns stay
-  // fixed, and the host becomes a two-dimensional viewport when cells grow.
+  // Font size and PTY geometry move together. The controller asks the server
+  // for the grid that actually fits this pane; the confirmed grid then resizes
+  // every viewer in order with the PTY output stream.
   useEffect(() => {
     const t = termRef.current;
     if (!t) return;
     t.options.fontSize = Math.round((13 * zoom) / 100);
-    localLayoutRef.current();
+    resyncRef.current();
   }, [zoom]);
 
   // Move keyboard focus into the terminal whenever this pane becomes the active

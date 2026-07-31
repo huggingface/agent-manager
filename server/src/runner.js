@@ -69,6 +69,12 @@ const SCROLLBACK_BYTES = Number.isFinite(configuredScrollback) && configuredScro
 // fires per animation frame while a window is dragged; coalescing that burst
 // avoids repeatedly reflowing the terminal and repeatedly sending SIGWINCH.
 const RESIZE_SETTLE_MS = Number(process.env.AM_RESIZE_SETTLE_MS || 120);
+// Bound untrusted WebSocket geometry without imposing the old 400x200 ceiling,
+// which left visible dead space on high-DPI displays at low zoom levels.
+const MIN_COLS = 20;
+const MIN_ROWS = 5;
+const MAX_COLS = 1000;
+const MAX_ROWS = 500;
 
 const hosts = new Map(); // session id -> host
 
@@ -151,6 +157,15 @@ function effectiveGrid(host) {
   return host.controller?.want || { cols: host.cols, rows: host.rows };
 }
 
+function preferredGrid(cols, rows, fallback) {
+  const c = Number.isFinite(cols) ? Math.round(cols) : fallback.cols;
+  const r = Number.isFinite(rows) ? Math.round(rows) : fallback.rows;
+  return {
+    cols: Math.max(MIN_COLS, Math.min(MAX_COLS, c)),
+    rows: Math.max(MIN_ROWS, Math.min(MAX_ROWS, r)),
+  };
+}
+
 function notifyGrid(host, reset = false) {
   for (const sub of host.subs) {
     sub.onGrid(host.cols, host.rows, host.controller === sub, host.subs.size, reset);
@@ -172,8 +187,12 @@ function applyGrid(host) {
   host.cols = cols;
   host.rows = rows;
   try { host.vt.resize(cols, rows); } catch {}
-  try { host.pty.resize(cols, rows); } catch {}
+  // Put the geometry frame on every viewer's ordered WebSocket stream before
+  // SIGWINCH can make the foreground application repaint at the new size.
+  // Otherwise those repaint bytes may be interpreted using the old grid and
+  // leave duplicated or displaced rows in the browser emulator.
   notifyGrid(host, false);
+  try { host.pty.resize(cols, rows); } catch {}
   return true;
 }
 
@@ -740,10 +759,7 @@ export function attach(session, cols, rows) {
     onData: () => {},
     onExit: () => {},
     onGrid: () => {},
-    want: {
-      cols: Math.max(20, Math.min(400, Math.round(Number.isFinite(cols) ? cols : host.cols))),
-      rows: Math.max(5, Math.min(200, Math.round(Number.isFinite(rows) ? rows : host.rows))),
-    },
+    want: preferredGrid(cols, rows, host),
   };
   host.subs.add(sub);
   if (!host.controller) host.controller = sub;
@@ -765,10 +781,7 @@ export function attach(session, cols, rows) {
     // controller's request changes the PTY.
     resize: (c, r) => {
       if (!Number.isFinite(c) || !Number.isFinite(r)) return;
-      const want = {
-        cols: Math.max(20, Math.min(400, Math.round(c))),
-        rows: Math.max(5, Math.min(200, Math.round(r))),
-      };
+      const want = preferredGrid(c, r, host);
       const had = sub.want;
       sub.want = want;
       if (had && had.cols === want.cols && had.rows === want.rows) return;

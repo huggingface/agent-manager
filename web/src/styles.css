@@ -558,7 +558,7 @@ body {
 .slot.focused { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: 0 4px 18px -10px rgba(0, 0, 0, 0.35); }
 .slot.focused .pane-head { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
 
-.term-host { flex: 1; min-height: 0; padding: 10px 8px 8px 12px; background: var(--term-bg); overflow: auto; overscroll-behavior: contain; }
+.term-host { flex: 1; min-height: 0; background: var(--term-bg); overflow: hidden; }
 /* The grid is measured against this filler, so it must stay unpadded: FitAddon
    reads the PARENT's computed height and does NOT subtract its padding, so a
    padded parent made the grid count a row that doesn't fit and the bottom line
@@ -588,7 +588,7 @@ body {
 .term-paste .tp-input { width: 100%; box-sizing: border-box; resize: none; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: var(--r-md);
   background: var(--panel-2); color: var(--text); font-size: 13px; line-height: 1.35; }
 .term-paste .tp-input:focus { outline: none; border-color: var(--accent); }
-.term-host .xterm { min-width: 100%; min-height: 100%; }
+.term-host .xterm { width: 100%; height: 100%; padding: 10px 8px 8px 12px; }
 .xterm .xterm-viewport { scrollbar-width: none; }
 .xterm .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; display: none; }
 

@@ -52,7 +52,7 @@ function view(id, cols, rows, mirror = false) {
       ? new Headless({ cols, rows, scrollback: 20000, allowProposedApi: true })
       : null;
     const v = {
-      bytes: '', frames: [], term,
+      bytes: '', frames: [], events: [], term,
       type: (data) => ws.send(JSON.stringify({ t: 'i', d: data })),
       resize: (nextCols, nextRows) => ws.send(JSON.stringify({ t: 'r', cols: nextCols, rows: nextRows })),
       claim: () => ws.send(JSON.stringify({ t: 'claim' })),
@@ -75,6 +75,7 @@ function view(id, cols, rows, mirror = false) {
         let frame;
         try { frame = JSON.parse(text.slice(CTRL.length)); } catch { return; }
         v.frames.push(frame);
+        v.events.push({ type: 'frame', frame });
         if (term && (frame.t === 'grid' || frame.t === 'restore')) {
           const applyGrid = () => {
             if (frame.reset) { term.reset(); term.clear(); }
@@ -90,6 +91,7 @@ function view(id, cols, rows, mirror = false) {
         }
       } else {
         v.bytes += text;
+        v.events.push({ type: 'data', text });
         if (term) term.write(text);
       }
     });
@@ -144,6 +146,33 @@ try {
     await stop(id);
   }
 
+  // The geometry frame must precede output triggered by SIGWINCH. Otherwise a
+  // TUI's repaint is interpreted at the old size and only reflowed afterward,
+  // which can leave duplicate or displaced rows in a browser emulator.
+  {
+    const id = await session('ordered repaint');
+    const v = await view(id, 100, 30, true);
+    await sleep(500);
+    v.type(`trap 'printf "\\033[2J\\033[HRESIZE-AT-%sx%s\\n" "$COLUMNS" "$LINES"' WINCH\r`);
+    await sleep(400);
+    v.events.length = 0;
+    v.resize(73, 21);
+    const repainted = await waitFor(() => v.events.some((event) => event.type === 'data'
+      && event.text.includes('RESIZE-AT-73x21')));
+    const gridAt = v.events.findIndex((event) => event.type === 'frame'
+      && event.frame.t === 'grid' && event.frame.cols === 73 && event.frame.rows === 21);
+    const repaintAt = v.events.findIndex((event) => event.type === 'data'
+      && event.text.includes('RESIZE-AT-73x21'));
+    check('SIGWINCH repaint arrives after the confirmed grid', repainted && gridAt >= 0 && gridAt < repaintAt,
+      `grid event ${gridAt}, repaint event ${repaintAt}`);
+    if (Headless) {
+      const screen = await v.screenText();
+      check('ordered repaint is rendered once', screen.split('RESIZE-AT-73x21').length - 1 === 1);
+    }
+    v.close();
+    await stop(id);
+  }
+
   // A drag should issue one final resize, not one SIGWINCH per animation frame.
   {
     const id = await session('resize storm');
@@ -157,6 +186,21 @@ try {
     const settled = await waitFor(() => v.lastFrame('grid')?.cols === 88 && v.lastFrame('grid')?.rows === 24);
     check('resize storm settles at its final size', settled, JSON.stringify(v.lastFrame('grid')));
     check('resize storm is coalesced', v.countFrames('grid') <= 3, `${v.countFrames('grid')} grid frames`);
+    v.close();
+    await stop(id);
+  }
+
+  // Low zoom on a large/high-DPI panel can legitimately exceed the former
+  // 400x200 cap. The safety bound must not create dead space in that range.
+  {
+    const id = await session('large panel');
+    const v = await view(id, 120, 40);
+    await sleep(300);
+    v.resize(640, 300);
+    const expanded = await waitFor(() => v.lastFrame('grid')?.cols === 640
+      && v.lastFrame('grid')?.rows === 300);
+    check('large low-zoom panel is not clipped to the legacy grid cap', expanded,
+      JSON.stringify(v.lastFrame('grid')));
     v.close();
     await stop(id);
   }
