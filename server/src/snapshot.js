@@ -116,48 +116,12 @@ function renderRow(cells, cols) {
   return out;
 }
 
-/**
- * Rows `from`..`to` as styled lines, ready to be PRINTED rather than placed —
- * for putting rows into scrollback, where a line has to be written and scrolled
- * off rather than positioned. Blank rows are kept as empty strings so the
- * archived block keeps its shape.
- */
-export function rowsToAnsi(snap, from, to) {
-  const grid = cellGrid(snap);
-  const out = [];
-  for (let row = Math.max(0, from); row < Math.min(snap.rows, to); row++) {
-    out.push(renderRow(grid[row], snap.cols));
-  }
-  return out;
-}
-
-/**
- * The rows placed absolutely, with NO erase and no buffer switch — for painting
- * into a screen whose other rows must survive.
- *
- * That is the case after a resize: growing pulls history back down out of
- * scrollback into the top rows, and erasing before painting would throw exactly
- * that away. The caller erased before the resize instead, so everything this does
- * not cover is already blank.
- */
-export function snapshotToRows(snap) {
-  const grid = cellGrid(snap);
-  let out = '\x1b[?25l\x1b[0m';
-  for (let row = 0; row < snap.rows; row++) {
-    const line = renderRow(grid[row], snap.cols);
-    if (line) out += `\x1b[${row + 1};1H` + line;
-  }
-  out += `\x1b[0m\x1b[${snap.cursorRow + 1};${snap.cursorCol + 1}H\x1b[?25h`;
-  return out;
-}
-
 export function snapshotToAnsi(snap) {
   const grid = cellGrid(snap);
 
-  // Normalise the buffer first: a byte replay can leave the receiver on the
-  // alternate screen (or off it), and the repaint alone would then land on the
-  // wrong buffer. Reset attributes so nothing leaks in from what was showing,
-  // and hide the cursor so the repaint doesn't strobe across the screen.
+  // Normalise the receiver's active buffer first. Reset attributes so nothing
+  // leaks in from what was showing, and hide the cursor so the repaint doesn't
+  // strobe across the screen.
   let out = snap.isAltScreen ? '\x1b[?1049h' : '\x1b[?1049l';
   out += '\x1b[?25l\x1b[0m\x1b[H\x1b[2J';
 
@@ -168,5 +132,29 @@ export function snapshotToAnsi(snap) {
 
   out += `\x1b[0m\x1b[${snap.cursorRow + 1};${snap.cursorCol + 1}H`;
   out += '\x1b[?25h';
+  return out;
+}
+
+/**
+ * Rebuild a fresh viewer from Ghostty's canonical state.
+ *
+ * The binding currently exposes styled cells only for the visible screen, while
+ * scrollback is plain text. That is still a much stronger restore boundary than
+ * replaying a truncated raw PTY byte stream: it includes every retained history
+ * row, is already reflowed to the current geometry, and cannot begin halfway
+ * through an escape sequence.
+ *
+ * A line becomes scrollback only after it leaves the visible grid. Print the
+ * history on the primary screen, then scroll the remaining visible history rows
+ * off before painting the authoritative current screen.
+ */
+export function snapshotToRestoreAnsi(snap) {
+  const history = (snap.scrollbackLines || []).map((line) => line.text || '');
+  let out = '\x1b[?1049l\x1b[?25l\x1b[0m\x1b[H\x1b[2J';
+  if (history.length) {
+    out += history.join('\r\n');
+    out += `\x1b[${snap.rows};1H` + '\r\n'.repeat(Math.min(history.length, snap.rows));
+  }
+  out += snapshotToAnsi(snap);
   return out;
 }

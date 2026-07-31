@@ -259,8 +259,8 @@ async function deliver(session, text, from) {
 }
 
 // Type a prompt into a session's terminal from the Overview — no pane needed.
-// If the agent is stopped, wake it first (detached tmux + resume) and give the
-// CLI a moment to boot before the keystrokes land.
+// If the agent is stopped, start its backend PTY and give the resumed CLI a
+// moment to boot before the keystrokes land.
 app.post('/api/sessions/:id/input', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
@@ -278,9 +278,8 @@ app.post('/api/sessions/:id/input', async (req, res) => {
 // ---------- agent-to-agent API (/api/agents) ----------
 // Agents coordinate through the same primitives the operator drives from the
 // Overview: read the roster, watch a pane, send a prompt, wait, launch a peer,
-// stop one. This adds no capability — every agent in this container can already
-// `tmux send-keys` at its neighbours — it makes the capability legible,
-// attributed, and stable enough to document in the environment skill.
+// stop one. This makes container-local coordination legible, attributed, and
+// stable enough to document in the environment skill.
 //
 // The etiquette (check state before interrupting, don't ping-pong, don't stop
 // someone unasked, don't spawn armies) is TAUGHT in that skill rather than
@@ -984,7 +983,7 @@ Hermes — alongside plain shells and a file browser.
 ## What persists (and what doesn't)
 - \`/data\` is **durable storage** (a mounted bucket). Files under \`/data/workspaces/…\` and \`/data/home/…\` survive restarts and sleep.
 - **Empty directories are not persisted** — only files. If a folder must exist, keep a file in it.
-- Sessions are **tmux-backed**: they keep running when the browser disconnects and can be resumed after the Space sleeps.
+- Sessions are held by the Agent Manager backend and keep running when the browser disconnects. A backend restart or Space sleep ends live processes; retained workspace files still persist.
 - Exception: OpenClaw runs with its own \`$HOME\` on local disk for filesystem compatibility; that state is backed up to the bucket every minute.
 
 ## You may not be alone
@@ -2153,35 +2152,30 @@ wss.on('connection', (ws, req) => {
     if (d.length) ws.send(d);
   });
   handle.onExit(() => {
-    // Only ONE reason to close now: the agent process itself exited. There is no
-    // handover any more — the grid is shared, so a second device attaching does
-    // not take the session away from the first. Still no auto-reconnect on 4000,
-    // or we would respawn the agent in a loop.
+    // Only ONE reason to close now: the agent process itself exited. A second
+    // viewer does not detach the first; it starts as a watcher instead. Still no
+    // auto-reconnect on 4000, or we would respawn the agent in a loop.
     if (ws.readyState === ws.OPEN) {
       try { ws.close(4000, 'exited'); } catch { ws.close(); }
     }
   });
-  // The shared grid moved (a viewer joined, left, or asked for a different size).
-  // Every viewer is told, so nobody keeps drawing into a stale geometry.
-  // `clear` says the backend cleared its screen before reflowing and is sending a
-  // repaint: the browser has to do the same, or its emulator archives a rewrapped
-  // copy of the screen that ours deliberately did not.
-  handle.onGrid((cols_, rows_, shared, viewers, clear) => {
+  // A session has one canonical grid and one viewer controls its dimensions.
+  // Watchers still report their preferred size so taking control is immediate.
+  // `reset` means an authoritative Ghostty snapshot follows this frame.
+  handle.onGrid((cols_, rows_, controller, viewers, reset) => {
     if (ws.readyState !== ws.OPEN) return;
-    try { ws.send(TERM_CTRL + JSON.stringify({ t: 'grid', cols: cols_, rows: rows_, shared, viewers, clear })); } catch {}
+    try { ws.send(TERM_CTRL + JSON.stringify({ t: 'grid', cols: cols_, rows: rows_, controller, viewers, reset })); } catch {}
   });
 
-  // Hand the screen back immediately: replayed scrollback, then a snapshot
-  // repaint on top as the authority. No tmux redraw, and nothing is asked of the
-  // agent's TUI — which is why this works even while it sits idle.
+  // Ghostty owns the durable terminal model. Reattachment receives one canonical
+  // serialization of its retained scrollback and current styled screen.
   const restore = handle.restore();
   if (restore) {
     try {
       ws.send(TERM_CTRL + JSON.stringify({
         t: 'restore', cols: restore.cols, rows: restore.rows,
-        viewers: restore.viewers, shared: restore.shared,
+        viewers: restore.viewers, controller: restore.controller, reset: true,
       }));
-      if (restore.replay) ws.send(restore.replay);
       ws.send(restore.ansi);
     } catch {}
   }
@@ -2191,8 +2185,7 @@ wss.on('connection', (ws, req) => {
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.t === 'i') handle.write(msg.d);
     else if (msg.t === 'r') handle.resize(msg.cols, msg.rows);
-    // 'copy' is gone: scrollback now lives in the browser (it is replayed on
-    // attach), so a selection is local and needs no round trip to tmux.
+    else if (msg.t === 'claim') handle.claim();
   });
 
   // Detaching a viewer, NOT stopping the session.

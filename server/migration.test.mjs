@@ -1,13 +1,13 @@
-// End-to-end check of the tmux -> libghostty session migration.
+// End-to-end check of the libghostty-backed session model.
 // Uses a `shell` session so it costs no agent tokens.
 //   node migration.test.mjs
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { WebSocket } from 'ws';
 
-// DATA_DIR must be ABSOLUTE: cleanRelPath() resolves against WORKSPACES_DIR and
-// compares strings, so a relative root makes every path look like an escape.
-const DATA_DIR = path.resolve('./.mig');
+const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-migration-'));
 
 const PORT = 7893;
 const CTRL = '\x00\x00AM:';
@@ -28,7 +28,7 @@ let bootLog = '';
 srv.stdout.on('data', (d) => { bootLog += d; });
 srv.stderr.on('data', (d) => { bootLog += d; });
 
-/** A viewer: collects raw bytes and control frames, can send input/resize. */
+/** A viewer: collects raw bytes and control frames, can send input/resize/claim. */
 function view(id, cols = 100, rows = 30) {
   return new Promise((resolve) => {
     const ws = new WebSocket(`ws://localhost:${PORT}/ws?session=${id}&cols=${cols}&rows=${rows}`);
@@ -36,6 +36,7 @@ function view(id, cols = 100, rows = 30) {
       bytes: '', frames: [], closes: [],
       type: (d) => ws.send(JSON.stringify({ t: 'i', d })),
       resize: (c, r) => ws.send(JSON.stringify({ t: 'r', cols: c, rows: r })),
+      claim: () => ws.send(JSON.stringify({ t: 'claim' })),
       lastFrame: (t) => [...v.frames].reverse().find((f) => f.t === t) || null,
       open: () => ws.readyState === 1,
       close: () => { try { ws.close(); } catch {} },
@@ -84,6 +85,7 @@ try {
   const a = await view(id);
   check('viewer attaches', a.open());
   await sleep(1500);
+  check('the first viewer controls the session', a.lastFrame('restore')?.controller === true);
   a.type('echo hello-from-viewer-a\r');
   await sleep(1300);
   check('input reaches the PTY and output comes back', a.bytes.includes('hello-from-viewer-a'),
@@ -103,12 +105,12 @@ try {
   });
   await sleep(1600);
 
-  // --- reattach: restore frame + replayed scrollback ------------------------
+  // --- reattach: restore frame + canonical scrollback -----------------------
   const b = await view(id);
   await sleep(1000);
   const restore = b.lastFrame('restore');
   check('reattach sends a restore frame', !!restore, restore && `${restore.cols}x${restore.rows}`);
-  check('restore replays earlier scrollback', b.bytes.includes('hello-from-viewer-a'),
+  check('restore serializes earlier scrollback', b.bytes.includes('hello-from-viewer-a'),
     `${b.bytes.length}B restored`);
   check('restore includes work done while detached', b.bytes.includes('ran-while-detached'));
   check('no tmux [exited] noise', !b.bytes.includes('[exited]'));
@@ -129,8 +131,8 @@ try {
   check('an idle shell settles back to idle', calm && calm.state === 'idle', calm && calm.state);
 
   // --- the agent-watch API still works, now off the grid --------------------
-  // capturePane() used to shell out to `tmux capture-pane`; it reads the held
-  // grid instead. Same shape (plain text, screen + scrollback above it).
+  // capturePane() reads the held grid directly. Same shape as the old endpoint:
+  // plain text, with screen and scrollback above it.
   const tailRes = await fetch(`${base}/api/agents/${id}/tail?lines=200`);
   const tail = await tailRes.json();
   const tailText = typeof tail === 'string' ? tail : (tail.text || tail.tail || JSON.stringify(tail));
@@ -141,7 +143,7 @@ try {
     tailText.includes('hello-from-viewer-a') ? 'has scrollback' : 'MISSING scrollback');
   check('agent tail has no trailing blank padding', !/\n\s*\n\s*$/.test(tailText));
 
-  // --- two viewers share one grid, nobody is kicked -------------------------
+  // --- two viewers share one grid with one explicit controller --------------
   const c = await view(id, 150, 40);
   await sleep(400);
   c.resize(150, 40);
@@ -154,19 +156,30 @@ try {
   check('both viewers are told the same grid',
     !!bGrid && !!cGrid && bGrid.cols === cGrid.cols && bGrid.rows === cGrid.rows,
     bGrid && cGrid ? `${bGrid.cols}x${bGrid.rows} vs ${cGrid.cols}x${cGrid.rows}` : 'missing grid frame');
-  check('grid follows the smallest viewer', !!bGrid && bGrid.cols === 40 && bGrid.rows === 20,
+  check('grid follows the controller, not the smallest viewer', !!bGrid && bGrid.cols === 40 && bGrid.rows === 20,
     bGrid && `${bGrid.cols}x${bGrid.rows}`);
-  check('grid is flagged shared', !!bGrid && bGrid.shared === true && bGrid.viewers === 2);
+  check('viewer roles are explicit', !!bGrid && bGrid.controller === true && bGrid.viewers === 2
+    && cGrid?.controller === false && cGrid.viewers === 2);
+  c.type('echo ignored-watcher-input\r');
+  await sleep(500);
+  check('watcher input is ignored', !b.bytes.includes('ignored-watcher-input'));
+  c.claim();
+  await sleep(700);
+  const claimed = c.lastFrame('grid');
+  check('a watcher can explicitly claim control', !!claimed && claimed.controller === true
+    && claimed.cols === 150 && claimed.rows === 40,
+    claimed && `${claimed.cols}x${claimed.rows} controller=${claimed.controller}`);
   c.type('echo seen-by-both\r');
   await sleep(1100);
   check('both viewers see the same live output',
     b.bytes.includes('seen-by-both') && c.bytes.includes('seen-by-both'));
 
+  b.resize(60, 20);
+  await sleep(500);
+  const stays = c.lastFrame('grid');
+  check('a watcher resize cannot disturb the controller', !!stays && stays.cols === 150 && stays.rows === 40,
+    stays && `${stays.cols}x${stays.rows}`);
   b.close();
-  await sleep(1000);
-  const grown = c.lastFrame('grid');
-  check('grid grows back when a viewer leaves', !!grown && grown.cols === 150 && grown.rows === 40,
-    grown && `${grown.cols}x${grown.rows}`);
 
   // --- stopping is explicit ------------------------------------------------
   await fetch(`${base}/api/sessions/${id}/stop`, { method: 'POST' });
@@ -184,6 +197,7 @@ try {
   srv.kill('SIGTERM');
   await sleep(600);
   srv.kill('SIGKILL');
+  try { fs.rmSync(DATA_DIR, { recursive: true, force: true }); } catch {}
   console.log(failures ? `\n${failures} FAILURE(S)` : '\nall checks passed');
   process.exit(failures ? 1 : 0);
 }

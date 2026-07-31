@@ -124,15 +124,22 @@ browser (xterm.js panes)
 
 Each agent is a PTY held by the backend, with a **libghostty-vt** terminal fed
 from its output. That grid is the authoritative screen, so reopening a pane is a
-snapshot repaint plus replayed scrollback rather than a redraw, several browsers
-can watch and drive one session at once (they share one grid, sized to the
-smallest), and agent state is read from the grid instead of shelling out per
-session. A resize is a request too: the browser measures itself and asks, the
-backend applies the size once the asking stops and then repaints every viewer
-from the grid — so a window drag costs one PTY resize instead of one per frame,
-each of which would push another copy of a TUI's screen into the scrollback. Sessions survive browser disconnects but NOT a backend restart, and not
-a Space sleep/rebuild; with storage the working dir and CLI state persist, so a
-re-opened session resumes its own conversation. Claude
+canonical serialization of its retained history and styled screen rather than a
+truncated PTY byte replay, and agent state is read from the grid instead of
+shelling out per session. Several browsers can watch the same session, but one
+explicit controller owns input and PTY dimensions; interacting with a watcher
+claims control. This prevents background tabs and small phones from resizing a
+desktop session, and prevents several browser emulators from all answering the
+same terminal query.
+
+A resize is a controller request. The backend coalesces window-drag bursts,
+allows Ghostty to perform normal reflow, then tells every viewer the confirmed
+geometry before more PTY output arrives. Full history serialization is reserved
+for attach/reconnect. Browser zoom is presentation-only: it changes cell size
+and pans locally without resizing the PTY. Sessions survive browser disconnects
+but not a backend restart or Space sleep/rebuild; with storage the working
+directory and CLI state persist, so a reopened session resumes its own
+conversation. Claude
 sessions are pinned to a per-session conversation id at creation; Codex sessions
 are pinned right after first launch (the id is captured from the rollout file
 Codex creates) — so agents sharing a folder never resume each other's
@@ -144,11 +151,8 @@ conversations.
 |---|---|---|
 | `PORT` | `7860` | HTTP + WS port (HF `app_port`) |
 | `DATA_DIR` | `/data` | Durable root (mounted private Storage Bucket) |
-| `AM_SCROLLBACK` | `20000` | Scrollback lines kept per session grid |
-| `AM_REPLAY_BYTES` | `262144` | PTY bytes replayed to a reattaching browser |
+| `AM_SCROLLBACK_BYTES` | `67108864` | Maximum Ghostty scrollback memory per session |
 | `AM_RESIZE_SETTLE_MS` | `120` | Quiet period before a resize is applied to the PTY |
-| `AM_RESIZE_CARRY` | `1` | `0` reflows on resize like a plain terminal (duplicates scrollback) |
-| `AM_RESIZE_ARCHIVE_MS` | `700` | Grace period for an app to repaint before rows a shrink pushed off are archived |
 | `ANTHROPIC_API_KEY` | — | Claude Code / opencode / Hermes (Space **secret**) |
 | `OPENAI_API_KEY` / `CODEX_API_KEY` | — | Codex (Space secret) |
 | `GEMINI_API_KEY` | — | Gemini CLI (Space secret) |

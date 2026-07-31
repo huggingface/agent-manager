@@ -489,13 +489,6 @@ body {
 /* terminal boot cover ("connecting… / starting claude…") */
 .term-boot { position: absolute; inset: 0; top: 34px; display: flex; align-items: center; justify-content: center; background: var(--term-bg); color: var(--muted); font-size: 12.5px; z-index: 4; pointer-events: none; }
 .term-boot .et-cursor { height: 13px; width: 7px; margin-left: 7px; }
-/* copy-mode hint: a translucent banner just under the pane header while tmux is
-   in copy/scrollback mode, so a "dead" keyboard makes sense */
-.term-copy-hint { position: absolute; top: 40px; left: 50%; transform: translateX(-50%); z-index: 5; pointer-events: none;
-  padding: 3px 11px; border-radius: 999px; font-size: 11px; letter-spacing: 0.01em;
-  color: var(--accent-fg); background: color-mix(in srgb, var(--accent) 82%, transparent);
-  box-shadow: 0 2px 10px rgb(0 0 0 / 0.25); animation: rise-in 0.14s ease-out; white-space: nowrap; }
-
 /* terminal "process exited" overlay */
 /* Non-blocking banner so the agent's last output (e.g. a login error) stays readable. */
 /* stopped state: quiet line centered in the pane, in the boot-cover's voice */
@@ -552,6 +545,8 @@ body {
 .pane-head .ph-left { grid-column: 1; justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
 .pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; text-align: center; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
 .pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; }
+.pane-head .ph-role { flex: none; padding: 2px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-family: var(--font-mono); font-size: 9.5px; line-height: 1.2; }
+.pane-head .ph-role.controller { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }
@@ -563,14 +558,12 @@ body {
 .slot.focused { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: 0 4px 18px -10px rgba(0, 0, 0, 0.35); }
 .slot.focused .pane-head { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
 
-.term-host { flex: 1; min-height: 0; padding: 10px 8px 8px 12px; background: var(--term-bg); }
-/* The terminal's own parent must carry NO padding. FitAddon sizes the grid from
-   getComputedStyle(parent).height, which under border-box INCLUDES padding — so
-   padding on the direct parent made it count one row (and one column) more than
-   fits, and the grid overflowed its clipped viewport: the bottom line rendered
-   sliced in half. Most visible with Codex, which paints its status line on the
-   very last row, where Claude leaves it blank. The frame keeps the padding; this
-   filler is the exact box the grid is measured against. */
+.term-host { flex: 1; min-height: 0; padding: 10px 8px 8px 12px; background: var(--term-bg); overflow: auto; overscroll-behavior: contain; }
+/* The grid is measured against this filler, so it must stay unpadded: FitAddon
+   reads the PARENT's computed height and does NOT subtract its padding, so a
+   padded parent made the grid count a row that doesn't fit and the bottom line
+   rendered sliced (most visible with Codex, which paints its status line on the
+   very last row). The padding lives on .xterm, which FitAddon does subtract. */
 .term-fill { height: 100%; min-height: 0; }
 /* mobile control-key bar: the keys a phone keyboard lacks, pinned below the
    terminal so it rides just above the on-screen keyboard */
@@ -595,7 +588,7 @@ body {
 .term-paste .tp-input { width: 100%; box-sizing: border-box; resize: none; padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: var(--r-md);
   background: var(--panel-2); color: var(--text); font-size: 13px; line-height: 1.35; }
 .term-paste .tp-input:focus { outline: none; border-color: var(--accent); }
-.term-host .xterm { height: 100%; }
+.term-host .xterm { min-width: 100%; min-height: 100%; }
 .xterm .xterm-viewport { scrollbar-width: none; }
 .xterm .xterm-viewport::-webkit-scrollbar { width: 0; height: 0; display: none; }
 
