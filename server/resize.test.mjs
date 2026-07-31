@@ -82,6 +82,15 @@ function view(id, cols, rows, mirror = false) {
         for (let i = 0; i < buf.length; i++) out.push(buf.getLine(i)?.translateToString(true) ?? '');
         return out.join('\n');
       },
+      // Just the visible screen — what the app is displaying right now.
+      viewportText: async () => {
+        if (!term) return '';
+        await new Promise((r) => term.write('', r));
+        const buf = term.buffer.active;
+        const out = [];
+        for (let i = buf.baseY; i < buf.baseY + term.rows; i++) out.push(buf.getLine(i)?.translateToString(true) ?? '');
+        return out.join('\n');
+      },
     };
     ws.on('message', (data) => {
       const s = data.toString('utf8');
@@ -360,6 +369,47 @@ try {
     for (let i = 1; i <= 120; i++) if (count(seen, i) > 1) browserDoubled.push(i);
     check('and copies nothing in the browser either', browserDoubled.length === 0,
       browserDoubled.length ? `${browserDoubled.length} doubled, e.g. out-${browserDoubled.slice(0, 5).join(', out-')}` : '');
+    v.close();
+    await fetch(`${base}/api/sessions/${id}/stop`, { method: 'POST' });
+  }
+
+  // --- an app whose frame overflows the pane -------------------------------
+  // The case a real agent pane hits on zoom, and the one thing here that is NOT
+  // ours to fix: an agent renders the tail of its conversation, narrowing wraps
+  // those lines, and the frame becomes taller than the screen. Printing it scrolls
+  // the overflow into scrollback, where it is a copy of what the frame also shows.
+  // Any terminal does this; measured here at 251 duplicated tokens with the carry
+  // on and 371 with AM_RESIZE_CARRY=0, so what we can prevent, we do.
+  //
+  // The copies are one per print: the app painted an overflowing frame three times
+  // here (once on launch, once per resize) and rows appear up to three times, with
+  // the carry on and off alike. What the carry removes is OUR share — the rewrapped
+  // copy reflow would archive on top — which is the whole 371-vs-251 difference.
+  // The bound below is what catches that share coming back.
+  if (!Headless) {
+    console.log('SKIP  overflow checks (@xterm/headless not installed)');
+  } else {
+    const id = await session('resize overflow');
+    const v = await view(id, 150, 40, true);
+    v.resize(150, 40);
+    await sleep(900);
+    v.type(`FIXED_LINES=30 node ${FIXTURE}\r`);
+    await sleep(2000);
+    v.resize(148, 38);          // teaches host.repaints = true
+    await sleep(1000);
+    v.resize(100, 26);          // 100% -> 150%: wraps the frame past the screen
+    await sleep(2000);
+
+    const buffer = await v.screenText();
+    const counts = new Map();
+    for (const m of buffer.matchAll(/\b\d{3}\.\d{2}\b/g)) counts.set(m[0], (counts.get(m[0]) || 0) + 1);
+    const values = [...counts.values()];
+    const dupes = values.filter((n) => n > 1).length;
+    const most = Math.max(0, ...values);
+    // 251 with the carry, 371 without it. The gap is the rewrap copy, and 300 sits
+    // in it: this fails if the resize path starts archiving a screen again.
+    check('an overflowing frame duplicates only what the app itself printed', dupes <= 300,
+      `${dupes} duplicated tokens, up to ${most} copies each (app printed 3 frames)`);
     v.close();
     await fetch(`${base}/api/sessions/${id}/stop`, { method: 'POST' });
   }

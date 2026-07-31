@@ -13,6 +13,15 @@ const ROWS = () => process.stdout.rows || 24;
 const TRANSCRIPT = Array.from({ length: 60 }, (_, i) =>
   Array.from({ length: 22 }, (_, j) => `${String(i + 1).padStart(3, '0')}.${String(j).padStart(2, '0')}`).join(' '));
 
+// With FIXED_LINES set, print that many transcript lines whatever the size —
+// which is what an agent showing the tail of a conversation does. Narrowing the
+// pane then WRAPS those lines, so the printed frame becomes taller than the screen
+// and printing it scrolls the overflow into scrollback. That overflow is a copy of
+// what the frame also shows, and it is the artifact a real agent pane leaves
+// behind on zoom. Without the variable, the frame is trimmed to fit and nothing
+// scrolls.
+const FIXED = Number(process.env.FIXED_LINES || 0);
+
 function paint() {
   let out = '\x1b[?25l\x1b[H';
   for (let r = 0; r < ROWS(); r++) out += '\x1b[2K\x1b[1B';
@@ -21,7 +30,7 @@ function paint() {
   // like a TUI showing the most recent output above its input box.
   const perLine = Math.max(1, Math.ceil(TRANSCRIPT[0].length / COLS()));
   const fit = Math.max(1, Math.floor((ROWS() - 2) / perLine));
-  out += TRANSCRIPT.slice(-fit).join('\r\n');
+  out += TRANSCRIPT.slice(-(FIXED || fit)).join('\r\n');
   out += `\r\n[fixture ${COLS()}x${ROWS()}]\x1b[?25h`;
   process.stdout.write(out);
 }
