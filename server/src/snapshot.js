@@ -131,6 +131,26 @@ export function rowsToAnsi(snap, from, to) {
   return out;
 }
 
+/**
+ * The rows placed absolutely, with NO erase and no buffer switch — for painting
+ * into a screen whose other rows must survive.
+ *
+ * That is the case after a resize: growing pulls history back down out of
+ * scrollback into the top rows, and erasing before painting would throw exactly
+ * that away. The caller erased before the resize instead, so everything this does
+ * not cover is already blank.
+ */
+export function snapshotToRows(snap) {
+  const grid = cellGrid(snap);
+  let out = '\x1b[?25l\x1b[0m';
+  for (let row = 0; row < snap.rows; row++) {
+    const line = renderRow(grid[row], snap.cols);
+    if (line) out += `\x1b[${row + 1};1H` + line;
+  }
+  out += `\x1b[0m\x1b[${snap.cursorRow + 1};${snap.cursorCol + 1}H\x1b[?25h`;
+  return out;
+}
+
 export function snapshotToAnsi(snap) {
   const grid = cellGrid(snap);
 
