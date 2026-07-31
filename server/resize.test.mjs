@@ -317,6 +317,53 @@ try {
     await fetch(`${base}/api/sessions/${id}/stop`, { method: 'POST' });
   }
 
+  // --- zooming OUT gives back the top, it does not copy it -----------------
+  // Growing the screen pulls history back down out of scrollback to fill the new
+  // rows. The carry used to paint the outgoing screen over exactly those rows, so
+  // zooming out destroyed the history it had just recovered and left the old
+  // screen stranded above the app's repaint: "I can't scroll all the way to the
+  // top, and zooming out further duplicates at the top."
+  if (!Headless) {
+    console.log('SKIP  zoom-out checks (@xterm/headless not installed)');
+  } else {
+    const id = await session('resize zoom out');
+    const v = await view(id, 120, 40, true);
+    v.resize(120, 40);
+    await sleep(900);
+    v.type(`node ${FIXTURE}\r`);
+    await sleep(1500);
+    v.type('\x03');
+    await sleep(800);
+    v.type('for i in $(seq 1 120); do echo "out-$i"; done; echo; echo; echo\r');
+    await sleep(2000);
+
+    const count = (text, n) => (text.match(new RegExp(`out-${n}(?!\\d)`, 'g')) || []).length;
+    // Zoom in, then back out past where it started.
+    for (const [c, r] of [[100, 26], [90, 20], [100, 26], [110, 34], [120, 44]]) {
+      v.resize(c, r);
+      await sleep(500);
+    }
+    await sleep(1200);
+    const seen = await v.screenText();
+    const grid = await gridText(id);
+    const lost = [];
+    const doubled = [];
+    for (let i = 1; i <= 120; i++) {
+      if (count(grid, i) === 0) lost.push(i);
+      if (count(grid, i) > 1) doubled.push(i);
+    }
+    check('zooming out keeps every line it recovered', lost.length === 0,
+      lost.length ? `${lost.length} gone, e.g. out-${lost.slice(0, 5).join(', out-')}` : '');
+    check('zooming out copies nothing to the top', doubled.length === 0,
+      doubled.length ? `${doubled.length} doubled, e.g. out-${doubled.slice(0, 5).join(', out-')}` : '');
+    const browserDoubled = [];
+    for (let i = 1; i <= 120; i++) if (count(seen, i) > 1) browserDoubled.push(i);
+    check('and copies nothing in the browser either', browserDoubled.length === 0,
+      browserDoubled.length ? `${browserDoubled.length} doubled, e.g. out-${browserDoubled.slice(0, 5).join(', out-')}` : '');
+    v.close();
+    await fetch(`${base}/api/sessions/${id}/stop`, { method: 'POST' });
+  }
+
   // --- the screen survives a resize the app ignores ------------------------
   // Clearing before the reflow is only safe because the screen is re-painted
   // afterwards. An app that never answers SIGWINCH is the case that proves it:

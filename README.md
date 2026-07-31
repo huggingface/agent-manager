@@ -148,7 +148,7 @@ conversations.
 | `AM_REPLAY_BYTES` | `262144` | PTY bytes replayed to a reattaching browser |
 | `AM_RESIZE_SETTLE_MS` | `120` | Quiet period before a resize is applied to the PTY |
 | `AM_RESIZE_CARRY` | `1` | `0` reflows on resize like a plain terminal (duplicates scrollback) |
-| `AM_RESIZE_ARCHIVE_MS` | `250` | Grace period for an app to repaint before rows a shrink pushed off are archived |
+| `AM_RESIZE_ARCHIVE_MS` | `700` | Grace period for an app to repaint before rows a shrink pushed off are archived |
 | `ANTHROPIC_API_KEY` | — | Claude Code / opencode / Hermes (Space **secret**) |
 | `OPENAI_API_KEY` / `CODEX_API_KEY` | — | Codex (Space secret) |
 | `GEMINI_API_KEY` | — | Gemini CLI (Space secret) |
