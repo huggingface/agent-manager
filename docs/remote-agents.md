@@ -517,8 +517,12 @@ would return to the agent as a *timeout error* — indistinguishable from a brok
 enough to make an agent give up or thrash. 300 s fits inside one tool call with margin; the
 1800 s ceiling stays reachable for native or backgrounded clients that have no such cap.
 
-The edge's own limit is still unmeasured. cowrite's ~50 min is the only evidence, and the probe
-attempted here hit a Space running an older revision. Worth measuring once this deploys.
+**The edge tolerates the default, measured.** A 300 s poll through
+`lvwerra-am-dev-2.hf.space` returned after exactly 300 s having emitted 11 `:hb` lines, opening
+with `:connected` and closing with `{"messages":[],"seq":1}` — so heartbeats keep HF's proxy from
+timing the connection out, and `x-accel-buffering: no` is enough to stop it buffering them. The
+full round trip (ping → hello → poll → reply, with a message queued before anyone connected) also
+works over the edge. The 1800 s ceiling is still untested; only the default is proven.
 
 ### 12.2 §6.2's state machine did not close
 
@@ -561,6 +565,11 @@ tick from that and nothing else.
   we never paid and cannot see. They *do* appear in the Overview, with a folder-built digest.
 - **They are absent from the agent-API spawn catalog.** An agent in here cannot paste a connect
   prompt onto a laptop, so offering it the option only produces dead panes.
+- **It runs on real Space infrastructure**, not just localhost: deployed to `lvwerra/am-dev-2`
+  (private, own bucket) with `scripts/deploy-dev-space.sh`. Two things that only shows up there —
+  git-lfs objects need pushing explicitly because hooks cannot run from a bucket-backed workspace,
+  and every instance builds from the same README so the dashboard card has to be renamed in the
+  Space repo to tell dev from prod.
 - **Two CSS/markup faults only a browser found:** `.pane-head` is a 3-column grid built for
   terminal panes (a flat header needs the Files pane's flex override), and agent markdown
   rendered as unstyled `<pre>`, so code blocks looked like prose. A typecheck cannot see either.
