@@ -53,11 +53,17 @@ const DEFAULT_SORT: Sort = { key: 'name', desc: false };
 // much harder to scan.
 const sortEntries = (es: FileEntry[], s: Sort) => {
   const dir = s.desc ? -1 : 1;
+  // Name breaks every tie, and it follows the sort direction. That last part
+  // matters most for folders: they have no size at all, and a whole tree checked
+  // out at once shares one mtime, so they tie constantly — with a tie-break
+  // pinned to ascending they sat in the very same order whichever column and
+  // whichever direction you picked, which read as "sorting is broken".
+  const byName = (a: FileEntry, b: FileEntry) => a.name.localeCompare(b.name) * dir;
   return [...es].sort((a, b) => {
-    if (a.dir !== b.dir) return a.dir ? -1 : 1;
-    if (s.key === 'size') return (a.size - b.size) * dir || a.name.localeCompare(b.name);
-    if (s.key === 'time') return ((a.mtime || 0) - (b.mtime || 0)) * dir || a.name.localeCompare(b.name);
-    return a.name.localeCompare(b.name) * dir;
+    if (a.dir !== b.dir) return a.dir ? -1 : 1; // folders always lead
+    if (s.key === 'size') return (a.size - b.size) * dir || byName(a, b);
+    if (s.key === 'time') return ((a.mtime || 0) - (b.mtime || 0)) * dir || byName(a, b);
+    return byName(a, b);
   });
 };
 
