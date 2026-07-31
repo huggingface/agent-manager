@@ -32,6 +32,15 @@ export AM_LOCAL="/home/node/local"
 if ! mkdir -p "$AM_LOCAL/bin" 2>/dev/null; then AM_LOCAL="$DATA_DIR/.local-cache"; mkdir -p "$AM_LOCAL/bin"; fi
 export UV_CACHE_DIR="$AM_LOCAL/uv-cache"
 
+# Liveness handle for the state-sync loops below: this script ends with
+# `exec node …`, so $$ IS the app's pid. Each loop checks it and gives up once
+# its own app instance is gone, because a dev-mode app restart re-runs this
+# script inside the SAME container: the old loops survive (reparented to PID 1)
+# and the new run adds three more. Measured after three restart attempts: ten
+# loops alive, all waking every 60s to rsync the same bucket paths over each
+# other. Not exported — nothing downstream needs it (see NON_SECRET note above).
+AM_MAIN_PID=$$
+
 # Codex keeps a growing family of SQLite databases (logs_2, goals_1, memories_1
 # plus mmap'd -shm siblings) that corrupt on the FUSE bucket: SQLite needs real
 # locking/mmap. Same cure as OpenClaw — codex's HOME lives on LOCAL disk. The
@@ -54,6 +63,7 @@ rsync -a --exclude 'sessions' --exclude '*.sqlite*' --exclude 'db-backups' \
 ln -sfn "$CODEX_DURABLE/sessions" "$CODEX_HOME/sessions"
 ( while :; do
     sleep 60
+    kill -0 "$AM_MAIN_PID" 2>/dev/null || exit
     rsync -a --exclude 'sessions' --exclude '*.sqlite*' --exclude 'db-backups' \
       --exclude 'cache' --exclude '.tmp' --exclude 'mcp-oauth-locks' \
       "$CODEX_HOME/" "$CODEX_DURABLE/" 2>/dev/null || true
@@ -92,6 +102,7 @@ done
 cp "$HOME/.gitconfig" "$OPENCLAW_HOME/.gitconfig" 2>/dev/null || true
 ( while :; do
     sleep 60
+    kill -0 "$AM_MAIN_PID" 2>/dev/null || exit
     rsync -a --delete "$OPENCLAW_STATE_DIR/" "$OC_BACKUP/" 2>/dev/null || true
   done ) &
 
@@ -124,6 +135,7 @@ ln -sfn "$OC_LIVE" "$OC_LINK"
 ln -sfn "$HERMES_LIVE" "$HERMES_LINK"
 ( while :; do
     sleep 60
+    kill -0 "$AM_MAIN_PID" 2>/dev/null || exit
     rsync -a "$OC_LIVE/" "$OC_DURABLE/" 2>/dev/null || true
     rsync -a "$HERMES_LIVE/" "$HERMES_DURABLE/" 2>/dev/null || true
   done ) &
