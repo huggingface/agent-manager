@@ -5,14 +5,14 @@ const fileFor = (directory, id) => path.join(
   directory, `${String(id).replace(/[^a-zA-Z0-9._-]/g, '_')}.json`,
 );
 
-export const TERMINAL_HISTORY_VERSION = 5;
+export const TERMINAL_HISTORY_VERSION = 6;
 
 /** Load a plain-text Ghostty scrollback checkpoint, ignoring old/bad schemas. */
 export function loadTerminalHistory(directory, id) {
   try {
     const body = fs.readFileSync(fileFor(directory, id), 'utf8');
     const saved = JSON.parse(body);
-    if (![1, 2, 3, 4, TERMINAL_HISTORY_VERSION].includes(saved?.version)
+    if (![1, 2, 3, 4, 5, TERMINAL_HISTORY_VERSION].includes(saved?.version)
         || !Number.isFinite(saved.cols) || !Array.isArray(saved.lines)) return null;
     const lines = saved.lines.filter((line) => typeof line === 'string').map((text) => ({ text }));
     return lines.length ? {

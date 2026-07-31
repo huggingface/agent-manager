@@ -223,6 +223,23 @@ function visibleRows(vt) {
   try { return vt.getVisibleText().split('\n').map((text) => ({ text })); } catch { return []; }
 }
 
+function longestPrefixOccurrence(pattern, text) {
+  const prefix = new Array(pattern.length).fill(0);
+  for (let i = 1, matched = 0; i < pattern.length; i++) {
+    while (matched && pattern[i] !== pattern[matched]) matched = prefix[matched - 1];
+    if (pattern[i] === pattern[matched]) matched++;
+    prefix[i] = matched;
+  }
+  let matched = 0, best = 0, bestEnd = -1;
+  for (let i = 0; i < text.length; i++) {
+    while (matched && text[i] !== pattern[matched]) matched = prefix[matched - 1];
+    if (text[i] === pattern[matched]) matched++;
+    if (matched > best) { best = matched; bestEnd = i; }
+    if (matched === pattern.length) matched = prefix[matched - 1];
+  }
+  return { length: best, end: bestEnd };
+}
+
 /**
  * Merge a primary-screen repaint into the fullest transcript seen so far.
  *
@@ -242,23 +259,6 @@ export function mergeRepaintArchive(base, repaint) {
     for (let i = text.length - 1; i >= 0; i--) result += text[i];
     return result;
   };
-  const longestPrefixOccurrence = (pattern, text) => {
-    const prefix = new Array(pattern.length).fill(0);
-    for (let i = 1, matched = 0; i < pattern.length; i++) {
-      while (matched && pattern[i] !== pattern[matched]) matched = prefix[matched - 1];
-      if (pattern[i] === pattern[matched]) matched++;
-      prefix[i] = matched;
-    }
-    let matched = 0, best = 0, bestEnd = -1;
-    for (let i = 0; i < text.length; i++) {
-      while (matched && text[i] !== pattern[matched]) matched = prefix[matched - 1];
-      if (text[i] === pattern[matched]) matched++;
-      if (matched > best) { best = matched; bestEnd = i; }
-      if (matched === pattern.length) matched = prefix[matched - 1];
-    }
-    return { length: best, end: bestEnd };
-  };
-
   // Shape 1: an archive suffix is revealed after a freshly painted header.
   const suffix = longestPrefixOccurrence(
     reverse(base.slice(-repaint.length)), reverse(repaint),
@@ -277,11 +277,26 @@ export function mergeRepaintArchive(base, repaint) {
     + repaint.slice(repaintOffset + suffix.length);
 }
 
-/** The archive prefix not represented by the repaint's visible styled grid. */
-export function repaintArchiveHistory(archive, visible) {
-  const history = visible && archive.endsWith(visible)
-    ? archive.slice(0, archive.length - visible.length) : archive;
-  return logicalHistory(history);
+/**
+ * Replace the archive's old visible tail with a new repaint.
+ *
+ * Resize output is presentation, never appended terminal output. Match the
+ * longest prefix of the new visible grid inside the archive; everything before
+ * that point is the hidden prefix, and the new grid replaces everything after
+ * it (including dimension-dependent status/footer text).
+ */
+export function repaintArchiveView(archive, visible, fallbackHistory = '') {
+  if (!visible) return { archive, history: logicalHistory(archive) };
+  const leading = visible.match(/^(?:[ \t]*\n)*/)?.[0].length || 0;
+  const candidate = visible.slice(leading);
+  const match = candidate ? longestPrefixOccurrence(candidate, archive) : { length: 0, end: -1 };
+  const minimum = Math.min(12, candidate.trim().length, archive.trim().length);
+  let history = fallbackHistory;
+  if (match.length >= minimum && minimum > 0) {
+    const archiveOffset = match.end - match.length + 1;
+    history = archive.slice(0, archiveOffset);
+  }
+  return { archive: history + visible, history: logicalHistory(history) };
 }
 
 function terminalArchive(vt, snap) {
@@ -309,15 +324,14 @@ function finishCapturedGrid(host, txn) {
       try {
         const visible = visibleRows(txn.vt);
         const visibleText = logicalText(visible, txn.cols);
-        const repaint = logicalText([...(snap.scrollbackLines || []), ...visible], txn.cols);
-        committedArchive = mergeRepaintArchive(txn.archive, repaint);
-        const history = repaintArchiveHistory(committedArchive, visibleText);
+        const view = repaintArchiveView(txn.archive, visibleText, txn.fallbackHistory);
+        committedArchive = view.archive;
         replacement = ghostty.createTerminal({
           cols: txn.cols,
           rows: txn.rows,
           scrollbackLimit: SCROLLBACK_BYTES,
         });
-        replacement.feed(snapshotToRestoreAnsi({ ...snap, scrollbackLines: history }));
+        replacement.feed(snapshotToRestoreAnsi({ ...snap, scrollbackLines: view.history }));
       } catch (error) {
         console.error('[runner] resize capture commit', error && error.message);
         try { replacement?.dispose(); } catch {}
@@ -376,18 +390,23 @@ function startCapturedGrid(host, cols, rows, seed = null, resizePty = true) {
   const previous = host.resizeCapture;
   let archive = seed?.history
     ? logicalText(seed.history, seed.historyCols || host.cols) : host.repaintArchive;
+  let fallbackHistory = seed?.history ? archive : null;
   if (previous) {
     archive = previous.archive;
+    fallbackHistory = previous.fallbackHistory;
     host.resizeCapture = null;
     clearCaptureTimers(previous);
     try { previous.vt.dispose(); } catch {}
   }
-  if (archive == null) {
-    try {
-      const source = host.vt.snapshot({ includeScrollback: true });
+  try {
+    const source = host.vt.snapshot({ includeScrollback: true });
+    if (archive == null) {
       archive = terminalArchive(host.vt, source);
-    } catch { return false; }
-  }
+    }
+    if (fallbackHistory == null) {
+      fallbackHistory = logicalText(source.scrollbackLines || [], source.cols);
+    }
+  } catch { return false; }
 
   let scratch;
   try {
@@ -403,6 +422,7 @@ function startCapturedGrid(host, cols, rows, seed = null, resizePty = true) {
     cols,
     rows,
     archive: archive || '',
+    fallbackHistory: fallbackHistory || '',
     sawData: false,
     idleTimer: null,
     maxTimer: null,
@@ -482,16 +502,17 @@ function armTraceHydration(host) {
       // into one archive rather than appending either presentation verbatim.
       const startup = terminalArchive(host.vt, snap);
       const archive = mergeRepaintArchive(logicalText(recovered, snap.cols), startup);
+      const view = repaintArchiveView(archive, visibleText);
       replacement = ghostty.createTerminal({
         cols: host.cols, rows: host.rows, scrollbackLimit: SCROLLBACK_BYTES,
       });
       replacement.feed(snapshotToRestoreAnsi({
         ...snap,
-        scrollbackLines: repaintArchiveHistory(archive, visibleText),
+        scrollbackLines: view.history,
       }));
       const previous = host.vt;
       host.vt = replacement;
-      host.repaintArchive = archive;
+      host.repaintArchive = view.archive;
       notifyGrid(host, true);
       const committed = host.vt.snapshot({ includeCells: true, includeScrollback: true });
       const ansi = snapshotToRestoreAnsi(committed);

@@ -15,7 +15,7 @@ import {
   TERMINAL_HISTORY_VERSION, createTerminalHistoryCheckpoint, loadTerminalHistory,
   traceHistoryLines,
 } from './src/history-store.js';
-import { mergeRepaintArchive, repaintArchiveHistory } from './src/runner.js';
+import { mergeRepaintArchive, repaintArchiveView } from './src/runner.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-resize-'));
@@ -210,17 +210,18 @@ try {
     check('a wide repaint merges recovered turns into one full archive',
       archive === wide && archive.split('❯ hi there').length - 1 === 1);
     check('a wide repaint needs no duplicate scrollback',
-      repaintArchiveHistory(archive, wide).length === 0);
+      repaintArchiveView(archive, wide).history.length === 0);
     const narrow = 'newer live turn\n';
-    const narrowHistory = repaintArchiveHistory(
-      mergeRepaintArchive(archive, narrow), narrow,
-    ).map((line) => line.text).join('\n');
+    const narrowView = repaintArchiveView(archive, narrow);
+    const narrowHistory = narrowView.history.map((line) => line.text).join('\n');
     check('a narrow repaint restores the archive prefix above the viewport',
       narrowHistory.includes('Claude welcome frame') && narrowHistory.includes('❯ hi there'));
     check('a repaint replaces a volatile old footer after its transcript overlap',
-      mergeRepaintArchive('deep history\nshared transcript\n[old 160x40]\n',
-        'shared transcript\n[new 90x24]\n')
+      repaintArchiveView('deep history\nshared transcript\n[old 160x40]\n',
+        'shared transcript\n[new 90x24]\n').archive
       === 'deep history\nshared transcript\n[new 90x24]\n');
+    check('zooming wide again exposes the archive without growing it',
+      repaintArchiveView(narrowView.archive, wide).archive === wide);
   }
 
   const up = await waitFor(async () => {
