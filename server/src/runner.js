@@ -317,6 +317,12 @@ function applyGrid(host) {
   host.resizedAt = Date.now();
   host.resizeBytes = 0;
   if (carried) {
+    // Painted straight away, not deferred. Holding it back until the app had its
+    // say was tried, on the theory that an app reprinting its own frame makes our
+    // copy redundant — measured, it changes nothing, because such an app erases
+    // the screen before it prints. All deferring bought was a blank pane.
+    try { host.vt.feed(carried.ansi); } catch {}
+    for (const sub of host.subs) sub.onData(carried.ansi);
     // Oldest first: a second resize before the verdict lands adds to the same
     // batch rather than replacing it.
     host.pendingArchive = [...(host.pendingArchive || []), ...carried.dropped];
@@ -324,9 +330,8 @@ function applyGrid(host) {
     host.archiveTimer = setTimeout(() => settleArchive(host), ARCHIVE_SETTLE_MS);
     if (host.archiveTimer.unref) host.archiveTimer.unref();
   }
-  let ansi = carried ? carried.ansi : null;
-  if (carried) { try { host.vt.feed(carried.ansi); } catch {} }
-  else if (shrinking) { try { ansi = snapshotToAnsi(host.vt.snapshot({ includeCells: true })); } catch {} }
+  let ansi = null;
+  if (!carried && shrinking) { try { ansi = snapshotToAnsi(host.vt.snapshot({ includeCells: true })); } catch {} }
   for (const sub of host.subs) {
     // `carried` doubles as the flag: the viewer's own emulator has to skip its
     // reflow exactly when we skipped ours, or it archives what we did not — and it
