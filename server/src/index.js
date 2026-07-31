@@ -17,9 +17,10 @@ import * as order from './order.js';
 import * as demo from './demo.js';
 import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection, paneModes, isRunning, capturePane } from './runner.js';
 import { buildUsage } from './usage.js';
-import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle } from './traces.js';
+import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, traceHarnessOf } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
+import { kindOfName, kindOfFile, mimeOf, readTextHead, TEXT_MAX } from './preview.js';
 import { startWatchdog } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
@@ -1279,13 +1280,86 @@ app.get('/api/files/:id', (req, res) => {
   fs.mkdirSync(root, { recursive: true });
   const dir = resolveSafe(root, req.query.path);
   if (!dir || !fs.existsSync(dir)) return res.status(400).json({ error: 'bad path' });
+  // One stat per entry (folders included) — the pane shows a Modified column.
+  // `kind` comes from the NAME only: it just picks the row glyph, and sniffing
+  // every extensionless file here would mean an extra open per row on a bucket.
+  // /preview does the real detection for the one file being opened.
   const entries = fs.readdirSync(dir, { withFileTypes: true }).map((e) => {
-    let size = 0;
-    try { if (e.isFile()) size = fs.statSync(path.join(dir, e.name)).size; } catch {}
-    return { name: e.name, dir: e.isDirectory(), size };
+    const full = path.join(dir, e.name);
+    const isDir = e.isDirectory();
+    let size = 0, mtime = 0;
+    try {
+      const st = fs.statSync(full);
+      mtime = st.mtimeMs;
+      if (!isDir) size = st.size;
+    } catch {}
+    return isDir
+      ? { name: e.name, dir: true, size: 0, mtime }
+      : { name: e.name, dir: false, size, mtime, kind: kindOfName(e.name) ?? undefined };
   });
   entries.sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : a.name.localeCompare(b.name)));
   res.json({ path: path.relative(root, dir), root: path.basename(root), entries });
+});
+
+// What the viewer needs to show one file: its kind, its stats, and — for the
+// text-ish kinds — the content itself, capped. Image/html/pdf are fetched by the
+// browser from /raw instead.
+app.get('/api/files/:id/preview', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const root = folderPathOf(s);
+  const f = resolveSafe(root, req.query.path);
+  if (!f || !fs.existsSync(f)) return res.status(404).json({ error: 'not found' });
+  const st = fs.statSync(f);
+  if (!st.isFile()) return res.status(400).json({ error: 'not a file' });
+  let kind = kindOfFile(f);
+  // A transcript is a .jsonl like any other until you read a line of it, so the
+  // sniff happens HERE and not in the listing: this route already opens the one
+  // file being viewed, while the listing must stay name-only (see /api/files/:id).
+  let harness = null;
+  if (kind === 'text' && /\.jsonl$/i.test(f)) {
+    harness = await traceHarnessOf(f);
+    if (harness) kind = 'trace';
+  }
+  const meta = {
+    path: path.relative(root, f), name: path.basename(f), size: st.size, mtime: st.mtimeMs,
+    kind, mime: mimeOf(f, kind === 'trace' ? 'text' : kind), harness,
+  };
+  // A trace still carries its raw text, so the Source toggle has something to
+  // show without a second round trip.
+  if (kind === 'text' || kind === 'markdown' || kind === 'trace') {
+    // No size ceiling: readTextHead is bounded (512 KB) whatever the file weighs,
+    // so a 500 MB log costs one capped read and the viewer shows its head with a
+    // "download for the rest" note. Refusing outright was worse than a partial
+    // answer — the head is usually the part you came for, and a trace of tens of
+    // MB is ordinary.
+    try {
+      const { text, truncated } = readTextHead(f);
+      return res.json({ ...meta, text, truncated });
+    } catch (e) {
+      return res.status(500).json({ error: String(e && e.message || e) });
+    }
+  }
+  res.json(meta);
+});
+
+// Raw bytes, inline — the <img>/<iframe> source for image, html and pdf
+// previews. The CSP sandbox is the load-bearing part: workspace files are
+// written by agents and may contain anything, and this app has no auth of its
+// own. `sandbox` (without allow-same-origin) puts the document in an opaque
+// origin, so even opened directly in a tab it can't read this app's storage or
+// call its API with the operator's cookies. The iframe's own sandbox attribute
+// decides whether scripts run at all.
+app.get('/api/files/:id/raw', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).end();
+  const f = resolveSafe(folderPathOf(s), req.query.path);
+  if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) return res.status(404).end();
+  res.setHeader('content-type', mimeOf(f, kindOfFile(f)));
+  res.setHeader('x-content-type-options', 'nosniff');
+  res.setHeader('content-security-policy', 'sandbox allow-scripts allow-popups allow-forms allow-modals');
+  res.setHeader('content-disposition', `inline; filename="${path.basename(f).replace(/[^\w.\- ]/g, '_')}"`);
+  res.sendFile(f);
 });
 
 app.get('/api/files/:id/download', (req, res) => {
@@ -1294,6 +1368,129 @@ app.get('/api/files/:id/download', (req, res) => {
   const f = resolveSafe(folderPathOf(s), req.query.path);
   if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) return res.status(404).end();
   res.download(f);
+});
+
+// Save an edited text file.
+//
+// Two guards earn their keep here. First, `mtime`: agents are writing these very
+// files while a tab sits open on one, so a save carries the mtime the editor
+// loaded and is refused if the file moved on — losing an agent's work to a
+// stale buffer is worse than making someone reload. Second, only files we could
+// show WHOLE are writable: the preview serves the first 512 KB of a big file, and
+// saving that back would silently truncate the rest.
+app.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const f = resolveSafe(folderPathOf(s), req.query.path);
+  if (!f || !fs.existsSync(f)) return res.status(404).json({ error: 'not found' });
+  const st = fs.statSync(f);
+  if (!st.isFile()) return res.status(400).json({ error: 'not a file' });
+
+  const kind = kindOfFile(f);
+  if (kind === 'binary' || kind === 'image' || kind === 'pdf') {
+    return res.status(415).json({ error: 'not a text file' });
+  }
+  if (st.size > TEXT_MAX) {
+    return res.status(413).json({ error: 'too big to edit — only the first part was loaded' });
+  }
+  const expected = Number(req.query.mtime || 0);
+  if (expected && Math.abs(st.mtimeMs - expected) > 1000) {
+    return res.status(409).json({ error: 'changed on disk since you opened it', mtime: st.mtimeMs });
+  }
+  const text = typeof req.body === 'string' ? req.body : '';
+  if (text.length > TEXT_MAX) return res.status(413).json({ error: 'too big to save' });
+
+  // Write beside the target and rename: a crash or a full disk leaves the
+  // original intact rather than a half-written file.
+  const tmp = path.join(path.dirname(f), `.${path.basename(f)}.am-tmp`);
+  try {
+    fs.writeFileSync(tmp, text, 'utf8');
+    fs.renameSync(tmp, f);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    return res.status(500).json({ error: String((e && e.message) || e) });
+  }
+  const after = fs.statSync(f);
+  res.json({ ok: true, size: after.size, mtime: after.mtimeMs });
+});
+
+// ---------- create and delete ----------
+// A workspace-relative NAME (not a path): one segment, nothing that could climb
+// out of the folder it is being created in.
+function cleanName(n) {
+  const name = String(n || '').trim();
+  if (!name || name.length > 200) return null;
+  if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') return null;
+  if (name.startsWith('.') && name.length === 1) return null;
+  return name;
+}
+
+// Create an empty folder or an empty file. Two verbs, one shape, because the
+// pane offers them side by side.
+for (const [verb, make] of [
+  ['mkdir', (dest) => fs.mkdirSync(dest)],
+  // 'wx' is the whole point: it fails rather than truncating a file that is
+  // already there, so "new file" can never quietly empty an existing one.
+  ['touch', (dest) => fs.closeSync(fs.openSync(dest, 'wx'))],
+]) {
+  app.post(`/api/files/:id/${verb}`, (req, res) => {
+    const s = store.get(req.params.id);
+    if (!s) return res.status(404).json({ error: 'not found' });
+    const dir = resolveSafe(folderPathOf(s), (req.body || {}).path || '');
+    const name = cleanName((req.body || {}).name);
+    if (!dir || !name) return res.status(400).json({ error: 'bad name' });
+    const dest = path.join(dir, name);
+    if (fs.existsSync(dest)) return res.status(409).json({ error: `"${name}" already exists here` });
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      make(dest);
+    } catch (e) {
+      return res.status(500).json({ error: String((e && e.message) || e) });
+    }
+    res.status(201).json({ ok: true, name });
+  });
+}
+
+// Delete one entry. Folders go recursively — the pane says so before asking.
+app.delete('/api/files/:id/entry', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const root = folderPathOf(s);
+  const target = resolveSafe(root, req.query.path);
+  if (!target || !fs.existsSync(target)) return res.status(404).json({ error: 'not found' });
+  // resolveSafe keeps this inside the workspace; this keeps it off the workspace
+  // itself, which would take every session's folder with it.
+  if (path.resolve(target) === path.resolve(root)) return res.status(400).json({ error: 'cannot delete the workspace root' });
+  try {
+    fs.rmSync(target, { recursive: true, force: true });
+  } catch (e) {
+    return res.status(500).json({ error: String((e && e.message) || e) });
+  }
+  res.json({ ok: true });
+});
+
+// One page of an on-disk transcript, rendered by the same reader the Trace pane
+// uses. Paged rather than whole: these files reach tens of MB, and the viewer
+// only ever has a window of them on screen.
+app.get('/api/files/:id/trace', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const f = resolveSafe(folderPathOf(s), req.query.path);
+  if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json(await readTraceByPath(f, {
+      offset: Number(req.query.offset) || 0,
+      limit: Number(req.query.limit) || 200,
+    }));
+  } catch (e) {
+    // "not a transcript" is an ordinary answer here, not a failure: the pane
+    // falls back to showing the file as text.
+    if (['no-trace', 'unsupported-harness'].includes(e && e.code)) {
+      return res.status(404).json({ error: e.message, code: e.code });
+    }
+    console.error('[trace file]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'trace read failed' });
+  }
 });
 
 // Stream uploads straight to disk — a big drag-drop must not be buffered in the

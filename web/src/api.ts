@@ -1,6 +1,14 @@
 import type { Cli, Group, MoveTarget, RemoteInfo, RemoteMessage, Session, Tree } from './types';
 
 const HEADERS = { 'content-type': 'application/json' };
+// Like `json`, but keeps the server's own words — these routes fail for reasons
+// worth reading ("already exists here").
+const jsonOrError = async (r: Response) => {
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `${r.status}`);
+  return body;
+};
+
 const json = (r: Response) => {
   if (!r.ok) throw new Error(`${r.status}`);
   return r.json();
@@ -150,19 +158,72 @@ export interface Traces { sessions: SessionTraces[]; totals: TraceStats; generat
 export const getTraces = (): Promise<Traces> => fetch('/api/traces').then(json);
 
 // ---- files ----
-export interface FileEntry { name: string; dir: boolean; size: number; }
+// 'trace' is content-detected, not name-detected: a transcript is a .jsonl like
+// any other until /preview reads a line of it (see the route).
+export type FileKind = 'text' | 'markdown' | 'html' | 'image' | 'pdf' | 'binary' | 'trace';
+export interface FileEntry { name: string; dir: boolean; size: number; mtime: number; kind?: FileKind; }
 export interface FileListing { path: string; root: string; entries: FileEntry[]; }
+export interface FilePreview {
+  path: string; name: string; size: number; mtime: number; kind: FileKind; mime: string;
+  text?: string; truncated?: boolean; reason?: string;
+  /** kind==='trace': which harness wrote it (claude, codex, …). */
+  harness?: string | null;
+}
 
 export const listFiles = (id: string, p = ''): Promise<FileListing> =>
   fetch(`/api/files/${id}?path=${encodeURIComponent(p)}`).then(json);
+
+export const previewFile = (id: string, p: string): Promise<FilePreview> =>
+  fetch(`/api/files/${id}/preview?path=${encodeURIComponent(p)}`).then(json);
+
+// One page of a transcript sitting in the workspace, shaped exactly like the
+// Trace pane's own pages so the same viewer renders it.
+export const getFileTracePage = async (id: string, p: string, offset = 0, limit = 200): Promise<TracePage> => {
+  const r = await fetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&offset=${offset}&limit=${limit}`);
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    throw new TraceUnavailable(d.error || 'could not read this trace', d.code || 'no-trace');
+  }
+  return r.json();
+};
+
+export const rawUrl = (id: string, p: string) =>
+  `/api/files/${id}/raw?path=${encodeURIComponent(p)}`;
 
 export const uploadFile = (id: string, p: string, file: File) =>
   fetch(`/api/files/${id}/upload?path=${encodeURIComponent(p)}&name=${encodeURIComponent(file.name)}`, {
     method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: file,
   }).then(json);
 
+// Create an empty folder / an empty file inside `parent`. The server refuses a
+// name that already exists rather than overwriting it.
+export const createFolder = (id: string, parent: string, name: string) =>
+  fetch(`/api/files/${id}/mkdir`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ path: parent, name }) })
+    .then(jsonOrError);
+
+export const createFile = (id: string, parent: string, name: string) =>
+  fetch(`/api/files/${id}/touch`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ path: parent, name }) })
+    .then(jsonOrError);
+
+// Delete a file, or a folder and everything under it.
+export const deleteEntry = (id: string, p: string) =>
+  fetch(`/api/files/${id}/entry?path=${encodeURIComponent(p)}`, { method: 'DELETE' }).then(jsonOrError);
+
 export const downloadUrl = (id: string, p: string) =>
   `/api/files/${id}/download?path=${encodeURIComponent(p)}`;
+
+// Save an edited text file. `mtime` is the one the editor loaded: the server
+// refuses the write if the file changed underneath (an agent edited it too).
+export const writeFile = async (id: string, p: string, text: string, mtime: number): Promise<{ size: number; mtime: number }> => {
+  const r = await fetch(`/api/files/${id}/write?path=${encodeURIComponent(p)}&mtime=${mtime}`, {
+    method: 'PUT', headers: { 'content-type': 'text/plain; charset=utf-8' }, body: text,
+  });
+  // Unlike the rest of the API, a failed save has something worth reading in it
+  // ("changed on disk since you opened it") — surface it instead of a number.
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `${r.status}`);
+  return body;
+};
 
 // ---- session sharing (docs/session-sharing.md) ----
 export interface ShareInfo {
