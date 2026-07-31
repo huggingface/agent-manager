@@ -1969,8 +1969,21 @@ server.requestTimeout = 0;
 const wss = new WebSocketServer({ server, path: '/ws' });
 // Without these listeners a transport error (client reset, listen failure)
 // throws out of the EventEmitter and crashes the process.
-wss.on('error', (e) => console.error('[wss error]', e.message));
-server.on('error', (e) => console.error('[server error]', e.message));
+// A bind failure surfaces on both emitters; the server handler below owns it, so
+// skip it here to keep one report and one exit.
+wss.on('error', (e) => { if (e && e.syscall !== 'listen') console.error('[wss error]', e.message); });
+server.on('error', (e) => {
+  console.error('[server error]', e.message);
+  // A failed listen leaves no handle, so the loop drains and node returns 0 —
+  // the supervisor reads that as a clean stop and stays quiet, and the operator
+  // reads "exit code: 0" as the Space crashing on its own. Fail loudly instead.
+  // (Seen on Spaces dev mode: it restarts the app in the same container while
+  // the previous, healthy node still holds the port.)
+  if (e && e.syscall === 'listen') {
+    console.error(`[fatal] cannot listen on :${PORT} — something else is probably already bound to it. Exiting 1.`);
+    process.exit(1);
+  }
+});
 
 // Only accept WebSockets from our own page. WS handshakes skip CORS entirely
 // and the browser attaches cookies, so without this check any website could try
