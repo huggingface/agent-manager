@@ -175,6 +175,45 @@ function RenameInput({ init, onCommit, onCancel }: {
   );
 }
 
+// Leaving a file with an unsaved buffer is the one moment that deserves to
+// interrupt: a hint at the foot of the pane is not a warning, and the cost of
+// missing it is the work you just did. Small, centred on the pane, and every
+// answer is one click — including doing nothing.
+function UnsavedDialog({ name, conflict, busy, onSave, onDiscard, onCancel }: {
+  name: string; conflict: boolean; busy: boolean;
+  onSave: () => void; onDiscard: () => void; onCancel: () => void;
+}) {
+  return (
+    <div
+      className="fv-modal-back"
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}
+    >
+      <div
+        className="fv-modal" role="dialog" aria-modal="true" aria-label="Unsaved changes"
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === 'Escape') { e.preventDefault(); onCancel(); }   // Esc backs out, never discards
+          if (e.key === 'Enter') { e.preventDefault(); onSave(); }
+        }}
+      >
+        <div className="fv-modal-title">Unsaved changes in {name}</div>
+        <div className="fv-modal-body">
+          {conflict
+            ? 'This file also changed on disk since you opened it. Saving replaces what is there now.'
+            : 'Your edits have not been written to the file.'}
+        </div>
+        <div className="fv-modal-acts">
+          <button className="mini-btn" onClick={onCancel}>Keep editing</button>
+          <button className="mini-btn danger" onClick={onDiscard} disabled={busy}>Discard</button>
+          <button className="mini-btn primary" autoFocus onClick={onSave} disabled={busy}>
+            {busy ? 'Saving…' : conflict ? 'Overwrite and close' : 'Save and close'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Deleting asks in the row itself rather than in a browser dialog: the question
 // names what is about to go, and for a folder it says that its contents go with
 // it, because none of this is undoable.
@@ -452,6 +491,8 @@ export type SaveState = {
   status: 'clean' | 'dirty' | 'saving' | 'saved' | 'error';
   /** Write the buffer. Enabled only while there is something to write. */
   save: () => void;
+  /** Write it and report whether it landed — for "save and close". */
+  saveNow: (force?: boolean) => Promise<boolean>;
   /** Throw the buffer away and go back to what is on disk. */
   discard: () => void;
   error: string | null;
@@ -553,9 +594,12 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   // One writer for every save — the debounce, the flush on close, and ⌘S all
   // come through here. `force` drops the mtime precondition, which is what
   // "overwrite" means after a conflict.
-  const flush = useCallback(async (force = false) => {
+  // Resolves true when the file on disk matches the buffer — which "save and
+  // close" needs, so a failed write keeps the dialog up instead of closing over
+  // the error.
+  const flush = useCallback(async (force = false): Promise<boolean> => {
     const job = pending.current;
-    if (!job) return;
+    if (!job) return true;               // nothing outstanding
     pending.current = null;
     setStatus('saving'); setSaveErr(null);
     try {
@@ -565,6 +609,7 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
       if (kindRef.current === 'html') setSource(job.text);
       setStatus('saved');
       onSaved?.();
+      return true;
     } catch (e: any) {
       const msg = String(e?.message || e);
       // A refused save must NOT drop the text — put it back so the next attempt
@@ -573,6 +618,7 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
       setConflict(/changed on disk/.test(msg));
       setSaveErr(msg);
       setStatus('error');
+      return false;
     }
   }, [sessionId, path, onSaved]);
 
@@ -599,6 +645,7 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   const edit = useMemo<SaveState>(() => ({
     can: canEdit,
     save: () => flush(),
+    saveNow: (force = false) => flush(force),
     discard: () => {
       pending.current = null;
       setDraft(null); setSaveErr(null); setStatus('clean');
@@ -791,15 +838,33 @@ export default function FilesPane({
   };
 
   // Nothing is written without being asked for, so leaving a file with an unsaved
-  // buffer would drop it silently. Ask once; a second Esc (or Back) goes through.
+  // buffer would drop it silently. Ask in a dialog — the answer is the work.
   const edit = info.edit;
   const unsaved = edit?.status === 'dirty' || edit?.status === 'error' || !!edit?.conflict;
   const leaveView = () => {
-    if (unsaved && !confirmClose) { setConfirmClose(true); return; }
+    if (unsaved) { setConfirmClose(true); return; }
     setConfirmClose(false);
     setViewing(null);
   };
   useEffect(() => { if (!unsaved) setConfirmClose(false); }, [unsaved]);
+
+  // "Save and close" has to wait for the write to land before leaving, so the
+  // dialog stays up (disabled) rather than closing on a save that then fails.
+  // Dismissing the dialog has to hand focus back, or the keyboard is left on
+  // <body> and the next Esc goes nowhere — which reads as the guard being broken.
+  const backToEditing = () => {
+    setConfirmClose(false);
+    requestAnimationFrame(() => {
+      const cm = paneRef.current?.querySelector<HTMLElement>('.fv-cm .cm-content');
+      (cm || paneRef.current)?.focus({ preventScroll: true });
+    });
+  };
+
+  const saveAndClose = async () => {
+    if (!edit) return;
+    const ok = await edit.saveNow(!!edit.conflict);
+    if (ok) { setConfirmClose(false); setViewing(null); }
+  };
 
   // Create lands in the folder you are looking at, which is the one the
   // breadcrumb names.
@@ -1114,6 +1179,17 @@ export default function FilesPane({
         </div>
       </div>
 
+      {viewing && confirmClose && edit && (
+        <UnsavedDialog
+          name={viewing.split('/').pop()!}
+          conflict={!!edit.conflict}
+          busy={edit.status === 'saving'}
+          onSave={saveAndClose}
+          onDiscard={() => { edit.discard(); setConfirmClose(false); setViewing(null); }}
+          onCancel={backToEditing}
+        />
+      )}
+
       {viewing && (
         <div className="files-view">
           <FileView
@@ -1126,11 +1202,7 @@ export default function FilesPane({
       <div className="files-hint">
         {!viewing
           ? 'Click a file to preview · click a folder to expand · double-click a folder to open it'
-          : confirmClose
-            ? (edit?.conflict
-              ? 'This file changed on disk — Reload or Overwrite, or Esc again to leave your edits behind'
-              : 'Unsaved changes — ⌘S to save, or Esc again to discard them')
-            : edit?.status === 'dirty'
+          : edit?.status === 'dirty'
               ? 'Unsaved changes — ⌘S or Save'
               : edit?.can
                 ? 'Type to edit · ⌘S saves · Esc goes back'

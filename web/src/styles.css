@@ -721,6 +721,9 @@ body {
 .tw-warn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mini-btn.danger { background: var(--danger); color: #fff; border-color: transparent; }
 .mini-btn.danger:disabled { opacity: .5; }
+/* the one obvious action in a group — Create, Save and close */
+.mini-btn.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+.mini-btn.primary:disabled { opacity: .45; }
 .tree-row.selected { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .tree-row.selected .tw-name { color: var(--accent); font-weight: 600; }
 .tree-msg { color: var(--muted); font-size: 0.85em; padding: 0.15em 0; }
@@ -804,6 +807,17 @@ body {
 .fv-trace-tools .tv-search { height: 20px; font-size: 11px; max-width: 12em; }
 .fv-trace-tools .tv-nav .mini-btn { padding: 0 4px; }
 .files-view .trace-body { flex: 1; min-height: 0; }
+
+/* Unsaved-changes dialog: over the PANE, not the window — it belongs to the file
+   you were editing, and other panes stay usable. */
+.fv-modal-back { position: absolute; inset: 0; z-index: 30; display: grid; place-items: center;
+  background: color-mix(in srgb, var(--bg) 62%, transparent); backdrop-filter: blur(1.5px); }
+.fv-modal { width: min(23rem, calc(100% - 2rem)); background: var(--panel); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--r-lg);
+  box-shadow: 0 8px 28px #0000002e; padding: 14px 16px 12px; }
+.fv-modal-title { font-weight: 600; font-size: 13px; margin-bottom: 5px; }
+.fv-modal-body { font-size: 12px; color: var(--muted); line-height: 1.45; }
+.fv-modal-acts { display: flex; justify-content: flex-end; gap: 6px; margin-top: 13px; }
 
 /* pdf: our own pages, stacked on the same neutral stage as images */
 .fv-pdf { flex: 1; min-height: 0; overflow: auto; background: var(--bg); }
