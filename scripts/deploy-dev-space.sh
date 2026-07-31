@@ -78,7 +78,10 @@ def setkey(h, k, v):
 head = setkey(head, "title", f"{name} (dev)")
 head = setkey(head, "emoji", "🚧")
 head = setkey(head, "colorFrom", "yellow")
-head = setkey(head, "short_description", f"DEV instance · branch {ref} @ {sha} · own bucket, not prod data")
+# The Hub rejects a card whose short_description exceeds 60 chars, and the
+# rejection surfaces as a YAML validation error on the whole commit.
+desc = f"DEV · {ref} @ {sha} · own bucket"
+head = setkey(head, "short_description", desc[:60])
 api.upload_file(
     path_or_fileobj=f"---\n{head}\n---\n{body}".encode(),
     path_in_repo="README.md", repo_id=space, repo_type="space",
