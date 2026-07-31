@@ -148,10 +148,10 @@ export default function Sidebar({
   const submitQuick = () => {
     const p = quickPrompt.trim();
     if (!quickCli) return;
-    // A remote agent is addressed by its name, so it cannot be created unnamed —
-    // and its "location" is always its own message folder, never the picker's.
+    // A remote agent names itself like any other agent when unnamed
+    // (remote-agent-1, -2, …); its "location" is always its own message folder,
+    // never the picker's.
     if (isRemote(quickCli)) {
-      if (!quickName.trim()) { setQuickError('a remote agent needs a name — it is the folder and the address'); return; }
       onQuickStart(quickCli, p, quickName.trim(), '.');
       setQuickPrompt(''); setQuickName(''); closePanel();
       return;

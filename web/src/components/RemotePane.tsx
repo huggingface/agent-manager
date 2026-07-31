@@ -4,7 +4,7 @@ import { REMOTE_STATE_LABEL } from '../types';
 import * as api from '../api';
 import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
-import { CloseGlyph, StopGlyph, PlayGlyph, ShareGlyph } from './icons';
+import { CloseGlyph, StopGlyph, PlayGlyph, ShareGlyph, AckGlyph } from './icons';
 
 // Looks like the terminal, is not one: no PTY, no xterm.js, no WebSocket. The
 // agent's real TUI is running on its own machine — what crosses the wire is
@@ -13,6 +13,15 @@ import { CloseGlyph, StopGlyph, PlayGlyph, ShareGlyph } from './icons';
 
 const POLL_MS = 2000; // the app's existing /api/tree cadence
 const MAX_RENDER = 2000; // a human-paced conversation, not a 6 MB transcript
+
+const fmtAgo = (ts?: number | null) => {
+  if (!ts) return null;
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 10) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
+};
 
 export default function RemotePane({
   session, focused, zoom = 100, dragId, onDragActive, onFocus, onClose, onRename,
@@ -31,16 +40,22 @@ export default function RemotePane({
   const [messages, setMessages] = useState<RemoteMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  const [showConnect, setShowConnect] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(session.name);
+  const [connectOpen, setConnectOpen] = useState(false);
   const [prompt, setPrompt] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
   const cursor = useRef(0);
   const atBottom = useRef(true);
+  const autoOpened = useRef(false);
 
-  // Merge a delta into the log. The server only ever appends, so de-duping on
-  // seq is enough — no reconciliation, no flicker.
+  // One font size for the log, the composer and the status line, so the pane
+  // reads as one surface and the zoom control moves all of it together.
+  const fontSize = `${(13 * zoom) / 100}px`;
+
   const absorb = useCallback((incoming: RemoteMessage[]) => {
     if (!incoming.length) return;
     setMessages((prev) => {
@@ -79,23 +94,41 @@ export default function RemotePane({
     if (el && atBottom.current) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
-  const onScroll = () => {
-    const el = bodyRef.current;
-    if (el) atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  };
-
   const loadPrompt = useCallback(async () => {
     if (!name) return;
     try { setPrompt(await api.getRemotePrompt(name)); } catch { setPrompt('could not load the connect prompt'); }
   }, [name]);
 
-  const openConnect = () => {
-    setShowConnect(true);
-    if (prompt === null) loadPrompt();
+  // Nothing has ever spoken from the other side, so this pane's whole job right
+  // now is pairing: open the connect popover once, unasked. It closes like any
+  // other popover and never re-opens itself.
+  const neverConnected = !!info && !info.connected && !messages.some((m) => m.role === 'agent');
+  useEffect(() => {
+    if (!neverConnected || autoOpened.current) return;
+    autoOpened.current = true;
+    setConnectOpen(true);
+    loadPrompt();
+  }, [neverConnected, loadPrompt]);
+
+  // Anchored popover, so dismissal works the way every other popover does.
+  useEffect(() => {
+    if (!connectOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (popRef.current && !popRef.current.contains(e.target as Node)) setConnectOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setConnectOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [connectOpen]);
+
+  const toggleConnect = () => {
+    setConnectOpen((open) => {
+      if (!open && prompt === null) loadPrompt();
+      return !open;
+    });
   };
 
-  // Nothing in the prompt is secret, so a plain clipboard copy is the whole
-  // pairing step.
   const copy = () => {
     if (!prompt) return;
     navigator.clipboard?.writeText(prompt).then(() => {
@@ -108,8 +141,6 @@ export default function RemotePane({
     const text = draft.trim();
     if (!text || sending) return;
     setSending(true);
-    // Optimistic: the operator's own words appear at once, then the poll
-    // replaces them with the server's copy (which owns the seq).
     setDraft('');
     atBottom.current = true;
     try {
@@ -131,18 +162,17 @@ export default function RemotePane({
     } catch { setErr('could not change the connection'); }
   };
 
+  const commitName = () => {
+    setEditing(false);
+    const next = titleDraft.trim();
+    if (next && next !== session.name) onRename?.(next);
+  };
+
   const state = info?.state || session.state;
   const paused = info?.paused ?? !!session.remote?.paused;
   const peer = info?.peer || null;
-  // Once connected, the header stops showing the folder and shows where the
-  // agent actually is — the more useful fact.
-  const where = peer
-    ? [peer.harness, peer.cwd].filter(Boolean).join(' · ')
-    : `workspace/remote-agents/${name}/`;
-  // Nothing has ever spoken from the other side, so the pane's job right now is
-  // pairing — the connect prompt IS the pane, not a modal behind a button.
-  const neverConnected = !!info && !info.connected && !messages.some((m) => m.role === 'agent');
-  useEffect(() => { if (neverConnected && prompt === null) loadPrompt(); }, [neverConnected, prompt, loadPrompt]);
+  const stateLabel = REMOTE_STATE_LABEL[state];
+  const seenAgo = fmtAgo(info?.lastSeenAt);
 
   const rendered = useMemo(
     () => messages.map((m) => ({ ...m, html: m.role === 'agent' ? renderMarkdown(m.text) : '' })),
@@ -151,53 +181,77 @@ export default function RemotePane({
 
   return (
     <div className={`slot${focused ? ' focused' : ''}`} onMouseDown={onFocus}>
+      {/* The standard three-column pane header: identity left, name centred,
+          actions right — same as every other agent's pane. Everything else the
+          operator might want to know lives in the status line under the
+          composer, the way a CLI keeps its context on one bottom row. */}
       <div
-        className={`pane-head rp-head${dragId ? ' draggable' : ''}`}
+        className={`pane-head${dragId ? ' draggable' : ''}`}
         draggable={!!dragId}
         onDragStart={dragId ? (e) => { e.dataTransfer.setData('text/plain', dragId); e.dataTransfer.effectAllowed = 'move'; onDragActive?.(true); } : undefined}
         onDragEnd={dragId ? () => onDragActive?.(false) : undefined}
       >
-        <Logo cli="remote" size={16} tint="#5ec2e0" />
-        <span className={`dot ${state}`} title={REMOTE_STATE_LABEL[state]} />
-        <span
-          className="rp-name"
-          title={onRename ? 'Double-click to rename' : undefined}
-          onDoubleClick={onRename ? () => {
-            const next = window.prompt('Rename pane', session.name);
-            if (next && next.trim()) onRename(next.trim());
-          } : undefined}
-        >{session.name}</span>
-        <span className="rp-where" title={peer?.host ? `on ${peer.host}` : undefined}>{where}</span>
-        <span className="spacer" />
-        <button className="mini-btn" title="Show the connect prompt" onClick={(e) => { e.stopPropagation(); openConnect(); }}><ShareGlyph /></button>
-        <button
-          className="mini-btn"
-          title={paused ? 'Reconnect — let an agent poll again' : 'Disconnect — tell the agent to stop'}
-          onClick={(e) => { e.stopPropagation(); togglePaused(); }}
-        >{paused ? <PlayGlyph /> : <StopGlyph />}</button>
-        <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
+        <div className="ph-left">
+          <Logo cli="remote" size={16} tint="#5ec2e0" />
+          <span className={`status ${state}`} title={stateLabel} />
+        </div>
+        {editing ? (
+          <input
+            className="ph-title-input" autoFocus value={titleDraft}
+            onMouseDown={(e) => e.stopPropagation()}
+            onChange={(e) => setTitleDraft(e.target.value)}
+            onBlur={commitName}
+            onKeyDown={(e) => { if (e.key === 'Enter') commitName(); if (e.key === 'Escape') setEditing(false); }}
+          />
+        ) : (
+          <span
+            className="ph-title"
+            title={onRename ? 'double-click to rename' : undefined}
+            onDoubleClick={onRename ? () => { setTitleDraft(session.name); setEditing(true); } : undefined}
+          >{session.name}</span>
+        )}
+        <div className="ph-right">
+          <div className="rp-pop-wrap" ref={popRef}>
+            <button
+              className={`mini-btn${connectOpen ? ' on' : ''}`}
+              title="Connect an agent — show the prompt to copy"
+              onClick={(e) => { e.stopPropagation(); toggleConnect(); }}
+            ><ShareGlyph /></button>
+            {connectOpen && (
+              <div className="rp-pop" onMouseDown={(e) => e.stopPropagation()}>
+                <div className="rp-pop-head">
+                  <span>connect an agent as <b>{name}</b></span>
+                  <span className="spacer" />
+                  <button className="mini-btn" onClick={copy} disabled={!prompt}>{copied ? 'copied' : 'copy'}</button>
+                  <button className="mini-btn" onClick={() => setConnectOpen(false)}><CloseGlyph /></button>
+                </div>
+                <pre className="rp-pop-prompt">{prompt ?? 'loading…'}</pre>
+                <div className="rp-pop-foot">
+                  paste into a coding CLI on the machine you want to work from · nothing here is secret
+                </div>
+              </div>
+            )}
+          </div>
+          <button
+            className="mini-btn"
+            title={paused ? 'Reconnect — let an agent poll again' : 'Disconnect — tell the agent to stop'}
+            onClick={(e) => { e.stopPropagation(); togglePaused(); }}
+          >{paused ? <PlayGlyph /> : <StopGlyph />}</button>
+          <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
+        </div>
       </div>
 
       <div
         className="rp-body"
         ref={bodyRef}
-        onScroll={onScroll}
-        style={{ fontSize: `${(13 * zoom) / 100}px` }}
+        onScroll={() => {
+          const el = bodyRef.current;
+          if (el) atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        }}
+        style={{ fontSize }}
       >
-        {/* The pairing state IS the pane — no modal. */}
-        {(showConnect || neverConnected) && (
-          <div className="rp-connect">
-            <div className="rp-connect-head">
-              <span>{neverConnected && !showConnect ? 'waiting for an agent to connect' : `connect an agent as "${name}"`}</span>
-              <span className="spacer" />
-              <button className="mini-btn" onClick={copy} disabled={!prompt}>{copied ? 'copied' : 'copy'}</button>
-              {showConnect && <button className="mini-btn" onClick={() => setShowConnect(false)}>hide</button>}
-            </div>
-            <pre className="rp-prompt">{prompt ?? 'loading…'}</pre>
-            <div className="rp-connect-foot">
-              paste this into a coding CLI on the machine you want to work from · nothing here is secret
-            </div>
-          </div>
+        {neverConnected && (
+          <div className="rp-sys">· waiting for an agent to connect</div>
         )}
         {rendered.map((m) => (
           m.role === 'system' ? (
@@ -206,10 +260,10 @@ export default function RemotePane({
             <div key={m.seq} className="rp-user">
               <span className="rp-caret">❯</span>
               <span className="rp-user-text">{m.text}</span>
-              {/* Honest: the server drew this from the highest seq a poll
-                  actually returned. Nothing more is claimed. */}
+              {/* Drawn from the highest seq a poll actually returned; claims
+                  nothing beyond that. */}
               {m.seq <= (info?.deliveredThrough ?? 0) && (
-                <span className="rp-ack" title="picked up by the agent">✓</span>
+                <AckGlyph className="rp-ack" />
               )}
             </div>
           ) : (
@@ -219,7 +273,7 @@ export default function RemotePane({
         {err && <div className="rp-err">{err}</div>}
       </div>
 
-      <div className="rp-composer">
+      <div className="rp-composer" style={{ fontSize }}>
         <span className="rp-caret">❯</span>
         <textarea
           className="rp-input"
@@ -227,10 +281,20 @@ export default function RemotePane({
           value={draft}
           placeholder={paused ? 'disconnected — a message will wait in the log' : 'message this agent'}
           onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
-          }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
         />
+      </div>
+
+      {/* The bottom status row: state, where the agent actually is, when we last
+          heard from it. */}
+      <div className="rp-status" style={{ fontSize }}>
+        <span className={`rp-state ${state}`}>{stateLabel}</span>
+        {peer?.harness && <><span className="rp-dot">·</span><span>{peer.harness}</span></>}
+        {peer?.cwd && <><span className="rp-dot">·</span><span className="rp-cwd" title={peer.cwd}>{peer.cwd}</span></>}
+        {peer?.host && <><span className="rp-dot">·</span><span>on {peer.host}</span></>}
+        {!peer && <><span className="rp-dot">·</span><span className="rp-cwd">remote-agents/{name}/</span></>}
+        <span className="spacer" />
+        {seenAgo && <span className="rp-seen">last seen {seenAgo}</span>}
         <span className="rp-hint">↵ send · ⇧↵ newline</span>
       </div>
     </div>

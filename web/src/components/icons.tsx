@@ -44,13 +44,26 @@ export const ListGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
-// A remote agent: broadcast arcs around a dot. Not a vendor, so it gets a glyph
-// like files/trace rather than a logo.
+// A remote agent: `> <` facing each other inside a circle — the machine-to-machine
+// connection sign, not a vendor logo. The gap is the point: two ends reaching
+// toward each other across a distance.
 export const RemoteGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
-    <circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none" />
-    <path d="M4.7 11.3a4.7 4.7 0 0 1 0-6.6M11.3 4.7a4.7 4.7 0 0 1 0 6.6" />
-    <path d="M2.4 13.6a8 8 0 0 1 0-11.2M13.6 2.4a8 8 0 0 1 0 11.2" opacity="0.45" />
+    {/* Thin ring, bold chevrons: at 16px the ring plus fine inner detail muddles
+        into a circled X, so the enclosure recedes and the `><` carries the mark. */}
+    <circle cx="8" cy="8" r="7.1" strokeWidth="1" />
+    <path d="M5.1 5.9 6.7 8 5.1 10.1M10.9 5.9 9.3 8l1.6 2.1" strokeWidth="1.7" strokeLinejoin="round" />
+  </G>
+);
+
+// The "the agent has this" tick. Its own glyph rather than a text ✓ so it can be
+// sized and coloured deliberately (accent, via currentColor).
+export const AckGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    {/* Heavier than the 1.2 house stroke: this is a small mark that has to read
+        at a glance next to a line of text. Set on the path, since G fixes the
+        stroke width for every other glyph. */}
+    <path d="M3.2 8.6 6.4 11.8 12.8 4.6" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
   </G>
 );
 

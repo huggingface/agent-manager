@@ -548,8 +548,6 @@ app.post('/api/remote/:name/hello', express.json({ limit: '8kb' }), (req, res) =
   };
   store.update(s.id, { remote: { ...s.remote, peer } });
   remote.noteSeen(name);
-  const where = [peer.harness, peer.cwd, peer.host && `on ${peer.host}`].filter(Boolean).join(' · ');
-  remote.append(name, { role: 'system', from: name, text: `connected${where ? ` · ${where}` : ''}` });
   res.json({ ok: true, name, seq: remote.lastSeq(name) });
 });
 
@@ -1458,9 +1456,6 @@ function createSession({ name, cli, groupId, path: reqPath, prompt }) {
 app.post('/api/sessions', (req, res) => {
   const { name, cli, groupId, path: reqPath, prompt } = req.body || {};
   if (!cli || !cliById(cli)) return res.status(400).json({ error: 'unknown cli' });
-  // A remote agent is addressed by its name, so it is the one kind that cannot
-  // be created unnamed.
-  if (isRemote(cli) && !(name && name.trim())) return res.status(400).json({ error: 'a remote agent needs a name — it is the folder and the address' });
   const s = createSession({ name, cli, groupId, path: reqPath, prompt });
   if (!s) return res.status(400).json({ error: 'bad path' });
   if (s.error) return res.status(400).json({ error: s.error });
