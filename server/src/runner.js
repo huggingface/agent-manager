@@ -102,7 +102,13 @@ export function agentInfo() {
   if (!USE_TMUX) return map;
   let list;
   try {
-    list = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'], { encoding: 'utf8' });
+    // stderr is dropped on every tmux call that already handles its own
+    // failure: with no server running (fresh container, or after the last
+    // session ends) tmux prints "error connecting to /tmp/tmux-1000/default"
+    // and the catch below treats that as "no sessions" — so the message is
+    // pure noise that made a healthy Space look broken in the log.
+    list = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
   } catch {
     paneSig.clear();
     return map; // no server / no sessions
@@ -114,7 +120,10 @@ export function agentInfo() {
     const id = name.slice(3);
     live.add(id);
     let text = '';
-    try { text = execFileSync('tmux', ['capture-pane', '-p', '-t', name], { encoding: 'utf8' }); } catch {}
+    try {
+      text = execFileSync('tmux', ['capture-pane', '-p', '-t', name],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {}
     const sig = djb2(text);
     const prev = paneSig.get(id);
     const changedAt = !prev || prev.sig !== sig ? now : prev.changedAt;
@@ -736,10 +745,12 @@ export function copySelection(id) {
   const bufferName = `am-copy-${tmuxName(id)}`;
   let text = '';
   try {
-    text = execFileSync('tmux', ['save-buffer', '-b', bufferName, '-'], { encoding: 'utf8', env: TERM_ENV });
+    text = execFileSync('tmux', ['save-buffer', '-b', bufferName, '-'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: TERM_ENV });
   } catch {
     try {
-      text = execFileSync('tmux', ['save-buffer', '-'], { encoding: 'utf8', env: TERM_ENV });
+      text = execFileSync('tmux', ['save-buffer', '-'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: TERM_ENV });
     } catch {
       return null;
     }
