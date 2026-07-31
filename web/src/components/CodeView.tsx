@@ -84,11 +84,11 @@ export default function CodeView({ text, name, editable, onChange, onSave, theme
   }, [name]);
 
   // Adopt text that changed from the outside (file reloaded, edits discarded)
-  // while leaving the user's own typing alone.
+  // while leaving the user's own typing alone. setDoc marks the dispatch as ours
+  // so it doesn't come back through onChange as a fresh edit.
   useEffect(() => {
     const v = view.current;
-    if (!v || v.state.doc.toString() === text) return;
-    v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: text } });
+    if (v) core.current?.setDoc(v, text);
   }, [text]);
 
   useEffect(() => { if (view.current) core.current?.setEditable(view.current, editable); }, [editable]);

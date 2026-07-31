@@ -1414,6 +1414,20 @@ app.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), (re
   res.json({ ok: true, size: after.size, mtime: after.mtimeMs });
 });
 
+// Folders something else depends on: an agent's own workspace and the shared
+// skills dir. Renaming or deleting those out from under a running agent breaks
+// its cwd, so the pane refuses. Returns a label to say WHY, or null if it's fair
+// game. (Carried over from #9, which had this before we did.)
+function dependedOnDir(abs) {
+  const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+  const target = real(abs);
+  if (target === real(SKILLS_DIR)) return 'the shared skills folder';
+  for (const s of store.list()) {
+    if (s.path && real(workspacePath(s.path)) === target) return `${s.name}'s workspace`;
+  }
+  return null;
+}
+
 // ---------- create and delete ----------
 // A workspace-relative NAME (not a path): one segment, nothing that could climb
 // out of the folder it is being created in.
@@ -1451,6 +1465,69 @@ for (const [verb, make] of [
   });
 }
 
+// Rename one entry in place. The new name is a NAME, so a rename can never also
+// move something — that is the /move route's job (still to come from #9).
+app.post('/api/files/:id/rename', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const root = folderPathOf(s);
+  const from = resolveSafe(root, (req.body || {}).path);
+  const name = cleanName((req.body || {}).name);
+  if (!from || !name) return res.status(400).json({ error: 'bad name' });
+  if (!fs.existsSync(from)) return res.status(404).json({ error: 'not found' });
+  if (path.resolve(from) === path.resolve(root)) return res.status(400).json({ error: 'cannot rename the workspace root' });
+  const dep = dependedOnDir(from);
+  if (dep) return res.status(409).json({ error: `that folder is ${dep}` });
+  const to = path.join(path.dirname(from), name);
+  if (path.resolve(to) === path.resolve(from)) return res.json({ ok: true, name }); // no-op
+  if (fs.existsSync(to)) return res.status(409).json({ error: `"${name}" already exists here` });
+  try {
+    fs.renameSync(from, to);
+  } catch (e) {
+    return res.status(500).json({ error: String((e && e.message) || e) });
+  }
+  res.json({ ok: true, name, path: path.relative(root, to) });
+});
+
+// Move an entry into another folder under the same root, keeping its name — the
+// drag-and-drop half of rename. `to` is the destination FOLDER ('' = the root).
+// Adapted from PR #9, including the realpath check below.
+app.post('/api/files/:id/move', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const root = folderPathOf(s);
+  const b = req.body || {};
+  const from = resolveSafe(root, b.path);
+  if (!from || !fs.existsSync(from)) return res.status(404).json({ error: 'not found' });
+  if (path.resolve(from) === path.resolve(root)) return res.status(400).json({ error: 'cannot move the workspace root' });
+  const dep = dependedOnDir(from);
+  if (dep) return res.status(409).json({ error: `that folder is ${dep}` });
+
+  const destDir = resolveSafe(root, b.to || '');
+  if (!destDir || !fs.existsSync(destDir)) return res.status(404).json({ error: 'no such folder' });
+  if (!fs.statSync(destDir).isDirectory()) return res.status(400).json({ error: 'not a folder' });
+
+  // A folder can't land inside itself — compared on REAL paths, so a symlink in
+  // the destination chain can't smuggle the subtree past the check.
+  try {
+    const realFrom = fs.realpathSync(from);
+    const realDest = fs.realpathSync(destDir);
+    if (realDest === realFrom || realDest.startsWith(realFrom + path.sep)) {
+      return res.status(400).json({ error: "can't move a folder into itself" });
+    }
+  } catch { return res.status(400).json({ error: 'bad path' }); }
+
+  const to = path.join(destDir, path.basename(from));
+  if (path.resolve(to) === path.resolve(from)) return res.json({ ok: true, path: path.relative(root, to) });
+  if (fs.existsSync(to)) return res.status(409).json({ error: `"${path.basename(from)}" already exists there` });
+  try {
+    fs.renameSync(from, to);
+  } catch (e) {
+    return res.status(500).json({ error: String((e && e.message) || e) });
+  }
+  res.json({ ok: true, path: path.relative(root, to) });
+});
+
 // Delete one entry. Folders go recursively — the pane says so before asking.
 app.delete('/api/files/:id/entry', (req, res) => {
   const s = store.get(req.params.id);
@@ -1461,6 +1538,10 @@ app.delete('/api/files/:id/entry', (req, res) => {
   // resolveSafe keeps this inside the workspace; this keeps it off the workspace
   // itself, which would take every session's folder with it.
   if (path.resolve(target) === path.resolve(root)) return res.status(400).json({ error: 'cannot delete the workspace root' });
+  // A folder an agent is living in, or the shared skills dir, is not the
+  // browser's to remove: the agent's cwd would vanish under a running process.
+  const dep = dependedOnDir(target);
+  if (dep) return res.status(409).json({ error: `that folder is ${dep}` });
   try {
     fs.rmSync(target, { recursive: true, force: true });
   } catch (e) {
