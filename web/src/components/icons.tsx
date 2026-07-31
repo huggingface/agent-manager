@@ -150,10 +150,32 @@ export const GlobeGlyph = ({ className }: { className?: string }) => (
 
 export const RefreshGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
-    <path d="M13.2 8A5.2 5.2 0 1 1 11 3.8" />
-    <path d="M11.2 1.6l.3 2.5 2.5-.3" />
+    {/* The arc ends at 12 o'clock and the head points along it, clockwise. The
+        old head sat at 1 o'clock across the tangent, which drew a hook rather
+        than an arrow. */}
+    <path d="M13.2 8A5.2 5.2 0 1 1 8 2.8" />
+    <path d="M5.8 0.9L8 2.8 5.9 4.9" />
   </G>
 );
+
+// Create: the folder/file glyphs above with a plus where the corner is free.
+export const FolderPlusGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M1.75 4.25a1 1 0 0 1 1-1h3.1a1 1 0 0 1 .7.3l.9.9h5.1a1 1 0 0 1 1 1v1.2" />
+    <path d="M1.75 4.25v8.3a1 1 0 0 0 1 1h5.4" />
+    <path d="M11.6 9.1v4.6M9.3 11.4h4.6" />
+  </G>
+);
+
+export const FilePlusGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M9 1.75H4a1 1 0 0 0-1 1v10.5a1 1 0 0 0 1 1h4.1" />
+    <path d="M9 1.75L12.25 5v2.5" />
+    <path d="M8.75 1.9V5.25h3.35" />
+    <path d="M11.6 8.6v4.6M9.3 10.9h4.6" />
+  </G>
+);
+
 
 export const PulseGlyph = ({ className }: { className?: string }) => (
   <G className={className}>

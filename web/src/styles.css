@@ -662,6 +662,24 @@ body {
 .tw-act svg { width: 1em; height: 1em; }
 .tree-row:hover .tw-act { opacity: 1; }
 .tw-act:hover { color: var(--accent); }
+.tw-act.danger:hover { color: var(--danger); }
+.tw-acts { flex: none; display: inline-flex; align-items: center; gap: 1px; }
+
+/* Create prompt and delete confirm: one row above the listing, where the thing
+   they act on is in view. A destructive question gets the danger tint and its
+   own verb — never an OK button. */
+.files-new { flex: none; display: flex; align-items: center; gap: 6px; padding: 5px 10px;
+  border-bottom: 1px solid var(--border); background: var(--panel); font-size: 12px; }
+.files-new .tw-ico { width: 1em; height: 1em; color: var(--muted); flex: none; }
+.files-new-input { flex: 1; min-width: 0; background: var(--term-bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--r-sm); padding: 3px 7px; font: inherit; }
+.files-new-input:focus { outline: none; border-color: var(--accent); }
+.files-new.danger-row { background: color-mix(in srgb, var(--danger) 8%, var(--panel)); }
+.files-new.err { color: var(--danger); }
+.tw-confirm { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+.tw-warn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mini-btn.danger { background: var(--danger); color: #fff; border-color: transparent; }
+.mini-btn.danger:disabled { opacity: .5; }
 .tree-row.selected { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .tree-row.selected .tw-name { color: var(--accent); font-weight: 600; }
 .tree-msg { color: var(--muted); font-size: 0.85em; padding: 0.15em 0; }

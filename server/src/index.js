@@ -1175,6 +1175,61 @@ app.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), (re
   res.json({ ok: true, size: after.size, mtime: after.mtimeMs });
 });
 
+// ---------- create and delete ----------
+// A workspace-relative NAME (not a path): one segment, nothing that could climb
+// out of the folder it is being created in.
+function cleanName(n) {
+  const name = String(n || '').trim();
+  if (!name || name.length > 200) return null;
+  if (name.includes('/') || name.includes('\\') || name === '.' || name === '..') return null;
+  if (name.startsWith('.') && name.length === 1) return null;
+  return name;
+}
+
+// Create an empty folder or an empty file. Two verbs, one shape, because the
+// pane offers them side by side.
+for (const [verb, make] of [
+  ['mkdir', (dest) => fs.mkdirSync(dest)],
+  // 'wx' is the whole point: it fails rather than truncating a file that is
+  // already there, so "new file" can never quietly empty an existing one.
+  ['touch', (dest) => fs.closeSync(fs.openSync(dest, 'wx'))],
+]) {
+  app.post(`/api/files/:id/${verb}`, (req, res) => {
+    const s = store.get(req.params.id);
+    if (!s) return res.status(404).json({ error: 'not found' });
+    const dir = resolveSafe(folderPathOf(s), (req.body || {}).path || '');
+    const name = cleanName((req.body || {}).name);
+    if (!dir || !name) return res.status(400).json({ error: 'bad name' });
+    const dest = path.join(dir, name);
+    if (fs.existsSync(dest)) return res.status(409).json({ error: `"${name}" already exists here` });
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      make(dest);
+    } catch (e) {
+      return res.status(500).json({ error: String((e && e.message) || e) });
+    }
+    res.status(201).json({ ok: true, name });
+  });
+}
+
+// Delete one entry. Folders go recursively — the pane says so before asking.
+app.delete('/api/files/:id/entry', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const root = folderPathOf(s);
+  const target = resolveSafe(root, req.query.path);
+  if (!target || !fs.existsSync(target)) return res.status(404).json({ error: 'not found' });
+  // resolveSafe keeps this inside the workspace; this keeps it off the workspace
+  // itself, which would take every session's folder with it.
+  if (path.resolve(target) === path.resolve(root)) return res.status(400).json({ error: 'cannot delete the workspace root' });
+  try {
+    fs.rmSync(target, { recursive: true, force: true });
+  } catch (e) {
+    return res.status(500).json({ error: String((e && e.message) || e) });
+  }
+  res.json({ ok: true });
+});
+
 // One page of an on-disk transcript, rendered by the same reader the Trace pane
 // uses. Paged rather than whole: these files reach tens of MB, and the viewer
 // only ever has a window of them on screen.

@@ -10,6 +10,7 @@ import { TraceView, type TraceSource } from './TracePane';
 import {
   FolderGlyph, FileGlyph, CloseGlyph, UpGlyph, UploadGlyph, BackGlyph, DownloadGlyph,
   RefreshGlyph, ImageGlyph, CodeGlyph, DocGlyph, GlobeGlyph,
+  FolderPlusGlyph, FilePlusGlyph, TrashGlyph,
 } from './icons';
 
 const fmtSize = (n: number) => {
@@ -123,10 +124,28 @@ function useDir(sessionId: string, path: string, reloadKey: number) {
 type RowProps = {
   sessionId: string; prefix: boolean[]; sort: Sort; reloadKey: number;
   onOpen: (p: string) => void; onPreview: (p: string) => void; selected: string | null;
+  onDelete: (path: string, name: string, dir: boolean) => void;
 };
 
+// Deleting asks in the row itself rather than in a browser dialog: the question
+// names what is about to go, and for a folder it says that its contents go with
+// it, because none of this is undoable.
+function ConfirmDelete({ name, dir, busy, onYes, onNo }: {
+  name: string; dir: boolean; busy: boolean; onYes: () => void; onNo: () => void;
+}) {
+  return (
+    <span className="tw-confirm" onClick={(e) => e.stopPropagation()}>
+      <span className="tw-warn">
+        {dir ? `Delete "${name}" and everything in it?` : `Delete "${name}"?`}
+      </span>
+      <button className="mini-btn danger" disabled={busy} onClick={onYes}>{busy ? 'Deleting…' : 'Delete'}</button>
+      <button className="mini-btn" disabled={busy} onClick={onNo}>Cancel</button>
+    </span>
+  );
+}
+
 // Rows for one already-loaded listing; folders recurse through FolderNode.
-function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, onPreview, selected }: RowProps & {
+function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, onPreview, selected, onDelete }: RowProps & {
   entries: FileEntry[]; path: string;
 }) {
   const arr = sortEntries(entries, sort);
@@ -140,7 +159,7 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
             <FolderNode
               key={e.name} sessionId={sessionId} path={p} name={e.name} mtime={e.mtime}
               prefix={prefix} isLast={isLast} sort={sort} reloadKey={reloadKey}
-              onOpen={onOpen} onPreview={onPreview} selected={selected}
+              onOpen={onOpen} onPreview={onPreview} selected={selected} onDelete={onDelete}
             />
           );
         }
@@ -158,12 +177,20 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
             <span className="tw-name">{e.name}</span>
             <span className="tw-size">{fmtSize(e.size)}</span>
             <span className="tw-time">{fmtWhen(e.mtime)}</span>
-            <button
-              className="tw-act" title="Download"
-              onClick={(ev) => { ev.stopPropagation(); triggerDownload(api.downloadUrl(sessionId, p), e.name); }}
-            >
-              <DownloadGlyph />
-            </button>
+            <span className="tw-acts">
+              <button
+                className="tw-act" title="Download"
+                onClick={(ev) => { ev.stopPropagation(); triggerDownload(api.downloadUrl(sessionId, p), e.name); }}
+              >
+                <DownloadGlyph />
+              </button>
+              <button
+                className="tw-act danger" title={`Delete ${e.name}`}
+                onClick={(ev) => { ev.stopPropagation(); onDelete(p, e.name, false); }}
+              >
+                <TrashGlyph />
+              </button>
+            </span>
           </div>
         );
       })}
@@ -185,7 +212,7 @@ function DirContents({ path, sessionId, prefix, ...rest }: RowProps & { path: st
 function FolderNode({ path, name, mtime, isLast, ...rest }: RowProps & {
   path: string; name: string; mtime: number; isLast: boolean;
 }) {
-  const { prefix, onOpen } = rest;
+  const { prefix, onOpen, onDelete } = rest;
   const [open, setOpen] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
@@ -208,7 +235,14 @@ function FolderNode({ path, name, mtime, isLast, ...rest }: RowProps & {
         <span className="tw-name">{name}</span>
         <span className="tw-size" />
         <span className="tw-time">{fmtWhen(mtime)}</span>
-        <span className="tw-act" />
+        <span className="tw-acts">
+          <button
+            className="tw-act danger" title={`Delete ${name}`}
+            onClick={(ev) => { ev.stopPropagation(); onDelete(path, name, true); }}
+          >
+            <TrashGlyph />
+          </button>
+        </span>
       </div>
       {open && <DirContents path={path} {...rest} prefix={[...prefix, !isLast]} />}
     </>
@@ -597,6 +631,11 @@ export default function FilesPane({
   const [raw, setRaw] = useState(false);          // markdown/html: show the source
   const [scripts, setScripts] = useState(false);  // html: run the page's own JS
   const [confirmClose, setConfirmClose] = useState(false); // leaving with unsaved edits
+  const [creating, setCreating] = useState<null | 'folder' | 'file'>(null);
+  const [newName, setNewName] = useState('');
+  const [pendingDel, setPendingDel] = useState<null | { path: string; name: string; dir: boolean }>(null);
+  const [acting, setActing] = useState(false);
+  const [actErr, setActErr] = useState<string | null>(null);
   const paneRef = useRef<HTMLDivElement | null>(null);
 
   const dir = useDir(session.id, root, reloadKey);
@@ -632,6 +671,40 @@ export default function FilesPane({
     setViewing(null);
   };
   useEffect(() => { if (!edit?.conflict) setConfirmClose(false); }, [edit?.conflict]);
+
+  // Create lands in the folder you are looking at, which is the one the
+  // breadcrumb names.
+  const create = async () => {
+    const name = newName.trim();
+    if (!name || !creating) return;
+    setActing(true); setActErr(null);
+    try {
+      await (creating === 'folder' ? api.createFolder : api.createFile)(session.id, root, name);
+      setCreating(null); setNewName('');
+      setReloadKey((k) => k + 1);
+    } catch (e: any) {
+      setActErr(String(e?.message || e));
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const doDelete = async () => {
+    if (!pendingDel) return;
+    setActing(true); setActErr(null);
+    try {
+      await api.deleteEntry(session.id, pendingDel.path);
+      // If the open file was the one deleted, leave the viewer rather than
+      // showing a preview of something that no longer exists.
+      if (viewing && (viewing === pendingDel.path || viewing.startsWith(`${pendingDel.path}/`))) setViewing(null);
+      setPendingDel(null);
+      setReloadKey((k) => k + 1);
+    } catch (e: any) {
+      setActErr(String(e?.message || e));
+    } finally {
+      setActing(false);
+    }
+  };
 
   const up = () => setRoot(root.includes('/') ? root.slice(0, root.lastIndexOf('/')) : '');
   const openDir = (p: string) => { setViewing(null); setRoot(p); };
@@ -704,6 +777,14 @@ export default function FilesPane({
               ))}
             </div>
             <span className="spacer" />
+            <button
+              className="mini-btn" title="New folder here"
+              onClick={() => { setCreating('folder'); setNewName(''); setActErr(null); }}
+            ><FolderPlusGlyph /></button>
+            <button
+              className="mini-btn" title="New empty file here"
+              onClick={() => { setCreating('file'); setNewName(''); setActErr(null); }}
+            ><FilePlusGlyph /></button>
             <button className="mini-btn" title="Refresh" onClick={() => setReloadKey((k) => k + 1)}><RefreshGlyph /></button>
             <label className="mini-btn upload-btn" title="Upload files">
               <UploadGlyph /> Upload
@@ -796,6 +877,33 @@ export default function FilesPane({
       {/* The tree stays mounted while a preview is open, so going back lands on
           the same expanded folders and the same scroll position. */}
       <div className="files-stack" hidden={!!viewing} style={{ fontSize: `${(13 * zoom) / 100}px` }}>
+        {creating && (
+          <div className="files-new">
+            {creating === 'folder' ? <FolderPlusGlyph className="tw-ico" /> : <FilePlusGlyph className="tw-ico" />}
+            <input
+              autoFocus className="files-new-input"
+              placeholder={creating === 'folder' ? 'New folder name' : 'New file name'}
+              value={newName}
+              onChange={(e) => { setNewName(e.target.value); setActErr(null); }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); create(); }
+                if (e.key === 'Escape') { e.preventDefault(); setCreating(null); setActErr(null); }
+              }}
+            />
+            <button className="mini-btn primary" disabled={!newName.trim() || acting} onClick={create}>Create</button>
+            <button className="mini-btn" disabled={acting} onClick={() => { setCreating(null); setActErr(null); }}>Cancel</button>
+          </div>
+        )}
+        {pendingDel && (
+          <div className="files-new danger-row">
+            <TrashGlyph className="tw-ico" />
+            <ConfirmDelete
+              name={pendingDel.name} dir={pendingDel.dir} busy={acting}
+              onYes={doDelete} onNo={() => { setPendingDel(null); setActErr(null); }}
+            />
+          </div>
+        )}
+        {actErr && <div className="files-new err">{actErr}</div>}
         <Cols
           sort={sort}
           onSort={(k) => setSort((s) => (s.key === k ? { key: k, desc: !s.desc } : { key: k, desc: k !== 'name' }))}
@@ -813,6 +921,7 @@ export default function FilesPane({
             <DirRows
               entries={dir.entries} path={root} sessionId={session.id} prefix={[]} sort={sort}
               reloadKey={reloadKey} onOpen={openDir} onPreview={setViewing} selected={viewing}
+              onDelete={(p, name, isDir) => { setCreating(null); setActErr(null); setPendingDel({ path: p, name, dir: isDir }); }}
             />
           )}
           {busy && <div className="tree-msg">Uploading…</div>}

@@ -1,6 +1,14 @@
 import type { Cli, Group, MoveTarget, Session, Tree } from './types';
 
 const HEADERS = { 'content-type': 'application/json' };
+// Like `json`, but keeps the server's own words — these routes fail for reasons
+// worth reading ("already exists here").
+const jsonOrError = async (r: Response) => {
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `${r.status}`);
+  return body;
+};
+
 const json = (r: Response) => {
   if (!r.ok) throw new Error(`${r.status}`);
   return r.json();
@@ -166,6 +174,20 @@ export const uploadFile = (id: string, p: string, file: File) =>
   fetch(`/api/files/${id}/upload?path=${encodeURIComponent(p)}&name=${encodeURIComponent(file.name)}`, {
     method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: file,
   }).then(json);
+
+// Create an empty folder / an empty file inside `parent`. The server refuses a
+// name that already exists rather than overwriting it.
+export const createFolder = (id: string, parent: string, name: string) =>
+  fetch(`/api/files/${id}/mkdir`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ path: parent, name }) })
+    .then(jsonOrError);
+
+export const createFile = (id: string, parent: string, name: string) =>
+  fetch(`/api/files/${id}/touch`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ path: parent, name }) })
+    .then(jsonOrError);
+
+// Delete a file, or a folder and everything under it.
+export const deleteEntry = (id: string, p: string) =>
+  fetch(`/api/files/${id}/entry?path=${encodeURIComponent(p)}`, { method: 'DELETE' }).then(jsonOrError);
 
 export const downloadUrl = (id: string, p: string) =>
   `/api/files/${id}/download?path=${encodeURIComponent(p)}`;
