@@ -194,6 +194,14 @@ try {
     check('trace recovery seeds only turns older than the live viewport',
       text.includes('older prompt') && text.includes('older answer')
       && !text.includes('live prompt') && !text.includes('live answer'));
+
+    const alreadyVisible = traceHistoryLines({ turns: [
+      { role: 'user', blocks: [{ type: 'text', text: 'hi there' }] },
+      { role: 'assistant', kind: 'final', blocks: [{ type: 'text', text: 'Hey!' }] },
+      { role: 'user', blocks: [{ type: 'text', text: 'live prompt' }] },
+    ] }, '❯ hi there\n\n● Hey!');
+    check('trace recovery does not duplicate short turns replayed by the agent',
+      alreadyVisible.length === 0);
   }
 
   const up = await waitFor(async () => {
@@ -228,8 +236,8 @@ try {
     const id = await session('ordered repaint');
     const v = await view(id, 100, 30, true);
     await sleep(500);
-    v.type(`trap 'printf "\\033[2J\\033[HRESIZE-AT-%sx%s\\n" "$COLUMNS" "$LINES"' WINCH\r`);
-    await sleep(400);
+    v.type(`trap 'printf "\\033[2J\\033[HRESIZE-AT-%sx%s\\n" "$COLUMNS" "$LINES"' WINCH; printf 'TRAP-READY\\n'\r`);
+    await waitFor(() => v.bytes.includes('TRAP-READY'));
     v.events.length = 0;
     v.resize(73, 21);
     const repainted = await waitFor(() => v.events.some((event) => event.type === 'data'

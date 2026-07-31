@@ -5,14 +5,14 @@ const fileFor = (directory, id) => path.join(
   directory, `${String(id).replace(/[^a-zA-Z0-9._-]/g, '_')}.json`,
 );
 
-export const TERMINAL_HISTORY_VERSION = 2;
+export const TERMINAL_HISTORY_VERSION = 3;
 
 /** Load a plain-text Ghostty scrollback checkpoint, ignoring old/bad schemas. */
 export function loadTerminalHistory(directory, id) {
   try {
     const body = fs.readFileSync(fileFor(directory, id), 'utf8');
     const saved = JSON.parse(body);
-    if (![1, TERMINAL_HISTORY_VERSION].includes(saved?.version)
+    if (![1, 2, TERMINAL_HISTORY_VERSION].includes(saved?.version)
         || !Number.isFinite(saved.cols) || !Array.isArray(saved.lines)) return null;
     const lines = saved.lines.filter((line) => typeof line === 'string').map((text) => ({ text }));
     return lines.length ? {
@@ -94,6 +94,8 @@ export function traceHistoryLines(page, currentText = '', maxChars = 1024 * 1024
     if (turns[i]?.role === 'user') { latestUser = i; break; }
   }
   const current = normalText(currentText);
+  const currentLines = new Set(String(currentText || '').split(/\r?\n/)
+    .map(normalText).filter(Boolean));
   const lines = [];
   let chars = 0;
   for (const turn of turns.slice(0, latestUser < 0 ? turns.length : latestUser)) {
@@ -105,10 +107,13 @@ export function traceHistoryLines(page, currentText = '', maxChars = 1024 * 1024
       .join('\n')
       .trim();
     if (!text) continue;
+    const rendered = `${turn.role === 'user' ? '❯' : '●'} ${text}`;
+    // Prefix matching needs a minimum length to avoid accidental prose hits,
+    // but short prompts are safe to match as complete marked terminal rows.
+    if (!rendered.includes('\n') && currentLines.has(normalText(rendered))) continue;
     const normalized = normalText(text);
     const probe = normalized.slice(0, 80);
     if (probe.length >= 12 && current.includes(probe)) continue;
-    const rendered = `${turn.role === 'user' ? '❯' : '●'} ${text}`;
     const next = [...rendered.split('\n'), ''];
     for (const line of next) { lines.push(line); chars += line.length + 1; }
     while (chars > maxChars && lines.length) chars -= lines.shift().length + 1;

@@ -82,8 +82,11 @@ const RESIZE_CAPTURE_MAX_MS = Number(process.env.AM_RESIZE_CAPTURE_MAX_MS || 900
 // terminal with only its freshly repainted viewport.
 const HISTORY_SAVE_MS = Number(process.env.AM_HISTORY_SAVE_MS || 5000);
 const HISTORY_DIR = path.join(STATE_DIR, 'terminal-history');
-const TRACE_HYDRATE_IDLE_MS = 250;
-const TRACE_HYDRATE_MIN_MS = 1000;
+// Claude's resume stream can pause between its welcome frame and replayed
+// conversation. Treat that as one startup transaction; hydrating during the
+// pause would seed a turn that Claude is about to print itself.
+const TRACE_HYDRATE_IDLE_MS = Number(process.env.AM_TRACE_HYDRATE_IDLE_MS || 1500);
+const TRACE_HYDRATE_MIN_MS = Number(process.env.AM_TRACE_HYDRATE_MIN_MS || 2500);
 // Bound untrusted WebSocket geometry without imposing the old 400x200 ceiling,
 // which left visible dead space on high-DPI displays at low zoom levels.
 const MIN_COLS = 20;
@@ -979,9 +982,9 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   });
   const vt = ghostty.createTerminal({ cols, rows, scrollbackLimit: SCROLLBACK_BYTES });
   const loadedHistory = loadTerminalHistory(HISTORY_DIR, session.id);
-  // Version 1 agent checkpoints may contain the startup repaint frames that
-  // trace hydration used to append. Rebuild those once from the trace. Shell
-  // history was never subject to that path and remains safe to restore.
+  // Older agent checkpoints may contain startup repaint frames or a turn that
+  // trace hydration raced with Claude's own replay. Rebuild those once from
+  // the trace. Shell history never used that path and remains safe to restore.
   const persistedHistory = captureResize
     && loadedHistory?.version < TERMINAL_HISTORY_VERSION ? null : loadedHistory;
   if (persistedHistory) {
