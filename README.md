@@ -155,3 +155,48 @@ cd web && npm install && npm run dev
 ```
 
 This repo *is* the Space — the build runs the `Dockerfile`.
+
+### Deploying a branch to a dev Space
+
+Test a branch on real Space infrastructure — the FUSE bucket, HF's edge, tmux —
+without touching production:
+
+```bash
+export HF_TOKEN=<write access to your namespace>
+bash scripts/deploy-dev-space.sh am-dev-2 feat/my-branch
+```
+
+Idempotent, so re-run it to redeploy. It creates the Space **private** and gives
+it **its own bucket** (`<name>-data`) mounted at `/data`, force-pushes the branch
+as the Space's `main` (Spaces only build `main`), names the dashboard card, then
+waits for the build and checks `/api/health` answers JSON.
+
+Four things it handles that catch people out by hand:
+
+- **Its own bucket, never prod's.** Mounting production's bucket into a dev Space
+  gives it prod's sessions, workspaces *and* logged-in CLI credentials, and lets
+  a test run write to them. A dev instance gets a fresh bucket, so it starts
+  empty and its own logins stay its own.
+- **Private, always.** The app authenticates nobody past HF's edge, so a public
+  instance is a shell for whoever finds it. It does lock itself when public, but
+  the right answer is not to publish it at all.
+- **LFS objects go up first.** Git hooks cannot run from a workspace on the
+  bucket (object storage holds no exec bit), so the `git lfs` pre-push hook never
+  fires and a plain `git push` sends an LFS *pointer* with no object behind it —
+  which the Hub rejects, confusingly, as "an LFS pointer pointed to a file that
+  does not exist". The script pushes objects explicitly first.
+- **The dashboard card is renamed on the Space only.** Every instance builds from
+  this same README, so they all show up as "Agent Manager" — useless when you
+  have three. After pushing, the script rewrites the front-matter *in the Space
+  repo* to `<name> (dev)` 🚧 with the branch and sha in the description. The
+  repo's own README is untouched, so production is never renamed. `README.md` is
+  not `COPY`'d by the `Dockerfile`, so that commit rebuilds no layers.
+
+To throw one away: delete the Space **and** its bucket (the bucket is a separate
+repo and outlives the Space otherwise).
+
+```python
+from huggingface_hub import HfApi, delete_bucket
+HfApi().delete_repo("you/am-dev-2", repo_type="space")
+delete_bucket("you/am-dev-2-data")   # buckets are not a repo_type — own function
+```
