@@ -15,7 +15,7 @@ import {
   TERMINAL_HISTORY_VERSION, createTerminalHistoryCheckpoint, loadTerminalHistory,
   traceHistoryLines,
 } from './src/history-store.js';
-import { trimHistoryShownInRepaint } from './src/runner.js';
+import { mergeRepaintArchive, repaintArchiveHistory } from './src/runner.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-resize-'));
@@ -204,20 +204,23 @@ try {
     check('trace recovery does not duplicate short turns replayed by the agent',
       alreadyVisible.length === 0);
 
-    const trimmed = trimHistoryShownInRepaint([
-      { text: 'older unique turn' },
-      { text: '❯ hi there' },
-      { text: '' },
-      { text: '● Hey! What can I help you with today?' },
-    ], 160, [
-      { text: 'Claude welcome frame' },
-      { text: '❯ hi there' },
-      { text: '' },
-      { text: '● Hey! What can I help you with today?' },
-      { text: 'newer live turn' },
-    ], 160);
-    check('a repaint revealing recovered turns removes their scrollback copies',
-      trimmed.length === 1 && trimmed[0].text === 'older unique turn');
+    const archiveSeed = 'older unique turn\n❯ hi there\n\n● Hey!\n';
+    const wide = 'Claude welcome frame\nolder unique turn\n❯ hi there\n\n● Hey!\nnewer live turn\n';
+    const archive = mergeRepaintArchive(archiveSeed, wide);
+    check('a wide repaint merges recovered turns into one full archive',
+      archive === wide && archive.split('❯ hi there').length - 1 === 1);
+    check('a wide repaint needs no duplicate scrollback',
+      repaintArchiveHistory(archive, wide).length === 0);
+    const narrow = 'newer live turn\n';
+    const narrowHistory = repaintArchiveHistory(
+      mergeRepaintArchive(archive, narrow), narrow,
+    ).map((line) => line.text).join('\n');
+    check('a narrow repaint restores the archive prefix above the viewport',
+      narrowHistory.includes('Claude welcome frame') && narrowHistory.includes('❯ hi there'));
+    check('a repaint replaces a volatile old footer after its transcript overlap',
+      mergeRepaintArchive('deep history\nshared transcript\n[old 160x40]\n',
+        'shared transcript\n[new 90x24]\n')
+      === 'deep history\nshared transcript\n[new 90x24]\n');
   }
 
   const up = await waitFor(async () => {

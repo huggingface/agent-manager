@@ -219,63 +219,73 @@ function logicalHistory(text) {
   return lines.map((line) => ({ text: line }));
 }
 
-/**
- * Remove the longest logical suffix of canonical history that the repaint is
- * now showing in its frame. Agent TUIs reveal older transcript rows when a
- * panel grows; retaining those same rows in scrollback creates a duplicate
- * immediately above the frame even though neither source is itself corrupt.
- */
-export function trimHistoryShownInRepaint(history, historyCols, repaint, repaintCols) {
-  if (!history.length || !repaint.length) return history;
-  const fullRepaint = logicalText(repaint, repaintCols);
-  for (let row = 0; row < history.length; row++) {
-    // Only compare at hard-line boundaries. Starting halfway through a soft
-    // wrap could delete the first half of an otherwise unique logical line.
-    if (row > 0 && textColumns(history[row - 1].text || '') >= historyCols) continue;
-    const suffix = logicalText(history.slice(row), historyCols);
-    if (suffix.trim().length >= 8 && fullRepaint.includes(suffix)) {
-      return history.slice(0, row);
-    }
-  }
-  return history;
+function visibleRows(vt) {
+  try { return vt.getVisibleText().split('\n').map((text) => ({ text })); } catch { return []; }
 }
 
 /**
- * Add only the part of a repaint's overflow that was not already history.
- * Wrapping changes row boundaries, so reconstruct logical text first. The
- * longest exact history suffix matching the frame prefix is the overlap. This
- * also handles a history boundary through the middle of a wrapped word.
+ * Merge a primary-screen repaint into the fullest transcript seen so far.
+ *
+ * A growing pane can reveal an archived suffix after a fresh welcome/header,
+ * so the overlap may occur inside the repaint rather than at its first byte.
+ * Searching the reversed strings finds the longest archive suffix anywhere in
+ * the repaint in linear time. The repaint prefix is inserted before that
+ * suffix, preserving a header without retaining two copies of the turns.
  */
-function mergeRepaintHistory(history, historyCols, frame, frameCols) {
-  const base = logicalText(history, historyCols);
-  if (!frame.length) return logicalHistory(base);
-  const repaint = logicalText(frame, frameCols);
-  if (!base) return logicalHistory(repaint);
-  if (!repaint) return logicalHistory(base);
+export function mergeRepaintArchive(base, repaint) {
+  if (!base) return repaint;
+  if (!repaint) return base;
+  if (!base.trim()) return repaint;
+  if (!repaint.trim()) return base;
+  const reverse = (text) => {
+    let result = '';
+    for (let i = text.length - 1; i >= 0; i--) result += text[i];
+    return result;
+  };
+  const longestPrefixOccurrence = (pattern, text) => {
+    const prefix = new Array(pattern.length).fill(0);
+    for (let i = 1, matched = 0; i < pattern.length; i++) {
+      while (matched && pattern[i] !== pattern[matched]) matched = prefix[matched - 1];
+      if (pattern[i] === pattern[matched]) matched++;
+      prefix[i] = matched;
+    }
+    let matched = 0, best = 0, bestEnd = -1;
+    for (let i = 0; i < text.length; i++) {
+      while (matched && text[i] !== pattern[matched]) matched = prefix[matched - 1];
+      if (text[i] === pattern[matched]) matched++;
+      if (matched > best) { best = matched; bestEnd = i; }
+      if (matched === pattern.length) matched = prefix[matched - 1];
+    }
+    return { length: best, end: bestEnd };
+  };
 
-  const pattern = repaint;
-  const prefix = new Array(pattern.length).fill(0);
-  for (let i = 1, matched = 0; i < pattern.length; i++) {
-    while (matched && pattern[i] !== pattern[matched]) matched = prefix[matched - 1];
-    if (pattern[i] === pattern[matched]) matched++;
-    prefix[i] = matched;
+  // Shape 1: an archive suffix is revealed after a freshly painted header.
+  const suffix = longestPrefixOccurrence(
+    reverse(base.slice(-repaint.length)), reverse(repaint),
+  );
+  // Shape 2: the repaint starts in the archive, then replaces its volatile
+  // footer (dimensions, status line, prompt chrome) with the new one.
+  const prefix = longestPrefixOccurrence(repaint.slice(0, base.length), base);
+  const minimum = Math.min(12, base.trim().length, repaint.trim().length);
+  if (Math.max(suffix.length, prefix.length) < minimum) return base + repaint;
+  if (prefix.length > suffix.length) {
+    const baseOffset = prefix.end - prefix.length + 1;
+    return base.slice(0, baseOffset) + repaint;
   }
-  let matched = 0;
-  const tail = base.slice(-pattern.length);
-  for (let i = 0; i < tail.length; i++) {
-    while (matched && tail[i] !== pattern[matched]) matched = prefix[matched - 1];
-    if (tail[i] === pattern[matched]) matched++;
-    if (matched === pattern.length && i + 1 < tail.length) matched = prefix[matched - 1];
-  }
-  // Scratch overflow is presentation, not durable output. With no exact
-  // boundary it is safer to retain known history than archive another frame.
-  if (!matched) return logicalHistory(base);
-  if (matched >= repaint.length) return logicalHistory(base);
+  const repaintOffset = repaint.length - 1 - suffix.end;
+  return repaint.slice(0, repaintOffset) + base
+    + repaint.slice(repaintOffset + suffix.length);
+}
 
-  // Keep logical lines instead of the source emulator's visual rows. Restore
-  // can then wrap them at the destination width without introducing hard line
-  // breaks through words that happened to straddle the old right edge.
-  return logicalHistory(base + repaint.slice(matched));
+/** The archive prefix not represented by the repaint's visible styled grid. */
+export function repaintArchiveHistory(archive, visible) {
+  const history = visible && archive.endsWith(visible)
+    ? archive.slice(0, archive.length - visible.length) : archive;
+  return logicalHistory(history);
+}
+
+function terminalArchive(vt, snap) {
+  return logicalText([...(snap.scrollbackLines || []), ...visibleRows(vt)], snap.cols);
 }
 
 /**
@@ -292,20 +302,16 @@ function finishCapturedGrid(host, txn) {
 
   let snap = null;
   let replacement = null;
+  let committedArchive = null;
   if (txn.sawData) {
     try { snap = txn.vt.snapshot({ includeCells: true, includeScrollback: true }); } catch {}
     if (snap) {
       try {
-        let repaint = [];
-        try {
-          repaint = txn.vt.getVisibleText().split('\n').map((text) => ({ text }));
-        } catch {}
-        const uniqueHistory = trimHistoryShownInRepaint(
-          txn.history, txn.historyCols, repaint, txn.cols,
-        );
-        const history = mergeRepaintHistory(
-          uniqueHistory, txn.historyCols, snap.scrollbackLines || [], txn.cols,
-        );
+        const visible = visibleRows(txn.vt);
+        const visibleText = logicalText(visible, txn.cols);
+        const repaint = logicalText([...(snap.scrollbackLines || []), ...visible], txn.cols);
+        committedArchive = mergeRepaintArchive(txn.archive, repaint);
+        const history = repaintArchiveHistory(committedArchive, visibleText);
         replacement = ghostty.createTerminal({
           cols: txn.cols,
           rows: txn.rows,
@@ -328,19 +334,17 @@ function finishCapturedGrid(host, txn) {
       host.vt.resize(txn.cols, txn.rows);
       host.cols = txn.cols;
       host.rows = txn.rows;
-      host.capturedHistory = null;
-      host.capturedHistoryCols = null;
+      host.repaintArchive = null;
       notifyGrid(host, false);
     } else {
       const previous = host.vt;
       host.vt = replacement;
       host.cols = txn.cols;
       host.rows = txn.rows;
-      // Keep the exact pre-resize history for a consecutive zoom gesture. A
-      // reconstructed Ghostty grid may pull some of it into the visible area at
-      // one width; reusing this boundary prevents the next repaint replacing it.
-      host.capturedHistory = txn.history;
-      host.capturedHistoryCols = txn.historyCols;
+      // The archive retains the full transcript even when a wide grid exposes
+      // all of it and therefore needs no scrollback. A later narrow repaint can
+      // derive the hidden prefix again instead of losing the oldest rows.
+      host.repaintArchive = committedArchive;
       // Reset and restore one canonical snapshot. Keeping a browser's old
       // scrollback while painting only the new viewport makes the two models
       // diverge after a narrow zoom, even when the server history is correct.
@@ -370,20 +374,18 @@ function armCapturedGrid(host, txn) {
 /** Start or supersede the bounded repaint transaction for an agent TUI. */
 function startCapturedGrid(host, cols, rows, seed = null, resizePty = true) {
   const previous = host.resizeCapture;
-  let history = seed?.history || null;
-  let historyCols = seed?.historyCols || null;
+  let archive = seed?.history
+    ? logicalText(seed.history, seed.historyCols || host.cols) : host.repaintArchive;
   if (previous) {
-    history = previous.history;
-    historyCols = previous.historyCols;
+    archive = previous.archive;
     host.resizeCapture = null;
     clearCaptureTimers(previous);
     try { previous.vt.dispose(); } catch {}
   }
-  if (!history) {
+  if (archive == null) {
     try {
       const source = host.vt.snapshot({ includeScrollback: true });
-      history = host.capturedHistory || source.scrollbackLines || [];
-      historyCols = host.capturedHistoryCols || source.cols;
+      archive = terminalArchive(host.vt, source);
     } catch { return false; }
   }
 
@@ -400,8 +402,7 @@ function startCapturedGrid(host, cols, rows, seed = null, resizePty = true) {
     vt: scratch,
     cols,
     rows,
-    history: history || [],
-    historyCols: historyCols || host.cols,
+    archive: archive || '',
     sawData: false,
     idleTimer: null,
     maxTimer: null,
@@ -468,27 +469,29 @@ function armTraceHydration(host) {
 
     let snap;
     try { snap = host.vt.snapshot({ includeCells: true, includeScrollback: true }); } catch { return; }
-    // With no durable checkpoint, startup scrollback consists of resume and
-    // SIGWINCH presentation frames. It is not conversation history: Claude can
-    // repaint the same welcome view at several widths before settling. Only
-    // the final visible screen is trusted; the trace supplies older turns.
-    const currentText = (() => { try { return host.vt.getVisibleText(); } catch { return ''; } })();
+    const visible = visibleRows(host.vt);
+    const visibleText = logicalText(visible, snap.cols);
+    const currentText = visible.map((line) => line.text || '').join('\n');
     const recovered = traceHistoryLines(host.traceHistoryPage, currentText);
     host.traceHistoryPage = null;
 
     let replacement = null;
     try {
+      // The trace supplies missing older turns while the settled startup grid
+      // supplies the welcome and the newest live turn. Merge their overlap
+      // into one archive rather than appending either presentation verbatim.
+      const startup = terminalArchive(host.vt, snap);
+      const archive = mergeRepaintArchive(logicalText(recovered, snap.cols), startup);
       replacement = ghostty.createTerminal({
         cols: host.cols, rows: host.rows, scrollbackLimit: SCROLLBACK_BYTES,
       });
       replacement.feed(snapshotToRestoreAnsi({
         ...snap,
-        scrollbackLines: recovered,
+        scrollbackLines: repaintArchiveHistory(archive, visibleText),
       }));
       const previous = host.vt;
       host.vt = replacement;
-      host.capturedHistory = null;
-      host.capturedHistoryCols = null;
+      host.repaintArchive = archive;
       notifyGrid(host, true);
       const committed = host.vt.snapshot({ includeCells: true, includeScrollback: true });
       const ansi = snapshotToRestoreAnsi(committed);
@@ -1033,8 +1036,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     rows,
     captureResize,
     resizeCapture: null,
-    capturedHistory: null,
-    capturedHistoryCols: null,
+    repaintArchive: null,
     startupHistory: captureResize ? persistedHistory : null,
     historyCheckpoint: null,
     traceHistoryPage: null,
@@ -1051,7 +1053,12 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     directory: HISTORY_DIR,
     id: host.id,
     delayMs: HISTORY_SAVE_MS,
-    snapshot: () => host.vt.snapshot({ includeScrollback: true }),
+    snapshot: () => {
+      const snap = host.vt.snapshot({ includeScrollback: true });
+      if (!captureResize) return snap;
+      const archive = host.repaintArchive ?? terminalArchive(host.vt, snap);
+      return { cols: host.cols, scrollbackLines: logicalHistory(archive) };
+    },
     blocked: () => !!host.resizeCapture,
     persistedBody: persistedHistory?.body || null,
   });
@@ -1085,8 +1092,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
 
     // This is real output outside a resize transaction. It may have advanced
     // scrollback, so the next transaction takes a fresh canonical boundary.
-    host.capturedHistory = null;
-    host.capturedHistoryCols = null;
+    host.repaintArchive = null;
     try { host.vt.feed(chunk); } catch (e) { console.error('[runner] vt.feed', e && e.message); }
     host.historyCheckpoint.schedule();
 
