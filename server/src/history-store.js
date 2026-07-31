@@ -72,3 +72,42 @@ export function createTerminalHistoryCheckpoint({
 
   return { schedule, flush };
 }
+
+const normalText = (text) => String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+/**
+ * Render earlier conversational turns as plain terminal history.
+ *
+ * The latest user turn is deliberately omitted: the resumed TUI owns that
+ * viewport. Messages already visible in the live grid are omitted as well, so
+ * trace recovery cannot create a second copy of content Claude did repaint.
+ */
+export function traceHistoryLines(page, currentText = '', maxChars = 1024 * 1024) {
+  const turns = Array.isArray(page?.turns) ? page.turns : [];
+  let latestUser = -1;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i]?.role === 'user') { latestUser = i; break; }
+  }
+  const current = normalText(currentText);
+  const lines = [];
+  let chars = 0;
+  for (const turn of turns.slice(0, latestUser < 0 ? turns.length : latestUser)) {
+    if (turn?.role !== 'user' && turn?.role !== 'assistant') continue;
+    if (turn.role === 'assistant' && turn.kind && turn.kind !== 'final') continue;
+    const text = (turn.blocks || [])
+      .filter((block) => block?.type === 'text')
+      .map((block) => String(block.text || ''))
+      .join('\n')
+      .trim();
+    if (!text) continue;
+    const normalized = normalText(text);
+    const probe = normalized.slice(0, 80);
+    if (probe.length >= 12 && current.includes(probe)) continue;
+    const rendered = `${turn.role === 'user' ? '❯' : '●'} ${text}`;
+    const next = [...rendered.split('\n'), ''];
+    for (const line of next) { lines.push(line); chars += line.length + 1; }
+    while (chars > maxChars && lines.length) chars -= lines.shift().length + 1;
+  }
+  while (lines.at(-1) === '') lines.pop();
+  return lines.map((text) => ({ text }));
+}

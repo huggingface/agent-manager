@@ -5,9 +5,11 @@ import fs from 'node:fs';
 import { remoteState, setPaused } from './remote.js';
 import { cliById, isRemote, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
-import { captureOpencodeSession } from './traces.js';
+import { captureOpencodeSession, readTrace } from './traces.js';
 import { buildPaletteIndex, snapshotToRestoreAnsi, textColumns } from './snapshot.js';
-import { createTerminalHistoryCheckpoint, loadTerminalHistory } from './history-store.js';
+import {
+  createTerminalHistoryCheckpoint, loadTerminalHistory, traceHistoryLines,
+} from './history-store.js';
 
 // libghostty-vt ships prebuilts for linux x64/arm64 and macOS arm64. Loading it
 // is guarded so a platform without a prebuilt still boots and says so, rather
@@ -79,6 +81,8 @@ const RESIZE_CAPTURE_MAX_MS = Number(process.env.AM_RESIZE_CAPTURE_MAX_MS || 900
 // terminal with only its freshly repainted viewport.
 const HISTORY_SAVE_MS = Number(process.env.AM_HISTORY_SAVE_MS || 5000);
 const HISTORY_DIR = path.join(STATE_DIR, 'terminal-history');
+const TRACE_HYDRATE_IDLE_MS = 250;
+const TRACE_HYDRATE_MIN_MS = 1000;
 // Bound untrusted WebSocket geometry without imposing the old 400x200 ceiling,
 // which left visible dead space on high-DPI displays at low zoom levels.
 const MIN_COLS = 20;
@@ -416,6 +420,71 @@ function scheduleGrid(host) {
     if (!applyGrid(host)) notifyGrid(host, false);
   }, RESIZE_SETTLE_MS);
   if (host.gridTimer.unref) host.gridTimer.unref();
+}
+
+function armTraceHydration(host) {
+  if (!host.traceHistoryPage || host.traceHistoryTimer) return;
+  const readyAt = Math.max(
+    host.startedAt + TRACE_HYDRATE_MIN_MS,
+    (host.lastOutputAt || host.startedAt) + TRACE_HYDRATE_IDLE_MS,
+    host.resizeCapture ? Date.now() + TRACE_HYDRATE_IDLE_MS : 0,
+  );
+  host.traceHistoryTimer = setTimeout(() => {
+    host.traceHistoryTimer = null;
+    if (hosts.get(host.id) !== host || !host.traceHistoryPage) return;
+    if (host.resizeCapture || Date.now() < readyAt) { armTraceHydration(host); return; }
+
+    let snap;
+    try { snap = host.vt.snapshot({ includeCells: true, includeScrollback: true }); } catch { return; }
+    const currentText = [
+      ...(snap.scrollbackLines || []).map((line) => line.text || ''),
+      (() => { try { return host.vt.getVisibleText(); } catch { return ''; } })(),
+    ].join('\n');
+    const recovered = traceHistoryLines(host.traceHistoryPage, currentText);
+    host.traceHistoryPage = null;
+    if (!recovered.length) return;
+
+    let replacement = null;
+    try {
+      replacement = ghostty.createTerminal({
+        cols: host.cols, rows: host.rows, scrollbackLimit: SCROLLBACK_BYTES,
+      });
+      replacement.feed(snapshotToRestoreAnsi({
+        ...snap,
+        scrollbackLines: [...recovered, ...(snap.scrollbackLines || [])],
+      }));
+      const previous = host.vt;
+      host.vt = replacement;
+      host.capturedHistory = null;
+      host.capturedHistoryCols = null;
+      notifyGrid(host, true);
+      const committed = host.vt.snapshot({ includeCells: true, includeScrollback: true });
+      const ansi = snapshotToRestoreAnsi(committed);
+      for (const sub of host.subs) sub.onData(ansi);
+      try { previous.dispose(); } catch {}
+      sampleScreen(host);
+      host.historyCheckpoint.schedule();
+    } catch (error) {
+      console.error('[runner] trace history restore', error && error.message);
+      try { replacement?.dispose(); } catch {}
+    }
+  }, Math.max(0, readyAt - Date.now()));
+  if (host.traceHistoryTimer.unref) host.traceHistoryTimer.unref();
+}
+
+async function hydrateTraceHistory(session, host) {
+  try {
+    let page = await readTrace(session, { offset: 0, limit: 500 });
+    if (page.total > page.turns.length) {
+      page = await readTrace(session, { offset: Math.max(0, page.total - 500), limit: 500 });
+    }
+    if (hosts.get(host.id) !== host) return;
+    host.traceHistoryPage = page;
+    armTraceHydration(host);
+  } catch {
+    // A new/onboarding session may not have a trace yet; live output remains
+    // authoritative and its first checkpoint will become the durable seed.
+  }
 }
 
 // ---------- Codex conversation pinning ----------
@@ -931,10 +1000,13 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     capturedHistoryCols: null,
     startupHistory: captureResize ? persistedHistory : null,
     historyCheckpoint: null,
+    traceHistoryPage: null,
+    traceHistoryTimer: null,
     subs: new Set(),
     controller: null,
     gridTimer: null,
     startedAt: Date.now(),
+    lastOutputAt: Date.now(),
     screenChangedAt: Date.now(),
     bells: 0,
   };
@@ -948,6 +1020,12 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   });
 
   term.onData((chunk) => {
+    host.lastOutputAt = Date.now();
+    if (host.traceHistoryTimer) {
+      clearTimeout(host.traceHistoryTimer);
+      host.traceHistoryTimer = null;
+    }
+    if (host.traceHistoryPage) armTraceHydration(host);
     let txn = host.resizeCapture;
     if (!txn && host.startupHistory) {
       const startup = host.startupHistory;
@@ -988,6 +1066,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   term.onExit(() => {
     hosts.delete(session.id);
     if (host.gridTimer) { clearTimeout(host.gridTimer); host.gridTimer = null; }
+    if (host.traceHistoryTimer) { clearTimeout(host.traceHistoryTimer); host.traceHistoryTimer = null; }
     if (host.resizeCapture) {
       clearCaptureTimers(host.resizeCapture);
       try { host.resizeCapture.vt.dispose(); } catch {}
@@ -1000,6 +1079,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   });
 
   hosts.set(session.id, host);
+  if (!persistedHistory && captureResize) hydrateTraceHistory(session, host);
   if (!session.everStarted) update(session.id, { everStarted: true, pendingPrompt: undefined });
   if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
   if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);

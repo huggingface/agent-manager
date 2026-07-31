@@ -11,6 +11,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
+import { traceHistoryLines } from './src/history-store.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-resize-'));
@@ -161,6 +162,19 @@ const stop = async (id) => {
 };
 
 try {
+  {
+    const recovered = traceHistoryLines({ turns: [
+      { role: 'user', blocks: [{ type: 'text', text: 'older prompt' }] },
+      { role: 'assistant', kind: 'final', blocks: [{ type: 'text', text: 'older answer' }] },
+      { role: 'user', blocks: [{ type: 'text', text: 'live prompt' }] },
+      { role: 'assistant', kind: 'final', blocks: [{ type: 'text', text: 'live answer' }] },
+    ] });
+    const text = recovered.map((line) => line.text).join('\n');
+    check('trace recovery seeds only turns older than the live viewport',
+      text.includes('older prompt') && text.includes('older answer')
+      && !text.includes('live prompt') && !text.includes('live answer'));
+  }
+
   const up = await waitFor(async () => {
     try { return (await fetch(`${base}/api/health`)).ok; } catch { return false; }
   }, 100_000);
