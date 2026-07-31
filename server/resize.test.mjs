@@ -1,9 +1,9 @@
 // Invariants for the server-held terminal model.
 //
-// These tests intentionally avoid classifying foreground applications or
-// counting "acceptable" duplicate rows. The contract is smaller and firmer:
-// Ghostty owns retained state, a resize is ordered ordinary reflow, and exactly
-// one viewer controls input and PTY geometry. Full serialization is attach-only.
+// The contract is explicit rather than heuristic: shell output uses ordinary
+// reflow, while known primary-screen agent TUIs settle their SIGWINCH repaint in
+// a scratch terminal so presentation bytes never become history. Exactly one
+// viewer controls input and PTY geometry; Ghostty remains the durable authority.
 //   node resize.test.mjs
 import fs from 'node:fs';
 import os from 'node:os';
@@ -14,6 +14,7 @@ import { WebSocket } from 'ws';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-resize-'));
+const FIXTURE = path.join(HERE, 'fixtures', 'repaint-tui.mjs');
 const PORT = 7895;
 const CTRL = '\x00\x00AM:';
 const base = `http://localhost:${PORT}`;
@@ -35,7 +36,13 @@ const waitFor = async (fn, timeout = 8000) => {
 
 const srv = spawn('node', ['src/index.js'], {
   cwd: HERE,
-  env: { ...process.env, PORT: String(PORT), DATA_DIR, AM_BASHRC: '/nonexistent' },
+  env: {
+    ...process.env,
+    PORT: String(PORT),
+    DATA_DIR,
+    AM_BASHRC: '/nonexistent',
+    AM_TEST_REPAINT_CMD: `env FIXED_LINES=30 HISTORY_LINES=2105 ${JSON.stringify(process.execPath)} ${JSON.stringify(FIXTURE)}`,
+  },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let log = '';
@@ -64,9 +71,20 @@ function view(id, cols, rows, mirror = false) {
         if (!term) return '';
         await new Promise((done) => term.write('', done));
         const buf = term.buffer.active;
-        const lines = [];
-        for (let i = 0; i < buf.length; i++) lines.push(buf.getLine(i)?.translateToString(true) ?? '');
-        return lines.join('\n');
+        let text = '';
+        for (let i = 0; i < buf.length; i++) {
+          const line = buf.getLine(i);
+          const row = line?.translateToString(true) ?? '';
+          // Snapshot restores use absolute cursor painting, which cannot carry
+          // xterm's private isWrapped bit. A full row is nevertheless a visual
+          // wrap and must be joined before checking transcript completeness.
+          if (i > 0 && !line?.isWrapped) {
+            const previous = buf.getLine(i - 1)?.translateToString(true) ?? '';
+            if (previous.length < term.cols) text += '\n';
+          }
+          text += row;
+        }
+        return text;
       },
     };
     ws.on('message', (data) => {
@@ -100,10 +118,10 @@ function view(id, cols, rows, mirror = false) {
   });
 }
 
-async function session(name) {
+async function session(name, cli = 'shell') {
   const created = await (await fetch(`${base}/api/sessions`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ cli: 'shell', name }),
+    body: JSON.stringify({ cli, name }),
   })).json();
   if (!created.id) throw new Error(`no session: ${JSON.stringify(created).slice(0, 200)}`);
   return created.id;
@@ -114,6 +132,17 @@ const gridText = async (id, lines = 2000) => {
   const body = await response.json();
   return typeof body === 'string' ? body : (body.text || body.tail || '');
 };
+
+/** Every fixture token is unique, so repeats prove a frame entered history twice. */
+function duplicateTokens(text) {
+  const counts = new Map();
+  for (const match of text.matchAll(/\b\d{3}\.\d{2}\b/g)) {
+    counts.set(match[0], (counts.get(match[0]) || 0) + 1);
+  }
+  return [...counts.values()].filter((count) => count > 1).length;
+}
+
+const uniqueTokens = (text) => new Set(text.match(/\b\d{3}\.\d{2}\b/g) || []).size;
 
 const stop = async (id) => {
   await fetch(`${base}/api/sessions/${id}/stop`, { method: 'POST' }).catch(() => {});
@@ -170,6 +199,75 @@ try {
       check('ordered repaint is rendered once', screen.split('RESIZE-AT-73x21').length - 1 === 1);
     }
     v.close();
+    await stop(id);
+  }
+
+  // Claude-style primary-screen TUIs print a complete frame on every SIGWINCH.
+  // Some frames are taller than the pane; streaming those repaint bytes would
+  // archive another welcome/conversation copy on every zoom step. Agent resizes
+  // therefore settle in a scratch terminal and commit only the final screen.
+  {
+    const id = await session('captured agent repaint', 'test-repaint');
+    const v = await view(id, 150, 40, true);
+    const painted = await waitFor(async () => (await gridText(id)).includes('[fixture 150x40]'));
+    check('Claude-style fixture paints its initial frame', painted);
+    const beforeGrid = duplicateTokens(await gridText(id));
+    const initialGridText = await gridText(id);
+    const initialBrowserText = Headless ? await v.screenText() : '';
+    const beforeBrowser = Headless ? duplicateTokens(initialBrowserText) : 0;
+    const initialGridTokens = uniqueTokens(initialGridText);
+    const initialBrowserTokens = Headless ? uniqueTokens(initialBrowserText) : 0;
+    check('fixture starts without duplicate history', beforeGrid === 0 && beforeBrowser === 0,
+      `grid=${beforeGrid}, browser=${beforeBrowser}`);
+    if (Headless) check('fixture starts with deep history', initialBrowserText.includes('history-0001'));
+
+    for (const [cols, rows] of [[120, 32], [90, 24], [120, 32], [150, 40]]) {
+      v.resize(cols, rows);
+      const settled = await waitFor(() => v.lastFrame('grid')?.cols === cols
+        && v.lastFrame('grid')?.rows === rows);
+      check(`agent repaint settles at ${cols}x${rows}`, settled, JSON.stringify(v.lastFrame('grid')));
+      await sleep(150);
+      const stepGridText = await gridText(id);
+      check(`canonical history stays unique at ${cols}x${rows}`, duplicateTokens(stepGridText) === beforeGrid,
+        `${duplicateTokens(stepGridText)} duplicate tokens`);
+      if (Headless) {
+        const stepBrowserText = await v.screenText();
+        check(`browser history stays unique at ${cols}x${rows}`, duplicateTokens(stepBrowserText) === beforeBrowser,
+          `${duplicateTokens(stepBrowserText)} duplicate tokens`);
+        check(`browser history stays complete at ${cols}x${rows}`,
+          uniqueTokens(stepBrowserText) === initialBrowserTokens,
+          `${initialBrowserTokens} before, ${uniqueTokens(stepBrowserText)} after`);
+        check(`browser deep history survives at ${cols}x${rows}`,
+          stepBrowserText.includes('history-0001'));
+      }
+    }
+
+    const finalGridText = await gridText(id);
+    const afterGrid = duplicateTokens(finalGridText);
+    check('zoom round-trip adds no duplicate frame to canonical history', afterGrid === beforeGrid,
+      `${beforeGrid} before, ${afterGrid} after`);
+    check('zoom round-trip retains canonical history', uniqueTokens(finalGridText) === initialGridTokens,
+      `${initialGridTokens} before, ${uniqueTokens(finalGridText)} after`);
+    if (Headless) {
+      const finalBrowserText = await v.screenText();
+      const afterBrowser = duplicateTokens(finalBrowserText);
+      check('zoom round-trip adds no duplicate frame to browser history', afterBrowser === beforeBrowser,
+        `${beforeBrowser} before, ${afterBrowser} after`);
+      check('zoom round-trip retains browser history', uniqueTokens(finalBrowserText) === initialBrowserTokens,
+        `${initialBrowserTokens} before, ${uniqueTokens(finalBrowserText)} after`);
+    }
+    v.close();
+    await sleep(250);
+    const reattached = await view(id, 150, 40, true);
+    const restored = await waitFor(() => reattached.lastFrame('restore')?.cols === 150);
+    const restoredText = Headless ? await reattached.screenText() : '';
+    check('reattach remains free of resize-generated frames', restored
+      && (!Headless || duplicateTokens(restoredText) === beforeGrid),
+    Headless ? `${duplicateTokens(restoredText)} duplicate tokens` : '');
+    check('reattach retains complete and deep history', restored
+      && (!Headless || (uniqueTokens(restoredText) === initialBrowserTokens
+        && restoredText.includes('history-0001'))));
+    reattached.close();
     await stop(id);
   }
 

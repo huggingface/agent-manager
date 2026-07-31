@@ -135,6 +135,33 @@ export function snapshotToAnsi(snap) {
   return out;
 }
 
+// Snapshot history is plain terminal text. Count its display columns closely
+// enough to know how many visual rows it occupies when restored at a different
+// width; using string.length loses wrapped rows (and then the screen repaint
+// overwrites them). Combining marks are zero-width, common CJK/emoji ranges are
+// two columns, and everything else is one.
+export function textColumns(text) {
+  let width = 0;
+  for (const char of text) {
+    const cp = char.codePointAt(0);
+    if (cp === 0x200d || cp === 0xfe0e || cp === 0xfe0f || /\p{Mark}/u.test(char)) continue;
+    const wide = cp >= 0x1100 && (
+      cp <= 0x115f || cp === 0x2329 || cp === 0x232a
+      || (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f)
+      || (cp >= 0xac00 && cp <= 0xd7a3)
+      || (cp >= 0xf900 && cp <= 0xfaff)
+      || (cp >= 0xfe10 && cp <= 0xfe19)
+      || (cp >= 0xfe30 && cp <= 0xfe6f)
+      || (cp >= 0xff00 && cp <= 0xff60)
+      || (cp >= 0xffe0 && cp <= 0xffe6)
+      || (cp >= 0x1f300 && cp <= 0x1faff)
+      || (cp >= 0x20000 && cp <= 0x3fffd)
+    );
+    width += wide ? 2 : 1;
+  }
+  return width;
+}
+
 /**
  * Rebuild a fresh viewer from Ghostty's canonical state.
  *
@@ -153,7 +180,9 @@ export function snapshotToRestoreAnsi(snap) {
   let out = '\x1b[?1049l\x1b[?25l\x1b[0m\x1b[H\x1b[2J';
   if (history.length) {
     out += history.join('\r\n');
-    out += `\x1b[${snap.rows};1H` + '\r\n'.repeat(Math.min(history.length, snap.rows));
+    const visualRows = history.reduce((total, line) =>
+      total + Math.max(1, Math.ceil(textColumns(line) / Math.max(1, snap.cols))), 0);
+    out += `\x1b[${snap.rows};1H` + '\r\n'.repeat(Math.min(visualRows, snap.rows));
   }
   out += snapshotToAnsi(snap);
   return out;

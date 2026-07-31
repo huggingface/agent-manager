@@ -54,6 +54,7 @@ export function refreshVersions() {
  *  - `bin`  : binary checked on PATH to report availability
  *  - `run`  : command run inside the session shell on first launch
  *  - `cont` : command used to resume a prior conversation (null = no resume)
+ *  - `resizeMode: 'repaint'`: primary-screen TUI redraws its frame on SIGWINCH
  */
 // One setup story for every agent; only the accepted secret names differ.
 const setupHint = (...keys) =>
@@ -79,23 +80,27 @@ export const CLIS = [
   // nothing to launch HERE (that is the point), but unlike files/trace it holds
   // a conversation, so it gets a light and a digest like any other agent.
   { id: 'remote',   label: 'Remote agent', bin: null,      color: '#5ec2e0', run: null,             cont: null },
-  { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue',
+  { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue', resizeMode: 'repaint',
     withPrompt: (q) => `claude ${q}`,
     setup: setupHint('ANTHROPIC_API_KEY') },
-  { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: 'codex',          cont: 'codex resume --last',
+  { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: 'codex',          cont: 'codex resume --last', resizeMode: 'repaint',
     withPrompt: (q) => `codex ${q}`,
     setup: setupHint('OPENAI_API_KEY') },
-  { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', run: 'gemini',         cont: null,
+  { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', run: 'gemini',         cont: null, resizeMode: 'repaint',
     withPrompt: (q) => `gemini -i ${q}`, // -i = interactive session seeded with the prompt
     setup: setupHint('GEMINI_API_KEY') },
-  { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: 'opencode --continue',
+  { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: 'opencode --continue', resizeMode: 'repaint',
     withPrompt: (q) => `opencode --prompt ${q}`,
     setup: setupHint('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY') },
-  { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', run: 'hermes',         cont: 'hermes -c',
+  { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', run: 'hermes',         cont: 'hermes -c', resizeMode: 'repaint',
     setup: setupHint('HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY') },
   // `chat` = TUI in --local mode: embedded agent, no gateway/daemon needed.
-  { id: 'openclaw', label: 'OpenClaw',    bin: 'openclaw', color: '#c83636', run: 'openclaw chat',  cont: null,
+  { id: 'openclaw', label: 'OpenClaw',    bin: 'openclaw', color: '#c83636', run: 'openclaw chat',  cont: null, resizeMode: 'repaint',
     setup: setupHint('ANTHROPIC_API_KEY') },
+  // Test-only primary-screen repaint fixture. Absent from every normal runtime.
+  ...(process.env.AM_TEST_REPAINT_CMD
+    ? [{ id: 'test-repaint', label: 'Repaint fixture', bin: 'bash', color: '#8aa0ad', run: process.env.AM_TEST_REPAINT_CMD, cont: null, resizeMode: 'repaint' }]
+    : []),
 ];
 
 export function cliById(id) {

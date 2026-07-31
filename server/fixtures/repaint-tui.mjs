@@ -21,6 +21,7 @@ const TRANSCRIPT = Array.from({ length: 60 }, (_, i) =>
 // behind on zoom. Without the variable, the frame is trimmed to fit and nothing
 // scrolls.
 const FIXED = Number(process.env.FIXED_LINES || 0);
+const HISTORY = Number(process.env.HISTORY_LINES || 0);
 
 function paint() {
   let out = '\x1b[?25l\x1b[H';
@@ -37,5 +38,9 @@ function paint() {
 
 process.stdout.on('resize', paint);
 process.stdin.resume();
+if (HISTORY > 0) {
+  process.stdout.write(Array.from({ length: HISTORY }, (_, i) =>
+    `history-${String(i + 1).padStart(4, '0')}`).join('\r\n') + '\r\n');
+}
 paint();
 setInterval(() => {}, 1 << 30);

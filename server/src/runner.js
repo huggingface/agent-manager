@@ -6,7 +6,7 @@ import { remoteState, setPaused } from './remote.js';
 import { cliById, WORKSPACES_DIR, isRemote } from './config.js';
 import { update, list } from './sessions.js';
 import { captureOpencodeSession } from './traces.js';
-import { buildPaletteIndex, snapshotToRestoreAnsi } from './snapshot.js';
+import { buildPaletteIndex, snapshotToRestoreAnsi, textColumns } from './snapshot.js';
 
 // libghostty-vt ships prebuilts for linux x64/arm64 and macOS arm64. Loading it
 // is guarded so a platform without a prebuilt still boots and says so, rather
@@ -69,6 +69,11 @@ const SCROLLBACK_BYTES = Number.isFinite(configuredScrollback) && configuredScro
 // fires per animation frame while a window is dragged; coalescing that burst
 // avoids repeatedly reflowing the terminal and repeatedly sending SIGWINCH.
 const RESIZE_SETTLE_MS = Number(process.env.AM_RESIZE_SETTLE_MS || 120);
+// Primary-screen agent TUIs redraw their whole frame after SIGWINCH. Let that
+// burst settle in a scratch emulator, then merge its final frame once; streaming
+// the raw redraw would turn every overflow row into duplicate history.
+const RESIZE_CAPTURE_IDLE_MS = Number(process.env.AM_RESIZE_CAPTURE_IDLE_MS || 80);
+const RESIZE_CAPTURE_MAX_MS = Number(process.env.AM_RESIZE_CAPTURE_MAX_MS || 900);
 // Bound untrusted WebSocket geometry without imposing the old 400x200 ceiling,
 // which left visible dead space on high-DPI displays at low zoom levels.
 const MIN_COLS = 20;
@@ -172,18 +177,216 @@ function notifyGrid(host, reset = false) {
   }
 }
 
+function clearCaptureTimers(txn) {
+  if (txn.idleTimer) clearTimeout(txn.idleTimer);
+  if (txn.maxTimer) clearTimeout(txn.maxTimer);
+  txn.idleTimer = null;
+  txn.maxTimer = null;
+}
+
+function logicalText(lines, cols) {
+  let text = '';
+  for (let line = 0; line < lines.length; line++) {
+    const row = lines[line].text || '';
+    text += row;
+    // A full terminal row is a soft wrap. Do not insert whitespace: Claude's
+    // words can be split at an arbitrary column between snapshots. A shorter
+    // row ended with a real line break, which must remain part of the overlap.
+    if (textColumns(row) < cols) {
+      text += '\n';
+    }
+  }
+  return text;
+}
+
+function logicalHistory(text) {
+  if (!text) return [];
+  const lines = text.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  return lines.map((line) => ({ text: line }));
+}
+
+/**
+ * Add only the part of a repaint's overflow that was not already history.
+ * Wrapping changes row boundaries, so reconstruct logical text first. The
+ * longest exact history suffix matching the frame prefix is the overlap. This
+ * also handles a history boundary through the middle of a wrapped word.
+ */
+function mergeRepaintHistory(history, historyCols, frame, frameCols) {
+  const base = logicalText(history, historyCols);
+  if (!frame.length) return logicalHistory(base);
+  const repaint = logicalText(frame, frameCols);
+  if (!base) return logicalHistory(repaint);
+  if (!repaint) return logicalHistory(base);
+
+  const pattern = repaint;
+  const prefix = new Array(pattern.length).fill(0);
+  for (let i = 1, matched = 0; i < pattern.length; i++) {
+    while (matched && pattern[i] !== pattern[matched]) matched = prefix[matched - 1];
+    if (pattern[i] === pattern[matched]) matched++;
+    prefix[i] = matched;
+  }
+  let matched = 0;
+  const tail = base.slice(-pattern.length);
+  for (let i = 0; i < tail.length; i++) {
+    while (matched && tail[i] !== pattern[matched]) matched = prefix[matched - 1];
+    if (tail[i] === pattern[matched]) matched++;
+    if (matched === pattern.length && i + 1 < tail.length) matched = prefix[matched - 1];
+  }
+  // Scratch overflow is presentation, not durable output. With no exact
+  // boundary it is safer to retain known history than archive another frame.
+  if (!matched) return logicalHistory(base);
+  if (matched >= repaint.length) return logicalHistory(base);
+
+  // Keep logical lines instead of the source emulator's visual rows. Restore
+  // can then wrap them at the destination width without introducing hard line
+  // breaks through words that happened to straddle the old right edge.
+  return logicalHistory(base + repaint.slice(matched));
+}
+
+/**
+ * Commit one captured agent repaint without duplicating its overflow rows.
+ *
+ * The pre-resize scrollback boundary and final repaint are merged once, then
+ * both the server terminal and every viewer are restored from that same state.
+ * Shell sessions never use this path.
+ */
+function finishCapturedGrid(host, txn) {
+  if (host.resizeCapture !== txn) return;
+  host.resizeCapture = null;
+  clearCaptureTimers(txn);
+
+  let snap = null;
+  let replacement = null;
+  if (txn.sawData) {
+    try { snap = txn.vt.snapshot({ includeCells: true, includeScrollback: true }); } catch {}
+    if (snap) {
+      try {
+        const history = mergeRepaintHistory(
+          txn.history, txn.historyCols, snap.scrollbackLines || [], txn.cols,
+        );
+        replacement = ghostty.createTerminal({
+          cols: txn.cols,
+          rows: txn.rows,
+          scrollbackLimit: SCROLLBACK_BYTES,
+        });
+        replacement.feed(snapshotToRestoreAnsi({ ...snap, scrollbackLines: history }));
+      } catch (error) {
+        console.error('[runner] resize capture commit', error && error.message);
+        try { replacement?.dispose(); } catch {}
+        replacement = null;
+        snap = null;
+      }
+    }
+  }
+
+  try {
+    if (!snap) {
+      // The foreground process ignored SIGWINCH. Ordinary reflow is the only
+      // faithful outcome because no repaint exists to replace the old screen.
+      host.vt.resize(txn.cols, txn.rows);
+      host.cols = txn.cols;
+      host.rows = txn.rows;
+      host.capturedHistory = null;
+      host.capturedHistoryCols = null;
+      notifyGrid(host, false);
+    } else {
+      const previous = host.vt;
+      host.vt = replacement;
+      host.cols = txn.cols;
+      host.rows = txn.rows;
+      // Keep the exact pre-resize history for a consecutive zoom gesture. A
+      // reconstructed Ghostty grid may pull some of it into the visible area at
+      // one width; reusing this boundary prevents the next repaint replacing it.
+      host.capturedHistory = txn.history;
+      host.capturedHistoryCols = txn.historyCols;
+      // Reset and restore one canonical snapshot. Keeping a browser's old
+      // scrollback while painting only the new viewport makes the two models
+      // diverge after a narrow zoom, even when the server history is correct.
+      notifyGrid(host, true);
+      const committed = host.vt.snapshot({ includeCells: true, includeScrollback: true });
+      const ansi = snapshotToRestoreAnsi(committed);
+      for (const sub of host.subs) sub.onData(ansi);
+      try { previous.dispose(); } catch {}
+      sampleScreen(host);
+    }
+  } finally {
+    try { txn.vt.dispose(); } catch {}
+  }
+
+  // A newer controller preference may have arrived while the repaint settled.
+  const next = effectiveGrid(host);
+  if (next.cols !== host.cols || next.rows !== host.rows) scheduleGrid(host);
+}
+
+function armCapturedGrid(host, txn) {
+  if (txn.idleTimer) clearTimeout(txn.idleTimer);
+  txn.idleTimer = setTimeout(() => finishCapturedGrid(host, txn), RESIZE_CAPTURE_IDLE_MS);
+  if (txn.idleTimer.unref) txn.idleTimer.unref();
+}
+
+/** Start or supersede the bounded repaint transaction for an agent TUI. */
+function startCapturedGrid(host, cols, rows) {
+  const previous = host.resizeCapture;
+  let history = null;
+  let historyCols = null;
+  if (previous) {
+    history = previous.history;
+    historyCols = previous.historyCols;
+    host.resizeCapture = null;
+    clearCaptureTimers(previous);
+    try { previous.vt.dispose(); } catch {}
+  }
+  if (!history) {
+    try {
+      const source = host.vt.snapshot({ includeScrollback: true });
+      history = host.capturedHistory || source.scrollbackLines || [];
+      historyCols = host.capturedHistoryCols || source.cols;
+    } catch { return false; }
+  }
+
+  let scratch;
+  try {
+    scratch = ghostty.createTerminal({ cols, rows, scrollbackLimit: 4 * 1024 * 1024 });
+  } catch (error) {
+    console.error('[runner] resize capture setup', error && error.message);
+    try { scratch?.dispose(); } catch {}
+    return false;
+  }
+
+  const txn = {
+    vt: scratch,
+    cols,
+    rows,
+    history: history || [],
+    historyCols: historyCols || host.cols,
+    sawData: false,
+    idleTimer: null,
+    maxTimer: null,
+  };
+  host.resizeCapture = txn;
+  try { host.pty.resize(cols, rows); } catch {}
+  txn.maxTimer = setTimeout(() => finishCapturedGrid(host, txn), RESIZE_CAPTURE_MAX_MS);
+  if (txn.maxTimer.unref) txn.maxTimer.unref();
+  return true;
+}
+
 /**
  * Move the session to the size its viewers imply.
  *
- * Ghostty performs ordinary terminal reflow. We deliberately do not clear,
- * classify, carry, or synthesize history around it: those policies cannot know
- * whether the foreground app will repaint and can destroy real output. Viewers
- * receive the confirmed geometry before subsequent PTY output and perform the
- * same ordinary reflow; full history serialization is reserved for attachment.
+ * Shells use ordinary reflow: every row is real output. Known agent TUIs on the
+ * primary screen instead use a bounded scratch transaction because their full
+ * SIGWINCH redraw is presentation, not new history. Alternate-screen programs
+ * are already isolated from primary scrollback and use ordinary resize.
  */
 function applyGrid(host) {
   const { cols, rows } = effectiveGrid(host);
-  if (cols === host.cols && rows === host.rows) return false;
+  if (!host.resizeCapture && cols === host.cols && rows === host.rows) return false;
+  if (host.captureResize) {
+    let alt = false;
+    try { alt = !!host.vt.snapshot().isAltScreen; } catch {}
+    if (!alt && startCapturedGrid(host, cols, rows)) return true;
+  }
   host.cols = cols;
   host.rows = rows;
   try { host.vt.resize(cols, rows); } catch {}
@@ -685,6 +888,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   const workdir = path.join(WORKSPACES_DIR, folder);
   fs.mkdirSync(workdir, { recursive: true });
   const full = commandFor(session);
+  const captureResize = cliById(session.cli)?.resizeMode === 'repaint';
 
   const env = {
     ...TERM_ENV,
@@ -704,6 +908,10 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     vt,
     cols,
     rows,
+    captureResize,
+    resizeCapture: null,
+    capturedHistory: null,
+    capturedHistoryCols: null,
     subs: new Set(),
     controller: null,
     gridTimer: null,
@@ -713,7 +921,22 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   };
 
   term.onData((chunk) => {
-    try { vt.feed(chunk); } catch (e) { console.error('[runner] vt.feed', e && e.message); }
+    const txn = host.resizeCapture;
+    if (txn) {
+      try { txn.vt.feed(chunk); } catch (e) { console.error('[runner] resize capture', e && e.message); }
+      txn.sawData = true;
+      for (let i = 0; i < chunk.length; i++) {
+        if (chunk.charCodeAt(i) === 7) { host.bells++; host.lastBellAt = Date.now(); }
+      }
+      armCapturedGrid(host, txn);
+      return;
+    }
+
+    // This is real output outside a resize transaction. It may have advanced
+    // scrollback, so the next transaction takes a fresh canonical boundary.
+    host.capturedHistory = null;
+    host.capturedHistoryCols = null;
+    try { host.vt.feed(chunk); } catch (e) { console.error('[runner] vt.feed', e && e.message); }
 
     // State detection rides the feed path: the grid is already current, so there
     // is nothing to poll and no subprocess to spawn.
@@ -728,7 +951,12 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   term.onExit(() => {
     hosts.delete(session.id);
     if (host.gridTimer) { clearTimeout(host.gridTimer); host.gridTimer = null; }
-    try { vt.dispose(); } catch {}
+    if (host.resizeCapture) {
+      clearCaptureTimers(host.resizeCapture);
+      try { host.resizeCapture.vt.dispose(); } catch {}
+      host.resizeCapture = null;
+    }
+    try { host.vt.dispose(); } catch {}
     for (const sub of host.subs) sub.onExit();
     host.subs.clear();
   });
