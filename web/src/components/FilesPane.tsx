@@ -10,7 +10,7 @@ import { TraceView, type TraceSource } from './TracePane';
 import {
   FolderGlyph, FileGlyph, CloseGlyph, UpGlyph, UploadGlyph, BackGlyph, DownloadGlyph,
   RefreshGlyph, ImageGlyph, CodeGlyph, DocGlyph, GlobeGlyph,
-  FolderPlusGlyph, FilePlusGlyph, TrashGlyph,
+  FolderPlusGlyph, FilePlusGlyph, TrashGlyph, PencilGlyph,
 } from './icons';
 
 const fmtSize = (n: number) => {
@@ -125,7 +125,44 @@ type RowProps = {
   sessionId: string; prefix: boolean[]; sort: Sort; reloadKey: number;
   onOpen: (p: string) => void; onPreview: (p: string) => void; selected: string | null;
   onDelete: (path: string, name: string, dir: boolean) => void;
+  onRename: (path: string, name: string) => void;
+  renaming: string | null;
+  setRenaming: (path: string | null) => void;
 };
+
+// Renaming happens in the row, on the name itself: the thing being renamed stays
+// where it is, under the cursor, instead of jumping to a dialog. Enter commits,
+// Esc abandons, and a blur commits too — leaving the field is an answer.
+function RenameInput({ init, onCommit, onCancel }: {
+  init: string; onCommit: (name: string) => void; onCancel: () => void;
+}) {
+  const [v, setV] = useState(init);
+  const done = useRef(false);
+  const finish = (commit: boolean) => {
+    if (done.current) return;            // blur fires again after Enter
+    done.current = true;
+    const name = v.trim();
+    if (commit && name && name !== init) onCommit(name); else onCancel();
+  };
+  return (
+    <input
+      className="tw-rename" autoFocus value={v}
+      onClick={(e) => e.stopPropagation()}
+      onFocus={(e) => {
+        // Select the stem, not the extension: renaming rarely means retyping .txt.
+        const dot = init.lastIndexOf('.');
+        e.currentTarget.setSelectionRange(0, dot > 0 ? dot : init.length);
+      }}
+      onChange={(e) => setV(e.target.value)}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+        if (e.key === 'Escape') { e.preventDefault(); done.current = true; onCancel(); }
+      }}
+      onBlur={() => finish(true)}
+    />
+  );
+}
 
 // Deleting asks in the row itself rather than in a browser dialog: the question
 // names what is about to go, and for a folder it says that its contents go with
@@ -145,7 +182,7 @@ function ConfirmDelete({ name, dir, busy, onYes, onNo }: {
 }
 
 // Rows for one already-loaded listing; folders recurse through FolderNode.
-function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, onPreview, selected, onDelete }: RowProps & {
+function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, onPreview, selected, onDelete, onRename, renaming, setRenaming }: RowProps & {
   entries: FileEntry[]; path: string;
 }) {
   const arr = sortEntries(entries, sort);
@@ -160,6 +197,7 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
               key={e.name} sessionId={sessionId} path={p} name={e.name} mtime={e.mtime}
               prefix={prefix} isLast={isLast} sort={sort} reloadKey={reloadKey}
               onOpen={onOpen} onPreview={onPreview} selected={selected} onDelete={onDelete}
+              onRename={onRename} renaming={renaming} setRenaming={setRenaming}
             />
           );
         }
@@ -174,10 +212,22 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
           >
             <Rails prefix={prefix} isLast={isLast} />
             <KindGlyph name={e.name} kind={e.kind} className="tw-ico" />
-            <span className="tw-name">{e.name}</span>
+            {renaming === p ? (
+              <RenameInput
+                init={e.name}
+                onCommit={(name) => onRename(p, name)}
+                onCancel={() => setRenaming(null)}
+              />
+            ) : <span className="tw-name">{e.name}</span>}
             <span className="tw-size">{fmtSize(e.size)}</span>
             <span className="tw-time">{fmtWhen(e.mtime)}</span>
             <span className="tw-acts">
+              <button
+                className="tw-act" title={`Rename ${e.name}`}
+                onClick={(ev) => { ev.stopPropagation(); setRenaming(p); }}
+              >
+                <PencilGlyph />
+              </button>
               <button
                 className="tw-act" title="Download"
                 onClick={(ev) => { ev.stopPropagation(); triggerDownload(api.downloadUrl(sessionId, p), e.name); }}
@@ -212,11 +262,12 @@ function DirContents({ path, sessionId, prefix, ...rest }: RowProps & { path: st
 function FolderNode({ path, name, mtime, isLast, ...rest }: RowProps & {
   path: string; name: string; mtime: number; isLast: boolean;
 }) {
-  const { prefix, onOpen, onDelete } = rest;
+  const { prefix, onOpen, onDelete, onRename, renaming, setRenaming } = rest;
   const [open, setOpen] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   const onClick = () => {
+    if (renaming === path) return;   // the row is an input right now
     if (timer.current) return;
     timer.current = setTimeout(() => { timer.current = null; setOpen((o) => !o); }, 200);
   };
@@ -232,10 +283,22 @@ function FolderNode({ path, name, mtime, isLast, ...rest }: RowProps & {
       >
         <Rails prefix={prefix} isLast={isLast} />
         <FolderGlyph className="tw-ico dir" open={open} />
-        <span className="tw-name">{name}</span>
+        {renaming === path ? (
+          <RenameInput
+            init={name}
+            onCommit={(next) => onRename(path, next)}
+            onCancel={() => setRenaming(null)}
+          />
+        ) : <span className="tw-name">{name}</span>}
         <span className="tw-size" />
         <span className="tw-time">{fmtWhen(mtime)}</span>
         <span className="tw-acts">
+          <button
+            className="tw-act" title={`Rename ${name}`}
+            onClick={(ev) => { ev.stopPropagation(); setRenaming(path); }}
+          >
+            <PencilGlyph />
+          </button>
           <button
             className="tw-act danger" title={`Delete ${name}`}
             onClick={(ev) => { ev.stopPropagation(); onDelete(path, name, true); }}
@@ -635,6 +698,7 @@ export default function FilesPane({
   const [creating, setCreating] = useState<null | 'folder' | 'file'>(null);
   const [newName, setNewName] = useState('');
   const [pendingDel, setPendingDel] = useState<null | { path: string; name: string; dir: boolean }>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
   const [actErr, setActErr] = useState<string | null>(null);
   const paneRef = useRef<HTMLDivElement | null>(null);
@@ -687,6 +751,20 @@ export default function FilesPane({
       setActErr(String(e?.message || e));
     } finally {
       setActing(false);
+    }
+  };
+
+  const doRename = async (p: string, name: string) => {
+    setRenaming(null); setActErr(null);
+    try {
+      const { path: next } = await api.renameEntry(session.id, p, name);
+      // Keep the viewer pointed at the same bytes: renaming the open file, or a
+      // folder above it, should not close what you were reading.
+      if (viewing === p) setViewing(next);
+      else if (viewing && viewing.startsWith(`${p}/`)) setViewing(`${next}${viewing.slice(p.length)}`);
+      setReloadKey((k) => k + 1);
+    } catch (e: any) {
+      setActErr(String(e?.message || e));
     }
   };
 
@@ -923,6 +1001,7 @@ export default function FilesPane({
               entries={dir.entries} path={root} sessionId={session.id} prefix={[]} sort={sort}
               reloadKey={reloadKey} onOpen={openDir} onPreview={setViewing} selected={viewing}
               onDelete={(p, name, isDir) => { setCreating(null); setActErr(null); setPendingDel({ path: p, name, dir: isDir }); }}
+              onRename={doRename} renaming={renaming} setRenaming={(p) => { setActErr(null); setRenaming(p); }}
             />
           )}
           {busy && <div className="tree-msg">Uploading…</div>}

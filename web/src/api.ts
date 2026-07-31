@@ -205,6 +205,11 @@ export const createFile = (id: string, parent: string, name: string) =>
   fetch(`/api/files/${id}/touch`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ path: parent, name }) })
     .then(jsonOrError);
 
+// Rename in place. The server takes a NAME, so this can never also move it.
+export const renameEntry = (id: string, p: string, name: string): Promise<{ path: string }> =>
+  fetch(`/api/files/${id}/rename`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ path: p, name }) })
+    .then(jsonOrError);
+
 // Delete a file, or a folder and everything under it.
 export const deleteEntry = (id: string, p: string) =>
   fetch(`/api/files/${id}/entry?path=${encodeURIComponent(p)}`, { method: 'DELETE' }).then(jsonOrError);
