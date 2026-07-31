@@ -145,7 +145,12 @@ export function deriveState(session, info) {
 // its first line. Capture that id shortly after launch and pin it on the
 // session, so restarts resume THIS agent's conversation — `resume --last`
 // would grab whichever Codex agent in the same folder ran last.
-const codexCapturing = new Set(); // session ids with a capture in flight
+const codexCapturing = new Map(); // id -> pending re-pin timer
+
+// Every harness's conversation pin is re-checked on this cadence for as long as
+// the pane is alive, so a mid-session reset (/clear and friends) can't leave the
+// pin describing a conversation the user has moved on from.
+const REPIN_MS = 20_000;
 
 function codexSessionsRoot() {
   const home = process.env.CODEX_HOME || path.join(process.env.HOME || os.homedir(), '.codex');
@@ -227,6 +232,7 @@ function firstLine(p) {
 
 function tryCaptureCodexId(sessionId, workdir, sinceMs) {
   const claimed = new Set(list().filter((s) => s.id !== sessionId && s.codexSessionId).map((s) => s.codexSessionId));
+  const pinned = (list().find((s) => s.id === sessionId) || {}).codexSessionId;
   for (const c of codexRolloutsSince(sinceMs)) {
     const m = c.p.match(/rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/);
     if (!m || claimed.has(m[1])) continue;
@@ -243,6 +249,10 @@ function tryCaptureCodexId(sessionId, workdir, sinceMs) {
     // aren't this agent's conversation, so pinning one would break resume and
     // the Overview digest.
     if (mp.thread_source === 'subagent' || (mp.source && mp.source.subagent)) continue;
+    // The watcher re-runs for the life of the pane, so the usual outcome is
+    // "still the same conversation" — don't rewrite sessions.json for that.
+    if (m[1] === pinned) return true;
+    if (pinned) console.warn(`[codex] re-pinning ${sessionId}: ${pinned} -> ${m[1]} (conversation was replaced)`);
     update(sessionId, { codexSessionId: m[1], codexRollout: c.p });
     return true;
   }
@@ -262,24 +272,38 @@ function pinIsStale(session) {
   } catch { return false; }
 }
 
+// Same staleness problem as Claude's pin, same remedy: codex starts a fresh
+// conversation — and a fresh rollout file — when the thread is reset, so a pin
+// captured once at launch stops describing the live conversation. Keep watching
+// for as long as the pane is alive and follow the newest rollout this folder
+// produces. tryCaptureCodexId only writes when the id actually changes.
 function scheduleCodexCapture(session, workdir) {
   if (session.codexSessionId && pinIsStale(session)) {
     session = update(session.id, { codexSessionId: undefined, codexRollout: undefined }) || session;
   }
-  if (session.codexSessionId || codexCapturing.has(session.id)) return;
-  codexCapturing.add(session.id);
+  const prev = codexCapturing.get(session.id);
+  if (prev) clearTimeout(prev);
   const since = Date.now() - 2000;
-  const delays = [5000, 15000, 45000]; // rollout appears ~instantly; retries cover slow starts
-  const attempt = (i) => {
-    if (tryCaptureCodexId(session.id, workdir, since) || i + 1 >= delays.length) {
-      codexCapturing.delete(session.id);
-      return;
+  let warnedShared = false;
+
+  const tick = () => {
+    if (!isRunning(session.id)) { codexCapturing.delete(session.id); return; }
+    if (folderIsShared(session.id, workdir, 'codex')) {
+      if (!warnedShared) {
+        warnedShared = true;
+        console.warn(`[codex] ${session.id}: folder shared with another live session — not following thread resets here`);
+      }
+    } else {
+      tryCaptureCodexId(session.id, workdir, since);
     }
-    const t = setTimeout(() => attempt(i + 1), delays[i + 1] - delays[i]);
+    const t = setTimeout(tick, REPIN_MS);
     if (t.unref) t.unref();
+    codexCapturing.set(session.id, t);
   };
-  const t0 = setTimeout(() => attempt(0), delays[0]);
+
+  const t0 = setTimeout(tick, 5000); // rollout appears ~instantly
   if (t0.unref) t0.unref();
+  codexCapturing.set(session.id, t0);
 }
 
 // opencode has no per-conversation handle we can pass on launch, so we can't
@@ -296,10 +320,10 @@ function scheduleCodexCapture(session, workdir) {
 // forever: the Overview shows no digest, `--resume` can't find the transcript so
 // the session silently starts fresh every launch, and sharing can't locate it.
 //
-// So verify the pin after launch the same way codex/opencode capture theirs, and
-// re-pin to the transcript Claude actually wrote. Observed live on a test Space:
+// So verify the pin after launch — and keep verifying it, see the watcher below —
+// re-pinning to the transcript Claude actually wrote. Observed live on a test Space:
 // session pinned 4efced14…, transcript on disk cb22b656….
-const claudeCapturing = new Set();
+const claudeCapturing = new Map(); // id -> pending re-pin timer
 
 function claudeProjectDirs() {
   const home = process.env.HOME || '';
@@ -338,58 +362,145 @@ const transcriptExists = (uuid) =>
     });
   });
 
-function scheduleClaudeCapture(session, workdir) {
-  if (claudeCapturing.has(session.id)) return;
-  claudeCapturing.add(session.id);
-  const since = Date.now() - 2000;
-  const delays = [5000, 15000, 45000, 90000];
-  const attempt = (i) => {
-    // The pin is fine as soon as a matching transcript exists — the common case.
-    if (transcriptExists(session.sessionUuid)) { claudeCapturing.delete(session.id); return; }
+// A transcript's opening cwd/timestamp never changes once written, and the
+// filename IS the conversation id, so a path is never reused for a different
+// conversation. That makes the head safe to remember — which matters because the
+// watcher rescans every REPIN_MS for the life of every session, and on the Space
+// these are synchronous reads against a FUSE mount. Without this, every tick
+// re-read every transcript on disk and would show up as event-loop lag.
+const headMemo = new Map(); // transcript path -> head
 
-    const claimed = new Set(list().filter((s) => s.id !== session.id && s.sessionUuid).map((s) => s.sessionUuid));
-    for (const c of claudeTranscriptsSince(since)) {
-      const uuid = path.basename(c.p).replace(/\.jsonl$/, '');
-      if (claimed.has(uuid)) continue;
-      // The cwd is NOT on the first line: a transcript opens with metadata lines
-      // (mode, permission-mode, file-history-snapshot, ai-title, worktree-state)
-      // that have no cwd, and only the conversation lines carry one — line 4 or 5
-      // in every real transcript measured. Reading line 1 made this check always
-      // fail, so the re-pin could never actually claim anything.
-      const head = transcriptHead(c.p);
-      // Only claim a conversation started in THIS session's folder.
-      if (!head || head.cwd !== workdir) continue;
-      const created = Date.parse(head.timestamp || '') || 0;
-      if (created && created < since - 15_000) continue; // someone else's older thread
-      console.warn(`[claude] re-pinning ${session.id}: ${session.sessionUuid} -> ${uuid} (--session-id was not honoured)`);
-      update(session.id, { sessionUuid: uuid });
-      claudeCapturing.delete(session.id);
-      return;
-    }
-    if (i + 1 >= delays.length) { claudeCapturing.delete(session.id); return; }
-    const t = setTimeout(() => attempt(i + 1), delays[i + 1] - delays[i]);
-    if (t.unref) t.unref();
-  };
-  const t0 = setTimeout(() => attempt(0), delays[0]);
-  if (t0.unref) t0.unref();
+function transcriptHeadCached(p) {
+  const hit = headMemo.get(p);
+  if (hit) return hit;
+  const head = transcriptHead(p);
+  // Only remember a definite answer: null can just mean the file has no cwd line
+  // yet (still being written), and caching that would poison it for the process.
+  if (head) {
+    if (headMemo.size > 500) headMemo.clear();
+    headMemo.set(p, head);
+  }
+  return head;
 }
 
-const opencodeCapturing = new Set();
-function scheduleOpencodeCapture(session, workdir) {
-  if (session.opencodeSessionId || opencodeCapturing.has(session.id)) return;
-  opencodeCapturing.add(session.id);
+// The newest conversation written in `workdir` that no other session has pinned,
+// as { uuid, start }. `start` is the conversation's OWN first timestamp, which is
+// what distinguishes a /clear-spawned successor from the thread it replaced —
+// both keep receiving mtime updates, only the successor is newly born.
+// Exported for server/test/repin.test.mjs.
+export function claudeCandidate(sessionId, workdir, sinceMs) {
+  const claimed = new Set(list().filter((s) => s.id !== sessionId && s.sessionUuid).map((s) => s.sessionUuid));
+  let best = null;
+  for (const c of claudeTranscriptsSince(sinceMs)) {
+    const uuid = path.basename(c.p).replace(/\.jsonl$/, '');
+    if (claimed.has(uuid)) continue;
+    // The cwd is NOT on the first line: a transcript opens with metadata lines
+    // (mode, permission-mode, file-history-snapshot, ai-title, worktree-state)
+    // that have no cwd, and only the conversation lines carry one — line 4 or 5
+    // in every real transcript measured. Reading line 1 made this check always
+    // fail, so the re-pin could never actually claim anything.
+    const head = transcriptHeadCached(c.p);
+    // Only claim a conversation started in THIS session's folder.
+    if (!head || head.cwd !== workdir) continue;
+    const start = Date.parse(head.timestamp || '') || 0;
+    // Born in this launch window, or it's an older thread that merely received
+    // writes — someone else's, or our own pre-relaunch one.
+    if (start && start < sinceMs - 15_000) continue;
+    if (!best || start > best.start) best = { uuid, start };
+  }
+  return best;
+}
+
+// Another LIVE session of the same harness on the same folder makes a new
+// conversation there unattributable: we cannot tell whose /clear produced it.
+// Refuse to guess, the way share.js does when a folder has rivals.
+function folderIsShared(sessionId, workdir, cli) {
+  return list().some((s) => s.id !== sessionId && s.cli === cli
+    && path.join(WORKSPACES_DIR, s.path ?? s.id) === workdir && isRunning(s.id));
+}
+
+// Re-pinning is NOT a one-shot check, because the pin can go stale mid-session.
+// `/clear` ends the conversation and starts a new one with an id of its own,
+// exactly like the onboarding fallback above: the transcript we pinned stops
+// growing and Claude writes a NEW file. Nothing told the manager, so the pin
+// aged out silently — the Overview digest, the trace panel and sharing all kept
+// reading the pre-/clear thread, and the next launch ran `--resume <old uuid>`,
+// restoring the conversation as it was BEFORE the /clear and discarding
+// everything since. That is why a Space restart brought back the old session.
+//
+// So the watcher keeps looking for as long as the pane is alive and follows the
+// session forward onto whatever conversation Claude is actually writing. One
+// mechanism now covers both failure modes: the launch-time fallback (pin never
+// honoured) and a /clear at any later point.
+function scheduleClaudeCapture(session, workdir) {
+  // A relaunch restarts the watch with a fresh window, so `since` can't drift
+  // older and start admitting pre-relaunch threads as candidates.
+  const prev = claudeCapturing.get(session.id);
+  if (prev) clearTimeout(prev);
   const since = Date.now() - 2000;
-  const delays = [3000, 8000, 20000, 45000, 90000];
-  const attempt = (i) => {
-    const claimed = new Set(list().filter((s) => s.id !== session.id && s.opencodeSessionId).map((s) => s.opencodeSessionId));
-    const hit = captureOpencodeSession(workdir, since, claimed);
-    if (hit) { update(session.id, { opencodeSessionId: hit.id }); opencodeCapturing.delete(session.id); return; }
-    if (i + 1 >= delays.length) { opencodeCapturing.delete(session.id); return; }
-    const t = setTimeout(() => attempt(i + 1), delays[i + 1] - delays[i]);
+  let warnedShared = false;
+
+  const tick = () => {
+    if (!isRunning(session.id)) { claudeCapturing.delete(session.id); return; }
+    if (folderIsShared(session.id, workdir, 'claude')) {
+      if (!warnedShared) {
+        warnedShared = true;
+        console.warn(`[claude] ${session.id}: folder shared with another live session — not following /clear here`);
+      }
+    } else {
+      const pinned = (list().find((s) => s.id === session.id) || session).sessionUuid;
+      const hit = claudeCandidate(session.id, workdir, since);
+      if (hit && hit.uuid !== pinned) {
+        const why = transcriptExists(pinned) ? 'conversation was replaced (/clear)' : '--session-id was not honoured';
+        console.warn(`[claude] re-pinning ${session.id}: ${pinned} -> ${hit.uuid} (${why})`);
+        update(session.id, { sessionUuid: hit.uuid });
+      }
+    }
+    const t = setTimeout(tick, REPIN_MS);
     if (t.unref) t.unref();
+    claudeCapturing.set(session.id, t);
   };
-  const t0 = setTimeout(() => attempt(0), delays[0]);
+
+  const t0 = setTimeout(tick, 5000);
   if (t0.unref) t0.unref();
+  claudeCapturing.set(session.id, t0);
+}
+
+const opencodeCapturing = new Map(); // id -> pending re-pin timer
+
+// As with Claude and codex, the pin has to keep up with the live conversation:
+// starting a new opencode conversation writes a new `session` row, and a pin
+// captured once at launch would keep pointing at the abandoned one.
+function scheduleOpencodeCapture(session, workdir) {
+  const prev = opencodeCapturing.get(session.id);
+  if (prev) clearTimeout(prev);
+  const since = Date.now() - 2000;
+  let warnedShared = false;
+
+  const tick = () => {
+    if (!isRunning(session.id)) { opencodeCapturing.delete(session.id); return; }
+    if (folderIsShared(session.id, workdir, 'opencode')) {
+      if (!warnedShared) {
+        warnedShared = true;
+        console.warn(`[opencode] ${session.id}: folder shared with another live session — not following new conversations here`);
+      }
+    } else {
+      const claimed = new Set(list().filter((s) => s.id !== session.id && s.opencodeSessionId).map((s) => s.opencodeSessionId));
+      const pinned = (list().find((s) => s.id === session.id) || session).opencodeSessionId;
+      const hit = captureOpencodeSession(workdir, since, claimed);
+      if (hit && hit.id !== pinned) {
+        if (pinned) console.warn(`[opencode] re-pinning ${session.id}: ${pinned} -> ${hit.id} (conversation was replaced)`);
+        update(session.id, { opencodeSessionId: hit.id });
+      }
+    }
+    const t = setTimeout(tick, REPIN_MS);
+    if (t.unref) t.unref();
+    opencodeCapturing.set(session.id, t);
+  };
+
+  const t0 = setTimeout(tick, 3000);
+  if (t0.unref) t0.unref();
+  opencodeCapturing.set(session.id, t0);
 }
 
 // Single-quote a string for embedding in an `sh -lc` command line.
