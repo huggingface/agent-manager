@@ -3,9 +3,10 @@ import path from 'node:path';
 import pty from 'node-pty';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import { USE_TMUX, cliById, WORKSPACES_DIR } from './config.js';
+import { USE_TMUX, cliById, WORKSPACES_DIR, isRemote } from './config.js';
 import { update, list } from './sessions.js';
 import { captureOpencodeSession } from './traces.js';
+import { remoteState, setPaused } from './remote.js';
 
 const TERM_ENV = {
   ...process.env,
@@ -133,6 +134,9 @@ export function agentInfo() {
  */
 export function deriveState(session, info) {
   if (session.cli === 'files' || session.cli === 'trace') return 'idle'; // passive panels, not processes
+  // A remote agent's liveness comes from its polling, not from a pane we can
+  // capture — there is no tmux session here to diff.
+  if (isRemote(session.cli)) return remoteState(session);
   if (!info) return isRunning(session.id) ? 'idle' : 'stopped';
   if (info.age <= BUSY_SECS) return 'working';
   return session.cli === 'shell' ? 'idle' : 'waiting';
@@ -594,6 +598,9 @@ function commandFor(session) {
 
 /** Attach a new PTY client to the session (creating the tmux session if needed). */
 export function attach(session, cols, rows) {
+  // A remote agent has no terminal here by design — its harness runs on another
+  // machine. /ws catches this and says so in the pane.
+  if (isRemote(session.cli)) throw new Error('this pane has no terminal — it talks to an agent elsewhere');
   // The recorded workspace-relative path ('' = the workspaces root itself).
   // If the folder was deleted or moved, mkdir simply recreates it empty — no
   // tracking, no magic.
@@ -653,6 +660,9 @@ export function attach(session, cols, rows) {
  * had to spawn. Direct-PTY mode has no detached equivalent — throws if dead.
  */
 export function ensureRunning(session) {
+  // Nothing to start: a remote agent starts itself, elsewhere. Callers that
+  // might see one must go through deliver() (index.js) instead of assuming a PTY.
+  if (isRemote(session.cli)) throw new Error('a remote agent runs on its own machine — nothing to start here');
   if (isRunning(session.id)) return false;
   if (!USE_TMUX) throw new Error('session is not running');
   const folder = session.path ?? session.id;
@@ -740,6 +750,10 @@ export function copySelection(id) {
 
 /** Stop a session entirely (kills the tmux session / the running process). */
 export function stop(id) {
+  // A remote agent has no process to kill — "stopped" means disconnected, so the
+  // same button pauses it and closes its open polls.
+  const s = list().find((x) => x.id === id);
+  if (s && isRemote(s.cli)) { setPaused(s, true, 'stopped from the manager'); return; }
   if (USE_TMUX) {
     try {
       execFileSync('tmux', ['kill-session', '-t', tmuxName(id)], { stdio: 'ignore' });

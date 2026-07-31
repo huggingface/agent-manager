@@ -14,6 +14,9 @@ export interface Session {
   // Only on `cli: 'trace'` panes: what the read-only trace view is pointed at.
   // A regular agent session needs no such record — it reads its own transcript.
   traceSource?: { kind: 'session' | 'bundle'; ref: string } | null;
+  // Only on `cli: 'remote'` panes: the slug that is both the folder and the API
+  // address, plus the off switch and whatever the agent said about itself.
+  remote?: { name: string; paused?: boolean; peer?: RemotePeer | null } | null;
 }
 
 export interface Cli {
@@ -54,6 +57,49 @@ export const STATE_LABEL: Record<SessionState, string> = {
 // no trace clock, no Overview card, and never count as a group's agents.
 export const PASSIVE_CLIS = ['files', 'trace'];
 export const isPassive = (cli: string) => PASSIVE_CLIS.includes(cli);
+
+// A remote agent: a conversation with an agent running on another machine. It is
+// an agent (card, digest, light) but has no process here, so it is NOT passive
+// and NOT a terminal — see docs/remote-agents.md.
+export const isRemote = (cli: string) => cli === 'remote';
+
+// The three states mean something different when the agent is elsewhere: there
+// is no process to be "stopped", only a connection that is or isn't there.
+export const REMOTE_STATE_LABEL: Record<SessionState, string> = {
+  working: 'working',
+  waiting: 'listening',
+  idle: 'listening',
+  stopped: 'not connected',
+};
+
+export interface RemoteMessage {
+  seq: number;
+  role: 'user' | 'agent' | 'system';
+  from: string;
+  at?: string;
+  text: string;
+}
+
+export interface RemotePeer {
+  harness: string | null;
+  cwd: string | null;
+  host: string | null;
+  at: string;
+}
+
+export interface RemoteInfo {
+  name: string;
+  paused: boolean;
+  peer: RemotePeer | null;
+  connected: boolean;
+  polls: number;
+  lastSeenAt: number | null;
+  seq: number;
+  // Highest seq a poll actually handed to the agent — the pane's ✓ comes from
+  // this and claims nothing beyond it.
+  deliveredThrough: number;
+  state: SessionState;
+}
 
 export type OverviewFilter = 'all' | 'waiting' | 'working' | 'quiet';
 

@@ -1,4 +1,4 @@
-import type { Cli, Group, MoveTarget, Session, Tree } from './types';
+import type { Cli, Group, MoveTarget, RemoteInfo, RemoteMessage, Session, Tree } from './types';
 
 const HEADERS = { 'content-type': 'application/json' };
 const json = (r: Response) => {
@@ -106,6 +106,26 @@ export const getMeta = (): Promise<{ sessions: MetaSession[]; generatedAt: strin
 // this CLI only resolves through the bulk pass.
 export const getMetaOne = (id: string): Promise<{ id: string; digest: MetaDigest | null }> =>
   fetch(`/api/meta/${id}`).then(json);
+// ---------- remote agents ----------
+// The pane polls this at the app's usual 2 s cadence. since=0 returns the tail;
+// a cursor returns only the delta.
+export const getRemoteLog = (id: string, since = 0): Promise<RemoteInfo & { messages: RemoteMessage[] }> =>
+  fetch(`/api/sessions/${id}/remote?since=${since}`).then(json);
+
+// The operator's turn goes through the same route a local agent's does, so the
+// server's deliver() shim decides what "typing at it" means.
+export const sayToRemote = (id: string, text: string) => sendInput(id, text);
+
+// text/plain, and free of secrets by design — safe to put on a clipboard.
+export const getRemotePrompt = (name: string): Promise<string> =>
+  fetch(`/api/remote/${encodeURIComponent(name)}/prompt`).then((r) => {
+    if (!r.ok) throw new Error(`${r.status}`);
+    return r.text();
+  });
+
+export const setRemotePaused = (id: string, paused: boolean): Promise<RemoteInfo> =>
+  fetch(`/api/sessions/${id}/remote/paused`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ paused }) }).then(json);
+
 export const sendInput = (id: string, text: string): Promise<{ ok: boolean; started?: boolean }> =>
   fetch(`/api/sessions/${id}/input`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ text }) }).then(json);
 

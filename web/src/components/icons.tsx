@@ -44,6 +44,32 @@ export const ListGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+// A remote agent: `> <` facing each other inside a circle — the machine-to-machine
+// connection sign, not a vendor logo. The gap is the point: two ends reaching
+// toward each other across a distance.
+export const RemoteGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    {/* Thin ring, bold chevrons: at 16px the ring plus fine inner detail muddles
+        into a circled X, so the enclosure recedes and the marks carry the glyph.
+        `>` rides high-left and `<` low-right, overlapping by 0.8u horizontally
+        while their facing arms stay parallel with ~1.9u of clear air — two ends
+        passing each other, never crossing. */}
+    <circle cx="8" cy="8" r="7.1" strokeWidth="1" />
+    <path d="M5.2 3.9 8.4 5.7 5.2 7.5M10.8 8.5 7.6 10.3l3.2 1.8" strokeWidth="1.35" strokeLinejoin="round" />
+  </G>
+);
+
+// The "the agent has this" tick. Its own glyph rather than a text ✓ so it can be
+// sized and coloured deliberately (accent, via currentColor).
+export const AckGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    {/* Heavier than the 1.2 house stroke: this is a small mark that has to read
+        at a glance next to a line of text. Set on the path, since G fixes the
+        stroke width for every other glyph. */}
+    <path d="M3.2 8.6 6.4 11.8 12.8 4.6" strokeWidth="2.1" strokeLinecap="butt" strokeLinejoin="miter" />
+  </G>
+);
+
 export const BoltGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <path d="M8.9 1.6 3.9 8.9h3.2l-1 5.5 5-7.3H7.9l1-5.5z" strokeLinejoin="round" />
