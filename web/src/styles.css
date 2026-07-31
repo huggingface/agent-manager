@@ -690,11 +690,19 @@ body {
    carry download+delete, folders only delete, and the header carries neither.
    Sized to two buttons and right-aligned, so Size and Modified land on the same
    x in every row and under their own headings. */
+/* the folder new entries land in, and the one a drag is currently over */
+.tree-row.target > .tw-name { text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; }
+.tree-row.drop { background: color-mix(in srgb, var(--accent) 20%, transparent);
+  outline: 1px solid var(--accent); outline-offset: -1px; }
+.tree-row.moving { opacity: 0.5; }
+.files-new-where { flex: none; color: var(--muted); font-size: 11px; }
+.files-new strong { font-weight: 600; }
+
 .tw-rename { flex: 1; min-width: 0; font: inherit; color: var(--text); background: var(--term-bg);
   border: 1px solid var(--accent); border-radius: var(--r-sm); padding: 0 4px; margin: -1px 0; outline: none; }
 
 /* room for three buttons on a file row (rename, download, delete) */
-.tw-acts { flex: none; width: 4.9em; display: inline-flex; align-items: center;
+.tw-acts { flex: none; width: 6.5em; display: inline-flex; align-items: center;
   justify-content: flex-end; gap: 1px; }
 
 /* Create prompt and delete confirm: one row above the listing, where the thing

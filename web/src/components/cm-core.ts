@@ -170,7 +170,9 @@ export function createEditor(opts: {
       langComp.of([]),
       themeComp.of(baseTheme(opts.theme === 'dark')),
       editComp.of([EditorView.editable.of(opts.editable), EditorState.readOnly.of(!opts.editable)]),
-      EditorView.updateListener.of((u) => { if (u.docChanged) opts.onChange(u.state.doc.toString()); }),
+      EditorView.updateListener.of((u) => {
+        if (u.docChanged && !applying.has(u.view)) opts.onChange(u.state.doc.toString());
+      }),
     ],
   });
 
@@ -181,6 +183,21 @@ export function createEditor(opts: {
     if (lang) view.dispatch({ effects: langComp.reconfigure(lang) });
   }).catch(() => {});
   return view;
+}
+
+// Replacing the document from the outside (a discard, a reload, a rename) is not
+// an edit. Without this flag the update listener fires on our own dispatch and
+// marks the file dirty again the instant it was made clean.
+const applying = new WeakSet<EditorView>();
+
+export function setDoc(view: EditorView, text: string) {
+  if (view.state.doc.toString() === text) return;
+  applying.add(view);
+  try {
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+  } finally {
+    applying.delete(view);
+  }
 }
 
 export function setEditable(view: EditorView, editable: boolean) {

@@ -89,6 +89,16 @@ export const MoonGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+// Move: an arrow leaving one container for another.
+export const MoveGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M2.4 3.9a1 1 0 0 1 1-1h2.2a1 1 0 0 1 .7.3l.6.6h1.9" />
+    <path d="M2.4 3.9v7.3a1 1 0 0 0 1 1h3.1" />
+    <path d="M9.1 6.2h4.5M11.5 4.1l2.1 2.1-2.1 2.1" />
+    <path d="M13.6 8.9v2.3a1 1 0 0 1-1 1H9.4" />
+  </G>
+);
+
 export const TrashGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <path d="M3 4.5h10M6.4 4.4v-1a1 1 0 0 1 1-1h1.2a1 1 0 0 1 1 1v1" />

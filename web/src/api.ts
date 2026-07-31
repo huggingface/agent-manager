@@ -210,6 +210,12 @@ export const renameEntry = (id: string, p: string, name: string): Promise<{ path
   fetch(`/api/files/${id}/rename`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ path: p, name }) })
     .then(jsonOrError);
 
+// Move an entry into another folder, keeping its name. `to` is the destination
+// folder ('' = the pane's root).
+export const moveEntry = (id: string, p: string, to: string): Promise<{ path: string }> =>
+  fetch(`/api/files/${id}/move`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ path: p, to }) })
+    .then(jsonOrError);
+
 // Delete a file, or a folder and everything under it.
 export const deleteEntry = (id: string, p: string) =>
   fetch(`/api/files/${id}/entry?path=${encodeURIComponent(p)}`, { method: 'DELETE' }).then(jsonOrError);

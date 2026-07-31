@@ -1489,6 +1489,45 @@ app.post('/api/files/:id/rename', (req, res) => {
   res.json({ ok: true, name, path: path.relative(root, to) });
 });
 
+// Move an entry into another folder under the same root, keeping its name — the
+// drag-and-drop half of rename. `to` is the destination FOLDER ('' = the root).
+// Adapted from PR #9, including the realpath check below.
+app.post('/api/files/:id/move', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const root = folderPathOf(s);
+  const b = req.body || {};
+  const from = resolveSafe(root, b.path);
+  if (!from || !fs.existsSync(from)) return res.status(404).json({ error: 'not found' });
+  if (path.resolve(from) === path.resolve(root)) return res.status(400).json({ error: 'cannot move the workspace root' });
+  const dep = dependedOnDir(from);
+  if (dep) return res.status(409).json({ error: `that folder is ${dep}` });
+
+  const destDir = resolveSafe(root, b.to || '');
+  if (!destDir || !fs.existsSync(destDir)) return res.status(404).json({ error: 'no such folder' });
+  if (!fs.statSync(destDir).isDirectory()) return res.status(400).json({ error: 'not a folder' });
+
+  // A folder can't land inside itself — compared on REAL paths, so a symlink in
+  // the destination chain can't smuggle the subtree past the check.
+  try {
+    const realFrom = fs.realpathSync(from);
+    const realDest = fs.realpathSync(destDir);
+    if (realDest === realFrom || realDest.startsWith(realFrom + path.sep)) {
+      return res.status(400).json({ error: "can't move a folder into itself" });
+    }
+  } catch { return res.status(400).json({ error: 'bad path' }); }
+
+  const to = path.join(destDir, path.basename(from));
+  if (path.resolve(to) === path.resolve(from)) return res.json({ ok: true, path: path.relative(root, to) });
+  if (fs.existsSync(to)) return res.status(409).json({ error: `"${path.basename(from)}" already exists there` });
+  try {
+    fs.renameSync(from, to);
+  } catch (e) {
+    return res.status(500).json({ error: String((e && e.message) || e) });
+  }
+  res.json({ ok: true, path: path.relative(root, to) });
+});
+
 // Delete one entry. Folders go recursively — the pane says so before asking.
 app.delete('/api/files/:id/entry', (req, res) => {
   const s = store.get(req.params.id);

@@ -10,7 +10,7 @@ import { TraceView, type TraceSource } from './TracePane';
 import {
   FolderGlyph, FileGlyph, CloseGlyph, UpGlyph, UploadGlyph, BackGlyph, DownloadGlyph,
   RefreshGlyph, ImageGlyph, CodeGlyph, DocGlyph, GlobeGlyph,
-  FolderPlusGlyph, FilePlusGlyph, TrashGlyph, PencilGlyph,
+  FolderPlusGlyph, FilePlusGlyph, TrashGlyph, PencilGlyph, MoveGlyph,
 } from './icons';
 
 const fmtSize = (n: number) => {
@@ -74,9 +74,6 @@ const triggerDownload = (url: string, name: string) => {
   document.body.appendChild(a); a.click(); a.remove();
 };
 
-// How long typing has to pause before the file is written back.
-const AUTOSAVE_MS = 800;
-
 const CODE_RE = /\.(js|mjs|cjs|jsx|ts|tsx|py|rb|go|rs|java|kt|swift|c|h|cc|cpp|cs|php|pl|lua|r|jl|sh|bash|zsh|fish|ps1|css|scss|less|json|jsonl|ya?ml|toml|ini|sql|graphql|vue|svelte|tf)$/i;
 
 // Kind glyphs, one pen: a listing should read as one set, not a sticker album.
@@ -128,7 +125,21 @@ type RowProps = {
   onRename: (path: string, name: string) => void;
   renaming: string | null;
   setRenaming: (path: string | null) => void;
+  /** Drag-and-drop, and the tap-friendly version of the same move. */
+  onMove: (from: string, toDir: string) => void;
+  moving: Moving | null;
+  setMoving: (m: Moving | null) => void;
+  /** The folder new entries and uploads land in. */
+  target: string;
+  setTarget: (dir: string) => void;
 };
+
+export interface Moving { path: string; name: string; dir: boolean }
+
+// A move that would change nothing, or eat itself: back into the folder it is
+// already in, or a folder into its own subtree.
+const canMoveTo = (m: Moving, destDir: string) =>
+  dirOf(m.path) !== destDir && destDir !== m.path && !destDir.startsWith(`${m.path}/`);
 
 // Renaming happens in the row, on the name itself: the thing being renamed stays
 // where it is, under the cursor, instead of jumping to a dialog. Enter commits,
@@ -182,7 +193,7 @@ function ConfirmDelete({ name, dir, busy, onYes, onNo }: {
 }
 
 // Rows for one already-loaded listing; folders recurse through FolderNode.
-function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, onPreview, selected, onDelete, onRename, renaming, setRenaming }: RowProps & {
+function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, onPreview, selected, onDelete, onRename, renaming, setRenaming, onMove, moving, setMoving, target, setTarget }: RowProps & {
   entries: FileEntry[]; path: string;
 }) {
   const arr = sortEntries(entries, sort);
@@ -198,6 +209,7 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
               prefix={prefix} isLast={isLast} sort={sort} reloadKey={reloadKey}
               onOpen={onOpen} onPreview={onPreview} selected={selected} onDelete={onDelete}
               onRename={onRename} renaming={renaming} setRenaming={setRenaming}
+              onMove={onMove} moving={moving} setMoving={setMoving} target={target} setTarget={setTarget}
             />
           );
         }
@@ -205,8 +217,15 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
         return (
           <div
             key={e.name}
-            className={`tree-row file${selected === p ? ' selected' : ''}`}
+            className={`tree-row file${selected === p ? ' selected' : ''}${moving?.path === p ? ' moving' : ''}`}
             style={padFor(prefix)}
+            draggable={renaming !== p}
+            onDragStart={(ev) => {
+              ev.dataTransfer.setData('text/plain', p);
+              ev.dataTransfer.effectAllowed = 'move';
+              setMoving({ path: p, name: e.name, dir: false });
+            }}
+            onDragEnd={() => setMoving(null)}
             onClick={() => onPreview(p)}
             title={`${e.name} — ${kindNote}${fmtSize(e.size)} · ${fmtStamp(e.mtime)}`}
           >
@@ -227,6 +246,12 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
                 onClick={(ev) => { ev.stopPropagation(); setRenaming(p); }}
               >
                 <PencilGlyph />
+              </button>
+              <button
+                className="tw-act" title={`Move ${e.name} — then pick a folder`}
+                onClick={(ev) => { ev.stopPropagation(); setMoving({ path: p, name: e.name, dir: false }); }}
+              >
+                <MoveGlyph />
               </button>
               <button
                 className="tw-act" title="Download"
@@ -262,12 +287,20 @@ function DirContents({ path, sessionId, prefix, ...rest }: RowProps & { path: st
 function FolderNode({ path, name, mtime, isLast, ...rest }: RowProps & {
   path: string; name: string; mtime: number; isLast: boolean;
 }) {
-  const { prefix, onOpen, onDelete, onRename, renaming, setRenaming } = rest;
+  const { prefix, onOpen, onDelete, onRename, renaming, setRenaming, onMove, moving, setMoving, target, setTarget } = rest;
   const [open, setOpen] = useState(false);
+  const [over, setOver] = useState(false);
+  const takes = !!moving && canMoveTo(moving, path);   // would a drop here do anything?
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   const onClick = () => {
     if (renaming === path) return;   // the row is an input right now
+    if (moving) {                    // a move is armed: this row is the answer
+      if (canMoveTo(moving, path)) onMove(moving.path, path);
+      else setMoving(null);
+      return;
+    }
+    setTarget(path);                 // new folders, new files and uploads land here
     if (timer.current) return;
     timer.current = setTimeout(() => { timer.current = null; setOpen((o) => !o); }, 200);
   };
@@ -278,7 +311,24 @@ function FolderNode({ path, name, mtime, isLast, ...rest }: RowProps & {
   return (
     <>
       <div
-        className="tree-row folder" style={padFor(prefix)} onClick={onClick} onDoubleClick={onDoubleClick}
+        className={`tree-row folder${target === path ? ' target' : ''}${over && takes ? ' drop' : ''}${moving?.path === path ? ' moving' : ''}`}
+        style={padFor(prefix)}
+        draggable={renaming !== path}
+        onDragStart={(ev) => {
+          ev.dataTransfer.setData('text/plain', path);
+          ev.dataTransfer.effectAllowed = 'move';
+          setMoving({ path, name, dir: true });
+        }}
+        onDragEnd={() => { setMoving(null); setOver(false); }}
+        onDragOver={(ev) => { if (takes) { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; setOver(true); } }}
+        onDragLeave={() => setOver(false)}
+        onDrop={(ev) => {
+          setOver(false);
+          if (!takes || !moving) return;
+          ev.preventDefault(); ev.stopPropagation();
+          onMove(moving.path, path);
+        }}
+        onClick={onClick} onDoubleClick={onDoubleClick}
         title={`${name} — folder · ${fmtStamp(mtime)}\nClick to expand · double-click to open`}
       >
         <Rails prefix={prefix} isLast={isLast} />
@@ -298,6 +348,12 @@ function FolderNode({ path, name, mtime, isLast, ...rest }: RowProps & {
             onClick={(ev) => { ev.stopPropagation(); setRenaming(path); }}
           >
             <PencilGlyph />
+          </button>
+          <button
+            className="tw-act" title={`Move ${name} — then pick a folder`}
+            onClick={(ev) => { ev.stopPropagation(); setMoving({ path, name, dir: true }); }}
+          >
+            <MoveGlyph />
           </button>
           <button
             className="tw-act danger" title={`Delete ${name}`}
@@ -390,7 +446,11 @@ export type SaveState = {
   /** Editable at all: a text kind we hold WHOLE (not a truncated head). */
   can: boolean;
   why?: string;                                   // why not, when it can't
-  status: 'clean' | 'typing' | 'saving' | 'saved' | 'error';
+  status: 'clean' | 'dirty' | 'saving' | 'saved' | 'error';
+  /** Write the buffer. Enabled only while there is something to write. */
+  save: () => void;
+  /** Throw the buffer away and go back to what is on disk. */
+  discard: () => void;
   error: string | null;
   /** A concurrent writer won the race; the two ways out. */
   conflict: boolean;
@@ -422,9 +482,9 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   const [status, setStatus] = useState<SaveState['status']>('clean');
   const [saveErr, setSaveErr] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
-  // The autosave timer, and the values it must read at fire time rather than at
-  // schedule time (mtime moves with every save).
-  const timer = useRef<number | null>(null);
+  // The buffer waiting to be written, if any. There is no timer: these files
+  // have no undo and no git behind them, so nothing reaches disk until it is
+  // asked for.
   const pending = useRef<{ text: string; mtime: number } | null>(null);
 
   useEffect(() => {
@@ -494,7 +554,6 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
     const job = pending.current;
     if (!job) return;
     pending.current = null;
-    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
     setStatus('saving'); setSaveErr(null);
     try {
       const after = await api.writeFile(sessionId, path, job.text, force ? 0 : job.mtime);
@@ -514,25 +573,19 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
     }
   }, [sessionId, path, onSaved]);
 
-  // Every keystroke restarts a short timer: agents read these files, and this
-  // one writes to a FUSE-mounted bucket, so a save per character is out.
+  // Typing only fills the buffer. Writing it is a decision, taken with the Save
+  // button or ⌘S — an autosave here would be one stray keystroke away from
+  // silently rewriting a file with no undo behind it.
   const onEdit = useCallback((next: string) => {
     setDraft(next);
     if (!canEdit || !meta) return;
     pending.current = { text: next, mtime: meta.mtime };
-    setStatus('typing');
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => flush(), AUTOSAVE_MS);
-  }, [canEdit, meta, flush]);
+    setStatus((st) => (st === 'error' ? st : 'dirty'));   // keep a failure visible
+  }, [canEdit, meta]);
 
-  // Closing the file, or switching to another, must not lose the last keystroke:
-  // fetch outlives the component, so firing it from cleanup is enough.
-  const flushRef = useRef(flush);
-  flushRef.current = flush;
-  useEffect(() => () => {
-    if (timer.current) clearTimeout(timer.current);
-    if (pending.current) flushRef.current();
-  }, [path]);
+  // Switching files abandons an unsaved buffer, so the pane asks before it lets
+  // that happen (see leaveView).
+  useEffect(() => () => { pending.current = null; }, [path]);
 
   useEffect(() => {
     if (status !== 'saved') return;
@@ -542,6 +595,11 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
 
   const edit = useMemo<SaveState>(() => ({
     can: canEdit,
+    save: () => flush(),
+    discard: () => {
+      pending.current = null;
+      setDraft(null); setSaveErr(null); setStatus('clean');
+    },
     // Only worth saying when editing was plausible and isn't: nobody expects to
     // type into a PDF, so an image or a binary says nothing at all.
     why: editKind && meta?.truncated ? 'too big to edit — only the first part is loaded' : undefined,
@@ -550,9 +608,8 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
     conflict,
     reload: () => {
       pending.current = null;
-      if (timer.current) { clearTimeout(timer.current); timer.current = null; }
       setDraft(null); setSaveErr(null); setConflict(false); setStatus('clean');
-    setTraceHead(null); setTraceQuery('');
+      setTraceHead(null); setTraceQuery('');
       setMeta(null);
       api.previewFile(sessionId, path).then(setMeta).catch(() => {});
       if (kindRef.current === 'html') {
@@ -699,6 +756,10 @@ export default function FilesPane({
   const [newName, setNewName] = useState('');
   const [pendingDel, setPendingDel] = useState<null | { path: string; name: string; dir: boolean }>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [moving, setMoving] = useState<Moving | null>(null);
+  // Where new folders, new files and uploads land: the folder you last clicked,
+  // falling back to the one the breadcrumb names.
+  const [target, setTarget] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
   const [actErr, setActErr] = useState<string | null>(null);
   const paneRef = useRef<HTMLDivElement | null>(null);
@@ -720,22 +781,22 @@ export default function FilesPane({
   const upload = async (files: FileList | File[]) => {
     setBusy(true);
     for (const f of Array.from(files)) {
-      try { await api.uploadFile(session.id, root, f); } catch { /* skip */ }
+      try { await api.uploadFile(session.id, dest, f); } catch { /* skip */ }
     }
     setBusy(false);
     setReloadKey((k) => k + 1);
   };
 
-  // Leaving is unconditional now — the last keystroke is flushed on the way out
-  // (see FileView). The exception is an unresolved conflict, where leaving WOULD
-  // drop work: that asks once.
+  // Nothing is written without being asked for, so leaving a file with an unsaved
+  // buffer would drop it silently. Ask once; a second Esc (or Back) goes through.
   const edit = info.edit;
+  const unsaved = edit?.status === 'dirty' || edit?.status === 'error' || !!edit?.conflict;
   const leaveView = () => {
-    if (edit?.conflict && !confirmClose) { setConfirmClose(true); return; }
+    if (unsaved && !confirmClose) { setConfirmClose(true); return; }
     setConfirmClose(false);
     setViewing(null);
   };
-  useEffect(() => { if (!edit?.conflict) setConfirmClose(false); }, [edit?.conflict]);
+  useEffect(() => { if (!unsaved) setConfirmClose(false); }, [unsaved]);
 
   // Create lands in the folder you are looking at, which is the one the
   // breadcrumb names.
@@ -744,13 +805,28 @@ export default function FilesPane({
     if (!name || !creating) return;
     setActing(true); setActErr(null);
     try {
-      await (creating === 'folder' ? api.createFolder : api.createFile)(session.id, root, name);
+      await (creating === 'folder' ? api.createFolder : api.createFile)(session.id, dest, name);
       setCreating(null); setNewName('');
       setReloadKey((k) => k + 1);
     } catch (e: any) {
       setActErr(String(e?.message || e));
     } finally {
       setActing(false);
+    }
+  };
+
+  const dest = target && (target === root || target.startsWith(root ? `${root}/` : '')) ? target : root;
+  useEffect(() => { setTarget(null); setMoving(null); }, [root]);
+
+  const doMove = async (from: string, toDir: string) => {
+    setMoving(null); setActErr(null);
+    try {
+      const { path: next } = await api.moveEntry(session.id, from, toDir);
+      if (viewing === from) setViewing(next);
+      else if (viewing && viewing.startsWith(`${from}/`)) setViewing(`${next}${viewing.slice(from.length)}`);
+      setReloadKey((k) => k + 1);
+    } catch (e: any) {
+      setActErr(String(e?.message || e));
     }
   };
 
@@ -814,10 +890,9 @@ export default function FilesPane({
       onKeyDown={viewing ? (e) => {
         if (e.key === 'Escape') { e.preventDefault(); leaveView(); }
         // Cmd/Ctrl-S works from anywhere in the pane, not just inside the editor.
-        // ⌘S is a no-op that people press anyway: swallow it so the browser's
-        // save dialog never appears over an editor that already saved.
         else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's' && edit?.can) {
           e.preventDefault();
+          if (edit.status === 'dirty' || edit.status === 'error') edit.save();
         }
       } : undefined}
     >
@@ -835,8 +910,8 @@ export default function FilesPane({
             <span className="fv-title" title={viewing}>
               <KindGlyph name={name} kind={meta?.kind} className="tw-ico" />
               <span className="fv-name">{name}</span>
-              {(edit?.status === 'typing' || edit?.status === 'saving') && (
-                <span className="fv-dirty" title="Saving…">•</span>
+              {(edit?.status === 'dirty' || edit?.status === 'saving') && (
+                <span className="fv-dirty" title="Unsaved changes">•</span>
               )}
             </span>
             <span className="spacer" />
@@ -894,8 +969,18 @@ export default function FilesPane({
             ) : edit?.error ? (
               <span className="fi-err" title={edit.error}>{edit.error}</span>
             ) : edit?.can && edit.status !== 'clean' ? (
-              <span className={`fv-save ${edit.status}`}>
-                {edit.status === 'saving' ? 'saving…' : edit.status === 'saved' ? 'saved' : 'editing…'}
+              <span className="fv-edit">
+                {edit.status === 'saved' ? <span className="fv-save saved">saved</span> : (
+                  <>
+                    <button className="mini-btn" onClick={edit.discard} disabled={edit.status === 'saving'}>Discard</button>
+                    <button
+                      className="mini-btn primary" onClick={edit.save}
+                      disabled={edit.status === 'saving'} title="Save (⌘S)"
+                    >
+                      {edit.status === 'saving' ? 'Saving…' : 'Save'}
+                    </button>
+                  </>
+                )}
               </span>
             ) : null}
             {edit && !edit.can && edit.why && (
@@ -962,6 +1047,7 @@ export default function FilesPane({
             <input
               autoFocus className="files-new-input"
               placeholder={creating === 'folder' ? 'New folder name' : 'New file name'}
+              title={`Will be created in ${dest || rootLabel}`}
               value={newName}
               onChange={(e) => { setNewName(e.target.value); setActErr(null); }}
               onKeyDown={(e) => {
@@ -969,8 +1055,23 @@ export default function FilesPane({
                 if (e.key === 'Escape') { e.preventDefault(); setCreating(null); setActErr(null); }
               }}
             />
+            <span className="files-new-where" title="Click a folder to change where new entries land">
+              in {dest ? dest.split('/').pop() : rootLabel}
+            </span>
             <button className="mini-btn primary" disabled={!newName.trim() || acting} onClick={create}>Create</button>
             <button className="mini-btn" disabled={acting} onClick={() => { setCreating(null); setActErr(null); }}>Cancel</button>
+          </div>
+        )}
+        {moving && (
+          <div className="files-new">
+            <MoveGlyph className="tw-ico" />
+            <span className="tw-warn">Moving <strong>{moving.name}</strong> — click a folder, or drop it on one</span>
+            {canMoveTo(moving, root) && (
+              <button className="mini-btn" onClick={() => doMove(moving.path, root)}>
+                Move here ({root ? root.split('/').pop() : rootLabel})
+              </button>
+            )}
+            <button className="mini-btn" onClick={() => setMoving(null)}>Cancel</button>
           </div>
         )}
         {pendingDel && (
@@ -1002,6 +1103,8 @@ export default function FilesPane({
               reloadKey={reloadKey} onOpen={openDir} onPreview={setViewing} selected={viewing}
               onDelete={(p, name, isDir) => { setCreating(null); setActErr(null); setPendingDel({ path: p, name, dir: isDir }); }}
               onRename={doRename} renaming={renaming} setRenaming={(p) => { setActErr(null); setRenaming(p); }}
+              onMove={doMove} moving={moving} setMoving={(m) => { setActErr(null); setMoving(m); }}
+              target={dest} setTarget={setTarget}
             />
           )}
           {busy && <div className="tree-msg">Uploading…</div>}
@@ -1021,10 +1124,14 @@ export default function FilesPane({
         {!viewing
           ? 'Click a file to preview · click a folder to expand · double-click a folder to open it'
           : confirmClose
-            ? 'This file changed on disk — Reload or Overwrite, or Esc again to leave your edits behind'
-            : edit?.can
-              ? 'Type to edit — saved automatically · Esc goes back'
-              : 'Esc goes back to the files'}
+            ? (edit?.conflict
+              ? 'This file changed on disk — Reload or Overwrite, or Esc again to leave your edits behind'
+              : 'Unsaved changes — ⌘S to save, or Esc again to discard them')
+            : edit?.status === 'dirty'
+              ? 'Unsaved changes — ⌘S or Save'
+              : edit?.can
+                ? 'Type to edit · ⌘S saves · Esc goes back'
+                : 'Esc goes back to the files'}
       </div>
     </div>
   );
