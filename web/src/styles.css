@@ -739,6 +739,13 @@ body {
 .fv-conflict { display: inline-flex; gap: 6px; align-items: center; }
 .fi-err { color: var(--danger); font-size: 11px; max-width: 22em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* a trace rendered inside the file viewer: the pane's own body scrolls it, and
+   the viewer's toolbar bits sit in the info strip with the other toggles */
+.fv-trace-tools { display: inline-flex; gap: 6px; align-items: center; min-width: 0; }
+.fv-trace-tools .tv-search { height: 20px; font-size: 11px; max-width: 12em; }
+.fv-trace-tools .tv-nav .mini-btn { padding: 0 4px; }
+.files-view .trace-body { flex: 1; min-height: 0; }
+
 /* pdf: our own pages, stacked on the same neutral stage as images */
 .fv-pdf { flex: 1; min-height: 0; overflow: auto; background: var(--bg); }
 .fv-pdf .pdf-pages { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 14px; }
@@ -760,7 +767,8 @@ body {
 
 .fv-frame { flex: 1; min-height: 0; width: 100%; border: none; background: #fff; }
 .fv-foot { flex: none; padding: 4px 11px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 11px; }
-.fv-foot a { color: var(--accent); }
+.fv-foot a, .link-btn { color: var(--accent); }
+.link-btn { background: none; border: none; padding: 0; font: inherit; cursor: pointer; text-decoration: underline; }
 
 .fv-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px; color: var(--muted); font-size: 13px; text-align: center; }
 .fv-sub { color: var(--muted); font-size: 11.5px; font-family: var(--font-mono); opacity: 0.85; }

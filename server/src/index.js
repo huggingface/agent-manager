@@ -16,7 +16,7 @@ import * as order from './order.js';
 import * as demo from './demo.js';
 import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection, paneModes, isRunning, capturePane } from './runner.js';
 import { buildUsage } from './usage.js';
-import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle } from './traces.js';
+import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, traceHarnessOf } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 import { kindOfName, kindOfFile, mimeOf, readTextHead, TEXT_MAX } from './preview.js';
@@ -1065,7 +1065,7 @@ app.get('/api/files/:id', (req, res) => {
 // What the viewer needs to show one file: its kind, its stats, and — for the
 // text-ish kinds — the content itself, capped. Image/html/pdf are fetched by the
 // browser from /raw instead.
-app.get('/api/files/:id/preview', (req, res) => {
+app.get('/api/files/:id/preview', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const root = folderPathOf(s);
@@ -1073,13 +1073,27 @@ app.get('/api/files/:id/preview', (req, res) => {
   if (!f || !fs.existsSync(f)) return res.status(404).json({ error: 'not found' });
   const st = fs.statSync(f);
   if (!st.isFile()) return res.status(400).json({ error: 'not a file' });
-  const kind = kindOfFile(f);
+  let kind = kindOfFile(f);
+  // A transcript is a .jsonl like any other until you read a line of it, so the
+  // sniff happens HERE and not in the listing: this route already opens the one
+  // file being viewed, while the listing must stay name-only (see /api/files/:id).
+  let harness = null;
+  if (kind === 'text' && /\.jsonl$/i.test(f)) {
+    harness = await traceHarnessOf(f);
+    if (harness) kind = 'trace';
+  }
   const meta = {
     path: path.relative(root, f), name: path.basename(f), size: st.size, mtime: st.mtimeMs,
-    kind, mime: mimeOf(f, kind),
+    kind, mime: mimeOf(f, kind === 'trace' ? 'text' : kind), harness,
   };
-  if (kind === 'text' || kind === 'markdown') {
-    if (st.size > TEXT_MAX * 8) return res.json({ ...meta, kind: 'binary', reason: 'too big to preview' });
+  // A trace still carries its raw text, so the Source toggle has something to
+  // show without a second round trip.
+  if (kind === 'text' || kind === 'markdown' || kind === 'trace') {
+    // No size ceiling: readTextHead is bounded (512 KB) whatever the file weighs,
+    // so a 500 MB log costs one capped read and the viewer shows its head with a
+    // "download for the rest" note. Refusing outright was worse than a partial
+    // answer — the head is usually the part you came for, and a trace of tens of
+    // MB is ordinary.
     try {
       const { text, truncated } = readTextHead(f);
       return res.json({ ...meta, text, truncated });
@@ -1159,6 +1173,30 @@ app.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), (re
   }
   const after = fs.statSync(f);
   res.json({ ok: true, size: after.size, mtime: after.mtimeMs });
+});
+
+// One page of an on-disk transcript, rendered by the same reader the Trace pane
+// uses. Paged rather than whole: these files reach tens of MB, and the viewer
+// only ever has a window of them on screen.
+app.get('/api/files/:id/trace', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const f = resolveSafe(folderPathOf(s), req.query.path);
+  if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json(await readTraceByPath(f, {
+      offset: Number(req.query.offset) || 0,
+      limit: Number(req.query.limit) || 200,
+    }));
+  } catch (e) {
+    // "not a transcript" is an ordinary answer here, not a failure: the pane
+    // falls back to showing the file as text.
+    if (['no-trace', 'unsupported-harness'].includes(e && e.code)) {
+      return res.status(404).json({ error: e.message, code: e.code });
+    }
+    console.error('[trace file]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'trace read failed' });
+  }
 });
 
 // Stream uploads straight to disk — a big drag-drop must not be buffered in the

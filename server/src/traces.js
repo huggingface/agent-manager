@@ -1444,6 +1444,34 @@ export async function readTrace(session, { offset = 0, limit = 200 } = {}) {
 }
 
 /**
+ * Is this file a trace we can render? Cheap: reads at most the first few lines.
+ * Returns the harness id, or null for "just a .jsonl".
+ */
+export async function traceHarnessOf(file) {
+  try { return await sniffHarness(file); } catch { return null; }
+}
+
+/**
+ * Read ANY transcript on disk as a trace, by path — what the Files pane needs
+ * when you open a rollout or a Claude transcript directly. The session-bound
+ * reader above locates a file for a session; this one is handed the file and
+ * sniffs the format the same way an imported bundle does.
+ */
+export async function readTraceByPath(file, { offset = 0, limit = 200 } = {}) {
+  const st = await statRetry(file);
+  if (!st) { const e = new Error('trace file unreadable'); e.code = 'no-trace'; throw e; }
+
+  const key = `f:${file}:${st.mtimeMs}:${st.size}`;
+  if (viewMemo.key !== key) {
+    const harness = await sniffHarness(file);
+    if (!harness) { const e = new Error('unrecognized trace format'); e.code = 'unsupported-harness'; throw e; }
+    const parsed = await tracked(PHASE.readTrace, () => parseTraceFile(harness, file, null));
+    viewMemo = { key, val: parsed };
+  }
+  return pageOf(viewMemo.val, offset, limit);
+}
+
+/**
  * Read an accepted incoming bundle: DATA_DIR/traces/<envelopeId>/<name>.jsonl
  * plus meta/. The harness is sniffed from the file, since a bundle carries
  * whatever format the sender's harness ships.

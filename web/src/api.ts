@@ -130,12 +130,16 @@ export interface Traces { sessions: SessionTraces[]; totals: TraceStats; generat
 export const getTraces = (): Promise<Traces> => fetch('/api/traces').then(json);
 
 // ---- files ----
-export type FileKind = 'text' | 'markdown' | 'html' | 'image' | 'pdf' | 'binary';
+// 'trace' is content-detected, not name-detected: a transcript is a .jsonl like
+// any other until /preview reads a line of it (see the route).
+export type FileKind = 'text' | 'markdown' | 'html' | 'image' | 'pdf' | 'binary' | 'trace';
 export interface FileEntry { name: string; dir: boolean; size: number; mtime: number; kind?: FileKind; }
 export interface FileListing { path: string; root: string; entries: FileEntry[]; }
 export interface FilePreview {
   path: string; name: string; size: number; mtime: number; kind: FileKind; mime: string;
   text?: string; truncated?: boolean; reason?: string;
+  /** kind==='trace': which harness wrote it (claude, codex, …). */
+  harness?: string | null;
 }
 
 export const listFiles = (id: string, p = ''): Promise<FileListing> =>
@@ -143,6 +147,17 @@ export const listFiles = (id: string, p = ''): Promise<FileListing> =>
 
 export const previewFile = (id: string, p: string): Promise<FilePreview> =>
   fetch(`/api/files/${id}/preview?path=${encodeURIComponent(p)}`).then(json);
+
+// One page of a transcript sitting in the workspace, shaped exactly like the
+// Trace pane's own pages so the same viewer renders it.
+export const getFileTracePage = async (id: string, p: string, offset = 0, limit = 200): Promise<TracePage> => {
+  const r = await fetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&offset=${offset}&limit=${limit}`);
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    throw new TraceUnavailable(d.error || 'could not read this trace', d.code || 'no-trace');
+  }
+  return r.json();
+};
 
 export const rawUrl = (id: string, p: string) =>
   `/api/files/${id}/raw?path=${encodeURIComponent(p)}`;

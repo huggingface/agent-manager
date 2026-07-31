@@ -6,6 +6,7 @@ import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
 import CodeView from './CodeView';
 import PdfView from './PdfView';
+import { TraceView, type TraceSource } from './TracePane';
 import {
   FolderGlyph, FileGlyph, CloseGlyph, UpGlyph, UploadGlyph, BackGlyph, DownloadGlyph,
   RefreshGlyph, ImageGlyph, CodeGlyph, DocGlyph, GlobeGlyph,
@@ -88,6 +89,7 @@ const KindGlyph = ({ name, kind, className }: { name: string; kind?: FileKind; c
 
 const KIND_LABEL: Record<FileKind, string> = {
   text: 'text', markdown: 'markdown', html: 'html', image: 'image', pdf: 'pdf', binary: 'binary',
+  trace: 'trace',
 };
 
 // ASCII-tree rails: one cell per ancestor (vertical line if that ancestor has
@@ -269,7 +271,19 @@ function useTheme(): 'light' | 'dark' {
   return theme;
 }
 
-type ViewInfo = { meta: FilePreview | null; extra: string[]; edit?: SaveState };
+type ViewInfo = { meta: FilePreview | null; extra: string[]; edit?: SaveState; trace?: TraceInfo };
+
+// What a rendered trace needs from the pane's info strip: the same chips and
+// prompt navigation the Trace pane puts in its own header.
+export type TraceInfo = {
+  harnessLabel?: string;
+  model?: string | null;
+  turns?: number;
+  prompts: number;
+  query: string;
+  setQuery: (q: string) => void;
+  go: (dir: -1 | 1) => void;
+};
 
 // Text files are simply editable — there is no edit mode to enter and no Save
 // button to find, so all the chrome needs is a quiet word about where the
@@ -299,6 +313,9 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   const [source, setSource] = useState<string | null>(null);
   const [dims, setDims] = useState<string | null>(null);
   const [pages, setPages] = useState<number | null>(null);
+  const [traceHead, setTraceHead] = useState<{ harnessLabel?: string; model?: string | null; total?: number; userTurns?: number[] } | null>(null);
+  const [traceQuery, setTraceQuery] = useState('');
+  const traceNav = useRef<((dir: -1 | 1) => void) | null>(null);
   const theme = useTheme();
 
   // Editing state. `draft` is null until the first keystroke: the editor is
@@ -316,6 +333,7 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
     let alive = true;
     setMeta(null); setErr(null); setSource(null); setDims(null); setPages(null);
     setDraft(null); setSaveErr(null); setConflict(false); setStatus('clean');
+    setTraceHead(null); setTraceQuery('');
     api.previewFile(sessionId, path)
       .then((m) => { if (alive) setMeta(m); })
       .catch((e) => { if (alive) setErr(String(e?.message || e)); });
@@ -348,15 +366,21 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   // viewer body stays one uninterrupted surface.
   const extra = useMemo(() => {
     const out: string[] = [];
-    if (shown) out.push(`${shown.split('\n').length.toLocaleString()} lines`);
+    // A rendered trace is measured in turns, not lines: the line count and the
+    // read cap describe the JSONL under it, so they belong to the Source view.
+    const rendering = meta?.kind === 'trace' && !raw;
+    if (shown && !rendering) out.push(`${shown.split('\n').length.toLocaleString()} lines`);
     if (dims) out.push(dims);
     if (pages) out.push(`${pages} page${pages === 1 ? '' : 's'}`);
-    if (meta?.truncated) out.push('truncated');
+    if (meta?.truncated && !rendering) out.push('truncated');
     return out;
-  }, [shown, meta?.truncated, dims, pages]);
+  }, [shown, meta?.truncated, meta?.kind, raw, dims, pages]);
 
   // Editable = a text-ish kind we hold in FULL. A truncated head must never be
   // writable: saving it back would drop everything past the 512 KB cap.
+  // Traces are excluded on purpose: they are the live record a harness resumes
+  // from, and an autosaving editor one stray keystroke away from it is a bad
+  // trade for a file nobody needs to hand-edit.
   const editKind = !!meta && (meta.kind === 'text' || meta.kind === 'markdown' || meta.kind === 'html');
   const canEdit = editKind && !meta?.truncated;
   const saved = meta?.kind === 'html' ? (source ?? '') : (meta?.text ?? '');
@@ -430,6 +454,7 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
       pending.current = null;
       if (timer.current) { clearTimeout(timer.current); timer.current = null; }
       setDraft(null); setSaveErr(null); setConflict(false); setStatus('clean');
+    setTraceHead(null); setTraceQuery('');
       setMeta(null);
       api.previewFile(sessionId, path).then(setMeta).catch(() => {});
       if (kindRef.current === 'html') {
@@ -439,7 +464,20 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
     overwrite: () => flush(true),
   }), [canEdit, editKind, meta?.truncated, status, saveErr, conflict, flush, sessionId, path]);
 
-  useEffect(() => { onInfo({ meta, extra, edit }); }, [meta, extra, edit, onInfo]);
+  const traceInfo = useMemo<TraceInfo | undefined>(() => (meta?.kind === 'trace' && !raw ? {
+    harnessLabel: traceHead?.harnessLabel,
+    model: traceHead?.model,
+    turns: traceHead?.total,
+    prompts: traceHead?.userTurns?.length || 0,
+    query: traceQuery,
+    setQuery: setTraceQuery,
+    go: (d: -1 | 1) => traceNav.current?.(d),
+  } : undefined), [meta?.kind, raw, traceHead, traceQuery]);
+
+  const traceSrc = useCallback<TraceSource>(
+    (offset, limit) => api.getFileTracePage(sessionId, path, offset, limit), [sessionId, path]);
+
+  useEffect(() => { onInfo({ meta, extra, edit, trace: traceInfo }); }, [meta, extra, edit, traceInfo, onInfo]);
 
   if (err) return <div className="fv-empty">Could not open this file.<div className="fv-sub">{err}</div></div>;
   if (!meta) return <div className="fv-empty">Loading…</div>;
@@ -460,6 +498,16 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
       return raw
         ? code(shown)
         : <div className="markdown fv-md" dangerouslySetInnerHTML={{ __html: md }} />;
+    }
+    if (meta.kind === 'trace') {
+      // Same two faces as markdown: the rendered conversation, or the JSONL
+      // underneath it.
+      return raw ? code(shown) : (
+        <TraceView
+          src={traceSrc} srcKey={`${sessionId}:${path}`} zoom={zoom} query={traceQuery}
+          onHead={setTraceHead} onNav={(go) => { traceNav.current = go; }}
+        />
+      );
     }
     if (meta.kind === 'text') return code(shown);
     if (meta.kind === 'image') {
@@ -507,10 +555,22 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
 
   // Only the code viewer follows the shared zoom; rendered markdown, images and
   // framed pages carry their own typography.
-  const isCode = meta.kind === 'text' || (raw && (meta.kind === 'markdown' || meta.kind === 'html'));
+  const isCode = meta.kind === 'text'
+    || (raw && (meta.kind === 'markdown' || meta.kind === 'html' || meta.kind === 'trace'));
+  // A capped read is a partial answer, so say so where the text ends rather than
+  // only as a chip in the strip — and offer the whole file in the same breath.
+  const headOnly = !!meta.truncated && (isCode || meta.kind === 'markdown');
   return (
     <div className="fv-body" style={isCode ? { fontSize: `${(12.5 * zoom) / 100}px` } : undefined}>
       {body()}
+      {headOnly && (
+        <div className="fv-foot">
+          Showing the first {fmtSize((shown || '').length)} of {fmtSize(meta.size)}.{' '}
+          <button className="link-btn" onClick={() => triggerDownload(api.downloadUrl(sessionId, path), meta.name)}>
+            Download the whole file
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -681,10 +741,32 @@ export default function FilesPane({
             {edit && !edit.can && edit.why && (
               <span className="fi-stat fi-extra" title={edit.why}>read-only</span>
             )}
-            {(meta?.kind === 'markdown' || meta?.kind === 'html') && (
+            {info.trace && (
+              // The Trace pane keeps these in its own header; here they join the
+              // strip, so a transcript in the Files pane still has the chips,
+              // prompt jumps and search that make a long one navigable.
+              <span className="fv-trace-tools">
+                {info.trace.harnessLabel && <span className="tv-chip">{info.trace.harnessLabel}</span>}
+                {info.trace.model && <span className="tv-chip">{info.trace.model}</span>}
+                {info.trace.turns != null && <span className="fi-stat">{info.trace.turns.toLocaleString()} turns</span>}
+                <span className="tv-nav">
+                  <button className="mini-btn" disabled={!info.trace.prompts} onClick={() => info.trace!.go(-1)}
+                    title={info.trace.prompts ? `Previous prompt (${info.trace.prompts})` : 'No prompts in this trace'}>▲</button>
+                  <button className="mini-btn" disabled={!info.trace.prompts} onClick={() => info.trace!.go(1)}
+                    title={info.trace.prompts ? `Next prompt (${info.trace.prompts})` : 'No prompts in this trace'}>▼</button>
+                </span>
+                <input
+                  className="tv-search fi-extra" placeholder="Search…"
+                  value={info.trace.query} onChange={(e) => info.trace!.setQuery(e.target.value)}
+                />
+              </span>
+            )}
+            {(meta?.kind === 'markdown' || meta?.kind === 'html' || meta?.kind === 'trace') && (
               <span className="fv-toggles">
                 <span className="seg">
-                  <button className={raw ? '' : 'on'} onClick={() => setRaw(false)}>{meta.kind === 'html' ? 'Page' : 'Rendered'}</button>
+                  <button className={raw ? '' : 'on'} onClick={() => setRaw(false)}>
+                    {meta.kind === 'html' ? 'Page' : meta.kind === 'trace' ? 'Trace' : 'Rendered'}
+                  </button>
                   <button className={raw ? 'on' : ''} onClick={() => setRaw(true)}>Source</button>
                 </span>
                 {meta.kind === 'html' && !raw && (

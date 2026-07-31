@@ -181,20 +181,24 @@ function Row({ turn, index }: { turn: TraceTurn; index: number }) {
 
 // ---------- the pane ----------
 
-export default function TracePane({
-  session, focused, zoom = 100, dragId, onDragActive, onFocus, onClose,
-}: {
-  session: Session;
-  focused?: boolean;
+// The viewer itself: paging, windowing, measurement, search, prompt jumps. It
+// takes a page loader rather than a session, so the same reader serves the Trace
+// pane and a transcript opened in the Files pane. Its chrome lives in whichever
+// pane hosts it — `onHead` hands up what the toolbar needs to say, `onNav` hands
+// up the prompt jump for the host's buttons.
+export type TraceSource = (offset: number, limit: number) => Promise<TracePage>;
+
+export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }: {
+  src: TraceSource;
+  /** Changing this resets the loaded turns — a different session or file. */
+  srcKey: string;
   zoom?: number;
-  dragId?: string;
-  onDragActive?: (dragging: boolean) => void;
-  onFocus?: () => void;
-  onClose: () => void;
+  query?: string;
+  onHead?: (head: Omit<TracePage, 'turns'> | null) => void;
+  onNav?: (go: (dir: -1 | 1) => void) => void;
 }) {
   const [head, setHead] = useState<Omit<TracePage, 'turns'> | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [query, setQuery] = useState('');
   const turns = useRef<(TraceTurn | undefined)[]>([]);
   const pending = useRef<Set<number>>(new Set());
   const [, forceRender] = useState(0);
@@ -213,7 +217,7 @@ export default function TracePane({
     if (pending.current.has(pageIndex)) return;
     pending.current.add(pageIndex);
     try {
-      const p = await api.getTracePage(session.id, pageIndex * PAGE, PAGE);
+      const p = await src(pageIndex * PAGE, PAGE);
       const { turns: got, ...meta } = p;
       if (turns.current.length !== meta.total) {
         turns.current.length = meta.total;
@@ -230,14 +234,14 @@ export default function TracePane({
     } finally {
       pending.current.delete(pageIndex);
     }
-  }, [session.id, bump]);
+  }, [src, bump]);
 
   useEffect(() => {
     turns.current = [];
     heights.current = [];
     setHead(null);
     loadPage(0);
-  }, [session.id, loadPage]);
+  }, [srcKey, loadPage]);
 
   // ---- windowing ----
   // Prefix sums over measured (or estimated) row heights. n is bounded by the
@@ -367,42 +371,16 @@ export default function TracePane({
     );
   }
 
-  const totalTokens = head?.usage ? fmtUsage(head.usage) : '';
+
+  // Hand the host what its toolbar needs. goPrompt is rebuilt every render, so
+  // the host gets a stable wrapper around the current one.
+  const goRef = useRef(goPrompt);
+  goRef.current = goPrompt;
+  useEffect(() => { onNav?.((d: -1 | 1) => goRef.current(d)); }, [onNav]);
+  useEffect(() => { onHead?.(head); }, [head, onHead]);
 
   return (
-    <div className={`slot${focused ? ' focused' : ''}`} onMouseDown={onFocus}>
-      <div
-        className={`pane-head trace-head${dragId ? ' draggable' : ''}`}
-        draggable={!!dragId}
-        onDragStart={dragId ? (e) => { e.dataTransfer.setData('text/plain', dragId); e.dataTransfer.effectAllowed = 'move'; onDragActive?.(true); } : undefined}
-        onDragEnd={dragId ? () => onDragActive?.(false) : undefined}
-      >
-        <Logo cli="trace" size={16} tint="#7c8cf8" />
-        {/* A received trace is identified by what it IS, not by which CLI wrote
-            it — so the session's own name leads, with the harness as a chip. */}
-        <span className="tv-title" title={head?.title || undefined}>{head?.title || head?.harnessLabel || 'trace'}</span>
-        {head?.title && head.harnessLabel && <span className="tv-chip">{head.harnessLabel}</span>}
-        {head?.model && <span className="tv-chip">{head.model}</span>}
-        {head && <span className="tv-count">{fmtNum(head.total)} turns</span>}
-        {totalTokens && <span className="tv-tokens">{totalTokens}</span>}
-        <span className="spacer" />
-        {/* Prompt-to-prompt navigation: an agent turn can run for dozens of rows,
-            and what you usually want is the next thing YOU said. */}
-        <span className="tv-nav">
-          <button className="mini-btn" disabled={!prompts.length} onClick={() => goPrompt(-1)}
-            title={prompts.length ? `Previous prompt (${prompts.length} in this session)` : 'No prompts in this trace'}>▲</button>
-          <button className="mini-btn" disabled={!prompts.length} onClick={() => goPrompt(1)}
-            title={prompts.length ? `Next prompt (${prompts.length} in this session)` : 'No prompts in this trace'}>▼</button>
-        </span>
-        <input
-          className="tv-search"
-          placeholder="Search…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
-        <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
-      </div>
-
+    <>
       <div
         className="trace-body"
         ref={scroller}
@@ -452,6 +430,65 @@ export default function TracePane({
           {head.firstTs ? ` · ${new Date(head.firstTs).toLocaleString()}` : ''}
         </div>
       )}
+    </>
+  );
+}
+
+export default function TracePane({
+  session, focused, zoom = 100, dragId, onDragActive, onFocus, onClose,
+}: {
+  session: Session;
+  focused?: boolean;
+  zoom?: number;
+  dragId?: string;
+  onDragActive?: (dragging: boolean) => void;
+  onFocus?: () => void;
+  onClose: () => void;
+}) {
+  const [head, setHead] = useState<Omit<TracePage, 'turns'> | null>(null);
+  const [query, setQuery] = useState('');
+  const nav = useRef<((dir: -1 | 1) => void) | null>(null);
+  const onNav = useCallback((go: (dir: -1 | 1) => void) => { nav.current = go; }, []);
+  const src = useCallback<TraceSource>((offset, limit) => api.getTracePage(session.id, offset, limit), [session.id]);
+
+  const prompts = head?.userTurns || [];
+  const totalTokens = head?.usage ? fmtUsage(head.usage) : '';
+
+  return (
+    <div className={`slot${focused ? ' focused' : ''}`} onMouseDown={onFocus}>
+      <div
+        className={`pane-head trace-head${dragId ? ' draggable' : ''}`}
+        draggable={!!dragId}
+        onDragStart={dragId ? (e) => { e.dataTransfer.setData('text/plain', dragId); e.dataTransfer.effectAllowed = 'move'; onDragActive?.(true); } : undefined}
+        onDragEnd={dragId ? () => onDragActive?.(false) : undefined}
+      >
+        <Logo cli="trace" size={16} tint="#7c8cf8" />
+        {/* A received trace is identified by what it IS, not by which CLI wrote
+            it — so the session's own name leads, with the harness as a chip. */}
+        <span className="tv-title" title={head?.title || undefined}>{head?.title || head?.harnessLabel || 'trace'}</span>
+        {head?.title && head.harnessLabel && <span className="tv-chip">{head.harnessLabel}</span>}
+        {head?.model && <span className="tv-chip">{head.model}</span>}
+        {head && <span className="tv-count">{fmtNum(head.total)} turns</span>}
+        {totalTokens && <span className="tv-tokens">{totalTokens}</span>}
+        <span className="spacer" />
+        {/* Prompt-to-prompt navigation: an agent turn can run for dozens of rows,
+            and what you usually want is the next thing YOU said. */}
+        <span className="tv-nav">
+          <button className="mini-btn" disabled={!prompts.length} onClick={() => nav.current?.(-1)}
+            title={prompts.length ? `Previous prompt (${prompts.length} in this session)` : 'No prompts in this trace'}>▲</button>
+          <button className="mini-btn" disabled={!prompts.length} onClick={() => nav.current?.(1)}
+            title={prompts.length ? `Next prompt (${prompts.length} in this session)` : 'No prompts in this trace'}>▼</button>
+        </span>
+        <input
+          className="tv-search"
+          placeholder="Search…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
+      </div>
+
+      <TraceView src={src} srcKey={session.id} zoom={zoom} query={query} onHead={setHead} onNav={onNav} />
     </div>
   );
 }
