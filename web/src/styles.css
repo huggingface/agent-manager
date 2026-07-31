@@ -1015,6 +1015,12 @@ a.btn-ghost { text-decoration: none; }
   flex: none; width: 1.15em; height: 1.15em; color: var(--accent);
   align-self: center; margin-left: 1px;
 }
+/* The other half of the tick: quiet, italic, and out of the way — it marks a
+   normal waiting state, not a problem. */
+.rp-pending {
+  flex: none; font-style: italic; font-size: 0.8em; color: var(--muted);
+  opacity: 0.85; margin-left: 2px; white-space: nowrap;
+}
 
 .rp-agent { padding-left: 15px; word-break: break-word; }
 .rp-agent p { margin: 0 0 0.5em; }

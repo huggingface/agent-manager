@@ -272,11 +272,12 @@ export default function RemotePane({
             <div key={m.seq} className="rp-user">
               <span className="rp-caret">❯</span>
               <span className="rp-user-text">{m.text}</span>
-              {/* Drawn from the highest seq a poll actually returned; claims
-                  nothing beyond that. */}
-              {m.seq <= (info?.deliveredThrough ?? 0) && (
-                <AckGlyph className="rp-ack" />
-              )}
+              {/* Both states come from the highest seq a poll actually returned,
+                  and claim nothing beyond it: the agent either has this message
+                  or has not collected it yet. */}
+              {m.seq <= (info?.deliveredThrough ?? 0)
+                ? <AckGlyph className="rp-ack" />
+                : <span className="rp-pending" title="the agent has not collected this yet">pending</span>}
             </div>
           ) : (
             <div key={m.seq} className="rp-agent" dangerouslySetInnerHTML={{ __html: m.html }} />

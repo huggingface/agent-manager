@@ -55,7 +55,7 @@ export const RemoteGlyph = ({ className }: { className?: string }) => (
         while their facing arms stay parallel with ~1.9u of clear air — two ends
         passing each other, never crossing. */}
     <circle cx="8" cy="8" r="7.1" strokeWidth="1" />
-    <path d="M5.2 3.9 8.4 5.7 5.2 7.5M10.8 8.5 7.6 10.3l3.2 1.8" strokeWidth="1.7" strokeLinejoin="round" />
+    <path d="M5.2 3.9 8.4 5.7 5.2 7.5M10.8 8.5 7.6 10.3l3.2 1.8" strokeWidth="1.35" strokeLinejoin="round" />
   </G>
 );
 
