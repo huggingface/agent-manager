@@ -8,7 +8,8 @@ import { update, list } from './sessions.js';
 import { captureOpencodeSession, readTrace } from './traces.js';
 import { buildPaletteIndex, snapshotToRestoreAnsi, textColumns } from './snapshot.js';
 import {
-  createTerminalHistoryCheckpoint, loadTerminalHistory, traceHistoryLines,
+  createTerminalHistoryCheckpoint, loadTerminalHistory, TERMINAL_HISTORY_VERSION,
+  traceHistoryLines,
 } from './history-store.js';
 
 // libghostty-vt ships prebuilts for linux x64/arm64 and macOS arm64. Loading it
@@ -436,13 +437,13 @@ function armTraceHydration(host) {
 
     let snap;
     try { snap = host.vt.snapshot({ includeCells: true, includeScrollback: true }); } catch { return; }
-    const currentText = [
-      ...(snap.scrollbackLines || []).map((line) => line.text || ''),
-      (() => { try { return host.vt.getVisibleText(); } catch { return ''; } })(),
-    ].join('\n');
+    // With no durable checkpoint, startup scrollback consists of resume and
+    // SIGWINCH presentation frames. It is not conversation history: Claude can
+    // repaint the same welcome view at several widths before settling. Only
+    // the final visible screen is trusted; the trace supplies older turns.
+    const currentText = (() => { try { return host.vt.getVisibleText(); } catch { return ''; } })();
     const recovered = traceHistoryLines(host.traceHistoryPage, currentText);
     host.traceHistoryPage = null;
-    if (!recovered.length) return;
 
     let replacement = null;
     try {
@@ -451,7 +452,7 @@ function armTraceHydration(host) {
       });
       replacement.feed(snapshotToRestoreAnsi({
         ...snap,
-        scrollbackLines: [...recovered, ...(snap.scrollbackLines || [])],
+        scrollbackLines: recovered,
       }));
       const previous = host.vt;
       host.vt = replacement;
@@ -977,7 +978,12 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     name: 'xterm-256color', cols, rows, cwd: workdir, env,
   });
   const vt = ghostty.createTerminal({ cols, rows, scrollbackLimit: SCROLLBACK_BYTES });
-  const persistedHistory = loadTerminalHistory(HISTORY_DIR, session.id);
+  const loadedHistory = loadTerminalHistory(HISTORY_DIR, session.id);
+  // Version 1 agent checkpoints may contain the startup repaint frames that
+  // trace hydration used to append. Rebuild those once from the trace. Shell
+  // history was never subject to that path and remains safe to restore.
+  const persistedHistory = captureResize
+    && loadedHistory?.version < TERMINAL_HISTORY_VERSION ? null : loadedHistory;
   if (persistedHistory) {
     try {
       vt.feed(snapshotToRestoreAnsi({

@@ -5,14 +5,19 @@ const fileFor = (directory, id) => path.join(
   directory, `${String(id).replace(/[^a-zA-Z0-9._-]/g, '_')}.json`,
 );
 
+export const TERMINAL_HISTORY_VERSION = 2;
+
 /** Load a plain-text Ghostty scrollback checkpoint, ignoring old/bad schemas. */
 export function loadTerminalHistory(directory, id) {
   try {
     const body = fs.readFileSync(fileFor(directory, id), 'utf8');
     const saved = JSON.parse(body);
-    if (saved?.version !== 1 || !Number.isFinite(saved.cols) || !Array.isArray(saved.lines)) return null;
+    if (![1, TERMINAL_HISTORY_VERSION].includes(saved?.version)
+        || !Number.isFinite(saved.cols) || !Array.isArray(saved.lines)) return null;
     const lines = saved.lines.filter((line) => typeof line === 'string').map((text) => ({ text }));
-    return lines.length ? { cols: Math.max(1, Math.round(saved.cols)), lines, body } : null;
+    return lines.length ? {
+      version: saved.version, cols: Math.max(1, Math.round(saved.cols)), lines, body,
+    } : null;
   } catch { return null; }
 }
 
@@ -66,7 +71,7 @@ export function createTerminalHistoryCheckpoint({
     let snap;
     try { snap = snapshot(); } catch { return; }
     const lines = (snap.scrollbackLines || []).map((line) => line.text || '');
-    pending = JSON.stringify({ version: 1, cols: snap.cols, lines });
+    pending = JSON.stringify({ version: TERMINAL_HISTORY_VERSION, cols: snap.cols, lines });
     writePending();
   };
 

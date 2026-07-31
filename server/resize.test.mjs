@@ -11,7 +11,10 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
-import { traceHistoryLines } from './src/history-store.js';
+import {
+  TERMINAL_HISTORY_VERSION, createTerminalHistoryCheckpoint, loadTerminalHistory,
+  traceHistoryLines,
+} from './src/history-store.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-resize-'));
@@ -162,6 +165,24 @@ const stop = async (id) => {
 };
 
 try {
+  {
+    const directory = fs.mkdtempSync(path.join(DATA_DIR, 'history-schema-'));
+    const legacyFile = path.join(directory, 'legacy.json');
+    fs.writeFileSync(legacyFile, JSON.stringify({ version: 1, cols: 80, lines: ['old'] }));
+    check('legacy checkpoints remain readable for unaffected shell sessions',
+      loadTerminalHistory(directory, 'legacy')?.version === 1);
+
+    const checkpoint = createTerminalHistoryCheckpoint({
+      directory, id: 'current', delayMs: 1,
+      snapshot: () => ({ cols: 90, scrollbackLines: [{ text: 'clean' }] }),
+      blocked: () => false,
+    });
+    checkpoint.flush();
+    const wrote = await waitFor(() => loadTerminalHistory(directory, 'current')?.version
+      === TERMINAL_HISTORY_VERSION);
+    check('new checkpoints use the clean startup generation', wrote);
+  }
+
   {
     const recovered = traceHistoryLines({ turns: [
       { role: 'user', blocks: [{ type: 'text', text: 'older prompt' }] },
