@@ -41,6 +41,7 @@ const srv = spawn('node', ['src/index.js'], {
     PORT: String(PORT),
     DATA_DIR,
     AM_BASHRC: '/nonexistent',
+    AM_HISTORY_SAVE_MS: '50',
     AM_TEST_REPAINT_CMD: `env FIXED_LINES=30 HISTORY_LINES=2105 ${JSON.stringify(process.execPath)} ${JSON.stringify(FIXTURE)}`,
   },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -85,6 +86,16 @@ function view(id, cols, rows, mirror = false) {
           text += row;
         }
         return text;
+      },
+      scrollsBack: async () => {
+        if (!term) return false;
+        await new Promise((done) => term.write('', done));
+        const buf = term.buffer.active;
+        const bottom = buf.baseY;
+        term.scrollToTop();
+        const top = buf.viewportY;
+        term.scrollToBottom();
+        return bottom > 0 && top < bottom && buf.viewportY === bottom;
       },
     };
     ws.on('message', (data) => {
@@ -219,7 +230,10 @@ try {
     const initialBrowserTokens = Headless ? uniqueTokens(initialBrowserText) : 0;
     check('fixture starts without duplicate history', beforeGrid === 0 && beforeBrowser === 0,
       `grid=${beforeGrid}, browser=${beforeBrowser}`);
-    if (Headless) check('fixture starts with deep history', initialBrowserText.includes('history-0001'));
+    if (Headless) {
+      check('fixture starts with deep history', initialBrowserText.includes('history-0001'));
+      check('browser viewport can scroll through that history', await v.scrollsBack());
+    }
 
     for (const [cols, rows] of [[120, 32], [90, 24], [120, 32], [150, 40]]) {
       v.resize(cols, rows);
@@ -268,6 +282,24 @@ try {
       && (!Headless || (uniqueTokens(restoredText) === initialBrowserTokens
         && restoredText.includes('history-0001'))));
     reattached.close();
+    await stop(id);
+
+    // Stopping the PTY models a backend restart: a new host must load its
+    // durable checkpoint before the resumed TUI paints, without duplicating
+    // either the old frame or its welcome banner.
+    const checkpoint = path.join(DATA_DIR, 'state', 'terminal-history', `${id}.json`);
+    check('terminal history is checkpointed durably', await waitFor(() => fs.existsSync(checkpoint)));
+    const restarted = await view(id, 150, 40, true);
+    const resumed = await waitFor(async () => (await gridText(id)).includes('[fixture 150x40]'));
+    await sleep(250);
+    const restartedText = Headless ? await restarted.screenText() : '';
+    check('host restart restores deep scrollback', resumed
+      && (!Headless || restartedText.includes('history-0001')));
+    check('host restart does not duplicate repaint content', !Headless
+      || duplicateTokens(restartedText) === beforeBrowser,
+    Headless ? `${duplicateTokens(restartedText)} duplicate tokens` : '');
+    if (Headless) check('restored viewport remains scrollable', await restarted.scrollsBack());
+    restarted.close();
     await stop(id);
   }
 

@@ -3,10 +3,11 @@ import path from 'node:path';
 import pty from 'node-pty';
 import fs from 'node:fs';
 import { remoteState, setPaused } from './remote.js';
-import { cliById, WORKSPACES_DIR, isRemote } from './config.js';
+import { cliById, isRemote, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
 import { captureOpencodeSession } from './traces.js';
 import { buildPaletteIndex, snapshotToRestoreAnsi, textColumns } from './snapshot.js';
+import { createTerminalHistoryCheckpoint, loadTerminalHistory } from './history-store.js';
 
 // libghostty-vt ships prebuilts for linux x64/arm64 and macOS arm64. Loading it
 // is guarded so a platform without a prebuilt still boots and says so, rather
@@ -47,9 +48,8 @@ const bashLaunch = `exec bash --rcfile ${BASHRC} -i`;
 //   * agent state is a property read rather than a `tmux capture-pane`
 //     subprocess per session per poll.
 //
-// What we gave up is tmux outliving this process. On a Space that only ever
-// bridged a node restart (a rebuild or a sleep takes the whole container), and
-// each CLI resumes its own conversation on relaunch.
+// PTYs still end with this process, but canonical scrollback is checkpointed to
+// durable storage below and rejoined with the CLI's resumed screen on relaunch.
 
 // Rendered text unchanged for this long means the agent isn't working.
 const BUSY_SECS = 4;
@@ -74,6 +74,11 @@ const RESIZE_SETTLE_MS = Number(process.env.AM_RESIZE_SETTLE_MS || 120);
 // the raw redraw would turn every overflow row into duplicate history.
 const RESIZE_CAPTURE_IDLE_MS = Number(process.env.AM_RESIZE_CAPTURE_IDLE_MS || 80);
 const RESIZE_CAPTURE_MAX_MS = Number(process.env.AM_RESIZE_CAPTURE_MAX_MS || 900);
+// Unlike the PTY process, /data survives a Space rebuild. Checkpoint canonical
+// scrollback there so deploys and sleeps do not turn a resumed agent into a
+// terminal with only its freshly repainted viewport.
+const HISTORY_SAVE_MS = Number(process.env.AM_HISTORY_SAVE_MS || 5000);
+const HISTORY_DIR = path.join(STATE_DIR, 'terminal-history');
 // Bound untrusted WebSocket geometry without imposing the old 400x200 ceiling,
 // which left visible dead space on high-DPI displays at low zoom levels.
 const MIN_COLS = 20;
@@ -313,6 +318,7 @@ function finishCapturedGrid(host, txn) {
   } finally {
     try { txn.vt.dispose(); } catch {}
   }
+  host.historyCheckpoint.schedule();
 
   // A newer controller preference may have arrived while the repaint settled.
   const next = effectiveGrid(host);
@@ -326,10 +332,10 @@ function armCapturedGrid(host, txn) {
 }
 
 /** Start or supersede the bounded repaint transaction for an agent TUI. */
-function startCapturedGrid(host, cols, rows) {
+function startCapturedGrid(host, cols, rows, seed = null, resizePty = true) {
   const previous = host.resizeCapture;
-  let history = null;
-  let historyCols = null;
+  let history = seed?.history || null;
+  let historyCols = seed?.historyCols || null;
   if (previous) {
     history = previous.history;
     historyCols = previous.historyCols;
@@ -365,7 +371,7 @@ function startCapturedGrid(host, cols, rows) {
     maxTimer: null,
   };
   host.resizeCapture = txn;
-  try { host.pty.resize(cols, rows); } catch {}
+  if (resizePty) { try { host.pty.resize(cols, rows); } catch {} }
   txn.maxTimer = setTimeout(() => finishCapturedGrid(host, txn), RESIZE_CAPTURE_MAX_MS);
   if (txn.maxTimer.unref) txn.maxTimer.unref();
   return true;
@@ -902,6 +908,17 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     name: 'xterm-256color', cols, rows, cwd: workdir, env,
   });
   const vt = ghostty.createTerminal({ cols, rows, scrollbackLimit: SCROLLBACK_BYTES });
+  const persistedHistory = loadTerminalHistory(HISTORY_DIR, session.id);
+  if (persistedHistory) {
+    try {
+      vt.feed(snapshotToRestoreAnsi({
+        cols, rows, cursorRow: 0, cursorCol: 0, isAltScreen: false, cells: [],
+        scrollbackLines: persistedHistory.lines,
+      }));
+    } catch (error) {
+      console.error('[runner] history restore', error && error.message);
+    }
+  }
   const host = {
     id: session.id,
     pty: term,
@@ -912,6 +929,8 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     resizeCapture: null,
     capturedHistory: null,
     capturedHistoryCols: null,
+    startupHistory: captureResize ? persistedHistory : null,
+    historyCheckpoint: null,
     subs: new Set(),
     controller: null,
     gridTimer: null,
@@ -919,9 +938,26 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     screenChangedAt: Date.now(),
     bells: 0,
   };
+  host.historyCheckpoint = createTerminalHistoryCheckpoint({
+    directory: HISTORY_DIR,
+    id: host.id,
+    delayMs: HISTORY_SAVE_MS,
+    snapshot: () => host.vt.snapshot({ includeScrollback: true }),
+    blocked: () => !!host.resizeCapture,
+    persistedBody: persistedHistory?.body || null,
+  });
 
   term.onData((chunk) => {
-    const txn = host.resizeCapture;
+    let txn = host.resizeCapture;
+    if (!txn && host.startupHistory) {
+      const startup = host.startupHistory;
+      host.startupHistory = null;
+      startCapturedGrid(host, host.cols, host.rows, {
+        history: startup.lines,
+        historyCols: startup.cols,
+      }, false);
+      txn = host.resizeCapture;
+    }
     if (txn) {
       try { txn.vt.feed(chunk); } catch (e) { console.error('[runner] resize capture', e && e.message); }
       txn.sawData = true;
@@ -937,6 +973,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     host.capturedHistory = null;
     host.capturedHistoryCols = null;
     try { host.vt.feed(chunk); } catch (e) { console.error('[runner] vt.feed', e && e.message); }
+    host.historyCheckpoint.schedule();
 
     // State detection rides the feed path: the grid is already current, so there
     // is nothing to poll and no subprocess to spawn.
@@ -956,6 +993,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
       try { host.resizeCapture.vt.dispose(); } catch {}
       host.resizeCapture = null;
     }
+    host.historyCheckpoint.flush();
     try { host.vt.dispose(); } catch {}
     for (const sub of host.subs) sub.onExit();
     host.subs.clear();
