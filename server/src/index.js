@@ -1117,6 +1117,50 @@ app.get('/api/files/:id/download', (req, res) => {
   res.download(f);
 });
 
+// Save an edited text file.
+//
+// Two guards earn their keep here. First, `mtime`: agents are writing these very
+// files while a tab sits open on one, so a save carries the mtime the editor
+// loaded and is refused if the file moved on — losing an agent's work to a
+// stale buffer is worse than making someone reload. Second, only files we could
+// show WHOLE are writable: the preview serves the first 512 KB of a big file, and
+// saving that back would silently truncate the rest.
+app.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const f = resolveSafe(folderPathOf(s), req.query.path);
+  if (!f || !fs.existsSync(f)) return res.status(404).json({ error: 'not found' });
+  const st = fs.statSync(f);
+  if (!st.isFile()) return res.status(400).json({ error: 'not a file' });
+
+  const kind = kindOfFile(f);
+  if (kind === 'binary' || kind === 'image' || kind === 'pdf') {
+    return res.status(415).json({ error: 'not a text file' });
+  }
+  if (st.size > TEXT_MAX) {
+    return res.status(413).json({ error: 'too big to edit — only the first part was loaded' });
+  }
+  const expected = Number(req.query.mtime || 0);
+  if (expected && Math.abs(st.mtimeMs - expected) > 1000) {
+    return res.status(409).json({ error: 'changed on disk since you opened it', mtime: st.mtimeMs });
+  }
+  const text = typeof req.body === 'string' ? req.body : '';
+  if (text.length > TEXT_MAX) return res.status(413).json({ error: 'too big to save' });
+
+  // Write beside the target and rename: a crash or a full disk leaves the
+  // original intact rather than a half-written file.
+  const tmp = path.join(path.dirname(f), `.${path.basename(f)}.am-tmp`);
+  try {
+    fs.writeFileSync(tmp, text, 'utf8');
+    fs.renameSync(tmp, f);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    return res.status(500).json({ error: String((e && e.message) || e) });
+  }
+  const after = fs.statSync(f);
+  res.json({ ok: true, size: after.size, mtime: after.mtimeMs });
+});
+
 // Stream uploads straight to disk — a big drag-drop must not be buffered in the
 // RAM of the process that's also pumping every terminal's PTY data.
 app.post('/api/files/:id/upload', (req, res) => {

@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Session } from '../types';
 import * as api from '../api';
 import type { FileEntry, FileKind, FilePreview } from '../api';
 import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
+import CodeView from './CodeView';
+import PdfView from './PdfView';
 import {
   FolderGlyph, FileGlyph, CloseGlyph, UpGlyph, UploadGlyph, BackGlyph, DownloadGlyph,
   RefreshGlyph, ImageGlyph, CodeGlyph, DocGlyph, GlobeGlyph,
@@ -246,38 +248,62 @@ function resolveMarkdown(html: string, sessionId: string, filePath: string) {
   return host.innerHTML;
 }
 
-// Line-numbered plain text. The gutter is sticky so it survives horizontal
-// scrolling of a long line.
-function TextView({ text }: { text: string }) {
-  const gutter = useMemo(
-    () => Array.from({ length: text.split('\n').length }, (_, i) => i + 1).join('\n'),
-    [text],
-  );
-  return (
-    <div className="fv-code">
-      <pre className="fv-gutter" aria-hidden>{gutter}</pre>
-      <pre className="fv-text">{text}</pre>
-    </div>
-  );
+// Which theme the app is in — CodeMirror needs to know, since its own chrome
+// (selection, active line) is drawn from it rather than from our stylesheet.
+function useTheme(): 'light' | 'dark' {
+  const read = () => (document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light');
+  const [theme, setTheme] = useState<'light' | 'dark'>(read);
+  useEffect(() => {
+    const obs = new MutationObserver(() => setTheme(read()));
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => obs.disconnect();
+  }, []);
+  return theme;
 }
 
-type ViewInfo = { meta: FilePreview | null; extra: string[] };
+type ViewInfo = { meta: FilePreview | null; extra: string[]; edit?: EditState };
+
+// What the pane's chrome needs to know about an in-progress edit, so the Edit /
+// Save / Discard controls can live up in the info strip with the other toggles.
+export type EditState = {
+  /** This file can be edited at all (text, whole — not a truncated head). */
+  can: boolean;
+  why?: string;      // why not, when it can't
+  on: boolean;       // edit mode is active
+  dirty: boolean;
+  saving: boolean;
+  error: string | null;
+  start: () => void;
+  save: () => void;
+  discard: () => void;
+};
 
 // The viewer for one file. Kinds it can't render fall back to an honest
 // "download it instead" card rather than an empty box. The view mode (`raw`,
 // `scripts`) belongs to the pane, which draws the toggles in its info strip.
-function FileView({ sessionId, path, zoom, raw, scripts, onInfo }: {
+function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   sessionId: string; path: string; zoom: number; raw: boolean; scripts: boolean;
   onInfo: (info: ViewInfo) => void;
+  onSaved?: () => void;
 }) {
   const [meta, setMeta] = useState<FilePreview | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [source, setSource] = useState<string | null>(null);
   const [dims, setDims] = useState<string | null>(null);
+  const [pages, setPages] = useState<number | null>(null);
+  const theme = useTheme();
+
+  // Editing state. `draft` is null whenever we're just reading — so "is there an
+  // edit in progress" is one question with one answer, and leaving edit mode
+  // can't leave a stale buffer behind.
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveErr, setSaveErr] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
-    setMeta(null); setErr(null); setSource(null); setDims(null);
+    setMeta(null); setErr(null); setSource(null); setDims(null); setPages(null);
+    setDraft(null); setSaveErr(null);
     api.previewFile(sessionId, path)
       .then((m) => { if (alive) setMeta(m); })
       .catch((e) => { if (alive) setErr(String(e?.message || e)); });
@@ -302,29 +328,78 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo }: {
     [kind, meta?.text, raw, sessionId, path],
   );
 
+  // The text currently on screen: the draft while editing, the file otherwise.
+  // html keeps its source in `source` (the preview payload has no text for it).
+  const shown = draft ?? (meta?.kind === 'html' ? (source ?? '') : (meta?.text ?? ''));
+
   // Facts about the open file are reported up to the pane's info strip, so the
   // viewer body stays one uninterrupted surface.
   const extra = useMemo(() => {
     const out: string[] = [];
-    if (meta?.text != null) out.push(`${meta.text.split('\n').length.toLocaleString()} lines`);
+    if (shown) out.push(`${shown.split('\n').length.toLocaleString()} lines`);
     if (dims) out.push(dims);
+    if (pages) out.push(`${pages} page${pages === 1 ? '' : 's'}`);
     if (meta?.truncated) out.push('truncated');
     return out;
-  }, [meta?.text, meta?.truncated, dims]);
+  }, [shown, meta?.truncated, dims, pages]);
 
-  useEffect(() => { onInfo({ meta, extra }); }, [meta, extra, onInfo]);
+  const save = useCallback(async () => {
+    if (draft == null || !meta) return;
+    setSaving(true); setSaveErr(null);
+    try {
+      const after = await api.writeFile(sessionId, path, draft, meta.mtime);
+      setMeta({ ...meta, text: meta.kind === 'html' ? meta.text : draft, size: after.size, mtime: after.mtime });
+      if (meta.kind === 'html') setSource(draft);
+      setDraft(null);
+      onSaved?.();
+    } catch (e: any) {
+      setSaveErr(String(e?.message || e));
+    } finally {
+      setSaving(false);
+    }
+  }, [draft, meta, sessionId, path, onSaved]);
+
+  // Editable = a text-ish kind we hold in FULL. A truncated head must never be
+  // savable: writing it back would drop everything past the 512 KB cap.
+  const editKind = !!meta && (meta.kind === 'text' || meta.kind === 'markdown' || meta.kind === 'html');
+  const saved = meta?.kind === 'html' ? (source ?? '') : (meta?.text ?? '');
+  const edit = useMemo<EditState>(() => ({
+    can: editKind && !meta?.truncated,
+    // Only worth saying when editing was plausible and isn't: nobody expects to
+    // type into a PDF, so an image or a binary says nothing at all.
+    why: editKind && meta?.truncated ? 'too big to edit — only the first part is loaded' : undefined,
+    on: draft != null,
+    dirty: draft != null && draft !== saved,
+    saving,
+    error: saveErr,
+    start: () => setDraft(saved),
+    save,
+    discard: () => { setDraft(null); setSaveErr(null); },
+  }), [editKind, meta?.truncated, draft, saved, saving, saveErr, save]);
+
+  useEffect(() => { onInfo({ meta, extra, edit }); }, [meta, extra, edit, onInfo]);
 
   if (err) return <div className="fv-empty">Could not open this file.<div className="fv-sub">{err}</div></div>;
   if (!meta) return <div className="fv-empty">Loading…</div>;
 
   const rawSrc = api.rawUrl(sessionId, path);
+  const code = (text: string) => (
+    <CodeView
+      text={text} name={meta.name} theme={theme}
+      editable={draft != null}
+      onChange={setDraft}
+      onSave={() => { if (draft != null) save(); }}
+    />
+  );
   const body = () => {
     if (meta.kind === 'markdown') {
-      return raw
-        ? <TextView text={meta.text ?? ''} />
+      // An edit always happens against the source, so starting one from the
+      // rendered view shows the source rather than silently editing nothing.
+      return raw || draft != null
+        ? code(shown)
         : <div className="markdown fv-md" dangerouslySetInnerHTML={{ __html: md }} />;
     }
-    if (meta.kind === 'text') return <TextView text={meta.text ?? ''} />;
+    if (meta.kind === 'text') return code(shown);
     if (meta.kind === 'image') {
       return (
         <div className="fv-image">
@@ -336,7 +411,9 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo }: {
       );
     }
     if (meta.kind === 'html') {
-      if (raw) return source === null ? <div className="fv-empty">Loading source…</div> : <TextView text={source} />;
+      if (raw || draft != null) {
+        return source === null ? <div className="fv-empty">Loading source…</div> : code(shown);
+      }
       return (
         <iframe
           // The key forces a fresh frame when the scripts toggle flips: sandbox
@@ -350,18 +427,11 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo }: {
         />
       );
     }
-    // PDFs render in the browser's own viewer, which some browsers (and every
-    // headless one) simply don't have — so always offer the way out.
-    if (meta.kind === 'pdf') {
-      return (
-        <>
-          <iframe className="fv-frame" src={rawSrc} title={meta.name} />
-          <div className="fv-foot">
-            Nothing shown? <a href={rawSrc} target="_blank" rel="noopener noreferrer">open it in a new tab</a>
-          </div>
-        </>
-      );
-    }
+    // Painted page by page with pdf.js rather than handed to the browser's own
+    // viewer: /raw is sandboxed without allow-same-origin, and Chrome won't run
+    // its PDF viewer on a sandboxed resource — in a frame OR in its own tab. See
+    // PdfView.
+    if (meta.kind === 'pdf') return <PdfView src={rawSrc} onPages={setPages} />;
     return (
       <div className="fv-empty">
         No preview for this kind of file.
@@ -375,9 +445,10 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo }: {
 
   // Only the code viewer follows the shared zoom; rendered markdown, images and
   // framed pages carry their own typography.
-  const code = meta.kind === 'text' || (raw && (meta.kind === 'markdown' || meta.kind === 'html'));
+  const isCode = meta.kind === 'text' || draft != null
+    || (raw && (meta.kind === 'markdown' || meta.kind === 'html'));
   return (
-    <div className="fv-body" style={code ? { fontSize: `${(12.5 * zoom) / 100}px` } : undefined}>
+    <div className="fv-body" style={isCode ? { fontSize: `${(12.5 * zoom) / 100}px` } : undefined}>
       {body()}
     </div>
   );
@@ -404,6 +475,7 @@ export default function FilesPane({
   const [info, setInfo] = useState<ViewInfo>({ meta: null, extra: [] });
   const [raw, setRaw] = useState(false);          // markdown/html: show the source
   const [scripts, setScripts] = useState(false);  // html: run the page's own JS
+  const [confirmClose, setConfirmClose] = useState(false); // leaving with unsaved edits
   const paneRef = useRef<HTMLDivElement | null>(null);
 
   const dir = useDir(session.id, root, reloadKey);
@@ -416,6 +488,7 @@ export default function FilesPane({
     setInfo({ meta: null, extra: [] });
     setRaw(false);
     setScripts(false);
+    setConfirmClose(false);
     if (viewing) paneRef.current?.focus({ preventScroll: true });
   }, [viewing]);
 
@@ -427,6 +500,16 @@ export default function FilesPane({
     setBusy(false);
     setReloadKey((k) => k + 1);
   };
+
+  // Leaving a file with unsaved edits asks once rather than discarding quietly;
+  // the second Esc (or Back) goes through.
+  const edit = info.edit;
+  const leaveView = () => {
+    if (edit?.dirty && !confirmClose) { setConfirmClose(true); return; }
+    setConfirmClose(false);
+    setViewing(null);
+  };
+  useEffect(() => { if (!edit?.dirty) setConfirmClose(false); }, [edit?.dirty]);
 
   const up = () => setRoot(root.includes('/') ? root.slice(0, root.lastIndexOf('/')) : '');
   const openDir = (p: string) => { setViewing(null); setRoot(p); };
@@ -454,7 +537,13 @@ export default function FilesPane({
       // Esc anywhere in the pane leaves the preview — the handler sits on the
       // pane, not on the viewer, so it still fires after a click on a toggle in
       // the info strip moved focus out of the body.
-      onKeyDown={viewing ? (e) => { if (e.key === 'Escape') { e.preventDefault(); setViewing(null); } } : undefined}
+      onKeyDown={viewing ? (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); leaveView(); }
+        // Cmd/Ctrl-S works from anywhere in the pane, not just inside the editor.
+        else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's' && edit?.on) {
+          e.preventDefault(); if (edit.dirty) edit.save();
+        }
+      } : undefined}
     >
       {/* One compact bar: logo, navigation (or back), actions, close. */}
       <div
@@ -466,10 +555,11 @@ export default function FilesPane({
         <Logo cli="files" size={16} tint="#d99a2b" />
         {viewing ? (
           <>
-            <button className="mini-btn" title="Back to files (Esc)" onClick={() => setViewing(null)}><BackGlyph /></button>
+            <button className="mini-btn" title="Back to files (Esc)" onClick={leaveView}><BackGlyph /></button>
             <span className="fv-title" title={viewing}>
               <KindGlyph name={name} kind={meta?.kind} className="tw-ico" />
               <span className="fv-name">{name}</span>
+              {edit?.dirty && <span className="fv-dirty" title="Unsaved changes">•</span>}
             </span>
             <span className="spacer" />
             <button className="mini-btn" title="Download" onClick={() => triggerDownload(api.downloadUrl(session.id, viewing), name)}>
@@ -507,6 +597,28 @@ export default function FilesPane({
             {meta && <span className="fi-stat fi-extra" title={fmtStamp(meta.mtime)}>{fmtWhen(meta.mtime)}</span>}
             {info.extra.map((x) => <span key={x} className="fi-stat fi-extra">{x}</span>)}
             <span className="spacer" />
+            {edit?.error && <span className="fi-err" title={edit.error}>{edit.error}</span>}
+            {edit && (edit.can || edit.on) && (
+              <span className="fv-edit">
+                {edit.on ? (
+                  <>
+                    <button className="mini-btn" onClick={edit.discard} disabled={edit.saving}>Discard</button>
+                    <button
+                      className="mini-btn primary" onClick={edit.save}
+                      disabled={!edit.dirty || edit.saving}
+                      title="Save (⌘S)"
+                    >
+                      {edit.saving ? 'Saving…' : 'Save'}
+                    </button>
+                  </>
+                ) : (
+                  <button className="mini-btn" onClick={edit.start} title="Edit this file">Edit</button>
+                )}
+              </span>
+            )}
+            {edit && !edit.can && !edit.on && edit.why && (
+              <span className="fi-stat fi-extra" title={edit.why}>read-only</span>
+            )}
             {(meta?.kind === 'markdown' || meta?.kind === 'html') && (
               <span className="fv-toggles">
                 <span className="seg">
@@ -565,14 +677,21 @@ export default function FilesPane({
 
       {viewing && (
         <div className="files-view">
-          <FileView sessionId={session.id} path={viewing} zoom={zoom} raw={raw} scripts={scripts} onInfo={setInfo} />
+          <FileView
+            sessionId={session.id} path={viewing} zoom={zoom} raw={raw} scripts={scripts}
+            onInfo={setInfo} onSaved={() => setReloadKey((k) => k + 1)}
+          />
         </div>
       )}
 
       <div className="files-hint">
-        {viewing
-          ? 'Esc goes back to the files'
-          : 'Click a file to preview · click a folder to expand · double-click a folder to open it'}
+        {!viewing
+          ? 'Click a file to preview · click a folder to expand · double-click a folder to open it'
+          : confirmClose
+            ? 'Unsaved changes — Esc again to discard, or ⌘S to save'
+            : edit?.on
+              ? '⌘S saves · Discard reverts · Esc goes back'
+              : 'Esc goes back to the files'}
       </div>
     </div>
   );

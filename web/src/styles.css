@@ -687,6 +687,61 @@ body {
 .fv-gutter { position: sticky; left: 0; flex: none; padding-right: 10px; padding-left: 10px; text-align: right; color: color-mix(in srgb, var(--muted) 70%, transparent); background: var(--term-bg); border-right: 1px solid var(--border); user-select: none; }
 .fv-text { padding-left: 12px; padding-right: 14px; color: var(--text); white-space: pre; }
 
+/* CodeMirror sits where the <pre> pair was and inherits the same surface; the
+   plain pair stays as the pre-load fallback, so the swap is invisible. */
+.fv-code-host { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.fv-cm { flex: 1; min-height: 0; overflow: hidden; }
+.fv-cm .cm-editor { height: 100%; }
+.fv-cm .cm-editor.cm-focused { outline: none; }
+
+/* Syntax palette. Two jobs: stay legible on --term-bg in both themes, and stay
+   quiet — comments recede, strings and keywords carry the structure, everything
+   else is close to body text. Tuned against WCAG AA on the pane background. */
+:root {
+  --cm-comment: #7b8794;
+  --cm-keyword: #8250df;
+  --cm-string:  #0a7c42;
+  --cm-number:  #b3541e;
+  --cm-fn:      #1f6feb;
+  --cm-type:    #953800;
+  --cm-prop:    #0550ae;
+  --cm-punct:   #57606a;
+  --cm-tag:     #116329;
+  --cm-def:     #1f6feb;
+  --cm-meta:    #6a737d;
+  --cm-heading: #0550ae;
+  --cm-link:    #0e7c86;
+  --cm-invalid: #c2433a;
+}
+[data-theme='dark'] {
+  --cm-comment: #7d8a97;
+  --cm-keyword: #c39bff;
+  --cm-string:  #6fd39b;
+  --cm-number:  #ffab70;
+  --cm-fn:      #79b8ff;
+  --cm-type:    #ffcb8b;
+  --cm-prop:    #9fc6ff;
+  --cm-punct:   #9aa7b2;
+  --cm-tag:     #7ee2a8;
+  --cm-def:     #79b8ff;
+  --cm-meta:    #8b97a0;
+  --cm-heading: #9fc6ff;
+  --cm-link:    #2bb3bd;
+  --cm-invalid: #e0726a;
+}
+
+/* editing chrome */
+.fv-edit { display: inline-flex; gap: 4px; align-items: center; }
+.fv-dirty { color: var(--accent); font-size: 15px; line-height: 1; margin-left: 1px; }
+.fi-err { color: var(--danger); font-size: 11px; max-width: 22em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mini-btn.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+.mini-btn.primary:disabled { opacity: .45; }
+
+/* pdf: our own pages, stacked on the same neutral stage as images */
+.fv-pdf { flex: 1; min-height: 0; overflow: auto; background: var(--bg); }
+.fv-pdf .pdf-pages { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 14px; }
+.fv-pdf .pdf-page { border-radius: var(--r-sm); box-shadow: 0 1px 4px #0003; background: #fff; max-width: 100%; }
+
 /* the shared .markdown card is defined later in this file — win on specificity */
 .markdown.fv-md { flex: 1; min-height: 0; border: none; border-radius: 0; background: none; padding: 14px 18px 26px; }
 .markdown.fv-md img { border-radius: var(--r-md); }

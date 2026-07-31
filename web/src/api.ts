@@ -155,6 +155,19 @@ export const uploadFile = (id: string, p: string, file: File) =>
 export const downloadUrl = (id: string, p: string) =>
   `/api/files/${id}/download?path=${encodeURIComponent(p)}`;
 
+// Save an edited text file. `mtime` is the one the editor loaded: the server
+// refuses the write if the file changed underneath (an agent edited it too).
+export const writeFile = async (id: string, p: string, text: string, mtime: number): Promise<{ size: number; mtime: number }> => {
+  const r = await fetch(`/api/files/${id}/write?path=${encodeURIComponent(p)}&mtime=${mtime}`, {
+    method: 'PUT', headers: { 'content-type': 'text/plain; charset=utf-8' }, body: text,
+  });
+  // Unlike the rest of the API, a failed save has something worth reading in it
+  // ("changed on disk since you opened it") — surface it instead of a number.
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `${r.status}`);
+  return body;
+};
+
 // ---- session sharing (docs/session-sharing.md) ----
 export interface ShareInfo {
   namespace: string | null;
