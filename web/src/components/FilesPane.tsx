@@ -265,7 +265,8 @@ function Cols({ sort, onSort }: { sort: Sort; onSort: (k: SortKey) => void }) {
       {cell('name', 'Name', 'tw-name')}
       {cell('size', 'Size', 'tw-size')}
       {cell('time', 'Modified', 'tw-time')}
-      <span className="tw-act" />
+      {/* the row-actions column, reserved so the headings sit over their values */}
+      <span className="tw-acts" />
     </div>
   );
 }

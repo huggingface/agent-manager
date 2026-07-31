@@ -627,10 +627,13 @@ body {
 
 /* Header and rows share one font-size (set inline on .files-stack from the
    shared zoom) so their em-based column widths line up at any zoom. */
-.files-stack { flex: 1; min-height: 0; container-type: inline-size; display: flex; flex-direction: column; font-size: 13px; }
+.files-stack { flex: 1; min-height: 0; container-type: inline-size; display: flex; flex-direction: column; font-size: 13px;
+  --files-gutter: 8px; }   /* the inset the rows sit in — the header matches it, see .files-cols */
 .files-stack[hidden] { display: none; }           /* a class-set display beats the UA [hidden] rule */
 /* column header — labels the row cells and doubles as the sort control */
-.files-cols { flex: none; display: flex; align-items: center; padding: 3px 0.5em 3px 8px; gap: 0.4em; background: var(--panel); border-bottom: 1px solid var(--border); }
+.files-cols { flex: none; display: flex; align-items: center; gap: 0.4em; background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 3px calc(0.5em + var(--files-gutter)) 3px var(--files-gutter); }
 .fc-btn { background: none; border: none; padding: 0; margin: 0; font: inherit; font-size: 0.78em; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); cursor: pointer; display: inline-flex; align-items: center; gap: 2px; }
 .fc-btn:hover { color: var(--text); }
 .fc-btn.on { color: var(--accent); }
@@ -640,7 +643,7 @@ body {
 .fc-arrow { width: 0.7em; }
 
 /* tree file viewer — ASCII-style rails (font-size set inline from shared zoom) */
-.files-body.tree { padding: 6px 8px; font-size: 13px; }
+.files-body.tree { padding: 6px var(--files-gutter); font-size: 13px; }
 .tree-row { position: relative; display: flex; align-items: center; gap: 0.4em; padding: 0.15em 0.5em 0.15em 0; border-radius: var(--r-sm); cursor: pointer; text-decoration: none; color: var(--text); white-space: nowrap; user-select: none; font-size: 1em; }
 .tree-row:hover { background: var(--panel-2); }
 
@@ -663,7 +666,12 @@ body {
 .tree-row:hover .tw-act { opacity: 1; }
 .tw-act:hover { color: var(--accent); }
 .tw-act.danger:hover { color: var(--danger); }
-.tw-acts { flex: none; display: inline-flex; align-items: center; gap: 1px; }
+/* One fixed column for the row actions, whatever a row happens to hold: files
+   carry download+delete, folders only delete, and the header carries neither.
+   Sized to two buttons and right-aligned, so Size and Modified land on the same
+   x in every row and under their own headings. */
+.tw-acts { flex: none; width: 3.3em; display: inline-flex; align-items: center;
+  justify-content: flex-end; gap: 1px; }
 
 /* Create prompt and delete confirm: one row above the listing, where the thing
    they act on is in view. A destructive question gets the danger tint and its
