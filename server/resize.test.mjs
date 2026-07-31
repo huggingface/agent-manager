@@ -15,6 +15,7 @@ import {
   TERMINAL_HISTORY_VERSION, createTerminalHistoryCheckpoint, loadTerminalHistory,
   traceHistoryLines,
 } from './src/history-store.js';
+import { trimHistoryShownInRepaint } from './src/runner.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-resize-'));
@@ -202,6 +203,21 @@ try {
     ] }, '❯ hi there\n\n● Hey!');
     check('trace recovery does not duplicate short turns replayed by the agent',
       alreadyVisible.length === 0);
+
+    const trimmed = trimHistoryShownInRepaint([
+      { text: 'older unique turn' },
+      { text: '❯ hi there' },
+      { text: '' },
+      { text: '● Hey! What can I help you with today?' },
+    ], 160, [
+      { text: 'Claude welcome frame' },
+      { text: '❯ hi there' },
+      { text: '' },
+      { text: '● Hey! What can I help you with today?' },
+      { text: 'newer live turn' },
+    ], 160);
+    check('a repaint revealing recovered turns removes their scrollback copies',
+      trimmed.length === 1 && trimmed[0].text === 'older unique turn');
   }
 
   const up = await waitFor(async () => {

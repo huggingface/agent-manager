@@ -85,8 +85,8 @@ const HISTORY_DIR = path.join(STATE_DIR, 'terminal-history');
 // Claude's resume stream can pause between its welcome frame and replayed
 // conversation. Treat that as one startup transaction; hydrating during the
 // pause would seed a turn that Claude is about to print itself.
-const TRACE_HYDRATE_IDLE_MS = Number(process.env.AM_TRACE_HYDRATE_IDLE_MS || 1500);
-const TRACE_HYDRATE_MIN_MS = Number(process.env.AM_TRACE_HYDRATE_MIN_MS || 2500);
+const TRACE_HYDRATE_IDLE_MS = Number(process.env.AM_TRACE_HYDRATE_IDLE_MS || 5000);
+const TRACE_HYDRATE_MIN_MS = Number(process.env.AM_TRACE_HYDRATE_MIN_MS || 3000);
 // Bound untrusted WebSocket geometry without imposing the old 400x200 ceiling,
 // which left visible dead space on high-DPI displays at low zoom levels.
 const MIN_COLS = 20;
@@ -220,6 +220,27 @@ function logicalHistory(text) {
 }
 
 /**
+ * Remove the longest logical suffix of canonical history that the repaint is
+ * now showing in its frame. Agent TUIs reveal older transcript rows when a
+ * panel grows; retaining those same rows in scrollback creates a duplicate
+ * immediately above the frame even though neither source is itself corrupt.
+ */
+export function trimHistoryShownInRepaint(history, historyCols, repaint, repaintCols) {
+  if (!history.length || !repaint.length) return history;
+  const fullRepaint = logicalText(repaint, repaintCols);
+  for (let row = 0; row < history.length; row++) {
+    // Only compare at hard-line boundaries. Starting halfway through a soft
+    // wrap could delete the first half of an otherwise unique logical line.
+    if (row > 0 && textColumns(history[row - 1].text || '') >= historyCols) continue;
+    const suffix = logicalText(history.slice(row), historyCols);
+    if (suffix.trim().length >= 8 && fullRepaint.includes(suffix)) {
+      return history.slice(0, row);
+    }
+  }
+  return history;
+}
+
+/**
  * Add only the part of a repaint's overflow that was not already history.
  * Wrapping changes row boundaries, so reconstruct logical text first. The
  * longest exact history suffix matching the frame prefix is the overlap. This
@@ -275,8 +296,15 @@ function finishCapturedGrid(host, txn) {
     try { snap = txn.vt.snapshot({ includeCells: true, includeScrollback: true }); } catch {}
     if (snap) {
       try {
+        let repaint = [];
+        try {
+          repaint = txn.vt.getVisibleText().split('\n').map((text) => ({ text }));
+        } catch {}
+        const uniqueHistory = trimHistoryShownInRepaint(
+          txn.history, txn.historyCols, repaint, txn.cols,
+        );
         const history = mergeRepaintHistory(
-          txn.history, txn.historyCols, snap.scrollbackLines || [], txn.cols,
+          uniqueHistory, txn.historyCols, snap.scrollbackLines || [], txn.cols,
         );
         replacement = ghostty.createTerminal({
           cols: txn.cols,
