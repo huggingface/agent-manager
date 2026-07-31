@@ -730,12 +730,14 @@ body {
   --cm-invalid: #e0726a;
 }
 
-/* editing chrome */
-.fv-edit { display: inline-flex; gap: 4px; align-items: center; }
+/* editing chrome: files are simply editable, so this is a status line rather
+   than a set of controls — it says what just happened and then gets out of the
+   way. Only a conflict, where the answer is genuinely the user's, has buttons. */
 .fv-dirty { color: var(--accent); font-size: 15px; line-height: 1; margin-left: 1px; }
+.fv-save { font-size: 11px; color: var(--muted); transition: opacity .2s; }
+.fv-save.saved { color: var(--go); }
+.fv-conflict { display: inline-flex; gap: 6px; align-items: center; }
 .fi-err { color: var(--danger); font-size: 11px; max-width: 22em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mini-btn.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
-.mini-btn.primary:disabled { opacity: .45; }
 
 /* pdf: our own pages, stacked on the same neutral stage as images */
 .fv-pdf { flex: 1; min-height: 0; overflow: auto; background: var(--bg); }

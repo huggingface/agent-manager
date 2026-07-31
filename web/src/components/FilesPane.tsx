@@ -67,6 +67,9 @@ const triggerDownload = (url: string, name: string) => {
   document.body.appendChild(a); a.click(); a.remove();
 };
 
+// How long typing has to pause before the file is written back.
+const AUTOSAVE_MS = 800;
+
 const CODE_RE = /\.(js|mjs|cjs|jsx|ts|tsx|py|rb|go|rs|java|kt|swift|c|h|cc|cpp|cs|php|pl|lua|r|jl|sh|bash|zsh|fish|ps1|css|scss|less|json|jsonl|ya?ml|toml|ini|sql|graphql|vue|svelte|tf)$/i;
 
 // Kind glyphs, one pen: a listing should read as one set, not a sticker album.
@@ -261,21 +264,21 @@ function useTheme(): 'light' | 'dark' {
   return theme;
 }
 
-type ViewInfo = { meta: FilePreview | null; extra: string[]; edit?: EditState };
+type ViewInfo = { meta: FilePreview | null; extra: string[]; edit?: SaveState };
 
-// What the pane's chrome needs to know about an in-progress edit, so the Edit /
-// Save / Discard controls can live up in the info strip with the other toggles.
-export type EditState = {
-  /** This file can be edited at all (text, whole — not a truncated head). */
+// Text files are simply editable — there is no edit mode to enter and no Save
+// button to find, so all the chrome needs is a quiet word about where the
+// autosave got to, and the two choices a conflict genuinely requires.
+export type SaveState = {
+  /** Editable at all: a text kind we hold WHOLE (not a truncated head). */
   can: boolean;
-  why?: string;      // why not, when it can't
-  on: boolean;       // edit mode is active
-  dirty: boolean;
-  saving: boolean;
+  why?: string;                                   // why not, when it can't
+  status: 'clean' | 'typing' | 'saving' | 'saved' | 'error';
   error: string | null;
-  start: () => void;
-  save: () => void;
-  discard: () => void;
+  /** A concurrent writer won the race; the two ways out. */
+  conflict: boolean;
+  reload: () => void;
+  overwrite: () => void;
 };
 
 // The viewer for one file. Kinds it can't render fall back to an honest
@@ -293,17 +296,21 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   const [pages, setPages] = useState<number | null>(null);
   const theme = useTheme();
 
-  // Editing state. `draft` is null whenever we're just reading — so "is there an
-  // edit in progress" is one question with one answer, and leaving edit mode
-  // can't leave a stale buffer behind.
+  // Editing state. `draft` is null until the first keystroke: the editor is
+  // always writable, but a file nobody touched has nothing to save.
   const [draft, setDraft] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<SaveState['status']>('clean');
   const [saveErr, setSaveErr] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+  // The autosave timer, and the values it must read at fire time rather than at
+  // schedule time (mtime moves with every save).
+  const timer = useRef<number | null>(null);
+  const pending = useRef<{ text: string; mtime: number } | null>(null);
 
   useEffect(() => {
     let alive = true;
     setMeta(null); setErr(null); setSource(null); setDims(null); setPages(null);
-    setDraft(null); setSaveErr(null);
+    setDraft(null); setSaveErr(null); setConflict(false); setStatus('clean');
     api.previewFile(sessionId, path)
       .then((m) => { if (alive) setMeta(m); })
       .catch((e) => { if (alive) setErr(String(e?.message || e)); });
@@ -343,39 +350,89 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
     return out;
   }, [shown, meta?.truncated, dims, pages]);
 
-  const save = useCallback(async () => {
-    if (draft == null || !meta) return;
-    setSaving(true); setSaveErr(null);
+  // Editable = a text-ish kind we hold in FULL. A truncated head must never be
+  // writable: saving it back would drop everything past the 512 KB cap.
+  const editKind = !!meta && (meta.kind === 'text' || meta.kind === 'markdown' || meta.kind === 'html');
+  const canEdit = editKind && !meta?.truncated;
+  const saved = meta?.kind === 'html' ? (source ?? '') : (meta?.text ?? '');
+
+  // Read at fire time by a callback that outlives the render that made it.
+  const kindRef = useRef(meta?.kind);
+  kindRef.current = meta?.kind;
+
+  // One writer for every save — the debounce, the flush on close, and ⌘S all
+  // come through here. `force` drops the mtime precondition, which is what
+  // "overwrite" means after a conflict.
+  const flush = useCallback(async (force = false) => {
+    const job = pending.current;
+    if (!job) return;
+    pending.current = null;
+    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+    setStatus('saving'); setSaveErr(null);
     try {
-      const after = await api.writeFile(sessionId, path, draft, meta.mtime);
-      setMeta({ ...meta, text: meta.kind === 'html' ? meta.text : draft, size: after.size, mtime: after.mtime });
-      if (meta.kind === 'html') setSource(draft);
-      setDraft(null);
+      const after = await api.writeFile(sessionId, path, job.text, force ? 0 : job.mtime);
+      setConflict(false);
+      setMeta((m) => (m ? { ...m, text: m.kind === 'html' ? m.text : job.text, size: after.size, mtime: after.mtime } : m));
+      if (kindRef.current === 'html') setSource(job.text);
+      setStatus('saved');
       onSaved?.();
     } catch (e: any) {
-      setSaveErr(String(e?.message || e));
-    } finally {
-      setSaving(false);
+      const msg = String(e?.message || e);
+      // A refused save must NOT drop the text — put it back so the next attempt
+      // (or an overwrite) still has it.
+      pending.current = job;
+      setConflict(/changed on disk/.test(msg));
+      setSaveErr(msg);
+      setStatus('error');
     }
-  }, [draft, meta, sessionId, path, onSaved]);
+  }, [sessionId, path, onSaved]);
 
-  // Editable = a text-ish kind we hold in FULL. A truncated head must never be
-  // savable: writing it back would drop everything past the 512 KB cap.
-  const editKind = !!meta && (meta.kind === 'text' || meta.kind === 'markdown' || meta.kind === 'html');
-  const saved = meta?.kind === 'html' ? (source ?? '') : (meta?.text ?? '');
-  const edit = useMemo<EditState>(() => ({
-    can: editKind && !meta?.truncated,
+  // Every keystroke restarts a short timer: agents read these files, and this
+  // one writes to a FUSE-mounted bucket, so a save per character is out.
+  const onEdit = useCallback((next: string) => {
+    setDraft(next);
+    if (!canEdit || !meta) return;
+    pending.current = { text: next, mtime: meta.mtime };
+    setStatus('typing');
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => flush(), AUTOSAVE_MS);
+  }, [canEdit, meta, flush]);
+
+  // Closing the file, or switching to another, must not lose the last keystroke:
+  // fetch outlives the component, so firing it from cleanup is enough.
+  const flushRef = useRef(flush);
+  flushRef.current = flush;
+  useEffect(() => () => {
+    if (timer.current) clearTimeout(timer.current);
+    if (pending.current) flushRef.current();
+  }, [path]);
+
+  useEffect(() => {
+    if (status !== 'saved') return;
+    const t = setTimeout(() => setStatus('clean'), 1800);
+    return () => clearTimeout(t);
+  }, [status]);
+
+  const edit = useMemo<SaveState>(() => ({
+    can: canEdit,
     // Only worth saying when editing was plausible and isn't: nobody expects to
     // type into a PDF, so an image or a binary says nothing at all.
     why: editKind && meta?.truncated ? 'too big to edit — only the first part is loaded' : undefined,
-    on: draft != null,
-    dirty: draft != null && draft !== saved,
-    saving,
+    status,
     error: saveErr,
-    start: () => setDraft(saved),
-    save,
-    discard: () => { setDraft(null); setSaveErr(null); },
-  }), [editKind, meta?.truncated, draft, saved, saving, saveErr, save]);
+    conflict,
+    reload: () => {
+      pending.current = null;
+      if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+      setDraft(null); setSaveErr(null); setConflict(false); setStatus('clean');
+      setMeta(null);
+      api.previewFile(sessionId, path).then(setMeta).catch(() => {});
+      if (kindRef.current === 'html') {
+        fetch(api.rawUrl(sessionId, path)).then((r) => r.text()).then(setSource).catch(() => {});
+      }
+    },
+    overwrite: () => flush(true),
+  }), [canEdit, editKind, meta?.truncated, status, saveErr, conflict, flush, sessionId, path]);
 
   useEffect(() => { onInfo({ meta, extra, edit }); }, [meta, extra, edit, onInfo]);
 
@@ -386,16 +443,16 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   const code = (text: string) => (
     <CodeView
       text={text} name={meta.name} theme={theme}
-      editable={draft != null}
-      onChange={setDraft}
-      onSave={() => { if (draft != null) save(); }}
+      editable={canEdit}
+      onChange={onEdit}
+      onSave={() => flush()}   // ⌘S still works; it just beats the timer
     />
   );
   const body = () => {
     if (meta.kind === 'markdown') {
-      // An edit always happens against the source, so starting one from the
-      // rendered view shows the source rather than silently editing nothing.
-      return raw || draft != null
+      // Rendered stays the default view for markdown — Source is the editable
+      // face of the same file, one toggle away.
+      return raw
         ? code(shown)
         : <div className="markdown fv-md" dangerouslySetInnerHTML={{ __html: md }} />;
     }
@@ -411,7 +468,7 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
       );
     }
     if (meta.kind === 'html') {
-      if (raw || draft != null) {
+      if (raw) {
         return source === null ? <div className="fv-empty">Loading source…</div> : code(shown);
       }
       return (
@@ -445,8 +502,7 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
 
   // Only the code viewer follows the shared zoom; rendered markdown, images and
   // framed pages carry their own typography.
-  const isCode = meta.kind === 'text' || draft != null
-    || (raw && (meta.kind === 'markdown' || meta.kind === 'html'));
+  const isCode = meta.kind === 'text' || (raw && (meta.kind === 'markdown' || meta.kind === 'html'));
   return (
     <div className="fv-body" style={isCode ? { fontSize: `${(12.5 * zoom) / 100}px` } : undefined}>
       {body()}
@@ -501,15 +557,16 @@ export default function FilesPane({
     setReloadKey((k) => k + 1);
   };
 
-  // Leaving a file with unsaved edits asks once rather than discarding quietly;
-  // the second Esc (or Back) goes through.
+  // Leaving is unconditional now — the last keystroke is flushed on the way out
+  // (see FileView). The exception is an unresolved conflict, where leaving WOULD
+  // drop work: that asks once.
   const edit = info.edit;
   const leaveView = () => {
-    if (edit?.dirty && !confirmClose) { setConfirmClose(true); return; }
+    if (edit?.conflict && !confirmClose) { setConfirmClose(true); return; }
     setConfirmClose(false);
     setViewing(null);
   };
-  useEffect(() => { if (!edit?.dirty) setConfirmClose(false); }, [edit?.dirty]);
+  useEffect(() => { if (!edit?.conflict) setConfirmClose(false); }, [edit?.conflict]);
 
   const up = () => setRoot(root.includes('/') ? root.slice(0, root.lastIndexOf('/')) : '');
   const openDir = (p: string) => { setViewing(null); setRoot(p); };
@@ -540,8 +597,10 @@ export default function FilesPane({
       onKeyDown={viewing ? (e) => {
         if (e.key === 'Escape') { e.preventDefault(); leaveView(); }
         // Cmd/Ctrl-S works from anywhere in the pane, not just inside the editor.
-        else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's' && edit?.on) {
-          e.preventDefault(); if (edit.dirty) edit.save();
+        // ⌘S is a no-op that people press anyway: swallow it so the browser's
+        // save dialog never appears over an editor that already saved.
+        else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's' && edit?.can) {
+          e.preventDefault();
         }
       } : undefined}
     >
@@ -559,7 +618,9 @@ export default function FilesPane({
             <span className="fv-title" title={viewing}>
               <KindGlyph name={name} kind={meta?.kind} className="tw-ico" />
               <span className="fv-name">{name}</span>
-              {edit?.dirty && <span className="fv-dirty" title="Unsaved changes">•</span>}
+              {(edit?.status === 'typing' || edit?.status === 'saving') && (
+                <span className="fv-dirty" title="Saving…">•</span>
+              )}
             </span>
             <span className="spacer" />
             <button className="mini-btn" title="Download" onClick={() => triggerDownload(api.downloadUrl(session.id, viewing), name)}>
@@ -597,26 +658,22 @@ export default function FilesPane({
             {meta && <span className="fi-stat fi-extra" title={fmtStamp(meta.mtime)}>{fmtWhen(meta.mtime)}</span>}
             {info.extra.map((x) => <span key={x} className="fi-stat fi-extra">{x}</span>)}
             <span className="spacer" />
-            {edit?.error && <span className="fi-err" title={edit.error}>{edit.error}</span>}
-            {edit && (edit.can || edit.on) && (
-              <span className="fv-edit">
-                {edit.on ? (
-                  <>
-                    <button className="mini-btn" onClick={edit.discard} disabled={edit.saving}>Discard</button>
-                    <button
-                      className="mini-btn primary" onClick={edit.save}
-                      disabled={!edit.dirty || edit.saving}
-                      title="Save (⌘S)"
-                    >
-                      {edit.saving ? 'Saving…' : 'Save'}
-                    </button>
-                  </>
-                ) : (
-                  <button className="mini-btn" onClick={edit.start} title="Edit this file">Edit</button>
-                )}
+            {edit?.conflict ? (
+              // The one moment that still needs a decision: someone else wrote
+              // the file while this buffer was open.
+              <span className="fv-conflict">
+                <span className="fi-err">changed on disk</span>
+                <button className="mini-btn" onClick={edit.reload} title="Throw away my edits and load the file as it is now">Reload</button>
+                <button className="mini-btn" onClick={edit.overwrite} title="Save my version over theirs">Overwrite</button>
               </span>
-            )}
-            {edit && !edit.can && !edit.on && edit.why && (
+            ) : edit?.error ? (
+              <span className="fi-err" title={edit.error}>{edit.error}</span>
+            ) : edit?.can && edit.status !== 'clean' ? (
+              <span className={`fv-save ${edit.status}`}>
+                {edit.status === 'saving' ? 'saving…' : edit.status === 'saved' ? 'saved' : 'editing…'}
+              </span>
+            ) : null}
+            {edit && !edit.can && edit.why && (
               <span className="fi-stat fi-extra" title={edit.why}>read-only</span>
             )}
             {(meta?.kind === 'markdown' || meta?.kind === 'html') && (
@@ -688,9 +745,9 @@ export default function FilesPane({
         {!viewing
           ? 'Click a file to preview · click a folder to expand · double-click a folder to open it'
           : confirmClose
-            ? 'Unsaved changes — Esc again to discard, or ⌘S to save'
-            : edit?.on
-              ? '⌘S saves · Discard reverts · Esc goes back'
+            ? 'This file changed on disk — Reload or Overwrite, or Esc again to leave your edits behind'
+            : edit?.can
+              ? 'Type to edit — saved automatically · Esc goes back'
               : 'Esc goes back to the files'}
       </div>
     </div>
