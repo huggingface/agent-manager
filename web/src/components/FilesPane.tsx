@@ -242,6 +242,12 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
             <span className="tw-time">{fmtWhen(e.mtime)}</span>
             <span className="tw-acts">
               <button
+                className="tw-act" title="Download"
+                onClick={(ev) => { ev.stopPropagation(); triggerDownload(api.downloadUrl(sessionId, p), e.name); }}
+              >
+                <DownloadGlyph />
+              </button>
+              <button
                 className="tw-act" title={`Rename ${e.name}`}
                 onClick={(ev) => { ev.stopPropagation(); setRenaming(p); }}
               >
@@ -252,12 +258,6 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
                 onClick={(ev) => { ev.stopPropagation(); setMoving({ path: p, name: e.name, dir: false }); }}
               >
                 <MoveGlyph />
-              </button>
-              <button
-                className="tw-act" title="Download"
-                onClick={(ev) => { ev.stopPropagation(); triggerDownload(api.downloadUrl(sessionId, p), e.name); }}
-              >
-                <DownloadGlyph />
               </button>
               <button
                 className="tw-act danger" title={`Delete ${e.name}`}
@@ -343,6 +343,9 @@ function FolderNode({ path, name, mtime, isLast, ...rest }: RowProps & {
         <span className="tw-size" />
         <span className="tw-time">{fmtWhen(mtime)}</span>
         <span className="tw-acts">
+          {/* no download for a folder — hold its slot so Rename, Move and Delete
+              sit in the same place on every row */}
+          <span className="tw-act ghost" aria-hidden />
           <button
             className="tw-act" title={`Rename ${name}`}
             onClick={(ev) => { ev.stopPropagation(); setRenaming(path); }}

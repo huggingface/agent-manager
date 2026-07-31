@@ -686,6 +686,7 @@ body {
 .tree-row:hover .tw-act { opacity: 1; }
 .tw-act:hover { color: var(--accent); }
 .tw-act.danger:hover { color: var(--danger); }
+.tw-act.ghost { pointer-events: none; }
 /* One fixed column for the row actions, whatever a row happens to hold: files
    carry download+delete, folders only delete, and the header carries neither.
    Sized to two buttons and right-aligned, so Size and Modified land on the same
