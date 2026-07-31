@@ -134,8 +134,10 @@ body {
 .widget-actions .btn-primary { flex: 1; }
 
 /* quickstart: one row of harnesses (+ the group tile), one prompt, go */
-.quick-clis { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
-.quick-cli { width: 28px; height: 28px; flex: none; display: inline-flex; align-items: center; justify-content: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; padding: 0; opacity: 0.65; }
+/* Sized so every tile fits on ONE row at the sidebar's width; wrap stays as a
+   fallback for a narrower viewport rather than overflowing. */
+.quick-clis { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.quick-cli { width: 25px; height: 25px; flex: none; display: inline-flex; align-items: center; justify-content: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; padding: 0; opacity: 0.65; }
 .quick-cli:hover:not(:disabled) { opacity: 1; border-color: var(--border-strong); }
 .quick-cli.on { opacity: 1; border-width: 1.5px; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
 .quick-cli.off { opacity: 0.25; cursor: default; }

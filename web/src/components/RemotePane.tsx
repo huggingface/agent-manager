@@ -262,9 +262,6 @@ export default function RemotePane({
         }}
         style={{ fontSize }}
       >
-        {neverConnected && (
-          <div className="rp-sys">· waiting for an agent to connect</div>
-        )}
         {rendered.map((m) => (
           m.role === 'system' ? (
             <div key={m.seq} className="rp-sys">· {m.text}</div>

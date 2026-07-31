@@ -116,7 +116,8 @@ export default function Sidebar({
   // Quickstart: one harness pick + one prompt, agent launches in workspace/.
   // Every agent harness is shown; ones not installed here are greyed out.
   // "More options" adds a name + folder; the group tile flips to group creation.
-  const quickable = clis.filter((c) => c.id !== 'shell' && !isPassive(c.id));
+  const quickable = clis.filter((c) => c.id !== 'shell' && !isPassive(c.id) && !isRemote(c.id));
+  const remoteCli = clis.find((c) => isRemote(c.id)) || null;
   const openQuick = () => {
     setQuickError(null);
     setQuickName('');
@@ -357,6 +358,14 @@ export default function Sidebar({
                   <Logo cli="openclaw" size={8} />
                 </span>
               </button>
+              {remoteCli && (
+                <button
+                  className={`quick-cli${quickMode === 'agent' && quickCli === 'remote' ? ' on' : ''}`}
+                  title="Remote agent — an agent on another machine"
+                  style={quickMode === 'agent' && quickCli === 'remote' ? { borderColor: remoteCli.color } : undefined}
+                  onClick={() => { setQuickMode('agent'); setQuickCli('remote'); }}
+                ><Logo cli="remote" size={14} /></button>
+              )}
             </div>
 
             {quickMode === 'agent' ? (
