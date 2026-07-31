@@ -47,6 +47,7 @@ export default function RemotePane({
   const [copied, setCopied] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const popRef = useRef<HTMLDivElement | null>(null);
   const cursor = useRef(0);
   const atBottom = useRef(true);
@@ -174,6 +175,17 @@ export default function RemotePane({
   const stateLabel = REMOTE_STATE_LABEL[state];
   const seenAgo = fmtAgo(info?.lastSeenAt);
 
+  const MAX_ROWS = 10;
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = 'auto'; // let it report its natural content height
+    const lh = parseFloat(getComputedStyle(el).lineHeight) || 20;
+    const cap = lh * MAX_ROWS;
+    el.style.height = `${Math.min(el.scrollHeight, cap)}px`;
+    el.style.overflowY = el.scrollHeight > cap ? 'auto' : 'hidden';
+  }, [draft, fontSize]);
+
   const rendered = useMemo(
     () => messages.map((m) => ({ ...m, html: m.role === 'agent' ? renderMarkdown(m.text) : '' })),
     [messages],
@@ -276,6 +288,7 @@ export default function RemotePane({
       <div className="rp-composer" style={{ fontSize }}>
         <span className="rp-caret">❯</span>
         <textarea
+          ref={inputRef}
           className="rp-input"
           rows={1}
           value={draft}

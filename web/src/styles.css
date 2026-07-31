@@ -1039,8 +1039,10 @@ a.btn-ghost { text-decoration: none; }
 }
 .rp-input {
   flex: 1; min-width: 0; border: none; background: none; font: inherit;
-  color: var(--text); outline: none; resize: none; overflow: hidden;
-  max-height: 140px; line-height: 1.5;
+  color: var(--text); outline: none; resize: none; line-height: 1.5;
+  /* height + overflow-y are set from the content (see RemotePane): one row until
+     the text needs more, then growth, then scrolling at ten lines. */
+  overflow-y: hidden;
 }
 .rp-input::placeholder { color: var(--muted); opacity: 0.7; }
 

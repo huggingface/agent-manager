@@ -50,9 +50,12 @@ export const ListGlyph = ({ className }: { className?: string }) => (
 export const RemoteGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     {/* Thin ring, bold chevrons: at 16px the ring plus fine inner detail muddles
-        into a circled X, so the enclosure recedes and the `><` carries the mark. */}
+        into a circled X, so the enclosure recedes and the marks carry the glyph.
+        `>` rides high-left and `<` low-right, overlapping by 0.8u horizontally
+        while their facing arms stay parallel with ~1.9u of clear air — two ends
+        passing each other, never crossing. */}
     <circle cx="8" cy="8" r="7.1" strokeWidth="1" />
-    <path d="M5.1 5.9 6.7 8 5.1 10.1M10.9 5.9 9.3 8l1.6 2.1" strokeWidth="1.7" strokeLinejoin="round" />
+    <path d="M5.2 3.9 8.4 5.7 5.2 7.5M10.8 8.5 7.6 10.3l3.2 1.8" strokeWidth="1.7" strokeLinejoin="round" />
   </G>
 );
 
@@ -63,7 +66,7 @@ export const AckGlyph = ({ className }: { className?: string }) => (
     {/* Heavier than the 1.2 house stroke: this is a small mark that has to read
         at a glance next to a line of text. Set on the path, since G fixes the
         stroke width for every other glyph. */}
-    <path d="M3.2 8.6 6.4 11.8 12.8 4.6" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
+    <path d="M3.2 8.6 6.4 11.8 12.8 4.6" strokeWidth="2.1" strokeLinecap="butt" strokeLinejoin="miter" />
   </G>
 );
 
