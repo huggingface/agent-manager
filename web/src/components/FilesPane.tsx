@@ -49,26 +49,20 @@ type SortKey = 'name' | 'size' | 'time';
 type Sort = { key: SortKey; desc: boolean };
 const DEFAULT_SORT: Sort = { key: 'name', desc: false };
 
-// Name breaks every tie and follows the sort direction, so a column with lots of
-// equal values (folders share an mtime when a tree arrives in one checkout, and
-// have no size at all) still visibly reverses.
+// A sort sorts the listing — folders included. No type grouping in any column:
+// asking for name order and getting two alphabetical runs, one of folders and
+// one of files, means finding a name still takes two passes over the pane.
 //
-// Folders lead in the NAME order only. That's the browsing view, where grouping
-// them is the convention every file manager follows. Size and Modified are
-// questions ABOUT the contents — "what changed last?" — and an answer that keeps
-// folders in a block of their own isn't an answer, so there everything sorts
-// together. (Finder splits the same way: folders on top by name, interleaved by
-// date.)
+// Name also breaks every tie, following the sort direction, so a column full of
+// equal values still visibly reverses — folders share an mtime when a tree
+// arrives in one checkout, and have no size at all.
 const sortEntries = (es: FileEntry[], s: Sort) => {
   const dir = s.desc ? -1 : 1;
   const byName = (a: FileEntry, b: FileEntry) => a.name.localeCompare(b.name) * dir;
   return [...es].sort((a, b) => {
-    if (s.key === 'name') {
-      if (a.dir !== b.dir) return a.dir ? -1 : 1;
-      return byName(a, b);
-    }
     if (s.key === 'size') return (a.size - b.size) * dir || byName(a, b);
-    return ((a.mtime || 0) - (b.mtime || 0)) * dir || byName(a, b);
+    if (s.key === 'time') return ((a.mtime || 0) - (b.mtime || 0)) * dir || byName(a, b);
+    return byName(a, b);
   });
 };
 
