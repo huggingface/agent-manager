@@ -146,8 +146,10 @@ export default function TerminalPane({
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const resyncRef = useRef<() => void>(() => {});
+  const claimRef = useRef<() => void>(() => {});
   const reconnectRef = useRef<() => void>(() => {});
   const controllerRef = useRef(false);
+  const previousZoomRef = useRef(zoom);
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
   const sendKeyRef = useRef<(d: string) => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
@@ -265,6 +267,7 @@ export default function TerminalPane({
       setController(true);
       send({ t: 'claim' });
     };
+    claimRef.current = claimControl;
     const onPointerDown = (e: PointerEvent) => {
       // A touch may only be inspecting local scrollback. Claim lazily below if
       // the gesture actually needs to drive an application's mouse mode.
@@ -502,6 +505,7 @@ export default function TerminalPane({
       term.dispose();
       termRef.current = null;
       resyncRef.current = () => {};
+      claimRef.current = () => {};
     };
   }, [session.id]);
 
@@ -516,6 +520,13 @@ export default function TerminalPane({
   useEffect(() => {
     const t = termRef.current;
     if (!t) return;
+    const changed = previousZoomRef.current !== zoom;
+    previousZoomRef.current = zoom;
+    // Zoom is an explicit interaction outside the terminal element. If this
+    // pane is a watcher, take the geometry lease before reporting its newly
+    // fitted size; otherwise only the local glyphs grow and the canonical grid
+    // remains too large, clipping the bottom/right of the pane.
+    if (changed) claimRef.current();
     t.options.fontSize = Math.round((13 * zoom) / 100);
     resyncRef.current();
   }, [zoom]);
