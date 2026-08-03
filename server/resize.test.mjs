@@ -16,6 +16,7 @@ import {
   traceHistoryLines,
 } from './src/history-store.js';
 import { mergeRepaintArchive, repaintArchiveView } from './src/runner.js';
+import { snapshotToRestoreAnsi, styledTerminalRows } from './src/snapshot.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-resize-'));
@@ -175,13 +176,31 @@ try {
 
     const checkpoint = createTerminalHistoryCheckpoint({
       directory, id: 'current', delayMs: 1,
-      snapshot: () => ({ cols: 90, scrollbackLines: [{ text: 'clean' }] }),
+      snapshot: () => ({
+        cols: 90, scrollbackLines: [{ text: 'clean', ansi: '\x1b[38;5;2mclean\x1b[0m' }],
+      }),
       blocked: () => false,
     });
     checkpoint.flush();
     const wrote = await waitFor(() => loadTerminalHistory(directory, 'current')?.version
       === TERMINAL_HISTORY_VERSION);
     check('new checkpoints use the clean startup generation', wrote);
+    check('checkpoints retain validated scrollback styling',
+      loadTerminalHistory(directory, 'current')?.lines[0]?.ansi
+      === '\x1b[38;5;2mclean\x1b[0m');
+
+    const styled = styledTerminalRows({
+      cols: 20, rows: 1,
+      scrollbackLines: [{ row: 0, text: 'red history' }],
+      visibleLines: [{ row: 0, text: 'live' }],
+    }, '<div style="font-family: monospace; white-space: pre;"><div style="display: inline;color: var(--vt-palette-1);">red history</div>\nlive</div>');
+    const restore = snapshotToRestoreAnsi({
+      cols: 20, rows: 1, cursorRow: 0, cursorCol: 0, cells: [],
+      scrollbackLines: styled.slice(0, 1),
+    });
+    check('Ghostty HTML scrollback colors convert back to ANSI',
+      styled[0].ansi?.includes('\x1b[38;5;1m')
+      && restore.includes('\x1b[38;5;1mred history'));
   }
 
   {
@@ -356,11 +375,12 @@ try {
     const resumed = await waitFor(async () => (await gridText(id)).includes('[fixture 150x40]'));
     await sleep(250);
     const restartedText = Headless ? await restarted.screenText() : '';
+    const restartDuplicates = Headless ? duplicateTokens(restartedText) : 0;
     check('host restart restores deep scrollback', resumed
       && (!Headless || restartedText.includes('history-0001')));
     check('host restart does not duplicate repaint content', !Headless
-      || duplicateTokens(restartedText) === beforeBrowser,
-    Headless ? `${duplicateTokens(restartedText)} duplicate tokens` : '');
+      || restartDuplicates === beforeBrowser,
+    Headless ? `${restartDuplicates} duplicate tokens` : '');
     if (Headless) check('restored viewport remains scrollable', await restarted.scrollsBack());
     restarted.close();
     await stop(id);

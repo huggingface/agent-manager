@@ -6,7 +6,9 @@ import { remoteState, setPaused } from './remote.js';
 import { cliById, isRemote, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
 import { captureOpencodeSession, readTrace } from './traces.js';
-import { buildPaletteIndex, snapshotToRestoreAnsi, textColumns } from './snapshot.js';
+import {
+  buildPaletteIndex, snapshotToRestoreAnsi, styledSnapshotLines, textColumns,
+} from './snapshot.js';
 import {
   createTerminalHistoryCheckpoint, loadTerminalHistory, TERMINAL_HISTORY_VERSION,
   traceHistoryLines,
@@ -303,6 +305,39 @@ function terminalArchive(vt, snap) {
   return logicalText([...(snap.scrollbackLines || []), ...visibleRows(vt)], snap.cols);
 }
 
+const MAX_HISTORY_STYLES = 50_000;
+
+function learnHistoryStyles(host, vt, snap) {
+  if (!host.historyStyles || typeof vt.formatHtml !== 'function') return;
+  const visibleHasStyle = (snap.cells || []).some((cell) => cell.bold || cell.italic
+    || cell.underline || cell.foreground || cell.background);
+  if (!visibleHasStyle && host.historyStyles.size === 0) return;
+  let styled;
+  try { styled = styledSnapshotLines(snap, vt.formatHtml()); } catch { return; }
+  for (const line of [...styled.rows, ...styled.logical]) {
+    if (!line.text || !line.ansi) continue;
+    // Refresh insertion order so frequently repainted transcript rows survive
+    // the bounded cache while old one-off status lines age out.
+    host.historyStyles.delete(line.text);
+    host.historyStyles.set(line.text, line.ansi);
+  }
+  while (host.historyStyles.size > MAX_HISTORY_STYLES) {
+    host.historyStyles.delete(host.historyStyles.keys().next().value);
+  }
+}
+
+function withHistoryStyles(host, lines) {
+  return (lines || []).map((line) => {
+    const ansi = line.ansi || host.historyStyles?.get(line.text || '');
+    return ansi ? { ...line, ansi } : line;
+  });
+}
+
+function styledSnapshot(host, vt, snap) {
+  learnHistoryStyles(host, vt, snap);
+  return { ...snap, scrollbackLines: withHistoryStyles(host, snap.scrollbackLines) };
+}
+
 /**
  * Commit one captured agent repaint without duplicating its overflow rows.
  *
@@ -322,6 +357,7 @@ function finishCapturedGrid(host, txn) {
     try { snap = txn.vt.snapshot({ includeCells: true, includeScrollback: true }); } catch {}
     if (snap) {
       try {
+        learnHistoryStyles(host, txn.vt, snap);
         const visible = visibleRows(txn.vt);
         const visibleText = logicalText(visible, txn.cols);
         const view = repaintArchiveView(txn.archive, visibleText, txn.fallbackHistory);
@@ -331,7 +367,9 @@ function finishCapturedGrid(host, txn) {
           rows: txn.rows,
           scrollbackLimit: SCROLLBACK_BYTES,
         });
-        replacement.feed(snapshotToRestoreAnsi({ ...snap, scrollbackLines: view.history }));
+        replacement.feed(snapshotToRestoreAnsi({
+          ...snap, scrollbackLines: withHistoryStyles(host, view.history),
+        }));
       } catch (error) {
         console.error('[runner] resize capture commit', error && error.message);
         try { replacement?.dispose(); } catch {}
@@ -364,7 +402,7 @@ function finishCapturedGrid(host, txn) {
       // diverge after a narrow zoom, even when the server history is correct.
       notifyGrid(host, true);
       const committed = host.vt.snapshot({ includeCells: true, includeScrollback: true });
-      const ansi = snapshotToRestoreAnsi(committed);
+      const ansi = snapshotToRestoreAnsi(styledSnapshot(host, host.vt, committed));
       for (const sub of host.subs) sub.onData(ansi);
       try { previous.dispose(); } catch {}
       sampleScreen(host);
@@ -389,7 +427,10 @@ function armCapturedGrid(host, txn) {
 function startCapturedGrid(host, cols, rows, seed = null, resizePty = true) {
   const previous = host.resizeCapture;
   let archive = seed?.history
-    ? logicalText(seed.history, seed.historyCols || host.cols) : host.repaintArchive;
+    ? (seed.logical
+      ? `${seed.history.map((line) => line.text || '').join('\n')}\n`
+      : logicalText(seed.history, seed.historyCols || host.cols))
+    : host.repaintArchive;
   let fallbackHistory = seed?.history ? archive : null;
   if (previous) {
     archive = previous.archive;
@@ -494,6 +535,7 @@ function armTraceHydration(host) {
     const currentText = visible.map((line) => line.text || '').join('\n');
     const recovered = traceHistoryLines(host.traceHistoryPage, currentText);
     host.traceHistoryPage = null;
+    learnHistoryStyles(host, host.vt, snap);
 
     let replacement = null;
     try {
@@ -508,14 +550,14 @@ function armTraceHydration(host) {
       });
       replacement.feed(snapshotToRestoreAnsi({
         ...snap,
-        scrollbackLines: view.history,
+        scrollbackLines: withHistoryStyles(host, view.history),
       }));
       const previous = host.vt;
       host.vt = replacement;
       host.repaintArchive = view.archive;
       notifyGrid(host, true);
       const committed = host.vt.snapshot({ includeCells: true, includeScrollback: true });
-      const ansi = snapshotToRestoreAnsi(committed);
+      const ansi = snapshotToRestoreAnsi(styledSnapshot(host, host.vt, committed));
       for (const sub of host.subs) sub.onData(ansi);
       try { previous.dispose(); } catch {}
       sampleScreen(host);
@@ -1058,6 +1100,8 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     captureResize,
     resizeCapture: null,
     repaintArchive: null,
+    historyStyles: new Map((persistedHistory?.lines || [])
+      .filter((line) => line.text && line.ansi).map((line) => [line.text, line.ansi])),
     startupHistory: captureResize ? persistedHistory : null,
     historyCheckpoint: null,
     traceHistoryPage: null,
@@ -1076,9 +1120,15 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     delayMs: HISTORY_SAVE_MS,
     snapshot: () => {
       const snap = host.vt.snapshot({ includeScrollback: true });
-      if (!captureResize) return snap;
+      learnHistoryStyles(host, host.vt, snap);
+      if (!captureResize) {
+        return { ...snap, scrollbackLines: withHistoryStyles(host, snap.scrollbackLines) };
+      }
       const archive = host.repaintArchive ?? terminalArchive(host.vt, snap);
-      return { cols: host.cols, scrollbackLines: logicalHistory(archive) };
+      return {
+        cols: host.cols,
+        scrollbackLines: withHistoryStyles(host, logicalHistory(archive)),
+      };
     },
     blocked: () => !!host.resizeCapture,
     persistedBody: persistedHistory?.body || null,
@@ -1098,6 +1148,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
       startCapturedGrid(host, host.cols, host.rows, {
         history: startup.lines,
         historyCols: startup.cols,
+        logical: true,
       }, false);
       txn = host.resizeCapture;
     }
@@ -1207,7 +1258,7 @@ export function attach(session, cols, rows) {
       let snap;
       try { snap = host.vt.snapshot({ includeCells: true, includeScrollback: true }); } catch { return null; }
       return {
-        ansi: snapshotToRestoreAnsi(snap),
+        ansi: snapshotToRestoreAnsi(styledSnapshot(host, host.vt, snap)),
         cols: snap.cols,
         rows: snap.rows,
         viewers: host.subs.size,

@@ -162,6 +162,96 @@ export function textColumns(text) {
   return width;
 }
 
+function htmlEntities(text) {
+  return text
+    .replace(/&#x([0-9a-f]+);/gi, (_, value) => String.fromCodePoint(Number.parseInt(value, 16)))
+    .replace(/&#(\d+);/g, (_, value) => String.fromCodePoint(Number.parseInt(value, 10)))
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+function cssColor(style, property, layer) {
+  const escaped = property.replace('-', '\\-');
+  const palette = style.match(new RegExp(`(?:^|;)${escaped}: var\\(--vt-palette-(\\d+)\\)`));
+  if (palette) return `${layer};5;${palette[1]}`;
+  const rgb = style.match(new RegExp(`(?:^|;)${escaped}: rgb\\((\\d+), (\\d+), (\\d+)\\)`));
+  return rgb ? `${layer};2;${rgb[1]};${rgb[2]};${rgb[3]}` : '';
+}
+
+function htmlStyleSgr(style) {
+  const codes = [];
+  const foreground = cssColor(style, 'color', 38);
+  const background = cssColor(style, 'background-color', 48);
+  if (foreground) codes.push(foreground);
+  if (background) codes.push(background);
+  if (style.includes('font-weight: bold')) codes.push('1');
+  if (style.includes('opacity: 0.5')) codes.push('2');
+  if (style.includes('font-style: italic')) codes.push('3');
+  if (/text-decoration-line:[^;]*underline/.test(style)) codes.push('4');
+  if (/text-decoration-line:[^;]*blink/.test(style)) codes.push('5');
+  if (style.includes('filter: invert(100%)')) codes.push('7');
+  if (/text-decoration-line:[^;]*line-through/.test(style)) codes.push('9');
+  if (/text-decoration-line:[^;]*overline/.test(style)) codes.push('53');
+  return codes.length ? `\x1b[${codes.join(';')}m` : '';
+}
+
+const hasAnsiStyle = (text) => text.replace(/\x1b\[0m/g, '').includes('\x1b[');
+
+/** Convert Ghostty's deterministic debug HTML into one ANSI string per visual row. */
+function htmlAnsiRows(html) {
+  if (typeof html !== 'string') return [];
+  const first = html.indexOf('>');
+  const last = html.lastIndexOf('</div>');
+  if (first < 0 || last <= first) return [];
+  const inner = html.slice(first + 1, last);
+  const ansi = inner
+    .replace(/<div style="([^"]*)">/g, (_, style) => htmlStyleSgr(style))
+    .replace(/<\/div>/g, '\x1b[0m');
+  return htmlEntities(ansi).split('\n');
+}
+
+/** Styled visual rows for the complete primary grid, including scrollback. */
+export function styledTerminalRows(snap, html) {
+  const plain = [...(snap.scrollbackLines || []), ...(snap.visibleLines || [])];
+  const ansi = htmlAnsiRows(html);
+  while (ansi.length < plain.length && !(plain[ansi.length]?.text || '')) ansi.push('');
+  if (ansi.length !== plain.length) return plain.map((line) => ({ text: line.text || '' }));
+  return plain.map((line, index) => {
+    const text = line.text || '';
+    const rendered = ansi[index] || '';
+    return hasAnsiStyle(rendered) ? { text, ansi: `${rendered}\x1b[0m` } : { text };
+  });
+}
+
+function joinStyledRows(rows, cols) {
+  const lines = [];
+  let text = '';
+  let ansi = '';
+  for (const row of rows) {
+    text += row.text || '';
+    ansi += row.ansi || row.text || '';
+    if (textColumns(row.text || '') < cols) {
+      lines.push(hasAnsiStyle(ansi) ? { text, ansi: `${ansi}\x1b[0m` } : { text });
+      text = '';
+      ansi = '';
+    }
+  }
+  if (text || ansi) lines.push(hasAnsiStyle(ansi) ? { text, ansi: `${ansi}\x1b[0m` } : { text });
+  return lines;
+}
+
+/** Styled logical lines, joining visual rows that were soft-wrapped. */
+export function styledLogicalLines(snap, html) {
+  return joinStyledRows(styledTerminalRows(snap, html), snap.cols);
+}
+
+/** Parse Ghostty's formatted state once when both visual and logical keys are needed. */
+export function styledSnapshotLines(snap, html) {
+  const rows = styledTerminalRows(snap, html);
+  return { rows, logical: joinStyledRows(rows, snap.cols) };
+}
+
 /**
  * Rebuild a fresh viewer from Ghostty's canonical state.
  *
@@ -176,12 +266,14 @@ export function textColumns(text) {
  * off before painting the authoritative current screen.
  */
 export function snapshotToRestoreAnsi(snap) {
-  const history = (snap.scrollbackLines || []).map((line) => line.text || '');
+  const history = (snap.scrollbackLines || []).map((line) => ({
+    text: line.text || '', ansi: typeof line.ansi === 'string' ? line.ansi : '',
+  }));
   let out = '\x1b[?1049l\x1b[?25l\x1b[0m\x1b[H\x1b[2J';
   if (history.length) {
-    out += history.join('\r\n');
+    out += history.map((line) => line.ansi || line.text).join('\r\n');
     const visualRows = history.reduce((total, line) =>
-      total + Math.max(1, Math.ceil(textColumns(line) / Math.max(1, snap.cols))), 0);
+      total + Math.max(1, Math.ceil(textColumns(line.text) / Math.max(1, snap.cols))), 0);
     out += `\x1b[${snap.rows};1H` + '\r\n'.repeat(Math.min(visualRows, snap.rows));
   }
   out += snapshotToAnsi(snap);
