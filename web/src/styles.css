@@ -722,6 +722,7 @@ body {
 .mini-btn.danger { background: var(--danger); color: #fff; border-color: transparent; }
 .mini-btn.danger:disabled { opacity: .5; }
 /* the one obvious action in a group — Create, Save and close */
+.mini-btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .mini-btn.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
 .mini-btn.primary:disabled { opacity: .45; }
 .tree-row.selected { background: color-mix(in srgb, var(--accent) 14%, transparent); }
