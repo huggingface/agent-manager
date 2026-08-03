@@ -2167,6 +2167,18 @@ wss.on('connection', (ws, req) => {
     try { ws.send(TERM_CTRL + JSON.stringify({ t: 'grid', cols: cols_, rows: rows_, controller, viewers, reset })); } catch {}
   });
 
+  // Register input before sending the initial restore. Browsers may issue a
+  // claim/resize from `onopen`, while this function is still serializing that
+  // restore. Installing the listener afterwards left a small window where the
+  // first mobile geometry request was silently lost.
+  ws.on('message', (raw) => {
+    let msg;
+    try { msg = JSON.parse(raw.toString()); } catch { return; }
+    if (msg.t === 'i') handle.write(msg.d);
+    else if (msg.t === 'r') handle.resize(msg.cols, msg.rows);
+    else if (msg.t === 'claim') handle.claim();
+  });
+
   // Ghostty owns the durable terminal model. Reattachment receives one canonical
   // serialization of its retained scrollback and current styled screen.
   const restore = handle.restore();
@@ -2179,14 +2191,6 @@ wss.on('connection', (ws, req) => {
       ws.send(restore.ansi);
     } catch {}
   }
-
-  ws.on('message', (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
-    if (msg.t === 'i') handle.write(msg.d);
-    else if (msg.t === 'r') handle.resize(msg.cols, msg.rows);
-    else if (msg.t === 'claim') handle.claim();
-  });
 
   // Detaching a viewer, NOT stopping the session.
   ws.on('close', () => handle.kill());

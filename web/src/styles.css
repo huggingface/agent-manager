@@ -1032,10 +1032,19 @@ a.btn-ghost { text-decoration: none; }
 
 /* phones: two full-screen views — the sidebar list, or the selected pane */
 @media (max-width: 720px) {
-  /* Height follows the VISUAL viewport (set by App from window.visualViewport):
-     when the on-screen keyboard opens it shrinks the app so the terminal +
-     control bar stay above the keyboard instead of hiding behind it. */
-  .app { height: var(--vvh, 100dvh); overflow: hidden; }
+  /* Follow the VISUAL viewport rectangle (set from window.visualViewport):
+     when the on-screen keyboard opens it shrinks/moves the app so the terminal
+     and control bar stay above the keyboard instead of hiding behind it. */
+  html, body, #root { overflow: hidden; overscroll-behavior: none; }
+  .app {
+    position: fixed;
+    top: var(--vv-top, 0px);
+    left: var(--vv-left, 0px);
+    width: var(--vvw, 100%);
+    height: var(--vvh, 100dvh);
+    overflow: hidden;
+  }
+  .term-host { touch-action: none; overscroll-behavior: contain; }
   .app.m-home .main { display: none; }
   .app.m-home .sidebar { width: 100%; border-right: none; }
   .app.m-stage .sidebar { display: none; }

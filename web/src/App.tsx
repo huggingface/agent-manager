@@ -103,15 +103,28 @@ export default function App() {
 
   // Track the visual viewport so the mobile layout can sit above the on-screen
   // keyboard (which shrinks visualViewport but not the layout viewport on iOS).
-  // --vvh drives the mobile app height (see styles.css).
+  // The CSS variables pin the app to that viewport's exact rectangle.
   useEffect(() => {
     const vv = window.visualViewport;
     if (!vv) return;
-    const apply = () => document.documentElement.style.setProperty('--vvh', `${Math.round(vv.height)}px`);
+    const apply = () => {
+      const root = document.documentElement.style;
+      root.setProperty('--vvw', `${Math.round(vv.width)}px`);
+      root.setProperty('--vvh', `${Math.round(vv.height)}px`);
+      root.setProperty('--vv-top', `${Math.round(vv.offsetTop)}px`);
+      root.setProperty('--vv-left', `${Math.round(vv.offsetLeft)}px`);
+    };
     apply();
     vv.addEventListener('resize', apply);
     vv.addEventListener('scroll', apply);
-    return () => { vv.removeEventListener('resize', apply); vv.removeEventListener('scroll', apply); };
+    return () => {
+      vv.removeEventListener('resize', apply);
+      vv.removeEventListener('scroll', apply);
+      document.documentElement.style.removeProperty('--vvw');
+      document.documentElement.style.removeProperty('--vvh');
+      document.documentElement.style.removeProperty('--vv-top');
+      document.documentElement.style.removeProperty('--vv-left');
+    };
   }, []);
 
   // Refresh info while locked so flipping the Space to Private unlocks the UI

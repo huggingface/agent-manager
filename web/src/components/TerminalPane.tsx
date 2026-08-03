@@ -236,6 +236,14 @@ export default function TerminalPane({
     term.open(hostRef.current!);
     termRef.current = term;
 
+    // Track the user's semantic scroll state independently of the viewport's
+    // pixel scrollTop. During a row-count change xterm can transiently report
+    // the old pixel position against the new scroll height.
+    let followingBottom = true;
+    const scrollSub = term.onScroll(() => {
+      followingBottom = term.buffer.active.viewportY >= term.buffer.active.baseY;
+    });
+
     // Track the committed local xterm selection so Cmd/Ctrl+C can copy it
     // synchronously — deferring (setTimeout) would break execCommand's gesture.
     const selSub = term.onSelectionChange(() => {
@@ -352,6 +360,10 @@ export default function TerminalPane({
       ws.onopen = () => {
         setConn('connected');
         retryDelay = 1200;
+        // Selecting a terminal is an explicit foreground action on mobile.
+        // Claim before reporting its fit so an already-open desktop does not
+        // leave the phone rendering a clipped desktop-sized canonical grid.
+        if (isMobile && !document.hidden) claimControl();
         requestSize();
       };
       ws.onmessage = (e) => {
@@ -367,12 +379,22 @@ export default function TerminalPane({
               setViewers(Math.max(1, Number(m.viewers) || 1));
               const applyGrid = () => {
                 try {
+                  // xterm can retain the old pixel scrollTop when the viewport
+                  // gains rows (notably landscape -> portrait), which leaves a
+                  // formerly-live view stranded in history. Preserve the
+                  // semantic bottom anchor without disturbing someone who is
+                  // deliberately reading scrollback.
+                  const wasAtBottom = m.reset || followingBottom;
                   if (m.reset) {
                     term.reset();
                     term.clear();
                   }
                   if (m.cols > 0 && m.rows > 0 && (term.cols !== m.cols || term.rows !== m.rows)) {
                     term.resize(m.cols, m.rows);
+                  }
+                  if (wasAtBottom) {
+                    term.scrollToBottom();
+                    followingBottom = true;
                   }
                 } catch { /* ignore */ }
               };
@@ -451,8 +473,10 @@ export default function TerminalPane({
     window.addEventListener('focus', onReturn);
     document.addEventListener('visibilitychange', onVisible);
 
-    // Touch scrolling prefers browser-retained history. At the live bottom an
-    // app that tracks the mouse receives SGR wheel events from the controller.
+    // A phone drag always navigates browser-retained terminal history. Passing
+    // it to an agent's mouse mode at the live bottom makes Claude consume the
+    // gesture without moving xterm's viewport, leaving no reliable way back
+    // through history on touch-only devices.
     let touchY: number | null = null;
     const onTouchStart = (e: TouchEvent) => { touchY = e.touches[0].clientY; };
     const onTouchMove = (e: TouchEvent) => {
@@ -462,24 +486,19 @@ export default function TerminalPane({
       const steps = Math.trunc(dy / 24); // ~one wheel notch per 24px of drag
       if (steps !== 0) {
         touchY = y;
-        let tracking = false;
-        try { tracking = ((term as unknown as { modes?: { mouseTrackingMode?: string } }).modes?.mouseTrackingMode ?? 'none') !== 'none'; } catch { /* older xterm */ }
-        const btn = steps > 0 ? 64 : 65; // drag down reveals earlier output = wheel up
-        for (let i = 0; i < Math.abs(steps); i++) {
-          const inHistory = term.buffer.active.viewportY < term.buffer.active.baseY;
-          if (tracking && !inHistory) {
-            claimControl();
-            send({ t: 'i', d: `\x1b[<${btn};${Math.max(1, Math.floor(term.cols / 2))};${Math.max(1, Math.floor(term.rows / 2))}M` });
-          }
-          else term.scrollLines(steps > 0 ? -1 : 1);
-        }
+        term.scrollLines(steps > 0 ? -Math.abs(steps) : Math.abs(steps));
       }
-      if (Math.abs(dy) > 4) e.preventDefault(); // keep the page from rubber-banding
+      if (Math.abs(dy) > 4) {
+        e.preventDefault(); // keep the page from rubber-banding
+        e.stopPropagation(); // xterm must not also interpret the same drag
+      }
     };
     const onTouchEnd = () => { touchY = null; };
+    const onTouchCancel = () => { touchY = null; };
     host.addEventListener('touchstart', onTouchStart, { passive: true });
-    host.addEventListener('touchmove', onTouchMove, { passive: false });
+    host.addEventListener('touchmove', onTouchMove, { passive: false, capture: true });
     host.addEventListener('touchend', onTouchEnd);
+    host.addEventListener('touchcancel', onTouchCancel);
 
     connect();
 
@@ -494,12 +513,14 @@ export default function TerminalPane({
       host.removeEventListener('paste', onPaste, true);
       document.removeEventListener('copy', onCopy, true);
       host.removeEventListener('touchstart', onTouchStart);
-      host.removeEventListener('touchmove', onTouchMove);
+      host.removeEventListener('touchmove', onTouchMove, true);
       host.removeEventListener('touchend', onTouchEnd);
+      host.removeEventListener('touchcancel', onTouchCancel);
       window.removeEventListener('focus', onReturn);
       document.removeEventListener('visibilitychange', onVisible);
       dataSub.dispose();
       keySub.dispose();
+      scrollSub.dispose();
       selSub.dispose();
       try { ws?.close(); } catch { /* ignore */ }
       term.dispose();
