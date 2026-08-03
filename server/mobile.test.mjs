@@ -360,6 +360,18 @@ try {
   check('the focused xterm input is anchored at the mobile terminal bottom',
     mobileInputAnchor.ok, JSON.stringify(mobileInputAnchor));
 
+  // A direct .hf.space app receives real viewport geometry on the affected
+  // devices. Even if a test browser emits no change, focus alone must not
+  // invoke the Hub-iframe fallback outside an iframe.
+  await sleep(650);
+  const directNoSignalLayout = await page.locator('.app').evaluate((node) => ({
+    height: node.getBoundingClientRect().height,
+    strategy: document.documentElement.dataset.keyboardLayout ?? null,
+  }));
+  check('direct app does not guess a keyboard height without a browser signal',
+    Math.abs(directNoSignalLayout.height - 667) < 1 && directNoSignalLayout.strategy === null,
+    JSON.stringify(directNoSignalLayout));
+
   // Embedded Chromium can leave the child visual viewport unchanged but expose
   // the OSK rectangle. Ensure that independent signal clips the app and PTY.
   await page.evaluate(() => window.__setVirtualKeyboard(430, 237));
@@ -426,6 +438,53 @@ try {
   check('closing the keyboard restores viewport and terminal geometry',
     keyboardClosed && Math.abs(restoredLayout.top) < 1 && Math.abs(restoredLayout.height - 667) < 1,
     JSON.stringify({ keyboardClosed, restoredLayout, grid: latestGrid() }));
+
+  // The huggingface.co Space page is a cross-origin wrapper around the actual
+  // app iframe. Mobile Safari does not propagate its keyboard viewport into
+  // that child, so verify the focus-derived fallback with every geometry signal
+  // deliberately left unchanged.
+  const embeddedPage = await context.newPage();
+  await embeddedPage.setContent(
+    `<style>html,body{margin:0}iframe{display:block;width:375px;height:667px;border:0}</style>`
+      + `<iframe src="${WEB}"></iframe>`,
+  );
+  const embeddedReady = await waitFor(() => embeddedPage.frames().some((frame) =>
+    frame !== embeddedPage.mainFrame() && frame.url().startsWith(WEB)));
+  const embeddedFrame = embeddedPage.frames().find((frame) =>
+    frame !== embeddedPage.mainFrame() && frame.url().startsWith(WEB));
+  if (!embeddedReady || !embeddedFrame) throw new Error('embedded app frame did not load');
+  await embeddedFrame.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
+  await embeddedFrame.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
+  await embeddedFrame.locator('.tile-terminal:not(.tile-cached) .term-host').click();
+  const embeddedFallback = await waitFor(() => embeddedFrame.evaluate(() =>
+    document.documentElement.dataset.keyboardLayout === 'focus-fallback'));
+  const embeddedLayout = await embeddedFrame.locator('.app').evaluate((node) => {
+    const app = node.getBoundingClientRect();
+    const keybar = document.querySelector('.tile-terminal:not(.tile-cached) .term-keybar')
+      ?.getBoundingClientRect();
+    return {
+      height: app.height,
+      bottom: app.bottom,
+      keybarBottom: keybar?.bottom ?? null,
+      strategy: document.documentElement.dataset.keyboardLayout ?? null,
+      visualViewportHeight: window.visualViewport?.height ?? null,
+      innerHeight: window.innerHeight,
+    };
+  });
+  check('Hub iframe uses a focus fallback when keyboard geometry is unavailable',
+    embeddedFallback
+      && Math.abs(embeddedLayout.height - 360) < 1
+      && embeddedLayout.keybarBottom <= embeddedLayout.bottom
+      && embeddedLayout.visualViewportHeight === 667
+      && embeddedLayout.innerHeight === 667,
+    JSON.stringify(embeddedLayout));
+  await embeddedFrame.locator('.xterm-helper-textarea').evaluate((node) => node.blur());
+  const embeddedRestored = await waitFor(() => embeddedFrame.evaluate(() => {
+    const app = document.querySelector('.app')?.getBoundingClientRect();
+    return !document.documentElement.dataset.keyboardLayout && Math.abs((app?.height ?? 0) - 667) < 1;
+  }));
+  check('blurring an embedded prompt restores the full iframe height', embeddedRestored);
+  await embeddedPage.close();
 
   // A compact last-frame preview should survive a full page reload and remain
   // available while the backend/Space is unavailable. This deliberately blocks

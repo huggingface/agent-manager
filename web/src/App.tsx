@@ -104,12 +104,55 @@ export default function App() {
 
   // Track the visual viewport so the mobile layout can sit above the on-screen
   // keyboard (which shrinks visualViewport but not the layout viewport on iOS).
-  // The CSS variables pin the app to that viewport's exact rectangle.
+  // The CSS variables pin the app to that viewport's exact rectangle. The Hub
+  // page embeds the app in a cross-origin iframe; mobile Safari leaves that
+  // child viewport unchanged when its keyboard opens. In that one no-signal
+  // case, fall back to a conservative focus-derived visible height.
   useEffect(() => {
     const vv = window.visualViewport;
     type VirtualKeyboardLike = EventTarget & { boundingRect?: DOMRectReadOnly };
     const keyboard = (navigator as Navigator & { virtualKeyboard?: VirtualKeyboardLike }).virtualKeyboard;
-    if (!vv && !keyboard) return;
+    type ViewportBaseline = {
+      width: number;
+      height: number;
+      top: number;
+      innerHeight: number;
+    };
+    const root = document.documentElement;
+    const keyboardSignalThreshold = 80;
+    const embedded = window.self !== window.top;
+    let focusedInput: Element | null = null;
+    let focusBaseline: ViewportBaseline | null = null;
+    let focusFallback = false;
+    let focusFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const acceptsKeyboardInput = (target: Element | null): target is HTMLElement => {
+      if (!(target instanceof HTMLElement)) return false;
+      if (target.isContentEditable) return true;
+      if (target instanceof HTMLTextAreaElement) return !target.readOnly && !target.disabled;
+      if (!(target instanceof HTMLInputElement) || target.readOnly || target.disabled) return false;
+      return !['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit']
+        .includes(target.type);
+    };
+    const embeddedTouchLayout = () => embedded
+      && window.matchMedia('(max-width: 720px)').matches
+      && (navigator.maxTouchPoints > 0 || window.matchMedia('(pointer: coarse)').matches);
+    const captureViewport = (): ViewportBaseline => ({
+      width: vv?.width ?? document.documentElement.clientWidth,
+      height: vv?.height ?? window.innerHeight,
+      top: vv?.offsetTop ?? 0,
+      innerHeight: window.innerHeight,
+    });
+    const hasKeyboardGeometry = () => {
+      if (!focusBaseline) return false;
+      const keyboardHeight = keyboard?.boundingRect?.height ?? 0;
+      const visualHeight = vv?.height ?? window.innerHeight;
+      const visualShrink = focusBaseline.height - visualHeight;
+      const layoutShrink = focusBaseline.innerHeight - window.innerHeight;
+      return keyboardHeight >= keyboardSignalThreshold
+        || visualShrink >= keyboardSignalThreshold
+        || layoutShrink >= keyboardSignalThreshold;
+    };
     const apply = () => {
       const keyboardRect = keyboard?.boundingRect;
       const left = vv?.offsetLeft ?? 0;
@@ -122,11 +165,24 @@ export default function App() {
       if (keyboardRect && keyboardRect.height > 0 && keyboardRect.top > top) {
         height = Math.min(height, keyboardRect.top - top);
       }
-      const root = document.documentElement.style;
-      root.setProperty('--vvw', `${Math.round(width)}px`);
-      root.setProperty('--vvh', `${Math.round(height)}px`);
-      root.setProperty('--vv-top', `${Math.round(top)}px`);
-      root.setProperty('--vv-left', `${Math.round(left)}px`);
+      if (hasKeyboardGeometry()) focusFallback = false;
+      if (focusFallback && focusBaseline && acceptsKeyboardInput(document.activeElement)) {
+        // The parent page owns the real visual viewport, but cross-origin frame
+        // isolation prevents us from reading it. A phone keyboard typically
+        // consumes roughly the lower half; 54% visible keeps the xterm prompt
+        // above it without disturbing direct-app browsers with real geometry.
+        const visibleRatio = focusBaseline.width > focusBaseline.height ? 0.48 : 0.54;
+        height = Math.min(height, Math.round(focusBaseline.height * visibleRatio));
+        root.dataset.keyboardLayout = 'focus-fallback';
+      } else if (hasKeyboardGeometry()) {
+        root.dataset.keyboardLayout = 'browser-geometry';
+      } else {
+        delete root.dataset.keyboardLayout;
+      }
+      root.style.setProperty('--vvw', `${Math.round(width)}px`);
+      root.style.setProperty('--vvh', `${Math.round(height)}px`);
+      root.style.setProperty('--vv-top', `${Math.round(top)}px`);
+      root.style.setProperty('--vv-left', `${Math.round(left)}px`);
     };
 
     // WebKit may dispatch the keyboard viewport event before offsetTop has its
@@ -154,30 +210,81 @@ export default function App() {
         focusTimers.add(timer);
       }
     };
+    const scheduleEmbeddedFallback = () => {
+      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
+      focusFallbackTimer = null;
+      if (!embeddedTouchLayout() || !acceptsKeyboardInput(document.activeElement)) return;
+      focusFallbackTimer = setTimeout(() => {
+        focusFallbackTimer = null;
+        if (document.activeElement === focusedInput && !hasKeyboardGeometry()) {
+          focusFallback = true;
+          apply();
+        }
+      }, 500);
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (acceptsKeyboardInput(target)) {
+        focusedInput = target;
+        focusBaseline = captureViewport();
+        focusFallback = false;
+        stabilizeFocus();
+        scheduleEmbeddedFallback();
+        return;
+      }
+      stabilizeFocus();
+    };
+    const onFocusOut = () => {
+      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
+      focusFallbackTimer = null;
+      const timer = setTimeout(() => {
+        focusTimers.delete(timer);
+        if (!acceptsKeyboardInput(document.activeElement)) {
+          focusedInput = null;
+          focusBaseline = null;
+          focusFallback = false;
+          apply();
+        }
+      }, 0);
+      focusTimers.add(timer);
+    };
+    const onOrientationChange = () => {
+      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
+      focusFallbackTimer = null;
+      focusFallback = false;
+      if (acceptsKeyboardInput(document.activeElement)) {
+        focusedInput = document.activeElement;
+        focusBaseline = captureViewport();
+      }
+      stabilizeFocus();
+      scheduleEmbeddedFallback();
+    };
     apply();
     vv?.addEventListener('resize', onViewportChange);
     vv?.addEventListener('scroll', onViewportChange);
     vv?.addEventListener('scrollend', onViewportChange);
     keyboard?.addEventListener('geometrychange', onViewportChange);
     window.addEventListener('resize', onViewportChange);
-    window.addEventListener('orientationchange', stabilizeFocus);
-    document.addEventListener('focusin', stabilizeFocus);
-    document.addEventListener('focusout', stabilizeFocus);
+    window.addEventListener('orientationchange', onOrientationChange);
+    document.addEventListener('focusin', onFocusIn);
+    document.addEventListener('focusout', onFocusOut);
     return () => {
       for (const timer of settleTimers) clearTimeout(timer);
       for (const timer of focusTimers) clearTimeout(timer);
+      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
       vv?.removeEventListener('resize', onViewportChange);
       vv?.removeEventListener('scroll', onViewportChange);
       vv?.removeEventListener('scrollend', onViewportChange);
       keyboard?.removeEventListener('geometrychange', onViewportChange);
       window.removeEventListener('resize', onViewportChange);
-      window.removeEventListener('orientationchange', stabilizeFocus);
-      document.removeEventListener('focusin', stabilizeFocus);
-      document.removeEventListener('focusout', stabilizeFocus);
-      document.documentElement.style.removeProperty('--vvw');
-      document.documentElement.style.removeProperty('--vvh');
-      document.documentElement.style.removeProperty('--vv-top');
-      document.documentElement.style.removeProperty('--vv-left');
+      window.removeEventListener('orientationchange', onOrientationChange);
+      document.removeEventListener('focusin', onFocusIn);
+      document.removeEventListener('focusout', onFocusOut);
+      root.style.removeProperty('--vvw');
+      root.style.removeProperty('--vvh');
+      root.style.removeProperty('--vv-top');
+      root.style.removeProperty('--vv-left');
+      delete root.dataset.keyboardLayout;
     };
   }, []);
 
