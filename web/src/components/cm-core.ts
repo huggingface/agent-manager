@@ -132,6 +132,7 @@ async function languageFor(name: string): Promise<Extension | null> {
 const langComp = new Compartment();
 const editComp = new Compartment();
 const themeComp = new Compartment();
+const wrapComp = new Compartment();
 
 export type EditorHandle = EditorView & { __compartments?: never };
 
@@ -140,6 +141,7 @@ export function createEditor(opts: {
   doc: string;
   name: string;
   editable: boolean;
+  wrap: boolean;
   theme: 'light' | 'dark';
   onChange: (next: string) => void;
   onSave: () => void;
@@ -153,6 +155,7 @@ export function createEditor(opts: {
   const state = EditorState.create({
     doc: opts.doc,
     extensions: [
+      wrapComp.of(opts.wrap ? EditorView.lineWrapping : []),
       lineNumbers(),
       foldGutter(),
       highlightSpecialChars(),
@@ -198,6 +201,10 @@ export function setDoc(view: EditorView, text: string) {
   } finally {
     applying.delete(view);
   }
+}
+
+export function setWrap(view: EditorView, wrap: boolean) {
+  view.dispatch({ effects: wrapComp.reconfigure(wrap ? EditorView.lineWrapping : []) });
 }
 
 export function setEditable(view: EditorView, editable: boolean) {

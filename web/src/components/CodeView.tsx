@@ -41,9 +41,11 @@ export type CodeViewProps = {
   onSave?: () => void;
   /** Light/dark, so the editor's own chrome matches the app. */
   theme: 'light' | 'dark';
+  /** Soft-wrap long lines instead of scrolling sideways. */
+  wrap?: boolean;
 };
 
-export default function CodeView({ text, name, editable, onChange, onSave, theme }: CodeViewProps) {
+export default function CodeView({ text, name, editable, onChange, onSave, theme, wrap = false }: CodeViewProps) {
   const host = useRef<HTMLDivElement | null>(null);
   const view = useRef<any>(null);
   const core = useRef<CM | null>(null);
@@ -68,6 +70,7 @@ export default function CodeView({ text, name, editable, onChange, onSave, theme
         doc: text,
         name,
         editable,
+        wrap,
         theme,
         onChange: (v: string) => cbs.current.onChange?.(v),
         onSave: () => cbs.current.onSave?.(),
@@ -92,6 +95,7 @@ export default function CodeView({ text, name, editable, onChange, onSave, theme
   }, [text]);
 
   useEffect(() => { if (view.current) core.current?.setEditable(view.current, editable); }, [editable]);
+  useEffect(() => { if (view.current) core.current?.setWrap(view.current, wrap); }, [wrap]);
   useEffect(() => { if (view.current) core.current?.setTheme(view.current, theme); }, [theme]);
 
   return (

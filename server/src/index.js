@@ -4,6 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { URL, fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
+import crypto from 'node:crypto';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import {
@@ -1324,6 +1325,9 @@ app.get('/api/files/:id/preview', async (req, res) => {
   const meta = {
     path: path.relative(root, f), name: path.basename(f), size: st.size, mtime: st.mtimeMs,
     kind, mime: mimeOf(f, kind === 'trace' ? 'text' : kind), harness,
+    // Only for files small enough to edit — which is exactly the set that can be
+    // saved, so nothing is hashed that could never be written back.
+    tag: st.size <= TEXT_MAX ? contentTag(f) : null,
   };
   // A trace still carries its raw text, so the Source toggle has something to
   // show without a second round trip.
@@ -1372,10 +1376,10 @@ app.get('/api/files/:id/download', (req, res) => {
 
 // Save an edited text file.
 //
-// Two guards earn their keep here. First, `mtime`: agents are writing these very
-// files while a tab sits open on one, so a save carries the mtime the editor
-// loaded and is refused if the file moved on — losing an agent's work to a
-// stale buffer is worse than making someone reload. Second, only files we could
+// Two guards earn their keep here. First, `base`: agents are writing these very
+// files while a tab sits open on one, so a save carries the content tag the
+// editor loaded and is refused if the file moved on — losing an agent's work to
+// a stale buffer is worse than making someone reload. Second, only files we could
 // show WHOLE are writable: the preview serves the first 512 KB of a big file, and
 // saving that back would silently truncate the rest.
 app.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), (req, res) => {
@@ -1393,8 +1397,8 @@ app.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), (re
   if (st.size > TEXT_MAX) {
     return res.status(413).json({ error: 'too big to edit — only the first part was loaded' });
   }
-  const expected = Number(req.query.mtime || 0);
-  if (expected && Math.abs(st.mtimeMs - expected) > 1000) {
+  const base = String(req.query.base || '');
+  if (base && base !== contentTag(f)) {
     return res.status(409).json({ error: 'changed on disk since you opened it', mtime: st.mtimeMs });
   }
   const text = typeof req.body === 'string' ? req.body : '';
@@ -1411,8 +1415,21 @@ app.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), (re
     return res.status(500).json({ error: String((e && e.message) || e) });
   }
   const after = fs.statSync(f);
-  res.json({ ok: true, size: after.size, mtime: after.mtimeMs });
+  res.json({ ok: true, size: after.size, mtime: after.mtimeMs, tag: contentTag(f) });
 });
+
+// What the editor's save is checked against. NOT mtime: /data is a FUSE bucket
+// mount that rewrites a file's mtime when it syncs the object — measured drifting
+// 5.8s with nobody touching the file — so an mtime precondition refuses honest
+// saves all day. The content is the thing we actually care about: same bytes as
+// when the editor loaded means nobody else got in.
+function contentTag(file) {
+  try {
+    return crypto.createHash('sha1').update(fs.readFileSync(file)).digest('hex').slice(0, 16);
+  } catch {
+    return null;
+  }
+}
 
 // Folders something else depends on: an agent's own workspace and the shared
 // skills dir. Renaming or deleting those out from under a running agent breaks
