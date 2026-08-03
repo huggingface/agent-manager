@@ -165,6 +165,8 @@ export interface FileEntry { name: string; dir: boolean; size: number; mtime: nu
 export interface FileListing { path: string; root: string; entries: FileEntry[]; }
 export interface FilePreview {
   path: string; name: string; size: number; mtime: number; kind: FileKind; mime: string;
+  /** Content tag a save is checked against — null for files too big to edit. */
+  tag?: string | null;
   text?: string; truncated?: boolean; reason?: string;
   /** kind==='trace': which harness wrote it (claude, codex, …). */
   harness?: string | null;
@@ -223,10 +225,13 @@ export const deleteEntry = (id: string, p: string) =>
 export const downloadUrl = (id: string, p: string) =>
   `/api/files/${id}/download?path=${encodeURIComponent(p)}`;
 
-// Save an edited text file. `mtime` is the one the editor loaded: the server
-// refuses the write if the file changed underneath (an agent edited it too).
-export const writeFile = async (id: string, p: string, text: string, mtime: number): Promise<{ size: number; mtime: number }> => {
-  const r = await fetch(`/api/files/${id}/write?path=${encodeURIComponent(p)}&mtime=${mtime}`, {
+// Save an edited text file. `base` is the content tag the editor loaded: the
+// server refuses the write if the file's bytes moved on since (an agent edited
+// it too). Deliberately NOT mtime — the bucket mount rewrites that on its own
+// when it syncs an object, which made every save look like a conflict.
+export const writeFile = async (id: string, p: string, text: string, base: string | null): Promise<{ size: number; mtime: number; tag: string | null }> => {
+  const q = base ? `&base=${encodeURIComponent(base)}` : '';
+  const r = await fetch(`/api/files/${id}/write?path=${encodeURIComponent(p)}${q}`, {
     method: 'PUT', headers: { 'content-type': 'text/plain; charset=utf-8' }, body: text,
   });
   // Unlike the rest of the API, a failed save has something worth reading in it

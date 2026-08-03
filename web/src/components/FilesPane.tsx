@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { recall, remember, readWrap, writeWrap } from './filesMemory';
 import type { Session } from '../types';
 import * as api from '../api';
 import type { FileEntry, FileKind, FilePreview } from '../api';
@@ -467,7 +468,11 @@ function useTheme(): 'light' | 'dark' {
   return theme;
 }
 
-type ViewInfo = { meta: FilePreview | null; extra: string[]; edit?: SaveState; trace?: TraceInfo };
+type ViewInfo = {
+  meta: FilePreview | null; extra: string[]; edit?: SaveState; trace?: TraceInfo;
+  /** True when a text surface is on screen, so wrapping means something. */
+  showWrap?: boolean;
+};
 
 // What a rendered trace needs from the pane's info strip: the same chips and
 // prompt navigation the Trace pane puts in its own header.
@@ -500,6 +505,13 @@ export type SaveState = {
   conflict: boolean;
   reload: () => void;
   overwrite: () => void;
+  /** Soft-wrap long lines — a reading preference, sticky across files. */
+  wrap: boolean;
+  setWrap: (on: boolean) => void;
+  /** Re-indent JSON in the buffer. Absent unless the open file is JSON. */
+  format?: () => void;
+  /** Why the last Format didn't happen. Not a save failure — nothing is dirty. */
+  formatError?: string | null;
 };
 
 // The viewer for one file. Kinds it can't render fall back to an honest
@@ -522,19 +534,42 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
 
   // Editing state. `draft` is null until the first keystroke: the editor is
   // always writable, but a file nobody touched has nothing to save.
-  const [draft, setDraft] = useState<string | null>(null);
-  const [status, setStatus] = useState<SaveState['status']>('clean');
+  const [wrap, setWrapPref] = useState(readWrap);
+  const [draft, setDraft] = useState<string | null>(() => {
+    const kept = recall(sessionId).draft;
+    return kept && kept.path === path ? kept.text : null;
+  });
+  const [status, setStatus] = useState<SaveState['status']>(() => {
+    const kept = recall(sessionId).draft;
+    return kept && kept.path === path ? 'dirty' : 'clean';
+  });
   const [saveErr, setSaveErr] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   // The buffer waiting to be written, if any. There is no timer: these files
   // have no undo and no git behind them, so nothing reaches disk until it is
   // asked for.
-  const pending = useRef<{ text: string; mtime: number } | null>(null);
+  const pending = useRef<{ text: string; base: string | null } | null>(null);
+  // Adopt a kept buffer ONCE per file. Re-checking on every render resurrected
+  // it mid-save — ⌘S fires two handlers (the editor's keymap and the pane's), the
+  // first cleared `pending` and the render in between put it back with the tag it
+  // had before the write, so the second handler saved a stale base and the file
+  // reported itself changed on disk one moment after being saved.
+  const restoredFor = useRef<string | null>(null);
+  if (restoredFor.current !== path) {
+    restoredFor.current = path;
+    const kept = recall(sessionId).draft;
+    pending.current = kept && kept.path === path ? { text: kept.text, base: kept.base } : null;
+  }
 
   useEffect(() => {
     let alive = true;
     setMeta(null); setErr(null); setSource(null); setDims(null); setPages(null);
-    setDraft(null); setSaveErr(null); setConflict(false); setStatus('clean');
+    setSaveErr(null); setConflict(false); setFmtErr(null);
+    // A buffer kept across a pane switch survives the reload of its own file —
+    // dropping it here is exactly the loss this is meant to prevent.
+    const kept = recall(sessionId).draft;
+    if (kept && kept.path === path) { setDraft(kept.text); setStatus('dirty'); }
+    else { setDraft(null); setStatus('clean'); }
     setTraceHead(null); setTraceQuery('');
     api.previewFile(sessionId, path)
       .then((m) => { if (alive) setMeta(m); })
@@ -597,15 +632,21 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   // Resolves true when the file on disk matches the buffer — which "save and
   // close" needs, so a failed write keeps the dialog up instead of closing over
   // the error.
-  const flush = useCallback(async (force = false): Promise<boolean> => {
+  const inflight = useRef<Promise<boolean> | null>(null);
+  const flush = useCallback((force = false): Promise<boolean> => {
+    // One write at a time. Two callers land on the same save rather than racing
+    // each other into a conflict of their own making.
+    if (inflight.current) return inflight.current;
     const job = pending.current;
-    if (!job) return true;               // nothing outstanding
+    if (!job) return Promise.resolve(true);   // nothing outstanding
     pending.current = null;
     setStatus('saving'); setSaveErr(null);
+    const run = async (): Promise<boolean> => {
     try {
-      const after = await api.writeFile(sessionId, path, job.text, force ? 0 : job.mtime);
+      const after = await api.writeFile(sessionId, path, job.text, force ? null : job.base);
       setConflict(false);
-      setMeta((m) => (m ? { ...m, text: m.kind === 'html' ? m.text : job.text, size: after.size, mtime: after.mtime } : m));
+      setMeta((m) => (m ? { ...m, text: m.kind === 'html' ? m.text : job.text, size: after.size, mtime: after.mtime, tag: after.tag } : m));
+      remember(sessionId, { draft: null });
       if (kindRef.current === 'html') setSource(job.text);
       setStatus('saved');
       onSaved?.();
@@ -620,6 +661,10 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
       setStatus('error');
       return false;
     }
+    };
+    const p = run().finally(() => { inflight.current = null; });
+    inflight.current = p;
+    return p;
   }, [sessionId, path, onSaved]);
 
   // Typing only fills the buffer. Writing it is a decision, taken with the Save
@@ -628,9 +673,13 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   const onEdit = useCallback((next: string) => {
     setDraft(next);
     if (!canEdit || !meta) return;
-    pending.current = { text: next, mtime: meta.mtime };
+    const base = meta.tag ?? null;
+    pending.current = { text: next, base };
+    // Held outside the component so switching this tile to another session — or
+    // reloading the app — doesn't take the buffer with it.
+    remember(sessionId, { draft: { path, text: next, base } });
     setStatus((st) => (st === 'error' ? st : 'dirty'));   // keep a failure visible
-  }, [canEdit, meta]);
+  }, [canEdit, meta, sessionId, path]);
 
   // Switching files abandons an unsaved buffer, so the pane asks before it lets
   // that happen (see leaveView).
@@ -642,12 +691,34 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
     return () => clearTimeout(t);
   }, [status]);
 
+  // JSON arrives from agents as one enormous line more often than not, which is
+  // unreadable either way: wrap turns it into a paragraph, Format gives it
+  // structure. Both are offered; neither writes anything on its own.
+  const isJson = /\.json$/i.test(meta?.name || '');
+  // Kept apart from saveErr on purpose: "this isn't valid JSON" is a complaint
+  // about a button press, not an unsaved buffer, and must not make the file look
+  // dirty or stand in the way of closing it.
+  const [fmtErr, setFmtErr] = useState<string | null>(null);
+  const format = useCallback(() => {
+    const src = draft ?? saved;
+    try {
+      const next = `${JSON.stringify(JSON.parse(src), null, 2)}\n`;
+      if (next !== src) onEdit(next);
+      setFmtErr(null);
+    } catch (e: any) {
+      // Say where it broke — "Expected double-quoted property name at position
+      // 15" is the useful half of this feature when a file is half-written.
+      setFmtErr(`not valid JSON — ${String(e?.message || e).replace(/^JSON\.parse: /, '')}`);
+    }
+  }, [draft, saved, onEdit]);
+
   const edit = useMemo<SaveState>(() => ({
     can: canEdit,
     save: () => flush(),
     saveNow: (force = false) => flush(force),
     discard: () => {
       pending.current = null;
+      remember(sessionId, { draft: null });
       setDraft(null); setSaveErr(null); setStatus('clean');
     },
     // Only worth saying when editing was plausible and isn't: nobody expects to
@@ -658,6 +729,7 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
     conflict,
     reload: () => {
       pending.current = null;
+      remember(sessionId, { draft: null });
       setDraft(null); setSaveErr(null); setConflict(false); setStatus('clean');
       setTraceHead(null); setTraceQuery('');
       setMeta(null);
@@ -667,7 +739,12 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
       }
     },
     overwrite: () => flush(true),
-  }), [canEdit, editKind, meta?.truncated, status, saveErr, conflict, flush, sessionId, path]);
+    wrap,
+    setWrap: (on: boolean) => { setWrapPref(on); writeWrap(on); },
+    format: isJson && canEdit ? format : undefined,
+    formatError: fmtErr,
+  }), [canEdit, editKind, meta?.truncated, status, saveErr, conflict, flush, sessionId, path,
+       wrap, isJson, format, fmtErr]);
 
   const traceInfo = useMemo<TraceInfo | undefined>(() => (meta?.kind === 'trace' && !raw ? {
     harnessLabel: traceHead?.harnessLabel,
@@ -682,7 +759,12 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   const traceSrc = useCallback<TraceSource>(
     (offset, limit) => api.getFileTracePage(sessionId, path, offset, limit), [sessionId, path]);
 
-  useEffect(() => { onInfo({ meta, extra, edit, trace: traceInfo }); }, [meta, extra, edit, traceInfo, onInfo]);
+  // Rendered markdown and a rendered trace do their own wrapping; the toggle is
+  // for the surfaces that actually scroll sideways.
+  const showWrap = !!meta && (meta.kind === 'text'
+    || ((meta.kind === 'markdown' || meta.kind === 'html' || meta.kind === 'trace') && raw));
+  useEffect(() => { onInfo({ meta, extra, edit, trace: traceInfo, showWrap }); },
+    [meta, extra, edit, traceInfo, showWrap, onInfo]);
 
   if (err) return <div className="fv-empty">Could not open this file.<div className="fv-sub">{err}</div></div>;
   if (!meta) return <div className="fv-empty">Loading…</div>;
@@ -691,6 +773,7 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   const code = (text: string) => (
     <CodeView
       text={text} name={meta.name} theme={theme}
+      wrap={wrap}
       editable={canEdit}
       onChange={onEdit}
       onSave={() => flush()}   // ⌘S still works; it just beats the timer
@@ -791,13 +874,15 @@ export default function FilesPane({
   onFocus?: () => void;
   onClose: () => void;
 }) {
-  const [root, setRoot] = useState('');
+  // Where this pane was when it last went off screen. Read once, at mount.
+  const kept = useMemo(() => recall(session.id), [session.id]);
+  const [root, setRoot] = useState(kept.root);
   const [rootLabel, setRootLabel] = useState('workspace');
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const [sort, setSort] = useState<Sort>(DEFAULT_SORT);
-  const [viewing, setViewing] = useState<string | null>(null);
+  const [sort, setSort] = useState<Sort>(kept.sort ?? DEFAULT_SORT);
+  const [viewing, setViewing] = useState<string | null>(kept.viewing);
   const [info, setInfo] = useState<ViewInfo>({ meta: null, extra: [] });
   const [raw, setRaw] = useState(false);          // markdown/html: show the source
   const [scripts, setScripts] = useState(false);  // html: run the page's own JS
@@ -809,12 +894,19 @@ export default function FilesPane({
   const [moving, setMoving] = useState<Moving | null>(null);
   // Where new folders, new files and uploads land: the folder you last clicked,
   // falling back to the one the breadcrumb names.
-  const [target, setTarget] = useState<string | null>(null);
+  const [target, setTarget] = useState<string | null>(kept.target);
   const [acting, setActing] = useState(false);
   const [actErr, setActErr] = useState<string | null>(null);
   const paneRef = useRef<HTMLDivElement | null>(null);
 
   const dir = useDir(session.id, root, reloadKey);
+
+  // Coming back to a pane should put you where you left it, not at the top of
+  // the workspace — the folder you were in, the file you were reading, and the
+  // way you had it sorted.
+  useEffect(() => {
+    remember(session.id, { root, viewing, target, sort });
+  }, [session.id, root, viewing, target, sort]);
 
   useEffect(() => { api.listFiles(session.id, '').then((r) => setRootLabel(r.root)).catch(() => {}); }, [session.id]);
   // Entering a preview focuses the pane, so Esc walks back out without a
@@ -1051,6 +1143,25 @@ export default function FilesPane({
                 )}
               </span>
             ) : null}
+            {edit?.formatError && <span className="fi-err" title={edit.formatError}>{edit.formatError}</span>}
+            {edit?.can && edit.format && (
+              <button
+                className="mini-btn" onClick={edit.format}
+                title="Re-indent this JSON in the buffer — it still needs saving"
+              >
+                Format
+              </button>
+            )}
+            {info.showWrap && edit && (
+              <button
+                className={`mini-btn${edit.wrap ? ' on' : ''}`}
+                onClick={() => edit.setWrap(!edit.wrap)}
+                title={edit.wrap ? 'Long lines are wrapped — click to let them run' : 'Wrap long lines'}
+                aria-pressed={edit.wrap}
+              >
+                Wrap
+              </button>
+            )}
             {edit && !edit.can && edit.why && (
               <span className="fi-stat fi-extra" title={edit.why}>read-only</span>
             )}
