@@ -7,6 +7,9 @@
 //
 // Every token is unique (`LLL.CC`), so a token appearing twice in the grid is a
 // real duplicate and not two identical filler lines.
+import fs from 'node:fs';
+import path from 'node:path';
+
 const COLS = () => process.stdout.columns || 80;
 const ROWS = () => process.stdout.rows || 24;
 
@@ -23,7 +26,7 @@ const TRANSCRIPT = Array.from({ length: 60 }, (_, i) =>
 const FIXED = Number(process.env.FIXED_LINES || 0);
 const HISTORY = Number(process.env.HISTORY_LINES || 0);
 
-function paint() {
+function paint(limit = null) {
   let out = '\x1b[?25l\x1b[H';
   for (let r = 0; r < ROWS(); r++) out += '\x1b[2K\x1b[1B';
   out += '\x1b[H';
@@ -31,7 +34,9 @@ function paint() {
   // like a TUI showing the most recent output above its input box.
   const perLine = Math.max(1, Math.ceil(TRANSCRIPT[0].length / COLS()));
   const fit = Math.max(1, Math.floor((ROWS() - 2) / perLine));
-  out += TRANSCRIPT.slice(-(FIXED || fit)).join('\r\n');
+  out += TRANSCRIPT.slice(-(limit ?? (FIXED || fit)))
+    .map((line, index) => `\x1b[38;5;${31 + (index % 6)}m${line}\x1b[0m`)
+    .join('\r\n');
   out += `\r\n[fixture ${COLS()}x${ROWS()}]\x1b[?25h`;
   process.stdout.write(out);
 }
@@ -42,5 +47,16 @@ if (HISTORY > 0) {
   process.stdout.write(Array.from({ length: HISTORY }, (_, i) =>
     `history-${String(i + 1).padStart(4, '0')}`).join('\r\n') + '\r\n');
 }
-paint();
+const resumeDelay = Number(process.env.DELAY_RESUME_MS || 0);
+const launchMarker = path.join(process.cwd(), '.repaint-fixture-launched');
+if (resumeDelay > 0 && fs.existsSync(launchMarker)) {
+  // Claude can pause after the first part of its resumed screen. A startup
+  // capture must span that gap; otherwise the remainder is mistaken for new
+  // terminal history and duplicates the persisted transcript.
+  paint(1);
+  setTimeout(paint, resumeDelay);
+} else {
+  if (resumeDelay > 0) fs.writeFileSync(launchMarker, '1');
+  paint();
+}
 setInterval(() => {}, 1 << 30);

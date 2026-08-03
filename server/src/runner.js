@@ -79,6 +79,12 @@ const RESIZE_SETTLE_MS = Number(process.env.AM_RESIZE_SETTLE_MS || 120);
 // the raw redraw would turn every overflow row into duplicate history.
 const RESIZE_CAPTURE_IDLE_MS = Number(process.env.AM_RESIZE_CAPTURE_IDLE_MS || 80);
 const RESIZE_CAPTURE_MAX_MS = Number(process.env.AM_RESIZE_CAPTURE_MAX_MS || 900);
+// A resumed agent paints through the same primary-screen protocol as a resize,
+// but may pause for seconds between its welcome frame and replayed transcript.
+// Keep that transaction distinct from the deliberately short resize debounce:
+// committing its first chunk makes every later chunk look like new history.
+const STARTUP_CAPTURE_IDLE_MS = Number(process.env.AM_STARTUP_CAPTURE_IDLE_MS || 5000);
+const STARTUP_CAPTURE_MAX_MS = Number(process.env.AM_STARTUP_CAPTURE_MAX_MS || 20000);
 // Unlike the PTY process, /data survives a Space rebuild. Checkpoint canonical
 // scrollback there so deploys and sleeps do not turn a resumed agent into a
 // terminal with only its freshly repainted viewport.
@@ -419,7 +425,7 @@ function finishCapturedGrid(host, txn) {
 
 function armCapturedGrid(host, txn) {
   if (txn.idleTimer) clearTimeout(txn.idleTimer);
-  txn.idleTimer = setTimeout(() => finishCapturedGrid(host, txn), RESIZE_CAPTURE_IDLE_MS);
+  txn.idleTimer = setTimeout(() => finishCapturedGrid(host, txn), txn.idleMs);
   if (txn.idleTimer.unref) txn.idleTimer.unref();
 }
 
@@ -465,12 +471,14 @@ function startCapturedGrid(host, cols, rows, seed = null, resizePty = true) {
     archive: archive || '',
     fallbackHistory: fallbackHistory || '',
     sawData: false,
+    idleMs: seed ? STARTUP_CAPTURE_IDLE_MS : RESIZE_CAPTURE_IDLE_MS,
+    maxMs: seed ? STARTUP_CAPTURE_MAX_MS : RESIZE_CAPTURE_MAX_MS,
     idleTimer: null,
     maxTimer: null,
   };
   host.resizeCapture = txn;
   if (resizePty) { try { host.pty.resize(cols, rows); } catch {} }
-  txn.maxTimer = setTimeout(() => finishCapturedGrid(host, txn), RESIZE_CAPTURE_MAX_MS);
+  txn.maxTimer = setTimeout(() => finishCapturedGrid(host, txn), txn.maxMs);
   if (txn.maxTimer.unref) txn.maxTimer.unref();
   return true;
 }

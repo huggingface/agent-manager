@@ -48,7 +48,9 @@ const srv = spawn('node', ['src/index.js'], {
     DATA_DIR,
     AM_BASHRC: '/nonexistent',
     AM_HISTORY_SAVE_MS: '50',
-    AM_TEST_REPAINT_CMD: `env FIXED_LINES=30 HISTORY_LINES=2105 ${JSON.stringify(process.execPath)} ${JSON.stringify(FIXTURE)}`,
+    AM_STARTUP_CAPTURE_IDLE_MS: '300',
+    AM_STARTUP_CAPTURE_MAX_MS: '3000',
+    AM_TEST_REPAINT_CMD: `env FIXED_LINES=30 HISTORY_LINES=2105 DELAY_RESUME_MS=180 ${JSON.stringify(process.execPath)} ${JSON.stringify(FIXTURE)}`,
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -102,6 +104,33 @@ function view(id, cols, rows, mirror = false) {
         const top = buf.viewportY;
         term.scrollToBottom();
         return bottom > 0 && top < bottom && buf.viewportY === bottom;
+      },
+      bufferState: async () => {
+        if (!term) return null;
+        await new Promise((done) => term.write('', done));
+        const buf = term.buffer.active;
+        const initialViewport = buf.viewportY;
+        let coloredHistoryCells = 0;
+        for (let y = 0; y < buf.baseY; y++) {
+          const line = buf.getLine(y);
+          if (!line) continue;
+          for (let x = 0; x < line.length; x++) {
+            const cell = line.getCell(x);
+            if (cell?.getChars() && (!cell.isFgDefault() || !cell.isBgDefault())) {
+              coloredHistoryCells++;
+            }
+          }
+        }
+        term.scrollToTop();
+        const top = buf.viewportY;
+        term.scrollToBottom();
+        return {
+          historyRows: buf.baseY,
+          initialViewport,
+          atBottom: initialViewport === buf.baseY,
+          canReachBothEnds: buf.baseY > 0 && top === 0 && buf.viewportY === buf.baseY,
+          coloredHistoryCells,
+        };
       },
     };
     ws.on('message', (data) => {
@@ -315,6 +344,10 @@ try {
     if (Headless) {
       check('fixture starts with deep history', initialBrowserText.includes('history-0001'));
       check('browser viewport can scroll through that history', await v.scrollsBack());
+      const state = await v.bufferState();
+      check('fixture starts at the live bottom', state?.atBottom, JSON.stringify(state));
+      check('fixture starts with styled history', state?.coloredHistoryCells > 0,
+        JSON.stringify(state));
     }
 
     for (const [cols, rows] of [[120, 32], [90, 24], [120, 32], [150, 40]]) {
@@ -335,6 +368,13 @@ try {
           `${initialBrowserTokens} before, ${uniqueTokens(stepBrowserText)} after`);
         check(`browser deep history survives at ${cols}x${rows}`,
           stepBrowserText.includes('history-0001'));
+        const state = await v.bufferState();
+        check(`browser reaches both history ends at ${cols}x${rows}`,
+          state?.canReachBothEnds, JSON.stringify(state));
+        check(`browser remains at the live bottom at ${cols}x${rows}`,
+          state?.atBottom, JSON.stringify(state));
+        check(`styled history survives at ${cols}x${rows}`,
+          state?.coloredHistoryCells > 0, JSON.stringify(state));
       }
     }
 
@@ -363,6 +403,13 @@ try {
     check('reattach retains complete and deep history', restored
       && (!Headless || (uniqueTokens(restoredText) === initialBrowserTokens
         && restoredText.includes('history-0001'))));
+    if (Headless) {
+      const state = await reattached.bufferState();
+      check('reattach reaches both history ends and starts at bottom',
+        state?.canReachBothEnds && state?.atBottom, JSON.stringify(state));
+      check('reattach retains styled history', state?.coloredHistoryCells > 0,
+        JSON.stringify(state));
+    }
     reattached.close();
     await stop(id);
 
@@ -373,15 +420,68 @@ try {
     check('terminal history is checkpointed durably', await waitFor(() => fs.existsSync(checkpoint)));
     const restarted = await view(id, 150, 40, true);
     const resumed = await waitFor(async () => (await gridText(id)).includes('[fixture 150x40]'));
-    await sleep(250);
+    const startupCommitted = await waitFor(() => restarted.frames.some((frame) =>
+      frame.t === 'grid' && frame.reset));
+    await sleep(350);
     const restartedText = Headless ? await restarted.screenText() : '';
     const restartDuplicates = Headless ? duplicateTokens(restartedText) : 0;
     check('host restart restores deep scrollback', resumed
       && (!Headless || restartedText.includes('history-0001')));
-    check('host restart does not duplicate repaint content', !Headless
+    check('delayed startup repaint commits as one transaction', startupCommitted);
+    check('host restart does not duplicate delayed repaint content', !Headless
       || restartDuplicates === beforeBrowser,
     Headless ? `${restartDuplicates} duplicate tokens` : '');
-    if (Headless) check('restored viewport remains scrollable', await restarted.scrollsBack());
+    if (Headless) {
+      check('host restart retains exact transcript cardinality',
+        uniqueTokens(restartedText) === initialBrowserTokens,
+        `${initialBrowserTokens} before, ${uniqueTokens(restartedText)} after`);
+      const state = await restarted.bufferState();
+      check('restored viewport reaches both ends and starts at bottom',
+        state?.canReachBothEnds && state?.atBottom, JSON.stringify(state));
+      check('host restart retains styled history', state?.coloredHistoryCells > 0,
+        JSON.stringify(state));
+    }
+
+    // Exercise the actual failure combination: after a delayed restart, a
+    // second viewer takes the geometry lease, zooms narrow, then zooms wide.
+    // Every transition must preserve the same transcript and scroll model.
+    const takeover = await view(id, 110, 28, true);
+    await sleep(150);
+    takeover.claim();
+    const claimed = await waitFor(() => takeover.lastFrame('grid')?.controller === true
+      && takeover.lastFrame('grid')?.cols === 110 && takeover.lastFrame('grid')?.rows === 28);
+    check('post-restart watcher claims the narrow zoom geometry', claimed,
+      JSON.stringify(takeover.lastFrame('grid')));
+    await sleep(150);
+    if (Headless) {
+      const narrowText = await takeover.screenText();
+      const state = await takeover.bufferState();
+      check('post-restart narrow zoom keeps one complete transcript',
+        duplicateTokens(narrowText) === beforeBrowser
+        && uniqueTokens(narrowText) === initialBrowserTokens,
+        `${duplicateTokens(narrowText)} duplicates, ${uniqueTokens(narrowText)} tokens`);
+      check('post-restart narrow zoom keeps scroll and styling',
+        state?.canReachBothEnds && state?.atBottom && state?.coloredHistoryCells > 0,
+        JSON.stringify(state));
+    }
+    takeover.resize(150, 40);
+    const widened = await waitFor(() => takeover.lastFrame('grid')?.cols === 150
+      && takeover.lastFrame('grid')?.rows === 40);
+    check('post-restart controller zooms wide again', widened,
+      JSON.stringify(takeover.lastFrame('grid')));
+    await sleep(150);
+    if (Headless) {
+      const wideText = await takeover.screenText();
+      const state = await takeover.bufferState();
+      check('post-restart wide zoom keeps one complete transcript',
+        duplicateTokens(wideText) === beforeBrowser
+        && uniqueTokens(wideText) === initialBrowserTokens,
+        `${duplicateTokens(wideText)} duplicates, ${uniqueTokens(wideText)} tokens`);
+      check('post-restart wide zoom keeps scroll and styling',
+        state?.canReachBothEnds && state?.atBottom && state?.coloredHistoryCells > 0,
+        JSON.stringify(state));
+    }
+    takeover.close();
     restarted.close();
     await stop(id);
   }

@@ -5,7 +5,7 @@ const fileFor = (directory, id) => path.join(
   directory, `${String(id).replace(/[^a-zA-Z0-9._-]/g, '_')}.json`,
 );
 
-export const TERMINAL_HISTORY_VERSION = 7;
+export const TERMINAL_HISTORY_VERSION = 8;
 
 const validAnsi = (ansi, text) => typeof ansi === 'string'
   && ansi.replace(/\x1b\[[0-9;]*m/g, '') === text;
@@ -15,7 +15,7 @@ export function loadTerminalHistory(directory, id) {
   try {
     const body = fs.readFileSync(fileFor(directory, id), 'utf8');
     const saved = JSON.parse(body);
-    if (![1, 2, 3, 4, 5, 6, TERMINAL_HISTORY_VERSION].includes(saved?.version)
+    if (![1, 2, 3, 4, 5, 6, 7, TERMINAL_HISTORY_VERSION].includes(saved?.version)
         || !Number.isFinite(saved.cols) || !Array.isArray(saved.lines)) return null;
     const lines = saved.lines.flatMap((line) => {
       if (typeof line === 'string') return [{ text: line }];
