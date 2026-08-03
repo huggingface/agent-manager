@@ -235,6 +235,24 @@ export default function TerminalPane({
     term.loadAddon(new (ClipboardAddon as unknown as new (b: Base64, p: typeof clipboardProvider) => ClipboardAddon)(new Base64(), clipboardProvider));
     term.open(hostRef.current!);
     termRef.current = term;
+    const host = hostRef.current!;
+
+    // xterm deliberately parks its real textarea far off-screen. That is fine
+    // with a hardware keyboard, but a mobile browser (especially a Space inside
+    // a cross-origin iframe) has no visible focus target to pan above the OSK.
+    // Keep the still-transparent 1px input at the bottom of the terminal so the
+    // browser's native focused-element avoidance can cross the iframe boundary.
+    const mobileInput = isMobile
+      ? host.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea')
+      : null;
+    const anchorMobileInput = () => {
+      if (!mobileInput) return;
+      // xterm rewrites left/top whenever its cursor moves. Custom properties
+      // survive those writes and feed the mobile !important rules in CSS.
+      mobileInput.style.setProperty('--am-input-left', `${Math.max(1, Math.round(host.clientWidth / 2))}px`);
+      mobileInput.style.setProperty('--am-input-top', `${Math.max(1, host.clientHeight - 12)}px`);
+    };
+    anchorMobileInput();
 
     // Track the user's semantic scroll state independently of the viewport's
     // pixel scrollTop. During a row-count change xterm can transiently report
@@ -253,7 +271,6 @@ export default function TerminalPane({
       const text = term.hasSelection() ? selectionText(term) : lastSelection;
       if (text) copyText(text);
     };
-    const host = hostRef.current!;
     const onCopy = (e: ClipboardEvent) => {
       if (!term.hasSelection()) return;
       const text = selectionText(term);
@@ -452,6 +469,7 @@ export default function TerminalPane({
     // ResizeObserver fires every frame while a window is dragged or the sidebar
     // animates. Ask once, when it stops.
     const resync = () => {
+      anchorMobileInput();
       if (resyncTimer) clearTimeout(resyncTimer);
       resyncTimer = setTimeout(() => { resyncTimer = null; requestSize(); }, 80);
     };

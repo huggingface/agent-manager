@@ -146,6 +146,15 @@ try {
     Object.defineProperty(window, 'visualViewport', {
       configurable: true, value: viewport,
     });
+    const virtualKeyboard = new EventTarget();
+    virtualKeyboard.boundingRect = new DOMRect(0, 667, 375, 0);
+    Object.defineProperty(navigator, 'virtualKeyboard', {
+      configurable: true, value: virtualKeyboard,
+    });
+    window.__setVirtualKeyboard = (top, height, width = viewport.width) => {
+      virtualKeyboard.boundingRect = new DOMRect(0, top, width, height);
+      virtualKeyboard.dispatchEvent(new Event('geometrychange'));
+    };
     window.__setVisualViewport = (height, offsetTop, width = viewport.width) => {
       viewport.width = width;
       viewport.height = height;
@@ -153,6 +162,18 @@ try {
       viewport.pageTop = offsetTop;
       viewport.dispatchEvent(new Event('resize'));
       viewport.dispatchEvent(new Event('scroll'));
+    };
+    // Safari can fire with the final height but a stale zero offset, then update
+    // offsetTop without another event. Focus stabilization must catch that.
+    window.__setVisualViewportLate = (height, offsetTop, delay = 80) => {
+      viewport.height = height;
+      viewport.offsetTop = 0;
+      viewport.pageTop = 0;
+      viewport.dispatchEvent(new Event('resize'));
+      setTimeout(() => {
+        viewport.offsetTop = offsetTop;
+        viewport.pageTop = offsetTop;
+      }, delay);
     };
   });
   const page = await context.newPage();
@@ -261,9 +282,44 @@ try {
     Math.abs(returnedScroll.top - returnedScroll.max) < 2,
     JSON.stringify(returnedScroll));
 
-  const beforeKeyboardGrid = latestGrid();
+  const fullKeyboardGrid = latestGrid();
   await page.locator('.term-host').click();
-  await page.evaluate(() => window.__setVisualViewport(360, 118));
+  const mobileInputAnchor = await page.evaluate(() => {
+    const host = document.querySelector('.term-host').getBoundingClientRect();
+    const node = document.querySelector('.term-host .xterm-helper-textarea');
+    const input = node.getBoundingClientRect();
+    return {
+      ok: input.width >= 1 && input.height >= 1
+        && input.top >= host.bottom - 5 && input.left > host.left && input.right < host.right,
+      host: { top: host.top, right: host.right, bottom: host.bottom, left: host.left },
+      input: { top: input.top, right: input.right, bottom: input.bottom, left: input.left,
+        width: input.width, height: input.height },
+      style: node.getAttribute('style'),
+    };
+  });
+  check('the focused xterm input is anchored at the mobile terminal bottom',
+    mobileInputAnchor.ok, JSON.stringify(mobileInputAnchor));
+
+  // Embedded Chromium can leave the child visual viewport unchanged but expose
+  // the OSK rectangle. Ensure that independent signal clips the app and PTY.
+  await page.evaluate(() => window.__setVirtualKeyboard(430, 237));
+  const geometryResized = await waitFor(() => latestGrid()?.rows < fullKeyboardGrid.rows);
+  const geometryLayout = await page.locator('.app').evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    const keybar = document.querySelector('.term-keybar')?.getBoundingClientRect();
+    return { top: box.top, bottom: box.bottom, height: box.height, keybarBottom: keybar?.bottom ?? null };
+  });
+  check('keyboard geometry resizes an embedded mobile terminal without viewport changes',
+    geometryResized && Math.abs(geometryLayout.height - 430) < 1
+      && geometryLayout.keybarBottom <= 430,
+    JSON.stringify({ geometryResized, geometryLayout, grid: latestGrid() }));
+  await page.evaluate(() => window.__setVirtualKeyboard(667, 0));
+  const geometryClosed = await waitFor(() => latestGrid()?.rows >= fullKeyboardGrid.rows);
+  check('clearing embedded keyboard geometry restores the terminal', geometryClosed,
+    JSON.stringify(latestGrid()));
+
+  const beforeKeyboardGrid = latestGrid();
+  await page.evaluate(() => window.__setVisualViewportLate(360, 118));
   const keyboardResized = await waitFor(() => {
     const frame = latestGrid();
     return frame?.controller === false && frame?.rows < beforeKeyboardGrid.rows;

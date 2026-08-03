@@ -106,20 +106,66 @@ export default function App() {
   // The CSS variables pin the app to that viewport's exact rectangle.
   useEffect(() => {
     const vv = window.visualViewport;
-    if (!vv) return;
+    type VirtualKeyboardLike = EventTarget & { boundingRect?: DOMRectReadOnly };
+    const keyboard = (navigator as Navigator & { virtualKeyboard?: VirtualKeyboardLike }).virtualKeyboard;
+    if (!vv && !keyboard) return;
     const apply = () => {
+      const keyboardRect = keyboard?.boundingRect;
+      const left = vv?.offsetLeft ?? 0;
+      const top = vv?.offsetTop ?? 0;
+      const width = vv?.width ?? document.documentElement.clientWidth;
+      let height = vv?.height ?? window.innerHeight;
+      // Chromium can expose keyboard geometry even when an embedded document's
+      // visual viewport is unchanged. Never grow the visual viewport from it;
+      // only clip an actually overlapping keyboard.
+      if (keyboardRect && keyboardRect.height > 0 && keyboardRect.top > top) {
+        height = Math.min(height, keyboardRect.top - top);
+      }
       const root = document.documentElement.style;
-      root.setProperty('--vvw', `${Math.round(vv.width)}px`);
-      root.setProperty('--vvh', `${Math.round(vv.height)}px`);
-      root.setProperty('--vv-top', `${Math.round(vv.offsetTop)}px`);
-      root.setProperty('--vv-left', `${Math.round(vv.offsetLeft)}px`);
+      root.setProperty('--vvw', `${Math.round(width)}px`);
+      root.setProperty('--vvh', `${Math.round(height)}px`);
+      root.setProperty('--vv-top', `${Math.round(top)}px`);
+      root.setProperty('--vv-left', `${Math.round(left)}px`);
+    };
+
+    // WebKit may dispatch the keyboard viewport event before offsetTop has its
+    // final value, then correct the property without another event. Re-read at
+    // the end of the event turn and while the focus animation settles.
+    let settleTimer: ReturnType<typeof setTimeout> | null = null;
+    const focusTimers = new Set<ReturnType<typeof setTimeout>>();
+    const onViewportChange = () => {
+      apply();
+      if (settleTimer) clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => { settleTimer = null; apply(); }, 80);
+    };
+    const stabilizeFocus = () => {
+      for (const timer of focusTimers) clearTimeout(timer);
+      focusTimers.clear();
+      for (const delay of [0, 50, 150, 300, 500, 800]) {
+        const timer = setTimeout(() => { focusTimers.delete(timer); apply(); }, delay);
+        focusTimers.add(timer);
+      }
     };
     apply();
-    vv.addEventListener('resize', apply);
-    vv.addEventListener('scroll', apply);
+    vv?.addEventListener('resize', onViewportChange);
+    vv?.addEventListener('scroll', onViewportChange);
+    vv?.addEventListener('scrollend', onViewportChange);
+    keyboard?.addEventListener('geometrychange', onViewportChange);
+    window.addEventListener('resize', onViewportChange);
+    window.addEventListener('orientationchange', stabilizeFocus);
+    document.addEventListener('focusin', stabilizeFocus);
+    document.addEventListener('focusout', stabilizeFocus);
     return () => {
-      vv.removeEventListener('resize', apply);
-      vv.removeEventListener('scroll', apply);
+      if (settleTimer) clearTimeout(settleTimer);
+      for (const timer of focusTimers) clearTimeout(timer);
+      vv?.removeEventListener('resize', onViewportChange);
+      vv?.removeEventListener('scroll', onViewportChange);
+      vv?.removeEventListener('scrollend', onViewportChange);
+      keyboard?.removeEventListener('geometrychange', onViewportChange);
+      window.removeEventListener('resize', onViewportChange);
+      window.removeEventListener('orientationchange', stabilizeFocus);
+      document.removeEventListener('focusin', stabilizeFocus);
+      document.removeEventListener('focusout', stabilizeFocus);
       document.documentElement.style.removeProperty('--vvw');
       document.documentElement.style.removeProperty('--vvh');
       document.documentElement.style.removeProperty('--vv-top');

@@ -1045,6 +1045,15 @@ a.btn-ghost { text-decoration: none; }
     overflow: hidden;
   }
   .term-host { touch-action: none; overscroll-behavior: contain; }
+  /* Keep xterm's transparent real input at the visible prompt edge. xterm
+     normally parks/moves it for desktop IME behavior; on phones this element
+     is also the browser's only clue about what must remain above the OSK. */
+  .term-host .xterm-helper-textarea {
+    left: var(--am-input-left, 50%) !important;
+    top: var(--am-input-top, calc(100% - 2px)) !important;
+    width: 1px !important;
+    height: 1px !important;
+  }
   .app.m-home .main { display: none; }
   .app.m-home .sidebar { width: 100%; border-right: none; }
   .app.m-stage .sidebar { display: none; }
