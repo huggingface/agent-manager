@@ -297,8 +297,48 @@ export function repaintArchiveView(archive, visible, fallbackHistory = '') {
   if (!visible) return { archive, history: logicalHistory(archive) };
   const leading = visible.match(/^(?:[ \t]*\n)*/)?.[0].length || 0;
   const candidate = visible.slice(leading);
-  const match = candidate ? longestPrefixOccurrence(candidate, archive) : { length: 0, end: -1 };
-  const minimum = Math.min(12, candidate.trim().length, archive.trim().length);
+  let match = candidate ? longestPrefixOccurrence(candidate, archive) : { length: 0, end: -1 };
+
+  // A few shared characters are not a safe repaint boundary in a substantial
+  // screen. Claude's randomized status lines, for example, all begin with
+  // "Worked for ". Anchoring a fresh screen there can retain the old turn that
+  // precedes a later status line, then append that same turn again. Require a
+  // meaningful overlap for long screens, while still accepting complete short
+  // prompts in small panes.
+  const archiveContentLength = archive.trim().length;
+  const confidence = (tail) => Math.min(
+    64,
+    archiveContentLength,
+    Math.max(12, Math.floor(tail.trim().length / 2)),
+  );
+  let minimum = confidence(candidate);
+
+  // A repaint may start with one volatile row before its stable transcript.
+  // If the first row offers only a weak match, advance by logical lines until
+  // the first substantial overlap is found. The visible grid is bounded to 500
+  // rows, and the cap keeps a maliciously fragmented screen from repeatedly
+  // scanning a large archive.
+  if (match.length < minimum) {
+    let offset = 0;
+    for (let attempts = 0; attempts < 32;) {
+      const newline = candidate.indexOf('\n', offset);
+      if (newline < 0) break;
+      offset = newline + 1;
+      const tail = candidate.slice(offset);
+      if (!tail.trim()) break;
+      const nextBreak = tail.indexOf('\n');
+      const firstLine = tail.slice(0, nextBreak < 0 ? undefined : nextBreak);
+      if (firstLine.trim().length < 12) continue;
+      attempts++;
+      const next = longestPrefixOccurrence(tail, archive);
+      const nextMinimum = confidence(tail);
+      if (next.length >= nextMinimum) {
+        match = next;
+        minimum = nextMinimum;
+        break;
+      }
+    }
+  }
   let history = fallbackHistory;
   if (match.length >= minimum && minimum > 0) {
     const archiveOffset = match.end - match.length + 1;

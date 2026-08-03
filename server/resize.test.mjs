@@ -268,6 +268,16 @@ try {
       repaintArchiveView('deep history\nshared transcript\n[old 160x40]\n',
         'shared transcript\n[new 90x24]\n').archive
       === 'deep history\nshared transcript\n[new 90x24]\n');
+    const poem = '❯ write me a poem about silicon\n\n● Silicon\n\n'
+      + 'Second most common thing underfoot, plain as the beach you forget while you walk it —\n'
+      + 'Someone thought to melt it, draw it out into a single perfect column, one lattice unbroken.\n';
+    const volatilePrefix = repaintArchiveView(
+      `older unique turn\n${poem}✻ Worked for 8s\n[old footer]\n`,
+      `✻ Worked for 2s\n${poem}✻ Worked for 8s\n[new footer]\n`,
+    ).archive;
+    check('a volatile leading status cannot anchor after and duplicate the repainted turn',
+      volatilePrefix.split('❯ write me a poem about silicon').length - 1 === 1
+      && volatilePrefix.includes('[new footer]') && !volatilePrefix.includes('[old footer]'));
     check('zooming wide again exposes the archive without growing it',
       repaintArchiveView(narrowView.archive, wide).archive === wide);
   }
@@ -418,8 +428,13 @@ try {
     // either the old frame or its welcome banner.
     const checkpoint = path.join(DATA_DIR, 'state', 'terminal-history', `${id}.json`);
     check('terminal history is checkpointed durably', await waitFor(() => fs.existsSync(checkpoint)));
-    const restarted = await view(id, 150, 40, true);
-    const resumed = await waitFor(async () => (await gridText(id)).includes('[fixture 150x40]'));
+    // A mobile pane opens its socket with xterm's provisional 80x24 geometry,
+    // then reports the measured phone grid as soon as layout settles. Exercise
+    // that change while the resumed TUI is still repainting, not only after the
+    // startup transaction has committed.
+    const restarted = await view(id, 80, 24, true);
+    restarted.resize(40, 28);
+    const resumed = await waitFor(async () => (await gridText(id)).includes('[fixture 40x28]'));
     const startupCommitted = await waitFor(() => restarted.frames.some((frame) =>
       frame.t === 'grid' && frame.reset));
     await sleep(350);
