@@ -509,9 +509,9 @@ export type SaveState = {
   wrap: boolean;
   setWrap: (on: boolean) => void;
   /** Re-indent JSON in the buffer. Absent unless the open file is JSON. */
-  format?: () => void;
-  /** Why the last Format didn't happen. Not a save failure — nothing is dirty. */
-  formatError?: string | null;
+  prettify?: () => void;
+  /** Why the last Prettify didn't happen. Not a save failure — nothing is dirty. */
+  prettifyError?: string | null;
 };
 
 // The viewer for one file. Kinds it can't render fall back to an honest
@@ -692,14 +692,14 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   }, [status]);
 
   // JSON arrives from agents as one enormous line more often than not, which is
-  // unreadable either way: wrap turns it into a paragraph, Format gives it
+  // unreadable either way: wrap turns it into a paragraph, Prettify gives it
   // structure. Both are offered; neither writes anything on its own.
   const isJson = /\.json$/i.test(meta?.name || '');
   // Kept apart from saveErr on purpose: "this isn't valid JSON" is a complaint
   // about a button press, not an unsaved buffer, and must not make the file look
   // dirty or stand in the way of closing it.
   const [fmtErr, setFmtErr] = useState<string | null>(null);
-  const format = useCallback(() => {
+  const prettify = useCallback(() => {
     const src = draft ?? saved;
     try {
       const next = `${JSON.stringify(JSON.parse(src), null, 2)}\n`;
@@ -741,10 +741,10 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
     overwrite: () => flush(true),
     wrap,
     setWrap: (on: boolean) => { setWrapPref(on); writeWrap(on); },
-    format: isJson && canEdit ? format : undefined,
-    formatError: fmtErr,
+    prettify: isJson && canEdit ? prettify : undefined,
+    prettifyError: fmtErr,
   }), [canEdit, editKind, meta?.truncated, status, saveErr, conflict, flush, sessionId, path,
-       wrap, isJson, format, fmtErr]);
+       wrap, isJson, prettify, fmtErr]);
 
   const traceInfo = useMemo<TraceInfo | undefined>(() => (meta?.kind === 'trace' && !raw ? {
     harnessLabel: traceHead?.harnessLabel,
@@ -1143,13 +1143,13 @@ export default function FilesPane({
                 )}
               </span>
             ) : null}
-            {edit?.formatError && <span className="fi-err" title={edit.formatError}>{edit.formatError}</span>}
-            {edit?.can && edit.format && (
+            {edit?.prettifyError && <span className="fi-err" title={edit.prettifyError}>{edit.prettifyError}</span>}
+            {edit?.can && edit.prettify && (
               <button
-                className="mini-btn" onClick={edit.format}
+                className="mini-btn" onClick={edit.prettify}
                 title="Re-indent this JSON in the buffer — it still needs saving"
               >
-                Format
+                Prettify
               </button>
             )}
             {info.showWrap && edit && (
