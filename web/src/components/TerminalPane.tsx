@@ -88,6 +88,54 @@ function selectionText(term: Terminal): string {
 // socket with this leading NUL sentinel, which real pty output never begins with.
 const MODE_CTRL = '\x00\x00AM:';
 
+type TerminalPreview = { version: 1; at: number; cols: number; rows: string[] };
+const PREVIEW_PREFIX = 'am-terminal-preview:';
+const PREVIEW_INDEX = 'am-terminal-preview-index';
+const MAX_PREVIEWS = 12;
+
+function loadTerminalPreview(id: string): TerminalPreview | null {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(`${PREVIEW_PREFIX}${id}`) || 'null');
+    if (parsed?.version !== 1 || !Array.isArray(parsed.rows)
+        || !parsed.rows.some((line: unknown) => typeof line === 'string' && line.trim())) return null;
+    return {
+      version: 1,
+      at: Number(parsed.at) || 0,
+      cols: Math.max(1, Number(parsed.cols) || 80),
+      rows: parsed.rows.filter((line: unknown) => typeof line === 'string').slice(0, 80),
+    };
+  } catch { return null; }
+}
+
+// Keep only a compact rendering of the viewport, never the full 20k-line
+// scrollback. It is a loading preview, not a second terminal state model.
+function saveTerminalPreview(id: string, term: Terminal) {
+  try {
+    const buffer = term.buffer.active;
+    const rowCount = Math.min(term.rows, 80);
+    const colCount = Math.min(term.cols, 240);
+    const rows: string[] = [];
+    for (let y = 0; y < rowCount; y++) {
+      const line = buffer.getLine(buffer.viewportY + y);
+      rows.push((line?.translateToString(false, 0, colCount) || '').replace(/[ \t]+$/, ''));
+    }
+    if (!rows.some((line) => line.trim())) return;
+    const saved: TerminalPreview = { version: 1, at: Date.now(), cols: term.cols, rows };
+    localStorage.setItem(`${PREVIEW_PREFIX}${id}`, JSON.stringify(saved));
+
+    let previous: string[] = [];
+    try { previous = JSON.parse(localStorage.getItem(PREVIEW_INDEX) || '[]'); } catch {}
+    const next = [id, ...previous].filter((value, i, all) =>
+      typeof value === 'string' && all.indexOf(value) === i).slice(0, MAX_PREVIEWS);
+    localStorage.setItem(PREVIEW_INDEX, JSON.stringify(next));
+    for (const stale of previous) {
+      if (typeof stale === 'string' && !next.includes(stale)) {
+        localStorage.removeItem(`${PREVIEW_PREFIX}${stale}`);
+      }
+    }
+  } catch { /* storage may be disabled or full; previews are best-effort */ }
+}
+
 function legacyCopy(text: string): boolean {
   const prev = document.activeElement as HTMLElement | null;
   try {
@@ -150,6 +198,7 @@ export default function TerminalPane({
   const reconnectRef = useRef<() => void>(() => {});
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
+  const [preview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
   const sendKeyRef = useRef<(d: string) => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
@@ -237,6 +286,15 @@ export default function TerminalPane({
     termRef.current = term;
     const host = hostRef.current!;
 
+    let previewTimer: ReturnType<typeof setTimeout> | null = null;
+    const persistPreview = () => {
+      if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
+      saveTerminalPreview(session.id, term);
+    };
+    const schedulePreview = () => {
+      if (!previewTimer) previewTimer = setTimeout(persistPreview, 700);
+    };
+
     // xterm deliberately parks its real textarea far off-screen. That is fine
     // with a hardware keyboard, but a mobile browser (especially a Space inside
     // a cross-origin iframe) has no visible focus target to pan above the OSK.
@@ -260,6 +318,7 @@ export default function TerminalPane({
     let followingBottom = true;
     const scrollSub = term.onScroll(() => {
       followingBottom = term.buffer.active.viewportY >= term.buffer.active.baseY;
+      schedulePreview();
     });
 
     // Track the committed local xterm selection so Cmd/Ctrl+C can copy it
@@ -286,6 +345,10 @@ export default function TerminalPane({
     };
     const claimControl = () => {
       if (controllerRef.current) return;
+      // Activation can precede WebSocket.open when a pane is first mounted.
+      // Do not consume that claim locally: onopen will retry it once it can
+      // actually reach the server.
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
       // Optimistic locally so the input event following this gesture is not
       // dropped. WebSocket ordering guarantees claim reaches the server first.
       controllerRef.current = true;
@@ -366,10 +429,14 @@ export default function TerminalPane({
       controllerRef.current = false;
       setController(false);
       setConn('connecting');
-      setBooting(true);
-      bootLive = true;
+      // A reconnect keeps the already-rendered xterm visible. On a fresh page,
+      // `booting` instead exposes the saved preview until canonical restore has
+      // painted real content.
+      const needsCover = !screenHasContent();
+      setBooting(needsCover);
+      bootLive = needsCover;
       if (bootTimer) clearTimeout(bootTimer);
-      bootTimer = setTimeout(endBoot, 20_000);
+      bootTimer = needsCover ? setTimeout(endBoot, 20_000) : null;
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const url = `${proto}://${location.host}/ws?session=${encodeURIComponent(session.id)}&cols=${term.cols}&rows=${term.rows}`;
       ws = new WebSocket(url);
@@ -413,6 +480,7 @@ export default function TerminalPane({
                     term.scrollToBottom();
                     followingBottom = true;
                   }
+                  schedulePreview();
                 } catch { /* ignore */ }
               };
               // Writes are asynchronous. A queued empty write is a barrier so
@@ -425,7 +493,7 @@ export default function TerminalPane({
           } catch { /* ignore */ }
           return;
         }
-        term.write(d);
+        term.write(d, schedulePreview);
         // Probe shortly after each burst (throttled; write() is async).
         if (bootLive && !bootCheck) {
           bootCheck = setTimeout(() => {
@@ -526,6 +594,7 @@ export default function TerminalPane({
       if (bootTimer) clearTimeout(bootTimer);
       if (bootCheck) clearTimeout(bootCheck);
       if (resyncTimer) clearTimeout(resyncTimer);
+      persistPreview();
       ro.disconnect();
       host.removeEventListener('pointerdown', onPointerDown, true);
       host.removeEventListener('paste', onPaste, true);
@@ -565,16 +634,23 @@ export default function TerminalPane({
     // pane is a watcher, take the geometry lease before reporting its newly
     // fitted size; otherwise only the local glyphs grow and the canonical grid
     // remains too large, clipping the bottom/right of the pane.
-    if (changed) claimRef.current();
+    if (changed && active) claimRef.current();
     t.options.fontSize = Math.round((13 * zoom) / 100);
-    resyncRef.current();
-  }, [zoom]);
+    if (active) resyncRef.current();
+  }, [zoom, active]);
 
   // Move keyboard focus into the terminal whenever this pane becomes the active
   // one (e.g. selected from the sidebar, or newly created).
   useEffect(() => {
     if (!active) return;
-    const t = setTimeout(() => termRef.current?.focus(), 0);
+    // A retained pane may have spent time under display:none. Reclaim and
+    // remeasure only after its grid cell has layout again; hidden panes never
+    // get to resize the canonical PTY.
+    const t = setTimeout(() => {
+      claimRef.current();
+      resyncRef.current();
+      termRef.current?.focus();
+    }, 0);
     return () => clearTimeout(t);
   }, [active]);
 
@@ -684,7 +760,13 @@ export default function TerminalPane({
           <button className="tp-x" onClick={() => { setPasteOpen(false); termRef.current?.focus(); }}>cancel</button>
         </div>
       )}
-      {booting && conn !== 'exited' && (
+      {booting && preview && conn !== 'exited' && (
+        <div className="term-preview mono" aria-label="Restoring terminal">
+          <pre style={{ fontSize: `${Math.round((13 * zoom) / 100)}px` }}>{preview.rows.join('\n')}</pre>
+          <span>restoring last view…</span>
+        </div>
+      )}
+      {booting && !preview && conn !== 'exited' && (
         <div className="term-boot mono">
           {conn === 'connecting' ? 'connecting' : `starting ${cli?.label || session.cli}`}<span className="et-cursor" />
         </div>

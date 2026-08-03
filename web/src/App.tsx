@@ -14,7 +14,7 @@ import Locked from './components/Locked';
 import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
-import { isPassive } from './types';
+import { isPassive, isRemote } from './types';
 import { GridGlyph, ListGlyph } from './components/icons';
 
 // Phone-sized viewport: the app becomes two full-screen views (list ⇄ pane).
@@ -40,6 +40,7 @@ function autoGrid(n: number): GridSpec {
 
 type SettingsPage = 'general' | 'usage' | 'skills';
 const ROOT_PATH = '.';
+const WARM_TERMINAL_LIMIT = 12;
 const normalizePath = (p?: string | null) => (p && p.trim() ? p : ROOT_PATH);
 
 function initialTheme(): 'light' | 'dark' {
@@ -131,12 +132,19 @@ export default function App() {
     // WebKit may dispatch the keyboard viewport event before offsetTop has its
     // final value, then correct the property without another event. Re-read at
     // the end of the event turn and while the focus animation settles.
-    let settleTimer: ReturnType<typeof setTimeout> | null = null;
+    const settleTimers = new Set<ReturnType<typeof setTimeout>>();
     const focusTimers = new Set<ReturnType<typeof setTimeout>>();
     const onViewportChange = () => {
       apply();
-      if (settleTimer) clearTimeout(settleTimer);
-      settleTimer = setTimeout(() => { settleTimer = null; apply(); }, 80);
+      for (const timer of settleTimers) clearTimeout(timer);
+      settleTimers.clear();
+      // One delayed read is still racy: WebKit can update offsetTop immediately
+      // after it fires. Sample the short animation tail without depending on a
+      // second browser event.
+      for (const delay of [50, 150, 300, 500]) {
+        const timer = setTimeout(() => { settleTimers.delete(timer); apply(); }, delay);
+        settleTimers.add(timer);
+      }
     };
     const stabilizeFocus = () => {
       for (const timer of focusTimers) clearTimeout(timer);
@@ -156,7 +164,7 @@ export default function App() {
     document.addEventListener('focusin', stabilizeFocus);
     document.addEventListener('focusout', stabilizeFocus);
     return () => {
-      if (settleTimer) clearTimeout(settleTimer);
+      for (const timer of settleTimers) clearTimeout(timer);
       for (const timer of focusTimers) clearTimeout(timer);
       vv?.removeEventListener('resize', onViewportChange);
       vv?.removeEventListener('scroll', onViewportChange);
@@ -314,6 +322,38 @@ export default function App() {
   const visibleSessions = activeGroup ? pageSessions : activeSingle ? [activeSingle] : [];
   const visibleIds = visibleSessions.map((s) => s.id).join(',');
   const showZoom = visibleSessions.length > 0;
+
+  // Keep a small working set of terminal panes alive across navigation. The
+  // backend session already survives a viewer disconnect; retaining xterm and
+  // its socket as well makes switching back genuinely instant and preserves the
+  // exact local scroll/selection state. This is deliberately bounded: mounting
+  // every session would start stopped agents and turn a large sidebar into many
+  // live WebSockets and 20k-line browser buffers.
+  const visibleTerminalIds = (settingsOpen || (isMobile && !mobileStage) ? [] : visibleSessions)
+    .filter((s) => !isPassive(s.cli) && !isRemote(s.cli))
+    .map((s) => s.id);
+  const visibleTerminalKey = visibleTerminalIds.join(',');
+  const sessionIdsKey = tree.sessions.map((s) => s.id).join(',');
+  const [warmTerminalIds, setWarmTerminalIds] = useState<string[]>([]);
+  useEffect(() => {
+    const valid = new Set(tree.sessions
+      .filter((s) => !isPassive(s.cli) && !isRemote(s.cli))
+      .map((s) => s.id));
+    setWarmTerminalIds((previous) => {
+      const next = [...visibleTerminalIds, ...previous]
+        .filter((id, i, all) => valid.has(id) && all.indexOf(id) === i)
+        .slice(0, Math.max(WARM_TERMINAL_LIMIT, visibleTerminalIds.length));
+      return next.length === previous.length && next.every((id, i) => id === previous[i])
+        ? previous : next;
+    });
+  // Stable string keys avoid running this state update on every tree poll.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleTerminalKey, sessionIdsKey]);
+  // Include newly selected panes on the navigation render itself; the effect
+  // above retains them for later renders and applies the LRU bound.
+  const retainedTerminalIds = [...visibleTerminalIds, ...warmTerminalIds]
+    .filter((id, i, all) => !!sessById[id] && all.indexOf(id) === i)
+    .slice(0, Math.max(WARM_TERMINAL_LIMIT, visibleTerminalIds.length));
 
   // Pane rearrangement (drag a pane header onto another tile).
   const [paneDrag, setPaneDrag] = useState(false);
@@ -533,21 +573,60 @@ export default function App() {
     const slotCount = activeGroup ? g.cols * g.rows : sessions.length;
     const slots = Array.from({ length: slotCount }, (_, i) => sessions[i] ?? null);
     const canDrag = !!activeGroup && groupSessions.length > 1;
+    const slotStyle = (i: number) => ({
+      gridColumn: (i % g.cols) + 1,
+      gridRow: Math.floor(i / g.cols) + 1,
+    });
+    const slotByTerminal = new Map(slots
+      .map((s, i) => [s, i] as const)
+      .filter(([s]) => s && !isPassive(s.cli) && !isRemote(s.cli))
+      .map(([s, i]) => [s!.id, i]));
+    const deckVisible = !settingsOpen && sessions.length > 0 && (!isMobile || mobileStage);
     // A sidebar session hovering a full grid still needs somewhere to land:
     // offer a ghost strip appended below the tiles.
     const ghost = sessionDragActive && !!activeGroup;
     return (
       <div
-        className={`tiles${paneDrag ? ' pane-dragging' : ''}${sessionDragActive && activeGroup ? ' session-dragging' : ''}`}
+        className={`tiles pane-deck${sessions.length ? '' : ' deck-hidden'}${paneDrag ? ' pane-dragging' : ''}${sessionDragActive && activeGroup ? ' session-dragging' : ''}`}
         style={{ gridTemplateColumns: `repeat(${g.cols}, 1fr)`, gridTemplateRows: `repeat(${g.rows}, minmax(0, 1fr))` }}
         onDragOver={activeGroup ? allowDrop : undefined}
         onDragLeave={() => setDropMain(false)}
         onDrop={activeGroup ? onDropMain : undefined}
       >
-        {slots.map((s, i) => (
+        {retainedTerminalIds.map((id) => {
+          const s = sessById[id];
+          if (!s) return null;
+          const slot = slotByTerminal.get(id);
+          const shown = slot !== undefined;
+          return (
+            <div
+              key={`terminal-${id}`}
+              className={`tile tile-terminal${shown ? '' : ' tile-cached'}`}
+              style={shown ? slotStyle(slot) : undefined}
+              {...(shown && activeGroup ? tileDnd(slot, true) : {})}
+            >
+              <TerminalPane
+                session={s}
+                cli={cliMap[s.cli]}
+                theme={theme}
+                zoom={zoom}
+                focused={shown && sessions.length > 1 && s.id === focusedId}
+                active={shown && deckVisible && s.id === focusedId}
+                dragId={shown && canDrag ? `p:${s.id}` : undefined}
+                isMobile={isMobile}
+                onDragActive={setPaneDrag}
+                onFocus={() => setFocusedId(s.id)}
+                onRename={(name) => renameSession(s.id, name)}
+                onClose={() => closePane(s.id)}
+              />
+            </div>
+          );
+        })}
+        {slots.map((s, i) => (s && !isPassive(s.cli) && !isRemote(s.cli) ? null : (
           <div
-            key={s ? s.id : `empty-${i}`}
+            key={s ? `passive-${s.id}` : `empty-${i}`}
             className={`tile${s ? '' : ' tile-empty'}${(paneDrag || sessionDragActive) && overTile === i ? ' tile-over' : ''}`}
+            style={slotStyle(i)}
             {...(activeGroup ? tileDnd(i, !!s) : {})}
           >
             {s && (s.cli === 'files' ? (
@@ -571,7 +650,7 @@ export default function App() {
                 onRename={(name) => renameSession(s.id, name)}
                 onClose={() => closePane(s.id)}
               />
-            ) : s.cli === 'trace' ? (
+            ) : (
               <TracePane
                 session={s}
                 zoom={zoom}
@@ -581,24 +660,9 @@ export default function App() {
                 onFocus={() => setFocusedId(s.id)}
                 onClose={() => closePane(s.id)}
               />
-            ) : (
-              <TerminalPane
-                session={s}
-                cli={cliMap[s.cli]}
-                theme={theme}
-                zoom={zoom}
-                focused={visibleSessions.length > 1 && s.id === focusedId}
-                active={s.id === focusedId}
-                dragId={canDrag ? `p:${s.id}` : undefined}
-                isMobile={isMobile}
-                onDragActive={setPaneDrag}
-                onFocus={() => setFocusedId(s.id)}
-                onRename={(name) => renameSession(s.id, name)}
-                onClose={() => closePane(s.id)}
-              />
             ))}
           </div>
-        ))}
+        )))}
         {ghost && (
           <div
             className={`tile tile-ghost${overTile === slots.length ? ' tile-over' : ''}`}
@@ -613,8 +677,9 @@ export default function App() {
 
   if (info?.locked) return <Locked spaceId={info.spaceId} reason={info.lockReason} bucket={info.lockBucket} />;
 
-  if (settingsOpen) {
-    return (
+  return (
+    <>
+      {settingsOpen && (
       <SettingsView
         page={settingsPage}
         onPage={setSettingsPage}
@@ -627,11 +692,8 @@ export default function App() {
         demoMode={!!info?.demoMode}
         onToggleDemo={toggleDemo}
       />
-    );
-  }
-
-  return (
-    <div className={`app${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
+      )}
+    <div className={`app${settingsOpen ? ' app-suspended' : ''}${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
       {showWelcome && <Welcome onClose={dismissWelcome} />}
       {toast && <div className="toast mono" role="alert">{toast}</div>}
       {shareId && sessById[shareId] && (
@@ -717,6 +779,14 @@ export default function App() {
           </div>
         )}
         <div className="stage">
+          {renderTiles(
+            isMobile && !mobileStage
+              ? []
+              : activeGroup && groupSessions.length > 0
+              ? pageSessions
+              : activeSingle ? [activeSingle] : [],
+            activeGroup && groupSessions.length > 0 ? grid : { cols: 1, rows: 1 },
+          )}
           {activeRef === 'overview' ? (
             <Overview
               clis={clis}
@@ -733,8 +803,7 @@ export default function App() {
                 openSession(sid, g?.id);
               }}
             />
-          ) : activeGroup ? (
-            groupSessions.length === 0 ? (
+          ) : activeGroup && groupSessions.length === 0 ? (
               <div
                 className={`empty-group${dropMain ? ' drop-over' : ''}`}
                 onDragOver={allowDrop}
@@ -747,17 +816,14 @@ export default function App() {
                   <div className="dropline">drop an agent here to add it to this group</div>
                 </div>
               </div>
-            ) : renderTiles(pageSessions, grid)
-          ) : activeSingle ? (
-            renderTiles([activeSingle], { cols: 1, rows: 1 })
-          ) : (
+          ) : !activeGroup && !activeSingle ? (
             <div className="empty-group">
               <EmptyPrompt
                 path="workspaces"
                 hints={['create an agent or a group from the sidebar', 'drag an agent onto another to group them']}
               />
             </div>
-          )}
+          ) : null}
         </div>
         {activeRef === 'overview' && (
           <div className="zoombar ov-bar">
@@ -794,5 +860,6 @@ export default function App() {
         )}
       </div>
     </div>
+    </>
   );
 }

@@ -65,6 +65,7 @@ for (const child of [backend]) {
 let browser;
 let desktop;
 let id;
+let secondId;
 try {
   const ready = await waitFor(async () => {
     return fetch(`${API}/api/health`).then((r) => r.ok).catch(() => false);
@@ -77,6 +78,12 @@ try {
   })).json();
   id = created.id;
   if (!id) throw new Error(`session creation failed: ${JSON.stringify(created)}`);
+  const second = await (await fetch(`${API}/api/sessions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cli: 'shell', name: 'mobile-terminal-second', path: '.' }),
+  })).json();
+  secondId = second.id;
+  if (!secondId) throw new Error(`second session creation failed: ${JSON.stringify(second)}`);
 
   const desktopFrames = [];
   desktop = new WebSocket(`ws://127.0.0.1:7896/ws?session=${id}&cols=140&rows=45`);
@@ -136,7 +143,19 @@ try {
         }
       }
     }
-    window.WebSocket = RecordedWebSocket;
+    class OfflineWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      readyState = OfflineWebSocket.CONNECTING;
+      binaryType = 'blob';
+      send() {}
+      close() { this.readyState = OfflineWebSocket.CLOSED; }
+    }
+    let offline = false;
+    try { offline = localStorage.getItem('__am_test_offline_sockets') === '1'; } catch {}
+    window.WebSocket = offline ? OfflineWebSocket : RecordedWebSocket;
 
     const viewport = new EventTarget();
     Object.assign(viewport, {
@@ -179,7 +198,7 @@ try {
   const page = await context.newPage();
   await page.goto(WEB, { waitUntil: 'domcontentloaded' });
   await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
-  await page.locator('.term-host .xterm-screen').waitFor({ state: 'visible' });
+  await page.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
 
   const latestGrid = () => [...desktopFrames].reverse().find((frame) =>
     frame.t === 'grid' || frame.t === 'restore');
@@ -200,14 +219,55 @@ try {
     }));
 
   const initialFit = await page.evaluate(() => {
-    const host = document.querySelector('.term-host').getBoundingClientRect();
-    const screen = document.querySelector('.term-host .xterm-screen').getBoundingClientRect();
+    const host = document.querySelector('.tile-terminal:not(.tile-cached) .term-host').getBoundingClientRect();
+    const screen = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-screen').getBoundingClientRect();
     return { host: { width: host.width, height: host.height }, screen: { width: screen.width, height: screen.height } };
   });
   check('the initial mobile terminal fits its panel in both dimensions',
     initialFit.screen.width <= initialFit.host.width + 1
       && initialFit.screen.height <= initialFit.host.height + 1,
     JSON.stringify(initialFit));
+
+  // Switching to another session and back must retain the original xterm and
+  // WebSocket. A mobile Back alone was never sufficient to catch this: it only
+  // hides the whole stage without changing activeRef.
+  const firstSocketUrl = initialSocket.url;
+  await page.getByTitle('Back to list').click();
+  await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-second' }).first().click();
+  await page.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
+  const secondOpened = await waitFor(() => page.evaluate(() => window.__terminalSockets.length === 2));
+  await page.getByTitle('Back to list').click();
+  await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
+  await page.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
+  await sleep(250);
+  const retained = await page.evaluate((url) => {
+    const matching = window.__terminalSockets.filter((socket) => socket.url === url);
+    const cachedTiles = [...document.querySelectorAll('.tile-terminal')];
+    return {
+      matching: matching.length,
+      closed: matching.flatMap((socket) => socket.events).some((event) => event.type === 'close'),
+      terminals: document.querySelectorAll('.tile-terminal .xterm').length,
+      hidden: cachedTiles.filter((tile) => getComputedStyle(tile).display === 'none').length,
+    };
+  }, firstSocketUrl);
+  check('switching sessions reuses the original terminal and socket',
+    secondOpened && retained.matching === 1 && !retained.closed
+      && retained.terminals === 2 && retained.hidden === 1,
+    JSON.stringify({ secondOpened, retained }));
+  const hiddenMessagesBeforeZoom = await page.evaluate((sessionId) => {
+    const socket = window.__terminalSockets.find((item) => item.url.includes(`session=${sessionId}`));
+    return socket?.sent?.length ?? -1;
+  }, secondId);
+  await page.getByTitle('Zoom in').click();
+  await page.getByTitle('Zoom out').click();
+  await sleep(250);
+  const hiddenMessagesAfterZoom = await page.evaluate((sessionId) => {
+    const socket = window.__terminalSockets.find((item) => item.url.includes(`session=${sessionId}`));
+    return socket?.sent?.length ?? -1;
+  }, secondId);
+  check('zooming the active pane does not claim or resize a hidden cached pane',
+    hiddenMessagesBeforeZoom >= 0 && hiddenMessagesAfterZoom === hiddenMessagesBeforeZoom,
+    JSON.stringify({ hiddenMessagesBeforeZoom, hiddenMessagesAfterZoom }));
 
   // If the initial-claim assertion failed, take control through the existing
   // explicit zoom path so scrolling and keyboard assertions remain diagnostic.
@@ -226,8 +286,8 @@ try {
     return frame?.cols > portraitGrid.cols && frame?.rows < portraitGrid.rows;
   });
   const landscapeFit = await page.evaluate(() => {
-    const host = document.querySelector('.term-host').getBoundingClientRect();
-    const screen = document.querySelector('.term-host .xterm-screen').getBoundingClientRect();
+    const host = document.querySelector('.tile-terminal:not(.tile-cached) .term-host').getBoundingClientRect();
+    const screen = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-screen').getBoundingClientRect();
     return { host: { width: host.width, height: host.height }, screen: { width: screen.width, height: screen.height } };
   });
   check('orientation changes refit mobile rows and columns',
@@ -241,41 +301,41 @@ try {
     return frame?.cols === portraitGrid.cols && frame?.rows === portraitGrid.rows;
   });
 
-  await waitFor(() => page.locator('.xterm-viewport').evaluate((node) =>
+  await waitFor(() => page.locator('.tile-terminal:not(.tile-cached) .xterm-viewport').evaluate((node) =>
     node.scrollHeight > node.clientHeight));
-  const returnedToBottom = await waitFor(() => page.locator('.xterm-viewport').evaluate((node) =>
+  const returnedToBottom = await waitFor(() => page.locator('.tile-terminal:not(.tile-cached) .xterm-viewport').evaluate((node) =>
     Math.abs(node.scrollTop - (node.scrollHeight - node.clientHeight)) <= 1));
   check('returning to portrait keeps a live terminal anchored at the bottom', returnedToBottom);
 
-  const beforeScroll = await page.locator('.xterm-viewport').evaluate((node) => ({
+  const beforeScroll = await page.locator('.tile-terminal:not(.tile-cached) .xterm-viewport').evaluate((node) => ({
     top: node.scrollTop, max: node.scrollHeight - node.clientHeight,
     area: node.querySelector('.xterm-scroll-area')?.getBoundingClientRect().height || 0,
   }));
-  const hostBox = await page.locator('.term-host').boundingBox();
+  const hostBox = await page.locator('.tile-terminal:not(.tile-cached) .term-host').boundingBox();
   const x = hostBox.x + hostBox.width / 2;
   const y = hostBox.y + Math.min(120, hostBox.height / 3);
-  await page.locator('.term-host').dispatchEvent('touchstart', {
+  await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchstart', {
     touches: [{ identifier: 1, clientX: x, clientY: y }],
   });
-  await page.locator('.term-host').dispatchEvent('touchmove', {
+  await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchmove', {
     touches: [{ identifier: 1, clientX: x, clientY: y + 96 }],
   });
-  await page.locator('.term-host').dispatchEvent('touchend', { touches: [] });
+  await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchend', { touches: [] });
   await sleep(100);
-  const historyTop = await page.locator('.xterm-viewport').evaluate((node) => node.scrollTop);
+  const historyTop = await page.locator('.tile-terminal:not(.tile-cached) .xterm-viewport').evaluate((node) => node.scrollTop);
   check('a downward touch drag enters local history even with mouse tracking enabled',
     beforeScroll.max > 0 && historyTop < beforeScroll.top,
     JSON.stringify({ beforeScroll, historyTop }));
 
-  await page.locator('.term-host').dispatchEvent('touchstart', {
+  await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchstart', {
     touches: [{ identifier: 2, clientX: x, clientY: y + 96 }],
   });
-  await page.locator('.term-host').dispatchEvent('touchmove', {
+  await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchmove', {
     touches: [{ identifier: 2, clientX: x, clientY: y }],
   });
-  await page.locator('.term-host').dispatchEvent('touchend', { touches: [] });
+  await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchend', { touches: [] });
   await sleep(100);
-  const returnedScroll = await page.locator('.xterm-viewport').evaluate((node) => ({
+  const returnedScroll = await page.locator('.tile-terminal:not(.tile-cached) .xterm-viewport').evaluate((node) => ({
     top: node.scrollTop, max: node.scrollHeight - node.clientHeight,
   }));
   check('the reverse touch drag returns to the live bottom',
@@ -283,10 +343,10 @@ try {
     JSON.stringify(returnedScroll));
 
   const fullKeyboardGrid = latestGrid();
-  await page.locator('.term-host').click();
+  await page.locator('.tile-terminal:not(.tile-cached) .term-host').click();
   const mobileInputAnchor = await page.evaluate(() => {
-    const host = document.querySelector('.term-host').getBoundingClientRect();
-    const node = document.querySelector('.term-host .xterm-helper-textarea');
+    const host = document.querySelector('.tile-terminal:not(.tile-cached) .term-host').getBoundingClientRect();
+    const node = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-helper-textarea');
     const input = node.getBoundingClientRect();
     return {
       ok: input.width >= 1 && input.height >= 1
@@ -306,7 +366,7 @@ try {
   const geometryResized = await waitFor(() => latestGrid()?.rows < fullKeyboardGrid.rows);
   const geometryLayout = await page.locator('.app').evaluate((node) => {
     const box = node.getBoundingClientRect();
-    const keybar = document.querySelector('.term-keybar')?.getBoundingClientRect();
+    const keybar = document.querySelector('.tile-terminal:not(.tile-cached) .term-keybar')?.getBoundingClientRect();
     return { top: box.top, bottom: box.bottom, height: box.height, keybarBottom: keybar?.bottom ?? null };
   });
   check('keyboard geometry resizes an embedded mobile terminal without viewport changes',
@@ -335,8 +395,8 @@ try {
       };
     };
     const app = rect('.app');
-    const host = rect('.term-host');
-    const keybar = rect('.term-keybar');
+    const host = rect('.tile-terminal:not(.tile-cached) .term-host');
+    const keybar = rect('.tile-terminal:not(.tile-cached) .term-keybar');
     return {
       app,
       hostBottom: host?.bottom ?? null,
@@ -367,7 +427,77 @@ try {
     keyboardClosed && Math.abs(restoredLayout.top) < 1 && Math.abs(restoredLayout.height - 667) < 1,
     JSON.stringify({ keyboardClosed, restoredLayout, grid: latestGrid() }));
 
+  // A compact last-frame preview should survive a full page reload and remain
+  // available while the backend/Space is unavailable. This deliberately blocks
+  // terminal sockets after reload, so success cannot come from a fast restore.
+  const previewSaved = await waitFor(() => page.evaluate((sessionId) => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(`am-terminal-preview:${sessionId}`) || 'null');
+      return saved?.rows?.some((line) => String(line).includes('MOBILE-HISTORY-0220'));
+    } catch { return false; }
+  }, id), 5_000);
+  await page.evaluate(() => localStorage.setItem('__am_test_offline_sockets', '1'));
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
+  const previewVisible = await page.locator('.term-preview').filter({ hasText: 'MOBILE-HISTORY-0220' })
+    .isVisible().catch(() => false);
+  check('the last terminal view survives reload while the backend is unavailable',
+    previewSaved && previewVisible, JSON.stringify({ previewSaved, previewVisible }));
+
   await context.close();
+
+  // The pane deck is shared by desktop group layouts too. Put the two existing
+  // sessions in one group and verify explicit grid placement plus persistence
+  // across Overview and Settings (both used to tear terminal panes down).
+  const group = await (await fetch(`${API}/api/groups`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'cache-layout-group' }),
+  })).json();
+  for (const sessionId of [id, secondId]) {
+    await fetch(`${API}/api/move`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ref: `s:${sessionId}`, to: { kind: 'into', groupId: group.id } }),
+    });
+  }
+  const desktopContext = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const desktopPage = await desktopContext.newPage();
+  await desktopPage.goto(WEB, { waitUntil: 'domcontentloaded' });
+  await desktopPage.locator('.row.group-head').filter({ hasText: 'cache-layout-group' }).click();
+  const groupTerms = desktopPage.locator('.tile-terminal:not(.tile-cached) .xterm');
+  await groupTerms.first().waitFor({ state: 'visible' });
+  const groupReady = await waitFor(() => groupTerms.count().then((count) => count === 2));
+  const groupLayout = await desktopPage.locator('.tile-terminal:not(.tile-cached)').evaluateAll((tiles) =>
+    tiles.map((tile) => {
+      const box = tile.getBoundingClientRect();
+      tile.setAttribute('data-cache-probe', 'retained');
+      return { left: box.left, top: box.top, width: box.width, height: box.height };
+    }));
+  check('retained terminals occupy the desktop group grid', groupReady
+    && groupLayout.length === 2 && Math.abs(groupLayout[0].top - groupLayout[1].top) < 1
+    && groupLayout[1].left > groupLayout[0].left + groupLayout[0].width,
+  JSON.stringify(groupLayout));
+
+  await desktopPage.locator('.ov-row').click();
+  const overviewRetained = await desktopPage.locator('.tile-terminal[data-cache-probe="retained"]')
+    .count() === 2;
+  await desktopPage.locator('.row.group-head').filter({ hasText: 'cache-layout-group' }).click();
+  const groupRestored = await waitFor(() => desktopPage
+    .locator('.tile-terminal:not(.tile-cached)[data-cache-probe="retained"]')
+    .count().then((count) => count === 2));
+  check('Overview hides group terminals without recreating them', overviewRetained && groupRestored,
+    JSON.stringify({ overviewRetained, groupRestored }));
+
+  await desktopPage.getByTitle('Settings').click();
+  await desktopPage.locator('.app.settings').waitFor({ state: 'visible' });
+  const settingsRetained = await desktopPage
+    .locator('.app.app-suspended .tile-terminal[data-cache-probe="retained"] .xterm').count() === 2;
+  await desktopPage.locator('.app.settings').getByTitle('Back').click();
+  const settingsRestored = await waitFor(() => desktopPage
+    .locator('.tile-terminal:not(.tile-cached)[data-cache-probe="retained"] .xterm')
+    .count().then((count) => count === 2));
+  check('Settings hides group terminals without recreating them', settingsRetained && settingsRestored,
+    JSON.stringify({ settingsRetained, settingsRestored }));
+  await desktopContext.close();
 } catch (error) {
   check('mobile browser test completes', false, String(error?.stack || error));
   console.log(logs.slice(-3000));
@@ -375,6 +505,7 @@ try {
   try { desktop?.close(); } catch {}
   try { await browser?.close(); } catch {}
   if (id) await fetch(`${API}/api/sessions/${id}/stop`, { method: 'POST' }).catch(() => {});
+  if (secondId) await fetch(`${API}/api/sessions/${secondId}/stop`, { method: 'POST' }).catch(() => {});
   backend.kill('SIGTERM');
   await sleep(400);
   backend.kill('SIGKILL');
