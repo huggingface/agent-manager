@@ -13,6 +13,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
+    "test:ui": "node terminal-ui.test.mjs",
     "test": "node test/repin.test.mjs && node test/opencode-resume.test.mjs && node migration.test.mjs && node resize.test.mjs"
   },
   "engines": {
