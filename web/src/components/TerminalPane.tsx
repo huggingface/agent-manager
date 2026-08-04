@@ -192,6 +192,7 @@ export default function TerminalPane({
   onClose: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const resyncRef = useRef<() => void>(() => {});
   const claimRef = useRef<() => void>(() => {});
@@ -562,29 +563,104 @@ export default function TerminalPane({
     // A phone drag always navigates browser-retained terminal history. Passing
     // it to an agent's mouse mode at the live bottom makes Claude consume the
     // gesture without moving xterm's viewport, leaving no reliable way back
-    // through history on touch-only devices.
+    // through history on touch-only devices. xterm 5.5 registers no touch
+    // listeners of its own (verified against the bundled lib) and .term-host
+    // sets touch-action:none on mobile, so neither xterm nor the browser will
+    // pan: this is the only touch scrolling a phone has, in every pane.
+    //
+    // Convert the drag to whole rows and carry the remainder in `residual`.
+    // Quantising each event to a fixed notch instead silently drops whatever
+    // does not fill one — a 96px drag moved the view 68px — and that shortfall
+    // is what reads as lag, because the text trails the finger by design.
+    // scrollLines moves ydisp, the authority the viewport follows.
+    // The frame, not the inner measurement box: .term-host is what carries
+    // touch-action:none and what the user actually drags, and it stays the
+    // gesture target however the box inside it is nested.
+    const frame = frameRef.current ?? host;
+    const viewport = host.querySelector<HTMLElement>('.xterm-viewport');
     let touchY: number | null = null;
-    const onTouchStart = (e: TouchEvent) => { touchY = e.touches[0].clientY; };
-    const onTouchMove = (e: TouchEvent) => {
-      if (touchY == null) return;
-      const y = e.touches[0].clientY;
-      const dy = y - touchY;
-      const steps = Math.trunc(dy / 24); // ~one wheel notch per 24px of drag
-      if (steps !== 0) {
-        touchY = y;
-        term.scrollLines(steps > 0 ? -Math.abs(steps) : Math.abs(steps));
-      }
-      if (Math.abs(dy) > 4) {
-        e.preventDefault(); // keep the page from rubber-banding
-        e.stopPropagation(); // xterm must not also interpret the same drag
-      }
+    let residual = 0;        // px of gesture not yet worth a whole row
+    let glideFrame = 0;
+    let velocity = 0;        // px/ms, signed like deltaY (positive scrolls down)
+    let lastMoveAt = 0;
+    // The scroll area spans every line in the buffer, so its height over that
+    // line count is the row height under whichever renderer is attached.
+    const scrollByPixels = (px: number) => {
+      const lines = term.buffer.active.length;
+      const cell = viewport && lines ? viewport.scrollHeight / lines : 0;
+      if (!cell) return 0;
+      residual += px;
+      const rows = Math.trunc(residual / cell);
+      if (!rows) return 0;
+      residual -= rows * cell;
+      term.scrollLines(rows);
+      return rows;
     };
-    const onTouchEnd = () => { touchY = null; };
-    const onTouchCancel = () => { touchY = null; };
-    host.addEventListener('touchstart', onTouchStart, { passive: true });
-    host.addEventListener('touchmove', onTouchMove, { passive: false, capture: true });
-    host.addEventListener('touchend', onTouchEnd);
-    host.addEventListener('touchcancel', onTouchCancel);
+    const stopGlide = () => { if (glideFrame) { cancelAnimationFrame(glideFrame); glideFrame = 0; } };
+    const onTouchStart = (e: TouchEvent) => {
+      stopGlide();               // a new touch takes over from any coasting
+      velocity = 0;
+      residual = 0;
+      touchY = e.touches[0].clientY;
+      lastMoveAt = e.timeStamp;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (touchY == null || !e.touches.length) return;
+      const y = e.touches[0].clientY;
+      const deltaY = touchY - y;
+      touchY = y;
+      if (deltaY === 0) return;
+      const dt = e.timeStamp - lastMoveAt;
+      lastMoveAt = e.timeStamp;
+      // Weight the newest sample heavily: what matters is the speed at release,
+      // and a touch stream is noisy. Ignore a stale gap (a paused finger) and
+      // anything faster than a touch stream can legitimately be — a single
+      // coalesced jump over a 2ms gap is not a 48px/ms flick, and dividing by
+      // it would launch the glide clean through the buffer. A hand tops out
+      // around 4px/ms; real events arrive 8-16ms apart.
+      if (dt >= 4 && dt < 100) {
+        const sample = Math.max(-4, Math.min(4, deltaY / dt));
+        velocity = velocity * 0.3 + sample * 0.7;
+      }
+      scrollByPixels(deltaY);
+      if (e.cancelable) e.preventDefault(); // keep the page from rubber-banding
+      // This listener runs in capture before xterm's listener on the same host.
+      // stopPropagation alone would still allow that second handler.
+      e.stopImmediatePropagation();
+    };
+    const onTouchEnd = () => {
+      touchY = null;
+      const v0 = velocity;
+      velocity = 0;
+      // Only a flick coasts. A slow, deliberate drag through history must land
+      // exactly where the finger left it — drifting past the line someone was
+      // reading is worse than having no momentum at all. 0.4px/ms is about
+      // 400px/s: far above a careful drag, far below a real flick.
+      if (!viewport || Math.abs(v0) < 0.4) return;
+      let v = v0;
+      let previous = 0;
+      const glide = (now: number) => {
+        // Clamp the step so a dropped frame does not teleport the viewport.
+        const frame = previous ? Math.min(now - previous, 50) : 16;
+        previous = now;
+        const before = term.buffer.active.viewportY;
+        const rows = scrollByPixels(v * frame);
+        v *= 0.95 ** (frame / 16);      // ~5% per 60Hz frame, frame-rate neutral
+        // Stop at a standstill, or the moment a requested row does not move the
+        // view: that is either end of the buffer, and coasting into it drags.
+        if (Math.abs(v) < 0.02 || (rows !== 0 && term.buffer.active.viewportY === before)) {
+          glideFrame = 0;
+          return;
+        }
+        glideFrame = requestAnimationFrame(glide);
+      };
+      glideFrame = requestAnimationFrame(glide);
+    };
+    const onTouchCancel = () => { touchY = null; velocity = 0; stopGlide(); };
+    frame.addEventListener('touchstart', onTouchStart, { passive: true });
+    frame.addEventListener('touchmove', onTouchMove, { passive: false, capture: true });
+    frame.addEventListener('touchend', onTouchEnd);
+    frame.addEventListener('touchcancel', onTouchCancel);
 
     connect();
 
@@ -599,10 +675,11 @@ export default function TerminalPane({
       host.removeEventListener('pointerdown', onPointerDown, true);
       host.removeEventListener('paste', onPaste, true);
       document.removeEventListener('copy', onCopy, true);
-      host.removeEventListener('touchstart', onTouchStart);
-      host.removeEventListener('touchmove', onTouchMove, true);
-      host.removeEventListener('touchend', onTouchEnd);
-      host.removeEventListener('touchcancel', onTouchCancel);
+      frame.removeEventListener('touchstart', onTouchStart);
+      frame.removeEventListener('touchmove', onTouchMove, true);
+      frame.removeEventListener('touchend', onTouchEnd);
+      frame.removeEventListener('touchcancel', onTouchCancel);
+      stopGlide();
       window.removeEventListener('focus', onReturn);
       document.removeEventListener('visibilitychange', onVisible);
       dataSub.dispose();
@@ -699,7 +776,7 @@ export default function TerminalPane({
           <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
-      <div className="term-host">
+      <div className="term-host" ref={frameRef}>
         <div className="term-fill" ref={hostRef} />
       </div>
       {isMobile && conn === 'connected' && (
