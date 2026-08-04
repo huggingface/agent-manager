@@ -293,7 +293,11 @@ export default function TerminalPane({
       saveTerminalPreview(session.id, term);
     };
     const schedulePreview = () => {
-      if (!previewTimer) previewTimer = setTimeout(persistPreview, 700);
+      // Preview serialization reads every visible buffer row and writes
+      // localStorage synchronously. Debounce until output/scrolling is idle so
+      // it never lands in the middle of a mobile drag.
+      if (previewTimer) clearTimeout(previewTimer);
+      previewTimer = setTimeout(persistPreview, 700);
     };
 
     // xterm deliberately parks its real textarea far off-screen. That is fine

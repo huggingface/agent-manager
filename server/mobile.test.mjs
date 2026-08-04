@@ -311,28 +311,65 @@ try {
     top: node.scrollTop, max: node.scrollHeight - node.clientHeight,
     area: node.querySelector('.xterm-scroll-area')?.getBoundingClientRect().height || 0,
   }));
+  const messagesBeforeScroll = await page.evaluate(() =>
+    window.__terminalSockets.reduce((count, socket) => count + socket.sent.length, 0));
+  await page.evaluate((sessionId) => {
+    const original = Storage.prototype.setItem;
+    window.__previewWritesDuringGesture = 0;
+    Storage.prototype.setItem = function instrumentPreviewWrite(key, value) {
+      if (key === `am-terminal-preview:${sessionId}`) window.__previewWritesDuringGesture++;
+      return original.call(this, key, value);
+    };
+  }, id);
   const hostBox = await page.locator('.tile-terminal:not(.tile-cached) .term-host').boundingBox();
   const x = hostBox.x + hostBox.width / 2;
   const y = hostBox.y + Math.min(120, hostBox.height / 3);
+  const dragDistance = 96;
+  const dragSteps = 16;
   await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchstart', {
     touches: [{ identifier: 1, clientX: x, clientY: y }],
   });
-  await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchmove', {
-    touches: [{ identifier: 1, clientX: x, clientY: y + 96 }],
-  });
+  for (let step = 1; step <= dragSteps; step++) {
+    await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchmove', {
+      touches: [{
+        identifier: 1, clientX: x, clientY: y + (dragDistance * step / dragSteps),
+      }],
+    });
+    // Keep the gesture active beyond the preview debounce. A throttle would
+    // write synchronously during this loop; a true debounce must stay silent.
+    await sleep(60);
+  }
+  const writesBeforeTouchEnd = await page.evaluate(() => window.__previewWritesDuringGesture);
   await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchend', { touches: [] });
-  await sleep(100);
+  await sleep(800);
   const historyTop = await page.locator('.tile-terminal:not(.tile-cached) .xterm-viewport').evaluate((node) => node.scrollTop);
-  check('a downward touch drag enters local history even with mouse tracking enabled',
-    beforeScroll.max > 0 && historyTop < beforeScroll.top,
-    JSON.stringify({ beforeScroll, historyTop }));
+  const writesAfterTouchEnd = await page.evaluate(() => window.__previewWritesDuringGesture);
+  const messagesAfterScroll = await page.evaluate(() =>
+    window.__terminalSockets.reduce((count, socket) => count + socket.sent.length, 0));
+  const scrolledPixels = beforeScroll.top - historyTop;
+  check('small mobile touch moves track the finger through mouse-mode history',
+    beforeScroll.max > 0
+      && scrolledPixels >= dragDistance * 0.8
+      && scrolledPixels <= dragDistance * 1.2,
+    JSON.stringify({ beforeScroll, historyTop, scrolledPixels, dragDistance }));
+  check('terminal preview persistence waits until the touch gesture is idle',
+    writesBeforeTouchEnd === 0 && writesAfterTouchEnd >= 1,
+    JSON.stringify({ writesBeforeTouchEnd, writesAfterTouchEnd }));
+  check('local history scrolling sends no PTY control or resize messages',
+    messagesAfterScroll === messagesBeforeScroll,
+    JSON.stringify({ messagesBeforeScroll, messagesAfterScroll }));
 
   await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchstart', {
-    touches: [{ identifier: 2, clientX: x, clientY: y + 96 }],
+    touches: [{ identifier: 2, clientX: x, clientY: y + dragDistance }],
   });
-  await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchmove', {
-    touches: [{ identifier: 2, clientX: x, clientY: y }],
-  });
+  for (let step = 1; step <= dragSteps; step++) {
+    await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchmove', {
+      touches: [{
+        identifier: 2, clientX: x,
+        clientY: y + dragDistance - (dragDistance * step / dragSteps),
+      }],
+    });
+  }
   await page.locator('.tile-terminal:not(.tile-cached) .term-host').dispatchEvent('touchend', { touches: [] });
   await sleep(100);
   const returnedScroll = await page.locator('.tile-terminal:not(.tile-cached) .xterm-viewport').evaluate((node) => ({
