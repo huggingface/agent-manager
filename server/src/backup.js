@@ -142,6 +142,29 @@ hf upload "\$AM_DATASET" /live . --repo-type dataset --private --delete "*" \\
   --commit-message "Bucket snapshot \$(date -u +%Y-%m-%dT%H:%MZ)"
 `;
 
+/**
+ * The Job id out of `hf jobs run --detach` output, whatever shape it comes in.
+ *
+ * This is deliberately format-agnostic. The image installs huggingface_hub
+ * unpinned, so the CLI here is not the CLI a dev machine has, and a version that
+ * printed the id differently silently left us with `jobId: null` — which killed
+ * overlap protection and made the status row report a stage it had invented.
+ * Accepts `id=<id>`, a bare id on its own line, or one embedded in a job URL.
+ */
+export function parseJobId(out) {
+  const text = String(out || '');
+  const looksLikeId = (s) => /^[a-f0-9]{16,32}$/i.test(s || '');
+  const tagged = text.match(/\bid=([A-Za-z0-9]+)/);
+  if (tagged && looksLikeId(tagged[1])) return tagged[1];
+  const fromUrl = text.match(/\/jobs\/[^\s/]+\/([A-Za-z0-9]+)/);
+  if (fromUrl && looksLikeId(fromUrl[1])) return fromUrl[1];
+  for (const line of text.split('\n').map((l) => l.trim()).reverse()) {
+    const last = line.split(/\s+/).pop();
+    if (looksLikeId(last)) return last;
+  }
+  return null;
+}
+
 // Job arguments, as an array (never a shell string). Exported for the tests:
 // asserting on this is how we know a config value cannot reach a shell.
 export function jobArgs({ source, mirror, dataset }) {
@@ -207,7 +230,10 @@ export async function runBackupNow(cfg) {
   if (mirror) await run(['buckets', 'create', mirror, '--private', '--exist-ok']).catch(() => {});
 
   const out = await run(jobArgs({ source, mirror, dataset }), { timeout: 180_000 });
-  const job = (out.match(/id=(\S+)/) || [])[1] || null;
+  const job = parseJobId(out);
+  // A launch we cannot identify still happened — record it, but say so, because
+  // without an id there is nothing to poll and no overlap to detect.
+  if (!job) console.warn('[backup] launched a Job but could not parse its id from:', out.slice(0, 200));
   saveState({ jobId: job, startedAt: Date.now(), source, mirror, dataset, error: null });
   return { job };
 }
@@ -222,15 +248,24 @@ async function jobStage(jobId) {
   } catch { return null; }
 }
 
-const DONE = new Set(['COMPLETED', 'ERROR', 'FAILED', 'CANCELED']);
+// Stages that mean a run is genuinely in flight. Observed from the Hub:
+// SCHEDULING and RUNNING while live, COMPLETED or ERROR once finished.
+//
+// Deliberately a list of ACTIVE stages rather than terminal ones, so anything
+// unrecognised — a new stage name, or `inspect` failing and returning nothing —
+// counts as NOT running. Enumerating terminal stages had it the wrong way round:
+// an unknown answer read as "running", which is the worse mistake twice over. It
+// showed a run in progress that had long finished, and it would have blocked
+// every future backup behind a job that no longer exists.
+const ACTIVE = new Set(['SCHEDULING', 'RUNNING']);
+export const isActiveStage = (stage) => !!stage && ACTIVE.has(stage);
 
-/** Is the last launched Job still going? Unknown stage counts as finished, so a
- *  Hub hiccup can never wedge backups off forever. */
+/** Is the last launched Job still going? Unknown counts as finished, so a Hub
+ *  hiccup can never wedge backups off forever. */
 async function isRunning() {
   const { jobId } = loadState();
   if (!jobId) return false;
-  const stage = await jobStage(jobId);
-  return !!stage && !DONE.has(stage);
+  return isActiveStage(await jobStage(jobId));
 }
 
 /**
@@ -297,10 +332,10 @@ export async function backupStatus(cfg) {
     defaults,
     hasToken: hasToken(),
     canRunNow: !runNowBlockedBy(),
-    running: !!stage && !DONE.has(stage),
+    running: isActiveStage(stage),
     unavailable: unavailableReason(cfg),
     last: state.startedAt
-      ? { at: state.startedAt, jobId: state.jobId || null, stage: stage || 'RUNNING' }
+      ? { at: state.startedAt, jobId: state.jobId || null, stage: stage || null }
       : null,
     jobName: jobName(),
     jobsUrl: jobsUrl(),

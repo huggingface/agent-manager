@@ -97,7 +97,8 @@ export interface BackupStatus {
   canRunNow: boolean;
   running: boolean;
   unavailable: string | null;
-  last: { at: number; jobId: string | null; stage: string } | null;
+  // stage is null when the Hub did not answer — never guessed.
+  last: { at: number; jobId: string | null; stage: string | null } | null;
   // One static URL lists every run by its `name=` label, so the row never
   // needs a job id to link to them.
   jobName: string;

@@ -437,15 +437,12 @@ export default function SettingsView({
                           <span>Backup jobs</span>
                           <b><a href={bk.jobsUrl} target="_blank" rel="noreferrer">{bk.jobName}</a></b>
                         </div>
+                        {/* A timestamp, not a stage. The job's own state belongs
+                            on the jobs page linked above — reporting it here meant
+                            reporting it wrongly whenever the Hub did not answer. */}
                         <div>
                           <span>Last updated</span>
-                          <b>
-                            {bk.running
-                              ? 'backing up now…'
-                              : bk.last
-                                ? `${new Date(bk.last.at).toLocaleString()}${bk.last.stage ? ` (${bk.last.stage.toLowerCase()})` : ''}`
-                                : 'never'}
-                          </b>
+                          <b>{bk.last ? new Date(bk.last.at).toLocaleString() : 'never'}</b>
                         </div>
                         {bk.error && (
                           <div>

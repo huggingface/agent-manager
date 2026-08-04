@@ -2,8 +2,37 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   EVERY_MS, INTERVALS, intervalMs, validRepoId, jobArgs, JOB_SCRIPT, JOB_FLAVOR,
-  hasToken, unavailableReason, runNowBlockedBy, jobName, jobsUrl,
+  hasToken, unavailableReason, runNowBlockedBy, jobName, jobsUrl, isActiveStage, parseJobId,
 } from '../src/backup.js';
+
+// The image installs huggingface_hub unpinned, so the CLI in the Space is not the
+// one on a dev machine. A version whose launch output differs left jobId null,
+// which killed overlap protection outright — so the parse must not depend on one
+// output shape.
+test('parseJobId survives any of the shapes the CLI prints', () => {
+  const ID = '6a7245596b79c09949c227fc';
+  assert.equal(parseJobId(`id=${ID} url=https://huggingface.co/jobs/lvwerra/${ID}`), ID);
+  assert.equal(parseJobId(`https://huggingface.co/jobs/lvwerra/${ID}`), ID);
+  assert.equal(parseJobId(ID), ID);
+  assert.equal(parseJobId(`Job started\n${ID}\n`), ID);
+  // Nothing id-shaped must never be mistaken for an id.
+  assert.equal(parseJobId(''), null);
+  assert.equal(parseJobId('Hint: pass --name to rename it'), null);
+  assert.equal(parseJobId(undefined), null);
+  assert.equal(parseJobId('id=short'), null);
+});
+
+// An unknown answer must never read as "running": that showed a finished run as
+// in-progress, and would have blocked every later backup behind a job that no
+// longer exists. Unrecognised stages count as finished, on purpose.
+test('only known active stages count as running', () => {
+  assert.equal(isActiveStage('RUNNING'), true);
+  assert.equal(isActiveStage('SCHEDULING'), true);
+  for (const s of ['COMPLETED', 'ERROR', 'FAILED', 'CANCELED', 'CANCELLED', 'DELETED',
+                   'SOMETHING_NEW', '', null, undefined]) {
+    assert.equal(isActiveStage(s), false, `${String(s)} must not count as running`);
+  }
+});
 
 // The jobs link filters the Hub's job list by the label every run carries, so
 // the name used to launch a Job and the name used to find it must not drift.

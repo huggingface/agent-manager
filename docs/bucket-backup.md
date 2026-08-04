@@ -274,7 +274,7 @@ Back up the bucket                              [ off | 1h | 3h | 24h ]
   Backup dataset    lvwerra/am-dev-2-backup     -> the dataset page
   Mirror bucket     lvwerra/am-dev-2-backup     -> the bucket page
   Backup jobs       am-backup-am-dev-2          -> every run of this Space's backup
-  Last updated      4 Aug 19:35 (completed)     -- or "backing up now..."
+  Last updated      4 Aug 19:35                 -- a timestamp, never a stage
 
   [ Back up now ]        <- available whenever there is a token, schedule or not;
                             reads "Backing up..." and is disabled while one runs
@@ -294,6 +294,23 @@ which the Hub keeps as a `name=` label, so
 failed. Strictly better than linking the latest job id: no state to track, and the
 page you land on shows a failure in context. A test pins the launch name and the
 filter to the same value so they cannot drift.
+
+**No stage in the table.** It read `(running)` for runs that had long finished,
+because `stage || 'RUNNING'` invented an answer whenever the Hub did not give one.
+The state a Job is in belongs on the jobs page linked above; the row reports only
+when it last ran. Two fixes behind that:
+
+- **Active stages are enumerated, not terminal ones.** `SCHEDULING`/`RUNNING` mean
+  in flight; anything else — including an unrecognised stage or no answer at all —
+  counts as finished. The old way round meant an unknown answer read as "running",
+  which both lied and would have blocked every later backup behind a job that no
+  longer exists.
+- **The Job id is parsed format-agnostically.** The image installs
+  `huggingface_hub` unpinned, so the CLI in a Space is not the one on a dev
+  machine, and a differing launch output silently left `jobId: null` — which
+  disabled overlap detection and left nothing to poll. `parseJobId` accepts
+  `id=<id>`, a bare id, or one inside a job URL, and logs the raw output when it
+  still cannot find one.
 
 **Links inherit the text colour**, with a dotted underline that goes solid and
 accent on hover — the same restraint as `.trace-hint a`. Default-blue anchors were
