@@ -6,279 +6,299 @@ but `/data` holds the workspaces agents have been working in, their transcripts,
 the session list, and the operator's config. A deleted Space, a detached volume,
 or an `rm -rf` in the wrong workspace takes all of it.
 
-This is a periodic mirror of the bucket into a **private dataset repo**, so that
-losing the Space costs an afternoon instead of everything.
+This is a periodic mirror of the bucket into **private Hub storage**, on an
+interval the operator sets alongside `archive` (Settings → hourly by default once
+enabled). Nothing here deletes from the bucket, ever.
 
-Interval is an operator setting alongside `archive` (Settings → hourly by default
-once enabled). Nothing here deletes from the bucket, ever.
+The bucket is itself a Hub resource, so the copy happens **entirely Hub-side**:
+no walk of the FUSE mount, no download, no re-upload. §3 is the evidence, and it
+is what makes an hourly cadence cheap enough to be boring.
 
 ## 1. Decisions (locked)
 
-1. **A mirrored file tree, not a tarball.** The dataset holds the bucket's files
-   at their own paths. A tarball would be a fresh multi-gigabyte LFS blob every
-   hour, stored forever (§3, §10). A tree dedupes: only changed files transfer,
-   and an hour with no changes produces *no commit at all* (§3).
-2. **One private dataset per Space**, `<namespace>/am-bucket-<space-name>`.
-   Created `--private`, and the backup **refuses to run** if the repo is not
-   private — the same instinct as `visibility.js`, which locks the whole app when
-   the Space or bucket is public.
-3. **Agent credentials are excluded by default.** The bucket contains live OAuth
-   credentials (§4). A backup exists to save *work*, and a restore can re-login.
-   Copying live tokens into a Hub repo multiplies the blast radius of that repo
-   for no gain the operator asked for. Opt-in toggle, worded plainly.
-4. **The walk and the upload run in a child process.** Same hard rule as
-   `share.js` §1: this app has wedged once on synchronous work, and a background
-   task that fires every hour must never be the next cause.
-5. **Off until the operator turns it on.** It writes the contents of their
-   machine to their Hub account; that is a deliberate act, not a default. Once
-   on, the interval defaults to hourly.
-6. **Restore is a documented script, not a button.** Restoring over a live
-   bucket is destructive and situational (§9). v1 gives `scripts/restore-bucket.mjs`
-   and instructions; the app does not offer one-click restore.
+1. **Destination is a private bucket, not a dataset repo.** Not a preference —
+   bucket→repo copy is refused by the Hub today (§3.1). The bucket destination is
+   also the better fit: server-side copy, and no git history to grow forever.
+   The Hub's own docs recommend buckets for rolling backups for exactly that
+   reason.
+2. **The copy is server-side, by Xet hash.** `hf cp hf://buckets/<src>/ hf://buckets/<dst>/`
+   moves hashes, not bytes: 13,482 real files in 20 s (§3.2). The app makes API
+   calls; it does not read `/data`.
+3. **Everything is copied, credentials included.** Operator's call, and the
+   mechanism agrees: server-side copy has no include/exclude, so per-prefix
+   surgery would mean giving up the fast path. A restored Space comes back
+   signed-in.
+4. **The destination must be private, and that is a hard gate.** The mirror
+   contains live OAuth tokens for every agent, the Web Push private key, and
+   `session-secret` (§4). The backup refuses to run against a non-private
+   destination — checked on every run, not just at creation. Same instinct as
+   `visibility.js`, which locks the app when the Space or bucket is public.
+5. **Off until the operator turns it on.** It copies the contents of their
+   machine into another Hub resource; that is a deliberate act. Once on, hourly.
+6. **Never prune the destination.** A file deleted in `/data` stays in the
+   mirror. That is what makes this a backup rather than a synchroniser — an
+   `rm -rf` in a workspace is precisely the accident we are insuring against, and
+   a mirror that faithfully reproduces the deletion insures against nothing.
+7. **Restore is a documented script, not a button** (§9). Restoring over a live
+   bucket is destructive and only the operator knows which side should win.
 
 ## 2. What we already have
 
-- `share.js` publishes a dataset repo already: `hf repo create --type dataset`,
-  `hf upload`, then `hfApi()` for settings/access. Same CLI, same token, same
-  namespace resolution (`shareNamespace()`). The backup reuses that shape and
-  needs no new Hub plumbing.
+- **The bucket id, already discovered.** `visibility.js` reads
+  `GET /api/spaces/{id}` → `runtime.volumes[]` and keeps the entries with
+  `type === 'bucket'`. Verified on two Spaces: `{source: 'lvwerra/agent-manager-data', mountPath: '/data'}`.
+  The feature needs no new discovery.
+- **`hf` CLI 1.25.1 in the image**, with `hf buckets create/cp/list/info/rm`.
+  `share.js` already shells out to `hf` with this token, so there is no new auth
+  path.
 - `am-config.json` + `GET/PUT /api/config` + a whitelisted enum, rendered as a
-  segmented control in `SettingsView.tsx`. `archive.after` is exactly the
-  precedent the operator asked for; `backup` is another key in the same object.
-- `watchdog.js` for the "periodic work that must not wedge the loop" pattern, and
-  `tracked()`/`PHASE` if the backup ever touches the main thread.
-- `scripts/share-session.mjs` as the model for a heavy child-process worker that
-  is *also* runnable by hand — the property that makes it debuggable.
+  segmented control in `SettingsView.tsx`. `archive.after` is the precedent the
+  operator asked for; `backup` is another key in the same object.
+- `share.js`'s rule that heavy work happens in a child process. Less critical
+  here — `hf cp` *is* a subprocess and the work is on the Hub — but the timer
+  still spawns rather than blocks.
 
 ## 3. Verified Hub behaviour
 
-Measured against a throwaway private dataset (`hf` **1.25.1**, since deleted);
-152 files including one 3 MB binary.
+All measured against the real Hub with `hf` 1.25.1, on this Space's own buckets.
+
+### 3.1 Bucket → dataset repo is not possible today
+
+```
+$ hf cp hf://buckets/lvwerra/am-dev-2-data/sessions.json \
+        hf://datasets/lvwerra/am-backup-probe2/sessions.json
+Error: Invalid value. Bucket-to-repo copy is not supported.
+```
+
+The client raises it (`hf_api.py`: `if destination_uri.is_repo: if source_uri.is_bucket: raise`),
+and the CLI source attributes it to a **server limitation**. The Hub docs say so
+twice, in the same words:
+
+> Note that transferring data the other way from a bucket to a repository
+> (model, dataset, Space) without reuploading is **not yet available, but is on
+> the roadmap**.
+
+Supported directions today: local→repo, local→bucket, repo→repo, repo→bucket,
+bucket→bucket. Server-side copies also require source and destination in the
+**same storage region**.
+
+**So "back up to a dataset, Hub-side" is not available.** It is on the roadmap,
+which makes this worth re-checking later: if it lands, §11.2 becomes a two-line
+change of destination type and the design is otherwise untouched.
+
+### 3.2 Bucket → bucket is server-side, recursive, and fast
+
+| case | files | wall |
+|---|---|---|
+| whole small bucket (`am-dev-2-data`) | 49 | **1 s** |
+| `state/` of the production bucket, cold | 13,482 | **20 s** |
+| the same copy again | 13,482 | **18 s** |
+
+- A **trailing slash on both sides copies contents recursively**, preserving
+  paths. All 49/49 files of the small bucket landed at the same relative paths.
+- ~670 files/s. The production bucket is 102,691 files, so a **full mirror
+  extrapolates to ≈2.5 minutes** — comfortably inside an hourly cadence, and it
+  costs the Space no I/O at all.
+- The repeat run is not cheaper (18 s vs 20 s): `cp` re-copies entries rather
+  than diffing. Since no bytes move, this is a per-file metadata cost, not
+  bandwidth. It also means there is no "nothing changed, do nothing" shortcut on
+  this path — unlike the dataset path (§3.4).
+- Only Xet-tracked files copy server-to-server; the docs note small non-Xet files
+  are transparently downloaded and re-uploaded by the client. At 670 files/s over
+  13k mixed small files, nothing suggests we hit that path meaningfully from a
+  bucket source.
+
+### 3.3 What buckets do not give us
+
+- **No versioning.** Buckets are "non-versioned and mutable", overwrite-in-place,
+  and deletions are "immediate and permanent". There is no history and no
+  point-in-time recovery. See §10 — this is the real cost of the fast path.
+- **No remote→remote sync**, so no `--delete` and no `--include/--exclude`
+  between two buckets: `hf sync` raises "Remote to remote sync is not supported.
+  One path must be local." Pruning, if ever wanted, is a separate
+  `hf buckets rm --recursive`. Per §1.6 we do not want it.
+- **`hf buckets info` lags.** Immediately after a verified 49-file copy it still
+  reported `size: 0, total_files: 0`. It is eventually consistent — verify a copy
+  with `hf buckets list -R`, never with `info`.
+- Destination mtimes are **copy time**, not source time, so mtime cannot be used
+  to reason about staleness of individual files.
+
+### 3.4 The dataset-repo path, for comparison (§11.2)
+
+Measured separately, uploading a local directory with `hf upload` (152 files, one
+3 MB binary):
 
 | case | wall | result |
 |---|---|---|
-| cold upload (152 files, 3 MB) | 44 s | 1 commit |
-| re-run, nothing changed | 10 s | **no commit** — "No files have been modified since last commit. Skipping to prevent empty commit." |
-| re-run, one small file changed | 10 s | 1 commit, only that file transferred |
-| re-run with `--delete "*"`, one file deleted locally | 10 s | 1 commit, the file is gone from the repo |
-| re-run with `--delete "*"`, nothing changed | 10 s | **no commit** |
+| cold | 44 s | 1 commit |
+| nothing changed | 10 s | **no commit** — "No files have been modified since last commit. Skipping to prevent empty commit." |
+| one file changed | 10 s | 1 commit, only that file transferred |
+| `--delete "*"`, one file deleted locally | 10 s | 1 commit, mirrored the deletion |
+| `--delete "*"`, nothing changed | 10 s | no commit |
 
-What this buys us, and why the whole design leans on it:
+So `hf upload` is already an incremental, hash-checking mirror that produces no
+empty commits, and files over a few MB land in LFS automatically. It is a good
+mechanism — it just requires reading the mount, and it keeps every version
+forever (§10).
 
-- **`hf upload <repo> <dir> . --repo-type dataset` is already an incremental
-  mirror.** It hash-checks every file and transfers only what differs. We do not
-  need to track state, diff trees, or remember what we sent last hour.
-- **An idle hour is free and invisible.** No empty commits means hourly backups
-  do not produce 8,760 junk commits a year; the history is a list of real
-  changes. This survives `--delete "*"`, so mirroring deletions costs nothing
-  when nothing was deleted.
-- **`--delete "*"` matches nested paths**, so one flag makes the dataset a true
-  mirror rather than an append-only pile of files the operator once had.
-- Files over a few MB land in **LFS** automatically (the 3 MB binary did) — no
-  `.gitattributes` work on our side.
-- `upload-large-folder` is **deprecated** in 1.25.1 in favour of `hf upload`.
+## 4. What is in the bucket (measured)
 
-## 4. What is actually in the bucket (measured)
-
-On this Space's bucket, walked directly:
+The production bucket `lvwerra/agent-manager-data`: **11.4 GB, 102,691 files.**
+Walking the mount directly:
 
 | subtree | files |
 |---|---|
-| everything under `/data` | **89,681** |
+| everything under `/data` | 89,681 |
 | `workspaces/` | 58,356 |
 | `state/` | 13,447 |
-| — of which `state/claude/projects/` (transcripts) | 767 |
 | `node_modules/` anywhere | 18,647 |
 | `.git/` anywhere | 3,410 |
 
-Two costs that shape the design:
+Cost of the mount-based alternative, for the record: a cold recursive walk ran
+into minutes (`du -sh /data` did not finish in 300 s) while a warm walk of one
+620 MB workspace took 1 s. The Hub-side path skips this entirely.
 
-- **The FUSE walk is the expensive part, and it is cache-dependent.** A cold
-  recursive walk of the whole bucket ran into minutes — `du -sh /data` did not
-  finish inside 300 s — while a warm walk of one 620 MB workspace took 1 s. So
-  the first backup after a boot is slow and later ones are cheap, which is
-  survivable hourly but *only* off the event loop (§1.4).
-- **Live credentials are in there**, which is the single most consequential fact
-  in this document:
-  - `state/claude/.credentials.json`
-  - `state/codex/auth.json`
-  - `state/hermes/auth.json`
-  - `state/vapid.json` — this install's private Web Push key
-  - `secret-notes.json` — the operator's descriptions of injected secrets
+**Credential surface**, all of it included per §1.3 and the reason §1.4 is a hard
+gate:
 
-  A dataset holding those is a credential store with a Hub URL. Hence §1.3.
+- `state/claude/.credentials.json`, `state/codex/auth.json`, `state/hermes/auth.json`
+- `state/vapid.json` — this install's private Web Push key
+- `session-secret` at the bucket root
+- `home/` — agent dotfiles and whatever else lives in the home directory
+- `secret-notes.json` — the operator's descriptions of injected secrets
 
-## 5. What gets excluded
-
-Default exclusions, in two classes.
-
-**Regenerable bulk** — costs upload time and storage, restores by rebuilding:
+## 5. The pipeline
 
 ```
-**/node_modules/**    **/.venv/**        **/__pycache__/**   **/*.pyc
-**/dist/**            **/build/**        **/target/**        **/.next/**
-**/.cache/**          **/.pytest_cache/**
-```
-
-`node_modules` alone is 18,647 files — 21% of the bucket's file count for
-content that `npm ci` reproduces.
-
-**Credentials and keys** — excluded unless the operator opts in:
-
-```
-state/*/.credentials.json   state/*/auth.json   state/*/.env
-state/vapid.json            **/.git-credentials
-```
-
-**Deliberately kept:** `.git` directories. Git objects are immutable and
-content-addressed, which makes them the *ideal* case for a deduping mirror —
-each object uploads once, forever. And branches, stashes, and unpushed commits
-are exactly the work a backup is for. 3,410 files is cheap.
-
-Whatever is skipped gets **counted and logged** in the backup status (§7). A
-backup that silently omits things reads as "you are covered" when you are not.
-
-## 6. The pipeline
-
-```
-hourly timer (main thread, unref'd)
-  └─ skip if: disabled · already running · repo not private · no HF_TOKEN
-  └─ spawn scripts/backup-bucket.mjs          ← child process, per §1.4
-        ├─ walk DATA_DIR applying the exclusion globs
-        ├─ hf upload <repo> <staged> . --repo-type dataset --delete "*"
-        │     (hash-check → transfer only what changed → skip empty commits)
-        └─ print a JSON report on stdout
-  └─ persist the report to DATA_DIR/backup-state.json
+timer (interval from am-config.json, unref'd)
+  └─ skip if: disabled · already running · no HF_TOKEN
+  └─ resolve source bucket id from runtime.volumes[]        (visibility.js)
+  └─ resolve/create destination:  <ns>/<space>-backup  --private
+  └─ HARD GATE: hf buckets info <dst> → private !== true  ⇒ refuse, surface why
+  └─ spawn: hf cp hf://buckets/<src>/ hf://buckets/<dst>/latest/
+  └─ verify with `hf buckets list <dst>/latest -R | wc -l`  (never `info`, §3.3)
+  └─ persist { at, duration, files, error } to DATA_DIR/backup-state.json
 ```
 
 Details that matter:
 
-- **The staged tree.** `hf upload` takes a directory, and we need exclusions
-  applied — so the script builds a staging tree of **hardlinks** into a temp dir
-  (no copy, no extra bytes) and uploads that. Hardlinks across the FUSE mount
-  need verifying on the real Space; if they fail, fall back to `--exclude` globs
-  passed straight to `hf upload` (it supports them) and skip staging entirely.
-  **Open — the fallback is the safer default until measured (§12).**
-- **One at a time.** A run that overruns the hour must not overlap the next; the
-  timer checks a running flag and logs the skip.
-- **Catch-up on boot, jittered.** If the last backup is older than the interval,
-  run one a few minutes after boot — not at boot, when the CLIs are installing
-  and the walk is coldest.
-- **A backup is a fuzzy snapshot.** Agents are writing while we read. Files may
-  be captured mid-write and the tree is not a point-in-time image. That is
-  acceptable for this purpose and must be *said*, not glossed: it is a backup of
-  a running machine, not a database snapshot.
-- **Failures are logged, not retried.** The next hour is the retry. The last
-  error is surfaced in the status row so a silently broken backup becomes
-  visible.
+- **One at a time.** A run that overruns must not overlap the next; the timer
+  checks a running flag and logs the skip.
+- **Catch-up on boot, jittered** — a few minutes after start, not at boot when
+  the CLIs are still installing.
+- **A backup is a fuzzy snapshot.** Agents write while the copy runs, so the
+  mirror is not point-in-time consistent. Acceptable here, and worth saying
+  rather than glossing: it is a backup of a running machine.
+- **Failures are logged, not retried.** The next hour is the retry; the last
+  error surfaces in the status row so a silently broken backup becomes visible.
+- **`latest/` prefix**, not a dated one — see §10 on why dated prefixes are a
+  billing question rather than a free win.
 
-## 7. Settings surface
-
-One new block in `SettingsView.tsx`, matching `archive`:
-
-```
-Back up the bucket                                   [ off | hourly | 6h | daily ]
-  Mirrors your workspaces and session history to a private dataset so
-  a lost Space is recoverable. Nothing is ever deleted from the bucket.
-
-  Dataset   [ lvwerra/am-bucket-am-dev-2        ]  (private)
-  Include agent credentials                                    [ off | on ]
-    Off: the backup skips saved logins, so a restored Space asks you to
-    sign in again. On: your live agent tokens are copied to the dataset.
-
-  Last backup: 12 minutes ago · 1.2 GB · 34 files changed · skipped 18,647
-  [ Back up now ]                                    [ Open dataset ↗ ]
-```
-
-The status line is load-bearing: a backup nobody can see the state of is a
-backup nobody trusts.
-
-## 8. Config and API
+## 6. Config and API
 
 ```js
 // am-config.json — validated with a whitelist, like archive.after
 backup: {
   every: 'never' | 'hour' | '6h' | 'day',   // default 'never' (§1.5)
-  repo: '',                                  // default <ns>/am-bucket-<space>
-  includeCredentials: false,                 // §1.3
+  bucket: '',                                // default <ns>/<space>-backup
 }
 ```
 
 ```
-GET  /api/backup/status   → { every, repo, private, running, last: {...}, error }
-POST /api/backup/run      → kick one now (same path as the timer)
+GET  /api/backup/status  → { every, bucket, private, running, last: {...}, error }
+POST /api/backup/run     → kick one now (same path as the timer)
 ```
 
 `GET/PUT /api/config` gains the `backup` key. No new auth surface: both routes
-sit behind the same visibility gate as everything else.
+sit behind the existing visibility gate.
 
-## 9. Restore
+## 7. Settings surface
 
-`scripts/restore-bucket.mjs <repo> <target>`:
+One block in `SettingsView.tsx`, matching `archive`:
 
 ```
-hf download <repo> --repo-type dataset --local-dir <target>
+Back up the bucket                            [ off | hourly | 6h | daily ]
+  Copies everything on your bucket — workspaces, history, saved logins —
+  to a second private bucket on the Hub. The copy happens on the Hub, so
+  it costs this Space nothing. Nothing is ever deleted from your bucket,
+  and files you delete stay in the backup.
+
+  Backup bucket  [ lvwerra/agent-manager-backup ]   ● private
+
+  Last backup: 12 minutes ago · 102,691 files · 2m 28s
+  [ Back up now ]                            [ Open bucket ↗ ]
 ```
 
-then re-create what was excluded — `npm ci` where a `package-lock.json` came
-back, re-login for each agent. Documented, not automated, because restoring onto
-a bucket that already has content is destructive and only the operator knows
-which side should win.
+The privacy dot is not decoration: it is the state of the §1.4 gate, and the one
+thing an operator must be able to see at a glance about a copy of their
+credentials.
 
-The reason this stays a script: a "Restore" button that overwrites a live bucket
-is a footgun aimed at the one thing this feature exists to protect.
+## 8. Restore
 
-## 10. Storage growth
+Restore is the direction the Hub *does* support Hub-side, which is a pleasant
+asymmetry: `hf cp hf://buckets/<backup>/latest/ hf://buckets/<live>/` puts the
+data back without anything being downloaded — and the same copy works into a
+*fresh* Space's bucket, which is the real disaster case.
 
-The mirror's cost over time is **the sum of every distinct version of every
-file**, because git keeps history. The hazard is not the big files, it is the
-*churny* big files: anything multi-MB that changes every hour is a new LFS object
-every hour, kept forever.
+`scripts/restore-bucket.mjs <backup-bucket> <target-bucket>` wraps that with the
+guards that matter: refuse when the target is non-empty unless `--force`, and
+print what would be overwritten first. Documented, not a button, per §1.7.
 
-Known churn: agent transcripts under `state/*/projects/` (append-only JSONL, so
-every hour is a new full copy of a growing file) and any SQLite database an agent
-keeps. 767 transcript files today, but they only grow.
+## 9. Storage growth
 
-Options, in preference order — **not yet decided (§12)**:
+A bucket mirror costs **the current footprint, once** — 11.4 GB today, whatever
+it is tomorrow. There is no history to accumulate, which is exactly why the Hub
+docs recommend buckets over dataset repos for rolling backups: with git, deleting
+a file frees nothing.
 
-1. Accept it, and surface the dataset's size in the status row so growth is
-   visible before it is a problem.
-2. Squash history periodically (`super_squash_history`), keeping the mirror
-   current and dropping the past — a mirror, not an archive.
-3. Exclude transcripts from the hourly pass and let session *sharing* (which
-   already exports traces properly, with redaction) own that data.
+The one growth term is §1.6: files deleted in `/data` linger in the mirror
+forever. Deliberate, and cheap — but it means the mirror is a high-water mark of
+everything the bucket has ever held, not a copy of what it holds now. If that
+ever gets expensive, prune with `hf buckets rm --recursive` against a reviewed
+list; never automatically.
 
-Option 3 is tempting and probably right long-term: two features backing up the
-same transcripts, one of them without redaction, is a smell.
+**Pseudo-versioning is possible but unpriced.** Copying to a dated prefix each
+run (`latest/` → `2026-08-04T13/`) would give point-in-time recovery, and Xet
+chunk dedup means unchanged content is not stored twice. But the docs say
+dedup-based *billing* is an Enterprise benefit, so on other plans dated prefixes
+may bill as full copies. Not doing it until the billing is confirmed (§11.4).
 
-## 11. Risks and open questions
+## 10. Risks and open questions
 
-1. **The credential decision (§1.3) is the one to review first.** Default-off is
-   my recommendation. Note that "off" makes a restored Space need re-login for
-   every agent, which is a real cost the operator may prefer to trade away.
-2. **A backup dataset is a new blast radius.** Even excluding credentials, the
-   workspaces contain whatever agents wrote — source, data, notes. The
-   private-repo check (§1.2) is a hard gate, not a warning, for that reason.
-   Should we also refuse when the *Space* is public, as `visibility.js` does?
-3. **Hardlink staging across FUSE is unverified** (§6). Fallback is `--exclude`
-   globs, which is simpler; possibly skip staging in v1 entirely.
-4. **Cold-walk cost on a much larger bucket.** 89,681 files walks fine warm; the
-   cold case ran to minutes here. A bucket 10× this size may not fit an hourly
-   cadence, so the status row should show duration and the timer should log when
-   a run overruns its interval.
-5. **Hub rate limits / commit volume** are untested at a sustained hourly cadence
-   over weeks. Expected fine — no-op hours make no commits at all — but unproven.
-6. **Two backups of one thing.** §10 option 3; worth settling before both exist.
+1. **No point-in-time recovery is the real trade.** This design protects against
+   deletion (§1.6) and against losing the Space, but not against *corruption*: a
+   file damaged in place propagates on the next copy and the good version is gone
+   forever. The dataset path (§3.4) is the one that gives history. If corruption
+   matters more than cost, the answer is both — hourly bucket mirror plus an
+   occasional versioned dataset snapshot from the mount, which is §11.2 and is
+   deliberately not in v1.
+2. **A backup bucket is a second copy of every credential.** §1.4's gate is the
+   mitigation, and it must be re-checked every run — a bucket can be flipped to
+   public after creation. Open: should the backup also refuse when the *Space* is
+   public, as `visibility.js` does for the app?
+3. **Region.** Server-side copy requires source and destination in the same
+   storage region. Untested across regions — the destination should be created
+   without an explicit region so it lands in the default, and a region mismatch
+   should be reported as its own error rather than a generic copy failure.
+4. **Dated-prefix billing** (§9) is unconfirmed.
+5. **~2.5 min is extrapolated**, from 13,482 files in 20 s. The full 102,691-file
+   copy has not been run end to end. If it is much worse than linear, hourly on a
+   large bucket needs revisiting — hence duration in the status row.
+6. **Sustained hourly API volume** over weeks is unproven.
 7. **Restore has never been exercised.** A backup that has not been restored once
-   is a hypothesis. Phase 3 should include an actual restore into a scratch Space.
+   is a hypothesis. Phase 3 restores into a scratch Space for real.
+8. **Bucket→repo is on the roadmap** (§3.1). Re-check before building anything
+   elaborate on the mount-based path.
 
-## 12. Phasing
+## 11. Phasing
 
-1. **Config + scheduler + `scripts/backup-bucket.mjs` + status API.** Headless,
-   driven by `POST /api/backup/run`. Prove the incremental mirror on a real
-   bucket and measure the cold walk.
-2. **Settings UI** (§7) — the interval control, dataset field, credential
-   toggle, status line, "Back up now".
+1. **Config + timer + the copy + status API.** Headless, driven by
+   `POST /api/backup/run`; run one full 102,691-file copy and record the real
+   duration (§10.5).
+2. **Settings UI** (§7) — interval, destination, the privacy dot, status line,
+   "Back up now".
 3. **`scripts/restore-bucket.mjs` + docs, and one real restore** into a scratch
-   Space. Until this runs, the feature is unproven (§11.7).
-4. **Retention** — decide §10, implement squash or transcript exclusion.
+   Space. Until this runs, the feature is unproven (§10.7).
+4. **Optional versioned snapshots** — the §3.4 dataset path at a slow cadence,
+   for point-in-time recovery (§10.1), or dated prefixes if §9's billing turns
+   out to be favourable.
