@@ -14,7 +14,7 @@ import Locked from './components/Locked';
 import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
-import { isPassive } from './types';
+import { isPassive, isRemote } from './types';
 import { GridGlyph, ListGlyph } from './components/icons';
 
 // Phone-sized viewport: the app becomes two full-screen views (list ⇄ pane).
@@ -40,6 +40,7 @@ function autoGrid(n: number): GridSpec {
 
 type SettingsPage = 'general' | 'usage' | 'skills';
 const ROOT_PATH = '.';
+const WARM_TERMINAL_LIMIT = 12;
 const normalizePath = (p?: string | null) => (p && p.trim() ? p : ROOT_PATH);
 
 function initialTheme(): 'light' | 'dark' {
@@ -103,15 +104,188 @@ export default function App() {
 
   // Track the visual viewport so the mobile layout can sit above the on-screen
   // keyboard (which shrinks visualViewport but not the layout viewport on iOS).
-  // --vvh drives the mobile app height (see styles.css).
+  // The CSS variables pin the app to that viewport's exact rectangle. The Hub
+  // page embeds the app in a cross-origin iframe; mobile Safari leaves that
+  // child viewport unchanged when its keyboard opens. In that one no-signal
+  // case, fall back to a conservative focus-derived visible height.
   useEffect(() => {
     const vv = window.visualViewport;
-    if (!vv) return;
-    const apply = () => document.documentElement.style.setProperty('--vvh', `${Math.round(vv.height)}px`);
+    type VirtualKeyboardLike = EventTarget & { boundingRect?: DOMRectReadOnly };
+    const keyboard = (navigator as Navigator & { virtualKeyboard?: VirtualKeyboardLike }).virtualKeyboard;
+    type ViewportBaseline = {
+      width: number;
+      height: number;
+      top: number;
+      innerHeight: number;
+    };
+    const root = document.documentElement;
+    const keyboardSignalThreshold = 80;
+    const embedded = window.self !== window.top;
+    let focusedInput: Element | null = null;
+    let focusBaseline: ViewportBaseline | null = null;
+    let focusFallback = false;
+    let focusFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const acceptsKeyboardInput = (target: Element | null): target is HTMLElement => {
+      if (!(target instanceof HTMLElement)) return false;
+      if (target.isContentEditable) return true;
+      if (target instanceof HTMLTextAreaElement) return !target.readOnly && !target.disabled;
+      if (!(target instanceof HTMLInputElement) || target.readOnly || target.disabled) return false;
+      return !['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit']
+        .includes(target.type);
+    };
+    const embeddedTouchLayout = () => embedded
+      && window.matchMedia('(max-width: 720px)').matches
+      && (navigator.maxTouchPoints > 0 || window.matchMedia('(pointer: coarse)').matches);
+    const captureViewport = (): ViewportBaseline => ({
+      width: vv?.width ?? document.documentElement.clientWidth,
+      height: vv?.height ?? window.innerHeight,
+      top: vv?.offsetTop ?? 0,
+      innerHeight: window.innerHeight,
+    });
+    const hasKeyboardGeometry = () => {
+      if (!focusBaseline) return false;
+      const keyboardHeight = keyboard?.boundingRect?.height ?? 0;
+      const visualHeight = vv?.height ?? window.innerHeight;
+      const visualShrink = focusBaseline.height - visualHeight;
+      const layoutShrink = focusBaseline.innerHeight - window.innerHeight;
+      return keyboardHeight >= keyboardSignalThreshold
+        || visualShrink >= keyboardSignalThreshold
+        || layoutShrink >= keyboardSignalThreshold;
+    };
+    const apply = () => {
+      const keyboardRect = keyboard?.boundingRect;
+      const left = vv?.offsetLeft ?? 0;
+      const top = vv?.offsetTop ?? 0;
+      const width = vv?.width ?? document.documentElement.clientWidth;
+      let height = vv?.height ?? window.innerHeight;
+      // Chromium can expose keyboard geometry even when an embedded document's
+      // visual viewport is unchanged. Never grow the visual viewport from it;
+      // only clip an actually overlapping keyboard.
+      if (keyboardRect && keyboardRect.height > 0 && keyboardRect.top > top) {
+        height = Math.min(height, keyboardRect.top - top);
+      }
+      if (hasKeyboardGeometry()) focusFallback = false;
+      if (focusFallback && focusBaseline && acceptsKeyboardInput(document.activeElement)) {
+        // The parent page owns the real visual viewport, but cross-origin frame
+        // isolation prevents us from reading it. A phone keyboard typically
+        // consumes roughly the lower half; 54% visible keeps the xterm prompt
+        // above it without disturbing direct-app browsers with real geometry.
+        const visibleRatio = focusBaseline.width > focusBaseline.height ? 0.48 : 0.54;
+        height = Math.min(height, Math.round(focusBaseline.height * visibleRatio));
+        root.dataset.keyboardLayout = 'focus-fallback';
+      } else if (hasKeyboardGeometry()) {
+        root.dataset.keyboardLayout = 'browser-geometry';
+      } else {
+        delete root.dataset.keyboardLayout;
+      }
+      root.style.setProperty('--vvw', `${Math.round(width)}px`);
+      root.style.setProperty('--vvh', `${Math.round(height)}px`);
+      root.style.setProperty('--vv-top', `${Math.round(top)}px`);
+      root.style.setProperty('--vv-left', `${Math.round(left)}px`);
+    };
+
+    // WebKit may dispatch the keyboard viewport event before offsetTop has its
+    // final value, then correct the property without another event. Re-read at
+    // the end of the event turn and while the focus animation settles.
+    const settleTimers = new Set<ReturnType<typeof setTimeout>>();
+    const focusTimers = new Set<ReturnType<typeof setTimeout>>();
+    const onViewportChange = () => {
+      apply();
+      for (const timer of settleTimers) clearTimeout(timer);
+      settleTimers.clear();
+      // One delayed read is still racy: WebKit can update offsetTop immediately
+      // after it fires. Sample the short animation tail without depending on a
+      // second browser event.
+      for (const delay of [50, 150, 300, 500]) {
+        const timer = setTimeout(() => { settleTimers.delete(timer); apply(); }, delay);
+        settleTimers.add(timer);
+      }
+    };
+    const stabilizeFocus = () => {
+      for (const timer of focusTimers) clearTimeout(timer);
+      focusTimers.clear();
+      for (const delay of [0, 50, 150, 300, 500, 800]) {
+        const timer = setTimeout(() => { focusTimers.delete(timer); apply(); }, delay);
+        focusTimers.add(timer);
+      }
+    };
+    const scheduleEmbeddedFallback = () => {
+      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
+      focusFallbackTimer = null;
+      if (!embeddedTouchLayout() || !acceptsKeyboardInput(document.activeElement)) return;
+      focusFallbackTimer = setTimeout(() => {
+        focusFallbackTimer = null;
+        if (document.activeElement === focusedInput && !hasKeyboardGeometry()) {
+          focusFallback = true;
+          apply();
+        }
+      }, 500);
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (acceptsKeyboardInput(target)) {
+        focusedInput = target;
+        focusBaseline = captureViewport();
+        focusFallback = false;
+        stabilizeFocus();
+        scheduleEmbeddedFallback();
+        return;
+      }
+      stabilizeFocus();
+    };
+    const onFocusOut = () => {
+      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
+      focusFallbackTimer = null;
+      const timer = setTimeout(() => {
+        focusTimers.delete(timer);
+        if (!acceptsKeyboardInput(document.activeElement)) {
+          focusedInput = null;
+          focusBaseline = null;
+          focusFallback = false;
+          apply();
+        }
+      }, 0);
+      focusTimers.add(timer);
+    };
+    const onOrientationChange = () => {
+      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
+      focusFallbackTimer = null;
+      focusFallback = false;
+      if (acceptsKeyboardInput(document.activeElement)) {
+        focusedInput = document.activeElement;
+        focusBaseline = captureViewport();
+      }
+      stabilizeFocus();
+      scheduleEmbeddedFallback();
+    };
     apply();
-    vv.addEventListener('resize', apply);
-    vv.addEventListener('scroll', apply);
-    return () => { vv.removeEventListener('resize', apply); vv.removeEventListener('scroll', apply); };
+    vv?.addEventListener('resize', onViewportChange);
+    vv?.addEventListener('scroll', onViewportChange);
+    vv?.addEventListener('scrollend', onViewportChange);
+    keyboard?.addEventListener('geometrychange', onViewportChange);
+    window.addEventListener('resize', onViewportChange);
+    window.addEventListener('orientationchange', onOrientationChange);
+    document.addEventListener('focusin', onFocusIn);
+    document.addEventListener('focusout', onFocusOut);
+    return () => {
+      for (const timer of settleTimers) clearTimeout(timer);
+      for (const timer of focusTimers) clearTimeout(timer);
+      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
+      vv?.removeEventListener('resize', onViewportChange);
+      vv?.removeEventListener('scroll', onViewportChange);
+      vv?.removeEventListener('scrollend', onViewportChange);
+      keyboard?.removeEventListener('geometrychange', onViewportChange);
+      window.removeEventListener('resize', onViewportChange);
+      window.removeEventListener('orientationchange', onOrientationChange);
+      document.removeEventListener('focusin', onFocusIn);
+      document.removeEventListener('focusout', onFocusOut);
+      root.style.removeProperty('--vvw');
+      root.style.removeProperty('--vvh');
+      root.style.removeProperty('--vv-top');
+      root.style.removeProperty('--vv-left');
+      delete root.dataset.keyboardLayout;
+    };
   }, []);
 
   // Refresh info while locked so flipping the Space to Private unlocks the UI
@@ -255,6 +429,38 @@ export default function App() {
   const visibleSessions = activeGroup ? pageSessions : activeSingle ? [activeSingle] : [];
   const visibleIds = visibleSessions.map((s) => s.id).join(',');
   const showZoom = visibleSessions.length > 0;
+
+  // Keep a small working set of terminal panes alive across navigation. The
+  // backend session already survives a viewer disconnect; retaining xterm and
+  // its socket as well makes switching back genuinely instant and preserves the
+  // exact local scroll/selection state. This is deliberately bounded: mounting
+  // every session would start stopped agents and turn a large sidebar into many
+  // live WebSockets and 20k-line browser buffers.
+  const visibleTerminalIds = (settingsOpen || (isMobile && !mobileStage) ? [] : visibleSessions)
+    .filter((s) => !isPassive(s.cli) && !isRemote(s.cli))
+    .map((s) => s.id);
+  const visibleTerminalKey = visibleTerminalIds.join(',');
+  const sessionIdsKey = tree.sessions.map((s) => s.id).join(',');
+  const [warmTerminalIds, setWarmTerminalIds] = useState<string[]>([]);
+  useEffect(() => {
+    const valid = new Set(tree.sessions
+      .filter((s) => !isPassive(s.cli) && !isRemote(s.cli))
+      .map((s) => s.id));
+    setWarmTerminalIds((previous) => {
+      const next = [...visibleTerminalIds, ...previous]
+        .filter((id, i, all) => valid.has(id) && all.indexOf(id) === i)
+        .slice(0, Math.max(WARM_TERMINAL_LIMIT, visibleTerminalIds.length));
+      return next.length === previous.length && next.every((id, i) => id === previous[i])
+        ? previous : next;
+    });
+  // Stable string keys avoid running this state update on every tree poll.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleTerminalKey, sessionIdsKey]);
+  // Include newly selected panes on the navigation render itself; the effect
+  // above retains them for later renders and applies the LRU bound.
+  const retainedTerminalIds = [...visibleTerminalIds, ...warmTerminalIds]
+    .filter((id, i, all) => !!sessById[id] && all.indexOf(id) === i)
+    .slice(0, Math.max(WARM_TERMINAL_LIMIT, visibleTerminalIds.length));
 
   // Pane rearrangement (drag a pane header onto another tile).
   const [paneDrag, setPaneDrag] = useState(false);
@@ -474,21 +680,60 @@ export default function App() {
     const slotCount = activeGroup ? g.cols * g.rows : sessions.length;
     const slots = Array.from({ length: slotCount }, (_, i) => sessions[i] ?? null);
     const canDrag = !!activeGroup && groupSessions.length > 1;
+    const slotStyle = (i: number) => ({
+      gridColumn: (i % g.cols) + 1,
+      gridRow: Math.floor(i / g.cols) + 1,
+    });
+    const slotByTerminal = new Map(slots
+      .map((s, i) => [s, i] as const)
+      .filter(([s]) => s && !isPassive(s.cli) && !isRemote(s.cli))
+      .map(([s, i]) => [s!.id, i]));
+    const deckVisible = !settingsOpen && sessions.length > 0 && (!isMobile || mobileStage);
     // A sidebar session hovering a full grid still needs somewhere to land:
     // offer a ghost strip appended below the tiles.
     const ghost = sessionDragActive && !!activeGroup;
     return (
       <div
-        className={`tiles${paneDrag ? ' pane-dragging' : ''}${sessionDragActive && activeGroup ? ' session-dragging' : ''}`}
+        className={`tiles pane-deck${sessions.length ? '' : ' deck-hidden'}${paneDrag ? ' pane-dragging' : ''}${sessionDragActive && activeGroup ? ' session-dragging' : ''}`}
         style={{ gridTemplateColumns: `repeat(${g.cols}, 1fr)`, gridTemplateRows: `repeat(${g.rows}, minmax(0, 1fr))` }}
         onDragOver={activeGroup ? allowDrop : undefined}
         onDragLeave={() => setDropMain(false)}
         onDrop={activeGroup ? onDropMain : undefined}
       >
-        {slots.map((s, i) => (
+        {retainedTerminalIds.map((id) => {
+          const s = sessById[id];
+          if (!s) return null;
+          const slot = slotByTerminal.get(id);
+          const shown = slot !== undefined;
+          return (
+            <div
+              key={`terminal-${id}`}
+              className={`tile tile-terminal${shown ? '' : ' tile-cached'}`}
+              style={shown ? slotStyle(slot) : undefined}
+              {...(shown && activeGroup ? tileDnd(slot, true) : {})}
+            >
+              <TerminalPane
+                session={s}
+                cli={cliMap[s.cli]}
+                theme={theme}
+                zoom={zoom}
+                focused={shown && sessions.length > 1 && s.id === focusedId}
+                active={shown && deckVisible && s.id === focusedId}
+                dragId={shown && canDrag ? `p:${s.id}` : undefined}
+                isMobile={isMobile}
+                onDragActive={setPaneDrag}
+                onFocus={() => setFocusedId(s.id)}
+                onRename={(name) => renameSession(s.id, name)}
+                onClose={() => closePane(s.id)}
+              />
+            </div>
+          );
+        })}
+        {slots.map((s, i) => (s && !isPassive(s.cli) && !isRemote(s.cli) ? null : (
           <div
-            key={s ? s.id : `empty-${i}`}
+            key={s ? `passive-${s.id}` : `empty-${i}`}
             className={`tile${s ? '' : ' tile-empty'}${(paneDrag || sessionDragActive) && overTile === i ? ' tile-over' : ''}`}
+            style={slotStyle(i)}
             {...(activeGroup ? tileDnd(i, !!s) : {})}
           >
             {s && (s.cli === 'files' ? (
@@ -512,7 +757,7 @@ export default function App() {
                 onRename={(name) => renameSession(s.id, name)}
                 onClose={() => closePane(s.id)}
               />
-            ) : s.cli === 'trace' ? (
+            ) : (
               <TracePane
                 session={s}
                 zoom={zoom}
@@ -522,24 +767,9 @@ export default function App() {
                 onFocus={() => setFocusedId(s.id)}
                 onClose={() => closePane(s.id)}
               />
-            ) : (
-              <TerminalPane
-                session={s}
-                cli={cliMap[s.cli]}
-                theme={theme}
-                zoom={zoom}
-                focused={visibleSessions.length > 1 && s.id === focusedId}
-                active={s.id === focusedId}
-                dragId={canDrag ? `p:${s.id}` : undefined}
-                isMobile={isMobile}
-                onDragActive={setPaneDrag}
-                onFocus={() => setFocusedId(s.id)}
-                onRename={(name) => renameSession(s.id, name)}
-                onClose={() => closePane(s.id)}
-              />
             ))}
           </div>
-        ))}
+        )))}
         {ghost && (
           <div
             className={`tile tile-ghost${overTile === slots.length ? ' tile-over' : ''}`}
@@ -554,8 +784,9 @@ export default function App() {
 
   if (info?.locked) return <Locked spaceId={info.spaceId} reason={info.lockReason} bucket={info.lockBucket} />;
 
-  if (settingsOpen) {
-    return (
+  return (
+    <>
+      {settingsOpen && (
       <SettingsView
         page={settingsPage}
         onPage={setSettingsPage}
@@ -568,11 +799,8 @@ export default function App() {
         demoMode={!!info?.demoMode}
         onToggleDemo={toggleDemo}
       />
-    );
-  }
-
-  return (
-    <div className={`app${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
+      )}
+    <div className={`app${settingsOpen ? ' app-suspended' : ''}${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
       {showWelcome && <Welcome onClose={dismissWelcome} />}
       {toast && <div className="toast mono" role="alert">{toast}</div>}
       {shareId && sessById[shareId] && (
@@ -658,6 +886,14 @@ export default function App() {
           </div>
         )}
         <div className="stage">
+          {renderTiles(
+            isMobile && !mobileStage
+              ? []
+              : activeGroup && groupSessions.length > 0
+              ? pageSessions
+              : activeSingle ? [activeSingle] : [],
+            activeGroup && groupSessions.length > 0 ? grid : { cols: 1, rows: 1 },
+          )}
           {activeRef === 'overview' ? (
             <Overview
               clis={clis}
@@ -674,8 +910,7 @@ export default function App() {
                 openSession(sid, g?.id);
               }}
             />
-          ) : activeGroup ? (
-            groupSessions.length === 0 ? (
+          ) : activeGroup && groupSessions.length === 0 ? (
               <div
                 className={`empty-group${dropMain ? ' drop-over' : ''}`}
                 onDragOver={allowDrop}
@@ -688,17 +923,14 @@ export default function App() {
                   <div className="dropline">drop an agent here to add it to this group</div>
                 </div>
               </div>
-            ) : renderTiles(pageSessions, grid)
-          ) : activeSingle ? (
-            renderTiles([activeSingle], { cols: 1, rows: 1 })
-          ) : (
+          ) : !activeGroup && !activeSingle ? (
             <div className="empty-group">
               <EmptyPrompt
                 path="workspaces"
                 hints={['create an agent or a group from the sidebar', 'drag an agent onto another to group them']}
               />
             </div>
-          )}
+          ) : null}
         </div>
         {activeRef === 'overview' && (
           <div className="zoombar ov-bar">
@@ -735,5 +967,6 @@ export default function App() {
         )}
       </div>
     </div>
+    </>
   );
 }

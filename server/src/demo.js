@@ -1,7 +1,7 @@
 // Demo mode: a pure view filter. Activating snapshots the session and group IDs
 // that exist right now and hides them from the sidebar/overview, so the Space
 // reads like a fresh install (empty workspace + welcome). Nothing is deleted —
-// tmux sessions keep running, logins and secrets stay valid — and anything
+// live sessions keep running, logins and secrets stay valid — and anything
 // created *after* activation shows through (it isn't in the snapshot).
 // Deactivating clears the snapshot and every real session reappears untouched.
 import fs from 'fs';

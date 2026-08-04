@@ -1,12 +1,31 @@
 import os from 'node:os';
 import path from 'node:path';
 import pty from 'node-pty';
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import { USE_TMUX, cliById, WORKSPACES_DIR, isRemote } from './config.js';
-import { update, list } from './sessions.js';
-import { captureOpencodeSession } from './traces.js';
 import { remoteState, setPaused } from './remote.js';
+import { cliById, isRemote, STATE_DIR, WORKSPACES_DIR } from './config.js';
+import { update, list } from './sessions.js';
+import { captureOpencodeSession, readTrace } from './traces.js';
+import {
+  buildPaletteIndex, snapshotToRestoreAnsi, styledSnapshotLines, textColumns,
+} from './snapshot.js';
+import {
+  createTerminalHistoryCheckpoint, loadTerminalHistory, TERMINAL_HISTORY_VERSION,
+  traceHistoryLines,
+} from './history-store.js';
+
+// libghostty-vt ships prebuilts for linux x64/arm64 and macOS arm64. Loading it
+// is guarded so a platform without a prebuilt still boots and says so, rather
+// than taking the whole app down.
+let ghostty = null;
+export let ghosttyError = null;
+try {
+  ghostty = await import('@coder/libghostty-vt-node');
+  buildPaletteIndex(ghostty.createTerminal);
+} catch (err) {
+  ghosttyError = String(err && err.message ? err.message : err);
+  console.error('[runner] libghostty-vt unavailable:', ghosttyError);
+}
 
 const TERM_ENV = {
   ...process.env,
@@ -16,18 +35,74 @@ const TERM_ENV = {
 };
 
 const BASHRC = process.env.AM_BASHRC || '/app/session.bashrc';
-const TMUX_CONF = process.env.TMUX_CONF || '/app/tmux.conf';
 const AM_USER = process.env.SPACE_AUTHOR_NAME || process.env.AM_USER || os.userInfo().username || 'user';
 
 // Interactive bash that loads our prompt rcfile (bash ignores a missing rcfile,
 // so this is safe in local dev where /app/session.bashrc doesn't exist).
 const bashLaunch = `exec bash --rcfile ${BASHRC} -i`;
 
-const tmuxName = (id) => `am-${id}`;
+// ---------- session hosts (what replaced tmux) ----------
+//
+// Every session is one PTY held by THIS process, with a libghostty-vt terminal
+// fed from its output. That terminal is the authoritative screen, so:
+//
+//   * a browser attaching gets canonical history plus a snapshot repaint,
+//     instead of asking tmux to redraw and hoping the agent's TUI cooperates;
+//   * several browsers can watch the same session, with one explicit input/size
+//     controller instead of a one-device-at-a-time disconnect handover;
+//   * agent state is a property read rather than a `tmux capture-pane`
+//     subprocess per session per poll.
+//
+// PTYs still end with this process, but canonical scrollback is checkpointed to
+// durable storage below and rejoined with the CLI's resumed screen on relaunch.
 
-// If the rendered pane text hasn't changed for this long, it's not working.
+// Rendered text unchanged for this long means the agent isn't working.
 const BUSY_SECS = 4;
-const paneSig = new Map(); // id -> { sig, changedAt } (changedAt in unix seconds)
+// Re-rendering the grid to text on every chunk during a burst is wasteful.
+const SAMPLE_THROTTLE_MS = 250;
+// Despite the Node wrapper's `scrollbackLimit` name, Ghostty's native option is
+// a byte budget. Passing a line count such as 20,000 retains only a small native
+// allocation (about 700 ordinary rows). Keep the unit explicit at our boundary.
+const DEFAULT_SCROLLBACK_BYTES = 64 * 1024 * 1024;
+const configuredScrollback = process.env.AM_SCROLLBACK_BYTES === undefined
+  ? Number.NaN
+  : Number(process.env.AM_SCROLLBACK_BYTES);
+const SCROLLBACK_BYTES = Number.isFinite(configuredScrollback) && configuredScrollback >= 0
+  ? configuredScrollback
+  : DEFAULT_SCROLLBACK_BYTES;
+// A layout resize is only worth acting on once it stops changing. ResizeObserver
+// fires per animation frame while a window is dragged; coalescing that burst
+// avoids repeatedly reflowing the terminal and repeatedly sending SIGWINCH.
+const RESIZE_SETTLE_MS = Number(process.env.AM_RESIZE_SETTLE_MS || 120);
+// Primary-screen agent TUIs redraw their whole frame after SIGWINCH. Let that
+// burst settle in a scratch emulator, then merge its final frame once; streaming
+// the raw redraw would turn every overflow row into duplicate history.
+const RESIZE_CAPTURE_IDLE_MS = Number(process.env.AM_RESIZE_CAPTURE_IDLE_MS || 80);
+const RESIZE_CAPTURE_MAX_MS = Number(process.env.AM_RESIZE_CAPTURE_MAX_MS || 900);
+// A resumed agent paints through the same primary-screen protocol as a resize,
+// but may pause for seconds between its welcome frame and replayed transcript.
+// Keep that transaction distinct from the deliberately short resize debounce:
+// committing its first chunk makes every later chunk look like new history.
+const STARTUP_CAPTURE_IDLE_MS = Number(process.env.AM_STARTUP_CAPTURE_IDLE_MS || 5000);
+const STARTUP_CAPTURE_MAX_MS = Number(process.env.AM_STARTUP_CAPTURE_MAX_MS || 20000);
+// Unlike the PTY process, /data survives a Space rebuild. Checkpoint canonical
+// scrollback there so deploys and sleeps do not turn a resumed agent into a
+// terminal with only its freshly repainted viewport.
+const HISTORY_SAVE_MS = Number(process.env.AM_HISTORY_SAVE_MS || 5000);
+const HISTORY_DIR = path.join(STATE_DIR, 'terminal-history');
+// Claude's resume stream can pause between its welcome frame and replayed
+// conversation. Treat that as one startup transaction; hydrating during the
+// pause would seed a turn that Claude is about to print itself.
+const TRACE_HYDRATE_IDLE_MS = Number(process.env.AM_TRACE_HYDRATE_IDLE_MS || 5000);
+const TRACE_HYDRATE_MIN_MS = Number(process.env.AM_TRACE_HYDRATE_MIN_MS || 3000);
+// Bound untrusted WebSocket geometry without imposing the old 400x200 ceiling,
+// which left visible dead space on high-DPI displays at low zoom levels.
+const MIN_COLS = 20;
+const MIN_ROWS = 5;
+const MAX_COLS = 1000;
+const MAX_ROWS = 500;
+
+const hosts = new Map(); // session id -> host
 
 function djb2(s) {
   let h = 5381;
@@ -35,108 +110,46 @@ function djb2(s) {
   return h;
 }
 
-// In direct-PTY (no-tmux) mode we track live handles to report running status.
-const live = new Map(); // id -> Set(handle)
-const track = (id, h) => {
-  if (!live.has(id)) live.set(id, new Set());
-  live.get(id).add(h);
-};
-const untrack = (id, h) => {
-  const s = live.get(id);
-  if (s) {
-    s.delete(h);
-    if (!s.size) live.delete(id);
-  }
-};
-
 export function isRunning(id) {
-  if (USE_TMUX) {
-    try {
-      execFileSync('tmux', ['has-session', '-t', tmuxName(id)], { stdio: 'ignore' });
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  return live.has(id);
+  return hosts.has(id);
 }
 
-// Which sessions have a pane in copy mode right now — one tmux call covers all
-// panes, so the server can push a copy-mode hint to attached clients cheaply.
-export function paneModes() {
-  const modes = {};
-  if (!USE_TMUX) return modes;
-  let out = '';
-  try {
-    // Mode first (a single 0/1), then the session name — which is `am-<id>`
-    // and never contains a space, so splitting on the first space is safe.
-    out = execFileSync('tmux', ['list-panes', '-a', '-F', '#{pane_in_mode} #{session_name}'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch { return modes; } // no tmux server yet
-  for (const line of out.split('\n')) {
-    const sp = line.indexOf(' ');
-    if (sp < 0) continue;
-    const name = line.slice(sp + 1);
-    if (!name.startsWith('am-')) continue;
-    const id = name.slice(3);
-    modes[id] = modes[id] || line.slice(0, sp) === '1';
+export function ghosttyReady() {
+  return !!ghostty;
+}
+
+/** Sample the grid's rendered text and record when it last changed. */
+function sampleScreen(host) {
+  const now = Date.now();
+  if (host.lastSampleAt && now - host.lastSampleAt < SAMPLE_THROTTLE_MS) return;
+  host.lastSampleAt = now;
+  let text = '';
+  try { text = host.vt.getVisibleText(); } catch { return; }
+  const sig = djb2(text);
+  if (host.screenSig !== sig) {
+    host.screenSig = sig;
+    host.screenChangedAt = now;
   }
-  return modes;
 }
 
 /**
- * Detect activity by DIFFING each pane's rendered text between polls. This
- * ignores colour-only animations (e.g. Codex's shimmering banner) that fooled a
- * raw output-activity check, while still catching spinners, streaming output and
- * elapsed-time counters (their text changes). Returns Map id -> { age } where
- * age is seconds since the pane text last changed.
+ * Activity per session, keyed like the old tmux sweep so callers don't change.
+ * No subprocess and no memo: the grid is already current, so this is a map build
+ * over held sessions.
  */
-let infoMemo = { ts: 0, map: new Map() };
-
 export function agentInfo() {
-  // The sweep shells out to tmux once per session, synchronously. Memoize it
-  // briefly so N browser tabs polling /api/tree don't multiply that cost.
-  if (Date.now() - infoMemo.ts < 1500) return infoMemo.map;
   const map = new Map();
-  infoMemo = { ts: Date.now(), map };
-  if (!USE_TMUX) return map;
-  let list;
-  try {
-    // stderr is dropped on every tmux call that already handles its own
-    // failure: with no server running (fresh container, or after the last
-    // session ends) tmux prints "error connecting to /tmp/tmux-1000/default"
-    // and the catch below treats that as "no sessions" — so the message is
-    // pure noise that made a healthy Space look broken in the log.
-    list = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch {
-    paneSig.clear();
-    return map; // no server / no sessions
+  const now = Date.now();
+  for (const [id, host] of hosts) {
+    const changedAt = host.screenChangedAt || host.startedAt;
+    map.set(id, { age: Math.round((now - changedAt) / 1000), bells: host.bells || 0 });
   }
-  const now = Math.floor(Date.now() / 1000);
-  const live = new Set();
-  for (const name of list.split('\n')) {
-    if (!name.startsWith('am-')) continue;
-    const id = name.slice(3);
-    live.add(id);
-    let text = '';
-    try {
-      text = execFileSync('tmux', ['capture-pane', '-p', '-t', name],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    } catch {}
-    const sig = djb2(text);
-    const prev = paneSig.get(id);
-    const changedAt = !prev || prev.sig !== sig ? now : prev.changedAt;
-    paneSig.set(id, { sig, changedAt });
-    map.set(id, { age: now - changedAt });
-  }
-  for (const id of [...paneSig.keys()]) if (!live.has(id)) paneSig.delete(id);
   return map;
 }
 
 /**
  * Map activity + the session's known CLI into a UI state:
- *   working  — pane text is actively changing (thinking / streaming / a command)
+ *   working  — screen text is actively changing (thinking / streaming / a command)
  *   waiting  — agent alive but its screen is static → it's your turn
  *   idle     — a plain shell sitting at its prompt
  *   stopped  — no live session
@@ -149,6 +162,492 @@ export function deriveState(session, info) {
   if (!info) return isRunning(session.id) ? 'idle' : 'stopped';
   if (info.age <= BUSY_SECS) return 'working';
   return session.cli === 'shell' ? 'idle' : 'waiting';
+}
+
+/** The visible screen as text, with no browser attached. */
+export function peek(id) {
+  const host = hosts.get(id);
+  if (!host) return null;
+  try { return host.vt.getVisibleText(); } catch { return null; }
+}
+
+// ---------- the shared grid ----------
+//
+// A PTY has exactly one geometry. One attached viewer therefore holds a size
+// lease (the controller); every other viewer watches the same grid without
+// changing it. A watcher can take the lease through an explicit interaction.
+// This prevents a phone or background tab from resizing a desktop session merely
+// by connecting.
+
+function effectiveGrid(host) {
+  return host.controller?.want || { cols: host.cols, rows: host.rows };
+}
+
+function preferredGrid(cols, rows, fallback) {
+  const c = Number.isFinite(cols) ? Math.round(cols) : fallback.cols;
+  const r = Number.isFinite(rows) ? Math.round(rows) : fallback.rows;
+  return {
+    cols: Math.max(MIN_COLS, Math.min(MAX_COLS, c)),
+    rows: Math.max(MIN_ROWS, Math.min(MAX_ROWS, r)),
+  };
+}
+
+function notifyGrid(host, reset = false) {
+  for (const sub of host.subs) {
+    sub.onGrid(host.cols, host.rows, host.controller === sub, host.subs.size, reset);
+  }
+}
+
+function clearCaptureTimers(txn) {
+  if (txn.idleTimer) clearTimeout(txn.idleTimer);
+  if (txn.maxTimer) clearTimeout(txn.maxTimer);
+  txn.idleTimer = null;
+  txn.maxTimer = null;
+}
+
+function logicalText(lines, cols) {
+  let text = '';
+  for (let line = 0; line < lines.length; line++) {
+    const row = lines[line].text || '';
+    text += row;
+    // A full terminal row is a soft wrap. Do not insert whitespace: Claude's
+    // words can be split at an arbitrary column between snapshots. A shorter
+    // row ended with a real line break, which must remain part of the overlap.
+    if (textColumns(row) < cols) {
+      text += '\n';
+    }
+  }
+  return text;
+}
+
+function logicalHistory(text) {
+  if (!text) return [];
+  const lines = text.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  return lines.map((line) => ({ text: line }));
+}
+
+function visibleRows(vt) {
+  try { return vt.getVisibleText().split('\n').map((text) => ({ text })); } catch { return []; }
+}
+
+function longestPrefixOccurrence(pattern, text) {
+  const prefix = new Array(pattern.length).fill(0);
+  for (let i = 1, matched = 0; i < pattern.length; i++) {
+    while (matched && pattern[i] !== pattern[matched]) matched = prefix[matched - 1];
+    if (pattern[i] === pattern[matched]) matched++;
+    prefix[i] = matched;
+  }
+  let matched = 0, best = 0, bestEnd = -1;
+  for (let i = 0; i < text.length; i++) {
+    while (matched && text[i] !== pattern[matched]) matched = prefix[matched - 1];
+    if (text[i] === pattern[matched]) matched++;
+    if (matched > best) { best = matched; bestEnd = i; }
+    if (matched === pattern.length) matched = prefix[matched - 1];
+  }
+  return { length: best, end: bestEnd };
+}
+
+/**
+ * Merge a primary-screen repaint into the fullest transcript seen so far.
+ *
+ * A growing pane can reveal an archived suffix after a fresh welcome/header,
+ * so the overlap may occur inside the repaint rather than at its first byte.
+ * Searching the reversed strings finds the longest archive suffix anywhere in
+ * the repaint in linear time. The repaint prefix is inserted before that
+ * suffix, preserving a header without retaining two copies of the turns.
+ */
+export function mergeRepaintArchive(base, repaint) {
+  if (!base) return repaint;
+  if (!repaint) return base;
+  if (!base.trim()) return repaint;
+  if (!repaint.trim()) return base;
+  const reverse = (text) => {
+    let result = '';
+    for (let i = text.length - 1; i >= 0; i--) result += text[i];
+    return result;
+  };
+  // Shape 1: an archive suffix is revealed after a freshly painted header.
+  const suffix = longestPrefixOccurrence(
+    reverse(base.slice(-repaint.length)), reverse(repaint),
+  );
+  // Shape 2: the repaint starts in the archive, then replaces its volatile
+  // footer (dimensions, status line, prompt chrome) with the new one.
+  const prefix = longestPrefixOccurrence(repaint.slice(0, base.length), base);
+  const minimum = Math.min(12, base.trim().length, repaint.trim().length);
+  if (Math.max(suffix.length, prefix.length) < minimum) return base + repaint;
+  if (prefix.length > suffix.length) {
+    const baseOffset = prefix.end - prefix.length + 1;
+    return base.slice(0, baseOffset) + repaint;
+  }
+  const repaintOffset = repaint.length - 1 - suffix.end;
+  return repaint.slice(0, repaintOffset) + base
+    + repaint.slice(repaintOffset + suffix.length);
+}
+
+/**
+ * Replace the archive's old visible tail with a new repaint.
+ *
+ * Resize output is presentation, never appended terminal output. Match the
+ * longest prefix of the new visible grid inside the archive; everything before
+ * that point is the hidden prefix, and the new grid replaces everything after
+ * it (including dimension-dependent status/footer text).
+ */
+export function repaintArchiveView(archive, visible, fallbackHistory = '') {
+  if (!visible) return { archive, history: logicalHistory(archive) };
+  const leading = visible.match(/^(?:[ \t]*\n)*/)?.[0].length || 0;
+  const candidate = visible.slice(leading);
+  let match = candidate ? longestPrefixOccurrence(candidate, archive) : { length: 0, end: -1 };
+
+  // A few shared characters are not a safe repaint boundary in a substantial
+  // screen. Claude's randomized status lines, for example, all begin with
+  // "Worked for ". Anchoring a fresh screen there can retain the old turn that
+  // precedes a later status line, then append that same turn again. Require a
+  // meaningful overlap for long screens, while still accepting complete short
+  // prompts in small panes.
+  const archiveContentLength = archive.trim().length;
+  const confidence = (tail) => Math.min(
+    64,
+    archiveContentLength,
+    Math.max(12, Math.floor(tail.trim().length / 2)),
+  );
+  let minimum = confidence(candidate);
+
+  // A repaint may start with one volatile row before its stable transcript.
+  // If the first row offers only a weak match, advance by logical lines until
+  // the first substantial overlap is found. The visible grid is bounded to 500
+  // rows, and the cap keeps a maliciously fragmented screen from repeatedly
+  // scanning a large archive.
+  if (match.length < minimum) {
+    let offset = 0;
+    for (let attempts = 0; attempts < 32;) {
+      const newline = candidate.indexOf('\n', offset);
+      if (newline < 0) break;
+      offset = newline + 1;
+      const tail = candidate.slice(offset);
+      if (!tail.trim()) break;
+      const nextBreak = tail.indexOf('\n');
+      const firstLine = tail.slice(0, nextBreak < 0 ? undefined : nextBreak);
+      if (firstLine.trim().length < 12) continue;
+      attempts++;
+      const next = longestPrefixOccurrence(tail, archive);
+      const nextMinimum = confidence(tail);
+      if (next.length >= nextMinimum) {
+        match = next;
+        minimum = nextMinimum;
+        break;
+      }
+    }
+  }
+  let history = fallbackHistory;
+  if (match.length >= minimum && minimum > 0) {
+    const archiveOffset = match.end - match.length + 1;
+    history = archive.slice(0, archiveOffset);
+  }
+  return { archive: history + visible, history: logicalHistory(history) };
+}
+
+function terminalArchive(vt, snap) {
+  return logicalText([...(snap.scrollbackLines || []), ...visibleRows(vt)], snap.cols);
+}
+
+const MAX_HISTORY_STYLES = 50_000;
+
+function learnHistoryStyles(host, vt, snap) {
+  if (!host.historyStyles || typeof vt.formatHtml !== 'function') return;
+  const visibleHasStyle = (snap.cells || []).some((cell) => cell.bold || cell.italic
+    || cell.underline || cell.foreground || cell.background);
+  if (!visibleHasStyle && host.historyStyles.size === 0) return;
+  let styled;
+  try { styled = styledSnapshotLines(snap, vt.formatHtml()); } catch { return; }
+  for (const line of [...styled.rows, ...styled.logical]) {
+    if (!line.text || !line.ansi) continue;
+    // Refresh insertion order so frequently repainted transcript rows survive
+    // the bounded cache while old one-off status lines age out.
+    host.historyStyles.delete(line.text);
+    host.historyStyles.set(line.text, line.ansi);
+  }
+  while (host.historyStyles.size > MAX_HISTORY_STYLES) {
+    host.historyStyles.delete(host.historyStyles.keys().next().value);
+  }
+}
+
+function withHistoryStyles(host, lines) {
+  return (lines || []).map((line) => {
+    const ansi = line.ansi || host.historyStyles?.get(line.text || '');
+    return ansi ? { ...line, ansi } : line;
+  });
+}
+
+function styledSnapshot(host, vt, snap) {
+  learnHistoryStyles(host, vt, snap);
+  return { ...snap, scrollbackLines: withHistoryStyles(host, snap.scrollbackLines) };
+}
+
+/**
+ * Commit one captured agent repaint without duplicating its overflow rows.
+ *
+ * The pre-resize scrollback boundary and final repaint are merged once, then
+ * both the server terminal and every viewer are restored from that same state.
+ * Shell sessions never use this path.
+ */
+function finishCapturedGrid(host, txn) {
+  if (host.resizeCapture !== txn) return;
+  host.resizeCapture = null;
+  clearCaptureTimers(txn);
+
+  let snap = null;
+  let replacement = null;
+  let committedArchive = null;
+  if (txn.sawData) {
+    try { snap = txn.vt.snapshot({ includeCells: true, includeScrollback: true }); } catch {}
+    if (snap) {
+      try {
+        learnHistoryStyles(host, txn.vt, snap);
+        const visible = visibleRows(txn.vt);
+        const visibleText = logicalText(visible, txn.cols);
+        const view = repaintArchiveView(txn.archive, visibleText, txn.fallbackHistory);
+        committedArchive = view.archive;
+        replacement = ghostty.createTerminal({
+          cols: txn.cols,
+          rows: txn.rows,
+          scrollbackLimit: SCROLLBACK_BYTES,
+        });
+        replacement.feed(snapshotToRestoreAnsi({
+          ...snap, scrollbackLines: withHistoryStyles(host, view.history),
+        }));
+      } catch (error) {
+        console.error('[runner] resize capture commit', error && error.message);
+        try { replacement?.dispose(); } catch {}
+        replacement = null;
+        snap = null;
+      }
+    }
+  }
+
+  try {
+    if (!snap) {
+      // The foreground process ignored SIGWINCH. Ordinary reflow is the only
+      // faithful outcome because no repaint exists to replace the old screen.
+      host.vt.resize(txn.cols, txn.rows);
+      host.cols = txn.cols;
+      host.rows = txn.rows;
+      host.repaintArchive = null;
+      notifyGrid(host, false);
+    } else {
+      const previous = host.vt;
+      host.vt = replacement;
+      host.cols = txn.cols;
+      host.rows = txn.rows;
+      // The archive retains the full transcript even when a wide grid exposes
+      // all of it and therefore needs no scrollback. A later narrow repaint can
+      // derive the hidden prefix again instead of losing the oldest rows.
+      host.repaintArchive = committedArchive;
+      // Reset and restore one canonical snapshot. Keeping a browser's old
+      // scrollback while painting only the new viewport makes the two models
+      // diverge after a narrow zoom, even when the server history is correct.
+      notifyGrid(host, true);
+      const committed = host.vt.snapshot({ includeCells: true, includeScrollback: true });
+      const ansi = snapshotToRestoreAnsi(styledSnapshot(host, host.vt, committed));
+      for (const sub of host.subs) sub.onData(ansi);
+      try { previous.dispose(); } catch {}
+      sampleScreen(host);
+    }
+  } finally {
+    try { txn.vt.dispose(); } catch {}
+  }
+  host.historyCheckpoint.schedule();
+
+  // A newer controller preference may have arrived while the repaint settled.
+  const next = effectiveGrid(host);
+  if (next.cols !== host.cols || next.rows !== host.rows) scheduleGrid(host);
+}
+
+function armCapturedGrid(host, txn) {
+  if (txn.idleTimer) clearTimeout(txn.idleTimer);
+  txn.idleTimer = setTimeout(() => finishCapturedGrid(host, txn), txn.idleMs);
+  if (txn.idleTimer.unref) txn.idleTimer.unref();
+}
+
+/** Start or supersede the bounded repaint transaction for an agent TUI. */
+function startCapturedGrid(host, cols, rows, seed = null, resizePty = true) {
+  const previous = host.resizeCapture;
+  // A viewer can report its measured geometry before the resumed CLI emits
+  // its first byte. That resize is still part of startup, so claim the durable
+  // seed here rather than leaving it for a later output chunk.
+  const pendingStartup = !seed && !previous ? host.startupHistory : null;
+  if (pendingStartup) {
+    seed = {
+      history: pendingStartup.lines,
+      historyCols: pendingStartup.cols,
+      logical: true,
+    };
+  }
+  // Resizing during a startup capture supersedes its scratch grid, but must not
+  // downgrade its long idle window to the ordinary resize debounce. Otherwise
+  // a delayed resume repaint is committed later as duplicate terminal output.
+  const startupCapture = !!seed || !!previous?.startupCapture;
+  let archive = seed?.history
+    ? (seed.logical
+      ? `${seed.history.map((line) => line.text || '').join('\n')}\n`
+      : logicalText(seed.history, seed.historyCols || host.cols))
+    : host.repaintArchive;
+  let fallbackHistory = seed?.history ? archive : null;
+  if (previous) {
+    archive = previous.archive;
+    fallbackHistory = previous.fallbackHistory;
+    host.resizeCapture = null;
+    clearCaptureTimers(previous);
+    try { previous.vt.dispose(); } catch {}
+  }
+  try {
+    const source = host.vt.snapshot({ includeScrollback: true });
+    if (archive == null) {
+      archive = terminalArchive(host.vt, source);
+    }
+    if (fallbackHistory == null) {
+      fallbackHistory = logicalText(source.scrollbackLines || [], source.cols);
+    }
+  } catch { return false; }
+
+  let scratch;
+  try {
+    scratch = ghostty.createTerminal({ cols, rows, scrollbackLimit: 4 * 1024 * 1024 });
+  } catch (error) {
+    console.error('[runner] resize capture setup', error && error.message);
+    try { scratch?.dispose(); } catch {}
+    return false;
+  }
+
+  const txn = {
+    vt: scratch,
+    cols,
+    rows,
+    archive: archive || '',
+    fallbackHistory: fallbackHistory || '',
+    sawData: false,
+    startupCapture,
+    idleMs: startupCapture ? STARTUP_CAPTURE_IDLE_MS : RESIZE_CAPTURE_IDLE_MS,
+    maxMs: startupCapture ? STARTUP_CAPTURE_MAX_MS : RESIZE_CAPTURE_MAX_MS,
+    idleTimer: null,
+    maxTimer: null,
+  };
+  host.resizeCapture = txn;
+  if (pendingStartup) host.startupHistory = null;
+  if (resizePty) { try { host.pty.resize(cols, rows); } catch {} }
+  txn.maxTimer = setTimeout(() => finishCapturedGrid(host, txn), txn.maxMs);
+  if (txn.maxTimer.unref) txn.maxTimer.unref();
+  return true;
+}
+
+/**
+ * Move the session to the size its viewers imply.
+ *
+ * Shells use ordinary reflow: every row is real output. Known agent TUIs on the
+ * primary screen instead use a bounded scratch transaction because their full
+ * SIGWINCH redraw is presentation, not new history. Alternate-screen programs
+ * are already isolated from primary scrollback and use ordinary resize.
+ */
+function applyGrid(host) {
+  const { cols, rows } = effectiveGrid(host);
+  if (!host.resizeCapture && cols === host.cols && rows === host.rows) return false;
+  if (host.captureResize) {
+    let alt = false;
+    try { alt = !!host.vt.snapshot().isAltScreen; } catch {}
+    if (!alt && startCapturedGrid(host, cols, rows)) return true;
+  }
+  host.cols = cols;
+  host.rows = rows;
+  try { host.vt.resize(cols, rows); } catch {}
+  // Put the geometry frame on every viewer's ordered WebSocket stream before
+  // SIGWINCH can make the foreground application repaint at the new size.
+  // Otherwise those repaint bytes may be interpreted using the old grid and
+  // leave duplicated or displaced rows in the browser emulator.
+  notifyGrid(host, false);
+  try { host.pty.resize(cols, rows); } catch {}
+  return true;
+}
+
+/**
+ * Apply the controller's preferred grid once requests stop arriving. If a
+ * pending request clamps back to the current size, report that canonical size.
+ */
+function scheduleGrid(host) {
+  if (host.gridTimer) clearTimeout(host.gridTimer);
+  host.gridTimer = setTimeout(() => {
+    host.gridTimer = null;
+    if (!applyGrid(host)) notifyGrid(host, false);
+  }, RESIZE_SETTLE_MS);
+  if (host.gridTimer.unref) host.gridTimer.unref();
+}
+
+function armTraceHydration(host) {
+  if (!host.traceHistoryPage || host.traceHistoryTimer) return;
+  const readyAt = Math.max(
+    host.startedAt + TRACE_HYDRATE_MIN_MS,
+    (host.lastOutputAt || host.startedAt) + TRACE_HYDRATE_IDLE_MS,
+    host.resizeCapture ? Date.now() + TRACE_HYDRATE_IDLE_MS : 0,
+  );
+  host.traceHistoryTimer = setTimeout(() => {
+    host.traceHistoryTimer = null;
+    if (hosts.get(host.id) !== host || !host.traceHistoryPage) return;
+    if (host.resizeCapture || Date.now() < readyAt) { armTraceHydration(host); return; }
+
+    let snap;
+    try { snap = host.vt.snapshot({ includeCells: true, includeScrollback: true }); } catch { return; }
+    const visible = visibleRows(host.vt);
+    const visibleText = logicalText(visible, snap.cols);
+    const currentText = visible.map((line) => line.text || '').join('\n');
+    const recovered = traceHistoryLines(host.traceHistoryPage, currentText);
+    host.traceHistoryPage = null;
+    learnHistoryStyles(host, host.vt, snap);
+
+    let replacement = null;
+    try {
+      // The trace supplies missing older turns while the settled startup grid
+      // supplies the welcome and the newest live turn. Merge their overlap
+      // into one archive rather than appending either presentation verbatim.
+      const startup = terminalArchive(host.vt, snap);
+      const archive = mergeRepaintArchive(logicalText(recovered, snap.cols), startup);
+      const view = repaintArchiveView(archive, visibleText);
+      replacement = ghostty.createTerminal({
+        cols: host.cols, rows: host.rows, scrollbackLimit: SCROLLBACK_BYTES,
+      });
+      replacement.feed(snapshotToRestoreAnsi({
+        ...snap,
+        scrollbackLines: withHistoryStyles(host, view.history),
+      }));
+      const previous = host.vt;
+      host.vt = replacement;
+      host.repaintArchive = view.archive;
+      notifyGrid(host, true);
+      const committed = host.vt.snapshot({ includeCells: true, includeScrollback: true });
+      const ansi = snapshotToRestoreAnsi(styledSnapshot(host, host.vt, committed));
+      for (const sub of host.subs) sub.onData(ansi);
+      try { previous.dispose(); } catch {}
+      sampleScreen(host);
+      host.historyCheckpoint.schedule();
+    } catch (error) {
+      console.error('[runner] trace history restore', error && error.message);
+      try { replacement?.dispose(); } catch {}
+    }
+  }, Math.max(0, readyAt - Date.now()));
+  if (host.traceHistoryTimer.unref) host.traceHistoryTimer.unref();
+}
+
+async function hydrateTraceHistory(session, host) {
+  try {
+    let page = await readTrace(session, { offset: 0, limit: 500 });
+    if (page.total > page.turns.length) {
+      page = await readTrace(session, { offset: Math.max(0, page.total - 500), limit: 500 });
+    }
+    if (hosts.get(host.id) !== host) return;
+    host.traceHistoryPage = page;
+    armTraceHydration(host);
+  } catch {
+    // A new/onboarding session may not have a trace yet; live output remains
+    // authoritative and its first checkpoint will become the durable seed.
+  }
 }
 
 // ---------- Codex conversation pinning ----------
@@ -598,18 +1097,28 @@ function commandFor(session) {
   }
 
   // Other agents: resume when one likely exists, else a fresh launch. `exec` so
-  // the agent is the pane's foreground process; when it exits the tmux session
-  // ends — a clear "done" signal — and the fallback preserves that.
+  // the agent is the PTY's foreground process; when it exits the session ends —
+  // a clear "done" signal — and the fallback preserves that.
   if (session.everStarted && cli.cont) return `${cli.cont} || exec ${cli.run}`;
   if (q0 && cli.withPrompt) return `exec ${cli.withPrompt(q0)}`;
   return `exec ${cli.run}`;
 }
 
-/** Attach a new PTY client to the session (creating the tmux session if needed). */
-export function attach(session, cols, rows) {
-  // A remote agent has no terminal here by design — its harness runs on another
-  // machine. /ws catches this and says so in the pane.
-  if (isRemote(session.cli)) throw new Error('this pane has no terminal — it talks to an agent elsewhere');
+/**
+ * Start the session's PTY and its grid, without any browser attached. Returns
+ * true if it had to spawn. This is now the ONLY way a session starts, so the
+ * Overview reply box waking a stopped agent and a browser opening a pane take
+ * exactly the same path.
+ */
+export function ensureRunning(session, cols = 120, rows = 34) {
+  // Nothing to start: a remote agent starts itself, on its own machine. Both
+  // callers guard this too; keep the refusal here so no future one can spawn
+  // a PTY for a pane that can never use it.
+  if (isRemote(session.cli)) throw new Error('a remote agent runs on its own machine — nothing to start here');
+  const existing = hosts.get(session.id);
+  if (existing) return false;
+  if (!ghostty) throw new Error(`libghostty-vt unavailable: ${ghosttyError}`);
+
   // The recorded workspace-relative path ('' = the workspaces root itself).
   // If the folder was deleted or moved, mkdir simply recreates it empty — no
   // tracking, no magic.
@@ -617,79 +1126,134 @@ export function attach(session, cols, rows) {
   const workdir = path.join(WORKSPACES_DIR, folder);
   fs.mkdirSync(workdir, { recursive: true });
   const full = commandFor(session);
+  const captureResize = cliById(session.cli)?.resizeMode === 'repaint';
 
-  let term;
-  if (USE_TMUX) {
-    const args = [];
-    if (fs.existsSync(TMUX_CONF)) args.push('-f', TMUX_CONF);
-    args.push(
-      // -A: attach if it exists, else create. -D: detach any other client, so
-      // exactly ONE device drives the session at a time. Sharing it was worse:
-      // window-size=latest resized the shared window to whoever spoke last, and
-      // agent TUIs (which paint into the normal buffer, not the alt screen)
-      // re-emit their frame with erase math computed at the OLD width — so every
-      // phone/desktop flip left another copy of the same text in the scrollback,
-      // wrapped at the other device's width. The handover is sequential instead:
-      // the detached client is told the session lives on (close code 4001) and
-      // waits for a deliberate return before taking it back (see TerminalPane).
-      'new-session', '-A', '-D', '-s', tmuxName(session.id), '-c', workdir,
-      '-e', `AM_SESSION=${folder}`,
-      '-e', `AM_NAME=${session.name}`,
-      '-e', `AM_ID=${session.id}`,
-      '-e', `AM_USER=${AM_USER}`,
-      '-e', `AM_ROOT=${WORKSPACES_DIR}`, // prompt shows $PWD relative to this
-      'sh', '-lc', full,
-    );
-    term = pty.spawn('tmux', args, { name: 'xterm-256color', cols, rows, cwd: workdir, env: TERM_ENV });
-  } else {
-    const env = { ...TERM_ENV, AM_SESSION: folder, AM_NAME: session.name, AM_ID: session.id, AM_USER, AM_ROOT: WORKSPACES_DIR };
-    term = pty.spawn('bash', ['-lc', full], { name: 'xterm-256color', cols, rows, cwd: workdir, env });
-  }
-
-  if (!session.everStarted) update(session.id, { everStarted: true, pendingPrompt: undefined });
-  if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
-  if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
-  if (session.cli === 'claude') scheduleClaudeCapture(session, workdir);
-
-  const handle = {
-    onData: (cb) => term.onData(cb),
-    onExit: (cb) => term.onExit(cb),
-    write: (d) => { try { term.write(d); } catch {} },
-    resize: (c, r) => { try { term.resize(c, r); } catch {} },
-    kill: () => { try { term.kill(); } catch {} },
+  const env = {
+    ...TERM_ENV,
+    AM_SESSION: folder,
+    AM_NAME: session.name,
+    AM_ID: session.id,
+    AM_USER,
+    AM_ROOT: WORKSPACES_DIR, // prompt shows $PWD relative to this
   };
-  track(session.id, handle);
-  term.onExit(() => untrack(session.id, handle));
-  return handle;
-}
+  const term = pty.spawn('bash', ['-lc', full], {
+    name: 'xterm-256color', cols, rows, cwd: workdir, env,
+  });
+  const vt = ghostty.createTerminal({ cols, rows, scrollbackLimit: SCROLLBACK_BYTES });
+  const loadedHistory = loadTerminalHistory(HISTORY_DIR, session.id);
+  // Older agent checkpoints may contain startup repaint frames or a turn that
+  // trace hydration raced with Claude's own replay. Rebuild those once from
+  // the trace. Shell history never used that path and remains safe to restore.
+  const persistedHistory = captureResize
+    && loadedHistory?.version < TERMINAL_HISTORY_VERSION ? null : loadedHistory;
+  if (persistedHistory) {
+    try {
+      vt.feed(snapshotToRestoreAnsi({
+        cols, rows, cursorRow: 0, cursorCol: 0, isAltScreen: false, cells: [],
+        scrollbackLines: persistedHistory.lines,
+      }));
+    } catch (error) {
+      console.error('[runner] history restore', error && error.message);
+    }
+  }
+  const host = {
+    id: session.id,
+    pty: term,
+    vt,
+    cols,
+    rows,
+    captureResize,
+    resizeCapture: null,
+    repaintArchive: null,
+    historyStyles: new Map((persistedHistory?.lines || [])
+      .filter((line) => line.text && line.ansi).map((line) => [line.text, line.ansi])),
+    startupHistory: captureResize ? persistedHistory : null,
+    historyCheckpoint: null,
+    traceHistoryPage: null,
+    traceHistoryTimer: null,
+    subs: new Set(),
+    controller: null,
+    gridTimer: null,
+    startedAt: Date.now(),
+    lastOutputAt: Date.now(),
+    screenChangedAt: Date.now(),
+    bells: 0,
+  };
+  host.historyCheckpoint = createTerminalHistoryCheckpoint({
+    directory: HISTORY_DIR,
+    id: host.id,
+    delayMs: HISTORY_SAVE_MS,
+    snapshot: () => {
+      const snap = host.vt.snapshot({ includeScrollback: true });
+      learnHistoryStyles(host, host.vt, snap);
+      if (!captureResize) {
+        return { ...snap, scrollbackLines: withHistoryStyles(host, snap.scrollbackLines) };
+      }
+      const archive = host.repaintArchive ?? terminalArchive(host.vt, snap);
+      return {
+        cols: host.cols,
+        scrollbackLines: withHistoryStyles(host, logicalHistory(archive)),
+      };
+    },
+    blocked: () => !!host.resizeCapture,
+    persistedBody: persistedHistory?.body || null,
+  });
 
-/**
- * Make sure the session's tmux process exists WITHOUT a browser pane attached
- * (used by the Overview reply box to wake a stopped agent). Returns true if it
- * had to spawn. Direct-PTY mode has no detached equivalent — throws if dead.
- */
-export function ensureRunning(session) {
-  // Nothing to start: a remote agent starts itself, elsewhere. Callers that
-  // might see one must go through deliver() (index.js) instead of assuming a PTY.
-  if (isRemote(session.cli)) throw new Error('a remote agent runs on its own machine — nothing to start here');
-  if (isRunning(session.id)) return false;
-  if (!USE_TMUX) throw new Error('session is not running');
-  const folder = session.path ?? session.id;
-  const workdir = path.join(WORKSPACES_DIR, folder);
-  fs.mkdirSync(workdir, { recursive: true });
-  const args = [];
-  if (fs.existsSync(TMUX_CONF)) args.push('-f', TMUX_CONF);
-  args.push(
-    'new-session', '-d', '-s', tmuxName(session.id), '-c', workdir,
-    '-x', '200', '-y', '50', // sane size until a client attaches (window-size=latest)
-    '-e', `AM_SESSION=${folder}`,
-    '-e', `AM_NAME=${session.name}`,
-    '-e', `AM_ID=${session.id}`,
-    '-e', `AM_USER=${AM_USER}`,
-    '-e', `AM_ROOT=${WORKSPACES_DIR}`,
-    'sh', '-lc', commandFor(session),
-  );
-  execFileSync('tmux', args, { stdio: 'ignore', env: TERM_ENV });
+  term.onData((chunk) => {
+    host.lastOutputAt = Date.now();
+    if (host.traceHistoryTimer) {
+      clearTimeout(host.traceHistoryTimer);
+      host.traceHistoryTimer = null;
+    }
+    if (host.traceHistoryPage) armTraceHydration(host);
+    let txn = host.resizeCapture;
+    if (!txn && host.startupHistory) {
+      startCapturedGrid(host, host.cols, host.rows, null, false);
+      txn = host.resizeCapture;
+    }
+    if (txn) {
+      try { txn.vt.feed(chunk); } catch (e) { console.error('[runner] resize capture', e && e.message); }
+      txn.sawData = true;
+      for (let i = 0; i < chunk.length; i++) {
+        if (chunk.charCodeAt(i) === 7) { host.bells++; host.lastBellAt = Date.now(); }
+      }
+      armCapturedGrid(host, txn);
+      return;
+    }
+
+    // This is real output outside a resize transaction. It may have advanced
+    // scrollback, so the next transaction takes a fresh canonical boundary.
+    host.repaintArchive = null;
+    try { host.vt.feed(chunk); } catch (e) { console.error('[runner] vt.feed', e && e.message); }
+    host.historyCheckpoint.schedule();
+
+    // State detection rides the feed path: the grid is already current, so there
+    // is nothing to poll and no subprocess to spawn.
+    sampleScreen(host);
+    for (let i = 0; i < chunk.length; i++) {
+      if (chunk.charCodeAt(i) === 7) { host.bells++; host.lastBellAt = Date.now(); }
+    }
+
+    for (const sub of host.subs) sub.onData(chunk);
+  });
+
+  term.onExit(() => {
+    hosts.delete(session.id);
+    if (host.gridTimer) { clearTimeout(host.gridTimer); host.gridTimer = null; }
+    if (host.traceHistoryTimer) { clearTimeout(host.traceHistoryTimer); host.traceHistoryTimer = null; }
+    if (host.resizeCapture) {
+      clearCaptureTimers(host.resizeCapture);
+      try { host.resizeCapture.vt.dispose(); } catch {}
+      host.resizeCapture = null;
+    }
+    host.historyCheckpoint.flush();
+    try { host.vt.dispose(); } catch {}
+    for (const sub of host.subs) sub.onExit();
+    host.subs.clear();
+  });
+
+  hosts.set(session.id, host);
+  if (!persistedHistory && captureResize) hydrateTraceHistory(session, host);
   if (!session.everStarted) update(session.id, { everStarted: true, pendingPrompt: undefined });
   if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
   if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
@@ -697,80 +1261,130 @@ export function ensureRunning(session) {
   return true;
 }
 
+/**
+ * Subscribe a viewer to a session, starting it if needed.
+ *
+ * Unlike the tmux version this does NOT spawn anything per viewer, and
+ * `handle.kill()` only unsubscribes — closing a tab must never stop an agent.
+ * `handle.restore()` returns a canonical snapshot: Ghostty's complete plain-text
+ * history followed by a styled visible-screen repaint. It never replays an
+ * arbitrary suffix of old PTY bytes at a new geometry.
+ */
+export function attach(session, cols, rows) {
+  ensureRunning(session, cols, rows);
+  const host = hosts.get(session.id);
+  if (!host) throw new Error('session failed to start');
+
+  const sub = {
+    onData: () => {},
+    onExit: () => {},
+    onGrid: () => {},
+    want: preferredGrid(cols, rows, host),
+  };
+  host.subs.add(sub);
+  if (!host.controller) host.controller = sub;
+  // Existing viewers need to know that the session is now shared. The new
+  // viewer receives the same role/count in its restore frame below.
+  notifyGrid(host, false);
+  if (host.controller === sub && (sub.want.cols !== host.cols || sub.want.rows !== host.rows)) scheduleGrid(host);
+
+  return {
+    onData: (cb) => { sub.onData = (d) => { try { cb(d); } catch {} }; },
+    onExit: (cb) => { sub.onExit = () => { try { cb(); } catch {} }; },
+    onGrid: (cb) => { sub.onGrid = (c, r, controller, viewers, reset) => { try { cb(c, r, controller, viewers, reset); } catch {} }; },
+    // Input and terminal-query responses are accepted from one emulator only.
+    write: (d) => {
+      if (host.controller !== sub) return;
+      try { host.pty.write(d); } catch {}
+    },
+    // Every viewer remembers what it can display, but only the current
+    // controller's request changes the PTY.
+    resize: (c, r) => {
+      if (!Number.isFinite(c) || !Number.isFinite(r)) return;
+      const want = preferredGrid(c, r, host);
+      const had = sub.want;
+      sub.want = want;
+      if (had && had.cols === want.cols && had.rows === want.rows) return;
+      if (host.controller === sub) scheduleGrid(host);
+    },
+    claim: () => {
+      if (!host.subs.has(sub) || host.controller === sub) return;
+      host.controller = sub;
+      notifyGrid(host, false);
+      scheduleGrid(host);
+    },
+    restore: () => {
+      let snap;
+      try { snap = host.vt.snapshot({ includeCells: true, includeScrollback: true }); } catch { return null; }
+      return {
+        ansi: snapshotToRestoreAnsi(styledSnapshot(host, host.vt, snap)),
+        cols: snap.cols,
+        rows: snap.rows,
+        viewers: host.subs.size,
+        controller: host.controller === sub,
+      };
+    },
+    // Detach this viewer only. The session, its grid and its scrollback stay.
+    kill: () => {
+      const controlled = host.controller === sub;
+      host.subs.delete(sub);
+      if (controlled) host.controller = host.subs.values().next().value || null;
+      notifyGrid(host, false);
+      if (controlled && host.controller) scheduleGrid(host);
+    },
+  };
+}
+
 /** Type a line into the session's terminal (works with no browser attached). */
 export async function sendInput(id, text) {
+  const host = hosts.get(id);
+  if (!host) throw new Error('session is not running');
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
   // the inner newlines as soft line breaks instead of submitting early.
   const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
   // The Enter must arrive as its OWN keypress: TUIs (codex) detect rapid input
   // bursts as a paste, and a CR inside the burst becomes a newline in the
   // composer instead of a submit. A short gap breaks the burst.
-  const gap = () => new Promise((r) => setTimeout(r, 300));
-  if (USE_TMUX) {
-    execFileSync('tmux', ['send-keys', '-t', tmuxName(id), '-l', '--', payload], { stdio: 'ignore' });
-    await gap();
-    execFileSync('tmux', ['send-keys', '-t', tmuxName(id), 'Enter'], { stdio: 'ignore' });
-    return;
-  }
-  const set = live.get(id);
-  if (!set || !set.size) throw new Error('session is not running');
-  const h = set.values().next().value;
-  h.write(payload);
-  await gap();
-  h.write('\r');
+  host.pty.write(payload);
+  await new Promise((r) => setTimeout(r, 300));
+  host.pty.write('\r');
 }
 
 /**
  * The session's rendered screen plus `lines` of scrollback above it — what a
  * human would see in the pane. Used by the agent API so one agent can watch
  * another's progress instead of spending a turn asking.
+ *
+ * Reads the grid we already hold, so it costs no subprocess. snapshot() returns
+ * history as plain text, which is exactly what the tmux `capture-pane -p` this
+ * replaced produced, so callers see the same shape.
  */
 export function capturePane(id, lines = 80) {
-  if (!USE_TMUX) return null;
+  const host = hosts.get(id);
+  if (!host) return null; // stopped
   const n = Math.max(0, Math.min(2000, lines));
-  let out;
-  try {
-    out = execFileSync('tmux', ['capture-pane', '-p', '-S', `-${n}`, '-t', tmuxName(id)],
-      { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch { return null; } // no such session (stopped)
-  // capture-pane pads the pane to its full height with blank lines; drop them so
-  // a short screen doesn't arrive as 50 lines of nothing. -S already bounds the
-  // scrollback, so the caller decides whether to trim the visible screen too.
-  return out.replace(/\s+$/, '');
+  let snap;
+  try { snap = host.vt.snapshot({ includeScrollback: n > 0 }); } catch { return null; }
+  const history = (snap.scrollbackLines || []).slice(-n).map((l) => l.text);
+  const visible = (snap.visibleLines || []).map((l) => l.text);
+  // Trailing blank rows are padding, not content: a short screen should not
+  // arrive as 50 lines of nothing.
+  return [...history, ...visible].join('\n').replace(/\s+$/, '');
 }
 
-/** Return the last mouse selection for this session as a browser-consumable OSC 52. */
-export function copySelection(id) {
-  if (!USE_TMUX) return null;
-  const bufferName = `am-copy-${tmuxName(id)}`;
-  let text = '';
-  try {
-    text = execFileSync('tmux', ['save-buffer', '-b', bufferName, '-'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: TERM_ENV });
-  } catch {
-    try {
-      text = execFileSync('tmux', ['save-buffer', '-'],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: TERM_ENV });
-    } catch {
-      return null;
-    }
-  }
-  if (!text) return null;
-  return `\x1b]52;c;${Buffer.from(text, 'utf8').toString('base64')}\x07`;
-}
-
-/** Stop a session entirely (kills the tmux session / the running process). */
+/** Stop a session entirely (kills the process; viewers get an exit close code). */
 export function stop(id) {
-  // A remote agent has no process to kill — "stopped" means disconnected, so the
-  // same button pauses it and closes its open polls.
-  const s = list().find((x) => x.id === id);
-  if (s && isRemote(s.cli)) { setPaused(s, true, 'stopped from the manager'); return; }
-  if (USE_TMUX) {
-    try {
-      execFileSync('tmux', ['kill-session', '-t', tmuxName(id)], { stdio: 'ignore' });
-    } catch {}
-  } else {
-    const s = live.get(id);
-    if (s) for (const h of s) h.kill();
+  const host = hosts.get(id);
+  if (!host) return;
+  try { host.pty.kill(); } catch {}
+}
+
+/**
+ * Kill every session. Without tmux nothing outlives this process, so a clean
+ * shutdown should not leave orphaned PTYs behind holding the workspace.
+ */
+export function stopAll() {
+  for (const host of hosts.values()) {
+    try { host.pty.kill(); } catch {}
   }
 }
