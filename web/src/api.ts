@@ -94,6 +94,8 @@ export interface BackupStatus {
   dataset: string;
   defaults: { mirror: string; dataset: string };
   hasToken: boolean;
+  canRunNow: boolean;
+  running: boolean;
   unavailable: string | null;
   last: { at: number; jobId: string | null; stage: string } | null;
   nextDue: number | null;
@@ -101,8 +103,10 @@ export interface BackupStatus {
   error: string | null;
 }
 export const backupStatus = (): Promise<BackupStatus> => fetch('/api/backup/status').then(json);
-export const runBackup = (): Promise<{ job?: string; error?: string }> =>
-  fetch('/api/backup/run', { method: 'POST' }).then(json);
+// jsonOrError, not json: the refusals worth showing ("a backup is already
+// running") are in the body, and json() throws them away for a bare status.
+export const runBackup = (): Promise<{ job?: string }> =>
+  fetch('/api/backup/run', { method: 'POST' }).then(jsonOrError);
 
 export interface SecretsData { detected: string[]; notes: Record<string, string>; }
 export const getSecrets = (): Promise<SecretsData> => fetch('/api/secrets').then(json);

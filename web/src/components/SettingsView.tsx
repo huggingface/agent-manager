@@ -181,14 +181,28 @@ export default function SettingsView({
   // Hub says about the last one rather than anything we remember locally.
   const [bk, setBk] = useState<api.BackupStatus | null>(null);
   const [bkBusy, setBkBusy] = useState(false);
+  const [bkMsg, setBkMsg] = useState('');
   const loadBackup = () => api.backupStatus().then(setBk).catch(() => {});
   useEffect(() => { loadBackup(); }, []);
   // Re-read after a save lands, so the interval and privacy dot stop disagreeing
   // with what was just chosen.
   useEffect(() => { if (cfgSaved === 'saved') loadBackup(); }, [cfgSaved]);
+  // While a Job is in flight, follow it: the copying happens on the Hub, so the
+  // only way to see it finish is to ask.
+  useEffect(() => {
+    if (!bk?.running) return;
+    const t = setInterval(loadBackup, 10_000);
+    return () => clearInterval(t);
+  }, [bk?.running]);
   const doBackup = async () => {
     setBkBusy(true);
-    try { await api.runBackup(); } catch {}
+    setBkMsg('');
+    try {
+      const r = await api.runBackup();
+      setBkMsg(r.job ? `Launched on the Hub as job ${r.job}.` : 'Launched.');
+    } catch (e) {
+      setBkMsg((e as Error).message || 'Could not launch the backup.');
+    }
     await loadBackup();
     setBkBusy(false);
   };
@@ -381,7 +395,7 @@ export default function SettingsView({
                       a bucket you can restore from instantly, and a dataset that keeps version history.
                       Nothing is ever deleted from your bucket.
                     </div>
-                    {bk?.hasToken && cfg.backup.every !== 'never' && (
+                    {bk?.canRunNow && (bk.last || cfg.backup.every !== 'never') && (
                       <div className="s-help" style={{ marginTop: 6 }}>
                         <span className="mono">{bk.mirror || bk.defaults.mirror}</span>
                         {bk.datasetPrivate === false
@@ -397,11 +411,21 @@ export default function SettingsView({
                         {bk.error && <> · <span style={{ color: 'var(--warn, #d97757)' }}>{bk.error}</span></>}
                       </div>
                     )}
-                    {bk?.hasToken && cfg.backup.every !== 'never' && (
-                      <button className="btn-ghost" style={{ marginTop: 8 }} disabled={bkBusy} onClick={doBackup}>
-                        {bkBusy ? 'Launching…' : 'Back up now'}
+                    {/* On demand regardless of the interval: taking one backup
+                        before a risky change should not mean switching on a
+                        schedule. Disabled while a run is in flight — two Jobs
+                        uploading to one dataset would race. */}
+                    {bk?.canRunNow && (
+                      <button
+                        className="btn-ghost"
+                        style={{ marginTop: 8 }}
+                        disabled={bkBusy || bk.running}
+                        onClick={doBackup}
+                      >
+                        {bkBusy ? 'Launching…' : bk.running ? 'Backing up…' : 'Back up now'}
                       </button>
                     )}
+                    {bkMsg && <div className="s-help" style={{ marginTop: 6 }}>{bkMsg}</div>}
                   </div>
                   <span className="cfg-ctl">
                     <div className="seg cfg-seg">

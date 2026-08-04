@@ -152,14 +152,23 @@ export function jobArgs({ source, mirror, dataset }) {
 }
 
 /**
- * Why a backup cannot run right now, or null if it can. One place, so the timer
- * and the settings row always agree about it.
+ * Why an on-demand backup cannot run, or null if it can. Deliberately does NOT
+ * consider the interval: "back up now" is exactly what you want before a risky
+ * change, without committing to a schedule.
  */
-export function unavailableReason(cfg) {
+export function runNowBlockedBy() {
   if (!hasToken()) return 'needs a write-scoped HF_TOKEN secret on the Space';
   if (!sourceBucket()) return 'no bucket is mounted on this Space';
-  if ((cfg?.backup?.every || 'never') === 'never') return 'switched off';
   return null;
+}
+
+/**
+ * Why the scheduled backup is not running, or null if it is live. Same reasons
+ * as on-demand plus the interval, so the timer and the settings row can never
+ * disagree about it.
+ */
+export function unavailableReason(cfg) {
+  return runNowBlockedBy() || ((cfg?.backup?.every || 'never') === 'never' ? 'switched off' : null);
 }
 
 /** Resolve the destinations, falling back to <namespace>/<space>-backup. */
@@ -172,9 +181,13 @@ async function targets(cfg) {
 
 /** Launch one backup Job now. Returns { job } — the Hub does the rest. */
 export async function runBackupNow(cfg) {
-  if (!hasToken()) throw new Error('needs a write-scoped HF_TOKEN secret on the Space');
+  const blocked = runNowBlockedBy();
+  if (blocked) throw new Error(blocked);
+  // Two runs at once would have two Jobs uploading to the same dataset, which
+  // race. The timer skips for this reason too; on demand it is worth saying out
+  // loud rather than silently doing nothing.
+  if (await isRunning()) throw new Error('a backup is already running');
   const source = sourceBucket();
-  if (!source) throw new Error('no bucket is mounted on this Space — nothing to back up');
   const { mirror, dataset } = await targets(cfg);
   for (const [label, id] of [['source', source], ['dataset', dataset], ['mirror', mirror]]) {
     if (label === 'mirror' && !id) continue;
@@ -202,6 +215,15 @@ async function jobStage(jobId) {
 
 const DONE = new Set(['COMPLETED', 'ERROR', 'FAILED', 'CANCELED']);
 
+/** Is the last launched Job still going? Unknown stage counts as finished, so a
+ *  Hub hiccup can never wedge backups off forever. */
+async function isRunning() {
+  const { jobId } = loadState();
+  if (!jobId) return false;
+  const stage = await jobStage(jobId);
+  return !!stage && !DONE.has(stage);
+}
+
 /**
  * One tick: launch a backup if one is due. Deliberately dumb — no cron, no
  * catch-up queue. "Due" is just "the last one started more than an interval
@@ -215,9 +237,7 @@ export async function tick(cfg) {
   if (!due) return { skipped: 'not due' };
 
   // Never let two runs overlap: a big first backup can outlast an interval.
-  if (state.jobId && !DONE.has(await jobStage(state.jobId))) {
-    return { skipped: 'previous backup still running' };
-  }
+  if (await isRunning()) return { skipped: 'previous backup still running' };
   try {
     const r = await runBackupNow(cfg);
     console.log(`[backup] launched job ${r.job} (every ${cfg.backup.every})`);
@@ -254,9 +274,11 @@ export async function backupStatus(cfg) {
   const every = cfg?.backup?.every || 'never';
   const source = sourceBucket();
   const { mirror, dataset, defaults } = await targets(cfg);
+  // Not gated on the interval: an on-demand backup is a real backup, and its
+  // result has to be visible even with the schedule off.
   const [stage, priv] = await Promise.all([
-    every === 'never' ? null : jobStage(state.jobId),
-    every === 'never' || !dataset ? null : datasetPrivate(dataset),
+    state.jobId ? jobStage(state.jobId) : null,
+    dataset && hasToken() ? datasetPrivate(dataset) : null,
   ]);
   return {
     every,
@@ -265,6 +287,8 @@ export async function backupStatus(cfg) {
     dataset,
     defaults,
     hasToken: hasToken(),
+    canRunNow: !runNowBlockedBy(),
+    running: !!stage && !DONE.has(stage),
     unavailable: unavailableReason(cfg),
     last: state.startedAt
       ? { at: state.startedAt, jobId: state.jobId || null, stage: stage || 'RUNNING' }

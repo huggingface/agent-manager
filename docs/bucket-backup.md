@@ -239,10 +239,22 @@ backup: {
 
 ```
 GET  /api/backup/status  → { every, source, mirror, dataset, defaults, hasToken,
-                             unavailable, last: { at, jobId, stage }, nextDue,
+                             canRunNow, running, unavailable,
+                             last: { at, jobId, stage }, nextDue,
                              datasetPrivate, error }
-POST /api/backup/run     → launch one Job now
+POST /api/backup/run     → launch one Job now (works with the schedule off)
 ```
+
+**On demand does not require a schedule.** `unavailable` is why the *timer* is
+quiet — it includes "switched off" — while `canRunNow` ignores the interval
+entirely, because taking one backup before a risky change is the main reason to
+want a button. Both derive from one function, so the row and the timer can never
+disagree.
+
+`POST /api/backup/run` refuses while a run is in flight ("a backup is already
+running"): two Jobs uploading to one dataset would race. The route returns the
+reason in the body and the client surfaces it, rather than swallowing it for a
+bare status code.
 
 `status` re-reads the last Job's stage from the **Hub** and the destination's
 privacy on every call, rather than reporting what we last remembered.
@@ -260,7 +272,8 @@ Back up the bucket                              [ off | 1h | 3h | 24h ]
   copies. Every 1h means 24 runs a day.
 
   lvwerra/agent-manager-backup — private · last run 4 Aug 16:36 (completed)
-  [ Back up now ]
+  [ Back up now ]        ← available whenever there is a token, schedule or not;
+                           reads "Backing up…" and is disabled while one runs
 ```
 
 **The cost is the operator's, so the row says whose.** "It costs this Space

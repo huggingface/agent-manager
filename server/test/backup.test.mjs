@@ -2,8 +2,33 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   EVERY_MS, INTERVALS, intervalMs, validRepoId, jobArgs, JOB_SCRIPT, JOB_FLAVOR,
-  hasToken, unavailableReason,
+  hasToken, unavailableReason, runNowBlockedBy,
 } from '../src/backup.js';
+
+// "Back up now" must not require a schedule: taking one backup before a risky
+// change is the main reason to want the button at all.
+test('on demand works with the schedule off, but not without a token', () => {
+  const saved = { t: process.env.HF_TOKEN, h: process.env.HUGGING_FACE_HUB_TOKEN, s: process.env.AM_BACKUP_SOURCE };
+  try {
+    process.env.HF_TOKEN = 'hf_test';
+    process.env.AM_BACKUP_SOURCE = 'ns/bucket';
+    // Off is a reason the TIMER stays quiet, never a reason to refuse on demand.
+    assert.equal(unavailableReason({ backup: { every: 'never' } }), 'switched off');
+    assert.equal(runNowBlockedBy(), null);
+
+    // The prerequisites are still prerequisites.
+    delete process.env.HF_TOKEN;
+    delete process.env.HUGGING_FACE_HUB_TOKEN;
+    assert.match(runNowBlockedBy(), /HF_TOKEN/);
+    process.env.HF_TOKEN = 'hf_test';
+    delete process.env.AM_BACKUP_SOURCE;
+    assert.match(runNowBlockedBy(), /no bucket/);
+  } finally {
+    for (const [k, v] of [['HF_TOKEN', saved.t], ['HUGGING_FACE_HUB_TOKEN', saved.h], ['AM_BACKUP_SOURCE', saved.s]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+});
 
 // The operator pays for every run, so the tier is pinned rather than inherited
 // from the Hub's default — which could change under us and quietly make hourly
