@@ -17,8 +17,10 @@ Two copies, on an interval the operator sets alongside `archive`:
 Both happen inside one **HF Job** that this app launches and forgets, so the
 copying runs on the Hub: a backup costs this Space one API call, never reads
 `/data` (whose cold walk runs to minutes), and cannot wedge the event loop that
-pumps the terminals. It needs an `HF_TOKEN` (§1.6). Nothing here deletes from the
-bucket, ever.
+pumps the terminals. It does cost the *operator* — each run bills an HF Job
+(cpu-basic) and both copies occupy Hub storage, which §7 states plainly before
+anyone switches it on. It needs an `HF_TOKEN` (§1.6). Nothing here deletes from
+the bucket, ever.
 
 ## 1. Decisions (locked)
 
@@ -193,7 +195,7 @@ hf jobs run --detach --name am-backup-<space> \
   --secrets HF_TOKEN \
   -e AM_SOURCE=<live bucket> -e AM_MIRROR=<mirror bucket> -e AM_DATASET=<dataset> \
   -v hf://buckets/<live bucket>:/live:ro \
-  --timeout 3000s python:3.12 bash -c '<script>'
+  --flavor cpu-basic --timeout 3000s python:3.12 bash -c '<script>'
 ```
 
 The script:
@@ -212,6 +214,9 @@ Details that matter:
   There is no legitimate bucket called `; rm -rf /`. Tested.
 - **`--timeout 3000s`** (50 min) is deliberately shorter than the shortest
   interval, so a hung run dies before the next one is due. Tested.
+- **`--flavor cpu-basic` is pinned, not inherited.** The operator pays for every
+  run, the work is API calls and file hashing, and a change to the Hub's default
+  flavour must not be able to quietly make hourly backups more expensive. Tested.
 - **Runs never overlap.** Before launching, the previous Job's stage is checked;
   a first backup of a large bucket can outlast an interval, and two concurrent
   uploads to one dataset would race. Skipping is logged, not silent.
@@ -248,15 +253,28 @@ privacy on every call, rather than reporting what we last remembered.
 Back up the bucket                              [ off | 1h | 3h | 24h ]
   Copies your whole bucket — workspaces, history, saved logins — to private
   Hub storage: a bucket you can restore from instantly, and a dataset that
-  keeps version history. The copy runs on the Hub, so it costs this Space
-  nothing and continues while it sleeps.
+  keeps version history. Nothing is ever deleted from your bucket.
+
+  Each run is an HF Job billed to your account — cpu-basic, $0.01 per hour
+  of runtime, so a few minutes per backup — plus Hub storage for both
+  copies. Every 1h means 24 runs a day.
 
   lvwerra/agent-manager-backup — private · last run 4 Aug 16:36 (completed)
   [ Back up now ]
 ```
 
-Without a token the intervals are disabled and the row says so, pointing at the
-`HF_TOKEN` secret (§1.6) in the same words the update/relaunch rows already use.
+**The cost is the operator's, so the row says whose.** "It costs this Space
+nothing" was true and beside the point: the Space is not who pays. What matters
+before switching this on is that each run bills an HF Job and both copies occupy
+Hub storage, so the row states the tier, the rate, and how many runs an interval
+implies.
+
+**Unavailable has to look unavailable.** With no token, only *off* is selectable
+and a warning box says why — that backing up needs a write-scoped `HF_TOKEN`
+secret (§1.6) which this Space does not have. `disabled` alone only stops the
+click: `.seg button` had no `:disabled` style, so a dead control still rendered as
+a live one. Fixed in `styles.css`, which also fixes every other segmented control
+in the app.
 
 The privacy dots are not decoration: they are the state of the §1.4 gate, and the
 one thing an operator must be able to see at a glance about a copy of their

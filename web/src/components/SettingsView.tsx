@@ -379,13 +379,18 @@ export default function SettingsView({
                     <div className="s-help">
                       Copies your whole bucket — workspaces, history, saved logins — to private Hub storage:
                       a bucket you can restore from instantly, and a dataset that keeps version history.
-                      The copy runs on the Hub as a Job, so it costs this Space nothing. Nothing is ever
-                      deleted from your bucket.
+                      Nothing is ever deleted from your bucket.
+                    </div>
+                    <div className="s-help" style={{ marginTop: 6 }}>
+                      Each run is an <b>HF Job billed to your account</b> — cpu-basic, $0.01 per hour of
+                      runtime, so a few minutes per backup — plus Hub storage for both copies (the mirror is
+                      about the size of your bucket). Every 1h means 24 runs a day.
                     </div>
                     {!bk?.hasToken && (
-                      <div className="s-help" style={{ marginTop: 6 }}>
-                        This needs a write-scoped <span className="mono">HF_TOKEN</span> Space secret —
-                        without one there is no way to launch the Job or write to the Hub.
+                      <div className="s-warn">
+                        Only <b>off</b> is available: backing up needs a write-scoped{' '}
+                        <span className="mono">HF_TOKEN</span> Space secret, and this Space has none. Without
+                        one there is no way to launch the Job or write to the Hub.
                       </div>
                     )}
                     {bk?.hasToken && cfg.backup.every !== 'never' && (

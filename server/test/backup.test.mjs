@@ -1,9 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  EVERY_MS, INTERVALS, intervalMs, validRepoId, jobArgs, JOB_SCRIPT,
+  EVERY_MS, INTERVALS, intervalMs, validRepoId, jobArgs, JOB_SCRIPT, JOB_FLAVOR,
   hasToken, unavailableReason,
 } from '../src/backup.js';
+
+// The operator pays for every run, so the tier is pinned rather than inherited
+// from the Hub's default — which could change under us and quietly make hourly
+// backups more expensive.
+test('the job hardware is pinned to the cheapest tier', () => {
+  assert.equal(JOB_FLAVOR, 'cpu-basic');
+  const args = jobArgs({ source: 'ns/b', mirror: '', dataset: 'ns/d' });
+  assert.equal(args[args.indexOf('--flavor') + 1], 'cpu-basic');
+});
 
 // The interval enum is the operator-facing contract: off, 1h, 3h, 24h.
 test('the interval enum is exactly off/1h/3h/24h', () => {

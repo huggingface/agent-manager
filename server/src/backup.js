@@ -45,6 +45,11 @@ const TICK_MS = 300_000; // 5 min
 // stack up behind each other.
 const JOB_TIMEOUT = '3000s'; // 50 min
 const JOB_IMAGE = 'python:3.12';
+// Pinned, not left to the default: the operator pays for this. cpu-basic is the
+// cheapest tier ($0.0002/min) and the work is API calls and file hashing, so
+// nothing here benefits from more machine. Pinning also means a change to the
+// Hub's default flavour cannot silently make hourly backups more expensive.
+export const JOB_FLAVOR = 'cpu-basic';
 
 export const hasToken = () => !!(process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN);
 
@@ -140,6 +145,7 @@ export function jobArgs({ source, mirror, dataset }) {
     '-e', `AM_DATASET=${dataset}`,
     // Read-only: a backup must not be able to write to what it is reading.
     '-v', `hf://buckets/${source}:/live:ro`,
+    '--flavor', JOB_FLAVOR,
     '--timeout', JOB_TIMEOUT,
     JOB_IMAGE, 'bash', '-c', JOB_SCRIPT,
   ];
