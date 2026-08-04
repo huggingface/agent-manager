@@ -1,28 +1,28 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CRON, cronFor, validRepoId, jobArgs, fingerprint, reconcile, JOB_SCRIPT,
+  EVERY_MS, INTERVALS, intervalMs, validRepoId, jobArgs, JOB_SCRIPT,
+  hasToken, unavailableReason,
 } from '../src/backup.js';
 
-// The interval enum is the operator-facing contract; every value the config
-// accepts must map to a cron, and 'never' must map to nothing at all.
-test('cronFor covers the config enum and only that', () => {
-  for (const every of ['hour', '6h', 'day']) {
-    assert.ok(cronFor(every), `${every} should have a cron`);
-    assert.match(cronFor(every), /^[\d*\/ ,-]+$/);
-  }
-  assert.equal(cronFor('never'), null);
-  assert.equal(cronFor('nonsense'), null);
-  assert.equal(cronFor(undefined), null);
-  assert.equal(Object.keys(CRON).length, 3);
+// The interval enum is the operator-facing contract: off, 1h, 3h, 24h.
+test('the interval enum is exactly off/1h/3h/24h', () => {
+  assert.deepEqual(INTERVALS, ['never', '1h', '3h', '24h']);
+  assert.equal(intervalMs('1h'), 3_600_000);
+  assert.equal(intervalMs('3h'), 3 * 3_600_000);
+  assert.equal(intervalMs('24h'), 24 * 3_600_000);
+  // 'never' has no interval, so "is it due?" can never be true.
+  assert.equal(intervalMs('never'), 0);
+  assert.equal(intervalMs('nonsense'), 0);
+  assert.equal(intervalMs(undefined), 0);
 });
 
 // A run must be dead before the next one is due, or a hung backup stacks up
 // behind itself.
 test('the job timeout is shorter than the shortest interval', () => {
-  const args = jobArgs({ source: 'ns/b', mirror: '', dataset: 'ns/d', cron: CRON.hour, name: 'x' });
+  const args = jobArgs({ source: 'ns/b', mirror: '', dataset: 'ns/d' });
   const secs = Number(args[args.indexOf('--timeout') + 1].replace('s', ''));
-  assert.ok(secs < 3600, `timeout ${secs}s must be under the hourly cadence`);
+  assert.ok(secs * 1000 < EVERY_MS['1h'], `timeout ${secs}s must be under 1h`);
 });
 
 test('validRepoId accepts real ids and rejects shell metacharacters', () => {
@@ -42,12 +42,10 @@ test('validRepoId accepts real ids and rejects shell metacharacters', () => {
 // argv/env, never as shell syntax. If someone later interpolates a config value
 // into JOB_SCRIPT, this fails.
 test('config values reach the job as env vars, not shell text', () => {
-  const args = jobArgs({ source: 'ns/src', mirror: 'ns/mir', dataset: 'ns/ds', cron: CRON.hour, name: 'am-backup-x' });
-  assert.ok(args.includes('-e'));
+  const args = jobArgs({ source: 'ns/src', mirror: 'ns/mir', dataset: 'ns/ds' });
   assert.ok(args.includes('AM_SOURCE=ns/src'));
   assert.ok(args.includes('AM_MIRROR=ns/mir'));
   assert.ok(args.includes('AM_DATASET=ns/ds'));
-  // The script is one argument, and it names only env vars.
   const script = args[args.length - 1];
   assert.equal(script, JOB_SCRIPT);
   for (const id of ['ns/src', 'ns/mir', 'ns/ds']) {
@@ -57,21 +55,19 @@ test('config values reach the job as env vars, not shell text', () => {
 
 // A backup must never be able to write to the bucket it is reading.
 test('the source bucket is mounted read-only', () => {
-  const args = jobArgs({ source: 'ns/src', mirror: '', dataset: 'ns/ds', cron: CRON.day, name: 'x' });
+  const args = jobArgs({ source: 'ns/src', mirror: '', dataset: 'ns/ds' });
   const vol = args[args.indexOf('-v') + 1];
   assert.equal(vol, 'hf://buckets/ns/src:/live:ro');
-  assert.ok(vol.endsWith(':ro'));
 });
 
-test('no cron means a one-off detached job, not a schedule', () => {
-  const once = jobArgs({ source: 'ns/src', mirror: '', dataset: 'ns/ds' });
-  assert.deepEqual(once.slice(0, 3), ['jobs', 'run', '--detach']);
-  const sched = jobArgs({ source: 'ns/src', mirror: '', dataset: 'ns/ds', cron: CRON.hour });
-  assert.deepEqual(sched.slice(0, 4), ['jobs', 'scheduled', 'run', CRON.hour]);
+test('a backup is one detached job launch', () => {
+  const args = jobArgs({ source: 'ns/src', mirror: '', dataset: 'ns/ds' });
+  assert.deepEqual(args.slice(0, 3), ['jobs', 'run', '--detach']);
+  assert.ok(args.includes('--secrets') && args.includes('HF_TOKEN'));
 });
 
-// The upload has to create the dataset private, and re-verify privacy every run:
-// the mirror carries live agent credentials (docs/bucket-backup.md §4).
+// The upload has to create the dataset private and re-verify privacy every run:
+// the copy carries live agent credentials (docs/bucket-backup.md §4).
 test('the job script gates on privacy and creates private', () => {
   assert.match(JOB_SCRIPT, /--private/);
   assert.match(JOB_SCRIPT, /refusing to back up/);
@@ -80,33 +76,31 @@ test('the job script gates on privacy and creates private', () => {
   assert.match(JOB_SCRIPT, /set -euo pipefail/);
 });
 
-// There is no "update" verb for a scheduled Job, so any change is a
-// delete-then-create. Missing a change would silently keep backing up to the
-// old destination.
-test('reconcile replaces on any change and removes when disabled', () => {
-  const fp = (o) => ({ fingerprint: fingerprint(o), suspend: false });
-  const base = { cron: CRON.hour, source: 'ns/s', mirror: 'ns/m', dataset: 'ns/d' };
+// Without a token there is no way to launch a Job or write to the Hub, so the
+// feature must report itself unavailable rather than failing every interval.
+test('no HF_TOKEN means unavailable, with the token as the stated reason', () => {
+  const saved = [process.env.HF_TOKEN, process.env.HUGGING_FACE_HUB_TOKEN, process.env.AM_BACKUP_SOURCE];
+  try {
+    delete process.env.HF_TOKEN;
+    delete process.env.HUGGING_FACE_HUB_TOKEN;
+    process.env.AM_BACKUP_SOURCE = 'ns/bucket';
+    assert.equal(hasToken(), false);
+    assert.match(unavailableReason({ backup: { every: '1h' } }), /HF_TOKEN/);
 
-  assert.equal(reconcile(null, fp(base)), 'create');
-  assert.equal(reconcile(fp(base), fp(base)), 'keep');
-  assert.equal(reconcile(fp(base), null), 'delete');
-  assert.equal(reconcile(null, null), 'keep');
-
-  for (const changed of [
-    { ...base, cron: CRON.day },
-    { ...base, source: 'ns/other' },
-    { ...base, mirror: '' },
-    { ...base, dataset: 'ns/other' },
-  ]) {
-    assert.equal(reconcile(fp(base), fp(changed)), 'replace', JSON.stringify(changed));
+    process.env.HF_TOKEN = 'hf_test';
+    assert.equal(hasToken(), true);
+    // With a token, a bucket and an interval, nothing stands in the way.
+    assert.equal(unavailableReason({ backup: { every: '1h' } }), null);
+    // Off is off, whatever else is true.
+    assert.equal(unavailableReason({ backup: { every: 'never' } }), 'switched off');
+    assert.equal(unavailableReason({}), 'switched off');
+    // No bucket to read means nothing to back up.
+    delete process.env.AM_BACKUP_SOURCE;
+    assert.match(unavailableReason({ backup: { every: '1h' } }), /no bucket/);
+  } finally {
+    [process.env.HF_TOKEN, process.env.HUGGING_FACE_HUB_TOKEN, process.env.AM_BACKUP_SOURCE] = saved;
+    for (const [k, v] of [['HF_TOKEN', saved[0]], ['HUGGING_FACE_HUB_TOKEN', saved[1]], ['AM_BACKUP_SOURCE', saved[2]]]) {
+      if (v === undefined) delete process.env[k];
+    }
   }
-
-  // A suspended schedule is not a working backup — bring it back.
-  assert.equal(reconcile({ fingerprint: fingerprint(base), suspend: true }, fp(base)), 'replace');
-});
-
-test('fingerprint distinguishes an empty mirror from a named one', () => {
-  const a = fingerprint({ cron: CRON.hour, source: 'ns/s', mirror: '', dataset: 'ns/d' });
-  const b = fingerprint({ cron: CRON.hour, source: 'ns/s', mirror: 'ns/m', dataset: 'ns/d' });
-  assert.notEqual(a, b);
 });

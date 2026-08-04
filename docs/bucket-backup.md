@@ -14,17 +14,25 @@ Two copies, on an interval the operator sets alongside `archive`:
   cannot give, because buckets are mutable and non-versioned. This is the "get
   yesterday's file back" copy.
 
-Both run in a **scheduled HF Job**, so the work happens on the Hub: backups
-continue while this Space is asleep, cost it no I/O, and never walk the FUSE
-mount. Nothing here deletes from the bucket, ever.
+Both happen inside one **HF Job** that this app launches and forgets, so the
+copying runs on the Hub: a backup costs this Space one API call, never reads
+`/data` (whose cold walk runs to minutes), and cannot wedge the event loop that
+pumps the terminals. It needs an `HF_TOKEN` (§1.6). Nothing here deletes from the
+bucket, ever.
 
 ## 1. Decisions (locked)
 
-1. **The schedule lives on the Hub, not in this app.** `hf jobs scheduled run`
-   takes a cron. The Space's only job is to make the Hub's schedule match the
-   operator's config, and to report what the Hub says about it. A backup that
-   only runs while the app is healthy is a backup that will be missing exactly
-   when it is needed.
+1. **One dumb loop: if it is on and due, launch a Job.** Every five minutes the
+   app asks whether the last run started more than an interval ago; if so it
+   launches one detached Job and forgets it. No cron, no catch-up queue, no
+   reconciliation. "Due" is derived from a timestamp on disk, so it behaves
+   correctly across restarts.
+
+   The cost is that backups only fire while the app is up. That is a smaller loss
+   than it sounds — the bucket only changes when agents are running, which means
+   when the Space is up — and `hf jobs scheduled` (a cron on the Hub, which does
+   fire while the Space sleeps) is a contained change if that stops being true.
+   It was built and verified working; it was dropped to keep the PoC simple.
 2. **Two destinations, because they are cheap at different things.** Bucket
    storage is accounted in *logical* bytes — two identical snapshots measured as
    exactly 2× (§3.5) — so dated bucket snapshots multiply cost. A git repo stores
@@ -41,15 +49,19 @@ mount. Nothing here deletes from the bucket, ever.
    anything is written. Verified to bite (§3.6).
 5. **The source bucket is mounted read-only** (`:ro`) in the Job. A backup must
    not be able to write to the thing it is backing up.
-6. **Off until the operator turns it on.** It copies this machine's contents into
-   other Hub resources; that is a deliberate act. Once on, hourly.
-7. **Never prune the mirror.** A file deleted in `/data` stays in the bucket
+6. **It requires `HF_TOKEN` in the environment.** There is no way to launch a Job
+   or write to the Hub without one, so with no token the feature reports itself
+   unavailable — one reason string, shared by the timer and the settings row —
+   rather than failing every interval into the logs.
+7. **Off until the operator turns it on.** It copies this machine's contents into
+   other Hub resources; that is a deliberate act. Once on: 1h, 3h or 24h.
+8. **Never prune the mirror.** A file deleted in `/data` stays in the bucket
    mirror. An `rm -rf` in a workspace is precisely the accident being insured
    against, and a mirror that faithfully reproduces the deletion insures against
    nothing. The dataset gets `--delete "*"` so its *newest* commit matches the
    bucket, while every earlier commit keeps the deleted file recoverable — the
    best of both.
-8. **Restore is a documented script, not a button** (§8).
+9. **Restore is a documented script, not a button** (§8).
 
 ## 2. What we already have
 
@@ -57,8 +69,10 @@ mount. Nothing here deletes from the bucket, ever.
   `GET /api/spaces/{id}` → `runtime.volumes[]`, keeping entries with
   `type === 'bucket'`. Verified on two Spaces:
   `{source: 'lvwerra/agent-manager-data', mountPath: '/data'}`.
-- **`hf` CLI 1.25.1 in the image**, with `buckets`, `cp`, `jobs scheduled`.
-  `share.js` already shells out to `hf` with this token — no new auth path.
+- **`hf` CLI 1.25.1 in the image**, with `buckets`, `cp` and `jobs run`.
+  `share.js` already shells out to `hf` with this token — no new auth path, and
+  `index.js` already treats a missing `HF_TOKEN` as a feature-disabled state
+  (`canRelaunch`), which is the pattern §1.6 follows.
 - `am-config.json` + `GET/PUT /api/config` + a whitelisted enum, rendered as a
   segmented control in `SettingsView.tsx`. `archive.after` is the precedent the
   operator asked for; `backup` is another key in the same object.
@@ -135,7 +149,7 @@ verified 49-file copy it still reported `size: 0`. Verify a copy with
 
 ### 3.6 The privacy gate refuses a public destination
 
-Flipped the destination dataset to public and triggered the schedule:
+Flipped the destination dataset to public and launched a run:
 
 ```
 refusing to back up: dataset lvwerra/… is not private
@@ -172,10 +186,10 @@ one 620 MB workspace took 1 s.
 
 ## 5. The pipeline
 
-One scheduled Job, `am-backup-<space>`, cron from the config:
+One detached Job per interval, `am-backup-<space>`:
 
 ```
-hf jobs scheduled run "0 * * * *" --name am-backup-<space> \
+hf jobs run --detach --name am-backup-<space> \
   --secrets HF_TOKEN \
   -e AM_SOURCE=<live bucket> -e AM_MIRROR=<mirror bucket> -e AM_DATASET=<dataset> \
   -v hf://buckets/<live bucket>:/live:ro \
@@ -198,13 +212,11 @@ Details that matter:
   There is no legitimate bucket called `; rm -rf /`. Tested.
 - **`--timeout 3000s`** (50 min) is deliberately shorter than the shortest
   interval, so a hung run dies before the next one is due. Tested.
-- **No update verb for a scheduled Job** — only run/delete — so any change to
-  cron or destination is delete-then-create. The desired state is fingerprinted
-  and compared, because missing a change means silently backing up to the old
-  destination. Tested.
-- **Reconcile is idempotent**: with nothing changed it is one list call and no
-  writes. Runs on boot (12 s in, after bucket discovery) and after every config
-  save.
+- **Runs never overlap.** Before launching, the previous Job's stage is checked;
+  a first backup of a large bucket can outlast an interval, and two concurrent
+  uploads to one dataset would race. Skipping is logged, not silent.
+- **The config is re-read every tick**, so changing the interval takes effect
+  without restarting anything.
 - **A backup is a fuzzy snapshot.** Agents write while it runs, so it is not
   point-in-time consistent. Acceptable for this purpose, and worth saying rather
   than glossing.
@@ -214,37 +226,37 @@ Details that matter:
 ```js
 // am-config.json — validated with a whitelist, like archive.after
 backup: {
-  every: 'never' | 'hour' | '6h' | 'day',   // default 'never' (§1.6)
-  mirror: '',                                // default <ns>/<space>-backup
-  dataset: '',                               // default <ns>/<space>-backup
+  every: 'never' | '1h' | '3h' | '24h',   // default 'never' (§1.7)
+  mirror: '',                              // default <ns>/<space>-backup
+  dataset: '',                             // default <ns>/<space>-backup
 }
 ```
 
 ```
-GET  /api/backup/status  → { every, source, mirror, dataset, defaults,
-                             scheduled: { cron, suspended, lastRun, nextRun },
+GET  /api/backup/status  → { every, source, mirror, dataset, defaults, hasToken,
+                             unavailable, last: { at, jobId, stage }, nextDue,
                              datasetPrivate, error }
-POST /api/backup/run     → trigger the schedule now (or a one-off Job if off)
+POST /api/backup/run     → launch one Job now
 ```
 
-`status` reports the schedule as the **Hub** sees it, not as we last left it, and
-re-reads the destination's privacy on every call.
+`status` re-reads the last Job's stage from the **Hub** and the destination's
+privacy on every call, rather than reporting what we last remembered.
 
-## 7. Settings surface (phase 2)
+## 7. Settings surface
 
 ```
-Back up the bucket                            [ off | hourly | 6h | daily ]
+Back up the bucket                              [ off | 1h | 3h | 24h ]
   Copies your whole bucket — workspaces, history, saved logins — to private
   Hub storage: a bucket you can restore from instantly, and a dataset that
   keeps version history. The copy runs on the Hub, so it costs this Space
   nothing and continues while it sleeps.
 
-  Mirror   [ lvwerra/agent-manager-backup ]            ● private
-  History  [ lvwerra/agent-manager-backup ] (dataset)  ● private
-
-  Last run: 12 minutes ago · next 15:00 · 102,691 files
-  [ Back up now ]                          [ Open ↗ ]
+  lvwerra/agent-manager-backup — private · last run 4 Aug 16:36 (completed)
+  [ Back up now ]
 ```
+
+Without a token the intervals are disabled and the row says so, pointing at the
+`HF_TOKEN` secret (§1.6) in the same words the update/relaunch rows already use.
 
 The privacy dots are not decoration: they are the state of the §1.4 gate, and the
 one thing an operator must be able to see at a glance about a copy of their
@@ -303,12 +315,16 @@ knows which side should win.
 
 ## 11. Phasing
 
-1. **Done** — config keys, Hub-side schedule reconciliation, the two-step Job,
-   `GET /api/backup/status`, `POST /api/backup/run`, tests. Verified end to end
-   against the Hub: schedule created, idempotent re-reconcile, trigger, both
-   steps run, private dataset committed, and the privacy gate refusing a public
-   destination.
-2. **Settings UI** (§7) — interval, destinations, privacy dots, status, run-now.
+1. **Done (this PR)** — config keys, the interval loop, the two-step Job, the
+   token gate, `GET /api/backup/status`, `POST /api/backup/run`, the settings row,
+   and tests. Verified end to end against the real Hub on a small bucket: off and
+   no-token skip with a reason, first tick launches, the next tick correctly says
+   "not due", the Job completes, and the private dataset gets its commit. The
+   privacy gate was verified by breaking it — public destination, run aborts with
+   exit 1, no commit.
+2. **A real run against the production bucket** — 11.4 GB / 102,691 files. Every
+   number for that scale is still extrapolated (§10.3); this is the next thing to
+   learn, and cheap to learn.
 3. **`scripts/restore-bucket.mjs` + docs, and one real restore** into a scratch
-   Space (§10.5).
+   Space (§10.5). Until this runs, the feature is a hypothesis.
 4. **Retention** — decide §9 for transcript churn.

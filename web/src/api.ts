@@ -78,26 +78,30 @@ export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
   jobs: { askAboveUsd: number };
   archive: { after: 'week' | 'month' | 'never' };
-  backup: { every: 'never' | 'hour' | '6h' | 'day'; mirror: string; dataset: string };
+  backup: { every: BackupEvery; mirror: string; dataset: string };
   defaultArtifactsSpace?: string;
 }
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
 export const saveConfig = (c: AmConfig) =>
   fetch('/api/config', { method: 'PUT', headers: HEADERS, body: JSON.stringify(c) }).then(json);
 
-// ---- bucket backup: the schedule lives on the Hub, so status is read from it ----
+// ---- bucket backup: a Job on the Hub does the copying (docs/bucket-backup.md) ----
+export type BackupEvery = 'never' | '1h' | '3h' | '24h';
 export interface BackupStatus {
-  every: 'never' | 'hour' | '6h' | 'day';
+  every: BackupEvery;
   source: string | null;
   mirror: string;
   dataset: string;
   defaults: { mirror: string; dataset: string };
-  scheduled: { id: string; cron: string; suspended: boolean; lastRun: string | null; nextRun: string | null } | null;
+  hasToken: boolean;
+  unavailable: string | null;
+  last: { at: number; jobId: string | null; stage: string } | null;
+  nextDue: number | null;
   datasetPrivate: boolean | null;
   error: string | null;
 }
 export const backupStatus = (): Promise<BackupStatus> => fetch('/api/backup/status').then(json);
-export const runBackup = (): Promise<{ triggered?: string; job?: string; error?: string }> =>
+export const runBackup = (): Promise<{ job?: string; error?: string }> =>
   fetch('/api/backup/run', { method: 'POST' }).then(json);
 
 export interface SecretsData { detected: string[]; notes: Record<string, string>; }

@@ -5,47 +5,48 @@ import { DATA_DIR } from './config.js';
 import { visibility } from './visibility.js';
 import { shareNamespace } from './share.js';
 
-// Bucket backup: a periodic, Hub-side copy of this Space's bucket.
-// Design and rationale: docs/bucket-backup.md (§3 verified behaviour, §5 pipeline).
+// Bucket backup: every 1h/3h/24h, launch one HF Job that copies this Space's
+// bucket to private Hub storage. Design: docs/bucket-backup.md
 //
-// Two steps, neither of which runs here:
+// The whole feature is one loop: if it is switched on and enough time has
+// passed, launch a Job. Nothing else. The Job does two things, because a mirror
+// alone is not a backup:
 //
 //   1. bucket → bucket, server-side by Xet hash. No bytes move (13,482 files in
 //      20s, measured) and a restore from it is equally instant. Overwritten each
-//      run — it is the "get the Space back" copy.
-//   2. the same bucket, mounted READ-ONLY inside the Job, → a private dataset
-//      repo. This is the version history a bucket cannot give: buckets are
-//      mutable and non-versioned, so without this an overwritten file is simply
-//      gone (§10.1).
+//      run — this is the "get the Space back" copy.
+//   2. the same bucket, mounted READ-ONLY in the Job, → a private dataset repo.
+//      Buckets are mutable and non-versioned, so without this an overwritten
+//      file is simply gone. This is the "get yesterday's file back" copy.
 //
-// Both steps run in a SCHEDULED HF JOB, which is the whole point: the work
-// happens on the Hub, so backups continue while this Space is asleep, cost it no
-// I/O at all, and never touch the FUSE mount whose cold walk runs to minutes.
-// This app has wedged once on synchronous work; a job that fires every hour
-// should not be the next cause, and the safest way to achieve that is for the
-// hour to not belong to us.
+// The copying happens on the Hub, not here: we launch the Job and forget it. So
+// a backup costs this Space one API call, never reads /data (whose cold walk runs
+// to minutes), and cannot wedge the event loop that pumps the terminals.
 //
-// Why a dataset for history and a bucket for the mirror, rather than one of
-// them: bucket storage is accounted in logical bytes — two identical snapshots
-// measured as exactly 2× — while a git repo stores each distinct blob once and
-// skips empty commits entirely. So history is far cheaper in the dataset, and
-// instant restore is only possible from the bucket (§9).
+// Requires HF_TOKEN in the environment — there is no way to launch a Job or write
+// to the Hub without one, so with no token the feature reports itself
+// unavailable rather than failing every hour in the logs.
 
 const STATE_FILE = path.join(DATA_DIR, 'backup-state.json');
 const SPACE_ID = process.env.SPACE_ID || '';
 const spaceName = () => SPACE_ID.split('/')[1] || 'agent-manager';
 
-// 50 minutes: a run that hangs must die before the next hour fires, so a stuck
-// backup can never stack up behind itself.
-const JOB_TIMEOUT = '3000s';
+export const EVERY_MS = {
+  '1h': 3_600_000,
+  '3h': 10_800_000,
+  '24h': 86_400_000,
+};
+export const INTERVALS = ['never', ...Object.keys(EVERY_MS)];
+export const intervalMs = (every) => EVERY_MS[every] || 0;
+
+// How often we ask "is a backup due?". Cheap: reads a file, compares two numbers.
+const TICK_MS = 300_000; // 5 min
+// A Job that hangs must die well inside the shortest interval so runs cannot
+// stack up behind each other.
+const JOB_TIMEOUT = '3000s'; // 50 min
 const JOB_IMAGE = 'python:3.12';
 
-export const CRON = {
-  hour: '0 * * * *',
-  '6h': '0 */6 * * *',
-  day: '0 3 * * *', // small hours, when a bucket is least likely to be mid-write
-};
-export const cronFor = (every) => CRON[every] || null;
+export const hasToken = () => !!(process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN);
 
 // A bucket/dataset id arrives from PUT /api/config and ends up in a Job's
 // argument list. Anything outside this charset is refused rather than escaped —
@@ -56,11 +57,7 @@ export const validRepoId = (s) => typeof s === 'string' && s.length <= 96 && ID_
 function run(args, { timeout = 120_000 } = {}) {
   return new Promise((resolve, reject) => {
     execFile('hf', args, { timeout, env: process.env, maxBuffer: 8 << 20 }, (err, stdout, stderr) => {
-      if (err) {
-        err.stderr = String(stderr || '');
-        err.stdout = String(stdout || '');
-        return reject(err);
-      }
+      if (err) { err.stderr = String(stderr || ''); return reject(err); }
       resolve(String(stdout || ''));
     });
   });
@@ -69,8 +66,10 @@ function run(args, { timeout = 120_000 } = {}) {
 export function loadState() {
   try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return {}; }
 }
-function saveState(s) {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2)); } catch {}
+function saveState(patch) {
+  const next = { ...loadState(), ...patch };
+  try { fs.writeFileSync(STATE_FILE, JSON.stringify(next, null, 2)); } catch {}
+  return next;
 }
 
 // The bucket mounted at /data, as discovered by visibility.js from
@@ -85,15 +84,15 @@ export function sourceBucket() {
 export async function defaultsFor() {
   const ns = await shareNamespace().catch(() => '');
   if (!ns) return { mirror: '', dataset: '' };
-  return { mirror: `${ns}/${spaceName()}-backup`, dataset: `${ns}/${spaceName()}-backup` };
+  const base = `${ns}/${spaceName()}-backup`;
+  return { mirror: base, dataset: base };
 }
 
 // The script the Job runs. No interpolation: every value arrives as an env var
 // (`-e`), so a config string can never become shell syntax.
 export const JOB_SCRIPT = `set -euo pipefail
 # Plain package, no [cli] extra: 1.26.0 dropped it ("does not provide the extra
-# 'cli'") and ships the CLI in the base install. Asking for it only earns a
-# warning in the run logs.
+# 'cli'") and ships the CLI in the base install.
 pip install -q huggingface_hub
 
 # A backup carries every saved login on the bucket — agent OAuth tokens, the Web
@@ -122,174 +121,160 @@ if [ -n "\${AM_MIRROR:-}" ]; then
 fi
 
 # 2. Version history, read from the bucket mounted read-only at /live — the
-#    Hub's copy, not any Space's disk. Unchanged files transfer nothing and
-#    produce no commit; --delete mirrors removals into the new commit while the
-#    previous commit keeps them recoverable.
+#    Hub's copy, not this Space's disk. Unchanged files transfer nothing and
+#    produce no commit at all; --delete makes the newest commit match the bucket
+#    while every earlier commit keeps deleted files recoverable.
 hf upload "\$AM_DATASET" /live . --repo-type dataset --private --delete "*" \\
   --commit-message "Bucket snapshot \$(date -u +%Y-%m-%dT%H:%MZ)"
 `;
 
 // Job arguments, as an array (never a shell string). Exported for the tests:
 // asserting on this is how we know a config value cannot reach a shell.
-export function jobArgs({ source, mirror, dataset, cron = null, name }) {
-  const spec = [
+export function jobArgs({ source, mirror, dataset }) {
+  return [
+    'jobs', 'run', '--detach',
+    '--name', `am-backup-${spaceName()}`.slice(0, 40),
     '--secrets', 'HF_TOKEN',
     '-e', `AM_SOURCE=${source}`,
     '-e', `AM_MIRROR=${mirror || ''}`,
     '-e', `AM_DATASET=${dataset}`,
+    // Read-only: a backup must not be able to write to what it is reading.
     '-v', `hf://buckets/${source}:/live:ro`,
     '--timeout', JOB_TIMEOUT,
     JOB_IMAGE, 'bash', '-c', JOB_SCRIPT,
   ];
-  if (name) spec.unshift('--name', name);
-  return cron
-    ? ['jobs', 'scheduled', 'run', cron, ...spec]
-    : ['jobs', 'run', '--detach', ...spec];
-}
-
-// What the config asks for, as one comparable string. If this changes, the
-// schedule is replaced — there is no "update" verb for a scheduled Job, only
-// run/delete, so a change means delete-then-create.
-export const fingerprint = ({ cron, source, mirror, dataset }) =>
-  [cron, source, mirror || '-', dataset].join('|');
-
-export function reconcile(existing, desired) {
-  if (!desired) return existing ? 'delete' : 'keep';
-  if (!existing) return 'create';
-  if (existing.fingerprint !== desired.fingerprint) return 'replace';
-  if (existing.suspend) return 'replace';
-  return 'keep';
-}
-
-async function listSchedules() {
-  try { return JSON.parse(await run(['jobs', 'scheduled', 'ls', '--json'])) || []; } catch { return []; }
-}
-
-async function findSchedule(id) {
-  if (!id) return null;
-  return (await listSchedules()).find((s) => s.id === id) || null;
 }
 
 /**
- * Make the Hub match the operator's config: create, replace, or remove the
- * scheduled Job. Called on boot and after PUT /api/config. Never throws — a
- * backup that cannot be scheduled records why and leaves the app alone.
+ * Why a backup cannot run right now, or null if it can. One place, so the timer
+ * and the settings row always agree about it.
  */
-export async function ensureSchedule(cfg) {
-  const state = loadState();
-  const every = cfg?.backup?.every || 'never';
-  const cron = cronFor(every);
-  const existing = await findSchedule(state.scheduledJobId);
-  const existingRec = existing ? { fingerprint: state.fingerprint, suspend: !!existing.suspend } : null;
-
-  if (!cron) {
-    if (existing) await run(['jobs', 'scheduled', 'delete', existing.id]).catch(() => {});
-    saveState({ ...state, scheduledJobId: null, fingerprint: null, every: 'never', error: null });
-    return { action: existing ? 'deleted' : 'none' };
-  }
-
-  const source = sourceBucket();
-  if (!source) {
-    saveState({ ...state, error: 'no bucket is mounted on this Space — nothing to back up' });
-    return { action: 'blocked', error: 'no bucket mounted' };
-  }
-  const d = await defaultsFor();
-  const mirror = (cfg.backup.mirror || d.mirror || '').trim();
-  const dataset = (cfg.backup.dataset || d.dataset || '').trim();
-  for (const [label, id] of [['source', source], ['dataset', dataset], ['mirror', mirror]]) {
-    if (label === 'mirror' && !id) continue;
-    if (!validRepoId(id)) {
-      const error = `refusing to schedule: ${label} "${id}" is not a valid repo id`;
-      saveState({ ...state, error });
-      return { action: 'blocked', error };
-    }
-  }
-
-  const desired = { fingerprint: fingerprint({ cron, source, mirror, dataset }) };
-  const action = reconcile(existingRec, desired);
-  if (action === 'keep') return { action };
-
-  // The mirror bucket has to exist and be private before anything is copied
-  // into it. The dataset is created private by the upload itself.
-  if (mirror) {
-    await run(['buckets', 'create', mirror, '--private', '--exist-ok']).catch(() => {});
-  }
-
-  if (action === 'replace' && existing) {
-    await run(['jobs', 'scheduled', 'delete', existing.id]).catch(() => {});
-  }
-  const name = `am-backup-${spaceName()}`.slice(0, 40);
-  const out = await run(jobArgs({ source, mirror, dataset, cron, name }), { timeout: 180_000 });
-  const id = (out.match(/id=(\S+)/) || [])[1] || null;
-  saveState({
-    ...state, scheduledJobId: id, fingerprint: desired.fingerprint,
-    every, source, mirror, dataset, error: null, scheduledAt: new Date().toISOString(),
-  });
-  return { action, id };
+export function unavailableReason(cfg) {
+  if (!hasToken()) return 'needs a write-scoped HF_TOKEN secret on the Space';
+  if (!sourceBucket()) return 'no bucket is mounted on this Space';
+  if ((cfg?.backup?.every || 'never') === 'never') return 'switched off';
+  return null;
 }
 
-/** Kick a backup now: trigger the schedule if there is one, else a one-off Job. */
-export async function runBackupNow(cfg) {
-  const state = loadState();
-  if (state.scheduledJobId) {
-    await run(['jobs', 'scheduled', 'trigger', state.scheduledJobId], { timeout: 120_000 });
-    return { triggered: state.scheduledJobId };
-  }
-  const source = sourceBucket();
-  if (!source) throw new Error('no bucket is mounted on this Space — nothing to back up');
+/** Resolve the destinations, falling back to <namespace>/<space>-backup. */
+async function targets(cfg) {
   const d = await defaultsFor();
   const mirror = (cfg?.backup?.mirror || d.mirror || '').trim();
   const dataset = (cfg?.backup?.dataset || d.dataset || '').trim();
-  if (!validRepoId(dataset)) throw new Error(`not a valid dataset id: ${dataset}`);
+  return { mirror, dataset, defaults: d };
+}
+
+/** Launch one backup Job now. Returns { job } — the Hub does the rest. */
+export async function runBackupNow(cfg) {
+  if (!hasToken()) throw new Error('needs a write-scoped HF_TOKEN secret on the Space');
+  const source = sourceBucket();
+  if (!source) throw new Error('no bucket is mounted on this Space — nothing to back up');
+  const { mirror, dataset } = await targets(cfg);
+  for (const [label, id] of [['source', source], ['dataset', dataset], ['mirror', mirror]]) {
+    if (label === 'mirror' && !id) continue;
+    if (!validRepoId(id)) throw new Error(`${label} "${id}" is not a valid repo id`);
+  }
+  // The mirror bucket must exist and be private before anything is copied into
+  // it; the dataset is created private by the upload itself.
   if (mirror) await run(['buckets', 'create', mirror, '--private', '--exist-ok']).catch(() => {});
+
   const out = await run(jobArgs({ source, mirror, dataset }), { timeout: 180_000 });
-  return { job: (out.match(/id=(\S+)/) || [])[1] || null };
+  const job = (out.match(/id=(\S+)/) || [])[1] || null;
+  saveState({ jobId: job, startedAt: Date.now(), source, mirror, dataset, error: null });
+  return { job };
+}
+
+/** Terminal state of the last launched Job, or null while it is still going. */
+async function jobStage(jobId) {
+  if (!jobId) return null;
+  try {
+    const j = JSON.parse(await run(['jobs', 'inspect', jobId, '--json'], { timeout: 30_000 }));
+    const s = Array.isArray(j) ? j[0] : j;
+    return (s && s.status && s.status.stage) || null;
+  } catch { return null; }
+}
+
+const DONE = new Set(['COMPLETED', 'ERROR', 'FAILED', 'CANCELED']);
+
+/**
+ * One tick: launch a backup if one is due. Deliberately dumb — no cron, no
+ * catch-up queue. "Due" is just "the last one started more than an interval
+ * ago", which behaves correctly across restarts because it is derived from the
+ * timestamp on disk rather than from an in-memory schedule.
+ */
+export async function tick(cfg) {
+  if (unavailableReason(cfg)) return { skipped: unavailableReason(cfg) };
+  const state = loadState();
+  const due = Date.now() - (state.startedAt || 0) >= intervalMs(cfg.backup.every);
+  if (!due) return { skipped: 'not due' };
+
+  // Never let two runs overlap: a big first backup can outlast an interval.
+  if (state.jobId && !DONE.has(await jobStage(state.jobId))) {
+    return { skipped: 'previous backup still running' };
+  }
+  try {
+    const r = await runBackupNow(cfg);
+    console.log(`[backup] launched job ${r.job} (every ${cfg.backup.every})`);
+    return r;
+  } catch (e) {
+    const error = e.stderr || e.message;
+    saveState({ error, erroredAt: Date.now() });
+    console.warn('[backup] launch failed:', error);
+    return { error };
+  }
 }
 
 /**
- * Status for the settings row. Reports the schedule as the HUB sees it, not as
- * we last left it — a backup nobody can verify the state of is a backup nobody
- * trusts, and the destination's privacy is the one thing that must be visible.
+ * Start the loop. One unref'd timer that asks every 5 minutes whether a backup
+ * is due; the config is re-read each time, so switching the interval takes
+ * effect without restarting anything.
+ */
+export function startBackupTimer(getConfig) {
+  const t = setInterval(() => { tick(getConfig()).catch(() => {}); }, TICK_MS);
+  if (t.unref) t.unref();
+  // First check shortly after boot, once bucket discovery has landed.
+  const first = setTimeout(() => { tick(getConfig()).catch(() => {}); }, 30_000);
+  if (first.unref) first.unref();
+  return () => { clearInterval(t); clearTimeout(first); };
+}
+
+/**
+ * Status for the settings row. A backup nobody can see the state of is a backup
+ * nobody trusts — and the destination's privacy is the one thing that must be
+ * visible, so it is re-read here rather than remembered.
  */
 export async function backupStatus(cfg) {
   const state = loadState();
   const every = cfg?.backup?.every || 'never';
   const source = sourceBucket();
-  const d = await defaultsFor();
-  const mirror = (cfg?.backup?.mirror || d.mirror || '').trim();
-  const dataset = (cfg?.backup?.dataset || d.dataset || '').trim();
-  const sched = await findSchedule(state.scheduledJobId);
-
-  let priv = null;
-  if (every !== 'never' && dataset) {
-    priv = await datasetPrivate(dataset);
-  }
-
+  const { mirror, dataset, defaults } = await targets(cfg);
+  const [stage, priv] = await Promise.all([
+    every === 'never' ? null : jobStage(state.jobId),
+    every === 'never' || !dataset ? null : datasetPrivate(dataset),
+  ]);
   return {
     every,
     source,
     mirror,
     dataset,
-    defaults: d,
-    scheduled: sched
-      ? { id: sched.id, cron: sched.schedule, suspended: !!sched.suspend,
-          lastRun: sched.last_run && sched.last_run !== 'N/A' ? sched.last_run : null,
-          nextRun: sched.next_run || null }
+    defaults,
+    hasToken: hasToken(),
+    unavailable: unavailableReason(cfg),
+    last: state.startedAt
+      ? { at: state.startedAt, jobId: state.jobId || null, stage: stage || 'RUNNING' }
       : null,
-    datasetPrivate: priv,   // null = unknown/not created yet
+    nextDue: state.startedAt && intervalMs(every) ? state.startedAt + intervalMs(every) : null,
+    datasetPrivate: priv, // null = unknown or not created yet
     error: state.error || null,
   };
 }
 
-// One small authed read; the settings row needs the CURRENT answer, because a
+// One small authed read: the settings row needs the CURRENT answer, because a
 // repo holding credentials can be flipped public at any time.
 async function datasetPrivate(dataset) {
+  if (!validRepoId(dataset)) return null;
   try {
-    const out = await run(['datasets', 'info', dataset, '--json'], { timeout: 30_000 });
-    const j = JSON.parse(out);
+    const j = JSON.parse(await run(['datasets', 'info', dataset, '--json'], { timeout: 30_000 }));
     return j.private === true;
-  } catch (e) {
-    if (/404|not found|RepositoryNotFound/i.test(e.stderr || e.message || '')) return null;
-    return null;
-  }
+  } catch { return null; }
 }

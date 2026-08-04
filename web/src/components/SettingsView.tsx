@@ -177,6 +177,22 @@ export default function SettingsView({
     return () => clearTimeout(t);
   }, [cfg, savedCfg]);
 
+  // Bucket backup: the copying happens in an HF Job, so the row reports what the
+  // Hub says about the last one rather than anything we remember locally.
+  const [bk, setBk] = useState<api.BackupStatus | null>(null);
+  const [bkBusy, setBkBusy] = useState(false);
+  const loadBackup = () => api.backupStatus().then(setBk).catch(() => {});
+  useEffect(() => { loadBackup(); }, []);
+  // Re-read after a save lands, so the interval and privacy dot stop disagreeing
+  // with what was just chosen.
+  useEffect(() => { if (cfgSaved === 'saved') loadBackup(); }, [cfgSaved]);
+  const doBackup = async () => {
+    setBkBusy(true);
+    try { await api.runBackup(); } catch {}
+    await loadBackup();
+    setBkBusy(false);
+  };
+
   // App self-update: version check on open, update on confirm.
   const [upd, setUpd] = useState<api.UpdateCheck | null>(null);
   const [updState, setUpdState] = useState<{ busy?: boolean; msg?: string; confirm?: boolean }>({});
@@ -354,6 +370,59 @@ export default function SettingsView({
                       value={cfg.jobs.askAboveUsd}
                       onChange={(e) => setCfg({ ...cfg, jobs: { askAboveUsd: Math.max(0, Number(e.target.value) || 0) } })}
                     />
+                  </span>
+                </div>
+
+                <div className="setting-row">
+                  <div>
+                    <div className="s-label">Back up the bucket</div>
+                    <div className="s-help">
+                      Copies your whole bucket — workspaces, history, saved logins — to private Hub storage:
+                      a bucket you can restore from instantly, and a dataset that keeps version history.
+                      The copy runs on the Hub as a Job, so it costs this Space nothing. Nothing is ever
+                      deleted from your bucket.
+                    </div>
+                    {!bk?.hasToken && (
+                      <div className="s-help" style={{ marginTop: 6 }}>
+                        This needs a write-scoped <span className="mono">HF_TOKEN</span> Space secret —
+                        without one there is no way to launch the Job or write to the Hub.
+                      </div>
+                    )}
+                    {bk?.hasToken && cfg.backup.every !== 'never' && (
+                      <div className="s-help" style={{ marginTop: 6 }}>
+                        <span className="mono">{bk.mirror || bk.defaults.mirror}</span>
+                        {bk.datasetPrivate === false
+                          ? ' — NOT private, so backups are refused until you fix that'
+                          : bk.datasetPrivate === true ? ' — private' : ' — created private on the first run'}
+                        {bk.last && (
+                          <>
+                            {' · last run '}
+                            {new Date(bk.last.at).toLocaleString()}
+                            {bk.last.stage ? ` (${bk.last.stage.toLowerCase()})` : ''}
+                          </>
+                        )}
+                        {bk.error && <> · <span style={{ color: 'var(--warn, #d97757)' }}>{bk.error}</span></>}
+                      </div>
+                    )}
+                    {bk?.hasToken && cfg.backup.every !== 'never' && (
+                      <button className="btn-ghost" style={{ marginTop: 8 }} disabled={bkBusy} onClick={doBackup}>
+                        {bkBusy ? 'Launching…' : 'Back up now'}
+                      </button>
+                    )}
+                  </div>
+                  <span className="cfg-ctl">
+                    <div className="seg cfg-seg">
+                      {(['never', '1h', '3h', '24h'] as const).map((e) => (
+                        <button
+                          key={e}
+                          className={cfg.backup.every === e ? 'on' : ''}
+                          disabled={!bk?.hasToken && e !== 'never'}
+                          onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, every: e } })}
+                        >
+                          {e === 'never' ? 'off' : e}
+                        </button>
+                      ))}
+                    </div>
                   </span>
                 </div>
 
