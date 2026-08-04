@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { remoteState, setPaused } from './remote.js';
 import { cliById, isRemote, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
-import { captureOpencodeSession, readTrace } from './traces.js';
+import { captureOpencodeSession, opencodeSessionExists, readTrace } from './traces.js';
 import {
   buildPaletteIndex, snapshotToRestoreAnsi, styledSnapshotLines, textColumns,
 } from './snapshot.js';
@@ -1147,7 +1147,12 @@ function scheduleOpencodeCapture(session, workdir) {
 // Single-quote a string for embedding in an `sh -lc` command line.
 const shq = (t) => `'${String(t).replace(/'/g, `'\\''`)}'`;
 
-function commandFor(session) {
+// Conversation ids reach the launch line unquoted, and this one comes back out
+// of a database rather than from us (Claude's uuid we mint ourselves). Shape-check
+// it so nothing but an opencode session id can ever be interpolated.
+const SES_ID = /^ses_[A-Za-z0-9_-]+$/;
+
+export function commandFor(session) {
   const cli = cliById(session.cli) || cliById('shell');
   if (cli.id === 'shell') return bashLaunch;
   // Quickstart: a prompt queued at creation rides the FIRST launch command
@@ -1202,11 +1207,24 @@ function commandFor(session) {
     const guard = 'G="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"; '
       + 'mkdir -p "$(dirname "$G")"; [ -d "$G" ] && rm -rf "$G"; '
       + '[ -e "$G" ] || { [ -f "${G}c" ] && cp "${G}c" "$G" || echo "{}" > "$G"; }; ';
-    // `--continue` resumes the most-recent conversation in the CWD, so two
-    // opencode agents sharing a folder would resume onto the SAME conversation
-    // (cross-talk) — same hazard as codex `resume --last`. Only continue when
-    // this session holds its folder alone; otherwise start fresh, and capture
-    // pins the new conversation right away (see scheduleOpencodeCapture).
+    // Resume the conversation this session is PINNED to, by id. `--continue`
+    // (below) takes the most-recent conversation in the CWD instead, which
+    // ignores the pin entirely: after a reset a restart came back on whichever
+    // conversation the folder touched last, and the pin the watcher maintains —
+    // the one the digest, the trace panel and sharing all read — described a
+    // different thread than the pane was showing. Existence-checked in JS rather
+    // than in the shell, because the db is one file for all conversations (no
+    // per-conversation path to test) and a missing row is fatal, not a fallback.
+    const pin = session.opencodeSessionId;
+    if (session.everStarted && pin && SES_ID.test(pin) && opencodeSessionExists(pin)) {
+      return `${guard}exec opencode --session ${pin}`;
+    }
+    // Unpinned (or the conversation is gone): `--continue` resumes the
+    // most-recent conversation in the CWD, so two opencode agents sharing a
+    // folder would resume onto the SAME one (cross-talk) — same hazard as codex
+    // `resume --last`. Only continue when this session holds its folder alone;
+    // otherwise start fresh, and capture pins the new conversation right away
+    // (see scheduleOpencodeCapture).
     const folder = session.path ?? session.id;
     const shared = list().some((o) => o.id !== session.id && o.cli === 'opencode' && (o.path ?? o.id) === folder);
     const base = session.everStarted && cli.cont && !shared

@@ -433,6 +433,21 @@ export function captureOpencodeSession(directory, sinceMs, claimed) {
   } catch { return null; } finally { try { db.close(); } catch {} }
 }
 
+// Does a pinned opencode conversation still exist? The launch line resumes by id
+// (`opencode --session <ses_…>`), and opencode exits 1 with "Session not found"
+// the moment the row is gone — verified on 1.18.9 — which would kill the pane on
+// sight. So the pin is checked here, before it can reach the shell: a purged
+// conversation starts fresh instead, the same honest fallback the Claude
+// transcript check and the codex rollout check give.
+export function opencodeSessionExists(id) {
+  if (!DatabaseSync || !id) return false;
+  let db;
+  try { db = new DatabaseSync(opencodeDbPath(), { readOnly: true }); } catch { return false; }
+  try {
+    return !!db.prepare('select 1 from session where id = ?').get(id);
+  } catch { return false; } finally { try { db.close(); } catch {} }
+}
+
 // ---------- Hermes (SQLite: ~/.hermes/state.db, WAL) ----------
 // sessions carry cwd + token totals; messages carry role/content/tool_name.
 // Timestamps are float SECONDS — converted to ms for digest fields.
