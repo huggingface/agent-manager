@@ -472,6 +472,21 @@ function armCapturedGrid(host, txn) {
 /** Start or supersede the bounded repaint transaction for an agent TUI. */
 function startCapturedGrid(host, cols, rows, seed = null, resizePty = true) {
   const previous = host.resizeCapture;
+  // A viewer can report its measured geometry before the resumed CLI emits
+  // its first byte. That resize is still part of startup, so claim the durable
+  // seed here rather than leaving it for a later output chunk.
+  const pendingStartup = !seed && !previous ? host.startupHistory : null;
+  if (pendingStartup) {
+    seed = {
+      history: pendingStartup.lines,
+      historyCols: pendingStartup.cols,
+      logical: true,
+    };
+  }
+  // Resizing during a startup capture supersedes its scratch grid, but must not
+  // downgrade its long idle window to the ordinary resize debounce. Otherwise
+  // a delayed resume repaint is committed later as duplicate terminal output.
+  const startupCapture = !!seed || !!previous?.startupCapture;
   let archive = seed?.history
     ? (seed.logical
       ? `${seed.history.map((line) => line.text || '').join('\n')}\n`
@@ -511,12 +526,14 @@ function startCapturedGrid(host, cols, rows, seed = null, resizePty = true) {
     archive: archive || '',
     fallbackHistory: fallbackHistory || '',
     sawData: false,
-    idleMs: seed ? STARTUP_CAPTURE_IDLE_MS : RESIZE_CAPTURE_IDLE_MS,
-    maxMs: seed ? STARTUP_CAPTURE_MAX_MS : RESIZE_CAPTURE_MAX_MS,
+    startupCapture,
+    idleMs: startupCapture ? STARTUP_CAPTURE_IDLE_MS : RESIZE_CAPTURE_IDLE_MS,
+    maxMs: startupCapture ? STARTUP_CAPTURE_MAX_MS : RESIZE_CAPTURE_MAX_MS,
     idleTimer: null,
     maxTimer: null,
   };
   host.resizeCapture = txn;
+  if (pendingStartup) host.startupHistory = null;
   if (resizePty) { try { host.pty.resize(cols, rows); } catch {} }
   txn.maxTimer = setTimeout(() => finishCapturedGrid(host, txn), txn.maxMs);
   if (txn.maxTimer.unref) txn.maxTimer.unref();
@@ -1191,13 +1208,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     if (host.traceHistoryPage) armTraceHydration(host);
     let txn = host.resizeCapture;
     if (!txn && host.startupHistory) {
-      const startup = host.startupHistory;
-      host.startupHistory = null;
-      startCapturedGrid(host, host.cols, host.rows, {
-        history: startup.lines,
-        historyCols: startup.cols,
-        logical: true,
-      }, false);
+      startCapturedGrid(host, host.cols, host.rows, null, false);
       txn = host.resizeCapture;
     }
     if (txn) {

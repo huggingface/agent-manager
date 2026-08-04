@@ -48,9 +48,9 @@ const srv = spawn('node', ['src/index.js'], {
     DATA_DIR,
     AM_BASHRC: '/nonexistent',
     AM_HISTORY_SAVE_MS: '50',
-    AM_STARTUP_CAPTURE_IDLE_MS: '300',
+    AM_STARTUP_CAPTURE_IDLE_MS: '700',
     AM_STARTUP_CAPTURE_MAX_MS: '3000',
-    AM_TEST_REPAINT_CMD: `env FIXED_LINES=30 HISTORY_LINES=2105 DELAY_RESUME_MS=180 ${JSON.stringify(process.execPath)} ${JSON.stringify(FIXTURE)}`,
+    AM_TEST_REPAINT_CMD: `env FIXED_LINES=30 HISTORY_LINES=2105 DELAY_RESUME_MS=400 ${JSON.stringify(process.execPath)} ${JSON.stringify(FIXTURE)}`,
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
