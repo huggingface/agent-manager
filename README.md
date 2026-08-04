@@ -18,8 +18,9 @@ file browser, all in your browser. Each agent runs in a workspace folder you
 pick at creation (defaulting to where the last agent was created) — names are
 just labels, independent of folders, and several agents can share a folder.
 Groups are visual: they organize the sidebar and tile agents side by side.
-Sessions are
-tmux-backed, so they survive disconnects. A **Skills** page distributes reusable
+Sessions live in the
+backend, so they survive disconnects and can be watched from several devices at
+once. A **Skills** page distributes reusable
 `SKILL.md` files to every agent, and a **Usage** page shows tokens/cost and your
 5-hour / weekly quota.
 
@@ -117,14 +118,28 @@ and `CODEX_HOME` under `/data/state`).
 browser (xterm.js panes)
   └── WebSocket /ws?session=<id>          one connection per visible pane
         └── Node backend (Express + ws)
-              └── node-pty → tmux session per agent   ← survives disconnect/restart
+              └── node-pty per agent + a libghostty-vt grid   ← the live screen
                     └── claude | codex | gemini | opencode | hermes | bash
 ```
 
-Each agent is a long-lived `tmux` session (`am-<id>`) that survives browser
-disconnects and in-Space server restarts. It does not survive a Space
-sleep/rebuild (the container is torn down), but with storage the working dir and
-CLI state persist, so a re-opened session resumes its own conversation. Claude
+Each agent is a PTY held by the backend, with a **libghostty-vt** terminal fed
+from its output. That grid is the authoritative screen, so reopening a pane is a
+canonical serialization of its retained history and styled screen rather than a
+truncated PTY byte replay, and agent state is read from the grid instead of
+shelling out per session. Several browsers can watch the same session, but one
+explicit controller owns input and PTY dimensions; interacting with a watcher
+claims control. This prevents background tabs and small phones from resizing a
+desktop session, and prevents several browser emulators from all answering the
+same terminal query.
+
+A resize is a controller request. The backend coalesces window-drag bursts,
+allows Ghostty to perform normal reflow, then tells every viewer the confirmed
+geometry before more PTY output arrives. Full history serialization is reserved
+for attach/reconnect. Browser zoom is presentation-only: it changes cell size
+and pans locally without resizing the PTY. Sessions survive browser disconnects
+but not a backend restart or Space sleep/rebuild; with storage the working
+directory and CLI state persist, so a reopened session resumes its own
+conversation. Claude
 sessions are pinned to a per-session conversation id at creation; Codex sessions
 are pinned right after first launch (the id is captured from the rollout file
 Codex creates) — so agents sharing a folder never resume each other's
@@ -136,7 +151,8 @@ conversations.
 |---|---|---|
 | `PORT` | `7860` | HTTP + WS port (HF `app_port`) |
 | `DATA_DIR` | `/data` | Durable root (mounted private Storage Bucket) |
-| `USE_TMUX` | auto | `1`/`0` to force tmux on/off (off = direct PTY, no persistence) |
+| `AM_SCROLLBACK_BYTES` | `67108864` | Maximum Ghostty scrollback memory per session |
+| `AM_RESIZE_SETTLE_MS` | `120` | Quiet period before a resize is applied to the PTY |
 | `ANTHROPIC_API_KEY` | — | Claude Code / opencode / Hermes (Space **secret**) |
 | `OPENAI_API_KEY` / `CODEX_API_KEY` | — | Codex (Space secret) |
 | `GEMINI_API_KEY` | — | Gemini CLI (Space secret) |
@@ -147,7 +163,7 @@ Logging in interactively inside a terminal works too — credentials are written
 ## Local development
 
 ```bash
-# backend (no tmux locally → direct-PTY mode; only the Shell CLI works offline)
+# backend (needs node >= 20.19 for libghostty-vt; only the Shell CLI works offline)
 cd server && npm install && npm run dev
 
 # frontend (proxies /api and /ws to the backend on :7860)

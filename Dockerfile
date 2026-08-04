@@ -10,7 +10,9 @@ RUN npm run build
 # Node 22+: required by OpenClaw (22.19+); everything else is version-agnostic.
 FROM node:22-bookworm AS runtime
 
-# System deps: tmux (session durability), git, build tools (node-pty native build),
+# System deps: git, build tools (node-pty native build),
+# tmux is still installed for AGENTS to use if they want it — the app itself no
+# longer runs sessions through it (see server/src/runner.js),
 # ripgrep (used by the coding CLIs), curl/ca-certs — plus everyday QoL tools
 # agents and humans reach for (jq/htop/sqlite3/editors/media, fonts so headless
 # Chromium screenshots don't render tofu).
@@ -118,14 +120,14 @@ RUN [ -x /home/node/.local/bin/hermes ] \
       || true
 USER node
 
-# App code + built frontend + runtime config (tmux + prompt rcfile).
+# App code + built frontend + runtime config (prompt rcfile).
 COPY --chown=node:node server/ server/
 # scripts/ is not developer-only: share.js runs scripts/share-session.mjs as a
 # child process to build a share bundle off the event loop, so it must ship.
 COPY --chown=node:node scripts/ scripts/
 COPY --chown=node:node --from=web /web/dist /app/public
 COPY --chown=node:node entrypoint.sh /app/entrypoint.sh
-COPY --chown=node:node tmux.conf session.bashrc /app/
+COPY --chown=node:node session.bashrc /app/
 
 ENV PORT=7860 \
     DATA_DIR=/data \

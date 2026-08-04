@@ -31,18 +31,12 @@ const THEMES: Record<'light' | 'dark', ITheme> = {
   },
 };
 
-type ConnState = 'connecting' | 'connected' | 'closed' | 'exited' | 'handedoff';
+type ConnState = 'connecting' | 'connected' | 'closed' | 'exited';
 
 // Close code the server uses when the session's process exited for real (vs a
 // transient drop). The client must NOT auto-reconnect on this, or it would
 // respawn the agent in a loop and trample an in-progress login flow.
 const EXIT_CODE = 4000;
-
-// Close code for "another device took this session over" (tmux attaches with
-// -D, so only one client drives a session at a time). The session is still
-// running: we must not reconnect on a timer, or this pane and the phone would
-// pull the session back and forth. We wait for the user to come back here.
-const HANDOFF_CODE = 4001;
 
 function workspaceLabel(p: string | null) {
   const rel = (p || '').replace(/^\.\/?/, '').replace(/^\/+|\/+$/g, '');
@@ -50,10 +44,8 @@ function workspaceLabel(p: string | null) {
 }
 
 // Serialize the current selection, joining soft-wrapped rows instead of
-// emitting a newline per visual row. tmux repaints with explicit cursor moves,
-// so a wrapped logical line arrives as separate full-width rows that xterm's
-// default getSelection() would break with '\n'. We rejoin a row to the next
-// when xterm flags it wrapped OR it's filled to the last column (the tmux case).
+// emitting a newline per visual row. Some full-width rows painted with cursor
+// movement lack xterm's wrap flag, so a filled last cell is a second signal.
 function selectionText(term: Terminal): string {
   try {
     const pos = term.getSelectionPosition?.();
@@ -92,20 +84,56 @@ function selectionText(term: Terminal): string {
 //      and flush on the user's next click, so the copy lands when they return.
 // It must run synchronously inside the triggering event — deferring to a
 // setTimeout loses the activation that execCommand needs.
-const OSC52_COPY_WINDOW_MS = 1500;
-// Server → client control frames (copy-mode state) ride the terminal socket
-// with this leading NUL sentinel, which real pty output never begins with.
+// Server → client control frames (restore, shared-grid size) ride the terminal
+// socket with this leading NUL sentinel, which real pty output never begins with.
 const MODE_CTRL = '\x00\x00AM:';
-let osc52CopyAllowedUntil = 0;
 
-function allowNextOsc52Copy() {
-  osc52CopyAllowedUntil = Date.now() + OSC52_COPY_WINDOW_MS;
+type TerminalPreview = { version: 1; at: number; cols: number; rows: string[] };
+const PREVIEW_PREFIX = 'am-terminal-preview:';
+const PREVIEW_INDEX = 'am-terminal-preview-index';
+const MAX_PREVIEWS = 12;
+
+function loadTerminalPreview(id: string): TerminalPreview | null {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(`${PREVIEW_PREFIX}${id}`) || 'null');
+    if (parsed?.version !== 1 || !Array.isArray(parsed.rows)
+        || !parsed.rows.some((line: unknown) => typeof line === 'string' && line.trim())) return null;
+    return {
+      version: 1,
+      at: Number(parsed.at) || 0,
+      cols: Math.max(1, Number(parsed.cols) || 80),
+      rows: parsed.rows.filter((line: unknown) => typeof line === 'string').slice(0, 80),
+    };
+  } catch { return null; }
 }
 
-function consumeOsc52CopyPermission(): boolean {
-  if (Date.now() > osc52CopyAllowedUntil) return false;
-  osc52CopyAllowedUntil = 0;
-  return true;
+// Keep only a compact rendering of the viewport, never the full 20k-line
+// scrollback. It is a loading preview, not a second terminal state model.
+function saveTerminalPreview(id: string, term: Terminal) {
+  try {
+    const buffer = term.buffer.active;
+    const rowCount = Math.min(term.rows, 80);
+    const colCount = Math.min(term.cols, 240);
+    const rows: string[] = [];
+    for (let y = 0; y < rowCount; y++) {
+      const line = buffer.getLine(buffer.viewportY + y);
+      rows.push((line?.translateToString(false, 0, colCount) || '').replace(/[ \t]+$/, ''));
+    }
+    if (!rows.some((line) => line.trim())) return;
+    const saved: TerminalPreview = { version: 1, at: Date.now(), cols: term.cols, rows };
+    localStorage.setItem(`${PREVIEW_PREFIX}${id}`, JSON.stringify(saved));
+
+    let previous: string[] = [];
+    try { previous = JSON.parse(localStorage.getItem(PREVIEW_INDEX) || '[]'); } catch {}
+    const next = [id, ...previous].filter((value, i, all) =>
+      typeof value === 'string' && all.indexOf(value) === i).slice(0, MAX_PREVIEWS);
+    localStorage.setItem(PREVIEW_INDEX, JSON.stringify(next));
+    for (const stale of previous) {
+      if (typeof stale === 'string' && !next.includes(stale)) {
+        localStorage.removeItem(`${PREVIEW_PREFIX}${stale}`);
+      }
+    }
+  } catch { /* storage may be disabled or full; previews are best-effort */ }
 }
 
 function legacyCopy(text: string): boolean {
@@ -164,20 +192,24 @@ export default function TerminalPane({
   onClose: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const resyncRef = useRef<() => void>(() => {});
+  const claimRef = useRef<() => void>(() => {});
   const reconnectRef = useRef<() => void>(() => {});
-  // Take a handed-off session back (bound inside the connection effect).
-  const resumeRef = useRef<() => void>(() => {});
+  const controllerRef = useRef(false);
+  const previousZoomRef = useRef(zoom);
+  const [preview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
   const sendKeyRef = useRef<(d: string) => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
-  // "starting…" cover while the CLI boots into an empty pane (attach on the
+  // "starting…" cover while the CLI boots into an empty pane (starting on the
   // Space can take seconds). Hidden only when the screen actually SHOWS
-  // something — byte counts lie, because tmux's attach repaint of a blank
-  // 200×50 screen is already kilobytes of escapes.
+  // something — byte counts lie because a blank-screen repaint can already be
+  // kilobytes of escape sequences.
   const [booting, setBooting] = useState(true);
-  const [copyMode, setCopyMode] = useState(false); // tmux copy/scrollback mode
+  const [controller, setController] = useState(false);
+  const [viewers, setViewers] = useState(1);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.name);
   // Fallback paste sheet: shown only when we can't read the clipboard directly.
@@ -219,34 +251,33 @@ export default function TerminalPane({
   useEffect(() => {
     const term = new Terminal({
       fontFamily: "'Geist Mono', ui-monospace, 'SF Mono', Menlo, 'Cascadia Code', monospace",
-      fontSize: 13,
+      // Start at the requested zoom so attachment does not briefly create a
+      // 100% grid and then force an avoidable reflow as the session boots.
+      fontSize: Math.round((13 * zoom) / 100),
       cursorBlink: true,
       scrollback: 20000,
       theme: THEMES[theme],
-      // Let users make a *local* selection even when the app (tmux / an agent
-      // TUI) has grabbed the mouse: ⌥-drag on macOS, Shift-drag elsewhere.
+      // Let users make a local selection even when an agent TUI has grabbed
+      // the mouse: ⌥-drag on macOS, Shift-drag elsewhere.
       macOptionClickForcesSelection: true,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
 
     let lastSelection = '';
-    let tmuxSelectionPending = false;
-    let tmuxSelectionText = '';
-    let tmuxSelectionAt = 0;
+    let osc52Text = '';
+    let osc52At = 0;
 
-    // tmux emits OSC 52 when copy-mode commits a mouse selection. Do not write
-    // the system clipboard there; stash the decoded text and wait for Cmd/C.
+    // An agent may deliberately emit OSC 52. Browsers generally reject an
+    // unsolicited clipboard write, so retain it briefly and let Cmd/C perform
+    // the write inside a real user gesture.
     const clipboardProvider = {
       readText: (sel: string) => (sel !== 'p' && navigator.clipboard?.readText ? navigator.clipboard.readText().catch(() => '') : ''),
       writeText: (sel: string, data: string) => {
-        const allowed = sel !== 'p' && consumeOsc52CopyPermission();
         if (sel !== 'p') {
-          tmuxSelectionText = data;
-          tmuxSelectionAt = Date.now();
-          tmuxSelectionPending = true;
+          osc52Text = data;
+          osc52At = Date.now();
         }
-        if (allowed) copyText(data);
       },
     };
     // addon-clipboard@0.1.0 has a (base64, provider) runtime constructor but
@@ -254,107 +285,122 @@ export default function TerminalPane({
     term.loadAddon(new (ClipboardAddon as unknown as new (b: Base64, p: typeof clipboardProvider) => ClipboardAddon)(new Base64(), clipboardProvider));
     term.open(hostRef.current!);
     termRef.current = term;
+    const host = hostRef.current!;
+
+    let previewTimer: ReturnType<typeof setTimeout> | null = null;
+    const persistPreview = () => {
+      if (previewTimer) { clearTimeout(previewTimer); previewTimer = null; }
+      saveTerminalPreview(session.id, term);
+    };
+    const schedulePreview = () => {
+      // Preview serialization reads every visible buffer row and writes
+      // localStorage synchronously. Debounce until output/scrolling is idle so
+      // it never lands in the middle of a mobile drag.
+      if (previewTimer) clearTimeout(previewTimer);
+      previewTimer = setTimeout(persistPreview, 700);
+    };
+
+    // xterm deliberately parks its real textarea far off-screen. That is fine
+    // with a hardware keyboard, but a mobile browser (especially a Space inside
+    // a cross-origin iframe) has no visible focus target to pan above the OSK.
+    // Keep the still-transparent 1px input at the bottom of the terminal so the
+    // browser's native focused-element avoidance can cross the iframe boundary.
+    const mobileInput = isMobile
+      ? host.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea')
+      : null;
+    const anchorMobileInput = () => {
+      if (!mobileInput) return;
+      // xterm rewrites left/top whenever its cursor moves. Custom properties
+      // survive those writes and feed the mobile !important rules in CSS.
+      mobileInput.style.setProperty('--am-input-left', `${Math.max(1, Math.round(host.clientWidth / 2))}px`);
+      mobileInput.style.setProperty('--am-input-top', `${Math.max(1, host.clientHeight - 12)}px`);
+    };
+    anchorMobileInput();
+
+    // Track the user's semantic scroll state independently of the viewport's
+    // pixel scrollTop. During a row-count change xterm can transiently report
+    // the old pixel position against the new scroll height.
+    let followingBottom = true;
+    const scrollSub = term.onScroll(() => {
+      followingBottom = term.buffer.active.viewportY >= term.buffer.active.baseY;
+      schedulePreview();
+    });
 
     // Track the committed local xterm selection so Cmd/Ctrl+C can copy it
     // synchronously — deferring (setTimeout) would break execCommand's gesture.
     const selSub = term.onSelectionChange(() => {
       lastSelection = term.hasSelection() ? selectionText(term) : '';
-      if (lastSelection) tmuxSelectionPending = false;
     });
     const copySelection = () => {
       const text = term.hasSelection() ? selectionText(term) : lastSelection;
       if (text) copyText(text);
     };
-    const copyTmuxSelection = (e?: ClipboardEvent): boolean => {
-      const fresh = tmuxSelectionText && Date.now() - tmuxSelectionAt < 120_000;
-      if (!tmuxSelectionPending || !fresh) return false;
-      if (e?.clipboardData) {
-        e.clipboardData.setData('text/plain', tmuxSelectionText);
-        e.preventDefault();
-        e.stopPropagation();
-      } else {
-        copyText(tmuxSelectionText);
-      }
-      return true;
-    };
-    const host = hostRef.current!;
-    let mouseDragStart: { x: number; y: number } | null = null;
-    let mouseDragged = false;
-    const onPointerDown = (e: PointerEvent) => {
-      takeBack(); // clicking into a handed-off pane means "I'm working here now"
-      if (e.pointerType !== 'mouse' || e.button !== 0) return;
-      mouseDragStart = { x: e.clientX, y: e.clientY };
-      mouseDragged = false;
-    };
-    const onPointerMove = (e: PointerEvent) => {
-      if (!mouseDragStart || (e.buttons & 1) === 0) return;
-      if (Math.abs(e.clientX - mouseDragStart.x) > 3 || Math.abs(e.clientY - mouseDragStart.y) > 3) mouseDragged = true;
-    };
-    const onPointerUp = (e: PointerEvent) => {
-      if (e.pointerType !== 'mouse' || e.button !== 0) return;
-      if (mouseDragged && !term.hasSelection()) {
-        tmuxSelectionPending = true;
-      } else if (!term.hasSelection()) {
-        tmuxSelectionPending = false;
-      }
-      mouseDragStart = null;
-      mouseDragged = false;
-    };
-    const onClick = (e: MouseEvent) => {
-      if (e.detail >= 2 && !term.hasSelection()) {
-        tmuxSelectionPending = true;
-      }
-    };
-    host.addEventListener('pointerdown', onPointerDown, true);
-    host.addEventListener('pointermove', onPointerMove, true);
-    host.addEventListener('pointerup', onPointerUp, true);
-    host.addEventListener('click', onClick, true);
-
-    const onDocumentPointerDown = (e: PointerEvent) => {
-      if (!host.contains(e.target as Node)) tmuxSelectionPending = false;
-    };
     const onCopy = (e: ClipboardEvent) => {
-      copyTmuxSelection(e);
+      if (!term.hasSelection()) return;
+      const text = selectionText(term);
+      if (!text || !e.clipboardData) return;
+      e.clipboardData.setData('text/plain', text);
+      e.preventDefault();
     };
-    document.addEventListener('pointerdown', onDocumentPointerDown, true);
     document.addEventListener('copy', onCopy, true);
 
     let ws: WebSocket | null = null;
     const send = (o: unknown) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o));
     };
-    // The mobile key-bar sends control sequences the on-screen keyboard can't.
-    sendKeyRef.current = (d: string) => { send({ t: 'i', d }); endBoot(); };
+    const claimControl = () => {
+      if (controllerRef.current) return;
+      // Activation can precede WebSocket.open when a pane is first mounted.
+      // Do not consume that claim locally: onopen will retry it once it can
+      // actually reach the server.
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      // Optimistic locally so the input event following this gesture is not
+      // dropped. WebSocket ordering guarantees claim reaches the server first.
+      controllerRef.current = true;
+      setController(true);
+      send({ t: 'claim' });
+    };
+    claimRef.current = claimControl;
+    const onPointerDown = (e: PointerEvent) => {
+      // A touch may only be inspecting local scrollback. Claim lazily below if
+      // the gesture actually needs to drive an application's mouse mode.
+      if (e.pointerType !== 'touch') claimControl();
+    };
+    const onPaste = () => claimControl();
+    host.addEventListener('pointerdown', onPointerDown, true);
+    host.addEventListener('paste', onPaste, true);
 
-    // ⌘/Ctrl+C copies selected text. With a tmux mouse selection, ask the server
-    // to run tmux's copy command; the resulting OSC 52 is accepted only because
-    // it follows this key gesture. Paste is left to xterm's native handler so
-    // bracketed-paste framing is preserved.
+    // The mobile key-bar sends control sequences the on-screen keyboard can't.
+    sendKeyRef.current = (d: string) => {
+      claimControl();
+      send({ t: 'i', d });
+      endBoot();
+    };
+
+    // ⌘/Ctrl+C copies a local selection. Without one, Ctrl+C remains SIGINT;
+    // Cmd+C may accept a recent OSC 52 payload deliberately emitted by the app.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
       if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C') && term.hasSelection()) {
         copySelection();
         term.clearSelection();
-        tmuxSelectionPending = false;
         return false;
       }
-      if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C') && tmuxSelectionPending) {
-        if (!copyTmuxSelection()) {
-          allowNextOsc52Copy();
-          send({ t: 'copy' });
-        }
+      if (e.metaKey && (e.key === 'c' || e.key === 'C')) {
+        if (osc52Text && Date.now() - osc52At < 120_000) copyText(osc52Text);
         return false;
       }
-      if (e.metaKey && (e.key === 'c' || e.key === 'C')) return false;
-      if (e.key === 'Escape') tmuxSelectionPending = false;
+      claimControl();
       return true;
     });
+    // The only local fit: this terminal is still empty, so there is no buffer to
+    // reflow, and it gives the initial size we open the socket with. Every later
+    // size change goes through resync() as a REQUEST — see there.
     try { fit.fit(); } catch { /* layout not ready yet */ }
     // Re-measure once the webfont is ready (glyph width changes vs the fallback).
-    document.fonts?.ready.then(() => { try { fit.fit(); } catch { /* ignore */ } });
+    document.fonts?.ready.then(() => resync());
 
     let closedByUs = false;
-    let handedOff = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
     // Reconnect with backoff: a sleeping/unreachable Space shouldn't be hammered
     // every second by every open pane. Reset once a connection succeeds.
@@ -385,11 +431,17 @@ export default function TerminalPane({
       setBooting(false);
     };
     const connect = () => {
+      controllerRef.current = false;
+      setController(false);
       setConn('connecting');
-      setBooting(true);
-      bootLive = true;
+      // A reconnect keeps the already-rendered xterm visible. On a fresh page,
+      // `booting` instead exposes the saved preview until canonical restore has
+      // painted real content.
+      const needsCover = !screenHasContent();
+      setBooting(needsCover);
+      bootLive = needsCover;
       if (bootTimer) clearTimeout(bootTimer);
-      bootTimer = setTimeout(endBoot, 20_000);
+      bootTimer = needsCover ? setTimeout(endBoot, 20_000) : null;
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const url = `${proto}://${location.host}/ws?session=${encodeURIComponent(session.id)}&cols=${term.cols}&rows=${term.rows}`;
       ws = new WebSocket(url);
@@ -397,18 +449,56 @@ export default function TerminalPane({
       ws.onopen = () => {
         setConn('connected');
         retryDelay = 1200;
-        try { fit.fit(); } catch { /* ignore */ }
-        send({ t: 'r', cols: term.cols, rows: term.rows });
+        // Selecting a terminal is an explicit foreground action on mobile.
+        // Claim before reporting its fit so an already-open desktop does not
+        // leave the phone rendering a clipped desktop-sized canonical grid.
+        if (isMobile && !document.hidden) claimControl();
+        requestSize();
       };
       ws.onmessage = (e) => {
         const d = typeof e.data === 'string' ? e.data : new Uint8Array(e.data as ArrayBuffer);
-        // Control frame (copy-mode changes): a leading NUL sentinel that raw
-        // pty output never produces — handle it instead of writing to the term.
+        // Control frame: a leading NUL sentinel that raw pty output never
+        // produces — handle it instead of writing to the term.
         if (typeof d === 'string' && d.startsWith(MODE_CTRL)) {
-          try { const m = JSON.parse(d.slice(MODE_CTRL.length)); if (m.t === 'mode') setCopyMode(!!m.copy); } catch { /* ignore */ }
+          try {
+            const m = JSON.parse(d.slice(MODE_CTRL.length));
+            if (m.t === 'grid' || m.t === 'restore') {
+              controllerRef.current = !!m.controller;
+              setController(!!m.controller);
+              setViewers(Math.max(1, Number(m.viewers) || 1));
+              const applyGrid = () => {
+                try {
+                  // xterm can retain the old pixel scrollTop when the viewport
+                  // gains rows (notably landscape -> portrait), which leaves a
+                  // formerly-live view stranded in history. Preserve the
+                  // semantic bottom anchor without disturbing someone who is
+                  // deliberately reading scrollback.
+                  const wasAtBottom = m.reset || followingBottom;
+                  if (m.reset) {
+                    term.reset();
+                    term.clear();
+                  }
+                  if (m.cols > 0 && m.rows > 0 && (term.cols !== m.cols || term.rows !== m.rows)) {
+                    term.resize(m.cols, m.rows);
+                  }
+                  if (wasAtBottom) {
+                    term.scrollToBottom();
+                    followingBottom = true;
+                  }
+                  schedulePreview();
+                } catch { /* ignore */ }
+              };
+              // Writes are asynchronous. A queued empty write is a barrier so
+              // resize/reset cannot reinterpret bytes from the preceding grid.
+              const geometryChanged = m.cols > 0 && m.rows > 0
+                && (term.cols !== m.cols || term.rows !== m.rows);
+              if (m.reset || geometryChanged) term.write('', applyGrid);
+              else applyGrid();
+            }
+          } catch { /* ignore */ }
           return;
         }
-        term.write(d);
+        term.write(d, schedulePreview);
         // Probe shortly after each burst (throttled; write() is async).
         if (bootLive && !bootCheck) {
           bootCheck = setTimeout(() => {
@@ -420,12 +510,9 @@ export default function TerminalPane({
       ws.onclose = (e) => {
         // A real process exit: stop here and let the user relaunch. Anything
         // else is a transient drop (sleep/wake, network) → auto-reconnect and
-        // reattach to the still-running tmux session.
+        // reattach to the still-running backend session.
         endBoot();
         if (e.code === EXIT_CODE) { setConn('exited'); return; }
-        // Another device took over: stay detached (no retry timer) until the
-        // user deliberately comes back to this pane — see takeBack().
-        if (e.code === HANDOFF_CODE) { handedOff = true; setConn('handedoff'); return; }
         setConn('closed');
         if (!closedByUs) {
           retry = setTimeout(connect, retryDelay);
@@ -435,77 +522,149 @@ export default function TerminalPane({
       ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
     };
     // Manual restart: clear the dead run's screen so the content probe watches
-    // the NEW process paint, not leftovers (tmux repaints the live screen).
+    // the new process paint, not leftovers.
     reconnectRef.current = () => { if (retry) clearTimeout(retry); retryDelay = 1200; try { term.reset(); } catch { /* ignore */ } connect(); };
 
-    // Take the session back from whichever device holds it now. Called ONLY for
-    // a deliberate return to this pane — the tab regaining focus/visibility, or
-    // a tap/click in the terminal — never on a timer, so the phone we just put
-    // down keeps the session while it sits in the background. Reattaching sizes
-    // tmux to this device, which is the point: each device gets a window that
-    // fits it, at the cost of one reflow per handover instead of per glance.
-    const takeBack = () => {
-      if (!handedOff || document.hidden) return false;
-      handedOff = false;
-      connect();
-      return true;
+    // Report the pane's preferred size without locally fitting its terminal.
+    // Only the current controller's preference changes the canonical grid;
+    // watchers retain theirs for a future claim.
+    let resyncTimer: ReturnType<typeof setTimeout> | null = null;
+    const requestSize = () => {
+      const box = hostRef.current;
+      if (!box || box.clientWidth < 40 || box.clientHeight < 40) return;
+      try {
+        const d = fit.proposeDimensions();
+        const cols = d ? Math.max(1, d.cols) : 0;
+        const rows = d ? Math.max(1, d.rows) : 0;
+        if (cols > 0 && rows > 0) send({ t: 'r', cols, rows });
+      } catch { /* layout not ready */ }
     };
-    resumeRef.current = () => { takeBack(); };
-
-    // Re-fit and tell the server our size. The attached client owns the tmux
-    // window, so this keeps it fitting this device exactly instead of leaving
-    // tmux's "dots" filler. Never reconnects: a layout change (another pane
-    // opening, the sidebar toggling) is not a reason to pull a session off the
-    // device the user is actually holding.
+    // ResizeObserver fires every frame while a window is dragged or the sidebar
+    // animates. Ask once, when it stops.
     const resync = () => {
-      if (handedOff) return;
-      try { fit.fit(); send({ t: 'r', cols: term.cols, rows: term.rows }); } catch { /* ignore */ }
+      anchorMobileInput();
+      if (resyncTimer) clearTimeout(resyncTimer);
+      resyncTimer = setTimeout(() => { resyncTimer = null; requestSize(); }, 80);
     };
-    // Returning to this tab IS deliberate — take the session back, or just
-    // re-sync the size if we still hold it.
-    const onReturn = () => { if (!takeBack()) resync(); };
+    resyncRef.current = resync;
+    const onReturn = () => resync();
     const onVisible = () => { if (!document.hidden) onReturn(); };
-    resyncRef.current = resync; // so the zoom control can refit
-
     // Typing means the user sees enough to interact — drop the boot cover.
     // Real keystrokes only (onKey): onData ALSO fires for xterm's automatic
     // replies to the TUI's terminal queries (DA/CPR), which arrive instantly
     // on attach and must not count as "the user typed".
-    const keySub = term.onKey(() => endBoot());
-    const dataSub = term.onData((d) => send({ t: 'i', d }));
+    const keySub = term.onKey(() => { claimControl(); endBoot(); });
+    // Watchers render output but do not answer terminal queries. This prevents
+    // N browser emulators from injecting N DA/CPR responses into one PTY.
+    const dataSub = term.onData((d) => {
+      if (controllerRef.current) send({ t: 'i', d });
+    });
     const ro = new ResizeObserver(resync);
     ro.observe(hostRef.current!);
     window.addEventListener('focus', onReturn);
     document.addEventListener('visibilitychange', onVisible);
 
-    // Touch scrolling: xterm doesn't translate touch gestures for applications
-    // that grabbed the mouse (tmux always does here), so swipes did nothing on
-    // phones. Convert drags into wheel steps: SGR mouse-wheel sequences when
-    // the app tracks the mouse (tmux scrolls its history), local scrollLines
-    // otherwise.
+    // A phone drag always navigates browser-retained terminal history. Passing
+    // it to an agent's mouse mode at the live bottom makes Claude consume the
+    // gesture without moving xterm's viewport, leaving no reliable way back
+    // through history on touch-only devices. xterm 5.5 registers no touch
+    // listeners of its own (verified against the bundled lib) and .term-host
+    // sets touch-action:none on mobile, so neither xterm nor the browser will
+    // pan: this is the only touch scrolling a phone has, in every pane.
+    //
+    // Convert the drag to whole rows and carry the remainder in `residual`.
+    // Quantising each event to a fixed notch instead silently drops whatever
+    // does not fill one — a 96px drag moved the view 68px — and that shortfall
+    // is what reads as lag, because the text trails the finger by design.
+    // scrollLines moves ydisp, the authority the viewport follows.
+    // The frame, not the inner measurement box: .term-host is what carries
+    // touch-action:none and what the user actually drags, and it stays the
+    // gesture target however the box inside it is nested.
+    const frame = frameRef.current ?? host;
+    const viewport = host.querySelector<HTMLElement>('.xterm-viewport');
     let touchY: number | null = null;
-    const onTouchStart = (e: TouchEvent) => { takeBack(); touchY = e.touches[0].clientY; };
-    const onTouchMove = (e: TouchEvent) => {
-      if (touchY == null) return;
-      const y = e.touches[0].clientY;
-      const dy = y - touchY;
-      const steps = Math.trunc(dy / 24); // ~one wheel notch per 24px of drag
-      if (steps !== 0) {
-        touchY = y;
-        let tracking = false;
-        try { tracking = ((term as unknown as { modes?: { mouseTrackingMode?: string } }).modes?.mouseTrackingMode ?? 'none') !== 'none'; } catch { /* older xterm */ }
-        const btn = steps > 0 ? 64 : 65; // drag down reveals earlier output = wheel up
-        for (let i = 0; i < Math.abs(steps); i++) {
-          if (tracking) send({ t: 'i', d: `\x1b[<${btn};${Math.max(1, Math.floor(term.cols / 2))};${Math.max(1, Math.floor(term.rows / 2))}M` });
-          else term.scrollLines(steps > 0 ? -1 : 1);
-        }
-      }
-      if (Math.abs(dy) > 4) e.preventDefault(); // keep the page from rubber-banding
+    let residual = 0;        // px of gesture not yet worth a whole row
+    let glideFrame = 0;
+    let velocity = 0;        // px/ms, signed like deltaY (positive scrolls down)
+    let lastMoveAt = 0;
+    // The scroll area spans every line in the buffer, so its height over that
+    // line count is the row height under whichever renderer is attached.
+    const scrollByPixels = (px: number) => {
+      const lines = term.buffer.active.length;
+      const cell = viewport && lines ? viewport.scrollHeight / lines : 0;
+      if (!cell) return 0;
+      residual += px;
+      const rows = Math.trunc(residual / cell);
+      if (!rows) return 0;
+      residual -= rows * cell;
+      term.scrollLines(rows);
+      return rows;
     };
-    const onTouchEnd = () => { touchY = null; };
-    host.addEventListener('touchstart', onTouchStart, { passive: true });
-    host.addEventListener('touchmove', onTouchMove, { passive: false });
-    host.addEventListener('touchend', onTouchEnd);
+    const stopGlide = () => { if (glideFrame) { cancelAnimationFrame(glideFrame); glideFrame = 0; } };
+    const onTouchStart = (e: TouchEvent) => {
+      stopGlide();               // a new touch takes over from any coasting
+      velocity = 0;
+      residual = 0;
+      touchY = e.touches[0].clientY;
+      lastMoveAt = e.timeStamp;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (touchY == null || !e.touches.length) return;
+      const y = e.touches[0].clientY;
+      const deltaY = touchY - y;
+      touchY = y;
+      if (deltaY === 0) return;
+      const dt = e.timeStamp - lastMoveAt;
+      lastMoveAt = e.timeStamp;
+      // Weight the newest sample heavily: what matters is the speed at release,
+      // and a touch stream is noisy. Ignore a stale gap (a paused finger) and
+      // anything faster than a touch stream can legitimately be — a single
+      // coalesced jump over a 2ms gap is not a 48px/ms flick, and dividing by
+      // it would launch the glide clean through the buffer. A hand tops out
+      // around 4px/ms; real events arrive 8-16ms apart.
+      if (dt >= 4 && dt < 100) {
+        const sample = Math.max(-4, Math.min(4, deltaY / dt));
+        velocity = velocity * 0.3 + sample * 0.7;
+      }
+      scrollByPixels(deltaY);
+      if (e.cancelable) e.preventDefault(); // keep the page from rubber-banding
+      // This listener runs in capture before xterm's listener on the same host.
+      // stopPropagation alone would still allow that second handler.
+      e.stopImmediatePropagation();
+    };
+    const onTouchEnd = () => {
+      touchY = null;
+      const v0 = velocity;
+      velocity = 0;
+      // Only a flick coasts. A slow, deliberate drag through history must land
+      // exactly where the finger left it — drifting past the line someone was
+      // reading is worse than having no momentum at all. 0.4px/ms is about
+      // 400px/s: far above a careful drag, far below a real flick.
+      if (!viewport || Math.abs(v0) < 0.4) return;
+      let v = v0;
+      let previous = 0;
+      const glide = (now: number) => {
+        // Clamp the step so a dropped frame does not teleport the viewport.
+        const frame = previous ? Math.min(now - previous, 50) : 16;
+        previous = now;
+        const before = term.buffer.active.viewportY;
+        const rows = scrollByPixels(v * frame);
+        v *= 0.95 ** (frame / 16);      // ~5% per 60Hz frame, frame-rate neutral
+        // Stop at a standstill, or the moment a requested row does not move the
+        // view: that is either end of the buffer, and coasting into it drags.
+        if (Math.abs(v) < 0.02 || (rows !== 0 && term.buffer.active.viewportY === before)) {
+          glideFrame = 0;
+          return;
+        }
+        glideFrame = requestAnimationFrame(glide);
+      };
+      glideFrame = requestAnimationFrame(glide);
+    };
+    const onTouchCancel = () => { touchY = null; velocity = 0; stopGlide(); };
+    frame.addEventListener('touchstart', onTouchStart, { passive: true });
+    frame.addEventListener('touchmove', onTouchMove, { passive: false, capture: true });
+    frame.addEventListener('touchend', onTouchEnd);
+    frame.addEventListener('touchcancel', onTouchCancel);
 
     connect();
 
@@ -514,24 +673,28 @@ export default function TerminalPane({
       if (retry) clearTimeout(retry);
       if (bootTimer) clearTimeout(bootTimer);
       if (bootCheck) clearTimeout(bootCheck);
+      if (resyncTimer) clearTimeout(resyncTimer);
+      persistPreview();
       ro.disconnect();
       host.removeEventListener('pointerdown', onPointerDown, true);
-      host.removeEventListener('pointermove', onPointerMove, true);
-      host.removeEventListener('pointerup', onPointerUp, true);
-      host.removeEventListener('click', onClick, true);
-      document.removeEventListener('pointerdown', onDocumentPointerDown, true);
+      host.removeEventListener('paste', onPaste, true);
       document.removeEventListener('copy', onCopy, true);
-      host.removeEventListener('touchstart', onTouchStart);
-      host.removeEventListener('touchmove', onTouchMove);
-      host.removeEventListener('touchend', onTouchEnd);
+      frame.removeEventListener('touchstart', onTouchStart);
+      frame.removeEventListener('touchmove', onTouchMove, true);
+      frame.removeEventListener('touchend', onTouchEnd);
+      frame.removeEventListener('touchcancel', onTouchCancel);
+      stopGlide();
       window.removeEventListener('focus', onReturn);
       document.removeEventListener('visibilitychange', onVisible);
       dataSub.dispose();
       keySub.dispose();
+      scrollSub.dispose();
       selSub.dispose();
       try { ws?.close(); } catch { /* ignore */ }
       term.dispose();
       termRef.current = null;
+      resyncRef.current = () => {};
+      claimRef.current = () => {};
     };
   }, [session.id]);
 
@@ -540,19 +703,35 @@ export default function TerminalPane({
     if (termRef.current) termRef.current.options.theme = THEMES[theme];
   }, [theme]);
 
-  // Zoom: adjust font size (100% = 13px) and refit.
+  // Font size and PTY geometry move together. The controller asks the server
+  // for the grid that actually fits this pane; the confirmed grid then resizes
+  // every viewer in order with the PTY output stream.
   useEffect(() => {
     const t = termRef.current;
     if (!t) return;
+    const changed = previousZoomRef.current !== zoom;
+    previousZoomRef.current = zoom;
+    // Zoom is an explicit interaction outside the terminal element. If this
+    // pane is a watcher, take the geometry lease before reporting its newly
+    // fitted size; otherwise only the local glyphs grow and the canonical grid
+    // remains too large, clipping the bottom/right of the pane.
+    if (changed && active) claimRef.current();
     t.options.fontSize = Math.round((13 * zoom) / 100);
-    resyncRef.current();
-  }, [zoom]);
+    if (active) resyncRef.current();
+  }, [zoom, active]);
 
   // Move keyboard focus into the terminal whenever this pane becomes the active
   // one (e.g. selected from the sidebar, or newly created).
   useEffect(() => {
     if (!active) return;
-    const t = setTimeout(() => termRef.current?.focus(), 0);
+    // A retained pane may have spent time under display:none. Reclaim and
+    // remeasure only after its grid cell has layout again; hidden panes never
+    // get to resize the canonical PTY.
+    const t = setTimeout(() => {
+      claimRef.current();
+      resyncRef.current();
+      termRef.current?.focus();
+    }, 0);
     return () => clearTimeout(t);
   }, [active]);
 
@@ -592,16 +771,18 @@ export default function TerminalPane({
           <span className="ph-title" title={`${pathLabel} · double-click to rename`} onDoubleClick={() => { setDraft(session.name); setEditing(true); }}>{session.name}</span>
         )}
         <div className="ph-right">
+          {viewers > 1 && (
+            <span className={`ph-role${controller ? ' controller' : ''}`} title={controller ? 'This pane controls terminal input and size' : 'Interact with the terminal to take control'}>
+              {controller ? `${viewers} viewers` : 'watching'}
+            </span>
+          )}
           <span className="ph-path" title={pathLabel}>{pathLabel}</span>
           <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
-      <div className="term-host">
+      <div className="term-host" ref={frameRef}>
         <div className="term-fill" ref={hostRef} />
       </div>
-      {copyMode && (
-        <div className="term-copy-hint mono">copy mode · scroll to read, press Esc or type to return</div>
-      )}
       {isMobile && conn === 'connected' && (
         // Control keys the phone keyboard lacks — needed for TUI menus (model
         // pickers, etc.). preventDefault keeps terminal focus so the keyboard
@@ -660,21 +841,13 @@ export default function TerminalPane({
           <button className="tp-x" onClick={() => { setPasteOpen(false); termRef.current?.focus(); }}>cancel</button>
         </div>
       )}
-      {conn === 'handedoff' && (
-        // The session is running elsewhere, not stopped — say so, and make the
-        // way back obvious (clicking the terminal works too).
-        <div className="term-exit mono">
-          <div className="tx-row">
-            <span>open on another device · still running</span>
-            <button
-              className="tx-btn"
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={(e) => { e.stopPropagation(); resumeRef.current(); }}
-            ><RefreshGlyph /> resume here</button>
-          </div>
+      {booting && preview && conn !== 'exited' && (
+        <div className="term-preview mono" aria-label="Restoring terminal">
+          <pre style={{ fontSize: `${Math.round((13 * zoom) / 100)}px` }}>{preview.rows.join('\n')}</pre>
+          <span>restoring last view…</span>
         </div>
       )}
-      {booting && conn !== 'exited' && conn !== 'handedoff' && (
+      {booting && !preview && conn !== 'exited' && (
         <div className="term-boot mono">
           {conn === 'connecting' ? 'connecting' : `starting ${cli?.label || session.cli}`}<span className="et-cursor" />
         </div>

@@ -13,7 +13,7 @@ const PAGES: { id: Page; label: string }[] = [
   { id: 'skills', label: 'Skills' },
 ];
 
-interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; tmux?: boolean; canRelaunch?: boolean; secrets?: string[]; bucketUnverified?: boolean; }
+interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; engine?: string; ghostty?: boolean; canRelaunch?: boolean; secrets?: string[]; bucketUnverified?: boolean; }
 
 function urlBase64ToUint8Array(base64: string) {
   const padding = '='.repeat((4 - (base64.length % 4)) % 4);
@@ -446,7 +446,7 @@ export default function SettingsView({
               <div><span>Space</span><b>{info?.spaceId || '—'}</b></div>
               <div><span>Durable storage</span><b className="mono">{info?.dataDir || '—'}</b></div>
               <div><span>Home</span><b className="mono">{info?.home || '—'}</b></div>
-              <div><span>tmux</span><b>{info?.tmux ? 'on' : 'off'}</b></div>
+              <div><span>terminal</span><b>{info?.ghostty ? 'libghostty' : 'unavailable'}</b></div>
             </div>
 
           </div>
