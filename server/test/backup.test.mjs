@@ -2,8 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   EVERY_MS, INTERVALS, intervalMs, validRepoId, jobArgs, JOB_SCRIPT, JOB_FLAVOR,
-  hasToken, unavailableReason, runNowBlockedBy,
+  hasToken, unavailableReason, runNowBlockedBy, jobUrl,
 } from '../src/backup.js';
+
+// The row links to the running Job, so the URL has to be right — and absent
+// rather than broken when either half is missing.
+test('jobUrl points at the Hub job page, or is null', () => {
+  assert.equal(jobUrl('lvwerra', 'abc123'), 'https://huggingface.co/jobs/lvwerra/abc123');
+  assert.equal(jobUrl('', 'abc123'), null);
+  assert.equal(jobUrl('lvwerra', null), null);
+  assert.equal(jobUrl(undefined, undefined), null);
+});
 
 // "Back up now" must not require a schedule: taking one backup before a risky
 // change is the main reason to want the button at all.

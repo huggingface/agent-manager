@@ -97,7 +97,7 @@ export interface BackupStatus {
   canRunNow: boolean;
   running: boolean;
   unavailable: string | null;
-  last: { at: number; jobId: string | null; stage: string } | null;
+  last: { at: number; jobId: string | null; stage: string; url: string | null } | null;
   nextDue: number | null;
   datasetPrivate: boolean | null;
   error: string | null;

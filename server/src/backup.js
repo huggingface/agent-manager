@@ -93,6 +93,12 @@ export async function defaultsFor() {
   return { mirror: base, dataset: base };
 }
 
+const HF = 'https://huggingface.co';
+// A Job's page lives under the namespace that launched it. The settings row
+// links to it while a backup runs, because that page is the only place the
+// progress actually is — the work is on the Hub, not here.
+export const jobUrl = (ns, jobId) => (ns && jobId ? `${HF}/jobs/${ns}/${jobId}` : null);
+
 // The script the Job runs. No interpolation: every value arrives as an env var
 // (`-e`), so a config string can never become shell syntax.
 export const JOB_SCRIPT = `set -euo pipefail
@@ -291,7 +297,12 @@ export async function backupStatus(cfg) {
     running: !!stage && !DONE.has(stage),
     unavailable: unavailableReason(cfg),
     last: state.startedAt
-      ? { at: state.startedAt, jobId: state.jobId || null, stage: stage || 'RUNNING' }
+      ? {
+          at: state.startedAt,
+          jobId: state.jobId || null,
+          stage: stage || 'RUNNING',
+          url: jobUrl((dataset || mirror || '').split('/')[0], state.jobId),
+        }
       : null,
     nextDue: state.startedAt && intervalMs(every) ? state.startedAt + intervalMs(every) : null,
     datasetPrivate: priv, // null = unknown or not created yet

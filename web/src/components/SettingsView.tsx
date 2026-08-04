@@ -198,8 +198,9 @@ export default function SettingsView({
     setBkBusy(true);
     setBkMsg('');
     try {
-      const r = await api.runBackup();
-      setBkMsg(r.job ? `Launched on the Hub as job ${r.job}.` : 'Launched.');
+      // On success the status line takes over — it names the running job and
+      // links to it, so repeating the id here would just be noise.
+      await api.runBackup();
     } catch (e) {
       setBkMsg((e as Error).message || 'Could not launch the backup.');
     }
@@ -397,17 +398,53 @@ export default function SettingsView({
                     </div>
                     {bk?.canRunNow && (bk.last || cfg.backup.every !== 'never') && (
                       <div className="s-help" style={{ marginTop: 6 }}>
-                        <span className="mono">{bk.mirror || bk.defaults.mirror}</span>
+                        {/* Two destinations, named separately: one is a dataset
+                            and one is a bucket, and they default to the same id
+                            string — so showing one unlabelled name was telling
+                            you which only by luck. */}
+                        History{' '}
+                        <a
+                          className="mono"
+                          href={`https://huggingface.co/datasets/${bk.dataset || bk.defaults.dataset}`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {bk.dataset || bk.defaults.dataset}
+                        </a>
                         {bk.datasetPrivate === false
                           ? ' — NOT private, so backups are refused until you fix that'
                           : bk.datasetPrivate === true ? ' — private' : ' — created private on the first run'}
-                        {bk.last && (
+                        {(bk.mirror || bk.defaults.mirror) && (
+                          <>
+                            {' · mirror '}
+                            <a
+                              className="mono"
+                              href={`https://huggingface.co/buckets/${bk.mirror || bk.defaults.mirror}`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              {bk.mirror || bk.defaults.mirror}
+                            </a>
+                          </>
+                        )}
+                        {bk.running ? (
+                          <>
+                            {' · backing up now'}
+                            {bk.last?.url && (
+                              <> — <a href={bk.last.url} target="_blank" rel="noreferrer">follow the job ↗</a></>
+                            )}
+                          </>
+                        ) : bk.last ? (
                           <>
                             {' · last run '}
                             {new Date(bk.last.at).toLocaleString()}
-                            {bk.last.stage ? ` (${bk.last.stage.toLowerCase()})` : ''}
+                            {bk.last.stage ? ' (' : ''}
+                            {bk.last.stage && bk.last.url
+                              ? <a href={bk.last.url} target="_blank" rel="noreferrer">{bk.last.stage.toLowerCase()}</a>
+                              : bk.last.stage?.toLowerCase()}
+                            {bk.last.stage ? ')' : ''}
                           </>
-                        )}
+                        ) : null}
                         {bk.error && <> · <span style={{ color: 'var(--warn, #d97757)' }}>{bk.error}</span></>}
                       </div>
                     )}

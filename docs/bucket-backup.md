@@ -271,10 +271,23 @@ Back up the bucket                              [ off | 1h | 3h | 24h ]
   of runtime, so a few minutes per backup — plus Hub storage for both
   copies. Every 1h means 24 runs a day.
 
-  lvwerra/agent-manager-backup — private · last run 4 Aug 16:36 (completed)
+  History lvwerra/am-backup — private · mirror lvwerra/am-backup
+          ^ links to the dataset            ^ links to the bucket
+  · last run 4 Aug 16:36 (completed)   ← the stage links to the Job's page
+  · backing up now — follow the job ↗  ← while one is in flight
+
   [ Back up now ]        ← available whenever there is a token, schedule or not;
                            reads "Backing up…" and is disabled while one runs
 ```
+
+**Both destinations are named and linked, separately.** They default to the same
+id string — one a dataset, one a bucket — so a single unlabelled name told you
+which only by luck. The dataset carries the privacy state, since that is what the
+gate checks.
+
+**While a backup runs, the row links to the Job.** The copying happens on the Hub,
+so that page is where the progress actually is; the row polls every 10s and
+follows the stage until it is terminal.
 
 **The cost is the operator's, so the row says whose.** "It costs this Space
 nothing" was true and beside the point: the Space is not who pays. What matters
