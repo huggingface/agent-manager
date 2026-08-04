@@ -381,18 +381,6 @@ export default function SettingsView({
                       a bucket you can restore from instantly, and a dataset that keeps version history.
                       Nothing is ever deleted from your bucket.
                     </div>
-                    <div className="s-help" style={{ marginTop: 6 }}>
-                      Each run is an <b>HF Job billed to your account</b> — cpu-basic, $0.01 per hour of
-                      runtime, so a few minutes per backup — plus Hub storage for both copies (the mirror is
-                      about the size of your bucket). Every 1h means 24 runs a day.
-                    </div>
-                    {!bk?.hasToken && (
-                      <div className="s-warn">
-                        Only <b>off</b> is available: backing up needs a write-scoped{' '}
-                        <span className="mono">HF_TOKEN</span> Space secret, and this Space has none. Without
-                        one there is no way to launch the Job or write to the Hub.
-                      </div>
-                    )}
                     {bk?.hasToken && cfg.backup.every !== 'never' && (
                       <div className="s-help" style={{ marginTop: 6 }}>
                         <span className="mono">{bk.mirror || bk.defaults.mirror}</span>
@@ -430,6 +418,22 @@ export default function SettingsView({
                     </div>
                   </span>
                 </div>
+                {/* Full width, outside the row: whichever of these applies is the
+                    thing to read before touching the control above. Without a
+                    token, why the intervals are dead; with one, who pays. */}
+                {!bk?.hasToken ? (
+                  <div className="s-warn">
+                    Only <b>off</b> is available: backing up needs a write-scoped{' '}
+                    <span className="mono">HF_TOKEN</span> Space secret, and this Space has none. Without one
+                    there is no way to launch the Job or write to the Hub.
+                  </div>
+                ) : (
+                  <div className="s-warn">
+                    Each run is an <b>HF Job billed to your account</b> — cpu-basic, $0.01 per hour of runtime,
+                    so a few minutes per backup — plus Hub storage for both copies (the mirror is about the size
+                    of your bucket). Every 1h means 24 runs a day.
+                  </div>
+                )}
 
                 <div className="setting-row">
                   <div>
