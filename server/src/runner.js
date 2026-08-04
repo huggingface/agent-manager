@@ -944,6 +944,111 @@ function folderIsShared(sessionId, workdir, cli) {
 // session forward onto whatever conversation Claude is actually writing. One
 // mechanism now covers both failure modes: the launch-time fallback (pin never
 // honoured) and a /clear at any later point.
+
+// ---------- breadcrumbs: the pane tells us, so we don't have to guess ----------
+// The transcript scan above cannot attribute a new conversation when several
+// live claude panes share a folder — folderIsShared refuses, and a /clear in
+// such a folder was never followed. But the pane itself KNOWS: a SessionStart
+// hook (installed into settings.json below, script at scripts/am-repin-hook.sh)
+// runs inside the pane's process tree, where $AM_ID names the pane and the
+// payload carries the new conversation's id. It drops that as a breadcrumb
+// here; the watcher consumes it and re-pins with no guessing at all. The scan
+// stays as the fallback for panes without a breadcrumb (hook newly installed,
+// crumb lost) — and for codex/opencode, which have no hook mechanism.
+const REPIN_DIR = process.env.AM_REPIN_DIR || '/tmp/am-repin';
+
+// Read AND remove the pane's breadcrumb — consumed on read, so a stale crumb
+// can never flip a pin backwards after a later, scan-based re-pin.
+function takeClaudeBreadcrumb(sessionId) {
+  const p = path.join(REPIN_DIR, `${sessionId}.json`);
+  let raw;
+  try { raw = fs.readFileSync(p, 'utf8'); } catch { return null; }
+  try { fs.unlinkSync(p); } catch {}
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+// The pane's root process (what tmux spawned). After `exec claude` this IS
+// claude; in the `claude --session-id … || exec claude` branch claude is a
+// child of it. Either way the hook's $CLAUDE_PID must descend from it.
+function paneRootPid(sessionId) {
+  try {
+    const out = execFileSync('tmux', ['list-panes', '-t', tmuxName(sessionId), '-F', '#{pane_pid}'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: TERM_ENV });
+    const pid = parseInt(out.trim().split('\n')[0], 10);
+    return Number.isInteger(pid) && pid > 1 ? pid : null;
+  } catch { return null; }
+}
+
+// Walk /proc ppid links. comm in /proc/<pid>/stat may contain spaces and
+// parens, so split after the LAST ') '.
+function pidHasAncestor(pid, ancestor, readStat = (p) => fs.readFileSync(`/proc/${p}/stat`, 'utf8')) {
+  for (let p = pid, hops = 0; Number.isInteger(p) && p > 1 && hops < 64; hops++) {
+    if (p === ancestor) return true;
+    let stat;
+    try { stat = readStat(p); } catch { return false; }
+    const tail = stat.slice(stat.lastIndexOf(') ') + 2).split(' ');
+    p = parseInt(tail[1], 10); // state ppid …
+  }
+  return false;
+}
+
+// Pure verdict on one breadcrumb, exported for server/test/repin.test.mjs.
+// `facts` carries everything environmental: { workdir, pinned, claimed (Set of
+// uuids other sessions pin), pidTrusted (bool: claudePid descends from the
+// pane) }. Returns { repin: uuid } or { repin: null, why }.
+export function breadcrumbVerdict(crumb, sessionId, facts) {
+  if (!crumb || typeof crumb !== 'object') return { repin: null, why: 'unreadable' };
+  if (crumb.amId !== sessionId) return { repin: null, why: 'amId mismatch' };
+  const uuid = crumb.payload?.session_id;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(uuid || ''))
+    return { repin: null, why: 'no session_id' };
+  // A crumb written before a pane was moved to another folder must not follow
+  // it there — same folder-scoping rule the transcript scan applies.
+  if (crumb.payload?.cwd !== facts.workdir) return { repin: null, why: 'cwd mismatch' };
+  // Nested `claude -p` runs inherit $AM_ID and fire SessionStart too (verified
+  // on 2.1.220 — the docs say -p skips hooks; it does not). The hook filters
+  // on CLAUDE_CODE_ENTRYPOINT, and this is the backstop: only a process that
+  // descends from the pane speaks for the pane.
+  if (!facts.pidTrusted) return { repin: null, why: 'pid not in pane' };
+  if (facts.claimed?.has(uuid)) return { repin: null, why: 'claimed by another session' };
+  if (uuid === facts.pinned) return { repin: null, why: 'already pinned' };
+  return { repin: uuid };
+}
+
+// Register the SessionStart hook in $CLAUDE_CONFIG_DIR/settings.json. Merge,
+// never replace: the file also holds permissions/model/theme. Idempotent — a
+// second boot finds the entry and writes nothing. A file that exists but does
+// not parse is left alone (clobbering the user's settings to install a hook
+// would be a terrible trade), and every failure is non-fatal: without the
+// hook the watcher simply keeps today's behaviour.
+export function installClaudeRepinHook(hookCmd = '/app/scripts/am-repin-hook.sh') {
+  const dir = process.env.CLAUDE_CONFIG_DIR;
+  if (!dir) return false;
+  const file = path.join(dir, 'settings.json');
+  let cfg = {};
+  try {
+    cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (e) {
+    if (e.code !== 'ENOENT') { console.warn(`[claude] not installing repin hook: ${file} unreadable (${e.message})`); return false; }
+  }
+  if (typeof cfg !== 'object' || cfg === null || Array.isArray(cfg)) { console.warn(`[claude] not installing repin hook: ${file} is not an object`); return false; }
+  const entries = Array.isArray(cfg.hooks?.SessionStart) ? cfg.hooks.SessionStart : [];
+  const present = entries.some((m) => (m?.hooks || []).some((h) => String(h?.command || '').includes('am-repin-hook.sh')));
+  if (present) return true;
+  // No matcher: fire for every source. `startup` replaces the "--session-id
+  // not honoured" heuristic with a fact, `resume` is a proven no-op (same id),
+  // and `clear` is the case this exists for. Filtering happens server-side.
+  cfg.hooks = cfg.hooks || {};
+  cfg.hooks.SessionStart = [...entries, { hooks: [{ type: 'command', command: hookCmd, timeout: 5 }] }];
+  try {
+    const tmp = `${file}.am-tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n');
+    fs.renameSync(tmp, file);
+    console.warn(`[claude] repin hook installed in ${file}`);
+    return true;
+  } catch (e) { console.warn(`[claude] repin hook install failed: ${e.message}`); return false; }
+}
+
 function scheduleClaudeCapture(session, workdir) {
   // A relaunch restarts the watch with a fresh window, so `since` can't drift
   // older and start admitting pre-relaunch threads as candidates.
@@ -954,13 +1059,37 @@ function scheduleClaudeCapture(session, workdir) {
 
   const tick = () => {
     if (!isRunning(session.id)) { claudeCapturing.delete(session.id); return; }
+    const pinned = (list().find((s) => s.id === session.id) || session).sessionUuid;
+
+    // Breadcrumb first: the pane's own SessionStart hook told us which
+    // conversation it is on, so no guessing — and no shared-folder refusal —
+    // is needed. Consumed on read; a rejected crumb falls through to the scan.
+    const crumb = takeClaudeBreadcrumb(session.id);
+    if (crumb) {
+      const root = paneRootPid(session.id);
+      const verdict = breadcrumbVerdict(crumb, session.id, {
+        workdir,
+        pinned,
+        claimed: new Set(list().filter((s) => s.id !== session.id && s.sessionUuid).map((s) => s.sessionUuid)),
+        pidTrusted: !!root && pidHasAncestor(crumb.claudePid, root),
+      });
+      if (verdict.repin) {
+        console.warn(`[claude] re-pinning ${session.id}: ${pinned} -> ${verdict.repin} (breadcrumb, source: ${crumb.payload?.source || '?'})`);
+        update(session.id, { sessionUuid: verdict.repin });
+        const t = setTimeout(tick, REPIN_MS);
+        if (t.unref) t.unref();
+        claudeCapturing.set(session.id, t);
+        return;
+      }
+      if (verdict.why !== 'already pinned') console.warn(`[claude] ${session.id}: breadcrumb rejected (${verdict.why})`);
+    }
+
     if (folderIsShared(session.id, workdir, 'claude')) {
       if (!warnedShared) {
         warnedShared = true;
-        console.warn(`[claude] ${session.id}: folder shared with another live session — not following /clear here`);
+        console.warn(`[claude] ${session.id}: folder shared with another live session — following /clear only via breadcrumbs here`);
       }
     } else {
-      const pinned = (list().find((s) => s.id === session.id) || session).sessionUuid;
       const hit = claudeCandidate(session.id, workdir, since);
       if (hit && hit.uuid !== pinned) {
         const why = transcriptExists(pinned) ? 'conversation was replaced (/clear)' : '--session-id was not honoured';
