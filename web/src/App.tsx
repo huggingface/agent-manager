@@ -718,6 +718,7 @@ export default function App() {
                 theme={theme}
                 zoom={zoom}
                 focused={shown && sessions.length > 1 && s.id === focusedId}
+                visible={shown && deckVisible}
                 active={shown && deckVisible && s.id === focusedId}
                 dragId={shown && canDrag ? `p:${s.id}` : undefined}
                 isMobile={isMobile}

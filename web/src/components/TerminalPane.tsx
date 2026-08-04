@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { ClipboardAddon, Base64 } from '@xterm/addon-clipboard';
@@ -176,12 +176,13 @@ if (typeof window !== 'undefined') {
 }
 
 export default function TerminalPane({
-  session, cli, theme, focused, active, zoom = 100, dragId, isMobile, onDragActive, onFocus, onRename, onClose,
+  session, cli, theme, focused, visible, active, zoom = 100, dragId, isMobile, onDragActive, onFocus, onRename, onClose,
 }: {
   session: Session;
   cli?: Cli;
   theme: 'light' | 'dark';
   focused?: boolean;
+  visible?: boolean;
   active?: boolean;
   zoom?: number;
   dragId?: string;          // set when the pane can be rearranged (group view)
@@ -195,6 +196,7 @@ export default function TerminalPane({
   const frameRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const resyncRef = useRef<() => void>(() => {});
+  const reconcileScrollRef = useRef<() => void>(() => {});
   const claimRef = useRef<() => void>(() => {});
   const reconnectRef = useRef<() => void>(() => {});
   const controllerRef = useRef(false);
@@ -547,6 +549,21 @@ export default function TerminalPane({
       resyncTimer = setTimeout(() => { resyncTimer = null; requestSize(); }, 80);
     };
     resyncRef.current = resync;
+    // xterm deliberately ignores DOM scroll events while its viewport is under
+    // display:none. Output can still advance its logical viewport in that
+    // state, leaving scrollTop behind; the next wheel then calculates a large
+    // jump from two contradictory positions. Move away and back through the
+    // public scroll API once the pane has layout again. This makes xterm rebuild
+    // its scroll area and reconcile scrollTop without changing where the user
+    // was reading.
+    reconcileScrollRef.current = () => {
+      const box = hostRef.current;
+      const buffer = term.buffer.active;
+      if (!box || box.clientWidth < 40 || box.clientHeight < 40 || buffer.baseY <= 0) return;
+      const step = buffer.viewportY > 0 ? -1 : 1;
+      term.scrollLines(step);
+      term.scrollLines(-step);
+    };
     const onReturn = () => resync();
     const onVisible = () => { if (!document.hidden) onReturn(); };
     // Typing means the user sees enough to interact — drop the boot cover.
@@ -694,6 +711,7 @@ export default function TerminalPane({
       term.dispose();
       termRef.current = null;
       resyncRef.current = () => {};
+      reconcileScrollRef.current = () => {};
       claimRef.current = () => {};
     };
   }, [session.id]);
@@ -719,6 +737,14 @@ export default function TerminalPane({
     t.options.fontSize = Math.round((13 * zoom) / 100);
     if (active) resyncRef.current();
   }, [zoom, active]);
+
+  // A retained pane can receive output while display:none. Reconcile xterm's
+  // logical and DOM scroll positions as soon as any cached tile becomes visible,
+  // including non-focused panes in a group.
+  useLayoutEffect(() => {
+    if (!visible) return;
+    reconcileScrollRef.current();
+  }, [visible]);
 
   // Move keyboard focus into the terminal whenever this pane becomes the active
   // one (e.g. selected from the sidebar, or newly created).
