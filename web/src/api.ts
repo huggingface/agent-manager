@@ -78,7 +78,7 @@ export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
   jobs: { askAboveUsd: number };
   archive: { after: 'week' | 'month' | 'never' };
-  backup: { every: BackupEvery; mirror: string; dataset: string };
+  backup: { every: BackupEvery; mirror: string; dataset: string; exclude: string[] };
   defaultArtifactsSpace?: string;
 }
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
@@ -103,6 +103,9 @@ export interface BackupStatus {
   // needs a job id to link to them.
   jobName: string;
   jobsUrl: string;
+  // The tokens as stored, and the globs they expand to.
+  exclude: string[];
+  excludePatterns: string[];
   nextDue: number | null;
   datasetPrivate: boolean | null;
   error: string | null;

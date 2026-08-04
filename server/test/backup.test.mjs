@@ -3,7 +3,63 @@ import assert from 'node:assert/strict';
 import {
   EVERY_MS, INTERVALS, intervalMs, validRepoId, jobArgs, JOB_SCRIPT, JOB_FLAVOR,
   hasToken, unavailableReason, runNowBlockedBy, jobName, jobsUrl, isActiveStage, parseJobId,
+  normalizeExclude, excludePatterns, MAX_EXCLUDES,
 } from '../src/backup.js';
+
+// The rule that is not obvious and cost a Hub round-trip to learn: `**/x/**` does
+// NOT match a top-level `x/`, so a bare folder token needs BOTH patterns. Verified
+// against the Hub — with only the `**/` form, the copy at the bucket root still
+// went up.
+test('a bare folder token excludes it at the root AND nested', () => {
+  assert.deepEqual(excludePatterns(['env']), ['env/**', '**/env/**']);
+  assert.deepEqual(excludePatterns(['node_modules', '.venv']),
+    ['node_modules/**', '**/node_modules/**', '.venv/**', '**/.venv/**']);
+});
+
+test('a path anchors at the root, and an explicit glob is left alone', () => {
+  // A slash means "this exact place", so it is not also matched anywhere.
+  assert.deepEqual(excludePatterns(['state/claude/cache']), ['state/claude/cache/**']);
+  // Already a glob: passed through untouched, however odd.
+  assert.deepEqual(excludePatterns(['**/*.pyc']), ['**/*.pyc']);
+  assert.deepEqual(excludePatterns(['cache-*']), ['cache-*']);
+  assert.deepEqual(excludePatterns([]), []);
+  assert.deepEqual(excludePatterns(undefined), []);
+});
+
+test('normalizeExclude tidies input and refuses anything shell-shaped', () => {
+  // Slashes at either end are noise; duplicates and blanks go.
+  assert.deepEqual(normalizeExclude(['  env  ', '/env/', 'env', '', '   ']), ['env']);
+  assert.deepEqual(normalizeExclude(['a', 'b']), ['a', 'b']);
+  // Whitespace is what the Job's split relies on NOT being there.
+  for (const bad of ['two words', 'tab\there', 'new\nline']) {
+    assert.deepEqual(normalizeExclude([bad]), [], `${JSON.stringify(bad)} must be dropped`);
+  }
+  for (const bad of ['$(whoami)', '`id`', 'a;rm -rf /', 'a|b', 'a&b', "a'b", 'a"b', '<a', 'x'.repeat(65)]) {
+    assert.deepEqual(normalizeExclude([bad]), [], `${bad} must be dropped`);
+  }
+  // Non-strings and non-arrays cannot crash it.
+  assert.deepEqual(normalizeExclude([42, null, undefined, {}, 'ok']), ['ok']);
+  assert.deepEqual(normalizeExclude('env'), []);
+  // Unbounded lists are not a thing an operator needs.
+  assert.equal(normalizeExclude(Array.from({ length: 100 }, (_, i) => `d${i}`)).length, MAX_EXCLUDES);
+});
+
+// The patterns cross into the Job as one space-joined env var and are split back
+// apart by the shell. If either side of that contract changes, this fails.
+test('patterns reach the Job as one env var the shell can split exactly', () => {
+  const args = jobArgs({ source: 'ns/src', mirror: '', dataset: 'ns/ds', exclude: ['env', 'node_modules'] });
+  const env = args[args.indexOf('AM_EXCLUDE=env/** **/env/** node_modules/** **/node_modules/**')];
+  assert.ok(env, `AM_EXCLUDE not passed as expected; got ${JSON.stringify(args.filter((a) => String(a).startsWith('AM_')))}`);
+  // No pattern may contain whitespace, or the split inside the Job is wrong.
+  for (const pat of excludePatterns(['env', 'node_modules'])) assert.ok(!/\s/.test(pat));
+  // Nothing to skip is an empty value, not a missing variable.
+  const none = jobArgs({ source: 'ns/src', mirror: '', dataset: 'ns/ds' });
+  assert.ok(none.includes('AM_EXCLUDE='));
+  // And the script must build the args itself rather than have them interpolated.
+  assert.match(JOB_SCRIPT, /read -ra AM_EXCLUDE_PATS/);
+  assert.match(JOB_SCRIPT, /EXCLUDE_ARGS\+=\(--exclude "\$p"\)/);
+  assert.ok(!JOB_SCRIPT.includes('node_modules/**'), 'patterns must not be baked into the script');
+});
 
 // The image installs huggingface_hub unpinned, so the CLI in the Space is not the
 // one on a dev machine. A version whose launch output differs left jobId null,
