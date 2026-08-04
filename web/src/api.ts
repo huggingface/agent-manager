@@ -78,11 +78,40 @@ export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
   jobs: { askAboveUsd: number };
   archive: { after: 'week' | 'month' | 'never' };
+  backup: { every: BackupEvery; mirror: string; dataset: string };
   defaultArtifactsSpace?: string;
 }
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
 export const saveConfig = (c: AmConfig) =>
   fetch('/api/config', { method: 'PUT', headers: HEADERS, body: JSON.stringify(c) }).then(json);
+
+// ---- bucket backup: a Job on the Hub does the copying (docs/bucket-backup.md) ----
+export type BackupEvery = 'never' | '1h' | '3h' | '24h';
+export interface BackupStatus {
+  every: BackupEvery;
+  source: string | null;
+  mirror: string;
+  dataset: string;
+  defaults: { mirror: string; dataset: string };
+  hasToken: boolean;
+  canRunNow: boolean;
+  running: boolean;
+  unavailable: string | null;
+  // stage is null when the Hub did not answer — never guessed.
+  last: { at: number; jobId: string | null; stage: string | null } | null;
+  // One static URL lists every run by its `name=` label, so the row never
+  // needs a job id to link to them.
+  jobName: string;
+  jobsUrl: string;
+  nextDue: number | null;
+  datasetPrivate: boolean | null;
+  error: string | null;
+}
+export const backupStatus = (): Promise<BackupStatus> => fetch('/api/backup/status').then(json);
+// jsonOrError, not json: the refusals worth showing ("a backup is already
+// running") are in the body, and json() throws them away for a bare status.
+export const runBackup = (): Promise<{ job?: string }> =>
+  fetch('/api/backup/run', { method: 'POST' }).then(jsonOrError);
 
 export interface SecretsData { detected: string[]; notes: Record<string, string>; }
 export const getSecrets = (): Promise<SecretsData> => fetch('/api/secrets').then(json);

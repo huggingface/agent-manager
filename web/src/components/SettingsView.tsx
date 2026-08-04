@@ -177,6 +177,37 @@ export default function SettingsView({
     return () => clearTimeout(t);
   }, [cfg, savedCfg]);
 
+  // Bucket backup: the copying happens in an HF Job, so the row reports what the
+  // Hub says about the last one rather than anything we remember locally.
+  const [bk, setBk] = useState<api.BackupStatus | null>(null);
+  const [bkBusy, setBkBusy] = useState(false);
+  const [bkMsg, setBkMsg] = useState('');
+  const loadBackup = () => api.backupStatus().then(setBk).catch(() => {});
+  useEffect(() => { loadBackup(); }, []);
+  // Re-read after a save lands, so the interval and privacy dot stop disagreeing
+  // with what was just chosen.
+  useEffect(() => { if (cfgSaved === 'saved') loadBackup(); }, [cfgSaved]);
+  // While a Job is in flight, follow it: the copying happens on the Hub, so the
+  // only way to see it finish is to ask.
+  useEffect(() => {
+    if (!bk?.running) return;
+    const t = setInterval(loadBackup, 10_000);
+    return () => clearInterval(t);
+  }, [bk?.running]);
+  const doBackup = async () => {
+    setBkBusy(true);
+    setBkMsg('');
+    try {
+      // On success the status line takes over — it names the running job and
+      // links to it, so repeating the id here would just be noise.
+      await api.runBackup();
+    } catch (e) {
+      setBkMsg((e as Error).message || 'Could not launch the backup.');
+    }
+    await loadBackup();
+    setBkBusy(false);
+  };
+
   // App self-update: version check on open, update on confirm.
   const [upd, setUpd] = useState<api.UpdateCheck | null>(null);
   const [updState, setUpdState] = useState<{ busy?: boolean; msg?: string; confirm?: boolean }>({});
@@ -356,6 +387,118 @@ export default function SettingsView({
                     />
                   </span>
                 </div>
+
+                <div className="setting-row">
+                  <div>
+                    <div className="s-label">Back up the bucket</div>
+                    <div className="s-help">
+                      Copies your whole bucket — workspaces, history, saved logins — to private Hub storage:
+                      a bucket you can restore from instantly, and a dataset that keeps version history.
+                      Nothing is ever deleted from your bucket.
+                    </div>
+                    {/* A kv table, not a run-on sentence: three destinations and a
+                        timestamp are things you scan, not read. The two repos
+                        default to the same id string — one a dataset, one a
+                        bucket — so each row says which it is. */}
+                    {bk?.canRunNow && (bk.last || cfg.backup.every !== 'never') && (
+                      <div className="kv kv-inline">
+                        <div>
+                          <span>Backup dataset</span>
+                          <b>
+                            <a
+                              className="mono"
+                              href={`https://huggingface.co/datasets/${bk.dataset || bk.defaults.dataset}`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              {bk.dataset || bk.defaults.dataset}
+                            </a>
+                            {bk.datasetPrivate === false && (
+                              <span style={{ color: 'var(--danger)' }}> — not private</span>
+                            )}
+                          </b>
+                        </div>
+                        {(bk.mirror || bk.defaults.mirror) && (
+                          <div>
+                            <span>Mirror bucket</span>
+                            <b>
+                              <a
+                                className="mono"
+                                href={`https://huggingface.co/buckets/${bk.mirror || bk.defaults.mirror}`}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                {bk.mirror || bk.defaults.mirror}
+                              </a>
+                            </b>
+                          </div>
+                        )}
+                        <div>
+                          <span>Backup jobs</span>
+                          <b><a href={bk.jobsUrl} target="_blank" rel="noreferrer">{bk.jobName}</a></b>
+                        </div>
+                        {/* A timestamp, not a stage. The job's own state belongs
+                            on the jobs page linked above — reporting it here meant
+                            reporting it wrongly whenever the Hub did not answer. */}
+                        <div>
+                          <span>Last updated</span>
+                          <b>{bk.last ? new Date(bk.last.at).toLocaleString() : 'never'}</b>
+                        </div>
+                        {bk.error && (
+                          <div>
+                            <span>Last error</span>
+                            <b style={{ color: 'var(--danger)' }}>{bk.error}</b>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {/* On demand regardless of the interval: taking one backup
+                        before a risky change should not mean switching on a
+                        schedule. Disabled while a run is in flight — two Jobs
+                        uploading to one dataset would race. */}
+                    {bk?.canRunNow && (
+                      <button
+                        className="btn-ghost"
+                        style={{ marginTop: 8 }}
+                        disabled={bkBusy || bk.running}
+                        onClick={doBackup}
+                      >
+                        {bkBusy ? 'Launching…' : bk.running ? 'Backing up…' : 'Back up now'}
+                      </button>
+                    )}
+                    {bkMsg && <div className="s-help" style={{ marginTop: 6 }}>{bkMsg}</div>}
+                  </div>
+                  <span className="cfg-ctl">
+                    <div className="seg cfg-seg">
+                      {(['never', '1h', '3h', '24h'] as const).map((e) => (
+                        <button
+                          key={e}
+                          className={cfg.backup.every === e ? 'on' : ''}
+                          disabled={!bk?.hasToken && e !== 'never'}
+                          onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, every: e } })}
+                        >
+                          {e === 'never' ? 'off' : e}
+                        </button>
+                      ))}
+                    </div>
+                  </span>
+                </div>
+                {/* Full width, outside the row: whichever of these applies is the
+                    thing to read before touching the control above. Without a
+                    token, why the intervals are dead; with one, who pays. */}
+                {!bk?.hasToken ? (
+                  <div className="s-warn">
+                    Only <b>off</b> is available: backing up needs a write-scoped{' '}
+                    <span className="mono">HF_TOKEN</span> Space secret, and this Space has none. Without one
+                    there is no way to launch the Job or write to the Hub.
+                  </div>
+                ) : (
+                  <div className="s-warn">
+                    Each run is an <b>HF Job billed to your account</b> — cpu-basic, $0.01 per hour of runtime,
+                    so a few minutes per backup — plus Hub storage for both copies (the mirror is about the size
+                    of your bucket). Every 1h means 24 runs a day.
+                  </div>
+                )}
 
                 <div className="setting-row">
                   <div>
