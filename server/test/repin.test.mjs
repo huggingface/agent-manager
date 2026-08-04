@@ -76,6 +76,56 @@ check('claimed uuid skipped', runner.claudeCandidate('s1', WORKDIR, SINCE)?.uuid
 console.log('\nnothing new in the window means no re-pin');
 check('no candidate', runner.claudeCandidate('s1', path.join(cfg.WORKSPACES_DIR, 'empty'), SINCE), null);
 
+// ---------- breadcrumbs: attribution the scan cannot do in shared folders ----------
+const E = 'eeeeeeee-0000-0000-0000-000000000005';
+const crumb = (over = {}) => ({
+  amId: 's1', claudePid: 4242,
+  payload: { session_id: E, cwd: WORKDIR, source: 'clear' },
+  ...over,
+});
+const facts = (over = {}) => ({
+  workdir: WORKDIR, pinned: A, claimed: new Set([B]), pidTrusted: true, ...over,
+});
+const verdict = (c, f) => runner.breadcrumbVerdict(c, 's1', f);
+
+console.log('\na trusted breadcrumb re-pins, no folder-sharing question asked');
+check('clean crumb accepted', verdict(crumb(), facts()).repin, E);
+
+console.log('\na breadcrumb only speaks for the pane that wrote it');
+check('amId mismatch rejected', verdict(crumb({ amId: 's2' }), facts()).repin, null);
+check('cwd mismatch rejected',
+  verdict(crumb({ payload: { session_id: E, cwd: '/elsewhere', source: 'clear' } }), facts()).repin, null);
+
+console.log('\na nested claude -p cannot claim the pane (pid not under the pane root)');
+check('untrusted pid rejected', verdict(crumb(), facts({ pidTrusted: false })).repin, null);
+check('untrusted pid says why', verdict(crumb(), facts({ pidTrusted: false })).why, 'pid not in pane');
+
+console.log('\nno-ops and garbage stay no-ops');
+check('already-pinned crumb is a no-op',
+  verdict(crumb({ payload: { session_id: A, cwd: WORKDIR, source: 'resume' } }), facts()).why, 'already pinned');
+check('claimed uuid left to its session',
+  verdict(crumb({ payload: { session_id: B, cwd: WORKDIR, source: 'clear' } }), facts()).why, 'claimed by another session');
+check('malformed session_id rejected',
+  verdict(crumb({ payload: { session_id: 'not-a-uuid', cwd: WORKDIR } }), facts()).repin, null);
+check('null crumb rejected', verdict(null, facts()).repin, null);
+
+// ---------- hook installer: merge, never replace; idempotent; refuse corrupt ----------
+console.log('\ninstaller merges into existing settings and is idempotent');
+const settings = path.join(CFG, 'settings.json');
+fs.writeFileSync(settings, JSON.stringify({ model: 'opus', permissions: { allow: ['Bash'] } }));
+check('installs into existing file', runner.installClaudeRepinHook('/app/scripts/am-repin-hook.sh'), true);
+let s = JSON.parse(fs.readFileSync(settings, 'utf8'));
+check('other keys kept', s.model, 'opus');
+check('hook entry present', s.hooks.SessionStart.length, 1);
+check('second run is a no-op', runner.installClaudeRepinHook('/app/scripts/am-repin-hook.sh'), true);
+s = JSON.parse(fs.readFileSync(settings, 'utf8'));
+check('no duplicate entry', s.hooks.SessionStart.length, 1);
+
+console.log('\ninstaller refuses to clobber a corrupt settings file');
+fs.writeFileSync(settings, '{ not json');
+check('corrupt file left alone', runner.installClaudeRepinHook('/x.sh'), false);
+check('corrupt content untouched', fs.readFileSync(settings, 'utf8'), '{ not json');
+
 console.log(`\n${pass} passed, ${fail} failed`);
 fs.rmSync(TMP, { recursive: true, force: true });
 process.exit(fail ? 1 : 0);

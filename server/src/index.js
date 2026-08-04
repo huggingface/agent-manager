@@ -16,7 +16,7 @@ import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
 import * as demo from './demo.js';
-import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection, paneModes, isRunning, capturePane } from './runner.js';
+import { attach, agentInfo, deriveState, stop, ensureRunning, sendInput, copySelection, paneModes, isRunning, capturePane, installClaudeRepinHook } from './runner.js';
 import { buildUsage } from './usage.js';
 import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, traceHarnessOf } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
@@ -32,6 +32,10 @@ store.init();
 groups.init();
 order.init();
 demo.init();
+// Claude panes report conversation resets (e.g. /clear) through a SessionStart
+// hook, so the re-pin watcher can follow them even in shared folders where the
+// transcript scan must refuse to guess. Non-fatal if it can't be installed.
+installClaudeRepinHook();
 
 // One-time migration to the explicit-path model: sessions used to own a folder
 // named after them (renamed along with them), or inherit their group's shared
