@@ -97,7 +97,11 @@ export interface BackupStatus {
   canRunNow: boolean;
   running: boolean;
   unavailable: string | null;
-  last: { at: number; jobId: string | null; stage: string; url: string | null } | null;
+  last: { at: number; jobId: string | null; stage: string } | null;
+  // One static URL lists every run by its `name=` label, so the row never
+  // needs a job id to link to them.
+  jobName: string;
+  jobsUrl: string;
   nextDue: number | null;
   datasetPrivate: boolean | null;
   error: string | null;

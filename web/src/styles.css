@@ -915,6 +915,14 @@ a.btn-ghost { text-decoration: none; }
 .kv > div:last-child { border-bottom: none; }
 .kv span { color: var(--muted); }
 .kv b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 65%; }
+/* Links in a kv table read as part of the value, not as web-1.0 blue: same
+   restraint as .trace-hint a — inherit the text colour, hint with a dotted rule,
+   and only take the accent on hover. */
+.kv a { color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
+.kv a:hover { color: var(--accent); text-decoration-style: solid; }
+/* A kv used inside a setting's description sits tighter than a section-level one. */
+.kv-inline { margin-top: 8px; }
+.kv-inline > div { padding: 6px 2px; font-size: 12.5px; }
 .placeholder { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 20px; }
 .placeholder p { margin: 0 0 8px; }
 

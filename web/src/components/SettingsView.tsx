@@ -396,56 +396,63 @@ export default function SettingsView({
                       a bucket you can restore from instantly, and a dataset that keeps version history.
                       Nothing is ever deleted from your bucket.
                     </div>
+                    {/* A kv table, not a run-on sentence: three destinations and a
+                        timestamp are things you scan, not read. The two repos
+                        default to the same id string — one a dataset, one a
+                        bucket — so each row says which it is. */}
                     {bk?.canRunNow && (bk.last || cfg.backup.every !== 'never') && (
-                      <div className="s-help" style={{ marginTop: 6 }}>
-                        {/* Two destinations, named separately: one is a dataset
-                            and one is a bucket, and they default to the same id
-                            string — so showing one unlabelled name was telling
-                            you which only by luck. */}
-                        History{' '}
-                        <a
-                          className="mono"
-                          href={`https://huggingface.co/datasets/${bk.dataset || bk.defaults.dataset}`}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          {bk.dataset || bk.defaults.dataset}
-                        </a>
-                        {bk.datasetPrivate === false
-                          ? ' — NOT private, so backups are refused until you fix that'
-                          : bk.datasetPrivate === true ? ' — private' : ' — created private on the first run'}
-                        {(bk.mirror || bk.defaults.mirror) && (
-                          <>
-                            {' · mirror '}
+                      <div className="kv kv-inline">
+                        <div>
+                          <span>Backup dataset</span>
+                          <b>
                             <a
                               className="mono"
-                              href={`https://huggingface.co/buckets/${bk.mirror || bk.defaults.mirror}`}
+                              href={`https://huggingface.co/datasets/${bk.dataset || bk.defaults.dataset}`}
                               target="_blank"
                               rel="noreferrer"
                             >
-                              {bk.mirror || bk.defaults.mirror}
+                              {bk.dataset || bk.defaults.dataset}
                             </a>
-                          </>
-                        )}
-                        {bk.running ? (
-                          <>
-                            {' · backing up now'}
-                            {bk.last?.url && (
-                              <> — <a href={bk.last.url} target="_blank" rel="noreferrer">follow the job ↗</a></>
+                            {bk.datasetPrivate === false && (
+                              <span style={{ color: 'var(--danger)' }}> — not private</span>
                             )}
-                          </>
-                        ) : bk.last ? (
-                          <>
-                            {' · last run '}
-                            {new Date(bk.last.at).toLocaleString()}
-                            {bk.last.stage ? ' (' : ''}
-                            {bk.last.stage && bk.last.url
-                              ? <a href={bk.last.url} target="_blank" rel="noreferrer">{bk.last.stage.toLowerCase()}</a>
-                              : bk.last.stage?.toLowerCase()}
-                            {bk.last.stage ? ')' : ''}
-                          </>
-                        ) : null}
-                        {bk.error && <> · <span style={{ color: 'var(--warn, #d97757)' }}>{bk.error}</span></>}
+                          </b>
+                        </div>
+                        {(bk.mirror || bk.defaults.mirror) && (
+                          <div>
+                            <span>Mirror bucket</span>
+                            <b>
+                              <a
+                                className="mono"
+                                href={`https://huggingface.co/buckets/${bk.mirror || bk.defaults.mirror}`}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                {bk.mirror || bk.defaults.mirror}
+                              </a>
+                            </b>
+                          </div>
+                        )}
+                        <div>
+                          <span>Backup jobs</span>
+                          <b><a href={bk.jobsUrl} target="_blank" rel="noreferrer">{bk.jobName}</a></b>
+                        </div>
+                        <div>
+                          <span>Last updated</span>
+                          <b>
+                            {bk.running
+                              ? 'backing up now…'
+                              : bk.last
+                                ? `${new Date(bk.last.at).toLocaleString()}${bk.last.stage ? ` (${bk.last.stage.toLowerCase()})` : ''}`
+                                : 'never'}
+                          </b>
+                        </div>
+                        {bk.error && (
+                          <div>
+                            <span>Last error</span>
+                            <b style={{ color: 'var(--danger)' }}>{bk.error}</b>
+                          </div>
+                        )}
                       </div>
                     )}
                     {/* On demand regardless of the interval: taking one backup

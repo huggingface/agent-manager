@@ -2,16 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   EVERY_MS, INTERVALS, intervalMs, validRepoId, jobArgs, JOB_SCRIPT, JOB_FLAVOR,
-  hasToken, unavailableReason, runNowBlockedBy, jobUrl,
+  hasToken, unavailableReason, runNowBlockedBy, jobName, jobsUrl,
 } from '../src/backup.js';
 
-// The row links to the running Job, so the URL has to be right — and absent
-// rather than broken when either half is missing.
-test('jobUrl points at the Hub job page, or is null', () => {
-  assert.equal(jobUrl('lvwerra', 'abc123'), 'https://huggingface.co/jobs/lvwerra/abc123');
-  assert.equal(jobUrl('', 'abc123'), null);
-  assert.equal(jobUrl('lvwerra', null), null);
-  assert.equal(jobUrl(undefined, undefined), null);
+// The jobs link filters the Hub's job list by the label every run carries, so
+// the name used to launch a Job and the name used to find it must not drift.
+test('the jobs link filters by the same name the Job is launched with', () => {
+  const args = jobArgs({ source: 'ns/src', mirror: '', dataset: 'ns/ds' });
+  assert.equal(args[args.indexOf('--name') + 1], jobName());
+  assert.equal(jobsUrl(), `https://huggingface.co/settings/jobs?label=name%3D${jobName()}`);
+  // The label has to arrive encoded, or the Hub reads it as a second parameter.
+  assert.ok(jobsUrl().includes('%3D'));
+  assert.ok(!jobsUrl().includes('label=name='));
 });
 
 // "Back up now" must not require a schedule: taking one backup before a risky

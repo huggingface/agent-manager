@@ -94,10 +94,13 @@ export async function defaultsFor() {
 }
 
 const HF = 'https://huggingface.co';
-// A Job's page lives under the namespace that launched it. The settings row
-// links to it while a backup runs, because that page is the only place the
-// progress actually is — the work is on the Hub, not here.
-export const jobUrl = (ns, jobId) => (ns && jobId ? `${HF}/jobs/${ns}/${jobId}` : null);
+
+// Every run is launched with `--name am-backup-<space>`, which the Hub stores as
+// a `name=` label. So one static URL lists this Space's backup runs — past,
+// present and failed — and the row never has to track a job id to link to them.
+export const jobName = () => `am-backup-${spaceName()}`.slice(0, 40);
+export const jobsUrl = () =>
+  `${HF}/settings/jobs?label=${encodeURIComponent(`name=${jobName()}`)}`;
 
 // The script the Job runs. No interpolation: every value arrives as an env var
 // (`-e`), so a config string can never become shell syntax.
@@ -144,7 +147,7 @@ hf upload "\$AM_DATASET" /live . --repo-type dataset --private --delete "*" \\
 export function jobArgs({ source, mirror, dataset }) {
   return [
     'jobs', 'run', '--detach',
-    '--name', `am-backup-${spaceName()}`.slice(0, 40),
+    '--name', jobName(),
     '--secrets', 'HF_TOKEN',
     '-e', `AM_SOURCE=${source}`,
     '-e', `AM_MIRROR=${mirror || ''}`,
@@ -297,13 +300,10 @@ export async function backupStatus(cfg) {
     running: !!stage && !DONE.has(stage),
     unavailable: unavailableReason(cfg),
     last: state.startedAt
-      ? {
-          at: state.startedAt,
-          jobId: state.jobId || null,
-          stage: stage || 'RUNNING',
-          url: jobUrl((dataset || mirror || '').split('/')[0], state.jobId),
-        }
+      ? { at: state.startedAt, jobId: state.jobId || null, stage: stage || 'RUNNING' }
       : null,
+    jobName: jobName(),
+    jobsUrl: jobsUrl(),
     nextDue: state.startedAt && intervalMs(every) ? state.startedAt + intervalMs(every) : null,
     datasetPrivate: priv, // null = unknown or not created yet
     error: state.error || null,

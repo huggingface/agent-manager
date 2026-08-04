@@ -271,23 +271,33 @@ Back up the bucket                              [ off | 1h | 3h | 24h ]
   of runtime, so a few minutes per backup — plus Hub storage for both
   copies. Every 1h means 24 runs a day.
 
-  History lvwerra/am-backup — private · mirror lvwerra/am-backup
-          ^ links to the dataset            ^ links to the bucket
-  · last run 4 Aug 16:36 (completed)   ← the stage links to the Job's page
-  · backing up now — follow the job ↗  ← while one is in flight
+  Backup dataset    lvwerra/am-dev-2-backup     -> the dataset page
+  Mirror bucket     lvwerra/am-dev-2-backup     -> the bucket page
+  Backup jobs       am-backup-am-dev-2          -> every run of this Space's backup
+  Last updated      4 Aug 19:35 (completed)     -- or "backing up now..."
 
-  [ Back up now ]        ← available whenever there is a token, schedule or not;
-                           reads "Backing up…" and is disabled while one runs
+  [ Back up now ]        <- available whenever there is a token, schedule or not;
+                            reads "Backing up..." and is disabled while one runs
 ```
 
-**Both destinations are named and linked, separately.** They default to the same
-id string — one a dataset, one a bucket — so a single unlabelled name told you
-which only by luck. The dataset carries the privacy state, since that is what the
-gate checks.
+**A table, not a sentence.** Three destinations and a timestamp are things you
+scan. It reuses the `.kv` block the Space section already uses, so it looks like
+the rest of the dashboard rather than like a new invention.
 
-**While a backup runs, the row links to the Job.** The copying happens on the Hub,
-so that page is where the progress actually is; the row polls every 10s and
-follows the stage until it is terminal.
+**Both repos are named, because they default to the same id string** — one a
+dataset, one a bucket. A single unlabelled name told you which only by luck. The
+dataset row carries the privacy state, since that is what the gate checks.
+
+**The jobs link is static.** Every run is launched with `--name am-backup-<space>`,
+which the Hub keeps as a `name=` label, so
+`/settings/jobs?label=name%3Dam-backup-<space>` lists them all — past, running and
+failed. Strictly better than linking the latest job id: no state to track, and the
+page you land on shows a failure in context. A test pins the launch name and the
+filter to the same value so they cannot drift.
+
+**Links inherit the text colour**, with a dotted underline that goes solid and
+accent on hover — the same restraint as `.trace-hint a`. Default-blue anchors were
+the one thing in the row that did not look like this app.
 
 **The cost is the operator's, so the row says whose.** "It costs this Space
 nothing" was true and beside the point: the Space is not who pays. What matters
