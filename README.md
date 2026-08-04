@@ -109,8 +109,11 @@ api.restart_space(space_id)
 
 Everything durable lives under `/data`: `sessions.json`, `groups.json`,
 `workspaces/<path>/` (agent working dirs + shared `skills/`), and each
-CLI's config/credentials/history (`HOME=/data/home`, plus `CLAUDE_CONFIG_DIR`
-and `CODEX_HOME` under `/data/state`).
+CLI's closed state checkpoints under `/data/state`. Active harness state lives
+on local POSIX storage and is restored/checkpointed by
+[`scripts/agent-state.sh`](scripts/agent-state.sh); SQLite harnesses use online
+database backups rather than copying live WAL files. See
+[`docs/agent-state-checkpoints.md`](docs/agent-state-checkpoints.md).
 
 ## Architecture
 

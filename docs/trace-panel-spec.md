@@ -168,15 +168,17 @@ A session is a *query*, not a file.
   `type: 'text' | 'tool' | 'step-finish'`, plus `text`, `tool`, `state.input`, `state.output`
 - **Never copy or ship this database**: `account.access_token`, `account.refresh_token` and a
   `credential` table live in it. Select one conversation.
-- Live data is on **local disk via a symlink** with a durable copy synced to the bucket
-  (commit `1dfb753`), precisely because a synchronous read of a FUSE-backed sqlite froze the
-  whole server. Open **read-only**, and never on a hot path.
+- Live data is on **local disk via a symlink**. Durable state is a verified
+  SQLite online-backup checkpoint; copying a live DB/WAL/SHM set with `rsync`
+  is not transactionally safe. This layout also prevents a synchronous read of
+  FUSE-backed SQLite from freezing the whole server. Open **read-only**, and
+  never on a hot path.
 
 ### Hermes — **SQLite**, `~/.hermes/state.db`
 - `sessions(id, cwd, title, started_at, input_tokens, output_tokens, cache_read_tokens)`
 - `messages(id, session_id, role, content, timestamp, tool_name, token_count, active)` —
   flat `content`; a row with `tool_name` set is a tool interaction. `timestamp` is **seconds**
-  (multiply by 1000). Same FUSE/symlink note as opencode.
+  (multiply by 1000). Same local-live/online-checkpoint note as opencode.
 - Hermes has **no per-session pin** in Agent Manager, so it is attributed by `cwd`.
 - Alternative worth knowing: `hermes sessions export --format trace` emits Claude-Code JSONL
   specifically for the HF viewer, and `--redact` exists. We chose direct SQLite reads for one

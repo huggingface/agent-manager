@@ -17,7 +17,7 @@ FROM node:22-bookworm AS runtime
 # agents and humans reach for (jq/htop/sqlite3/editors/media, fonts so headless
 # Chromium screenshots don't render tofu).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      tmux git git-lfs ca-certificates curl python3 make g++ ripgrep bubblewrap rsync \
+      tmux git git-lfs ca-certificates curl python3 make g++ ripgrep bubblewrap rsync util-linux \
       jq htop lsof tree ncdu sqlite3 vim nano zip unzip file procps less \
       ffmpeg imagemagick fonts-liberation fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/* \

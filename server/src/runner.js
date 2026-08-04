@@ -1835,6 +1835,8 @@ export function ensureRunning(session, cols = 120, rows = 34) {
       console.error('[runner] history restore', error && error.message);
     }
   }
+  let resolveExit;
+  const exitPromise = new Promise((resolve) => { resolveExit = resolve; });
   const host = {
     id: session.id,
     runId,
@@ -1849,6 +1851,8 @@ export function ensureRunning(session, cols = 120, rows = 34) {
       .filter((line) => line.text && line.ansi).map((line) => [line.text, line.ansi])),
     terminalModes: createTerminalModeTracker(),
     startupHistory: captureResize ? persistedHistory : null,
+    exitPromise,
+    resolveExit,
     historyCheckpoint: null,
     traceHistoryPage: null,
     traceHistoryTimer: null,
@@ -1941,6 +1945,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     try { host.vt.dispose(); } catch {}
     for (const sub of host.subs) sub.onExit();
     host.subs.clear();
+    host.resolveExit();
   });
 
   hosts.set(session.id, host);
@@ -2075,8 +2080,19 @@ export function stop(id) {
  * Kill every session. Without tmux nothing outlives this process, so a clean
  * shutdown should not leave orphaned PTYs behind holding the workspace.
  */
-export function stopAll() {
-  for (const host of hosts.values()) {
+export async function stopAll(timeoutMs = 1000) {
+  const active = [...hosts.values()];
+  for (const host of active) {
     try { host.pty.kill(); } catch {}
   }
+  if (!active.length) return;
+
+  // Give each CLI a bounded chance to handle SIGHUP, close its transcript, and
+  // flush final local state before PID 1 takes the shutdown checkpoint.
+  let timer;
+  await Promise.race([
+    Promise.allSettled(active.map((host) => host.exitPromise)),
+    new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+  ]);
+  if (timer) clearTimeout(timer);
 }

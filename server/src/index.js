@@ -158,8 +158,14 @@ await Promise.race([
 // running instead of exiting.
 // No tmux to outlive us any more: kill the PTYs we hold on the way out so a
 // restart can't leave orphaned agents writing into the workspace.
+let shutdownStarted = false;
 for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, () => { try { stopAll(); } catch {} process.exit(0); });
+  process.on(sig, async () => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    try { await stopAll(); } catch {}
+    process.exit(0);
+  });
 }
 
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -783,9 +789,14 @@ const BUILD_ENV_KEYS = (() => {
 // after the build-time snapshot, so its vars would otherwise be misdetected as
 // injected secrets. Keep this list in sync with entrypoint.sh.
 const NON_SECRET = new Set([
-  'HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'NPM_CONFIG_PREFIX', 'PWD', 'OLDPWD', 'SHLVL', '_', 'HOSTNAME',
+  'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_DURABLE', 'CODEX_HOME', 'CODEX_DURABLE',
+  'GEMINI_CLI_HOME', 'GEMINI_LIVE', 'GEMINI_DURABLE',
+  'OPENCLAW_STATE_DIR', 'OPENCLAW_HOME', 'OPENCLAW_DURABLE',
+  'OPENCODE_LIVE', 'OPENCODE_DURABLE', 'HERMES_LIVE', 'HERMES_DURABLE',
+  'AGENT_STATE_SCRIPT', 'AGENT_STATE_CHECKPOINT_SECONDS', 'DATA_DIR',
+  'NPM_CONFIG_PREFIX', 'PWD', 'OLDPWD', 'SHLVL', '_', 'HOSTNAME',
   'ACCELERATOR', 'COMMIT_SHA', 'CPU_CORES', 'HF_DATASETS_TRUST_REMOTE_CODE', 'IMAGE_SHA', 'MEMORY', 'OMP_NUM_THREADS',
-  'UV_CACHE_DIR', 'PIP_CACHE_DIR', 'PYTHONPYCACHEPREFIX', 'PYTHONUSERBASE', 'OPENCLAW_STATE_DIR', 'OPENCLAW_HOME',
+  'UV_CACHE_DIR', 'PIP_CACHE_DIR', 'PYTHONPYCACHEPREFIX', 'PYTHONUSERBASE',
 ]);
 const NON_SECRET_PREFIX = ['SPACE_', 'KUBERNETES_', 'NVIDIA_', 'CUDA_', 'NV_', 'AM_'];
 function injectedEnvKeys() {
@@ -1385,10 +1396,14 @@ function skillTargetDirs() {
   const home = process.env.HOME || os.homedir();
   const claudeCfg = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
   const dirs = [
-    path.join(home, '.agents', 'skills'),   // Codex, Gemini, opencode
+    path.join(home, '.agents', 'skills'),   // Codex and opencode
     path.join(claudeCfg, 'skills'),          // Claude Code
     path.join(home, '.hermes', 'skills'),    // Hermes
   ];
+  // GEMINI_CLI_HOME deliberately changes the home Gemini resolves its global
+  // .agents directory against; fan skills into that local/checkpointed home as
+  // well as the ordinary durable HOME.
+  if (process.env.GEMINI_CLI_HOME) dirs.push(path.join(process.env.GEMINI_CLI_HOME, '.agents', 'skills'));
   // OpenClaw runs with its own HOME (see entrypoint.sh) and reads managed
   // skills from ~/.agents/skills resolved against THAT home. Recreated on
   // every boot, so it needs no backup coverage.
