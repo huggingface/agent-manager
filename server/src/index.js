@@ -25,6 +25,7 @@ import { kindOfName, kindOfFile, mimeOf, readTextHead, TEXT_MAX } from './previe
 import { startWatchdog } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
+import * as backup from './backup.js';
 
 ensureDirs();
 refreshVersions();
@@ -878,6 +879,14 @@ function loadAmConfig() {
     archive: {
       after: ['week', 'month', 'never'].includes(saved.archive?.after) ? saved.archive.after : 'month',
     },
+    // How often the bucket is mirrored to private Hub storage. Off by default:
+    // it copies this machine's contents — saved logins included — into another
+    // Hub resource, which is the operator's call to make. docs/bucket-backup.md
+    backup: {
+      every: ['never', 'hour', '6h', 'day'].includes(saved.backup?.every) ? saved.backup.every : 'never',
+      mirror: (saved.backup?.mirror || '').trim(),
+      dataset: (saved.backup?.dataset || '').trim(),
+    },
   };
 }
 app.get('/api/config', (_req, res) => res.json({ ...loadAmConfig(), defaultArtifactsSpace: defaultArtifactsSpace() }));
@@ -891,10 +900,28 @@ app.put('/api/config', (req, res) => {
     },
     jobs: { askAboveUsd: Math.max(0, Number(b.jobs?.askAboveUsd) || 0) },
     archive: { after: ['week', 'month', 'never'].includes(b.archive?.after) ? b.archive.after : 'month' },
+    backup: {
+      every: ['never', 'hour', '6h', 'day'].includes(b.backup?.every) ? b.backup.every : 'never',
+      mirror: typeof b.backup?.mirror === 'string' ? b.backup.mirror.trim() : '',
+      dataset: typeof b.backup?.dataset === 'string' ? b.backup.dataset.trim() : '',
+    },
   };
   try { fs.writeFileSync(AM_CONFIG_FILE, JSON.stringify(cfg, null, 2)); } catch {}
   generateEnvSkill(loadSecretNotes());
+  // The schedule lives on the Hub, so saving config means reconciling it there.
+  // Never blocks the response: a Hub hiccup must not fail a settings save.
+  backup.ensureSchedule(cfg).catch((e) => console.warn('[backup] schedule failed:', e.message));
   res.json({ ok: true });
+});
+
+// ---------- bucket backup: status + run-now (docs/bucket-backup.md) ----------
+app.get('/api/backup/status', async (_req, res) => {
+  try { res.json(await backup.backupStatus(loadAmConfig())); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/backup/run', async (_req, res) => {
+  try { res.json(await backup.runBackupNow(loadAmConfig())); }
+  catch (e) { res.status(500).json({ error: e.stderr || e.message }); }
 });
 
 // The artifacts section teaches agents to publish rich HTML results to a
@@ -2217,6 +2244,15 @@ generateEnvSkill(loadSecretNotes()); // keep the environment skill current on bo
 // destabilize a fresh container. The Usage page fetches per-provider on open
 // (skeletons + stale-while-revalidate), so nothing is lost but the boot risk.
 setTimeout(() => { traceDigests().catch(() => {}); }, 4000);
+
+// Reconcile the backup schedule with the config once the bucket id has been
+// discovered (visibility.js supplies it, and the boot check is bounded to 9s
+// above). Idempotent: with nothing changed this is one list call and no writes.
+setTimeout(() => {
+  backup.ensureSchedule(loadAmConfig())
+    .then((r) => { if (r && r.action && r.action !== 'keep' && r.action !== 'none') console.log('[backup]', r.action, r.id || r.error || ''); })
+    .catch((e) => console.warn('[backup] schedule failed:', e.message));
+}, 12_000);
 
 // Off-thread stall detector — must start early so it's watching before the
 // first heavy build. Logs any event-loop wedge to the run logs (see watchdog.js).
