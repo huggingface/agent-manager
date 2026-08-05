@@ -63,7 +63,17 @@ the bucket, ever.
    nothing. The dataset gets `--delete "*"` so its *newest* commit matches the
    bucket, while every earlier commit keeps the deleted file recoverable — the
    best of both.
-9. **Restore is a documented script, not a button** (§8).
+9. **The skip list applies to the history, not the mirror.** `hf cp` cannot
+   filter (§3.9), and making the mirror filterable would cost the server-side copy
+   that makes it nearly free. The dataset is where thousands of env files actually
+   hurt — every one of them gets hashed on every run — so that is where they are
+   skipped.
+10. **Skip tokens are folder names, expanded server-side.** A bare name becomes
+   both `name/**` and `**/name/**`, because the second does not imply the first
+   (§3.8). Tokens are validated to hold no whitespace or shell characters: they
+   cross into the Job as one space-joined env var and the shell splits them back
+   apart, so the charset is what makes that split exact.
+11. **Restore is a documented script, not a button** (§8).
 
 ## 2. What we already have
 
@@ -162,6 +172,43 @@ The dataset received **no new commit**. This is the one control standing between
 the operator's saved logins and the public internet, so it is verified rather
 than assumed.
 
+### 3.8 Excluding folders: `--exclude` works, and the glob rule surprises
+
+`hf upload` takes repeatable `--exclude` globs, and they do what you want — but
+**`**/env/**` does not match a top-level `env/`**:
+
+| patterns | `env/` at root | `sub/env/` |
+|---|---|---|
+| `**/env/**` | **kept** | excluded |
+| `env/**` + `**/env/**` | excluded | excluded |
+
+So a bare folder token has to become two patterns. With only the `**/` form the
+copy at the bucket root still goes up, which is exactly the case an operator means
+when they type `node_modules`.
+
+What it saves, measured on an 805-file tree (800 of them a `.venv`):
+
+| | files hashed | wall |
+|---|---|---|
+| no excludes | 805 | **7 s** |
+| `.venv` excluded | 5 | **1 s** |
+
+That is local disk; the Job reads a FUSE mount, which is slower, so the real
+saving is larger than this.
+
+### 3.9 The server-side mirror cannot filter
+
+`hf cp` has no `--include/--exclude` at all, and `hf sync` refuses remote→remote
+("One path must be local"). So the skip list applies to the **dataset history
+only** — the mirror is a whole-bucket server-side copy or nothing.
+
+It could be filtered: inside the Job the bucket is mounted at `/live`, so
+`hf buckets sync /live hf://buckets/<mirror>/latest --exclude … --delete` is a
+*local*→remote sync and does support patterns. It would also throw away the
+property that makes the mirror nearly free — no bytes move, hashes only, 13,482
+files in 20 s — and make it read and re-upload 11.4 GB instead. Not worth it for
+files nobody wanted anyway. §10.9.
+
 ### 3.7 Incidental
 
 `pip install "huggingface_hub[cli]"` warns on 1.26.0 — *"does not provide the
@@ -234,12 +281,14 @@ backup: {
   every: 'never' | '1h' | '3h' | '24h',   // default 'never' (§1.7)
   mirror: '',                              // default <ns>/<space>-backup
   dataset: '',                             // default <ns>/<space>-backup
+  exclude: [],                             // folder tokens kept out of the history
 }
 ```
 
 ```
 GET  /api/backup/status  → { every, source, mirror, dataset, defaults, hasToken,
                              canRunNow, running, unavailable,
+                             exclude, excludePatterns,
                              last: { at, jobId, stage }, nextDue,
                              datasetPrivate, error }
 POST /api/backup/run     → launch one Job now (works with the schedule off)
@@ -276,6 +325,9 @@ Back up the bucket                              [ off | 1h | 3h | 24h ]
   Backup jobs       am-backup-am-dev-2          -> every run of this Space's backup
   Last updated      4 Aug 19:35                 -- a timestamp, never a stage
 
+  Skip these folders — type a name and press Enter
+  [ node_modules × ] [ .venv × ] [ add another…            ]
+
   [ Back up now ]        <- available whenever there is a token, schedule or not;
                             reads "Backing up..." and is disabled while one runs
 ```
@@ -294,6 +346,12 @@ which the Hub keeps as a `name=` label, so
 failed. Strictly better than linking the latest job id: no state to track, and the
 page you land on shows a failure in context. A test pins the launch name and the
 filter to the same value so they cannot drift.
+
+**The skip field is a token field**, because that is what the data is: a short
+list of folder names, each independently removable. Enter or comma commits,
+Backspace on an empty box takes the last one back. The status API also reports the
+expanded globs — a skip list nobody can see the expansion of is one nobody can
+debug, and §3.8 is why the expansion is not obvious.
 
 **No stage in the table.** It read `(running)` for runs that had long finished,
 because `stage || 'RUNNING'` invented an answer whenever the Hub did not give one.
@@ -383,6 +441,13 @@ knows which side should win.
 6. **Sustained hourly Job volume** over weeks is unproven, as is the interaction
    with the Job quota on a free account.
 7. **Bucket→repo is on the roadmap** (§3.1) — re-check before elaborating step 2.
+
+### 10.9 The mirror still holds what the history skips
+
+Excluded folders stay in the bucket mirror (§3.9), so they still occupy its
+storage, and a restore from the mirror brings them back. That is arguably right —
+the mirror exists to put a Space back exactly as it was — but it means "skip" means
+"skip in the history", and the settings copy says so rather than implying more.
 
 ## 11. Phasing
 

@@ -871,6 +871,15 @@ body {
 .cfg-seg button { flex: 1; padding: 6px 0; }
 .cfg-input { width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--text); font-size: 12.5px; }
 .cfg-input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
+/* Token field: chips plus a bare input, sharing one bordered box so it reads as
+   a single control rather than a list next to a textbox. */
+.tagf { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); }
+.tagf:focus-within { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); }
+.tagf-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 4px 2px 7px; border-radius: var(--r-sm); background: var(--panel-2); border: 1px solid var(--border); font-size: 12px; }
+.tagf-x { border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; }
+.tagf-x:hover { color: var(--danger); }
+.tagf-input { flex: 1; min-width: 120px; border: none; background: transparent; color: var(--text); font-size: 12.5px; padding: 3px 2px; }
+.tagf-input:focus { outline: none; }
 .cfg-usd { color: var(--muted); }
 .cfg-num { width: 90px; flex: none; text-align: right; }
 /* artifacts sub-settings stay visible when off, just clearly inert */
