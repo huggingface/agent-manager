@@ -56,25 +56,25 @@ const B = 'bbbbbbbb-0000-0000-0000-000000000002';
 console.log('\n/clear: the later-born conversation in this folder wins');
 transcript(A, { startMs: NOW });
 transcript(B, { startMs: NOW + 60_000 });
-check('follows the successor', runner.claudeCandidate('s1', WORKDIR, SINCE)?.uuid, B);
+check('follows the successor', (await runner.claudeCandidate('s1', WORKDIR, SINCE))?.uuid, B);
 
 console.log('\na conversation in a different folder is never claimed');
 transcript('cccccccc-0000-0000-0000-000000000003',
   { cwd: path.join(cfg.WORKSPACES_DIR, 'proj-b'), startMs: NOW + 120_000, projDir: '-proj-b' });
-check('other folder ignored', runner.claudeCandidate('s1', WORKDIR, SINCE)?.uuid, B);
+check('other folder ignored', (await runner.claudeCandidate('s1', WORKDIR, SINCE))?.uuid, B);
 
 console.log('\nan older thread that merely received writes is not a successor');
 transcript('dddddddd-0000-0000-0000-000000000004', { startMs: NOW - 3600_000, mtimeMs: NOW + 180_000 });
 check('pre-window thread rejected despite a fresh mtime',
-  runner.claudeCandidate('s1', WORKDIR, SINCE)?.uuid, B);
+  (await runner.claudeCandidate('s1', WORKDIR, SINCE))?.uuid, B);
 
 console.log('\na conversation another session has pinned is left to it');
 const rival = sessions.create({ name: 'rival', cli: 'claude', path: 'proj-a' });
 sessions.update(rival.id, { sessionUuid: B });
-check('claimed uuid skipped', runner.claudeCandidate('s1', WORKDIR, SINCE)?.uuid, A);
+check('claimed uuid skipped', (await runner.claudeCandidate('s1', WORKDIR, SINCE))?.uuid, A);
 
 console.log('\nnothing new in the window means no re-pin');
-check('no candidate', runner.claudeCandidate('s1', path.join(cfg.WORKSPACES_DIR, 'empty'), SINCE), null);
+check('no candidate', await runner.claudeCandidate('s1', path.join(cfg.WORKSPACES_DIR, 'empty'), SINCE), null);
 
 // ---------- breadcrumbs: attribution the scan cannot do in shared folders ----------
 const E = 'eeeeeeee-0000-0000-0000-000000000005';
@@ -129,23 +129,23 @@ try {
 }
 
 // ---------- scan cadence: the breadcrumb is the mechanism, the scan a backstop ----------
-// The scan is a readdirSync + a statSync per transcript, and CLAUDE_CONFIG_DIR is
-// on the FUSE bucket on the Space: ~1.2s of blocked event loop whenever the
-// mount's attribute cache is cold. At the REPIN_MS beat that froze the terminal
-// every ~20s per live pane, so once the hook has proven itself it steps down.
+// With the scan awaited the cadence is no longer about event-loop block time — it
+// is about not walking the bucket 3x a minute per pane for an answer the
+// breadcrumb already gave. So the backstop is a minute, and a minute is also the
+// longest a pin can stay stale if a crumb is ever lost.
 const MINUTE = 60_000;
 console.log('\nwithout a proven hook the scan runs every tick (unchanged)');
 check('no proof: due immediately', runner.claudeScanDue({ hookProven: false, lastScanAt: NOW }, NOW), true);
 check('no proof: still due 20s later',
   runner.claudeScanDue({ hookProven: false, lastScanAt: NOW }, NOW + 20_000), true);
 
-console.log('\na proven hook steps the scan down to a backstop cadence');
+console.log('\na proven hook steps the scan down to the backstop cadence');
 check('proven: not due on the next beat',
   runner.claudeScanDue({ hookProven: true, lastScanAt: NOW }, NOW + 20_000), false);
-check('proven: not due after 9 minutes',
-  runner.claudeScanDue({ hookProven: true, lastScanAt: NOW }, NOW + 9 * MINUTE), false);
-check('proven: due again after 10 minutes',
-  runner.claudeScanDue({ hookProven: true, lastScanAt: NOW }, NOW + 10 * MINUTE), true);
+check('proven: not due at 59s',
+  runner.claudeScanDue({ hookProven: true, lastScanAt: NOW }, NOW + MINUTE - 1000), false);
+check('proven: due again at a minute',
+  runner.claudeScanDue({ hookProven: true, lastScanAt: NOW }, NOW + MINUTE), true);
 
 console.log('\na proven pane still scans once before its first backstop');
 check('proven but never scanned: due',

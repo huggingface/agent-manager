@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import pty from 'node-pty';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import { remoteState, setPaused } from './remote.js';
 import { cliById, isRemote, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
@@ -703,18 +704,21 @@ function codexRolloutsSince(sinceMs) {
 // truncate the JSON and make every capture silently fail.
 // The first line of a transcript that records a `cwd`, with its timestamp.
 // Bounded on lines AND bytes: a file-history-snapshot line can be megabytes.
-function transcriptHead(p) {
-  // openSync INSIDE the try: on the bucket mount a transcript can rotate away
+// Async, like the rest of the claude scan: every read here is against the FUSE
+// bucket, where a cold one costs tens of ms, and this is on the one event loop
+// that carries every session's PTY. See claudeTranscriptsSince.
+async function transcriptHead(p) {
+  // open() INSIDE the try: on the bucket mount a transcript can rotate away
   // between the stat that found it and this open, and the only caller runs in a
   // setTimeout where a throw is unhandled.
-  let fd = null;
+  let fh = null;
   try {
-    fd = fs.openSync(p, 'r');
+    fh = await fsp.open(p, 'r');
     const CHUNK = 65536, MAX_BYTES = 512 * 1024, MAX_LINES = 64;
     let carry = '', pos = 0, lines = 0;
     while (pos < MAX_BYTES && lines < MAX_LINES) {
       const b = Buffer.alloc(Math.min(CHUNK, MAX_BYTES - pos));
-      const n = fs.readSync(fd, b, 0, b.length, pos);
+      const { bytesRead: n } = await fh.read(b, 0, b.length, pos);
       if (!n) break;
       pos += n;
       carry += b.toString('utf8', 0, n);
@@ -731,7 +735,7 @@ function transcriptHead(p) {
       if (n < b.length) break; // EOF
     }
     return null;
-  } catch { return null; } finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } }
+  } catch { return null; } finally { if (fh) { try { await fh.close(); } catch {} } }
 }
 
 function firstLine(p) {
@@ -854,47 +858,70 @@ function claudeProjectDirs() {
 }
 
 // Every transcript, newest first, touched since `sinceMs`.
-function claudeTranscriptsSince(sinceMs) {
+//
+// Async, and that is the point rather than a style choice. This is a readdir per
+// project dir plus a stat per transcript, and on the Space CLAUDE_CONFIG_DIR is
+// on the FUSE bucket. Measured there over 32 transcripts: ~3ms when the mount's
+// attribute cache is warm, 1.1-1.3s when it is cold (~37ms per stat round trip).
+// The sync version spent all of that ON the one event loop that also carries
+// every session's PTY, so a cold scan was a hard freeze of every terminal — at
+// the REPIN_MS beat, once per live pane, every ~20 seconds.
+//
+// The awaited version does the same I/O for the same wall time, but on the
+// libuv threadpool: measured over 302 files, 11.6s of wall time for 26ms of
+// event-loop block. Sequential rather than Promise.all on purpose — 32 parallel
+// FUSE stats would saturate the 4-thread pool and push every other fs
+// operation in the process behind them, and nothing here is waiting on the
+// result.
+async function claudeTranscriptsSince(sinceMs) {
   const out = [];
   for (const proj of claudeProjectDirs()) {
     let dirs = [];
-    try { dirs = fs.readdirSync(proj, { withFileTypes: true }); } catch { continue; }
+    try { dirs = await fsp.readdir(proj, { withFileTypes: true }); } catch { continue; }
     for (const d of dirs) {
       if (!d.isDirectory()) continue;
       let files = [];
-      try { files = fs.readdirSync(path.join(proj, d.name)); } catch { continue; }
+      try { files = await fsp.readdir(path.join(proj, d.name)); } catch { continue; }
       for (const f of files) {
         if (!f.endsWith('.jsonl')) continue;
         const p = path.join(proj, d.name, f);
-        try { const st = fs.statSync(p); if (st.mtimeMs >= sinceMs) out.push({ p, m: st.mtimeMs }); } catch {}
+        try { const st = await fsp.stat(p); if (st.mtimeMs >= sinceMs) out.push({ p, m: st.mtimeMs }); } catch {}
       }
     }
   }
   return out.sort((a, b) => b.m - a.m);
 }
 
-const transcriptExists = (uuid) =>
-  !!uuid && claudeProjectDirs().some((proj) => {
+// Async for the same reason as claudeTranscriptsSince — plain loops rather than
+// .some(), which cannot await a predicate. Only reached when a re-pin is about to
+// happen, and only to say which of the two reasons it is.
+async function transcriptExists(uuid) {
+  if (!uuid) return false;
+  for (const proj of claudeProjectDirs()) {
     let dirs = [];
-    try { dirs = fs.readdirSync(proj, { withFileTypes: true }); } catch { return false; }
-    return dirs.some((d) => {
-      if (!d.isDirectory()) return false;
-      try { return fs.readdirSync(path.join(proj, d.name)).some((f) => f.startsWith(uuid)); } catch { return false; }
-    });
-  });
+    try { dirs = await fsp.readdir(proj, { withFileTypes: true }); } catch { continue; }
+    for (const d of dirs) {
+      if (!d.isDirectory()) continue;
+      try {
+        const files = await fsp.readdir(path.join(proj, d.name));
+        if (files.some((f) => f.startsWith(uuid))) return true;
+      } catch { /* dir vanished mid-walk */ }
+    }
+  }
+  return false;
+}
 
 // A transcript's opening cwd/timestamp never changes once written, and the
 // filename IS the conversation id, so a path is never reused for a different
 // conversation. That makes the head safe to remember — which matters because the
-// watcher rescans every REPIN_MS for the life of every session, and on the Space
-// these are synchronous reads against a FUSE mount. Without this, every tick
-// re-read every transcript on disk and would show up as event-loop lag.
+// watcher rescans for the life of every session, and on the Space these are reads
+// against a FUSE mount. Without this, every tick re-read every transcript on disk.
 const headMemo = new Map(); // transcript path -> head
 
-function transcriptHeadCached(p) {
+async function transcriptHeadCached(p) {
   const hit = headMemo.get(p);
   if (hit) return hit;
-  const head = transcriptHead(p);
+  const head = await transcriptHead(p);
   // Only remember a definite answer: null can just mean the file has no cwd line
   // yet (still being written), and caching that would poison it for the process.
   if (head) {
@@ -909,10 +936,10 @@ function transcriptHeadCached(p) {
 // what distinguishes a /clear-spawned successor from the thread it replaced —
 // both keep receiving mtime updates, only the successor is newly born.
 // Exported for server/test/repin.test.mjs.
-export function claudeCandidate(sessionId, workdir, sinceMs) {
+export async function claudeCandidate(sessionId, workdir, sinceMs) {
   const claimed = new Set(list().filter((s) => s.id !== sessionId && s.sessionUuid).map((s) => s.sessionUuid));
   let best = null;
-  for (const c of claudeTranscriptsSince(sinceMs)) {
+  for (const c of await claudeTranscriptsSince(sinceMs)) {
     const uuid = path.basename(c.p).replace(/\.jsonl$/, '');
     if (claimed.has(uuid)) continue;
     // The cwd is NOT on the first line: a transcript opens with metadata lines
@@ -920,7 +947,7 @@ export function claudeCandidate(sessionId, workdir, sinceMs) {
     // that have no cwd, and only the conversation lines carry one — line 4 or 5
     // in every real transcript measured. Reading line 1 made this check always
     // fail, so the re-pin could never actually claim anything.
-    const head = transcriptHeadCached(c.p);
+    const head = await transcriptHeadCached(c.p);
     // Only claim a conversation started in THIS session's folder.
     if (!head || head.cwd !== workdir) continue;
     const start = Date.parse(head.timestamp || '') || 0;
@@ -1066,19 +1093,14 @@ export function installClaudeRepinHook(hookCmd = '/app/scripts/am-repin-hook.sh'
 }
 
 // Once the pane's SessionStart hook has proven itself, the transcript scan is a
-// backstop rather than the mechanism, and it runs on this cadence instead of
-// REPIN_MS. The scan is the expensive half of a tick and the breadcrumb is the
-// authoritative one: `claudeTranscriptsSince` is a readdirSync per project dir
-// plus a statSync per transcript, and on the Space those land on the FUSE bucket
-// (CLAUDE_CONFIG_DIR is under /data). Measured there: ~3ms when the mount's
-// attribute cache is warm, 1.1-1.3s when it is cold — a synchronous block of the
-// one event loop that also carries every session's PTY. At the REPIN_MS beat,
-// once per live pane, that was a terminal freeze roughly every 20 seconds.
-//
-// This is the window in which a pin can be stale if a breadcrumb is ever LOST
-// (the hook fired but its crumb never reached us). The breadcrumb path itself
-// stays on the REPIN_MS beat — it reads one file on local disk and costs nothing.
-const SCAN_BACKSTOP_MS = 10 * 60_000;
+// backstop rather than the mechanism, so it runs on this cadence instead of
+// REPIN_MS. Now that the scan is awaited rather than synchronous this is no longer
+// about event-loop block time — it is only about not walking the bucket 3x a
+// minute per pane for an answer the breadcrumb already gave. So it can be short:
+// this is also the window in which a pin stays stale if a breadcrumb is ever LOST
+// (the hook fired but its crumb never reached us), and a minute of staleness in
+// that already-unlikely case costs one late Overview digest.
+const SCAN_BACKSTOP_MS = 60_000;
 
 /**
  * Should this tick run the transcript scan?
@@ -1105,8 +1127,13 @@ function scheduleClaudeCapture(session, workdir) {
   let hookProven = false;
   let lastScanAt = 0;
 
-  const tick = () => {
-    if (!isRunning(session.id)) { claudeCapturing.delete(session.id); return; }
+  // Returns whether to keep watching. Rearming is the caller's job (see `run`):
+  // the scan awaits now, so a throw lands as a rejected promise rather than as an
+  // exception in a setTimeout callback, and exactly one place deciding the next
+  // beat is what keeps a failed tick from either killing the watcher or arming
+  // two timers.
+  const tick = async () => {
+    if (!isRunning(session.id)) { claudeCapturing.delete(session.id); return false; }
     const pinned = (list().find((s) => s.id === session.id) || session).sessionUuid;
 
     // Breadcrumb first: the pane's own SessionStart hook told us which
@@ -1130,10 +1157,7 @@ function scheduleClaudeCapture(session, workdir) {
       if (verdict.repin) {
         console.warn(`[claude] re-pinning ${session.id}: ${pinned} -> ${verdict.repin} (breadcrumb, source: ${crumb.payload?.source || '?'})`);
         update(session.id, { sessionUuid: verdict.repin });
-        const t = setTimeout(tick, REPIN_MS);
-        if (t.unref) t.unref();
-        claudeCapturing.set(session.id, t);
-        return;
+        return true;
       }
       if (verdict.why !== 'already pinned') console.warn(`[claude] ${session.id}: breadcrumb rejected (${verdict.why})`);
     }
@@ -1144,22 +1168,38 @@ function scheduleClaudeCapture(session, workdir) {
         console.warn(`[claude] ${session.id}: folder shared with another live session — following /clear only via breadcrumbs here`);
       }
     } else if (claudeScanDue({ hookProven, lastScanAt })) {
-      lastScanAt = Date.now();
-      const hit = claudeCandidate(session.id, workdir, since);
-      if (hit && hit.uuid !== pinned) {
-        const why = transcriptExists(pinned) ? 'conversation was replaced (/clear)' : '--session-id was not honoured';
-        console.warn(`[claude] re-pinning ${session.id}: ${pinned} -> ${hit.uuid} (${why})`);
+      lastScanAt = Date.now(); // stamped BEFORE the await, so one scan is in flight at a time
+      const hit = await claudeCandidate(session.id, workdir, since);
+      // The scan yielded, so re-read the pin rather than trusting the one read at
+      // the top of this tick — a breadcrumb tick cannot have run (the next beat is
+      // armed only after this returns), but an explicit relaunch can have re-pinned.
+      const now = (list().find((s) => s.id === session.id) || session).sessionUuid;
+      if (hit && hit.uuid !== now) {
+        const why = await transcriptExists(now) ? 'conversation was replaced (/clear)' : '--session-id was not honoured';
+        console.warn(`[claude] re-pinning ${session.id}: ${now} -> ${hit.uuid} (${why})`);
         update(session.id, { sessionUuid: hit.uuid });
       }
     }
-    const t = setTimeout(tick, REPIN_MS);
-    if (t.unref) t.unref();
-    claudeCapturing.set(session.id, t);
+    return true;
   };
 
-  const t0 = setTimeout(tick, 5000);
-  if (t0.unref) t0.unref();
-  claudeCapturing.set(session.id, t0);
+  // One rearm per tick, whatever the tick did. A tick that throws logs and keeps
+  // the watcher alive: dropping it would silently stop following /clear for the
+  // rest of the pane's life, which is the failure this whole mechanism exists for.
+  const run = () => tick()
+    .catch((e) => {
+      console.warn(`[claude] ${session.id}: repin tick failed (${e && e.message}) — retrying next beat`);
+      return isRunning(session.id);
+    })
+    .then((again) => { if (again) rearm(); else claudeCapturing.delete(session.id); });
+
+  function rearm(ms = REPIN_MS) {
+    const t = setTimeout(run, ms);
+    if (t.unref) t.unref();
+    claudeCapturing.set(session.id, t);
+  }
+
+  rearm(5000);
 }
 
 const opencodeCapturing = new Map(); // id -> pending re-pin timer
