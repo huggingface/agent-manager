@@ -493,7 +493,8 @@ export default function SettingsView({
                         <div className="s-help" style={{ marginTop: 10 }}>
                           Skip these folders — type a name and press Enter. Anywhere they appear
                           (<span className="mono">node_modules</span>, <span className="mono">.venv</span>),
-                          they stay out of the history and the backup gets quicker.
+                          they stay out of the history and the backup gets quicker. The list starts
+                          on the caches a package manager can rebuild; remove any you want kept.
                         </div>
                         <div className="tagf" onClick={(e) => {
                           if (e.target === e.currentTarget) (e.currentTarget.querySelector('input') as HTMLInputElement)?.focus();

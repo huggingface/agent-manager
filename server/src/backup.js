@@ -70,6 +70,42 @@ export const validRepoId = (s) => typeof s === 'string' && s.length <= 96 && ID_
 const EXCLUDE_RE = /^[A-Za-z0-9._*?/-]+$/;
 export const MAX_EXCLUDES = 40;
 
+/**
+ * What a fresh install skips until the operator says otherwise.
+ *
+ * Chosen by walking this Space's own bucket rather than from taste: across 24
+ * workspace folders it holds 11 `node_modules`, 6 `.venv`, 4 `.cache`, and a
+ * `$HOME/.cache` carrying `ms-playwright`, `google-chrome-for-testing-headless`,
+ * `huggingface`, `uv`, `node-gyp` and the `claude-cli-nodejs` transcripts that
+ * make a dataset commit fail outright (§3.10). Every name here is something a
+ * package manager or toolchain rebuilds on demand.
+ *
+ * Two names were deliberately left OUT, and both matter more than what is in:
+ *   - `.git` appears 11 times, more often than anything else, and is the single
+ *     thing you would most want back. A size-ranked "junk" heuristic picks it
+ *     first; it is history, not cache.
+ *   - `dist` / `build` / `target` appear too, but they are ambiguous — a source
+ *     folder is called `build` often enough, and a default that silently drops
+ *     work is worse than one that copies some junk. Add them per-install.
+ */
+export const DEFAULT_EXCLUDE = Object.freeze([
+  'node_modules', '.venv', 'venv', '__pycache__', '.cache', '.npm', '.pnpm-store',
+  '.pytest_cache', '.mypy_cache', '.ruff_cache', '.ipynb_checkpoints', '.next', '.turbo',
+]);
+
+/**
+ * The stored value, or the default when the operator has never set one.
+ *
+ * An absent key and an empty list are NOT the same: `undefined` means "never
+ * asked", which takes the default, while `[]` is a list the operator emptied on
+ * purpose and must stay empty — otherwise clearing the field in Settings would
+ * silently refill itself on the next read.
+ */
+export function excludeFromConfig(saved) {
+  if (saved === undefined || saved === null) return [...DEFAULT_EXCLUDE];
+  return normalizeExclude(saved);
+}
+
 export function normalizeExclude(list) {
   if (!Array.isArray(list)) return [];
   const out = [];

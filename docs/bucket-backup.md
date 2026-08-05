@@ -196,6 +196,34 @@ What it saves, measured on an 805-file tree (800 of them a `.venv`):
 That is local disk; the Job reads a FUSE mount, which is slower, so the real
 saving is larger than this.
 
+**The list ships prepopulated.** An install that has never set one gets
+`node_modules`, `.venv`, `venv`, `__pycache__`, `.cache`, `.npm`, `.pnpm-store`,
+`.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.ipynb_checkpoints`, `.next`,
+`.turbo` — every one of them rebuilt on demand by a package manager or toolchain.
+
+The names came from walking this Space's own bucket, not from taste. Across 24
+workspace folders: 11 `node_modules`, 6 `.venv`, 4 `.cache`, plus a `$HOME/.cache`
+holding `ms-playwright`, `google-chrome-for-testing-headless`, `huggingface`, `uv`
+and the `claude-cli-nodejs` transcripts of §3.10.
+
+Two things that survey found are deliberately **not** in the default:
+
+- **`.git` — 11 of them, the most common folder in the bucket.** Rank candidates
+  by size or count and it comes out on top; it is also the one thing you would
+  most want back. Never default it.
+- **`dist`, `build`, `target`** — regenerable in most repos, a hand-written source
+  folder in enough of them. A default that silently drops work is worse than one
+  that copies some junk, so these are opt-in.
+
+An absent key and an empty list mean different things: `undefined` is "never
+asked" and takes the default, `[]` is a list the operator emptied on purpose and
+stays empty. Without that split, clearing the field in Settings would refill
+itself on the next read. Note the consequence for an **existing** install whose
+config predates this: it has no key, so it picks the default up and its next run
+skips those folders. Nothing already backed up is lost — newly excluded files drop
+out of the newest commit but stay in the dataset's history, retrievable from the
+revision that last held them.
+
 ### 3.9 The server-side mirror cannot filter
 
 `hf cp` has no `--include/--exclude` at all, and `hf sync` refuses remote→remote
