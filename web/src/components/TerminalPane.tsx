@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { ClipboardAddon, Base64 } from '@xterm/addon-clipboard';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { Cli, Session } from '../types';
 import { STATE_LABEL } from '../types';
@@ -285,6 +286,22 @@ export default function TerminalPane({
     // addon-clipboard@0.1.0 has a (base64, provider) runtime constructor but
     // types it as (provider) — construct positionally to match the runtime.
     term.loadAddon(new (ClipboardAddon as unknown as new (b: Base64, p: typeof clipboardProvider) => ClipboardAddon)(new Base64(), clipboardProvider));
+    // Make URLs in agent output clickable. An anchor click rather than
+    // window.open: with noopener requested window.open returns null whether it
+    // succeeded or was blocked, so there is no way to tell, and layering a
+    // fallback behind it opens the link twice. noopener/noreferrer keep the
+    // opened page from reaching back into the app through window.opener.
+    term.loadAddon(new WebLinksAddon((event, uri) => {
+      if (event?.defaultPrevented) return;
+      const a = document.createElement('a');
+      a.href = uri;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }));
     term.open(hostRef.current!);
     termRef.current = term;
     const host = hostRef.current!;
@@ -330,8 +347,13 @@ export default function TerminalPane({
 
     // Track the committed local xterm selection so Cmd/Ctrl+C can copy it
     // synchronously — deferring (setTimeout) would break execCommand's gesture.
+    // The selection we have already put on the clipboard. A copy now leaves the
+    // highlight in place, so without this a selection would shadow Ctrl+C's
+    // SIGINT for as long as it stayed on screen.
+    let copiedSelection = '';
     const selSub = term.onSelectionChange(() => {
       lastSelection = term.hasSelection() ? selectionText(term) : '';
+      copiedSelection = ''; // a fresh selection is copyable again
     });
     const copySelection = () => {
       const text = term.hasSelection() ? selectionText(term) : lastSelection;
@@ -384,8 +406,15 @@ export default function TerminalPane({
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
       if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C') && term.hasSelection()) {
+        // The highlight stays after copying — watching it vanish the instant you
+        // copy reads as "did that work?", and every other app keeps it. What it
+        // must not do is shadow SIGINT forever, so a second Ctrl+C on a
+        // selection we already copied goes to the process instead. Cmd+C is
+        // never an interrupt, so it just copies again.
+        const text = selectionText(term);
+        if (e.ctrlKey && !e.metaKey && text && text === copiedSelection) return true;
         copySelection();
-        term.clearSelection();
+        copiedSelection = text;
         return false;
       }
       if (e.metaKey && (e.key === 'c' || e.key === 'C')) {
