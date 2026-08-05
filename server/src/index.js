@@ -734,6 +734,10 @@ app.get('/api/info', (_req, res) => res.json({
   // True when the Space is private but we couldn't verify its bucket is private
   // (no HF_TOKEN to discover the bucket). Non-blocking; the UI shows a warning.
   bucketUnverified: !isPublic() && !!visibility().bucketUnverified,
+  // Backup health, or null when there is nothing wrong. Read from state, never
+  // the Hub: every open tab polls this route every 15s. Withheld while public
+  // for the same reason as `secrets` — it names the operator's repos.
+  backup: isPublic() ? null : backup.backupHealth(loadAmConfig()),
   // First-run welcome: shown once per Space (flag persists on the bucket).
   welcomeSeen: welcomeSeen(),
   // Demo mode: current sessions hidden from view; forces the welcome to show.
@@ -901,6 +905,10 @@ function loadAmConfig() {
       every: backup.INTERVALS.includes(saved.backup?.every) ? saved.backup.every : 'never',
       mirror: (saved.backup?.mirror || '').trim(),
       dataset: (saved.backup?.dataset || '').trim(),
+      // Folder names to keep out of the history — the slow, regenerable kind.
+      // Prepopulated on a config that has never set one, so a fresh install is
+      // quick by default; an emptied list stays empty. backup.js explains both.
+      exclude: backup.excludeFromConfig(saved.backup?.exclude),
     },
   };
 }
@@ -919,6 +927,10 @@ app.put('/api/config', (req, res) => {
       every: backup.INTERVALS.includes(b.backup?.every) ? b.backup.every : 'never',
       mirror: typeof b.backup?.mirror === 'string' ? b.backup.mirror.trim() : '',
       dataset: typeof b.backup?.dataset === 'string' ? b.backup.dataset.trim() : '',
+      // Normalized here, not trusted: these end up in a Job's argument list.
+      // Same undefined-vs-empty rule as the read path: a body that omits the key
+      // never asked and takes the default, `[]` is an emptied list and persists.
+      exclude: backup.excludeFromConfig(b.backup?.exclude),
     },
   };
   try { fs.writeFileSync(AM_CONFIG_FILE, JSON.stringify(cfg, null, 2)); } catch {}

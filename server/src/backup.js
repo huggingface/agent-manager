@@ -59,6 +59,87 @@ export const hasToken = () => !!(process.env.HF_TOKEN || process.env.HUGGING_FAC
 const ID_RE = /^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/;
 export const validRepoId = (s) => typeof s === 'string' && s.length <= 96 && ID_RE.test(s);
 
+// Folders the operator does not want in the history: the slow, regenerable kind
+// (`node_modules`, `.venv`, `env`) that turn one backup into thousands of file
+// hashes. Measured on 805 files: 7s without, 1s with them excluded — and a real
+// bucket's mount is slower than a local disk, so the saving is larger there.
+//
+// Tokens are folder names, or raw globs for anything finer. No whitespace and no
+// shell metacharacters: these are joined into one env var and split apart again
+// inside the Job, so the charset is what makes that split exact.
+const EXCLUDE_RE = /^[A-Za-z0-9._*?/-]+$/;
+export const MAX_EXCLUDES = 40;
+
+/**
+ * What a fresh install skips until the operator says otherwise.
+ *
+ * Chosen by walking this Space's own bucket rather than from taste: across 24
+ * workspace folders it holds 11 `node_modules`, 6 `.venv`, 4 `.cache`, and a
+ * `$HOME/.cache` carrying `ms-playwright`, `google-chrome-for-testing-headless`,
+ * `huggingface`, `uv`, `node-gyp` and the `claude-cli-nodejs` transcripts that
+ * make a dataset commit fail outright (§3.10). Every name here is something a
+ * package manager or toolchain rebuilds on demand.
+ *
+ * Two names were deliberately left OUT, and both matter more than what is in:
+ *   - `.git` appears 11 times, more often than anything else, and is the single
+ *     thing you would most want back. A size-ranked "junk" heuristic picks it
+ *     first; it is history, not cache.
+ *   - `dist` / `build` / `target` appear too, but they are ambiguous — a source
+ *     folder is called `build` often enough, and a default that silently drops
+ *     work is worse than one that copies some junk. Add them per-install.
+ */
+export const DEFAULT_EXCLUDE = Object.freeze([
+  'node_modules', '.venv', 'venv', '__pycache__', '.cache', '.npm', '.pnpm-store',
+  '.pytest_cache', '.mypy_cache', '.ruff_cache', '.ipynb_checkpoints', '.next', '.turbo',
+]);
+
+/**
+ * The stored value, or the default when the operator has never set one.
+ *
+ * An absent key and an empty list are NOT the same: `undefined` means "never
+ * asked", which takes the default, while `[]` is a list the operator emptied on
+ * purpose and must stay empty — otherwise clearing the field in Settings would
+ * silently refill itself on the next read.
+ */
+export function excludeFromConfig(saved) {
+  if (saved === undefined || saved === null) return [...DEFAULT_EXCLUDE];
+  return normalizeExclude(saved);
+}
+
+export function normalizeExclude(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const raw of list) {
+    if (typeof raw !== 'string') continue;
+    // Leading and trailing slashes are noise: `/env/` and `env` mean the same.
+    const t = raw.trim().replace(/^\/+/, '').replace(/\/+$/, '');
+    if (!t || t.length > 64 || !EXCLUDE_RE.test(t)) continue;
+    if (!out.includes(t)) out.push(t);
+  }
+  return out.slice(0, MAX_EXCLUDES);
+}
+
+/**
+ * Tokens -> `hf upload --exclude` globs.
+ *
+ * A bare name becomes TWO patterns, which is not obvious: `**\/env/**` does not
+ * match a top-level `env/`, verified against the Hub — `**\/` needs at least one
+ * leading segment. So excluding `env` needs `env/**` as well, or the copy at the
+ * bucket root silently still goes up.
+ *
+ * A token with a slash is a path and anchors at the bucket root; one containing
+ * `*` or `?` is already a glob and is passed through untouched.
+ */
+export function excludePatterns(tokens) {
+  const pats = [];
+  for (const t of normalizeExclude(tokens)) {
+    if (t.includes('*') || t.includes('?')) pats.push(t);
+    else if (t.includes('/')) pats.push(`${t}/**`);
+    else pats.push(`${t}/**`, `**/${t}/**`);
+  }
+  return pats;
+}
+
 function run(args, { timeout = 120_000 } = {}) {
   return new Promise((resolve, reject) => {
     execFile('hf', args, { timeout, env: process.env, maxBuffer: 8 << 20 }, (err, stdout, stderr) => {
@@ -134,11 +215,26 @@ if [ -n "\${AM_MIRROR:-}" ]; then
   hf cp "hf://buckets/\$AM_SOURCE/" "hf://buckets/\$AM_MIRROR/latest/"
 fi
 
+# Folders the operator asked to skip, as one --exclude per pattern. read -ra
+# splits on the spaces the server joined them with and nothing else: no globbing
+# against the container's filesystem, and each pattern reaches hf as a single
+# quoted argv element. Patterns are validated server-side to hold no whitespace,
+# which is what makes this split exact.
+EXCLUDE_ARGS=()
+if [ -n "\${AM_EXCLUDE:-}" ]; then
+  read -ra AM_EXCLUDE_PATS <<< "\$AM_EXCLUDE"
+  for p in "\${AM_EXCLUDE_PATS[@]}"; do EXCLUDE_ARGS+=(--exclude "\$p"); done
+  echo "skipping: \$AM_EXCLUDE"
+fi
+
 # 2. Version history, read from the bucket mounted read-only at /live — the
 #    Hub's copy, not this Space's disk. Unchanged files transfer nothing and
 #    produce no commit at all; --delete makes the newest commit match the bucket
-#    while every earlier commit keeps deleted files recoverable.
+#    while every earlier commit keeps deleted files recoverable — including
+#    anything newly excluded, which drops out of the newest commit but stays
+#    recoverable in the ones before it.
 hf upload "\$AM_DATASET" /live . --repo-type dataset --private --delete "*" \\
+  "\${EXCLUDE_ARGS[@]}" \\
   --commit-message "Bucket snapshot \$(date -u +%Y-%m-%dT%H:%MZ)"
 `;
 
@@ -167,7 +263,7 @@ export function parseJobId(out) {
 
 // Job arguments, as an array (never a shell string). Exported for the tests:
 // asserting on this is how we know a config value cannot reach a shell.
-export function jobArgs({ source, mirror, dataset }) {
+export function jobArgs({ source, mirror, dataset, exclude = [] }) {
   return [
     'jobs', 'run', '--detach',
     '--name', jobName(),
@@ -175,6 +271,9 @@ export function jobArgs({ source, mirror, dataset }) {
     '-e', `AM_SOURCE=${source}`,
     '-e', `AM_MIRROR=${mirror || ''}`,
     '-e', `AM_DATASET=${dataset}`,
+    // Space-joined: the tokens are validated to contain no whitespace, so the
+    // Job can split them back apart exactly.
+    '-e', `AM_EXCLUDE=${excludePatterns(exclude).join(' ')}`,
     // Read-only: a backup must not be able to write to what it is reading.
     '-v', `hf://buckets/${source}:/live:ro`,
     '--flavor', JOB_FLAVOR,
@@ -208,7 +307,7 @@ async function targets(cfg) {
   const d = await defaultsFor();
   const mirror = (cfg?.backup?.mirror || d.mirror || '').trim();
   const dataset = (cfg?.backup?.dataset || d.dataset || '').trim();
-  return { mirror, dataset, defaults: d };
+  return { mirror, dataset, defaults: d, exclude: normalizeExclude(cfg?.backup?.exclude) };
 }
 
 /** Launch one backup Job now. Returns { job } — the Hub does the rest. */
@@ -220,7 +319,7 @@ export async function runBackupNow(cfg) {
   // loud rather than silently doing nothing.
   if (await isRunning()) throw new Error('a backup is already running');
   const source = sourceBucket();
-  const { mirror, dataset } = await targets(cfg);
+  const { mirror, dataset, exclude } = await targets(cfg);
   for (const [label, id] of [['source', source], ['dataset', dataset], ['mirror', mirror]]) {
     if (label === 'mirror' && !id) continue;
     if (!validRepoId(id)) throw new Error(`${label} "${id}" is not a valid repo id`);
@@ -229,23 +328,73 @@ export async function runBackupNow(cfg) {
   // it; the dataset is created private by the upload itself.
   if (mirror) await run(['buckets', 'create', mirror, '--private', '--exist-ok']).catch(() => {});
 
-  const out = await run(jobArgs({ source, mirror, dataset }), { timeout: 180_000 });
+  const out = await run(jobArgs({ source, mirror, dataset, exclude }), { timeout: 180_000 });
   const job = parseJobId(out);
   // A launch we cannot identify still happened — record it, but say so, because
   // without an id there is nothing to poll and no overlap to detect.
   if (!job) console.warn('[backup] launched a Job but could not parse its id from:', out.slice(0, 200));
-  saveState({ jobId: job, startedAt: Date.now(), source, mirror, dataset, error: null });
+  saveState({ jobId: job, startedAt: Date.now(), source, mirror, dataset, error: null, outcomeFor: null });
   return { job };
+}
+
+/** Stage and the platform's own message for a Job — "Job timeout" lives in the
+ *  message, and it is the difference between "it broke" and "it never finished". */
+async function jobStatus(jobId) {
+  if (!jobId) return { stage: null, message: null };
+  try {
+    const j = JSON.parse(await run(['jobs', 'inspect', jobId, '--json'], { timeout: 30_000 }));
+    const s = Array.isArray(j) ? j[0] : j;
+    return { stage: (s && s.status && s.status.stage) || null, message: (s && s.status && s.status.message) || null };
+  } catch { return { stage: null, message: null }; }
 }
 
 /** Terminal state of the last launched Job, or null while it is still going. */
 async function jobStage(jobId) {
-  if (!jobId) return null;
+  return (await jobStatus(jobId)).stage;
+}
+
+/**
+ * Why a run failed, in one line, from its own logs.
+ *
+ * The platform message says "Job timeout"; the logs say the bucket has a
+ * `.cache/` path the Hub will not commit. The second is the one that tells an
+ * operator what to do, so both are kept and this is the one shown first.
+ */
+async function failureReason(jobId) {
   try {
-    const j = JSON.parse(await run(['jobs', 'inspect', jobId, '--json'], { timeout: 30_000 }));
-    const s = Array.isArray(j) ? j[0] : j;
-    return (s && s.status && s.status.stage) || null;
+    const out = await run(['jobs', 'logs', jobId], { timeout: 90_000 });
+    const lines = out.split('\n').map((l) => l.trim())
+      .filter((l) => l && !/^(WARNING|Hint:|\[notice\])/.test(l));
+    const telling = [...lines].reverse()
+      .find((l) => /error|refus|denied|invalid|cannot|failed|timeout/i.test(l));
+    return (telling || lines[lines.length - 1] || '').slice(0, 300) || null;
   } catch { return null; }
+}
+
+/**
+ * Record how the last run ended, once, so the answer survives in state instead
+ * of needing a Hub call to discover.
+ *
+ * This is the whole point of the feature: a backup that fails quietly is worse
+ * than no backup at all, because the operator believes they are covered. Until
+ * now nothing wrote a failure down — the settings row only learned of one if
+ * somebody happened to open it while the evidence was still fresh.
+ */
+async function recordOutcome() {
+  const st = loadState();
+  if (!st.jobId || st.outcomeFor === st.jobId) return;
+  const { stage, message } = await jobStatus(st.jobId);
+  if (!stage || isActiveStage(stage)) return; // still running, or the Hub did not say
+  if (stage === 'COMPLETED') {
+    saveState({ outcomeFor: st.jobId, failures: 0, lastFailure: null, lastSuccessAt: Date.now() });
+    return;
+  }
+  saveState({
+    outcomeFor: st.jobId,
+    failures: (st.failures || 0) + 1,
+    lastFailure: { at: Date.now(), jobId: st.jobId, stage, message: message || null, reason: await failureReason(st.jobId) },
+  });
+  console.warn(`[backup] run ${st.jobId} ended ${stage}${message ? ` (${message})` : ''}`);
 }
 
 // Stages that mean a run is genuinely in flight. Observed from the Hub:
@@ -275,6 +424,9 @@ async function isRunning() {
  * timestamp on disk rather than from an in-memory schedule.
  */
 export async function tick(cfg) {
+  // How the last run ended is recorded even when this tick does nothing else —
+  // otherwise a failure is only noticed by someone opening the settings page.
+  if (hasToken()) await recordOutcome().catch(() => {});
   if (unavailableReason(cfg)) return { skipped: unavailableReason(cfg) };
   const state = loadState();
   const due = Date.now() - (state.startedAt || 0) >= intervalMs(cfg.backup.every);
@@ -299,13 +451,57 @@ export async function tick(cfg) {
  * is due; the config is re-read each time, so switching the interval takes
  * effect without restarting anything.
  */
+/** Note when the schedule was first switched on, so "no success yet" can go
+ *  stale for a backup that has never once worked — which is this Space today. */
+export function armStaleClock(cfg) {
+  if (!intervalMs(cfg?.backup?.every)) return;
+  const st = loadState();
+  if (!st.firstArmedAt) saveState({ firstArmedAt: Date.now() });
+}
+
 export function startBackupTimer(getConfig) {
-  const t = setInterval(() => { tick(getConfig()).catch(() => {}); }, TICK_MS);
+  armStaleClock(getConfig());
+  const t = setInterval(() => { armStaleClock(getConfig()); tick(getConfig()).catch(() => {}); }, TICK_MS);
   if (t.unref) t.unref();
   // First check shortly after boot, once bucket discovery has landed.
   const first = setTimeout(() => { tick(getConfig()).catch(() => {}); }, 30_000);
   if (first.unref) first.unref();
   return () => { clearInterval(t); clearTimeout(first); };
+}
+
+/**
+ * Backup health, from state alone — no Hub calls, because this rides on
+ * /api/info which every open tab polls every 15 seconds.
+ *
+ * Returns null when there is nothing wrong, so the dashboard shows nothing at
+ * all in the normal case. Two ways to be unwell:
+ *   - `failing`: the last run ended in ERROR (or was killed).
+ *   - `stale`: no successful run in three intervals. A silent stall — the timer
+ *     never firing, the token going bad — leaves an operator just as wrongly
+ *     confident as an outright failure, and looks fine without this.
+ */
+export function backupHealth(cfg) {
+  const every = cfg?.backup?.every || 'never';
+  const ms = intervalMs(every);
+  if (!ms) return null; // switched off: silence is correct
+  const st = loadState();
+  const f = st.lastFailure || null;
+  const lastSuccessAt = st.lastSuccessAt || null;
+  const since = lastSuccessAt || st.firstArmedAt || null;
+  const stale = !!since && Date.now() - since > ms * 3;
+  if (!f && !stale) return null;
+  return {
+    failing: !!f,
+    stale,
+    failures: st.failures || 0,
+    at: f ? f.at : null,
+    jobId: f ? f.jobId : null,
+    stage: f ? f.stage : null,
+    message: f ? f.message || null : null,
+    reason: f ? f.reason || null : null,
+    lastSuccessAt,
+    jobsUrl: jobsUrl(),
+  };
 }
 
 /**
@@ -317,7 +513,7 @@ export async function backupStatus(cfg) {
   const state = loadState();
   const every = cfg?.backup?.every || 'never';
   const source = sourceBucket();
-  const { mirror, dataset, defaults } = await targets(cfg);
+  const { mirror, dataset, defaults, exclude } = await targets(cfg);
   // Not gated on the interval: an on-demand backup is a real backup, and its
   // result has to be visible even with the schedule off.
   const [stage, priv] = await Promise.all([
@@ -339,6 +535,14 @@ export async function backupStatus(cfg) {
       : null,
     jobName: jobName(),
     jobsUrl: jobsUrl(),
+    // The tokens as stored, and the globs they become — a skip list nobody can
+    // see the expansion of is a skip list nobody can debug.
+    exclude,
+    excludePatterns: excludePatterns(exclude),
+    health: backupHealth(cfg),
+    failures: state.failures || 0,
+    lastFailure: state.lastFailure || null,
+    lastSuccessAt: state.lastSuccessAt || null,
     nextDue: state.startedAt && intervalMs(every) ? state.startedAt + intervalMs(every) : null,
     datasetPrivate: priv, // null = unknown or not created yet
     error: state.error || null,

@@ -55,6 +55,14 @@ export const deleteGroup = (id: string) =>
 export const move = (ref: string, to: MoveTarget) =>
   fetch('/api/move', { method: 'POST', headers: HEADERS, body: JSON.stringify({ ref, to }) }).then(json);
 
+// Present only when a backup is unwell; null the rest of the time, so the
+// dashboard shows nothing in the normal case.
+export interface BackupHealth {
+  failing: boolean; stale: boolean; failures: number;
+  at: number | null; jobId: string | null; stage: string | null;
+  message: string | null; reason: string | null;
+  lastSuccessAt: number | null; jobsUrl: string;
+}
 export const getInfo = () => fetch('/api/info').then(json);
 
 export const dismissWelcome = () => fetch('/api/welcome/seen', { method: 'POST' }).then(json);
@@ -78,7 +86,7 @@ export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
   jobs: { askAboveUsd: number };
   archive: { after: 'week' | 'month' | 'never' };
-  backup: { every: BackupEvery; mirror: string; dataset: string };
+  backup: { every: BackupEvery; mirror: string; dataset: string; exclude: string[] };
   defaultArtifactsSpace?: string;
 }
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
@@ -103,6 +111,13 @@ export interface BackupStatus {
   // needs a job id to link to them.
   jobName: string;
   jobsUrl: string;
+  // The tokens as stored, and the globs they expand to.
+  exclude: string[];
+  excludePatterns: string[];
+  health: BackupHealth | null;
+  failures: number;
+  lastFailure: { at: number; jobId: string; stage: string; message: string | null; reason: string | null } | null;
+  lastSuccessAt: number | null;
   nextDue: number | null;
   datasetPrivate: boolean | null;
   error: string | null;

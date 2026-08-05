@@ -63,7 +63,17 @@ the bucket, ever.
    nothing. The dataset gets `--delete "*"` so its *newest* commit matches the
    bucket, while every earlier commit keeps the deleted file recoverable — the
    best of both.
-9. **Restore is a documented script, not a button** (§8).
+9. **The skip list applies to the history, not the mirror.** `hf cp` cannot
+   filter (§3.9), and making the mirror filterable would cost the server-side copy
+   that makes it nearly free. The dataset is where thousands of env files actually
+   hurt — every one of them gets hashed on every run — so that is where they are
+   skipped.
+10. **Skip tokens are folder names, expanded server-side.** A bare name becomes
+   both `name/**` and `**/name/**`, because the second does not imply the first
+   (§3.8). Tokens are validated to hold no whitespace or shell characters: they
+   cross into the Job as one space-joined env var and the shell splits them back
+   apart, so the charset is what makes that split exact.
+11. **Restore is a documented script, not a button** (§8).
 
 ## 2. What we already have
 
@@ -162,6 +172,99 @@ The dataset received **no new commit**. This is the one control standing between
 the operator's saved logins and the public internet, so it is verified rather
 than assumed.
 
+### 3.8 Excluding folders: `--exclude` works, and the glob rule surprises
+
+`hf upload` takes repeatable `--exclude` globs, and they do what you want — but
+**`**/env/**` does not match a top-level `env/`**:
+
+| patterns | `env/` at root | `sub/env/` |
+|---|---|---|
+| `**/env/**` | **kept** | excluded |
+| `env/**` + `**/env/**` | excluded | excluded |
+
+So a bare folder token has to become two patterns. With only the `**/` form the
+copy at the bucket root still goes up, which is exactly the case an operator means
+when they type `node_modules`.
+
+What it saves, measured on an 805-file tree (800 of them a `.venv`):
+
+| | files hashed | wall |
+|---|---|---|
+| no excludes | 805 | **7 s** |
+| `.venv` excluded | 5 | **1 s** |
+
+That is local disk; the Job reads a FUSE mount, which is slower, so the real
+saving is larger than this.
+
+**The list ships prepopulated.** An install that has never set one gets
+`node_modules`, `.venv`, `venv`, `__pycache__`, `.cache`, `.npm`, `.pnpm-store`,
+`.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.ipynb_checkpoints`, `.next`,
+`.turbo` — every one of them rebuilt on demand by a package manager or toolchain.
+
+The names came from walking this Space's own bucket, not from taste. Across 24
+workspace folders: 11 `node_modules`, 6 `.venv`, 4 `.cache`, plus a `$HOME/.cache`
+holding `ms-playwright`, `google-chrome-for-testing-headless`, `huggingface`, `uv`
+and the `claude-cli-nodejs` transcripts of §3.10.
+
+Two things that survey found are deliberately **not** in the default:
+
+- **`.git` — 11 of them, the most common folder in the bucket.** Rank candidates
+  by size or count and it comes out on top; it is also the one thing you would
+  most want back. Never default it.
+- **`dist`, `build`, `target`** — regenerable in most repos, a hand-written source
+  folder in enough of them. A default that silently drops work is worse than one
+  that copies some junk, so these are opt-in.
+
+An absent key and an empty list mean different things: `undefined` is "never
+asked" and takes the default, `[]` is a list the operator emptied on purpose and
+stays empty. Without that split, clearing the field in Settings would refill
+itself on the next read. Note the consequence for an **existing** install whose
+config predates this: it has no key, so it picks the default up and its next run
+skips those folders. Nothing already backed up is lost — newly excluded files drop
+out of the newest commit but stay in the dataset's history, retrievable from the
+revision that last held them.
+
+### 3.9 The server-side mirror cannot filter
+
+`hf cp` has no `--include/--exclude` at all, and `hf sync` refuses remote→remote
+("One path must be local"). So the skip list applies to the **dataset history
+only** — the mirror is a whole-bucket server-side copy or nothing.
+
+It could be filtered: inside the Job the bucket is mounted at `/live`, so
+`hf buckets sync /live hf://buckets/<mirror>/latest --exclude … --delete` is a
+*local*→remote sync and does support patterns. It would also throw away the
+property that makes the mirror nearly free — no bytes move, hashes only, 13,482
+files in 20 s — and make it read and re-upload 11.4 GB instead. Not worth it for
+files nobody wanted anyway. §10.9.
+
+### 3.10 What actually fails on a real bucket
+
+This Space's backups had been failing for a day before anyone noticed, which is
+the whole reason §7.1 exists. Two separate causes, from the Job logs:
+
+**The Hub refuses `.cache/` paths.** The mirror step succeeds, then:
+
+```
+✓ Copied
+Error: Invalid value. Invalid `path_in_repo` in CommitOperation:
+cannot update files under a '.cache/' folder
+(path: 'home/.cache/claude-cli-nodejs/…/2026-07-09T08-43-35-094Z.jsonl')
+```
+
+A bucket with an agent cache under `home/.cache/` can therefore *never* produce a
+dataset commit. `lvwerra/agent-manager-backup` held exactly one commit — "initial
+commit" — for a day of hourly runs.
+
+**The walk does not fit the job.** Failed runs show `Job timeout` after 1h33m to
+2h7m, against a `--timeout 3000s` (50 min) we asked for — so that flag is not
+being honoured either, and something around 1h30m is. Successful runs on a
+49-file bucket take 14–17 s; this bucket is 102,691 files on a FUSE mount.
+
+Excluding `.cache`, `node_modules`, `.venv` and `__pycache__` was **still running
+after 40 minutes** with no "Found N files" line, i.e. still walking. So exclusions
+fix the `.cache` rejection but may not fix the walk: `hf upload` appears to
+enumerate the tree before filtering it. Unresolved — §10.10.
+
 ### 3.7 Incidental
 
 `pip install "huggingface_hub[cli]"` warns on 1.26.0 — *"does not provide the
@@ -234,12 +337,14 @@ backup: {
   every: 'never' | '1h' | '3h' | '24h',   // default 'never' (§1.7)
   mirror: '',                              // default <ns>/<space>-backup
   dataset: '',                             // default <ns>/<space>-backup
+  exclude: [],                             // folder tokens kept out of the history
 }
 ```
 
 ```
 GET  /api/backup/status  → { every, source, mirror, dataset, defaults, hasToken,
                              canRunNow, running, unavailable,
+                             exclude, excludePatterns,
                              last: { at, jobId, stage }, nextDue,
                              datasetPrivate, error }
 POST /api/backup/run     → launch one Job now (works with the schedule off)
@@ -276,6 +381,9 @@ Back up the bucket                              [ off | 1h | 3h | 24h ]
   Backup jobs       am-backup-am-dev-2          -> every run of this Space's backup
   Last updated      4 Aug 19:35                 -- a timestamp, never a stage
 
+  Skip these folders — type a name and press Enter
+  [ node_modules × ] [ .venv × ] [ add another…            ]
+
   [ Back up now ]        <- available whenever there is a token, schedule or not;
                             reads "Backing up..." and is disabled while one runs
 ```
@@ -294,6 +402,12 @@ which the Hub keeps as a `name=` label, so
 failed. Strictly better than linking the latest job id: no state to track, and the
 page you land on shows a failure in context. A test pins the launch name and the
 filter to the same value so they cannot drift.
+
+**The skip field is a token field**, because that is what the data is: a short
+list of folder names, each independently removable. Enter or comma commits,
+Backspace on an empty box takes the last one back. The status API also reports the
+expanded globs — a skip list nobody can see the expansion of is one nobody can
+debug, and §3.8 is why the expansion is not obvious.
 
 **No stage in the table.** It read `(running)` for runs that had long finished,
 because `stage || 'RUNNING'` invented an answer whenever the Hub did not give one.
@@ -332,6 +446,29 @@ in the app.
 The privacy dots are not decoration: they are the state of the §1.4 gate, and the
 one thing an operator must be able to see at a glance about a copy of their
 credentials.
+
+## 7.1 Making failure visible
+
+A backup that fails quietly is worse than no backup, because the operator stops
+thinking about it. Nothing wrote a failure down before: the settings row learned of
+one only if somebody happened to open it, and `/api/backup/status` asked the Hub
+live rather than remembering.
+
+- **The timer records how each run ended**, once per job id, into
+  `backup-state.json`: stage, the platform's message, and one line of reason
+  lifted from the Job's own logs. That is where "cannot update files under a
+  '.cache/' folder" comes from — the platform only says `Job timeout`, which tells
+  an operator nothing about what to do.
+- **`/api/info` carries a health object**, or null when all is well. It is read
+  from state, never the Hub, because every open tab polls that route every 15
+  seconds. Withheld while the Space is public, like `secrets`.
+- **A strip above the stage**, on every view, not dismissible — a dismissed
+  warning is silence again, and silence is the failure mode. It shows the reason,
+  links to the filtered jobs list, and opens Settings.
+- **Staleness counts as unwell.** Three intervals with no successful run raises the
+  strip even when nothing errored. A timer that never fires, or a token that went
+  bad, leaves an operator exactly as wrongly confident as a failing run — and looks
+  perfectly healthy without this check.
 
 ## 8. Restore
 
@@ -383,6 +520,24 @@ knows which side should win.
 6. **Sustained hourly Job volume** over weeks is unproven, as is the interaction
    with the Job quota on a free account.
 7. **Bucket→repo is on the roadmap** (§3.1) — re-check before elaborating step 2.
+
+### 10.9 The mirror still holds what the history skips
+
+Excluded folders stay in the bucket mirror (§3.9), so they still occupy its
+storage, and a restore from the mirror brings them back. That is arguably right —
+the mirror exists to put a Space back exactly as it was — but it means "skip" means
+"skip in the history", and the settings copy says so rather than implying more.
+
+### 10.10 The walk may not fit any job
+
+Failed runs on this bucket are killed around 1h30m (§3.10), and `--timeout 3000s`
+is not honoured. Excluding the obvious noise did not visibly shorten the walk in a
+40-minute observation, which suggests `hf upload` enumerates before it filters. If
+that holds, the fix is not a longer list of exclusions but a different step 2 —
+uploading a subtree at a time, or letting the mirror be the only whole-bucket copy
+and giving the dataset a narrower job (sessions, config, transcripts) rather than
+everything. Undecided, and the reason §7.1 matters in the meantime: the operator
+should be told it is broken even while it stays broken.
 
 ## 11. Phasing
 
