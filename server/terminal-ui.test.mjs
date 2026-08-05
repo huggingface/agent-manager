@@ -58,7 +58,9 @@ backend.stderr.on('data', (d) => { logs += d; });
 
 let browser;
 let feed;
+let mouseFeed;
 let id;
+let mouseId;
 try {
   if (!await waitFor(() => fetch(`${API}/api/health`).then((r) => r.ok).catch(() => false), 60_000)) {
     throw new Error(`server did not start:\n${logs.slice(-2000)}`);
@@ -81,6 +83,25 @@ try {
     throw new Error('fixture output never reached the terminal');
   }
 
+  // OpenCode enables mouse reporting before a browser normally attaches. Its
+  // alternate screen has no xterm scrollback, so losing these modes on restore
+  // makes xterm translate the wheel into Up/Down (prompt history) instead of an
+  // SGR mouse event (the conversation scrollbox).
+  const mouseCreated = await (await fetch(`${API}/api/sessions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cli: 'shell', name: 'terminal-mouse-restore', path: '.' }),
+  })).json();
+  mouseId = mouseCreated.id;
+  if (!mouseId) throw new Error(`mouse fixture session creation failed: ${JSON.stringify(mouseCreated)}`);
+  mouseFeed = new WebSocket(`ws://127.0.0.1:7897/ws?session=${mouseId}&cols=120&rows=30`);
+  await new Promise((resolve, reject) => { mouseFeed.once('open', resolve); mouseFeed.once('error', reject); });
+  await sleep(400);
+  mouseFeed.send(JSON.stringify({
+    t: 'i',
+    d: "printf '\\033[?1049h\\033[?1000h\\033[?1002h\\033[?1003h\\033[?1006h\\033[?2004h'\r",
+  }));
+  await sleep(600);
+
   browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     viewport: { width: 1280, height: 800 },
@@ -90,6 +111,19 @@ try {
   // test must not depend on reaching the public internet.
   await context.route('https://example.com/**', (route) =>
     route.fulfill({ status: 200, contentType: 'text/html', body: '<title>probe</title>ok' }));
+  await context.addInitScript(() => {
+    const NativeWebSocket = window.WebSocket;
+    window.__terminalMessages = [];
+    window.WebSocket = class RecordedWebSocket extends NativeWebSocket {
+      send(data) {
+        try {
+          const parsed = JSON.parse(String(data));
+          if (parsed?.t === 'i' || parsed?.t === 'claim') window.__terminalMessages.push(parsed);
+        } catch {}
+        return super.send(data);
+      }
+    };
+  });
 
   const page = await context.newPage();
   await page.goto(API, { waitUntil: 'domcontentloaded' });
@@ -198,8 +232,34 @@ try {
   } else {
     check('repeated Cmd+C keeps copying and keeps the selection', false, 'second fixture not found');
   }
+
+  // ---------- 5. restored mouse mode keeps wheel input out of the prompt ----
+  await page.locator('.sidebar .row').filter({ hasText: 'terminal-mouse-restore' }).first().click();
+  const mouseTerm = page.locator('.tile-terminal:not(.tile-cached) .xterm-screen');
+  await mouseTerm.waitFor({ state: 'visible' });
+  const mouseRect = await mouseTerm.boundingBox();
+  if (mouseRect) {
+    const x = mouseRect.x + mouseRect.width / 2;
+    const y = mouseRect.y + mouseRect.height / 3;
+    // A desktop pointer gesture takes the terminal's input lease. Clear its
+    // press/release reports before recording the wheel itself.
+    await page.mouse.click(x, y);
+    await waitFor(() => page.evaluate(() =>
+      window.__terminalMessages.some((message) => message.t === 'claim')));
+    await page.mouse.move(x, y);
+    await page.evaluate(() => { window.__terminalMessages.length = 0; });
+    await page.mouse.wheel(0, -96);
+    await sleep(250);
+  }
+  const wheelInput = await page.evaluate(() =>
+    window.__terminalMessages.filter((message) => message.t === 'i').map((message) => message.d));
+  check('an upward wheel after attach remains an OpenCode-style mouse event',
+    !!mouseRect && wheelInput.some((data) => /^\x1b\[<64;\d+;\d+M$/.test(data))
+      && !wheelInput.some((data) => data.includes('\x1b[A')),
+    JSON.stringify({ wheelInput }));
 } finally {
   try { feed?.close(); } catch {}
+  try { mouseFeed?.close(); } catch {}
   try { await browser?.close(); } catch {}
   backend.kill('SIGKILL');
   fs.rmSync(DATA_DIR, { recursive: true, force: true });

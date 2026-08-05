@@ -13,6 +13,7 @@ import {
   createTerminalHistoryCheckpoint, loadTerminalHistory, TERMINAL_HISTORY_VERSION,
   traceHistoryLines,
 } from './history-store.js';
+import { createTerminalModeTracker } from './terminal-modes.js';
 
 // libghostty-vt ships prebuilts for linux x64/arm64 and macOS arm64. Loading it
 // is guarded so a platform without a prebuilt still boots and says so, rather
@@ -384,6 +385,14 @@ function styledSnapshot(host, vt, snap) {
   return { ...snap, scrollbackLines: withHistoryStyles(host, snap.scrollbackLines) };
 }
 
+// A Ghostty snapshot restores the rendered grid. Append the interaction modes
+// observed on the PTY so a newly attached xterm also behaves like the terminal
+// that saw the TUI start (mouse reporting, bracketed paste, cursor-key mode…).
+function viewerRestoreAnsi(host, vt, snap) {
+  return snapshotToRestoreAnsi(styledSnapshot(host, vt, snap))
+    + host.terminalModes.restoreAnsi();
+}
+
 /**
  * Commit one captured agent repaint without duplicating its overflow rows.
  *
@@ -448,7 +457,7 @@ function finishCapturedGrid(host, txn) {
       // diverge after a narrow zoom, even when the server history is correct.
       notifyGrid(host, true);
       const committed = host.vt.snapshot({ includeCells: true, includeScrollback: true });
-      const ansi = snapshotToRestoreAnsi(styledSnapshot(host, host.vt, committed));
+      const ansi = viewerRestoreAnsi(host, host.vt, committed);
       for (const sub of host.subs) sub.onData(ansi);
       try { previous.dispose(); } catch {}
       sampleScreen(host);
@@ -622,7 +631,7 @@ function armTraceHydration(host) {
       host.repaintArchive = view.archive;
       notifyGrid(host, true);
       const committed = host.vt.snapshot({ includeCells: true, includeScrollback: true });
-      const ansi = snapshotToRestoreAnsi(styledSnapshot(host, host.vt, committed));
+      const ansi = viewerRestoreAnsi(host, host.vt, committed);
       for (const sub of host.subs) sub.onData(ansi);
       try { previous.dispose(); } catch {}
       sampleScreen(host);
@@ -1314,6 +1323,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     repaintArchive: null,
     historyStyles: new Map((persistedHistory?.lines || [])
       .filter((line) => line.text && line.ansi).map((line) => [line.text, line.ansi])),
+    terminalModes: createTerminalModeTracker(),
     startupHistory: captureResize ? persistedHistory : null,
     historyCheckpoint: null,
     traceHistoryPage: null,
@@ -1348,6 +1358,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
 
   term.onData((chunk) => {
     host.lastOutputAt = Date.now();
+    host.terminalModes.feed(chunk);
     if (host.traceHistoryTimer) {
       clearTimeout(host.traceHistoryTimer);
       host.traceHistoryTimer = null;
@@ -1464,7 +1475,7 @@ export function attach(session, cols, rows) {
       let snap;
       try { snap = host.vt.snapshot({ includeCells: true, includeScrollback: true }); } catch { return null; }
       return {
-        ansi: snapshotToRestoreAnsi(styledSnapshot(host, host.vt, snap)),
+        ansi: viewerRestoreAnsi(host, host.vt, snap),
         cols: snap.cols,
         rows: snap.rows,
         viewers: host.subs.size,
