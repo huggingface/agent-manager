@@ -209,6 +209,34 @@ property that makes the mirror nearly free — no bytes move, hashes only, 13,48
 files in 20 s — and make it read and re-upload 11.4 GB instead. Not worth it for
 files nobody wanted anyway. §10.9.
 
+### 3.10 What actually fails on a real bucket
+
+This Space's backups had been failing for a day before anyone noticed, which is
+the whole reason §7.1 exists. Two separate causes, from the Job logs:
+
+**The Hub refuses `.cache/` paths.** The mirror step succeeds, then:
+
+```
+✓ Copied
+Error: Invalid value. Invalid `path_in_repo` in CommitOperation:
+cannot update files under a '.cache/' folder
+(path: 'home/.cache/claude-cli-nodejs/…/2026-07-09T08-43-35-094Z.jsonl')
+```
+
+A bucket with an agent cache under `home/.cache/` can therefore *never* produce a
+dataset commit. `lvwerra/agent-manager-backup` held exactly one commit — "initial
+commit" — for a day of hourly runs.
+
+**The walk does not fit the job.** Failed runs show `Job timeout` after 1h33m to
+2h7m, against a `--timeout 3000s` (50 min) we asked for — so that flag is not
+being honoured either, and something around 1h30m is. Successful runs on a
+49-file bucket take 14–17 s; this bucket is 102,691 files on a FUSE mount.
+
+Excluding `.cache`, `node_modules`, `.venv` and `__pycache__` was **still running
+after 40 minutes** with no "Found N files" line, i.e. still walking. So exclusions
+fix the `.cache` rejection but may not fix the walk: `hf upload` appears to
+enumerate the tree before filtering it. Unresolved — §10.10.
+
 ### 3.7 Incidental
 
 `pip install "huggingface_hub[cli]"` warns on 1.26.0 — *"does not provide the
@@ -391,6 +419,29 @@ The privacy dots are not decoration: they are the state of the §1.4 gate, and t
 one thing an operator must be able to see at a glance about a copy of their
 credentials.
 
+## 7.1 Making failure visible
+
+A backup that fails quietly is worse than no backup, because the operator stops
+thinking about it. Nothing wrote a failure down before: the settings row learned of
+one only if somebody happened to open it, and `/api/backup/status` asked the Hub
+live rather than remembering.
+
+- **The timer records how each run ended**, once per job id, into
+  `backup-state.json`: stage, the platform's message, and one line of reason
+  lifted from the Job's own logs. That is where "cannot update files under a
+  '.cache/' folder" comes from — the platform only says `Job timeout`, which tells
+  an operator nothing about what to do.
+- **`/api/info` carries a health object**, or null when all is well. It is read
+  from state, never the Hub, because every open tab polls that route every 15
+  seconds. Withheld while the Space is public, like `secrets`.
+- **A strip above the stage**, on every view, not dismissible — a dismissed
+  warning is silence again, and silence is the failure mode. It shows the reason,
+  links to the filtered jobs list, and opens Settings.
+- **Staleness counts as unwell.** Three intervals with no successful run raises the
+  strip even when nothing errored. A timer that never fires, or a token that went
+  bad, leaves an operator exactly as wrongly confident as a failing run — and looks
+  perfectly healthy without this check.
+
 ## 8. Restore
 
 The direction the Hub *does* support server-side, pleasingly:
@@ -448,6 +499,17 @@ Excluded folders stay in the bucket mirror (§3.9), so they still occupy its
 storage, and a restore from the mirror brings them back. That is arguably right —
 the mirror exists to put a Space back exactly as it was — but it means "skip" means
 "skip in the history", and the settings copy says so rather than implying more.
+
+### 10.10 The walk may not fit any job
+
+Failed runs on this bucket are killed around 1h30m (§3.10), and `--timeout 3000s`
+is not honoured. Excluding the obvious noise did not visibly shorten the walk in a
+40-minute observation, which suggests `hf upload` enumerates before it filters. If
+that holds, the fix is not a longer list of exclusions but a different step 2 —
+uploading a subtree at a time, or letting the mirror be the only whole-bucket copy
+and giving the dataset a narrower job (sessions, config, transcripts) rather than
+everything. Undecided, and the reason §7.1 matters in the meantime: the operator
+should be told it is broken even while it stays broken.
 
 ## 11. Phasing
 
