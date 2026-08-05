@@ -86,7 +86,7 @@ export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
   jobs: { askAboveUsd: number };
   archive: { after: 'week' | 'month' | 'never' };
-  backup: { every: BackupEvery; mirror: string; dataset: string; exclude: string[] };
+  backup: { every: BackupEvery; dataset: string; exclude: string[] };
   defaultArtifactsSpace?: string;
 }
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
@@ -98,9 +98,9 @@ export type BackupEvery = 'never' | '1h' | '3h' | '24h';
 export interface BackupStatus {
   every: BackupEvery;
   source: string | null;
-  mirror: string;
+  staging: string;
   dataset: string;
-  defaults: { mirror: string; dataset: string };
+  defaults: { dataset: string; staging: string };
   hasToken: boolean;
   canRunNow: boolean;
   running: boolean;
@@ -113,7 +113,8 @@ export interface BackupStatus {
   jobsUrl: string;
   // The tokens as stored, and the globs they expand to.
   exclude: string[];
-  excludePatterns: string[];
+  excludeDefaults: string[];
+  excludeIsDefault: boolean;
   health: BackupHealth | null;
   failures: number;
   lastFailure: { at: number; jobId: string; stage: string; message: string | null; reason: string | null } | null;

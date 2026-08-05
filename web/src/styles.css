@@ -1352,3 +1352,10 @@ a.btn-ghost { text-decoration: none; }
   padding: 5px 9px; border-top: 1px solid var(--border);
   font-size: 10.5px; color: var(--muted);
 }
+
+/* Skip-list header: help text with the restore control pinned to its right, so
+   the button sits with the list it resets rather than in the row of buttons that
+   run backups. */
+.skiphead { display: flex; align-items: flex-start; gap: 12px; }
+.skiphead > span { flex: 1; min-width: 0; }
+.skiprestore { flex: none; font-size: 11.5px; padding: 3px 8px; white-space: nowrap; }

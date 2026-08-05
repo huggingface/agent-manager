@@ -403,11 +403,12 @@ export default function SettingsView({
                   <div>
                     <div className="s-label">Back up the bucket</div>
                     <div className="s-help">
-                      Copies your whole bucket — workspaces, history, saved logins — to private Hub storage:
-                      a bucket you can restore from instantly, and a dataset that keeps version history.
-                      Nothing is ever deleted from your bucket.
+                      Snapshots your work — workspaces, transcripts, config — to a private dataset on
+                      the Hub every hour, so you can get back any past version. Caches and dependency
+                      folders are skipped, and saved logins are left out: a snapshot is never a place
+                      to keep credentials. Nothing is ever written to or deleted from your bucket.
                     </div>
-                    {/* A kv table, not a run-on sentence: three destinations and a
+                    {/* A kv table, not a run-on sentence: the destinations and a
                         timestamp are things you scan, not read. The two repos
                         default to the same id string — one a dataset, one a
                         bucket — so each row says which it is. */}
@@ -429,21 +430,6 @@ export default function SettingsView({
                             )}
                           </b>
                         </div>
-                        {(bk.mirror || bk.defaults.mirror) && (
-                          <div>
-                            <span>Mirror bucket</span>
-                            <b>
-                              <a
-                                className="mono"
-                                href={`https://huggingface.co/buckets/${bk.mirror || bk.defaults.mirror}`}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                {bk.mirror || bk.defaults.mirror}
-                              </a>
-                            </b>
-                          </div>
-                        )}
                         <div>
                           <span>Backup jobs</span>
                           <b><a href={bk.jobsUrl} target="_blank" rel="noreferrer">{bk.jobName}</a></b>
@@ -490,11 +476,26 @@ export default function SettingsView({
                         worth keeping — measured, that is 7s of work versus 1s. */}
                     {bk?.canRunNow && (
                       <>
-                        <div className="s-help" style={{ marginTop: 10 }}>
-                          Skip these folders — type a name and press Enter. Anywhere they appear
-                          (<span className="mono">node_modules</span>, <span className="mono">.venv</span>),
-                          they stay out of the history and the backup gets quicker. The list starts
-                          on the caches a package manager can rebuild; remove any you want kept.
+                        <div className="s-help skiphead" style={{ marginTop: 10 }}>
+                          <span>
+                            Skip these folders — type a name and press Enter. Anywhere they appear
+                            (<span className="mono">node_modules</span>, <span className="mono">.venv</span>),
+                            they stay out of the history. Everything here is something a command puts
+                            back; nothing is skipped for being large. Remove any you want kept.
+                          </span>
+                          {/* The default list is long and picked from measurements, so an operator
+                              who trims it has no way back without retyping 30 names. Hidden when
+                              the list already matches the defaults, so it is never a no-op —
+                              compared against the local edit rather than the server's copy, or it
+                              would linger until the next status poll. */}
+                          {bk.excludeDefaults?.length > 0
+                            && (cfg.backup.exclude.length !== bk.excludeDefaults.length
+                              || cfg.backup.exclude.some((t, i) => t !== bk.excludeDefaults[i])) && (
+                            <button
+                              className="btn-ghost skiprestore"
+                              onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, exclude: [...bk.excludeDefaults] } })}
+                            >Restore defaults</button>
+                          )}
                         </div>
                         <div className="tagf" onClick={(e) => {
                           if (e.target === e.currentTarget) (e.currentTarget.querySelector('input') as HTMLInputElement)?.focus();

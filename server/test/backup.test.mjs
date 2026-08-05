@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   EVERY_MS, INTERVALS, intervalMs, validRepoId, jobArgs, JOB_SCRIPT, JOB_FLAVOR,
   hasToken, unavailableReason, runNowBlockedBy, jobName, jobsUrl, isActiveStage, parseJobId,
-  normalizeExclude, excludePatterns, MAX_EXCLUDES, DEFAULT_EXCLUDE, excludeFromConfig,
+  normalizeExclude, MAX_EXCLUDES, DEFAULT_EXCLUDE, excludeFromConfig,
 } from '../src/backup.js';
 
 // The rule that is not obvious and cost a Hub round-trip to learn: `**/x/**` does
@@ -32,7 +32,7 @@ test('the default skip list is caches only — never .git, never ambiguous build
     assert.ok(!DEFAULT_EXCLUDE.includes(keep), `${keep} must not be skipped by default`);
   }
   // The names actually found in this Space's bucket are covered.
-  for (const junk of ['node_modules', '.venv', '__pycache__', '.cache', '.npm']) {
+  for (const junk of ['node_modules', '.venv', '__pycache__', '.cache', '.npm/_cacache']) {
     assert.ok(DEFAULT_EXCLUDE.includes(junk), `${junk} should be skipped by default`);
   }
   // Every default has to survive the validator it will be fed through, fit the
@@ -45,32 +45,6 @@ test('the default skip list is caches only — never .git, never ambiguous build
   assert.throws(() => DEFAULT_EXCLUDE.push('dist'));
   excludeFromConfig(undefined).push('dist');
   assert.ok(!DEFAULT_EXCLUDE.includes('dist'));
-});
-
-test('the default reaches a Job as splittable patterns, root and nested', () => {
-  const pats = excludePatterns([...DEFAULT_EXCLUDE]);
-  assert.equal(pats.length, DEFAULT_EXCLUDE.length * 2);
-  for (const p of pats) assert.ok(!/\s/.test(p), `${p} would break the shell split`);
-  assert.ok(pats.includes('node_modules/**') && pats.includes('**/node_modules/**'));
-  const env = jobArgs({ source: 'u/s', mirror: 'u/m', dataset: 'u/d', exclude: [...DEFAULT_EXCLUDE] })
-    .find((a) => String(a).startsWith('AM_EXCLUDE='));
-  assert.ok(env.includes('.cache/**') && env.includes('**/.cache/**'));
-});
-
-test('a bare folder token excludes it at the root AND nested', () => {
-  assert.deepEqual(excludePatterns(['env']), ['env/**', '**/env/**']);
-  assert.deepEqual(excludePatterns(['node_modules', '.venv']),
-    ['node_modules/**', '**/node_modules/**', '.venv/**', '**/.venv/**']);
-});
-
-test('a path anchors at the root, and an explicit glob is left alone', () => {
-  // A slash means "this exact place", so it is not also matched anywhere.
-  assert.deepEqual(excludePatterns(['state/claude/cache']), ['state/claude/cache/**']);
-  // Already a glob: passed through untouched, however odd.
-  assert.deepEqual(excludePatterns(['**/*.pyc']), ['**/*.pyc']);
-  assert.deepEqual(excludePatterns(['cache-*']), ['cache-*']);
-  assert.deepEqual(excludePatterns([]), []);
-  assert.deepEqual(excludePatterns(undefined), []);
 });
 
 test('normalizeExclude tidies input and refuses anything shell-shaped', () => {
@@ -93,25 +67,6 @@ test('normalizeExclude tidies input and refuses anything shell-shaped', () => {
 
 // The patterns cross into the Job as one space-joined env var and are split back
 // apart by the shell. If either side of that contract changes, this fails.
-test('patterns reach the Job as one env var the shell can split exactly', () => {
-  const args = jobArgs({ source: 'ns/src', mirror: '', dataset: 'ns/ds', exclude: ['env', 'node_modules'] });
-  const env = args[args.indexOf('AM_EXCLUDE=env/** **/env/** node_modules/** **/node_modules/**')];
-  assert.ok(env, `AM_EXCLUDE not passed as expected; got ${JSON.stringify(args.filter((a) => String(a).startsWith('AM_')))}`);
-  // No pattern may contain whitespace, or the split inside the Job is wrong.
-  for (const pat of excludePatterns(['env', 'node_modules'])) assert.ok(!/\s/.test(pat));
-  // Nothing to skip is an empty value, not a missing variable.
-  const none = jobArgs({ source: 'ns/src', mirror: '', dataset: 'ns/ds' });
-  assert.ok(none.includes('AM_EXCLUDE='));
-  // And the script must build the args itself rather than have them interpolated.
-  assert.match(JOB_SCRIPT, /read -ra AM_EXCLUDE_PATS/);
-  assert.match(JOB_SCRIPT, /EXCLUDE_ARGS\+=\(--exclude "\$p"\)/);
-  assert.ok(!JOB_SCRIPT.includes('node_modules/**'), 'patterns must not be baked into the script');
-});
-
-// The image installs huggingface_hub unpinned, so the CLI in the Space is not the
-// one on a dev machine. A version whose launch output differs left jobId null,
-// which killed overlap protection outright — so the parse must not depend on one
-// output shape.
 test('parseJobId survives any of the shapes the CLI prints', () => {
   const ID = '6a7245596b79c09949c227fc';
   assert.equal(parseJobId(`id=${ID} url=https://huggingface.co/jobs/lvwerra/${ID}`), ID);
@@ -219,38 +174,44 @@ test('validRepoId accepts real ids and rejects shell metacharacters', () => {
 // argv/env, never as shell syntax. If someone later interpolates a config value
 // into JOB_SCRIPT, this fails.
 test('config values reach the job as env vars, not shell text', () => {
-  const args = jobArgs({ source: 'ns/src', mirror: 'ns/mir', dataset: 'ns/ds' });
+  const args = jobArgs({ source: 'ns/src', dataset: 'ns/ds', staging: 'ns/snap' });
   assert.ok(args.includes('AM_SOURCE=ns/src'));
-  assert.ok(args.includes('AM_MIRROR=ns/mir'));
+  assert.ok(args.includes('AM_STAGING=ns/snap'));
   assert.ok(args.includes('AM_DATASET=ns/ds'));
   const script = args[args.length - 1];
   assert.equal(script, JOB_SCRIPT);
-  for (const id of ['ns/src', 'ns/mir', 'ns/ds']) {
+  for (const id of ['ns/src', 'ns/snap', 'ns/ds']) {
     assert.ok(!script.includes(id), 'ids must not be interpolated into the script');
   }
 });
 
-// A backup must never be able to write to the bucket it is reading.
-test('the source bucket is mounted read-only', () => {
-  const args = jobArgs({ source: 'ns/src', mirror: '', dataset: 'ns/ds' });
-  const vol = args[args.indexOf('-v') + 1];
-  assert.equal(vol, 'hf://buckets/ns/src:/live:ro');
+// The bucket used to be mounted read-only so a backup could not write to what it
+// was reading. Nothing is mounted now, which is the stronger version of the same
+// property — and it is why a run no longer pays 8 ms per file to walk it.
+test('nothing is mounted, so a backup cannot touch the source at all', () => {
+  const args = jobArgs({ source: 'ns/src', dataset: 'ns/ds', staging: 'ns/snap' });
+  assert.equal(args.indexOf('-v'), -1);
+  assert.ok(!args.some((a) => typeof a === 'string' && a.includes('/live')));
+  assert.ok(!JOB_SCRIPT.includes('/live'));
 });
 
 test('a backup is one detached job launch', () => {
-  const args = jobArgs({ source: 'ns/src', mirror: '', dataset: 'ns/ds' });
+  const args = jobArgs({ source: 'ns/src', dataset: 'ns/ds', staging: 'ns/snap' });
   assert.deepEqual(args.slice(0, 3), ['jobs', 'run', '--detach']);
   assert.ok(args.includes('--secrets') && args.includes('HF_TOKEN'));
 });
 
 // The upload has to create the dataset private and re-verify privacy every run:
 // the copy carries live agent credentials (docs/bucket-backup.md §4).
-test('the job script gates on privacy and creates private', () => {
-  assert.match(JOB_SCRIPT, /--private/);
+test('the job script gates on privacy and states it when creating', () => {
+  assert.match(JOB_SCRIPT, /private=True/);
   assert.match(JOB_SCRIPT, /refusing to back up/);
   assert.match(JOB_SCRIPT, /dataset_info/);
   assert.match(JOB_SCRIPT, /bucket_info/);
   assert.match(JOB_SCRIPT, /set -euo pipefail/);
+  // The source is gated too: reading a public bucket into a dataset is still a
+  // copy of something that should not have been readable.
+  assert.ok(JOB_SCRIPT.includes('must_be_private("bucket", SRC)'));
 });
 
 // Without a token there is no way to launch a Job or write to the Hub, so the
@@ -280,4 +241,99 @@ test('no HF_TOKEN means unavailable, with the token as the stated reason', () =>
       if (v === undefined) delete process.env[k];
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// The pipeline: what the Job is asked to do, and what it must refuse.
+// ---------------------------------------------------------------------------
+
+test('the Job gets tokens, a staging bucket, and no mount', () => {
+  const args = jobArgs({ source: 'ns/src', dataset: 'ns/ds', staging: 'ns/snap', exclude: ['node_modules', '.cache'] });
+  assert.ok(args.includes('-e'));
+  assert.ok(args.includes('AM_STAGING=ns/snap'));
+  assert.ok(args.includes('AM_DATASET=ns/ds'));
+  // Tokens, not globs: the Job matches them against the API listing itself.
+  assert.ok(args.includes('AM_EXCLUDE=node_modules .cache'));
+  // Nothing is mounted any more — the mount is the thing that cost 14m51s.
+  assert.equal(args.filter((a) => a === '-v').length, 0);
+  assert.ok(!args.some((a) => typeof a === 'string' && a.includes(':/live')));
+  // And no config value is ever spliced into a shell string.
+  assert.equal(args.at(-3), 'bash');
+  assert.equal(args.at(-2), '-c');
+  assert.equal(args.at(-1), JOB_SCRIPT);
+});
+
+test('no mirror survives anywhere in the launch', () => {
+  const args = jobArgs({ source: 'ns/src', dataset: 'ns/ds', staging: 'ns/snap' });
+  assert.ok(!args.some((a) => typeof a === 'string' && a.includes('AM_MIRROR')));
+  assert.ok(!JOB_SCRIPT.includes('AM_MIRROR'));
+});
+
+test('every destination is created explicitly private, then re-read', () => {
+  // The bug this replaces: a comment claiming `hf upload` creates a repo private.
+  // It creates it PUBLIC, so the assertion has to be in the code, not a comment.
+  assert.ok(JOB_SCRIPT.includes('private=True'), 'creates must state visibility');
+  assert.ok(!/creates it private/.test(JOB_SCRIPT), 'the wrong comment must be gone');
+  for (const rid of ['SRC', 'DATASET', 'STAGING']) {
+    assert.ok(JOB_SCRIPT.includes(`must_be_private("bucket", ${rid})`)
+      || JOB_SCRIPT.includes(`must_be_private("dataset", ${rid})`), `${rid} is gated`);
+  }
+  assert.ok(JOB_SCRIPT.includes('is not private'), 'a non-private destination stops the run');
+});
+
+test('the staging bucket is always torn down', () => {
+  // A staging bucket left behind is a second full copy of the operator's data.
+  assert.ok(JOB_SCRIPT.includes('delete_bucket(STAGING)'));
+  assert.ok(/finally:\s*\n\s*cleanup\(\)/.test(JOB_SCRIPT), 'cleanup runs even on a crash');
+});
+
+test('the commit is gated on a scrub that verified itself', () => {
+  assert.ok(JOB_SCRIPT.includes('refusing to commit: secrets still present'));
+  // The verify must come before the commit, or it proves nothing.
+  assert.ok(JOB_SCRIPT.indexOf('secrets still present') < JOB_SCRIPT.indexOf('upload_folder'));
+  // Tight patterns: a loose one rewrote ordinary prose containing "sk-".
+  assert.ok(JOB_SCRIPT.includes('(?<![A-Za-z0-9_-])'), 'secret patterns are boundary-anchored');
+  assert.ok(!JOB_SCRIPT.includes('sk-(?:proj-)?[A-Za-z0-9_-]{24,}'), 'the loose pattern is gone');
+});
+
+test('credential files are matched by exact name, not substring', () => {
+  // "/credentials" is not a substring of "/.credentials.json" — that gap put a
+  // credentials file into a probe commit.
+  assert.ok(JOB_SCRIPT.includes('CRED_NAMES'));
+  assert.ok(JOB_SCRIPT.includes('.credentials.json'));
+  assert.ok(JOB_SCRIPT.includes('rsplit("/", 1)[-1] in CRED_NAMES'));
+});
+
+test('an empty scope refuses rather than committing nothing', () => {
+  assert.ok(JOB_SCRIPT.includes('the scope matched no files'));
+});
+
+// ---------------------------------------------------------------------------
+// The default skip list: reproducibility is the only criterion.
+// ---------------------------------------------------------------------------
+
+test('defaults skip only what a command can put back', () => {
+  for (const t of ['node_modules', '.venv', '.cache', '__pycache__', '.lake/packages',
+                   '.elan/toolchains', '.npm/_cacache', '.tmp']) {
+    assert.ok(DEFAULT_EXCLUDE.includes(t), `${t} should be skipped by default`);
+  }
+});
+
+test('defaults never drop work: no .git, no worktrees, no size rule', () => {
+  // .git holds unpushed commits and staged changes: they exist nowhere else.
+  assert.ok(!DEFAULT_EXCLUDE.includes('.git'));
+  assert.ok(!DEFAULT_EXCLUDE.some((t) => t.includes('.git')));
+  // Ambiguous build names stay opt-in — a source folder is called `build` often.
+  for (const t of ['dist', 'build', 'target']) assert.ok(!DEFAULT_EXCLUDE.includes(t));
+  // And nothing anywhere decides by file size.
+  assert.ok(!/size\s*>/.test(JOB_SCRIPT), 'no size threshold in the pipeline');
+  assert.ok(!JOB_SCRIPT.includes('CAP'), 'no size cap survives');
+});
+
+test('restore-defaults has something to restore to, and knows when it does not', async () => {
+  // excludeIsDefault is what hides the button when pressing it would do nothing.
+  const trimmed = normalizeExclude(DEFAULT_EXCLUDE.slice(0, 3));
+  assert.notDeepEqual(trimmed, [...DEFAULT_EXCLUDE]);
+  assert.deepEqual(excludeFromConfig(undefined), [...DEFAULT_EXCLUDE]);
+  assert.deepEqual(excludeFromConfig([]), [], 'an emptied list stays empty');
 });

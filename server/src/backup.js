@@ -9,15 +9,21 @@ import { shareNamespace } from './share.js';
 // bucket to private Hub storage. Design: docs/bucket-backup.md
 //
 // The whole feature is one loop: if it is switched on and enough time has
-// passed, launch a Job. Nothing else. The Job does two things, because a mirror
-// alone is not a backup:
+// passed, launch a Job. Nothing else. The Job builds one versioned snapshot:
 //
-//   1. bucket → bucket, server-side by Xet hash. No bytes move (13,482 files in
-//      20s, measured) and a restore from it is equally instant. Overwritten each
-//      run — this is the "get the Space back" copy.
-//   2. the same bucket, mounted READ-ONLY in the Job, → a private dataset repo.
-//      Buckets are mutable and non-versioned, so without this an overwritten
-//      file is simply gone. This is the "get yesterday's file back" copy.
+//   1. list the bucket over the API — 8 s for 108,960 files, against 14m51s to
+//      stat the same tree through a FUSE mount (§3.11).
+//   2. decide the scope in code, then copy just those paths server-side by Xet
+//      hash into a private, EPHEMERAL staging bucket. Metadata only, no bytes.
+//      Being frozen is what makes a run self-consistent: the live bucket is
+//      written while we work.
+//   3. download the snapshot to the Job's local disk, scrub secrets, verify none
+//      remain, commit to a private dataset repo, delete the staging bucket.
+//
+// There is no persistent mirror. It cost a second full copy of the bucket, never
+// deleted anything (so it archived every credential the Space ever held), and the
+// restore it offered — "the Space exactly as it was, latest only" — is what the
+// bucket itself already is.
 //
 // The copying happens on the Hub, not here: we launch the Job and forget it. So
 // a backup costs this Space one API call, never reads /data (whose cold walk runs
@@ -73,24 +79,39 @@ export const MAX_EXCLUDES = 40;
 /**
  * What a fresh install skips until the operator says otherwise.
  *
- * Chosen by walking this Space's own bucket rather than from taste: across 24
- * workspace folders it holds 11 `node_modules`, 6 `.venv`, 4 `.cache`, and a
- * `$HOME/.cache` carrying `ms-playwright`, `google-chrome-for-testing-headless`,
- * `huggingface`, `uv`, `node-gyp` and the `claude-cli-nodejs` transcripts that
- * make a dataset commit fail outright (§3.10). Every name here is something a
- * package manager or toolchain rebuilds on demand.
+ * One criterion, and it is not size: **a command can put it back**. Everything
+ * here is owned by a package manager, a toolchain installer, a cache or a temp
+ * dir. Nothing is excluded for being large — a 292 MB session transcript is the
+ * most history-shaped thing on the bucket, and an earlier draft of this list
+ * dropped it to a per-file size cap, which was wrong.
  *
- * Two names were deliberately left OUT, and both matter more than what is in:
- *   - `.git` appears 11 times, more often than anything else, and is the single
- *     thing you would most want back. A size-ranked "junk" heuristic picks it
- *     first; it is history, not cache.
- *   - `dist` / `build` / `target` appear too, but they are ambiguous — a source
- *     folder is called `build` often enough, and a default that silently drops
- *     work is worse than one that copies some junk. Add them per-install.
+ * Measured against this Space's own bucket (110,590 files / 11.82 GB):
+ * excluding only the names below drops 86,615 files and 8.05 GB, leaving 23,975
+ * files and 3.78 GB. The heavy hitters were `node_modules` (25,184 files),
+ * `.cache` (11,319), `.tmp` (10,151), `.lake/packages` (9,606, 0.65 GB),
+ * `.elan/toolchains` (13,904, 2.75 GB) and `.npm/_cacache` (1.03 GB).
+ *
+ * Deliberately NOT here:
+ *   - `.git` — appears more often than anything else and holds the work you
+ *     would most want back: unpushed commits and staged changes live nowhere
+ *     else. Cheap to keep, and a partially-copied `.git` is a corrupt repo.
+ *   - git worktrees as a class. A clone looks reproducible from its remote, but
+ *     uncommitted work in it is not.
+ *   - `dist` / `build` / `target` — genuinely ambiguous names for a source
+ *     folder. A default that silently drops work is worse than one that copies
+ *     some junk. Add them per-install.
  */
 export const DEFAULT_EXCLUDE = Object.freeze([
-  'node_modules', '.venv', 'venv', '__pycache__', '.cache', '.npm', '.pnpm-store',
-  '.pytest_cache', '.mypy_cache', '.ruff_cache', '.ipynb_checkpoints', '.next', '.turbo',
+  // dependency trees
+  'node_modules', '.venv', 'venv', 'site-packages', '.lake/packages', '.pnpm-store',
+  // caches, by manager
+  '.cache', '.npm/_cacache', '.npm/_npx', '.yarn/cache', '.cargo/registry', 'pkg/mod',
+  '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.ipynb_checkpoints',
+  '.gradle/caches', '.m2/repository', '.deno', '.bun/install/cache', '.turbo', '.next',
+  // toolchains an installer re-fetches
+  '.elan/toolchains', '.rustup/toolchains', '.nvm/versions', '.pyenv/versions',
+  // scratch
+  '.tmp', '.elan/tmp', '.lake/build',
 ]);
 
 /**
@@ -117,27 +138,6 @@ export function normalizeExclude(list) {
     if (!out.includes(t)) out.push(t);
   }
   return out.slice(0, MAX_EXCLUDES);
-}
-
-/**
- * Tokens -> `hf upload --exclude` globs.
- *
- * A bare name becomes TWO patterns, which is not obvious: `**\/env/**` does not
- * match a top-level `env/`, verified against the Hub — `**\/` needs at least one
- * leading segment. So excluding `env` needs `env/**` as well, or the copy at the
- * bucket root silently still goes up.
- *
- * A token with a slash is a path and anchors at the bucket root; one containing
- * `*` or `?` is already a glob and is passed through untouched.
- */
-export function excludePatterns(tokens) {
-  const pats = [];
-  for (const t of normalizeExclude(tokens)) {
-    if (t.includes('*') || t.includes('?')) pats.push(t);
-    else if (t.includes('/')) pats.push(`${t}/**`);
-    else pats.push(`${t}/**`, `**/${t}/**`);
-  }
-  return pats;
 }
 
 function run(args, { timeout = 120_000 } = {}) {
@@ -169,9 +169,15 @@ export function sourceBucket() {
 
 export async function defaultsFor() {
   const ns = await shareNamespace().catch(() => '');
-  if (!ns) return { mirror: '', dataset: '' };
-  const base = `${ns}/${spaceName()}-backup`;
-  return { mirror: base, dataset: base };
+  if (!ns) return { dataset: '', staging: '' };
+  return {
+    dataset: `${ns}/${spaceName()}-backup`,
+    // Ephemeral: created private at the start of a run, deleted at the end of it.
+    // A distinct name from the dataset so a half-finished run can never be
+    // confused with the history, and so an operator's existing mirror bucket is
+    // never written to by the new pipeline.
+    staging: `${ns}/${spaceName()}-snapshot`,
+  };
 }
 
 const HF = 'https://huggingface.co';
@@ -186,56 +192,192 @@ export const jobsUrl = () =>
 // The script the Job runs. No interpolation: every value arrives as an env var
 // (`-e`), so a config string can never become shell syntax.
 export const JOB_SCRIPT = `set -euo pipefail
-# Plain package, no [cli] extra: 1.26.0 dropped it ("does not provide the extra
-# 'cli'") and ships the CLI in the base install.
-pip install -q huggingface_hub
+# Plain package, no [cli] extra: 1.26.0 dropped it and ships the CLI in the base
+# install. hf_xet speeds up the one leg that actually moves bytes.
+pip install -q "huggingface_hub[hf_xet]"
 
-# A backup carries every saved login on the bucket — agent OAuth tokens, the Web
-# Push private key, session-secret (docs/bucket-backup.md §4). So a public
-# destination is a stop, not a warning. Re-checked HERE, on every run, because a
-# repo can be flipped public long after it was created.
-python - <<'PY'
-import os, sys
+python - <<'EOPY'
+import os, re, sys, time, collections
 from huggingface_hub import HfApi
+
 api = HfApi()
-ds, mirror = os.environ["AM_DATASET"], os.environ.get("AM_MIRROR", "")
+SRC = os.environ["AM_SOURCE"]
+DATASET = os.environ["AM_DATASET"]
+STAGING = os.environ["AM_STAGING"]
+# Folder-name tokens, space-joined. Matched here rather than handed to an
+# uploader: an uploader enumerates the folder first and filters second, which
+# pays exactly the walk this pipeline exists to avoid.
+EXCLUDE = [t for t in os.environ.get("AM_EXCLUDE", "").split(" ") if t]
+WORK = "/work"
+
+def say(m): print(m, flush=True)
+
+# ---------------------------------------------------------------- privacy gate
+# A backup carries every saved login on the bucket (docs/bucket-backup.md §4), so
+# a public destination is a stop, not a warning. Re-checked HERE on every run,
+# because a repo can be flipped public long after it was created.
+#
+# Never inferred from a default: create_bucket() with no private= yields a PUBLIC
+# bucket, and hf upload into a repo that does not exist creates it PUBLIC. Both
+# verified against the Hub (§3.12). So every destination is created explicitly
+# private and then read back before a single byte is written.
+def must_be_private(kind, rid):
+    info = api.bucket_info(rid) if kind == "bucket" else api.dataset_info(rid)
+    if getattr(info, "private", None) is not True:
+        sys.exit("refusing to back up: " + kind + " " + rid + " is not private")
+
+must_be_private("bucket", SRC)
+api.create_repo(DATASET, repo_type="dataset", private=True, exist_ok=True)
+must_be_private("dataset", DATASET)
+api.create_bucket(STAGING, private=True, exist_ok=True)
+must_be_private("bucket", STAGING)
+say("destinations verified private: " + DATASET + ", " + STAGING)
+
+def cleanup():
+    # Left behind, staging is a second full copy of the bucket, so failing to
+    # remove it is loud rather than silent.
+    try:
+        api.delete_bucket(STAGING)
+        say("staging bucket deleted: " + STAGING)
+    except Exception as e:
+        say("WARNING could not delete staging bucket " + STAGING + ": " + str(e))
+
 try:
-    if api.dataset_info(ds).private is not True:
-        sys.exit(f"refusing to back up: dataset {ds} is not private")
-except Exception as e:
-    # Not existing yet is fine — the upload below creates it private.
-    if "404" not in str(e) and "RepositoryNotFound" not in type(e).__name__:
-        raise
-if mirror and api.bucket_info(mirror).private is not True:
-    sys.exit(f"refusing to back up: bucket {mirror} is not private")
-PY
+    # ------------------------------------------------------------------ 1. list
+    # Over the API, never a mount. The mount costs ~8 ms per file: a stat-only
+    # walk of this bucket took 14m51s for 108,960 files; the same tree lists in
+    # 8 s here. That gap is the whole reason for this rewrite.
+    t = time.time()
+    entries = [f for f in api.list_bucket_tree(SRC, recursive=True) if hasattr(f, "size")]
+    say("listed " + str(len(entries)) + " files in " + format(time.time() - t, ".1f") + "s")
 
-# 1. Server-side mirror: hashes move, not bytes.
-if [ -n "\${AM_MIRROR:-}" ]; then
-  hf cp "hf://buckets/\$AM_SOURCE/" "hf://buckets/\$AM_MIRROR/latest/"
-fi
+    # ------------------------------------------------------------- 2. the scope
+    def excluded(path):
+        q = "/" + path + "/"
+        return any(("/" + t.strip("/") + "/") in q for t in EXCLUDE)
 
-# Folders the operator asked to skip, as one --exclude per pattern. read -ra
-# splits on the spaces the server joined them with and nothing else: no globbing
-# against the container's filesystem, and each pattern reaches hf as a single
-# quoted argv element. Patterns are validated server-side to hold no whitespace,
-# which is what makes this split exact.
-EXCLUDE_ARGS=()
-if [ -n "\${AM_EXCLUDE:-}" ]; then
-  read -ra AM_EXCLUDE_PATS <<< "\$AM_EXCLUDE"
-  for p in "\${AM_EXCLUDE_PATS[@]}"; do EXCLUDE_ARGS+=(--exclude "\$p"); done
-  echo "skipping: \$AM_EXCLUDE"
-fi
+    # Files that exist to hold credentials, matched on the exact final path
+    # segment rather than as a substring: a substring test for "/credentials"
+    # sails straight past "/.credentials.json", which is how one got into a probe
+    # commit before the scrub existed.
+    CRED_NAMES = {
+        ".credentials.json", ".claude.json", "credentials.json", "auth.json",
+        "hosts.yml", "token", "stored_tokens", ".netrc", ".env", ".env.local",
+        "id_rsa", "id_ed25519", "credentials",
+    }
+    CRED_DIRS = ("/shell_snapshots/",)
 
-# 2. Version history, read from the bucket mounted read-only at /live — the
-#    Hub's copy, not this Space's disk. Unchanged files transfer nothing and
-#    produce no commit at all; --delete makes the newest commit match the bucket
-#    while every earlier commit keeps deleted files recoverable — including
-#    anything newly excluded, which drops out of the newest commit but stays
-#    recoverable in the ones before it.
-hf upload "\$AM_DATASET" /live . --repo-type dataset --private --delete "*" \\
-  "\${EXCLUDE_ARGS[@]}" \\
-  --commit-message "Bucket snapshot \$(date -u +%Y-%m-%dT%H:%MZ)"
+    def is_credential(path):
+        if any(d in "/" + path for d in CRED_DIRS):
+            return True
+        return path.rsplit("/", 1)[-1] in CRED_NAMES
+
+    keep = []
+    n_excl = n_cred = n_nohash = 0
+    for f in entries:
+        if excluded(f.path):
+            n_excl += 1
+        elif is_credential(f.path):
+            n_cred += 1
+        elif not f.xet_hash:
+            n_nohash += 1
+        else:
+            keep.append(f)
+    kb = sum((f.size or 0) for f in keep)
+    say("scope: keeping " + str(len(keep)) + " files (" + format(kb / 1e9, ".2f") + " GB); skipped "
+        + str(n_excl) + " reproducible, " + str(n_cred) + " credential-bearing, "
+        + str(n_nohash) + " without a hash")
+    if not keep:
+        sys.exit("refusing to commit: the scope matched no files")
+
+    # -------------------------------------------------- 3. frozen snapshot copy
+    # Server-side, by xet hash: metadata only, no bytes, ~880 files/s measured.
+    # The snapshot is also what makes a run self-consistent. The live bucket is
+    # written while we work, and reading it directly used to die with "not a file
+    # on the local file system" when the Space rotated a file away mid-run.
+    t = time.time()
+    for i in range(0, len(keep), 2000):
+        api.batch_bucket_files(
+            STAGING,
+            copy=[("bucket", SRC, f.xet_hash, f.path) for f in keep[i:i + 2000]],
+        )
+    say("snapshot: " + str(len(keep)) + " paths copied server-side in " + format(time.time() - t, ".0f") + "s")
+
+    # ------------------------------------------------------------ 4. sync local
+    # Local disk, so the walk before the commit is free: 0.14 s for 39,873 files
+    # against 14m51s for the same work on the mount.
+    os.makedirs(WORK, exist_ok=True)
+    t = time.time()
+    api.sync_bucket("hf://buckets/" + STAGING, WORK)
+    got = sum(len(fs) for _, _, fs in os.walk(WORK))
+    say("downloaded " + str(got) + " files in " + format(time.time() - t, ".0f") + "s")
+
+    # ---------------------------------------------------------------- 5. scrub
+    # Tight patterns on purpose: a looser sk-[A-Za-z0-9_-]{24,} matched
+    # "sk-abstraction-and-chart-selection" in ordinary prose, and a scrub that
+    # rewrites real content is worse than one that over-reports.
+    BEF = "(?<![A-Za-z0-9_-])"
+    AFT = "(?![A-Za-z0-9_-])"
+    SECRETS = [
+        ("hf", re.compile((BEF + "hf_[A-Za-z0-9]{34}" + AFT).encode())),
+        ("openai", re.compile((BEF + "sk-(?:proj-)?[A-Za-z0-9]{20,}" + AFT).encode())),
+        ("anthropic", re.compile((BEF + "sk-ant-[A-Za-z0-9_-]{24,}" + AFT).encode())),
+        ("github", re.compile((BEF + "gh[pousr]_[A-Za-z0-9]{36}" + AFT).encode())),
+        ("aws", re.compile((BEF + "AKIA[0-9A-Z]{16}" + AFT).encode())),
+        ("google", re.compile((BEF + "AIza[0-9A-Za-z_-]{35}" + AFT).encode())),
+    ]
+    NUL = bytes([0])
+
+    def textfiles():
+        for root, _, fs in os.walk(WORK):
+            for fn in fs:
+                fp = os.path.join(root, fn)
+                try:
+                    data = open(fp, "rb").read()
+                except OSError:
+                    continue
+                if NUL in data[:8192]:
+                    continue
+                yield fp, data
+
+    hits = collections.Counter()
+    touched = 0
+    t = time.time()
+    for fp, data in textfiles():
+        orig = data
+        for name, rx in SECRETS:
+            data, k = rx.subn(b"[REDACTED-SECRET]", data)
+            if k:
+                hits[name] += k
+        if data != orig:
+            open(fp, "wb").write(data)
+            touched += 1
+    say("scrub: redacted " + str(sum(hits.values())) + " secrets in " + str(touched)
+        + " files " + str(dict(hits)) + " in " + format(time.time() - t, ".0f") + "s")
+
+    # --------------------------------------------------------------- 6. verify
+    # Mandatory, not a nicety. The Hub's scanner is TruffleHog and it verifies a
+    # find by authenticating with it, which INVALIDATES a live token. A commit
+    # that leaks one does not merely fail: it breaks the operator's credentials.
+    left = [os.path.relpath(fp, WORK) for fp, d in textfiles()
+            if any(rx.search(d) for _, rx in SECRETS)]
+    if left:
+        sys.exit("refusing to commit: secrets still present in " + ", ".join(left[:5])
+                 + ((" (+" + str(len(left) - 5) + " more)") if len(left) > 5 else ""))
+    say("verified: no secret patterns remain")
+
+    # --------------------------------------------------------------- 7. commit
+    # delete_patterns makes the newest commit match the scope, while every
+    # earlier commit keeps since-removed files recoverable.
+    t = time.time()
+    api.upload_folder(
+        folder_path=WORK, repo_id=DATASET, repo_type="dataset", delete_patterns="*",
+        commit_message="Bucket snapshot " + time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime()),
+    )
+    say("committed to " + DATASET + " in " + format(time.time() - t, ".0f") + "s")
+finally:
+    cleanup()
+EOPY
 `;
 
 /**
@@ -263,19 +405,21 @@ export function parseJobId(out) {
 
 // Job arguments, as an array (never a shell string). Exported for the tests:
 // asserting on this is how we know a config value cannot reach a shell.
-export function jobArgs({ source, mirror, dataset, exclude = [] }) {
+export function jobArgs({ source, dataset, staging, exclude = [] }) {
   return [
     'jobs', 'run', '--detach',
     '--name', jobName(),
     '--secrets', 'HF_TOKEN',
     '-e', `AM_SOURCE=${source}`,
-    '-e', `AM_MIRROR=${mirror || ''}`,
     '-e', `AM_DATASET=${dataset}`,
-    // Space-joined: the tokens are validated to contain no whitespace, so the
-    // Job can split them back apart exactly.
-    '-e', `AM_EXCLUDE=${excludePatterns(exclude).join(' ')}`,
-    // Read-only: a backup must not be able to write to what it is reading.
-    '-v', `hf://buckets/${source}:/live:ro`,
+    '-e', `AM_STAGING=${staging}`,
+    // Folder-name tokens, space-joined. They are validated to contain no
+    // whitespace, so the Job splits them back apart exactly. Tokens, not globs:
+    // the Job matches them against the API listing itself, so the two-pattern
+    // glob dance `hf upload --exclude` needed is gone.
+    '-e', `AM_EXCLUDE=${normalizeExclude(exclude).join(' ')}`,
+    // No `-v`: nothing is mounted. The pipeline reads the bucket through the API
+    // and downloads to local disk, which is ~6,000x faster to walk (§3.11).
     '--flavor', JOB_FLAVOR,
     '--timeout', JOB_TIMEOUT,
     JOB_IMAGE, 'bash', '-c', JOB_SCRIPT,
@@ -305,9 +449,9 @@ export function unavailableReason(cfg) {
 /** Resolve the destinations, falling back to <namespace>/<space>-backup. */
 async function targets(cfg) {
   const d = await defaultsFor();
-  const mirror = (cfg?.backup?.mirror || d.mirror || '').trim();
   const dataset = (cfg?.backup?.dataset || d.dataset || '').trim();
-  return { mirror, dataset, defaults: d, exclude: normalizeExclude(cfg?.backup?.exclude) };
+  const staging = (cfg?.backup?.staging || d.staging || '').trim();
+  return { dataset, staging, defaults: d, exclude: excludeFromConfig(cfg?.backup?.exclude) };
 }
 
 /** Launch one backup Job now. Returns { job } — the Hub does the rest. */
@@ -319,21 +463,19 @@ export async function runBackupNow(cfg) {
   // loud rather than silently doing nothing.
   if (await isRunning()) throw new Error('a backup is already running');
   const source = sourceBucket();
-  const { mirror, dataset, exclude } = await targets(cfg);
-  for (const [label, id] of [['source', source], ['dataset', dataset], ['mirror', mirror]]) {
-    if (label === 'mirror' && !id) continue;
+  const { dataset, staging, exclude } = await targets(cfg);
+  for (const [label, id] of [['source', source], ['dataset', dataset], ['staging', staging]]) {
     if (!validRepoId(id)) throw new Error(`${label} "${id}" is not a valid repo id`);
   }
-  // The mirror bucket must exist and be private before anything is copied into
-  // it; the dataset is created private by the upload itself.
-  if (mirror) await run(['buckets', 'create', mirror, '--private', '--exist-ok']).catch(() => {});
-
-  const out = await run(jobArgs({ source, mirror, dataset, exclude }), { timeout: 180_000 });
+  // Nothing is pre-created here. Both destinations are created explicitly
+  // private INSIDE the Job and then read back before anything is written —
+  // creating them from two places is how you end up trusting a default.
+  const out = await run(jobArgs({ source, dataset, staging, exclude }), { timeout: 180_000 });
   const job = parseJobId(out);
   // A launch we cannot identify still happened — record it, but say so, because
   // without an id there is nothing to poll and no overlap to detect.
   if (!job) console.warn('[backup] launched a Job but could not parse its id from:', out.slice(0, 200));
-  saveState({ jobId: job, startedAt: Date.now(), source, mirror, dataset, error: null, outcomeFor: null });
+  saveState({ jobId: job, startedAt: Date.now(), source, dataset, staging, error: null, outcomeFor: null });
   return { job };
 }
 
@@ -513,7 +655,7 @@ export async function backupStatus(cfg) {
   const state = loadState();
   const every = cfg?.backup?.every || 'never';
   const source = sourceBucket();
-  const { mirror, dataset, defaults, exclude } = await targets(cfg);
+  const { dataset, staging, defaults, exclude } = await targets(cfg);
   // Not gated on the interval: an on-demand backup is a real backup, and its
   // result has to be visible even with the schedule off.
   const [stage, priv] = await Promise.all([
@@ -523,8 +665,8 @@ export async function backupStatus(cfg) {
   return {
     every,
     source,
-    mirror,
     dataset,
+    staging,
     defaults,
     hasToken: hasToken(),
     canRunNow: !runNowBlockedBy(),
@@ -535,10 +677,12 @@ export async function backupStatus(cfg) {
       : null,
     jobName: jobName(),
     jobsUrl: jobsUrl(),
-    // The tokens as stored, and the globs they become — a skip list nobody can
-    // see the expansion of is a skip list nobody can debug.
+    // The tokens as stored, plus the shipped defaults, so Settings can offer
+    // "restore defaults" and show whether the current list differs from them.
     exclude,
-    excludePatterns: excludePatterns(exclude),
+    excludeDefaults: [...DEFAULT_EXCLUDE],
+    excludeIsDefault: exclude.length === DEFAULT_EXCLUDE.length
+      && exclude.every((t, i) => t === DEFAULT_EXCLUDE[i]),
     health: backupHealth(cfg),
     failures: state.failures || 0,
     lastFailure: state.lastFailure || null,
