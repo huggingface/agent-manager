@@ -1,13 +1,13 @@
 ---
-title: Agent Manager
-emoji: 🖥️
-colorFrom: gray
+title: am-dev-2 (dev)
+emoji: 🚧
+colorFrom: yellow
 colorTo: indigo
 sdk: docker
 app_port: 7860
 pinned: false
+short_description: DEV · backup/exclude-folders @ 0df12e3 · own bucket
 license: apache-2.0
-short_description: Private cloud manager for AI coding CLI sessions
 ---
 
 # Agent Manager
