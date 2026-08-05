@@ -976,16 +976,23 @@ function takeClaudeBreadcrumb(sessionId) {
   try { return JSON.parse(raw); } catch { return null; }
 }
 
-// The pane's root process (what tmux spawned). After `exec claude` this IS
-// claude; in the `claude --session-id … || exec claude` branch claude is a
-// child of it. Either way the hook's $CLAUDE_PID must descend from it.
-function paneRootPid(sessionId) {
-  try {
-    const out = execFileSync('tmux', ['list-panes', '-t', tmuxName(sessionId), '-F', '#{pane_pid}'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: TERM_ENV });
-    const pid = parseInt(out.trim().split('\n')[0], 10);
-    return Number.isInteger(pid) && pid > 1 ? pid : null;
-  } catch { return null; }
+// The pane's root process — the PTY this server spawned for the session. After
+// `exec claude` this IS claude; in the `claude --session-id … || exec claude`
+// branch claude is a child of it. Either way the hook's $CLAUDE_PID must descend
+// from it.
+//
+// This used to ask tmux for `#{pane_pid}`. Replacing tmux with a server-held grid
+// left the call behind referencing two identifiers that no longer exist here
+// (`tmuxName`, `execFileSync`), so it threw a ReferenceError into its own bare
+// `catch` on every tick and returned null. That failed EVERY breadcrumb as 'pid
+// not in pane' and silently disabled the whole hook path — observed live: the
+// only breadcrumb outcome in the Space logs was `breadcrumb rejected (pid not in
+// pane)`. The server owns the PTY now, so the pane root is a property read and
+// there is no subprocess per tick either.
+// Exported for server/test/repin.test.mjs.
+export function paneRootPid(sessionId) {
+  const pid = hosts.get(sessionId)?.pty?.pid;
+  return Number.isInteger(pid) && pid > 1 ? pid : null;
 }
 
 // Walk /proc ppid links. comm in /proc/<pid>/stat may contain spaces and
@@ -1058,6 +1065,34 @@ export function installClaudeRepinHook(hookCmd = '/app/scripts/am-repin-hook.sh'
   } catch (e) { console.warn(`[claude] repin hook install failed: ${e.message}`); return false; }
 }
 
+// Once the pane's SessionStart hook has proven itself, the transcript scan is a
+// backstop rather than the mechanism, and it runs on this cadence instead of
+// REPIN_MS. The scan is the expensive half of a tick and the breadcrumb is the
+// authoritative one: `claudeTranscriptsSince` is a readdirSync per project dir
+// plus a statSync per transcript, and on the Space those land on the FUSE bucket
+// (CLAUDE_CONFIG_DIR is under /data). Measured there: ~3ms when the mount's
+// attribute cache is warm, 1.1-1.3s when it is cold — a synchronous block of the
+// one event loop that also carries every session's PTY. At the REPIN_MS beat,
+// once per live pane, that was a terminal freeze roughly every 20 seconds.
+//
+// This is the window in which a pin can be stale if a breadcrumb is ever LOST
+// (the hook fired but its crumb never reached us). The breadcrumb path itself
+// stays on the REPIN_MS beat — it reads one file on local disk and costs nothing.
+const SCAN_BACKSTOP_MS = 10 * 60_000;
+
+/**
+ * Should this tick run the transcript scan?
+ *
+ * Before the hook has proven itself the cadence is unchanged, so a pane with no
+ * working hook (hook newly installed, crumb lost, a harness with no hook at all)
+ * keeps the pre-existing behaviour and nothing regresses. Pure so the cadence is
+ * testable without a live pane; exported for server/test/repin.test.mjs.
+ */
+export function claudeScanDue({ hookProven, lastScanAt }, now = Date.now()) {
+  if (!hookProven) return true;
+  return now - (lastScanAt || 0) >= SCAN_BACKSTOP_MS;
+}
+
 function scheduleClaudeCapture(session, workdir) {
   // A relaunch restarts the watch with a fresh window, so `since` can't drift
   // older and start admitting pre-relaunch threads as candidates.
@@ -1065,6 +1100,10 @@ function scheduleClaudeCapture(session, workdir) {
   if (prev) clearTimeout(prev);
   const since = Date.now() - 2000;
   let warnedShared = false;
+  // Has a breadcrumb from this pane ever named this pane's OWN conversation? That
+  // is what demotes the scan to a backstop — see claudeScanDue.
+  let hookProven = false;
+  let lastScanAt = 0;
 
   const tick = () => {
     if (!isRunning(session.id)) { claudeCapturing.delete(session.id); return; }
@@ -1082,6 +1121,12 @@ function scheduleClaudeCapture(session, workdir) {
         claimed: new Set(list().filter((s) => s.id !== session.id && s.sessionUuid).map((s) => s.sessionUuid)),
         pidTrusted: !!root && pidHasAncestor(crumb.claudePid, root),
       });
+      // A crumb that named this pane's own conversation — whether it moved the
+      // pin or was already on it (the `resume` no-op) — proves the hook fires
+      // here, so the scan can step down to a backstop. A crumb rejected for any
+      // other reason proves nothing about this pane: 'pid not in pane' is a
+      // nested `claude -p`, 'cwd mismatch' is someone else's run.
+      if (verdict.repin || verdict.why === 'already pinned') hookProven = true;
       if (verdict.repin) {
         console.warn(`[claude] re-pinning ${session.id}: ${pinned} -> ${verdict.repin} (breadcrumb, source: ${crumb.payload?.source || '?'})`);
         update(session.id, { sessionUuid: verdict.repin });
@@ -1098,7 +1143,8 @@ function scheduleClaudeCapture(session, workdir) {
         warnedShared = true;
         console.warn(`[claude] ${session.id}: folder shared with another live session — following /clear only via breadcrumbs here`);
       }
-    } else {
+    } else if (claudeScanDue({ hookProven, lastScanAt })) {
+      lastScanAt = Date.now();
       const hit = claudeCandidate(session.id, workdir, since);
       if (hit && hit.uuid !== pinned) {
         const why = transcriptExists(pinned) ? 'conversation was replaced (/clear)' : '--session-id was not honoured';
