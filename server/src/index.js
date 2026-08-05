@@ -902,7 +902,9 @@ function loadAmConfig() {
       mirror: (saved.backup?.mirror || '').trim(),
       dataset: (saved.backup?.dataset || '').trim(),
       // Folder names to keep out of the history — the slow, regenerable kind.
-      exclude: backup.normalizeExclude(saved.backup?.exclude),
+      // Prepopulated on a config that has never set one, so a fresh install is
+      // quick by default; an emptied list stays empty. backup.js explains both.
+      exclude: backup.excludeFromConfig(saved.backup?.exclude),
     },
   };
 }
@@ -922,7 +924,9 @@ app.put('/api/config', (req, res) => {
       mirror: typeof b.backup?.mirror === 'string' ? b.backup.mirror.trim() : '',
       dataset: typeof b.backup?.dataset === 'string' ? b.backup.dataset.trim() : '',
       // Normalized here, not trusted: these end up in a Job's argument list.
-      exclude: backup.normalizeExclude(b.backup?.exclude),
+      // Same undefined-vs-empty rule as the read path: a body that omits the key
+      // never asked and takes the default, `[]` is an emptied list and persists.
+      exclude: backup.excludeFromConfig(b.backup?.exclude),
     },
   };
   try { fs.writeFileSync(AM_CONFIG_FILE, JSON.stringify(cfg, null, 2)); } catch {}

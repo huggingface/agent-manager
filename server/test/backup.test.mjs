@@ -3,13 +3,60 @@ import assert from 'node:assert/strict';
 import {
   EVERY_MS, INTERVALS, intervalMs, validRepoId, jobArgs, JOB_SCRIPT, JOB_FLAVOR,
   hasToken, unavailableReason, runNowBlockedBy, jobName, jobsUrl, isActiveStage, parseJobId,
-  normalizeExclude, excludePatterns, MAX_EXCLUDES,
+  normalizeExclude, excludePatterns, MAX_EXCLUDES, DEFAULT_EXCLUDE, excludeFromConfig,
 } from '../src/backup.js';
 
 // The rule that is not obvious and cost a Hub round-trip to learn: `**/x/**` does
 // NOT match a top-level `x/`, so a bare folder token needs BOTH patterns. Verified
 // against the Hub — with only the `**/` form, the copy at the bucket root still
 // went up.
+test('a config that never set a skip list gets the default, an emptied one stays empty', () => {
+  // The whole point of the split: `undefined` is "never asked", `[]` is a choice.
+  assert.deepEqual(excludeFromConfig(undefined), [...DEFAULT_EXCLUDE]);
+  assert.deepEqual(excludeFromConfig(null), [...DEFAULT_EXCLUDE]);
+  // An emptied list must NOT refill itself, or clearing the field in Settings
+  // would come back on the next read and the operator could never turn it off.
+  assert.deepEqual(excludeFromConfig([]), []);
+  // A set list is passed through the same validation as anything else.
+  assert.deepEqual(excludeFromConfig(['  env  ', '/env/']), ['env']);
+  assert.deepEqual(excludeFromConfig(['a', 'rm -rf /']), ['a']);
+  // Junk in the config file falls back to nothing rather than to the default:
+  // it IS a set value, just not a usable one.
+  assert.deepEqual(excludeFromConfig('node_modules'), []);
+});
+
+test('the default skip list is caches only — never .git, never ambiguous build dirs', () => {
+  // .git is the most common folder in the bucket and the one most worth keeping.
+  // A size-ranked heuristic would pick it first, so pin it explicitly.
+  for (const keep of ['.git', 'dist', 'build', 'target', 'src', 'data', '.config', '.ssh']) {
+    assert.ok(!DEFAULT_EXCLUDE.includes(keep), `${keep} must not be skipped by default`);
+  }
+  // The names actually found in this Space's bucket are covered.
+  for (const junk of ['node_modules', '.venv', '__pycache__', '.cache', '.npm']) {
+    assert.ok(DEFAULT_EXCLUDE.includes(junk), `${junk} should be skipped by default`);
+  }
+  // Every default has to survive the validator it will be fed through, fit the
+  // cap, and be unique — a default that silently drops would be invisible.
+  assert.deepEqual(normalizeExclude([...DEFAULT_EXCLUDE]), [...DEFAULT_EXCLUDE]);
+  assert.ok(DEFAULT_EXCLUDE.length <= MAX_EXCLUDES);
+  assert.equal(new Set(DEFAULT_EXCLUDE).size, DEFAULT_EXCLUDE.length);
+  // Frozen: it is handed out by reference-copy, and a caller mutating the
+  // module's own array would poison every later read.
+  assert.throws(() => DEFAULT_EXCLUDE.push('dist'));
+  excludeFromConfig(undefined).push('dist');
+  assert.ok(!DEFAULT_EXCLUDE.includes('dist'));
+});
+
+test('the default reaches a Job as splittable patterns, root and nested', () => {
+  const pats = excludePatterns([...DEFAULT_EXCLUDE]);
+  assert.equal(pats.length, DEFAULT_EXCLUDE.length * 2);
+  for (const p of pats) assert.ok(!/\s/.test(p), `${p} would break the shell split`);
+  assert.ok(pats.includes('node_modules/**') && pats.includes('**/node_modules/**'));
+  const env = jobArgs({ source: 'u/s', mirror: 'u/m', dataset: 'u/d', exclude: [...DEFAULT_EXCLUDE] })
+    .find((a) => String(a).startsWith('AM_EXCLUDE='));
+  assert.ok(env.includes('.cache/**') && env.includes('**/.cache/**'));
+});
+
 test('a bare folder token excludes it at the root AND nested', () => {
   assert.deepEqual(excludePatterns(['env']), ['env/**', '**/env/**']);
   assert.deepEqual(excludePatterns(['node_modules', '.venv']),
