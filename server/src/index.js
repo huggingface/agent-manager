@@ -734,6 +734,10 @@ app.get('/api/info', (_req, res) => res.json({
   // True when the Space is private but we couldn't verify its bucket is private
   // (no HF_TOKEN to discover the bucket). Non-blocking; the UI shows a warning.
   bucketUnverified: !isPublic() && !!visibility().bucketUnverified,
+  // Backup health, or null when there is nothing wrong. Read from state, never
+  // the Hub: every open tab polls this route every 15s. Withheld while public
+  // for the same reason as `secrets` — it names the operator's repos.
+  backup: isPublic() ? null : backup.backupHealth(loadAmConfig()),
   // First-run welcome: shown once per Space (flag persists on the bucket).
   welcomeSeen: welcomeSeen(),
   // Demo mode: current sessions hidden from view; forces the welcome to show.

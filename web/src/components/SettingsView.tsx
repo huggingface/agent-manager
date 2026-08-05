@@ -442,11 +442,29 @@ export default function SettingsView({
                             reporting it wrongly whenever the Hub did not answer. */}
                         <div>
                           <span>Last updated</span>
-                          <b>{bk.last ? new Date(bk.last.at).toLocaleString() : 'never'}</b>
+                          <b>{bk.lastSuccessAt ? new Date(bk.lastSuccessAt).toLocaleString() : 'never'}</b>
                         </div>
+                        {/* The dashboard strip says a backup is failing; this says
+                            what the Job actually reported, which is what tells you
+                            whether it is yours to fix. */}
+                        {bk.lastFailure && (
+                          <div>
+                            <span>Last failure</span>
+                            <b style={{ color: 'var(--danger)', whiteSpace: 'normal', textAlign: 'right' }}>
+                              {new Date(bk.lastFailure.at).toLocaleString()}
+                              {bk.lastFailure.message ? ` — ${bk.lastFailure.message}` : ''}
+                              {bk.failures > 1 ? ` (${bk.failures} in a row)` : ''}
+                              {bk.lastFailure.reason && (
+                                <div className="mono" style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 11.5, marginTop: 2 }}>
+                                  {bk.lastFailure.reason}
+                                </div>
+                              )}
+                            </b>
+                          </div>
+                        )}
                         {bk.error && (
                           <div>
-                            <span>Last error</span>
+                            <span>Could not launch</span>
                             <b style={{ color: 'var(--danger)' }}>{bk.error}</b>
                           </div>
                         )}

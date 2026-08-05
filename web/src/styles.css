@@ -71,6 +71,14 @@ body {
 .sidebar { width: 282px; flex: none; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
 .main { flex: 1; min-width: 0; padding: 12px; overflow: hidden; display: flex; flex-direction: column; }
 .stage { flex: 1; min-height: 0; }
+/* Backup failure strip: one line above whatever view you are on. Loud enough to
+   not be mistaken for chrome, quiet enough to live there until it is fixed. */
+.bkfail { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; padding: 7px 10px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); background: color-mix(in srgb, var(--danger) 10%, transparent); border-radius: var(--r-md); font-size: 12.5px; line-height: 1.35; }
+.bkfail-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
+.bkfail-txt { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bkfail-why { color: var(--muted); }
+.bkfail-link { flex: none; border: none; background: transparent; padding: 0; font: inherit; font-size: 12px; color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; cursor: pointer; }
+.bkfail-link:hover { color: var(--danger); text-decoration-style: solid; }
 .zoombar { display: flex; align-items: center; gap: 4px; padding: 4px 8px; margin-top: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); flex: none; }
 .zoombar .spacer { flex: 1; }
 /* overview bottom bar: filter + view segments, centered */

@@ -11,6 +11,7 @@ import ShareDialog from './components/ShareDialog';
 import Logo from './components/Logo';
 import Overview from './components/Overview';
 import Locked from './components/Locked';
+import BackupBanner from './components/BackupBanner';
 import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
@@ -885,6 +886,9 @@ export default function App() {
             )}
           </div>
         )}
+        {/* Visible where you already are, on every view. Rides on /api/info,
+            which is polled every 15s, so no new request for the normal case. */}
+        <BackupBanner health={info?.backup} onOpenSettings={() => { setSettingsPage('general'); setSettingsOpen(true); }} />
         <div className="stage">
           {renderTiles(
             isMobile && !mobileStage

@@ -234,18 +234,68 @@ export async function runBackupNow(cfg) {
   // A launch we cannot identify still happened — record it, but say so, because
   // without an id there is nothing to poll and no overlap to detect.
   if (!job) console.warn('[backup] launched a Job but could not parse its id from:', out.slice(0, 200));
-  saveState({ jobId: job, startedAt: Date.now(), source, mirror, dataset, error: null });
+  saveState({ jobId: job, startedAt: Date.now(), source, mirror, dataset, error: null, outcomeFor: null });
   return { job };
+}
+
+/** Stage and the platform's own message for a Job — "Job timeout" lives in the
+ *  message, and it is the difference between "it broke" and "it never finished". */
+async function jobStatus(jobId) {
+  if (!jobId) return { stage: null, message: null };
+  try {
+    const j = JSON.parse(await run(['jobs', 'inspect', jobId, '--json'], { timeout: 30_000 }));
+    const s = Array.isArray(j) ? j[0] : j;
+    return { stage: (s && s.status && s.status.stage) || null, message: (s && s.status && s.status.message) || null };
+  } catch { return { stage: null, message: null }; }
 }
 
 /** Terminal state of the last launched Job, or null while it is still going. */
 async function jobStage(jobId) {
-  if (!jobId) return null;
+  return (await jobStatus(jobId)).stage;
+}
+
+/**
+ * Why a run failed, in one line, from its own logs.
+ *
+ * The platform message says "Job timeout"; the logs say the bucket has a
+ * `.cache/` path the Hub will not commit. The second is the one that tells an
+ * operator what to do, so both are kept and this is the one shown first.
+ */
+async function failureReason(jobId) {
   try {
-    const j = JSON.parse(await run(['jobs', 'inspect', jobId, '--json'], { timeout: 30_000 }));
-    const s = Array.isArray(j) ? j[0] : j;
-    return (s && s.status && s.status.stage) || null;
+    const out = await run(['jobs', 'logs', jobId], { timeout: 90_000 });
+    const lines = out.split('\n').map((l) => l.trim())
+      .filter((l) => l && !/^(WARNING|Hint:|\[notice\])/.test(l));
+    const telling = [...lines].reverse()
+      .find((l) => /error|refus|denied|invalid|cannot|failed|timeout/i.test(l));
+    return (telling || lines[lines.length - 1] || '').slice(0, 300) || null;
   } catch { return null; }
+}
+
+/**
+ * Record how the last run ended, once, so the answer survives in state instead
+ * of needing a Hub call to discover.
+ *
+ * This is the whole point of the feature: a backup that fails quietly is worse
+ * than no backup at all, because the operator believes they are covered. Until
+ * now nothing wrote a failure down — the settings row only learned of one if
+ * somebody happened to open it while the evidence was still fresh.
+ */
+async function recordOutcome() {
+  const st = loadState();
+  if (!st.jobId || st.outcomeFor === st.jobId) return;
+  const { stage, message } = await jobStatus(st.jobId);
+  if (!stage || isActiveStage(stage)) return; // still running, or the Hub did not say
+  if (stage === 'COMPLETED') {
+    saveState({ outcomeFor: st.jobId, failures: 0, lastFailure: null, lastSuccessAt: Date.now() });
+    return;
+  }
+  saveState({
+    outcomeFor: st.jobId,
+    failures: (st.failures || 0) + 1,
+    lastFailure: { at: Date.now(), jobId: st.jobId, stage, message: message || null, reason: await failureReason(st.jobId) },
+  });
+  console.warn(`[backup] run ${st.jobId} ended ${stage}${message ? ` (${message})` : ''}`);
 }
 
 // Stages that mean a run is genuinely in flight. Observed from the Hub:
@@ -275,6 +325,9 @@ async function isRunning() {
  * timestamp on disk rather than from an in-memory schedule.
  */
 export async function tick(cfg) {
+  // How the last run ended is recorded even when this tick does nothing else —
+  // otherwise a failure is only noticed by someone opening the settings page.
+  if (hasToken()) await recordOutcome().catch(() => {});
   if (unavailableReason(cfg)) return { skipped: unavailableReason(cfg) };
   const state = loadState();
   const due = Date.now() - (state.startedAt || 0) >= intervalMs(cfg.backup.every);
@@ -299,13 +352,57 @@ export async function tick(cfg) {
  * is due; the config is re-read each time, so switching the interval takes
  * effect without restarting anything.
  */
+/** Note when the schedule was first switched on, so "no success yet" can go
+ *  stale for a backup that has never once worked — which is this Space today. */
+export function armStaleClock(cfg) {
+  if (!intervalMs(cfg?.backup?.every)) return;
+  const st = loadState();
+  if (!st.firstArmedAt) saveState({ firstArmedAt: Date.now() });
+}
+
 export function startBackupTimer(getConfig) {
-  const t = setInterval(() => { tick(getConfig()).catch(() => {}); }, TICK_MS);
+  armStaleClock(getConfig());
+  const t = setInterval(() => { armStaleClock(getConfig()); tick(getConfig()).catch(() => {}); }, TICK_MS);
   if (t.unref) t.unref();
   // First check shortly after boot, once bucket discovery has landed.
   const first = setTimeout(() => { tick(getConfig()).catch(() => {}); }, 30_000);
   if (first.unref) first.unref();
   return () => { clearInterval(t); clearTimeout(first); };
+}
+
+/**
+ * Backup health, from state alone — no Hub calls, because this rides on
+ * /api/info which every open tab polls every 15 seconds.
+ *
+ * Returns null when there is nothing wrong, so the dashboard shows nothing at
+ * all in the normal case. Two ways to be unwell:
+ *   - `failing`: the last run ended in ERROR (or was killed).
+ *   - `stale`: no successful run in three intervals. A silent stall — the timer
+ *     never firing, the token going bad — leaves an operator just as wrongly
+ *     confident as an outright failure, and looks fine without this.
+ */
+export function backupHealth(cfg) {
+  const every = cfg?.backup?.every || 'never';
+  const ms = intervalMs(every);
+  if (!ms) return null; // switched off: silence is correct
+  const st = loadState();
+  const f = st.lastFailure || null;
+  const lastSuccessAt = st.lastSuccessAt || null;
+  const since = lastSuccessAt || st.firstArmedAt || null;
+  const stale = !!since && Date.now() - since > ms * 3;
+  if (!f && !stale) return null;
+  return {
+    failing: !!f,
+    stale,
+    failures: st.failures || 0,
+    at: f ? f.at : null,
+    jobId: f ? f.jobId : null,
+    stage: f ? f.stage : null,
+    message: f ? f.message || null : null,
+    reason: f ? f.reason || null : null,
+    lastSuccessAt,
+    jobsUrl: jobsUrl(),
+  };
 }
 
 /**
@@ -339,6 +436,10 @@ export async function backupStatus(cfg) {
       : null,
     jobName: jobName(),
     jobsUrl: jobsUrl(),
+    health: backupHealth(cfg),
+    failures: state.failures || 0,
+    lastFailure: state.lastFailure || null,
+    lastSuccessAt: state.lastSuccessAt || null,
     nextDue: state.startedAt && intervalMs(every) ? state.startedAt + intervalMs(every) : null,
     datasetPrivate: priv, // null = unknown or not created yet
     error: state.error || null,
