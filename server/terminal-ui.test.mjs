@@ -175,6 +175,12 @@ try {
     JSON.stringify({ backAtPrompt, sleepSurvived: text.includes('NOT_INTERRUPTED') }));
 
   // ---------- 4. Cmd+C is never an interrupt ----------
+  // Check 3 waited on the SERVER's view of the output; the browser paints a
+  // moment later, so wait for the line to actually be on screen before
+  // measuring it, or this races the renderer rather than testing the copy.
+  const rendered = await waitFor(() => page.evaluate(() =>
+    document.querySelector('.tile-terminal:not(.tile-cached) .xterm-rows')?.textContent?.includes('AFTER_INTERRUPT')), 10_000);
+  if (!rendered) throw new Error('interrupt marker never rendered in the browser');
   const second = await rectOf('AFTER_INTERRUPT');
   if (second) {
     const y2 = second.y + second.height / 2;
