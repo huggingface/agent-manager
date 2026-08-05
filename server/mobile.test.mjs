@@ -123,6 +123,9 @@ try {
         super(url, protocols);
         if (String(url).includes('/ws?session=')) {
           const record = { url: String(url), sent: [], events: [] };
+          Object.defineProperty(record, 'sendRaw', {
+            value: (data) => this.send(data),
+          });
           window.__terminalSockets.push(record);
           this.addEventListener('open', () => record.events.push({ type: 'open' }));
           this.addEventListener('close', (event) => record.events.push({
@@ -236,6 +239,22 @@ try {
   await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-second' }).first().click();
   await page.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
   const secondOpened = await waitFor(() => page.evaluate(() => window.__terminalSockets.length === 2));
+
+  // Keep writing to the first session while its retained xterm is under
+  // display:none. xterm keeps the logical viewport at the live bottom, but a
+  // hidden DOM viewport cannot accept that pixel scrollTop. Re-activation must
+  // reconcile the two before the first wheel event uses the stale DOM value.
+  await page.evaluate(({ sessionId, input }) => {
+    const socket = window.__terminalSockets.find((item) => item.url.includes(`session=${sessionId}`));
+    socket?.sendRaw(JSON.stringify({ t: 'i', d: input }));
+  }, {
+    sessionId: id,
+    input: "printf '\\033[?1000l\\033[?1006l'; for i in $(seq 221 280); do printf 'MOBILE-HISTORY-%04d\\n' \"$i\"; done\r",
+  });
+  const hiddenOutputReady = await waitFor(async () => {
+    const body = await (await fetch(`${API}/api/agents/${id}/tail?lines=400`)).json();
+    return body.text?.includes('MOBILE-HISTORY-0280');
+  });
   await page.getByTitle('Back to list').click();
   await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
   await page.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
@@ -254,6 +273,26 @@ try {
     secondOpened && retained.matching === 1 && !retained.closed
       && retained.terminals === 2 && retained.hidden === 1,
     JSON.stringify({ secondOpened, retained }));
+  const reactivatedScroll = await page.locator('.tile-terminal:not(.tile-cached) .xterm-viewport').evaluate((node) => ({
+    top: node.scrollTop,
+    max: node.scrollHeight - node.clientHeight,
+  }));
+  check('a retained terminal restores its DOM viewport before wheel input',
+    hiddenOutputReady && reactivatedScroll.max > 0
+      && Math.abs(reactivatedScroll.top - reactivatedScroll.max) <= 1,
+    JSON.stringify({ hiddenOutputReady, reactivatedScroll }));
+  await page.locator('.tile-terminal:not(.tile-cached) .xterm').dispatchEvent('wheel', {
+    deltaY: -96, deltaMode: 0,
+  });
+  await sleep(100);
+  const wheelTop = await page.locator('.tile-terminal:not(.tile-cached) .xterm-viewport').evaluate((node) => node.scrollTop);
+  check('the first upward wheel after re-activation scrolls into history',
+    wheelTop < reactivatedScroll.top - 1,
+    JSON.stringify({ before: reactivatedScroll.top, after: wheelTop }));
+  await page.locator('.tile-terminal:not(.tile-cached) .xterm-viewport').evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  await sleep(100);
   const hiddenMessagesBeforeZoom = await page.evaluate((sessionId) => {
     const socket = window.__terminalSockets.find((item) => item.url.includes(`session=${sessionId}`));
     return socket?.sent?.length ?? -1;
@@ -529,13 +568,13 @@ try {
   const previewSaved = await waitFor(() => page.evaluate((sessionId) => {
     try {
       const saved = JSON.parse(localStorage.getItem(`am-terminal-preview:${sessionId}`) || 'null');
-      return saved?.rows?.some((line) => String(line).includes('MOBILE-HISTORY-0220'));
+      return saved?.rows?.some((line) => String(line).includes('MOBILE-HISTORY-0280'));
     } catch { return false; }
   }, id), 5_000);
   await page.evaluate(() => localStorage.setItem('__am_test_offline_sockets', '1'));
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
-  const previewVisible = await page.locator('.term-preview').filter({ hasText: 'MOBILE-HISTORY-0220' })
+  const previewVisible = await page.locator('.term-preview').filter({ hasText: 'MOBILE-HISTORY-0280' })
     .isVisible().catch(() => false);
   check('the last terminal view survives reload while the backend is unavailable',
     previewSaved && previewVisible, JSON.stringify({ previewSaved, previewVisible }));
