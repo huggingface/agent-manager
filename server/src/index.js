@@ -901,6 +901,8 @@ function loadAmConfig() {
       every: backup.INTERVALS.includes(saved.backup?.every) ? saved.backup.every : 'never',
       mirror: (saved.backup?.mirror || '').trim(),
       dataset: (saved.backup?.dataset || '').trim(),
+      // Folder names to keep out of the history — the slow, regenerable kind.
+      exclude: backup.normalizeExclude(saved.backup?.exclude),
     },
   };
 }
@@ -919,6 +921,8 @@ app.put('/api/config', (req, res) => {
       every: backup.INTERVALS.includes(b.backup?.every) ? b.backup.every : 'never',
       mirror: typeof b.backup?.mirror === 'string' ? b.backup.mirror.trim() : '',
       dataset: typeof b.backup?.dataset === 'string' ? b.backup.dataset.trim() : '',
+      // Normalized here, not trusted: these end up in a Job's argument list.
+      exclude: backup.normalizeExclude(b.backup?.exclude),
     },
   };
   try { fs.writeFileSync(AM_CONFIG_FILE, JSON.stringify(cfg, null, 2)); } catch {}

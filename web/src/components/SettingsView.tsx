@@ -182,6 +182,7 @@ export default function SettingsView({
   const [bk, setBk] = useState<api.BackupStatus | null>(null);
   const [bkBusy, setBkBusy] = useState(false);
   const [bkMsg, setBkMsg] = useState('');
+  const [skipDraft, setSkipDraft] = useState('');
   const loadBackup = () => api.backupStatus().then(setBk).catch(() => {});
   useEffect(() => { loadBackup(); }, []);
   // Re-read after a save lands, so the interval and privacy dot stop disagreeing
@@ -194,6 +195,16 @@ export default function SettingsView({
     const t = setInterval(loadBackup, 10_000);
     return () => clearInterval(t);
   }, [bk?.running]);
+  // One token per commit, deduped, whitespace and shell characters dropped — the
+  // server normalizes again, since it is the side that must not be trusted.
+  const addSkip = () => {
+    if (!cfg) return;
+    const t = skipDraft.trim().replace(/^\/+/, '').replace(/\/+$/, '');
+    setSkipDraft('');
+    if (!t || !/^[A-Za-z0-9._*?/-]+$/.test(t) || cfg.backup.exclude.includes(t)) return;
+    setCfg({ ...cfg, backup: { ...cfg.backup, exclude: [...cfg.backup.exclude, t] } });
+  };
+
   const doBackup = async () => {
     setBkBusy(true);
     setBkMsg('');
@@ -456,6 +467,49 @@ export default function SettingsView({
                         before a risky change should not mean switching on a
                         schedule. Disabled while a run is in flight — two Jobs
                         uploading to one dataset would race. */}
+                    {/* Folders to keep out of the history. An env directory is
+                        thousands of files the backup has to hash and none of them
+                        worth keeping — measured, that is 7s of work versus 1s. */}
+                    {bk?.canRunNow && (
+                      <>
+                        <div className="s-help" style={{ marginTop: 10 }}>
+                          Skip these folders — type a name and press Enter. Anywhere they appear
+                          (<span className="mono">node_modules</span>, <span className="mono">.venv</span>),
+                          they stay out of the history and the backup gets quicker.
+                        </div>
+                        <div className="tagf" onClick={(e) => {
+                          if (e.target === e.currentTarget) (e.currentTarget.querySelector('input') as HTMLInputElement)?.focus();
+                        }}>
+                          {cfg.backup.exclude.map((t) => (
+                            <span className="tagf-chip mono" key={t}>
+                              {t}
+                              <button
+                                className="tagf-x"
+                                aria-label={`Stop skipping ${t}`}
+                                onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, exclude: cfg.backup.exclude.filter((x) => x !== t) } })}
+                              >×</button>
+                            </span>
+                          ))}
+                          <input
+                            className="tagf-input mono"
+                            placeholder={cfg.backup.exclude.length ? 'add another…' : 'node_modules'}
+                            value={skipDraft}
+                            onChange={(e) => setSkipDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              // Enter or comma commits; Backspace on an empty box
+                              // takes the last chip back, as tag fields do.
+                              if (e.key === 'Enter' || e.key === ',') {
+                                e.preventDefault();
+                                addSkip();
+                              } else if (e.key === 'Backspace' && !skipDraft && cfg.backup.exclude.length) {
+                                setCfg({ ...cfg, backup: { ...cfg.backup, exclude: cfg.backup.exclude.slice(0, -1) } });
+                              }
+                            }}
+                            onBlur={addSkip}
+                          />
+                        </div>
+                      </>
+                    )}
                     {bk?.canRunNow && (
                       <button
                         className="btn-ghost"
