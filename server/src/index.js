@@ -31,10 +31,15 @@ import { startWatchdog } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
+import {
+  formatAttachmentDelivery, pruneAttachmentDirs, receiveImage, removeSessionAttachments,
+  resolveImage, resolveImages,
+} from './attachments.js';
 
 ensureDirs();
 refreshVersions();
 store.init();
+pruneAttachmentDirs(store.list().map((session) => session.id));
 groups.init();
 order.init();
 demo.init();
@@ -247,8 +252,9 @@ const operatorName = () => process.env.SPACE_AUTHOR_NAME || process.env.AM_USER 
  * agent-to-agent API) go through here, which is what makes remote agents
  * reachable from everywhere the local ones are without duplicating either path.
  */
-async function deliver(session, text, from) {
+async function deliver(session, { text, attachments = [] }, from) {
   if (isRemote(session.cli)) {
+    if (attachments.length) throw Object.assign(new Error('screenshots are not available for remote agents yet'), { statusCode: 400 });
     const name = session.remote?.name;
     if (!name) throw new Error('this remote pane has no name recorded');
     // Delivery does NOT un-pause: a disconnected agent isn't listening, so the
@@ -257,9 +263,18 @@ async function deliver(session, text, from) {
     remote.append(name, { role: 'user', from: from || operatorName(), text });
     return false;
   }
+  const prompt = formatAttachmentDelivery(session.cli, text, attachments);
+  // A session created before its first prompt can still use the CLI's launch
+  // argument. This is especially important for quickstart attachments: upload
+  // needs a session id first, but typing into a half-booted TUI loses turns.
+  const cli = cliById(session.cli);
+  if (!session.everStarted && cli?.withPrompt) {
+    store.update(session.id, { pendingPrompt: prompt });
+    return ensureRunning(store.get(session.id) || session);
+  }
   const started = ensureRunning(session);
   if (started) await sleep(3500); // let the CLI boot before the keystrokes land
-  await sendInput(session.id, text);
+  await sendInput(session.id, prompt);
   return started;
 }
 
@@ -271,12 +286,57 @@ app.post('/api/sessions/:id/input', async (req, res) => {
   if (!s) return res.status(404).json({ error: 'not found' });
   if (PASSIVE_CLIS.includes(s.cli)) return res.status(400).json({ error: `${s.cli} pane takes no input` });
   const text = typeof (req.body || {}).text === 'string' ? req.body.text.trim() : '';
-  if (!text) return res.status(400).json({ error: 'empty' });
+  const attachmentIds = (req.body || {}).attachmentIds ?? [];
+  if (!text && (!Array.isArray(attachmentIds) || attachmentIds.length === 0)) return res.status(400).json({ error: 'empty' });
   try {
-    const started = await deliver(s, text);
+    const attachments = resolveImages(s.id, attachmentIds);
+    const started = await deliver(s, { text, attachments });
     res.json({ ok: true, started });
   } catch (e) {
-    res.status(409).json({ error: String(e.message || e) });
+    res.status(e.statusCode || 409).json({ error: String(e.message || e) });
+  }
+});
+
+const canAttachImages = (session) => session.cli !== 'shell'
+  && !PASSIVE_CLIS.includes(session.cli) && !isRemote(session.cli);
+
+// Managed screenshots live under STATE_DIR, never in the user's repository.
+// The raw body is streamed and capped in attachments.js; express.json ignores
+// these image content types, so no middleware buffers them first.
+app.post('/api/sessions/:id/attachments', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  if (!canAttachImages(s)) {
+    const error = isRemote(s.cli)
+      ? 'screenshots are not available for remote agents yet — that agent cannot read files stored on this Space'
+      : `${s.cli} pane cannot accept screenshots`;
+    return res.status(400).json({ error });
+  }
+  try {
+    const image = await receiveImage(req, s.id, req.headers['content-type']);
+    if (!res.destroyed) res.status(201).json(image);
+  } catch (e) {
+    if (!res.headersSent && !res.destroyed) res.status(e.statusCode || 500).json({ error: String(e.message || e) });
+  }
+});
+
+app.get('/api/sessions/:id/attachments/:attachmentId/raw', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  try {
+    const image = resolveImage(s.id, req.params.attachmentId);
+    res.set({
+      'Content-Type': image.mime,
+      'Content-Length': String(image.bytes),
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': 'sandbox',
+      'Cache-Control': 'no-store',
+    });
+    const stream = fs.createReadStream(image.path);
+    stream.on('error', () => { if (!res.headersSent) res.status(404).end(); else res.destroy(); });
+    stream.pipe(res);
+  } catch (e) {
+    res.status(e.statusCode || 404).json({ error: String(e.message || e) });
   }
 });
 
@@ -466,7 +526,7 @@ app.post('/api/agents/:id/prompt', promptBody, async (req, res) => {
     // the operator's laptop, and the [message from x:] prefix plus `from:` in
     // the message's frontmatter is how it can tell a peer's request from the
     // operator's.
-    const started = await deliver(s, `[message from ${from.session.name}:] ${text}`, from.session.name);
+    const started = await deliver(s, { text: `[message from ${from.session.name}:] ${text}` }, from.session.name);
     res.json({ ok: true, id: s.id, name: s.name, started });
   } catch (e) {
     res.status(409).json({ error: String(e.message || e) });
@@ -2016,6 +2076,7 @@ app.delete('/api/sessions/:id', (req, res) => {
   groups.detachSession(s.id);
   order.drop(`s:${s.id}`);
   store.remove(s.id);
+  try { removeSessionAttachments(s.id); } catch (e) { console.error('[attachments.remove]', e && e.message); }
   res.json({ ok: true });
 });
 

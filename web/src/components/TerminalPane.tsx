@@ -8,6 +8,11 @@ import type { Cli, Session } from '../types';
 import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import { CloseGlyph, RefreshGlyph } from './icons';
+import * as api from '../api';
+import {
+  IMAGE_ACCEPT, IMAGE_MIMES, MAX_IMAGE_BYTES, MAX_IMAGES, imageFilesFromTransfer,
+  transferMayContainImage,
+} from '../lib/imageAttachments';
 
 const THEMES: Record<'light' | 'dark', ITheme> = {
   dark: {
@@ -199,6 +204,10 @@ export default function TerminalPane({
   const resyncRef = useRef<() => void>(() => {});
   const reconcileScrollRef = useRef<() => void>(() => {});
   const claimRef = useRef<() => void>(() => {});
+  const uploadImagesRef = useRef<(files: File[]) => void>(() => {});
+  const imagePickerRef = useRef<HTMLInputElement>(null);
+  const imageUploadBusyRef = useRef(false);
+  const imageStatusTimerRef = useRef<number | null>(null);
   const reconnectRef = useRef<() => void>(() => {});
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
@@ -217,6 +226,9 @@ export default function TerminalPane({
   const [draft, setDraft] = useState(session.name);
   // Fallback paste sheet: shown only when we can't read the clipboard directly.
   const [pasteOpen, setPasteOpen] = useState(false);
+  const [imageDrop, setImageDrop] = useState(false);
+  const [imageStatus, setImageStatus] = useState<{ kind: 'uploading' | 'success' | 'error'; text: string } | null>(null);
+  const supportsImages = session.cli !== 'shell';
   const commitName = () => {
     const v = draft.trim();
     if (v && v !== session.name) onRename?.(v);
@@ -233,6 +245,40 @@ export default function TerminalPane({
     termRef.current?.focus();
   };
 
+  const showImageStatus = (status: { kind: 'uploading' | 'success' | 'error'; text: string }, linger = 0) => {
+    if (imageStatusTimerRef.current) window.clearTimeout(imageStatusTimerRef.current);
+    setImageStatus(status);
+    if (linger) imageStatusTimerRef.current = window.setTimeout(() => setImageStatus(null), linger);
+  };
+
+  uploadImagesRef.current = (files: File[]) => {
+    if (!supportsImages) return;
+    if (imageUploadBusyRef.current) return;
+    const images = files
+      .filter((file) => (IMAGE_MIMES as readonly string[]).includes(file.type))
+      .slice(0, MAX_IMAGES);
+    if (!images.length) { showImageStatus({ kind: 'error', text: 'Use PNG, JPEG, GIF, or WebP' }, 4000); return; }
+    const invalid = images.find((file) => file.size === 0 || file.size > MAX_IMAGE_BYTES);
+    if (invalid) { showImageStatus({ kind: 'error', text: invalid.size ? 'Image is larger than 25 MB' : 'Image is empty' }, 4000); return; }
+    imageUploadBusyRef.current = true;
+    void (async () => {
+      try {
+        for (let index = 0; index < images.length; index += 1) {
+          showImageStatus({ kind: 'uploading', text: `uploading screenshot${images.length > 1 ? ` ${index + 1}/${images.length}` : ''}…` });
+          const attachment = await api.uploadImageAttachment(session.id, images[index]);
+          claimRef.current();
+          termRef.current?.paste(attachment.insertText);
+        }
+        termRef.current?.focus();
+        showImageStatus({ kind: 'success', text: `${images.length === 1 ? 'Screenshot' : `${images.length} screenshots`} inserted — press Enter when ready` }, 3000);
+      } catch (error) {
+        showImageStatus({ kind: 'error', text: error instanceof Error ? error.message : 'screenshot upload failed' }, 5000);
+      } finally {
+        imageUploadBusyRef.current = false;
+      }
+    })();
+  };
+
   // Phones have no Ctrl+V, so the key-bar needs an explicit paste. Two paths,
   // because the direct read is unavailable exactly where this app usually runs:
   //   1. navigator.clipboard.readText() — works top-level (iOS shows its own
@@ -243,12 +289,23 @@ export default function TerminalPane({
   //      not permissioned — so this works even when (1) is denied.
   // execCommand('paste') is not an option: unlike 'copy' it's disabled for web
   // content in every browser, so there is no synchronous legacy path.
-  const requestPaste = () => {
-    let p: Promise<string> | undefined;
-    try { p = navigator.clipboard?.readText?.(); } catch { p = undefined; }
-    if (!p) { setPasteOpen(true); return; }
-    p.then((text) => { if (text) commitPaste(text); else setPasteOpen(true); })
-      .catch(() => setPasteOpen(true));
+  const requestPaste = async () => {
+    try {
+      if (navigator.clipboard?.read) {
+        const items = await navigator.clipboard.read();
+        const files: File[] = [];
+        for (const item of items) {
+          for (const type of item.types.filter((candidate) => candidate.startsWith('image/'))) {
+            const blob = await item.getType(type);
+            files.push(new File([blob], 'Screenshot', { type: blob.type || type }));
+          }
+        }
+        if (files.length && supportsImages) { uploadImagesRef.current(files); return; }
+      }
+      const text = await navigator.clipboard?.readText?.();
+      if (text) { commitPaste(text); return; }
+    } catch { /* cross-origin iframe / denied permission: use DOM paste below */ }
+    setPasteOpen(true);
   };
 
   useEffect(() => {
@@ -390,9 +447,37 @@ export default function TerminalPane({
       // the gesture actually needs to drive an application's mouse mode.
       if (e.pointerType !== 'touch') claimControl();
     };
-    const onPaste = () => claimControl();
+    const onPaste = (event: ClipboardEvent) => {
+      const files = event.clipboardData ? imageFilesFromTransfer(event.clipboardData) : [];
+      if (supportsImages && files.length) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        uploadImagesRef.current(files);
+        return;
+      }
+      claimControl();
+    };
+    const onDragEnter = (event: DragEvent) => {
+      if (!supportsImages || !event.dataTransfer || !transferMayContainImage(event.dataTransfer)) return;
+      event.preventDefault(); event.stopPropagation(); setImageDrop(true);
+    };
+    const onDragOver = (event: DragEvent) => {
+      if (!supportsImages || !event.dataTransfer || !transferMayContainImage(event.dataTransfer)) return;
+      event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'copy';
+    };
+    const onDragLeave = (event: DragEvent) => {
+      if (!host.contains(event.relatedTarget as Node | null)) setImageDrop(false);
+    };
+    const onDrop = (event: DragEvent) => {
+      if (!supportsImages || !event.dataTransfer || !transferMayContainImage(event.dataTransfer)) return;
+      event.preventDefault(); event.stopPropagation(); setImageDrop(false);
+      uploadImagesRef.current(imageFilesFromTransfer(event.dataTransfer));
+    };
     host.addEventListener('pointerdown', onPointerDown, true);
     host.addEventListener('paste', onPaste, true);
+    host.addEventListener('dragenter', onDragEnter, true);
+    host.addEventListener('dragover', onDragOver, true);
+    host.addEventListener('dragleave', onDragLeave, true);
+    host.addEventListener('drop', onDrop, true);
 
     // The mobile key-bar sends control sequences the on-screen keyboard can't.
     sendKeyRef.current = (d: string) => {
@@ -724,6 +809,10 @@ export default function TerminalPane({
       ro.disconnect();
       host.removeEventListener('pointerdown', onPointerDown, true);
       host.removeEventListener('paste', onPaste, true);
+      host.removeEventListener('dragenter', onDragEnter, true);
+      host.removeEventListener('dragover', onDragOver, true);
+      host.removeEventListener('dragleave', onDragLeave, true);
+      host.removeEventListener('drop', onDrop, true);
       document.removeEventListener('copy', onCopy, true);
       frame.removeEventListener('touchstart', onTouchStart);
       frame.removeEventListener('touchmove', onTouchMove, true);
@@ -742,6 +831,8 @@ export default function TerminalPane({
       resyncRef.current = () => {};
       reconcileScrollRef.current = () => {};
       claimRef.current = () => {};
+      uploadImagesRef.current = () => {};
+      if (imageStatusTimerRef.current) window.clearTimeout(imageStatusTimerRef.current);
     };
   }, [session.id]);
 
@@ -832,12 +923,41 @@ export default function TerminalPane({
             </span>
           )}
           <span className="ph-path" title={pathLabel}>{pathLabel}</span>
+          {supportsImages && (
+            <>
+              <button
+                className="mini-btn ph-image"
+                title="Attach screenshot"
+                draggable={false}
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => { event.stopPropagation(); imagePickerRef.current?.click(); }}
+              >
+                <svg viewBox="0 0 18 18" aria-hidden="true">
+                  <rect x="2.5" y="3" width="13" height="12" rx="1.5" fill="none" stroke="currentColor" />
+                  <circle cx="6.5" cy="7" r="1.25" fill="currentColor" />
+                  <path d="m4 13 3.2-3.1 2.1 2 1.6-1.6L14 13" fill="none" stroke="currentColor" strokeLinejoin="round" />
+                </svg>
+              </button>
+              <input
+                ref={imagePickerRef}
+                className="image-file-input"
+                type="file"
+                accept={IMAGE_ACCEPT}
+                multiple
+                onChange={(event) => {
+                  uploadImagesRef.current(Array.from(event.currentTarget.files || []));
+                  event.currentTarget.value = '';
+                }}
+              />
+            </>
+          )}
           <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
-      <div className="term-host" ref={frameRef}>
+      <div className={`term-host${imageDrop ? ' image-drop' : ''}`} ref={frameRef}>
         <div className="term-fill" ref={hostRef} />
       </div>
+      {imageStatus && <div className={`term-image-status ${imageStatus.kind} mono`}>{imageStatus.text}</div>}
       {isMobile && conn === 'connected' && (
         // Control keys the phone keyboard lacks — needed for TUI menus (model
         // pickers, etc.). preventDefault keeps terminal focus so the keyboard
@@ -880,6 +1000,11 @@ export default function TerminalPane({
             // manual backup when they don't.
             placeholder="tap Paste — or long-press here"
             onPaste={(e) => {
+              const files = imageFilesFromTransfer(e.clipboardData);
+              if (supportsImages && files.length) {
+                e.preventDefault(); setPasteOpen(false); uploadImagesRef.current(files);
+                return;
+              }
               const text = e.clipboardData.getData('text/plain');
               if (text) { e.preventDefault(); commitPaste(text); }
             }}

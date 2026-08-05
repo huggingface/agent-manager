@@ -166,6 +166,28 @@ body {
 .quick-more:hover { text-decoration: underline; }
 .cart-row.off { opacity: 0.45; }
 
+/* screenshot attachments: one compact operational row shared by composers */
+.image-attachments { min-width: 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.image-file-input { display: none; }
+.image-pick { flex: none; width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel-2); color: var(--muted); cursor: pointer; }
+.image-pick:hover:not(:disabled) { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.image-pick:disabled { opacity: 0.38; cursor: not-allowed; }
+.image-pick svg { width: 15px; height: 15px; }
+.image-chip { min-width: 0; max-width: 205px; height: 36px; display: flex; align-items: center; gap: 6px; padding: 3px 5px 3px 3px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); }
+.image-chip.error { border-color: color-mix(in srgb, var(--danger) 48%, var(--border)); }
+.image-chip.uploading { border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); }
+.image-chip img { flex: none; width: 29px; height: 28px; border-radius: 3px; object-fit: cover; background: var(--panel-2); }
+.image-chip-copy { min-width: 0; display: flex; flex-direction: column; line-height: 1.15; }
+.image-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; font-weight: 600; }
+.image-chip-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; color: var(--muted); font: 9.5px var(--font-mono); }
+.image-chip.error .image-chip-meta { color: var(--danger); }
+.image-chip.uploading .image-chip-meta { color: var(--accent); animation: breathe 1.2s ease-in-out infinite; }
+.image-chip > button { flex: none; padding: 1px; border: none; background: transparent; color: var(--muted); font: 13px/1 var(--font-sans); cursor: pointer; }
+.image-chip > button:hover:not(:disabled) { color: var(--text); }
+.image-chip > button:disabled { opacity: 0.35; cursor: default; }
+.quick .image-attachments { align-items: flex-start; }
+.widget.quick.image-drop { border-style: dashed; border-color: var(--accent); background: color-mix(in srgb, var(--drop) 55%, var(--panel-2)); }
+
 /* new-agent: logo buttons */
 .agent-picks { display: flex; flex-direction: column; gap: 4px; }
 .agent-pick { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); color: var(--text); font: inherit; font-size: 13px; cursor: pointer; text-align: left; }
@@ -333,11 +355,16 @@ body {
 .ovw-win { width: 100%; max-width: 640px; max-height: 85vh; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 13px; box-shadow: 0 24px 60px rgb(0 0 0 / 0.4); overflow: hidden; }
 .ovw-win .ov-card { flex: 1; min-height: 0; padding: 14px 17px 12px; }
 .ovw-win .ov-body { flex: 1; min-height: 0; overflow-y: auto; }
-.ovw-win .ov-live { flex: none; }
+.ovw-win .ov-composer { flex: none; }
 .ov-x { background: none; border: none; color: var(--muted); font-size: 13px; cursor: pointer; padding: 0 2px 0 8px; flex: none; }
 .ov-x:hover { color: var(--text); }
 
 /* reply: a quiet, always-there input line — its ❯ mirrors the prompt's */
+.ov-composer { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px 8px; border-top: 1px solid var(--border); padding-top: 7px; }
+.ov-composer.image-drop { outline: 1px dashed var(--accent); outline-offset: 5px; background: var(--drop); }
+.ov-composer .image-attachments.has-images { grid-column: 1 / -1; }
+.ov-composer .image-attachments.has-images + .ov-live { grid-column: 1 / -1; }
+.ov-composer .ov-live { border-top: none; padding-top: 0; }
 .ov-live { display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--border); padding-top: 7px; font-size: 13px; }
 .ov-live .ov-p { color: var(--accent); font-weight: 700; font-size: 13px; }
 .ov-live textarea { flex: 1; min-width: 0; border: none; background: none; font: inherit; font-size: 13px; line-height: 1.45; color: var(--text); outline: none; padding: 2px 0; resize: none; overflow: hidden; max-height: 140px; }
@@ -572,6 +599,11 @@ body {
 .slot.focused .pane-head { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
 
 .term-host { flex: 1; min-height: 0; background: var(--term-bg); overflow: hidden; }
+.term-host.image-drop { outline: 2px dashed var(--accent); outline-offset: -8px; background: color-mix(in srgb, var(--drop) 45%, var(--term-bg)); }
+.term-image-status { position: absolute; z-index: 8; left: 50%; bottom: 10px; transform: translateX(-50%); max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: color-mix(in srgb, var(--term-bg) 92%, transparent); color: var(--muted); box-shadow: 0 4px 14px rgb(0 0 0 / 0.12); font-size: 10.5px; pointer-events: none; }
+.term-image-status.uploading { color: var(--accent); animation: breathe 1.2s ease-in-out infinite; }
+.term-image-status.success { color: var(--go); }
+.term-image-status.error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
 /* The grid is measured against this filler, so it must stay unpadded: FitAddon
    reads the PARENT's computed height and does NOT subtract its padding, so a
    padded parent made the grid count a row that doesn't fit and the bottom line
