@@ -751,9 +751,13 @@ function firstLine(p) {
   } finally { fs.closeSync(fd); }
 }
 
-function tryCaptureCodexId(sessionId, workdir, sinceMs) {
+// The newest rollout written in `workdir` that no other session has pinned, as
+// { id, p }. `bornBefore` caps how late a conversation may have been BORN and
+// still be taken as ours; in a shared folder that cap is what keeps a sibling's
+// later reset out of reach (see codexCaptureMode).
+// Exported for server/test/repin.test.mjs.
+export function codexCandidate(sessionId, workdir, sinceMs, { bornBefore = Infinity } = {}) {
   const claimed = new Set(list().filter((s) => s.id !== sessionId && s.codexSessionId).map((s) => s.codexSessionId));
-  const pinned = (list().find((s) => s.id === sessionId) || {}).codexSessionId;
   for (const c of codexRolloutsSince(sinceMs)) {
     const m = c.p.match(/rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/);
     if (!m || claimed.has(m[1])) continue;
@@ -764,20 +768,28 @@ function tryCaptureCodexId(sessionId, workdir, sinceMs) {
     // A sibling's ongoing conversation in the same folder gets fresh writes
     // (mtime) during our capture window — require the rollout to have been
     // CREATED after this launch so we never claim someone else's thread.
-    const created = Date.parse(mp.timestamp || meta.timestamp || '') || 0;
-    if (created && created < sinceMs - 15_000) continue;
+    const born = Date.parse(mp.timestamp || meta.timestamp || '') || 0;
+    if (born && born < sinceMs - 15_000) continue;
+    if (born && born > bornBefore) continue;
     // Skip Codex's internal guardian/subagent rollouts — they share the cwd but
     // aren't this agent's conversation, so pinning one would break resume and
     // the Overview digest.
     if (mp.thread_source === 'subagent' || (mp.source && mp.source.subagent)) continue;
-    // The watcher re-runs for the life of the pane, so the usual outcome is
-    // "still the same conversation" — don't rewrite sessions.json for that.
-    if (m[1] === pinned) return true;
-    if (pinned) console.warn(`[codex] re-pinning ${sessionId}: ${pinned} -> ${m[1]} (conversation was replaced)`);
-    update(sessionId, { codexSessionId: m[1], codexRollout: c.p });
-    return true;
+    return { id: m[1], p: c.p };
   }
-  return false;
+  return null;
+}
+
+function tryCaptureCodexId(sessionId, workdir, sinceMs, opts) {
+  const c = codexCandidate(sessionId, workdir, sinceMs, opts);
+  if (!c) return false;
+  const pinned = (list().find((s) => s.id === sessionId) || {}).codexSessionId;
+  // The watcher re-runs for the life of the pane, so the usual outcome is
+  // "still the same conversation" — don't rewrite sessions.json for that.
+  if (c.id === pinned) return true;
+  if (pinned) console.warn(`[codex] re-pinning ${sessionId}: ${pinned} -> ${c.id} (conversation was replaced)`);
+  update(sessionId, { codexSessionId: c.id, codexRollout: c.p });
+  return true;
 }
 
 // A pin captured before subagents were filtered out (or one whose rollout was
@@ -793,11 +805,38 @@ function pinIsStale(session) {
   } catch { return false; }
 }
 
+// How late after launch a conversation may be born and still be taken as ours
+// when the folder is shared. Codex writes its session_meta line as the TUI
+// starts — 3.5s after launch in the session that motivated this — so two
+// minutes is ample margin, while a sibling's reset minutes or hours in stays
+// out of reach.
+const CODEX_PIN_WINDOW_MS = 120_000;
+
+// What the watcher may do on this tick:
+//   'follow'  — capture, and keep following resets: this pane owns the folder.
+//   'window'  — unpinned in a shared folder. Capture, but only a conversation
+//               born in our launch window. This case used to do NOTHING, which
+//               meant a codex pane sharing a folder never got a pin at all: its
+//               conversation was on disk, and every restart came back empty,
+//               because resumeCmd correctly refuses `resume --last` there.
+//   'pinned'  — pinned in a shared folder: a NEW conversation here is
+//               unattributable (our reset, or a sibling's?), so don't follow it.
+//   'expired' — shared, unpinned, window gone: nothing safe left to take.
+// Exported for server/test/repin.test.mjs.
+export function codexCaptureMode({ shared, pinned, nowMs, sinceMs }) {
+  if (!shared) return 'follow';
+  if (pinned) return 'pinned';
+  return nowMs <= sinceMs + CODEX_PIN_WINDOW_MS ? 'window' : 'expired';
+}
+
 // Same staleness problem as Claude's pin, same remedy: codex starts a fresh
 // conversation — and a fresh rollout file — when the thread is reset, so a pin
 // captured once at launch stops describing the live conversation. Keep watching
 // for as long as the pane is alive and follow the newest rollout this folder
 // produces. tryCaptureCodexId only writes when the id actually changes.
+//
+// A shared folder narrows that to the initial capture only — see
+// codexCaptureMode for which part is safe there and which isn't.
 function scheduleCodexCapture(session, workdir) {
   if (session.codexSessionId && pinIsStale(session)) {
     session = update(session.id, { codexSessionId: undefined, codexRollout: undefined }) || session;
@@ -805,17 +844,25 @@ function scheduleCodexCapture(session, workdir) {
   const prev = codexCapturing.get(session.id);
   if (prev) clearTimeout(prev);
   const since = Date.now() - 2000;
-  let warnedShared = false;
+  let warnedShared = false, warnedExpired = false;
 
   const tick = () => {
     if (!isRunning(session.id)) { codexCapturing.delete(session.id); return; }
-    if (folderIsShared(session.id, workdir, 'codex')) {
-      if (!warnedShared) {
-        warnedShared = true;
-        console.warn(`[codex] ${session.id}: folder shared with another live session — not following thread resets here`);
-      }
-    } else {
-      tryCaptureCodexId(session.id, workdir, since);
+    const mode = codexCaptureMode({
+      shared: folderIsShared(session.id, workdir, 'codex'),
+      pinned: !!(list().find((s) => s.id === session.id) || {}).codexSessionId,
+      nowMs: Date.now(),
+      sinceMs: since,
+    });
+    if (mode === 'follow') tryCaptureCodexId(session.id, workdir, since);
+    else if (mode === 'window') {
+      tryCaptureCodexId(session.id, workdir, since, { bornBefore: since + CODEX_PIN_WINDOW_MS });
+    } else if (mode === 'pinned' && !warnedShared) {
+      warnedShared = true;
+      console.warn(`[codex] ${session.id}: folder shared with another live session — not following thread resets here`);
+    } else if (mode === 'expired' && !warnedExpired) {
+      warnedExpired = true;
+      console.warn(`[codex] ${session.id}: no rollout born in this folder within ${CODEX_PIN_WINDOW_MS / 1000}s of launch — staying unpinned, so a restart will start a fresh conversation`);
     }
     const t = setTimeout(tick, REPIN_MS);
     if (t.unref) t.unref();

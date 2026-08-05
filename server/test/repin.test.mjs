@@ -15,6 +15,7 @@ fs.mkdirSync(DATA, { recursive: true });
 
 process.env.CLAUDE_CONFIG_DIR = CFG;
 process.env.DATA_DIR = DATA;
+process.env.CODEX_HOME = path.join(TMP, 'codex');
 
 const sessions = await import('../src/sessions.js');
 const runner = await import('../src/runner.js');
@@ -108,6 +109,58 @@ check('claimed uuid left to its session',
 check('malformed session_id rejected',
   verdict(crumb({ payload: { session_id: 'not-a-uuid', cwd: WORKDIR } }), facts()).repin, null);
 check('null crumb rejected', verdict(null, facts()).repin, null);
+
+// ---------- codex: the pin a folder-sharing pane never got ----------
+// Codex has no breadcrumb, so a shared folder used to skip capture ENTIRELY and
+// the pane stayed unpinned for life — conversation on disk, every restart empty.
+// The initial capture is safe there; following a later reset is not.
+const R = (n) => `019fd29a-97e5-7d11-b36e-3ce290b0a00${n}`;
+function rollout(id, { cwd = WORKDIR, bornMs, mtimeMs, subagent = false }) {
+  const dir = path.join(process.env.CODEX_HOME, 'sessions', '2026', '08', '05');
+  fs.mkdirSync(dir, { recursive: true });
+  const p = path.join(dir, `rollout-2026-08-05T15-46-14-${id}.jsonl`);
+  const payload = { cwd, timestamp: new Date(bornMs).toISOString() };
+  if (subagent) payload.thread_source = 'subagent';
+  fs.writeFileSync(p, JSON.stringify({ type: 'session_meta', payload }) + '\n');
+  const t = (mtimeMs ?? bornMs) / 1000;
+  fs.utimesSync(p, t, t);
+  return p;
+}
+const WINDOW = { bornBefore: SINCE + 120_000 };
+
+console.log('\ncodex: the conversation born in this launch window is ours');
+rollout(R(1), { bornMs: NOW });
+check('own rollout captured', runner.codexCandidate('c1', WORKDIR, SINCE)?.id, R(1));
+
+console.log('\ncodex: whose folder and whose birth, not whose mtime');
+rollout(R(2), { cwd: path.join(cfg.WORKSPACES_DIR, 'proj-b'), bornMs: NOW + 1000, mtimeMs: NOW + 120_000 });
+check('other folder ignored', runner.codexCandidate('c1', WORKDIR, SINCE)?.id, R(1));
+rollout(R(3), { bornMs: NOW - 3600_000, mtimeMs: NOW + 180_000 });
+check('pre-launch rollout rejected despite a fresh mtime',
+  runner.codexCandidate('c1', WORKDIR, SINCE)?.id, R(1));
+rollout(R(4), { bornMs: NOW + 5000, mtimeMs: NOW + 200_000, subagent: true });
+check('subagent rollout skipped', runner.codexCandidate('c1', WORKDIR, SINCE)?.id, R(1));
+
+console.log('\ncodex: a later conversation is a reset to follow, or a sibling to leave alone');
+rollout(R(5), { bornMs: NOW + 240_000 });
+check('followed when the folder is ours', runner.codexCandidate('c1', WORKDIR, SINCE)?.id, R(5));
+check('out of reach in a shared folder', runner.codexCandidate('c1', WORKDIR, SINCE, WINDOW)?.id, R(1));
+
+console.log('\ncodex: a rollout another session pinned is left to it');
+const rivalCodex = sessions.create({ name: 'rival-codex', cli: 'codex', path: 'proj-a' });
+sessions.update(rivalCodex.id, { codexSessionId: R(1) });
+check('claimed rollout skipped', runner.codexCandidate('c1', WORKDIR, SINCE, WINDOW), null);
+
+console.log('\ncodex: what the watcher may do on a tick');
+const mode = (o) => runner.codexCaptureMode({ nowMs: NOW, sinceMs: SINCE, ...o });
+check('sole pane captures and follows resets', mode({ shared: false, pinned: false }), 'follow');
+check('sole pane keeps following once pinned', mode({ shared: false, pinned: true }), 'follow');
+check('shared and unpinned still captures', mode({ shared: true, pinned: false }), 'window');
+check('shared and pinned stops at the pin', mode({ shared: true, pinned: true }), 'pinned');
+check('window is open at its last instant',
+  mode({ shared: true, pinned: false, nowMs: SINCE + 120_000 }), 'window');
+check('shared, unpinned, window gone',
+  mode({ shared: true, pinned: false, nowMs: SINCE + 120_001 }), 'expired');
 
 // ---------- hook installer: merge, never replace; idempotent; refuse corrupt ----------
 console.log('\ninstaller merges into existing settings and is idempotent');
