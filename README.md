@@ -1,13 +1,13 @@
 ---
-title: Agent Manager
-emoji: 🖥️
-colorFrom: gray
-colorTo: indigo
+title: Agent Manager — DEV 3
+emoji: 🧪
+colorFrom: yellow
+colorTo: red
 sdk: docker
 app_port: 7860
 pinned: false
 license: apache-2.0
-short_description: Private cloud manager for AI coding CLI sessions
+short_description: "DEV · links + sticky selection + scroll fix (PR #28+#29)"
 ---
 
 # Agent Manager
