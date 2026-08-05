@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import * as api from '../api';
-import type { MetaSession } from '../api';
+import type { MetaSession, TraceTurn } from '../api';
 import type { Cli, OverviewFilter, Session, SessionState, Tree } from '../types';
 import { isPassive } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import Logo from './Logo';
+import ExchangeView from './conversation/Exchange';
+import { splitExchanges } from './conversation/exchanges';
 
 const fmtAgo = (ts: number) => {
   if (!ts) return '';
@@ -22,11 +24,61 @@ const eligible = (s: Session) => s.cli !== 'shell' && !isPassive(s.cli);
 const bucket = (state: SessionState): OverviewFilter =>
   state === 'working' ? 'working' : state === 'waiting' ? 'waiting' : 'quiet';
 
+/** How much of the conversation the card reads. Cheap: one page, from the end. */
+const CARD_TAIL = 120;
+const CARD_TURNS = 5;   // past this the card is the wrong tool, and says so
+const POLL_MS = 3_000;
+
+/**
+ * The tail of a session's conversation (docs/conversation-view.md §5).
+ *
+ * The digest cannot answer "what happened in the middle": `turnsLog` holds only
+ * assistant TEXT from the current request — no tool calls, no thinking, nothing
+ * before the last prompt. So the card reads the trace itself, and falls back to
+ * the digest when there is no transcript yet (a session that never started, an
+ * unsupported harness).
+ */
+function useConversationTail(id: string, live: boolean) {
+  const [turns, setTurns] = useState<TraceTurn[] | null>(null);
+  const [missing, setMissing] = useState(false);
+  const load = useCallback(async () => {
+    try {
+      const page = await api.getTracePage(id, -CARD_TAIL, CARD_TAIL);
+      setTurns(page.turns);
+      setMissing(false);
+    } catch {
+      setMissing(true);
+    }
+  }, [id]);
+  useEffect(() => { setTurns(null); setMissing(false); load(); }, [load]);
+  // While the agent works the transcript is still being written.
+  useEffect(() => {
+    if (!live) return undefined;
+    const h = window.setInterval(load, POLL_MS);
+    return () => window.clearInterval(h);
+  }, [live, load]);
+  return { turns, missing };
+}
+
+/** Opening the pane on this session, in RENDER mode (§3.3 keeps it per session). */
+const openRendered = (id: string, onOpen: (sid: string) => void) => {
+  try { localStorage.setItem(`am:pane-mode:${id}`, 'render'); } catch { /* private mode */ }
+  onOpen(id);
+};
+
 const Caret = () => (
   <svg className="ov-caret" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.8 3.2h6.4L5 7.4z" fill="currentColor" /></svg>
 );
 
-function Card({ s, color, pending, isMobile, onOpen, onClose }: {
+/**
+ * One exchange plus a reply box (docs/conversation-view.md §3.2).
+ *
+ * Collapsed it reads as it always did — your prompt, the answer, the reply line.
+ * What is new is the middle: `▸ 14 steps · 9 tools` unfolds the work between the
+ * two, and history grows one turn at a time instead of a stepper that replaced
+ * the answer with an older one.
+ */
+export function Card({ s, color, pending, isMobile, onOpen, onClose }: {
   s: MetaSession;
   color?: string;
   pending?: boolean; // digest still loading — show a shimmer instead of "no prompt yet"
@@ -42,8 +94,15 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
   // send succeeds — the digest round-trip (CLI writes transcript → rebuild →
   // poll) can take seconds, and a frozen card reads as "did that get lost?".
   const [sent, setSent] = useState<{ text: string; at: number } | null>(null);
-  const [histIdx, setHistIdx] = useState(0); // 0 = live view, n = n-th exchange back
+  const [histIdx, setHistIdx] = useState(0); // digest fallback only: n-th answer back
+  const [back, setBack] = useState(0);       // how many earlier turns are shown
+  const [openWork, setOpenWork] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const latestRef = useRef<HTMLDivElement>(null);
+  // The window is the only place the card can grow; inline in the list it stays
+  // a summary, so the answer is clamped and history stays behind the pane.
+  const windowed = !!onClose;
 
   // After you send (or when the transcript shows a prompt newer than the last
   // answer), the old answer is stale — a spinner takes its place.
@@ -57,6 +116,15 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
   const hist = d?.turnsLog ?? [];
   const idx = Math.min(histIdx, hist.length);
   const entry = idx > 0 ? hist[idx - 1] : null;
+
+  const { turns } = useConversationTail(s.id, running || awaiting);
+  const exchanges = useMemo(() => (turns ? splitExchanges(turns) : []), [turns]);
+  const cap = windowed ? CARD_TURNS : 1;
+  const shownX = exchanges.slice(Math.max(0, exchanges.length - 1 - back));
+  const latestX = shownX[shownX.length - 1];
+  const earlierX = shownX.slice(0, -1);
+  const remainingX = exchanges.length - shownX.length;
+  const atCap = back + 1 >= cap;
 
   const send = async () => {
     const text = draft.trim();
@@ -75,6 +143,22 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
     }
     setSending(false);
   };
+
+  // Where the body sits after a change:
+  //  · asked for the previous turn → the top, at the turn you asked for
+  //  · working → the tail, where the newest line is
+  //  · otherwise → the latest turn's prompt, reading downward from there
+  const wasBack = useRef(back);
+  useLayoutEffect(() => {
+    const el = bodyRef.current;
+    if (!el || !latestX) return;
+    const prepended = back > wasBack.current;
+    wasBack.current = back;
+    if (prepended) { el.scrollTop = 0; return; }
+    if (running) { el.scrollTop = el.scrollHeight; return; }
+    const tgt = latestRef.current;
+    if (tgt) el.scrollTop += tgt.getBoundingClientRect().top - el.getBoundingClientRect().top;
+  }, [back, sent, running, latestX]);
 
   const ago = fmtAgo(Math.max(d?.lastAssistantTs || 0, d?.lastPromptTs || 0) || Date.parse(s.createdAt) || 0);
   const promptText = sent ? sent.text : d?.lastPromptText || '';
@@ -99,7 +183,7 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
   const answerHtml = showAnswer ? renderMarkdown(answerMd || answerText) : '';
 
   return (
-    <div className="ov-card">
+    <div className={`ov-card${windowed ? '' : ' ov-compact'}`}>
       <div className="ov-id" onClick={() => onOpen(s.id)} title="Open pane">
         <span className={`status ${s.state}`} />
         <Logo cli={s.cli} size={12} tint={color} />
@@ -111,40 +195,81 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
       </div>
 
       {/* the card body is the ONLY scroll region (window mode); input stays put */}
-      <div className="ov-body">
-        {promptText ? (
-          <div className="ov-prompt">{sent ? sent.text : (d?.lastPromptRaw || promptText)}</div>
-        ) : pending ? (
-          <div className="ov-prompt-skel"><span className="skel" style={{ width: '70%' }} /></div>
-        ) : (
-          <div className="ov-prompt ov-prompt-none">no prompt yet</div>
-        )}
-        {(metaBits.length > 0 || hist.length > 0) && (
-          <div className="ov-meta mono">
-            <span className="ov-meta-bits">{metaBits.join(' · ')}</span>
-            <span className="spacer" />
-            {hist.length > 0 && (
-              <span className="ov-nav">
-                {idx > 0 && <span className="ov-nav-pos">turn {totalTurns - idx}/{totalTurns}</span>}
-                <button
-                  className="ov-nav-btn" title="Earlier turn" disabled={idx >= hist.length}
-                  onClick={() => setHistIdx(Math.min(idx + 1, hist.length))}
-                >↑</button>
-                <button
-                  className="ov-nav-btn" title="Later turn" disabled={idx === 0}
-                  onClick={() => setHistIdx(Math.max(idx - 1, 0))}
-                >↓</button>
-              </span>
+      <div className="ov-body" ref={bodyRef}>
+        {latestX ? (
+          <>
+            {/* History grows upward, one turn per click — never a transcript dump. */}
+            {windowed && (remainingX > 0 || back > 0) && (
+              <div className="cx-earlier mono">
+                {remainingX > 0 && !atCap && (
+                  <button className="cx-earlier-btn" onClick={() => setBack((b) => b + 1)}>
+                    ↑ show previous turn
+                  </button>
+                )}
+                {(atCap || back > 0) && (
+                  <button className="cx-earlier-btn" onClick={() => openRendered(s.id, onOpen)}>
+                    full history ↗
+                  </button>
+                )}
+                {atCap && <span className="cx-earlier-note">card holds {cap} turns</span>}
+              </div>
             )}
-          </div>
+            {earlierX.map((x) => <ExchangeView key={x.key} x={x} dim />)}
+            <div ref={latestRef}>
+              <ExchangeView
+                x={latestX}
+                open={openWork}
+                onToggle={() => setOpenWork((o) => !o)}
+                running={running && !justSent}
+              />
+            </div>
+            {/* Optimistic echo: the digest round-trip can take seconds, and a
+                frozen card reads as "did that get lost?". */}
+            {justSent && sent && (
+              <>
+                <div className="cx-prompt">{sent.text}</div>
+                <div className="cx-running mono">working</div>
+              </>
+            )}
+          </>
+        ) : (
+          /* No transcript to read yet (never started, or a harness with no
+             trace): the digest still knows the last prompt and answer. */
+          <>
+            {promptText ? (
+              <div className="ov-prompt">{sent ? sent.text : (d?.lastPromptRaw || promptText)}</div>
+            ) : pending ? (
+              <div className="ov-prompt-skel"><span className="skel" style={{ width: '70%' }} /></div>
+            ) : (
+              <div className="ov-prompt ov-prompt-none">no prompt yet</div>
+            )}
+            {(metaBits.length > 0 || hist.length > 0) && (
+              <div className="ov-meta mono">
+                <span className="ov-meta-bits">{metaBits.join(' · ')}</span>
+                <span className="spacer" />
+                {hist.length > 0 && (
+                  <span className="ov-nav">
+                    {idx > 0 && <span className="ov-nav-pos">turn {totalTurns - idx}/{totalTurns}</span>}
+                    <button
+                      className="ov-nav-btn" title="Earlier turn" disabled={idx >= hist.length}
+                      onClick={() => setHistIdx(Math.min(idx + 1, hist.length))}
+                    >↑</button>
+                    <button
+                      className="ov-nav-btn" title="Later turn" disabled={idx === 0}
+                      onClick={() => setHistIdx(Math.max(idx - 1, 0))}
+                    >↓</button>
+                  </span>
+                )}
+              </div>
+            )}
+            {answerHtml && (
+              <div className="ov-answer-wrap">
+                <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: answerHtml }} />
+              </div>
+            )}
+            {showLiveProgress && <div className="ov-busy mono">running</div>}
+          </>
         )}
-
-        {answerHtml && (
-          <div className="ov-answer-wrap">
-            <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: answerHtml }} />
-          </div>
-        )}
-        {showLiveProgress && <div className="ov-busy mono">running</div>}
       </div>
 
       <div className="ov-live">

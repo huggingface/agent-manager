@@ -7,6 +7,7 @@ import '@xterm/xterm/css/xterm.css';
 import type { Cli, Session } from '../types';
 import { STATE_LABEL } from '../types';
 import Logo from './Logo';
+import ConversationView from './conversation/ConversationView';
 import { CloseGlyph, RefreshGlyph } from './icons';
 
 const THEMES: Record<'light' | 'dark', ITheme> = {
@@ -176,6 +177,11 @@ if (typeof window !== 'undefined') {
   }, true);
 }
 
+const RENDER_KEY = 'am:pane-mode:';
+const readRenderMode = (id: string): 'tui' | 'render' => {
+  try { return localStorage.getItem(`${RENDER_KEY}${id}`) === 'render' ? 'render' : 'tui'; } catch { return 'tui'; }
+};
+
 export default function TerminalPane({
   session, cli, theme, focused, visible, active, zoom = 100, dragId, isMobile, onDragActive, onFocus, onRename, onClose,
 }: {
@@ -203,6 +209,14 @@ export default function TerminalPane({
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
   const [preview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
+  // TUI ⇄ RENDER (docs/conversation-view.md §3.3). A view preference, per
+  // session, kept out of the store: it says nothing about the session itself.
+  const [mode, setMode] = useState<'tui' | 'render'>(() => readRenderMode(session.id));
+  useEffect(() => { setMode(readRenderMode(session.id)); }, [session.id]);
+  const showMode = (m: 'tui' | 'render') => {
+    setMode(m);
+    try { localStorage.setItem(`${RENDER_KEY}${session.id}`, m); } catch { /* private mode */ }
+  };
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
   const sendKeyRef = useRef<(d: string) => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
@@ -832,11 +846,27 @@ export default function TerminalPane({
             </span>
           )}
           <span className="ph-path" title={pathLabel}>{pathLabel}</span>
+          {/* The trace stops being a separate thing you open: it is this
+              session, read instead of watched. */}
+          <span className="seg ph-modes" onMouseDown={(e) => e.stopPropagation()}>
+            <button className={mode === 'tui' ? 'on' : ''} title="The terminal itself"
+              onClick={(e) => { e.stopPropagation(); showMode('tui'); }}>TUI</button>
+            <button className={mode === 'render' ? 'on' : ''} title="The conversation, rendered"
+              onClick={(e) => { e.stopPropagation(); showMode('render'); }}>RENDER</button>
+          </span>
           <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
       <div className="term-host" ref={frameRef}>
         <div className="term-fill" ref={hostRef} />
+        {/* RENDER draws OVER the terminal rather than replacing it: xterm needs
+            layout to fit, and detaching tmux costs a repaint and can trip the
+            handoff path. The terminal stays mounted and connected underneath. */}
+        {mode === 'render' && (
+          <div className="pane-render" onMouseDown={(e) => e.stopPropagation()}>
+            <ConversationView session={session} />
+          </div>
+        )}
       </div>
       {isMobile && conn === 'connected' && (
         // Control keys the phone keyboard lacks — needed for TUI menus (model

@@ -1430,7 +1430,11 @@ function pageOf(parsed, offset, limit) {
   // before the page holding it has been fetched.
   const userTurns = [];
   for (let i = 0; i < total; i++) if (parsed.messages[i].role === 'user') userTurns.push(i);
-  const from = Math.max(0, Math.min(offset | 0, total));
+  // A negative offset reads from the END — what any surface showing the tail of
+  // a conversation wants (the Overview card, RENDER mode) without first making a
+  // round trip just to learn `total`.
+  const off = offset | 0;
+  const from = off < 0 ? Math.max(0, total + off) : Math.max(0, Math.min(off, total));
   const to = Math.min(total, from + Math.max(1, Math.min(limit | 0 || 200, 500)));
   return {
     harness: parsed.harness, harnessLabel: parsed.harnessLabel, sessionId: parsed.sessionId,
