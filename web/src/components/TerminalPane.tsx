@@ -8,6 +8,8 @@ import type { Cli, Session } from '../types';
 import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import ConversationView from './conversation/ConversationView';
+import { onPaneMode, readPaneMode, writePaneMode } from '../lib/paneMode';
+import type { PaneMode } from '../lib/paneMode';
 import { CloseGlyph, RefreshGlyph } from './icons';
 
 const THEMES: Record<'light' | 'dark', ITheme> = {
@@ -177,11 +179,6 @@ if (typeof window !== 'undefined') {
   }, true);
 }
 
-const RENDER_KEY = 'am:pane-mode:';
-const readRenderMode = (id: string): 'tui' | 'render' => {
-  try { return localStorage.getItem(`${RENDER_KEY}${id}`) === 'render' ? 'render' : 'tui'; } catch { return 'tui'; }
-};
-
 export default function TerminalPane({
   session, cli, theme, focused, visible, active, zoom = 100, dragId, isMobile, onDragActive, onFocus, onRename, onClose,
 }: {
@@ -200,6 +197,11 @@ export default function TerminalPane({
   onClose: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  // Focus, unless the conversation is covering the terminal. Several paths grab
+  // it — becoming active, the header, the key bar — and some fire after the mode
+  // changes, so the guard lives with the call rather than with the switch.
+  const modeRef = useRef<PaneMode>('tui');
+  const focusTerm = () => { if (modeRef.current !== 'render') termRef.current?.focus(); };
   const frameRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const resyncRef = useRef<() => void>(() => {});
@@ -209,14 +211,14 @@ export default function TerminalPane({
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
   const [preview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
-  // TUI ⇄ RENDER (docs/conversation-view.md §3.3). A view preference, per
-  // session, kept out of the store: it says nothing about the session itself.
-  const [mode, setMode] = useState<'tui' | 'render'>(() => readRenderMode(session.id));
-  useEffect(() => { setMode(readRenderMode(session.id)); }, [session.id]);
-  const showMode = (m: 'tui' | 'render') => {
-    setMode(m);
-    try { localStorage.setItem(`${RENDER_KEY}${session.id}`, m); } catch { /* private mode */ }
-  };
+  // TUI ⇄ RENDER (docs/conversation-view.md §3.3).
+  const [mode, setMode] = useState<PaneMode>(() => readPaneMode(session.id));
+  useEffect(() => { setMode(readPaneMode(session.id)); }, [session.id]);
+  // Someone else can ask for RENDER on a pane that is already open — the card's
+  // "full history ↗" does exactly that, and a localStorage write alone is silent.
+  useEffect(() => onPaneMode(session.id, setMode), [session.id]);
+  const showMode = (m: PaneMode) => { setMode(m); writePaneMode(session.id, m); };
+  modeRef.current = mode;
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
   const sendKeyRef = useRef<(d: string) => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
@@ -244,7 +246,7 @@ export default function TerminalPane({
     if (!text) return;
     setPasteOpen(false);
     termRef.current?.paste(text);
-    termRef.current?.focus();
+    focusTerm();
   };
 
   // Phones have no Ctrl+V, so the key-bar needs an explicit paste. Two paths,
@@ -799,10 +801,18 @@ export default function TerminalPane({
     const t = setTimeout(() => {
       claimRef.current();
       resyncRef.current();
-      termRef.current?.focus();
+      focusTerm();
     }, 0);
     return () => clearTimeout(t);
   }, [active]);
+
+  // Under RENDER the terminal is covered but still mounted — and a mounted xterm
+  // with focus swallows every keystroke into the agent's TTY, invisibly. Hand
+  // focus back when the terminal is on top again.
+  useEffect(() => {
+    if (mode === 'render') termRef.current?.blur();
+    else if (focused) termRef.current?.focus();
+  }, [mode, focused]);
 
   // Focused panes tint toward THEIR agent's brand color, not the app accent.
   const tint = cli?.color;
@@ -822,7 +832,7 @@ export default function TerminalPane({
         draggable={!!dragId}
         onDragStart={dragId ? (e) => { e.dataTransfer.setData('text/plain', dragId); e.dataTransfer.effectAllowed = 'move'; onDragActive?.(true); } : undefined}
         onDragEnd={dragId ? () => onDragActive?.(false) : undefined}
-        onMouseDown={(e) => { if (!dragId) e.preventDefault(); onFocus?.(); termRef.current?.focus(); }}
+        onMouseDown={(e) => { if (!dragId) e.preventDefault(); onFocus?.(); focusTerm(); }}
       >
         <div className="ph-left">
           <Logo cli={session.cli} size={16} tint={tint} />
@@ -864,7 +874,7 @@ export default function TerminalPane({
             handoff path. The terminal stays mounted and connected underneath. */}
         {mode === 'render' && (
           <div className="pane-render" onMouseDown={(e) => e.stopPropagation()}>
-            <ConversationView session={session} />
+            <ConversationView session={session} paused={visible === false} />
           </div>
         )}
       </div>
@@ -881,7 +891,7 @@ export default function TerminalPane({
             <button
               key={label}
               className="tk-btn"
-              onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); sendKeyRef.current(seq); termRef.current?.focus(); }}
+              onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); sendKeyRef.current(seq); focusTerm(); }}
             >{label}</button>
           ))}
           {/* Unlike the key buttons this must NOT preventDefault: the clipboard
@@ -916,14 +926,14 @@ export default function TerminalPane({
             // Typed text (or a paste some browsers deliver as plain input) still
             // needs a way out; Enter sends, Shift+Enter keeps the newline.
             onKeyDown={(e) => {
-              if (e.key === 'Escape') { setPasteOpen(false); termRef.current?.focus(); }
+              if (e.key === 'Escape') { setPasteOpen(false); focusTerm(); }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 commitPaste((e.target as HTMLTextAreaElement).value);
               }
             }}
           />
-          <button className="tp-x" onClick={() => { setPasteOpen(false); termRef.current?.focus(); }}>cancel</button>
+          <button className="tp-x" onClick={() => { setPasteOpen(false); focusTerm(); }}>cancel</button>
         </div>
       )}
       {booting && preview && conn !== 'exited' && (

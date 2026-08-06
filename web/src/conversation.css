@@ -114,11 +114,6 @@
 }
 
 /* ---------- card: history grows upward, one exchange at a time ---------- */
-/* The card body is the scroll region — sized by the window it is in, never by a
-   vh number: a phone frame is a container, and 60vh inside one leaves the card
-   two thirds empty. The frame gives it `flex: 1; min-height: 0; overflow-y: auto`
-   (styles.css .ovw-win); this only adds rhythm. */
-.cx-card .ov-body { gap: 12px; overscroll-behavior: contain; }
 .cx-earlier { display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 11px; }
 .cx-earlier-btn {
   background: none; border: none; padding: 0; font: inherit; font-size: 10.5px;
@@ -137,11 +132,6 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 
 /* ---------- RENDER mode: the same thing, stacked ---------- */
 .cxv { display: flex; flex-direction: column; min-height: 0; }
-.cxv-head { display: flex; align-items: center; gap: 8px; }
-.cxv-head .spacer { flex: 1; }
-.cxv-title { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cxv-modes { flex: none; }
-.cxv-modes button { padding: 2px 9px; font-size: 10px; letter-spacing: 0.06em; }
 
 .cxv-bar {
   /* wraps at ANY width, not behind a media query: a pane is a container, and

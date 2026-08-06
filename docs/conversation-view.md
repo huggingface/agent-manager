@@ -143,6 +143,11 @@ Rules that keep this from becoming the ugly viewer in a small box:
   the scroll region, sized by the window (`flex: 1; min-height: 0; overflow-y: auto`) — **never**
   by a `vh` number, which is measured against the viewport and leaves a full-screen phone card
   two-thirds empty.
+- **Only the card you opened reads the trace.** Inline in the Overview list a card is a
+  summary — one prompt, one clamped answer — and the digest already has that. Reading the trace
+  per visible agent, and polling it every three seconds for the working ones, would turn the
+  Overview from one `/api/meta` poll into one transcript read per row. The window (and RENDER)
+  is where the middle gets fetched.
 - **A card says nothing the surface around it already says.** No turn number (there is one turn),
   no clock (its header carries `·6m`), no model, no harness. In the viewer the same line's right
   half adds `turn 6/13` and the time, and names the model *only* when that turn's model differs
@@ -204,6 +209,15 @@ The pane header gets a two-state segmented control, next to the title:
   the nearest positioned ancestor and lands a few rows off.
 - Vocabulary: a **turn** is one exchange, a **message** is a raw transcript row. Each turn's meta
   line says `turn 6/13`, so the bar counts the same things the reader does.
+- **The terminal must not keep the keyboard** while RENDER covers it. A mounted xterm with focus
+  swallows keystrokes into the agent's TTY, invisibly — and several paths grab focus back (the
+  pane becoming active, the header, the key bar), some of them *after* the mode changes, so the
+  guard belongs at each call rather than at the switch.
+- **A failed refresh must not blank the conversation.** The poll's error is a strip above the
+  turns, not a replacement for them: this mount answers `EIO` now and then, and going stale for
+  three seconds beats losing your place mid-read.
+- **A search survives a refresh.** Only a new query jumps to the first hit; a poll landing keeps
+  your position among the matches.
 - **While the agent is working the viewer follows the tail**, and stops the moment you scroll up
   (`< 48px from the bottom` is "still following"). A viewer that yanks you back down on every
   tool call is unusable while a task runs; one that never moves makes you chase it.
@@ -389,16 +403,20 @@ Built (this branch):
 3. `pageOf()` takes a negative offset — "the last N turns" without a round trip to learn `total`
    (`server/test/trace-tail.test.mjs`).
 4. The session pane gets TUI ⇄ RENDER. RENDER draws over the terminal, which stays mounted and
-   connected; the mode is a per-session view preference in `localStorage`.
+   connected but loses the keyboard; the mode is a per-session view preference in `localStorage`
+   (`web/src/lib/paneMode.ts`), and its event reaches a pane that is already open — which is what
+   the card's "full history ↗" needs.
+5. Tests for the one piece of judgement in the renderer — what counts as the answer, and what
+   stays in the work (`web/test/exchanges.test.mjs`, `npm test` in `web/`).
 
 Not yet, in the order I would do it:
 
-5. `head.prompts[]` (§5) — index, first line and timestamp per prompt, so a surface can draw the
+6. `head.prompts[]` (§5) — index, first line and timestamp per prompt, so a surface can draw the
    skeleton and label "show previous turn" before fetching the page that holds it.
-6. The sidebar loses its trace buttons and `openTrace`; share moves into the pane header (§3.4).
-7. Windowing by exchange in RENDER mode: a collapsed turn is 2–3 rows, so the DOM stays small,
+7. The sidebar loses its trace buttons and `openTrace`; share moves into the pane header (§3.4).
+8. Windowing by exchange in RENDER mode: a collapsed turn is 2–3 rows, so the DOM stays small,
    `head.prompts[]` gives the skeleton up front, and only an opened turn needs its page. The
    measured-height machinery in `TraceView` is reused as-is — what changes is what a "row" means.
    Until then RENDER reads the last 400 turns in one request.
-8. The mobile card sizing block (§3.2) — the lab's `.lab-mfix` mirror of it is not the real
+9. The mobile card sizing block (§3.2) — the lab's `.lab-mfix` mirror of it is not the real
    `@media` rule, and the real one has not landed.

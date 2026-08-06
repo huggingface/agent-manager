@@ -24,8 +24,10 @@ const fmtNum = (n: number) => n.toLocaleString();
 const fmtUsage = (u?: { in: number; out: number } | null) =>
   (u ? `${fmtTok(u.in)}↓ ${fmtTok(u.out)}↑` : '');
 
-export default function ConversationView({ session, onHandover }: {
+export default function ConversationView({ session, paused, onHandover }: {
   session: Session;
+  /** The pane is off-screen: stop asking the server for a trace nobody sees. */
+  paused?: boolean;
   onHandover?: () => void;
 }) {
   const [page, setPage] = useState<TracePage | null>(null);
@@ -36,7 +38,7 @@ export default function ConversationView({ session, onHandover }: {
   const scroller = useRef<HTMLDivElement | null>(null);
   const rows = useRef(new Map<number, HTMLElement>());
 
-  const live = session.state === 'working';
+  const live = session.state === 'working' && !paused;
 
   const load = useCallback(async () => {
     try {
@@ -45,19 +47,24 @@ export default function ConversationView({ session, onHandover }: {
       setPage(p);
       setError('');
     } catch (e) {
+      // A failed REFRESH must not throw away the conversation on screen: this
+      // mount answers EIO now and then, and blanking mid-read is worse than
+      // going stale for three seconds.
       setError(e instanceof Error ? e.message : 'could not read this trace');
     }
   }, [session.id]);
 
-  useEffect(() => { setPage(null); load(); }, [load]);
+  useEffect(() => { setPage(null); setError(''); load(); }, [load]);
   // While the agent works, the trace is still being written.
   useEffect(() => {
     if (!live) return undefined;
     const h = window.setInterval(load, POLL_MS);
     return () => window.clearInterval(h);
   }, [live, load]);
+  // Coming back into view, catch up at once rather than waiting for a tick.
+  useEffect(() => { if (!paused && page) load(); }, [paused]);  // eslint-disable-line react-hooks/exhaustive-deps
 
-  const turns: TraceTurn[] = page?.turns || [];
+  const turns: TraceTurn[] = useMemo(() => page?.turns || [], [page]);
   const exchanges = useMemo(() => splitExchanges(turns), [turns]);
   const q = query.trim().toLowerCase();
   const shown = useMemo(() => {
@@ -77,12 +84,20 @@ export default function ConversationView({ session, onHandover }: {
     el.classList.add('on');
     el.scrollIntoView({ block: 'center', behavior: 'smooth' });
   };
+  // Recount after every render that can change the marks — but a poll landing
+  // must not throw you back to the first hit while you are walking them, so only
+  // a NEW query jumps.
+  const lastQuery = useRef(q);
   useEffect(() => {
     const found = marks();
+    const fresh = lastQuery.current !== q;
+    lastQuery.current = q;
     setHits(found.length);
-    setHit(0);
-    found.forEach((m) => m.classList.remove('on'));
-    if (found.length) goMark(found, 0);
+    if (!found.length) { setHit(0); return; }
+    const i = fresh ? 0 : Math.min(hit, found.length - 1);
+    setHit(i);
+    if (fresh) goMark(found, i);
+    else found[i]?.classList.add('on');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q, shown]);
 
@@ -123,8 +138,7 @@ export default function ConversationView({ session, onHandover }: {
     if (el && live && stick.current) el.scrollTop = el.scrollHeight;
   }, [turns, live]);
 
-  if (error) return <div className="cxv-empty mono">{error}</div>;
-  if (!page) return <div className="cxv-empty mono">reading the trace…</div>;
+  if (!page) return <div className="cxv-empty mono">{error || 'reading the trace…'}</div>;
 
   return (
     <div className="cxv">
@@ -156,8 +170,11 @@ export default function ConversationView({ session, onHandover }: {
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
         }}>
         <div className="cxv-col">
+          {error && <div className="cxv-msg bad mono">{error} · showing the last read</div>}
           {(page.truncated || page.offset > 0) && (
-            <div className="cxv-msg mono">earlier turns are not shown</div>
+            <div className="cxv-msg mono">
+              {page.offset > 0 ? `${fmtNum(page.offset)} earlier messages are not shown` : 'earlier turns are not shown'}
+            </div>
           )}
           {page.note && <div className="cxv-msg mono">{page.note}</div>}
           {q && (

@@ -7,6 +7,7 @@ import { isPassive } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import Logo from './Logo';
 import ExchangeView from './conversation/Exchange';
+import { writePaneMode } from '../lib/paneMode';
 import { splitExchanges } from './conversation/exchanges';
 
 const fmtAgo = (ts: number) => {
@@ -28,6 +29,7 @@ const bucket = (state: SessionState): OverviewFilter =>
 const CARD_TAIL = 120;
 const CARD_TURNS = 5;   // past this the card is the wrong tool, and says so
 const POLL_MS = 3_000;
+const MISSING_MS = 30_000;  // a session with no trace: check back, but rarely
 
 /**
  * The tail of a session's conversation (docs/conversation-view.md §5).
@@ -37,9 +39,14 @@ const POLL_MS = 3_000;
  * before the last prompt. So the card reads the trace itself, and falls back to
  * the digest when there is no transcript yet (a session that never started, an
  * unsupported harness).
+ *
+ * `on` is false for the card inline in the list: a summary does not need the
+ * middle, and one trace read per visible agent — every three seconds for the
+ * working ones — is a lot to spend on something nobody asked to see.
  */
-function useConversationTail(id: string, live: boolean) {
+function useConversationTail(id: string, on: boolean, live: boolean) {
   const [turns, setTurns] = useState<TraceTurn[] | null>(null);
+  // No transcript for this session: back off hard rather than 404 on a loop.
   const [missing, setMissing] = useState(false);
   const load = useCallback(async () => {
     try {
@@ -50,19 +57,23 @@ function useConversationTail(id: string, live: boolean) {
       setMissing(true);
     }
   }, [id]);
-  useEffect(() => { setTurns(null); setMissing(false); load(); }, [load]);
+  useEffect(() => {
+    setTurns(null);
+    setMissing(false);
+    if (on) load();
+  }, [load, on]);
   // While the agent works the transcript is still being written.
   useEffect(() => {
-    if (!live) return undefined;
-    const h = window.setInterval(load, POLL_MS);
+    if (!on || !live) return undefined;
+    const h = window.setInterval(load, missing ? MISSING_MS : POLL_MS);
     return () => window.clearInterval(h);
-  }, [live, load]);
+  }, [on, live, missing, load]);
   return { turns, missing };
 }
 
 /** Opening the pane on this session, in RENDER mode (§3.3 keeps it per session). */
 const openRendered = (id: string, onOpen: (sid: string) => void) => {
-  try { localStorage.setItem(`am:pane-mode:${id}`, 'render'); } catch { /* private mode */ }
+  writePaneMode(id, 'render');   // reaches a pane that is already open, too
   onOpen(id);
 };
 
@@ -117,7 +128,7 @@ export function Card({ s, color, pending, isMobile, onOpen, onClose }: {
   const idx = Math.min(histIdx, hist.length);
   const entry = idx > 0 ? hist[idx - 1] : null;
 
-  const { turns } = useConversationTail(s.id, running || awaiting);
+  const { turns } = useConversationTail(s.id, windowed, running || awaiting);
   const exchanges = useMemo(() => (turns ? splitExchanges(turns) : []), [turns]);
   const cap = windowed ? CARD_TURNS : 1;
   const shownX = exchanges.slice(Math.max(0, exchanges.length - 1 - back));
