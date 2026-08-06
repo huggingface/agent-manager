@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import pty from 'node-pty';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import { remoteState, setPaused } from './remote.js';
 import { cliById, isRemote, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
@@ -703,18 +704,21 @@ function codexRolloutsSince(sinceMs) {
 // truncate the JSON and make every capture silently fail.
 // The first line of a transcript that records a `cwd`, with its timestamp.
 // Bounded on lines AND bytes: a file-history-snapshot line can be megabytes.
-function transcriptHead(p) {
-  // openSync INSIDE the try: on the bucket mount a transcript can rotate away
+// Async, like the rest of the claude scan: every read here is against the FUSE
+// bucket, where a cold one costs tens of ms, and this is on the one event loop
+// that carries every session's PTY. See claudeTranscriptsSince.
+async function transcriptHead(p) {
+  // open() INSIDE the try: on the bucket mount a transcript can rotate away
   // between the stat that found it and this open, and the only caller runs in a
   // setTimeout where a throw is unhandled.
-  let fd = null;
+  let fh = null;
   try {
-    fd = fs.openSync(p, 'r');
+    fh = await fsp.open(p, 'r');
     const CHUNK = 65536, MAX_BYTES = 512 * 1024, MAX_LINES = 64;
     let carry = '', pos = 0, lines = 0;
     while (pos < MAX_BYTES && lines < MAX_LINES) {
       const b = Buffer.alloc(Math.min(CHUNK, MAX_BYTES - pos));
-      const n = fs.readSync(fd, b, 0, b.length, pos);
+      const { bytesRead: n } = await fh.read(b, 0, b.length, pos);
       if (!n) break;
       pos += n;
       carry += b.toString('utf8', 0, n);
@@ -731,7 +735,7 @@ function transcriptHead(p) {
       if (n < b.length) break; // EOF
     }
     return null;
-  } catch { return null; } finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } }
+  } catch { return null; } finally { if (fh) { try { await fh.close(); } catch {} } }
 }
 
 function firstLine(p) {
@@ -854,47 +858,70 @@ function claudeProjectDirs() {
 }
 
 // Every transcript, newest first, touched since `sinceMs`.
-function claudeTranscriptsSince(sinceMs) {
+//
+// Async, and that is the point rather than a style choice. This is a readdir per
+// project dir plus a stat per transcript, and on the Space CLAUDE_CONFIG_DIR is
+// on the FUSE bucket. Measured there over 32 transcripts: ~3ms when the mount's
+// attribute cache is warm, 1.1-1.3s when it is cold (~37ms per stat round trip).
+// The sync version spent all of that ON the one event loop that also carries
+// every session's PTY, so a cold scan was a hard freeze of every terminal — at
+// the REPIN_MS beat, once per live pane, every ~20 seconds.
+//
+// The awaited version does the same I/O for the same wall time, but on the
+// libuv threadpool: measured over 302 files, 11.6s of wall time for 26ms of
+// event-loop block. Sequential rather than Promise.all on purpose — 32 parallel
+// FUSE stats would saturate the 4-thread pool and push every other fs
+// operation in the process behind them, and nothing here is waiting on the
+// result.
+async function claudeTranscriptsSince(sinceMs) {
   const out = [];
   for (const proj of claudeProjectDirs()) {
     let dirs = [];
-    try { dirs = fs.readdirSync(proj, { withFileTypes: true }); } catch { continue; }
+    try { dirs = await fsp.readdir(proj, { withFileTypes: true }); } catch { continue; }
     for (const d of dirs) {
       if (!d.isDirectory()) continue;
       let files = [];
-      try { files = fs.readdirSync(path.join(proj, d.name)); } catch { continue; }
+      try { files = await fsp.readdir(path.join(proj, d.name)); } catch { continue; }
       for (const f of files) {
         if (!f.endsWith('.jsonl')) continue;
         const p = path.join(proj, d.name, f);
-        try { const st = fs.statSync(p); if (st.mtimeMs >= sinceMs) out.push({ p, m: st.mtimeMs }); } catch {}
+        try { const st = await fsp.stat(p); if (st.mtimeMs >= sinceMs) out.push({ p, m: st.mtimeMs }); } catch {}
       }
     }
   }
   return out.sort((a, b) => b.m - a.m);
 }
 
-const transcriptExists = (uuid) =>
-  !!uuid && claudeProjectDirs().some((proj) => {
+// Async for the same reason as claudeTranscriptsSince — plain loops rather than
+// .some(), which cannot await a predicate. Only reached when a re-pin is about to
+// happen, and only to say which of the two reasons it is.
+async function transcriptExists(uuid) {
+  if (!uuid) return false;
+  for (const proj of claudeProjectDirs()) {
     let dirs = [];
-    try { dirs = fs.readdirSync(proj, { withFileTypes: true }); } catch { return false; }
-    return dirs.some((d) => {
-      if (!d.isDirectory()) return false;
-      try { return fs.readdirSync(path.join(proj, d.name)).some((f) => f.startsWith(uuid)); } catch { return false; }
-    });
-  });
+    try { dirs = await fsp.readdir(proj, { withFileTypes: true }); } catch { continue; }
+    for (const d of dirs) {
+      if (!d.isDirectory()) continue;
+      try {
+        const files = await fsp.readdir(path.join(proj, d.name));
+        if (files.some((f) => f.startsWith(uuid))) return true;
+      } catch { /* dir vanished mid-walk */ }
+    }
+  }
+  return false;
+}
 
 // A transcript's opening cwd/timestamp never changes once written, and the
 // filename IS the conversation id, so a path is never reused for a different
 // conversation. That makes the head safe to remember — which matters because the
-// watcher rescans every REPIN_MS for the life of every session, and on the Space
-// these are synchronous reads against a FUSE mount. Without this, every tick
-// re-read every transcript on disk and would show up as event-loop lag.
+// watcher rescans for the life of every session, and on the Space these are reads
+// against a FUSE mount. Without this, every tick re-read every transcript on disk.
 const headMemo = new Map(); // transcript path -> head
 
-function transcriptHeadCached(p) {
+async function transcriptHeadCached(p) {
   const hit = headMemo.get(p);
   if (hit) return hit;
-  const head = transcriptHead(p);
+  const head = await transcriptHead(p);
   // Only remember a definite answer: null can just mean the file has no cwd line
   // yet (still being written), and caching that would poison it for the process.
   if (head) {
@@ -909,10 +936,10 @@ function transcriptHeadCached(p) {
 // what distinguishes a /clear-spawned successor from the thread it replaced —
 // both keep receiving mtime updates, only the successor is newly born.
 // Exported for server/test/repin.test.mjs.
-export function claudeCandidate(sessionId, workdir, sinceMs) {
+export async function claudeCandidate(sessionId, workdir, sinceMs) {
   const claimed = new Set(list().filter((s) => s.id !== sessionId && s.sessionUuid).map((s) => s.sessionUuid));
   let best = null;
-  for (const c of claudeTranscriptsSince(sinceMs)) {
+  for (const c of await claudeTranscriptsSince(sinceMs)) {
     const uuid = path.basename(c.p).replace(/\.jsonl$/, '');
     if (claimed.has(uuid)) continue;
     // The cwd is NOT on the first line: a transcript opens with metadata lines
@@ -920,7 +947,7 @@ export function claudeCandidate(sessionId, workdir, sinceMs) {
     // that have no cwd, and only the conversation lines carry one — line 4 or 5
     // in every real transcript measured. Reading line 1 made this check always
     // fail, so the re-pin could never actually claim anything.
-    const head = transcriptHeadCached(c.p);
+    const head = await transcriptHeadCached(c.p);
     // Only claim a conversation started in THIS session's folder.
     if (!head || head.cwd !== workdir) continue;
     const start = Date.parse(head.timestamp || '') || 0;
@@ -976,16 +1003,23 @@ function takeClaudeBreadcrumb(sessionId) {
   try { return JSON.parse(raw); } catch { return null; }
 }
 
-// The pane's root process (what tmux spawned). After `exec claude` this IS
-// claude; in the `claude --session-id … || exec claude` branch claude is a
-// child of it. Either way the hook's $CLAUDE_PID must descend from it.
-function paneRootPid(sessionId) {
-  try {
-    const out = execFileSync('tmux', ['list-panes', '-t', tmuxName(sessionId), '-F', '#{pane_pid}'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: TERM_ENV });
-    const pid = parseInt(out.trim().split('\n')[0], 10);
-    return Number.isInteger(pid) && pid > 1 ? pid : null;
-  } catch { return null; }
+// The pane's root process — the PTY this server spawned for the session. After
+// `exec claude` this IS claude; in the `claude --session-id … || exec claude`
+// branch claude is a child of it. Either way the hook's $CLAUDE_PID must descend
+// from it.
+//
+// This used to ask tmux for `#{pane_pid}`. Replacing tmux with a server-held grid
+// left the call behind referencing two identifiers that no longer exist here
+// (`tmuxName`, `execFileSync`), so it threw a ReferenceError into its own bare
+// `catch` on every tick and returned null. That failed EVERY breadcrumb as 'pid
+// not in pane' and silently disabled the whole hook path — observed live: the
+// only breadcrumb outcome in the Space logs was `breadcrumb rejected (pid not in
+// pane)`. The server owns the PTY now, so the pane root is a property read and
+// there is no subprocess per tick either.
+// Exported for server/test/repin.test.mjs.
+export function paneRootPid(sessionId) {
+  const pid = hosts.get(sessionId)?.pty?.pid;
+  return Number.isInteger(pid) && pid > 1 ? pid : null;
 }
 
 // Walk /proc ppid links. comm in /proc/<pid>/stat may contain spaces and
@@ -1058,17 +1092,65 @@ export function installClaudeRepinHook(hookCmd = '/app/scripts/am-repin-hook.sh'
   } catch (e) { console.warn(`[claude] repin hook install failed: ${e.message}`); return false; }
 }
 
+// Once the pane's SessionStart hook has proven itself, the transcript scan is a
+// backstop rather than the mechanism, so it runs on this cadence instead of
+// REPIN_MS. Now that the scan is awaited rather than synchronous this is no longer
+// about event-loop block time — it is only about not walking the bucket 3x a
+// minute per pane for an answer the breadcrumb already gave. So it can be short:
+// this also bounds how long a pin stays stale if a breadcrumb is ever LOST (the
+// hook fired but its crumb never reached us), and that staleness costs one late
+// Overview digest. Note the bound is this PLUS up to one beat, not exactly this:
+// only a tick can scan, ticks come every REPIN_MS, and each one is armed after the
+// previous finishes — so the first tick at or past the backstop can be as late as
+// SCAN_BACKSTOP_MS + REPIN_MS, plus the new scan's own duration.
+const SCAN_BACKSTOP_MS = 60_000;
+
+/**
+ * Should this tick run the transcript scan?
+ *
+ * Before the hook has proven itself the cadence is unchanged, so a pane with no
+ * working hook (hook newly installed, crumb lost, a harness with no hook at all)
+ * keeps the pre-existing behaviour and nothing regresses. Pure so the cadence is
+ * testable without a live pane; exported for server/test/repin.test.mjs.
+ */
+export function claudeScanDue({ hookProven, lastScanAt }, now = Date.now()) {
+  if (!hookProven) return true;
+  return now - (lastScanAt || 0) >= SCAN_BACKSTOP_MS;
+}
+
 function scheduleClaudeCapture(session, workdir) {
   // A relaunch restarts the watch with a fresh window, so `since` can't drift
   // older and start admitting pre-relaunch threads as candidates.
   const prev = claudeCapturing.get(session.id);
   if (prev) clearTimeout(prev);
   const since = Date.now() - 2000;
+  // The host this watch belongs to. Clearing `prev` above only cancels a PENDING
+  // beat; now that a tick awaits, one can be mid-scan when a relaunch calls this
+  // again, and that tick still has a rearm ahead of it — see rearm.
+  const host = hosts.get(session.id);
   let warnedShared = false;
+  // Has a breadcrumb from this pane ever named this pane's OWN conversation? That
+  // is what demotes the scan to a backstop — see claudeScanDue.
+  let hookProven = false;
+  let lastScanAt = 0;
 
-  const tick = () => {
-    if (!isRunning(session.id)) { claudeCapturing.delete(session.id); return; }
-    const pinned = (list().find((s) => s.id === session.id) || session).sessionUuid;
+  // Read fresh, never captured: the scan awaits, so anything read before it is a
+  // stale view of the world by the time it returns.
+  const currentPin = () => (list().find((s) => s.id === session.id) || session).sessionUuid;
+  const claimedByOthers = () =>
+    new Set(list().filter((s) => s.id !== session.id && s.sessionUuid).map((s) => s.sessionUuid));
+  // Is this watch still the pane's? A relaunch spawns a new host and a new watch,
+  // and that one owns the pin from then on.
+  const stillOurs = () => hosts.get(session.id) === host;
+
+  // Returns whether to keep watching. Rearming is the caller's job (see `run`):
+  // the scan awaits now, so a throw lands as a rejected promise rather than as an
+  // exception in a setTimeout callback, and exactly one place deciding the next
+  // beat is what keeps a failed tick from either killing the watcher or arming
+  // two timers.
+  const tick = async () => {
+    if (!isRunning(session.id)) { claudeCapturing.delete(session.id); return false; }
+    const pinned = currentPin();
 
     // Breadcrumb first: the pane's own SessionStart hook told us which
     // conversation it is on, so no guessing — and no shared-folder refusal —
@@ -1079,16 +1161,19 @@ function scheduleClaudeCapture(session, workdir) {
       const verdict = breadcrumbVerdict(crumb, session.id, {
         workdir,
         pinned,
-        claimed: new Set(list().filter((s) => s.id !== session.id && s.sessionUuid).map((s) => s.sessionUuid)),
+        claimed: claimedByOthers(),
         pidTrusted: !!root && pidHasAncestor(crumb.claudePid, root),
       });
+      // A crumb that named this pane's own conversation — whether it moved the
+      // pin or was already on it (the `resume` no-op) — proves the hook fires
+      // here, so the scan can step down to a backstop. A crumb rejected for any
+      // other reason proves nothing about this pane: 'pid not in pane' is a
+      // nested `claude -p`, 'cwd mismatch' is someone else's run.
+      if (verdict.repin || verdict.why === 'already pinned') hookProven = true;
       if (verdict.repin) {
         console.warn(`[claude] re-pinning ${session.id}: ${pinned} -> ${verdict.repin} (breadcrumb, source: ${crumb.payload?.source || '?'})`);
         update(session.id, { sessionUuid: verdict.repin });
-        const t = setTimeout(tick, REPIN_MS);
-        if (t.unref) t.unref();
-        claudeCapturing.set(session.id, t);
-        return;
+        return true;
       }
       if (verdict.why !== 'already pinned') console.warn(`[claude] ${session.id}: breadcrumb rejected (${verdict.why})`);
     }
@@ -1098,22 +1183,74 @@ function scheduleClaudeCapture(session, workdir) {
         warnedShared = true;
         console.warn(`[claude] ${session.id}: folder shared with another live session — following /clear only via breadcrumbs here`);
       }
-    } else {
-      const hit = claudeCandidate(session.id, workdir, since);
-      if (hit && hit.uuid !== pinned) {
-        const why = transcriptExists(pinned) ? 'conversation was replaced (/clear)' : '--session-id was not honoured';
-        console.warn(`[claude] re-pinning ${session.id}: ${pinned} -> ${hit.uuid} (${why})`);
-        update(session.id, { sessionUuid: hit.uuid });
+    } else if (claudeScanDue({ hookProven, lastScanAt })) {
+      const hit = await claudeCandidate(session.id, workdir, since);
+      // Stamped AFTER the scan resolves, not before it. Nothing can overlap it —
+      // the next beat is armed only once this tick returns — and stamping first
+      // meant a scan that threw was not retried on the next beat the way `run`
+      // logs, but skipped until the backstop expired.
+      lastScanAt = Date.now();
+      // Every input that decision rests on was read BEFORE the scan awaited, so
+      // re-read them rather than mutating a world that has moved on:
+      //   - this pane may have been relaunched, and the new watch owns the pin now
+      //     (its `since` is newer, so `hit` may be pre-relaunch and wrong);
+      //   - another claude pane may have gone live in this folder, which is
+      //     precisely the case folderIsShared refuses to guess at — and it was
+      //     false when this tick started;
+      //   - `hit` may since have been pinned by the session it belongs to;
+      //     claudeCandidate snapshots `claimed` before it walks the disk, so a
+      //     conversation that was unclaimed then can be claimed now. Taking it
+      //     anyway would make the owner's own breadcrumb bounce off 'claimed by
+      //     another session' for good.
+      if (hit && stillOurs() && !claimedByOthers().has(hit.uuid)
+          && !folderIsShared(session.id, workdir, 'claude')) {
+        const pin = currentPin();
+        if (hit.uuid !== pin) {
+          const why = await transcriptExists(pin) ? 'conversation was replaced (/clear)' : '--session-id was not honoured';
+          // transcriptExists awaited too, so confirm ownership once more before
+          // the write itself.
+          if (stillOurs()) {
+            console.warn(`[claude] re-pinning ${session.id}: ${pin} -> ${hit.uuid} (${why})`);
+            update(session.id, { sessionUuid: hit.uuid });
+          }
+        }
       }
     }
-    const t = setTimeout(tick, REPIN_MS);
-    if (t.unref) t.unref();
-    claudeCapturing.set(session.id, t);
+    return true;
   };
 
-  const t0 = setTimeout(tick, 5000);
-  if (t0.unref) t0.unref();
-  claudeCapturing.set(session.id, t0);
+  // One rearm per tick, whatever the tick did. A tick that throws logs and keeps
+  // the watcher alive: dropping it would silently stop following /clear for the
+  // rest of the pane's life, which is the failure this whole mechanism exists for.
+  const run = () => tick()
+    .catch((e) => {
+      console.warn(`[claude] ${session.id}: repin tick failed (${e && e.message}) — retrying next beat`);
+      return isRunning(session.id);
+    })
+    .then((again) => { if (again) rearm(); else claudeCapturing.delete(session.id); });
+
+  let armed = null;
+  function rearm(ms = REPIN_MS) {
+    // This watch is no longer the pane's: either a relaunch during an in-flight
+    // scan started a fresh one — which already owns the map entry, and arming here
+    // would leave BOTH chains beating with only one reachable by clearTimeout, the
+    // orphan keeping its own hookProven/lastScanAt and its own pre-relaunch
+    // `since` — or the pane simply exited and nothing replaced it. Same
+    // host-identity guard the grid timers use.
+    if (!stillOurs()) {
+      // Drop OUR entry on the way out. A fired Timeout still holds its callback
+      // (node does not release `_onTimeout`), so leaving it in the map retains this
+      // closure and the disposed host until the session next starts. Only ours
+      // though: a newer watch's timer has to survive untouched.
+      if (claudeCapturing.get(session.id) === armed) claudeCapturing.delete(session.id);
+      return;
+    }
+    armed = setTimeout(run, ms);
+    if (armed.unref) armed.unref();
+    claudeCapturing.set(session.id, armed);
+  }
+
+  rearm(5000);
 }
 
 const opencodeCapturing = new Map(); // id -> pending re-pin timer

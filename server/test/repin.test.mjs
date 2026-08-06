@@ -56,25 +56,25 @@ const B = 'bbbbbbbb-0000-0000-0000-000000000002';
 console.log('\n/clear: the later-born conversation in this folder wins');
 transcript(A, { startMs: NOW });
 transcript(B, { startMs: NOW + 60_000 });
-check('follows the successor', runner.claudeCandidate('s1', WORKDIR, SINCE)?.uuid, B);
+check('follows the successor', (await runner.claudeCandidate('s1', WORKDIR, SINCE))?.uuid, B);
 
 console.log('\na conversation in a different folder is never claimed');
 transcript('cccccccc-0000-0000-0000-000000000003',
   { cwd: path.join(cfg.WORKSPACES_DIR, 'proj-b'), startMs: NOW + 120_000, projDir: '-proj-b' });
-check('other folder ignored', runner.claudeCandidate('s1', WORKDIR, SINCE)?.uuid, B);
+check('other folder ignored', (await runner.claudeCandidate('s1', WORKDIR, SINCE))?.uuid, B);
 
 console.log('\nan older thread that merely received writes is not a successor');
 transcript('dddddddd-0000-0000-0000-000000000004', { startMs: NOW - 3600_000, mtimeMs: NOW + 180_000 });
 check('pre-window thread rejected despite a fresh mtime',
-  runner.claudeCandidate('s1', WORKDIR, SINCE)?.uuid, B);
+  (await runner.claudeCandidate('s1', WORKDIR, SINCE))?.uuid, B);
 
 console.log('\na conversation another session has pinned is left to it');
 const rival = sessions.create({ name: 'rival', cli: 'claude', path: 'proj-a' });
 sessions.update(rival.id, { sessionUuid: B });
-check('claimed uuid skipped', runner.claudeCandidate('s1', WORKDIR, SINCE)?.uuid, A);
+check('claimed uuid skipped', (await runner.claudeCandidate('s1', WORKDIR, SINCE))?.uuid, A);
 
 console.log('\nnothing new in the window means no re-pin');
-check('no candidate', runner.claudeCandidate('s1', path.join(cfg.WORKSPACES_DIR, 'empty'), SINCE), null);
+check('no candidate', await runner.claudeCandidate('s1', path.join(cfg.WORKSPACES_DIR, 'empty'), SINCE), null);
 
 // ---------- breadcrumbs: attribution the scan cannot do in shared folders ----------
 const E = 'eeeeeeee-0000-0000-0000-000000000005';
@@ -108,6 +108,55 @@ check('claimed uuid left to its session',
 check('malformed session_id rejected',
   verdict(crumb({ payload: { session_id: 'not-a-uuid', cwd: WORKDIR } }), facts()).repin, null);
 check('null crumb rejected', verdict(null, facts()).repin, null);
+
+// ---------- the pane root: the fact every breadcrumb is trusted against ----------
+// paneRootPid used to shell out to `tmux list-panes`. The libghostty migration
+// removed tmux but left the call, referencing identifiers that no longer exist —
+// so it threw into its own bare catch, returned null, and every breadcrumb was
+// rejected as 'pid not in pane'. A null pane root disables the hook path wholesale,
+// so this asserts against a REAL running session rather than a mock.
+console.log('\nthe pane root is the session PTY the server holds');
+check('unknown session has no pane root', runner.paneRootPid('nope'), null);
+// Spawning a real pane needs libghostty's native addon, which not every checkout
+// has built. Skip rather than throw out of ensureRunning: an unhandled throw here
+// aborts the process and takes the cadence and installer checks below with it,
+// which reads as a broken test run rather than a missing optional dependency.
+if (!runner.ghosttyReady()) {
+  console.log('  SKIP  live pane checks (libghostty-vt unavailable)');
+} else {
+  const live = sessions.create({ name: 'live', cli: 'shell', path: 'proj-a' });
+  try {
+    runner.ensureRunning(live, 80, 24);
+    const liveRoot = runner.paneRootPid(live.id);
+    check('live session has a pane root', Number.isInteger(liveRoot) && liveRoot > 1, true);
+    check('the pane root is a live process', fs.existsSync(`/proc/${liveRoot}`), true);
+  } finally {
+    runner.stop(live.id);
+  }
+}
+
+// ---------- scan cadence: the breadcrumb is the mechanism, the scan a backstop ----------
+// With the scan awaited the cadence is no longer about event-loop block time — it
+// is about not walking the bucket 3x a minute per pane for an answer the
+// breadcrumb already gave. So the backstop is a minute, and a minute is also the
+// longest a pin can stay stale if a crumb is ever lost.
+const MINUTE = 60_000;
+console.log('\nwithout a proven hook the scan runs every tick (unchanged)');
+check('no proof: due immediately', runner.claudeScanDue({ hookProven: false, lastScanAt: NOW }, NOW), true);
+check('no proof: still due 20s later',
+  runner.claudeScanDue({ hookProven: false, lastScanAt: NOW }, NOW + 20_000), true);
+
+console.log('\na proven hook steps the scan down to the backstop cadence');
+check('proven: not due on the next beat',
+  runner.claudeScanDue({ hookProven: true, lastScanAt: NOW }, NOW + 20_000), false);
+check('proven: not due at 59s',
+  runner.claudeScanDue({ hookProven: true, lastScanAt: NOW }, NOW + MINUTE - 1000), false);
+check('proven: due again at a minute',
+  runner.claudeScanDue({ hookProven: true, lastScanAt: NOW }, NOW + MINUTE), true);
+
+console.log('\na proven pane still scans once before its first backstop');
+check('proven but never scanned: due',
+  runner.claudeScanDue({ hookProven: true, lastScanAt: 0 }, NOW), true);
 
 // ---------- hook installer: merge, never replace; idempotent; refuse corrupt ----------
 console.log('\ninstaller merges into existing settings and is idempotent');
