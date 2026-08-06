@@ -5,7 +5,8 @@
  *   - a stopped terminal never reports a false insertion success;
  *   - an uploaded-but-uninserted screenshot can be retried without reupload;
  *   - attachment chips cannot mutate an in-flight send;
- *   - remote limitations are visible rather than tooltip-only.
+ *   - one clipboard image stays one chip across browser DataTransfer views;
+ *   - the creation dialog has no redundant file picker.
  *
  * Set SCREENSHOT_PUBLIC_DIR to a prebuilt web/dist to skip the build.
  */
@@ -186,34 +187,45 @@ try {
       && (await watcher.locator('.pane-head .ph-image').getAttribute('title'))?.includes('take control'));
   await watcher.close();
 
-  // Remote support is phase two, but its reason must be readable on touch
-  // devices where a disabled button's title can never be discovered.
+  // Keep the creation dialog focused on the prompt. Pasting still works, and
+  // pasted chips remain removable, but choosing files belongs in live views.
   await page.locator('.bolt-btn').click();
-  await page.locator('.quick-cli[title^="Remote agent"]').click();
-  const remoteReason = page.locator('.quick .image-attachments-note');
-  check('remote screenshot limitation is visibly explained',
-    await remoteReason.isVisible() && (await remoteReason.textContent())?.includes('cannot read files stored on this Space'));
+  check('creation dialog omits the redundant image picker',
+    await page.locator('.quick .image-pick').count() === 0
+      && await page.locator('.quick .image-file-input').count() === 0);
+  await page.locator('.quick-cli[title="Repaint fixture"]').click();
 
-  // Switch back to the test harness and hold the second upload. Once the first
+  // Hold the second upload. Once the first
   // chip says uploaded, every attachment mutation must remain disabled until
   // the single logical send transaction finishes.
-  await page.locator('.quick-cli[title="Repaint fixture"]').click();
   await page.locator('.quick-prompt').fill('inspect both screenshots');
   await page.locator('.quick-prompt').evaluate((element, bytes) => {
     const raw = atob(bytes);
     const data = Uint8Array.from(raw, (character) => character.charCodeAt(0));
+    // WebKit can expose one clipboard image as distinct File instances through
+    // items and files, including different timestamps. `files` must win rather
+    // than merging both browser views.
+    const itemFile = new File([data], 'first.jpg', { type: 'image/jpg', lastModified: 1 });
+    const listedFile = new File([data], 'first.jpg', { type: 'image/jpg', lastModified: 2 });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', { value: {
+      items: [{ kind: 'file', type: 'image/jpg', getAsFile: () => itemFile }],
+      files: [listedFile],
+    } });
+    element.dispatchEvent(event);
+  }, png.toString('base64'));
+  check('clipboard image paste uses the canonical file list once and preserves prompt text',
+    await page.locator('.quick .image-chip').count() === 1
+      && await page.locator('.quick-prompt').inputValue() === 'inspect both screenshots');
+  await page.locator('.quick-prompt').evaluate((element, bytes) => {
+    const raw = atob(bytes);
+    const data = Uint8Array.from(raw, (character) => character.charCodeAt(0));
     const transfer = new DataTransfer();
-    transfer.items.add(new File([data], 'first.jpg', { type: 'image/jpg' }));
+    transfer.items.add(new File([data], 'second.png', { type: 'image/png' }));
     element.dispatchEvent(new ClipboardEvent('paste', {
       bubbles: true, cancelable: true, clipboardData: transfer,
     }));
   }, png.toString('base64'));
-  check('clipboard image paste creates one deduplicated chip and preserves prompt text',
-    await page.locator('.quick .image-chip').count() === 1
-      && await page.locator('.quick-prompt').inputValue() === 'inspect both screenshots');
-  await page.locator('.quick .image-file-input').setInputFiles({
-    name: 'second.png', mimeType: 'image/png', buffer: png,
-  });
   let releaseSecond;
   let sawSecond;
   const secondReached = new Promise((resolve) => { sawSecond = resolve; });
@@ -233,9 +245,8 @@ try {
     sleep(20_000).then(() => { throw new Error('second upload did not start'); }),
   ]);
   const removeButtons = page.locator('.quick .image-chip > button');
-  check('all attachment mutations stay locked for the full send transaction',
-    await page.locator('.quick .image-pick').isDisabled()
-      && await removeButtons.nth(0).isDisabled()
+  check('attachment removal stays locked for the full send transaction',
+    await removeButtons.nth(0).isDisabled()
       && await removeButtons.nth(1).isDisabled());
   releaseSecond();
   await page.locator('.controls').waitFor({ state: 'hidden', timeout: 30_000 });

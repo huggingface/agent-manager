@@ -11,8 +11,8 @@ import { CloseGlyph, RefreshGlyph } from './icons';
 import * as api from '../api';
 import type { ImageAttachment } from '../api';
 import {
-  IMAGE_ACCEPT, MAX_IMAGES, imageFileError, imageFilesFromTransfer, looksLikeImageFile,
-  transferMayContainImage,
+  IMAGE_ACCEPT, MAX_IMAGES, imageFileError, imageFilesFromClipboardItems,
+  imageFilesFromTransfer, looksLikeImageFile, transferMayContainImage,
 } from '../lib/imageAttachments';
 
 const THEMES: Record<'light' | 'dark', ITheme> = {
@@ -366,13 +366,7 @@ export default function TerminalPane({
     try {
       if (navigator.clipboard?.read) {
         const items = await navigator.clipboard.read();
-        const files: File[] = [];
-        for (const item of items) {
-          for (const type of item.types.filter((candidate) => candidate.startsWith('image/'))) {
-            const blob = await item.getType(type);
-            files.push(new File([blob], 'Screenshot', { type: blob.type || type }));
-          }
-        }
+        const files = await imageFilesFromClipboardItems(items);
         if (files.length && supportsImages) { uploadImagesRef.current(files); return; }
       }
       const text = await navigator.clipboard?.readText?.();

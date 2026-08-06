@@ -510,7 +510,7 @@ export default function Sidebar({
                 <ImageAttachments
                   images={quickImages}
                   disabled={quickSending || !quickCli || isRemote(quickCli)}
-                  disabledReason={quickCli && isRemote(quickCli) ? 'Screenshots are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
+                  showPicker={false}
                   onFiles={addQuickImages}
                   onRemove={removeQuickImage}
                 />

@@ -17,7 +17,7 @@ export interface PendingImage {
   attachment?: ImageAttachment;
 }
 
-const identity = (file: File) => `${file.name}\u0000${file.type}\u0000${file.size}\u0000${file.lastModified}`;
+const identity = (file: File) => `${file.name}\u0000${file.type}\u0000${file.size}`;
 const IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp)$/i;
 
 export function normalizedImageMime(type: string) {
@@ -51,8 +51,17 @@ export function transferMayContainImage(transfer: DataTransfer) {
     || Array.from(transfer.files || []).some(looksLikeImageFile);
 }
 
-/** DataTransfer exposes the same file through both items and files in Chromium. */
+/**
+ * DataTransfer exposes the same file through both `files` and `items` in some
+ * browsers. The two views are not guaranteed to return the same File object —
+ * clipboard-created files can even get different `lastModified` values — so
+ * merging them can turn one paste into two attachments. `files` is the
+ * canonical list; `items` is only a fallback for browsers that leave it empty.
+ */
 export function imageFilesFromTransfer(transfer: DataTransfer) {
+  const listed = Array.from(transfer.files || []).filter(looksLikeImageFile);
+  if (listed.length) return listed;
+
   const files: File[] = [];
   const seen = new Set<string>();
   const add = (file: File | null) => {
@@ -65,7 +74,20 @@ export function imageFilesFromTransfer(transfer: DataTransfer) {
   for (const item of Array.from(transfer.items || [])) {
     if (item.kind === 'file') add(item.getAsFile());
   }
-  for (const file of Array.from(transfer.files || [])) add(file);
+  return files;
+}
+
+/** One ClipboardItem can advertise the same image in several MIME formats. */
+export async function imageFilesFromClipboardItems(items: ClipboardItem[]) {
+  const files: File[] = [];
+  for (const item of items) {
+    const imageTypes = item.types.filter((type) => normalizedImageMime(type).startsWith('image/'));
+    const type = imageTypes.find((candidate) =>
+      (IMAGE_MIMES as readonly string[]).includes(normalizedImageMime(candidate))) || imageTypes[0];
+    if (!type) continue;
+    const blob = await item.getType(type);
+    files.push(new File([blob], 'Screenshot', { type: blob.type || type }));
+  }
   return files;
 }
 
