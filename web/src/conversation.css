@@ -216,3 +216,8 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 .ct-row dt { color: var(--muted); }
 .ct-row dd { margin: 0; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
 .ct-row dd .cs-pre { margin: 2px 0; }
+
+/* The reply line under a rendered conversation — the card's own composer, so
+   answering an agent looks the same wherever you are reading it. */
+.cxv-live { flex: none; padding: 6px 12px; border-top: 1px solid var(--border); background: var(--panel); }
+.cxv-note { flex: none; padding: 0 12px 6px; }

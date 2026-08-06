@@ -187,6 +187,9 @@ The pane header gets a two-state segmented control, next to the title:
 ● claude  agent-manager           [ TUI | RENDER ]   ⇪ share   ✕
 ```
 
+- **Only an agent gets the switch.** A shell has no conversation to render, and the files/trace
+  panels are not sessions at all — same rule the Overview uses to decide what is an agent
+  (`cli !== 'shell' && !isPassive(cli)`).
 - **TUI** — today's terminal, untouched.
 - **RENDER** — the same session as a conversation: `TraceView` (already extracted upstream,
   `TracePane.tsx:TraceView`, takes a `src` loader) over `/api/trace/:id`, at D3.
@@ -223,6 +226,12 @@ The pane header gets a two-state segmented control, next to the title:
   tool call is unusable while a task runs; one that never moves makes you chase it.
 - **The prompt band sticks to the top** while you read a long turn. What you want overhead deep
   in someone's 67-step answer is the question it is answering — not a row of numbers.
+- **RENDER can be replied to.** Reading a conversation and answering it are the same act — the
+  card has always known that, and a rendered session that could only be read would send you back
+  to the TUI to type. It is the card's own composer (`.ov-live`), the same `sendInput`, and the
+  same optimistic echo: your prompt appears at the bottom with a `working` line until the
+  transcript catches up. Only a trace with **no agent behind it** — a shared file, an import — is
+  read-only, which is what `readOnly` is for.
 - **Share** moves here from the sidebar. One session, one place.
 - **Handover** ("continue from this trace in a new agent") lives in the RENDER footer, beside
   the provenance line — the only place where its meaning is obvious.

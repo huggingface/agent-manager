@@ -9,6 +9,7 @@ import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import ConversationView from './conversation/ConversationView';
 import { onPaneMode, readPaneMode, writePaneMode } from '../lib/paneMode';
+import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
 import { CloseGlyph, RefreshGlyph } from './icons';
 
@@ -211,12 +212,15 @@ export default function TerminalPane({
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
   const [preview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
-  // TUI ⇄ RENDER (docs/conversation-view.md §3.3).
-  const [mode, setMode] = useState<PaneMode>(() => readPaneMode(session.id));
-  useEffect(() => { setMode(readPaneMode(session.id)); }, [session.id]);
+  // TUI ⇄ RENDER (docs/conversation-view.md §3.3). Only an agent has a
+  // conversation to render: a shell is a shell, and files/trace panels are not
+  // this component's business at all.
+  const canRender = session.cli !== 'shell' && !isPassive(session.cli);
+  const [mode, setMode] = useState<PaneMode>(() => (canRender ? readPaneMode(session.id) : 'tui'));
+  useEffect(() => { setMode(canRender ? readPaneMode(session.id) : 'tui'); }, [session.id, canRender]);
   // Someone else can ask for RENDER on a pane that is already open — the card's
   // "full history ↗" does exactly that, and a localStorage write alone is silent.
-  useEffect(() => onPaneMode(session.id, setMode), [session.id]);
+  useEffect(() => (canRender ? onPaneMode(session.id, setMode) : undefined), [session.id, canRender]);
   const showMode = (m: PaneMode) => { setMode(m); writePaneMode(session.id, m); };
   modeRef.current = mode;
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
@@ -858,12 +862,14 @@ export default function TerminalPane({
           <span className="ph-path" title={pathLabel}>{pathLabel}</span>
           {/* The trace stops being a separate thing you open: it is this
               session, read instead of watched. */}
+          {canRender && (
           <span className="seg ph-modes" onMouseDown={(e) => e.stopPropagation()}>
             <button className={mode === 'tui' ? 'on' : ''} title="The terminal itself"
               onClick={(e) => { e.stopPropagation(); showMode('tui'); }}>TUI</button>
             <button className={mode === 'render' ? 'on' : ''} title="The conversation, rendered"
               onClick={(e) => { e.stopPropagation(); showMode('render'); }}>RENDER</button>
           </span>
+          )}
           <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
@@ -874,7 +880,7 @@ export default function TerminalPane({
             handoff path. The terminal stays mounted and connected underneath. */}
         {mode === 'render' && (
           <div className="pane-render" onMouseDown={(e) => e.stopPropagation()}>
-            <ConversationView session={session} paused={visible === false} />
+            <ConversationView session={session} paused={visible === false} isMobile={isMobile} />
           </div>
         )}
       </div>

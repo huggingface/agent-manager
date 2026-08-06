@@ -24,10 +24,13 @@ const fmtNum = (n: number) => n.toLocaleString();
 const fmtUsage = (u?: { in: number; out: number } | null) =>
   (u ? `${fmtTok(u.in)}↓ ${fmtTok(u.out)}↑` : '');
 
-export default function ConversationView({ session, paused, onHandover }: {
+export default function ConversationView({ session, paused, isMobile, readOnly, onHandover }: {
   session: Session;
   /** The pane is off-screen: stop asking the server for a trace nobody sees. */
   paused?: boolean;
+  isMobile?: boolean;
+  /** A trace with no agent behind it — a shared file, an import. Read-only. */
+  readOnly?: boolean;
   onHandover?: () => void;
 }) {
   const [page, setPage] = useState<TracePage | null>(null);
@@ -37,6 +40,17 @@ export default function ConversationView({ session, paused, onHandover }: {
   const [hit, setHit] = useState(0);
   const scroller = useRef<HTMLDivElement | null>(null);
   const rows = useRef(new Map<number, HTMLElement>());
+  // Follow the work while it arrives — but only while the reader is already at
+  // the bottom. Scrolling up to read something is a decision, and yanking the
+  // view back down on the next tool call would undo it.
+  const stick = useRef(true);
+  // Reading a conversation and answering it are the same act — the card has
+  // always known that. Only a trace with no agent behind it is read-only.
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const [sent, setSent] = useState<{ text: string; at: number } | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const live = session.state === 'working' && !paused;
 
@@ -66,6 +80,28 @@ export default function ConversationView({ session, paused, onHandover }: {
 
   const turns: TraceTurn[] = useMemo(() => page?.turns || [], [page]);
   const exchanges = useMemo(() => splitExchanges(turns), [turns]);
+  const last = exchanges[exchanges.length - 1];
+
+  // The optimistic echo stands until the transcript catches up: a CLI writes it,
+  // the reader picks it up, the poll lands — seconds, during which a card that
+  // showed nothing would read as "did that get lost?".
+  const promptOf = (x?: typeof last) =>
+    (x?.prompt?.blocks || []).filter((b) => b.type === 'text').map((b) => ('text' in b ? b.text : '')).join('').trim();
+  if (sent && promptOf(last) === sent.text) setSent(null);
+
+  const send = async () => {
+    const text = draft.trim();
+    if (!text || sending) return;
+    setSending(true); setFailed(false);
+    try {
+      await api.sendInput(session.id, text);
+      setDraft(''); setSent({ text, at: Date.now() });
+      if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
+      stick.current = true;
+      load();
+    } catch { setFailed(true); window.setTimeout(() => setFailed(false), 4000); }
+    setSending(false);
+  };
   const q = query.trim().toLowerCase();
   const shown = useMemo(() => {
     if (!q) return exchanges;
@@ -129,10 +165,6 @@ export default function ConversationView({ session, paused, onHandover }: {
   };
   const nav = (dir: -1 | 1) => (q && hits ? stepHit(dir) : goTurn(dir));
 
-  // Follow the work while it arrives — but only while the reader is already at
-  // the bottom. Scrolling up to read something is a decision, and yanking the
-  // view back down on the next tool call would undo it.
-  const stick = useRef(true);
   useLayoutEffect(() => {
     const el = scroller.current;
     if (el && live && stick.current) el.scrollTop = el.scrollHeight;
@@ -195,9 +227,39 @@ export default function ConversationView({ session, paused, onHandover }: {
               />
             </div>
           ))}
-          {!exchanges.length && <div className="cxv-msg mono">nothing in this trace yet</div>}
+          {sent && (
+            <>
+              <div className="cx-prompt">{sent.text}</div>
+              <div className="cx-running mono">working</div>
+            </>
+          )}
+          {!exchanges.length && !sent && <div className="cxv-msg mono">nothing in this trace yet</div>}
         </div>
       </div>
+
+      {!readOnly && (
+        <div className="ov-live cxv-live">
+          <span className="ov-p mono">❯</span>
+          <textarea
+            ref={inputRef}
+            rows={1}
+            value={draft}
+            disabled={sending}
+            placeholder={sending ? 'sending…' : 'reply…'}
+            autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+            onChange={(e) => { setDraft(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
+            onKeyDown={(e) => {
+              // Desktop: Enter sends, Shift+Enter newlines. Mobile keyboards
+              // cannot do Shift+Enter, so there the button sends.
+              if (e.key === 'Enter' && !e.shiftKey && !isMobile) { e.preventDefault(); send(); }
+              if (e.key === 'Escape') { setDraft(''); inputRef.current?.blur(); }
+            }}
+          />
+          {draft.trim() && <button className="ov-send" title="Send" onClick={send} disabled={sending}>↑</button>}
+          {draft.trim() && !isMobile && <span className="ov-hint">↵ send · ⇧↵ newline</span>}
+        </div>
+      )}
+      {failed && <div className="ov-note cxv-note">failed to reach the agent</div>}
 
       <div className="cxv-foot mono">
         <span className="cxv-path" title={page.cwd || undefined}>
