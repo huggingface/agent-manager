@@ -1121,6 +1121,10 @@ function scheduleClaudeCapture(session, workdir) {
   const prev = claudeCapturing.get(session.id);
   if (prev) clearTimeout(prev);
   const since = Date.now() - 2000;
+  // The host this watch belongs to. Clearing `prev` above only cancels a PENDING
+  // beat; now that a tick awaits, one can be mid-scan when a relaunch calls this
+  // again, and that tick still has a rearm ahead of it — see rearm.
+  const host = hosts.get(session.id);
   let warnedShared = false;
   // Has a breadcrumb from this pane ever named this pane's OWN conversation? That
   // is what demotes the scan to a backstop — see claudeScanDue.
@@ -1194,6 +1198,13 @@ function scheduleClaudeCapture(session, workdir) {
     .then((again) => { if (again) rearm(); else claudeCapturing.delete(session.id); });
 
   function rearm(ms = REPIN_MS) {
+    // A relaunch during an in-flight scan already started a fresh watch and owns
+    // the map entry. Without this check that watch's timer gets overwritten here
+    // and BOTH chains stay alive, only one of them reachable by clearTimeout: the
+    // pane then walks the bucket twice a beat, and the orphan keeps its own
+    // `hookProven`/`lastScanAt` (so it never steps down to the backstop) and its
+    // own pre-relaunch `since`. Same host-identity guard the grid timers use.
+    if (hosts.get(session.id) !== host) return;
     const t = setTimeout(run, ms);
     if (t.unref) t.unref();
     claudeCapturing.set(session.id, t);

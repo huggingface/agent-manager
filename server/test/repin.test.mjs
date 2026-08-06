@@ -117,15 +117,22 @@ check('null crumb rejected', verdict(null, facts()).repin, null);
 // so this asserts against a REAL running session rather than a mock.
 console.log('\nthe pane root is the session PTY the server holds');
 check('unknown session has no pane root', runner.paneRootPid('nope'), null);
-const live = sessions.create({ name: 'live', cli: 'shell', path: 'proj-a' });
-let liveRoot = null;
-try {
-  runner.ensureRunning(live, 80, 24);
-  liveRoot = runner.paneRootPid(live.id);
-  check('live session has a pane root', Number.isInteger(liveRoot) && liveRoot > 1, true);
-  check('the pane root is a live process', fs.existsSync(`/proc/${liveRoot}`), true);
-} finally {
-  runner.stop(live.id);
+// Spawning a real pane needs libghostty's native addon, which not every checkout
+// has built. Skip rather than throw out of ensureRunning: an unhandled throw here
+// aborts the process and takes the cadence and installer checks below with it,
+// which reads as a broken test run rather than a missing optional dependency.
+if (!runner.ghosttyReady()) {
+  console.log('  SKIP  live pane checks (libghostty-vt unavailable)');
+} else {
+  const live = sessions.create({ name: 'live', cli: 'shell', path: 'proj-a' });
+  try {
+    runner.ensureRunning(live, 80, 24);
+    const liveRoot = runner.paneRootPid(live.id);
+    check('live session has a pane root', Number.isInteger(liveRoot) && liveRoot > 1, true);
+    check('the pane root is a live process', fs.existsSync(`/proc/${liveRoot}`), true);
+  } finally {
+    runner.stop(live.id);
+  }
 }
 
 // ---------- scan cadence: the breadcrumb is the mechanism, the scan a backstop ----------
