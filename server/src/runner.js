@@ -1097,9 +1097,12 @@ export function installClaudeRepinHook(hookCmd = '/app/scripts/am-repin-hook.sh'
 // REPIN_MS. Now that the scan is awaited rather than synchronous this is no longer
 // about event-loop block time — it is only about not walking the bucket 3x a
 // minute per pane for an answer the breadcrumb already gave. So it can be short:
-// this is also the window in which a pin stays stale if a breadcrumb is ever LOST
-// (the hook fired but its crumb never reached us), and a minute of staleness in
-// that already-unlikely case costs one late Overview digest.
+// this also bounds how long a pin stays stale if a breadcrumb is ever LOST (the
+// hook fired but its crumb never reached us), and that staleness costs one late
+// Overview digest. Note the bound is this PLUS up to one beat, not exactly this:
+// only a tick can scan, ticks come every REPIN_MS, and each one is armed after the
+// previous finishes — so the first tick at or past the backstop can be as late as
+// SCAN_BACKSTOP_MS + REPIN_MS, plus the new scan's own duration.
 const SCAN_BACKSTOP_MS = 60_000;
 
 /**
@@ -1131,6 +1134,15 @@ function scheduleClaudeCapture(session, workdir) {
   let hookProven = false;
   let lastScanAt = 0;
 
+  // Read fresh, never captured: the scan awaits, so anything read before it is a
+  // stale view of the world by the time it returns.
+  const currentPin = () => (list().find((s) => s.id === session.id) || session).sessionUuid;
+  const claimedByOthers = () =>
+    new Set(list().filter((s) => s.id !== session.id && s.sessionUuid).map((s) => s.sessionUuid));
+  // Is this watch still the pane's? A relaunch spawns a new host and a new watch,
+  // and that one owns the pin from then on.
+  const stillOurs = () => hosts.get(session.id) === host;
+
   // Returns whether to keep watching. Rearming is the caller's job (see `run`):
   // the scan awaits now, so a throw lands as a rejected promise rather than as an
   // exception in a setTimeout callback, and exactly one place deciding the next
@@ -1138,7 +1150,7 @@ function scheduleClaudeCapture(session, workdir) {
   // two timers.
   const tick = async () => {
     if (!isRunning(session.id)) { claudeCapturing.delete(session.id); return false; }
-    const pinned = (list().find((s) => s.id === session.id) || session).sessionUuid;
+    const pinned = currentPin();
 
     // Breadcrumb first: the pane's own SessionStart hook told us which
     // conversation it is on, so no guessing — and no shared-folder refusal —
@@ -1149,7 +1161,7 @@ function scheduleClaudeCapture(session, workdir) {
       const verdict = breadcrumbVerdict(crumb, session.id, {
         workdir,
         pinned,
-        claimed: new Set(list().filter((s) => s.id !== session.id && s.sessionUuid).map((s) => s.sessionUuid)),
+        claimed: claimedByOthers(),
         pidTrusted: !!root && pidHasAncestor(crumb.claudePid, root),
       });
       // A crumb that named this pane's own conversation — whether it moved the
@@ -1172,16 +1184,36 @@ function scheduleClaudeCapture(session, workdir) {
         console.warn(`[claude] ${session.id}: folder shared with another live session — following /clear only via breadcrumbs here`);
       }
     } else if (claudeScanDue({ hookProven, lastScanAt })) {
-      lastScanAt = Date.now(); // stamped BEFORE the await, so one scan is in flight at a time
       const hit = await claudeCandidate(session.id, workdir, since);
-      // The scan yielded, so re-read the pin rather than trusting the one read at
-      // the top of this tick — a breadcrumb tick cannot have run (the next beat is
-      // armed only after this returns), but an explicit relaunch can have re-pinned.
-      const now = (list().find((s) => s.id === session.id) || session).sessionUuid;
-      if (hit && hit.uuid !== now) {
-        const why = await transcriptExists(now) ? 'conversation was replaced (/clear)' : '--session-id was not honoured';
-        console.warn(`[claude] re-pinning ${session.id}: ${now} -> ${hit.uuid} (${why})`);
-        update(session.id, { sessionUuid: hit.uuid });
+      // Stamped AFTER the scan resolves, not before it. Nothing can overlap it —
+      // the next beat is armed only once this tick returns — and stamping first
+      // meant a scan that threw was not retried on the next beat the way `run`
+      // logs, but skipped until the backstop expired.
+      lastScanAt = Date.now();
+      // Every input that decision rests on was read BEFORE the scan awaited, so
+      // re-read them rather than mutating a world that has moved on:
+      //   - this pane may have been relaunched, and the new watch owns the pin now
+      //     (its `since` is newer, so `hit` may be pre-relaunch and wrong);
+      //   - another claude pane may have gone live in this folder, which is
+      //     precisely the case folderIsShared refuses to guess at — and it was
+      //     false when this tick started;
+      //   - `hit` may since have been pinned by the session it belongs to;
+      //     claudeCandidate snapshots `claimed` before it walks the disk, so a
+      //     conversation that was unclaimed then can be claimed now. Taking it
+      //     anyway would make the owner's own breadcrumb bounce off 'claimed by
+      //     another session' for good.
+      if (hit && stillOurs() && !claimedByOthers().has(hit.uuid)
+          && !folderIsShared(session.id, workdir, 'claude')) {
+        const pin = currentPin();
+        if (hit.uuid !== pin) {
+          const why = await transcriptExists(pin) ? 'conversation was replaced (/clear)' : '--session-id was not honoured';
+          // transcriptExists awaited too, so confirm ownership once more before
+          // the write itself.
+          if (stillOurs()) {
+            console.warn(`[claude] re-pinning ${session.id}: ${pin} -> ${hit.uuid} (${why})`);
+            update(session.id, { sessionUuid: hit.uuid });
+          }
+        }
       }
     }
     return true;
@@ -1197,17 +1229,25 @@ function scheduleClaudeCapture(session, workdir) {
     })
     .then((again) => { if (again) rearm(); else claudeCapturing.delete(session.id); });
 
+  let armed = null;
   function rearm(ms = REPIN_MS) {
-    // A relaunch during an in-flight scan already started a fresh watch and owns
-    // the map entry. Without this check that watch's timer gets overwritten here
-    // and BOTH chains stay alive, only one of them reachable by clearTimeout: the
-    // pane then walks the bucket twice a beat, and the orphan keeps its own
-    // `hookProven`/`lastScanAt` (so it never steps down to the backstop) and its
-    // own pre-relaunch `since`. Same host-identity guard the grid timers use.
-    if (hosts.get(session.id) !== host) return;
-    const t = setTimeout(run, ms);
-    if (t.unref) t.unref();
-    claudeCapturing.set(session.id, t);
+    // This watch is no longer the pane's: either a relaunch during an in-flight
+    // scan started a fresh one — which already owns the map entry, and arming here
+    // would leave BOTH chains beating with only one reachable by clearTimeout, the
+    // orphan keeping its own hookProven/lastScanAt and its own pre-relaunch
+    // `since` — or the pane simply exited and nothing replaced it. Same
+    // host-identity guard the grid timers use.
+    if (!stillOurs()) {
+      // Drop OUR entry on the way out. A fired Timeout still holds its callback
+      // (node does not release `_onTimeout`), so leaving it in the map retains this
+      // closure and the disposed host until the session next starts. Only ours
+      // though: a newer watch's timer has to survive untouched.
+      if (claudeCapturing.get(session.id) === armed) claudeCapturing.delete(session.id);
+      return;
+    }
+    armed = setTimeout(run, ms);
+    if (armed.unref) armed.unref();
+    claudeCapturing.set(session.id, armed);
   }
 
   rearm(5000);
