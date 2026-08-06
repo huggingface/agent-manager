@@ -16,7 +16,7 @@ import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
 import * as demo from './demo.js';
-import { attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, isRunning, capturePane, ghosttyReady, ghosttyError, installClaudeRepinHook } from './runner.js';
+import { attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning, capturePane, ghosttyReady, ghosttyError, installClaudeRepinHook } from './runner.js';
 
 // Control frames ride the terminal socket behind a leading NUL pair, which real
 // PTY output never begins with. Same sentinel the old copy-mode hint used, so the
@@ -32,14 +32,15 @@ import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revo
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
 import {
-  formatAttachmentDelivery, pruneAttachmentDirs, receiveImage, removeSessionAttachments,
+  formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveImage, removeSessionAttachments,
   resolveImage, resolveImages,
 } from './attachments.js';
 
 ensureDirs();
 refreshVersions();
 store.init();
-pruneAttachmentDirs(store.list().map((session) => session.id));
+pruneAttachmentDirs(store.list().map((session) => session.id))
+  .catch((e) => console.error('[attachments.prune]', e && e.message));
 groups.init();
 order.init();
 demo.init();
@@ -155,7 +156,14 @@ process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e)
 process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
 
 const app = express();
-app.use(express.json());
+const jsonBody = express.json();
+app.use((req, res, next) => {
+  // The attachment route determines type from bytes. Skip JSON parsing even
+  // when untrusted browser metadata falsely claims application/json, or the
+  // global parser would reject valid PNG bytes before the streaming route.
+  if (req.method === 'POST' && /^\/api\/sessions\/[^/]+\/attachments$/.test(req.path)) return next();
+  return jsonBody(req, res, next);
+});
 
 // Safety lock: with no authentication, only serve the terminal backend when the
 // Space is private. If it's public, block every working API (and /ws below) and
@@ -264,16 +272,24 @@ async function deliver(session, { text, attachments = [] }, from) {
     return false;
   }
   const prompt = formatAttachmentDelivery(session.cli, text, attachments);
+  const prelude = formatAttachmentPrelude(session.cli, attachments);
   // A session created before its first prompt can still use the CLI's launch
   // argument. This is especially important for quickstart attachments: upload
   // needs a session id first, but typing into a half-booted TUI loses turns.
   const cli = cliById(session.cli);
-  if (!session.everStarted && cli?.withPrompt) {
-    store.update(session.id, { pendingPrompt: prompt });
+  if (!session.everStarted && cli?.withPrompt && prelude.length === 0) {
+    store.update(session.id, {
+      pendingPrompt: prompt,
+      pendingImagePaths: session.cli === 'codex' ? attachments.map((image) => image.path) : undefined,
+    });
     return ensureRunning(store.get(session.id) || session);
   }
   const started = ensureRunning(session);
   if (started) await sleep(3500); // let the CLI boot before the keystrokes land
+  for (const command of prelude) {
+    await sendInput(session.id, command);
+    await sleep(500);
+  }
   await sendInput(session.id, prompt);
   return started;
 }
@@ -299,6 +315,10 @@ app.post('/api/sessions/:id/input', async (req, res) => {
 
 const canAttachImages = (session) => session.cli !== 'shell'
   && !PASSIVE_CLIS.includes(session.cli) && !isRemote(session.cli);
+// A lost HTTP response must not make the Retry action paste the same path a
+// second time. Attachment ids are unique and the terminal UI never intentionally
+// inserts one twice, so this bounded per-session set is a natural idempotency key.
+const terminalAttachmentInsertions = new Map();
 
 // Managed screenshots live under STATE_DIR, never in the user's repository.
 // The raw body is streamed and capped in attachments.js; express.json ignores
@@ -317,6 +337,39 @@ app.post('/api/sessions/:id/attachments', async (req, res) => {
     if (!res.destroyed) res.status(201).json(image);
   } catch (e) {
     if (!res.headersSent && !res.destroyed) res.status(e.statusCode || 500).json({ error: String(e.message || e) });
+  }
+});
+
+// Insert terminal attachments without pressing Return on the operator's
+// prompt. This server acknowledgement is the source of truth for the terminal
+// overlay; a browser-local xterm paste can be dropped after a disconnect or
+// when another viewer owns the input lease.
+app.post('/api/sessions/:id/attachments/insert', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  if (!canAttachImages(s)) return res.status(400).json({ error: `${s.cli} pane cannot accept screenshots` });
+  try {
+    const attachments = resolveImages(s.id, (req.body || {}).attachmentIds ?? []);
+    if (!attachments.length) return res.status(400).json({ error: 'no screenshots to insert' });
+    const inserted = terminalAttachmentInsertions.get(s.id) || new Set();
+    const pending = attachments.filter((image) => !inserted.has(image.id));
+    const mode = s.cli === 'hermes' ? 'attached' : 'inserted';
+    if (!pending.length) return res.json({ ok: true, mode, repeated: true });
+    terminalAttachmentInsertions.set(s.id, inserted);
+    const prelude = formatAttachmentPrelude(s.cli, pending);
+    if (prelude.length) {
+      for (let index = 0; index < prelude.length; index += 1) {
+        await sendInput(s.id, prelude[index]);
+        inserted.add(pending[index].id);
+        await sleep(500);
+      }
+    } else {
+      pasteInput(s.id, pending.map((image) => image.insertText).join(''));
+      for (const image of pending) inserted.add(image.id);
+    }
+    return res.json({ ok: true, mode });
+  } catch (e) {
+    return res.status(e.statusCode || 409).json({ error: String(e.message || e) });
   }
 });
 
@@ -2065,7 +2118,7 @@ app.put('/api/trace/:id/source', (req, res) => {
   res.json({ ok: true, traceSource: { kind, ref } });
 });
 
-app.delete('/api/sessions/:id', (req, res) => {
+app.delete('/api/sessions/:id', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   stop(s.id);
@@ -2076,7 +2129,8 @@ app.delete('/api/sessions/:id', (req, res) => {
   groups.detachSession(s.id);
   order.drop(`s:${s.id}`);
   store.remove(s.id);
-  try { removeSessionAttachments(s.id); } catch (e) { console.error('[attachments.remove]', e && e.message); }
+  terminalAttachmentInsertions.delete(s.id);
+  try { await removeSessionAttachments(s.id); } catch (e) { console.error('[attachments.remove]', e && e.message); }
   res.json({ ok: true });
 });
 

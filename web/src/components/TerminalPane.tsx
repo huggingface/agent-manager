@@ -9,8 +9,9 @@ import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import { CloseGlyph, RefreshGlyph } from './icons';
 import * as api from '../api';
+import type { ImageAttachment } from '../api';
 import {
-  IMAGE_ACCEPT, IMAGE_MIMES, MAX_IMAGE_BYTES, MAX_IMAGES, imageFilesFromTransfer,
+  IMAGE_ACCEPT, MAX_IMAGES, imageFileError, imageFilesFromTransfer, looksLikeImageFile,
   transferMayContainImage,
 } from '../lib/imageAttachments';
 
@@ -228,7 +229,12 @@ export default function TerminalPane({
   const [pasteOpen, setPasteOpen] = useState(false);
   const [imageDrop, setImageDrop] = useState(false);
   const [imageStatus, setImageStatus] = useState<{ kind: 'uploading' | 'success' | 'error'; text: string } | null>(null);
+  const [imageUploadBusy, setImageUploadBusy] = useState(false);
+  const [pendingInsert, setPendingInsert] = useState<ImageAttachment[]>([]);
   const supportsImages = session.cli !== 'shell';
+  const hasInputControl = viewers <= 1 || controller;
+  const canAttachImages = supportsImages && conn === 'connected' && hasInputControl
+    && !imageUploadBusy && pendingInsert.length === 0;
   const commitName = () => {
     const v = draft.trim();
     if (v && v !== session.name) onRename?.(v);
@@ -251,30 +257,97 @@ export default function TerminalPane({
     if (linger) imageStatusTimerRef.current = window.setTimeout(() => setImageStatus(null), linger);
   };
 
+  const insertTerminalImages = async (attachments: ImageAttachment[]) => {
+    try {
+      const result = await api.insertImageAttachments(session.id, attachments.map((image) => image.id));
+      setPendingInsert([]);
+      const count = attachments.length;
+      showImageStatus({
+        kind: 'success',
+        text: result.mode === 'attached'
+          ? `${count === 1 ? 'Screenshot' : `${count} screenshots`} attached — continue typing`
+          : `${count === 1 ? 'Screenshot' : `${count} screenshots`} inserted — press Enter when ready`,
+      }, 3000);
+      termRef.current?.focus();
+      return true;
+    } catch {
+      setPendingInsert(attachments);
+      showImageStatus({
+        kind: 'error',
+        text: `${attachments.length === 1 ? 'Screenshot was' : 'Screenshots were'} saved but not inserted`,
+      });
+      return false;
+    }
+  };
+
+  const retryTerminalInsert = async () => {
+    if (!pendingInsert.length || imageUploadBusyRef.current) return;
+    if (conn !== 'connected') {
+      showImageStatus({ kind: 'error', text: 'Restart or reconnect the agent before retrying' });
+      return;
+    }
+    if (!hasInputControl) {
+      showImageStatus({ kind: 'error', text: 'Interact with the terminal to take control before retrying' });
+      return;
+    }
+    imageUploadBusyRef.current = true;
+    setImageUploadBusy(true);
+    showImageStatus({ kind: 'uploading', text: 'inserting saved screenshot…' });
+    try { await insertTerminalImages(pendingInsert); } finally {
+      imageUploadBusyRef.current = false;
+      setImageUploadBusy(false);
+    }
+  };
+
   uploadImagesRef.current = (files: File[]) => {
     if (!supportsImages) return;
+    if (conn !== 'connected') {
+      showImageStatus({ kind: 'error', text: 'Restart or reconnect the agent before attaching screenshots' }, 5000);
+      return;
+    }
+    if (!hasInputControl) {
+      showImageStatus({ kind: 'error', text: 'Interact with the terminal to take control before attaching screenshots' }, 5000);
+      return;
+    }
+    if (pendingInsert.length) {
+      showImageStatus({ kind: 'error', text: 'Retry the saved screenshot before attaching another' });
+      return;
+    }
     if (imageUploadBusyRef.current) return;
-    const images = files
-      .filter((file) => (IMAGE_MIMES as readonly string[]).includes(file.type))
-      .slice(0, MAX_IMAGES);
+    const candidates = files.filter(looksLikeImageFile);
+    if (candidates.length > MAX_IMAGES) {
+      showImageStatus({ kind: 'error', text: `Attach at most ${MAX_IMAGES} screenshots at a time` }, 4000);
+      return;
+    }
+    const images = candidates.slice(0, MAX_IMAGES);
     if (!images.length) { showImageStatus({ kind: 'error', text: 'Use PNG, JPEG, GIF, or WebP' }, 4000); return; }
-    const invalid = images.find((file) => file.size === 0 || file.size > MAX_IMAGE_BYTES);
-    if (invalid) { showImageStatus({ kind: 'error', text: invalid.size ? 'Image is larger than 25 MB' : 'Image is empty' }, 4000); return; }
+    const invalid = images.map((file) => imageFileError(file)).find(Boolean);
+    if (invalid) { showImageStatus({ kind: 'error', text: invalid }, 4000); return; }
     imageUploadBusyRef.current = true;
+    setImageUploadBusy(true);
     void (async () => {
+      const attachments: ImageAttachment[] = [];
       try {
         for (let index = 0; index < images.length; index += 1) {
           showImageStatus({ kind: 'uploading', text: `uploading screenshot${images.length > 1 ? ` ${index + 1}/${images.length}` : ''}…` });
           const attachment = await api.uploadImageAttachment(session.id, images[index]);
-          claimRef.current();
-          termRef.current?.paste(attachment.insertText);
+          attachments.push(attachment);
         }
-        termRef.current?.focus();
-        showImageStatus({ kind: 'success', text: `${images.length === 1 ? 'Screenshot' : `${images.length} screenshots`} inserted — press Enter when ready` }, 3000);
+        showImageStatus({ kind: 'uploading', text: `inserting screenshot${images.length === 1 ? '' : 's'}…` });
+        await insertTerminalImages(attachments);
       } catch (error) {
-        showImageStatus({ kind: 'error', text: error instanceof Error ? error.message : 'screenshot upload failed' }, 5000);
+        if (attachments.length) {
+          setPendingInsert(attachments);
+          showImageStatus({
+            kind: 'error',
+            text: `${attachments.length} screenshot${attachments.length === 1 ? '' : 's'} saved; another failed to upload`,
+          });
+        } else {
+          showImageStatus({ kind: 'error', text: error instanceof Error ? error.message : 'screenshot upload failed' }, 5000);
+        }
       } finally {
         imageUploadBusyRef.current = false;
+        setImageUploadBusy(false);
       }
     })();
   };
@@ -927,7 +1000,13 @@ export default function TerminalPane({
             <>
               <button
                 className="mini-btn ph-image"
-                title="Attach screenshot"
+                title={conn === 'connected'
+                  ? (!hasInputControl
+                    ? 'Interact with the terminal to take control before attaching screenshots'
+                    : (pendingInsert.length ? 'Retry the saved screenshot first' : 'Attach screenshot'))
+                  : 'Restart or reconnect the agent to attach screenshots'}
+                aria-label="Attach screenshot"
+                disabled={!canAttachImages}
                 draggable={false}
                 onMouseDown={(event) => event.stopPropagation()}
                 onClick={(event) => { event.stopPropagation(); imagePickerRef.current?.click(); }}
@@ -944,6 +1023,7 @@ export default function TerminalPane({
                 type="file"
                 accept={IMAGE_ACCEPT}
                 multiple
+                disabled={!canAttachImages}
                 onChange={(event) => {
                   uploadImagesRef.current(Array.from(event.currentTarget.files || []));
                   event.currentTarget.value = '';
@@ -957,7 +1037,18 @@ export default function TerminalPane({
       <div className={`term-host${imageDrop ? ' image-drop' : ''}`} ref={frameRef}>
         <div className="term-fill" ref={hostRef} />
       </div>
-      {imageStatus && <div className={`term-image-status ${imageStatus.kind} mono`}>{imageStatus.text}</div>}
+      {imageStatus && (
+        <div
+          className={`term-image-status ${imageStatus.kind}${pendingInsert.length ? ' has-action' : ''} mono`}
+          role={imageStatus.kind === 'error' ? 'alert' : 'status'}
+          aria-live={imageStatus.kind === 'error' ? 'assertive' : 'polite'}
+        >
+          <span>{imageStatus.text}</span>
+          {pendingInsert.length > 0 && (
+            <button type="button" onClick={retryTerminalInsert} disabled={imageUploadBusy || conn !== 'connected' || !hasInputControl}>retry</button>
+          )}
+        </div>
+      )}
       {isMobile && conn === 'connected' && (
         // Control keys the phone keyboard lacks — needed for TUI menus (model
         // pickers, etc.). preventDefault keeps terminal focus so the keyboard

@@ -190,16 +190,25 @@ export interface ImageAttachment {
 }
 
 export const uploadImageAttachment = async (id: string, file: File): Promise<ImageAttachment> => {
+  const headers: Record<string, string> = {
+    'x-file-name': encodeURIComponent(file.name || 'Screenshot'),
+  };
+  if (file.type) headers['content-type'] = file.type;
   const response = await fetch(`/api/sessions/${id}/attachments`, {
     method: 'POST',
-    headers: {
-      'content-type': file.type,
-      'x-file-name': encodeURIComponent(file.name || 'Screenshot'),
-    },
+    headers,
     body: file,
   });
   return jsonOrError(response);
 };
+
+export const insertImageAttachments = (
+  id: string,
+  attachmentIds: string[],
+): Promise<{ ok: boolean; mode: 'inserted' | 'attached'; repeated?: boolean }> =>
+  fetch(`/api/sessions/${id}/attachments/insert`, {
+    method: 'POST', headers: HEADERS, body: JSON.stringify({ attachmentIds }),
+  }).then(jsonOrError);
 
 export const sendInput = (id: string, text: string, attachmentIds: string[] = []): Promise<{ ok: boolean; started?: boolean }> =>
   fetch(`/api/sessions/${id}/input`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ text, attachmentIds }) }).then(jsonOrError);

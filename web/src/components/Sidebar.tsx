@@ -108,18 +108,28 @@ export default function Sidebar({
   useEffect(() => () => revokePendingImages(quickImagesRef.current), []);
 
   const updateQuickImage = (key: string, patch: Partial<PendingImage>) => {
-    setQuickImages((current) => current.map((image) => image.key === key ? { ...image, ...patch } : image));
+    setQuickImages((current) => {
+      const next = current.map((image) => image.key === key ? { ...image, ...patch } : image);
+      quickImagesRef.current = next;
+      return next;
+    });
   };
   const addQuickImages = (files: File[]) => {
-    const next = pendingImagesFromFiles(files, quickImages.length);
-    setQuickImages((current) => [...current, ...next.images]);
+    if (quickSending) return;
+    const next = pendingImagesFromFiles(files, quickImagesRef.current.length);
+    const merged = [...quickImagesRef.current, ...next.images];
+    quickImagesRef.current = merged;
+    setQuickImages(merged);
     setQuickError(next.error);
   };
   const removeQuickImage = (key: string) => {
+    if (quickSending) return;
     setQuickImages((current) => {
       const removed = current.find((image) => image.key === key);
       if (removed) URL.revokeObjectURL(removed.previewUrl);
-      return current.filter((image) => image.key !== key);
+      const next = current.filter((image) => image.key !== key);
+      quickImagesRef.current = next;
+      return next;
     });
     setQuickError(null);
   };
@@ -127,9 +137,13 @@ export default function Sidebar({
   // server-created session. Changing its identity starts a fresh target.
   const resetQuickTarget = () => {
     setQuickSessionId(null);
-    setQuickImages((current) => current.map((image) => image.attachment
-      ? { ...image, attachment: undefined, status: 'pending', error: undefined }
-      : image));
+    setQuickImages((current) => {
+      const next = current.map((image) => image.attachment
+        ? { ...image, attachment: undefined, status: 'pending' as const, error: undefined }
+        : image);
+      quickImagesRef.current = next;
+      return next;
+    });
   };
 
   const clearDrag = () => { setDragRef(null); setDrop(null); onDragState?.(null); };
@@ -155,7 +169,8 @@ export default function Sidebar({
   const bump = (id: string, d: number) => setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
   const closePanel = () => {
     if (panel === 'quick') {
-      revokePendingImages(quickImages);
+      revokePendingImages(quickImagesRef.current);
+      quickImagesRef.current = [];
       setQuickImages([]);
       setQuickSessionId(null);
       setQuickSending(false);
@@ -410,18 +425,18 @@ export default function Sidebar({
           <div
             className={`widget quick${quickDrop ? ' image-drop' : ''}`}
             onDragEnter={(event) => {
-              if (quickMode === 'agent' && quickCli && !isRemote(quickCli) && transferMayContainImage(event.dataTransfer)) {
+              if (!quickSending && quickMode === 'agent' && quickCli && !isRemote(quickCli) && transferMayContainImage(event.dataTransfer)) {
                 event.preventDefault(); setQuickDrop(true);
               }
             }}
             onDragOver={(event) => {
-              if (quickMode === 'agent' && quickCli && !isRemote(quickCli) && transferMayContainImage(event.dataTransfer)) {
+              if (!quickSending && quickMode === 'agent' && quickCli && !isRemote(quickCli) && transferMayContainImage(event.dataTransfer)) {
                 event.preventDefault(); event.dataTransfer.dropEffect = 'copy';
               }
             }}
             onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setQuickDrop(false); }}
             onDrop={(event) => {
-              if (quickMode !== 'agent' || !quickCli || isRemote(quickCli) || !transferMayContainImage(event.dataTransfer)) return;
+              if (quickSending || quickMode !== 'agent' || !quickCli || isRemote(quickCli) || !transferMayContainImage(event.dataTransfer)) return;
               event.preventDefault(); event.stopPropagation(); setQuickDrop(false);
               addQuickImages(imageFilesFromTransfer(event.dataTransfer));
             }}
@@ -432,7 +447,7 @@ export default function Sidebar({
                   key={c.id}
                   className={`quick-cli${quickMode === 'agent' && quickCli === c.id ? ' on' : ''}${c.available ? '' : ' off'}`}
                   title={c.available ? c.label : `${c.label} (not installed)`}
-                  disabled={!c.available}
+                  disabled={!c.available || quickSending}
                   style={quickMode === 'agent' && quickCli === c.id ? { borderColor: c.color } : undefined}
                   onClick={() => { setQuickMode('agent'); if (quickCli !== c.id) resetQuickTarget(); setQuickCli(c.id); }}
                 ><Logo cli={c.id} size={14} /></button>
@@ -441,7 +456,8 @@ export default function Sidebar({
               <button
                 className={`quick-cli quick-grp${quickMode === 'group' ? ' on' : ''}`}
                 title="New group"
-                  onClick={() => setQuickMode('group')}
+                disabled={quickSending}
+                onClick={() => setQuickMode('group')}
               >
                 <span className="grp-mini">
                   <Logo cli="claude" size={8} />
@@ -454,10 +470,11 @@ export default function Sidebar({
                 <button
                   className={`quick-cli${quickMode === 'agent' && quickCli === 'remote' ? ' on' : ''}`}
                   title="Remote agent — an agent on another machine"
+                  disabled={quickSending}
                   style={quickMode === 'agent' && quickCli === 'remote' ? { borderColor: remoteCli.color } : undefined}
                   onClick={() => {
                     setQuickMode('agent'); setQuickCli('remote'); setQuickSessionId(null);
-                    revokePendingImages(quickImages); setQuickImages([]); setQuickError(null);
+                    revokePendingImages(quickImagesRef.current); quickImagesRef.current = []; setQuickImages([]); setQuickError(null);
                   }}
                 ><Logo cli="remote" size={14} /></button>
               )}
@@ -465,7 +482,12 @@ export default function Sidebar({
 
             {quickMode === 'agent' ? (
               <>
-                {quickError && <div className="open-trace-err">{quickError}</div>}
+                {quickError && <div className="open-trace-err" role="alert">{quickError}</div>}
+                {quickError && quickSessionId && (
+                  <div className="quick-recovery mono">
+                    The agent was created. Retry will reuse it; delete it from the agent row if you want to start over.
+                  </div>
+                )}
                 <textarea
                   autoFocus
                   rows={1}
@@ -474,7 +496,7 @@ export default function Sidebar({
                   value={quickPrompt}
                   disabled={quickSending}
                   onPaste={(event) => {
-                    if (!quickCli || isRemote(quickCli)) return;
+                    if (quickSending || !quickCli || isRemote(quickCli)) return;
                     const files = imageFilesFromTransfer(event.clipboardData);
                     if (!files.length) return;
                     event.preventDefault(); addQuickImages(files);
@@ -488,7 +510,7 @@ export default function Sidebar({
                 <ImageAttachments
                   images={quickImages}
                   disabled={quickSending || !quickCli || isRemote(quickCli)}
-                  disabledReason={quickCli && isRemote(quickCli) ? 'Screenshots are not available for remote agents yet' : undefined}
+                  disabledReason={quickCli && isRemote(quickCli) ? 'Screenshots are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
                   onFiles={addQuickImages}
                   onRemove={removeQuickImage}
                 />

@@ -18,10 +18,37 @@ export interface PendingImage {
 }
 
 const identity = (file: File) => `${file.name}\u0000${file.type}\u0000${file.size}\u0000${file.lastModified}`;
+const IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp)$/i;
+
+export function normalizedImageMime(type: string) {
+  const value = String(type || '').split(';', 1)[0].trim().toLowerCase();
+  return value === 'image/jpg' || value === 'image/pjpeg' ? 'image/jpeg' : value;
+}
+
+// Clipboard and drag sources sometimes omit MIME metadata. Use it as a hint,
+// not as proof; the server validates the actual bytes before storing anything.
+export function looksLikeImageFile(file: Pick<File, 'name' | 'type'>) {
+  const type = normalizedImageMime(file.type);
+  return !type || type === 'application/octet-stream'
+    || type.startsWith('image/') || IMAGE_EXTENSION.test(file.name || '');
+}
+
+export function imageFileError(file: Pick<File, 'name' | 'type' | 'size'>) {
+  if (file.size > MAX_IMAGE_BYTES) return 'too large (25 MB max)';
+  if (file.size === 0) return 'empty image';
+  const type = normalizedImageMime(file.type);
+  if (type.startsWith('image/') && !(IMAGE_MIMES as readonly string[]).includes(type)) {
+    return 'unsupported image type';
+  }
+  if (type && type !== 'application/octet-stream' && !type.startsWith('image/')
+      && !IMAGE_EXTENSION.test(file.name || '')) return 'unsupported image type';
+  return undefined;
+}
 
 export function transferMayContainImage(transfer: DataTransfer) {
-  return Array.from(transfer.items || []).some((item) => item.kind === 'file' && item.type.startsWith('image/'))
-    || Array.from(transfer.files || []).some((file) => file.type.startsWith('image/'));
+  return Array.from(transfer.items || []).some((item) => item.kind === 'file'
+      && (item.type.startsWith('image/') || looksLikeImageFile(item.getAsFile() || { name: '', type: item.type })))
+    || Array.from(transfer.files || []).some(looksLikeImageFile);
 }
 
 /** DataTransfer exposes the same file through both items and files in Chromium. */
@@ -29,7 +56,7 @@ export function imageFilesFromTransfer(transfer: DataTransfer) {
   const files: File[] = [];
   const seen = new Set<string>();
   const add = (file: File | null) => {
-    if (!file || !file.type.startsWith('image/')) return;
+    if (!file || !looksLikeImageFile(file)) return;
     const id = identity(file);
     if (seen.has(id)) return;
     seen.add(id);
@@ -45,10 +72,7 @@ export function imageFilesFromTransfer(transfer: DataTransfer) {
 export function pendingImagesFromFiles(files: File[], currentCount = 0) {
   const remaining = Math.max(0, MAX_IMAGES - currentCount);
   const accepted = files.slice(0, remaining).map((file): PendingImage => {
-    let error: string | undefined;
-    if (!(IMAGE_MIMES as readonly string[]).includes(file.type)) error = 'unsupported image type';
-    else if (file.size > MAX_IMAGE_BYTES) error = 'too large (25 MB max)';
-    else if (file.size === 0) error = 'empty image';
+    const error = imageFileError(file);
     return {
       key: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`,
       file,
@@ -82,8 +106,7 @@ export async function uploadPendingImages(
       attachments.push(image.attachment);
       continue;
     }
-    if (!(IMAGE_MIMES as readonly string[]).includes(image.file.type)
-        || image.file.size === 0 || image.file.size > MAX_IMAGE_BYTES) {
+    if (imageFileError(image.file)) {
       throw new Error(image.error || 'invalid image');
     }
     update(image.key, { status: 'uploading', error: undefined });

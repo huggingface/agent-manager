@@ -104,6 +104,7 @@ const MAX_COLS = 1000;
 const MAX_ROWS = 500;
 
 const hosts = new Map(); // session id -> host
+const stopping = new Set();
 
 function djb2(s) {
   let h = 5381;
@@ -112,7 +113,7 @@ function djb2(s) {
 }
 
 export function isRunning(id) {
-  return hosts.has(id);
+  return hosts.has(id) && !stopping.has(id);
 }
 
 export function ghosttyReady() {
@@ -1168,6 +1169,9 @@ export function commandFor(session) {
   // (claude 'p', codex 'p', gemini -i 'p', opencode --prompt 'p') — the CLI
   // starts already working on it, no typing race against a booting TUI.
   const q0 = !session.everStarted && session.pendingPrompt ? shq(session.pendingPrompt) : '';
+  const q0Images = !session.everStarted && Array.isArray(session.pendingImagePaths)
+    ? session.pendingImagePaths.map((image) => shq(String(image))) : [];
+  const firstCommand = () => cli.withPrompt(q0, q0Images);
 
   // Claude keys conversations by working directory, so grouped sessions sharing
   // a folder would all `--continue` onto the SAME most-recent conversation. Pin
@@ -1238,7 +1242,7 @@ export function commandFor(session) {
     const shared = list().some((o) => o.id !== session.id && o.cli === 'opencode' && (o.path ?? o.id) === folder);
     const base = session.everStarted && cli.cont && !shared
       ? `${cli.cont} || exec ${cli.run}`
-      : `exec ${q0 && cli.withPrompt ? cli.withPrompt(q0) : cli.run}`;
+      : `exec ${q0 && cli.withPrompt ? firstCommand() : cli.run}`;
     return `${guard}${base}`;
   }
 
@@ -1256,7 +1260,7 @@ export function commandFor(session) {
   // the agent is the PTY's foreground process; when it exits the session ends —
   // a clear "done" signal — and the fallback preserves that.
   if (session.everStarted && cli.cont) return `${cli.cont} || exec ${cli.run}`;
-  if (q0 && cli.withPrompt) return `exec ${cli.withPrompt(q0)}`;
+  if (q0 && cli.withPrompt) return `exec ${firstCommand()}`;
   return `exec ${cli.run}`;
 }
 
@@ -1397,6 +1401,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
 
   term.onExit(() => {
     hosts.delete(session.id);
+    stopping.delete(session.id);
     if (host.gridTimer) { clearTimeout(host.gridTimer); host.gridTimer = null; }
     if (host.traceHistoryTimer) { clearTimeout(host.traceHistoryTimer); host.traceHistoryTimer = null; }
     if (host.resizeCapture) {
@@ -1411,8 +1416,11 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   });
 
   hosts.set(session.id, host);
+  stopping.delete(session.id);
   if (!persistedHistory && captureResize) hydrateTraceHistory(session, host);
-  if (!session.everStarted) update(session.id, { everStarted: true, pendingPrompt: undefined });
+  if (!session.everStarted) update(session.id, {
+    everStarted: true, pendingPrompt: undefined, pendingImagePaths: undefined,
+  });
   if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
   if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
   if (session.cli === 'claude') scheduleClaudeCapture(session, workdir);
@@ -1496,7 +1504,7 @@ export function attach(session, cols, rows) {
 /** Type a line into the session's terminal (works with no browser attached). */
 export async function sendInput(id, text) {
   const host = hosts.get(id);
-  if (!host) throw new Error('session is not running');
+  if (!host || stopping.has(id)) throw new Error('session is not running');
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
   // the inner newlines as soft line breaks instead of submitting early.
   const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
@@ -1506,6 +1514,16 @@ export async function sendInput(id, text) {
   host.pty.write(payload);
   await new Promise((r) => setTimeout(r, 300));
   host.pty.write('\r');
+}
+
+/** Insert text into a running terminal's composer without submitting it. */
+export function pasteInput(id, text) {
+  const host = hosts.get(id);
+  if (!host || stopping.has(id)) throw new Error('session is not running');
+  const value = String(text || '');
+  if (!value) return;
+  const payload = value.includes('\n') ? `\x1b[200~${value}\x1b[201~` : value;
+  host.pty.write(payload);
 }
 
 /**
@@ -1534,6 +1552,7 @@ export function capturePane(id, lines = 80) {
 export function stop(id) {
   const host = hosts.get(id);
   if (!host) return;
+  stopping.add(id);
   try { host.pty.kill(); } catch {}
 }
 
@@ -1543,6 +1562,7 @@ export function stop(id) {
  */
 export function stopAll() {
   for (const host of hosts.values()) {
+    stopping.add(host.id);
     try { host.pty.kill(); } catch {}
   }
 }

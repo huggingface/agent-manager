@@ -164,6 +164,7 @@ body {
 .quick-foot .quick-hint { margin-left: auto; white-space: nowrap; }
 .quick-more { background: none; border: none; padding: 0; font: inherit; font-size: 10.5px; font-weight: 600; color: var(--accent); cursor: pointer; white-space: nowrap; }
 .quick-more:hover { text-decoration: underline; }
+.quick-recovery { margin-top: -3px; color: var(--muted); font-size: 9.5px; line-height: 1.35; }
 .cart-row.off { opacity: 0.45; }
 
 /* screenshot attachments: one compact operational row shared by composers */
@@ -173,10 +174,14 @@ body {
 .image-pick:hover:not(:disabled) { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .image-pick:disabled { opacity: 0.38; cursor: not-allowed; }
 .image-pick svg { width: 15px; height: 15px; }
+.image-attachments-note { min-width: 0; color: var(--muted); font-size: 10px; line-height: 1.3; }
 .image-chip { min-width: 0; max-width: 205px; height: 36px; display: flex; align-items: center; gap: 6px; padding: 3px 5px 3px 3px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); }
 .image-chip.error { border-color: color-mix(in srgb, var(--danger) 48%, var(--border)); }
 .image-chip.uploading { border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); }
-.image-chip img { flex: none; width: 29px; height: 28px; border-radius: 3px; object-fit: cover; background: var(--panel-2); }
+.image-chip-preview { flex: none; width: 29px; height: 28px; border-radius: 3px; overflow: hidden; background: var(--panel-2); }
+.image-chip-preview:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.image-chip img { display: block; width: 29px; height: 28px; object-fit: cover; }
+.image-chip-placeholder { flex: none; width: 29px; height: 28px; display: inline-flex; align-items: center; justify-content: center; border-radius: 3px; background: var(--panel-2); color: var(--muted); font-size: 8px; }
 .image-chip-copy { min-width: 0; display: flex; flex-direction: column; line-height: 1.15; }
 .image-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; font-weight: 600; }
 .image-chip-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; color: var(--muted); font: 9.5px var(--font-mono); }
@@ -363,7 +368,9 @@ body {
 .ov-composer { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px 8px; border-top: 1px solid var(--border); padding-top: 7px; }
 .ov-composer.image-drop { outline: 1px dashed var(--accent); outline-offset: 5px; background: var(--drop); }
 .ov-composer .image-attachments.has-images { grid-column: 1 / -1; }
-.ov-composer .image-attachments.has-images + .ov-live { grid-column: 1 / -1; }
+.ov-composer .image-attachments.has-note { grid-column: 1 / -1; }
+.ov-composer .image-attachments.has-images + .ov-live,
+.ov-composer .image-attachments.has-note + .ov-live { grid-column: 1 / -1; }
 .ov-composer .ov-live { border-top: none; padding-top: 0; }
 .ov-live { display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--border); padding-top: 7px; font-size: 13px; }
 .ov-live .ov-p { color: var(--accent); font-weight: 700; font-size: 13px; }
@@ -604,6 +611,10 @@ body {
 .term-image-status.uploading { color: var(--accent); animation: breathe 1.2s ease-in-out infinite; }
 .term-image-status.success { color: var(--go); }
 .term-image-status.error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
+.term-image-status.has-action { display: flex; align-items: center; gap: 8px; pointer-events: auto; }
+.term-image-status button { padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 700; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.term-image-status button:disabled { opacity: 0.45; cursor: default; }
+.pane-head .ph-image:disabled { opacity: 0.35; cursor: default; }
 /* The grid is measured against this filler, so it must stay unpadded: FitAddon
    reads the PARENT's computed height and does NOT subtract its padding, so a
    padded parent made the grid count a row that doesn't fit and the bottom line

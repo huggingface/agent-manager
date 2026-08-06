@@ -1,6 +1,6 @@
 # Screenshot input
 
-Status: proposed
+Status: implemented in draft PR
 
 Date: 2026-08-05
 
@@ -61,10 +61,10 @@ denominator:
 | Harness | Observed path as of this design | First implementation |
 |---|---|---|
 | Claude Code | accepts an image path in a prompt; native terminals also support image paste/drop | explicit absolute path in the prompt |
-| Codex | `-i/--image` supports initial images; in-session image paste reads the server clipboard | explicit path, allowing `view_image`; native first-turn flag later |
+| Codex | `-i/--image` supports initial images; in-session image paste reads the server clipboard | native `-i` on the first turn plus an explicit path fallback |
 | Gemini CLI | `@<path>` injects supported images as multimodal context | `@<absolute-path>` |
 | opencode | TUI image drop and `opencode run -f/--file` are supported | explicit/drop-style absolute path |
-| Hermes | `--image` and the interactive `/image <path>` command are supported | `/image <absolute-path>` adapter, with explicit-path fallback |
+| Hermes | the current TUI supports `/image <path>` and detects a pasted standalone image path | `/image <absolute-path>` adapter, with explicit-path fallback |
 | OpenClaw | no stable image-attachment CLI contract was verified | explicit path, best effort |
 
 Every adapter must retain the explicit-path fallback. CLI flags and TUI commands
@@ -226,6 +226,10 @@ session's own directory, and never join an arbitrary browser-supplied filename.
   whose newest file is older than seven days. The grace period covers a crash
   between session persistence and upload completion.
 - Failed and aborted uploads delete their temporary file immediately.
+- Each session is capped at 200 stored screenshots and 500 MiB. Uploads for one
+  session are serialized so concurrent requests cannot race the quota check.
+- Pruning and session deletion use asynchronous filesystem operations so a
+  large attachment store cannot block terminal I/O.
 
 No separate database is required. The session-scoped directory, validated id,
 extension, and `stat` provide the metadata needed in v1.
@@ -262,7 +266,8 @@ and abort with `413` above 25 MiB. Once complete:
 
 1. Read the first small header from the temporary file.
 2. Detect PNG, JPEG, GIF, or WebP by magic bytes.
-3. Reject an unsupported or mismatched body with `415`.
+3. Reject unsupported or malformed bytes with `415`. A missing, aliased, or
+   incorrect request `Content-Type` does not override byte detection.
 4. Rename to the detected extension atomically.
 5. Return `201`.
 
@@ -358,15 +363,12 @@ trace.
 ### 8.2 Adapter interface
 
 Keep version-sensitive behavior in one module rather than scattered across React
-components and `runner.js`:
+components and `runner.js`. The implementation exposes the universal formatted
+prompt and any native prelude commands separately:
 
 ```ts
-interface AttachmentDelivery {
-  prompt: string;
-  prelude?: Array<{ text: string; submit: boolean; settleMs?: number }>;
-}
-
-formatAttachmentDelivery(cli, text, paths): AttachmentDelivery
+formatAttachmentDelivery(cli, text, images): string
+formatAttachmentPrelude(cli, images): string[]
 ```
 
 Initial adapters:
@@ -376,9 +378,10 @@ Initial adapters:
   prompt. If the command is unavailable, use the universal prompt.
 - all others: use the universal prompt.
 
-Codex `--image`, opencode `--file`, and other native launch flags are optional
-follow-ups. They should be added only with version probes/tests and must not be
-required for the feature to function.
+opencode `--file` and other native launch flags are optional follow-ups. Codex
+uses its installed `--image` support on a first turn; every adapter retains the
+explicit path so a missing or changed native flag is not the only route to the
+file.
 
 ### 8.3 First prompt without a boot race
 
@@ -391,8 +394,10 @@ two-step browser flow—create the session, then upload to its attachment scope�
 2. Upload all pending images to the returned session id.
 3. `POST /api/sessions/:id/input` with text and attachment ids.
 4. If the session has never started and its CLI has `withPrompt`, store the
-   fully formatted prompt as `pendingPrompt` and call `ensureRunning()`.
-5. `commandFor()` consumes `pendingPrompt` on the first launch as it does today.
+   fully formatted prompt as `pendingPrompt`; for Codex, also retain the
+   validated paths as `pendingImagePaths`; then call `ensureRunning()`.
+5. `commandFor()` consumes those fields on the first launch, adding one Codex
+   `-i` flag per image, and clears them once the PTY starts.
 
 Only resumed or already-started sessions use the existing boot-then-type path.
 If attachment upload fails after session creation, keep the stopped session and
@@ -401,19 +406,26 @@ the browser draft. Automatically deleting it would make recovery surprising.
 ### 8.4 Terminal insertion
 
 Live terminal paste/drop does not call `/input`, because `/input` submits a turn.
-After upload, the browser uses `insertText` returned by the attachment endpoint:
+After upload, it asks the server to insert the resolved attachments without a
+Return key:
 
-```ts
-term.paste(uploaded.insertText)
+```http
+POST /api/sessions/:id/attachments/insert
+Content-Type: application/json
+
+{"attachmentIds":["att_74e0f69dc9ed772cb685999e"]}
 ```
 
-`paste()` retains xterm's bracketed-paste handling. The browser claims terminal
-control before insertion exactly as it does for ordinary paste. A watcher that
-cannot claim control reports `Image uploaded, but this pane is watching—interact
-and try again` rather than pretending the path reached the CLI.
+The server writes `insertText` to the running PTY and acknowledges only after
+the write is accepted. It never sends Return. If the process stops after upload,
+the browser says the image was saved but not inserted and retains its attachment
+id behind a Retry action. This avoids treating a browser-local xterm paste as
+proof that a disconnected or non-controlling pane reached the CLI. Completed
+terminal insertions are idempotent by attachment id, so retrying after a lost
+HTTP response cannot paste the same path twice.
 
-Hermes is the one useful native exception: the browser may send `/image <path>`
-and Return, wait for the command to settle, and then restore focus without
+Hermes is the one useful native exception: the server may send `/image <path>`
+and Return, briefly wait for the command to settle, and then restore focus without
 submitting the actual prompt. This logic should still live behind the same
 adapter and fall back to `insertText`.
 
@@ -421,7 +433,7 @@ adapter and fall back to `insertText`.
 
 Add a small module, for example `web/src/lib/imageAttachments.ts`, containing:
 
-- accepted MIME types and client-side 25 MiB check;
+- accepted MIME hints, byte/size checks, and client-side 25 MiB check;
 - `imageFilesFromTransfer(DataTransfer)`;
 - `transferMayContainImage(DataTransfer)`;
 - duplicate suppression across `items` and `files`;
@@ -545,6 +557,7 @@ may reuse already uploaded ids while uploading only failed files.
 - The byte limit trips during streaming and leaves no partial file.
 - Aborted requests leave no partial file.
 - Concurrent uploads produce unique files.
+- Concurrent uploads cannot race the per-session byte/count quota.
 - Attachment ids cannot cross sessions or traverse paths.
 - Preview headers include CSP and `nosniff`.
 - A structured prompt rejects if any referenced attachment is absent.
@@ -561,7 +574,11 @@ may reuse already uploaded ids while uploading only failed files.
 - Plain-text paste is unchanged.
 - Removing a chip revokes its preview and excludes it from upload.
 - A multi-image submission waits for every upload before `/input`.
-- Terminal paste uploads and inserts a path without Return.
+- Every chip mutation remains disabled for the complete multi-image send.
+- Terminal paste receives a server acknowledgement and inserts without Return.
+- A terminal stopped after upload reports saved-but-not-inserted, disables new
+  attachments, and can retry the stored attachment after restart.
+- Remote composers show a visible explanation on touch layouts.
 - Terminal image drop does not trigger pane movement.
 - Pane movement data does not trigger the image drop UI.
 - The mobile fallback textarea handles both image and text paste.

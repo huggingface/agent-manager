@@ -520,7 +520,10 @@ export default function App() {
       await refresh();
       setActiveRef(`s:${sessionId}`);
     } catch (e) {
-      showErr('Couldn’t quickstart the agent')(e);
+      // Quickstart owns a persistent inline recovery state (including the
+      // stopped session created before an upload), so a second generic toast
+      // obscures the useful error and makes one failure look like two.
+      console.error('Couldn’t quickstart the agent', e);
       throw e;
     }
   };

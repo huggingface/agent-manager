@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useId, useRef } from 'react';
 import type { PendingImage } from '../lib/imageAttachments';
 import { IMAGE_ACCEPT } from '../lib/imageAttachments';
 
@@ -14,14 +14,17 @@ export default function ImageAttachments({ images, disabled, disabledReason, onF
   onRemove: (key: string) => void;
 }) {
   const picker = useRef<HTMLInputElement>(null);
+  const reasonId = useId();
+  const showReason = !!disabled && !!disabledReason;
   return (
-    <div className={`image-attachments${images.length ? ' has-images' : ''}`}>
+    <div className={`image-attachments${images.length ? ' has-images' : ''}${showReason ? ' has-note' : ''}`}>
       <button
         type="button"
         className="image-pick"
         disabled={disabled}
         title={disabledReason || 'Attach screenshots'}
-        aria-label={disabledReason || 'Attach screenshots'}
+        aria-label="Attach screenshots"
+        aria-describedby={showReason ? reasonId : undefined}
         onClick={() => picker.current?.click()}
       >
         <svg viewBox="0 0 18 18" aria-hidden="true">
@@ -42,17 +45,24 @@ export default function ImageAttachments({ images, disabled, disabledReason, onF
           event.currentTarget.value = '';
         }}
       />
+      {showReason && <span id={reasonId} className="image-attachments-note">{disabledReason}</span>}
       {images.map((image) => (
         <div key={image.key} className={`image-chip ${image.status}`}>
-          <img src={image.previewUrl} alt="" />
+          {image.error === 'unsupported image type' ? (
+            <span className="image-chip-placeholder mono" aria-hidden="true">IMG</span>
+          ) : (
+            <a className="image-chip-preview" href={image.previewUrl} target="_blank" rel="noreferrer" title={`Preview ${image.file.name || 'screenshot'}`}>
+              <img src={image.previewUrl} alt="" />
+            </a>
+          )}
           <span className="image-chip-copy">
             <span className="image-chip-name">{image.file.name || 'Screenshot'}</span>
-            <span className="image-chip-meta">
+            <span className="image-chip-meta" aria-live="polite">
               {image.status === 'uploading' ? 'uploading…'
                 : image.error || (image.status === 'uploaded' ? 'uploaded' : fmtBytes(image.file.size))}
             </span>
           </span>
-          <button type="button" onClick={() => onRemove(image.key)} disabled={image.status === 'uploading'} aria-label={`Remove ${image.file.name || 'screenshot'}`}>×</button>
+          <button type="button" onClick={() => onRemove(image.key)} disabled={disabled || image.status === 'uploading'} aria-label={`Remove ${image.file.name || 'screenshot'}`}>×</button>
         </div>
       ))}
     </div>

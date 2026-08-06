@@ -60,21 +60,30 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
   useEffect(() => () => revokePendingImages(imagesRef.current), []);
 
   const addImages = (files: File[]) => {
-    if (!allowImages || !files.length) return;
-    const next = pendingImagesFromFiles(files, images.length);
-    setImages((current) => [...current, ...next.images]);
+    if (!allowImages || sending || !files.length) return;
+    const next = pendingImagesFromFiles(files, imagesRef.current.length);
+    const merged = [...imagesRef.current, ...next.images];
+    imagesRef.current = merged;
+    setImages(merged);
     setImageError(next.error);
   };
   const removeImage = (key: string) => {
+    if (sending) return;
     setImages((current) => {
       const removed = current.find((image) => image.key === key);
       if (removed) URL.revokeObjectURL(removed.previewUrl);
-      return current.filter((image) => image.key !== key);
+      const next = current.filter((image) => image.key !== key);
+      imagesRef.current = next;
+      return next;
     });
     setImageError(null);
   };
   const updateImage = (key: string, patch: Partial<PendingImage>) => {
-    setImages((current) => current.map((image) => image.key === key ? { ...image, ...patch } : image));
+    setImages((current) => {
+      const next = current.map((image) => image.key === key ? { ...image, ...patch } : image);
+      imagesRef.current = next;
+      return next;
+    });
   };
 
   // After you send (or when the transcript shows a prompt newer than the last
@@ -92,15 +101,17 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
 
   const send = async () => {
     const text = draft.trim();
-    if ((!text && !images.length) || sending) return;
+    const batch = imagesRef.current;
+    if ((!text && !batch.length) || sending) return;
     setSending(true);
     setFailed(null);
     try {
-      const attachments = await uploadPendingImages(s.id, images, updateImage);
+      const attachments = await uploadPendingImages(s.id, batch, updateImage);
       await api.sendInput(s.id, text, attachments.map((image) => image.id));
-      const optimisticText = text || defaultImagePrompt(images.length);
+      const optimisticText = text || defaultImagePrompt(batch.length);
       setDraft('');
-      revokePendingImages(images);
+      revokePendingImages(batch);
+      imagesRef.current = [];
       setImages([]);
       setImageError(null);
       setSent({ text: optimisticText, at: Date.now() });
@@ -186,11 +197,11 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
 
       <div
         className={`ov-composer${dropActive ? ' image-drop' : ''}`}
-        onDragEnter={(event) => { if (allowImages && transferMayContainImage(event.dataTransfer)) { event.preventDefault(); setDropActive(true); } }}
-        onDragOver={(event) => { if (allowImages && transferMayContainImage(event.dataTransfer)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
+        onDragEnter={(event) => { if (allowImages && !sending && transferMayContainImage(event.dataTransfer)) { event.preventDefault(); setDropActive(true); } }}
+        onDragOver={(event) => { if (allowImages && !sending && transferMayContainImage(event.dataTransfer)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
         onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropActive(false); }}
         onDrop={(event) => {
-          if (!allowImages || !transferMayContainImage(event.dataTransfer)) return;
+          if (!allowImages || sending || !transferMayContainImage(event.dataTransfer)) return;
           event.preventDefault(); event.stopPropagation(); setDropActive(false);
           addImages(imageFilesFromTransfer(event.dataTransfer));
         }}
@@ -198,7 +209,7 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
         <ImageAttachments
           images={images}
           disabled={sending || !allowImages}
-          disabledReason={!allowImages ? 'Screenshots are not available for remote agents yet' : undefined}
+          disabledReason={!allowImages ? 'Screenshots are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
           onFiles={addImages}
           onRemove={removeImage}
         />
@@ -216,7 +227,7 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
             spellCheck={false}
             onPaste={(event) => {
               const files = imageFilesFromTransfer(event.clipboardData);
-              if (!allowImages || !files.length) return;
+              if (!allowImages || sending || !files.length) return;
               event.preventDefault(); addImages(files);
             }}
             onChange={(e) => { setDraft(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
@@ -234,7 +245,7 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
           {(draft.trim() || images.length > 0) && !isMobile && <span className="ov-hint">↵ send · ⇧↵ newline</span>}
         </div>
       </div>
-      {(imageError || failed) && <div className="ov-note">{imageError || failed}</div>}
+      {(imageError || failed) && <div className="ov-note" role="alert">{imageError || failed}</div>}
     </div>
   );
 }
