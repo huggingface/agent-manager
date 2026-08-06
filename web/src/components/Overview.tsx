@@ -72,9 +72,9 @@ function useConversationTail(id: string, on: boolean, live: boolean) {
   return { turns, missing };
 }
 
-/** Opening this session's pane, reading the conversation rather than the TTY. */
+/** Opening this session's pane in reader mode rather than on the TTY. */
 const openRendered = (id: string, onOpen: (sid: string) => void) => {
-  writePaneMode('conversation');   // app-wide, and it reaches open panes too
+  writePaneMode('reader');   // app-wide, and it reaches open panes too
   onOpen(id);
 };
 

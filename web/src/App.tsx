@@ -79,11 +79,11 @@ export default function App() {
   // stored — flipping the setting instantly (un)archives.
   const [showArchived, setShowArchived] = useState(false);
   const [archiveAfter, setArchiveAfter] = useState<'week' | 'month' | 'never'>('month');
-  // How every pane is read — the terminal itself, or the conversation in it.
-  // App-wide, like zoom, and remembered the same way.
+  // How every pane is read — the terminal itself, or reader mode over the same
+  // session. App-wide, like zoom, and remembered the same way.
   const [paneMode, setPaneMode] = useState(readPaneMode);
   useEffect(() => onPaneMode(setPaneMode), []);
-  const showPaneMode = (m: 'terminal' | 'conversation') => { setPaneMode(m); writePaneMode(m); };
+  const showPaneMode = (m: 'terminal' | 'reader') => { setPaneMode(m); writePaneMode(m); };
   const [zoom, setZoom] = useState<number>(() => {
     const z = parseInt(localStorage.getItem('am-zoom') || '100', 10);
     return Number.isFinite(z) ? z : 100;
@@ -986,14 +986,14 @@ export default function App() {
               </span>
             )}
             <span className="spacer" />
-            {/* Reading mode sits with zoom because it is the same kind of
-                setting: how you are looking at everything, not what a
-                particular pane is. */}
+            {/* Reader mode sits with zoom because it is the same kind of
+                setting: how you are looking at everything, not what any one
+                pane is. The content is identical either way — this is form. */}
             <span className="seg modebar">
               <button className={paneMode === 'terminal' ? 'on' : ''} title="The terminal itself"
                 onClick={() => showPaneMode('terminal')}>terminal</button>
-              <button className={paneMode === 'conversation' ? 'on' : ''} title="The conversation in it, rendered"
-                onClick={() => showPaneMode('conversation')}>conversation</button>
+              <button className={paneMode === 'reader' ? 'on' : ''} title="Reader mode — the same session, laid out"
+                onClick={() => showPaneMode('reader')}>reader</button>
             </span>
             <button className="zbtn" title="Zoom out" onClick={() => setZoom((z) => Math.max(50, z - 10))}>−</button>
             <button className="zlvl" title="Reset to 100%" onClick={() => setZoom(100)}>{zoom}%</button>

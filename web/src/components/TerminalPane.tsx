@@ -202,7 +202,7 @@ export default function TerminalPane({
   // it — becoming active, the header, the key bar — and some fire after the mode
   // changes, so the guard lives with the call rather than with the switch.
   const modeRef = useRef<PaneMode>('terminal');
-  const focusTerm = () => { if (modeRef.current !== 'conversation') termRef.current?.focus(); };
+  const focusTerm = () => { if (modeRef.current !== 'reader') termRef.current?.focus(); };
   const frameRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const resyncRef = useRef<() => void>(() => {});
@@ -213,11 +213,11 @@ export default function TerminalPane({
   const previousZoomRef = useRef(zoom);
   const [preview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
   // The mode is app-wide (the bottom bar owns it, like zoom), but only an agent
-  // has a conversation to show: a shell is a shell, and files/trace panels are
+  // has a conversation to read: a shell is a shell, and files/trace panels are
   // not this component's business at all.
   const canRender = session.cli !== 'shell' && !isPassive(session.cli);
-  const reading = mode === 'conversation' && canRender;
-  modeRef.current = reading ? 'conversation' : 'terminal';
+  const reading = mode === 'reader' && canRender;
+  modeRef.current = reading ? 'reader' : 'terminal';
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
   const sendKeyRef = useRef<(d: string) => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
@@ -805,7 +805,7 @@ export default function TerminalPane({
     return () => clearTimeout(t);
   }, [active]);
 
-  // Under RENDER the terminal is covered but still mounted — and a mounted xterm
+  // In reader mode the terminal is covered but still mounted — and a mounted xterm
   // with focus swallows every keystroke into the agent's TTY, invisibly. Hand
   // focus back when the terminal is on top again.
   useEffect(() => {
@@ -862,11 +862,11 @@ export default function TerminalPane({
       </div>
       <div className="term-host" ref={frameRef}>
         <div className="term-fill" ref={hostRef} />
-        {/* The conversation draws OVER the terminal rather than replacing it: xterm needs
+        {/* Reader mode draws OVER the terminal rather than replacing it: xterm needs
             layout to fit, and detaching tmux costs a repaint and can trip the
             handoff path. The terminal stays mounted and connected underneath. */}
         {reading && (
-          <div className="pane-render" onMouseDown={(e) => e.stopPropagation()}>
+          <div className="pane-reader" onMouseDown={(e) => e.stopPropagation()}>
             <ConversationView session={session} paused={visible === false} isMobile={isMobile} />
           </div>
         )}

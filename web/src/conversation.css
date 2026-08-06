@@ -187,10 +187,10 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
   .cs-detail { font-size: 12px; }
 }
 
-/* ---------- conversation mode inside a session pane ---------- */
+/* ---------- reader mode inside a session pane ---------- */
 /* Drawn over the live terminal, which stays mounted underneath. */
-.pane-render { position: absolute; inset: 0; z-index: 3; display: flex; background: var(--panel); }
-.pane-render > .cxv { flex: 1; min-width: 0; }
+.pane-reader { position: absolute; inset: 0; z-index: 3; display: flex; background: var(--panel); }
+.pane-reader > .cxv { flex: 1; min-width: 0; }
 .cxv-empty { margin: auto; padding: 24px; font-size: 11.5px; color: var(--muted); text-align: center; }
 .ph-modes { flex: none; }
 .ph-modes button { padding: 1px 7px; font-size: 9.5px; letter-spacing: 0.06em; }
