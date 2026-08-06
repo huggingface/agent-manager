@@ -470,6 +470,89 @@ live rather than remembering.
   bad, leaves an operator exactly as wrongly confident as a failing run — and looks
   perfectly healthy without this check.
 
+## 3.11 Why the mount had to go (measured)
+
+The old step 2 handed a mounted folder to `hf upload` and let it enumerate. That
+enumeration is the entire cost, and it is paid on every file whether wanted or not.
+
+| | files | time |
+|---|---|---|
+| stat-only walk of the FUSE mount (`find /live -type f`) | 108,960 | **14m51s** |
+| the same tree over the Hub API (`list_bucket_tree`) | 108,960 | **8 s** |
+| walk of the same content on the Job's local disk | 39,873 | **0.14 s** |
+
+~8 ms per file on the mount; ~6,000x faster on local disk. The Job has 453 GB of
+local disk, so the download is bounded by bandwidth (~5 MB/s measured), not space.
+
+Three failure modes died with the mount, all seen on this Space's own runs:
+
+1. **`.cache/` paths are rejected outright.** `cannot update files under a
+   '.cache/' folder` — the dataset held one commit, `initial commit`, for a day of
+   hourly runs.
+2. **`Job timeout` at 1h33m–2h07m**, against the `--timeout 3000s` we ask for,
+   which is not honoured.
+3. **`not a file on the local file system`** — the live bucket is written while the
+   run works, and a file rotated away mid-walk killed the whole snapshot. The
+   frozen staging snapshot removes this by construction.
+
+A fourth is not about speed and cannot be outrun: **the Hub secret-scans dataset
+commits and buckets are not scanned.** A commit carrying a live token is rejected —
+and TruffleHog verifies its find by authenticating with the token, which
+**invalidates it**. One of this Space's tokens was invalidated exactly that way.
+Hence §7.2.
+
+Measured end to end at prod scale: list 8.3 s → snapshot 12 s → download 129 s →
+scrub 2 s → verify → commit 113 s. **4m24s total**, for a job that had never once
+succeeded.
+
+## 7.2 Secrets never reach the history
+
+Two mechanisms, because either alone is insufficient:
+
+- **Skip** files that exist to hold credentials, matched on the exact final path
+  segment. A substring test for `/credentials` sails straight past
+  `/.credentials.json` — that gap put a credentials file into a probe commit.
+- **Scrub** stray occurrences in text files, then **verify**, then commit. The
+  verify is mandatory: if anything still matches, the run ends with no commit.
+
+Patterns are boundary-anchored. A looser `sk-[A-Za-z0-9_-]{24,}` matched
+`sk-abstraction-and-chart-selection` inside ordinary prose — a scrub that silently
+rewrites real content is worse than one that over-reports. Re-scanning 73 flagged
+files with tight patterns: 52 real, 21 false positives.
+
+## 3.12 Nothing is private by default
+
+Both verified against the Hub:
+
+| call | result |
+|---|---|
+| `create_bucket(id)` with no `private=` | **public** |
+| `hf upload <new-dataset>` (repo does not exist) | **public** |
+
+The second was live in this file, under a comment asserting the opposite:
+*"Not existing yet is fine — the upload below creates it private."* On any Space
+whose backup dataset did not exist yet, the first run published the bucket.
+
+So: every destination is created with visibility stated explicitly, then **read
+back and checked** before a byte is written. Not inferred, not assumed from a
+sibling call. The source bucket is gated too.
+
+## 9.1 There is no mirror
+
+Removed. It cost a second full copy of the bucket, and `hf cp` never deletes — so
+the mirror accumulated every file the bucket had ever held, including credentials
+long since rotated out (174 files present in the mirror and absent from the live
+bucket, measured). Deleting a leaked secret from the bucket did not remove it from
+the mirror.
+
+What it bought — "the Space exactly as it was, latest only" — is what the bucket
+already is. Restarts never involved backup: the bucket *is* the persistent store,
+which is why logins survive them.
+
+The trade this accepts: a lost bucket now means re-logging in, because the history
+holds no credentials by design (§7.2). An existing mirror bucket is **not** deleted
+automatically — that is the operator's call.
+
 ## 8. Restore
 
 The direction the Hub *does* support server-side, pleasingly:

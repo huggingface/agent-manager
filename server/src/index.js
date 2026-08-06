@@ -903,7 +903,6 @@ function loadAmConfig() {
     // resource, which is the operator's call to make. docs/bucket-backup.md
     backup: {
       every: backup.INTERVALS.includes(saved.backup?.every) ? saved.backup.every : 'never',
-      mirror: (saved.backup?.mirror || '').trim(),
       dataset: (saved.backup?.dataset || '').trim(),
       // Folder names to keep out of the history — the slow, regenerable kind.
       // Prepopulated on a config that has never set one, so a fresh install is
@@ -925,7 +924,6 @@ app.put('/api/config', (req, res) => {
     archive: { after: ['week', 'month', 'never'].includes(b.archive?.after) ? b.archive.after : 'month' },
     backup: {
       every: backup.INTERVALS.includes(b.backup?.every) ? b.backup.every : 'never',
-      mirror: typeof b.backup?.mirror === 'string' ? b.backup.mirror.trim() : '',
       dataset: typeof b.backup?.dataset === 'string' ? b.backup.dataset.trim() : '',
       // Normalized here, not trusted: these end up in a Job's argument list.
       // Same undefined-vs-empty rule as the read path: a body that omits the key
