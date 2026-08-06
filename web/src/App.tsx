@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
+import type { QuickStartAttachmentOptions } from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
 import FilesPane from './components/FilesPane';
 import TracePane from './components/TracePane';
@@ -17,6 +18,7 @@ import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
 import { isPassive, isRemote } from './types';
 import { GridGlyph, ListGlyph } from './components/icons';
+import { uploadPendingAttachments } from './lib/attachments';
 
 // Phone-sized viewport: the app becomes two full-screen views (list ⇄ pane).
 function useIsMobile() {
@@ -489,13 +491,43 @@ export default function App() {
   };
   // Quickstart: server boots the agent and types the prompt; we jump straight
   // to the new pane so you watch it happen.
-  const quickStart = async (cli: string, prompt: string, name = '', path = '.') => {
+  const quickStart = async (cli: string, prompt: string, name = '', path = '.', attachmentOptions?: QuickStartAttachmentOptions) => {
     try {
-      const s = await api.quickStart(cli, prompt, name, path);
-      rememberPath(s.path);
+      let sessionId: string;
+      let sessionPath: string | null = path;
+      if (attachmentOptions?.attachments.length) {
+        if (attachmentOptions.sessionId) {
+          sessionId = attachmentOptions.sessionId;
+        } else {
+          // Attachments are session-scoped, so create the stopped session first,
+          // then upload. If an upload fails the session remains visible and the
+          // sidebar retains its id for a retry.
+          const created = await api.createSession(name, cli, undefined, path);
+          sessionId = created.id;
+          sessionPath = created.path;
+          attachmentOptions.onSessionCreated(created.id);
+          rememberPath(created.path);
+          await refresh();
+        }
+        const attachments = await uploadPendingAttachments(
+          sessionId, attachmentOptions.attachments, attachmentOptions.onAttachmentUpdate,
+        );
+        await api.sendInput(sessionId, prompt, attachments.map((image) => image.id));
+      } else {
+        const created = await api.quickStart(cli, prompt, name, path);
+        sessionId = created.id;
+        sessionPath = created.path;
+      }
+      rememberPath(sessionPath);
       await refresh();
-      setActiveRef(`s:${s.id}`);
-    } catch (e) { showErr('Couldn’t quickstart the agent')(e); }
+      setActiveRef(`s:${sessionId}`);
+    } catch (e) {
+      // Quickstart owns a persistent inline recovery state (including the
+      // stopped session created before an upload), so a second generic toast
+      // obscures the useful error and makes one failure look like two.
+      console.error('Couldn’t quickstart the agent', e);
+      throw e;
+    }
   };
   // Creations land in an explicitly targeted group (the group's + button),
   // else the group you're currently looking at; loose otherwise.

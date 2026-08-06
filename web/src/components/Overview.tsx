@@ -3,8 +3,14 @@ import type { CSSProperties, ReactNode } from 'react';
 import * as api from '../api';
 import type { MetaSession } from '../api';
 import type { Cli, OverviewFilter, Session, SessionState, Tree } from '../types';
-import { isPassive } from '../types';
+import { isPassive, isRemote } from '../types';
 import { renderMarkdown } from '../lib/markdown';
+import {
+  defaultAttachmentPrompt, filesFromTransfer, pendingAttachmentsFromFiles, revokePendingAttachments,
+  transferMayContainFile, uploadPendingAttachments,
+} from '../lib/attachments';
+import type { PendingAttachment } from '../lib/attachments';
+import Attachments from './Attachments';
 import Logo from './Logo';
 
 const fmtAgo = (ts: number) => {
@@ -36,14 +42,49 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
 }) {
   const d = s.digest;
   const [draft, setDraft] = useState('');
+  const [images, setImages] = useState<PendingAttachment[]>([]);
+  const imagesRef = useRef<PendingAttachment[]>([]);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const [dropActive, setDropActive] = useState(false);
   const [sending, setSending] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
   // Optimistic echo: the sent text becomes the prompt line the moment the
   // send succeeds — the digest round-trip (CLI writes transcript → rebuild →
   // poll) can take seconds, and a frozen card reads as "did that get lost?".
   const [sent, setSent] = useState<{ text: string; at: number } | null>(null);
   const [histIdx, setHistIdx] = useState(0); // 0 = live view, n = n-th exchange back
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const allowAttachments = !isRemote(s.cli);
+
+  useEffect(() => { imagesRef.current = images; }, [images]);
+  useEffect(() => () => revokePendingAttachments(imagesRef.current), []);
+
+  const addImages = (files: File[]) => {
+    if (!allowAttachments || sending || !files.length) return;
+    const next = pendingAttachmentsFromFiles(files, imagesRef.current.length);
+    const merged = [...imagesRef.current, ...next.attachments];
+    imagesRef.current = merged;
+    setImages(merged);
+    setImageError(next.error);
+  };
+  const removeImage = (key: string) => {
+    if (sending) return;
+    setImages((current) => {
+      const removed = current.find((image) => image.key === key);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      const next = current.filter((image) => image.key !== key);
+      imagesRef.current = next;
+      return next;
+    });
+    setImageError(null);
+  };
+  const updateImage = (key: string, patch: Partial<PendingAttachment>) => {
+    setImages((current) => {
+      const next = current.map((image) => image.key === key ? { ...image, ...patch } : image);
+      imagesRef.current = next;
+      return next;
+    });
+  };
 
   // After you send (or when the transcript shows a prompt newer than the last
   // answer), the old answer is stale — a spinner takes its place.
@@ -60,18 +101,25 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
 
   const send = async () => {
     const text = draft.trim();
-    if (!text || sending) return;
+    const batch = imagesRef.current;
+    if ((!text && !batch.length) || sending) return;
     setSending(true);
-    setFailed(false);
+    setFailed(null);
     try {
-      await api.sendInput(s.id, text);
+      const attachments = await uploadPendingAttachments(s.id, batch, updateImage);
+      await api.sendInput(s.id, text, attachments.map((image) => image.id));
+      const optimisticText = text || defaultAttachmentPrompt(batch.length);
       setDraft('');
-      setSent({ text, at: Date.now() });
+      revokePendingAttachments(batch);
+      imagesRef.current = [];
+      setImages([]);
+      setImageError(null);
+      setSent({ text: optimisticText, at: Date.now() });
       setHistIdx(0);
       if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
-    } catch {
-      setFailed(true);
-      setTimeout(() => setFailed(false), 4000);
+    } catch (error) {
+      setFailed(error instanceof Error ? error.message : 'failed to reach the agent');
+      setTimeout(() => setFailed(null), 5000);
     }
     setSending(false);
   };
@@ -147,33 +195,57 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
         {showLiveProgress && <div className="ov-busy mono">running</div>}
       </div>
 
-      <div className="ov-live">
-        <span className="ov-p mono">❯</span>
-        <textarea
-          ref={inputRef}
-          rows={1}
-          value={draft}
-          disabled={sending}
-          placeholder={sending ? 'sending…' : 'reply…'}
-          autoComplete="off"
-          autoCorrect="off"
-          autoCapitalize="off"
-          spellCheck={false}
-          onChange={(e) => { setDraft(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
-          // iOS doesn't resize the layout for the keyboard — scroll the
-          // input into view once the keyboard has animated in.
-          onFocus={(e) => { const el = e.currentTarget; setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300); }}
-          onKeyDown={(e) => {
-            // Desktop: Enter sends, Shift+Enter newlines. Mobile keyboards can't
-            // do Shift+Enter, so Enter always newlines there and the button sends.
-            if (e.key === 'Enter' && !e.shiftKey && !isMobile) { e.preventDefault(); send(); }
-            if (e.key === 'Escape') { setDraft(''); inputRef.current?.blur(); }
-          }}
+      <div
+        className={`ov-composer${dropActive ? ' image-drop' : ''}`}
+        onDragEnter={(event) => { if (allowAttachments && !sending && transferMayContainFile(event.dataTransfer)) { event.preventDefault(); setDropActive(true); } }}
+        onDragOver={(event) => { if (allowAttachments && !sending && transferMayContainFile(event.dataTransfer)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
+        onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropActive(false); }}
+        onDrop={(event) => {
+          if (!allowAttachments || sending || !transferMayContainFile(event.dataTransfer)) return;
+          event.preventDefault(); event.stopPropagation(); setDropActive(false);
+          addImages(filesFromTransfer(event.dataTransfer));
+        }}
+      >
+        <Attachments
+          attachments={images}
+          disabled={sending || !allowAttachments}
+          disabledReason={!allowAttachments ? 'Files are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
+          onFiles={addImages}
+          onRemove={removeImage}
         />
-        {draft.trim() && <button className="ov-send" title="Send" onClick={send} disabled={sending}>↑</button>}
-        {draft.trim() && !isMobile && <span className="ov-hint">↵ send · ⇧↵ newline</span>}
+        <div className="ov-live">
+          <span className="ov-p mono">❯</span>
+          <textarea
+            ref={inputRef}
+            rows={1}
+            value={draft}
+            disabled={sending}
+            placeholder={sending ? 'sending…' : 'reply…'}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            spellCheck={false}
+            onPaste={(event) => {
+              const files = filesFromTransfer(event.clipboardData);
+              if (!allowAttachments || sending || !files.length) return;
+              event.preventDefault(); addImages(files);
+            }}
+            onChange={(e) => { setDraft(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
+            // iOS doesn't resize the layout for the keyboard — scroll the
+            // input into view once the keyboard has animated in.
+            onFocus={(e) => { const el = e.currentTarget; setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300); }}
+            onKeyDown={(e) => {
+              // Desktop: Enter sends, Shift+Enter newlines. Mobile keyboards can't
+              // do Shift+Enter, so Enter always newlines there and the button sends.
+              if (e.key === 'Enter' && !e.shiftKey && !isMobile) { e.preventDefault(); send(); }
+              if (e.key === 'Escape') { setDraft(''); inputRef.current?.blur(); }
+            }}
+          />
+          {(draft.trim() || images.length > 0) && <button className="ov-send" title="Send" onClick={send} disabled={sending}>↑</button>}
+          {(draft.trim() || images.length > 0) && !isMobile && <span className="ov-hint">↵ send · ⇧↵ newline</span>}
+        </div>
       </div>
-      {failed && <div className="ov-note">failed to reach the agent</div>}
+      {(imageError || failed) && <div className="ov-note" role="alert">{imageError || failed}</div>}
     </div>
   );
 }
