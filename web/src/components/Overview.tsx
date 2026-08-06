@@ -72,9 +72,9 @@ function useConversationTail(id: string, on: boolean, live: boolean) {
   return { turns, missing };
 }
 
-/** Opening the pane on this session, in RENDER mode (§3.3 keeps it per session). */
+/** Opening this session's pane, reading the conversation rather than the TTY. */
 const openRendered = (id: string, onOpen: (sid: string) => void) => {
-  writePaneMode(id, 'render');   // reaches a pane that is already open, too
+  writePaneMode('conversation');   // app-wide, and it reaches open panes too
   onOpen(id);
 };
 

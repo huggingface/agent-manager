@@ -187,7 +187,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
   .cs-detail { font-size: 12px; }
 }
 
-/* ---------- RENDER mode inside a session pane ---------- */
+/* ---------- conversation mode inside a session pane ---------- */
 /* Drawn over the live terminal, which stays mounted underneath. */
 .pane-render { position: absolute; inset: 0; z-index: 3; display: flex; background: var(--panel); }
 .pane-render > .cxv { flex: 1; min-width: 0; }

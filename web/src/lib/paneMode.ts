@@ -1,31 +1,27 @@
-// Which way a session's pane is being read: the terminal, or the conversation.
+// How every session pane is being read: the terminal, or the conversation.
 // (docs/conversation-view.md §3.3)
 //
-// A view preference, per session, kept in localStorage rather than the store —
-// it says nothing about the session itself, and it should survive a reload
-// without a round trip. The event exists because a pane that is ALREADY open
-// cannot see a write from somewhere else: the Overview card's "full history ↗"
-// sets the mode and then asks App to focus that pane.
-export type PaneMode = 'tui' | 'render';
+// One setting for the whole app, like zoom — not per session. Reading a fleet
+// means reading it the same way; flipping panes one at a time was a preference
+// nobody wanted to manage. Kept in localStorage so a reload does not undo it,
+// and announced so an already-mounted pane hears about it.
+export type PaneMode = 'terminal' | 'conversation';
 
-const KEY = 'am:pane-mode:';
+const KEY = 'am-pane-mode';
 const EVENT = 'am:pane-mode';
 
-export function readPaneMode(id: string): PaneMode {
-  try { return localStorage.getItem(KEY + id) === 'render' ? 'render' : 'tui'; } catch { return 'tui'; }
+export function readPaneMode(): PaneMode {
+  try { return localStorage.getItem(KEY) === 'conversation' ? 'conversation' : 'terminal'; } catch { return 'terminal'; }
 }
 
-export function writePaneMode(id: string, mode: PaneMode): void {
-  try { localStorage.setItem(KEY + id, mode); } catch { /* private mode: this session only */ }
-  window.dispatchEvent(new CustomEvent(EVENT, { detail: { id, mode } }));
+export function writePaneMode(mode: PaneMode): void {
+  try { localStorage.setItem(KEY, mode); } catch { /* private mode: this session only */ }
+  window.dispatchEvent(new CustomEvent(EVENT, { detail: mode }));
 }
 
-/** Called when someone else sets the mode for this session. */
-export function onPaneMode(id: string, apply: (m: PaneMode) => void): () => void {
-  const h = (e: Event) => {
-    const d = (e as CustomEvent<{ id: string; mode: PaneMode }>).detail;
-    if (d && d.id === id) apply(d.mode);
-  };
+/** Someone else changed it — the Overview card asking for the full history. */
+export function onPaneMode(apply: (m: PaneMode) => void): () => void {
+  const h = (e: Event) => apply((e as CustomEvent<PaneMode>).detail);
   window.addEventListener(EVENT, h);
   return () => window.removeEventListener(EVENT, h);
 }

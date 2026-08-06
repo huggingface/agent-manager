@@ -8,7 +8,6 @@ import type { Cli, Session } from '../types';
 import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import ConversationView from './conversation/ConversationView';
-import { onPaneMode, readPaneMode, writePaneMode } from '../lib/paneMode';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
 import { CloseGlyph, RefreshGlyph } from './icons';
@@ -181,7 +180,7 @@ if (typeof window !== 'undefined') {
 }
 
 export default function TerminalPane({
-  session, cli, theme, focused, visible, active, zoom = 100, dragId, isMobile, onDragActive, onFocus, onRename, onClose,
+  session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', dragId, isMobile, onDragActive, onFocus, onRename, onClose,
 }: {
   session: Session;
   cli?: Cli;
@@ -190,6 +189,7 @@ export default function TerminalPane({
   visible?: boolean;
   active?: boolean;
   zoom?: number;
+  mode?: PaneMode;          // app-wide reading mode, from the bottom bar
   dragId?: string;          // set when the pane can be rearranged (group view)
   isMobile?: boolean;       // show the on-screen control-key bar
   onDragActive?: (dragging: boolean) => void;
@@ -201,8 +201,8 @@ export default function TerminalPane({
   // Focus, unless the conversation is covering the terminal. Several paths grab
   // it — becoming active, the header, the key bar — and some fire after the mode
   // changes, so the guard lives with the call rather than with the switch.
-  const modeRef = useRef<PaneMode>('tui');
-  const focusTerm = () => { if (modeRef.current !== 'render') termRef.current?.focus(); };
+  const modeRef = useRef<PaneMode>('terminal');
+  const focusTerm = () => { if (modeRef.current !== 'conversation') termRef.current?.focus(); };
   const frameRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const resyncRef = useRef<() => void>(() => {});
@@ -212,17 +212,12 @@ export default function TerminalPane({
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
   const [preview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
-  // TUI ⇄ RENDER (docs/conversation-view.md §3.3). Only an agent has a
-  // conversation to render: a shell is a shell, and files/trace panels are not
-  // this component's business at all.
+  // The mode is app-wide (the bottom bar owns it, like zoom), but only an agent
+  // has a conversation to show: a shell is a shell, and files/trace panels are
+  // not this component's business at all.
   const canRender = session.cli !== 'shell' && !isPassive(session.cli);
-  const [mode, setMode] = useState<PaneMode>(() => (canRender ? readPaneMode(session.id) : 'tui'));
-  useEffect(() => { setMode(canRender ? readPaneMode(session.id) : 'tui'); }, [session.id, canRender]);
-  // Someone else can ask for RENDER on a pane that is already open — the card's
-  // "full history ↗" does exactly that, and a localStorage write alone is silent.
-  useEffect(() => (canRender ? onPaneMode(session.id, setMode) : undefined), [session.id, canRender]);
-  const showMode = (m: PaneMode) => { setMode(m); writePaneMode(session.id, m); };
-  modeRef.current = mode;
+  const reading = mode === 'conversation' && canRender;
+  modeRef.current = reading ? 'conversation' : 'terminal';
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
   const sendKeyRef = useRef<(d: string) => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
@@ -814,9 +809,9 @@ export default function TerminalPane({
   // with focus swallows every keystroke into the agent's TTY, invisibly. Hand
   // focus back when the terminal is on top again.
   useEffect(() => {
-    if (mode === 'render') termRef.current?.blur();
+    if (reading) termRef.current?.blur();
     else if (focused) termRef.current?.focus();
-  }, [mode, focused]);
+  }, [reading, focused]);
 
   // Focused panes tint toward THEIR agent's brand color, not the app accent.
   const tint = cli?.color;
@@ -862,23 +857,15 @@ export default function TerminalPane({
           <span className="ph-path" title={pathLabel}>{pathLabel}</span>
           {/* The trace stops being a separate thing you open: it is this
               session, read instead of watched. */}
-          {canRender && (
-          <span className="seg ph-modes" onMouseDown={(e) => e.stopPropagation()}>
-            <button className={mode === 'tui' ? 'on' : ''} title="The terminal itself"
-              onClick={(e) => { e.stopPropagation(); showMode('tui'); }}>TUI</button>
-            <button className={mode === 'render' ? 'on' : ''} title="The conversation, rendered"
-              onClick={(e) => { e.stopPropagation(); showMode('render'); }}>RENDER</button>
-          </span>
-          )}
           <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
       <div className="term-host" ref={frameRef}>
         <div className="term-fill" ref={hostRef} />
-        {/* RENDER draws OVER the terminal rather than replacing it: xterm needs
+        {/* The conversation draws OVER the terminal rather than replacing it: xterm needs
             layout to fit, and detaching tmux costs a repaint and can trip the
             handoff path. The terminal stays mounted and connected underneath. */}
-        {mode === 'render' && (
+        {reading && (
           <div className="pane-render" onMouseDown={(e) => e.stopPropagation()}>
             <ConversationView session={session} paused={visible === false} isMobile={isMobile} />
           </div>

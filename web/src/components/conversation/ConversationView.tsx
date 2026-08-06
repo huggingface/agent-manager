@@ -1,4 +1,4 @@
-// RENDER mode: a session's conversation, as a stack of exchanges.
+// Conversation mode: a session's trace, as a stack of exchanges.
 // (docs/conversation-view.md §3.3)
 //
 // The pane header above this belongs to the session; everything here is the
@@ -107,7 +107,7 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   const shown = useMemo(() => {
     if (!q) return exchanges;
     return exchanges.filter((x) =>
-      [x.prompt, x.answer, ...x.steps].some((t) =>
+      [x.prompt, ...x.answer, ...x.steps].some((t) =>
         t && t.blocks.some((b) => JSON.stringify(b).toLowerCase().includes(q))));
   }, [exchanges, q]);
 

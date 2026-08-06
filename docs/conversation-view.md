@@ -60,7 +60,7 @@ Four depths of one component:
 | **D0** brief | Overview tile | prompt (1 line) + state |
 | **D1** card | Overview card, collapsed | prompt, one meta line, answer, reply box |
 | **D2** open | Overview card, unfolded | + the steps between prompt and answer; `↑ show previous turn` walks back one exchange at a time |
-| **D3** full | Session pane, RENDER mode | every exchange, windowed, each expandable to D2 |
+| **D3** full | Session pane, conversation mode | every exchange, windowed, each expandable to D2 |
 
 The viewer stops being a different thing and becomes **a vertical stack of the card**. That is
 the whole design; the rest is consequences.
@@ -150,7 +150,7 @@ Rules that keep this from becoming the ugly viewer in a small box:
 - **Only the card you opened reads the trace.** Inline in the Overview list a card is a
   summary — one prompt, one clamped answer — and the digest already has that. Reading the trace
   per visible agent, and polling it every three seconds for the working ones, would turn the
-  Overview from one `/api/meta` poll into one transcript read per row. The window (and RENDER)
+  Overview from one `/api/meta` poll into one transcript read per row. The window (and conversation mode)
   is where the middle gets fetched.
 - **A card says nothing the surface around it already says.** No turn number (there is one turn),
   no clock (its header carries `·6m`), no model, no harness. In the viewer the same line's right
@@ -163,7 +163,7 @@ exchange per click**, never by "load everything":
 - A centred `↑ show previous turn` at the top of the body prepends the previous exchange,
   collapsed to prompt + answer (its steps fold behind the same `▸ n steps`). Centred, because it
   belongs to the whole card rather than to the column of text under it.
-- After the second one, `full history ↗` joins it, opening the pane in RENDER mode at that
+- After the second one, `full history ↗` joins it, opening the pane in conversation mode at that
   exchange. The card is for "what just happened"; archaeology has a bigger room, and the handoff
   is one click.
 - Cap the card at, say, 5 exchanges regardless — past that the card is the wrong tool and says so.
@@ -183,26 +183,29 @@ was a workaround for not having the middle; with the middle visible it has nothi
 `--vvh` is already maintained from `window.visualViewport` (`App.tsx:106-114`); the backdrop
 must use it, or an open keyboard covers the reply line it is there to serve.
 
-### 3.3 The session pane: TUI ⇄ RENDER
+### 3.3 The session pane: terminal ⇄ conversation
 
-The pane header gets a two-state segmented control, next to the title:
+The bottom bar gets a two-state control, next to the zoom:
 
 ```
-● claude  agent-manager           [ TUI | RENDER ]   ⇪ share   ✕
+                                        [ terminal | conversation ]   − 100% +
 ```
 
-- **Only an agent gets the switch.** A shell has no conversation to render, and the files/trace
-  panels are not sessions at all — same rule the Overview uses to decide what is an agent
-  (`cli !== 'shell' && !isPassive(cli)`).
-- **TUI** — today's terminal, untouched.
-- **RENDER** — the same session as a conversation: `TraceView` (already extracted upstream,
-  `TracePane.tsx:TraceView`, takes a `src` loader) over `/api/trace/:id`, at D3.
-- The mode is a **view preference**, kept in `localStorage` per session id, not in the store.
-- The terminal element stays mounted and connected underneath; RENDER draws over it. Toggling
+**It is one setting for the whole app, like zoom** — not a per-pane toggle. Reading a fleet means
+reading it the same way, and a per-session switch was a preference nobody wanted to manage. A
+pane with nothing to render (a shell) simply stays a terminal.
+
+- **Only an agent has a conversation.** A shell stays a terminal whatever the switch says, and
+  the files/trace panels are not sessions at all — same rule the Overview uses to decide what is
+  an agent (`cli !== 'shell' && !isPassive(cli)`).
+- **terminal** — today's terminal, untouched.
+- **conversation** — the same session, read: the exchange renderer over `/api/trace/:id`, at D3.
+- The mode is a **view preference**, kept in `localStorage` for the app, not in the store.
+- The terminal element stays mounted and connected underneath; the conversation draws over it. Toggling
   must not detach tmux — a reattach costs a repaint and can trip the handoff path
   (`HANDOFF_CODE`, `TerminalPane.tsx`). **Verify** this before shipping: xterm needs layout to
   fit, so "cover, don't unmount" is the low-risk option, and a refit on return is required.
-- The RENDER toolbar is a second header row, not a squeeze into the first — on a phone the
+- The conversation's toolbar is a second header row, not a squeeze into the first — on a phone the
   first row has no spare width. It carries only what is true of the whole session and said
   nowhere else: the model, `13 turns`, the token totals abbreviated (`2.2M↓ 654k↑`), `▲▼`, and
   the search box. The harness is the logo in the row above; the raw message count and the cached
@@ -216,7 +219,7 @@ The pane header gets a two-state segmented control, next to the title:
   the nearest positioned ancestor and lands a few rows off.
 - Vocabulary: a **turn** is one exchange, a **message** is a raw transcript row. Each turn's meta
   line says `turn 6/13`, so the bar counts the same things the reader does.
-- **The terminal must not keep the keyboard** while RENDER covers it. A mounted xterm with focus
+- **The terminal must not keep the keyboard** while the conversation covers it. A mounted xterm with focus
   swallows keystrokes into the agent's TTY, invisibly — and several paths grab focus back (the
   pane becoming active, the header, the key bar), some of them *after* the mode changes, so the
   guard belongs at each call rather than at the switch.
@@ -233,25 +236,25 @@ The pane header gets a two-state segmented control, next to the title:
 - **The conversation fills the pane.** A fixed reading column left a gutter of nothing on each
   side while the prompt band still spanned the full width, so the two disagreed about where the
   conversation began. The pane is the measure: narrow the pane and the conversation narrows.
-- **RENDER can be replied to.** Reading a conversation and answering it are the same act — the
+- **The conversation can be replied to.** Reading a conversation and answering it are the same act — the
   card has always known that, and a rendered session that could only be read would send you back
-  to the TUI to type. It is the card's own composer (`.ov-live`), the same `sendInput`, and the
+  to the terminal to type. It is the card's own composer (`.ov-live`), the same `sendInput`, and the
   same optimistic echo: your prompt appears at the bottom with a `working` line until the
   transcript catches up. Only a trace with **no agent behind it** — a shared file, an import — is
   read-only, which is what `readOnly` is for.
 - **Share** moves here from the sidebar. One session, one place.
-- **Handover** ("continue from this trace in a new agent") lives in the RENDER footer, beside
+- **Handover** ("continue from this trace in a new agent") lives in the conversation footer, beside
   the provenance line — the only place where its meaning is obvious.
 
 ### 3.4 What leaves the sidebar
 
 | Today | Tomorrow |
 |---|---|
-| `Read this session's trace` on every agent row (`Sidebar.tsx:245`) | pane header → **RENDER** |
+| `Read this session's trace` on every agent row (`Sidebar.tsx:245`) | bottom bar → **conversation** |
 | `Share this session` on every agent row (`Sidebar.tsx:246`) | pane header → **share** |
 | A `trace` **session row per read** (`App.tsx:openTrace`) | **gone** — no duplicate rows |
 | Trace row's `Share` (`Sidebar.tsx:237`) | trace pane header (imported traces keep a pane) |
-| Trace row's `Handover` (`Sidebar.tsx:238`) | RENDER / trace-pane footer |
+| Trace row's `Handover` (`Sidebar.tsx:238`) | conversation / trace-pane footer |
 | Quick-add **Trace** = open a shared dataset (`Sidebar.tsx:482`) | **stays** |
 
 The last row is deliberate: an **imported** trace has no session behind it, so it is a genuine
@@ -372,8 +375,8 @@ the block model already supports.
 ## 8. Open questions (operator)
 
 1. **How far back in the card?** Proposal: one exchange per click, hard cap 5, then hand off to
-   RENDER. Alternative: one, then straight to RENDER.
-2. **Is RENDER sticky per session**, or does a pane always open in TUI?
+   the conversation. Alternative: one, then straight to the full conversation.
+2. **Does the app open in conversation mode**, or always start on the terminal?
 3. **Kill the `↑ ↓` turn stepper?** Proposal: yes — unfolding replaces it.
 4. **Unfolded card of a running agent**: live-refresh every 3 s, or freeze until it finishes
    (cheaper, less alive)?
@@ -418,7 +421,7 @@ Built (this branch):
    there is no transcript to read.
 3. `pageOf()` takes a negative offset — "the last N turns" without a round trip to learn `total`
    (`server/test/trace-tail.test.mjs`).
-4. The session pane gets TUI ⇄ RENDER. RENDER draws over the terminal, which stays mounted and
+4. The session pane gets terminal ⇄ conversation, from the bottom bar, app-wide. It draws over the terminal, which stays mounted and
    connected but loses the keyboard; the mode is a per-session view preference in `localStorage`
    (`web/src/lib/paneMode.ts`), and its event reaches a pane that is already open — which is what
    the card's "full history ↗" needs.
@@ -430,9 +433,9 @@ Not yet, in the order I would do it:
 6. `head.prompts[]` (§5) — index, first line and timestamp per prompt, so a surface can draw the
    skeleton and label "show previous turn" before fetching the page that holds it.
 7. The sidebar loses its trace buttons and `openTrace`; share moves into the pane header (§3.4).
-8. Windowing by exchange in RENDER mode: a collapsed turn is 2–3 rows, so the DOM stays small,
+8. Windowing by exchange in conversation mode: a collapsed turn is 2–3 rows, so the DOM stays small,
    `head.prompts[]` gives the skeleton up front, and only an opened turn needs its page. The
    measured-height machinery in `TraceView` is reused as-is — what changes is what a "row" means.
-   Until then RENDER reads the last 400 turns in one request.
+   Until then it reads the last 400 turns in one request.
 9. The mobile card sizing block (§3.2) — the lab's `.lab-mfix` mirror of it is not the real
    `@media` rule, and the real one has not landed.

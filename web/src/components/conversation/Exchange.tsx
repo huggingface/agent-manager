@@ -15,10 +15,12 @@ import type { Exchange, Step } from './exchanges';
 import { fmtClock, fmtDur, fmtTok, oneLine, stepSummary, stepText, stepsOf } from './exchanges';
 import ToolCall from './ToolCall';
 
-const textOf = (t: TraceTurn | null) =>
-  (t?.blocks || []).filter((b) => b.type === 'text').map((b) => ('text' in b ? b.text : '')).join('\n\n').trim();
-const moreOf = (t: TraceTurn | null) =>
-  (t?.blocks || []).reduce((n, b) => n + (('more' in b && b.more) || 0), 0);
+const blocksOf = (t: TraceTurn | TraceTurn[] | null) =>
+  (Array.isArray(t) ? t : [t]).flatMap((x) => x?.blocks || []);
+const textOf = (t: TraceTurn | TraceTurn[] | null) =>
+  blocksOf(t).filter((b) => b.type === 'text').map((b) => ('text' in b ? b.text : '')).join('\n\n').trim();
+const moreOf = (t: TraceTurn | TraceTurn[] | null) =>
+  blocksOf(t).reduce((n, b) => n + (('more' in b && b.more) || 0), 0);
 
 const moreLabel = (more?: number) =>
   (more ? `+${more > 1024 ? `${Math.round(more / 1024)} KB` : `${more} chars`} not retained` : '');
@@ -190,6 +192,7 @@ export function ExchangeView({
 
       {/* Everything about the turn on ONE line, under the prompt: what the work
           was on the left, which turn it is on the right. Nothing above. */}
+      {(summary || n != null) && (
       <div className="cx-meta mono">
         {steps.length > 0 ? (
           <button className={`cx-fold${isOpen ? ' on' : ''}`} onClick={toggle} title={isOpen ? 'Hide the work' : 'Show the work'}>
@@ -208,6 +211,7 @@ export function ExchangeView({
           </>
         )}
       </div>
+      )}
       {isOpen && steps.length > 0 && (
         <div className="cx-steps">{steps.map((s, i) => <StepRow key={i} s={s} q={q} />)}</div>
       )}

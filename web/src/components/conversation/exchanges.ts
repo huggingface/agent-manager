@@ -10,7 +10,8 @@ export interface Exchange {
   at: number;
   prompt: TraceTurn | null;
   steps: TraceTurn[];
-  answer: TraceTurn | null;
+  /** Everything the agent said after its last action — usually one turn. */
+  answer: TraceTurn[];
   startTs: number;
   endTs: number;
   tokens: number;
@@ -34,7 +35,7 @@ export function splitExchanges(turns: TraceTurn[]): Exchange[] {
   let cur: Exchange | null = null;
   const open = (at: number, prompt: TraceTurn | null) => {
     cur = {
-      key: `x${at}`, at, prompt, steps: [], answer: null,
+      key: `x${at}`, at, prompt, steps: [], answer: [],
       startTs: prompt?.ts || 0, endTs: prompt?.ts || 0, tokens: 0, toolCalls: 0,
     };
     out.push(cur);
@@ -63,20 +64,30 @@ export function splitExchanges(turns: TraceTurn[]): Exchange[] {
     const said = t.blocks.filter((b) => b.type !== 'text' || b.text.trim());
     return said.length > 0 && said[said.length - 1].type === 'text';
   };
+  const spoke = (t: TraceTurn) => saidSomething(t) && endedOnIt(t);
 
   for (const x of out) {
-    let at = -1;
-    // A later `final` supersedes an earlier one (a resumed task can have two);
-    // the earlier one stays in the work, where it happened.
-    for (let i = x.steps.length - 1; i >= 0; i--) {
-      if (x.steps[i].kind === 'final' && saidSomething(x.steps[i])) { at = i; break; }
+    // The answer is the trailing RUN of messages: everything the agent said
+    // after its last action. Taking only the last one buried real answers —
+    // a harness marks the last assistant text of a request as `final`, and
+    // that is sometimes a throwaway ("No response requested.") written in
+    // reply to a notification, with the actual answer in the turn above it.
+    let from = x.steps.length;
+    while (from > 0 && spoke(x.steps[from - 1])) from--;
+    if (from < x.steps.length) {
+      x.answer = x.steps.slice(from);
+      x.steps.length = from;
+      continue;
     }
-    // No `final` anywhere (some harnesses, some truncations): the trailing turn
-    // is the answer if it ended on words. Showing none would be a lie; showing
-    // an earlier one would be a different lie.
-    const last = x.steps.length - 1;
-    if (at < 0 && last >= 0 && saidSomething(x.steps[last]) && endedOnIt(x.steps[last])) at = last;
-    if (at >= 0) { x.answer = x.steps[at]; x.steps.splice(at, 1); }
+    // Nothing at the end: an agent that answered and then went back to work
+    // (a resumed task) still answered. Its last `final` stands, where it is.
+    for (let i = x.steps.length - 1; i >= 0; i--) {
+      if (x.steps[i].kind === 'final' && saidSomething(x.steps[i])) {
+        x.answer = [x.steps[i]];
+        x.steps.splice(i, 1);
+        break;
+      }
+    }
   }
   return out;
 }

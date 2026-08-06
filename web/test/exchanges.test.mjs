@@ -30,7 +30,12 @@ const call = (name, arg) => ({ type: 'tool_use', name, text: JSON.stringify(arg)
 const result = (t, failed) => ({ type: 'tool_result', text: t, ...(failed ? { failed: true } : {}) });
 const user = (t) => ({ role: 'user', ts: at(), blocks: [text(t)] });
 const agent = (blocks, kind) => ({ role: 'assistant', ts: at(), ...(kind ? { kind } : {}), blocks });
-const said = (turn) => (turn ? turn.blocks.filter((b) => b.type === 'text').map((b) => b.text).join('') : null);
+// a prompt is one turn; an answer is the RUN of turns said after the last action
+const said = (t) => {
+  const turns = Array.isArray(t) ? t : [t].filter(Boolean);
+  if (!turns.length) return null;
+  return turns.map((x) => x.blocks.filter((b) => b.type === 'text').map((b) => b.text).join('')).join('\n\n');
+};
 const kinds = (steps) => steps.map((s) => (s.kind === 'tools' ? `${s.name}×${s.count}` : s.kind));
 
 // ---------------------------------------------------------------- mid-task
@@ -43,7 +48,7 @@ const kinds = (steps) => steps.map((s) => (s.kind === 'tools' ? `${s.name}×${s.
     agent([text('There it is — a sync stat sweep.'), call('Read', { file_path: 'runner.js' }), result('statSync(f)')]),
     agent([call('Edit', { file_path: 'runner.js' }), result('Applied 1 edit')]),
   ]);
-  assert.equal(x.answer, null, 'work in flight is not an answer');
+  assert.deepEqual(x.answer, [], 'work in flight is not an answer');
   assert.deepEqual(kinds(stepsOf(x.steps)),
     ['note', 'Grep×1', 'note', 'Read×1', 'Edit×1'],
     'messages stay above the calls they introduced');
@@ -68,7 +73,7 @@ const kinds = (steps) => steps.map((s) => (s.kind === 'tools' ? `${s.name}×${s.
     user('go'),
     agent([text('One more check.'), call('Bash', { command: 'npm test' }), result('ok')]),
   ]);
-  assert.equal(x.answer, null, 'ending on a tool call is not ending on words');
+  assert.deepEqual(x.answer, [], 'ending on a tool call is not ending on words');
 }
 
 // ------------------------------------------------------- a superseded final
@@ -83,6 +88,24 @@ const kinds = (steps) => steps.map((s) => (s.kind === 'tools' ? `${s.name}×${s.
   ]);
   assert.equal(said(x.answer), 'PR is up: #37.');
   assert.deepEqual(kinds(stepsOf(x.steps)), ['note', 'Bash×1'], 'the earlier final keeps its position');
+}
+
+// ------------------------------------------------- a throwaway after the answer
+// Seen live: the harness marks the last assistant text of a request `final`,
+// and that was "No response requested." — written in reply to a notification,
+// with the real answer in the turn above. Taking only the last `final` buried
+// the answer in the work and showed the boilerplate as the reply.
+{
+  const [x] = splitExchanges([
+    user('any news on hugging face?'),
+    agent([text("I'll search the web for this."), call('WebSearch', { query: 'hugging face' }), result('…')]),
+    agent([text("Here's the latest on the incident: …")]),
+    agent([text('No response requested.')], 'final'),
+  ]);
+  assert.equal(said(x.answer),
+    "Here's the latest on the incident: …\n\nNo response requested.",
+    'everything said after the last action is the answer');
+  assert.deepEqual(kinds(stepsOf(x.steps)), ['note', 'WebSearch×1'], 'and none of it is left in the work');
 }
 
 // --------------------------------------------------------------- splitting

@@ -15,6 +15,7 @@ import BackupBanner from './components/BackupBanner';
 import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
+import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { isPassive, isRemote } from './types';
 import { GridGlyph, ListGlyph } from './components/icons';
 
@@ -78,6 +79,11 @@ export default function App() {
   // stored — flipping the setting instantly (un)archives.
   const [showArchived, setShowArchived] = useState(false);
   const [archiveAfter, setArchiveAfter] = useState<'week' | 'month' | 'never'>('month');
+  // How every pane is read — the terminal itself, or the conversation in it.
+  // App-wide, like zoom, and remembered the same way.
+  const [paneMode, setPaneMode] = useState(readPaneMode);
+  useEffect(() => onPaneMode(setPaneMode), []);
+  const showPaneMode = (m: 'terminal' | 'conversation') => { setPaneMode(m); writePaneMode(m); };
   const [zoom, setZoom] = useState<number>(() => {
     const z = parseInt(localStorage.getItem('am-zoom') || '100', 10);
     return Number.isFinite(z) ? z : 100;
@@ -732,6 +738,7 @@ export default function App() {
                 cli={cliMap[s.cli]}
                 theme={theme}
                 zoom={zoom}
+                mode={paneMode}
                 focused={shown && sessions.length > 1 && s.id === focusedId}
                 visible={shown && deckVisible}
                 active={shown && deckVisible && s.id === focusedId}
@@ -979,6 +986,15 @@ export default function App() {
               </span>
             )}
             <span className="spacer" />
+            {/* Reading mode sits with zoom because it is the same kind of
+                setting: how you are looking at everything, not what a
+                particular pane is. */}
+            <span className="seg modebar">
+              <button className={paneMode === 'terminal' ? 'on' : ''} title="The terminal itself"
+                onClick={() => showPaneMode('terminal')}>terminal</button>
+              <button className={paneMode === 'conversation' ? 'on' : ''} title="The conversation in it, rendered"
+                onClick={() => showPaneMode('conversation')}>conversation</button>
+            </span>
             <button className="zbtn" title="Zoom out" onClick={() => setZoom((z) => Math.max(50, z - 10))}>−</button>
             <button className="zlvl" title="Reset to 100%" onClick={() => setZoom(100)}>{zoom}%</button>
             <button className="zbtn" title="Zoom in" onClick={() => setZoom((z) => Math.min(200, z + 10))}>+</button>
