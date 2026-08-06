@@ -8,23 +8,30 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-resume-'));
 const XDG = path.join(TMP, 'xdg');
 const DATA = path.join(TMP, 'data');
+const REPIN = path.join(TMP, 'repin');
 fs.mkdirSync(path.join(XDG, 'opencode'), { recursive: true });
 fs.mkdirSync(DATA, { recursive: true });
 
 process.env.XDG_DATA_HOME = XDG;
+process.env.XDG_CONFIG_HOME = path.join(TMP, 'config');
 process.env.DATA_DIR = DATA;
+process.env.AM_REPIN_DIR = REPIN;
+process.env.AM_ID = 'pane-1';
+process.env.AM_RUN_ID = '11111111-2222-4333-8444-555555555555';
+process.env.AM_CLI = 'opencode';
 
 // Only the columns the runner reads. opencode's real table has ~30 more; a
 // narrower one still proves the query, and drifts less.
 const DB = path.join(XDG, 'opencode', 'opencode.db');
 const db = new DatabaseSync(DB);
-db.exec('create table session (id text primary key, directory text not null, time_created integer not null)');
-const addRow = (id, directory, timeCreated) =>
-  db.prepare('insert into session (id, directory, time_created) values (?, ?, ?)').run(id, directory, timeCreated);
+db.exec('create table session (id text primary key, directory text not null, parent_id text, time_created integer not null)');
+const addRow = (id, directory, timeCreated, parentId = null) =>
+  db.prepare('insert into session (id, directory, parent_id, time_created) values (?, ?, ?, ?)').run(id, directory, parentId, timeCreated);
 
 const sessions = await import('../src/sessions.js');
 const runner = await import('../src/runner.js');
@@ -42,11 +49,42 @@ const has = (name, hay, needle) => check(name, String(hay).includes(needle), tru
 const LIVE = 'ses_0325987abffej9UeLKjc55GHK8';
 const GONE = 'ses_099999999ffezzzzzzzzzzzzzzz';
 addRow(LIVE, '/data/workspaces/proj-a', 1770000000000);
+addRow('ses_child', '/data/workspaces/proj-a', 1770000000001, LIVE);
 
 console.log('\nthe db decides whether a pin is still resumable');
 check('live row found', traces.opencodeSessionExists(LIVE), true);
 check('purged row not found', traces.opencodeSessionExists(GONE), false);
 check('no id is not a row', traces.opencodeSessionExists(null), false);
+check('exact row keeps its directory', traces.opencodeSessionInfo(LIVE)?.directory, '/data/workspaces/proj-a');
+check('exact row exposes subagent parent', traces.opencodeSessionInfo('ses_child')?.parentId, LIVE);
+check('missing exact row is null', traces.opencodeSessionInfo(GONE), null);
+
+console.log('\nthe global plugin reports exact root-session lifecycle events');
+const scripts = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts');
+const pluginSource = path.join(scripts, 'am-opencode-repin.js');
+check('plugin installs globally', runner.installOpencodeRepinPlugin(pluginSource), true);
+const installed = path.join(process.env.XDG_CONFIG_HOME, 'opencode', 'plugins', 'am-agent-manager.js');
+check('installed plugin is the app-owned source', fs.readFileSync(installed, 'utf8'), fs.readFileSync(pluginSource, 'utf8'));
+check('plugin install is idempotent', runner.installOpencodeRepinPlugin(pluginSource), true);
+
+const pluginBody = fs.readFileSync(pluginSource, 'utf8');
+const pluginModule = await import(`data:text/javascript;base64,${Buffer.from(pluginBody).toString('base64')}`);
+const hooks = await pluginModule.AgentManagerRepin({ directory: '/data/workspaces/proj-a' });
+const CREATED = 'ses_0ccccccccffeccccccccccccccc';
+await hooks.event({ event: { type: 'session.created', properties: { info: {
+  id: CREATED, directory: '/data/workspaces/proj-a',
+} } } });
+let crumb = JSON.parse(fs.readFileSync(path.join(REPIN, 'pane-1.opencode.json'), 'utf8'));
+check('created event reports exact id', crumb.payload.session_id, CREATED);
+check('created event carries launch nonce', crumb.runId, process.env.AM_RUN_ID);
+fs.unlinkSync(path.join(REPIN, 'pane-1.opencode.json'));
+await hooks.event({ event: { type: 'session.created', properties: { info: {
+  id: 'ses_child', directory: '/data/workspaces/proj-a', parentID: CREATED,
+} } } });
+check('subagent create ignored', fs.existsSync(path.join(REPIN, 'pane-1.opencode.json')), false);
+await hooks['chat.message']({ sessionID: LIVE });
+crumb = JSON.parse(fs.readFileSync(path.join(REPIN, 'pane-1.opencode.json'), 'utf8'));
+check('message hook follows selected existing session', crumb.payload.session_id, LIVE);
 
 console.log('\na restart resumes the pinned conversation, not the folder\'s newest');
 const s = sessions.create({ name: 'oc', cli: 'opencode', path: 'proj-a' });

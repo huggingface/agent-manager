@@ -46,6 +46,12 @@ ENV LANG=C.UTF-8
 # Pinned to @latest so a factory reboot (no-cache rebuild) reinstalls the newest
 # published versions — that's what the "Relaunch & update" button triggers.
 RUN npm install -g @anthropic-ai/claude-code@latest @openai/codex@latest
+# This image is the administrator of its own Codex runtime. Install Agent
+# Manager's lifecycle adapter as a managed hook so it runs deterministically
+# without weakening trust for any user/project hooks.
+COPY codex-requirements.toml /etc/codex/requirements.toml
+COPY scripts/am-codex-repin-hook.sh /etc/codex/hooks/am-codex-repin-hook.sh
+RUN chmod 755 /etc/codex/hooks/am-codex-repin-hook.sh
 # Newer agents, best-effort so a publish hiccup can't break the image build;
 # the app marks any missing binary "unavailable" gracefully.
 RUN npm install -g @google/gemini-cli@latest || echo "gemini-cli install failed"

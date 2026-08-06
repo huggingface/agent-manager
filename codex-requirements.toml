@@ -1,0 +1,16 @@
+# Agent Manager owns this container-level Codex policy. A managed hook needs no
+# per-pane trust prompt, unlike a user hooks.json entry, and it is limited to
+# reporting the exact root session selected by startup/resume/clear.
+[features]
+hooks = true
+
+[hooks]
+managed_dir = "/etc/codex/hooks"
+
+[[hooks.SessionStart]]
+matcher = "^(startup|resume|clear)$"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "/etc/codex/hooks/am-codex-repin-hook.sh"
+timeout = 5

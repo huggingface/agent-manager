@@ -6,15 +6,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'repin-'));
 const CFG = path.join(TMP, 'cfg');
 const DATA = path.join(TMP, 'data');
+const REPIN = path.join(TMP, 'repin');
+const CODEX = path.join(TMP, 'codex');
 fs.mkdirSync(path.join(CFG, 'projects'), { recursive: true });
 fs.mkdirSync(DATA, { recursive: true });
+fs.mkdirSync(path.join(CODEX, 'sessions', '2026', '08', '06'), { recursive: true });
 
 process.env.CLAUDE_CONFIG_DIR = CFG;
 process.env.DATA_DIR = DATA;
+process.env.AM_REPIN_DIR = REPIN;
+process.env.CODEX_HOME = CODEX;
 
 const sessions = await import('../src/sessions.js');
 const runner = await import('../src/runner.js');
@@ -78,13 +85,15 @@ check('no candidate', await runner.claudeCandidate('s1', path.join(cfg.WORKSPACE
 
 // ---------- breadcrumbs: attribution the scan cannot do in shared folders ----------
 const E = 'eeeeeeee-0000-0000-0000-000000000005';
+const RUN = '11111111-2222-4333-8444-555555555555';
 const crumb = (over = {}) => ({
-  amId: 's1', claudePid: 4242,
+  amId: 's1', runId: RUN, cli: 'claude', claudePid: 4242,
   payload: { session_id: E, cwd: WORKDIR, source: 'clear' },
   ...over,
 });
 const facts = (over = {}) => ({
-  workdir: WORKDIR, pinned: A, claimed: new Set([B]), pidTrusted: true, ...over,
+  cli: 'claude', runId: RUN, workdir: WORKDIR, pinned: A,
+  claimed: new Set([B]), pidTrusted: true, ...over,
 });
 const verdict = (c, f) => runner.breadcrumbVerdict(c, 's1', f);
 
@@ -93,6 +102,8 @@ check('clean crumb accepted', verdict(crumb(), facts()).repin, E);
 
 console.log('\na breadcrumb only speaks for the pane that wrote it');
 check('amId mismatch rejected', verdict(crumb({ amId: 's2' }), facts()).repin, null);
+check('stale launch rejected', verdict(crumb({ runId: 'old-run' }), facts()).why, 'runId mismatch');
+check('wrong harness rejected', verdict(crumb({ cli: 'codex' }), facts()).why, 'cli mismatch');
 check('cwd mismatch rejected',
   verdict(crumb({ payload: { session_id: E, cwd: '/elsewhere', source: 'clear' } }), facts()).repin, null);
 
@@ -108,6 +119,53 @@ check('claimed uuid left to its session',
 check('malformed session_id rejected',
   verdict(crumb({ payload: { session_id: 'not-a-uuid', cwd: WORKDIR } }), facts()).repin, null);
 check('null crumb rejected', verdict(null, facts()).repin, null);
+
+console.log('\nCodex and OpenCode use the same pane/run attribution contract');
+const CODEX_ID = '12345678-1234-4234-8234-123456789abc';
+const rollout = path.join(CODEX, 'sessions', '2026', '08', '06', `rollout-2026-08-06T00-00-00-${CODEX_ID}.jsonl`);
+fs.writeFileSync(rollout, '{}\n');
+const codexCrumb = {
+  amId: 's1', runId: RUN, cli: 'codex',
+  payload: { session_id: CODEX_ID, transcript_path: rollout, cwd: WORKDIR, source: 'clear' },
+};
+check('Codex exact id accepted', runner.breadcrumbVerdict(codexCrumb, 's1', {
+  cli: 'codex', runId: RUN, workdir: WORKDIR, pinned: null, claimed: new Set(),
+}).repin, CODEX_ID);
+check('Codex rollout path retained', runner.codexRolloutForBreadcrumb(codexCrumb), rollout);
+check('Codex path outside CODEX_HOME rejected', runner.codexRolloutForBreadcrumb({
+  ...codexCrumb, payload: { ...codexCrumb.payload, transcript_path: `/tmp/rollout-x-${CODEX_ID}.jsonl` },
+}), null);
+check('OpenCode exact id accepted', runner.breadcrumbVerdict({
+  amId: 's1', runId: RUN, cli: 'opencode',
+  payload: { session_id: 'ses_1234567890abcdef', cwd: WORKDIR },
+}, 's1', {
+  cli: 'opencode', runId: RUN, workdir: WORKDIR, pinned: null, claimed: new Set(),
+}).repin, 'ses_1234567890abcdef');
+
+console.log('\nhook scripts preserve the pane and launch identity');
+const scripts = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts');
+const repoRoot = path.dirname(scripts);
+const requirements = fs.readFileSync(path.join(repoRoot, 'codex-requirements.toml'), 'utf8');
+check('Codex hook is managed (no user trust prompt)', requirements.includes('managed_dir = "/etc/codex/hooks"'), true);
+check('managed policy runs the root-owned hook', requirements.includes('command = "/etc/codex/hooks/am-codex-repin-hook.sh"'), true);
+const hookPayload = JSON.stringify({ session_id: E, transcript_path: '/tmp/t.jsonl', cwd: WORKDIR, source: 'clear' });
+let hook = spawnSync('sh', [path.join(scripts, 'am-repin-hook.sh')], {
+  input: hookPayload,
+  env: { ...process.env, AM_ID: 's1', AM_RUN_ID: RUN, AM_CLI: 'claude', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_PID: '4242' },
+});
+check('Claude hook exits cleanly', hook.status, 0);
+let written = JSON.parse(fs.readFileSync(path.join(REPIN, 's1.claude.json'), 'utf8'));
+check('Claude hook writes run id', written.runId, RUN);
+check('Claude hook writes exact session id', written.payload.session_id, E);
+
+hook = spawnSync('sh', [path.join(scripts, 'am-codex-repin-hook.sh')], {
+  input: JSON.stringify(codexCrumb.payload),
+  env: { ...process.env, AM_ID: 's1', AM_RUN_ID: RUN, AM_CLI: 'codex' },
+});
+check('Codex hook exits cleanly', hook.status, 0);
+written = JSON.parse(fs.readFileSync(path.join(REPIN, 's1.codex.json'), 'utf8'));
+check('Codex hook writes run id', written.runId, RUN);
+check('Codex hook writes exact session id', written.payload.session_id, CODEX_ID);
 
 // ---------- the pane root: the fact every breadcrumb is trusted against ----------
 // paneRootPid used to shell out to `tmux list-panes`. The libghostty migration

@@ -1,12 +1,13 @@
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import pty from 'node-pty';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { remoteState, setPaused } from './remote.js';
 import { cliById, isRemote, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
-import { captureOpencodeSession, opencodeSessionExists, readTrace } from './traces.js';
+import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace } from './traces.js';
 import {
   buildPaletteIndex, snapshotToRestoreAnsi, styledSnapshotLines, textColumns,
 } from './snapshot.js';
@@ -662,11 +663,10 @@ async function hydrateTraceHistory(session, host) {
 
 // ---------- Codex conversation pinning ----------
 // Codex picks its own conversation id at launch and doesn't accept one up
-// front — but it announces the pick immediately: a rollout file named
+// front. The managed SessionStart hook below is the primary source of its exact
+// choice. This rollout discovery remains the fallback: a file named
 // rollout-<ts>-<id>.jsonl appears under $CODEX_HOME/sessions with the cwd in
-// its first line. Capture that id shortly after launch and pin it on the
-// session, so restarts resume THIS agent's conversation — `resume --last`
-// would grab whichever Codex agent in the same folder ran last.
+// its first line, so an unshared pane can still recover when hooks are absent.
 const codexCapturing = new Map(); // id -> pending re-pin timer
 
 // Every harness's conversation pin is re-checked on this cadence for as long as
@@ -832,8 +832,8 @@ function scheduleCodexCapture(session, workdir) {
 }
 
 // opencode has no per-conversation handle we can pass on launch, so we can't
-// mint an id like Claude's --session-id. Instead, capture the ses_ row opencode
-// writes to its db and pin it — mirrors the codex approach. The row appears
+// mint an id like Claude's --session-id. Its plugin reports the exact ses_ id;
+// this database discovery remains the unshared-folder fallback. A row appears
 // only once the conversation has content (the user's first message), so retry
 // on a longer, sparser schedule than codex.
 // ---------- Claude conversation re-pinning ----------
@@ -982,21 +982,29 @@ function folderIsShared(sessionId, workdir, cli) {
 // honoured) and a /clear at any later point.
 
 // ---------- breadcrumbs: the pane tells us, so we don't have to guess ----------
-// The transcript scan above cannot attribute a new conversation when several
-// live claude panes share a folder — folderIsShared refuses, and a /clear in
-// such a folder was never followed. But the pane itself KNOWS: a SessionStart
-// hook (installed into settings.json below, script at scripts/am-repin-hook.sh)
-// runs inside the pane's process tree, where $AM_ID names the pane and the
-// payload carries the new conversation's id. It drops that as a breadcrumb
-// here; the watcher consumes it and re-pins with no guessing at all. The scan
-// stays as the fallback for panes without a breadcrumb (hook newly installed,
-// crumb lost) — and for codex/opencode, which have no hook mechanism.
+// Folder scans cannot attribute a new conversation when several live panes of
+// one harness share a folder. The harness itself does know the exact id, so the
+// three harnesses with lifecycle extension points report it directly:
+//
+//   Claude   SessionStart command hook
+//   Codex    managed SessionStart command hook
+//   OpenCode global plugin (session.created and chat.message)
+//
+// Each PTY launch gets a fresh AM_RUN_ID. A breadcrumb must match both AM_ID and
+// that nonce, so a delayed event from the pane's previous process can never
+// move its replacement — and two panes in one folder can never claim each
+// other's conversation. The existing transcript/rollout/database discovery
+// stays below as a fallback for installations where an adapter is unavailable.
 const REPIN_DIR = process.env.AM_REPIN_DIR || '/tmp/am-repin';
+const breadcrumbCapturing = new Map(); // session id -> pending exact-event poll
+const BREADCRUMB_MS = 250;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CONVERSATION_ID = { claude: UUID, codex: UUID, opencode: /^ses_[A-Za-z0-9_-]+$/ };
 
 // Read AND remove the pane's breadcrumb — consumed on read, so a stale crumb
 // can never flip a pin backwards after a later, scan-based re-pin.
-function takeClaudeBreadcrumb(sessionId) {
-  const p = path.join(REPIN_DIR, `${sessionId}.json`);
+function takeBreadcrumb(sessionId, cli) {
+  const p = path.join(REPIN_DIR, `${sessionId}.${cli}.json`);
   let raw;
   try { raw = fs.readFileSync(p, 'utf8'); } catch { return null; }
   try { fs.unlinkSync(p); } catch {}
@@ -1036,14 +1044,16 @@ function pidHasAncestor(pid, ancestor, readStat = (p) => fs.readFileSync(`/proc/
 }
 
 // Pure verdict on one breadcrumb, exported for server/test/repin.test.mjs.
-// `facts` carries everything environmental: { workdir, pinned, claimed (Set of
-// uuids other sessions pin), pidTrusted (bool: claudePid descends from the
-// pane) }. Returns { repin: uuid } or { repin: null, why }.
+// `facts` carries everything environmental: { cli, runId, workdir, pinned,
+// claimed (ids other sessions pin), pidTrusted (Claude only) }. Returns
+// { repin: conversationId } or { repin: null, why }.
 export function breadcrumbVerdict(crumb, sessionId, facts) {
   if (!crumb || typeof crumb !== 'object') return { repin: null, why: 'unreadable' };
   if (crumb.amId !== sessionId) return { repin: null, why: 'amId mismatch' };
-  const uuid = crumb.payload?.session_id;
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(uuid || ''))
+  if (crumb.cli !== facts.cli) return { repin: null, why: 'cli mismatch' };
+  if (!facts.runId || crumb.runId !== facts.runId) return { repin: null, why: 'runId mismatch' };
+  const conversationId = crumb.payload?.session_id;
+  if (!CONVERSATION_ID[facts.cli]?.test(conversationId || ''))
     return { repin: null, why: 'no session_id' };
   // A crumb written before a pane was moved to another folder must not follow
   // it there — same folder-scoping rule the transcript scan applies.
@@ -1052,10 +1062,24 @@ export function breadcrumbVerdict(crumb, sessionId, facts) {
   // on 2.1.220 — the docs say -p skips hooks; it does not). The hook filters
   // on CLAUDE_CODE_ENTRYPOINT, and this is the backstop: only a process that
   // descends from the pane speaks for the pane.
-  if (!facts.pidTrusted) return { repin: null, why: 'pid not in pane' };
-  if (facts.claimed?.has(uuid)) return { repin: null, why: 'claimed by another session' };
-  if (uuid === facts.pinned) return { repin: null, why: 'already pinned' };
-  return { repin: uuid };
+  if (facts.cli === 'claude' && !facts.pidTrusted) return { repin: null, why: 'pid not in pane' };
+  if (facts.claimed?.has(conversationId)) return { repin: null, why: 'claimed by another session' };
+  if (conversationId === facts.pinned) return { repin: null, why: 'already pinned' };
+  return { repin: conversationId };
+}
+
+// Codex gives the exact transcript path with SessionStart. Keep only paths that
+// are under this CODEX_HOME's sessions tree and whose rollout filename encodes
+// the reported id; the hook's payload is data, never an arbitrary resume path.
+export function codexRolloutForBreadcrumb(crumb) {
+  const id = crumb?.payload?.session_id;
+  const raw = crumb?.payload?.transcript_path;
+  if (!UUID.test(id || '') || typeof raw !== 'string' || !raw) return null;
+  const root = path.resolve(codexSessionsRoot());
+  const resolved = path.resolve(raw);
+  const rel = path.relative(root, resolved);
+  if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
+  return path.basename(resolved).endsWith(`-${id}.jsonl`) ? resolved : null;
 }
 
 // Register the SessionStart hook in $CLAUDE_CONFIG_DIR/settings.json. Merge,
@@ -1090,6 +1114,110 @@ export function installClaudeRepinHook(hookCmd = '/app/scripts/am-repin-hook.sh'
     console.warn(`[claude] repin hook installed in ${file}`);
     return true;
   } catch (e) { console.warn(`[claude] repin hook install failed: ${e.message}`); return false; }
+}
+
+// OpenCode automatically loads global plugins from this directory. The plugin
+// is an app-owned file, so upgrades replace that one file atomically while all
+// user plugins and opencode.json settings remain untouched.
+export function installOpencodeRepinPlugin(source = '/app/scripts/am-opencode-repin.js') {
+  const base = process.env.OPENCODE_CONFIG_DIR
+    || path.join(process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || os.homedir(), '.config'), 'opencode');
+  const dir = path.join(base, 'plugins');
+  const file = path.join(dir, 'am-agent-manager.js');
+  let body;
+  try { body = fs.readFileSync(source, 'utf8'); }
+  catch (e) { console.warn(`[opencode] repin plugin source unavailable: ${e.message}`); return false; }
+  try {
+    if (fs.readFileSync(file, 'utf8') === body) return true;
+  } catch { /* install or upgrade it below */ }
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${file}.am-tmp`;
+    fs.writeFileSync(tmp, body);
+    fs.renameSync(tmp, file);
+    console.warn(`[opencode] repin plugin installed in ${file}`);
+    return true;
+  } catch (e) { console.warn(`[opencode] repin plugin install failed: ${e.message}`); return false; }
+}
+
+function exactPinFacts(session, host, workdir, pinField) {
+  return {
+    cli: session.cli,
+    runId: host.runId,
+    workdir,
+    pinned: (list().find((s) => s.id === session.id) || session)[pinField],
+    claimed: new Set(list().filter((s) => s.id !== session.id && s[pinField]).map((s) => s[pinField])),
+  };
+}
+
+// Apply one event from the pane's own adapter. This path never asks which file
+// or database row is newest: the reported id is the lookup key, and local state
+// is used only to validate that exact key before persisting it.
+function applyBreadcrumb(session, host, workdir, crumb) {
+  let facts;
+  let patch;
+  if (session.cli === 'claude') {
+    facts = exactPinFacts(session, host, workdir, 'sessionUuid');
+    const root = paneRootPid(session.id);
+    facts.pidTrusted = !!root && pidHasAncestor(crumb.claudePid, root);
+    patch = (id) => ({ sessionUuid: id });
+  } else if (session.cli === 'codex') {
+    facts = exactPinFacts(session, host, workdir, 'codexSessionId');
+    const rollout = codexRolloutForBreadcrumb(crumb);
+    if (!rollout) return { repin: null, why: 'invalid transcript_path' };
+    patch = (id) => ({ codexSessionId: id, codexRollout: rollout });
+  } else if (session.cli === 'opencode') {
+    facts = exactPinFacts(session, host, workdir, 'opencodeSessionId');
+    const row = opencodeSessionInfo(crumb?.payload?.session_id);
+    if (!row) return { repin: null, why: 'session missing from database' };
+    if (row.parentId) return { repin: null, why: 'subagent session' };
+    if (row.directory !== workdir) return { repin: null, why: 'database cwd mismatch' };
+    patch = (id) => ({ opencodeSessionId: id });
+  } else {
+    return { repin: null, why: 'unsupported cli' };
+  }
+
+  const verdict = breadcrumbVerdict(crumb, session.id, facts);
+  if (verdict.repin || verdict.why === 'already pinned') host.exactRepinProven = true;
+  if (verdict.repin) {
+    console.warn(`[${session.cli}] re-pinning ${session.id}: ${facts.pinned || '(none)'} -> ${verdict.repin} (exact ${crumb.payload?.source || 'event'})`);
+    update(session.id, patch(verdict.repin));
+  }
+  return verdict;
+}
+
+function consumeBreadcrumb(session, host, workdir) {
+  const crumb = takeBreadcrumb(session.id, session.cli);
+  if (!crumb) return;
+  try {
+    const verdict = applyBreadcrumb(session, host, workdir, crumb);
+    if (!verdict.repin && verdict.why !== 'already pinned')
+      console.warn(`[${session.cli}] ${session.id}: exact breadcrumb rejected (${verdict.why})`);
+  } catch (e) {
+    console.warn(`[${session.cli}] ${session.id}: exact breadcrumb failed (${e && e.message})`);
+  }
+}
+
+// Poll only a tiny file on local /tmp, frequently enough that a /clear followed
+// by an immediate pane exit still persists its new id. Expensive transcript,
+// rollout and database discovery retain their existing sparse cadence below.
+function scheduleBreadcrumbCapture(session, workdir) {
+  if (!CONVERSATION_ID[session.cli]) return;
+  const prev = breadcrumbCapturing.get(session.id);
+  if (prev) clearTimeout(prev);
+  const host = hosts.get(session.id);
+  let armed = null;
+  const tick = () => {
+    if (hosts.get(session.id) !== host) {
+      if (breadcrumbCapturing.get(session.id) === armed) breadcrumbCapturing.delete(session.id);
+      return;
+    }
+    consumeBreadcrumb(session, host, workdir);
+    armed = setTimeout(tick, BREADCRUMB_MS);
+    if (armed.unref) armed.unref();
+    breadcrumbCapturing.set(session.id, armed);
+  };
+  tick();
 }
 
 // Once the pane's SessionStart hook has proven itself, the transcript scan is a
@@ -1150,15 +1278,18 @@ function scheduleClaudeCapture(session, workdir) {
   // two timers.
   const tick = async () => {
     if (!isRunning(session.id)) { claudeCapturing.delete(session.id); return false; }
+    hookProven ||= !!host.exactRepinProven;
     const pinned = currentPin();
 
     // Breadcrumb first: the pane's own SessionStart hook told us which
     // conversation it is on, so no guessing — and no shared-folder refusal —
     // is needed. Consumed on read; a rejected crumb falls through to the scan.
-    const crumb = takeClaudeBreadcrumb(session.id);
+    const crumb = takeBreadcrumb(session.id, 'claude');
     if (crumb) {
       const root = paneRootPid(session.id);
       const verdict = breadcrumbVerdict(crumb, session.id, {
+        cli: 'claude',
+        runId: host.runId,
         workdir,
         pinned,
         claimed: claimedByOthers(),
@@ -1420,12 +1551,15 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   fs.mkdirSync(workdir, { recursive: true });
   const full = commandFor(session);
   const captureResize = cliById(session.cli)?.resizeMode === 'repaint';
+  const runId = crypto.randomUUID();
 
   const env = {
     ...TERM_ENV,
     AM_SESSION: folder,
     AM_NAME: session.name,
     AM_ID: session.id,
+    AM_RUN_ID: runId,
+    AM_CLI: session.cli,
     AM_USER,
     AM_ROOT: WORKSPACES_DIR, // prompt shows $PWD relative to this
   };
@@ -1451,6 +1585,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   }
   const host = {
     id: session.id,
+    runId,
     pty: term,
     vt,
     cols,
@@ -1533,6 +1668,10 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   });
 
   term.onExit(() => {
+    // Do one final local read before releasing this launch's nonce. In
+    // particular, `/clear` followed immediately by quit must still persist the
+    // conversation that was on screen when the pane ended.
+    consumeBreadcrumb(session, host, workdir);
     hosts.delete(session.id);
     if (host.gridTimer) { clearTimeout(host.gridTimer); host.gridTimer = null; }
     if (host.traceHistoryTimer) { clearTimeout(host.traceHistoryTimer); host.traceHistoryTimer = null; }
@@ -1550,6 +1689,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   hosts.set(session.id, host);
   if (!persistedHistory && captureResize) hydrateTraceHistory(session, host);
   if (!session.everStarted) update(session.id, { everStarted: true, pendingPrompt: undefined });
+  scheduleBreadcrumbCapture(session, workdir);
   if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
   if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
   if (session.cli === 'claude') scheduleClaudeCapture(session, workdir);
