@@ -89,8 +89,12 @@ it. The line is also the fold control, so it names what it is hiding:
 
   Done — `scripts/lab-fixtures.mjs` now merges by name …
 
-  ❯ reply…
+  ❯ reply…                                                                    ⬆
 ```
+
+The composer is the same everywhere: `❯`, a growing textarea, and a square send key. No
+"↵ send · ⇧↵ newline" caption — it appeared the moment you typed, which is the moment you
+already knew.
 
 In the viewer the same line carries the turn's identity on its right — one row, two halves:
 
@@ -226,6 +230,9 @@ The pane header gets a two-state segmented control, next to the title:
   tool call is unusable while a task runs; one that never moves makes you chase it.
 - **The prompt band sticks to the top** while you read a long turn. What you want overhead deep
   in someone's 67-step answer is the question it is answering — not a row of numbers.
+- **The conversation fills the pane.** A fixed reading column left a gutter of nothing on each
+  side while the prompt band still spanned the full width, so the two disagreed about where the
+  conversation began. The pane is the measure: narrow the pane and the conversation narrows.
 - **RENDER can be replied to.** Reading a conversation and answering it are the same act — the
   card has always known that, and a rendered session that could only be read would send you back
   to the TUI to type. It is the card's own composer (`.ov-live`), the same `sendInput`, and the

@@ -15,6 +15,7 @@ import type { TracePage, TraceTurn } from '../../api';
 import type { Session } from '../../types';
 import { fmtTok, splitExchanges } from './exchanges';
 import ExchangeView from './Exchange';
+import { SendGlyph } from '../icons';
 
 /** How much of the tail RENDER mode reads. The server caps a page at 500. */
 export const RENDER_TAIL = 400;
@@ -255,8 +256,7 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
               if (e.key === 'Escape') { setDraft(''); inputRef.current?.blur(); }
             }}
           />
-          {draft.trim() && <button className="ov-send" title="Send" onClick={send} disabled={sending}>↑</button>}
-          {draft.trim() && !isMobile && <span className="ov-hint">↵ send · ⇧↵ newline</span>}
+          {draft.trim() && <button className="ov-send" title="Send" onClick={send} disabled={sending}><SendGlyph /></button>}
         </div>
       )}
       {failed && <div className="ov-note cxv-note">failed to reach the agent</div>}

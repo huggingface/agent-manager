@@ -158,10 +158,13 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
   background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-sm);
 }
 
-/* panel background, and a reading column — line length is most of why the card
-   reads better than today's viewer */
-.cxv-body { flex: 1; min-height: 0; overflow-y: auto; background: var(--panel); padding: 4px 12px 30px; }
-.cxv-col { max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; }
+/* Panel background, and a column that FILLS the pane. A fixed reading width
+   left a gutter of nothing on each side while the prompt band — which is what
+   you scan for — still spanned the full width, so the two disagreed about where
+   the conversation began. The pane is the measure: make it narrow and the
+   conversation is narrow. */
+.cxv-body { flex: 1; min-height: 0; overflow-y: auto; background: var(--panel); padding: 4px 14px 30px; }
+.cxv-col { display: flex; flex-direction: column; min-width: 0; }
 .cxv-msg { font-size: 11px; color: var(--muted); padding: 6px 0; }
 .cxv-foot {
   display: flex; align-items: center; gap: 8px; flex: none;

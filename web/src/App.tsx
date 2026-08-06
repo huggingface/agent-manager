@@ -515,7 +515,21 @@ export default function App() {
       setActiveRef(`g:${g.id}`);
     } catch (e) { showErr('Couldn’t create the group')(e); }
   };
-  const doMove = (ref: string, to: MoveTarget) => api.move(ref, to).then(refresh).catch(showErr('Couldn’t move that'));
+  // Merging two agents, or dropping one into a group, changes what the pane you
+  // are looking at IS — it is now part of a grid. Follow it there rather than
+  // leaving you on a single view of a session that has moved.
+  const doMove = (ref: string, to: MoveTarget) => api.move(ref, to)
+    .then(async () => {
+      const next = await api.getTree().catch(() => null);
+      if (!next) return refresh();
+      setTree(next);
+      const watching = activeRef?.startsWith('s:') ? activeRef.slice(2) : null;
+      if (!watching) return undefined;
+      const home = next.groups.find((g) => g.sessionIds.includes(watching));
+      if (home) setActiveRef(`g:${home.id}`);
+      return undefined;
+    })
+    .catch(showErr('Couldn’t move that'));
   const renameGroup = (id: string, name: string) => api.renameGroup(id, name).then(refresh).catch(showErr('Couldn’t rename'));
   const renameSession = (id: string, name: string) => { if (name.trim()) api.renameSession(id, name.trim()).then(refresh).catch(showErr('Couldn’t rename')); };
   const deleteGroup = (id: string) => api.deleteGroup(id).then(() => { if (activeRef === `g:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the group'));

@@ -6,6 +6,7 @@ import type { Cli, OverviewFilter, Session, SessionState, Tree } from '../types'
 import { isPassive } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import Logo from './Logo';
+import { SendGlyph } from './icons';
 import ExchangeView from './conversation/Exchange';
 import { writePaneMode } from '../lib/paneMode';
 import { splitExchanges } from './conversation/exchanges';
@@ -306,8 +307,7 @@ export function Card({ s, color, pending, isMobile, onOpen, onClose }: {
             if (e.key === 'Escape') { setDraft(''); inputRef.current?.blur(); }
           }}
         />
-        {draft.trim() && <button className="ov-send" title="Send" onClick={send} disabled={sending}>↑</button>}
-        {draft.trim() && !isMobile && <span className="ov-hint">↵ send · ⇧↵ newline</span>}
+        {draft.trim() && <button className="ov-send" title="Send" onClick={send} disabled={sending}><SendGlyph /></button>}
       </div>
       {failed && <div className="ov-note">failed to reach the agent</div>}
     </div>
