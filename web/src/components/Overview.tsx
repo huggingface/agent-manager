@@ -6,11 +6,11 @@ import type { Cli, OverviewFilter, Session, SessionState, Tree } from '../types'
 import { isPassive, isRemote } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import {
-  defaultImagePrompt, imageFilesFromTransfer, pendingImagesFromFiles, revokePendingImages,
-  transferMayContainImage, uploadPendingImages,
-} from '../lib/imageAttachments';
-import type { PendingImage } from '../lib/imageAttachments';
-import ImageAttachments from './ImageAttachments';
+  defaultAttachmentPrompt, filesFromTransfer, pendingAttachmentsFromFiles, revokePendingAttachments,
+  transferMayContainFile, uploadPendingAttachments,
+} from '../lib/attachments';
+import type { PendingAttachment } from '../lib/attachments';
+import Attachments from './Attachments';
 import Logo from './Logo';
 
 const fmtAgo = (ts: number) => {
@@ -42,8 +42,8 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
 }) {
   const d = s.digest;
   const [draft, setDraft] = useState('');
-  const [images, setImages] = useState<PendingImage[]>([]);
-  const imagesRef = useRef<PendingImage[]>([]);
+  const [images, setImages] = useState<PendingAttachment[]>([]);
+  const imagesRef = useRef<PendingAttachment[]>([]);
   const [imageError, setImageError] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
   const [sending, setSending] = useState(false);
@@ -54,15 +54,15 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
   const [sent, setSent] = useState<{ text: string; at: number } | null>(null);
   const [histIdx, setHistIdx] = useState(0); // 0 = live view, n = n-th exchange back
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const allowImages = !isRemote(s.cli);
+  const allowAttachments = !isRemote(s.cli);
 
   useEffect(() => { imagesRef.current = images; }, [images]);
-  useEffect(() => () => revokePendingImages(imagesRef.current), []);
+  useEffect(() => () => revokePendingAttachments(imagesRef.current), []);
 
   const addImages = (files: File[]) => {
-    if (!allowImages || sending || !files.length) return;
-    const next = pendingImagesFromFiles(files, imagesRef.current.length);
-    const merged = [...imagesRef.current, ...next.images];
+    if (!allowAttachments || sending || !files.length) return;
+    const next = pendingAttachmentsFromFiles(files, imagesRef.current.length);
+    const merged = [...imagesRef.current, ...next.attachments];
     imagesRef.current = merged;
     setImages(merged);
     setImageError(next.error);
@@ -71,14 +71,14 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
     if (sending) return;
     setImages((current) => {
       const removed = current.find((image) => image.key === key);
-      if (removed) URL.revokeObjectURL(removed.previewUrl);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
       const next = current.filter((image) => image.key !== key);
       imagesRef.current = next;
       return next;
     });
     setImageError(null);
   };
-  const updateImage = (key: string, patch: Partial<PendingImage>) => {
+  const updateImage = (key: string, patch: Partial<PendingAttachment>) => {
     setImages((current) => {
       const next = current.map((image) => image.key === key ? { ...image, ...patch } : image);
       imagesRef.current = next;
@@ -106,11 +106,11 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
     setSending(true);
     setFailed(null);
     try {
-      const attachments = await uploadPendingImages(s.id, batch, updateImage);
+      const attachments = await uploadPendingAttachments(s.id, batch, updateImage);
       await api.sendInput(s.id, text, attachments.map((image) => image.id));
-      const optimisticText = text || defaultImagePrompt(batch.length);
+      const optimisticText = text || defaultAttachmentPrompt(batch.length);
       setDraft('');
-      revokePendingImages(batch);
+      revokePendingAttachments(batch);
       imagesRef.current = [];
       setImages([]);
       setImageError(null);
@@ -197,19 +197,19 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
 
       <div
         className={`ov-composer${dropActive ? ' image-drop' : ''}`}
-        onDragEnter={(event) => { if (allowImages && !sending && transferMayContainImage(event.dataTransfer)) { event.preventDefault(); setDropActive(true); } }}
-        onDragOver={(event) => { if (allowImages && !sending && transferMayContainImage(event.dataTransfer)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
+        onDragEnter={(event) => { if (allowAttachments && !sending && transferMayContainFile(event.dataTransfer)) { event.preventDefault(); setDropActive(true); } }}
+        onDragOver={(event) => { if (allowAttachments && !sending && transferMayContainFile(event.dataTransfer)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
         onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropActive(false); }}
         onDrop={(event) => {
-          if (!allowImages || sending || !transferMayContainImage(event.dataTransfer)) return;
+          if (!allowAttachments || sending || !transferMayContainFile(event.dataTransfer)) return;
           event.preventDefault(); event.stopPropagation(); setDropActive(false);
-          addImages(imageFilesFromTransfer(event.dataTransfer));
+          addImages(filesFromTransfer(event.dataTransfer));
         }}
       >
-        <ImageAttachments
-          images={images}
-          disabled={sending || !allowImages}
-          disabledReason={!allowImages ? 'Screenshots are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
+        <Attachments
+          attachments={images}
+          disabled={sending || !allowAttachments}
+          disabledReason={!allowAttachments ? 'Files are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
           onFiles={addImages}
           onRemove={removeImage}
         />
@@ -226,8 +226,8 @@ function Card({ s, color, pending, isMobile, onOpen, onClose }: {
             autoCapitalize="off"
             spellCheck={false}
             onPaste={(event) => {
-              const files = imageFilesFromTransfer(event.clipboardData);
-              if (!allowImages || sending || !files.length) return;
+              const files = filesFromTransfer(event.clipboardData);
+              if (!allowAttachments || sending || !files.length) return;
               event.preventDefault(); addImages(files);
             }}
             onChange={(e) => { setDraft(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}

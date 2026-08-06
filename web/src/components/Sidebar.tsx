@@ -4,11 +4,11 @@ import { STATE_LABEL, REMOTE_STATE_LABEL, isPassive, isRemote } from '../types';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
-import ImageAttachments from './ImageAttachments';
+import Attachments from './Attachments';
 import {
-  imageFilesFromTransfer, pendingImagesFromFiles, revokePendingImages, transferMayContainImage,
-} from '../lib/imageAttachments';
-import type { PendingImage } from '../lib/imageAttachments';
+  filesFromTransfer, pendingAttachmentsFromFiles, revokePendingAttachments, transferMayContainFile,
+} from '../lib/attachments';
+import type { PendingAttachment } from '../lib/attachments';
 import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph, HandoverGlyph, ListGlyph } from './icons';
 
 type Zone = 'before' | 'after' | 'on';
@@ -18,11 +18,11 @@ type Zone = 'before' | 'after' | 'on';
 // converters first, and a button that always fails is worse than no button.
 const SHAREABLE_CLIS = ['claude', 'codex', 'hermes', 'opencode', 'openclaw'];
 
-export interface QuickStartImageOptions {
+export interface QuickStartAttachmentOptions {
   sessionId: string | null;
-  images: PendingImage[];
+  attachments: PendingAttachment[];
   onSessionCreated: (id: string) => void;
-  onImageUpdate: (key: string, patch: Partial<PendingImage>) => void;
+  onAttachmentUpdate: (key: string, patch: Partial<PendingAttachment>) => void;
 }
 
 const fmtAgo = (ts?: number) => {
@@ -66,7 +66,7 @@ export default function Sidebar({
   onDragState?: (ref: string | null) => void; // lets the stage offer per-tile drop targets
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
-  onQuickStart: (cli: string, prompt: string, name?: string, path?: string, imageOptions?: QuickStartImageOptions) => Promise<void>;
+  onQuickStart: (cli: string, prompt: string, name?: string, path?: string, attachmentOptions?: QuickStartAttachmentOptions) => Promise<void>;
   archived: Set<string>;
   showArchived: boolean;
   onToggleArchived: () => void;
@@ -79,8 +79,8 @@ export default function Sidebar({
   const [quickName, setQuickName] = useState('');
   const [quickLoc, setQuickLoc] = useState('.');
   const [quickError, setQuickError] = useState<string | null>(null);
-  const [quickImages, setQuickImages] = useState<PendingImage[]>([]);
-  const quickImagesRef = useRef<PendingImage[]>([]);
+  const [quickImages, setQuickImages] = useState<PendingAttachment[]>([]);
+  const quickImagesRef = useRef<PendingAttachment[]>([]);
   const [quickSessionId, setQuickSessionId] = useState<string | null>(null);
   const [quickSending, setQuickSending] = useState(false);
   const [quickDrop, setQuickDrop] = useState(false);
@@ -105,9 +105,9 @@ export default function Sidebar({
   const waiting = tree.sessions.filter((s) => s.state === 'waiting').length;
 
   useEffect(() => { quickImagesRef.current = quickImages; }, [quickImages]);
-  useEffect(() => () => revokePendingImages(quickImagesRef.current), []);
+  useEffect(() => () => revokePendingAttachments(quickImagesRef.current), []);
 
-  const updateQuickImage = (key: string, patch: Partial<PendingImage>) => {
+  const updateQuickImage = (key: string, patch: Partial<PendingAttachment>) => {
     setQuickImages((current) => {
       const next = current.map((image) => image.key === key ? { ...image, ...patch } : image);
       quickImagesRef.current = next;
@@ -116,8 +116,8 @@ export default function Sidebar({
   };
   const addQuickImages = (files: File[]) => {
     if (quickSending) return;
-    const next = pendingImagesFromFiles(files, quickImagesRef.current.length);
-    const merged = [...quickImagesRef.current, ...next.images];
+    const next = pendingAttachmentsFromFiles(files, quickImagesRef.current.length);
+    const merged = [...quickImagesRef.current, ...next.attachments];
     quickImagesRef.current = merged;
     setQuickImages(merged);
     setQuickError(next.error);
@@ -126,7 +126,7 @@ export default function Sidebar({
     if (quickSending) return;
     setQuickImages((current) => {
       const removed = current.find((image) => image.key === key);
-      if (removed) URL.revokeObjectURL(removed.previewUrl);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
       const next = current.filter((image) => image.key !== key);
       quickImagesRef.current = next;
       return next;
@@ -169,7 +169,7 @@ export default function Sidebar({
   const bump = (id: string, d: number) => setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
   const closePanel = () => {
     if (panel === 'quick') {
-      revokePendingImages(quickImagesRef.current);
+      revokePendingAttachments(quickImagesRef.current);
       quickImagesRef.current = [];
       setQuickImages([]);
       setQuickSessionId(null);
@@ -232,7 +232,7 @@ export default function Sidebar({
       } finally { setQuickSending(false); }
       return;
     }
-    if (!p && !quickImages.length && !quickMore) return; // the bare quick path needs a prompt or image
+    if (!p && !quickImages.length && !quickMore) return; // the bare quick path needs a prompt or file
     setQuickSending(true);
     setQuickError(null);
     try {
@@ -240,9 +240,9 @@ export default function Sidebar({
         quickCli, p, quickMore ? quickName.trim() : '', quickMore ? quickLoc : '.',
         quickImages.length ? {
           sessionId: quickSessionId,
-          images: quickImages,
+          attachments: quickImages,
           onSessionCreated: setQuickSessionId,
-          onImageUpdate: updateQuickImage,
+          onAttachmentUpdate: updateQuickImage,
         } : undefined,
       );
       setQuickPrompt('');
@@ -425,20 +425,20 @@ export default function Sidebar({
           <div
             className={`widget quick${quickDrop ? ' image-drop' : ''}`}
             onDragEnter={(event) => {
-              if (!quickSending && quickMode === 'agent' && quickCli && !isRemote(quickCli) && transferMayContainImage(event.dataTransfer)) {
+              if (!quickSending && quickMode === 'agent' && quickCli && !isRemote(quickCli) && transferMayContainFile(event.dataTransfer)) {
                 event.preventDefault(); setQuickDrop(true);
               }
             }}
             onDragOver={(event) => {
-              if (!quickSending && quickMode === 'agent' && quickCli && !isRemote(quickCli) && transferMayContainImage(event.dataTransfer)) {
+              if (!quickSending && quickMode === 'agent' && quickCli && !isRemote(quickCli) && transferMayContainFile(event.dataTransfer)) {
                 event.preventDefault(); event.dataTransfer.dropEffect = 'copy';
               }
             }}
             onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setQuickDrop(false); }}
             onDrop={(event) => {
-              if (quickSending || quickMode !== 'agent' || !quickCli || isRemote(quickCli) || !transferMayContainImage(event.dataTransfer)) return;
+              if (quickSending || quickMode !== 'agent' || !quickCli || isRemote(quickCli) || !transferMayContainFile(event.dataTransfer)) return;
               event.preventDefault(); event.stopPropagation(); setQuickDrop(false);
-              addQuickImages(imageFilesFromTransfer(event.dataTransfer));
+              addQuickImages(filesFromTransfer(event.dataTransfer));
             }}
           >
             <div className="quick-clis">
@@ -474,7 +474,7 @@ export default function Sidebar({
                   style={quickMode === 'agent' && quickCli === 'remote' ? { borderColor: remoteCli.color } : undefined}
                   onClick={() => {
                     setQuickMode('agent'); setQuickCli('remote'); setQuickSessionId(null);
-                    revokePendingImages(quickImagesRef.current); quickImagesRef.current = []; setQuickImages([]); setQuickError(null);
+                    revokePendingAttachments(quickImagesRef.current); quickImagesRef.current = []; setQuickImages([]); setQuickError(null);
                   }}
                 ><Logo cli="remote" size={14} /></button>
               )}
@@ -497,7 +497,7 @@ export default function Sidebar({
                   disabled={quickSending}
                   onPaste={(event) => {
                     if (quickSending || !quickCli || isRemote(quickCli)) return;
-                    const files = imageFilesFromTransfer(event.clipboardData);
+                    const files = filesFromTransfer(event.clipboardData);
                     if (!files.length) return;
                     event.preventDefault(); addQuickImages(files);
                   }}
@@ -507,8 +507,8 @@ export default function Sidebar({
                     if (e.key === 'Escape') closePanel();
                   }}
                 />
-                <ImageAttachments
-                  images={quickImages}
+                <Attachments
+                  attachments={quickImages}
                   disabled={quickSending || !quickCli || isRemote(quickCli)}
                   showPicker={false}
                   onFiles={addQuickImages}

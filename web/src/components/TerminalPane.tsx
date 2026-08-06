@@ -9,11 +9,11 @@ import { STATE_LABEL } from '../types';
 import Logo from './Logo';
 import { CloseGlyph, RefreshGlyph } from './icons';
 import * as api from '../api';
-import type { ImageAttachment } from '../api';
+import type { Attachment } from '../api';
 import {
-  IMAGE_ACCEPT, MAX_IMAGES, imageFileError, imageFilesFromClipboardItems,
-  imageFilesFromTransfer, looksLikeImageFile, transferMayContainImage,
-} from '../lib/imageAttachments';
+  MAX_ATTACHMENTS, attachmentFileError, filesFromClipboardItems, filesFromTransfer,
+  transferMayContainFile,
+} from '../lib/attachments';
 
 const THEMES: Record<'light' | 'dark', ITheme> = {
   dark: {
@@ -230,10 +230,10 @@ export default function TerminalPane({
   const [imageDrop, setImageDrop] = useState(false);
   const [imageStatus, setImageStatus] = useState<{ kind: 'uploading' | 'success' | 'error'; text: string } | null>(null);
   const [imageUploadBusy, setImageUploadBusy] = useState(false);
-  const [pendingInsert, setPendingInsert] = useState<ImageAttachment[]>([]);
-  const supportsImages = session.cli !== 'shell';
+  const [pendingInsert, setPendingInsert] = useState<Attachment[]>([]);
+  const supportsAttachments = session.cli !== 'shell';
   const hasInputControl = viewers <= 1 || controller;
-  const canAttachImages = supportsImages && conn === 'connected' && hasInputControl
+  const canAttachFiles = supportsAttachments && conn === 'connected' && hasInputControl
     && !imageUploadBusy && pendingInsert.length === 0;
   const commitName = () => {
     const v = draft.trim();
@@ -257,16 +257,16 @@ export default function TerminalPane({
     if (linger) imageStatusTimerRef.current = window.setTimeout(() => setImageStatus(null), linger);
   };
 
-  const insertTerminalImages = async (attachments: ImageAttachment[]) => {
+  const insertTerminalAttachments = async (attachments: Attachment[]) => {
     try {
-      const result = await api.insertImageAttachments(session.id, attachments.map((image) => image.id));
+      const result = await api.insertAttachments(session.id, attachments.map((attachment) => attachment.id));
       setPendingInsert([]);
       const count = attachments.length;
       showImageStatus({
         kind: 'success',
         text: result.mode === 'attached'
-          ? `${count === 1 ? 'Screenshot' : `${count} screenshots`} attached — continue typing`
-          : `${count === 1 ? 'Screenshot' : `${count} screenshots`} inserted — press Enter when ready`,
+          ? `${count === 1 ? 'File' : `${count} files`} attached — continue typing`
+          : `${count === 1 ? 'File' : `${count} files`} inserted — press Enter when ready`,
       }, 3000);
       termRef.current?.focus();
       return true;
@@ -274,7 +274,7 @@ export default function TerminalPane({
       setPendingInsert(attachments);
       showImageStatus({
         kind: 'error',
-        text: `${attachments.length === 1 ? 'Screenshot was' : 'Screenshots were'} saved but not inserted`,
+        text: `${attachments.length === 1 ? 'File was' : 'Files were'} saved but not inserted`,
       });
       return false;
     }
@@ -292,58 +292,58 @@ export default function TerminalPane({
     }
     imageUploadBusyRef.current = true;
     setImageUploadBusy(true);
-    showImageStatus({ kind: 'uploading', text: 'inserting saved screenshot…' });
-    try { await insertTerminalImages(pendingInsert); } finally {
+    showImageStatus({ kind: 'uploading', text: 'inserting saved file…' });
+    try { await insertTerminalAttachments(pendingInsert); } finally {
       imageUploadBusyRef.current = false;
       setImageUploadBusy(false);
     }
   };
 
   uploadImagesRef.current = (files: File[]) => {
-    if (!supportsImages) return;
+    if (!supportsAttachments) return;
     if (conn !== 'connected') {
-      showImageStatus({ kind: 'error', text: 'Restart or reconnect the agent before attaching screenshots' }, 5000);
+      showImageStatus({ kind: 'error', text: 'Restart or reconnect the agent before attaching files' }, 5000);
       return;
     }
     if (!hasInputControl) {
-      showImageStatus({ kind: 'error', text: 'Interact with the terminal to take control before attaching screenshots' }, 5000);
+      showImageStatus({ kind: 'error', text: 'Interact with the terminal to take control before attaching files' }, 5000);
       return;
     }
     if (pendingInsert.length) {
-      showImageStatus({ kind: 'error', text: 'Retry the saved screenshot before attaching another' });
+      showImageStatus({ kind: 'error', text: 'Retry the saved file before attaching another' });
       return;
     }
     if (imageUploadBusyRef.current) return;
-    const candidates = files.filter(looksLikeImageFile);
-    if (candidates.length > MAX_IMAGES) {
-      showImageStatus({ kind: 'error', text: `Attach at most ${MAX_IMAGES} screenshots at a time` }, 4000);
+    const candidates = files;
+    if (candidates.length > MAX_ATTACHMENTS) {
+      showImageStatus({ kind: 'error', text: `Attach at most ${MAX_ATTACHMENTS} files at a time` }, 4000);
       return;
     }
-    const images = candidates.slice(0, MAX_IMAGES);
-    if (!images.length) { showImageStatus({ kind: 'error', text: 'Use PNG, JPEG, GIF, or WebP' }, 4000); return; }
-    const invalid = images.map((file) => imageFileError(file)).find(Boolean);
+    const images = candidates.slice(0, MAX_ATTACHMENTS);
+    if (!images.length) return;
+    const invalid = images.map((file) => attachmentFileError(file)).find(Boolean);
     if (invalid) { showImageStatus({ kind: 'error', text: invalid }, 4000); return; }
     imageUploadBusyRef.current = true;
     setImageUploadBusy(true);
     void (async () => {
-      const attachments: ImageAttachment[] = [];
+      const attachments: Attachment[] = [];
       try {
         for (let index = 0; index < images.length; index += 1) {
-          showImageStatus({ kind: 'uploading', text: `uploading screenshot${images.length > 1 ? ` ${index + 1}/${images.length}` : ''}…` });
-          const attachment = await api.uploadImageAttachment(session.id, images[index]);
+          showImageStatus({ kind: 'uploading', text: `uploading file${images.length > 1 ? ` ${index + 1}/${images.length}` : ''}…` });
+          const attachment = await api.uploadAttachment(session.id, images[index]);
           attachments.push(attachment);
         }
-        showImageStatus({ kind: 'uploading', text: `inserting screenshot${images.length === 1 ? '' : 's'}…` });
-        await insertTerminalImages(attachments);
+        showImageStatus({ kind: 'uploading', text: `inserting file${images.length === 1 ? '' : 's'}…` });
+        await insertTerminalAttachments(attachments);
       } catch (error) {
         if (attachments.length) {
           setPendingInsert(attachments);
           showImageStatus({
             kind: 'error',
-            text: `${attachments.length} screenshot${attachments.length === 1 ? '' : 's'} saved; another failed to upload`,
+            text: `${attachments.length} file${attachments.length === 1 ? '' : 's'} saved; another failed to upload`,
           });
         } else {
-          showImageStatus({ kind: 'error', text: error instanceof Error ? error.message : 'screenshot upload failed' }, 5000);
+          showImageStatus({ kind: 'error', text: error instanceof Error ? error.message : 'file upload failed' }, 5000);
         }
       } finally {
         imageUploadBusyRef.current = false;
@@ -366,8 +366,8 @@ export default function TerminalPane({
     try {
       if (navigator.clipboard?.read) {
         const items = await navigator.clipboard.read();
-        const files = await imageFilesFromClipboardItems(items);
-        if (files.length && supportsImages) { uploadImagesRef.current(files); return; }
+        const files = await filesFromClipboardItems(items);
+        if (files.length && supportsAttachments) { uploadImagesRef.current(files); return; }
       }
       const text = await navigator.clipboard?.readText?.();
       if (text) { commitPaste(text); return; }
@@ -515,8 +515,8 @@ export default function TerminalPane({
       if (e.pointerType !== 'touch') claimControl();
     };
     const onPaste = (event: ClipboardEvent) => {
-      const files = event.clipboardData ? imageFilesFromTransfer(event.clipboardData) : [];
-      if (supportsImages && files.length) {
+      const files = event.clipboardData ? filesFromTransfer(event.clipboardData) : [];
+      if (supportsAttachments && files.length) {
         event.preventDefault(); event.stopImmediatePropagation();
         uploadImagesRef.current(files);
         return;
@@ -524,20 +524,20 @@ export default function TerminalPane({
       claimControl();
     };
     const onDragEnter = (event: DragEvent) => {
-      if (!supportsImages || !event.dataTransfer || !transferMayContainImage(event.dataTransfer)) return;
+      if (!supportsAttachments || !event.dataTransfer || !transferMayContainFile(event.dataTransfer)) return;
       event.preventDefault(); event.stopPropagation(); setImageDrop(true);
     };
     const onDragOver = (event: DragEvent) => {
-      if (!supportsImages || !event.dataTransfer || !transferMayContainImage(event.dataTransfer)) return;
+      if (!supportsAttachments || !event.dataTransfer || !transferMayContainFile(event.dataTransfer)) return;
       event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'copy';
     };
     const onDragLeave = (event: DragEvent) => {
       if (!host.contains(event.relatedTarget as Node | null)) setImageDrop(false);
     };
     const onDrop = (event: DragEvent) => {
-      if (!supportsImages || !event.dataTransfer || !transferMayContainImage(event.dataTransfer)) return;
+      if (!supportsAttachments || !event.dataTransfer || !transferMayContainFile(event.dataTransfer)) return;
       event.preventDefault(); event.stopPropagation(); setImageDrop(false);
-      uploadImagesRef.current(imageFilesFromTransfer(event.dataTransfer));
+      uploadImagesRef.current(filesFromTransfer(event.dataTransfer));
     };
     host.addEventListener('pointerdown', onPointerDown, true);
     host.addEventListener('paste', onPaste, true);
@@ -990,34 +990,31 @@ export default function TerminalPane({
             </span>
           )}
           <span className="ph-path" title={pathLabel}>{pathLabel}</span>
-          {supportsImages && (
+          {supportsAttachments && (
             <>
               <button
                 className="mini-btn ph-image"
                 title={conn === 'connected'
                   ? (!hasInputControl
-                    ? 'Interact with the terminal to take control before attaching screenshots'
-                    : (pendingInsert.length ? 'Retry the saved screenshot first' : 'Attach screenshot'))
-                  : 'Restart or reconnect the agent to attach screenshots'}
-                aria-label="Attach screenshot"
-                disabled={!canAttachImages}
+                    ? 'Interact with the terminal to take control before attaching files'
+                    : (pendingInsert.length ? 'Retry the saved file first' : 'Attach files'))
+                  : 'Restart or reconnect the agent to attach files'}
+                aria-label="Attach files"
+                disabled={!canAttachFiles}
                 draggable={false}
                 onMouseDown={(event) => event.stopPropagation()}
                 onClick={(event) => { event.stopPropagation(); imagePickerRef.current?.click(); }}
               >
                 <svg viewBox="0 0 18 18" aria-hidden="true">
-                  <rect x="2.5" y="3" width="13" height="12" rx="1.5" fill="none" stroke="currentColor" />
-                  <circle cx="6.5" cy="7" r="1.25" fill="currentColor" />
-                  <path d="m4 13 3.2-3.1 2.1 2 1.6-1.6L14 13" fill="none" stroke="currentColor" strokeLinejoin="round" />
+                  <path d="M6.2 9.7 10.8 5a2.5 2.5 0 0 1 3.6 3.5l-6.2 6.3a4 4 0 0 1-5.7-5.7l6-6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
                 </svg>
               </button>
               <input
                 ref={imagePickerRef}
                 className="image-file-input"
                 type="file"
-                accept={IMAGE_ACCEPT}
                 multiple
-                disabled={!canAttachImages}
+                disabled={!canAttachFiles}
                 onChange={(event) => {
                   uploadImagesRef.current(Array.from(event.currentTarget.files || []));
                   event.currentTarget.value = '';
@@ -1085,8 +1082,8 @@ export default function TerminalPane({
             // manual backup when they don't.
             placeholder="tap Paste — or long-press here"
             onPaste={(e) => {
-              const files = imageFilesFromTransfer(e.clipboardData);
-              if (supportsImages && files.length) {
+              const files = filesFromTransfer(e.clipboardData);
+              if (supportsAttachments && files.length) {
                 e.preventDefault(); setPasteOpen(false); uploadImagesRef.current(files);
                 return;
               }

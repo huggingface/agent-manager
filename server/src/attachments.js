@@ -5,10 +5,10 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { STATE_DIR } from './config.js';
 
-export const ATTACHMENT_LIMIT = 25 * 1024 * 1024;
-// A single prompt is capped separately at five images. This lifetime cap keeps
+export const ATTACHMENT_LIMIT = 100 * 1024 * 1024;
+// A single prompt is capped separately at five files. This lifetime cap keeps
 // a forgotten session from growing without bound while still leaving room for
-// many ordinary screenshot turns.
+// many ordinary attachment turns.
 export const SESSION_ATTACHMENT_LIMIT = 500 * 1024 * 1024;
 export const SESSION_ATTACHMENT_COUNT_LIMIT = 200;
 export const ATTACHMENT_ID = /^att_[a-f0-9]{24}$/;
@@ -20,12 +20,46 @@ export const IMAGE_MIMES = Object.freeze([
 ]);
 
 const ATTACHMENTS_DIR = path.join(STATE_DIR, 'attachments');
-const EXTENSIONS = Object.freeze({
+const IMAGE_EXTENSIONS = Object.freeze({
   'image/png': 'png',
   'image/jpeg': 'jpg',
   'image/webp': 'webp',
   'image/gif': 'gif',
 });
+const MIME_BY_EXTENSION = Object.freeze({
+  ...Object.fromEntries(Object.entries(IMAGE_EXTENSIONS).map(([mime, extension]) => [extension, mime])),
+  jpeg: 'image/jpeg',
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  odt: 'application/vnd.oasis.opendocument.text',
+  ods: 'application/vnd.oasis.opendocument.spreadsheet',
+  odp: 'application/vnd.oasis.opendocument.presentation',
+  txt: 'text/plain',
+  md: 'text/markdown',
+  csv: 'text/csv',
+  html: 'text/html',
+  htm: 'text/html',
+  css: 'text/css',
+  js: 'text/javascript',
+  mjs: 'text/javascript',
+  svg: 'image/svg+xml',
+  json: 'application/json',
+  yaml: 'application/yaml',
+  yml: 'application/yaml',
+  xml: 'application/xml',
+  rtf: 'application/rtf',
+  zip: 'application/zip',
+  gz: 'application/gzip',
+  tar: 'application/x-tar',
+  '7z': 'application/x-7z-compressed',
+  epub: 'application/epub+zip',
+});
+const ATTACHMENT_FILE = /^att_[a-f0-9]{24}(?:[-.]|$)/;
 const uploadWindows = new Map();
 const uploadLocks = new Map();
 
@@ -40,7 +74,7 @@ function sessionDir(sessionId) {
   // boundary: a future caller must not turn an attachment lookup into a path
   // join with an arbitrary browser value.
   if (!/^[a-z0-9][a-z0-9-]{0,100}$/.test(String(sessionId))) {
-    throw httpError(400, 'session cannot accept images');
+    throw httpError(400, 'session cannot accept files');
   }
   return path.join(ATTACHMENTS_DIR, sessionId);
 }
@@ -48,7 +82,7 @@ function sessionDir(sessionId) {
 function checkUploadRate(sessionId) {
   const now = Date.now();
   const recent = (uploadWindows.get(sessionId) || []).filter((at) => now - at < 60_000);
-  if (recent.length >= 20) throw httpError(429, 'too many image uploads — try again in a minute');
+  if (recent.length >= 20) throw httpError(429, 'too many file uploads — try again in a minute');
   recent.push(now);
   uploadWindows.set(sessionId, recent);
 }
@@ -80,7 +114,7 @@ async function attachmentUsage(dir) {
       const stat = await fs.promises.lstat(path.join(dir, name));
       if (!stat.isFile() || stat.isSymbolicLink()) continue;
       bytes += stat.size;
-      if (ATTACHMENT_ID.test(path.parse(name).name)) count += 1;
+      if (ATTACHMENT_FILE.test(name)) count += 1;
     } catch {}
   }
   return { bytes, count };
@@ -134,30 +168,83 @@ function imageEnvelopeIsValid(mime, header, tail, totalBytes) {
   return false;
 }
 
-const responseShape = (sessionId, id, mime, bytes, filePath) => ({
-  id,
-  kind: 'image',
-  name: path.basename(filePath),
-  mime,
-  bytes,
-  path: filePath,
-  previewUrl: `/api/sessions/${encodeURIComponent(sessionId)}/attachments/${id}/raw`,
-  insertText: `Screenshot: ${filePath} `,
-});
+const normalizedMime = (value) => {
+  const mime = String(value || '').split(';', 1)[0].trim().toLowerCase();
+  const canonical = mime === 'image/jpg' || mime === 'image/pjpeg' ? 'image/jpeg' : mime;
+  return /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(canonical)
+    ? canonical : '';
+};
 
-/** Stream one browser image into the session-owned attachment store. */
-export async function receiveImage(readable, sessionId, contentType) {
-  // Browser MIME metadata is advisory. Clipboard implementations commonly
-  // omit it or use aliases such as image/jpg; the byte signature below is the
-  // security boundary and determines the stored extension and response type.
-  void contentType;
+const extensionOf = (name) => path.extname(name).slice(1).toLowerCase();
+const mimeForName = (name) => {
+  const known = MIME_BY_EXTENSION[extensionOf(name)];
+  return (typeof known === 'string' ? known : '') || 'application/octet-stream';
+};
+
+function truncateUtf8(value, maxBytes) {
+  let result = value;
+  while (Buffer.byteLength(result) > maxBytes) result = result.slice(0, -1);
+  return result;
+}
+
+function safeFileName(value) {
+  let decoded = String(Array.isArray(value) ? value[0] : value || 'attachment');
+  try { decoded = decodeURIComponent(decoded); } catch {}
+  let name = path.basename(decoded.replace(/\\/g, '/'))
+    .normalize('NFKC')
+    .replace(/[\u0000-\u001f\u007f/\\]/g, '_')
+    .trim();
+  if (!name || name === '.' || name === '..') name = 'attachment';
+  if (Buffer.byteLength(name) > 180) {
+    const candidate = path.extname(name);
+    const extension = Buffer.byteLength(candidate) <= 24 ? candidate : '';
+    const stem = extension ? name.slice(0, -extension.length) : name;
+    name = `${truncateUtf8(stem, 180 - Buffer.byteLength(extension))}${extension}`;
+  }
+  return name || 'attachment';
+}
+
+function canonicalImageName(name, mime) {
+  const extension = IMAGE_EXTENSIONS[mime];
+  const current = path.extname(name);
+  const stem = current ? name.slice(0, -current.length) : name;
+  return `${stem || 'Screenshot'}.${extension}`;
+}
+
+const isImageMime = (mime) => IMAGE_MIMES.includes(mime);
+const claimsNativeImage = (name, declared) =>
+  isImageMime(normalizedMime(declared))
+  || Object.values(IMAGE_EXTENSIONS).includes(extensionOf(name))
+  || extensionOf(name) === 'jpeg';
+
+const responseShape = (sessionId, id, mime, bytes, filePath, name = path.basename(filePath)) => {
+  const kind = isImageMime(mime) ? 'image' : 'file';
+  return {
+    id,
+    kind,
+    name,
+    mime,
+    bytes,
+    path: filePath,
+    previewUrl: `/api/sessions/${encodeURIComponent(sessionId)}/attachments/${id}/raw`,
+    insertText: `${kind === 'image' ? 'Screenshot' : 'File'}: ${filePath} `,
+  };
+};
+
+/** Stream one browser file into the session-owned attachment store. */
+export async function receiveAttachment(readable, sessionId, { contentType = '', fileName = '' } = {}) {
+  // Image metadata is advisory. Byte detection remains the security boundary
+  // for formats rendered inline or passed to a CLI's native image interface.
+  // Other formats are inert files: they are never executed, and the raw route
+  // forces them to download rather than rendering browser-active content.
+  const originalName = safeFileName(fileName);
   checkUploadRate(sessionId);
   return withUploadLock(sessionId, async () => {
     const dir = sessionDir(sessionId);
     await fs.promises.mkdir(dir, { recursive: true });
     const usage = await attachmentUsage(dir);
     if (usage.count >= SESSION_ATTACHMENT_COUNT_LIMIT) {
-      throw httpError(413, `this session already has ${SESSION_ATTACHMENT_COUNT_LIMIT} screenshots`);
+      throw httpError(413, `this session already has ${SESSION_ATTACHMENT_COUNT_LIMIT} files`);
     }
     const id = `att_${crypto.randomBytes(12).toString('hex')}`;
     const temporary = path.join(dir, `.${id}.${crypto.randomBytes(4).toString('hex')}.part`);
@@ -165,9 +252,9 @@ export async function receiveImage(readable, sessionId, contentType) {
     const limiter = new Transform({
       transform(chunk, _encoding, callback) {
         bytes += chunk.length;
-        if (bytes > ATTACHMENT_LIMIT) return callback(httpError(413, 'image is larger than 25 MB'));
+        if (bytes > ATTACHMENT_LIMIT) return callback(httpError(413, 'file is larger than 100 MB'));
         if (usage.bytes + bytes > SESSION_ATTACHMENT_LIMIT) {
-          return callback(httpError(413, 'this session has reached its 500 MB screenshot limit'));
+          return callback(httpError(413, 'this session has reached its 500 MB attachment limit'));
         }
         callback(null, chunk);
       },
@@ -175,7 +262,7 @@ export async function receiveImage(readable, sessionId, contentType) {
 
     try {
       await pipeline(readable, limiter, fs.createWriteStream(temporary, { flags: 'wx' }));
-      if (bytes === 0) throw httpError(413, 'image is empty');
+      if (bytes === 0) throw httpError(413, 'file is empty');
 
       const handle = await fs.promises.open(temporary, 'r');
       const header = Buffer.alloc(32);
@@ -191,14 +278,18 @@ export async function receiveImage(readable, sessionId, contentType) {
       const headerBytes = header.subarray(0, bytesRead);
       const tailBytes = tail.subarray(0, tailBytesRead);
       const detected = detectImageMime(headerBytes);
-      if (!detected) throw httpError(415, 'file is not a supported raster image');
-      if (!imageEnvelopeIsValid(detected, headerBytes, tailBytes, bytes)) {
+      if (detected && !imageEnvelopeIsValid(detected, headerBytes, tailBytes, bytes)) {
         throw httpError(415, 'image is truncated or malformed');
       }
+      if (!detected && claimsNativeImage(originalName, contentType)) {
+        throw httpError(415, 'file does not contain a valid PNG, JPEG, GIF, or WebP image');
+      }
 
-      const finalPath = path.join(dir, `${id}.${EXTENSIONS[detected]}`);
+      const storedName = detected ? canonicalImageName(originalName, detected) : originalName;
+      const mime = detected || mimeForName(storedName);
+      const finalPath = path.join(dir, `${id}-${storedName}`);
       await fs.promises.rename(temporary, finalPath);
-      return responseShape(sessionId, id, detected, bytes, finalPath);
+      return responseShape(sessionId, id, mime, bytes, finalPath, storedName);
     } catch (error) {
       await fs.promises.unlink(temporary).catch(() => {});
       throw error;
@@ -207,25 +298,31 @@ export async function receiveImage(readable, sessionId, contentType) {
 }
 
 /** Resolve an untrusted attachment id within exactly one session. */
-export function resolveImage(sessionId, attachmentId) {
+export function resolveAttachment(sessionId, attachmentId) {
   if (!ATTACHMENT_ID.test(String(attachmentId))) throw httpError(404, 'attachment not found');
   const dir = sessionDir(sessionId);
-  for (const [mime, extension] of Object.entries(EXTENSIONS)) {
-    const filePath = path.join(dir, `${attachmentId}.${extension}`);
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch {}
+  for (const name of names) {
+    const isCurrent = name.startsWith(`${attachmentId}-`);
+    const legacyExtension = name.startsWith(`${attachmentId}.`) ? extensionOf(name) : '';
+    if (!isCurrent && !Object.values(IMAGE_EXTENSIONS).includes(legacyExtension)) continue;
+    const filePath = path.join(dir, name);
     try {
       const stat = fs.lstatSync(filePath);
       if (!stat.isFile() || stat.isSymbolicLink()) continue;
-      return responseShape(sessionId, attachmentId, mime, stat.size, filePath);
+      const displayName = isCurrent ? name.slice(attachmentId.length + 1) : name;
+      return responseShape(sessionId, attachmentId, mimeForName(displayName), stat.size, filePath, displayName);
     } catch {}
   }
   throw httpError(404, 'attachment not found');
 }
 
-export function resolveImages(sessionId, attachmentIds) {
+export function resolveAttachments(sessionId, attachmentIds) {
   if (!Array.isArray(attachmentIds)) throw httpError(400, 'attachmentIds must be an array');
-  if (attachmentIds.length > 5) throw httpError(400, 'at most five images may be attached');
+  if (attachmentIds.length > 5) throw httpError(400, 'at most five files may be attached');
   if (new Set(attachmentIds).size !== attachmentIds.length) throw httpError(400, 'duplicate attachment id');
-  return attachmentIds.map((id) => resolveImage(sessionId, id));
+  return attachmentIds.map((id) => resolveAttachment(sessionId, id));
 }
 
 export async function removeSessionAttachments(sessionId) {
@@ -268,19 +365,23 @@ export async function pruneAttachmentDirs(sessionIds, now = Date.now()) {
 const quotePath = (filePath) => JSON.stringify(filePath);
 
 /** TUI commands that attach native image context before the textual prompt. */
-export function formatAttachmentPrelude(cli, images) {
+export function formatAttachmentPrelude(cli, attachments) {
   if (cli !== 'hermes') return [];
-  return images.map((image) => `/image ${quotePath(image.path)}`);
+  return attachments
+    .filter((attachment) => attachment.kind === 'image')
+    .map((image) => `/image ${quotePath(image.path)}`);
 }
 
 /** Keep CLI-version-specific formatting out of request handlers and React. */
-export function formatAttachmentDelivery(cli, text, images) {
-  const prompt = String(text || '').trim()
-    || `Please inspect the attached screenshot${images.length === 1 ? '' : 's'}.`;
-  if (!images.length) return prompt;
-  const paths = images.map((image) => image.path);
+export function formatAttachmentDelivery(cli, text, attachments) {
+  const onlyImages = attachments.length > 0 && attachments.every((attachment) => attachment.kind === 'image');
+  const prompt = String(text || '').trim() || (onlyImages
+    ? `Please inspect the attached screenshot${attachments.length === 1 ? '' : 's'}.`
+    : `Please inspect the attached file${attachments.length === 1 ? '' : 's'}.`);
+  if (!attachments.length) return prompt;
+  const paths = attachments.map((attachment) => attachment.path);
   if (cli === 'gemini') {
     return `${prompt}\n\n${paths.map((filePath) => `@${quotePath(filePath)}`).join('\n')}`;
   }
-  return `${prompt}\n\nAttached screenshots:\n${paths.map((filePath) => `- ${quotePath(filePath)}`).join('\n')}`;
+  return `${prompt}\n\nAttached files:\n${paths.map((filePath) => `- ${quotePath(filePath)}`).join('\n')}`;
 }

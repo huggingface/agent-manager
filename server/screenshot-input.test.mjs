@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * Screenshot-input integration checks in a real browser:
+ * Attachment-input integration checks in a real browser:
  *   - stored bytes, response MIME, and preview headers come from detection;
  *   - a stopped terminal never reports a false insertion success;
  *   - an uploaded-but-uninserted screenshot can be retried without reupload;
  *   - attachment chips cannot mutate an in-flight send;
  *   - one clipboard image stays one chip across browser DataTransfer views;
+ *   - document files stay inert downloads and can be sent beside images;
  *   - the creation dialog has no redundant file picker.
  *
  * Set SCREENSHOT_PUBLIC_DIR to a prebuilt web/dist to skip the build.
@@ -29,6 +30,8 @@ Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png);
 png.writeUInt32BE(13, 8); Buffer.from('IHDR').copy(png, 12);
 png.writeUInt32BE(1, 16); png.writeUInt32BE(1, 20);
 Buffer.from('IEND').copy(png, 37);
+const pdf = Buffer.from('%PDF-1.7\nopaque pdf data');
+const docx = Buffer.from('PK\x03\x04opaque office data');
 
 let failures = 0;
 const check = (name, ok, detail = '') => {
@@ -95,8 +98,40 @@ try {
   check('preview uses private, sandboxed response headers',
     preview.headers.get('content-type') === 'image/png'
       && preview.headers.get('cache-control') === 'no-store'
+      && preview.headers.get('content-disposition')?.startsWith('inline;')
       && preview.headers.get('x-content-type-options') === 'nosniff'
       && preview.headers.get('content-security-policy') === 'sandbox');
+
+  const documentUpload = await fetch(`${API}/api/sessions/${id}/attachments`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/pdf', 'x-file-name': encodeURIComponent('brief.pdf') },
+    body: pdf,
+  });
+  const document = await documentUpload.json();
+  const documentDownload = await fetch(`${API}${document.previewUrl}`);
+  check('PDF uploads are preserved as inert downloadable files',
+    documentUpload.status === 201
+      && document.kind === 'file'
+      && document.name === 'brief.pdf'
+      && document.mime === 'application/pdf'
+      && documentDownload.headers.get('content-disposition')?.startsWith('attachment;')
+      && documentDownload.headers.get('x-content-type-options') === 'nosniff'
+      && documentDownload.headers.get('content-security-policy') === 'sandbox',
+    JSON.stringify({ status: documentUpload.status, kind: document.kind, name: document.name }));
+
+  const svgUpload = await fetch(`${API}/api/sessions/${id}/attachments`, {
+    method: 'POST',
+    headers: { 'content-type': 'image/svg+xml', 'x-file-name': encodeURIComponent('diagram.svg') },
+    body: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>throw 1</script></svg>'),
+  });
+  const svg = await svgUpload.json();
+  const svgDownload = await fetch(`${API}${svg.previewUrl}`);
+  check('browser-active SVG is accepted only as a forced-download file',
+    svgUpload.status === 201
+      && svg.kind === 'file'
+      && svgDownload.headers.get('content-type') === 'image/svg+xml'
+      && svgDownload.headers.get('content-disposition')?.startsWith('attachment;')
+      && svgDownload.headers.get('content-security-policy') === 'sandbox');
 
   const missingId = `att_${'0'.repeat(24)}`;
   const mixedSend = await apiJson(`/api/sessions/${id}/input`, {
@@ -133,6 +168,9 @@ try {
   await page.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
   await page.locator('.pane-head .ph-image').waitFor({ state: 'visible' });
   await waitFor(() => page.locator('.pane-head .ph-image').isEnabled());
+  check('terminal file picker accepts documents and other regular files',
+    await page.locator('.pane-head .ph-image').getAttribute('aria-label') === 'Attach files'
+      && await page.locator('.pane-head .image-file-input').getAttribute('accept') === null);
 
   // Let the upload finish, stop the process, and only then expose the response
   // to the UI. The following insert request must fail authoritatively.
@@ -162,7 +200,7 @@ try {
   await retry.click();
   await page.locator('.term-image-status.success').waitFor({ state: 'visible' });
   const successText = await page.locator('.term-image-status.success').textContent();
-  check('retry inserts the already-uploaded screenshot after restart',
+  check('retry inserts the already-uploaded file after restart',
     !!successText?.includes('inserted') && successText.includes('press Enter'),
     JSON.stringify({ successText }));
   const terminalTail = await (await fetch(`${API}/api/agents/${id}/tail?lines=80`)).json();
@@ -190,7 +228,7 @@ try {
   // Keep the creation dialog focused on the prompt. Pasting still works, and
   // pasted chips remain removable, but choosing files belongs in live views.
   await page.locator('.bolt-btn').click();
-  check('creation dialog omits the redundant image picker',
+  check('creation dialog omits the redundant file picker',
     await page.locator('.quick .image-pick').count() === 0
       && await page.locator('.quick .image-file-input').count() === 0);
   await page.locator('.quick-cli[title="Repaint fixture"]').click();
@@ -198,7 +236,7 @@ try {
   // Hold the second upload. Once the first
   // chip says uploaded, every attachment mutation must remain disabled until
   // the single logical send transaction finishes.
-  await page.locator('.quick-prompt').fill('inspect both screenshots');
+  await page.locator('.quick-prompt').fill('inspect both files');
   await page.locator('.quick-prompt').evaluate((element, bytes) => {
     const raw = atob(bytes);
     const data = Uint8Array.from(raw, (character) => character.charCodeAt(0));
@@ -216,16 +254,21 @@ try {
   }, png.toString('base64'));
   check('clipboard image paste uses the canonical file list once and preserves prompt text',
     await page.locator('.quick .image-chip').count() === 1
-      && await page.locator('.quick-prompt').inputValue() === 'inspect both screenshots');
+      && await page.locator('.quick-prompt').inputValue() === 'inspect both files');
   await page.locator('.quick-prompt').evaluate((element, bytes) => {
     const raw = atob(bytes);
     const data = Uint8Array.from(raw, (character) => character.charCodeAt(0));
     const transfer = new DataTransfer();
-    transfer.items.add(new File([data], 'second.png', { type: 'image/png' }));
+    transfer.items.add(new File([data], 'requirements.docx', {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }));
     element.dispatchEvent(new ClipboardEvent('paste', {
       bubbles: true, cancelable: true, clipboardData: transfer,
     }));
-  }, png.toString('base64'));
+  }, docx.toString('base64'));
+  check('DOCX paste creates a generic file chip beside the image',
+    await page.locator('.quick .image-chip').count() === 2
+      && await page.locator('.quick .image-chip-placeholder', { hasText: 'DOCX' }).count() === 1);
   let releaseSecond;
   let sawSecond;
   const secondReached = new Promise((resolve) => { sawSecond = resolve; });

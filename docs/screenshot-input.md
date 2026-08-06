@@ -1,21 +1,22 @@
-# Screenshot input
+# File and screenshot input
 
 Status: implemented in draft PR
 
-Date: 2026-08-05
+Date: 2026-08-06
 
 ## 1. Summary
 
-Let the operator attach screenshots to an agent prompt by:
+Let the operator attach local files to an agent prompt by:
 
-- pasting an image from the browser clipboard;
-- dragging image files onto a prompt or terminal pane; or
-- choosing images with a small attachment button.
+- pasting files or screenshots from the browser clipboard;
+- dragging files onto a prompt or terminal pane; or
+- choosing files with a small attachment button in live views.
 
-The browser uploads the image bytes to Agent Manager. Agent Manager stores them
-outside the user's repository, then gives the target CLI a server-local image
-path. The prompt remains text at the PTY boundary; no binary data is sent through
-xterm or terminal escape sequences.
+The browser uploads the bytes to Agent Manager. Agent Manager stores them
+outside the user's repository, then gives the target CLI a server-local path.
+Raster images additionally use native image interfaces where the harness has a
+reliable one. The prompt remains text at the PTY boundary; no binary data is
+sent through xterm or terminal escape sequences.
 
 The first version covers local agent sessions. Remote agents need an additional
 download protocol because they do not share the Space's filesystem and are a
@@ -53,10 +54,11 @@ terminal graphics/clipboard protocol and corresponding support in every TUI.
 Those protocols do not solve the browser/container clipboard boundary and would
 couple Agent Manager to terminal-specific behavior.
 
-### 2.3 Coding CLIs already understand image paths
+### 2.3 Coding CLIs already understand local file paths
 
-The exact affordance differs by harness, but a server-local path is the common
-denominator:
+The exact native image affordance differs by harness, but a server-local path is
+the common denominator for images, PDFs, Office documents, archives, source
+files, and other regular files:
 
 | Harness | Observed path as of this design | First implementation |
 |---|---|---|
@@ -67,15 +69,16 @@ denominator:
 | Hermes | the current TUI supports `/image <path>` and detects a pasted standalone image path | `/image <absolute-path>` adapter, with explicit-path fallback |
 | OpenClaw | no stable image-attachment CLI contract was verified | explicit path, best effort |
 
-Every adapter must retain the explicit-path fallback. CLI flags and TUI commands
-change faster than Agent Manager, while a file that exists and a prompt that
-names it remain inspectable by an agent with filesystem and vision tools.
+Every adapter must retain the explicit-path fallback. Native image flags and
+TUI commands change faster than Agent Manager, while a file that exists and a
+prompt that names it remain inspectable by an agent with filesystem and vision
+tools.
 
 ## 3. Goals
 
-1. Paste a screenshot into any local agent input without first saving it by
-   hand.
-2. Drag one or more raster images onto the input or terminal pane.
+1. Paste a file or screenshot into any local agent input without first saving it
+   by hand.
+2. Drag one or more regular files onto the input or terminal pane.
 3. Work in the Hugging Face iframe and on phone-sized layouts.
 4. Make upload progress, success, and failure visible.
 5. Never submit a partially uploaded or missing attachment.
@@ -83,13 +86,13 @@ names it remain inspectable by an agent with filesystem and vision tools.
 7. Keep the attachment available for the lifetime of the session so resumed
    agents can still inspect it.
 8. Preserve ordinary text paste and Agent Manager's existing pane drag/drop.
-9. Use bounded streaming uploads so images do not block the process that pumps
+9. Use bounded streaming uploads so files do not block the process that pumps
    every PTY.
+10. Preserve native image behavior while making non-image files available by
+    explicit local path.
 
 ## 4. Non-goals
 
-- A general document upload system. The first version accepts raster images
-  only.
 - Images in agent-to-agent prompts. Agents inside the Space can already write a
   file and reference its path.
 - Synchronizing the operator's filesystem with a remote agent's filesystem.
@@ -102,24 +105,27 @@ names it remain inspectable by an agent with filesystem and vision tools.
 
 ### 5.1 Composers
 
-The Sidebar quickstart and Overview reply textarea get the same attachment
+The Sidebar quickstart and Overview reply textarea share the same paste/drop
 behavior:
 
-- Pasting an image adds a thumbnail chip and does not insert binary or fake text
+- Pasting a file adds a chip and does not insert binary or fake text
   into the textarea.
-- Dropping images over the composer shows a restrained dashed highlight and
+- Dropping files over the composer shows a restrained dashed highlight and
   adds the same chips.
-- An image button opens `<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple>`.
-- Each chip shows a thumbnail, filename or `Screenshot`, size, and remove button.
-- The prompt may contain text plus images or images alone.
-- An images-only submission uses `Please inspect the attached screenshot.` (or
-  `screenshots` for several) as its text.
-- At most five images may be attached to one prompt.
+- Overview and live terminal views expose a file button with an unrestricted
+  `<input type="file" multiple>`; quick creation intentionally stays prompt-first
+  and accepts paste/drop without another picker.
+- Image chips show thumbnails; other files show a compact extension badge.
+- The prompt may contain text plus files or files alone.
+- A files-only submission uses `Please inspect the attached file.` (or `files`
+  for several) as its text. Image-only server delivery retains the more specific
+  `screenshot` wording.
+- At most five files may be attached to one prompt.
 - The send button is disabled while an upload is active.
-- A failed upload leaves the draft and pending images intact and names the
+- A failed upload leaves the draft and pending files intact and names the
   failure next to the affected chip.
 
-Pending images remain browser `File` objects until the operator submits. This
+Pending files remain browser `File` objects until the operator submits. This
 means abandoning or editing a draft does not create server-side orphan files.
 `URL.createObjectURL()` supplies local previews and is revoked when a chip is
 removed or the component unmounts.
@@ -127,11 +133,11 @@ removed or the component unmounts.
 ### 5.2 Live terminal panes
 
 xterm owns the visible composer, so Agent Manager cannot reliably place its own
-persistent attachment chips inside it. Image paste/drop therefore behaves as a
+persistent attachment chips inside it. File paste/drop therefore behaves as a
 short transaction:
 
-1. Show `uploading screenshot…` over the bottom of the pane.
-2. Upload the image without sending a prompt.
+1. Show `uploading file…` over the bottom of the pane.
+2. Upload the file without sending a prompt.
 3. On success, attach it through the harness adapter or paste a formatted path
    reference into the CLI composer.
 4. Return focus to xterm. The operator can keep typing and presses Enter when
@@ -140,20 +146,21 @@ short transaction:
 An upload must never auto-submit the agent's prompt. Inserting the attachment and
 submitting are separate actions, matching native TUI image paste behavior.
 
-Only image-bearing drag events are claimed. Session/pane drag data continues to
+Only file-bearing drag events are claimed. Session/pane drag data continues to
 reach the existing group layout handlers. The terminal drop target sets
 `dropEffect='copy'`; pane reordering keeps `move`.
 
 ### 5.3 Mobile paste
 
-The existing key-bar Paste action becomes image-aware:
+The existing key-bar Paste action becomes file-aware:
 
 1. Try `navigator.clipboard.read()` inside the button's user gesture and extract
-   every `image/*` item.
-2. If no image exists, try `navigator.clipboard.readText()` and retain current
+   one preferred representation per file item (native raster first). Rich text
+   with a `text/plain` representation remains text rather than becoming a file.
+2. If no file exists, try `navigator.clipboard.readText()` and retain current
    text behavior.
 3. If either API is missing or denied, open the visible fallback textarea.
-4. Its `onPaste` handler checks `clipboardData.items` for images before reading
+4. Its `onPaste` handler checks `clipboardData.items` for files before reading
    `text/plain`.
 
 This keeps the cross-origin iframe fallback as the load-bearing path rather than
@@ -163,7 +170,7 @@ assuming async Clipboard API permission.
 
 The attachment affordance is disabled for remote sessions in phase one, with:
 
-> Screenshots are not available for remote agents yet — that agent cannot read
+> Files are not available for remote agents yet — that agent cannot read
 > files stored on this Space.
 
 Silently inserting a Space path would be worse: it looks attached in the UI but
@@ -173,15 +180,15 @@ cannot exist on the remote machine.
 
 ### 6.1 Location
 
-Managed images live at:
+Managed files live at:
 
 ```text
-${STATE_DIR}/attachments/<session-id>/<attachment-id>.<ext>
+${STATE_DIR}/attachments/<session-id>/<attachment-id>-<safe-original-name>
 ```
 
 This is deliberately outside `WORKSPACES_DIR`:
 
-- screenshots do not appear as untracked repository files;
+- attachments do not appear as untracked repository files;
 - Agent Manager owns their lifecycle;
 - several sessions sharing one working directory do not share an attachment
   namespace;
@@ -189,18 +196,19 @@ This is deliberately outside `WORKSPACES_DIR`:
 - the mounted `/data` bucket keeps them across browser disconnects, Space sleep,
   and process restarts.
 
-Filenames are generated by the server, contain no spaces, and never use a
-client-supplied path. The original filename is display-only and need not be
-persisted in v1.
+Attachment ids are generated by the server. The client filename is decoded,
+reduced to a basename, stripped of control/path characters, and bounded before
+it is appended to that id. Keeping the safe name preserves extensions required
+by tools that inspect PDF, DOCX, archive, source, and data files.
 
 ### 6.2 Attachment shape
 
 ```ts
-interface ImageAttachment {
+interface Attachment {
   id: string;        // att_<random>, scoped to the session
-  kind: 'image';
-  name: string;      // generated basename
-  mime: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
+  kind: 'image' | 'file';
+  name: string;      // sanitized original name; image extension is corrected
+  mime: string;
   bytes: number;
   path: string;      // absolute server path; used by the CLI adapter
   previewUrl: string;
@@ -214,8 +222,8 @@ session's own directory, and never join an arbitrary browser-supplied filename.
 
 ### 6.3 Lifecycle
 
-- Composer images are uploaded only on submit.
-- Terminal images are uploaded immediately because xterm needs a server path to
+- Composer files are uploaded only on submit.
+- Terminal files are uploaded immediately because xterm needs a server path to
   insert.
 - Successful attachments remain while the session exists, including while it
   is stopped.
@@ -226,8 +234,9 @@ session's own directory, and never join an arbitrary browser-supplied filename.
   whose newest file is older than seven days. The grace period covers a crash
   between session persistence and upload completion.
 - Failed and aborted uploads delete their temporary file immediately.
-- Each session is capped at 200 stored screenshots and 500 MiB. Uploads for one
-  session are serialized so concurrent requests cannot race the quota check.
+- Each file is capped at 100 MiB; each session is capped at 200 stored files and
+  500 MiB. Uploads for one session are serialized so concurrent requests cannot
+  race the quota check.
 - Pruning and session deletion use asynchronous filesystem operations so a
   large attachment store cannot block terminal I/O.
 
@@ -240,8 +249,8 @@ extension, and `stat` provide the metadata needed in v1.
 
 ```http
 POST /api/sessions/:id/attachments
-Content-Type: image/png
-X-File-Name: screenshot.png
+Content-Type: application/pdf
+X-File-Name: brief.pdf
 
 <raw bytes>
 ```
@@ -251,39 +260,41 @@ Successful response:
 ```json
 {
   "id": "att_74e0f69dc9ed772cb685999e",
-  "kind": "image",
-  "name": "att_74e0f69dc9ed772cb685999e.png",
-  "mime": "image/png",
+  "kind": "file",
+  "name": "brief.pdf",
+  "mime": "application/pdf",
   "bytes": 184332,
-  "path": "/data/state/attachments/session-id/att_74e0f69dc9ed772cb685999e.png",
+  "path": "/data/state/attachments/session-id/att_74e0f69dc9ed772cb685999e-brief.pdf",
   "previewUrl": "/api/sessions/session-id/attachments/att_74e0f69dc9ed772cb685999e/raw",
-  "insertText": "Screenshot: /data/state/attachments/session-id/att_74e0f69dc9ed772cb685999e.png "
+  "insertText": "File: /data/state/attachments/session-id/att_74e0f69dc9ed772cb685999e-brief.pdf "
 }
 ```
 
 The request body is streamed to a temporary file. While streaming, count bytes
-and abort with `413` above 25 MiB. Once complete:
+and abort with `413` above 100 MiB. Once complete:
 
 1. Read the first small header from the temporary file.
-2. Detect PNG, JPEG, GIF, or WebP by magic bytes.
-3. Reject unsupported or malformed bytes with `415`. A missing, aliased, or
-   incorrect request `Content-Type` does not override byte detection.
-4. Rename to the detected extension atomically.
+2. Detect PNG, JPEG, GIF, or WebP by magic bytes. Correct misleading image
+   metadata from those bytes and validate the complete image envelope.
+3. If a supported raster image is claimed but its bytes are invalid, reject it
+   with `415`. Otherwise preserve the regular file as an opaque attachment.
+4. Sanitize the basename and rename atomically under the generated id.
 5. Return `201`.
 
-Do not base64-wrap image data in JSON. Base64 adds roughly one third to transfer
-size and forces both browser and server to hold large strings in memory. The
-existing Files upload route is a good streaming pattern, but it is not reused
-directly because it accepts arbitrary names, overwrites, and has no size cap.
+Do not base64-wrap attachment data in JSON. Base64 adds roughly one third to
+transfer size and forces both browser and server to hold large strings in
+memory. The existing Files upload route is a good streaming pattern, but it is
+not reused directly because it writes into the user workspace and has different
+overwrite semantics.
 
 Errors:
 
 | Status | Meaning |
 |---|---|
-| `400` | session cannot accept images or malformed request |
+| `400` | session cannot accept files or malformed request |
 | `404` | unknown session/attachment |
-| `413` | empty or larger than 25 MiB |
-| `415` | bytes are not a supported raster image |
+| `413` | empty, larger than 100 MiB, or over the session quota |
+| `415` | a claimed PNG/JPEG/GIF/WebP is malformed |
 | `429` | per-session upload backstop exceeded |
 | `500` | durable write failed |
 
@@ -305,7 +316,12 @@ Content-Security-Policy: sandbox
 Cache-Control: no-store
 ```
 
-Screenshots may contain sensitive material, so use `Cache-Control: no-store` in
+Validated raster images use `Content-Disposition: inline` for chip previews.
+Every other file uses `Content-Disposition: attachment`; combined with `sandbox`
+and `nosniff`, HTML, SVG, Office, PDF, and other browser-capable formats cannot
+become active content in the Agent Manager origin.
+
+Attachments may contain sensitive material, so use `Cache-Control: no-store` in
 the first version. If bucket reads become measurable, a short private cache can
 be evaluated later without making year-long browser retention the default.
 
@@ -325,7 +341,7 @@ Content-Type: application/json
 
 The server resolves every id inside that session's attachment directory before
 starting or typing into the CLI. Unknown ids reject the whole request; never send
-a prompt with only a subset of its images.
+a prompt with only a subset of its files.
 
 `attachmentIds` defaults to `[]`, preserving every existing UI and API caller.
 The agent-to-agent `text/plain` route remains unchanged.
@@ -343,7 +359,7 @@ deliver(session, { text, attachments }, from)
 The HTTP route validates and resolves attachment ids, then the harness adapter
 turns `{text, absolutePaths}` into one of:
 
-- a textual prompt containing explicit image paths;
+- a textual prompt containing explicit file paths;
 - a path-injection syntax such as Gemini's `@path`; or
 - a short TUI attachment command followed by the textual prompt.
 
@@ -353,8 +369,8 @@ harness receives a native attachment:
 ```text
 Match this layout
 
-Attached screenshots:
-- /data/state/attachments/<session>/<attachment>.png
+Attached files:
+- /data/state/attachments/<session>/<attachment>-brief.pdf
 ```
 
 This is also the universal fallback. Do not include base64 data in the prompt or
@@ -367,8 +383,8 @@ components and `runner.js`. The implementation exposes the universal formatted
 prompt and any native prelude commands separately:
 
 ```ts
-formatAttachmentDelivery(cli, text, images): string
-formatAttachmentPrelude(cli, images): string[]
+formatAttachmentDelivery(cli, text, attachments): string
+formatAttachmentPrelude(cli, attachments): string[]
 ```
 
 Initial adapters:
@@ -376,7 +392,7 @@ Initial adapters:
 - `gemini`: append `@<escaped-absolute-path>` tokens to the prompt.
 - `hermes`: send `/image <quoted-path>` + Return for each image, then send the
   prompt. If the command is unavailable, use the universal prompt.
-- all others: use the universal prompt.
+- all others and all non-image files: use the universal explicit-path prompt.
 
 opencode `--file` and other native launch flags are optional follow-ups. Codex
 uses its installed `--image` support on a first turn; every adapter retains the
@@ -386,16 +402,16 @@ file.
 ### 8.3 First prompt without a boot race
 
 The quickstart path currently places an initial prompt on the CLI launch command
-because typing into a booting TUI could lose it. Screenshot quickstart needs a
+because typing into a booting TUI could lose it. Attachment quickstart needs a
 two-step browser flow—create the session, then upload to its attachment scope—so
 `deliver()` must preserve that property:
 
 1. `POST /api/sessions` without a prompt creates a stopped session.
-2. Upload all pending images to the returned session id.
+2. Upload all pending files to the returned session id.
 3. `POST /api/sessions/:id/input` with text and attachment ids.
 4. If the session has never started and its CLI has `withPrompt`, store the
    fully formatted prompt as `pendingPrompt`; for Codex, also retain the
-   validated paths as `pendingImagePaths`; then call `ensureRunning()`.
+   validated image paths as `pendingImagePaths`; then call `ensureRunning()`.
 5. `commandFor()` consumes those fields on the first launch, adding one Codex
    `-i` flag per image, and clears them once the PTY starts.
 
@@ -418,7 +434,7 @@ Content-Type: application/json
 
 The server writes `insertText` to the running PTY and acknowledges only after
 the write is accepted. It never sends Return. If the process stops after upload,
-the browser says the image was saved but not inserted and retains its attachment
+the browser says the file was saved but not inserted and retains its attachment
 id behind a Retry action. This avoids treating a browser-local xterm paste as
 proof that a disconnected or non-controlling pane reached the CLI. Completed
 terminal insertions are idempotent by attachment id, so retrying after a lost
@@ -431,11 +447,11 @@ adapter and fall back to `insertText`.
 
 ## 9. Frontend structure
 
-Add a small module, for example `web/src/lib/imageAttachments.ts`, containing:
+Add a small module, `web/src/lib/attachments.ts`, containing:
 
-- accepted MIME hints, byte/size checks, and client-side 25 MiB check;
-- `imageFilesFromTransfer(DataTransfer)`;
-- `transferMayContainImage(DataTransfer)`;
+- image-preview MIME hints and a client-side 100 MiB check;
+- `filesFromTransfer(DataTransfer)`;
+- `transferMayContainFile(DataTransfer)`;
 - duplicate suppression across `items` and `files`;
 - local preview creation/revocation; and
 - sequential or bounded-concurrency upload helpers.
@@ -443,7 +459,7 @@ Add a small module, for example `web/src/lib/imageAttachments.ts`, containing:
 Use sequential uploads initially. Five files is the maximum, bucket writes are
 the bottleneck, and simpler ordering makes chip status deterministic.
 
-Add a reusable `ImageAttachments` chip row used by Sidebar and Overview. The
+Add a reusable `Attachments` chip row used by Sidebar and Overview. The
 terminal imports only the transfer/upload helpers.
 
 Expected file changes:
@@ -451,11 +467,11 @@ Expected file changes:
 | File | Change |
 |---|---|
 | `web/src/api.ts` | attachment types, upload, preview URL, `sendInput(..., attachmentIds)` |
-| `web/src/lib/imageAttachments.ts` | clipboard/drop extraction and pending-image lifecycle |
-| `web/src/components/ImageAttachments.tsx` | thumbnail chips, picker, progress/error states |
-| `web/src/components/Sidebar.tsx` | quickstart paste/drop/picker and two-step submit |
-| `web/src/components/Overview.tsx` | reply attachments and screenshot-only send |
-| `web/src/components/TerminalPane.tsx` | capture-phase image paste/drop and mobile image paste |
+| `web/src/lib/attachments.ts` | clipboard/drop extraction and pending-file lifecycle |
+| `web/src/components/Attachments.tsx` | image previews, file badges, picker, progress/error states |
+| `web/src/components/Sidebar.tsx` | quickstart paste/drop and two-step submit |
+| `web/src/components/Overview.tsx` | reply attachments and file-only send |
+| `web/src/components/TerminalPane.tsx` | capture-phase file paste/drop and mobile file paste |
 | `web/src/styles.css` | chips, drop highlight, terminal upload overlay |
 | `server/src/attachments.js` | storage, validation, lookup, preview, cleanup |
 | `server/src/index.js` | routes and structured delivery |
@@ -466,19 +482,21 @@ Expected file changes:
 
 ### 10.1 Treat browser metadata as untrusted
 
-- Detect the actual file type from bytes, not `Content-Type`, extension, or
-  `File.name`.
-- Never accept SVG: it is active XML, not a screenshot transport format.
-- Generate the stored name and attachment id server-side.
+- Detect native/inline raster images from bytes, not `Content-Type`, extension,
+  or `File.name`.
+- Treat every non-raster format—including SVG and HTML—as an inert file and
+  force download; never render it as active content in the app origin.
+- Generate the attachment id server-side and reduce the client name to a
+  bounded, control-free basename.
 - Resolve only under a fixed session attachment root.
 - Refuse symlinks and non-regular files during lookup/preview.
 - Cap bytes while streaming and remove partial files on abort/error.
 - Use `wx`/exclusive temporary creation and atomic rename; never overwrite.
 
-### 10.2 Keep screenshots private by default
+### 10.2 Keep attachments private by default
 
-Screenshots routinely contain tokens, email addresses, internal dashboards, and
-customer data. They remain on the private Agent Manager storage and are not
+Attachments routinely contain tokens, customer data, internal documents, and
+source code. They remain on the private Agent Manager storage and are not
 uploaded to the Hub by this feature.
 
 Session sharing should keep its current safe behavior: a trace may contain the
@@ -494,8 +512,8 @@ The server does not derive prompt text from an original filename.
 
 ## 11. Remote-agent phase
 
-Remote agents currently exchange text messages and explicitly have no remote
-filesystem or file upload. Supporting screenshots requires protocol work, not
+Remote agents currently exchange text messages and explicitly have no shared
+filesystem or file upload. Supporting attachments requires protocol work, not
 just enabling the button.
 
 Extend a remote user message with attachments:
@@ -534,16 +552,16 @@ Markdown logs, and needlessly injects binary material into traces.
 
 | Failure | User-visible result | Prompt sent? |
 |---|---|---|
-| unsupported clipboard type | ordinary text paste continues, or no-op | no |
-| image larger than limit | chip says `too large (25 MB max)` | no |
+| clipboard contains no file | ordinary text paste continues, or no-op | no |
+| file larger than limit | chip says `too large (100 MB max)` | no |
 | network/write failure | chip or terminal overlay says upload failed | no |
 | one of several uploads fails | successful files remain, all chips stay for retry | no |
 | attachment id missing at send | `attachment no longer exists`; retain draft | no |
-| terminal socket closes after upload | say image was saved but not inserted; offer retry | no |
+| terminal socket closes after upload | say file was saved but not inserted; offer retry | no |
 | remote target | explain unsupported phase | no |
 | CLI cannot inspect path | agent sees explicit path and can report the limitation | yes |
 
-For multi-image composer sends, atomicity applies to delivery, not storage: files
+For multi-file composer sends, atomicity applies to delivery, not storage: files
 may upload one by one, but `/input` runs only after all have succeeded. A retry
 may reuse already uploaded ids while uploading only failed files.
 
@@ -553,7 +571,8 @@ may reuse already uploaded ids while uploading only failed files.
 
 - PNG, JPEG, GIF, and WebP magic bytes produce the right extension/MIME.
 - MIME/extension lies do not affect detection.
-- SVG, text, empty input, and malformed images are rejected.
+- PDF, DOCX, text, archives, and unknown extensions are stored as inert files.
+- Empty input and malformed claimed raster images are rejected.
 - The byte limit trips during streaming and leaves no partial file.
 - Aborted requests leave no partial file.
 - Concurrent uploads produce unique files.
@@ -561,7 +580,7 @@ may reuse already uploaded ids while uploading only failed files.
 - Attachment ids cannot cross sessions or traverse paths.
 - Preview headers include CSP and `nosniff`.
 - A structured prompt rejects if any referenced attachment is absent.
-- Screenshot-only prompts receive the default text.
+- File-only and screenshot-only prompts receive appropriate default text.
 - Deleting a session removes only its managed attachment directory.
 - First-turn attachment delivery uses `pendingPrompt` rather than the boot delay.
 
@@ -569,19 +588,20 @@ may reuse already uploaded ids while uploading only failed files.
 
 - A synthetic clipboard PNG on the quickstart textarea creates one chip and no
   text.
+- A pasted DOCX creates a generic extension chip and uploads beside an image.
 - A drop containing the same file through both `items` and `files` creates one
   chip.
 - Plain-text paste is unchanged.
 - Removing a chip revokes its preview and excludes it from upload.
-- A multi-image submission waits for every upload before `/input`.
-- Every chip mutation remains disabled for the complete multi-image send.
+- A multi-file submission waits for every upload before `/input`.
+- Every chip mutation remains disabled for the complete multi-file send.
 - Terminal paste receives a server acknowledgement and inserts without Return.
 - A terminal stopped after upload reports saved-but-not-inserted, disables new
   attachments, and can retry the stored attachment after restart.
-- Remote composers show a visible explanation on touch layouts.
-- Terminal image drop does not trigger pane movement.
-- Pane movement data does not trigger the image drop UI.
-- The mobile fallback textarea handles both image and text paste.
+- Remote live composers explain that Space-local files are unavailable.
+- Terminal file drop does not trigger pane movement.
+- Pane movement data does not trigger the file drop UI.
+- The mobile fallback textarea handles both file and text paste.
 - Clipboard API denial reaches the fallback sheet.
 - Upload failure preserves the draft and shows the server's reason.
 
@@ -591,10 +611,11 @@ server attachment test for storage and validation.
 
 ### 13.3 Manual harness matrix
 
-For each installed CLI, verify a first turn and a later turn with one PNG:
+For each installed CLI, verify a first turn and a later turn with one PNG, then
+repeat with a PDF or DOCX to exercise explicit-path delivery:
 
 - the prompt arrives once;
-- the CLI/model actually inspects the image;
+- the CLI/model actually inspects the file (and its visual content for images);
 - the terminal remains editable before submission;
 - resuming the session can still inspect the same path; and
 - a path containing a configurable `DATA_DIR` with spaces is quoted correctly.

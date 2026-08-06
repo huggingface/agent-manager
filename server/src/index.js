@@ -32,8 +32,8 @@ import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revo
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
 import {
-  formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveImage, removeSessionAttachments,
-  resolveImage, resolveImages,
+  formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeSessionAttachments,
+  resolveAttachment, resolveAttachments,
 } from './attachments.js';
 
 ensureDirs();
@@ -158,9 +158,9 @@ process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
 const app = express();
 const jsonBody = express.json();
 app.use((req, res, next) => {
-  // The attachment route determines type from bytes. Skip JSON parsing even
-  // when untrusted browser metadata falsely claims application/json, or the
-  // global parser would reject valid PNG bytes before the streaming route.
+  // Attachments are raw streaming bodies. Skip JSON parsing even when browser
+  // metadata claims application/json, or the global parser would consume a
+  // JSON file (and reject mislabeled image bytes) before the upload route.
   if (req.method === 'POST' && /^\/api\/sessions\/[^/]+\/attachments$/.test(req.path)) return next();
   return jsonBody(req, res, next);
 });
@@ -262,7 +262,7 @@ const operatorName = () => process.env.SPACE_AUTHOR_NAME || process.env.AM_USER 
  */
 async function deliver(session, { text, attachments = [] }, from) {
   if (isRemote(session.cli)) {
-    if (attachments.length) throw Object.assign(new Error('screenshots are not available for remote agents yet'), { statusCode: 400 });
+    if (attachments.length) throw Object.assign(new Error('files are not available for remote agents yet'), { statusCode: 400 });
     const name = session.remote?.name;
     if (!name) throw new Error('this remote pane has no name recorded');
     // Delivery does NOT un-pause: a disconnected agent isn't listening, so the
@@ -280,7 +280,9 @@ async function deliver(session, { text, attachments = [] }, from) {
   if (!session.everStarted && cli?.withPrompt && prelude.length === 0) {
     store.update(session.id, {
       pendingPrompt: prompt,
-      pendingImagePaths: session.cli === 'codex' ? attachments.map((image) => image.path) : undefined,
+      pendingImagePaths: session.cli === 'codex'
+        ? attachments.filter((attachment) => attachment.kind === 'image').map((image) => image.path)
+        : undefined,
     });
     return ensureRunning(store.get(session.id) || session);
   }
@@ -305,7 +307,7 @@ app.post('/api/sessions/:id/input', async (req, res) => {
   const attachmentIds = (req.body || {}).attachmentIds ?? [];
   if (!text && (!Array.isArray(attachmentIds) || attachmentIds.length === 0)) return res.status(400).json({ error: 'empty' });
   try {
-    const attachments = resolveImages(s.id, attachmentIds);
+    const attachments = resolveAttachments(s.id, attachmentIds);
     const started = await deliver(s, { text, attachments });
     res.json({ ok: true, started });
   } catch (e) {
@@ -313,28 +315,31 @@ app.post('/api/sessions/:id/input', async (req, res) => {
   }
 });
 
-const canAttachImages = (session) => session.cli !== 'shell'
+const canAttachFiles = (session) => session.cli !== 'shell'
   && !PASSIVE_CLIS.includes(session.cli) && !isRemote(session.cli);
 // A lost HTTP response must not make the Retry action paste the same path a
 // second time. Attachment ids are unique and the terminal UI never intentionally
 // inserts one twice, so this bounded per-session set is a natural idempotency key.
 const terminalAttachmentInsertions = new Map();
 
-// Managed screenshots live under STATE_DIR, never in the user's repository.
+// Managed attachments live under STATE_DIR, never in the user's repository.
 // The raw body is streamed and capped in attachments.js; express.json ignores
-// these image content types, so no middleware buffers them first.
+// this exact route, so no middleware buffers uploads first.
 app.post('/api/sessions/:id/attachments', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  if (!canAttachImages(s)) {
+  if (!canAttachFiles(s)) {
     const error = isRemote(s.cli)
-      ? 'screenshots are not available for remote agents yet — that agent cannot read files stored on this Space'
-      : `${s.cli} pane cannot accept screenshots`;
+      ? 'files are not available for remote agents yet — that agent cannot read files stored on this Space'
+      : `${s.cli} pane cannot accept files`;
     return res.status(400).json({ error });
   }
   try {
-    const image = await receiveImage(req, s.id, req.headers['content-type']);
-    if (!res.destroyed) res.status(201).json(image);
+    const attachment = await receiveAttachment(req, s.id, {
+      contentType: req.headers['content-type'],
+      fileName: req.headers['x-file-name'],
+    });
+    if (!res.destroyed) res.status(201).json(attachment);
   } catch (e) {
     if (!res.headersSent && !res.destroyed) res.status(e.statusCode || 500).json({ error: String(e.message || e) });
   }
@@ -347,26 +352,29 @@ app.post('/api/sessions/:id/attachments', async (req, res) => {
 app.post('/api/sessions/:id/attachments/insert', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  if (!canAttachImages(s)) return res.status(400).json({ error: `${s.cli} pane cannot accept screenshots` });
+  if (!canAttachFiles(s)) return res.status(400).json({ error: `${s.cli} pane cannot accept files` });
   try {
-    const attachments = resolveImages(s.id, (req.body || {}).attachmentIds ?? []);
-    if (!attachments.length) return res.status(400).json({ error: 'no screenshots to insert' });
+    const attachments = resolveAttachments(s.id, (req.body || {}).attachmentIds ?? []);
+    if (!attachments.length) return res.status(400).json({ error: 'no files to insert' });
     const inserted = terminalAttachmentInsertions.get(s.id) || new Set();
-    const pending = attachments.filter((image) => !inserted.has(image.id));
-    const mode = s.cli === 'hermes' ? 'attached' : 'inserted';
+    const pending = attachments.filter((attachment) => !inserted.has(attachment.id));
+    const mode = s.cli === 'hermes' && attachments.some((attachment) => attachment.kind === 'image')
+      ? 'attached' : 'inserted';
     if (!pending.length) return res.json({ ok: true, mode, repeated: true });
     terminalAttachmentInsertions.set(s.id, inserted);
-    const prelude = formatAttachmentPrelude(s.cli, pending);
+    const nativeImages = s.cli === 'hermes'
+      ? pending.filter((attachment) => attachment.kind === 'image') : [];
+    const prelude = formatAttachmentPrelude(s.cli, nativeImages);
     if (prelude.length) {
       for (let index = 0; index < prelude.length; index += 1) {
         await sendInput(s.id, prelude[index]);
-        inserted.add(pending[index].id);
+        inserted.add(nativeImages[index].id);
         await sleep(500);
       }
-    } else {
-      pasteInput(s.id, pending.map((image) => image.insertText).join(''));
-      for (const image of pending) inserted.add(image.id);
     }
+    const inline = pending.filter((attachment) => !inserted.has(attachment.id));
+    if (inline.length) pasteInput(s.id, inline.map((attachment) => attachment.insertText).join(''));
+    for (const attachment of inline) inserted.add(attachment.id);
     return res.json({ ok: true, mode });
   } catch (e) {
     return res.status(e.statusCode || 409).json({ error: String(e.message || e) });
@@ -377,15 +385,19 @@ app.get('/api/sessions/:id/attachments/:attachmentId/raw', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   try {
-    const image = resolveImage(s.id, req.params.attachmentId);
+    const attachment = resolveAttachment(s.id, req.params.attachmentId);
+    const encodedName = encodeURIComponent(attachment.name).replace(/[!'()*]/g, (character) =>
+      `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+    const fallbackName = attachment.name.replace(/[^\x20-\x7e]|["\\]/g, '_');
     res.set({
-      'Content-Type': image.mime,
-      'Content-Length': String(image.bytes),
+      'Content-Type': attachment.mime,
+      'Content-Length': String(attachment.bytes),
+      'Content-Disposition': `${attachment.kind === 'image' ? 'inline' : 'attachment'}; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`,
       'X-Content-Type-Options': 'nosniff',
       'Content-Security-Policy': 'sandbox',
       'Cache-Control': 'no-store',
     });
-    const stream = fs.createReadStream(image.path);
+    const stream = fs.createReadStream(attachment.path);
     stream.on('error', () => { if (!res.headersSent) res.status(404).end(); else res.destroy(); });
     stream.pipe(res);
   } catch (e) {

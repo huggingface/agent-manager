@@ -178,20 +178,20 @@ export const getRemotePrompt = (name: string): Promise<string> =>
 export const setRemotePaused = (id: string, paused: boolean): Promise<RemoteInfo> =>
   fetch(`/api/sessions/${id}/remote/paused`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ paused }) }).then(json);
 
-export interface ImageAttachment {
+export interface Attachment {
   id: string;
-  kind: 'image';
+  kind: 'image' | 'file';
   name: string;
-  mime: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
+  mime: string;
   bytes: number;
   path: string;
   previewUrl: string;
   insertText: string;
 }
 
-export const uploadImageAttachment = async (id: string, file: File): Promise<ImageAttachment> => {
+export const uploadAttachment = async (id: string, file: File): Promise<Attachment> => {
   const headers: Record<string, string> = {
-    'x-file-name': encodeURIComponent(file.name || 'Screenshot'),
+    'x-file-name': encodeURIComponent(file.name || 'Attachment'),
   };
   if (file.type) headers['content-type'] = file.type;
   const response = await fetch(`/api/sessions/${id}/attachments`, {
@@ -202,7 +202,7 @@ export const uploadImageAttachment = async (id: string, file: File): Promise<Ima
   return jsonOrError(response);
 };
 
-export const insertImageAttachments = (
+export const insertAttachments = (
   id: string,
   attachmentIds: string[],
 ): Promise<{ ok: boolean; mode: 'inserted' | 'attached'; repeated?: boolean }> =>
