@@ -24,6 +24,7 @@ process.env.AM_REPIN_DIR = REPIN;
 process.env.AM_ID = 'pane-1';
 process.env.AM_RUN_ID = '11111111-2222-4333-8444-555555555555';
 process.env.AM_CLI = 'opencode';
+process.env.AM_PANE_PID = String(process.pid);
 
 // Only the columns the runner reads. opencode's real table has ~30 more; a
 // narrower one still proves the query, and drifts less.
@@ -71,12 +72,15 @@ const pluginBody = fs.readFileSync(pluginSource, 'utf8');
 const pluginModule = await import(`data:text/javascript;base64,${Buffer.from(pluginBody).toString('base64')}`);
 const hooks = await pluginModule.AgentManagerRepin({ directory: '/data/workspaces/proj-a' });
 const CREATED = 'ses_0ccccccccffeccccccccccccccc';
-await hooks.event({ event: { type: 'session.created', properties: { info: {
+const createdDispatch = hooks.event({ event: { type: 'session.created', properties: { info: {
   id: CREATED, directory: '/data/workspaces/proj-a',
 } } } });
+check('created event writes before its Promise is awaited', fs.existsSync(path.join(REPIN, 'pane-1.opencode.json')), true);
+await createdDispatch;
 let crumb = JSON.parse(fs.readFileSync(path.join(REPIN, 'pane-1.opencode.json'), 'utf8'));
 check('created event reports exact id', crumb.payload.session_id, CREATED);
 check('created event carries launch nonce', crumb.runId, process.env.AM_RUN_ID);
+check('created event carries top-level process id', crumb.pluginPid, process.pid);
 fs.unlinkSync(path.join(REPIN, 'pane-1.opencode.json'));
 await hooks.event({ event: { type: 'session.created', properties: { info: {
   id: 'ses_child', directory: '/data/workspaces/proj-a', parentID: CREATED,
@@ -85,6 +89,18 @@ check('subagent create ignored', fs.existsSync(path.join(REPIN, 'pane-1.opencode
 await hooks['chat.message']({ sessionID: LIVE });
 crumb = JSON.parse(fs.readFileSync(path.join(REPIN, 'pane-1.opencode.json'), 'utf8'));
 check('message hook follows selected existing session', crumb.payload.session_id, LIVE);
+const shellOutput = { env: { KEEP: 'yes' } };
+await hooks['shell.env']({}, shellOutput);
+check('shell keeps unrelated environment', shellOutput.env.KEEP, 'yes');
+check('shell strips pane id', shellOutput.env.AM_ID, '');
+check('shell strips pane process marker', shellOutput.env.AM_PANE_PID, '');
+fs.unlinkSync(path.join(REPIN, 'pane-1.opencode.json'));
+process.env.AM_PANE_PID = '999999999';
+await hooks.event({ event: { type: 'session.created', properties: { info: {
+  id: 'ses_nested', directory: '/data/workspaces/proj-a',
+} } } });
+check('nested OpenCode process cannot report', fs.existsSync(path.join(REPIN, 'pane-1.opencode.json')), false);
+process.env.AM_PANE_PID = String(process.pid);
 
 console.log('\na restart resumes the pinned conversation, not the folder\'s newest');
 const s = sessions.create({ name: 'oc', cli: 'opencode', path: 'proj-a' });

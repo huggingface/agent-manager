@@ -109,7 +109,7 @@ check('cwd mismatch rejected',
 
 console.log('\na nested claude -p cannot claim the pane (pid not under the pane root)');
 check('untrusted pid rejected', verdict(crumb(), facts({ pidTrusted: false })).repin, null);
-check('untrusted pid says why', verdict(crumb(), facts({ pidTrusted: false })).why, 'pid not in pane');
+check('untrusted pid says why', verdict(crumb(), facts({ pidTrusted: false })).why, 'pid not top-level pane agent');
 
 console.log('\nno-ops and garbage stay no-ops');
 check('already-pinned crumb is a no-op',
@@ -129,9 +129,17 @@ const codexCrumb = {
   payload: { session_id: CODEX_ID, transcript_path: rollout, cwd: WORKDIR, source: 'clear' },
 };
 check('Codex exact id accepted', runner.breadcrumbVerdict(codexCrumb, 's1', {
-  cli: 'codex', runId: RUN, workdir: WORKDIR, pinned: null, claimed: new Set(),
+  cli: 'codex', runId: RUN, workdir: WORKDIR, pinned: null, claimed: new Set(), pidTrusted: true,
 }).repin, CODEX_ID);
 check('Codex rollout path retained', runner.codexRolloutForBreadcrumb(codexCrumb), rollout);
+check('Codex null transcript resolves by exact id', runner.codexRolloutForId(CODEX_ID), rollout);
+const CODEX_ALIAS = path.join(TMP, 'codex-alias');
+fs.mkdirSync(CODEX_ALIAS);
+fs.symlinkSync(path.join(CODEX, 'sessions'), path.join(CODEX_ALIAS, 'sessions'));
+process.env.CODEX_HOME = CODEX_ALIAS;
+check('Codex canonical path accepted through a symlinked sessions root',
+  runner.codexRolloutForBreadcrumb(codexCrumb), rollout);
+process.env.CODEX_HOME = CODEX;
 check('Codex path outside CODEX_HOME rejected', runner.codexRolloutForBreadcrumb({
   ...codexCrumb, payload: { ...codexCrumb.payload, transcript_path: `/tmp/rollout-x-${CODEX_ID}.jsonl` },
 }), null);
@@ -139,8 +147,32 @@ check('OpenCode exact id accepted', runner.breadcrumbVerdict({
   amId: 's1', runId: RUN, cli: 'opencode',
   payload: { session_id: 'ses_1234567890abcdef', cwd: WORKDIR },
 }, 's1', {
-  cli: 'opencode', runId: RUN, workdir: WORKDIR, pinned: null, claimed: new Set(),
+  cli: 'opencode', runId: RUN, workdir: WORKDIR, pinned: null, claimed: new Set(), pidTrusted: true,
 }).repin, 'ses_1234567890abcdef');
+
+console.log('\nonly the top-level agent process may emit a breadcrumb');
+const proc = new Map([
+  [99, '99 (bash) S 1 0 0'],
+  [100, '100 (node) S 1 0 0'],
+  [101, '101 (claude) S 100 0 0'],
+  [102, '102 (nested claude) S 101 0 0'],
+  [110, '110 (codex-x64 (native)) S 100 0 0'],
+  [120, '120 (tool shell) S 110 0 0'],
+  [200, '200 (node) S 120 0 0'],
+  [210, '210 (codex-x64) S 200 0 0'],
+]);
+const readStat = (pid) => {
+  if (!proc.has(pid)) throw new Error('gone');
+  return proc.get(pid);
+};
+check('pane root accepted', runner.pidIsPaneRootOrDirectChild(100, 100, readStat), true);
+check('direct Claude child accepted', runner.pidIsPaneRootOrDirectChild(101, 100, readStat), true);
+check('nested Claude rejected', runner.pidIsPaneRootOrDirectChild(102, 100, readStat), false);
+check('top native Codex accepted', runner.codexProcessPidTrusted(110, 100, readStat), true);
+proc.set(100, '100 (node) S 99 0 0');
+check('Codex behind retained launch shell accepted', runner.codexProcessPidTrusted(110, 99, readStat), true);
+check('nested native Codex rejected', runner.codexProcessPidTrusted(210, 100, readStat), false);
+check('gone Codex pid rejected', runner.codexProcessPidTrusted(999, 100, readStat), false);
 
 console.log('\nhook scripts preserve the pane and launch identity');
 const scripts = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts');
@@ -151,14 +183,31 @@ check('managed policy runs the root-owned hook', requirements.includes('command 
 const hookPayload = JSON.stringify({ session_id: E, transcript_path: '/tmp/t.jsonl', cwd: WORKDIR, source: 'clear' });
 let hook = spawnSync('sh', [path.join(scripts, 'am-repin-hook.sh')], {
   input: hookPayload,
-  env: { ...process.env, AM_ID: 's1', AM_RUN_ID: RUN, AM_CLI: 'claude', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_PID: '4242' },
+  env: {
+    ...process.env, AM_ID: 's1', AM_RUN_ID: RUN, AM_CLI: 'claude',
+    AM_PANE_PID: String(process.pid), CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_PID: String(process.pid),
+  },
 });
 check('Claude hook exits cleanly', hook.status, 0);
 let written = JSON.parse(fs.readFileSync(path.join(REPIN, 's1.claude.json'), 'utf8'));
 check('Claude hook writes run id', written.runId, RUN);
 check('Claude hook writes exact session id', written.payload.session_id, E);
 
-hook = spawnSync('sh', [path.join(scripts, 'am-codex-repin-hook.sh')], {
+const codexShim = path.join(TMP, 'codex-test');
+fs.symlinkSync('/bin/sh', codexShim);
+const paneShim = path.join(TMP, 'pane-shell');
+fs.symlinkSync('/bin/sh', paneShim);
+const codexLauncher = path.join(TMP, 'codex-launcher.cjs');
+fs.writeFileSync(codexLauncher, [
+  "const fs = require('node:fs');",
+  "const { spawnSync } = require('node:child_process');",
+  "const child = spawnSync(process.argv[2], ['-c', `sh '${process.argv[3]}'`], {",
+  "  input: fs.readFileSync(0), env: process.env, stdio: ['pipe', 'inherit', 'inherit'],",
+  "});",
+  "process.exit(child.status ?? 1);",
+].join('\n'));
+hook = spawnSync(paneShim, ['-c',
+  `export AM_PANE_PID=$$; node '${codexLauncher}' '${codexShim}' '${path.join(scripts, 'am-codex-repin-hook.sh')}'`], {
   input: JSON.stringify(codexCrumb.payload),
   env: { ...process.env, AM_ID: 's1', AM_RUN_ID: RUN, AM_CLI: 'codex' },
 });
@@ -166,6 +215,7 @@ check('Codex hook exits cleanly', hook.status, 0);
 written = JSON.parse(fs.readFileSync(path.join(REPIN, 's1.codex.json'), 'utf8'));
 check('Codex hook writes run id', written.runId, RUN);
 check('Codex hook writes exact session id', written.payload.session_id, CODEX_ID);
+check('Codex hook records its live agent process', Number.isInteger(written.codexPid), true);
 
 // ---------- the pane root: the fact every breadcrumb is trusted against ----------
 // paneRootPid used to shell out to `tmux list-panes`. The libghostty migration
