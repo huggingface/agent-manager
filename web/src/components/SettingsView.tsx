@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { Cli } from '../types';
+import { isPassive, isRemote, type Cli } from '../types';
 import * as api from '../api';
 import SkillsEditor from './SkillsEditor';
 import UsagePanel from './UsagePanel';
@@ -291,7 +291,11 @@ export default function SettingsView({
             <h3>Agents</h3>
             <div className="s-help">A coloured dot means the agent is configured and ready. Log in once inside a session (or set a key as a Space secret) — credentials persist on the bucket across restarts and all sessions.</div>
             <div className="agent-rows">
-              {clis.filter((c) => c.id !== 'shell' && c.id !== 'files').map((c) => {
+              {/* Only the CLIs this Space installs and you sign into. Shell needs
+                  no credentials; files/trace are panels rather than processes; a
+                  remote agent authenticates wherever it actually runs, so its
+                  readiness was never ours to report. */}
+              {clis.filter((c) => c.id !== 'shell' && !isPassive(c.id) && !isRemote(c.id)).map((c) => {
                 const ready = c.available && c.ready;
                 return (
                   <div key={c.id} className="agent-row">
