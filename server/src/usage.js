@@ -236,7 +236,12 @@ async function debugInfo() {
     ccusage,
     claudeDirs,
     codexRolloutFiles: (await codexRollouts()).length,
-    raw: { claude: await raw('claude'), codex: await raw('codex'), gemini: await raw('gemini') },
+    raw: {
+      claude: await raw('claude'),
+      codex: await raw('codex'),
+      opencode: await raw('opencode'),
+      gemini: await raw('gemini'),
+    },
   };
 }
 
@@ -249,9 +254,10 @@ async function buildUsageImpl(debug = false, only = null) {
   // parallel and render whichever answers first — one slow/hung provider
   // (ccusage has a 20s timeout) no longer blocks the rest.
   const wants = (p) => !only || only === p;
-  const [uClaude, uCodex, uGemini, qClaude, qCodex] = await Promise.all([
+  const [uClaude, uCodex, uOpencode, uGemini, qClaude, qCodex] = await Promise.all([
     wants('claude') ? providerUsage('claude') : null,
     wants('codex') ? providerUsage('codex') : null,
+    wants('opencode') ? providerUsage('opencode') : null,
     wants('gemini') ? providerUsage('gemini') : null,
     wants('claude') ? claudeQuota() : null,
     wants('codex') ? codexQuota() : null,
@@ -259,6 +265,10 @@ async function buildUsageImpl(debug = false, only = null) {
   const providers = {};
   if (wants('claude')) providers.claude = { ...(uClaude || {}), quota: qClaude };
   if (wants('codex')) providers.codex = { ...(uCodex || {}), quota: qCodex };
+  // OpenCode records token and model-cost data that ccusage can aggregate, but
+  // it has no single subscription quota: the underlying provider depends on
+  // the model selected for each session.
+  if (wants('opencode')) providers.opencode = { ...(uOpencode || {}), quota: null };
   if (wants('gemini')) providers.gemini = { ...(uGemini || {}), quota: null };
   const out = { providers, generatedAt: new Date().toISOString() };
   if (debug) out._debug = await debugInfo();
