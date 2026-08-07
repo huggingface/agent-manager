@@ -503,13 +503,16 @@ body {
 .term-preview pre { height: 100%; margin: 0; padding: 10px 8px 8px 12px; overflow: hidden; font: inherit; line-height: 1.15; white-space: pre; }
 .term-preview > span { position: absolute; right: 9px; bottom: 7px; padding: 3px 6px; border: 1px solid var(--border); border-radius: var(--r-sm); background: color-mix(in srgb, var(--term-bg) 88%, transparent); color: var(--muted); font-size: 10px; }
 /* terminal "process exited" overlay */
-/* Non-blocking banner so the agent's last output (e.g. a login error) stays readable. */
-/* stopped state: quiet line centered in the pane, in the boot-cover's voice */
-.term-exit { position: absolute; inset: 34px 0 0 0; display: flex; align-items: center; justify-content: center; z-index: 5; pointer-events: none; }
-.term-exit .tx-row { display: flex; align-items: center; gap: 14px; padding: 9px 16px; border-radius: var(--r-lg); background: color-mix(in srgb, var(--term-bg) 82%, transparent); backdrop-filter: blur(3px); color: var(--muted); font-size: 12.5px; }
-.term-exit .tx-btn { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px; background: none; border: none; padding: 2px 4px; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; }
+/* stopped state: an opaque card on a dimmed pane, so a stopped session reads as
+   stopped from across the room. The scrim is light enough that the agent's last
+   output (e.g. a login error) is still readable underneath, and the overlay
+   stays click-through except for the button itself. */
+.term-exit { position: absolute; inset: 34px 0 0 0; display: flex; align-items: center; justify-content: center; z-index: 5; pointer-events: none; background: color-mix(in srgb, var(--term-bg) 45%, transparent); animation: rise-in 0.16s ease-out; }
+.term-exit .tx-row { display: flex; align-items: center; gap: 12px; max-width: calc(100% - 20px); padding: 8px 8px 8px 14px; border: 1px solid var(--border-strong); border-radius: var(--r-lg); background: var(--panel); color: var(--text); font-size: 12.5px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.28); }
+.term-exit .tx-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-exit .tx-btn { pointer-events: auto; flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border: 1px solid var(--accent); border-radius: var(--r-md); background: var(--accent); color: var(--accent-fg); font: inherit; font-weight: 600; cursor: pointer; transition: background 0.12s ease-out; }
 .term-exit .tx-btn svg { width: 13px; height: 13px; }
-.term-exit .tx-btn:hover { text-decoration: underline; }
+.term-exit .tx-btn:hover { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }
 
 /* settings inline warning (e.g. unverifiable bucket) */
 .s-warn { margin: 6px 0 2px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); background: color-mix(in srgb, var(--danger) 10%, transparent); border-radius: var(--r-md); font-size: 12px; line-height: 1.5; color: var(--text); }
