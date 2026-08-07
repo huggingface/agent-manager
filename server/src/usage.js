@@ -66,6 +66,27 @@ function claudeEnv() {
   return { ...process.env, CLAUDE_CONFIG_DIR: dirs.join(',') };
 }
 
+// Hermes' live SQLite database is deliberately kept off the durable FUSE mount
+// at $AM_LOCAL/hermes (entrypoint.sh), while ccusage only discovers
+// $HOME/.hermes/state.db and has no path flag. Give the child a tiny local HOME
+// shim whose .hermes symlink points at the live directory. Never replace an
+// unexpected existing path: falling back to the normal HOME is safer.
+function hermesEnv() {
+  const home = process.env.HOME || '';
+  const normal = path.join(home, '.hermes', 'state.db');
+  const localRoot = process.env.AM_LOCAL || '';
+  const live = localRoot ? path.join(localRoot, 'hermes') : '';
+  if (!live || !fs.existsSync(path.join(live, 'state.db')) || fs.existsSync(normal)) return process.env;
+  const shim = path.join(localRoot, 'ccusage-hermes-home');
+  const link = path.join(shim, '.hermes');
+  try {
+    fs.mkdirSync(shim, { recursive: true });
+    if (!fs.existsSync(link)) fs.symlinkSync(live, link, 'dir');
+    if (fs.realpathSync(link) !== fs.realpathSync(live)) return process.env;
+    return { ...process.env, HOME: shim };
+  } catch { return process.env; }
+}
+
 // YYYYMMDD a few days back — the widest window the card shows is "this week",
 // so ccusage never needs to aggregate the whole (possibly huge) history.
 function sinceArg(days = 9) {
@@ -79,11 +100,17 @@ function sinceArg(days = 9) {
 // the model-pricing network fetch (a real source of multi-second hangs).
 function providerUsage(prov) {
   return cached(`u:${prov}`, async () => {
-    const env = prov === 'claude' ? claudeEnv() : process.env;
+    const env = prov === 'claude' ? claudeEnv() : prov === 'hermes' ? hermesEnv() : process.env;
+    const args = [prov, 'daily', '--json', '--offline', '--single-thread', '--since', sinceArg()];
+    // OpenClaw also lives on local disk, under an explicit state root rather
+    // than ccusage's ~/.openclaw default. Unlike Hermes, ccusage has a path flag.
+    if (prov === 'openclaw' && process.env.OPENCLAW_STATE_DIR) {
+      args.push('--open-claw-path', process.env.OPENCLAW_STATE_DIR);
+    }
     let out;
     try {
       ({ stdout: out } = await execFile(
-        'ccusage', [prov, 'daily', '--json', '--offline', '--single-thread', '--since', sinceArg()],
+        'ccusage', args,
         { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024, env },
       ));
     } catch { return null; }
@@ -240,6 +267,8 @@ async function debugInfo() {
       claude: await raw('claude'),
       codex: await raw('codex'),
       opencode: await raw('opencode'),
+      hermes: await raw('hermes'),
+      openclaw: await raw('openclaw'),
       gemini: await raw('gemini'),
     },
   };
@@ -254,10 +283,12 @@ async function buildUsageImpl(debug = false, only = null) {
   // parallel and render whichever answers first — one slow/hung provider
   // (ccusage has a 20s timeout) no longer blocks the rest.
   const wants = (p) => !only || only === p;
-  const [uClaude, uCodex, uOpencode, uGemini, qClaude, qCodex] = await Promise.all([
+  const [uClaude, uCodex, uOpencode, uHermes, uOpenclaw, uGemini, qClaude, qCodex] = await Promise.all([
     wants('claude') ? providerUsage('claude') : null,
     wants('codex') ? providerUsage('codex') : null,
     wants('opencode') ? providerUsage('opencode') : null,
+    wants('hermes') ? providerUsage('hermes') : null,
+    wants('openclaw') ? providerUsage('openclaw') : null,
     wants('gemini') ? providerUsage('gemini') : null,
     wants('claude') ? claudeQuota() : null,
     wants('codex') ? codexQuota() : null,
@@ -269,6 +300,8 @@ async function buildUsageImpl(debug = false, only = null) {
   // it has no single subscription quota: the underlying provider depends on
   // the model selected for each session.
   if (wants('opencode')) providers.opencode = { ...(uOpencode || {}), quota: null };
+  if (wants('hermes')) providers.hermes = { ...(uHermes || {}), quota: null };
+  if (wants('openclaw')) providers.openclaw = { ...(uOpenclaw || {}), quota: null };
   if (wants('gemini')) providers.gemini = { ...(uGemini || {}), quota: null };
   const out = { providers, generatedAt: new Date().toISOString() };
   if (debug) out._debug = await debugInfo();
