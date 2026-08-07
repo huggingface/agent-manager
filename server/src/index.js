@@ -31,6 +31,11 @@ import { startWatchdog } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
+import { installSlowFsProbe } from './slowfs.js';
+
+// Before anything else touches the mount: a sync fs call to /data is ~85ms of
+// frozen event loop here, and nothing else in the stack can see it. See slowfs.js.
+installSlowFsProbe();
 
 ensureDirs();
 refreshVersions();
