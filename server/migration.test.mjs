@@ -21,7 +21,7 @@ const check = (name, ok, detail = '') => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const srv = spawn('node', ['src/index.js'], {
-  env: { ...process.env, PORT: String(PORT), DATA_DIR, AM_BASHRC: '/nonexistent' },
+  env: { ...process.env, PORT: String(PORT), DATA_DIR, AM_BASHRC: '/nonexistent', AM_ALLOW_MISSING_ORIGIN: '1' },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let bootLog = '';
