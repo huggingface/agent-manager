@@ -28,7 +28,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const { SPACE_ID, AM_DISTRIBUTE_SKILLS, ...BASE_ENV } = process.env;
 
 const srv = spawn('node', ['src/index.js'], {
-  env: { ...BASE_ENV, PORT: String(PORT), DATA_DIR, AM_BASHRC: '/nonexistent' },
+  env: { ...BASE_ENV, PORT: String(PORT), DATA_DIR, AM_BASHRC: '/nonexistent', AM_ALLOW_MISSING_ORIGIN: '1' },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let bootLog = '';
