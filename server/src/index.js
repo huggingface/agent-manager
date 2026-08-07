@@ -18,7 +18,8 @@ import * as order from './order.js';
 import * as demo from './demo.js';
 import {
   attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, isRunning,
-  capturePane, ghosttyReady, ghosttyError, installClaudeRepinHook, installOpencodeRepinPlugin,
+  waitForInputReady, capturePane, ghosttyReady, ghosttyError,
+  installClaudeRepinHook, installOpencodeRepinPlugin,
 } from './runner.js';
 
 // Control frames ride the terminal socket behind a leading NUL pair, which real
@@ -271,8 +272,10 @@ async function deliver(session, text, from) {
     return false;
   }
   const started = ensureRunning(session);
-  if (started) await sleep(3500); // let the CLI boot before the keystrokes land
-  await sendInput(session.id, text);
+  if (started && !await waitForInputReady(session.id)) {
+    throw new Error('session did not become ready for input within 30 seconds — prompt was not sent');
+  }
+  await sendInput(session.id, text, { confirmEcho: started && session.cli === 'opencode' });
   return started;
 }
 

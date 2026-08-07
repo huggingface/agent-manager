@@ -45,6 +45,14 @@ else
   flock -n 9 || exit 0
 fi
 
+# `find -newer` is a strict comparison. A file written in the same filesystem
+# timestamp tick as a checkpoint marker would otherwise be skipped forever.
+# Keep a small overlap at every successful boundary; an occasional repeat copy
+# is harmless, while a missed transcript/config is not.
+mark_checkpoint_floor() {
+  touch -d '2 seconds ago' "$1" 2>/dev/null || touch "$1"
+}
+
 restore_tree() {
   key="$1" durable="$2" live="$3"; shift 3
   mkdir -p "$durable" "$live"
@@ -64,7 +72,7 @@ restore_tree() {
         touch -t 197001010000 "$stamp"
       else
         # Fresh container: every local byte came from this durable restore.
-        touch "$stamp"
+        mark_checkpoint_floor "$stamp"
       fi
     fi
   else
@@ -86,7 +94,7 @@ checkpoint_tree() {
   # is newer than `next` and will therefore be selected again next time.
   next="$stamp.next.$$"
   list="$stamp.files.$$"
-  touch "$next"
+  mark_checkpoint_floor "$next"
   (cd "$live" && find . -type f -newer "$stamp" -print0) > "$list"
 
   if [ -s "$list" ]; then
@@ -163,24 +171,35 @@ restore_sqlite_tree() {
 checkpoint_sqlite_tree() {
   live="$1" durable="$2" db_name="$3" checkpoint_name="$4"
   source="$live/$db_name"
-  [ -s "$source" ] || return 0
 
+  # A harness can write ordinary state before it creates its database (Hermes
+  # setup files are a real example). Always publish that file tree first. The
+  # database backup is optional until the database itself exists.
   if ! checkpoint_tree "$checkpoint_name-files" "$live" "$durable" \
     --exclude 'checkpoints' --exclude '*.db' --exclude '*.db-*' \
     --exclude '*.sqlite*' --exclude '*-wal' --exclude '*-shm'; then
     return 1
   fi
+  [ -s "$source" ] || return 0
 
   sqlite_stamp_dir="$AM_LOCAL/agent-state-stamps"
   sqlite_stamp="$sqlite_stamp_dir/$checkpoint_name-sqlite"
   mkdir -p "$sqlite_stamp_dir"
-  if [ ! -e "$sqlite_stamp" ]; then touch -t 197001010000 "$sqlite_stamp"; fi
+  # Timestamp-only detection has an equal-tick hole, while deliberately
+  # overlapping the marker would rewrite an idle database on rapid successive
+  # checkpoints. Record the exact local DB/WAL metadata observed BEFORE the
+  # backup instead. A concurrent commit changes the next signature and is
+  # therefore picked up by the following checkpoint.
   sqlite_next="$sqlite_stamp.next.$$"
-  touch "$sqlite_next"
-  sqlite_changed=false
-  [ "$source" -nt "$sqlite_stamp" ] && sqlite_changed=true
-  [ -e "$source-wal" ] && [ "$source-wal" -nt "$sqlite_stamp" ] && sqlite_changed=true
-  if [ "$sqlite_changed" = false ]; then
+  {
+    stat -c 'db|%s|%y|%z' "$source"
+    if [ -e "$source-wal" ]; then
+      stat -c 'wal|%s|%y|%z' "$source-wal"
+    else
+      echo 'wal|absent'
+    fi
+  } > "$sqlite_next"
+  if cmp -s "$sqlite_next" "$sqlite_stamp"; then
     rm -f "$sqlite_next"
     return 0
   fi

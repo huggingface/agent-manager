@@ -63,6 +63,13 @@ const bashLaunch = `exec bash --rcfile ${BASHRC} -i`;
 const BUSY_SECS = 4;
 // Re-rendering the grid to text on every chunk during a burst is wasteful.
 const SAMPLE_THROTTLE_MS = 250;
+// A prompt sent while a resumed TUI is still replaying its screen can be
+// discarded, or accept the text but swallow the Enter. Wait for the canonical
+// startup repaint and a genuinely quiet screen instead of guessing a boot
+// duration in the API layer.
+const INPUT_READY_QUIET_MS = Number(process.env.AM_INPUT_READY_QUIET_MS || BUSY_SECS * 1000);
+const INPUT_READY_TIMEOUT_MS = Number(process.env.AM_INPUT_READY_TIMEOUT_MS || 30000);
+const INPUT_ECHO_TIMEOUT_MS = Number(process.env.AM_INPUT_ECHO_TIMEOUT_MS || 20000);
 // Despite the Node wrapper's `scrollbackLimit` name, Ghostty's native option is
 // a byte budget. Passing a line count such as 20,000 retains only a small native
 // allocation (about 700 ordinary rows). Keep the unit explicit at our boundary.
@@ -1672,6 +1679,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     gridTimer: null,
     startedAt: Date.now(),
     lastOutputAt: Date.now(),
+    outputSeq: 0,
     screenChangedAt: Date.now(),
     bells: 0,
   };
@@ -1697,6 +1705,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
 
   term.onData((chunk) => {
     host.lastOutputAt = Date.now();
+    host.outputSeq++;
     host.terminalModes.feed(chunk);
     if (host.traceHistoryTimer) {
       clearTimeout(host.traceHistoryTimer);
@@ -1839,7 +1848,7 @@ export function attach(session, cols, rows) {
 }
 
 /** Type a line into the session's terminal (works with no browser attached). */
-export async function sendInput(id, text) {
+export async function sendInput(id, text, { confirmEcho = false } = {}) {
   const host = hosts.get(id);
   if (!host) throw new Error('session is not running');
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
@@ -1848,9 +1857,65 @@ export async function sendInput(id, text) {
   // The Enter must arrive as its OWN keypress: TUIs (codex) detect rapid input
   // bursts as a paste, and a CR inside the burst becomes a newline in the
   // composer instead of a submit. A short gap breaks the burst.
-  host.pty.write(payload);
+  if (confirmEcho) {
+    // OpenCode can finish its first stable paint several seconds before its
+    // input handler is installed. Probe with the real composer text, but do
+    // not press Enter until the TUI has painted that text back. Retrying only
+    // the unsubmitted composer is safe; Ctrl+U clears a late/partial attempt.
+    const expected = text.replace(/\s+/g, ' ').trim();
+    const probe = expected.slice(-Math.min(48, expected.length));
+    const deadline = Date.now() + INPUT_ECHO_TIMEOUT_MS;
+    let attempt = 0;
+    let echoed = false;
+    while (Date.now() < deadline && !echoed) {
+      if (hosts.get(id) !== host) throw new Error('session stopped while waiting for input acknowledgement');
+      if (attempt++) {
+        host.pty.write('\x15'); // clear any attempt accepted too late to paint
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const beforeOutput = host.outputSeq;
+      let beforeScreen = '';
+      try { beforeScreen = host.vt.getVisibleText(); } catch {}
+      host.pty.write(payload);
+      const attemptDeadline = Math.min(deadline, Date.now() + 1200);
+      while (Date.now() < attemptDeadline) {
+        if (hosts.get(id) !== host) throw new Error('session stopped while waiting for input acknowledgement');
+        let screen = '';
+        try { screen = host.vt.getVisibleText(); } catch {}
+        echoed = host.outputSeq > beforeOutput && screen !== beforeScreen
+          && screen.replace(/\s+/g, ' ').includes(probe);
+        if (echoed) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+    if (!echoed) throw new Error('session did not acknowledge the input before the timeout — prompt was not submitted');
+  } else {
+    host.pty.write(payload);
+  }
   await new Promise((r) => setTimeout(r, 300));
   host.pty.write('\r');
+}
+
+/**
+ * Wait until a newly-started pane can safely receive its first input.
+ *
+ * Resumed primary-screen TUIs may paint a welcome frame, pause, then replay a
+ * large conversation. `resizeCapture` spans that whole transaction when a
+ * durable terminal seed exists. The quiet-window check covers fresh panes and
+ * older sessions without a terminal seed. On timeout callers get an explicit
+ * failure instead of silently losing the operator's prompt.
+ */
+export async function waitForInputReady(id, timeoutMs = INPUT_READY_TIMEOUT_MS) {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  while (Date.now() < deadline) {
+    const host = hosts.get(id);
+    if (!host) throw new Error('session stopped while waiting for input readiness');
+    const lastActivity = Math.max(host.startedAt || 0, host.lastOutputAt || 0, host.screenChangedAt || 0);
+    if (!host.startupHistory && !host.resizeCapture
+      && Date.now() - lastActivity >= INPUT_READY_QUIET_MS) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
 }
 
 /**
