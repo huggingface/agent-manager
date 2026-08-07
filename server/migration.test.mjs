@@ -8,6 +8,41 @@ import path from 'node:path';
 import { WebSocket } from 'ws';
 
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-migration-'));
+const BASHRC = path.join(DATA_DIR, 'test.bashrc');
+const BASH_ENV = path.join(DATA_DIR, 'test.bash-env');
+const BIN_DIR = path.join(DATA_DIR, 'bin');
+fs.mkdirSync(BIN_DIR);
+// runner launches each CLI through `bash -lc`, whose login profile replaces
+// PATH. BASH_ENV runs afterwards and keeps this fixture ahead of the real CLI.
+fs.writeFileSync(BASH_ENV, `export PATH="${BIN_DIR}:$PATH"\n`);
+const FAKE_OPENCODE = path.join(BIN_DIR, 'opencode');
+fs.writeFileSync(FAKE_OPENCODE, `#!/usr/bin/env bash
+printf 'OPENCODE-SCREEN-READY\\r\\n'
+saved=$(stty -g)
+stty -echo -icanon min 0 time 1
+end=$((SECONDS + 8))
+while [ "$SECONDS" -lt "$end" ]; do
+  IFS= read -r -n 4096 -t 1 _ || true
+done
+stty "$saved"
+printf 'OPENCODE-INPUT-READY\\r\\n'
+while IFS= read -r line; do
+  printf 'OPENCODE-EXECUTED:%s\\r\\n' "$line"
+done
+`);
+fs.chmodSync(FAKE_OPENCODE, 0o755);
+fs.writeFileSync(BASHRC, `
+if [ "$AM_NAME" = "input-readiness" ]; then
+  # Model a history-heavy TUI that drains startup keystrokes. The old fixed
+  # 3.5s delay delivered during this loop and lost the operator's prompt.
+  for i in 1 2 3 4 5; do
+    printf 'BOOT-FRAME-%s\\n' "$i"
+    IFS= read -r -t 1 _ || true
+  done
+  printf 'INPUT-READY\\n'
+fi
+PS1='test$ '
+`);
 
 const PORT = 7893;
 const CTRL = '\x00\x00AM:';
@@ -28,7 +63,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const { SPACE_ID, AM_DISTRIBUTE_SKILLS, ...BASE_ENV } = process.env;
 
 const srv = spawn('node', ['src/index.js'], {
-  env: { ...BASE_ENV, PORT: String(PORT), DATA_DIR, AM_BASHRC: '/nonexistent', AM_ALLOW_MISSING_ORIGIN: '1' },
+  env: {
+    ...BASE_ENV, PATH: `${BIN_DIR}:${process.env.PATH}`, BASH_ENV,
+    PORT: String(PORT), DATA_DIR, AM_BASHRC: BASHRC, AM_ALLOW_MISSING_ORIGIN: '1',
+  },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let bootLog = '';
@@ -197,6 +235,44 @@ try {
   check('stopped session reports stopped', after && after.state === 'stopped', after && after.state);
 
   await fetch(`${base}/api/sessions/${id}`, { method: 'DELETE' }).catch(() => {});
+
+  // --- waking a stopped pane waits for the TUI, not a fixed delay ----------
+  const delayed = await (await fetch(`${base}/api/sessions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cli: 'shell', name: 'input-readiness', path: '.' }),
+  })).json();
+  const delayedId = delayed.id;
+  const delivered = await fetch(`${base}/api/sessions/${delayedId}/input`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: "printf '%s-executed\\n' \"$AM_NAME\"" }),
+  });
+  await sleep(700);
+  const delayedTail = await (await fetch(`${base}/api/agents/${delayedId}/tail?lines=120`)).json();
+  check('stopped-session input waits through a draining startup TUI',
+    delivered.ok && (delayedTail.text || '').includes('INPUT-READY')
+      && (delayedTail.text || '').includes('input-readiness-executed'));
+  await fetch(`${base}/api/sessions/${delayedId}`, { method: 'DELETE' }).catch(() => {});
+
+  // OpenCode paints its stable welcome screen before its keyboard handler is
+  // always ready. The first typed attempt is silently drained here; delivery
+  // must wait for the composer to echo the real prompt before pressing Enter.
+  const openCode = await (await fetch(`${base}/api/sessions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cli: 'opencode', name: 'opencode-input-readiness', path: '.' }),
+  })).json();
+  const openCodeInput = 'opencode-delivery-survived';
+  const openCodeDelivered = await fetch(`${base}/api/sessions/${openCode.id}/input`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: openCodeInput }),
+  });
+  await sleep(700);
+  const openCodeTail = await (await fetch(`${base}/api/agents/${openCode.id}/tail?lines=120`)).json();
+  const executed = (openCodeTail.text || '').match(new RegExp(`OPENCODE-EXECUTED:${openCodeInput}`, 'g')) || [];
+  check('OpenCode delivery waits for the real input handler after stable paint',
+    openCodeDelivered.ok
+      && executed.length === 1,
+    `${openCodeDelivered.status} ${JSON.stringify(openCodeTail.text || '')}`);
+  await fetch(`${base}/api/sessions/${openCode.id}`, { method: 'DELETE' }).catch(() => {});
 } catch (err) {
   check('no exceptions', false, String(err && err.message ? err.message : err));
   console.log('--- server log tail ---\n' + bootLog.slice(-1200));

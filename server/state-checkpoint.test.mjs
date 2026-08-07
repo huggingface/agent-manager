@@ -100,6 +100,19 @@ try {
   check('first checkpoint captures pre-existing newer local state',
     fs.readFileSync(durableClaude, 'utf8') === '{"turn":"new-local"}\n');
 
+  // SQLite-backed harnesses also have ordinary files (setup/auth/config)
+  // before their database is first created. Those files must not disappear
+  // merely because there is no database to snapshot yet.
+  const openPreDb = path.join(env.OPENCODE_LIVE, 'setup.json');
+  const hermesPreDb = path.join(env.HERMES_LIVE, 'config.yaml');
+  put(openPreDb, '{"configured":true}\n');
+  put(hermesPreDb, 'configured: true\n');
+  run('checkpoint');
+  check('opencode ordinary files checkpoint before opencode.db exists',
+    fs.readFileSync(path.join(env.OPENCODE_DURABLE, 'setup.json'), 'utf8') === '{"configured":true}\n');
+  check('Hermes ordinary files checkpoint before state.db exists',
+    fs.readFileSync(path.join(env.HERMES_DURABLE, 'config.yaml'), 'utf8') === 'configured: true\n');
+
   // Reproduce the Codex access pattern: append while holding the canonical
   // rollout FD open. Because the canonical file is now local, a different
   // process can checkpoint the visible bytes without waiting for close.
