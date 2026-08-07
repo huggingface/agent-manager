@@ -558,8 +558,6 @@ body {
 .pane-head .ph-left { grid-column: 1; justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
 .pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; text-align: center; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
 .pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; }
-.pane-head .ph-role { flex: none; padding: 2px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-family: var(--font-mono); font-size: 9.5px; line-height: 1.2; }
-.pane-head .ph-role.controller { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }

@@ -211,8 +211,6 @@ export default function TerminalPane({
   // something — byte counts lie because a blank-screen repaint can already be
   // kilobytes of escape sequences.
   const [booting, setBooting] = useState(true);
-  const [controller, setController] = useState(false);
-  const [viewers, setViewers] = useState(1);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.name);
   // Fallback paste sheet: shown only when we can't read the clipboard directly.
@@ -381,7 +379,6 @@ export default function TerminalPane({
       // Optimistic locally so the input event following this gesture is not
       // dropped. WebSocket ordering guarantees claim reaches the server first.
       controllerRef.current = true;
-      setController(true);
       send({ t: 'claim' });
     };
     claimRef.current = claimControl;
@@ -463,7 +460,6 @@ export default function TerminalPane({
     };
     const connect = () => {
       controllerRef.current = false;
-      setController(false);
       setConn('connecting');
       // A reconnect keeps the already-rendered xterm visible. On a fresh page,
       // `booting` instead exposes the saved preview until canonical restore has
@@ -495,8 +491,6 @@ export default function TerminalPane({
             const m = JSON.parse(d.slice(MODE_CTRL.length));
             if (m.t === 'grid' || m.t === 'restore') {
               controllerRef.current = !!m.controller;
-              setController(!!m.controller);
-              setViewers(Math.max(1, Number(m.viewers) || 1));
               const applyGrid = () => {
                 try {
                   // xterm can retain the old pixel scrollTop when the viewport
@@ -826,11 +820,6 @@ export default function TerminalPane({
           <span className="ph-title" title={`${pathLabel} · double-click to rename`} onDoubleClick={() => { setDraft(session.name); setEditing(true); }}>{session.name}</span>
         )}
         <div className="ph-right">
-          {viewers > 1 && (
-            <span className={`ph-role${controller ? ' controller' : ''}`} title={controller ? 'This pane controls terminal input and size' : 'Interact with the terminal to take control'}>
-              {controller ? `${viewers} viewers` : 'watching'}
-            </span>
-          )}
           <span className="ph-path" title={pathLabel}>{pathLabel}</span>
           <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
