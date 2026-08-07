@@ -399,7 +399,10 @@ export default function SettingsView({
                   </span>
                 </div>
 
-                <div className="setting-row">
+                {/* row-top: the description runs four lines, and the interval is
+                    the thing you read it for — it belongs level with the text, not
+                    floating halfway down beside it. */}
+                <div className="setting-row row-top">
                   <div>
                     <div className="s-label">Back up the bucket</div>
                     <div className="s-help">
@@ -443,18 +446,22 @@ export default function SettingsView({
                         </div>
                         {/* The dashboard strip says a backup is failing; this says
                             what the Job actually reported, which is what tells you
-                            whether it is yours to fix. */}
+                            whether it is yours to fix. The message and the Job's own
+                            reason are a paragraph you read once, so they hang off the
+                            timestamp as a tooltip rather than wrapping across the
+                            table and pushing every other row around. */}
                         {bk.lastFailure && (
                           <div>
                             <span>Last failure</span>
-                            <b style={{ color: 'var(--danger)', whiteSpace: 'normal', textAlign: 'right' }}>
+                            <b className="kv-fail">
                               {new Date(bk.lastFailure.at).toLocaleString()}
-                              {bk.lastFailure.message ? ` — ${bk.lastFailure.message}` : ''}
                               {bk.failures > 1 ? ` (${bk.failures} in a row)` : ''}
-                              {bk.lastFailure.reason && (
-                                <div className="mono" style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 11.5, marginTop: 2 }}>
-                                  {bk.lastFailure.reason}
-                                </div>
+                              {(bk.lastFailure.message || bk.lastFailure.reason) && (
+                                <span
+                                  className="tip"
+                                  tabIndex={0}
+                                  data-tip={[bk.lastFailure.message, bk.lastFailure.reason].filter(Boolean).join(' — ')}
+                                ><InfoGlyph className="tip-i" /></span>
                               )}
                             </b>
                           </div>
@@ -467,80 +474,6 @@ export default function SettingsView({
                         )}
                       </div>
                     )}
-                    {/* On demand regardless of the interval: taking one backup
-                        before a risky change should not mean switching on a
-                        schedule. Disabled while a run is in flight — two Jobs
-                        uploading to one dataset would race. */}
-                    {/* Folders to keep out of the history. An env directory is
-                        thousands of files the backup has to hash and none of them
-                        worth keeping — measured, that is 7s of work versus 1s. */}
-                    {bk?.canRunNow && (
-                      <>
-                        <div className="s-help skiphead" style={{ marginTop: 10 }}>
-                          <span>
-                            Skip these folders — type a name and press Enter. Anywhere they appear
-                            (<span className="mono">node_modules</span>, <span className="mono">.venv</span>),
-                            they stay out of the history. Everything here is something a command puts
-                            back; nothing is skipped for being large. Remove any you want kept.
-                          </span>
-                          {/* The default list is long and picked from measurements, so an operator
-                              who trims it has no way back without retyping 30 names. Hidden when
-                              the list already matches the defaults, so it is never a no-op —
-                              compared against the local edit rather than the server's copy, or it
-                              would linger until the next status poll. */}
-                          {bk.excludeDefaults?.length > 0
-                            && (cfg.backup.exclude.length !== bk.excludeDefaults.length
-                              || cfg.backup.exclude.some((t, i) => t !== bk.excludeDefaults[i])) && (
-                            <button
-                              className="btn-ghost skiprestore"
-                              onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, exclude: [...bk.excludeDefaults] } })}
-                            >Restore defaults</button>
-                          )}
-                        </div>
-                        <div className="tagf" onClick={(e) => {
-                          if (e.target === e.currentTarget) (e.currentTarget.querySelector('input') as HTMLInputElement)?.focus();
-                        }}>
-                          {cfg.backup.exclude.map((t) => (
-                            <span className="tagf-chip mono" key={t}>
-                              {t}
-                              <button
-                                className="tagf-x"
-                                aria-label={`Stop skipping ${t}`}
-                                onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, exclude: cfg.backup.exclude.filter((x) => x !== t) } })}
-                              >×</button>
-                            </span>
-                          ))}
-                          <input
-                            className="tagf-input mono"
-                            placeholder={cfg.backup.exclude.length ? 'add another…' : 'node_modules'}
-                            value={skipDraft}
-                            onChange={(e) => setSkipDraft(e.target.value)}
-                            onKeyDown={(e) => {
-                              // Enter or comma commits; Backspace on an empty box
-                              // takes the last chip back, as tag fields do.
-                              if (e.key === 'Enter' || e.key === ',') {
-                                e.preventDefault();
-                                addSkip();
-                              } else if (e.key === 'Backspace' && !skipDraft && cfg.backup.exclude.length) {
-                                setCfg({ ...cfg, backup: { ...cfg.backup, exclude: cfg.backup.exclude.slice(0, -1) } });
-                              }
-                            }}
-                            onBlur={addSkip}
-                          />
-                        </div>
-                      </>
-                    )}
-                    {bk?.canRunNow && (
-                      <button
-                        className="btn-ghost"
-                        style={{ marginTop: 8 }}
-                        disabled={bkBusy || bk.running}
-                        onClick={doBackup}
-                      >
-                        {bkBusy ? 'Launching…' : bk.running ? 'Backing up…' : 'Back up now'}
-                      </button>
-                    )}
-                    {bkMsg && <div className="s-help" style={{ marginTop: 6 }}>{bkMsg}</div>}
                   </div>
                   <span className="cfg-ctl">
                     <div className="seg cfg-seg">
@@ -573,6 +506,84 @@ export default function SettingsView({
                     of your bucket). Every 1h means 24 runs a day.
                   </div>
                 )}
+
+                {/* Folders to keep out of the history. An env directory is
+                    thousands of files the backup has to hash and none of them
+                    worth keeping — measured, that is 7s of work versus 1s.
+                    Full width, outside the row: thirty chips wrapping inside the
+                    label column read as a wall, and the field they belong to is a
+                    text input, which wants the whole measure. */}
+                {bk?.canRunNow && (
+                  <>
+                    <div className="s-help skiphead" style={{ marginTop: 10 }}>
+                      <span>
+                        Skip these folders — type a name and press Enter. Anywhere they appear
+                        (<span className="mono">node_modules</span>, <span className="mono">.venv</span>),
+                        they stay out of the history. Everything here is something a command puts
+                        back; nothing is skipped for being large. Remove any you want kept.
+                      </span>
+                      {/* The default list is long and picked from measurements, so an operator
+                          who trims it has no way back without retyping 30 names. Hidden when
+                          the list already matches the defaults, so it is never a no-op —
+                          compared against the local edit rather than the server's copy, or it
+                          would linger until the next status poll. */}
+                      {bk.excludeDefaults?.length > 0
+                        && (cfg.backup.exclude.length !== bk.excludeDefaults.length
+                          || cfg.backup.exclude.some((t, i) => t !== bk.excludeDefaults[i])) && (
+                        <button
+                          className="btn-ghost skiprestore"
+                          onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, exclude: [...bk.excludeDefaults] } })}
+                        >Restore defaults</button>
+                      )}
+                    </div>
+                    <div className="tagf" onClick={(e) => {
+                      if (e.target === e.currentTarget) (e.currentTarget.querySelector('input') as HTMLInputElement)?.focus();
+                    }}>
+                      {cfg.backup.exclude.map((t) => (
+                        <span className="tagf-chip mono" key={t}>
+                          {t}
+                          <button
+                            className="tagf-x"
+                            aria-label={`Stop skipping ${t}`}
+                            onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, exclude: cfg.backup.exclude.filter((x) => x !== t) } })}
+                          >×</button>
+                        </span>
+                      ))}
+                      <input
+                        className="tagf-input mono"
+                        placeholder={cfg.backup.exclude.length ? 'add another…' : 'node_modules'}
+                        value={skipDraft}
+                        onChange={(e) => setSkipDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          // Enter or comma commits; Backspace on an empty box
+                          // takes the last chip back, as tag fields do.
+                          if (e.key === 'Enter' || e.key === ',') {
+                            e.preventDefault();
+                            addSkip();
+                          } else if (e.key === 'Backspace' && !skipDraft && cfg.backup.exclude.length) {
+                            setCfg({ ...cfg, backup: { ...cfg.backup, exclude: cfg.backup.exclude.slice(0, -1) } });
+                          }
+                        }}
+                        onBlur={addSkip}
+                      />
+                    </div>
+                  </>
+                )}
+                {/* On demand regardless of the interval: taking one backup
+                    before a risky change should not mean switching on a
+                    schedule. Disabled while a run is in flight — two Jobs
+                    uploading to one dataset would race. */}
+                {bk?.canRunNow && (
+                  <button
+                    className="btn-ghost"
+                    style={{ marginTop: 8 }}
+                    disabled={bkBusy || bk.running}
+                    onClick={doBackup}
+                  >
+                    {bkBusy ? 'Launching…' : bk.running ? 'Backing up…' : 'Back up now'}
+                  </button>
+                )}
+                {bkMsg && <div className="s-help" style={{ marginTop: 6 }}>{bkMsg}</div>}
 
                 <div className="setting-row">
                   <div>
