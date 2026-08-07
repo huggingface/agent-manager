@@ -10,51 +10,12 @@ if ! mkdir -p "$DATA_DIR/workspaces" 2>/dev/null; then
 fi
 export DATA_DIR
 
-# Empty directories do NOT persist on the bucket — there is no backing object
-# key, so a dir created empty is gone after a restart, and anything pointing at
-# it (a symlink, a config path) breaks. `keepdir` occupies the path with a real
-# file so it survives. Use it for every bucket-backed dir created empty.
-#   Seen in the wild: $CODEX_DURABLE/sessions vanished, leaving
-#   $CODEX_HOME/sessions dangling -> codex "thread-store internal error:
-#   File exists (os error 17)" and every transcript lost.
-keepdir() {
-  for d in "$@"; do
-    mkdir -p "$d" 2>/dev/null || continue
-    [ -e "$d/.keep" ] || echo "keep marker: empty dirs are not persisted on the /data bucket" > "$d/.keep" 2>/dev/null || true
-  done
-}
-
-# Occupy a config path with a real file when nothing lives there. Two bugs need
-# this. (1) A tool that writes atomically (temp + rename) can leave the temp
-# behind and never land the target. (2) The bucket tree API then matches
-# `<path>` against the leftover `<path>.<uuid>.tmp` by RAW STRING PREFIX, and
-# hf-mount reads a non-empty listing as proof the path is a DIRECTORY — so the
-# missing file materializes as a phantom dir and readers die with EISDIR.
-# A real file short-circuits it: the HEAD succeeds, so the listing fallback that
-# synthesizes the directory never runs. See docs/fuse-phantom-directories.md.
-occupy_file() {
-  path="$1"; default="$2"
-  mkdir -p "$(dirname "$path")" 2>/dev/null || return 0
-  [ -d "$path" ] && rm -rf "$path" 2>/dev/null
-  [ -e "$path" ] || printf '%s\n' "$default" > "$path" 2>/dev/null || true
-}
-
-# Put HOME on the durable bucket so EVERY agent's logins/config persist across
-# restarts (gemini ~/.gemini, etc.). Agents whose SQLite state can't live on the
-# FUSE bucket (codex, openclaw, opencode, hermes) are relocated to local disk
-# below, each with its own durable copy on the bucket.
+# HOME remains the durable place for ordinary shell/user configuration. Agent
+# harness state is relocated to local disk below and checkpointed explicitly:
+# actively-mutated files and SQLite databases must not use the FUSE bucket as
+# their live filesystem.
 export HOME="$DATA_DIR/home"
 mkdir -p "$HOME"
-# Gemini writes its project registry atomically and the rename can fail on the
-# bucket, leaving projects.json.<uuid>.tmp orphans and no projects.json — after
-# which the prefix bug above turns projects.json into a directory and the CLI
-# dies with `EISDIR: illegal operation on a directory, read`. Keep a real file
-# there. Same class as the opencode.json guard in server/src/runner.js.
-occupy_file "$HOME/.gemini/projects.json" '{"projects": {}}'
-# Claude keeps its established dir (so existing logins keep working). Codex's
-# home moves to local disk below (its SQLite databases corrupt on the bucket).
-export CLAUDE_CONFIG_DIR="$DATA_DIR/state/claude"
-mkdir -p "$CLAUDE_CONFIG_DIR"
 
 # NOTE: every var exported below must be listed in NON_SECRET (server/src/
 # index.js) — this script runs after the build-time env snapshot, so anything
@@ -64,120 +25,118 @@ mkdir -p "$CLAUDE_CONFIG_DIR"
 # /data bucket — object storage is slow for many-small-files and can't mmap or
 # lock well, so running libraries from it is painful. These reinstall on demand.
 export AM_LOCAL="/home/node/local"
-if ! mkdir -p "$AM_LOCAL/bin" 2>/dev/null; then AM_LOCAL="$DATA_DIR/.local-cache"; mkdir -p "$AM_LOCAL/bin"; fi
+if ! mkdir -p "$AM_LOCAL/bin" 2>/dev/null; then
+  # Never fall back onto the bucket: agent state needs POSIX close/locking
+  # semantics even when the preferred local prefix is unavailable.
+  AM_LOCAL="/tmp/agent-manager-local"
+  mkdir -p "$AM_LOCAL/bin"
+fi
 export UV_CACHE_DIR="$AM_LOCAL/uv-cache"
 
-# Liveness handle for the state-sync loops below: this script ends with
-# `exec node …`, so $$ IS the app's pid. Each loop checks it and gives up once
-# its own app instance is gone, because a dev-mode app restart re-runs this
-# script inside the SAME container: the old loops survive (reparented to PID 1)
-# and the new run adds three more. Measured after three restart attempts: ten
-# loops alive, all waking every 60s to rsync the same bucket paths over each
-# other. Not exported — nothing downstream needs it (see NON_SECRET note above).
-AM_MAIN_PID=$$
-
-# Codex keeps a growing family of SQLite databases (logs_2, goals_1, memories_1
-# plus mmap'd -shm siblings) that corrupt on the FUSE bucket: SQLite needs real
-# locking/mmap. Same cure as OpenClaw — codex's HOME lives on LOCAL disk. The
-# heavyweight append-only rollouts stay on the bucket via one symlink (plain
-# files never corrupted there, and pinned rollout paths keep working); the
-# small durable state (auth, config, history) restores at boot and syncs back
-# every 60s; the SQLite caches are purely local, rebuilt from rollouts when
-# the disk resets.
-CODEX_DURABLE="$DATA_DIR/state/codex"
+# One state model for every harness:
+#   * live files are ordinary local POSIX files under $AM_LOCAL;
+#   * the bucket contains closed checkpoints only;
+#   * SQLite checkpoints use the online backup API rather than racing copies
+#     of a DB, WAL, and SHM.
+#
+# hf-mount's streaming writer buffers a long-lived append until close. Codex
+# keeps its rollout open for the life of a session, so the old sessions symlink
+# could lose the whole open epoch on a restart.
+export CODEX_DURABLE="$DATA_DIR/state/codex"
 export CODEX_HOME="$AM_LOCAL/codex-home"
-mkdir -p "$CODEX_HOME"
-# keepdir, not mkdir: `sessions` is the symlink target below, and an empty dir
-# on the bucket disappears — which is exactly how codex lost its thread store.
-keepdir "$CODEX_DURABLE/sessions" "$CODEX_DURABLE/db-backups"
-# quarantine sqlite remnants on the bucket (incl. the earlier symlink attempt)
-keepdir "$CODEX_DURABLE/db-backups/am-quarantine"
+export CLAUDE_DURABLE="$DATA_DIR/state/claude"
+export CLAUDE_CONFIG_DIR="$AM_LOCAL/agent-state/claude"
+export GEMINI_DURABLE="$DATA_DIR/state/gemini"
+export GEMINI_CLI_HOME="$AM_LOCAL/agent-state/gemini-home"
+export GEMINI_LIVE="$GEMINI_CLI_HOME/.gemini"
+export OPENCLAW_HOME="$AM_LOCAL/oc-home"
+export OPENCLAW_STATE_DIR="$OPENCLAW_HOME/.openclaw"
+export OPENCLAW_DURABLE="$DATA_DIR/state/openclaw-backup"
+export OPENCODE_LIVE="$AM_LOCAL/opencode-share"
+export OPENCODE_DURABLE="$DATA_DIR/state/opencode"
+export HERMES_LIVE="$AM_LOCAL/hermes"
+export HERMES_DURABLE="$DATA_DIR/state/hermes"
+
+mkdir -p "$CODEX_HOME" "$CODEX_DURABLE/sessions" "$CODEX_DURABLE/db-backups" \
+  "$CLAUDE_CONFIG_DIR" "$CLAUDE_DURABLE" "$GEMINI_LIVE" "$GEMINI_DURABLE" \
+  "$OPENCLAW_STATE_DIR" "$OPENCLAW_DURABLE" "$OPENCODE_LIVE" \
+  "$OPENCODE_DURABLE" "$HERMES_LIVE" "$HERMES_DURABLE"
+
+# Heal the old Codex layout on hot/dev restarts. Only unlink the known local
+# sessions symlink; never recursively remove its durable target.
+[ -L "$CODEX_HOME/sessions" ] && rm "$CODEX_HOME/sessions"
+mkdir -p "$CODEX_HOME/sessions"
+
+# Quarantine SQLite remnants from the old Codex bucket layout. Codex SQLite is
+# disposable cache state; transcripts and user history are checkpointed.
+mkdir -p "$CODEX_DURABLE/db-backups/am-quarantine"
 for f in "$CODEX_DURABLE"/logs_2.sqlite* "$CODEX_DURABLE"/goals_1.sqlite* "$CODEX_DURABLE"/memories_1.sqlite*; do
   [ -e "$f" ] || [ -L "$f" ] && mv "$f" "$CODEX_DURABLE/db-backups/am-quarantine/" 2>/dev/null || true
 done
-rsync -a --exclude 'sessions' --exclude '*.sqlite*' --exclude 'db-backups' \
-  --exclude 'cache' --exclude '.tmp' --exclude 'mcp-oauth-locks' \
-  "$CODEX_DURABLE/" "$CODEX_HOME/" 2>/dev/null || true
-ln -sfn "$CODEX_DURABLE/sessions" "$CODEX_HOME/sessions"
-( while :; do
-    sleep 60
-    kill -0 "$AM_MAIN_PID" 2>/dev/null || exit
-    rsync -a --exclude 'sessions' --exclude '*.sqlite*' --exclude 'db-backups' \
-      --exclude 'cache' --exclude '.tmp' --exclude 'mcp-oauth-locks' \
-      "$CODEX_HOME/" "$CODEX_DURABLE/" 2>/dev/null || true
-  done ) &
+
+# Preserve existing Gemini state while moving it out of durable HOME. The
+# legacy directory remains in place as a rollback copy.
+if [ -d "$HOME/.gemini" ] && [ ! -L "$HOME/.gemini" ]; then
+  if ! rsync -a --update "$HOME/.gemini/" "$GEMINI_DURABLE/"; then
+    echo "ERROR: could not migrate Gemini state; refusing to start with an empty live home" >&2
+    exit 1
+  fi
+fi
+
+# OpenClaw rejects a symlinked HOME/state path; migrate any state from the
+# earlier layouts into its durable checkpoint before restore.
+[ -L "$HOME/.openclaw" ] && rm "$HOME/.openclaw"
+for legacy in "$HOME/.openclaw.pre-symlink" "$HOME/.openclaw"; do
+  if [ -d "$legacy" ] && [ ! -L "$legacy" ]; then
+    if ! rsync -a --update "$legacy/" "$OPENCLAW_DURABLE/"; then
+      echo "ERROR: could not migrate OpenClaw state from $legacy" >&2
+      exit 1
+    fi
+  fi
+done
+
+# opencode and Hermes expect their state at paths under HOME. The live targets
+# are local; legacy real directories are retained as rollback copies instead of
+# being deleted during migration.
+OPENCODE_LINK="$HOME/.local/share/opencode"
+HERMES_LINK="$HOME/.hermes"
+mkdir -p "$(dirname "$OPENCODE_LINK")"
+for pair in "$OPENCODE_LINK|$OPENCODE_DURABLE" "$HERMES_LINK|$HERMES_DURABLE"; do
+  lnk="${pair%%|*}"; dur="${pair##*|}"
+  if [ -e "$lnk" ] && [ ! -L "$lnk" ]; then
+    if ! rsync -a --update "$lnk/" "$dur/"; then
+      echo "ERROR: could not migrate agent state from $lnk" >&2
+      exit 1
+    fi
+    backup="$lnk.pre-agent-state"
+    if [ -e "$backup" ] || [ -L "$backup" ]; then
+      backup="$backup.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    fi
+    if ! mv "$lnk" "$backup"; then
+      echo "ERROR: could not retain rollback copy at $backup" >&2
+      exit 1
+    fi
+  fi
+done
+ln -sfn "$OPENCODE_LIVE" "$OPENCODE_LINK"
+ln -sfn "$HERMES_LIVE" "$HERMES_LINK"
+
+# Restore after all one-time migrations have populated the durable side. On a
+# hot/dev restart, --update preserves newer local state.
+AGENT_STATE_SCRIPT="${AGENT_STATE_SCRIPT:-/app/scripts/agent-state.sh}"
+export AGENT_STATE_SCRIPT
+if ! sh "$AGENT_STATE_SCRIPT" restore; then
+  echo "ERROR: agent-state restore was incomplete; refusing to start agents against partial state" >&2
+  exit 1
+fi
+
+# Small comforts in OpenClaw's private HOME (harmless if missing).
+cp "$HOME/.gitconfig" "$OPENCLAW_HOME/.gitconfig" 2>/dev/null || true
 export PIP_CACHE_DIR="$AM_LOCAL/pip-cache"
 export PYTHONPYCACHEPREFIX="$AM_LOCAL/pycache"
 export PYTHONUSERBASE="$AM_LOCAL/py"          # pip install --user → local, fast
 export NPM_CONFIG_PREFIX="$AM_LOCAL/npm"       # npm install -g → local, no root needed
 export PATH="$AM_LOCAL/py/bin:$AM_LOCAL/npm/bin:$AM_LOCAL/bin:$HOME/.local/bin:$PATH"
-
-# OpenClaw: its session engine fingerprints file metadata at nanosecond
-# precision and false-positives on the FUSE bucket ("session file changed while
-# embedded prompt lock was released"). Its state therefore lives on LOCAL disk,
-# with a durable copy on the bucket: restored on boot, synced back every 60s.
-# Worst case on an unclean stop: the last minute of chat history.
-# OpenClaw can't run its state on the FUSE bucket (its session fence
-# false-positives on unstable metadata) and it REJECTS symlinked paths (the
-# workspace boundary check). No symlinks, no env overrides — OpenClaw simply
-# gets its OWN HOME on local disk: a real, ordinary install from its point of
-# view. Durable copy on the bucket: restored on boot, synced back every 60s.
-# Worst case on an unclean stop: the last minute of claw state.
-export OPENCLAW_HOME="$AM_LOCAL/oc-home"                # runner launches openclaw with HOME=$OPENCLAW_HOME
-export OPENCLAW_STATE_DIR="$OPENCLAW_HOME/.openclaw"    # where the server finds its config/traces
-OC_BACKUP="$DATA_DIR/state/openclaw-backup"
-mkdir -p "$OPENCLAW_STATE_DIR" "$OC_BACKUP"
-# heal from the earlier symlink experiment
-[ -L "$HOME/.openclaw" ] && rm "$HOME/.openclaw"
-# seed local state: backup (freshest) first, then legacy dirs fill gaps (--update: never clobber newer)
-[ -n "$(ls -A "$OC_BACKUP" 2>/dev/null)" ] && rsync -a "$OC_BACKUP/" "$OPENCLAW_STATE_DIR/" 2>/dev/null
-for legacy in "$HOME/.openclaw.pre-symlink" "$HOME/.openclaw"; do
-  if [ -d "$legacy" ] && [ ! -L "$legacy" ]; then
-    rsync -a --update "$legacy/" "$OPENCLAW_STATE_DIR/" 2>/dev/null || true
-  fi
-done
-# small comforts in the private HOME (harmless if missing)
-cp "$HOME/.gitconfig" "$OPENCLAW_HOME/.gitconfig" 2>/dev/null || true
-( while :; do
-    sleep 60
-    kill -0 "$AM_MAIN_PID" 2>/dev/null || exit
-    rsync -a --delete "$OPENCLAW_STATE_DIR/" "$OC_BACKUP/" 2>/dev/null || true
-  done ) &
-
-# opencode + hermes keep their conversation history in SQLite (opencode at
-# ~/.local/share/opencode, hermes at ~/.hermes). SQLite on the FUSE bucket
-# corrupts, and worse: a SYNCHRONOUS read can STALL on FUSE and wedge the
-# server's event loop — the Overview reads these dbs on every poll, so one
-# stalled read takes the whole Space down. The live data therefore lives on
-# LOCAL disk, exposed at the well-known path via a symlink, with a durable copy
-# on the bucket: restored on boot, synced back every 60s. Unlike codex these
-# dbs ARE the source of truth (no rollout files to rebuild from), so the
-# sync-back INCLUDES the sqlite. Worst case on an unclean stop: the last minute
-# of chat history.
-OC_LIVE="$AM_LOCAL/opencode-share"; OC_DURABLE="$DATA_DIR/state/opencode"; OC_LINK="$HOME/.local/share/opencode"
-HERMES_LIVE="$AM_LOCAL/hermes"; HERMES_DURABLE="$DATA_DIR/state/hermes"; HERMES_LINK="$HOME/.hermes"
-mkdir -p "$OC_LIVE" "$HERMES_LIVE" "$(dirname "$OC_LINK")"
-keepdir "$OC_DURABLE" "$HERMES_DURABLE"
-# One-time migration: existing history is a REAL dir at the well-known path on
-# the bucket. Fold it into the durable store BEFORE the path becomes a symlink,
-# so no conversation is stranded on the bucket or lost.
-for pair in "$OC_LINK|$OC_DURABLE" "$HERMES_LINK|$HERMES_DURABLE"; do
-  lnk="${pair%%|*}"; dur="${pair##*|}"
-  if [ -e "$lnk" ] && [ ! -L "$lnk" ]; then
-    rsync -a "$lnk/" "$dur/" 2>/dev/null || true
-    rm -rf "$lnk" 2>/dev/null || true
-  fi
-done
-rsync -a "$OC_DURABLE/" "$OC_LIVE/" 2>/dev/null || true       # restore durable → live (local disk is wiped each boot)
-rsync -a "$HERMES_DURABLE/" "$HERMES_LIVE/" 2>/dev/null || true
-ln -sfn "$OC_LIVE" "$OC_LINK"
-ln -sfn "$HERMES_LIVE" "$HERMES_LINK"
-( while :; do
-    sleep 60
-    kill -0 "$AM_MAIN_PID" 2>/dev/null || exit
-    rsync -a "$OC_LIVE/" "$OC_DURABLE/" 2>/dev/null || true
-    rsync -a "$HERMES_LIVE/" "$HERMES_DURABLE/" 2>/dev/null || true
-  done ) &
 
 # Durable, user-editable setup script. Runs on EVERY start (keep it idempotent);
 # seed a template on first boot.
@@ -221,4 +180,45 @@ else
 fi
 echo "[install.sh finished $(date -u) exit=$INSTALL_CODE]" >> "$DATA_DIR/install.log"
 
-exec node /app/server/src/index.js
+# Keep PID 1 as a tiny supervisor so normal Space/dev restarts receive a final
+# state checkpoint. The timer bounds loss on an ungraceful stop; the child is
+# stopped before the final checkpoint so SQLite and transcript state is quiet.
+AGENT_STATE_CHECKPOINT_SECONDS="${AGENT_STATE_CHECKPOINT_SECONDS:-15}"
+node /app/server/src/index.js &
+APP_PID=$!
+
+checkpoint_loop() {
+  while kill -0 "$APP_PID" 2>/dev/null; do
+    sleep "$AGENT_STATE_CHECKPOINT_SECONDS"
+    kill -0 "$APP_PID" 2>/dev/null || break
+    sh "$AGENT_STATE_SCRIPT" checkpoint \
+      || echo "WARN: periodic agent-state checkpoint failed"
+  done
+}
+checkpoint_loop &
+CHECKPOINT_PID=$!
+
+finish() {
+  code="${1:-0}"
+  kill "$CHECKPOINT_PID" 2>/dev/null || true
+  wait "$CHECKPOINT_PID" 2>/dev/null || true
+  # A timer checkpoint may still be finishing after its loop shell is stopped.
+  # checkpoint-final waits for that lock, then captures the quiet post-Node
+  # state instead of silently treating a busy lock as success.
+  sh "$AGENT_STATE_SCRIPT" checkpoint-final \
+    || echo "WARN: final agent-state checkpoint failed"
+  exit "$code"
+}
+
+shutdown() {
+  trap - TERM INT HUP
+  kill -TERM "$APP_PID" 2>/dev/null || true
+  wait "$APP_PID" 2>/dev/null
+  code=$?
+  finish "$code"
+}
+trap shutdown TERM INT HUP
+
+wait "$APP_PID"
+APP_CODE=$?
+finish "$APP_CODE"
