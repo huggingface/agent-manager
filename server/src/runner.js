@@ -680,21 +680,35 @@ function codexSessionsRoot() {
 }
 
 // Rollout files touched since `sinceMs`, newest first.
-function codexRolloutsSince(sinceMs) {
+//
+// Async for the same reason as claudeTranscriptsSince, and it is the same bug:
+// this is a readdir per day-directory plus a stat per rollout, and although
+// CODEX_HOME is on local disk, its `sessions` child is a SYMLINK onto the FUSE
+// bucket — `stat -f` says fuseblk, and `find` without -L will tell you the
+// directory is empty, which is how this hid. A stat there costs ~85ms, so the
+// sync version froze every pane in the Space for 400-750ms on the REPIN_MS beat,
+// once per codex session. Measured: stalls >250ms at 2.5/min, worst 3.9s.
+//
+// Sequential rather than Promise.all, exactly as in claudeTranscriptsSince:
+// parallel FUSE stats would saturate the 4-thread libuv pool and push every
+// other fs operation in the process behind them, and nothing here is waiting on
+// the result.
+// Exported for server/test/codex-repin.test.mjs.
+export async function codexRolloutsSince(sinceMs) {
   const out = [];
-  const walk = (dir, depth) => {
+  const walk = async (dir, depth) => {
     if (depth > 5) return;
     let ents = [];
-    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
     for (const e of ents) {
       const p = path.join(dir, e.name);
-      if (e.isDirectory()) walk(p, depth + 1);
+      if (e.isDirectory()) await walk(p, depth + 1);
       else if (e.name.startsWith('rollout-') && e.name.endsWith('.jsonl')) {
-        try { const m = fs.statSync(p).mtimeMs; if (m >= sinceMs) out.push({ p, m }); } catch {}
+        try { const m = (await fsp.stat(p)).mtimeMs; if (m >= sinceMs) out.push({ p, m }); } catch {}
       }
     }
   };
-  walk(codexSessionsRoot(), 0);
+  await walk(codexSessionsRoot(), 0);
   return out.sort((a, b) => b.m - a.m);
 }
 
@@ -738,31 +752,41 @@ async function transcriptHead(p) {
   } catch { return null; } finally { if (fh) { try { await fh.close(); } catch {} } }
 }
 
-function firstLine(p) {
-  const fd = fs.openSync(p, 'r');
+// Async for the same reason as the walk above: these rollouts are on the bucket,
+// and reading up to a megabyte of one synchronously blocked the loop carrying
+// every session's PTY. Opened INSIDE the try, like transcriptHead: a rollout can
+// rotate away between the stat that found it and this open.
+async function firstLine(p) {
+  let fh = null;
   try {
+    fh = await fsp.open(p, 'r');
     const CHUNK = 65536, MAX = 1024 * 1024;
     let buf = Buffer.alloc(0);
     for (let pos = 0; pos < MAX; pos += CHUNK) {
       const b = Buffer.alloc(CHUNK);
-      const n = fs.readSync(fd, b, 0, CHUNK, pos);
+      const { bytesRead: n } = await fh.read(b, 0, CHUNK, pos);
       buf = Buffer.concat([buf, b.subarray(0, n)]);
       const nl = buf.indexOf(0x0a);
       if (nl >= 0) return buf.toString('utf8', 0, nl);
       if (n < CHUNK) break; // EOF
     }
     return buf.toString('utf8');
-  } finally { fs.closeSync(fd); }
+  } finally { if (fh) { try { await fh.close(); } catch {} } }
 }
 
-function tryCaptureCodexId(sessionId, workdir, sinceMs) {
-  const claimed = new Set(list().filter((s) => s.id !== sessionId && s.codexSessionId).map((s) => s.codexSessionId));
-  const pinned = (list().find((s) => s.id === sessionId) || {}).codexSessionId;
-  for (const c of codexRolloutsSince(sinceMs)) {
+// Read fresh at every use, never snapshotted: this awaits a bucket walk and then
+// a file read per candidate, so a claim or a pin taken before those resolve is a
+// stale view of the world by the time it is acted on. Same lesson as the claude
+// scan — see the note above the re-pin in scheduleClaudeCapture.
+async function tryCaptureCodexId(sessionId, workdir, sinceMs) {
+  const claimedByOthers = () =>
+    new Set(list().filter((s) => s.id !== sessionId && s.codexSessionId).map((s) => s.codexSessionId));
+  const currentPin = () => (list().find((s) => s.id === sessionId) || {}).codexSessionId;
+  for (const c of await codexRolloutsSince(sinceMs)) {
     const m = c.p.match(/rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/);
-    if (!m || claimed.has(m[1])) continue;
+    if (!m || claimedByOthers().has(m[1])) continue;
     let meta;
-    try { meta = JSON.parse(firstLine(c.p)); } catch { continue; }
+    try { meta = JSON.parse(await firstLine(c.p)); } catch { continue; }
     const mp = (meta && meta.payload) || {};
     if (mp.cwd !== workdir) continue;
     // A sibling's ongoing conversation in the same folder gets fresh writes
@@ -774,6 +798,12 @@ function tryCaptureCodexId(sessionId, workdir, sinceMs) {
     // aren't this agent's conversation, so pinning one would break resume and
     // the Overview digest.
     if (mp.thread_source === 'subagent' || (mp.source && mp.source.subagent)) continue;
+    // Re-read now that the walk and the head read have both resolved: this
+    // rollout may since have been claimed by the session it actually belongs to,
+    // and taking it anyway would strand that session on a conversation it cannot
+    // reclaim.
+    if (claimedByOthers().has(m[1])) continue;
+    const pinned = currentPin();
     // The watcher re-runs for the life of the pane, so the usual outcome is
     // "still the same conversation" — don't rewrite sessions.json for that.
     if (m[1] === pinned) return true;
@@ -787,12 +817,13 @@ function tryCaptureCodexId(sessionId, workdir, sinceMs) {
 // A pin captured before subagents were filtered out (or one whose rollout was
 // rotated away) may point at a guardian/missing rollout — clear it so we
 // re-capture the real conversation on this launch.
-function pinIsStale(session) {
+async function pinIsStale(session) {
   if (!session.codexSessionId) return false;
   const p = session.codexRollout;
-  if (!p || !fs.existsSync(p)) return true;
+  if (!p) return true;
+  try { await fsp.stat(p); } catch { return true; } // gone, or the bucket says so
   try {
-    const mp = (JSON.parse(firstLine(p)) || {}).payload || {};
+    const mp = (JSON.parse(await firstLine(p)) || {}).payload || {};
     return mp.thread_source === 'subagent' || !!(mp.source && mp.source.subagent);
   } catch { return false; }
 }
@@ -803,32 +834,71 @@ function pinIsStale(session) {
 // for as long as the pane is alive and follow the newest rollout this folder
 // produces. tryCaptureCodexId only writes when the id actually changes.
 function scheduleCodexCapture(session, workdir) {
-  if (session.codexSessionId && pinIsStale(session)) {
-    session = update(session.id, { codexSessionId: undefined, codexRollout: undefined }) || session;
-  }
   const prev = codexCapturing.get(session.id);
   if (prev) clearTimeout(prev);
   const since = Date.now() - 2000;
+  // The host this watch belongs to. A relaunch spawns a new host and a new
+  // watch, and that one owns the pin from then on — same identity guard the
+  // claude watcher uses, and it matters for the same reason now that a tick
+  // awaits and a relaunch can land mid-scan.
+  const host = hosts.get(session.id);
+  const stillOurs = () => hosts.get(session.id) === host;
   let warnedShared = false;
+  let checkedStale = false;
 
-  const tick = () => {
-    if (!isRunning(session.id)) { codexCapturing.delete(session.id); return; }
+  const tick = async () => {
+    if (!isRunning(session.id)) { codexCapturing.delete(session.id); return false; }
+    // Clearing a stale pin used to run inline at schedule time, where its
+    // existsSync + whole-first-line read sat on the launch path. Both touch the
+    // bucket, so do it on the first beat instead — and read the session fresh,
+    // since the one passed in was captured before any of this awaited.
+    if (!checkedStale) {
+      checkedStale = true;
+      const live = list().find((s) => s.id === session.id);
+      if (live && live.codexSessionId && await pinIsStale(live) && stillOurs()) {
+        update(session.id, { codexSessionId: undefined, codexRollout: undefined });
+      }
+    }
     if (folderIsShared(session.id, workdir, 'codex')) {
       if (!warnedShared) {
         warnedShared = true;
         console.warn(`[codex] ${session.id}: folder shared with another live session — not following thread resets here`);
       }
-    } else {
-      tryCaptureCodexId(session.id, workdir, since);
+    } else if (stillOurs()) {
+      await tryCaptureCodexId(session.id, workdir, since);
     }
-    const t = setTimeout(tick, REPIN_MS);
-    if (t.unref) t.unref();
-    codexCapturing.set(session.id, t);
+    return true;
   };
 
-  const t0 = setTimeout(tick, 5000); // rollout appears ~instantly
-  if (t0.unref) t0.unref();
-  codexCapturing.set(session.id, t0);
+  // One rearm per tick, whatever the tick did. A tick that throws logs and keeps
+  // the watcher alive: dropping it would stop following thread resets for the
+  // rest of the pane's life, which is the failure this mechanism exists for.
+  const run = () => tick()
+    .catch((e) => {
+      console.warn(`[codex] ${session.id}: repin tick failed (${e && e.message}) — retrying next beat`);
+      return isRunning(session.id);
+    })
+    .then((again) => { if (again) rearm(); else codexCapturing.delete(session.id); });
+
+  let armed = null;
+  function rearm(ms = REPIN_MS) {
+    // Not the pane's watch any more: either a relaunch during an in-flight walk
+    // started a fresh one — which already owns the map entry, and arming here
+    // would leave BOTH chains beating with only one reachable by clearTimeout —
+    // or the pane exited and nothing replaced it.
+    if (!stillOurs()) {
+      // Drop OUR entry on the way out; a fired Timeout still retains its
+      // callback, and with it this closure and the disposed host. Only ours: a
+      // newer watch's timer has to survive untouched.
+      if (codexCapturing.get(session.id) === armed) codexCapturing.delete(session.id);
+      return;
+    }
+    armed = setTimeout(run, ms);
+    if (armed.unref) armed.unref();
+    codexCapturing.set(session.id, armed);
+  }
+
+  rearm(5000); // rollout appears ~instantly
 }
 
 // opencode has no per-conversation handle we can pass on launch, so we can't
