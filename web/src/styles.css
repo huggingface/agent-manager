@@ -871,6 +871,9 @@ body {
 .settings-page h3 { margin: 24px 0 8px; font-size: 14px; }
 /* plain rows, not cards: the bold label is the section header */
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 2px; }
+/* a row whose description runs several lines: the control sits level with the
+   text instead of centring against it, so the eye finds it where it starts */
+.setting-row.row-top { align-items: flex-start; }
 /* right-side controls share one width so the column reads as one rail */
 .setting-row > .btn-ghost, .setting-row .confirm-del { flex: none; }
 /* operator config (artifacts, jobs): every control sits in the same-width
@@ -936,6 +939,10 @@ a.btn-ghost { text-decoration: none; }
    and only take the accent on hover. */
 .kv a { color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
 .kv a:hover { color: var(--accent); text-decoration-style: solid; }
+/* A failure value: the timestamp is the row, and what went wrong hangs off the
+   (i) beside it. overflow is visible because .kv b clips for its ellipsis, and
+   that clipping would eat the tooltip card. */
+.kv b.kv-fail { display: inline-flex; align-items: center; gap: 6px; overflow: visible; color: var(--danger); }
 /* A kv used inside a setting's description sits tighter than a section-level one. */
 .kv-inline { margin-top: 8px; }
 .kv-inline > div { padding: 6px 2px; font-size: 12.5px; }
