@@ -1044,14 +1044,16 @@ tell who asked.
 
 ### Check harness usage and quota
 The same API exposes usage from harness logs on this Space. Claude and Codex
-include their latest 5-hour and weekly quota snapshots; OpenCode exposes tokens
-and estimated model cost (it has no single quota because sessions may use
-different providers):
+include their latest 5-hour and weekly quota snapshots. OpenCode, Hermes, and
+OpenClaw expose tokens and estimated model cost; they have no single quota
+because sessions may use different providers:
 
 \`\`\`sh
 curl -s "http://localhost:${PORT}/api/usage?provider=claude" | jq .providers.claude
 curl -s "http://localhost:${PORT}/api/usage?provider=codex" | jq .providers.codex
 curl -s "http://localhost:${PORT}/api/usage?provider=opencode" | jq .providers.opencode
+curl -s "http://localhost:${PORT}/api/usage?provider=hermes" | jq .providers.hermes
+curl -s "http://localhost:${PORT}/api/usage?provider=openclaw" | jq .providers.openclaw
 \`\`\`
 
 These values reflect local calls made from this Space, as of each harness's

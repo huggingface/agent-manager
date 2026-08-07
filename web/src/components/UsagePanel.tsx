@@ -7,6 +7,8 @@ const PROVS = [
   { id: 'claude', label: 'Claude Code', color: '#d97757' },
   { id: 'codex', label: 'Codex', color: '#5eb6a6' },
   { id: 'opencode', label: 'OpenCode', color: '#8a93a0' },
+  { id: 'hermes', label: 'Hermes', color: '#a78bfa' },
+  { id: 'openclaw', label: 'OpenClaw', color: '#c83636' },
   { id: 'gemini', label: 'Gemini CLI', color: '#4796e3' },
 ];
 
@@ -122,7 +124,7 @@ export default function UsagePanel() {
                   </div>
                 ) : p.id === 'gemini' ? (
                   <div className="s-help">No quota (consumer tier deprecated — uses an API key).</div>
-                ) : p.id === 'opencode' ? (
+                ) : ['opencode', 'hermes', 'openclaw'].includes(p.id) ? (
                   <div className="s-help">No single quota — cost depends on the model provider used by each session.</div>
                 ) : (
                   <div className="s-help">No quota yet — run a session to populate.</div>
