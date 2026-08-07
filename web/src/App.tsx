@@ -15,6 +15,7 @@ import BackupBanner from './components/BackupBanner';
 import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
+import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { isPassive, isRemote } from './types';
 import { GridGlyph, ListGlyph } from './components/icons';
 
@@ -78,6 +79,11 @@ export default function App() {
   // stored — flipping the setting instantly (un)archives.
   const [showArchived, setShowArchived] = useState(false);
   const [archiveAfter, setArchiveAfter] = useState<'week' | 'month' | 'never'>('month');
+  // How every pane is read — the terminal itself, or reader mode over the same
+  // session. App-wide, like zoom, and remembered the same way.
+  const [paneMode, setPaneMode] = useState(readPaneMode);
+  useEffect(() => onPaneMode(setPaneMode), []);
+  const showPaneMode = (m: 'terminal' | 'reader') => { setPaneMode(m); writePaneMode(m); };
   const [zoom, setZoom] = useState<number>(() => {
     const z = parseInt(localStorage.getItem('am-zoom') || '100', 10);
     return Number.isFinite(z) ? z : 100;
@@ -515,7 +521,21 @@ export default function App() {
       setActiveRef(`g:${g.id}`);
     } catch (e) { showErr('Couldn’t create the group')(e); }
   };
-  const doMove = (ref: string, to: MoveTarget) => api.move(ref, to).then(refresh).catch(showErr('Couldn’t move that'));
+  // Merging two agents, or dropping one into a group, changes what the pane you
+  // are looking at IS — it is now part of a grid. Follow it there rather than
+  // leaving you on a single view of a session that has moved.
+  const doMove = (ref: string, to: MoveTarget) => api.move(ref, to)
+    .then(async () => {
+      const next = await api.getTree().catch(() => null);
+      if (!next) return refresh();
+      setTree(next);
+      const watching = activeRef?.startsWith('s:') ? activeRef.slice(2) : null;
+      if (!watching) return undefined;
+      const home = next.groups.find((g) => g.sessionIds.includes(watching));
+      if (home) setActiveRef(`g:${home.id}`);
+      return undefined;
+    })
+    .catch(showErr('Couldn’t move that'));
   const renameGroup = (id: string, name: string) => api.renameGroup(id, name).then(refresh).catch(showErr('Couldn’t rename'));
   const renameSession = (id: string, name: string) => { if (name.trim()) api.renameSession(id, name.trim()).then(refresh).catch(showErr('Couldn’t rename')); };
   const deleteGroup = (id: string) => api.deleteGroup(id).then(() => { if (activeRef === `g:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the group'));
@@ -718,6 +738,7 @@ export default function App() {
                 cli={cliMap[s.cli]}
                 theme={theme}
                 zoom={zoom}
+                mode={paneMode}
                 focused={shown && sessions.length > 1 && s.id === focusedId}
                 visible={shown && deckVisible}
                 active={shown && deckVisible && s.id === focusedId}
@@ -965,6 +986,15 @@ export default function App() {
               </span>
             )}
             <span className="spacer" />
+            {/* Reader mode sits with zoom because it is the same kind of
+                setting: how you are looking at everything, not what any one
+                pane is. The content is identical either way — this is form. */}
+            <span className="seg modebar">
+              <button className={paneMode === 'terminal' ? 'on' : ''} title="The terminal itself"
+                onClick={() => showPaneMode('terminal')}>terminal</button>
+              <button className={paneMode === 'reader' ? 'on' : ''} title="Reader mode — the same session, laid out"
+                onClick={() => showPaneMode('reader')}>reader</button>
+            </span>
             <button className="zbtn" title="Zoom out" onClick={() => setZoom((z) => Math.max(50, z - 10))}>−</button>
             <button className="zlvl" title="Reset to 100%" onClick={() => setZoom(100)}>{zoom}%</button>
             <button className="zbtn" title="Zoom in" onClick={() => setZoom((z) => Math.min(200, z + 10))}>+</button>

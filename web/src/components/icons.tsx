@@ -285,3 +285,13 @@ export const HandoverGlyph = ({ className }: { className?: string }) => (
     <path d="M8.9 5.8 12.1 9l-3.2 3.2" />
   </G>
 );
+
+// Send: an upward arrow with a little more weight than the rest of the set —
+// it sits alone on a filled button, where 1.2px reads as thin.
+export const SendGlyph = ({ className }: { className?: string }) => (
+  <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.9" strokeLinejoin="round" strokeLinecap="round" aria-hidden="true">
+    <path d="M8 12.8V3.6" />
+    <path d="M4.1 7.4 8 3.4l3.9 4" />
+  </svg>
+);

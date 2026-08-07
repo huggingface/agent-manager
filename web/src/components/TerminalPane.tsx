@@ -7,6 +7,9 @@ import '@xterm/xterm/css/xterm.css';
 import type { Cli, Session } from '../types';
 import { STATE_LABEL } from '../types';
 import Logo from './Logo';
+import ConversationView from './conversation/ConversationView';
+import { isPassive } from '../types';
+import type { PaneMode } from '../lib/paneMode';
 import { CloseGlyph, RefreshGlyph } from './icons';
 
 const THEMES: Record<'light' | 'dark', ITheme> = {
@@ -177,7 +180,7 @@ if (typeof window !== 'undefined') {
 }
 
 export default function TerminalPane({
-  session, cli, theme, focused, visible, active, zoom = 100, dragId, isMobile, onDragActive, onFocus, onRename, onClose,
+  session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', dragId, isMobile, onDragActive, onFocus, onRename, onClose,
 }: {
   session: Session;
   cli?: Cli;
@@ -186,6 +189,7 @@ export default function TerminalPane({
   visible?: boolean;
   active?: boolean;
   zoom?: number;
+  mode?: PaneMode;          // app-wide reading mode, from the bottom bar
   dragId?: string;          // set when the pane can be rearranged (group view)
   isMobile?: boolean;       // show the on-screen control-key bar
   onDragActive?: (dragging: boolean) => void;
@@ -194,6 +198,11 @@ export default function TerminalPane({
   onClose: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  // Focus, unless the conversation is covering the terminal. Several paths grab
+  // it — becoming active, the header, the key bar — and some fire after the mode
+  // changes, so the guard lives with the call rather than with the switch.
+  const modeRef = useRef<PaneMode>('terminal');
+  const focusTerm = () => { if (modeRef.current !== 'reader') termRef.current?.focus(); };
   const frameRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const resyncRef = useRef<() => void>(() => {});
@@ -203,6 +212,12 @@ export default function TerminalPane({
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
   const [preview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
+  // The mode is app-wide (the bottom bar owns it, like zoom), but only an agent
+  // has a conversation to read: a shell is a shell, and files/trace panels are
+  // not this component's business at all.
+  const canRender = session.cli !== 'shell' && !isPassive(session.cli);
+  const reading = mode === 'reader' && canRender;
+  modeRef.current = reading ? 'reader' : 'terminal';
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
   const sendKeyRef = useRef<(d: string) => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
@@ -228,7 +243,7 @@ export default function TerminalPane({
     if (!text) return;
     setPasteOpen(false);
     termRef.current?.paste(text);
-    termRef.current?.focus();
+    focusTerm();
   };
 
   // Phones have no Ctrl+V, so the key-bar needs an explicit paste. Two paths,
@@ -779,10 +794,18 @@ export default function TerminalPane({
     const t = setTimeout(() => {
       claimRef.current();
       resyncRef.current();
-      termRef.current?.focus();
+      focusTerm();
     }, 0);
     return () => clearTimeout(t);
   }, [active]);
+
+  // In reader mode the terminal is covered but still mounted — and a mounted xterm
+  // with focus swallows every keystroke into the agent's TTY, invisibly. Hand
+  // focus back when the terminal is on top again.
+  useEffect(() => {
+    if (reading) termRef.current?.blur();
+    else if (focused) termRef.current?.focus();
+  }, [reading, focused]);
 
   // Focused panes tint toward THEIR agent's brand color, not the app accent.
   const tint = cli?.color;
@@ -802,7 +825,7 @@ export default function TerminalPane({
         draggable={!!dragId}
         onDragStart={dragId ? (e) => { e.dataTransfer.setData('text/plain', dragId); e.dataTransfer.effectAllowed = 'move'; onDragActive?.(true); } : undefined}
         onDragEnd={dragId ? () => onDragActive?.(false) : undefined}
-        onMouseDown={(e) => { if (!dragId) e.preventDefault(); onFocus?.(); termRef.current?.focus(); }}
+        onMouseDown={(e) => { if (!dragId) e.preventDefault(); onFocus?.(); focusTerm(); }}
       >
         <div className="ph-left">
           <Logo cli={session.cli} size={16} tint={tint} />
@@ -821,11 +844,21 @@ export default function TerminalPane({
         )}
         <div className="ph-right">
           <span className="ph-path" title={pathLabel}>{pathLabel}</span>
+          {/* The trace stops being a separate thing you open: it is this
+              session, read instead of watched. */}
           <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
       <div className="term-host" ref={frameRef}>
         <div className="term-fill" ref={hostRef} />
+        {/* Reader mode draws OVER the terminal rather than replacing it: xterm needs
+            layout to fit, and detaching tmux costs a repaint and can trip the
+            handoff path. The terminal stays mounted and connected underneath. */}
+        {reading && (
+          <div className="pane-reader" onMouseDown={(e) => e.stopPropagation()}>
+            <ConversationView session={session} paused={visible === false} isMobile={isMobile} />
+          </div>
+        )}
       </div>
       {isMobile && conn === 'connected' && (
         // Control keys the phone keyboard lacks — needed for TUI menus (model
@@ -840,7 +873,7 @@ export default function TerminalPane({
             <button
               key={label}
               className="tk-btn"
-              onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); sendKeyRef.current(seq); termRef.current?.focus(); }}
+              onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); sendKeyRef.current(seq); focusTerm(); }}
             >{label}</button>
           ))}
           {/* Unlike the key buttons this must NOT preventDefault: the clipboard
@@ -875,14 +908,14 @@ export default function TerminalPane({
             // Typed text (or a paste some browsers deliver as plain input) still
             // needs a way out; Enter sends, Shift+Enter keeps the newline.
             onKeyDown={(e) => {
-              if (e.key === 'Escape') { setPasteOpen(false); termRef.current?.focus(); }
+              if (e.key === 'Escape') { setPasteOpen(false); focusTerm(); }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 commitPaste((e.target as HTMLTextAreaElement).value);
               }
             }}
           />
-          <button className="tp-x" onClick={() => { setPasteOpen(false); termRef.current?.focus(); }}>cancel</button>
+          <button className="tp-x" onClick={() => { setPasteOpen(false); focusTerm(); }}>cancel</button>
         </div>
       )}
       {booting && preview && conn !== 'exited' && (

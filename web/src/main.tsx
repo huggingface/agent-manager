@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
 import './styles.css';
+import './conversation.css';
 
 // Last-resort guard: React unmounts the WHOLE tree on an uncaught render
 // error, which reads as a blank white page. Show a reload card instead.

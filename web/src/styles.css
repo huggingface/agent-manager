@@ -344,7 +344,10 @@ body {
 .ov-live textarea::placeholder { color: var(--muted); opacity: 0.7; }
 .ov-hint { font-size: 10.5px; color: var(--muted); flex: none; }
 /* send button — essential on mobile (no Shift+Enter), handy on desktop */
-.ov-send { flex: none; width: 26px; height: 26px; border: none; border-radius: 999px; background: var(--accent); color: var(--accent-fg); font-size: 14px; line-height: 1; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+/* A square key, not a bubble: it sits at the end of a line of type, and the
+   rounded pill read as a chat app rather than as a prompt. */
+.ov-send { flex: none; width: 26px; height: 26px; padding: 0; border: none; border-radius: 7px; background: var(--accent); color: var(--accent-fg); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.ov-send svg { width: 15px; height: 15px; }
 .ov-send:disabled { opacity: 0.5; cursor: default; }
 .ov-note { font-size: 11px; color: var(--danger); }
 
@@ -1067,6 +1070,10 @@ a.btn-ghost { text-decoration: none; }
 /* mobile stage top bar (back + agent chips) — rendered only on mobile */
 .mbar { display: flex; align-items: center; gap: 8px; padding: 0 0 8px; flex: none; }
 .mback { flex: none; font-size: 19px; padding-bottom: 3px; }
+/* Reading mode, in the zoom bar: the same weight as the controls beside it. */
+.modebar { flex: none; margin-right: 6px; }
+.modebar button { padding: 2px 8px; font-size: 10.5px; letter-spacing: 0.02em; }
+
 .mtitle { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mchips { display: flex; gap: 6px; overflow-x: auto; flex: 1; padding: 2px; }
 .mchip { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; flex: none; }
