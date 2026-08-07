@@ -49,7 +49,7 @@ if (!process.env.TERMUI_PUBLIC_DIR) {
 
 const backend = spawn('node', ['src/index.js'], {
   cwd: HERE,
-  env: { ...process.env, PORT: '7897', DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '' },
+  env: { ...process.env, PORT: '7897', DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '', AM_ALLOW_MISSING_ORIGIN: '1' },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let logs = '';

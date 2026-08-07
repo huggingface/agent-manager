@@ -52,7 +52,7 @@ const backend = spawn('node', ['src/index.js'], {
   // reached through localhost, and the origin guard should validate it as such.
   env: {
     ...process.env,
-    PORT: '7896', DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '',
+    PORT: '7896', DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '', AM_ALLOW_MISSING_ORIGIN: '1',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });

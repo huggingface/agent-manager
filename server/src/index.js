@@ -34,6 +34,7 @@ import { startWatchdog } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
+import { operationMiddleware, readOperations } from './operations.js';
 
 ensureDirs();
 refreshVersions();
@@ -170,6 +171,39 @@ app.use((req, res, next) => {
   return res.status(403).json({ error: 'locked', reason: 'public-space' });
 });
 
+// Every state-changing call has an attributable origin and a durable outcome.
+// The private Space has one human operator, represented by the stable
+// `operator` id. Local agents use their session id; remote agents use their
+// immutable remote name. The remote route fallback keeps already-running poll
+// loops compatible while newly generated prompts send the id explicitly.
+const resolveOperationOrigin = (raw, req) => {
+  if (raw === 'operator') {
+    return { id: 'operator', type: 'operator', name: process.env.SPACE_AUTHOR_NAME || process.env.AM_USER || 'operator' };
+  }
+  if (raw) {
+    const session = store.get(raw);
+    if (session) return { id: session.id, type: 'agent', name: session.name, cli: session.cli };
+    if (raw.startsWith('remote:')) {
+      const name = raw.slice('remote:'.length);
+      const remoteSession = store.list().find((s) => s.remote?.name === name);
+      if (remoteSession) return { id: raw, type: 'remote', name, cli: remoteSession.remote?.peer?.harness || 'remote' };
+    }
+    return null;
+  }
+  const match = req.path.match(/^\/api\/remote\/([^/]+)\/(?:hello|messages)$/);
+  if (!match) return null;
+  let name;
+  try { name = decodeURIComponent(match[1]); } catch { return null; }
+  const remoteSession = store.list().find((s) => s.remote?.name === name);
+  return remoteSession ? { id: `remote:${name}`, type: 'remote', name, cli: remoteSession.remote?.peer?.harness || 'remote' } : null;
+};
+app.use(operationMiddleware({
+  resolveOrigin: resolveOperationOrigin,
+  // Test servers explicitly opt out so old endpoint-focused fixtures do not
+  // have to pretend to be the operator. Production never sets this switch.
+  allowMissing: process.env.AM_ALLOW_MISSING_ORIGIN === '1',
+}));
+
 app.get('/api/visibility', (_req, res) => res.json(visibility()));
 
 app.get('/api/health', (_req, res) =>
@@ -178,6 +212,13 @@ app.get('/api/health', (_req, res) =>
 app.get('/api/clis', (_req, res) => res.json(cliCatalog()));
 
 app.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.debug === '1', req.query.provider || null)));
+
+// Newest first. The JSONL source lives under DATA_DIR; this bounded API is the
+// stable way for the operator or an agent to reconstruct manager operations.
+app.get('/api/operations', (req, res) => {
+  const before = typeof req.query.before === 'string' && req.query.before ? req.query.before : null;
+  res.json({ operations: readOperations(req.query.limit, before), generatedAt: new Date().toISOString() });
+});
 
 app.get('/api/traces', async (_req, res) => res.json(await buildTraces()));
 
@@ -1040,7 +1081,14 @@ Hermes — alongside plain shells and a file browser.
 The manager exposes a small HTTP API on \`localhost:${PORT}\`. You are \`$AM_ID\`
 (\`$AM_NAME\` is your display name). Every call that changes something takes
 \`?from=$AM_ID\` so the other agent, and the operator reading the log later, can
-tell who asked.
+tell who asked. The manager durably records these operations and their outcomes;
+prompt and file contents are hashed rather than copied into the audit log.
+
+To reconstruct recent manager operations (newest first):
+
+\`\`\`sh
+curl -s "http://localhost:${PORT}/api/operations?limit=100" | jq .operations
+\`\`\`
 
 ### See who is here
 \`\`\`sh
@@ -1166,7 +1214,7 @@ operator explicitly asked for it in their prompt (e.g. "notify me when the
 tests pass") — send exactly ONE message when that condition is met:
 
 \`\`\`sh
-curl -s -X POST http://localhost:${PORT}/api/notify \\
+curl -s -X POST "http://localhost:${PORT}/api/notify?from=$AM_ID" \\
   -H 'content-type: application/json' \\
   -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"<one-line outcome>\\"}"
 \`\`\`
@@ -1179,7 +1227,7 @@ For DELAYED notifications ("notify me in 10 minutes"), do not block on a long
 immediately (long-running foreground execs can destabilize some sessions):
 
 \`\`\`sh
-(sleep 600 && curl -s -X POST http://localhost:${PORT}/api/notify \\
+(sleep 600 && curl -s -X POST "http://localhost:${PORT}/api/notify?from=$AM_ID" \\
   -H 'content-type: application/json' \\
   -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"reminder\\"}") >/dev/null 2>&1 &
 \`\`\`
