@@ -84,7 +84,9 @@ export const CLIS = [
     withPrompt: (q) => `claude ${q}`,
     setup: setupHint('ANTHROPIC_API_KEY') },
   { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: 'codex',          cont: 'codex resume --last', resizeMode: 'repaint',
-    withPrompt: (q) => `codex ${q}`,
+    // `q` and image paths arrive shell-quoted from runner.commandFor(). Repeat
+    // -i because Codex's variadic flag would otherwise consume the prompt.
+    withPrompt: (q, images = []) => `codex${images.length ? ` ${images.map((image) => `-i ${image}`).join(' ')}` : ''} ${q}`,
     setup: setupHint('OPENAI_API_KEY') },
   { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', run: 'gemini',         cont: null, resizeMode: 'repaint',
     withPrompt: (q) => `gemini -i ${q}`, // -i = interactive session seeded with the prompt

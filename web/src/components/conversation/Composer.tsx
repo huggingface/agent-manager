@@ -11,7 +11,7 @@ import type { ClipboardEvent, KeyboardEvent, ReactNode, RefObject } from 'react'
 import { SendGlyph } from '../icons';
 
 export default function Composer({
-  draft, sending, isMobile, inputRef, className = '', above, onChange, onSend, onCancel, onPasteFiles,
+  draft, sending, isMobile, inputRef, className = '', above, canSendEmpty, onChange, onSend, onCancel, onPasteFiles,
 }: {
   draft: string;
   sending?: boolean;
@@ -20,6 +20,8 @@ export default function Composer({
   className?: string;
   /** Rendered directly above the line — an attachment strip, when there is one. */
   above?: ReactNode;
+  /** There is something to send even with an empty box — an attached file. */
+  canSendEmpty?: boolean;
   onChange: (v: string) => void;
   onSend: () => void;
   onCancel?: () => void;
@@ -66,7 +68,7 @@ export default function Composer({
         onFocus={(e) => { const el = e.currentTarget; setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300); }}
         onKeyDown={onKeyDown}
       />
-        {draft.trim() && (
+        {(draft.trim() || canSendEmpty) && (
           <button className="ov-send" title="Send" onClick={onSend} disabled={sending}><SendGlyph /></button>
         )}
       </div>

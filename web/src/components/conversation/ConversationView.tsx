@@ -17,6 +17,11 @@ import type { Session } from '../../types';
 import { fmtTok, splitExchanges } from './exchanges';
 import ExchangeView from './Exchange';
 import Composer from './Composer';
+import Attachments from '../Attachments';
+import {
+  filesFromTransfer, pendingAttachmentsFromFiles, revokePendingAttachments,
+  transferMayContainFile, uploadPendingAttachments, type PendingAttachment,
+} from '../../lib/attachments';
 
 /** How much of the tail RENDER mode reads. The server caps a page at 500. */
 export const RENDER_TAIL = 400;
@@ -54,6 +59,33 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState(false);
   const [sent, setSent] = useState<{ text: string; at: number } | null>(null);
+  // Attachments, exactly as the card does them (PR #39): one composer, one
+  // behaviour. The reader is where you are reading — it is where you paste.
+  const [images, setImages] = useState<PendingAttachment[]>([]);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const [dropActive, setDropActive] = useState(false);
+  const imagesRef = useRef<PendingAttachment[]>([]);
+  useEffect(() => { imagesRef.current = images; }, [images]);
+  useEffect(() => () => revokePendingAttachments(imagesRef.current), []);
+  const addImages = (files: File[]) => {
+    if (sending || !files.length) return;
+    const next = pendingAttachmentsFromFiles(files, imagesRef.current.length);
+    const merged = [...imagesRef.current, ...next.attachments];
+    imagesRef.current = merged;
+    setImages(merged);
+    setImageError(next.error);
+  };
+  const removeImage = (key: string) => {
+    if (sending) return;
+    setImages((current) => {
+      const gone = current.find((i) => i.key === key);
+      if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
+      const next = current.filter((i) => i.key !== key);
+      imagesRef.current = next;
+      return next;
+    });
+    setImageError(null);
+  };
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const live = session.state === 'working' && !paused;
@@ -93,19 +125,38 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
     (x?.prompt?.blocks || []).filter((b) => b.type === 'text').map((b) => ('text' in b ? b.text : '')).join('').trim();
   if (sent && promptOf(last) === sent.text) setSent(null);
 
+  const updateImage = (key: string, patch: Partial<PendingAttachment>) => {
+    setImages((current) => {
+      const next = current.map((i) => (i.key === key ? { ...i, ...patch } : i));
+      imagesRef.current = next;
+      return next;
+    });
+  };
   const send = async () => {
     const text = draft.trim();
-    if (!text || sending) return;
+    const batch = imagesRef.current;
+    if ((!text && !batch.length) || sending) return;
     // Optimistic, and it has to be: the prompt belongs on screen the moment you
     // send it, not when the POST comes back. Waiting for the round trip left a
     // beat where the box was still full and nothing had happened. If the send
     // fails, the echo is withdrawn and the text goes back in the box.
     setSending(true); setFailed(false);
-    setDraft(''); setSent({ text, at: Date.now() });
+    // Optimistic for the text; an upload has to finish before the prompt can
+    // reference it, so a batch shows as sending rather than as sent.
+    if (!batch.length) { setDraft(''); setSent({ text, at: Date.now() }); }
     if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     stick.current = true;
     try {
-      await api.sendInput(session.id, text);
+      const attached = await uploadPendingAttachments(session.id, batch, updateImage);
+      await api.sendInput(session.id, text, attached.map((a) => a.id));
+      if (batch.length) {
+        setDraft('');
+        revokePendingAttachments(batch);
+        imagesRef.current = [];
+        setImages([]);
+        setImageError(null);
+        setSent({ text: text || `sent ${batch.length} file${batch.length > 1 ? 's' : ''}`, at: Date.now() });
+      }
       load();
     } catch {
       setSent(null); setDraft(text); setFailed(true);
@@ -262,17 +313,34 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
       </div>
 
       {!readOnly && (
-        <Composer
-          className="cxv-live"
-          draft={draft}
-          sending={sending}
-          isMobile={isMobile}
-          inputRef={inputRef}
-          onChange={setDraft}
-          onSend={send}
-        />
+        <div
+          className={`ov-composer cxv-composer${dropActive ? ' image-drop' : ''}`}
+          onDragEnter={(e) => { if (!sending && transferMayContainFile(e.dataTransfer)) { e.preventDefault(); setDropActive(true); } }}
+          onDragOver={(e) => { if (!sending && transferMayContainFile(e.dataTransfer)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } }}
+          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropActive(false); }}
+          onDrop={(e) => {
+            if (sending || !transferMayContainFile(e.dataTransfer)) return;
+            e.preventDefault(); e.stopPropagation(); setDropActive(false);
+            addImages(filesFromTransfer(e.dataTransfer));
+          }}
+        >
+          <Attachments attachments={images} disabled={sending} onFiles={addImages} onRemove={removeImage} />
+          <Composer
+            className="cxv-live"
+            draft={draft}
+            sending={sending}
+            isMobile={isMobile}
+            inputRef={inputRef}
+            canSendEmpty={images.length > 0}
+            onChange={setDraft}
+            onSend={send}
+            onPasteFiles={addImages}
+          />
+        </div>
       )}
-      {failed && <div className="ov-note cxv-note">failed to reach the agent</div>}
+      {(imageError || failed) && (
+        <div className="ov-note cxv-note" role="alert">{imageError || 'failed to reach the agent'}</div>
+      )}
 
       <div className="cxv-foot mono">
         <span className="cxv-path" title={page.cwd || undefined}>

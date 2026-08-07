@@ -102,7 +102,13 @@ try {
   }));
   await sleep(600);
 
-  browser = await chromium.launch({ headless: true });
+  const bakedChromium = '/opt/pw-browsers/chromium-1208/chrome-linux64/chrome';
+  const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+    || (fs.existsSync(bakedChromium) ? bakedChromium : undefined);
+  browser = await chromium.launch({
+    headless: true,
+    ...(chromiumExecutable ? { executablePath: chromiumExecutable } : {}),
+  });
   const context = await browser.newContext({
     viewport: { width: 1280, height: 800 },
     permissions: ['clipboard-read', 'clipboard-write'],

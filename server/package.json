@@ -13,8 +13,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test:ui": "node terminal-ui.test.mjs",
-    "test": "node test/repin.test.mjs && node test/opencode-resume.test.mjs && node test/terminal-modes.test.mjs && node test/trace-tail.test.mjs && node migration.test.mjs && node resize.test.mjs"
+    "test:ui": "node terminal-ui.test.mjs && node screenshot-input.test.mjs",
+    "test:screenshots": "node screenshot-input.test.mjs",
+    "test": "node test/attachments.test.mjs && node test/repin.test.mjs && node test/opencode-resume.test.mjs && node test/terminal-modes.test.mjs && node test/trace-tail.test.mjs && node migration.test.mjs && node resize.test.mjs"
   },
   "engines": {
     "node": ">=20.19"
