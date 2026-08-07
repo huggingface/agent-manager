@@ -16,7 +16,10 @@ import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
 import * as demo from './demo.js';
-import { attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, isRunning, capturePane, ghosttyReady, ghosttyError, installClaudeRepinHook } from './runner.js';
+import {
+  attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, isRunning,
+  capturePane, ghosttyReady, ghosttyError, installClaudeRepinHook, installOpencodeRepinPlugin,
+} from './runner.js';
 
 // Control frames ride the terminal socket behind a leading NUL pair, which real
 // PTY output never begins with. Same sentinel the old copy-mode hint used, so the
@@ -38,10 +41,14 @@ store.init();
 groups.init();
 order.init();
 demo.init();
-// Claude panes report conversation resets (e.g. /clear) through a SessionStart
-// hook, so the re-pin watcher can follow them even in shared folders where the
-// transcript scan must refuse to guess. Non-fatal if it can't be installed.
+// Lifecycle adapters report conversation resets (e.g. /clear) with the exact
+// id, so re-pin watchers can follow them even in shared folders where storage
+// discovery must refuse to guess. Both installers are non-fatal; the existing
+// fallback remains available if either cannot be installed.
 installClaudeRepinHook();
+// OpenCode's global plugin reports the root session chosen by /new (/clear),
+// and the next prompt after switching to an existing session.
+installOpencodeRepinPlugin();
 
 // One-time migration to the explicit-path model: sessions used to own a folder
 // named after them (renamed along with them), or inherit their group's shared

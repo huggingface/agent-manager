@@ -414,12 +414,11 @@ function readOpencode() {
   return rows;
 }
 
-// Newest opencode conversation in `directory` created at/after `sinceMs` and
-// not already claimed by another session. The runner calls this shortly after
-// launch to PIN a session to its own `ses_…` id — opencode has no
-// per-conversation handle of its own (unlike codex's rollout uuid), so two
-// agents sharing a folder would otherwise cross-attribute. Read straight from
-// the db (not the memoized rows) so a just-created session is seen immediately.
+// Fallback discovery for installations where the exact-event plugin is absent:
+// newest opencode conversation in `directory` created at/after `sinceMs` and
+// not already claimed by another session. This is deliberately used only for
+// unshared folders; same-folder panes cannot safely attribute a newest row.
+// Read straight from the db so a just-created session is seen immediately.
 export function captureOpencodeSession(directory, sinceMs, claimed) {
   if (!DatabaseSync || !directory) return null;
   let db;
@@ -446,6 +445,22 @@ export function opencodeSessionExists(id) {
   try {
     return !!db.prepare('select 1 from session where id = ?').get(id);
   } catch { return false; } finally { try { db.close(); } catch {} }
+}
+
+// Exact row metadata for a session id reported by the opencode plugin. The
+// plugin tells us which id the pane is using; the database remains the local
+// authority for its folder and whether it is a root conversation rather than a
+// task/subagent child.
+export function opencodeSessionInfo(id) {
+  if (!DatabaseSync || !id) return null;
+  let db;
+  try { db = new DatabaseSync(opencodeDbPath(), { readOnly: true }); } catch { return null; }
+  try {
+    const row = db.prepare(
+      'select id, directory, parent_id as parentId from session where id = ?',
+    ).get(id);
+    return row ? { id: row.id, directory: row.directory || null, parentId: row.parentId || null } : null;
+  } catch { return null; } finally { try { db.close(); } catch {} }
 }
 
 // ---------- Hermes (SQLite: ~/.hermes/state.db, WAL) ----------
