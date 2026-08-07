@@ -10,12 +10,13 @@
 // is 2–3 rows, so the DOM stays small, but the measured-height machinery in
 // TraceView is what makes it survive a 5,000-turn session.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import * as api from '../../api';
 import type { TracePage, TraceTurn } from '../../api';
 import type { Session } from '../../types';
 import { fmtTok, splitExchanges } from './exchanges';
 import ExchangeView from './Exchange';
-import { SendGlyph } from '../icons';
+import Composer from './Composer';
 
 /** How much of the tail RENDER mode reads. The server caps a page at 500. */
 export const RENDER_TAIL = 400;
@@ -25,13 +26,15 @@ const fmtNum = (n: number) => n.toLocaleString();
 const fmtUsage = (u?: { in: number; out: number } | null) =>
   (u ? `${fmtTok(u.in)}↓ ${fmtTok(u.out)}↑` : '');
 
-export default function ConversationView({ session, paused, isMobile, readOnly, onHandover }: {
+export default function ConversationView({ session, paused, isMobile, readOnly, zoom = 100, onHandover }: {
   session: Session;
   /** The pane is off-screen: stop asking the server for a trace nobody sees. */
   paused?: boolean;
   isMobile?: boolean;
   /** A trace with no agent behind it — a shared file, an import. Read-only. */
   readOnly?: boolean;
+  /** The app zoom. The terminal underneath obeys it, so the reader must too. */
+  zoom?: number;
   onHandover?: () => void;
 }) {
   const [page, setPage] = useState<TracePage | null>(null);
@@ -93,14 +96,21 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   const send = async () => {
     const text = draft.trim();
     if (!text || sending) return;
+    // Optimistic, and it has to be: the prompt belongs on screen the moment you
+    // send it, not when the POST comes back. Waiting for the round trip left a
+    // beat where the box was still full and nothing had happened. If the send
+    // fails, the echo is withdrawn and the text goes back in the box.
     setSending(true); setFailed(false);
+    setDraft(''); setSent({ text, at: Date.now() });
+    if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
+    stick.current = true;
     try {
       await api.sendInput(session.id, text);
-      setDraft(''); setSent({ text, at: Date.now() });
-      if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
-      stick.current = true;
       load();
-    } catch { setFailed(true); window.setTimeout(() => setFailed(false), 4000); }
+    } catch {
+      setSent(null); setDraft(text); setFailed(true);
+      window.setTimeout(() => setFailed(false), 4000);
+    }
     setSending(false);
   };
   const q = query.trim().toLowerCase();
@@ -171,10 +181,23 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
     if (el && live && stick.current) el.scrollTop = el.scrollHeight;
   }, [turns, live]);
 
+  // Open on the newest turn, working or not. Reader mode mounts when you flip
+  // the switch, so landing at the top of a 400-turn window meant scrolling
+  // through a month of work to reach the thing you flipped it to read. The
+  // second pass catches tables and code blocks that lay themselves out late.
+  const landed = useRef(false);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el || landed.current || !turns.length) return;
+    landed.current = true;
+    el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(() => { if (stick.current) el.scrollTop = el.scrollHeight; });
+  }, [turns]);
+
   if (!page) return <div className="cxv-empty mono">{error || 'reading the trace…'}</div>;
 
   return (
-    <div className="cxv">
+    <div className="cxv" style={{ '--cx-zoom': zoom / 100 } as CSSProperties}>
       {/* The reader's own controls, on their own row: on a phone the pane
           header above has no spare width. */}
       <div className="cxv-bar mono">
@@ -239,25 +262,15 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
       </div>
 
       {!readOnly && (
-        <div className="ov-live cxv-live">
-          <span className="ov-p mono">❯</span>
-          <textarea
-            ref={inputRef}
-            rows={1}
-            value={draft}
-            disabled={sending}
-            placeholder={sending ? 'sending…' : 'reply…'}
-            autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
-            onChange={(e) => { setDraft(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
-            onKeyDown={(e) => {
-              // Desktop: Enter sends, Shift+Enter newlines. Mobile keyboards
-              // cannot do Shift+Enter, so there the button sends.
-              if (e.key === 'Enter' && !e.shiftKey && !isMobile) { e.preventDefault(); send(); }
-              if (e.key === 'Escape') { setDraft(''); inputRef.current?.blur(); }
-            }}
-          />
-          {draft.trim() && <button className="ov-send" title="Send" onClick={send} disabled={sending}><SendGlyph /></button>}
-        </div>
+        <Composer
+          className="cxv-live"
+          draft={draft}
+          sending={sending}
+          isMobile={isMobile}
+          inputRef={inputRef}
+          onChange={setDraft}
+          onSend={send}
+        />
       )}
       {failed && <div className="ov-note cxv-note">failed to reach the agent</div>}
 

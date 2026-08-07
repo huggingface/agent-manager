@@ -236,10 +236,12 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
     }
   }, [src, bump]);
 
+  const landed = useRef(false);
   useEffect(() => {
     turns.current = [];
     heights.current = [];
     setHead(null);
+    landed.current = false;
     loadPage(0);
   }, [srcKey, loadPage]);
 
@@ -311,6 +313,19 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
     if (Math.abs(el.scrollTop - target) > 2) el.scrollTop = target;
     if (++tries.current > 8) wanted.current = null;
   }, [offsets, heightsVersion, head]);
+
+  // Open on the end of the trace. A trace is read the way a log is read —
+  // newest first — and page 0 of a 4,000-turn transcript is last month. The
+  // first page tells us `total`; from there it is the same two-step landing the
+  // prompt nav uses, so estimated row heights get corrected as rows measure.
+  useEffect(() => {
+    if (landed.current || !head?.total) return;
+    landed.current = true;
+    const last = head.total - 1;
+    const page = Math.floor(last / PAGE);
+    if (turns.current[last]) goToTurn(last);
+    else loadPage(page).then(() => goToTurn(last));
+  }, [head, goToTurn, loadPage]);
 
   const prompts = head?.userTurns || [];
   const goPrompt = (dir: -1 | 1) => {

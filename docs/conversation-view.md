@@ -203,6 +203,12 @@ pane with nothing to render (a shell) simply stays a terminal.
   The two modes show the *same content*; what differs is the form, which is why the labels name
   the form. "Conversation" would have described the terminal just as well.
 - The mode is a **view preference**, kept in `localStorage` for the app, not in the store.
+- **Nothing of the terminal's may paint over the reader.** Its covers — `restoring last view…`,
+  `starting claude…`, `stopped · output preserved` — sit at `z-index: 4` and were drawn straight
+  over the conversation, so a reconnect turned the reader into a terminal screen with a reader
+  toolbar on top. They are gated off while reading (they belong to the terminal, and the reader
+  is reading a file that does not care whether the PTY is up), and the overlay now outranks
+  anything the terminal can raise.
 - The terminal element stays mounted and connected underneath; the reader draws over it. Toggling
   must not detach tmux — a reattach costs a repaint and can trip the handoff path
   (`HANDOFF_CODE`, `TerminalPane.tsx`). **Verify** this before shipping: xterm needs layout to
@@ -235,6 +241,16 @@ pane with nothing to render (a shell) simply stays a terminal.
   tool call is unusable while a task runs; one that never moves makes you chase it.
 - **The prompt band sticks to the top** while you read a long turn. What you want overhead deep
   in someone's 67-step answer is the question it is answering — not a row of numbers.
+- **The reader answers to the zoom bar.** It covers a terminal whose font the zoom keys scale,
+  so a reader that ignored them made zoom look broken. The conversation and the reply line
+  scale (`zoom: var(--cx-zoom)`); the toolbar and the path footer are chrome and stay put.
+- **It opens on the newest turn** — in the card, in the reader, and in the trace viewer, which
+  used to open on page 0, i.e. last month. In the viewer that means landing on `total - 1` by
+  the same two-step the prompt nav uses, because row heights start as estimates.
+- **The prompt band spans the pane.** Reaching into the left gutter but stopping at the text
+  column on the right made it read as a card floating over the answer rather than as the head of
+  it. Full bleed both sides; the meta row sits tight under the band it belongs to, and one
+  exchange ends well before the next begins.
 - **The reader fills the pane.** A fixed reading column left a gutter of nothing on each
   side while the prompt band still spanned the full width, so the two disagreed about where the
   conversation began. The pane is the measure: narrow the pane and the conversation narrows.
@@ -242,7 +258,14 @@ pane with nothing to render (a shell) simply stays a terminal.
   card has always known that, and a rendered session that could only be read would send you back
   to the terminal to type. It is the card's own composer (`.ov-live`), the same `sendInput`, and the
   same optimistic echo: your prompt appears at the bottom with a `working` line until the
-  transcript catches up. Only a trace with **no agent behind it** — a shared file, an import — is
+  transcript catches up. Optimistic means *before* the POST returns — it used to wait for the
+  round trip, which left a beat where the box was still full and nothing had happened. A failed
+  send withdraws the echo and puts the text back in the box.
+
+  Both surfaces use one `Composer` component. A composer accretes features — paste-to-attach
+  (PR #39), history recall, a slash-command menu — and duplicated markup is how one surface
+  quietly gets them and the other does not. `onPasteFiles` and `above` are the seam #39 plugs
+  into; until it lands, neither surface accepts a pasted screenshot. Only a trace with **no agent behind it** — a shared file, an import — is
   read-only, which is what `readOnly` is for.
 - **Share** moves here from the sidebar. One session, one place.
 - **Handover** ("continue from this trace in a new agent") lives in the conversation footer, beside
@@ -396,6 +419,16 @@ components against **captured conversations** in phone, tablet and desktop frame
 themes, with six scenarios — done, running, just-sent, failed tool, truncated, never-prompted.
 Fixtures are captured by running the app's own reader (`readTraceByPath`), so the harness cannot
 drift from the payload shape.
+
+A second local harness (`web/app-shots.mjs`, with `web/fixtures.mjs` for its fleet — both
+excluded for the same reason) drives a *running* instance rather than rendered components: it
+asserts what the UI actually does on click. Sixteen checks today — the list view reads no traces
+and opening a card reads exactly one, `full history ↗` flips an already-open pane, focus stays
+out of the covered terminal, the reader opens on the newest turn and answers to the zoom bar,
+the bottom bar is one height, a sent prompt echoes before the POST returns, a shell keeps its
+terminal, a failed refresh keeps the conversation, merging two agents switches to their group
+layout, and the trace viewer opens at the end. `fixtures.mjs` writes a Claude transcript and the
+sessions to read it from, so the counts it asserts are the same on every machine.
 
 It also **replays a turn block by block** — a tool call lands, its result comes back, thinking
 between them, the answer only at the end — which is how the live rules in §3.2 and §3.3 were

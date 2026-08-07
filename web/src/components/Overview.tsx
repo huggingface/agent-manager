@@ -6,7 +6,7 @@ import type { Cli, OverviewFilter, Session, SessionState, Tree } from '../types'
 import { isPassive } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import Logo from './Logo';
-import { SendGlyph } from './icons';
+import Composer from './conversation/Composer';
 import ExchangeView from './conversation/Exchange';
 import { writePaneMode } from '../lib/paneMode';
 import { splitExchanges } from './conversation/exchanges';
@@ -141,15 +141,20 @@ export function Card({ s, color, pending, isMobile, onOpen, onClose }: {
   const send = async () => {
     const text = draft.trim();
     if (!text || sending) return;
+    // Optimistic — see ConversationView.send: the echo goes up first, and is
+    // withdrawn if the send fails. The card and the reader answer the same way
+    // because they are the same composer.
     setSending(true);
     setFailed(false);
+    setDraft('');
+    setSent({ text, at: Date.now() });
+    setHistIdx(0);
+    if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     try {
       await api.sendInput(s.id, text);
-      setDraft('');
-      setSent({ text, at: Date.now() });
-      setHistIdx(0);
-      if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     } catch {
+      setSent(null);
+      setDraft(text);
       setFailed(true);
       setTimeout(() => setFailed(false), 4000);
     }
@@ -284,31 +289,14 @@ export function Card({ s, color, pending, isMobile, onOpen, onClose }: {
         )}
       </div>
 
-      <div className="ov-live">
-        <span className="ov-p mono">❯</span>
-        <textarea
-          ref={inputRef}
-          rows={1}
-          value={draft}
-          disabled={sending}
-          placeholder={sending ? 'sending…' : 'reply…'}
-          autoComplete="off"
-          autoCorrect="off"
-          autoCapitalize="off"
-          spellCheck={false}
-          onChange={(e) => { setDraft(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
-          // iOS doesn't resize the layout for the keyboard — scroll the
-          // input into view once the keyboard has animated in.
-          onFocus={(e) => { const el = e.currentTarget; setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300); }}
-          onKeyDown={(e) => {
-            // Desktop: Enter sends, Shift+Enter newlines. Mobile keyboards can't
-            // do Shift+Enter, so Enter always newlines there and the button sends.
-            if (e.key === 'Enter' && !e.shiftKey && !isMobile) { e.preventDefault(); send(); }
-            if (e.key === 'Escape') { setDraft(''); inputRef.current?.blur(); }
-          }}
-        />
-        {draft.trim() && <button className="ov-send" title="Send" onClick={send} disabled={sending}><SendGlyph /></button>}
-      </div>
+      <Composer
+        draft={draft}
+        sending={sending}
+        isMobile={isMobile}
+        inputRef={inputRef}
+        onChange={setDraft}
+        onSend={send}
+      />
       {failed && <div className="ov-note">failed to reach the agent</div>}
     </div>
   );
