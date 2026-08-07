@@ -4,7 +4,7 @@ import pty from 'node-pty';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { remoteState, setPaused } from './remote.js';
-import { cliById, isRemote, STATE_DIR, WORKSPACES_DIR } from './config.js';
+import { cliById, isRemote, PORT, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
 import { captureOpencodeSession, opencodeSessionExists, readTrace } from './traces.js';
 import {
@@ -1428,6 +1428,10 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     AM_ID: session.id,
     AM_USER,
     AM_ROOT: WORKSPACES_DIR, // prompt shows $PWD relative to this
+    // The port the agent API answers on. PORT is configurable, so a session
+    // must be able to READ it rather than trust a number baked into a doc when
+    // that doc was generated.
+    AM_PORT: String(PORT),
   };
   const term = pty.spawn('bash', ['-lc', full], {
     name: 'xterm-256color', cols, rows, cwd: workdir, env,
