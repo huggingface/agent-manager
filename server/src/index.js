@@ -1127,7 +1127,7 @@ refused rather than created, so a typo can't quietly fragment the sidebar. Make
 the group first, then spawn into it:
 
 \`\`\`sh
-GID=$(curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/groups" \\
+GID=$(curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/groups?from=$AM_ID" \\
   -H 'content-type: application/json' -d '{"name":"taskforce"}' | jq -r .id)
 
 curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents?cli=claude&group=$GID&from=$AM_ID" \\
@@ -1136,8 +1136,9 @@ curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents?cli=cl
 
 Spawn them one at a time, each with its own prompt, reusing \`$GID\`. Prefer the
 returned id over the name here: nothing stops two groups sharing a name, and
-\`group=<name>\` takes the first match. Creating a group is a manager operation
-rather than an agent-to-agent one, so it takes no \`?from=\`.
+\`group=<name>\` takes the first match. Group creation changes manager state, so
+it carries \`?from=$AM_ID\` like every other mutating agent call; this preserves
+the origin for the operation log.
 
 ### Stop an agent
 \`\`\`sh
