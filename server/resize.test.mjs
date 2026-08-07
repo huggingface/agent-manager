@@ -40,10 +40,17 @@ const waitFor = async (fn, timeout = 8000) => {
   return false;
 };
 
+// A test server must not publish skills. `SPACE_ID` is set when this runs inside
+// the Space itself, and it makes generateEnvSkill() fan the environment skill out
+// into every live agent's skills dir — from THIS checkout's template, over the
+// copies the running backend wrote. Those dirs are outside DATA_DIR, so a
+// throwaway DATA_DIR does not contain the damage. Strip both switches.
+const { SPACE_ID, AM_DISTRIBUTE_SKILLS, ...BASE_ENV } = process.env;
+
 const srv = spawn('node', ['src/index.js'], {
   cwd: HERE,
   env: {
-    ...process.env,
+    ...BASE_ENV,
     PORT: String(PORT),
     DATA_DIR,
     AM_BASHRC: '/nonexistent',

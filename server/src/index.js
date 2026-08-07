@@ -495,16 +495,24 @@ app.post('/api/agents', promptBody, (req, res) => {
   if (!prompt) return res.status(400).json({ error: 'a spawned agent needs a task — send the prompt as the request body' });
   // Default to the caller's own folder: peers usually work on the same thing.
   const where = typeof q.path === 'string' && q.path.trim() ? q.path : (from.session.path ?? from.session.id);
+  // …and into the caller's own group, by the same reasoning: a peer spawned to
+  // work alongside you belongs beside you in the sidebar, not loose at the top
+  // of it. ?group= overrides (id or display name); ?group=none opts out.
+  const g = groups.resolveSpawnGroup(q.group, from.session.id);
+  if (g.error) return res.status(400).json({ error: g.error });
   const s = createSession({
     name: typeof q.name === 'string' ? q.name : '',
     cli,
+    groupId: g.groupId,
     path: where,
     prompt: `[message from ${from.session.name}:] ${prompt}`,
   });
   if (!s) return res.status(400).json({ error: 'bad path' });
   if (s.error) return res.status(400).json({ error: s.error });
+  const joined = g.groupId ? groups.get(g.groupId) : null;
   res.status(201).json({
     id: s.id, name: s.name, cli: s.cli, path: s.path, workdir: workspacePath(s.path),
+    group: joined ? joined.name : null,
     ...(cat.ready ? {} : { warning: `${def.label} has no credential configured — it may stop at a sign-in prompt` }),
   });
 });
@@ -1037,14 +1045,21 @@ Hermes — alongside plain shells and a file browser.
 - You can see them, watch them, and talk to them — see the next section.
 
 ## Working with the other agents
-The manager exposes a small HTTP API on \`localhost:${PORT}\`. You are \`$AM_ID\`
+The manager exposes a small HTTP API on \`localhost:\${AM_PORT:-${PORT}}\`. You are \`$AM_ID\`
 (\`$AM_NAME\` is your display name). Every call that changes something takes
 \`?from=$AM_ID\` so the other agent, and the operator reading the log later, can
 tell who asked.
 
+Your session exports the port as \`$AM_PORT\` — read it rather than trusting a
+number you remember, and check it before you believe an empty answer: \`curl -s\`
+to a port nothing is listening on prints **nothing at all**, and in some agent
+sandboxes it exits 0 rather than failing. A wrong port therefore reads as "the
+roster is empty, I have no peers" instead of an error. \`curl -sS --fail\` will
+tell you what actually happened.
+
 ### See who is here
 \`\`\`sh
-curl -s "http://localhost:${PORT}/api/agents?from=$AM_ID" | jq .
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents?from=$AM_ID" | jq .
 \`\`\`
 Each entry carries \`id\`, \`name\`, \`cli\`, \`state\`, \`workdir\`, \`sharesFolderWith\`,
 a one-line \`lastPrompt\`/\`lastAnswer\`, \`recentFiles\`, and \`trace\` — the path to
@@ -1059,8 +1074,8 @@ digest for one agent. Read \`state\` before you do anything:
 
 ### Watch instead of asking
 \`\`\`sh
-curl -s "http://localhost:${PORT}/api/agents/$ID/tail?lines=120" | jq -r .text
-curl -s "http://localhost:${PORT}/api/agents/$ID/wait?timeout=120"   # blocks
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/tail?lines=120" | jq -r .text
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=120"   # blocks
 \`\`\`
 \`tail\` returns that agent's screen and scrollback — exactly what a human would
 see in its pane. \`wait\` blocks until it stops working (default: any of
@@ -1075,7 +1090,7 @@ loop asking it whether it's done.
 ### Send an agent a prompt
 Send the text as the request **body** so quoting and newlines never bite you:
 \`\`\`sh
-curl -s -X POST "http://localhost:${PORT}/api/agents/$ID/prompt?from=$AM_ID" \\
+curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/prompt?from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary @- <<'EOF'
 Please run the test suite in your folder and fix whatever fails.
 EOF
@@ -1099,20 +1114,42 @@ Rules that matter, because nothing enforces them for you:
 
 ### Launch a new agent
 \`\`\`sh
-curl -s -X POST "http://localhost:${PORT}/api/agents?cli=claude&name=reviewer&from=$AM_ID" \\
+curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents?cli=claude&name=reviewer&from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary @- <<'EOF'
 Review the diff in /data/workspaces/api and report anything that would break in production.
 EOF
 \`\`\`
 \`cli\` is required (the roster's \`clis\` array lists what's installed and
 credentialed). \`path\` defaults to **your own folder**; pass it to put the new
-agent somewhere else. The prompt is required — it starts working on it
+agent somewhere else. \`group\` likewise defaults to **your own group**, so the
+new agent lands beside you in the sidebar — pass \`group=<name>\` to put it in a
+different one (the names are the \`group\` field in the roster), or \`group=none\`
+to leave it ungrouped. The prompt is required — it starts working on it
 immediately. Spawn one agent for one clearly separable job; several agents in
 one folder is fine, but this Space is a small CPU box, so don't build a fleet.
 
+**Into a NEW group** — e.g. "start four agents in a group called taskforce".
+\`group=\` only ever selects a group that already exists; an unknown name is
+refused rather than created, so a typo can't quietly fragment the sidebar. Make
+the group first, then spawn into it:
+
+\`\`\`sh
+GID=$(curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/groups?from=$AM_ID" \\
+  -H 'content-type: application/json' -d '{"name":"taskforce"}' | jq -r .id)
+
+curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents?cli=claude&group=$GID&from=$AM_ID" \\
+  -H 'content-type: text/plain' --data-binary 'Draft the migration plan.'
+\`\`\`
+
+Spawn them one at a time, each with its own prompt, reusing \`$GID\`. Prefer the
+returned id over the name here: nothing stops two groups sharing a name, and
+\`group=<name>\` takes the first match. Group creation changes manager state, so
+it carries \`?from=$AM_ID\` like every other mutating agent call; this preserves
+the origin for the operation log.
+
 ### Stop an agent
 \`\`\`sh
-curl -s -X POST "http://localhost:${PORT}/api/agents/$ID/stop?from=$AM_ID"
+curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/stop?from=$AM_ID"
 \`\`\`
 **Only when the operator asked you to.** It kills that agent's CLI mid-thought.
 Files and conversation survive, and a later prompt resumes it, but work in
@@ -1124,7 +1161,7 @@ a GPU box — not in this container. They appear in the roster like anyone else 
 you message them the same way:
 
 \`\`\`sh
-curl -s -X POST "http://localhost:${PORT}/api/agents/$ID/prompt?from=$AM_ID" \\
+curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/prompt?from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary 'can you check the tokenizer?'
 \`\`\`
 
@@ -1166,7 +1203,7 @@ operator explicitly asked for it in their prompt (e.g. "notify me when the
 tests pass") — send exactly ONE message when that condition is met:
 
 \`\`\`sh
-curl -s -X POST http://localhost:${PORT}/api/notify \\
+curl -s -X POST http://localhost:\${AM_PORT:-${PORT}}/api/notify \\
   -H 'content-type: application/json' \\
   -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"<one-line outcome>\\"}"
 \`\`\`
@@ -1179,7 +1216,7 @@ For DELAYED notifications ("notify me in 10 minutes"), do not block on a long
 immediately (long-running foreground execs can destabilize some sessions):
 
 \`\`\`sh
-(sleep 600 && curl -s -X POST http://localhost:${PORT}/api/notify \\
+(sleep 600 && curl -s -X POST http://localhost:\${AM_PORT:-${PORT}}/api/notify \\
   -H 'content-type: application/json' \\
   -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"reminder\\"}") >/dev/null 2>&1 &
 \`\`\`
