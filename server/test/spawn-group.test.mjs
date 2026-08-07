@@ -64,6 +64,15 @@ console.log('\na non-string group is ignored rather than stringified');
 check('array falls back to inherit', groups.resolveSpawnGroup(['a', 'b'], CALLER).groupId, cowrite.id);
 check('object falls back to inherit', groups.resolveSpawnGroup({ x: 1 }, CALLER).groupId, cowrite.id);
 
+// The skill tells agents to create a group and then spawn into the id it
+// returns, rather than the name. This is why: nothing dedupes group names.
+console.log('\nduplicate names resolve to the first match; ids stay exact');
+const dupe = groups.create('Co-write');
+check('two groups can share a name', groups.list().filter((x) => x.name === 'Co-write').length, 2);
+check('by name takes the first', groups.resolveSpawnGroup('Co-write', LONER).groupId, cowrite.id);
+check('by id reaches the second', groups.resolveSpawnGroup(dupe.id, LONER).groupId, dupe.id);
+groups.remove(dupe.id);
+
 console.log('\nthe resolved id actually places the session (what the route then does)');
 const spawned = 'spawned-1';
 groups.attach(groups.resolveSpawnGroup(undefined, CALLER).groupId, spawned);

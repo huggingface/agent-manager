@@ -1121,6 +1121,24 @@ to leave it ungrouped. The prompt is required — it starts working on it
 immediately. Spawn one agent for one clearly separable job; several agents in
 one folder is fine, but this Space is a small CPU box, so don't build a fleet.
 
+**Into a NEW group** — e.g. "start four agents in a group called taskforce".
+\`group=\` only ever selects a group that already exists; an unknown name is
+refused rather than created, so a typo can't quietly fragment the sidebar. Make
+the group first, then spawn into it:
+
+\`\`\`sh
+GID=$(curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/groups" \\
+  -H 'content-type: application/json' -d '{"name":"taskforce"}' | jq -r .id)
+
+curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents?cli=claude&group=$GID&from=$AM_ID" \\
+  -H 'content-type: text/plain' --data-binary 'Draft the migration plan.'
+\`\`\`
+
+Spawn them one at a time, each with its own prompt, reusing \`$GID\`. Prefer the
+returned id over the name here: nothing stops two groups sharing a name, and
+\`group=<name>\` takes the first match. Creating a group is a manager operation
+rather than an agent-to-agent one, so it takes no \`?from=\`.
+
 ### Stop an agent
 \`\`\`sh
 curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/stop?from=$AM_ID"
