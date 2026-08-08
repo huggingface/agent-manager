@@ -527,7 +527,7 @@ body {
    touch so it never becomes the reason a gesture misbehaves. */
 .vvdebug {
   position: fixed; top: 0; left: 0; z-index: 999; margin: 0; padding: 4px 6px;
-  pointer-events: none; font-family: var(--mono, monospace); font-size: 9px; line-height: 1.35;
+  pointer-events: none; font-family: var(--font-mono); font-size: 9px; line-height: 1.35;
   white-space: pre; color: #9ff; background: rgb(0 0 0 / 0.72); border-bottom-right-radius: 4px;
 }
 
@@ -1103,10 +1103,12 @@ a.btn-ghost { text-decoration: none; }
   }
   .term-host { touch-action: none; overscroll-behavior: contain; }
   /* touch-action is intersected down the ancestor chain, so `none` here would
-     also forbid panning the reader's scroller nested inside. Reader mode hands
-     the vertical gesture back to the browser; the terminal's drag handler is
-     inert in that mode anyway. */
-  .term-host.reading { touch-action: pan-y; }
+     also forbid panning anything nested inside — the reader's scroller, and the
+     code blocks and tables inside it, which are `overflow-x: auto`. Hence
+     `auto` and not `pan-y`: a trace holds wide output, and pinning the axis
+     here would leave that unreachable sideways, the same bug one axis over.
+     The terminal's own drag handler is inert in this mode. */
+  .term-host.reading { touch-action: auto; }
   /* Keep xterm's transparent real input at the visible prompt edge. xterm
      normally parks/moves it for desktop IME behavior; on phones this element
      is also the browser's only clue about what must remain above the OSK. */

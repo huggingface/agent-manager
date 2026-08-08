@@ -208,6 +208,9 @@ export default function TerminalPane({
   const resyncRef = useRef<() => void>(() => {});
   const reconcileScrollRef = useRef<() => void>(() => {});
   const claimRef = useRef<() => void>(() => {});
+  // Reachable from the mode switch: a flick can still be coasting through the
+  // terminal's scrollback when the reader covers it.
+  const stopGlideRef = useRef<() => void>(() => {});
   const reconnectRef = useRef<() => void>(() => {});
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
@@ -624,16 +627,19 @@ export default function TerminalPane({
     // gesture without moving xterm's viewport, leaving no reliable way back
     // through history on touch-only devices. xterm 5.5 registers no touch
     // listeners of its own (verified against the bundled lib) and .term-host
-    // sets touch-action:none on mobile, so neither xterm nor the browser will
-    // pan: this is the only touch scrolling a phone has, in every pane.
+    // sets touch-action:none on mobile while the terminal is what you see, so
+    // neither xterm nor the browser will pan: this is the only touch scrolling
+    // a phone has, in every pane. Reader mode is the exception at both ends —
+    // it hands touch-action back (.term-host.reading) and these handlers stand
+    // down — because there the scroller you mean to drag is its own.
     //
     // Convert the drag to whole rows and carry the remainder in `residual`.
     // Quantising each event to a fixed notch instead silently drops whatever
     // does not fill one — a 96px drag moved the view 68px — and that shortfall
     // is what reads as lag, because the text trails the finger by design.
     // scrollLines moves ydisp, the authority the viewport follows.
-    // The frame, not the inner measurement box: .term-host is what carries
-    // touch-action:none and what the user actually drags, and it stays the
+    // The frame, not the inner measurement box: .term-host is what carries the
+    // touch-action rule and what the user actually drags, and it stays the
     // gesture target however the box inside it is nested.
     const frame = frameRef.current ?? host;
     const viewport = host.querySelector<HTMLElement>('.xterm-viewport');
@@ -656,6 +662,7 @@ export default function TerminalPane({
       return rows;
     };
     const stopGlide = () => { if (glideFrame) { cancelAnimationFrame(glideFrame); glideFrame = 0; } };
+    stopGlideRef.current = stopGlide;
     // Reader mode covers this frame with its own scroller. These listeners sit
     // on .term-host in CAPTURE and preventDefault, so without this guard every
     // drag over the conversation was eaten here and spent on the hidden
@@ -698,6 +705,10 @@ export default function TerminalPane({
       touchY = null;
       const v0 = velocity;
       velocity = 0;
+      // A drag that began on the terminal and ended after the switch flipped
+      // must not launch anything: the mode is broadcast app-wide, so the flip
+      // can come from another pane rather than from this hand.
+      if (modeRef.current === 'reader') return;
       // Only a flick coasts. A slow, deliberate drag through history must land
       // exactly where the finger left it — drifting past the line someone was
       // reading is worse than having no momentum at all. 0.4px/ms is about
@@ -810,7 +821,10 @@ export default function TerminalPane({
   // with focus swallows every keystroke into the agent's TTY, invisibly. Hand
   // focus back when the terminal is on top again.
   useEffect(() => {
-    if (reading) termRef.current?.blur();
+    // The glide too: a flick left coasting under the reader keeps moving a
+    // viewport nobody can see, and no touch can catch it — the handler that
+    // would stop it now stands down in this mode.
+    if (reading) { termRef.current?.blur(); stopGlideRef.current(); }
     else if (focused) termRef.current?.focus();
   }, [reading, focused]);
 

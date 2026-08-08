@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
 import FilesPane from './components/FilesPane';
@@ -13,16 +13,17 @@ import Overview from './components/Overview';
 import Locked from './components/Locked';
 import BackupBanner from './components/BackupBanner';
 import Welcome from './components/Welcome';
-import ViewportDebug from './components/ViewportDebug';
-
-// `?vvdebug=1` — a phone has no devtools, and the keyboard layout is guessed
-// when the app is embedded cross-origin. Read once: this never changes mid-run.
-const VV_DEBUG = new URLSearchParams(location.search).has('vvdebug');
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { isPassive, isRemote } from './types';
 import { GridGlyph, ListGlyph } from './components/icons';
+
+// `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
+// when the app is embedded cross-origin. Read once: it never changes mid-run,
+// and lazily imported so a debug surface is not part of the shipped bundle.
+const VV_DEBUG = new URLSearchParams(location.search).has('vvdebug');
+const ViewportDebug = lazy(() => import('./components/ViewportDebug'));
 
 // Phone-sized viewport: the app becomes two full-screen views (list ⇄ pane).
 function useIsMobile() {
@@ -828,9 +829,10 @@ export default function App() {
         onToggleDemo={toggleDemo}
       />
       )}
-    {/* Outside .app on purpose: it reports where .app was put, so it must not
-        be inside the box it is measuring. */}
-    {VV_DEBUG && <ViewportDebug />}
+    {/* Outside .app: it reports where .app was put. That does not make it
+        immune — it is fixed too, so a displaced fixed subtree would carry it
+        along — but the history it keeps still shows the displacement happening. */}
+    {VV_DEBUG && <Suspense fallback={null}><ViewportDebug /></Suspense>}
     <div className={`app${settingsOpen ? ' app-suspended' : ''}${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
       {showWelcome && <Welcome onClose={dismissWelcome} />}
       {toast && <div className="toast mono" role="alert">{toast}</div>}
