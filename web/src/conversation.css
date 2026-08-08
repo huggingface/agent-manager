@@ -163,7 +163,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    you scan for — still spanned the full width, so the two disagreed about where
    the conversation began. The pane is the measure: make it narrow and the
    conversation is narrow. */
-.cxv-body { flex: 1; min-height: 0; overflow-y: auto; background: var(--panel); padding: 4px 14px 30px; }
+.cxv-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px 14px 30px; }
 .cxv-col { display: flex; flex-direction: column; min-width: 0; }
 .cxv-msg { font-size: 11px; color: var(--muted); padding: 6px 0; }
 .cxv-foot {
