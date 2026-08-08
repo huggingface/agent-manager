@@ -656,7 +656,13 @@ export default function TerminalPane({
       return rows;
     };
     const stopGlide = () => { if (glideFrame) { cancelAnimationFrame(glideFrame); glideFrame = 0; } };
+    // Reader mode covers this frame with its own scroller. These listeners sit
+    // on .term-host in CAPTURE and preventDefault, so without this guard every
+    // drag over the conversation was eaten here and spent on the hidden
+    // terminal's scrollback: the trace could not be scrolled back at all on a
+    // phone, which is the only place this gesture exists.
     const onTouchStart = (e: TouchEvent) => {
+      if (modeRef.current === 'reader') return;
       stopGlide();               // a new touch takes over from any coasting
       velocity = 0;
       residual = 0;
@@ -664,6 +670,7 @@ export default function TerminalPane({
       lastMoveAt = e.timeStamp;
     };
     const onTouchMove = (e: TouchEvent) => {
+      if (modeRef.current === 'reader') return;
       if (touchY == null || !e.touches.length) return;
       const y = e.touches[0].clientY;
       const deltaY = touchY - y;
@@ -849,7 +856,11 @@ export default function TerminalPane({
           <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
-      <div className="term-host" ref={frameRef}>
+      {/* `reading` releases the frame's touch-action: the phone rule pins it to
+          `none` so the drag handler above owns terminal panning, and that also
+          forbids the browser from panning anything nested inside — including
+          the reader's own scroller. */}
+      <div className={`term-host${reading ? ' reading' : ''}`} ref={frameRef}>
         <div className="term-fill" ref={hostRef} />
         {/* Reader mode draws OVER the terminal rather than replacing it: xterm needs
             layout to fit, and detaching tmux costs a repaint and can trip the
