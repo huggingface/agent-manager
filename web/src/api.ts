@@ -86,6 +86,9 @@ export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
   jobs: { askAboveUsd: number };
   archive: { after: 'week' | 'month' | 'never' };
+  // After a restart, sessions that were running come back if you prompted them
+  // within `days` (or had work still in flight).
+  revive: { enabled: boolean; days: 1 | 3 | 7 };
   backup: { every: BackupEvery; dataset: string; exclude: string[] };
   defaultArtifactsSpace?: string;
 }

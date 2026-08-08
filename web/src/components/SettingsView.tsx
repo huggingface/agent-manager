@@ -591,6 +591,32 @@ export default function SettingsView({
 
                 <div className="setting-row">
                   <div>
+                    <div className="s-label">Restart sessions after a reboot</div>
+                    <div className="s-help">
+                      When the Space wakes or reboots, sessions that were running come back on their own: the ones
+                      you sent something to within this window, plus any that still had a command or background
+                      job running. Agents resume their own conversation and wait for you; nothing is re-sent.
+                    </div>
+                  </div>
+                  <span className="cfg-ctl">
+                    <div className="seg cfg-seg">
+                      {([1, 3, 7] as const).map((d) => (
+                        <button
+                          key={d}
+                          className={cfg.revive.enabled && cfg.revive.days === d ? 'on' : ''}
+                          onClick={() => setCfg({ ...cfg, revive: { enabled: true, days: d } })}
+                        >{d === 1 ? '1 day' : `${d} days`}</button>
+                      ))}
+                      <button
+                        className={!cfg.revive.enabled ? 'on' : ''}
+                        onClick={() => setCfg({ ...cfg, revive: { ...cfg.revive, enabled: false } })}
+                      >off</button>
+                    </div>
+                  </span>
+                </div>
+
+                <div className="setting-row">
+                  <div>
                     <div className="s-label">Archive inactive sessions</div>
                     <div className="s-help">Sessions with no activity beyond this window disappear from the sidebar and overview. Nothing is deleted; the "archived" checkbox in the sidebar brings them back.</div>
                   </div>
