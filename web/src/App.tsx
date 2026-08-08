@@ -13,6 +13,11 @@ import Overview from './components/Overview';
 import Locked from './components/Locked';
 import BackupBanner from './components/BackupBanner';
 import Welcome from './components/Welcome';
+import ViewportDebug from './components/ViewportDebug';
+
+// `?vvdebug=1` — a phone has no devtools, and the keyboard layout is guessed
+// when the app is embedded cross-origin. Read once: this never changes mid-run.
+const VV_DEBUG = new URLSearchParams(location.search).has('vvdebug');
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
@@ -823,6 +828,9 @@ export default function App() {
         onToggleDemo={toggleDemo}
       />
       )}
+    {/* Outside .app on purpose: it reports where .app was put, so it must not
+        be inside the box it is measuring. */}
+    {VV_DEBUG && <ViewportDebug />}
     <div className={`app${settingsOpen ? ' app-suspended' : ''}${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
       {showWelcome && <Welcome onClose={dismissWelcome} />}
       {toast && <div className="toast mono" role="alert">{toast}</div>}
