@@ -117,10 +117,13 @@ export default function App() {
 
   // Track the visual viewport so the mobile layout can sit above the on-screen
   // keyboard (which shrinks visualViewport but not the layout viewport on iOS).
-  // The CSS variables pin the app to that viewport's exact rectangle. The Hub
-  // page embeds the app in a cross-origin iframe; mobile Safari leaves that
-  // child viewport unchanged when its keyboard opens. In that one no-signal
-  // case, fall back to a conservative focus-derived visible height.
+  // The CSS variables pin the app to that viewport's exact rectangle.
+  //
+  // Where there is no signal — the Hub page embeds the app in a cross-origin
+  // iframe, and mobile Safari leaves that child viewport unchanged when its
+  // keyboard opens — the app reports the viewport it can see and stops there.
+  // It does not estimate one. Nothing here knows how tall a keyboard is, and
+  // the browser that does already scrolls a focused field into view.
   useEffect(() => {
     const vv = window.visualViewport;
     type VirtualKeyboardLike = EventTarget & { boundingRect?: DOMRectReadOnly };
@@ -133,11 +136,10 @@ export default function App() {
     };
     const root = document.documentElement;
     const keyboardSignalThreshold = 80;
-    const embedded = window.self !== window.top;
-    let focusedInput: Element | null = null;
+    // The viewport as it was before a field took focus — the only thing left
+    // that needs remembering, because a keyboard is detected as the SHRINK from
+    // it (hasKeyboardGeometry), not as an absolute height.
     let focusBaseline: ViewportBaseline | null = null;
-    let focusFallback = false;
-    let focusFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
     const acceptsKeyboardInput = (target: Element | null): target is HTMLElement => {
       if (!(target instanceof HTMLElement)) return false;
@@ -147,9 +149,6 @@ export default function App() {
       return !['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit']
         .includes(target.type);
     };
-    const embeddedTouchLayout = () => embedded
-      && window.matchMedia('(max-width: 720px)').matches
-      && (navigator.maxTouchPoints > 0 || window.matchMedia('(pointer: coarse)').matches);
     const captureViewport = (): ViewportBaseline => ({
       width: vv?.width ?? document.documentElement.clientWidth,
       height: vv?.height ?? window.innerHeight,
@@ -178,20 +177,18 @@ export default function App() {
       if (keyboardRect && keyboardRect.height > 0 && keyboardRect.top > top) {
         height = Math.min(height, keyboardRect.top - top);
       }
-      if (hasKeyboardGeometry()) focusFallback = false;
-      if (focusFallback && focusBaseline && acceptsKeyboardInput(document.activeElement)) {
-        // The parent page owns the real visual viewport, but cross-origin frame
-        // isolation prevents us from reading it. A phone keyboard typically
-        // consumes roughly the lower half; 54% visible keeps the xterm prompt
-        // above it without disturbing direct-app browsers with real geometry.
-        const visibleRatio = focusBaseline.width > focusBaseline.height ? 0.48 : 0.54;
-        height = Math.min(height, Math.round(focusBaseline.height * visibleRatio));
-        root.dataset.keyboardLayout = 'focus-fallback';
-      } else if (hasKeyboardGeometry()) {
-        root.dataset.keyboardLayout = 'browser-geometry';
-      } else {
-        delete root.dataset.keyboardLayout;
-      }
+      // When the browser reports no keyboard geometry — a cross-origin frame on
+      // mobile Safari, which the Hub page is — the app does NOT invent a height.
+      // It used to assume a keyboard ate 46% and shrink to fit, and a guess that
+      // is wrong in the safe direction is still wrong: the abandoned strip does
+      // not stay hidden behind the keyboard, because the browser scroll-reveals
+      // a focused field and drags it back into view. That strip is the blank
+      // band under the reader's composer. Leaving the viewport alone hands the
+      // job to the engine that can actually see the keyboard — the same
+      // scroll-into-view that already keeps xterm's pinned helper textarea
+      // above it.
+      if (hasKeyboardGeometry()) root.dataset.keyboardLayout = 'browser-geometry';
+      else delete root.dataset.keyboardLayout;
       root.style.setProperty('--vvw', `${Math.round(width)}px`);
       root.style.setProperty('--vvh', `${Math.round(height)}px`);
       root.style.setProperty('--vv-top', `${Math.round(top)}px`);
@@ -223,54 +220,24 @@ export default function App() {
         focusTimers.add(timer);
       }
     };
-    const scheduleEmbeddedFallback = () => {
-      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
-      focusFallbackTimer = null;
-      if (!embeddedTouchLayout() || !acceptsKeyboardInput(document.activeElement)) return;
-      focusFallbackTimer = setTimeout(() => {
-        focusFallbackTimer = null;
-        if (document.activeElement === focusedInput && !hasKeyboardGeometry()) {
-          focusFallback = true;
-          apply();
-        }
-      }, 500);
-    };
     const onFocusIn = (event: FocusEvent) => {
       const target = event.target instanceof Element ? event.target : null;
-      if (acceptsKeyboardInput(target)) {
-        focusedInput = target;
-        focusBaseline = captureViewport();
-        focusFallback = false;
-        stabilizeFocus();
-        scheduleEmbeddedFallback();
-        return;
-      }
+      if (acceptsKeyboardInput(target)) focusBaseline = captureViewport();
       stabilizeFocus();
     };
     const onFocusOut = () => {
-      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
-      focusFallbackTimer = null;
       const timer = setTimeout(() => {
         focusTimers.delete(timer);
         if (!acceptsKeyboardInput(document.activeElement)) {
-          focusedInput = null;
           focusBaseline = null;
-          focusFallback = false;
           apply();
         }
       }, 0);
       focusTimers.add(timer);
     };
     const onOrientationChange = () => {
-      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
-      focusFallbackTimer = null;
-      focusFallback = false;
-      if (acceptsKeyboardInput(document.activeElement)) {
-        focusedInput = document.activeElement;
-        focusBaseline = captureViewport();
-      }
+      if (acceptsKeyboardInput(document.activeElement)) focusBaseline = captureViewport();
       stabilizeFocus();
-      scheduleEmbeddedFallback();
     };
     apply();
     vv?.addEventListener('resize', onViewportChange);
@@ -284,7 +251,6 @@ export default function App() {
     return () => {
       for (const timer of settleTimers) clearTimeout(timer);
       for (const timer of focusTimers) clearTimeout(timer);
-      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
       vv?.removeEventListener('resize', onViewportChange);
       vv?.removeEventListener('scroll', onViewportChange);
       vv?.removeEventListener('scrollend', onViewportChange);
