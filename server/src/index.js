@@ -2282,7 +2282,13 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
-    if (msg.t === 'i') { handle.write(msg.d); touchInput(session.id); }
+    if (msg.t === 'i') {
+      handle.write(msg.d);
+      // Not every frame on this channel is you: the emulator answers the TUI's
+      // device-attribute and cursor queries down the same path, instantly on
+      // attach. Opening a pane is not sending it something.
+      if (!runstate.isTerminalReply(msg.d)) touchInput(session.id);
+    }
     else if (msg.t === 'r') handle.resize(msg.cols, msg.rows);
     else if (msg.t === 'claim') handle.claim();
   });

@@ -42,7 +42,10 @@ const STALE_SNAPSHOT_DAYS = 30;
 let previous = null;
 let lastWritten = '';
 // Boot revivals are staggered, so the first new snapshot must wait for them:
-// writing at 30s would record a half-revived Space as the whole truth.
+// writing at 30s would record a half-revived Space as the whole truth. Set in
+// init() so it holds on EVERY boot path — the ones that revive nothing because
+// something went wrong (no engine, Space locked) are exactly the ones where
+// erasing the record does the most damage.
 let settleAt = 0;
 
 /** Load the previous boot's snapshot. Call once, before startRunstateWatch(). */
@@ -51,19 +54,44 @@ export function init() {
     const j = JSON.parse(fs.readFileSync(RUNSTATE_FILE, 'utf8'));
     previous = j && typeof j === 'object' && j.sessions ? j : null;
   } catch { previous = null; }
+  // Hold the first write for a full cycle from here, whatever happens next. A
+  // boot that revives nothing — engine missing, Space still locked, revive
+  // switched off — must not answer by wiping the record of what was running:
+  // that record is the only reason the next boot can do better.
+  settleAt = Date.now() + SNAPSHOT_MS;
   return previous;
 }
 
-// Is anything running INSIDE this session — a foreground command, a `make &`
-// left in the background, an agent's tool call? The pane's root process is the
-// shell or the CLI itself; anything it started is a child of it, and Linux
-// hands us those directly. One small procfs read, no subprocess, no /proc walk.
-// This is the only signal a plain shell leaves that it was busy: it has no
-// transcript to read a prompt out of.
+// Is anything running INSIDE this shell — a foreground command, or a `make &`
+// left in the background? The pane's root process is the interactive bash, and
+// anything it started is a child of it, which Linux hands us directly. One small
+// procfs read, no subprocess, no /proc walk.
+//
+// SHELLS ONLY, on purpose. "Pane root == the thing you're talking to" is false
+// for most agent CLIs: `codex` is a `#!/usr/bin/env node` launcher that keeps
+// the native binary as a permanent child, and every `cont || exec run` launch
+// shape leaves bash as the pane root with the CLI as its child. Both report a
+// child forever, which would make the window mean nothing for those sessions —
+// they would revive on every restart regardless. Agents don't need this signal
+// anyway: they have a transcript, so the recency rule can see them. A shell has
+// nothing else, which is the whole reason this rule exists.
 function hasLiveChildren(pid) {
   if (!pid) return false;
   try { return fs.readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim().length > 0; }
   catch { return false; } // no procfs / process already gone
+}
+
+// A terminal answers the TUI's questions by itself: on attach, xterm replies to
+// device-attribute and cursor-position queries, and those replies travel the
+// same socket frame as your keystrokes (the client sends all of onData; only its
+// own control-claiming path distinguishes real keys). Counting them would make
+// "you sent this session something" mean "a pane was open on it", which is not
+// the question the revive window asks. Match only the shapes a terminal EMITS in
+// reply — DA/CPR/window-report/DECRPM and DCS/OSC answers — never a key: arrow
+// keys and friends end in uppercase A-D or `~`, none of which appear here.
+const REPLY = /^(?:\x1b\[[?>!]?[0-9;]*\$?[cRty]|\x1bP[\s\S]*?\x1b\\|\x1b\][\s\S]*?(?:\x07|\x1b\\))+$/;
+export function isTerminalReply(d) {
+  return typeof d === 'string' && d.length > 0 && REPLY.test(d);
 }
 
 /** What is alive right now, and where something is actually running. */
@@ -74,7 +102,10 @@ function snapshot() {
     // neither is a process this server could ever start.
     if (PASSIVE_CLIS.includes(s.cli) || isRemote(s.cli)) continue;
     if (!isRunning(s.id)) continue;
-    sessions[s.id] = { running: true, work: hasLiveChildren(paneRootPid(s.id)) };
+    sessions[s.id] = {
+      running: true,
+      work: s.cli === 'shell' && hasLiveChildren(paneRootPid(s.id)),
+    };
   }
   return { at: new Date().toISOString(), sessions };
 }
@@ -91,11 +122,13 @@ export function saveRunstate() {
   // timestamp nobody reads.
   const body = JSON.stringify(snap.sessions);
   if (body === lastWritten) return;
-  lastWritten = body;
   try {
     const tmp = `${RUNSTATE_FILE}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(snap, null, 2));
     fs.renameSync(tmp, RUNSTATE_FILE);
+    // Only once it's actually on disk: a FUSE write that threw must be retried
+    // next cycle, not remembered as the state of the file.
+    lastWritten = body;
   } catch (e) { console.error('[runstate]', e && e.message); }
 }
 
@@ -105,8 +138,8 @@ export function saveRunstate() {
  * old snapshot is a truer record of what was running than the new one, and a
  * Space that crash-loops on boot must not erase it.
  */
-export function startRunstateWatch() {
-  const t = setInterval(() => { if (Date.now() >= settleAt) saveRunstate(); }, SNAPSHOT_MS);
+export function startRunstateWatch({ intervalMs = SNAPSHOT_MS } = {}) {
+  const t = setInterval(() => { if (Date.now() >= settleAt) saveRunstate(); }, intervalMs);
   if (t.unref) t.unref();
   return t;
 }
@@ -138,7 +171,11 @@ export function selectRevivable({ snapshot: snap, sessions, digests, alive, days
     const d = digests.get(id);
     const lastPrompt = Math.max(Number(s.lastInputAt) || 0, (d && d.lastPromptTs) || 0);
     const recent = lastPrompt >= cutoff;
-    if (!recent && !rec.work) continue;
+    // `work` is only meaningful for a shell (see hasLiveChildren). Re-checked
+    // here rather than trusted, so a snapshot written before that was true
+    // can't revive an agent on a signal that was never valid for it.
+    const busy = !!rec.work && s.cli === 'shell';
+    if (!recent && !busy) continue;
     plan.push({ id, name: s.name, cli: s.cli, at: lastPrompt, why: recent ? 'prompted recently' : 'work in flight' });
   }
   return plan.sort((a, b) => b.at - a.at);
