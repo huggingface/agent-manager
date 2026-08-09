@@ -1663,16 +1663,35 @@ app.delete('/api/files/:id/entry', (req, res) => {
 // One page of an on-disk transcript, rendered by the same reader the Trace pane
 // uses. Paged rather than whole: these files reach tens of MB, and the viewer
 // only ever has a window of them on screen.
+// Which slice of a trace the caller is asking for. Three modes, one endpoint:
+//
+//   ?tail=1 | ?before=<cursor> | ?after=<cursor>   a window (the reader's path):
+//       the last stretch of the conversation, the stretch in front of one it
+//       already holds, or whatever has been written since — each answered from a
+//       byte range of the transcript rather than a parse of all of it.
+//   ?summary=1                                     whole-trace facts, no turns.
+//   ?offset=&limit=                                index paging, as before.
+function traceOpts(q) {
+  if (q.summary !== undefined) return { summary: true };
+  const at = q.tail !== undefined ? 'tail' : q.before !== undefined ? 'before' : q.after !== undefined ? 'after' : null;
+  if (!at) return { offset: Number(q.offset) || 0, limit: Number(q.limit) || 200 };
+  return {
+    window: {
+      at,
+      cursor: Number(at === 'before' ? q.before : q.after) || 0,
+      bytes: Number(q.bytes) || 0,
+      min: Number(q.min) || 0,
+    },
+  };
+}
+
 app.get('/api/files/:id/trace', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const f = resolveSafe(folderPathOf(s), req.query.path);
   if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) return res.status(404).json({ error: 'not found' });
   try {
-    res.json(await readTraceByPath(f, {
-      offset: Number(req.query.offset) || 0,
-      limit: Number(req.query.limit) || 200,
-    }));
+    res.json(await readTraceByPath(f, traceOpts(req.query)));
   } catch (e) {
     // "not a transcript" is an ordinary answer here, not a failure: the pane
     // falls back to showing the file as text.
@@ -2007,17 +2026,16 @@ app.get('/api/trace/:id', async (req, res) => {
   if (!pane) return res.status(404).json({ error: 'not found' });
 
   const source = pane.traceSource || { kind: 'session', ref: pane.id };
-  const offset = Number(req.query.offset) || 0;
-  const limit = Number(req.query.limit) || 200;
+  const opts = traceOpts(req.query);
 
   try {
     if (source.kind === 'bundle') {
       if (!/^[\w.-]+$/.test(String(source.ref))) return res.status(400).json({ error: 'bad bundle ref' });
-      return res.json(await readTraceBundle(path.join(DATA_DIR, 'traces', source.ref), { offset, limit }));
+      return res.json(await readTraceBundle(path.join(DATA_DIR, 'traces', source.ref), opts));
     }
     const target = store.get(source.ref);
     if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
-    res.json(await readTrace(target, { offset, limit }));
+    res.json(await readTrace(target, opts));
   } catch (e) {
     // These are expected states, not failures: no transcript yet, an
     // unsupported CLI, or a codex guardian rollout. The pane renders the reason.

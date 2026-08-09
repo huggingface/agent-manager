@@ -1179,6 +1179,10 @@ a.btn-ghost { text-decoration: none; }
 .trace-hint { flex: none; padding: 5px 10px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 11px; font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .tv-msg { color: var(--muted); font-size: 0.85em; padding: 0.3em 0.1em; }
+/* The line above the oldest loaded turn. Its height is fixed on purpose: it
+   sits above every row offset, so a line that grew or vanished when the reader
+   reached the start of the trace would shove the whole conversation. */
+.tv-top { height: 1.6em; line-height: 1.6em; padding: 0 0.1em; overflow: hidden; text-align: center; opacity: 0.75; }
 
 .tv-row { padding: 5px 0; border-bottom: 1px solid var(--border); }
 .tv-row.placeholder { opacity: 0.25; }

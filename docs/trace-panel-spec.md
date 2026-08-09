@@ -369,3 +369,53 @@ dedupe per ENTRY, not per joined string; and web searches exist ONLY as `web_sea
 
 **Encrypted reasoning is normal.** 49 of 56 reasoning items carried only
 `encrypted_content`. Say so in the UI; do not leave the impression the model didn't think.
+
+## 13. Tail-first reading (2026-08-09)
+
+§5 shipped one way of asking for turns: `offset`/`limit` over a whole-file parse. It is
+the right shape for the surfaces that want a fixed slice (the Overview card, RENDER mode)
+and the wrong one for the reader, because it can only answer *any* question after
+normalizing the entire transcript — 19 MB and 1,395 turns for the longest session on this
+Space — and the pane then opened on the OLDEST turn, which is never the one you came for.
+
+The reader now opens at the end and pages backwards.
+
+**Wire.** Same endpoints, three modes (`server/src/index.js` `traceOpts`):
+
+| Request | Answers with |
+|---|---|
+| `?tail=1&bytes=` | the last window of the transcript |
+| `?before=<cursor>` | the window in front of one you hold |
+| `?after=<cursor>` | whatever has been appended since |
+| `?summary=1` | whole-trace facts (`total`, `userTurns`, `usage`, `firstTs`), no turns |
+| `?offset=&limit=` | unchanged — index paging over the full parse |
+
+A window is a byte range of the .jsonl run through the same normalizers
+(`rangeJsonLines`), and the cursors it hands back are line-aligned, so consecutive
+windows abut exactly: no line is read twice and none is skipped. A window that starts
+mid-line drops that fragment (the window before it owns the line); a window that ends at
+a half-written line stops before it, so a live tail picks it up once it is whole. The
+SQLite harnesses have no byte offsets to seek — they answer the same shape with message
+indices as cursors (`window.mode`), and the reader treats a cursor as opaque either way.
+
+**What a window cannot know**, and therefore does not claim: `total`, `userTurns`,
+`firstTs` and the session's `usage` are whole-trace facts. They arrive from `?summary=1`,
+which the reader asks for 400 ms after its first paint. Until it lands the header says
+`N turns loaded` rather than inventing a total.
+
+**Cost, measured on the 19 MB / 1,395-turn transcript** (`edbfc11f…`, warm page cache):
+
+| | before | after |
+|---|---|---|
+| server time for the first request | 165 ms | 5 ms |
+| bytes on the wire | 676 KB | 96 KB |
+| first turn on screen (localhost) | 180 ms | 155 ms |
+| first turn on screen (10 Mbps / 40 ms) | 865 ms | 267 ms |
+
+**The one behavioural difference:** a harness message whose lines straddle a window
+boundary is split into two turns instead of merged into one. Stitching every window of
+that transcript gives 1,401 turns against the full parse's 1,395, with character-for-
+character identical content — six turns show as two rows each. Covered by
+`server/test/trace-window.test.mjs`, which also pins the edges: paging back terminates at
+byte 0, an appended turn arrives exactly once, a torn last line is not a turn until it is
+whole, and a transcript with no trailing newline still ends in one.

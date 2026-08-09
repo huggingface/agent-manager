@@ -10,20 +10,35 @@
 // Where we deliberately differ from the Hub viewer: it renders an ever-growing
 // window of the whole array (INITIAL 50 + 50 per sentinel hit) and holds every
 // message in the DOM, which is exactly why it dies on a 2.13 MB row. Here the
-// list is windowed by measured height and the data is paged from the server, so
-// a 6 MB session costs ~30 DOM rows.
+// list is windowed by measured height and the data is read from the END of the
+// transcript one byte-window at a time, so a 19 MB session costs one 95 KB
+// request and ~30 DOM rows to open.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Session } from '../types';
 import * as api from '../api';
-import type { TraceBlock, TracePage, TraceTurn } from '../api';
+import type { TraceBlock, TraceCursor, TraceSummary, TraceTurn, TraceWindow } from '../api';
 import { renderMarkdown } from '../lib/markdown';
 import Logo from './Logo';
 import { CloseGlyph } from './icons';
 
-const PAGE = 200;          // turns per request
+// How much transcript the first request asks for. Measured on the longest trace
+// on this box (19 MB / 1,395 turns): 384 KB is ~60 turns, 95 KB of JSON and
+// ~35 ms of server time, and renders in a frame — the smallest window that still
+// opens on a complete-looking conversation rather than a stub. See the PR.
+const WINDOW_BYTES = 384 * 1024;
 const ROW_EST = 44;        // unmeasured row height, collapsed
 const OVERSCAN_PX = 600;
+const NEAR_TOP_PX = 400;   // start fetching older turns before the reader arrives
+const STICK_PX = 24;       // "at the bottom" tolerance for following a live trace
+// Following a trace that is still being written. Nothing in here knows whether
+// an agent is running — but a transcript whose newest turn is seconds old is one
+// being written, so the cadence follows the trace itself: quick while it moves,
+// slow once it has gone quiet, which is also how it notices movement resuming.
+const LIVE_MS = 3_000;
+const IDLE_MS = 10_000;
+const FRESH_MS = 120_000;
+const SUMMARY_DELAY_MS = 400; // let the first paint happen before the whole-file read
 
 const fmtTs = (ms?: number) => (ms ? new Date(ms).toLocaleTimeString() : '');
 const fmtNum = (n: number) => n.toLocaleString();
@@ -181,12 +196,46 @@ function Row({ turn, index }: { turn: TraceTurn; index: number }) {
 
 // ---------- the pane ----------
 
-// The viewer itself: paging, windowing, measurement, search, prompt jumps. It
-// takes a page loader rather than a session, so the same reader serves the Trace
-// pane and a transcript opened in the Files pane. Its chrome lives in whichever
-// pane hosts it — `onHead` hands up what the toolbar needs to say, `onNav` hands
-// up the prompt jump for the host's buttons.
-export type TraceSource = (offset: number, limit: number) => Promise<TracePage>;
+// The viewer itself: windows, measurement, search, prompt jumps. It takes a
+// source rather than a session, so the same reader serves the Trace pane and a
+// transcript opened in the Files pane. Its chrome lives in whichever pane hosts
+// it — `onHead` hands up what the toolbar needs to say, `onNav` hands up the
+// prompt jump for the host's buttons.
+//
+// It opens on the END of the conversation. A transcript here reaches tens of MB
+// and thousands of turns, and the exchange a reader wants first is always the
+// last one — so the first request is a single window of the tail, and older
+// turns arrive one window at a time as you scroll back into them. The only read
+// that touches the whole trace is the summary, which buys the header an honest
+// turn count and is asked for after the first paint.
+export interface TraceSource {
+  window: (req: api.TraceReq, bytes?: number) => Promise<TraceWindow>;
+  summary: () => Promise<TraceSummary>;
+}
+
+/** What a host pane's toolbar needs. `total` is null until the summary lands. */
+export type TraceHeadInfo = Omit<TraceWindow, 'turns' | 'window'> & {
+  /** turns the reader is holding right now */
+  loaded: number;
+  /** the first turn of the conversation is loaded — there is nothing above */
+  atStart: boolean;
+};
+
+type Meta = Omit<TraceWindow, 'turns' | 'window'>;
+
+// Keep whichever value actually says something: a window that doesn't reach the
+// start of the trace reports no session start and no session cost, and must not
+// blank out what an earlier response already told us. Identity is preserved when
+// nothing changed — a poll that learns nothing must not look like new state.
+const mergeMeta = (prev: Meta | null, next: Meta): Meta => {
+  if (!prev) return next;
+  const out = { ...prev } as Record<string, unknown>;
+  let changed = false;
+  for (const [k, v] of Object.entries(next)) {
+    if ((v || !(k in out)) && out[k] !== v) { out[k] = v; changed = true; }
+  }
+  return changed ? (out as Meta) : prev;
+};
 
 export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }: {
   src: TraceSource;
@@ -194,15 +243,21 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
   srcKey: string;
   zoom?: number;
   query?: string;
-  onHead?: (head: Omit<TracePage, 'turns'> | null) => void;
+  onHead?: (head: TraceHeadInfo | null) => void;
   onNav?: (go: (dir: -1 | 1) => void) => void;
 }) {
-  const [head, setHead] = useState<Omit<TracePage, 'turns'> | null>(null);
+  const [meta, setMeta] = useState<Meta | null>(null);
+  const [summary, setSummary] = useState<TraceSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const turns = useRef<(TraceTurn | undefined)[]>([]);
-  const pending = useRef<Set<number>>(new Set());
-  const [, forceRender] = useState(0);
-  const bump = useCallback(() => forceRender((n) => n + 1), []);
+
+  const turns = useRef<TraceTurn[]>([]);
+  const cursor = useRef<TraceCursor | null>(null);
+  // ONE request at a time. Flicking the wheel at the top of a long trace fires
+  // scroll events by the dozen, and each one would otherwise start its own load;
+  // they would arrive out of order and prepend the same turns twice.
+  const loading = useRef(false);
+  const [tick, setTick] = useState(0);
+  const bump = useCallback(() => setTick((n) => n + 1), []);
 
   const scroller = useRef<HTMLDivElement | null>(null);
   const heights = useRef<number[]>([]);
@@ -212,47 +267,175 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
   const [heightsVersion, setHeightsVersion] = useState(0);
   const [range, setRange] = useState({ start: 0, end: 40 });
 
-  // ---- paging ----
-  const loadPage = useCallback(async (pageIndex: number) => {
-    if (pending.current.has(pageIndex)) return;
-    pending.current.add(pageIndex);
+  // Follow the newest turn while the agent writes — but only while the reader is
+  // already down there. Scrolling up to read something is a decision.
+  const stick = useRef(true);
+  // What must not move across a re-layout: the row at the top of the viewport,
+  // and how far into it we are. Prepending older turns changes every offset in
+  // the list, and a row that measures itself after it renders changes the ones
+  // above the viewport — without an anchor, the paragraph under the reader's
+  // eyes jumps away mid-sentence.
+  const anchor = useRef<{ i: number; delta: number } | null>(null);
+  // False until the scroller has been put where it belongs for the turns we
+  // hold. Until then `scrollTop` is 0 because nothing has been placed yet, not
+  // because the reader is at the top — and acting on it would fetch a window of
+  // older turns nobody asked for on every open.
+  const positioned = useRef(false);
+
+  // ---- windowing ----
+  // Prefix sums over measured (or estimated) row heights. n is bounded by what
+  // the reader has actually loaded, so a full recompute is cheap and happens
+  // only when a row is measured, turns arrive, or the window moves.
+  const offsets = useMemo(() => {
+    const n = turns.current.length;
+    const acc = new Float64Array(n + 1);
+    for (let i = 0; i < n; i++) acc[i + 1] = acc[i] + (heights.current[i] || ROW_EST);
+    return acc;
+  }, [range, tick, heightsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The loaders need the offsets as they are NOW, not as they were when the
+  // callback was made.
+  const offsetsRef = useRef(offsets);
+  offsetsRef.current = offsets;
+
+  /** First row whose bottom edge is past `top`. */
+  const rowAt = (acc: Float64Array, top: number) => {
+    let lo = 0;
+    let hi = Math.max(0, acc.length - 1);
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (acc[mid + 1] <= top) lo = mid + 1; else hi = mid; }
+    return lo;
+  };
+
+  // ---- loading ----
+  const loadTail = useCallback(async () => {
+    loading.current = true;
     try {
-      const p = await src(pageIndex * PAGE, PAGE);
-      const { turns: got, ...meta } = p;
-      if (turns.current.length !== meta.total) {
-        turns.current.length = meta.total;
-        heights.current.length = meta.total;
-      }
-      got.forEach((t, i) => { turns.current[meta.offset + i] = t; });
-      setHead(meta);
+      const { turns: got, window: win, ...m } = await src.window({ at: 'tail' }, WINDOW_BYTES);
+      turns.current = got;
+      heights.current = new Array(got.length);
+      cursor.current = win;
+      anchor.current = null;
+      stick.current = true;
+      positioned.current = false;
+      setMeta(m);
       setError(null);
+      setRange({ start: 0, end: Math.min(got.length, 40) });
       bump();
     } catch (e) {
       // The server distinguishes "nothing to show yet" from a real failure and
       // says which — pass its own words through rather than inventing a reason.
       setError(e instanceof api.TraceUnavailable ? e.message : 'could not read the trace');
     } finally {
-      pending.current.delete(pageIndex);
+      loading.current = false;
+    }
+  }, [src, bump]);
+
+  /** Fetch the window before the oldest turn held. Returns how many arrived. */
+  const loadOlder = useCallback(async () => {
+    const cur = cursor.current;
+    if (loading.current || !cur || cur.atStart) return 0;
+    loading.current = true;
+    try {
+      let from = cur.start;
+      let atStart = false;
+      let got: TraceTurn[] = [];
+      let meta2: Meta | null = null;
+      // A window can legitimately hold no turns at all (a stretch of file-history
+      // lines, a run of harness metadata). Keep walking back until it holds
+      // something, the file starts, or the cursor stops moving.
+      for (let hop = 0; hop < 8 && !got.length && !atStart; hop++) {
+        const { turns: page, window: win, ...m } = await src.window({ at: 'before', cursor: from }, WINDOW_BYTES);
+        got = page;
+        meta2 = m;
+        atStart = win.atStart || win.start >= from;
+        from = win.start;
+      }
+      const el = scroller.current;
+      if (el && got.length) {
+        // Same row, `got.length` places further down the list — see `anchor`.
+        const i = rowAt(offsetsRef.current, el.scrollTop);
+        anchor.current = { i: i + got.length, delta: el.scrollTop - (offsetsRef.current[i] || 0) };
+        stick.current = false;
+      }
+      turns.current = [...got, ...turns.current];
+      heights.current = [...new Array(got.length), ...heights.current];
+      cursor.current = { ...cur, start: from, atStart };
+      if (meta2) setMeta((p) => mergeMeta(p, meta2 as Meta));
+      if (got.length) setRange((r) => ({ start: r.start + got.length, end: r.end + got.length }));
+      bump();
+      return got.length;
+    } catch {
+      // Keep what is on screen; the next scroll retries.
+      return 0;
+    } finally {
+      loading.current = false;
+    }
+  }, [src, bump]);
+
+  /** Whatever the agent has written since we last looked. */
+  const loadNewer = useCallback(async () => {
+    const cur = cursor.current;
+    if (loading.current || !cur) return;
+    loading.current = true;
+    try {
+      const { turns: got, window: win, ...m } = await src.window({ at: 'after', cursor: cur.end });
+      if (win.gap) {
+        // More was written than one window can carry. Splicing it in would leave
+        // a hole in the middle of the conversation with nothing to say so —
+        // start again from the new tail instead.
+        turns.current = got;
+        heights.current = new Array(got.length);
+        cursor.current = win;
+        anchor.current = null;
+        stick.current = true;
+        positioned.current = false;
+        setRange({ start: 0, end: Math.min(got.length, 40) });
+      } else {
+        if (got.length) {
+          turns.current = [...turns.current, ...got];
+          heights.current = [...heights.current, ...new Array(got.length)];
+        }
+        cursor.current = { ...cur, end: win.end, atEnd: win.atEnd };
+      }
+      setMeta((p) => mergeMeta(p, m));
+      if (got.length) bump();
+    } catch {
+      // A poll that fails must not throw away the conversation on screen.
+    } finally {
+      loading.current = false;
     }
   }, [src, bump]);
 
   useEffect(() => {
     turns.current = [];
     heights.current = [];
-    setHead(null);
-    loadPage(0);
-  }, [srcKey, loadPage]);
+    cursor.current = null;
+    anchor.current = null;
+    stick.current = true;
+    positioned.current = false;
+    setMeta(null);
+    setSummary(null);
+    setRange({ start: 0, end: 40 });
+    loadTail();
+  }, [srcKey, loadTail]);
 
-  // ---- windowing ----
-  // Prefix sums over measured (or estimated) row heights. n is bounded by the
-  // reader's VIEW_MAX_MESSAGES, so a full recompute is cheap and happens only
-  // when a row is measured or the window moves.
-  const offsets = useMemo(() => {
-    const n = turns.current.length;
-    const acc = new Float64Array(n + 1);
-    for (let i = 0; i < n; i++) acc[i + 1] = acc[i] + (heights.current[i] || ROW_EST);
-    return acc;
-  }, [range, head, heightsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The one read that touches the whole file, fired AFTER the first paint: it
+  // buys the header a real turn count, the session's token total and the date
+  // the conversation started — none of which a window can know. If it fails or
+  // is slow, the header simply says how much is loaded.
+  useEffect(() => {
+    let dead = false;
+    const h = window.setTimeout(() => {
+      src.summary().then((s) => { if (!dead) setSummary(s); }).catch(() => {});
+    }, SUMMARY_DELAY_MS);
+    return () => { dead = true; window.clearTimeout(h); };
+  }, [src, srcKey]);
+
+  // The transcript may still be being written — see LIVE_MS above.
+  const lastTs = meta ? meta.lastTs : 0;
+  useEffect(() => {
+    const h = window.setInterval(loadNewer, lastTs && Date.now() - lastTs < FRESH_MS ? LIVE_MS : IDLE_MS);
+    return () => window.clearInterval(h);
+  }, [loadNewer, lastTs]);
 
   const recompute = useCallback(() => {
     const el = scroller.current;
@@ -260,38 +443,52 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
     const n = turns.current.length;
     const top = Math.max(0, el.scrollTop - OVERSCAN_PX);
     const bottom = el.scrollTop + el.clientHeight + OVERSCAN_PX;
-    // binary search for the first row whose bottom edge is past `top`
-    let lo = 0, hi = n;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (offsets[mid + 1] <= top) lo = mid + 1; else hi = mid; }
+    const lo = rowAt(offsets, top);
     let end = lo;
     while (end < n && offsets[end] < bottom) end++;
     if (lo !== range.start || end !== range.end) setRange({ start: lo, end: Math.max(end, lo + 1) });
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_PX;
+    // Reading back into the trace: fetch the stretch in front of what we hold,
+    // before the reader arrives at it. Also covers a tail window too short to
+    // fill the pane — there is no scrolling to do, so nothing else would ask.
+    if (positioned.current && el.scrollTop < NEAR_TOP_PX) loadOlder();
+  }, [offsets, range.start, range.end, loadOlder]);
 
-    // fetch whatever page the window needs
-    for (let i = lo; i < end; i++) {
-      if (!turns.current[i]) loadPage(Math.floor(i / PAGE));
-    }
-  }, [offsets, range.start, range.end, loadPage]);
+  useEffect(() => { recompute(); }, [recompute, meta]);
 
-  useEffect(() => { recompute(); }, [recompute, head]);
-
-  // ---- jump between prompts ----
-  // Landing exactly on a row is a two-step problem: the offsets are estimates
-  // until a row has been measured, so the first scroll is approximate and the
-  // real position is only known once the target has rendered. Remember the
-  // target and re-apply it as heights settle, giving up after a few passes so a
-  // row that keeps resizing can't hold the scroll position hostage.
+  // ---- keeping the view still ----
+  // Every layout change lands here: a jump to a prompt, a prepended window, a
+  // row that just measured itself, a new turn while pinned to the bottom.
   const wanted = useRef<number | null>(null);
   const tries = useRef(0);
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    // Landing exactly on a row is a two-step problem: offsets are estimates
+    // until a row has been measured, so the first scroll is approximate and the
+    // real position is known only once the target has rendered. Re-apply it as
+    // heights settle, giving up after a few passes so a row that keeps resizing
+    // can't hold the scroll position hostage.
+    if (wanted.current != null) {
+      const target = offsets[wanted.current] || 0;
+      if (Math.abs(el.scrollTop - target) > 2) el.scrollTop = target;
+      if (++tries.current > 8) wanted.current = null;
+    } else if (stick.current) {
+      el.scrollTop = el.scrollHeight;
+      anchor.current = null;
+    } else if (anchor.current) {
+      el.scrollTop = (offsets[anchor.current.i] || 0) + anchor.current.delta;
+      anchor.current = null;
+    }
+    // The turns we hold are on screen and the view is where it should be:
+    // `scrollTop` now means what the reader is doing.
+    if ((offsets[turns.current.length] || 0) > 0) positioned.current = true;
+  }, [offsets]);
 
   const firstVisible = useCallback(() => {
     const el = scroller.current;
-    const n = turns.current.length;
-    if (!el || !n) return 0;
-    const top = el.scrollTop + 1;
-    let lo = 0, hi = n;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (offsets[mid + 1] <= top) lo = mid + 1; else hi = mid; }
-    return lo;
+    if (!el || !turns.current.length) return 0;
+    return rowAt(offsets, el.scrollTop + 1);
   }, [offsets]);
 
   const goToTurn = useCallback((i: number) => {
@@ -299,31 +496,35 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
     if (!el) return;
     wanted.current = i;
     tries.current = 0;
+    stick.current = false;
     el.scrollTop = offsets[i] || 0;
     recompute();
   }, [offsets, recompute]);
 
-  useEffect(() => {
-    const i = wanted.current;
-    const el = scroller.current;
-    if (i == null || !el) return;
-    const target = offsets[i] || 0;
-    if (Math.abs(el.scrollTop - target) > 2) el.scrollTop = target;
-    if (++tries.current > 8) wanted.current = null;
-  }, [offsets, heightsVersion, head]);
+  // ---- jump between prompts ----
+  // The operator's own turns, among those loaded. Reaching past the oldest one
+  // loads the window in front of it rather than pretending there are no more.
+  const prompts = useMemo(() => {
+    const out: number[] = [];
+    turns.current.forEach((t, i) => { if (t.role === 'user') out.push(i); });
+    return out;
+  }, [tick]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const prompts = head?.userTurns || [];
-  const goPrompt = (dir: -1 | 1) => {
-    if (!prompts.length) return;
+  const goRef = useRef<(dir: -1 | 1) => void>(() => {});
+  const goPrompt = async (dir: -1 | 1) => {
     const cur = firstVisible();
-    const next = dir < 0
-      ? prompts.filter((i) => i < cur).pop()
-      : prompts.find((i) => i > cur);
-    // Past the last prompt, the ends are the useful destinations.
-    if (next !== undefined) goToTurn(next);
-    else if (dir < 0) goToTurn(prompts[0]);
-    else if (scroller.current) { wanted.current = null; scroller.current.scrollTop = scroller.current.scrollHeight; }
+    const next = dir < 0 ? prompts.filter((i) => i < cur).pop() : prompts.find((i) => i > cur);
+    if (next !== undefined) { goToTurn(next); return; }
+    if (dir > 0) {
+      // Past the last prompt, the end of the conversation is the destination.
+      const el = scroller.current;
+      if (el) { wanted.current = null; stick.current = true; el.scrollTop = el.scrollHeight; }
+      return;
+    }
+    if (!cursor.current?.atStart && await loadOlder()) { goRef.current(dir); return; }
+    if (prompts.length) goToTurn(prompts[0]);
   };
+  goRef.current = goPrompt;
 
   // Measure rendered rows (heights change when a fold is expanded).
   const rowRefs = useRef(new Map<number, HTMLElement>());
@@ -335,15 +536,23 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
         const h = e.contentRect.height;
         if (Number.isFinite(i) && Math.abs((heights.current[i] || 0) - h) > 1) { heights.current[i] = h; changed = true; }
       }
-      if (changed) setHeightsVersion((v) => v + 1);
+      if (!changed) return;
+      // Measuring changes the offsets of everything below — and of everything
+      // above, if a row above the viewport grew. Pin the row being read.
+      const el = scroller.current;
+      if (el && !stick.current && wanted.current == null) {
+        const i = rowAt(offsetsRef.current, el.scrollTop);
+        anchor.current = { i, delta: el.scrollTop - (offsetsRef.current[i] || 0) };
+      }
+      setHeightsVersion((v) => v + 1);
     });
     for (const el of rowRefs.current.values()) ro.observe(el);
     return () => ro.disconnect();
-    // `head` is in here so rows that arrive from a fetch (without the window
+    // `tick` is in here so rows that arrive from a fetch (without the window
     // moving) get measured too — otherwise they keep their 44px estimate and the
     // scroll height stays wrong. NOT heightsVersion: that's what the observer
     // sets, and re-attaching on it would churn on every measurement.
-  }, [range, head, bump]);
+  }, [range, tick, meta]);
 
   const setRowRef = (i: number) => (el: HTMLDivElement | null) => {
     if (el) rowRefs.current.set(i, el); else rowRefs.current.delete(i);
@@ -358,24 +567,31 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
       if (t && t.blocks.some((b) => JSON.stringify(b).toLowerCase().includes(q))) hits.push(i);
     });
     return hits.slice(0, 200);
-  }, [query, head, range, heightsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [query, tick, heightsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const n = turns.current.length;
+  const atStart = !!cursor.current?.atStart;
   const rows: ReactNode[] = [];
   for (let i = range.start; i < Math.min(range.end, n); i++) {
-    const t = turns.current[i];
     rows.push(
       <div key={i} ref={setRowRef(i)} data-i={i}>
-        {t ? <Row turn={t} index={i} /> : <div className="tv-row placeholder" style={{ height: ROW_EST }} />}
+        <Row turn={turns.current[i]} index={i} />
       </div>,
     );
   }
 
-
   // Hand the host what its toolbar needs. goPrompt is rebuilt every render, so
   // the host gets a stable wrapper around the current one.
-  const goRef = useRef(goPrompt);
-  goRef.current = goPrompt;
+  const head = useMemo<TraceHeadInfo | null>(() => (meta ? {
+    ...meta,
+    total: summary ? summary.total : null,
+    userTurns: summary ? summary.userTurns : null,
+    usage: meta.usage || (summary ? summary.usage : null),
+    firstTs: meta.firstTs || (summary ? summary.firstTs : 0),
+    truncated: meta.truncated || !!(summary && summary.truncated),
+    loaded: turns.current.length,
+    atStart,
+  } : null), [meta, summary, tick, atStart]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { onNav?.((d: -1 | 1) => goRef.current(d)); }, [onNav]);
   useEffect(() => { onHead?.(head); }, [head, onHead]);
 
@@ -392,42 +608,49 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
         style={{ fontSize: `${(13 * zoom) / 100}px` }}
       >
         {error && <div className="tv-msg">{error}</div>}
-        {!error && !head && <div className="tv-msg">reading…</div>}
+        {!error && !meta && <div className="tv-msg">reading…</div>}
 
-        {!error && head && matches && (
+        {!error && meta && matches && (
           <div className="tv-matches">
             <div className="tv-msg">
-              {matches.length} match{matches.length === 1 ? '' : 'es'} in the {fmtNum(turns.current.filter(Boolean).length)} turns
-              loaded so far{turns.current.filter(Boolean).length < head.total ? ' — scroll to load more' : ''}
+              {matches.length} match{matches.length === 1 ? '' : 'es'} in the {fmtNum(n)} turns
+              loaded so far{atStart ? '' : ' — scroll up to load more'}
             </div>
-            {matches.map((i) => <Row key={i} turn={turns.current[i]!} index={i} />)}
+            {matches.map((i) => <Row key={i} turn={turns.current[i]} index={i} />)}
           </div>
         )}
 
-        {!error && head && !matches && (
+        {!error && meta && !matches && (
           <>
+            {/* Fixed height whether it is loading, done, or at the beginning:
+                this line sits above every offset in the list, so changing its
+                size would move the whole conversation under the reader. */}
+            <div className="tv-msg tv-top">
+              {atStart
+                ? (head?.truncated ? 'session longer than the viewer’s cap — earlier turns are not shown' : 'beginning of the conversation')
+                : 'earlier turns load as you scroll up…'}
+            </div>
             {/* State the gaps up front: a reader who can't see the model's
                 reasoning should know it was withheld, not that there was none. */}
-            {head.note && <div className="tv-msg">{head.note}</div>}
+            {meta.note && <div className="tv-msg">{meta.note}</div>}
             <div style={{ height: offsets[range.start] || 0 }} />
             {rows}
             <div style={{ height: Math.max(0, (offsets[n] || 0) - (offsets[Math.min(range.end, n)] || 0)) }} />
-            {head.truncated && <div className="tv-msg">session longer than the viewer's cap — earlier turns only</div>}
           </>
         )}
       </div>
 
-      {head && (head.source || head.cwd) && (
+      {meta && (meta.source || meta.cwd) && (
         <div className="trace-hint">
-          {head.source?.repo && (
+          {meta.source?.repo && (
             <>
-              {head.sharedBy ? `shared by ${head.sharedBy} · ` : ''}
-              <a href={head.source.url || `https://huggingface.co/datasets/${head.source.repo}`} target="_blank" rel="noreferrer">{head.source.repo}</a>
+              {meta.sharedBy ? `shared by ${meta.sharedBy} · ` : ''}
+              <a href={meta.source.url || `https://huggingface.co/datasets/${meta.source.repo}`} target="_blank" rel="noreferrer">{meta.source.repo}</a>
               {' · '}
             </>
           )}
-          {head.cwd}
-          {head.firstTs ? ` · ${new Date(head.firstTs).toLocaleString()}` : ''}
+          {meta.cwd}
+          {head?.firstTs ? ` · ${new Date(head.firstTs).toLocaleString()}` : ''}
         </div>
       )}
     </>
@@ -445,14 +668,21 @@ export default function TracePane({
   onFocus?: () => void;
   onClose: () => void;
 }) {
-  const [head, setHead] = useState<Omit<TracePage, 'turns'> | null>(null);
+  const [head, setHead] = useState<TraceHeadInfo | null>(null);
   const [query, setQuery] = useState('');
   const nav = useRef<((dir: -1 | 1) => void) | null>(null);
   const onNav = useCallback((go: (dir: -1 | 1) => void) => { nav.current = go; }, []);
-  const src = useCallback<TraceSource>((offset, limit) => api.getTracePage(session.id, offset, limit), [session.id]);
+  const src = useMemo<TraceSource>(() => ({
+    window: (req, bytes) => api.getTraceWindow(session.id, req, bytes),
+    summary: () => api.getTraceSummary(session.id),
+  }), [session.id]);
 
-  const prompts = head?.userTurns || [];
+  const prompts = head?.userTurns?.length ?? 0;
   const totalTokens = head?.usage ? fmtUsage(head.usage) : '';
+  // Until the summary lands, the honest count is what the reader is holding.
+  const count = head && (head.total != null
+    ? `${fmtNum(head.total)} turns`
+    : `${fmtNum(head.loaded)} turn${head.loaded === 1 ? '' : 's'} loaded`);
 
   return (
     <div className={`slot${focused ? ' focused' : ''}`} onMouseDown={onFocus}>
@@ -468,16 +698,17 @@ export default function TracePane({
         <span className="tv-title" title={head?.title || undefined}>{head?.title || head?.harnessLabel || 'trace'}</span>
         {head?.title && head.harnessLabel && <span className="tv-chip">{head.harnessLabel}</span>}
         {head?.model && <span className="tv-chip">{head.model}</span>}
-        {head && <span className="tv-count">{fmtNum(head.total)} turns</span>}
+        {count && <span className="tv-count" title={head && head.total != null && head.loaded < head.total ? `${fmtNum(head.loaded)} loaded — scroll up for the rest` : undefined}>{count}</span>}
         {totalTokens && <span className="tv-tokens">{totalTokens}</span>}
         <span className="spacer" />
         {/* Prompt-to-prompt navigation: an agent turn can run for dozens of rows,
-            and what you usually want is the next thing YOU said. */}
+            and what you usually want is the next thing YOU said. Walking back
+            past the oldest prompt loaded pulls in the window before it. */}
         <span className="tv-nav">
-          <button className="mini-btn" disabled={!prompts.length} onClick={() => nav.current?.(-1)}
-            title={prompts.length ? `Previous prompt (${prompts.length} in this session)` : 'No prompts in this trace'}>▲</button>
-          <button className="mini-btn" disabled={!prompts.length} onClick={() => nav.current?.(1)}
-            title={prompts.length ? `Next prompt (${prompts.length} in this session)` : 'No prompts in this trace'}>▼</button>
+          <button className="mini-btn" disabled={!head} onClick={() => nav.current?.(-1)}
+            title={prompts ? `Previous prompt (${prompts} in this session)` : 'Previous prompt'}>▲</button>
+          <button className="mini-btn" disabled={!head} onClick={() => nav.current?.(1)}
+            title={prompts ? `Next prompt (${prompts} in this session)` : 'Next prompt'}>▼</button>
         </span>
         <input
           className="tv-search"
