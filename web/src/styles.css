@@ -562,13 +562,25 @@ body {
 
 .pane-head { container-type: inline-size; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr); align-items: center; gap: 9px; padding: 7px 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
 .pane-head .ph-left { grid-column: 1; justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
-.pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; text-align: center; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+.pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; display: inline-flex; align-items: baseline; justify-content: center; gap: 5px; text-align: center; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; cursor: text; }
+/* `[Group] name` is one title in two parts, and the group is the part that
+   gives way: it is weighted to shrink hundreds of times faster than the name,
+   so a tile too narrow for both truncates the context rather than the thing you
+   are looking for. Below a tile width where a clipped prefix would say nothing
+   anyway, it drops out entirely and the name gets the whole header. */
+.ph-group { flex: 0 500 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-weight: 500; }
+.ph-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; }
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }
 @container (max-width: 520px) {
   .pane-head .ph-path { display: none; }
+}
+/* Narrower than this a prefix could only ever be a sliver of itself, and a
+   header that reads "[A… name" is worse than one that just reads "name". */
+@container (max-width: 260px) {
+  .pane-head .ph-group { display: none; }
 }
 .slot { transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out; }
 /* fallback focus tint (terminal panes override with their agent's color inline) */
@@ -1074,7 +1086,7 @@ a.btn-ghost { text-decoration: none; }
 .modebar { flex: none; margin-right: 6px; }
 .modebar button { padding: 2px 8px; font-size: 10.5px; letter-spacing: 0.02em; }
 
-.mtitle { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mtitle { display: inline-flex; align-items: baseline; gap: 5px; min-width: 0; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mchips { display: flex; gap: 6px; overflow-x: auto; flex: 1; padding: 2px; }
 .mchip { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; flex: none; }
 .mchip.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
