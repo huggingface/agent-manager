@@ -138,7 +138,9 @@ export default function App() {
     const keyboardSignalThreshold = 80;
     // The viewport as it was before a field took focus — the only thing left
     // that needs remembering, because a keyboard is detected as the SHRINK from
-    // it (hasKeyboardGeometry), not as an absolute height.
+    // it (hasKeyboardGeometry), not as an absolute height. Since the estimate
+    // was deleted this feeds no layout at all: its one consumer is the
+    // keyboardLayout label, which only ?vvdebug=1 reads.
     let focusBaseline: ViewportBaseline | null = null;
 
     const acceptsKeyboardInput = (target: Element | null): target is HTMLElement => {
@@ -183,10 +185,17 @@ export default function App() {
       // is wrong in the safe direction is still wrong: the abandoned strip does
       // not stay hidden behind the keyboard, because the browser scroll-reveals
       // a focused field and drags it back into view. That strip is the blank
-      // band under the reader's composer. Leaving the viewport alone hands the
-      // job to the engine that can actually see the keyboard — the same
-      // scroll-into-view that already keeps xterm's pinned helper textarea
-      // above it.
+      // band under the reader's composer.
+      //
+      // What replaces it is the PARENT page's scroll, not ours: measured at
+      // 390x844, every box in this document — html, body, #root, .app, .main,
+      // .term-host, .pane-reader, .cxv — has a scroll range of exactly 0, so a
+      // scroll-into-view in here moves nothing. The reveal is entirely the
+      // embedder's, and this document's job is to not fight it by resizing
+      // itself against a keyboard it cannot see.
+      //
+      // Nothing below sizes anything: with the estimate gone, keyboardLayout is
+      // a label for ?vvdebug=1 to read. No CSS matches it.
       if (hasKeyboardGeometry()) root.dataset.keyboardLayout = 'browser-geometry';
       else delete root.dataset.keyboardLayout;
       root.style.setProperty('--vvw', `${Math.round(width)}px`);
@@ -222,7 +231,12 @@ export default function App() {
     };
     const onFocusIn = (event: FocusEvent) => {
       const target = event.target instanceof Element ? event.target : null;
-      if (acceptsKeyboardInput(target)) focusBaseline = captureViewport();
+      // Only when there is no baseline yet: tapping from one field straight to
+      // another keeps the keyboard up, and re-reading here would take the
+      // shrunk viewport as the "before" — after which the shrink measures zero
+      // and a keyboard that is plainly up reads as absent. focusout clears it
+      // when focus really leaves, so this stays fresh without being re-taken.
+      if (acceptsKeyboardInput(target) && !focusBaseline) focusBaseline = captureViewport();
       stabilizeFocus();
     };
     const onFocusOut = () => {

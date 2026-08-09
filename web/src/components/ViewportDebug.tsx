@@ -24,9 +24,10 @@ export default function ViewportDebug() {
     let frame = 0;
     let last = '';
     const history: string[] = [];
-    // vv.height while nothing is focused: what App.tsx's focusFallback later
-    // multiplies by its constant. In an iframe this is the FRAME's height, not
-    // the screen's — the discrepancy that makes the guess wrong.
+    // vv.height while nothing is focused. Nothing multiplies it any more — the
+    // estimate is gone — but it is still the number to compare against once a
+    // keyboard is up: unchanged here means this document got no signal at all,
+    // and inside an iframe it is the FRAME's height, not the screen's.
     let baseline = window.visualViewport?.height ?? window.innerHeight;
 
     const num = (n: number) => String(Math.round(n)).padStart(4);
