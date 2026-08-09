@@ -163,7 +163,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    you scan for — still spanned the full width, so the two disagreed about where
    the conversation began. The pane is the measure: make it narrow and the
    conversation is narrow. */
-.cxv-body { flex: 1; min-height: 0; overflow-y: auto; background: var(--panel); padding: 4px 14px 30px; }
+.cxv-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px 14px 30px; }
 .cxv-col { display: flex; flex-direction: column; min-width: 0; }
 .cxv-msg { font-size: 11px; color: var(--muted); padding: 6px 0; }
 .cxv-foot {
@@ -174,12 +174,14 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 .cxv-foot .cxv-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cxv-foot .spacer { flex: 1; min-width: 4px; }
 
-/* the prompt band sticks: deep inside a long turn, the thing you want overhead
-   is what you asked for — not a row of numbers */
-.cxv-col .cx-prompt {
-  position: sticky; top: 0; z-index: 2;
-  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
-}
+/* The prompt band used to stick to the top of this scroller, on the theory that
+   deep inside a long turn you want what you asked for overhead. In a pane-sized
+   reader it reads as the message refusing to scroll away — and on a phone,
+   where the band can be a third of what you can see, that is most of the screen
+   held back. It scrolls with everything else now; the tint is what marks it.
+   The opaque background that came with it went too: it existed so scrolling
+   content would not show through a floating band, and over .cxv-body's --panel
+   the base transparent tint composites to the same colour. */
 
 /* ---------- phone ---------- */
 @media (max-width: 720px) {
