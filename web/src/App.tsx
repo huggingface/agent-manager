@@ -472,17 +472,29 @@ export default function App() {
   const [pageRaw, setPage] = useState(0);
   const page = Math.min(pageRaw, pageCount - 1); // clamp when agents/layout change
   // Restoring a group has to restore its page too: mobile shows one pane per
-  // page, so the remembered focusedId would otherwise sit behind page 0. Fires
-  // once, on the first loaded tree — a standing effect would be exactly the
-  // activeRef clobber the note above warns about.
+  // page, so the remembered pane would otherwise sit behind page 0. Fires once,
+  // on the first loaded tree — a standing effect would be exactly the activeRef
+  // clobber the note above warns about.
+  //
+  // It reads the remembered pane from a ref, NOT from focusedId, because
+  // focusedId does not survive to here: "keep a focused pane within the visible
+  // set" below runs on the mount commit, when the tree is still empty and the
+  // visible set with it, and nulls focusedId — which the write-through then
+  // erases from storage. The ref is out of that effect's reach. Restoring the
+  // page puts the remembered pane in the visible set, and that same effect then
+  // focuses it (on mobile the page IS the pane, so it lands exactly).
+  const restoredFocus = useRef(readStored('am-focused-id'));
   const pageRestored = useRef(false);
   useEffect(() => {
     if (pageRestored.current || !treeLoaded) return;
     pageRestored.current = true;
-    if (!activeGroup || !focusedId) return;
-    const idx = activeGroup.sessionIds.indexOf(focusedId);
-    if (idx >= 0) setPage(Math.floor(idx / cap));
-  }, [treeLoaded, activeGroup, focusedId, cap]);
+    const want = restoredFocus.current;
+    if (!activeGroup || !want) return;
+    const idx = activeGroup.sessionIds.indexOf(want);
+    if (idx < 0) return; // remembered a pane this group no longer has
+    setPage(Math.floor(idx / cap));
+    setFocusedId(want);
+  }, [treeLoaded, activeGroup, cap]);
   const pageSessions = activeGroup ? groupSessions.slice(page * cap, (page + 1) * cap) : [];
 
   const visibleSessions = activeGroup ? pageSessions : activeSingle ? [activeSingle] : [];
