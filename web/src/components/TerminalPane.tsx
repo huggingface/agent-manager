@@ -10,6 +10,7 @@ import Logo from './Logo';
 import ConversationView from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
+import { groupLabel, sessionTitle } from '../lib/sessionTitle';
 import { CloseGlyph, RefreshGlyph } from './icons';
 
 const THEMES: Record<'light' | 'dark', ITheme> = {
@@ -180,11 +181,12 @@ if (typeof window !== 'undefined') {
 }
 
 export default function TerminalPane({
-  session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', dragId, isMobile, onDragActive, onFocus, onRename, onClose,
+  session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', dragId, isMobile, groupName, onDragActive, onFocus, onRename, onClose,
 }: {
   session: Session;
   cli?: Cli;
   theme: 'light' | 'dark';
+  groupName?: string | null; // the group this pane belongs to, if any
   focused?: boolean;
   visible?: boolean;
   active?: boolean;
@@ -831,6 +833,7 @@ export default function TerminalPane({
   // Focused panes tint toward THEIR agent's brand color, not the app accent.
   const tint = cli?.color;
   const pathLabel = workspaceLabel(session.path);
+  const group = groupLabel(groupName);
   return (
     <div
       className={`slot${focused ? ' focused' : ''}`}
@@ -861,7 +864,17 @@ export default function TerminalPane({
             onKeyDown={(e) => { if (e.key === 'Enter') commitName(); if (e.key === 'Escape') setEditing(false); }}
           />
         ) : (
-          <span className="ph-title" title={`${pathLabel} · double-click to rename`} onDoubleClick={() => { setDraft(session.name); setEditing(true); }}>{session.name}</span>
+          // Two spans, not one string: the group is a prefix that must give way
+          // before the agent's own name does (see .ph-group in styles.css), and
+          // the rename below still edits the name alone.
+          <span
+            className="ph-title"
+            title={`${sessionTitle(session.name, groupName)} · ${pathLabel} · double-click to rename`}
+            onDoubleClick={() => { setDraft(session.name); setEditing(true); }}
+          >
+            {group && <span className="ph-group">[{group}]</span>}
+            <span className="ph-name">{session.name}</span>
+          </span>
         )}
         <div className="ph-right">
           <span className="ph-path" title={pathLabel}>{pathLabel}</span>

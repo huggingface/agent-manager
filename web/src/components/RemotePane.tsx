@@ -4,6 +4,7 @@ import { REMOTE_STATE_LABEL } from '../types';
 import * as api from '../api';
 import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
+import { groupLabel, sessionTitle } from '../lib/sessionTitle';
 import { CloseGlyph, StopGlyph, PlayGlyph, ShareGlyph, AckGlyph } from './icons';
 
 // Looks like the terminal, is not one: no PTY, no xterm.js, no WebSocket. The
@@ -24,9 +25,10 @@ const fmtAgo = (ts?: number | null) => {
 };
 
 export default function RemotePane({
-  session, focused, zoom = 100, dragId, onDragActive, onFocus, onClose, onRename,
+  session, focused, zoom = 100, dragId, groupName, onDragActive, onFocus, onClose, onRename,
 }: {
   session: Session;
+  groupName?: string | null; // the group this pane belongs to, if any
   focused?: boolean;
   zoom?: number;
   dragId?: string;
@@ -36,6 +38,7 @@ export default function RemotePane({
   onRename?: (name: string) => void;
 }) {
   const name = session.remote?.name || '';
+  const group = groupLabel(groupName);
   const [info, setInfo] = useState<RemoteInfo | null>(null);
   const [messages, setMessages] = useState<RemoteMessage[]>([]);
   const [draft, setDraft] = useState('');
@@ -218,9 +221,12 @@ export default function RemotePane({
         ) : (
           <span
             className="ph-title"
-            title={onRename ? 'double-click to rename' : undefined}
+            title={`${sessionTitle(session.name, groupName)}${onRename ? ' · double-click to rename' : ''}`}
             onDoubleClick={onRename ? () => { setTitleDraft(session.name); setEditing(true); } : undefined}
-          >{session.name}</span>
+          >
+            {group && <span className="ph-group">[{group}]</span>}
+            <span className="ph-name">{session.name}</span>
+          </span>
         )}
         <div className="ph-right">
           <div className="rp-pop-wrap" ref={popRef}>
