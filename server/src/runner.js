@@ -661,6 +661,31 @@ async function hydrateTraceHistory(session, host) {
   }
 }
 
+// ---------- whose folder is this conversation in? ----------
+// Every pin path asks the same question of a candidate conversation: was it
+// started by THIS pane? The answer is the folder it was born in — and a pane's
+// folder is a tree, not one directory.
+//
+// This used to be `cwd === workdir`, and that quietly broke every agent that
+// works in a git worktree. The PTY starts in the session's folder, the agent
+// then enters `.claude/worktrees/<name>` (or just cd's somewhere below), and the
+// conversation a later `/clear` starts records that DEEPER cwd. Equality
+// rejected it from both directions — the SessionStart crumb as 'cwd mismatch',
+// the transcript scan by skipping the file — so the pin stayed on the abandoned
+// conversation for the rest of the pane's life. The reader kept showing the
+// pre-/clear thread while the terminal showed the new one, and the next launch
+// would `--resume` the old id and discard everything since. Observed live:
+// session claude-code-4 pinned edbfc11f… while claude wrote b1e23587… in
+// /data/workspaces/Agent-manager/.claude/worktrees/session-sharing.
+//
+// Containment, not prefix matching: `/w/proj-a2` must not count as inside
+// `/w/proj-a`. Exported for server/test/repin.test.mjs.
+export function cwdUnderWorkdir(cwd, workdir) {
+  if (typeof cwd !== 'string' || !cwd || typeof workdir !== 'string' || !workdir) return false;
+  const rel = path.relative(path.resolve(workdir), path.resolve(cwd));
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
 // ---------- Codex conversation pinning ----------
 // Codex picks its own conversation id at launch and doesn't accept one up
 // front. The managed SessionStart hook below is the primary source of its exact
@@ -764,7 +789,7 @@ function tryCaptureCodexId(sessionId, workdir, sinceMs) {
     let meta;
     try { meta = JSON.parse(firstLine(c.p)); } catch { continue; }
     const mp = (meta && meta.payload) || {};
-    if (mp.cwd !== workdir) continue;
+    if (!cwdUnderWorkdir(mp.cwd, workdir)) continue;
     // A sibling's ongoing conversation in the same folder gets fresh writes
     // (mtime) during our capture window — require the rollout to have been
     // CREATED after this launch so we never claim someone else's thread.
@@ -948,8 +973,10 @@ export async function claudeCandidate(sessionId, workdir, sinceMs) {
     // in every real transcript measured. Reading line 1 made this check always
     // fail, so the re-pin could never actually claim anything.
     const head = await transcriptHeadCached(c.p);
-    // Only claim a conversation started in THIS session's folder.
-    if (!head || head.cwd !== workdir) continue;
+    // Only claim a conversation started in THIS session's folder — or in a
+    // directory below it, which is where an agent in a worktree lives (see
+    // cwdUnderWorkdir).
+    if (!head || !cwdUnderWorkdir(head.cwd, workdir)) continue;
     const start = Date.parse(head.timestamp || '') || 0;
     // Born in this launch window, or it's an older thread that merely received
     // writes — someone else's, or our own pre-relaunch one.
@@ -959,12 +986,22 @@ export async function claudeCandidate(sessionId, workdir, sinceMs) {
   return best;
 }
 
-// Another LIVE session of the same harness on the same folder makes a new
+// Another LIVE session of the same harness whose folder OVERLAPS ours makes a new
 // conversation there unattributable: we cannot tell whose /clear produced it.
 // Refuse to guess, the way share.js does when a folder has rivals.
+//
+// Overlap, not equality, because the scan now accepts a conversation born
+// anywhere below the folder (see cwdUnderWorkdir): a live sibling running in a
+// subdirectory of ours — or in a parent of it, which is what a session on the
+// workspaces root is — is exactly as ambiguous as one in the same directory.
+// Refusing here costs nothing where it fires: the breadcrumb path is unaffected,
+// and it is the mechanism now — the scan is its backstop.
 function folderIsShared(sessionId, workdir, cli) {
-  return list().some((s) => s.id !== sessionId && s.cli === cli
-    && path.join(WORKSPACES_DIR, s.path ?? s.id) === workdir && isRunning(s.id));
+  return list().some((s) => {
+    if (s.id === sessionId || s.cli !== cli || !isRunning(s.id)) return false;
+    const other = path.join(WORKSPACES_DIR, s.path ?? s.id);
+    return cwdUnderWorkdir(other, workdir) || cwdUnderWorkdir(workdir, other);
+  });
 }
 
 // Re-pinning is NOT a one-shot check, because the pin can go stale mid-session.
@@ -1086,8 +1123,10 @@ export function breadcrumbVerdict(crumb, sessionId, facts) {
   if (!CONVERSATION_ID[facts.cli]?.test(conversationId || ''))
     return { repin: null, why: 'no session_id' };
   // A crumb written before a pane was moved to another folder must not follow
-  // it there — same folder-scoping rule the transcript scan applies.
-  if (crumb.payload?.cwd !== facts.workdir) return { repin: null, why: 'cwd mismatch' };
+  // it there — same folder-scoping rule the transcript scan applies, and the
+  // same tree (a worktree under the folder is still this pane's work).
+  if (!cwdUnderWorkdir(crumb.payload?.cwd, facts.workdir))
+    return { repin: null, why: 'cwd outside the session folder' };
   // Every supported adapter inherits the pane markers into child processes.
   // Only the top-level agent process may speak for the pane; nested agents can
   // otherwise re-pin their parent's Overview, trace and next resume target.
@@ -1242,7 +1281,8 @@ function applyBreadcrumb(session, host, workdir, crumb) {
     const row = opencodeSessionInfo(crumb?.payload?.session_id);
     if (!row) return { repin: null, why: 'session missing from database', retry: true };
     if (row.parentId) return { repin: null, why: 'subagent session' };
-    if (row.directory !== workdir) return { repin: null, why: 'database cwd mismatch' };
+    if (!cwdUnderWorkdir(row.directory, workdir))
+      return { repin: null, why: 'database cwd outside the session folder' };
     patch = (id) => ({ opencodeSessionId: id });
   }
 
