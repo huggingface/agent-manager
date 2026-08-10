@@ -84,9 +84,10 @@ body {
 /* overview bottom bar: filter · sort · view segments, centered — three of them
    don't fit a phone on one line, so it wraps rather than overflowing */
 .zoombar.ov-bar { justify-content: center; gap: 8px; flex-wrap: wrap; row-gap: 5px; }
-/* the sort segment says what it is, since "prompt"/"answer" next to a row of
-   filter words would otherwise read as two more filters */
-.ov-sortmark { display: inline-flex; align-items: center; padding: 0 5px 0 7px; color: var(--muted); }
+/* the sort segment needs to say what it is — "prompt"/"answer" next to a row of
+   filter words would otherwise read as two more filters — so a glyph sits beside
+   it, outside the segment (inside, it read as a fourth disabled button) */
+.ov-sortmark { display: inline-flex; align-items: center; color: var(--muted); margin-right: -3px; }
 .ov-sortmark svg { width: 12px; height: 12px; display: block; }
 .ov-viewseg button { display: inline-flex; align-items: center; padding: 4.5px 9px; }
 .ov-viewseg svg { width: 13px; height: 13px; }
@@ -241,14 +242,20 @@ body {
 .ov-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); }
 
 /* ---- sorted feed: labelled blocks instead of group capsules ---- */
-/* In the list the cards keep the feed's own spacing; tiles pack tighter, as
-   they do inside a group box. */
-.ov-sortsec { display: flex; flex-direction: column; gap: 18px; }
-.ovt-feed .ov-sortsec { gap: 8px; }
-.ovt-feed .ov-sortsec > .ovt-grid { margin: 0 11px; }
+/* The labels are SIBLINGS of the cards, not wrappers around them — a card that
+   changes section must keep its parent or React remounts it and the reply box
+   loses what you were typing (see rankedBlocks() in Overview.tsx). So the
+   spacing is done with margins on the label rather than a flex gap on a box.
+   In the list that is the feed's own 18px rhythm; in the grid the label is a
+   full-width row. */
+.ov-feed > .ov-sortlbl { margin: 4px 0 -8px; }
+.ovt-grid > .ov-sortlbl { grid-column: 1 / -1; margin: 6px 0 -1px; }
+.ovt-grid > .ov-sortlbl:first-child { margin-top: 0; }
 .ov-sortlbl { display: flex; align-items: center; gap: 9px; padding: 0 12px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; color: var(--muted); }
 .ov-sortrule { flex: 1; height: 1px; background: var(--border); }
-.ov-sortn { color: var(--border-strong); }
+/* --border-strong is a BORDER token: as text on the page background it lands at
+   ~1.4:1 in either theme, i.e. a count nobody can read. */
+.ov-sortn { color: var(--muted); }
 /* The group an agent is in, when the feed is flat and no capsule says it.
    In a list card it rides the name row and gives up its pixels first (shrink
    5×, never more than half the row): the prefix is context, the name is the

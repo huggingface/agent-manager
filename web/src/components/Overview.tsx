@@ -29,18 +29,30 @@ const bucket = (state: SessionState): OverviewFilter =>
   state === 'working' ? 'working' : state === 'waiting' ? 'waiting' : 'quiet';
 
 /**
- * Is this agent at work right now — the fact the sorted feed pins on.
+ * Is this agent at work right now — the one fact the card's "running" line and
+ * the sorted feed's pinned block both stand on.
  *
- * The card's own rule (`digest.running || state === 'working'`) with one
- * exception. A remote agent's digest reports `running` for a machine that is
- * merely *connected* (`server/src/remote.js` — `isListening && !paused`), which
- * is presence, not work; on that rule every laptop with the bridge open would
- * sit pinned at the top of the feed forever. Its terminal-derived state is the
- * honest signal there: `working` means it was handed a message it has not
- * answered (see REMOTE_STATE_LABEL in types.ts).
+ * `state === 'working'` is the terminal-derived signal: the screen changed in
+ * the last few seconds. `digest.running` is the agent's own task lifecycle
+ * (codex `task_started` with no `task_complete`), which catches an agent that is
+ * thinking without printing. Two guards on the second one, and both matter:
+ *
+ *  · NOT for a remote agent, whose digest sets `running` when the machine is
+ *    merely *connected* (`server/src/remote.js` — `isListening && !paused`).
+ *    That is presence, not work; on that rule every laptop with the bridge open
+ *    would sit pinned at the top of the feed forever. Its state is the honest
+ *    signal there — `working` means it was handed a message it hasn't answered
+ *    (see REMOTE_STATE_LABEL in types.ts).
+ *  · NOT for a stopped session. `task_complete` is what clears `running`, so a
+ *    codex that died mid-task (Ctrl-C, a restart, an OOM) leaves a transcript
+ *    that says "running" for as long as it exists. Without this the corpse
+ *    holds the top row of the feed forever, under a heading that says `running
+ *    now`, next to its own grey `stopped` dot. A live agent thinking quietly is
+ *    `waiting`, not `stopped`, so the case this is for still works.
  */
 const atWork = (m: MetaSession) =>
-  m.state === 'working' || (!isRemote(m.cli) && !!m.digest?.running);
+  m.state === 'working'
+  || (!isRemote(m.cli) && m.state !== 'stopped' && !!m.digest?.running);
 
 /** How much of the conversation the card reads. Cheap: one page, from the end. */
 const CARD_TAIL = 120;
@@ -139,9 +151,11 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   // answer), the old answer is stale — a spinner takes its place.
   const digestCaughtUp = !!d && !!sent && d.lastPromptTs >= sent.at - 60_000;
   if (sent && digestCaughtUp) setSent(null);
-  // Running: the agent's own task lifecycle when the transcript provides one
-  // (codex task_started/complete), else the terminal-derived state.
-  const running = !!d?.running || s.state === 'working';
+  // Running: one definition, shared with the tile and with the sorted feed's
+  // pinned block — see atWork(). It used to be spelled out here, which is how a
+  // connected-but-idle remote agent came to say "running" on its own card while
+  // the block that claims to hold the running ones left it out.
+  const running = atWork(s);
   const awaiting = (!!sent && !digestCaughtUp) || (!!d && !!d.lastPromptText && d.lastPromptTs > d.lastAssistantTs && running);
 
   const hist = d?.turnsLog ?? [];
@@ -337,7 +351,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
 /** Compact tile: status + prompt + state; click opens the conversation window. */
 function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color?: string; group?: string | null; dim?: boolean; pending?: boolean; onOpen: () => void }) {
   const d = s.digest;
-  const running = !!d?.running || s.state === 'working';
+  const running = atWork(s);   // same definition as the card and the pinned block
   const last = Math.max(d?.lastAssistantTs || 0, d?.lastPromptTs || 0) || Date.parse(s.createdAt) || 0;
   // ring = waiting on you AND recent — a fleet where everything is "waiting
   // since last week" shouldn't glow everywhere
@@ -452,10 +466,17 @@ export default function Overview({ clis, tree, filter, sort, view, archived, sho
           m,
           lastPromptTs: m.digest?.lastPromptTs || 0,
           lastAssistantTs: m.digest?.lastAssistantTs || 0,
-          running: atWork(m),
+          // Don't pin under the `running` filter: `visible()` has already kept
+          // ONLY working sessions, so pinning them all would empty the sorted
+          // block and make the sort a no-op that still looks selected.
+          running: filter !== 'working' && atWork(m),
         });
       }
     }
+    // Until the first /api/meta lands every digest is null, which would file the
+    // whole fleet under "nothing sent yet" — a labelled claim about agents we
+    // know nothing about yet. One unlabelled block until we do.
+    if (!metaReady) return { running: [], dated: items, undated: [] };
     return rankSessions(items, sort);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sorted, sort, tree.order, sessById, groupById, meta, metaReady, filter, archived, showArchived]);
@@ -530,34 +551,49 @@ export default function Overview({ clis, tree, filter, sort, view, archived, sho
   const rankedBlocks = (): ReactNode[] => {
     if (!sections) return [];
     type Row = { id: string; m: MetaSession };
-    const body = (rows: Row[]) => (view === 'tiles'
-      ? <div className="ovt-grid">{rows.map(({ m }) => (
-          <Tile key={m.id} s={m} color={colorOf[m.cli]} group={groupNameOf[m.id]} dim={archived.has(m.id)}
-            pending={pending(m.id)} onOpen={() => setOpenId(m.id)} />
-        ))}</div>
-      : rows.map(({ m }) => (
-          <div key={m.id} className="ov-panel">
-            <Card s={m} color={colorOf[m.cli]} group={groupNameOf[m.id]} pending={pending(m.id)} isMobile={isMobile} onOpen={onOpen} />
-          </div>
-        )));
-    const block = (key: string, label: string, rows: Row[]) => rows.length === 0 ? null : (
-      <div className="ov-sortsec" key={key}>
-        <div className="ov-sortlbl mono"><span>{label}</span><span className="ov-sortrule" /><span className="ov-sortn">{rows.length}</span></div>
-        {body(rows)}
-      </div>
-    );
-    return [
-      block('running', 'running now', sections.running),
-      block('dated', sortLabel(sort), sections.dated),
-      block('undated', sort === 'prompt' ? 'nothing sent yet' : 'no reply yet', sections.undated),
-    ].filter(Boolean) as ReactNode[];
+    const blocks = [
+      { key: 'running', label: 'running now', rows: sections.running },
+      // No label before the first poll answers: `sections` is unranked then.
+      { key: 'dated', label: metaReady ? sortLabel(sort) : '', rows: sections.dated },
+      { key: 'undated', label: sort === 'prompt' ? 'nothing sent yet' : 'no reply yet', rows: sections.undated },
+    ].filter((b) => b.rows.length > 0);
+    if (!blocks.length) return [];
+
+    // ONE parent for every card, with the labels as siblings between them —
+    // never a wrapper per block. A card whose section changes (it finishes, you
+    // send to it, its first prompt lands, you switch sort) would otherwise get a
+    // new PARENT, and React remounts on a changed parent no matter how stable
+    // the key is: the reply box's draft, the unfolded work, the scroll position
+    // and the optimistic echo all live in `Card` state and would be destroyed
+    // mid-sentence by a background poll.
+    const out: ReactNode[] = [];
+    for (const b of blocks) {
+      if (b.label) out.push(
+        <div className="ov-sortlbl mono" key={`lbl:${b.key}`}>
+          <span>{b.label}</span><span className="ov-sortrule" /><span className="ov-sortn">{b.rows.length}</span>
+        </div>,
+      );
+      for (const { m } of b.rows as Row[]) {
+        out.push(view === 'tiles'
+          ? <Tile key={m.id} s={m} color={colorOf[m.cli]} group={groupNameOf[m.id]} dim={archived.has(m.id)}
+              pending={pending(m.id)} onOpen={() => setOpenId(m.id)} />
+          : <div key={m.id} className="ov-panel">
+              <Card s={m} color={colorOf[m.cli]} group={groupNameOf[m.id]} pending={pending(m.id)} isMobile={isMobile} onOpen={onOpen} />
+            </div>);
+      }
+    }
+    // Tiles need the grid as that single parent; the labels span its full width.
+    return view === 'tiles' ? [<div className="ovt-grid" key="ranked">{out}</div>] : out;
   };
 
   const openSess = openId ? sessById[openId] : null;
   const windowEl = openSess && (
     <div className="ovw-backdrop" onClick={() => setOpenId(null)}>
       <div className="ovw-win" onClick={(e) => e.stopPropagation()}>
-        <Card s={dataFor(openSess)} color={colorOf[openSess.cli]} pending={pending(openSess.id)} isMobile={isMobile} onOpen={onOpen} onClose={() => setOpenId(null)} />
+        {/* The window shows ONE agent on its own — no capsule around it, sorted
+            or not — so it names its group the way a pane header does. */}
+        <Card s={dataFor(openSess)} color={colorOf[openSess.cli]} group={groupNameOf[openSess.id]}
+          pending={pending(openSess.id)} isMobile={isMobile} onOpen={onOpen} onClose={() => setOpenId(null)} />
       </div>
     </div>
   );

@@ -979,9 +979,11 @@ export default function App() {
               ))}
             </div>
             {/* Sort, independent of the filter beside it: one says WHICH agents
-                you are looking at, the other WHERE each one is in the feed. */}
+                you are looking at, the other WHERE each one is in the feed.
+                The glyph sits OUTSIDE the segment: inside it read as a fourth,
+                permanently-disabled option. */}
+            <span className="ov-sortmark" aria-hidden="true" title="Order"><SortGlyph /></span>
             <div className="seg ov-seg ov-sortseg">
-              <span className="ov-sortmark" aria-hidden="true"><SortGlyph /></span>
               <button className={ovSort === 'manual' ? 'on' : ''} title="Your own order — the sidebar's groups and arrangement"
                 onClick={() => setOvSort('manual')}>manual</button>
               <button className={ovSort === 'prompt' ? 'on' : ''} title="Newest message from you first"
