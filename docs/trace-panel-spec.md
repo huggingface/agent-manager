@@ -450,6 +450,22 @@ and one older window was fetched on every open. Paging is therefore gated on a f
 waits for both the first measurement and the first placement of the scroller. Opening a
 pane now costs exactly two requests, the tail and the summary, on both traces.
 
+**Things a review caught, all of them about a window claiming more than it knows.** The
+codex guardian guard read a fixed 16 KB and parsed the first line; a real `session_meta`
+carries `base_instructions` and runs 18–44 KB, so the parse always threw and the `catch`
+turned "I could not tell" into "not a subagent" — the guard never fired on a real rollout.
+It now grows the read until the line is whole, and a head it genuinely cannot read falls
+back to the whole-file reader rather than guessing. A window's `note` (codex's count of
+encrypted reasoning steps) is a per-parse number and was being rendered as a statement
+about the session, changing as you scrolled — it now travels with `usage`/`firstTs` as a
+summary-only fact. A single line larger than `WINDOW_MAX_BYTES` (a file-history blob)
+cannot be paged past; the reader used to conclude it had reached the beginning of the
+conversation, and now says what actually happened. A last line that never becomes valid
+JSON no longer costs the final answer its accent: having READ to EOF is what makes a
+window the end, not having consumed every byte. And in the pane, every load now carries a
+generation stamp, so a window in flight when you switch files cannot be spliced into the
+next transcript with the previous one's byte cursors.
+
 **The one behavioural difference:** a harness message whose lines straddle a window
 boundary is split into two turns instead of merged into one. Stitching every window of
 that transcript gives 1,433 turns against the full parse's 1,420, with character-for-

@@ -232,6 +232,11 @@ const mergeMeta = (prev: Meta | null, next: Meta): Meta => {
   const out = { ...prev } as Record<string, unknown>;
   let changed = false;
   for (const [k, v] of Object.entries(next)) {
+    // A window OLDER than what we hold describes an older stretch of the same
+    // conversation. Two of its facts must not travel backwards: `lastTs` drives
+    // how often we look for new turns (scrolling back would otherwise slow the
+    // live tail to a crawl), and `model` is the one the session is running now.
+    if ((k === 'lastTs' || k === 'model') && out[k] && (k !== 'lastTs' || (v as number) <= (out[k] as number))) continue;
     if ((v || !(k in out)) && out[k] !== v) { out[k] = v; changed = true; }
   }
   return changed ? (out as Meta) : prev;
@@ -256,6 +261,12 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
   // scroll events by the dozen, and each one would otherwise start its own load;
   // they would arrive out of order and prepend the same turns twice.
   const loading = useRef(false);
+  // Which source the turns in hand belong to. Every load reads this before its
+  // await and checks it after: switch files in the Files pane while a window is
+  // in flight and it would otherwise be prepended to the NEW file's turns, with
+  // the old file's byte cursors and header — a conversation spliced out of two
+  // different transcripts.
+  const gen = useRef(0);
   const [tick, setTick] = useState(0);
   const bump = useCallback(() => setTick((n) => n + 1), []);
 
@@ -342,8 +353,10 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
   // ---- loading ----
   const loadTail = useCallback(async () => {
     loading.current = true;
+    const mine = gen.current;
     try {
       const { turns: got, window: win, ...m } = await src.window({ at: 'tail' }, WINDOW_BYTES);
+      if (mine !== gen.current) return;
       turns.current = got;
       heights.current = new Array(got.length);
       cursor.current = win;
@@ -360,11 +373,12 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
       // this call returns, so the one-request-at-a-time guard still holds.
       if (!got.length && !win.atStart) window.setTimeout(() => loadOlderRef.current(), 0);
     } catch (e) {
+      if (mine !== gen.current) return;
       // The server distinguishes "nothing to show yet" from a real failure and
       // says which — pass its own words through rather than inventing a reason.
       setError(e instanceof api.TraceUnavailable ? e.message : 'could not read the trace');
     } finally {
-      loading.current = false;
+      if (mine === gen.current) loading.current = false;
     }
   }, [src, bump]);
 
@@ -375,28 +389,35 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
   /** Fetch the window before the oldest turn held. Returns how many arrived. */
   const loadOlder = useCallback(async () => {
     const cur = cursor.current;
-    if (loading.current || !cur || cur.atStart) return 0;
+    if (loading.current || !cur || cur.atStart || cur.blocked) return 0;
     loading.current = true;
+    const mine = gen.current;
     try {
       let from = cur.start;
       let atStart = false;
       let got: TraceTurn[] = [];
       let meta2: Meta | null = null;
+      let blocked = false;
       // A window can legitimately hold no turns at all (a stretch of file-history
       // lines, a run of harness metadata). Keep walking back until it holds
       // something, the file starts, or the cursor stops moving.
       for (let hop = 0; hop < 8 && !got.length && !atStart; hop++) {
         const { turns: page, window: win, ...m } = await src.window({ at: 'before', cursor: from }, WINDOW_BYTES);
+        if (mine !== gen.current) return 0;
         got = page;
         meta2 = m;
-        atStart = win.atStart || win.start >= from;
+        // `blocked` is a line too big for any window — the server cannot get
+        // past it, so neither can we, and this is NOT the start of the trace.
+        blocked = !!win.blocked;
+        atStart = win.atStart || (!blocked && win.start >= from);
         from = win.start;
+        if (blocked) break;
       }
       // Same row, `got.length` places further down the list — see `anchor`.
       if (got.length && captureAnchor(got.length)) stick.current = false;
       turns.current = [...got, ...turns.current];
       heights.current = [...new Array(got.length), ...heights.current];
-      cursor.current = { ...cur, start: from, atStart };
+      cursor.current = { ...cur, start: from, atStart, blocked };
       if (meta2) setMeta((p) => mergeMeta(p, meta2 as Meta));
       if (got.length) setRange((r) => ({ start: r.start + got.length, end: r.end + got.length }));
       bump();
@@ -405,7 +426,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
       // Keep what is on screen; the next scroll retries.
       return 0;
     } finally {
-      loading.current = false;
+      if (mine === gen.current) loading.current = false;
     }
   }, [src, bump]);
   loadOlderRef.current = loadOlder;
@@ -415,8 +436,10 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
     const cur = cursor.current;
     if (loading.current || !cur) return;
     loading.current = true;
+    const mine = gen.current;
     try {
       const { turns: got, window: win, ...m } = await src.window({ at: 'after', cursor: cur.end });
+      if (mine !== gen.current) return;
       if (win.gap) {
         // More was written than one window can carry. Splicing it in would leave
         // a hole in the middle of the conversation with nothing to say so —
@@ -441,11 +464,13 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
     } catch {
       // A poll that fails must not throw away the conversation on screen.
     } finally {
-      loading.current = false;
+      if (mine === gen.current) loading.current = false;
     }
   }, [src, bump]);
 
   useEffect(() => {
+    gen.current += 1;
+    loading.current = false;
     turns.current = [];
     heights.current = [];
     cursor.current = null;
@@ -572,7 +597,13 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
       if (el) { wanted.current = null; stick.current = true; el.scrollTop = el.scrollHeight; }
       return;
     }
-    if (!cursor.current?.atStart && await loadOlder()) { goRef.current(dir); return; }
+    // Let the prepend commit before looking again: the recursion would
+    // otherwise read the pre-prepend prompt list and fetch another window.
+    if (!cursor.current?.atStart && await loadOlder()) {
+      await new Promise((r) => window.setTimeout(r, 0));
+      goRef.current(dir);
+      return;
+    }
     if (prompts.length) goToTurn(prompts[0]);
   };
   goRef.current = goPrompt;
@@ -618,6 +649,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
 
   const n = turns.current.length;
   const atStart = !!cursor.current?.atStart;
+  const blocked = !!cursor.current?.blocked;
   const rows: ReactNode[] = [];
   for (let i = range.start; i < Math.min(range.end, n); i++) {
     rows.push(
@@ -673,9 +705,11 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
                 this line sits above every offset in the list, so changing its
                 size would move the whole conversation under the reader. */}
             <div className="tv-msg tv-top">
-              {atStart
-                ? (head?.truncated ? 'session longer than the viewer’s cap — earlier turns are not shown' : 'beginning of the conversation')
-                : 'earlier turns load as you scroll up…'}
+              {blocked
+                ? 'earlier turns can’t be read — one line here is larger than the reader’s window'
+                : atStart
+                  ? 'beginning of the conversation'
+                  : 'earlier turns load as you scroll up…'}
             </div>
             {/* State the gaps up front: a reader who can't see the model's
                 reasoning should know it was withheld, not that there was none. */}

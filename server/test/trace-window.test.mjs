@@ -124,5 +124,66 @@ const big = await readTraceByPath(huge, { window: { at: 'tail', bytes: 32 * 1024
 assert.equal(big.turns.length, 2, 'the window grew past a 300 KB turn');
 assert.equal(big.window.atStart, true);
 
+// ---- a codex guardian rollout is refused, however big its first line ----
+// `session_meta` carries base_instructions and runs to tens of KB in the real
+// thing; a guard that reads a fixed slab and parses what it got back parses
+// nothing at all, and "I could not tell" must never read as "not a subagent".
+const rollout = (subagent, padKb) => [
+  JSON.stringify({
+    type: 'session_meta', timestamp: new Date().toISOString(),
+    payload: { cwd: TMP, ...(subagent ? { thread_source: 'subagent' } : {}), base_instructions: { text: 'x'.repeat(padKb * 1024) } },
+  }),
+  ...Array.from({ length: 400 }, (_, i) => JSON.stringify({
+    type: 'response_item', timestamp: new Date().toISOString(),
+    payload: { type: 'message', role: i % 2 ? 'assistant' : 'user', content: [{ type: 'text', text: `codex turn ${i} ${'q'.repeat(500)}` }] },
+  })),
+].join('\n');
+
+for (const padKb of [0, 20, 48]) {
+  const guardian = path.join(TMP, `guardian-${padKb}.jsonl`);
+  fs.writeFileSync(guardian, `${rollout(true, padKb)}\n`);
+  await assert.rejects(
+    () => readTraceByPath(guardian, { window: { at: 'tail', bytes: 32 * 1024 } }),
+    (e) => e.code === 'trace-not-user-conversation',
+    `a guardian rollout with a ${padKb} KB session_meta is refused a window`,
+  );
+  await assert.rejects(
+    () => readTraceByPath(guardian, { offset: 0, limit: 10 }),
+    (e) => e.code === 'trace-not-user-conversation',
+    `and refused an index page (${padKb} KB)`,
+  );
+  const real = path.join(TMP, `real-${padKb}.jsonl`);
+  fs.writeFileSync(real, `${rollout(false, padKb)}\n`);
+  const okWin = await readTraceByPath(real, { window: { at: 'tail', bytes: 32 * 1024 } });
+  assert.ok(okWin.turns.length > 0, `the operator's own rollout still opens (${padKb} KB)`);
+}
+
+// ---- a line larger than any window blocks, and does not read as the start ----
+const wall = path.join(TMP, 'wall.jsonl');
+fs.writeFileSync(wall, `${[
+  claudeLine(0),
+  JSON.stringify({ type: 'file-history-snapshot', blob: 'z'.repeat(9 * 1024 * 1024) }),
+  ...Array.from({ length: 40 }, (_, i) => claudeLine(i + 1, 200)),
+].join('\n')}\n`);
+const beyond = await readTraceByPath(wall, { window: { at: 'tail', bytes: 64 * 1024 } });
+const stuck = await readTraceByPath(wall, { window: { at: 'before', cursor: beyond.window.start, bytes: 64 * 1024 } });
+assert.equal(stuck.turns.length, 0);
+assert.equal(stuck.window.atStart, false, 'a wall is not the beginning of the conversation');
+assert.equal(stuck.window.blocked, true, 'and the reader is told why it cannot get past it');
+
+// ---- a torn final line does not cost the last answer its accent ----
+const half = path.join(TMP, 'half-written.jsonl');
+fs.writeFileSync(half, `${[claudeLine(0), claudeLine(1)].join('\n')}\n{"type":"assistant","mess`);
+const t = await readTraceByPath(half, { window: { at: 'tail' } });
+assert.equal(t.window.atEnd, true, 'reading to EOF is being at the end, fragment or no fragment');
+assert.equal(t.turns[t.turns.length - 1].kind, 'final', 'so the last answer keeps its accent');
+assert.ok(t.window.end < fs.statSync(half).size, 'while the cursor still waits in front of the fragment');
+
+// ---- a partial window claims nothing about the whole session ----
+const partial = await readTraceByPath(file, { window: { at: 'tail', bytes: 32 * 1024 } });
+assert.equal(partial.note, null, 'a per-window count is not a fact about the session');
+assert.equal(partial.usage, null);
+assert.equal(partial.firstTs, 0);
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log('trace-window: ok');

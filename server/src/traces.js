@@ -1419,16 +1419,19 @@ function flattenToolContent(value) {
 
 // Bundles have no session record telling us the harness, so sniff the first
 // lines — same trick as the Hub's detect.ts / sniffTraceHarness.
-// A file's format does not change under us, and this is now on the path of
-// EVERY window request (it decides whether the trace can be seeked at all), so
-// the answer is remembered per path rather than re-read off the bucket each time.
-const harnessMemo = new Map();
+// This is now on the path of EVERY window request (it decides whether the trace
+// can be seeked at all), so the answer is remembered rather than re-read off the
+// bucket each time. Briefly, though: a path is not permanently one format — a
+// bundle ref can be re-imported with a different harness underneath it.
+const harnessMemo = new Map(); // path -> { at, harness }
+const HARNESS_TTL = 60_000;
 async function sniffHarness(file) {
-  if (harnessMemo.has(file)) return harnessMemo.get(file);
+  const hit = harnessMemo.get(file);
+  if (hit && Date.now() - hit.at < HARNESS_TTL) return hit.harness;
   const found = await sniffHarnessUncached(file);
   if (found) {
     if (harnessMemo.size > 200) harnessMemo.clear();
-    harnessMemo.set(file, found);
+    harnessMemo.set(file, { at: Date.now(), harness: found });
   }
   return found;
 }
@@ -1575,12 +1578,15 @@ const clampN = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 function windowOf(parsed, cur) {
   return {
     ...headOf(parsed),
-    // `firstTs` and `usage` describe the WHOLE conversation. A window that
-    // doesn't span the whole file knows neither, and reporting its own first
-    // line as the start of the session (or its own tokens as the session's bill)
-    // would be a confident lie. The summary pass fills them in.
+    // `firstTs`, `usage` and `note` describe the WHOLE conversation. A window
+    // that doesn't span the whole file knows none of them, and reporting its own
+    // first line as the start of the session, its own tokens as the session's
+    // bill, or its own count of encrypted reasoning steps as the session's,
+    // would be a confident lie — the last one visibly so, since it would change
+    // every time you scrolled. The summary pass fills them in.
     firstTs: cur.atStart ? parsed.firstTs : 0,
     usage: cur.atStart && cur.atEnd ? parsed.usage : null,
+    note: cur.atStart && cur.atEnd ? parsed.note || null : null,
     total: null,
     userTurns: null,
     turns: parsed.messages,
@@ -1611,7 +1617,13 @@ async function oneWindow(harness, file, sessionId, range, size) {
   const parsed = await parseTraceFile(harness, file, sessionId, range);
   const start = range.start ?? range.from;
   const end = range.end ?? range.to;
-  const atEnd = end >= size;
+  // Having READ to the end of the file is what makes this the end of the
+  // conversation. `end` can legitimately stop short of `size` — a line the agent
+  // is halfway through writing, or one a killed writer left broken — and taking
+  // that as "there is more to come" would deny the last answer its accent
+  // forever. The cursor still stops in front of the fragment, so the next
+  // `after: end` picks it up if it ever becomes whole.
+  const atEnd = range.to >= size;
   if (!atEnd) unmarkTrailingFinal(parsed);
   return { parsed, cur: { mode: 'bytes', start, end, atStart: start <= 0, atEnd } };
 }
@@ -1641,7 +1653,14 @@ async function readWindow(harness, file, sessionId, size, req) {
   for (;;) {
     const from = Math.max(0, to - span);
     const w = await oneWindow(harness, file, sessionId, { from, to, aligned: from === 0, eof }, size);
-    if (w.parsed.messages.length >= min || from === 0 || span >= WINDOW_MAX_BYTES) return w;
+    if (w.parsed.messages.length >= min || from === 0 || span >= WINDOW_MAX_BYTES) {
+      // A window that consumed nothing at all has hit a single line longer than
+      // the ceiling (a file-history blob), and no amount of asking again will
+      // get past it. Say that, rather than let the reader conclude it has
+      // reached the beginning of the conversation.
+      if (w.cur.start >= to && to > 0) w.cur.blocked = true;
+      return w;
+    }
     span = Math.min(span * 2, WINDOW_MAX_BYTES);
   }
 }
@@ -1649,9 +1668,11 @@ async function readWindow(harness, file, sessionId, size, req) {
 // Harnesses whose conversation lives in SQLite have no byte offsets to seek, and
 // a bundle small enough not to matter doesn't need them. They answer the same
 // shape with message INDICES as cursors: the reader treats a cursor as opaque.
+const INDEX_WINDOW_TURNS = 100; // no bytes to seek: page by turns, as index mode always did
+
 function windowIndex(parsed, req) {
   const total = parsed.messages.length;
-  const min = clampN(Math.trunc(req.min) || WINDOW_MIN_TURNS, 1, 500);
+  const min = clampN(Math.trunc(req.min) || INDEX_WINDOW_TURNS, 1, 500);
   const cursor = clampN(Math.trunc(req.cursor) || 0, 0, total);
   let from; let to;
   if (req.at === 'after') { from = cursor; to = total; } else if (req.at === 'before') { to = cursor; from = Math.max(0, to - min); } else { to = total; from = Math.max(0, total - min); }
@@ -1667,13 +1688,39 @@ function windowIndex(parsed, req) {
 // The subagent marker lives in `session_meta`, the FIRST line of a codex
 // rollout — a tail window never sees it, so a guardian thread would render as if
 // it were the operator's conversation. Check the head before serving a window.
+//
+// That line is NOT small: it carries `base_instructions.text`, and every real
+// rollout on this Space starts with 18–44 KB of it. Reading a fixed 16 KB and
+// parsing what came back therefore never parsed at all, and the `catch` turned
+// "I could not tell" into "not a subagent" — the guard silently never fired.
+// So: grow the read until the line is whole, and if it still cannot be read,
+// say so rather than assume the safe answer.
+const FIRST_LINE_MAX = 4 * 1024 * 1024;
+
+async function firstLine(file) {
+  for (let span = 64 * 1024; ; span *= 4) {
+    const buf = await rangeBuf(file, 0, span);
+    const nl = buf.indexOf(0x0a);
+    if (nl >= 0) return buf.toString('utf8', 0, nl);
+    // Shorter than the span means we read the whole file: it is one line.
+    if (buf.length < span) return buf.toString('utf8');
+    if (span >= FIRST_LINE_MAX) return null;
+  }
+}
+
 async function refuseCodexSubagent(file) {
-  const buf = await rangeBuf(file, 0, 16 * 1024);
-  const nl = buf.indexOf(0x0a);
+  const line = await firstLine(file);
   let j = null;
-  try { j = JSON.parse(buf.toString('utf8', 0, nl < 0 ? buf.length : nl)); } catch { return; }
-  const p = (j && j.payload) || {};
-  if (j && j.type === 'session_meta' && (p.thread_source === 'subagent' || p.source?.subagent)) {
+  try { j = line == null ? null : JSON.parse(line); } catch { j = null; }
+  if (!j) {
+    // Unreadable head: fall back to the reader that walks the whole rollout,
+    // which throws on the marker itself. Rare, and correctness beats the window.
+    const e = new Error('could not read the head of this rollout');
+    e.code = 'window-unavailable';
+    throw e;
+  }
+  const p = j.payload || {};
+  if (j.type === 'session_meta' && (p.thread_source === 'subagent' || p.source?.subagent)) {
     const err = new Error('this rollout is an internal guardian/subagent thread, not the session');
     err.code = 'trace-not-user-conversation';
     throw err;
@@ -1701,7 +1748,14 @@ async function serveTrace({ key, harness, file, sessionId, size, decorate }, opt
   if (!opts.window) return pageOf(await full(), opts.offset ?? 0, opts.limit ?? 200);
   if (!WINDOWABLE.has(harness)) return windowIndex(await full(), opts.window);
 
-  if (harness === 'codex') await refuseCodexSubagent(file);
+  if (harness === 'codex') {
+    try {
+      await refuseCodexSubagent(file);
+    } catch (e) {
+      if (e.code !== 'window-unavailable') throw e;
+      return windowIndex(await full(), opts.window); // whole-file read, which checks it properly
+    }
+  }
   const { parsed, cur } = await tracked(PHASE.readTrace, () =>
     readWindow(harness, file, sessionId, size, opts.window));
   if (decorate) await decorate(parsed);

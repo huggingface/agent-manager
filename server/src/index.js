@@ -1694,8 +1694,10 @@ app.get('/api/files/:id/trace', async (req, res) => {
     res.json(await readTraceByPath(f, traceOpts(req.query)));
   } catch (e) {
     // "not a transcript" is an ordinary answer here, not a failure: the pane
-    // falls back to showing the file as text.
-    if (['no-trace', 'unsupported-harness'].includes(e && e.code)) {
+    // falls back to showing the file as text. A codex guardian rollout is the
+    // same kind of answer — the session route already says so, and a 500 here
+    // would replace the reason with "could not read the trace".
+    if (['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(e && e.code)) {
       return res.status(404).json({ error: e.message, code: e.code });
     }
     console.error('[trace file]', e && e.message);

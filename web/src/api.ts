@@ -422,6 +422,8 @@ export interface TraceCursor {
   atEnd: boolean;
   /** the trace grew more than one window while we were away: replace, don't splice */
   gap?: boolean;
+  /** one line here is bigger than a window: nothing older can be reached */
+  blocked?: boolean;
 }
 
 export interface TraceWindow extends Omit<TracePage, 'total' | 'offset' | 'limit' | 'userTurns'> {
