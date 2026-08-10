@@ -407,10 +407,10 @@ export default function App() {
   const cliMap = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c])), [clis]);
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
-  // Which group an agent belongs to, by name — the one fact every place that
-  // titles a single agent needs. It rides the tree poll, so renaming a group or
-  // dragging an agent into another one retitles its pane and the browser tab on
-  // the next refresh, with no reload and nothing to keep in sync by hand.
+  // Which group an agent belongs to, by name — the one fact a pane header needs
+  // to title itself. It rides the tree poll, so renaming a group or dragging an
+  // agent into another one retitles its pane on the next refresh, with no
+  // reload and nothing to keep in sync by hand.
   const groupNameOf = useMemo(() => {
     const m: Record<string, string> = {};
     for (const g of tree.groups) for (const id of g.sessionIds) m[id] = g.name;
