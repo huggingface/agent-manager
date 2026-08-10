@@ -344,10 +344,14 @@ function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color
   const fresh = s.state === 'waiting' && Date.now() - last < 24 * 3600e3;
   return (
     <div className={`ovt-tile${fresh ? ' attn' : ''}${dim ? ' archived' : ''}`} onClick={onOpen}>
+      {/* A tile is ~225px: a group prefix INSIDE the name row would ellipsise,
+          and so would the name, leaving "[Age… trace reader pa…" — two clipped
+          strings and no legible fact. It gets its own line, where the full
+          width is available (the list card is wide enough to keep it inline). */}
+      {group && <div className="ovt-gline mono">[{group}]</div>}
       <div className="ovt-head">
         <span className={`status ${s.state}`} />
         <Logo cli={s.cli} size={12} tint={color} />
-        {group && <span className="ov-gtag mono">[{group}]</span>}
         <span className="ovt-name mono">{s.name}</span>
         <span className="ovt-ago">{pending ? '' : fmtAgo(last)}</span>
       </div>
