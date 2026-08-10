@@ -434,6 +434,14 @@ turn floor that makes a window grow (`WINDOW_MIN_TURNS`) is deliberately low for
 reason: at 30 it grew the codex rollout's window to 1.5 MB and its response to 591 KB,
 which is the whole-file cost this exists to avoid.
 
+**Scroll anchoring is measured, not modelled.** The first version restored the reading
+position from the prefix-sum height model, which is only ever approximately right for rows
+it has not measured yet: on a codex rollout — whose collapsed tool groups are several
+times `ROW_EST` — a prepend moved the text under the reader by ~280 px on the Space and
+~30 px locally. The reader now records the anchor row's real `getBoundingClientRect()`
+position and re-applies *that* after the layout, falling back to the model only for a row
+that has scrolled out of the rendered window. Drift on both traces is 0 px.
+
 **The one behavioural difference:** a harness message whose lines straddle a window
 boundary is split into two turns instead of merged into one. Stitching every window of
 that transcript gives 1,433 turns against the full parse's 1,420, with character-for-

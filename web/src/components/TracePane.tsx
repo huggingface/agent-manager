@@ -275,7 +275,14 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
   // the list, and a row that measures itself after it renders changes the ones
   // above the viewport — without an anchor, the paragraph under the reader's
   // eyes jumps away mid-sentence.
-  const anchor = useRef<{ i: number; delta: number } | null>(null);
+  //
+  // `top` is that row's real position in the scroller, and it is what the
+  // restore uses when the row is still rendered: the estimated-height model is
+  // only ever approximately right, and on rows far taller than ROW_EST (a codex
+  // rollout's tool groups) restoring from it left the text a few hundred pixels
+  // off. `delta` is the model-based fallback for a row that has scrolled out of
+  // the rendered window and has no geometry to read.
+  const anchor = useRef<{ i: number; delta: number; top: number | null } | null>(null);
   // False until the scroller has been put where it belongs for the turns we
   // hold. Until then `scrollTop` is 0 because nothing has been placed yet, not
   // because the reader is at the top — and acting on it would fetch a window of
@@ -297,12 +304,35 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
   const offsetsRef = useRef(offsets);
   offsetsRef.current = offsets;
 
+  // Rendered rows, by index — the ResizeObserver measures through these, and the
+  // anchor reads its geometry from them.
+  const rowRefs = useRef(new Map<number, HTMLElement>());
+
   /** First row whose bottom edge is past `top`. */
   const rowAt = (acc: Float64Array, top: number) => {
     let lo = 0;
     let hi = Math.max(0, acc.length - 1);
     while (lo < hi) { const mid = (lo + hi) >> 1; if (acc[mid + 1] <= top) lo = mid + 1; else hi = mid; }
     return lo;
+  };
+
+  /**
+   * Remember the row at the top of the viewport so the layout effect can put it
+   * back there. `shift` is how far this row is about to move down the list
+   * (the number of turns being prepended). Returns false when there is nothing
+   * to anchor to yet.
+   */
+  const captureAnchor = (shift: number) => {
+    const el = scroller.current;
+    if (!el || !turns.current.length) return false;
+    const i = rowAt(offsetsRef.current, el.scrollTop);
+    const node = rowRefs.current.get(i);
+    anchor.current = {
+      i: i + shift,
+      delta: el.scrollTop - (offsetsRef.current[i] || 0),
+      top: node ? node.getBoundingClientRect().top - el.getBoundingClientRect().top : null,
+    };
+    return true;
   };
 
   // ---- loading ----
@@ -349,13 +379,8 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
         atStart = win.atStart || win.start >= from;
         from = win.start;
       }
-      const el = scroller.current;
-      if (el && got.length) {
-        // Same row, `got.length` places further down the list — see `anchor`.
-        const i = rowAt(offsetsRef.current, el.scrollTop);
-        anchor.current = { i: i + got.length, delta: el.scrollTop - (offsetsRef.current[i] || 0) };
-        stick.current = false;
-      }
+      // Same row, `got.length` places further down the list — see `anchor`.
+      if (got.length && captureAnchor(got.length)) stick.current = false;
       turns.current = [...got, ...turns.current];
       heights.current = [...new Array(got.length), ...heights.current];
       cursor.current = { ...cur, start: from, atStart };
@@ -477,7 +502,17 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
       el.scrollTop = el.scrollHeight;
       anchor.current = null;
     } else if (anchor.current) {
-      el.scrollTop = (offsets[anchor.current.i] || 0) + anchor.current.delta;
+      const a = anchor.current;
+      const node = rowRefs.current.get(a.i);
+      if (node && a.top != null) {
+        // Where that row actually is now, against where it was: exact, and free
+        // of whatever the height model still gets wrong about rows it has never
+        // measured.
+        const now = node.getBoundingClientRect().top - el.getBoundingClientRect().top;
+        el.scrollTop += now - a.top;
+      } else {
+        el.scrollTop = (offsets[a.i] || 0) + a.delta;
+      }
       anchor.current = null;
     }
     // The turns we hold are on screen and the view is where it should be:
@@ -527,7 +562,6 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
   goRef.current = goPrompt;
 
   // Measure rendered rows (heights change when a fold is expanded).
-  const rowRefs = useRef(new Map<number, HTMLElement>());
   useLayoutEffect(() => {
     const ro = new ResizeObserver((entries) => {
       let changed = false;
@@ -539,11 +573,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
       if (!changed) return;
       // Measuring changes the offsets of everything below — and of everything
       // above, if a row above the viewport grew. Pin the row being read.
-      const el = scroller.current;
-      if (el && !stick.current && wanted.current == null) {
-        const i = rowAt(offsetsRef.current, el.scrollTop);
-        anchor.current = { i, delta: el.scrollTop - (offsetsRef.current[i] || 0) };
-      }
+      if (!stick.current && wanted.current == null) captureAnchor(0);
       setHeightsVersion((v) => v + 1);
     });
     for (const el of rowRefs.current.values()) ro.observe(el);
