@@ -568,8 +568,8 @@ body {
    so a tile too narrow for both truncates the context rather than the thing you
    are looking for. Below a tile width where a clipped prefix would say nothing
    anyway, it drops out entirely and the name gets the whole header. */
-.ph-group { flex: 0 500 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-weight: 500; }
-.ph-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-head .ph-group { flex: 0 500 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-weight: 500; }
+.pane-head .ph-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; }
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
@@ -1086,7 +1086,7 @@ a.btn-ghost { text-decoration: none; }
 .modebar { flex: none; margin-right: 6px; }
 .modebar button { padding: 2px 8px; font-size: 10.5px; letter-spacing: 0.02em; }
 
-.mtitle { display: inline-flex; align-items: baseline; gap: 5px; min-width: 0; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mtitle { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mchips { display: flex; gap: 6px; overflow-x: auto; flex: 1; padding: 2px; }
 .mchip { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; flex: none; }
 .mchip.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }

@@ -16,7 +16,6 @@ import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
-import { groupLabel, sessionTitle } from './lib/sessionTitle';
 import { isPassive, isRemote } from './types';
 import { GridGlyph, ListGlyph } from './components/icons';
 
@@ -446,21 +445,6 @@ export default function App() {
   const visibleSessions = activeGroup ? pageSessions : activeSingle ? [activeSingle] : [];
   const visibleIds = visibleSessions.map((s) => s.id).join(',');
   const showZoom = visibleSessions.length > 0;
-
-  // The browser tab names the agent you are actually in — `[Group] name`, the
-  // same reading as its pane header. A tab strip (or a phone's app switcher) is
-  // exactly where several Spaces and several `claude-code-N` look alike, so the
-  // group earns its place there; the app's own name is what gives way, since
-  // the favicon already says which app this is. Under a tiled group the title
-  // follows the focused pane, because that is the one taking your keystrokes.
-  const onStage = !isMobile || mobileStage;
-  const titleSession = onStage
-    ? visibleSessions.find((s) => s.id === focusedId) ?? visibleSessions[0] ?? null
-    : null;
-  const tabTitle = titleSession
-    ? sessionTitle(titleSession.name, groupNameOf[titleSession.id])
-    : 'Agent Manager';
-  useEffect(() => { document.title = tabTitle; }, [tabTitle]);
 
   // Keep a small working set of terminal panes alive across navigation. The
   // backend session already survives a viewer disconnect; retaining xterm and
@@ -931,19 +915,7 @@ export default function App() {
                 ))}
               </div>
             ) : (
-              <span className="mtitle mono" title={activeSingle ? sessionTitle(activeSingle.name, groupNameOf[activeSingle.id]) : undefined}>
-                {activeRef === 'overview' ? 'Overview' : (
-                  <>
-                    {/* Same rule as the pane header: the group is a prefix that
-                        elides before the agent's name does. A loose agent — the
-                        usual case for this bar — shows a bare name. */}
-                    {activeSingle && groupLabel(groupNameOf[activeSingle.id]) && (
-                      <span className="ph-group">[{groupNameOf[activeSingle.id]}]</span>
-                    )}
-                    <span className="ph-name">{activeSingle?.name}</span>
-                  </>
-                )}
-              </span>
+              <span className="mtitle mono">{activeRef === 'overview' ? 'Overview' : activeSingle?.name}</span>
             )}
           </div>
         )}
