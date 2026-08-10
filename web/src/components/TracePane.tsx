@@ -283,11 +283,15 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
   // off. `delta` is the model-based fallback for a row that has scrolled out of
   // the rendered window and has no geometry to read.
   const anchor = useRef<{ i: number; delta: number; top: number | null } | null>(null);
-  // False until the scroller has been put where it belongs for the turns we
-  // hold. Until then `scrollTop` is 0 because nothing has been placed yet, not
-  // because the reader is at the top — and acting on it would fetch a window of
-  // older turns nobody asked for on every open.
+  // False until the turns we hold have been MEASURED and the scroller put where
+  // it belongs. Until then `scrollTop` says nothing about where the reader is:
+  // before the first layout it is 0 because nothing has been placed, and before
+  // the first measurement the whole list is 44 px per row, so a window of 19
+  // dense turns looks 800 px tall when it is really 3,600 — near enough to the
+  // top to fetch a window of older turns nobody asked for. (Seen on a codex
+  // rollout on the Space; a Claude transcript's 60-turn window hid it.)
   const positioned = useRef(false);
+  const measured = useRef(false);
 
   // ---- windowing ----
   // Prefix sums over measured (or estimated) row heights. n is bounded by what
@@ -346,10 +350,15 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
       anchor.current = null;
       stick.current = true;
       positioned.current = false;
+      measured.current = false;
       setMeta(m);
       setError(null);
       setRange({ start: 0, end: Math.min(got.length, 40) });
       bump();
+      // Nothing to render means nothing to measure, so no measurement will ever
+      // arrive to unblock the paging: walk back until there is something. After
+      // this call returns, so the one-request-at-a-time guard still holds.
+      if (!got.length && !win.atStart) window.setTimeout(() => loadOlderRef.current(), 0);
     } catch (e) {
       // The server distinguishes "nothing to show yet" from a real failure and
       // says which — pass its own words through rather than inventing a reason.
@@ -358,6 +367,10 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
       loading.current = false;
     }
   }, [src, bump]);
+
+  // loadTail may need loadOlder before it is declared; the ref keeps that honest
+  // without reordering the two.
+  const loadOlderRef = useRef<() => Promise<number>>(async () => 0);
 
   /** Fetch the window before the oldest turn held. Returns how many arrived. */
   const loadOlder = useCallback(async () => {
@@ -395,6 +408,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
       loading.current = false;
     }
   }, [src, bump]);
+  loadOlderRef.current = loadOlder;
 
   /** Whatever the agent has written since we last looked. */
   const loadNewer = useCallback(async () => {
@@ -413,6 +427,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
         anchor.current = null;
         stick.current = true;
         positioned.current = false;
+        measured.current = false;
         setRange({ start: 0, end: Math.min(got.length, 40) });
       } else {
         if (got.length) {
@@ -437,6 +452,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
     anchor.current = null;
     stick.current = true;
     positioned.current = false;
+    measured.current = false;
     setMeta(null);
     setSummary(null);
     setRange({ start: 0, end: 40 });
@@ -515,9 +531,9 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
       }
       anchor.current = null;
     }
-    // The turns we hold are on screen and the view is where it should be:
-    // `scrollTop` now means what the reader is doing.
-    if ((offsets[turns.current.length] || 0) > 0) positioned.current = true;
+    // The turns we hold are measured, on screen, and the view is where it should
+    // be: `scrollTop` now means what the reader is doing.
+    if (measured.current && (offsets[turns.current.length] || 0) > 0) positioned.current = true;
   }, [offsets]);
 
   const firstVisible = useCallback(() => {
@@ -571,6 +587,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
         if (Number.isFinite(i) && Math.abs((heights.current[i] || 0) - h) > 1) { heights.current[i] = h; changed = true; }
       }
       if (!changed) return;
+      measured.current = true;
       // Measuring changes the offsets of everything below — and of everything
       // above, if a row above the viewport grew. Pin the row being read.
       if (!stick.current && wanted.current == null) captureAnchor(0);

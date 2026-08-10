@@ -442,6 +442,14 @@ times `ROW_EST` — a prepend moved the text under the reader by ~280 px on the 
 position and re-applies *that* after the layout, falling back to the model only for a row
 that has scrolled out of the rendered window. Drift on both traces is 0 px.
 
+**"Am I at the top?" is only answerable after measurement.** The reader fetches the window
+above when `scrollTop` enters a 400 px band, and `scrollTop` means nothing until the rows
+have been measured: before the first measuring pass every row is `ROW_EST` (44 px), so a
+window of 19 dense codex turns models as 800 px when it is really 3,600 — inside the band,
+and one older window was fetched on every open. Paging is therefore gated on a flag that
+waits for both the first measurement and the first placement of the scroller. Opening a
+pane now costs exactly two requests, the tail and the summary, on both traces.
+
 **The one behavioural difference:** a harness message whose lines straddle a window
 boundary is split into two turns instead of merged into one. Stitching every window of
 that transcript gives 1,433 turns against the full parse's 1,420, with character-for-
