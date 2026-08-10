@@ -14,9 +14,11 @@
 /**
  * The group's display name, or null when the session sits loose in the tree.
  *
- * Ungrouped is an absence here, not a word: the tree simply has no group that
- * lists the session, and `/api/agents` serialises that as `group: null`. So the
- * empty cases all collapse to the same bare name — there is no `[None] foo`.
+ * Ungrouped is an absence here, not a word: `/api/tree` gives the app groups
+ * with their `sessionIds`, so a loose session is simply one no group lists and
+ * the caller has nothing to pass. Every empty shape collapses to the same bare
+ * name — there is no `[None] foo`. (The roster that agents read, `/api/agents`,
+ * spells the same absence as `group: null`.)
  */
 export function groupLabel(name?: string | null): string | null {
   const trimmed = (name ?? '').trim();
