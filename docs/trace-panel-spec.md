@@ -403,19 +403,41 @@ indices as cursors (`window.mode`), and the reader treats a cursor as opaque eit
 which the reader asks for 400 ms after its first paint. Until it lands the header says
 `N turns loaded` rather than inventing a total.
 
-**Cost, measured on the 19 MB / 1,395-turn transcript** (`edbfc11f…`, warm page cache):
+**Cost.** Measured against `upstream/main` built and served from the same files, on
+two real traces on this Space: a 19 MB / ~1,420-turn **Claude** transcript and a 4.8 MB /
+~1,200-turn **codex** rollout. Server time is `curl` against a local server; "first turn
+on screen" is Playwright, median of 5–9 opens of the pane.
 
-| | before | after |
-|---|---|---|
-| server time for the first request | 165 ms | 5 ms |
-| bytes on the wire | 676 KB | 96 KB |
-| first turn on screen (localhost) | 180 ms | 155 ms |
-| first turn on screen (10 Mbps / 40 ms) | 865 ms | 267 ms |
+| | Claude 19 MB | | codex 4.8 MB | |
+|---|---|---|---|---|
+| | before | after | before | after |
+| bytes, first request | 676 KB | **82 KB** | 513 KB | **151 KB** |
+| server time, transcript changed since the last request | 160 ms | **6 ms** | 46 ms | **6 ms** |
+| server time, transcript unchanged (parse memo hit) | 6 ms | 6 ms | 5 ms | 6 ms |
+| first turn on screen, localhost | 181 ms | **167 ms** | 172 ms | 189 ms |
+| first turn on screen, 10 Mbps / 40 ms link | 866 ms | **267 ms** | 868 ms | **355 ms** |
+| opens on | oldest turn | **newest turn** | oldest turn | **newest turn** |
+
+Read honestly: **on loopback this is a wash** — both are ~170–190 ms, dominated by render
+and app work, and the codex case is if anything marginally slower. The win is the bytes,
+and it shows the moment there is a real link between the browser and the Space (3.2× and
+2.4×), plus the server work that vanishes: the "changed since the last request" row is the
+one a *working* agent hits, because the parse memo is keyed on mtime and every append
+invalidates it. The memo-hit row is what an idle trace costs, and there the two are the
+same — main was never slow at *serving* a memoized parse, only at building one and at
+putting 676 KB on the wire to show you the wrong end of the conversation.
+
+The 384 KB default window was chosen by sweeping 128 KB – 1 MB in a browser: paint time is
+flat (155–171 ms median, since the list is virtualized either way) and only the payload
+moves, so the smallest window that still opens on a full-looking conversation wins. The
+turn floor that makes a window grow (`WINDOW_MIN_TURNS`) is deliberately low for the same
+reason: at 30 it grew the codex rollout's window to 1.5 MB and its response to 591 KB,
+which is the whole-file cost this exists to avoid.
 
 **The one behavioural difference:** a harness message whose lines straddle a window
 boundary is split into two turns instead of merged into one. Stitching every window of
-that transcript gives 1,401 turns against the full parse's 1,395, with character-for-
-character identical content — six turns show as two rows each. Covered by
+that transcript gives 1,433 turns against the full parse's 1,420, with character-for-
+character identical content — thirteen turns show as two rows each. Covered by
 `server/test/trace-window.test.mjs`, which also pins the edges: paging back terminates at
 byte 0, an appended turn arrives exactly once, a torn last line is not a turn until it is
 whole, and a transcript with no trailing newline still ends in one.

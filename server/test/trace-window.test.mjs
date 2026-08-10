@@ -37,7 +37,7 @@ assert.equal(tail.window.atEnd, true, 'a tail window reaches the end of the file
 assert.equal(tail.window.end, SIZE, 'and consumed every whole line up to it');
 assert.equal(tail.window.atStart, false, '600 turns do not fit in 32 KB');
 assert.equal(textOf(tail.turns[tail.turns.length - 1]), `turn ${N - 1} ${'x'.repeat(200)}`, 'the last turn written is the last turn shown');
-assert.ok(tail.turns.length >= 30, `a window grows until it holds a readable number of turns (got ${tail.turns.length})`);
+assert.ok(tail.turns.length >= 12, `a window grows until it holds a readable number of turns (got ${tail.turns.length})`);
 // A window that cannot see the start of the trace must not claim to know when
 // the conversation began or what the whole of it cost.
 assert.equal(tail.firstTs, 0);

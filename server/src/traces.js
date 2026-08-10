@@ -1563,7 +1563,13 @@ const WINDOWABLE = new Set(['claude', 'codex', 'openclaw', 'sts']);
 const WINDOW_BYTES = 384 * 1024;         // default span (see the PR for the measurements)
 const WINDOW_MIN_BYTES = 32 * 1024;
 const WINDOW_MAX_BYTES = 8 * 1024 * 1024; // a single window can't cost more than this
-const WINDOW_MIN_TURNS = 30;             // grow the span until at least this many turns are in it
+// Grow the span until at least this many turns are in it — a floor against
+// opening on a stub, NOT a target. It is deliberately low, and growth doubles
+// rather than quadruples: a codex rollout packs ~20 turns into 384 KB, and
+// insisting on 30 grew that window to 1.5 MB and the response to 591 KB, which
+// is the whole-file cost this exists to avoid. Measured on `finetuning boy`
+// (2 MB rollout): 384 KB = 19 turns / 135 KB, 1.5 MB = 75 turns / 591 KB.
+const WINDOW_MIN_TURNS = 12;
 const clampN = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 
 function windowOf(parsed, cur) {
@@ -1636,7 +1642,7 @@ async function readWindow(harness, file, sessionId, size, req) {
     const from = Math.max(0, to - span);
     const w = await oneWindow(harness, file, sessionId, { from, to, aligned: from === 0, eof }, size);
     if (w.parsed.messages.length >= min || from === 0 || span >= WINDOW_MAX_BYTES) return w;
-    span = Math.min(span * 4, WINDOW_MAX_BYTES);
+    span = Math.min(span * 2, WINDOW_MAX_BYTES);
   }
 }
 
