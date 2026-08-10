@@ -166,9 +166,16 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   };
   const nav = (dir: -1 | 1) => (q && hits ? stepHit(dir) : goTurn(dir));
 
+  // Land on the end of the conversation, and stay there until the reader
+  // decides otherwise. This is not only for a working agent: switching a pane
+  // from terminal to reader (which mounts this component fresh) used to drop you
+  // at the top of the last 400 turns — hundreds of rows behind what the agent
+  // had just said, and behind what you were watching in the terminal a moment
+  // earlier. `stick` goes false the instant you scroll up, so following the end
+  // never fights a decision to read further back.
   useLayoutEffect(() => {
     const el = scroller.current;
-    if (el && live && stick.current) el.scrollTop = el.scrollHeight;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [turns, live]);
 
   if (!page) return <div className="cxv-empty mono">{error || 'reading the trace…'}</div>;
