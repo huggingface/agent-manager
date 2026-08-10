@@ -14,10 +14,10 @@ import Locked from './components/Locked';
 import BackupBanner from './components/BackupBanner';
 import Welcome from './components/Welcome';
 import * as api from './api';
-import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
+import type { Cli, GridSpec, MoveTarget, OverviewFilter, OverviewSort, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { isPassive, isRemote } from './types';
-import { GridGlyph, ListGlyph } from './components/icons';
+import { GridGlyph, ListGlyph, SortGlyph } from './components/icons';
 
 // `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
 // when the app is embedded cross-origin. Read once: it never changes mid-run,
@@ -80,6 +80,15 @@ export default function App() {
   const [ovView, setOvViewRaw] = useState<'tiles' | 'list'>(() =>
     (localStorage.getItem('am-ov-view') === 'list' ? 'list' : 'tiles'));
   const setOvView = (v: 'tiles' | 'list') => { setOvViewRaw(v); localStorage.setItem('am-ov-view', v); };
+  // Overview order: the tree's own arrangement (default) or ranked by a
+  // timestamp. A view preference like the two above it — per browser, and it
+  // survives a reload, because re-picking your order on every visit is the
+  // thing that makes a sort control feel like a toy.
+  const [ovSort, setOvSortRaw] = useState<OverviewSort>(() => {
+    const s = localStorage.getItem('am-ov-sort');
+    return s === 'prompt' || s === 'answer' ? s : 'manual';
+  });
+  const setOvSort = (v: OverviewSort) => { setOvSortRaw(v); localStorage.setItem('am-ov-sort', v); };
   // Archiving: sessions quiet for longer than the configured window are hidden
   // from the sidebar and overview unless "archived" is checked. Derived, never
   // stored — flipping the setting instantly (un)archives.
@@ -926,6 +935,7 @@ export default function App() {
               clis={clis}
               tree={tree}
               filter={ovFilter}
+              sort={ovSort}
               view={ovView}
               archived={archivedIds}
               showArchived={showArchived}
@@ -967,6 +977,17 @@ export default function App() {
                   {f === 'waiting' ? 'done' : f === 'working' ? 'running' : f === 'quiet' ? 'stopped' : 'all'}
                 </button>
               ))}
+            </div>
+            {/* Sort, independent of the filter beside it: one says WHICH agents
+                you are looking at, the other WHERE each one is in the feed. */}
+            <div className="seg ov-seg ov-sortseg">
+              <span className="ov-sortmark" aria-hidden="true"><SortGlyph /></span>
+              <button className={ovSort === 'manual' ? 'on' : ''} title="Your own order — the sidebar's groups and arrangement"
+                onClick={() => setOvSort('manual')}>manual</button>
+              <button className={ovSort === 'prompt' ? 'on' : ''} title="Newest message from you first"
+                onClick={() => setOvSort('prompt')}>prompt</button>
+              <button className={ovSort === 'answer' ? 'on' : ''} title="Newest reply from an agent first"
+                onClick={() => setOvSort('answer')}>answer</button>
             </div>
             <div className="seg ov-seg ov-viewseg">
               <button className={ovView === 'tiles' ? 'on' : ''} title="Tiles" onClick={() => setOvView('tiles')}><GridGlyph /></button>

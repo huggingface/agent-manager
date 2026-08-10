@@ -2,9 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { CSSProperties, ReactNode } from 'react';
 import * as api from '../api';
 import type { MetaSession, TraceTurn } from '../api';
-import type { Cli, OverviewFilter, Session, SessionState, Tree } from '../types';
-import { isPassive } from '../types';
+import type { Cli, OverviewFilter, OverviewSort, Session, SessionState, Tree } from '../types';
+import { isPassive, isRemote } from '../types';
 import { renderMarkdown } from '../lib/markdown';
+import { rankSessions, sortLabel } from '../lib/overviewSort';
+import type { Rankable } from '../lib/overviewSort';
 import Logo from './Logo';
 import { SendGlyph } from './icons';
 import ExchangeView from './conversation/Exchange';
@@ -25,6 +27,20 @@ const base = (p: string) => p.split('/').pop() || p;
 const eligible = (s: Session) => s.cli !== 'shell' && !isPassive(s.cli);
 const bucket = (state: SessionState): OverviewFilter =>
   state === 'working' ? 'working' : state === 'waiting' ? 'waiting' : 'quiet';
+
+/**
+ * Is this agent at work right now — the fact the sorted feed pins on.
+ *
+ * The card's own rule (`digest.running || state === 'working'`) with one
+ * exception. A remote agent's digest reports `running` for a machine that is
+ * merely *connected* (`server/src/remote.js` — `isListening && !paused`), which
+ * is presence, not work; on that rule every laptop with the bridge open would
+ * sit pinned at the top of the feed forever. Its terminal-derived state is the
+ * honest signal there: `working` means it was handed a message it has not
+ * answered (see REMOTE_STATE_LABEL in types.ts).
+ */
+const atWork = (m: MetaSession) =>
+  m.state === 'working' || (!isRemote(m.cli) && !!m.digest?.running);
 
 /** How much of the conversation the card reads. Cheap: one page, from the end. */
 const CARD_TAIL = 120;
@@ -90,9 +106,12 @@ const Caret = () => (
  * two, and history grows one turn at a time instead of a stepper that replaced
  * the answer with an older one.
  */
-export function Card({ s, color, pending, isMobile, onOpen, onClose }: {
+export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   s: MetaSession;
   color?: string;
+  // The group this agent belongs to, when the feed is not already drawing one
+  // around it (a sorted feed is flat). Same `[Group] name` a pane header uses.
+  group?: string | null;
   pending?: boolean; // digest still loading — show a shimmer instead of "no prompt yet"
   isMobile?: boolean;
   onOpen: (sid: string) => void;
@@ -199,6 +218,7 @@ export function Card({ s, color, pending, isMobile, onOpen, onClose }: {
       <div className="ov-id" onClick={() => onOpen(s.id)} title="Open pane">
         <span className={`status ${s.state}`} />
         <Logo cli={s.cli} size={12} tint={color} />
+        {group && <span className="ov-gtag mono">[{group}]</span>}
         <span className="ov-name mono">{s.name}</span>
         {ago && <span className="ov-ago">· {ago}</span>}
         <span className="spacer" />
@@ -315,7 +335,7 @@ export function Card({ s, color, pending, isMobile, onOpen, onClose }: {
 }
 
 /** Compact tile: status + prompt + state; click opens the conversation window. */
-function Tile({ s, color, dim, pending, onOpen }: { s: MetaSession; color?: string; dim?: boolean; pending?: boolean; onOpen: () => void }) {
+function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color?: string; group?: string | null; dim?: boolean; pending?: boolean; onOpen: () => void }) {
   const d = s.digest;
   const running = !!d?.running || s.state === 'working';
   const last = Math.max(d?.lastAssistantTs || 0, d?.lastPromptTs || 0) || Date.parse(s.createdAt) || 0;
@@ -327,6 +347,7 @@ function Tile({ s, color, dim, pending, onOpen }: { s: MetaSession; color?: stri
       <div className="ovt-head">
         <span className={`status ${s.state}`} />
         <Logo cli={s.cli} size={12} tint={color} />
+        {group && <span className="ov-gtag mono">[{group}]</span>}
         <span className="ovt-name mono">{s.name}</span>
         <span className="ovt-ago">{pending ? '' : fmtAgo(last)}</span>
       </div>
@@ -354,11 +375,13 @@ function Tile({ s, color, dim, pending, onOpen }: { s: MetaSession; color?: stri
 }
 
 /** Mission control: one reading column — group capsules with their agents as
- *  slabs, loose agents as standalone panels. */
-export default function Overview({ clis, tree, filter, view, archived, showArchived, meta, metaReady, isMobile, onOpen }: {
+ *  slabs, loose agents as standalone panels. Unless a sort is on, in which case
+ *  it is one flat ranked column instead (see §"sorted feed" below). */
+export default function Overview({ clis, tree, filter, sort, view, archived, showArchived, meta, metaReady, isMobile, onOpen }: {
   clis: Cli[];
   tree: Tree;
   filter: OverviewFilter; // controlled by the bottom bar in App
+  sort: OverviewSort;     // ditto, and independent of the filter
   view: 'tiles' | 'list'; // controlled by the bottom bar in App
   archived: Set<string>;
   showArchived: boolean;
@@ -387,6 +410,51 @@ export default function Overview({ clis, tree, filter, view, archived, showArchi
 
   const visible = (s: MetaSession) =>
     (filter === 'all' || bucket(s.state) === filter) && (showArchived || !archived.has(s.id));
+
+  // Which group each agent is in, by name. Only the sorted feed needs it: the
+  // manual feed draws the group as a frame around its members and would be
+  // saying it twice (the same rule the sidebar and pane headers follow —
+  // web/src/lib/sessionTitle.ts).
+  const groupNameOf = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const g of tree.groups) for (const id of g.sessionIds) m[id] = g.name;
+    return m;
+  }, [tree.groups]);
+
+  // ---- sorted feed: flat, ranked, groups become a prefix ----
+  //
+  // Sorting FLATTENS the grouping rather than ordering inside each capsule.
+  // "Where did I last type something" is a question about the whole fleet; an
+  // answer split across five capsules still has to be scanned capsule by
+  // capsule, and the first card of the feed — the one place the eye lands —
+  // would only be the newest agent *of whichever group happens to be first in
+  // the sidebar*. Which group an agent is in is not lost, it moves onto the
+  // card as `[Group] name`, exactly as a pane header spells it.
+  const sorted = sort !== 'manual';
+  const sections = useMemo(() => {
+    if (!sorted) return null;
+    // Walk the tree so ties (and the whole undated tail) come out in the order
+    // you arranged them in the sidebar.
+    const items: (Rankable & { m: MetaSession })[] = [];
+    for (const ref of tree.order) {
+      const ids = ref.startsWith('s:') ? [ref.slice(2)] : groupById[ref.slice(2)]?.sessionIds ?? [];
+      for (const id of ids) {
+        const s = sessById[id];
+        if (!s || !eligible(s)) continue;
+        const m = dataFor(s);
+        if (!visible(m)) continue;
+        items.push({
+          id,
+          m,
+          lastPromptTs: m.digest?.lastPromptTs || 0,
+          lastAssistantTs: m.digest?.lastAssistantTs || 0,
+          running: atWork(m),
+        });
+      }
+    }
+    return rankSessions(items, sort);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sorted, sort, tree.order, sessById, groupById, meta, metaReady, filter, archived, showArchived]);
 
   // Collapse at constant velocity: duration follows the group's height.
   const toggleGroup = (gid: string, el: HTMLElement) => {
@@ -418,26 +486,68 @@ export default function Overview({ clis, tree, filter, view, archived, showArchi
     if (looseTiles.length) tileBlocks.push(<div className="ovt-grid" key={`loose-${tileBlocks.length}`}>{looseTiles}</div>);
     looseTiles = [];
   };
-  for (const ref of tree.order) {
-    if (ref.startsWith('s:')) {
-      const s = sessById[ref.slice(2)];
-      if (s && eligible(s)) { const t = tileFor(s); if (t) looseTiles.push(t); }
-    } else {
-      const g = groupById[ref.slice(2)];
-      if (!g) continue;
-      const members = g.sessionIds.map((id) => sessById[id]).filter(Boolean).filter(eligible) as Session[];
-      const shown = members.map(tileFor).filter(Boolean);
-      if (!shown.length) continue;
-      flushLoose();
-      tileBlocks.push(
-        <div key={g.id} className="ovt-group">
-          <span className="ovt-glabel mono">{g.name}<span className="ovt-gn"> {shown.length}</span></span>
-          <div className="ovt-grid">{shown}</div>
-        </div>,
-      );
+  if (!sorted) {
+    for (const ref of tree.order) {
+      if (ref.startsWith('s:')) {
+        const s = sessById[ref.slice(2)];
+        if (s && eligible(s)) { const t = tileFor(s); if (t) looseTiles.push(t); }
+      } else {
+        const g = groupById[ref.slice(2)];
+        if (!g) continue;
+        const members = g.sessionIds.map((id) => sessById[id]).filter(Boolean).filter(eligible) as Session[];
+        const shown = members.map(tileFor).filter(Boolean);
+        if (!shown.length) continue;
+        flushLoose();
+        tileBlocks.push(
+          <div key={g.id} className="ovt-group">
+            <span className="ovt-glabel mono">{g.name}<span className="ovt-gn"> {shown.length}</span></span>
+            <div className="ovt-grid">{shown}</div>
+          </div>,
+        );
+      }
     }
+    flushLoose();
   }
-  flushLoose();
+
+  /**
+   * The ranked feed: at most three labelled blocks, in this order.
+   *
+   *  · running now — pinned, because a working agent's last message is whatever
+   *    it said BEFORE it started, and ranking it by that buries the one agent
+   *    that is doing something under a wall of finished ones.
+   *  · the sort itself — what you asked for, newest first.
+   *  · the tail — an agent with no such message at all (never started, no
+   *    transcript, a harness that writes none). Last, and labelled, so a 0
+   *    timestamp cannot pass itself off as "oldest".
+   *
+   * Every block is the same card or tile the manual feed draws; only the order
+   * and the `[Group]` prefix change.
+   */
+  const rankedBlocks = (): ReactNode[] => {
+    if (!sections) return [];
+    type Row = { id: string; m: MetaSession };
+    const body = (rows: Row[]) => (view === 'tiles'
+      ? <div className="ovt-grid">{rows.map(({ m }) => (
+          <Tile key={m.id} s={m} color={colorOf[m.cli]} group={groupNameOf[m.id]} dim={archived.has(m.id)}
+            pending={pending(m.id)} onOpen={() => setOpenId(m.id)} />
+        ))}</div>
+      : rows.map(({ m }) => (
+          <div key={m.id} className="ov-panel">
+            <Card s={m} color={colorOf[m.cli]} group={groupNameOf[m.id]} pending={pending(m.id)} isMobile={isMobile} onOpen={onOpen} />
+          </div>
+        )));
+    const block = (key: string, label: string, rows: Row[]) => rows.length === 0 ? null : (
+      <div className="ov-sortsec" key={key}>
+        <div className="ov-sortlbl mono"><span>{label}</span><span className="ov-sortrule" /><span className="ov-sortn">{rows.length}</span></div>
+        {body(rows)}
+      </div>
+    );
+    return [
+      block('running', 'running now', sections.running),
+      block('dated', sortLabel(sort), sections.dated),
+      block('undated', sort === 'prompt' ? 'nothing sent yet' : 'no reply yet', sections.undated),
+    ].filter(Boolean) as ReactNode[];
+  };
 
   const openSess = openId ? sessById[openId] : null;
   const windowEl = openSess && (
@@ -448,20 +558,23 @@ export default function Overview({ clis, tree, filter, view, archived, showArchi
     </div>
   );
 
+  const empty = <div className="usage-msg mono">{filter === 'all' ? 'no agents yet — shells and file panes don’t appear here.' : 'nothing in this state.'}</div>;
+
   if (view === 'tiles') {
+    const content = sorted ? rankedBlocks() : tileBlocks;
     return (
       <div className="ov-wrap">
         <div className="ov-feed ovt-feed">
-          {tileBlocks.length === 0 && <div className="usage-msg mono">{filter === 'all' ? 'no agents yet — shells and file panes don’t appear here.' : 'nothing in this state.'}</div>}
-          {tileBlocks}
+          {content.length === 0 && empty}
+          {content}
         </div>
         {windowEl}
       </div>
     );
   }
 
-  const blocks: ReactNode[] = [];
-  for (const ref of tree.order) {
+  const blocks: ReactNode[] = sorted ? rankedBlocks() : [];
+  if (!sorted) for (const ref of tree.order) {
     if (ref.startsWith('s:')) {
       const s = sessById[ref.slice(2)];
       if (s && eligible(s)) {
@@ -497,7 +610,7 @@ export default function Overview({ clis, tree, filter, view, archived, showArchi
   return (
     <div className="ov-wrap">
       <div className="ov-feed">
-        {blocks.length === 0 && <div className="usage-msg mono">{filter === 'all' ? 'no agents yet — shells and file panes don’t appear here.' : 'nothing in this state.'}</div>}
+        {blocks.length === 0 && empty}
         {blocks}
       </div>
     </div>
