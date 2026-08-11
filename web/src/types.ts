@@ -103,6 +103,11 @@ export interface RemoteInfo {
 
 export type OverviewFilter = 'all' | 'waiting' | 'working' | 'quiet';
 
+// How the Overview is ordered. `manual` is the tree's own arrangement — groups
+// as capsules, agents where you put them; the other two flatten that and rank
+// every agent by a timestamp from its digest. See web/src/lib/overviewSort.ts.
+export type OverviewSort = 'manual' | 'prompt' | 'answer';
+
 export type MoveTarget =
   | { kind: 'into'; groupId: string }
   | { kind: 'pair'; sessionId: string }

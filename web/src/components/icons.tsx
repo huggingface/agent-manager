@@ -229,6 +229,13 @@ export const GridGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+// Overview order: lines stepping down, longest first — a list that is ranked.
+export const SortGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M2.6 4h10.8M2.6 8h7.2M2.6 12h3.6" />
+  </G>
+);
+
 export const PlusGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <path d="M8 3.2v9.6M3.2 8h9.6" />
