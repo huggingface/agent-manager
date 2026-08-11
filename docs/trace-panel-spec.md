@@ -414,9 +414,18 @@ on screen" is Playwright, median of 5–9 opens of the pane.
 | bytes, first request | 676 KB | **82 KB** | 513 KB | **151 KB** |
 | server time, transcript changed since the last request | 160 ms | **6 ms** | 46 ms | **6 ms** |
 | server time, transcript unchanged (parse memo hit) | 6 ms | 6 ms | 5 ms | 6 ms |
+| the `?summary=1` read, 400 ms after the paint | — | 176 ms | — | 46 ms |
 | first turn on screen, localhost | 181 ms | **167 ms** | 172 ms | 189 ms |
 | first turn on screen, 10 Mbps / 40 ms link | 866 ms | **267 ms** | 868 ms | **355 ms** |
 | opens on | oldest turn | **newest turn** | oldest turn | **newest turn** |
+
+Read that table with the summary row in view: the whole-file parse is **deferred, not
+removed**. The reader still asks for `?summary=1` once per pane open, and on a transcript
+being appended to (the memo is keyed on mtime) that is the same 160–176 ms parse as before,
+just after the first paint instead of in front of it. What the window buys is the first
+view and every subsequent page; what it does not buy is a server that never reads the whole
+file. The honest summary of the server work is: one bounded read on the critical path, one
+whole-file read off it, and none at all for the pages after the first.
 
 Read honestly: **on loopback this is a wash** — both are ~170–190 ms, dominated by render
 and app work, and the codex case is if anything marginally slower. The win is the bytes,
@@ -466,10 +475,34 @@ window the end, not having consumed every byte. And in the pane, every load now 
 generation stamp, so a window in flight when you switch files cannot be spliced into the
 next transcript with the previous one's byte cursors.
 
-**The one behavioural difference:** a harness message whose lines straddle a window
-boundary is split into two turns instead of merged into one. Stitching every window of
+**codex windows are cut at task boundaries, not at arbitrary bytes.** A byte window is
+sound for a format whose lines stand alone. Codex's do not: `event_msg/task_complete`
+points BACK at the assistant message it marks, and a dangling pointer does not degrade —
+`normalizeCodex` cannot find the answer, so it pushes a verbatim second copy of it.
+Measured on a real 4.8 MB rollout at 128 KB windows: 955 stitched turns against the full
+parse's 953, two answers shown twice. A rollout describes its own unit
+(`task_started` … `task_complete`) and every backward reference lives inside one task, so a
+codex window now begins on a `task_started` line. Measured over every rollout on this
+Space: 339 `task_started`, 333 `task_complete`, none outside a started task, largest task
+768 KB — inside the 8 MB growth ceiling with room to spare. A task bigger than the ceiling
+cannot be aligned; there the pointer is treated as a marker only, since the answer it names
+is rendered (and marked) in the window that holds it. Verified: a synthetic 10 MB
+single-task rollout yields exactly one copy of its answer.
+
+With that, stitching every window of a codex rollout reproduces the full parse **exactly** —
+same turns, same blocks, same `final` accents — at 64 KB, 128 KB and 384 KB windows, on all
+six rollouts on this Space.
+
+**The one behavioural difference, and it is Claude's:** a harness message whose lines
+straddle a window boundary is split into two turns instead of merged into one. Stitching every window of
 that transcript gives 1,433 turns against the full parse's 1,420, with character-for-
-character identical content — thirteen turns show as two rows each. Covered by
+character identical content — thirteen turns show as two rows each. Checked as a multiset
+of blocks against the full parse across the six largest Claude transcripts and the six
+largest codex rollouts here, at three window sizes: **0 blocks missing and 0 duplicated in
+all 36 runs**. The `final` accent is withheld (never wrongly added) from a window that
+cannot see whether an answer is the last one before the next prompt: at the shipped 384 KB
+window the accents match the full parse exactly on both formats; at an unusually small
+64 KB window a 19 MB Claude transcript withholds 3 of 56. Covered by
 `server/test/trace-window.test.mjs`, which also pins the edges: paging back terminates at
 byte 0, an appended turn arrives exactly once, a torn last line is not a turn until it is
 whole, and a transcript with no trailing newline still ends in one.

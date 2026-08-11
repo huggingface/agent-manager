@@ -977,7 +977,7 @@ async function rangeBuf(file, from, to) {
 // offset can cut a UTF-8 character in half, and offsets derived from the decoded
 // string would then be a byte or two off — enough to corrupt the next cursor.
 async function* rangeJsonLines(file, range) {
-  const buf = await rangeBuf(file, range.from, range.to);
+  const buf = range.buf || await rangeBuf(file, range.from, range.to);
   let i = 0;
   if (!range.aligned) {
     const nl = buf.indexOf(0x0a);
@@ -1238,6 +1238,13 @@ async function normalizeCodex(file, out, range) {
           // A capped block only holds a prefix, so compare as a prefix there.
           if (marked && shown.some((t) => t === text || (t.length >= VIEW_BLOCK_CAP && text.startsWith(t)))) {
             marked.kind = 'final';
+          } else if (range && range.danglingTaskComplete === 'ignore') {
+            // This window had to cut a task in half (one bigger than the growth
+            // ceiling), so the answer this event points at is in a window we did
+            // not read — where it is already rendered, and already marked. A
+            // pointer to something outside the window is not an answer; emitting
+            // it here would show the reader a copy of a turn that occurs once.
+            cur = null;
           } else {
             cur = null;
             out.push({ role: 'assistant', kind: 'final', ts, blocks: [textBlock('text', text)] });
@@ -1247,6 +1254,10 @@ async function normalizeCodex(file, out, range) {
       } else if (p.type === 'turn_aborted' || p.type === 'thread_rolled_back') {
         cur = null;
       }
+      // Did this window's last task close inside it? That is what decides
+      // whether its final answer is really final — see oneWindow.
+      if (p.type === 'task_started') out.taskOpen = true;
+      else if (p.type === 'task_complete' || p.type === 'turn_aborted') out.taskOpen = false;
       continue;
     }
   }
@@ -1613,7 +1624,73 @@ function unmarkTrailingFinal(parsed) {
   }
 }
 
+// ---------- codex: windows are cut at task boundaries ----------
+// A byte window is sound for a format whose lines stand alone. Codex's do not:
+// `event_msg/task_complete` POINTS BACK at the assistant message it marks, and
+// `agent_reasoning` is deduped against reasoning items earlier in the same turn.
+// Cut the file anywhere and those references dangle — and a dangling
+// `task_complete` does not degrade, it INVENTS: `normalizeCodex` cannot find the
+// answer, so it pushes a verbatim second copy of it. Measured on a real 4.8 MB
+// rollout at 128 KB windows: 955 stitched turns against the full parse's 953,
+// two answers shown twice.
+//
+// The fix is not to dedupe the symptom but to stop cutting mid-reference. A
+// rollout describes its own unit — `task_started` … `task_complete` — and every
+// backward reference lives inside one task. So a codex window begins at a
+// `task_started` line: each task, with its answer, its reasoning and its token
+// count, lands whole in exactly one window, and stitching reproduces the full
+// parse exactly. Measured over every rollout on this Space: 339 `task_started`,
+// 333 `task_complete`, no `task_complete` outside a started task, largest task
+// 768 KB — comfortably inside the growth ceiling.
+const TASK_MARK = '"task_started"';
+
+/** Byte offset of the first `task_started` line at or after `buf`'s first whole
+ *  line, or -1 if this window holds none. `base` is the file offset of buf[0]. */
+function codexTaskStart(buf, base, firstLine) {
+  let i = firstLine;
+  while (i < buf.length) {
+    let nl = buf.indexOf(0x0a, i);
+    if (nl < 0) nl = buf.length;
+    // Cheap filter first: parsing every line of every window to find a boundary
+    // would cost as much as the parse itself.
+    if (buf.includes(TASK_MARK, i) && buf.indexOf(TASK_MARK, i) < nl) {
+      let j = null;
+      try { j = JSON.parse(buf.toString('utf8', i, nl)); } catch { j = null; }
+      if (j && j.type === 'event_msg' && j.payload && j.payload.type === 'task_started') return base + i;
+    }
+    i = nl + 1;
+  }
+  return -1;
+}
+
+/** Where a window's first whole line begins inside `buf`. */
+function firstWholeLine(buf, aligned) {
+  if (aligned) return 0;
+  const nl = buf.indexOf(0x0a);
+  return nl < 0 ? buf.length : nl + 1;
+}
+
 async function oneWindow(harness, file, sessionId, range, size) {
+  let taskAligned = false;
+  if (harness === 'codex' && range.from > 0) {
+    // Read once, align, then parse the same bytes — `range.buf` keeps this to a
+    // single read of the window.
+    const buf = await rangeBuf(file, range.from, range.to);
+    const at = codexTaskStart(buf, range.from, firstWholeLine(buf, range.aligned));
+    if (at >= 0) {
+      range.buf = buf.subarray(at - range.from);
+      range.from = at;
+      range.aligned = true;
+      taskAligned = true;
+    } else {
+      range.buf = buf;
+      // No boundary in reach: this window cuts a task in half, so a
+      // `task_complete` inside it may point at an answer we cannot see. Tell the
+      // normalizer to treat it as a marker only — pointing at something outside
+      // the window is not a reason to invent a copy of it.
+      range.danglingTaskComplete = 'ignore';
+    }
+  }
   const parsed = await parseTraceFile(harness, file, sessionId, range);
   const start = range.start ?? range.from;
   const end = range.end ?? range.to;
@@ -1624,7 +1701,14 @@ async function oneWindow(harness, file, sessionId, range, size) {
   // forever. The cursor still stops in front of the fragment, so the next
   // `after: end` picks it up if it ever becomes whole.
   const atEnd = range.to >= size;
-  if (!atEnd) unmarkTrailingFinal(parsed);
+  // Withhold the "final answer" accent only from a window that cannot know
+  // whether the answer is final. For codex that is precisely a window whose last
+  // task is still open at its edge — a closed task's answer is named by the
+  // harness itself. For the line-oriented formats it is any window that does not
+  // reach the end of the file, since "final" there means "no later answer before
+  // the next prompt", and the next prompt may be in the window after this one.
+  const openEdge = harness === 'codex' ? !!parsed.taskOpen : true;
+  if (!atEnd && openEdge) unmarkTrailingFinal(parsed);
   return { parsed, cur: { mode: 'bytes', start, end, atStart: start <= 0, atEnd } };
 }
 
@@ -1653,7 +1737,10 @@ async function readWindow(harness, file, sessionId, size, req) {
   for (;;) {
     const from = Math.max(0, to - span);
     const w = await oneWindow(harness, file, sessionId, { from, to, aligned: from === 0, eof }, size);
-    if (w.parsed.messages.length >= min || from === 0 || span >= WINDOW_MAX_BYTES) {
+    // A codex window that holds no task boundary had to cut a task in half; grow
+    // rather than serve a window whose references point outside it.
+    const unaligned = harness === 'codex' && from > 0 && w.cur.start <= from;
+    if ((w.parsed.messages.length >= min && !unaligned) || from === 0 || span >= WINDOW_MAX_BYTES) {
       // A window that consumed nothing at all has hit a single line longer than
       // the ceiling (a file-history blob), and no amount of asking again will
       // get past it. Say that, rather than let the reader conclude it has

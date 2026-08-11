@@ -185,5 +185,71 @@ assert.equal(partial.note, null, 'a per-window count is not a fact about the ses
 assert.equal(partial.usage, null);
 assert.equal(partial.firstTs, 0);
 
+// ---- codex: a window is cut at a task boundary, never inside one ----
+// `task_complete` POINTS BACK at the assistant message it marks. Cut a rollout
+// between the two and the pointer dangles — and the normalizer's fallback then
+// pushes a verbatim second copy of the answer, so the reader shows a turn the
+// conversation does not contain. Windows therefore begin at `task_started`.
+const ev = (type, payload, ts) => JSON.stringify({ type, timestamp: ts, payload });
+const codexTask = (i) => {
+  const ts = new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString();
+  return [
+    ev('event_msg', { type: 'task_started' }, ts),
+    ev('turn_context', { model: 'gpt-test', cwd: TMP }, ts),
+    ev('response_item', { type: 'message', role: 'user', content: [{ type: 'text', text: `ask ${i} ${'u'.repeat(300)}` }] }, ts),
+    ev('response_item', { type: 'function_call', name: 'exec', call_id: `c${i}`, arguments: '{"cmd":"ls"}' }, ts),
+    ev('response_item', { type: 'function_call_output', call_id: `c${i}`, output: `out ${i} ${'o'.repeat(300)}` }, ts),
+    ev('response_item', { type: 'message', role: 'assistant', content: [{ type: 'text', text: `ANSWER ${i} ${'a'.repeat(300)}` }] }, ts),
+    ev('event_msg', { type: 'agent_message', message: `ANSWER ${i} ${'a'.repeat(300)}` }, ts),
+    ev('event_msg', { type: 'task_complete', last_agent_message: `ANSWER ${i} ${'a'.repeat(300)}` }, ts),
+  ].join('\n');
+};
+const tasks = path.join(TMP, 'rollout-tasks.jsonl');
+fs.writeFileSync(tasks, `${[
+  ev('session_meta', { cwd: TMP, base_instructions: { text: 'i'.repeat(20 * 1024) } }, new Date().toISOString()),
+  ...Array.from({ length: 40 }, (_, i) => codexTask(i)),
+].join('\n')}\n`);
+
+const fullCodex = [];
+const cHead = await readTraceByPath(tasks, { offset: 0, limit: 500 });
+for (let off = 0; off < cHead.total; off += 500) fullCodex.push(...(await readTraceByPath(tasks, { offset: off, limit: 500 })).turns);
+const answers = (ts) => ts.flatMap((t) => t.blocks.filter((b) => b.type === 'text').map((b) => b.text)).filter((t) => t.startsWith('ANSWER'));
+assert.equal(new Set(answers(fullCodex)).size, answers(fullCodex).length, 'the full parse shows each answer once');
+
+// Every window size, including ones whose boundaries land between an assistant
+// message and its task_complete.
+for (const bytes of [16 * 1024, 32 * 1024, 64 * 1024]) {
+  let stitched = [];
+  let page = await readTraceByPath(tasks, { window: { at: 'tail', bytes } });
+  let hops = 0;
+  const firstLines = [];
+  for (;;) {
+    firstLines.push(page.window.start);
+    stitched = [...page.turns, ...stitched];
+    if (page.window.atStart || page.window.blocked) break;
+    assert.ok(++hops < 200, 'paging back terminates');
+    const before = page.window.start;
+    page = await readTraceByPath(tasks, { window: { at: 'before', cursor: before, bytes } });
+    assert.equal(page.window.end, before, 'windows still abut exactly');
+  }
+  const a = answers(stitched);
+  assert.equal(new Set(a).size, a.length, `no answer is shown twice (bytes=${bytes})`);
+  assert.deepEqual(a, answers(fullCodex), `the same answers, in the same order (bytes=${bytes})`);
+  assert.equal(stitched.length, fullCodex.length, `and the same number of turns (bytes=${bytes})`);
+  assert.equal(
+    stitched.filter((t) => t.kind === 'final').length,
+    fullCodex.filter((t) => t.kind === 'final').length,
+    `the final-answer accent lands the same number of times (bytes=${bytes})`,
+  );
+  // Every window except the one holding byte 0 begins ON a task boundary.
+  const buf = fs.readFileSync(tasks);
+  for (const at of firstLines) {
+    if (at === 0) continue;
+    const nl = buf.indexOf(0x0a, at);
+    const first = JSON.parse(buf.toString('utf8', at, nl < 0 ? buf.length : nl));
+    assert.equal(first.payload.type, 'task_started', `a window starts a task, not the middle of one (at ${at})`);
+  }
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log('trace-window: ok');
