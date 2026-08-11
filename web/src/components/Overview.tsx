@@ -10,6 +10,7 @@ import type { Rankable } from '../lib/overviewSort';
 import Logo from './Logo';
 import { SendGlyph } from './icons';
 import ExchangeView from './conversation/Exchange';
+import { useDraft } from './conversation/useDraft';
 import { writePaneMode } from '../lib/paneMode';
 import { splitExchanges } from './conversation/exchanges';
 
@@ -130,7 +131,11 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   onClose?: () => void; // present when the card lives in the conversation window
 }) {
   const d = s.digest;
-  const [draft, setDraft] = useState('');
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  // One unsent reply per agent, shared with reader mode: it is the same act on
+  // the same session, so the text you started in the card is the text the reader
+  // hands back. See drafts.ts for what it survives.
+  const [draft, setDraft] = useDraft(s.id, inputRef);
   const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState(false);
   // Optimistic echo: the sent text becomes the prompt line the moment the
@@ -140,7 +145,6 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   const [histIdx, setHistIdx] = useState(0); // digest fallback only: n-th answer back
   const [back, setBack] = useState(0);       // how many earlier turns are shown
   const [openWork, setOpenWork] = useState(false);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const latestRef = useRef<HTMLDivElement>(null);
   // The window is the only place the card can grow; inline in the list it stays

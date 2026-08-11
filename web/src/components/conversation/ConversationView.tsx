@@ -13,6 +13,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import * as api from '../../api';
 import type { TracePage, TraceTurn } from '../../api';
 import type { Session } from '../../types';
+import { useDraft } from './useDraft';
 import { fmtTok, splitExchanges } from './exchanges';
 import ExchangeView from './Exchange';
 import { SendGlyph } from '../icons';
@@ -47,11 +48,14 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   const stick = useRef(true);
   // Reading a conversation and answering it are the same act — the card has
   // always known that. Only a trace with no agent behind it is read-only.
-  const [draft, setDraft] = useState('');
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  // A half-typed reply outlives this component. On a phone, leaving the reader
+  // and coming back is usually a cold mount — the tab was evicted, or the Hub
+  // rebuilt the iframe — and plain state loses the text. drafts.ts.
+  const [draft, setDraft] = useDraft(session.id, inputRef);
   const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState(false);
   const [sent, setSent] = useState<{ text: string; at: number } | null>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const live = session.state === 'working' && !paused;
 

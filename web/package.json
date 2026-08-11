@@ -13,7 +13,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node test/exchanges.test.mjs && node test/sessionTitle.test.mjs && node test/overviewSort.test.mjs",
+    "test": "node test/exchanges.test.mjs && node test/sessionTitle.test.mjs && node test/overviewSort.test.mjs && node test/drafts.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
