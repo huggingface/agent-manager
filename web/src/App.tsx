@@ -57,11 +57,34 @@ function initialTheme(): 'light' | 'dark' {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
+// Where you left off. A phone evicts a backgrounded tab, and the Hub embeds the
+// Space in an iframe it rebuilds on every visit — so "coming back" is almost
+// always a cold mount, not a resume. Without this, the restored app has no
+// selection and mobile opens on the sidebar list, however deep in an agent you
+// were. The URL can't carry it (the Hub controls the iframe's src), so it has
+// to be storage.
+//
+// Storage can be denied outright — private mode, or a third-party iframe under
+// cross-site tracking prevention. That's a "don't remember" fallback to the
+// behaviour we already had, never a crash, so both sides swallow.
+const readStored = (k: string): string | null => {
+  try { return localStorage.getItem(k); } catch { return null; }
+};
+const writeStored = (k: string, v: string | null) => {
+  try {
+    if (v === null) localStorage.removeItem(k);
+    else localStorage.setItem(k, v);
+  } catch { /* storage denied — the selection just won't survive a reload */ }
+};
+
 export default function App() {
   const [clis, setClis] = useState<Cli[]>([]);
   const [tree, setTree] = useState<Tree>({ order: [], groups: [], sessions: [] });
-  const [activeRef, setActiveRef] = useState<string | null>(null);
-  const [focusedId, setFocusedId] = useState<string | null>(null);
+  // Restored from the last visit, then re-validated against the tree once it
+  // loads (the agent may be long gone). focusedId comes back too, so a group
+  // reopens on the pane you were actually reading rather than its first.
+  const [activeRef, setActiveRef] = useState<string | null>(() => readStored('am-active-ref'));
+  const [focusedId, setFocusedId] = useState<string | null>(() => readStored('am-focused-id'));
   const [theme, setTheme] = useState<'light' | 'dark'>(initialTheme);
   const [dropMain, setDropMain] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -101,7 +124,7 @@ export default function App() {
   // Mobile navigation: false = the sidebar is the (full-screen) home view,
   // true = the selected session/group fills the screen. Desktop ignores this.
   const isMobile = useIsMobile();
-  const [mobileStage, setMobileStage] = useState(false);
+  const [mobileStage, setMobileStage] = useState(() => readStored('am-mobile-stage') === '1');
   const [ovFilter, setOvFilter] = useState<OverviewFilter>('all');
   const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
   const rememberPath = (p?: string | null) => {
@@ -114,6 +137,12 @@ export default function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('am-theme', theme);
   }, [theme]);
+
+  // Write the selection through on every change rather than on unload: a phone
+  // killing a backgrounded tab does not reliably run unload handlers.
+  useEffect(() => { writeStored('am-active-ref', activeRef); }, [activeRef]);
+  useEffect(() => { writeStored('am-focused-id', focusedId); }, [focusedId]);
+  useEffect(() => { writeStored('am-mobile-stage', mobileStage ? '1' : '0'); }, [mobileStage]);
 
   // Track the visual viewport so the mobile layout can sit above the on-screen
   // keyboard (which shrinks visualViewport but not the layout viewport on iOS).
@@ -319,8 +348,11 @@ export default function App() {
     } catch (e) { showErr('Couldn’t toggle demo mode')(e); }
   };
 
+  // treeLoaded gates the selection check below: until the first tree actually
+  // arrives, "your agent isn't in this tree" only means the tree is still empty.
+  const [treeLoaded, setTreeLoaded] = useState(false);
   const refresh = useCallback(async () => {
-    try { setTree(await api.getTree()); } catch { /* offline */ }
+    try { setTree(await api.getTree()); setTreeLoaded(true); } catch { /* offline */ }
   }, []);
 
   useEffect(() => {
@@ -403,12 +435,20 @@ export default function App() {
     return m;
   }, [tree.groups]);
 
-  // Keep a valid selection ('overview' is always valid).
+  // Keep a valid selection ('overview' is always valid). Waits for the first
+  // tree: running against the empty initial one would discard a restored
+  // selection as "missing" a beat before the agents arrive.
   useEffect(() => {
+    if (!treeLoaded) return;
     const ok = activeRef && (activeRef === 'overview'
       || (activeRef.startsWith('g:') ? groupById[activeRef.slice(2)] : sessById[activeRef.slice(2)]));
-    if (!ok) setActiveRef(tree.order[0] ?? null);
-  }, [tree.order, groupById, sessById, activeRef]);
+    if (!ok) {
+      setActiveRef(tree.order[0] ?? null);
+      // The remembered agent is gone (deleted, or a different Space). Land on
+      // the list rather than full-screening whichever agent happens to be first.
+      setMobileStage(false);
+    }
+  }, [tree.order, groupById, sessById, activeRef, treeLoaded]);
 
   const activeGroup = activeRef?.startsWith('g:') ? groupById[activeRef.slice(2)] : null;
   const activeSingle = activeRef?.startsWith('s:') ? sessById[activeRef.slice(2)] : null;
@@ -426,6 +466,30 @@ export default function App() {
   // activeRef would clobber openSession's "land on this agent's pane").
   const [pageRaw, setPage] = useState(0);
   const page = Math.min(pageRaw, pageCount - 1); // clamp when agents/layout change
+  // Restoring a group has to restore its page too: mobile shows one pane per
+  // page, so the remembered pane would otherwise sit behind page 0. Fires once,
+  // on the first loaded tree — a standing effect would be exactly the activeRef
+  // clobber the note above warns about.
+  //
+  // It reads the remembered pane from a ref, NOT from focusedId, because
+  // focusedId does not survive to here: "keep a focused pane within the visible
+  // set" below runs on the mount commit, when the tree is still empty and the
+  // visible set with it, and nulls focusedId — which the write-through then
+  // erases from storage. The ref is out of that effect's reach. Restoring the
+  // page puts the remembered pane in the visible set, and that same effect then
+  // focuses it (on mobile the page IS the pane, so it lands exactly).
+  const restoredFocus = useRef(readStored('am-focused-id'));
+  const pageRestored = useRef(false);
+  useEffect(() => {
+    if (pageRestored.current || !treeLoaded) return;
+    pageRestored.current = true;
+    const want = restoredFocus.current;
+    if (!activeGroup || !want) return;
+    const idx = activeGroup.sessionIds.indexOf(want);
+    if (idx < 0) return; // remembered a pane this group no longer has
+    setPage(Math.floor(idx / cap));
+    setFocusedId(want);
+  }, [treeLoaded, activeGroup, cap]);
   const pageSessions = activeGroup ? groupSessions.slice(page * cap, (page + 1) * cap) : [];
 
   const visibleSessions = activeGroup ? pageSessions : activeSingle ? [activeSingle] : [];
