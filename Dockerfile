@@ -138,7 +138,21 @@ COPY --chown=node:node session.bashrc /app/
 ENV PORT=7860 \
     DATA_DIR=/data \
     PUBLIC_DIR=/app/public \
-    DISABLE_AUTOUPDATER=1
+    DISABLE_AUTOUPDATER=1 \
+    UV_THREADPOOL_SIZE=16
+
+# Why 16 and not libuv's default 4: /data is a FUSE bucket, and moving the
+# re-pin walks off the event loop moved them onto that pool instead — one
+# outstanding op per watching pane, and panes launched together stay in phase,
+# so their beats land together. Measured on the bucket, one stat on an unrelated
+# file while N panes walk (p95 / worst):
+#
+#   pool  4:  N=4  0.2ms / 8ms      N=8  99.6ms / 177ms
+#   pool 16:  N=4  0.2ms / 5ms      N=8   0.3ms /  89ms
+#
+# At 4 the pool is oversubscribed by the walks and everything else fs-shaped in
+# the process queues behind them. The isolated worst-case outliers are the mount
+# hiccuping and survive any pool size — it's the p95 that this fixes.
 
 # Snapshot the env var NAMES present at build time. HF injects Space secrets and
 # variables only at runtime, so anything in the runtime env that's absent here

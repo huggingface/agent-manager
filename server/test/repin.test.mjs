@@ -169,7 +169,8 @@ check('Codex exact id accepted', runner.breadcrumbVerdict(codexCrumb, 's1', {
   cli: 'codex', runId: RUN, workdir: WORKDIR, pinned: null, claimed: new Set(), pidTrusted: true,
 }).repin, CODEX_ID);
 check('Codex rollout path retained', runner.codexRolloutForBreadcrumb(codexCrumb), rollout);
-check('Codex null transcript resolves by exact id', runner.codexRolloutForId(CODEX_ID), rollout);
+// Awaited: the id lookup walks the rollout tree, which is async now.
+check('Codex null transcript resolves by exact id', await runner.codexRolloutForId(CODEX_ID), rollout);
 const CODEX_ALIAS = path.join(TMP, 'codex-alias');
 fs.mkdirSync(CODEX_ALIAS);
 fs.symlinkSync(path.join(CODEX, 'sessions'), path.join(CODEX_ALIAS, 'sessions'));
