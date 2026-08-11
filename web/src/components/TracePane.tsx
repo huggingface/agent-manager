@@ -294,6 +294,14 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
   // off. `delta` is the model-based fallback for a row that has scrolled out of
   // the rendered window and has no geometry to read.
   const anchor = useRef<{ i: number; delta: number; top: number | null } | null>(null);
+  // React keys for the rows. Indices move every time older turns are prepended,
+  // and a key that moves unmounts and remounts the row — which throws away every
+  // fold the reader had opened (`Collapsible` holds `open` in state) and every
+  // memoized markdown body, at exactly the moment they were reading a tool call
+  // and scrolled up for the context that produced it. Keys are therefore
+  // `keyBase + index`, with the base decremented by each prepend, so a given
+  // turn keeps the same key for the life of the pane.
+  const keyBase = useRef(0);
   // False until the turns we hold have been MEASURED and the scroller put where
   // it belongs. Until then `scrollTop` says nothing about where the reader is:
   // before the first layout it is 0 because nothing has been placed, and before
@@ -417,6 +425,15 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
       if (got.length && captureAnchor(got.length)) stick.current = false;
       turns.current = [...got, ...turns.current];
       heights.current = [...new Array(got.length), ...heights.current];
+      // Everything that names a row BY INDEX moves with the prepend: the keys,
+      // a pending jump, and an anchor captured before this landed. Missing the
+      // jump was worth a runaway — `wanted` kept addressing turn N of the newly
+      // prepended window, which sits a whole window before the turn asked for,
+      // and the restored scroll position then triggered another load.
+      keyBase.current -= got.length;
+      if (wanted.current != null) wanted.current += got.length;
+      // NOT the anchor: captureAnchor() above was already given this shift, and
+      // shifting it a second time threw the view a whole window forward.
       cursor.current = { ...cur, start: from, atStart, blocked };
       if (meta2) setMeta((p) => mergeMeta(p, meta2 as Meta));
       if (got.length) setRange((r) => ({ start: r.start + got.length, end: r.end + got.length }));
@@ -496,12 +513,18 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
     return () => { dead = true; window.clearTimeout(h); };
   }, [src, srcKey]);
 
-  // The transcript may still be being written — see LIVE_MS above.
+  // The transcript may still be being written — see LIVE_MS above. Except when
+  // "a window" costs a whole-file read: the SQLite harnesses have no byte
+  // offsets to seek, so every poll would re-parse the entire conversation (and
+  // evict the Overview's memo doing it). They are not polled at all, which is
+  // what this pane did for every harness before windows existed.
   const lastTs = meta ? meta.lastTs : 0;
+  const seekable = cursor.current ? cursor.current.mode === 'bytes' : true;
   useEffect(() => {
+    if (!seekable) return undefined;
     const h = window.setInterval(loadNewer, lastTs && Date.now() - lastTs < FRESH_MS ? LIVE_MS : IDLE_MS);
     return () => window.clearInterval(h);
-  }, [loadNewer, lastTs]);
+  }, [loadNewer, lastTs, seekable]);
 
   const recompute = useCallback(() => {
     const el = scroller.current;
@@ -517,7 +540,9 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
     // Reading back into the trace: fetch the stretch in front of what we hold,
     // before the reader arrives at it. Also covers a tail window too short to
     // fill the pane — there is no scrolling to do, so nothing else would ask.
-    if (positioned.current && el.scrollTop < NEAR_TOP_PX) loadOlder();
+    // Not while a jump is settling: goPrompt does its own fetching, and letting
+    // this fire too turned one ▲ into several windows.
+    if (positioned.current && wanted.current == null && el.scrollTop < NEAR_TOP_PX) loadOlder();
   }, [offsets, range.start, range.end, loadOlder]);
 
   useEffect(() => { recompute(); }, [recompute, meta]);
@@ -538,6 +563,9 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
     if (wanted.current != null) {
       const target = offsets[wanted.current] || 0;
       if (Math.abs(el.scrollTop - target) > 2) el.scrollTop = target;
+      // An anchor captured on the way here describes a position the jump is
+      // deliberately leaving; keeping it would re-apply it a layout pass later.
+      anchor.current = null;
       if (++tries.current > 8) wanted.current = null;
     } else if (stick.current) {
       el.scrollTop = el.scrollHeight;
@@ -653,7 +681,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
   const rows: ReactNode[] = [];
   for (let i = range.start; i < Math.min(range.end, n); i++) {
     rows.push(
-      <div key={i} ref={setRowRef(i)} data-i={i}>
+      <div key={keyBase.current + i} ref={setRowRef(i)} data-i={i}>
         <Row turn={turns.current[i]} index={i} />
       </div>,
     );
@@ -661,6 +689,14 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
 
   // Hand the host what its toolbar needs. goPrompt is rebuilt every render, so
   // the host gets a stable wrapper around the current one.
+  // What the pane knows about the trace: whatever this window could tell us,
+  // filled in from the summary for everything a window cannot know. That is not
+  // only the counts — a window of a codex rollout cannot count the session's
+  // encrypted reasoning steps (`note`), and a window of an STS file never sees
+  // the `{type:'session'}` first line that carries the title, the harness and
+  // the session id. Taking only the numbers left a reader with no idea the
+  // model's reasoning had been withheld, which is the one thing §12 of the spec
+  // says must never be left implied.
   const head = useMemo<TraceHeadInfo | null>(() => (meta ? {
     ...meta,
     total: summary ? summary.total : null,
@@ -668,6 +704,14 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
     usage: meta.usage || (summary ? summary.usage : null),
     firstTs: meta.firstTs || (summary ? summary.firstTs : 0),
     truncated: meta.truncated || !!(summary && summary.truncated),
+    note: meta.note || (summary ? summary.note : null),
+    title: meta.title || (summary ? summary.title : ''),
+    harnessLabel: meta.harnessLabel || (summary ? summary.harnessLabel : ''),
+    sessionId: meta.sessionId || (summary ? summary.sessionId : null),
+    model: meta.model || (summary ? summary.model : null),
+    cwd: meta.cwd || (summary ? summary.cwd : null),
+    source: meta.source || (summary ? summary.source : null),
+    sharedBy: meta.sharedBy || (summary ? summary.sharedBy : null),
     loaded: turns.current.length,
     atStart,
   } : null), [meta, summary, tick, atStart]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -695,7 +739,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
               {matches.length} match{matches.length === 1 ? '' : 'es'} in the {fmtNum(n)} turns
               loaded so far{atStart ? '' : ' — scroll up to load more'}
             </div>
-            {matches.map((i) => <Row key={i} turn={turns.current[i]} index={i} />)}
+            {matches.map((i) => <Row key={keyBase.current + i} turn={turns.current[i]} index={i} />)}
           </div>
         )}
 
@@ -713,7 +757,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
             </div>
             {/* State the gaps up front: a reader who can't see the model's
                 reasoning should know it was withheld, not that there was none. */}
-            {meta.note && <div className="tv-msg">{meta.note}</div>}
+            {head?.note && <div className="tv-msg">{head.note}</div>}
             <div style={{ height: offsets[range.start] || 0 }} />
             {rows}
             <div style={{ height: Math.max(0, (offsets[n] || 0) - (offsets[Math.min(range.end, n)] || 0)) }} />
@@ -721,16 +765,16 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
         )}
       </div>
 
-      {meta && (meta.source || meta.cwd) && (
+      {head && (head.source || head.cwd) && (
         <div className="trace-hint">
-          {meta.source?.repo && (
+          {head.source?.repo && (
             <>
-              {meta.sharedBy ? `shared by ${meta.sharedBy} · ` : ''}
-              <a href={meta.source.url || `https://huggingface.co/datasets/${meta.source.repo}`} target="_blank" rel="noreferrer">{meta.source.repo}</a>
+              {head.sharedBy ? `shared by ${head.sharedBy} · ` : ''}
+              <a href={head.source.url || `https://huggingface.co/datasets/${head.source.repo}`} target="_blank" rel="noreferrer">{head.source.repo}</a>
               {' · '}
             </>
           )}
-          {meta.cwd}
+          {head.cwd}
           {head?.firstTs ? ` · ${new Date(head.firstTs).toLocaleString()}` : ''}
         </div>
       )}
