@@ -263,6 +263,21 @@ export const BellGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+// Hiding a group from the Overview, and the button that shows it again.
+export const EyeGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M1.4 8S3.8 3.8 8 3.8 14.6 8 14.6 8 12.2 12.2 8 12.2 1.4 8 1.4 8Z" />
+    <circle cx="8" cy="8" r="2.1" />
+  </G>
+);
+
+export const EyeOffGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M6.3 4.2A6.6 6.6 0 0 1 8 4c4.2 0 6.6 4 6.6 4a12 12 0 0 1-2 2.4M4 5.3A12.4 12.4 0 0 0 1.4 8S3.8 12 8 12a6.9 6.9 0 0 0 2.1-.3" />
+    <path d="M6.6 6.7a2.1 2.1 0 0 0 2.9 2.9M2.6 2.6l10.8 10.8" />
+  </G>
+);
+
 export const InfoGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <circle cx="8" cy="8" r="6.2" />

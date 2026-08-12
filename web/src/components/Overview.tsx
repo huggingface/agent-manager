@@ -6,6 +6,7 @@ import type { Cli, OverviewChip, OverviewFilter, OverviewSort, Session, SessionS
 import { chipBuckets, isPassive, isRemote } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import { rankSessions, sortLabel } from '../lib/overviewSort';
+import { hiddenSessionIds } from '../lib/overviewHidden';
 import type { Rankable } from '../lib/overviewSort';
 import Logo from './Logo';
 import { SendGlyph } from './icons';
@@ -399,7 +400,7 @@ function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color
 /** Mission control: one reading column — group capsules with their agents as
  *  slabs, loose agents as standalone panels. Unless a sort is on, in which case
  *  it is one flat ranked column instead (see §"sorted feed" below). */
-export default function Overview({ clis, tree, chip, sort, view, archived, showArchived, meta, metaReady, isMobile, onOpen }: {
+export default function Overview({ clis, tree, chip, sort, view, archived, showArchived, showHidden, meta, metaReady, isMobile, onOpen }: {
   clis: Cli[];
   tree: Tree;
   chip: OverviewChip;     // controlled by the bottom bar in App
@@ -407,6 +408,10 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
   view: 'tiles' | 'list'; // controlled by the bottom bar in App
   archived: Set<string>;
   showArchived: boolean;
+  // Reveal what `tree.hidden` hides, for as long as you are looking. Transient by
+  // design — a persisted "show hidden" would be a mode you forget you are in, and
+  // hiding would then look broken.
+  showHidden: boolean;
   meta: Record<string, MetaSession>; // continuously polled in App; instant on open
   metaReady: boolean;                // false until the first poll lands
   isMobile: boolean;
@@ -430,11 +435,20 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
   // session is in `meta` (or genuinely has no digest).
   const pending = (id: string) => !metaReady && !meta[id];
 
+  // Hidden refs resolved down to session ids: a hidden GROUP hides its members,
+  // and `s:<id>` hides one agent wherever it sits. Doing it once here is what
+  // makes hiding hold in all three renderings and under every sort — including
+  // the ranked feed's pinned `running now` block, which is the case that matters:
+  // hide a group and its working agent must not float back to the top.
+  const hiddenIds = useMemo(() => hiddenSessionIds(tree), [tree]);
+
   // One chip can stand for several buckets ('started' is waiting AND working), so
   // this is set membership, not equality.
   const buckets = chipBuckets(chip);
   const visible = (s: MetaSession) =>
-    buckets.includes(bucket(s.state)) && (showArchived || !archived.has(s.id));
+    buckets.includes(bucket(s.state))
+    && (showArchived || !archived.has(s.id))
+    && (showHidden || !hiddenIds.has(s.id));
 
   // Which group each agent is in, by name. Only the sorted feed needs it: the
   // manual feed draws the group as a frame around its members and would be
@@ -490,7 +504,7 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
     if (!metaReady) return { running: [], dated: items, undated: [] };
     return rankSessions(items, sort);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sorted, sort, tree.order, sessById, groupById, meta, metaReady, chip, archived, showArchived]);
+  }, [sorted, sort, tree.order, sessById, groupById, meta, metaReady, chip, archived, showArchived, hiddenIds, showHidden]);
 
   // Collapse at constant velocity: duration follows the group's height.
   const toggleGroup = (gid: string, el: HTMLElement) => {
@@ -514,7 +528,9 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
   const tileFor = (s: Session) => {
     const m = dataFor(s);
     if (!visible(m)) return null;
-    return <Tile key={s.id} s={m} color={colorOf[s.cli]} dim={archived.has(s.id)} pending={pending(s.id)} onOpen={() => setOpenId(s.id)} />;
+    // Revealed-but-hidden reads the same as archived: present, and visibly not
+    // part of what you normally look at.
+    return <Tile key={s.id} s={m} color={colorOf[s.cli]} dim={archived.has(s.id) || hiddenIds.has(s.id)} pending={pending(s.id)} onOpen={() => setOpenId(s.id)} />;
   };
   const tileBlocks: ReactNode[] = [];
   let looseTiles: ReactNode[] = [];
@@ -586,7 +602,7 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
       );
       for (const { m } of b.rows as Row[]) {
         out.push(view === 'tiles'
-          ? <Tile key={m.id} s={m} color={colorOf[m.cli]} group={groupNameOf[m.id]} dim={archived.has(m.id)}
+          ? <Tile key={m.id} s={m} color={colorOf[m.cli]} group={groupNameOf[m.id]} dim={archived.has(m.id) || hiddenIds.has(m.id)}
               pending={pending(m.id)} onOpen={() => setOpenId(m.id)} />
           : <div key={m.id} className="ov-panel">
               <Card s={m} color={colorOf[m.cli]} group={groupNameOf[m.id]} pending={pending(m.id)} isMobile={isMobile} onOpen={onOpen} />
@@ -609,11 +625,16 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
     </div>
   );
 
-  // "nothing in this state" is still true of the chips that mean exactly one
-  // state; `started` means two, so it says what it actually looked for.
+  // An empty feed has more than one cause now, and guessing wrong is worse than
+  // saying nothing: "no agents yet" while a hidden group sits there working would
+  // be a lie the operator cannot see through. So hiding is named first, and
+  // counted, whenever it is what emptied the feed.
+  const hiddenCount = hiddenIds.size;
   const empty = (
     <div className="usage-msg mono">
-      {chip === 'all' ? 'no agents yet — shells and file panes don’t appear here.'
+      {!showHidden && hiddenCount > 0
+        ? `nothing to show — ${hiddenCount} hidden. reveal them from the bar below.`
+        : chip === 'all' ? 'no agents yet — shells and file panes don’t appear here.'
         : chip === 'started' ? 'nothing started — no agent is running or waiting on you.'
         : 'nothing in this state.'}
     </div>

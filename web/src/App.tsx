@@ -16,8 +16,9 @@ import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
+import { hiddenSessionIds } from './lib/overviewHidden';
 import { isPassive, isRemote } from './types';
-import { GridGlyph, ListGlyph, SortGlyph } from './components/icons';
+import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
 
 // `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
 // when the app is embedded cross-origin. Read once: it never changes mid-run,
@@ -90,7 +91,7 @@ const writeStored = (k: string, v: string | null) => {
 
 export default function App() {
   const [clis, setClis] = useState<Cli[]>([]);
-  const [tree, setTree] = useState<Tree>({ order: [], groups: [], sessions: [] });
+  const [tree, setTree] = useState<Tree>({ order: [], groups: [], sessions: [], hidden: [] });
   // Restored from the last visit, then re-validated against the tree once it
   // loads (the agent may be long gone). focusedId comes back too, so a group
   // reopens on the pane you were actually reading rather than its first.
@@ -128,6 +129,11 @@ export default function App() {
   // stored — flipping the setting instantly (un)archives.
   const [showArchived, setShowArchived] = useState(false);
   const [archiveAfter, setArchiveAfter] = useState<'week' | 'month' | 'never'>('month');
+  // Hiding a group from the Overview is a standing choice and lives on the server
+  // (tree.hidden). REVEALING it is a glance, so that half stays here and resets on
+  // reload — otherwise "show hidden" becomes a mode you forget you left on, and
+  // hiding reads as broken.
+  const [showHidden, setShowHidden] = useState(false);
   // How every pane is read — the terminal itself, or reader mode over the same
   // session. App-wide, like zoom, and remembered the same way.
   const [paneMode, setPaneMode] = useState(readPaneMode);
@@ -379,6 +385,18 @@ export default function App() {
     try { setTree(await api.getTree()); setTreeLoaded(true); } catch { /* offline */ }
   }, []);
 
+  // Hide/unhide a group (or one agent) in the Overview. Optimistic, because the
+  // tree poll is up to 2.5s away and a control that does nothing for two seconds
+  // reads as broken; the server's own list replaces this on the next poll.
+  const toggleOverviewHidden = (ref: string, hide: boolean) => {
+    setTree((t) => {
+      const next = new Set(t.hidden);
+      if (hide) next.add(ref); else next.delete(ref);
+      return { ...t, hidden: [...next] };
+    });
+    api.setOverviewHidden(ref, hide).then(refresh).catch(showErr('could not change what the overview shows'));
+  };
+
   useEffect(() => {
     api.getClis().then(setClis).catch(() => {});
     refresh();
@@ -445,6 +463,13 @@ export default function App() {
     }
     return out;
   }, [tree.sessions, ages, archiveAfter]);
+
+  // What the operator hid from the Overview, as refs (`g:<id>` / `s:<id>`). The
+  // server owns the list; this is just the shape the sidebar wants for a lookup.
+  const hiddenRefs = useMemo(() => new Set(tree.hidden), [tree.hidden]);
+  // The bar's button counts AGENTS, not refs: "1 hidden" for a six-agent group
+  // would understate what is missing from the feed.
+  const hiddenCount = useMemo(() => hiddenSessionIds(tree).size, [tree]);
 
   const cliMap = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c])), [clis]);
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
@@ -983,6 +1008,8 @@ export default function App() {
         archived={archivedIds}
         showArchived={showArchived}
         onToggleArchived={() => setShowArchived((v) => !v)}
+        overviewHidden={hiddenRefs}
+        onToggleOverviewHidden={toggleOverviewHidden}
       />
 
       <div className="main">
@@ -1024,6 +1051,7 @@ export default function App() {
               view={ovView}
               archived={archivedIds}
               showArchived={showArchived}
+              showHidden={showHidden}
               meta={meta}
               metaReady={metaReady}
               isMobile={isMobile}
@@ -1079,6 +1107,18 @@ export default function App() {
               <button className={ovView === 'tiles' ? 'on' : ''} title="Tiles" onClick={() => setOvView('tiles')}><GridGlyph /></button>
               <button className={ovView === 'list' ? 'on' : ''} title="List" onClick={() => setOvView('list')}><ListGlyph /></button>
             </div>
+            {/* The way back. It appears only once something IS hidden, so the bar
+                costs nothing until you use the feature — and it counts groups and
+                agents, never "1 waiting", because being told about the group you
+                hid is the thing you were trying to stop. */}
+            {hiddenCount > 0 && (
+              <button className={`zbtn ov-hidebtn${showHidden ? ' on' : ''}`}
+                title={showHidden ? 'Hide them again' : 'Show what you hid from the overview'}
+                onClick={() => setShowHidden((v) => !v)}>
+                {showHidden ? <EyeGlyph /> : <EyeOffGlyph />}
+                <span className="mono">{hiddenCount} hidden</span>
+              </button>
+            )}
           </div>
         )}
         {showZoom && (

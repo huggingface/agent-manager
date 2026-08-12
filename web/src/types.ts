@@ -44,6 +44,12 @@ export interface Tree {
   order: string[]; // refs: "g:<id>" | "s:<id>"
   groups: Group[];
   sessions: Session[];
+  // Refs the operator hid from the OVERVIEW — same vocabulary as `order`, so one
+  // list covers a whole group and a single agent. Server-side and deliberate:
+  // unlike archiving it never expires and does not care what state the agent is
+  // in. The sidebar ignores it entirely; that is the way back. See
+  // server/src/hidden.js.
+  hidden: string[];
 }
 
 export const STATE_LABEL: Record<SessionState, string> = {
