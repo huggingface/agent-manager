@@ -18,6 +18,7 @@ import * as api from '../../api';
 import type { TraceTurn } from '../../api';
 import { useTraceWindows, type TraceSource } from '../../lib/traceWindows';
 import type { Session } from '../../types';
+import { recallReading, rememberReading } from './readingPosition';
 import { useDraft } from './useDraft';
 import { fmtTok, splitExchanges } from './exchanges';
 import ExchangeView from './Exchange';
@@ -176,7 +177,7 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
       : tops.find((t) => t > cur + 8);
     if (next != null) el.scrollTo({ top: Math.max(0, next - 4), behavior: 'smooth' });
   };
-  const nav = (dir: -1 | 1) => (q && hits ? stepHit(dir) : goTurn(dir));
+  const nav = (dir: -1 | 1) => { moved(); return q && hits ? stepHit(dir) : goTurn(dir); };
 
   // Land on the end of the conversation, and stay there until the reader
   // decides otherwise. This is not only for a working agent: switching a pane
@@ -218,6 +219,120 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
     anchor.current = null;
   }, [version, live, sent]);
 
+  // ---- where you had got to -----------------------------------------------
+  // Opening on the end is right for a conversation you have not read; it is not
+  // right for one you were half-way up. See readingPosition.ts for why the anchor
+  // is a turn timestamp and not a key, an index or a pixel.
+
+  /** Distance from the reading area's top edge to a row, in scroll coordinates. */
+  const rowTop = (el: HTMLElement, node: HTMLElement) =>
+    node.getBoundingClientRect().top - (el.getBoundingClientRect().top - el.scrollTop);
+
+  // Nothing is remembered until you have actually moved the view. `stick` starts
+  // true as an ASSUMPTION (follow the work), not an observation, so recording on
+  // it would file "you were at the end" for every session you merely glanced at.
+  // And the evidence is a GESTURE, not a `scroll` event: a scroll fires for
+  // reasons that are not you — the reader re-anchoring as older windows arrive,
+  // above all — and gating on that still filed phantom positions.
+  const touched = useRef(false);
+  const moved = () => { touched.current = true; };
+
+  const shownRef = useRef(shown);
+  shownRef.current = shown;
+
+  const capture = useCallback(() => {
+    const el = scroller.current;
+    if (!el || !touched.current) return;
+    if (stick.current) { rememberReading(session.id, { ts: 0, off: 0, end: true }); return; }
+    const list = shownRef.current;
+    const hit = [...rows.current.entries()]
+      .sort((a, b) => a[0] - b[0])
+      // The first row still showing at the top edge is the turn you are reading —
+      // skipping any whose prompt is in a window we have not read yet, because a
+      // fragment has no timestamp of its own to come back to.
+      .find(([i, node]) => rowTop(el, node) + node.offsetHeight > el.scrollTop + 4
+        && (list[i]?.startTs ?? 0) > 0);
+    if (!hit) return;
+    const [i, node] = hit;
+    rememberReading(session.id, {
+      ts: list[i].startTs, off: el.scrollTop - rowTop(el, node), end: false,
+    });
+  }, [session.id]);
+
+  // Scroll fires in bursts; one write per quiet moment is plenty.
+  const settle = useRef<number>(0);
+  const onScrolled = () => {
+    window.clearTimeout(settle.current);
+    settle.current = window.setTimeout(capture, 150);
+  };
+  // Flush on the way out. Through a ref, because an effect that depended on
+  // `capture` would run its cleanup on every dependency change, and this has to
+  // mean unmount rather than "something moved".
+  const flush = useRef(capture);
+  flush.current = capture;
+  useEffect(() => () => { window.clearTimeout(settle.current); flush.current(); }, []);
+
+  /**
+   * Looking for the remembered turn, paging backwards until it shows up. Bounded:
+   * the reader holds one window and the turn may be several behind it, but a
+   * remembered position is not worth walking a 19 MB transcript for, so past this
+   * we give up and stay on the end — which is where the reader would have been
+   * anyway.
+   */
+  const MAX_HOPS = 6;
+  const seeking = useRef<{ ts: number; off: number; hops: number } | null>(null);
+
+  /** One attempt to land on the remembered turn, or one window back towards it. */
+  const trySeek = useCallback(() => {
+    const st = seeking.current;
+    const el = scroller.current;
+    if (!st || !el) return;
+    const list = shownRef.current;
+    const idx = list.findIndex((x) => x.startTs === st.ts);
+    const node = idx >= 0 ? rows.current.get(idx) : undefined;
+    if (node) {
+      el.scrollTop = Math.max(0, rowTop(el, node) + st.off);
+      stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+      seeking.current = null;
+      return;
+    }
+    // Not in what we hold. Either walk back a window, or stop pretending: the end
+    // is where the reader would have been anyway.
+    if (atStart || blocked || st.hops >= MAX_HOPS) {
+      seeking.current = null;
+      stick.current = true;
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    st.hops += 1;
+    loadOlder();
+  }, [atStart, blocked, loadOlder]);
+
+  const wantRestore = useRef(true);
+  // Restore on mount, and again on coming back into view: a pane can stay mounted
+  // while its tile is hidden, so a browser that drops the scroll offset of a
+  // `display: none` scroller would otherwise leave no re-mount to hook.
+  useEffect(() => { if (!paused) wantRestore.current = true; }, [paused]);
+  useEffect(() => {
+    if (!wantRestore.current || !head) return;
+    wantRestore.current = false;
+    const want = recallReading(session.id);
+    // No memory, or you were at the end: leave the landing to whoever owns it,
+    // which is the open-on-the-end rule above.
+    if (!want || want.end || !want.ts) return;
+    seeking.current = { ts: want.ts, off: want.off, hops: 0 };
+    stick.current = false;  // do not follow the end while we look for the place
+    // Start here rather than waiting for the effect below. Passive effects run
+    // AFTER layout effects, so arming the seek on this commit and leaving the
+    // landing to a layout effect meant nothing tried until the next render — and
+    // a quiet trace does not have one.
+    trySeek();
+  }, [head, paused, session.id, trySeek]);
+
+  // Every window that arrives is another chance to land. After the hook's own
+  // anchor effect, so this has the last word on scrollTop.
+  useLayoutEffect(() => { trySeek(); }, [version, trySeek]);
+
   if (!head) return <div className="cxv-empty mono">{error || 'reading the trace…'}</div>;
 
   return (
@@ -246,12 +361,17 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
       </div>
 
       <div className="cxv-body" ref={scroller}
+        onWheel={moved}
+        onTouchStart={moved}
+        onPointerDown={moved}
+        onKeyDown={moved}
         onScroll={(e) => {
           const el = e.currentTarget;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
           // Reading back into the conversation: fetch the stretch in front of
           // what we hold before the reader arrives at it.
           if (el.scrollTop < NEAR_TOP_PX) loadOlder();
+          onScrolled();
         }}>
         <div className="cxv-col">
           {error && <div className="cxv-msg bad mono">{error} · showing the last read</div>}
@@ -259,7 +379,7 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
             type="button"
             className="cxv-msg mono cxv-top"
             disabled={atStart || blocked}
-            onClick={() => loadOlder()}
+            onClick={() => { moved(); loadOlder(); }}
             title={atStart || blocked ? undefined : 'Load the previous stretch of the conversation'}
           >
             {blocked
