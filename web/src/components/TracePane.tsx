@@ -586,8 +586,8 @@ export default function TracePane({
   const nav = useRef<((dir: -1 | 1) => void) | null>(null);
   const onNav = useCallback((go: (dir: -1 | 1) => void) => { nav.current = go; }, []);
   const src = useMemo<TraceSource>(() => ({
-    window: (req, bytes, min) => api.getTraceWindow(session.id, req, bytes, min),
-    summary: () => api.getTraceSummary(session.id),
+    window: (req, bytes, min, signal) => api.getTraceWindow(session.id, req, bytes, min, signal),
+    summary: (signal) => api.getTraceSummary(session.id, signal),
   }), [session.id]);
 
   const prompts = head?.userTurns?.length ?? 0;

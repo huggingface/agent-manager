@@ -16,6 +16,7 @@ import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewFilter, OverviewSort, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
+import { useReaderBatch } from './lib/readerBatch';
 import { isPassive, isRemote } from './types';
 import { GridGlyph, ListGlyph, SortGlyph } from './components/icons';
 
@@ -120,20 +121,11 @@ export default function App() {
   // How every pane is read — the terminal itself, or reader mode over the same
   // session. App-wide, like zoom, and remembered the same way.
   const [paneMode, setPaneMode] = useState(readPaneMode);
-  // Which visible batch has let its focused reader paint. Reset before entering
-  // reader mode; a batch key below also prevents readiness leaking across pages.
+  // Which continuous appearance of a visible batch has let its focused reader
+  // paint. The activation key below changes across page/group/hide transitions.
   const [readerReadyFor, setReaderReadyFor] = useState('');
-  const paneModeRef = useRef(paneMode);
-  paneModeRef.current = paneMode;
-  useEffect(() => onPaneMode((m) => {
-    if (m === 'reader' && paneModeRef.current !== 'reader') setReaderReadyFor('');
-    paneModeRef.current = m;
-    setPaneMode(m);
-  }), []);
-  const showPaneMode = (m: 'terminal' | 'reader') => {
-    if (m === 'reader' && paneMode !== 'reader') setReaderReadyFor('');
-    setPaneMode(m); writePaneMode(m);
-  };
+  useEffect(() => onPaneMode(setPaneMode), []);
+  const showPaneMode = (m: 'terminal' | 'reader') => { setPaneMode(m); writePaneMode(m); };
   const [zoom, setZoom] = useState<number>(() => {
     const z = parseInt(localStorage.getItem('am-zoom') || '100', 10);
     return Number.isFinite(z) ? z : 100;
@@ -529,10 +521,10 @@ export default function App() {
   const visibleTerminalKey = visibleTerminalIds.join(',');
   const readerLeadId = focusedId && visibleTerminalIds.includes(focusedId)
     ? focusedId : visibleTerminalIds[0] || null;
-  // Focus can move after the batch is ready; that must not tear down and
-  // re-fetch every sibling reader. A different visible page/group is a new
-  // batch, while focus only chooses which member gets its critical path.
-  const readerBatch = visibleTerminalKey;
+  // A batch is one continuous on-screen appearance, not merely a set of ids:
+  // opening Settings/mobile home unmounts readers, so returning to the same ids
+  // must gate them again. Focus only chooses the leader and does not change it.
+  const readerBatch = useReaderBatch(paneMode === 'reader' ? visibleTerminalKey : '');
   const readerFollowersReady = readerReadyFor === readerBatch;
   const sessionIdsKey = tree.sessions.map((s) => s.id).join(',');
   const [warmTerminalIds, setWarmTerminalIds] = useState<string[]>([]);

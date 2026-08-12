@@ -441,8 +441,8 @@ export type TraceSummary = Omit<TracePage, 'turns' | 'offset' | 'limit'>;
 
 const traceRange = (req: TraceReq) => (req.at === 'tail' ? 'tail=1' : `${req.at}=${req.cursor}`);
 
-const traceFetch = async <T>(url: string): Promise<T> => {
-  const r = await fetch(url);
+const traceFetch = async <T>(url: string, signal?: AbortSignal): Promise<T> => {
+  const r = await fetch(url, { signal });
   if (r.status === 404) {
     const d = await r.json().catch(() => ({}));
     throw new TraceUnavailable(d.error || 'no trace for this session yet', d.code || 'no-trace');
@@ -454,17 +454,17 @@ const traceFetch = async <T>(url: string): Promise<T> => {
 const windowSize = (bytes?: number, min?: number) =>
   `${bytes ? `&bytes=${bytes}` : ''}${min ? `&min=${min}` : ''}`;
 
-export const getTraceWindow = (id: string, req: TraceReq, bytes?: number, min?: number): Promise<TraceWindow> =>
-  traceFetch(`/api/trace/${id}?${traceRange(req)}${windowSize(bytes, min)}`);
+export const getTraceWindow = (id: string, req: TraceReq, bytes?: number, min?: number, signal?: AbortSignal): Promise<TraceWindow> =>
+  traceFetch(`/api/trace/${id}?${traceRange(req)}${windowSize(bytes, min)}`, signal);
 
-export const getTraceSummary = (id: string): Promise<TraceSummary> =>
-  traceFetch(`/api/trace/${id}?summary=1`);
+export const getTraceSummary = (id: string, signal?: AbortSignal): Promise<TraceSummary> =>
+  traceFetch(`/api/trace/${id}?summary=1`, signal);
 
-export const getFileTraceWindow = (id: string, p: string, req: TraceReq, bytes?: number, min?: number): Promise<TraceWindow> =>
-  traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&${traceRange(req)}${windowSize(bytes, min)}`);
+export const getFileTraceWindow = (id: string, p: string, req: TraceReq, bytes?: number, min?: number, signal?: AbortSignal): Promise<TraceWindow> =>
+  traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&${traceRange(req)}${windowSize(bytes, min)}`, signal);
 
-export const getFileTraceSummary = (id: string, p: string): Promise<TraceSummary> =>
-  traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&summary=1`);
+export const getFileTraceSummary = (id: string, p: string, signal?: AbortSignal): Promise<TraceSummary> =>
+  traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&summary=1`, signal);
 
 export interface TraceLocation {
   path: string;

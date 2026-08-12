@@ -66,8 +66,8 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   const live = session.state === 'working' && !paused;
 
   const src = useMemo<TraceSource>(() => ({
-    window: (req, bytes, min) => api.getTraceWindow(session.id, req, bytes, min),
-    summary: () => api.getTraceSummary(session.id),
+    window: (req, bytes, min, signal) => api.getTraceWindow(session.id, req, bytes, min, signal),
+    summary: (signal) => api.getTraceSummary(session.id, signal),
   }), [session.id]);
 
   // React keys for the exchanges, and the reading position across a prepend.

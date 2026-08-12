@@ -39,8 +39,8 @@ const FRESH_MS = 120_000;
 const SUMMARY_DELAY_MS = 400; // let the first paint happen before the whole-file read
 
 export interface TraceSource {
-  window: (req: api.TraceReq, bytes?: number, min?: number) => Promise<TraceWindow>;
-  summary: () => Promise<TraceSummary>;
+  window: (req: api.TraceReq, bytes?: number, min?: number, signal?: AbortSignal) => Promise<TraceWindow>;
+  summary: (signal?: AbortSignal) => Promise<TraceSummary>;
 }
 
 export type Meta = Omit<TraceWindow, 'turns' | 'window'>;
@@ -108,6 +108,9 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
   // the old file's byte cursors and header — a conversation spliced out of two
   // different transcripts.
   const gen = useRef(0);
+  const windowAbort = useRef<AbortController | null>(null);
+  const summaryAbort = useRef<AbortController | null>(null);
+  const summaryStarted = useRef(false);
   const [version, setVersion] = useState(0);
   const bump = useCallback(() => setVersion((n) => n + 1), []);
 
@@ -118,9 +121,11 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
     if (cb.current.paused) return;
     loading.current = true;
     const mine = gen.current;
+    const abort = new AbortController();
+    windowAbort.current = abort;
     try {
       const { turns: got, window: win, ...m } = await src.window(
-        { at: 'tail' }, INITIAL_WINDOW_BYTES, INITIAL_WINDOW_TURNS,
+        { at: 'tail' }, INITIAL_WINDOW_BYTES, INITIAL_WINDOW_TURNS, abort.signal,
       );
       if (mine !== gen.current) return;
       turns.current = got;
@@ -139,6 +144,7 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
       // says which — pass its own words through rather than inventing a reason.
       setError(e instanceof api.TraceUnavailable ? e.message : 'could not read the trace');
     } finally {
+      if (windowAbort.current === abort) windowAbort.current = null;
       if (mine === gen.current) loading.current = false;
     }
   }, [src, bump]);
@@ -151,6 +157,8 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
     if (cb.current.paused || loading.current || !cur || cur.atStart || cur.blocked) return 0;
     loading.current = true;
     const mine = gen.current;
+    const abort = new AbortController();
+    windowAbort.current = abort;
     try {
       let from = cur.start;
       let atStart = false;
@@ -161,7 +169,9 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
       // lines, a run of harness metadata). Keep walking back until it holds
       // something, the file starts, or the cursor stops moving.
       for (let hop = 0; hop < 8 && !got.length && !atStart; hop++) {
-        const { turns: page, window: win, ...m } = await src.window({ at: 'before', cursor: from }, WINDOW_BYTES);
+        const { turns: page, window: win, ...m } = await src.window(
+          { at: 'before', cursor: from }, WINDOW_BYTES, undefined, abort.signal,
+        );
         if (mine !== gen.current) return 0;
         got = page;
         meta2 = m;
@@ -182,6 +192,7 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
       // Keep what is on screen; the next scroll retries.
       return 0;
     } finally {
+      if (windowAbort.current === abort) windowAbort.current = null;
       if (mine === gen.current) loading.current = false;
     }
   }, [src, bump]);
@@ -193,8 +204,12 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
     if (cb.current.paused || loading.current || !cur) return 0;
     loading.current = true;
     const mine = gen.current;
+    const abort = new AbortController();
+    windowAbort.current = abort;
     try {
-      const { turns: got, window: win, ...m } = await src.window({ at: 'after', cursor: cur.end });
+      const { turns: got, window: win, ...m } = await src.window(
+        { at: 'after', cursor: cur.end }, undefined, undefined, abort.signal,
+      );
       if (mine !== gen.current) return 0;
       if (win.gap) {
         // More was written than one window can carry. Splicing it in would leave
@@ -217,6 +232,7 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
       // A poll that fails must not throw away the conversation on screen.
       return 0;
     } finally {
+      if (windowAbort.current === abort) windowAbort.current = null;
       if (mine === gen.current) loading.current = false;
     }
   }, [src, bump]);
@@ -225,6 +241,11 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
 
   useEffect(() => {
     gen.current += 1;
+    windowAbort.current?.abort();
+    windowAbort.current = null;
+    summaryAbort.current?.abort();
+    summaryAbort.current = null;
+    summaryStarted.current = false;
     loading.current = false;
     turns.current = [];
     cursor.current = null;
@@ -233,6 +254,13 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
     setSummary(null);
     setError(null);
     if (!paused) loadTail();
+    return () => {
+      gen.current += 1;
+      windowAbort.current?.abort();
+      windowAbort.current = null;
+      summaryAbort.current?.abort();
+      summaryAbort.current = null;
+    };
   }, [srcKey, loadTail, paused]);
 
   // The one read that touches the whole file, fired AFTER the first paint: it
@@ -240,18 +268,26 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
   // conversation started and the disclosures a window cannot see — none of which
   // a window can know. If it fails or is slow, the header simply says how much
   // is loaded.
+  const summaryReady = !!meta;
   useEffect(() => {
     // `meta` is set by the tail response and this effect runs after that render
     // commits. Starting the clock on mount let a slow tail lose a race to every
     // pane's full-file summary — exactly the work the delay meant to keep away
     // from first paint. A paused/hidden reader does no summary work at all.
-    if (paused || !meta || summary) return undefined;
+    if (paused || !summaryReady || summary || summaryStarted.current) return undefined;
     let dead = false;
     const h = window.setTimeout(() => {
-      src.summary().then((s) => { if (!dead) setSummary(s); }).catch(() => {});
+      if (summaryStarted.current) return;
+      summaryStarted.current = true;
+      const abort = new AbortController();
+      summaryAbort.current = abort;
+      src.summary(abort.signal)
+        .then((s) => { if (!dead) setSummary(s); })
+        .catch(() => {})
+        .finally(() => { if (summaryAbort.current === abort) summaryAbort.current = null; });
     }, SUMMARY_DELAY_MS);
     return () => { dead = true; window.clearTimeout(h); };
-  }, [src, srcKey, paused, meta, summary]);
+  }, [src, srcKey, paused, summaryReady, summary]);
 
   // The transcript may still be being written — see LIVE_MS above. Except when
   // "a window" costs a whole-file read: the SQLite harnesses have no byte
