@@ -263,6 +263,29 @@ pane with nothing to render (a shell) simply stays a terminal.
   Writes pause between `compositionstart` and `compositionend`: a phone keyboard composes, and the
   pre-composition snapshot is a string the user meant, where a mid-composition one is half a
   syllable.
+- **It comes back to where you were reading** (`readingPosition.ts`). Opening on the end is right
+  for a conversation you have not read; it is not right for one you were half-way up. In-app
+  navigation already survived — the pane stays mounted and the browser preserves the scroll box
+  across the `display: none` that hides a warm tile — so this is about the **cold mount**: a
+  reload, an evicted tab, the Hub rebuilding the iframe. Same layer as the draft in §3.3.
+
+  The anchor is a **turn timestamp**, and the windowed reader forces that choice. Exchanges
+  *regroup* as older windows arrive — the one at the top of the list is a fragment whose prompt was
+  in the window not yet read, and the two become one when it lands — so no React key, list index or
+  pixel offset identifies a place for longer than one fetch. A turn's `ts` comes from the
+  transcript and never moves.
+
+  If the remembered turn is not in the window the reader opened with, it **pages backwards to find
+  it**, through the same public `loadOlder()` a scroll would use, bounded to six windows. Past that
+  it stays on the end — a remembered position is not worth walking a 19 MB transcript for.
+
+  Three rules decide whether it feels right rather than merely works. **Nothing is remembered until
+  you have moved the view**, and the evidence is a *gesture* — wheel, touch, pointer, keys, the turn
+  nav, the load-earlier button — never a `scroll` event, which fires when the reader re-anchors
+  under a prepend and would otherwise file a position you never chose. **If you were at the end you
+  return to the new end**, not to the row that used to be last. And a **turn that cannot be reached**
+  degrades to the end rather than the top. Bounded to 100 sessions; never expires, because unlike a
+  draft it is not text you typed.
 - **Share** moves here from the sidebar. One session, one place.
 - **Handover** ("continue from this trace in a new agent") lives in the conversation footer, beside
   the provenance line — the only place where its meaning is obvious.
