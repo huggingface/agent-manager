@@ -244,6 +244,25 @@ pane with nothing to render (a shell) simply stays a terminal.
   same optimistic echo: your prompt appears at the bottom with a `working` line until the
   transcript catches up. Only a trace with **no agent behind it** — a shared file, an import — is
   read-only, which is what `readOnly` is for.
+- **A half-typed reply is kept** (`drafts.ts`, `useDraft.ts`). Reported from a phone: start typing
+  an answer, switch apps, come back, and the text is gone. The pane is not what loses it — App.tsx
+  keeps a dozen panes warm, so an in-app trip to the session list already survived — the
+  **document** is. A phone evicts a backgrounded tab, and the Hub rebuilds the Space's iframe on
+  every visit, so coming back is a cold mount. That rules out both in-memory state and the URL
+  (the Hub owns the iframe's `src`): it has to be storage, written through on every change, because
+  a tab being killed does not reliably run unload handlers.
+
+  One draft per **agent**, shared by the card and the reader, because they are the same act on the
+  same session. Restoring only fills the box — never focus, never send. Sending clears it, via the
+  `setDraft('')` the send already did. It is bounded on three axes, because a composer that throws
+  on a keystroke is far worse than one that forgets: 32 KB per draft (past that it stays in memory
+  only), 128 KB in total with the oldest evicted first, and **24 hours**, after which it is deleted
+  rather than merely hidden — an unsent draft is text you typed on a device that may not be only
+  yours. Quota failures and storage being denied outright both degrade in silence.
+
+  Writes pause between `compositionstart` and `compositionend`: a phone keyboard composes, and the
+  pre-composition snapshot is a string the user meant, where a mid-composition one is half a
+  syllable.
 - **Share** moves here from the sidebar. One session, one place.
 - **Handover** ("continue from this trace in a new agent") lives in the conversation footer, beside
   the provenance line — the only place where its meaning is obvious.
