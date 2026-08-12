@@ -83,6 +83,34 @@ check('claimed uuid skipped', (await runner.claudeCandidate('s1', WORKDIR, SINCE
 console.log('\nnothing new in the window means no re-pin');
 check('no candidate', await runner.claudeCandidate('s1', path.join(cfg.WORKSPACES_DIR, 'empty'), SINCE), null);
 
+// ---------- the folder is a tree ----------
+// An agent that enters a git worktree is still the same pane in the same folder,
+// and the conversation its /clear starts records the DEEPER cwd. Equality here
+// meant the pin could never follow that — the reader kept showing the pre-/clear
+// thread while the terminal showed the new one, and the next launch would
+// `--resume` the abandoned id.
+console.log('\ncwdUnderWorkdir: the pane owns its whole tree, and nothing beside it');
+const WT = path.join(WORKDIR, '.claude', 'worktrees', 'wt-1');
+check('the folder itself', runner.cwdUnderWorkdir(WORKDIR, WORKDIR), true);
+check('a worktree below it', runner.cwdUnderWorkdir(WT, WORKDIR), true);
+check('a plain subdirectory', runner.cwdUnderWorkdir(path.join(WORKDIR, 'server'), WORKDIR), true);
+check('a sibling sharing a name prefix',
+  runner.cwdUnderWorkdir(`${WORKDIR}2`, WORKDIR), false);
+check('the parent folder', runner.cwdUnderWorkdir(cfg.WORKSPACES_DIR, WORKDIR), false);
+check('somewhere else entirely', runner.cwdUnderWorkdir('/elsewhere', WORKDIR), false);
+check('no cwd at all', runner.cwdUnderWorkdir(null, WORKDIR), false);
+check('no workdir at all', runner.cwdUnderWorkdir(WORKDIR, ''), false);
+
+console.log('\na /clear inside a worktree is followed');
+const F = 'ffffffff-0000-0000-0000-000000000006';
+transcript(F, { cwd: WT, startMs: NOW + 240_000, projDir: '-proj-a--claude-worktrees-wt-1' });
+check('worktree conversation claimed', (await runner.claudeCandidate('s1', WORKDIR, SINCE))?.uuid, F);
+
+console.log('\na neighbouring folder whose name starts the same is still not ours');
+transcript('99999999-0000-0000-0000-000000000009',
+  { cwd: `${WORKDIR}2`, startMs: NOW + 300_000, projDir: '-proj-a2' });
+check('prefix neighbour ignored', (await runner.claudeCandidate('s1', WORKDIR, SINCE))?.uuid, F);
+
 // ---------- breadcrumbs: attribution the scan cannot do in shared folders ----------
 const E = 'eeeeeeee-0000-0000-0000-000000000005';
 const RUN = '11111111-2222-4333-8444-555555555555';
@@ -106,6 +134,15 @@ check('stale launch rejected', verdict(crumb({ runId: 'old-run' }), facts()).why
 check('wrong harness rejected', verdict(crumb({ cli: 'codex' }), facts()).why, 'cli mismatch');
 check('cwd mismatch rejected',
   verdict(crumb({ payload: { session_id: E, cwd: '/elsewhere', source: 'clear' } }), facts()).repin, null);
+check('a crumb from a parent folder rejected',
+  verdict(crumb({ payload: { session_id: E, cwd: cfg.WORKSPACES_DIR, source: 'clear' } }), facts()).why,
+  'cwd outside the session folder');
+check('a crumb from a prefix neighbour rejected',
+  verdict(crumb({ payload: { session_id: E, cwd: `${WORKDIR}2`, source: 'clear' } }), facts()).repin, null);
+
+console.log('\na /clear reported from a worktree below the folder is this pane speaking');
+check('worktree crumb accepted',
+  verdict(crumb({ payload: { session_id: E, cwd: WT, source: 'clear' } }), facts()).repin, E);
 
 console.log('\na nested claude -p cannot claim the pane (pid not under the pane root)');
 check('untrusted pid rejected', verdict(crumb(), facts({ pidTrusted: false })).repin, null);
