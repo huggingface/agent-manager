@@ -14,7 +14,7 @@ import Locked from './components/Locked';
 import BackupBanner from './components/BackupBanner';
 import Welcome from './components/Welcome';
 import * as api from './api';
-import type { Cli, GridSpec, MoveTarget, OverviewFilter, OverviewSort, Session, Tree } from './types';
+import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { isPassive, isRemote } from './types';
 import { GridGlyph, ListGlyph, SortGlyph } from './components/icons';
@@ -50,6 +50,17 @@ type SettingsPage = 'general' | 'usage' | 'skills';
 const ROOT_PATH = '.';
 const WARM_TERMINAL_LIMIT = 12;
 const normalizePath = (p?: string | null) => (p && p.trim() ? p : ROOT_PATH);
+// The Overview's filter chips. The label IS the chip, so there is no second
+// display string that can drift from the value; the tooltips carry the rest.
+// `started` is the union of the two before it, not a fifth state of its own —
+// see chipBuckets in types.ts.
+const OV_CHIPS: { chip: OverviewChip; title: string }[] = [
+  { chip: 'all', title: 'Every agent' },
+  { chip: 'done', title: 'Answered and waiting on you' },
+  { chip: 'running', title: 'Working right now' },
+  { chip: 'started', title: 'Anything still up — running or waiting on you' },
+  { chip: 'stopped', title: 'Not running' },
+];
 
 function initialTheme(): 'light' | 'dark' {
   const stored = localStorage.getItem('am-theme');
@@ -134,7 +145,11 @@ export default function App() {
   // true = the selected session/group fills the screen. Desktop ignores this.
   const isMobile = useIsMobile();
   const [mobileStage, setMobileStage] = useState(() => readStored('am-mobile-stage') === '1');
-  const [ovFilter, setOvFilter] = useState<OverviewFilter>('all');
+  // Which chip the Overview's bottom bar is on. A chip is coarser than a bucket
+  // (`started` = waiting or working) — see chipBuckets in types.ts. Not persisted,
+  // unlike the sort beside it: "show me only the stopped ones" is a thing you do
+  // for a moment, not a standing preference.
+  const [ovChip, setOvChip] = useState<OverviewChip>('all');
   const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
   const rememberPath = (p?: string | null) => {
     const next = normalizePath(p);
@@ -1004,7 +1019,7 @@ export default function App() {
             <Overview
               clis={clis}
               tree={tree}
-              filter={ovFilter}
+              chip={ovChip}
               sort={ovSort}
               view={ovView}
               archived={archivedIds}
@@ -1042,10 +1057,9 @@ export default function App() {
         {activeRef === 'overview' && (
           <div className="zoombar ov-bar">
             <div className="seg ov-seg">
-              {(['all', 'waiting', 'working', 'quiet'] as OverviewFilter[]).map((f) => (
-                <button key={f} className={ovFilter === f ? 'on' : ''} onClick={() => setOvFilter(f)}>
-                  {f === 'waiting' ? 'done' : f === 'working' ? 'running' : f === 'quiet' ? 'stopped' : 'all'}
-                </button>
+              {OV_CHIPS.map(({ chip, title }) => (
+                <button key={chip} className={ovChip === chip ? 'on' : ''} title={title}
+                  onClick={() => setOvChip(chip)}>{chip}</button>
               ))}
             </div>
             {/* Sort, independent of the filter beside it: one says WHICH agents
