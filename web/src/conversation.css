@@ -166,6 +166,16 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 .cxv-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px 14px 30px; }
 .cxv-col { display: flex; flex-direction: column; min-width: 0; }
 .cxv-msg { font-size: 11px; color: var(--muted); padding: 6px 0; }
+/* The line above the oldest loaded exchange. Fixed height on purpose: it sits
+   above everything in the column, so a line that grew or vanished when the
+   reader reached the start would shove the whole conversation. */
+.cxv-top {
+  height: 1.5em; line-height: 1.5em; padding: 0; text-align: center; opacity: 0.75;
+  display: block; width: 100%; background: none; border: 0; color: inherit;
+  font: inherit; cursor: pointer;
+}
+.cxv-top:disabled { cursor: default; }
+.cxv-top:not(:disabled):hover { opacity: 1; text-decoration: underline; }
 .cxv-foot {
   display: flex; align-items: center; gap: 8px; flex: none;
   padding: 5px 10px; border-top: 1px solid var(--border); background: var(--panel);

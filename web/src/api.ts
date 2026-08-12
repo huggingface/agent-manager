@@ -408,6 +408,61 @@ export const getTracePage = async (id: string, offset = 0, limit = 200): Promise
   return r.json();
 };
 
+// ---- windows: how the reader actually reads ----
+// A conversation is read from its END. `tail` is the last stretch of it,
+// `before` the stretch in front of one you already hold, `after` whatever has
+// been written since — each answered from a byte range of the transcript
+// instead of a parse of the whole thing. Cursors are opaque: hand back the
+// `start`/`end` the server gave you.
+export type TraceReq = { at: 'tail' } | { at: 'before' | 'after'; cursor: number };
+
+export interface TraceCursor {
+  /** byte offsets for a .jsonl, message indices for the SQLite harnesses */
+  mode: 'bytes' | 'index';
+  start: number;
+  end: number;
+  atStart: boolean;
+  atEnd: boolean;
+  /** the trace grew more than one window while we were away: replace, don't splice */
+  gap?: boolean;
+  /** one line here is bigger than a window: nothing older can be reached */
+  blocked?: boolean;
+}
+
+export interface TraceWindow extends Omit<TracePage, 'total' | 'offset' | 'limit' | 'userTurns'> {
+  /** null when the window doesn't span the whole trace — ask for the summary */
+  total: number | null;
+  userTurns: number[] | null;
+  window: TraceCursor;
+}
+
+/** Whole-trace facts a single window cannot know. One full parse, off the paint path. */
+export type TraceSummary = Omit<TracePage, 'turns' | 'offset' | 'limit'>;
+
+const traceRange = (req: TraceReq) => (req.at === 'tail' ? 'tail=1' : `${req.at}=${req.cursor}`);
+
+const traceFetch = async <T>(url: string): Promise<T> => {
+  const r = await fetch(url);
+  if (r.status === 404) {
+    const d = await r.json().catch(() => ({}));
+    throw new TraceUnavailable(d.error || 'no trace for this session yet', d.code || 'no-trace');
+  }
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
+  return r.json();
+};
+
+export const getTraceWindow = (id: string, req: TraceReq, bytes?: number): Promise<TraceWindow> =>
+  traceFetch(`/api/trace/${id}?${traceRange(req)}${bytes ? `&bytes=${bytes}` : ''}`);
+
+export const getTraceSummary = (id: string): Promise<TraceSummary> =>
+  traceFetch(`/api/trace/${id}?summary=1`);
+
+export const getFileTraceWindow = (id: string, p: string, req: TraceReq, bytes?: number): Promise<TraceWindow> =>
+  traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&${traceRange(req)}${bytes ? `&bytes=${bytes}` : ''}`);
+
+export const getFileTraceSummary = (id: string, p: string): Promise<TraceSummary> =>
+  traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&summary=1`);
+
 export interface TraceLocation {
   path: string;
   sessionId?: string | null;

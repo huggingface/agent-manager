@@ -5,21 +5,24 @@
 // reader's own: a line of session facts, search, turn navigation, and the same
 // ExchangeView the Overview card shows one of.
 //
-// Draft scope: this reads the tail of the trace in one request and renders every
-// turn in it. Windowing by exchange (§10.7) is the next step — a collapsed turn
-// is 2–3 rows, so the DOM stays small, but the measured-height machinery in
-// TraceView is what makes it survive a 5,000-turn session.
+// It opens on the END of the conversation and pages backwards: one window of the
+// transcript to start, another when you scroll to the top, anchored so the text
+// you are reading does not move under you. Before that it read the last 400
+// turns in a single request and stopped there — 702 KB on a 19 MB session, with
+// "1,020 earlier messages are not shown" and no way to reach them — and it
+// re-fetched all 400 every three seconds while the agent worked, each one a full
+// re-parse of the transcript on the server. The paging itself lives in
+// lib/traceWindows.ts, shared with the Trace pane.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../../api';
-import type { TracePage, TraceTurn } from '../../api';
+import type { TraceTurn } from '../../api';
+import { useTraceWindows, type TraceSource } from '../../lib/traceWindows';
 import type { Session } from '../../types';
 import { fmtTok, splitExchanges } from './exchanges';
 import ExchangeView from './Exchange';
 import { SendGlyph } from '../icons';
 
-/** How much of the tail RENDER mode reads. The server caps a page at 500. */
-export const RENDER_TAIL = 400;
-const POLL_MS = 3_000;
+const NEAR_TOP_PX = 300;   // start fetching older turns before the reader arrives
 
 const fmtNum = (n: number) => n.toLocaleString();
 const fmtUsage = (u?: { in: number; out: number } | null) =>
@@ -34,8 +37,6 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   readOnly?: boolean;
   onHandover?: () => void;
 }) {
-  const [page, setPage] = useState<TracePage | null>(null);
-  const [error, setError] = useState<string>('');
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState(0);
   const [hit, setHit] = useState(0);
@@ -55,32 +56,39 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
 
   const live = session.state === 'working' && !paused;
 
-  const load = useCallback(async () => {
-    try {
-      // A negative offset reads from the end (server/src/traces.js pageOf).
-      const p = await api.getTracePage(session.id, -RENDER_TAIL, RENDER_TAIL);
-      setPage(p);
-      setError('');
-    } catch (e) {
-      // A failed REFRESH must not throw away the conversation on screen: this
-      // mount answers EIO now and then, and blanking mid-read is worse than
-      // going stale for three seconds.
-      setError(e instanceof Error ? e.message : 'could not read this trace');
-    }
-  }, [session.id]);
+  const src = useMemo<TraceSource>(() => ({
+    window: (req, bytes) => api.getTraceWindow(session.id, req, bytes),
+    summary: () => api.getTraceSummary(session.id),
+  }), [session.id]);
 
-  useEffect(() => { setPage(null); setError(''); load(); }, [load]);
-  // While the agent works, the trace is still being written.
-  useEffect(() => {
-    if (!live) return undefined;
-    const h = window.setInterval(load, POLL_MS);
-    return () => window.clearInterval(h);
-  }, [live, load]);
-  // Coming back into view, catch up at once rather than waiting for a tick.
-  useEffect(() => { if (!paused && page) load(); }, [paused]);  // eslint-disable-line react-hooks/exhaustive-deps
+  // React keys for the exchanges, and the reading position across a prepend.
+  // The keys are indices into a list that grows at the FRONT, so without a base
+  // that moves with it every exchange remounts when older turns arrive.
+  const keyBase = useRef(0);
+  // The anchor is the scroll height, not an element. Turns regroup here: an
+  // exchange at the top of the list is a fragment whose prompt was in the window
+  // we had not read yet, and when that window arrives the two become ONE
+  // exchange — so the element the reader was looking at can cease to exist as an
+  // element. What does not change is that everything new is added ABOVE, so
+  // keeping the distance to the bottom constant keeps the same text under the
+  // reader's eyes regardless of how the pieces were regrouped.
+  const anchor = useRef<number | null>(null);
 
-  const turns: TraceTurn[] = useMemo(() => page?.turns || [], [page]);
-  const exchanges = useMemo(() => splitExchanges(turns), [turns]);
+  const onPrepend = useCallback((count: number) => {
+    keyBase.current -= count;
+    const el = scroller.current;
+    if (!el) return;
+    anchor.current = el.scrollHeight - el.scrollTop;
+    stick.current = false;
+  }, []);
+
+  const onReset = useCallback(() => { anchor.current = null; stick.current = true; fills.current = 0; }, []);
+
+  const { turns: turnsRef, head, error, version, atStart, blocked, loadOlder, loadNewer } =
+    useTraceWindows(src, session.id, { onPrepend, onReset, paused, live });
+
+  const turns: TraceTurn[] = turnsRef.current;
+  const exchanges = useMemo(() => splitExchanges(turns), [version, turns]); // eslint-disable-line react-hooks/exhaustive-deps
   const last = exchanges[exchanges.length - 1];
 
   // The optimistic echo stands until the transcript catches up: a CLI writes it,
@@ -99,7 +107,7 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
       setDraft(''); setSent({ text, at: Date.now() });
       if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
       stick.current = true;
-      load();
+      loadNewer();
     } catch { setFailed(true); window.setTimeout(() => setFailed(false), 4000); }
     setSending(false);
   };
@@ -166,25 +174,61 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   };
   const nav = (dir: -1 | 1) => (q && hits ? stepHit(dir) : goTurn(dir));
 
+  // Land on the end of the conversation, and stay there until the reader
+  // decides otherwise. This is not only for a working agent: switching a pane
+  // from terminal to reader (which mounts this component fresh) used to drop you
+  // at the top of the last 400 turns — hundreds of rows behind what the agent
+  // had just said, and behind what you were watching in the terminal a moment
+  // earlier. `stick` goes false the instant you scroll up, so following the end
+  // never fights a decision to read further back.
+  // A window that does not fill the pane leaves nothing to scroll, and paging is
+  // driven by scrolling — so on a tall display the reader would sit on the last
+  // few exchanges of a long conversation with no gesture that reaches the rest.
+  // (Measured: at a 2200 px viewport the first window was 2007 px and no wheel
+  // event could ever fire.)
+  //
+  // Fetching until it overflows is NOT the fix: this view collapses an agent's
+  // steps into one line, so a window of sixty turns can add almost no height,
+  // and "keep going until you can scroll" walked back through twelve windows of
+  // a conversation nobody had asked to see. So: a couple of attempts to make the
+  // pane scrollable, and past that the line at the top becomes the way to ask.
+  const fills = useRef(0);
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || !head || atStart || blocked) return;
+    if (el.scrollHeight > el.clientHeight) { fills.current = 0; return; }
+    if (fills.current >= 2) return;
+    fills.current += 1;
+    loadOlder();
+  }, [version, head, atStart, blocked, loadOlder]);
+
   useLayoutEffect(() => {
     const el = scroller.current;
-    if (el && live && stick.current) el.scrollTop = el.scrollHeight;
-  }, [turns, live]);
+    if (!el) return;
+    if (stick.current) { el.scrollTop = el.scrollHeight; anchor.current = null; return; }
+    // Older turns just arrived above the reader: restore the distance to the
+    // bottom, which is the same text on screen however the exchanges regrouped.
+    const a = anchor.current;
+    if (a == null) return;
+    el.scrollTop = el.scrollHeight - a;
+    anchor.current = null;
+  }, [version, live, sent]);
 
-  if (!page) return <div className="cxv-empty mono">{error || 'reading the trace…'}</div>;
+  if (!head) return <div className="cxv-empty mono">{error || 'reading the trace…'}</div>;
 
   return (
     <div className="cxv">
       {/* The reader's own controls, on their own row: on a phone the pane
           header above has no spare width. */}
       <div className="cxv-bar mono">
-        {page.model && <span className="cxv-chip">{page.model}</span>}
-        <span className="cxv-count" title={`${fmtNum(page.total)} messages`}>
+        {head.model && <span className="cxv-chip">{head.model}</span>}
+        <span className="cxv-count" title={head.total != null ? `${fmtNum(head.total)} messages in this conversation` : `${fmtNum(head.loaded)} messages loaded`}>
           {fmtNum(exchanges.length)} turn{exchanges.length === 1 ? '' : 's'}
+          {head.total != null && head.loaded < head.total ? ` of ${fmtNum(head.total)} messages` : ''}
         </span>
-        {page.usage && (
-          <span className="cxv-tok" title={page.usage.cacheRead ? `${fmtNum(page.usage.cacheRead)} cached` : undefined}>
-            {fmtUsage(page.usage)}
+        {head.usage && (
+          <span className="cxv-tok" title={head.usage.cacheRead ? `${fmtNum(head.usage.cacheRead)} cached` : undefined}>
+            {fmtUsage(head.usage)}
           </span>
         )}
         <span className="spacer" />
@@ -201,29 +245,45 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
         onScroll={(e) => {
           const el = e.currentTarget;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+          // Reading back into the conversation: fetch the stretch in front of
+          // what we hold before the reader arrives at it.
+          if (el.scrollTop < NEAR_TOP_PX) loadOlder();
         }}>
         <div className="cxv-col">
           {error && <div className="cxv-msg bad mono">{error} · showing the last read</div>}
-          {(page.truncated || page.offset > 0) && (
-            <div className="cxv-msg mono">
-              {page.offset > 0 ? `${fmtNum(page.offset)} earlier messages are not shown` : 'earlier turns are not shown'}
-            </div>
-          )}
-          {page.note && <div className="cxv-msg mono">{page.note}</div>}
+          <button
+            type="button"
+            className="cxv-msg mono cxv-top"
+            disabled={atStart || blocked}
+            onClick={() => loadOlder()}
+            title={atStart || blocked ? undefined : 'Load the previous stretch of the conversation'}
+          >
+            {blocked
+              ? 'earlier turns can’t be read — one line here is larger than the reader’s window'
+              : atStart
+                ? 'beginning of the conversation'
+                : 'earlier turns load as you scroll up — or click here'}
+          </button>
+          {head.note && <div className="cxv-msg mono">{head.note}</div>}
           {q && (
             <div className="cxv-msg mono">
-              {shown.length} of {exchanges.length} turns match “{query}”
+              {shown.length} of the {exchanges.length} turn{exchanges.length === 1 ? '' : 's'} loaded
+              so far match “{query}”{atStart ? '' : ' — scroll up to load more'}
               {hits ? ` · ${hits} highlighted, ▲▼ walks them` : ''}
             </div>
           )}
           {shown.map((x, i) => (
-            <div key={x.key} ref={(el) => { if (el) rows.current.set(i, el); else rows.current.delete(i); }}>
+            <div
+              key={keyBase.current + x.at}
+              data-x={String(keyBase.current + x.at)}
+              ref={(el) => { if (el) rows.current.set(i, el); else rows.current.delete(i); }}
+            >
               <ExchangeView
                 x={x}
                 n={exchanges.indexOf(x) + 1}
                 total={exchanges.length}
                 q={q || undefined}
-                baseModel={page.model || undefined}
+                baseModel={head.model || undefined}
                 running={live && x === exchanges[exchanges.length - 1]}
               />
             </div>
@@ -262,9 +322,9 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
       {failed && <div className="ov-note cxv-note">failed to reach the agent</div>}
 
       <div className="cxv-foot mono">
-        <span className="cxv-path" title={page.cwd || undefined}>
-          {page.cwd}
-          {page.firstTs ? ` · ${new Date(page.firstTs).toLocaleDateString()}` : ''}
+        <span className="cxv-path" title={head.cwd || undefined}>
+          {head.cwd}
+          {head.firstTs ? ` · ${new Date(head.firstTs).toLocaleDateString()}` : ''}
         </span>
         <span className="spacer" />
         {onHandover && (
