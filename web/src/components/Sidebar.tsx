@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Cli, MoveTarget, Group, Session, Tree } from '../types';
 import { STATE_LABEL, REMOTE_STATE_LABEL, isPassive, isRemote } from '../types';
 import Logo from './Logo';
@@ -12,6 +12,9 @@ type Zone = 'before' | 'after' | 'on';
 // verbatim (mirrors SHAREABLE_CLIS in server/src/share.js). The others need
 // converters first, and a button that always fails is worse than no button.
 const SHAREABLE_CLIS = ['claude', 'codex', 'hermes', 'opencode', 'openclaw'];
+
+// Folded groups, remembered across reloads.
+const COLLAPSED_KEY = 'am-collapsed';
 
 const fmtAgo = (ts?: number) => {
   if (!ts) return '';
@@ -74,7 +77,18 @@ export default function Sidebar({
   const [cart, setCart] = useState<Record<string, number>>({});
   const [editRef, setEditRef] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Which groups are folded. Kept per browser (like the theme and the zoom):
+  // it's how you've arranged THIS screen, and a phone and a desktop want
+  // different answers.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(COLLAPSED_KEY) || '[]');
+      return new Set(Array.isArray(saved) ? saved.filter((x): x is string => typeof x === 'string') : []);
+    } catch { return new Set(); }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed])); } catch { /* private mode */ }
+  }, [collapsed]);
   const [dragRef, setDragRef] = useState<string | null>(null);
   const [drop, setDrop] = useState<{ ref: string; zone: Zone } | null>(null);
   // "Open a shared trace": paste a dataset id/URL, we pull it and show it.

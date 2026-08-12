@@ -10,6 +10,7 @@ import Logo from './Logo';
 import ConversationView from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
+import { groupLabel, sessionTitle } from '../lib/sessionTitle';
 import { CloseGlyph, RefreshGlyph } from './icons';
 
 const THEMES: Record<'light' | 'dark', ITheme> = {
@@ -180,11 +181,12 @@ if (typeof window !== 'undefined') {
 }
 
 export default function TerminalPane({
-  session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', dragId, isMobile, onDragActive, onFocus, onRename, onClose,
+  session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', dragId, isMobile, groupName, onDragActive, onFocus, onRename, onClose,
 }: {
   session: Session;
   cli?: Cli;
   theme: 'light' | 'dark';
+  groupName?: string | null; // the group this pane belongs to, if any
   focused?: boolean;
   visible?: boolean;
   active?: boolean;
@@ -208,6 +210,9 @@ export default function TerminalPane({
   const resyncRef = useRef<() => void>(() => {});
   const reconcileScrollRef = useRef<() => void>(() => {});
   const claimRef = useRef<() => void>(() => {});
+  // Reachable from the mode switch: a flick can still be coasting through the
+  // terminal's scrollback when the reader covers it.
+  const stopGlideRef = useRef<() => void>(() => {});
   const reconnectRef = useRef<() => void>(() => {});
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
@@ -624,16 +629,19 @@ export default function TerminalPane({
     // gesture without moving xterm's viewport, leaving no reliable way back
     // through history on touch-only devices. xterm 5.5 registers no touch
     // listeners of its own (verified against the bundled lib) and .term-host
-    // sets touch-action:none on mobile, so neither xterm nor the browser will
-    // pan: this is the only touch scrolling a phone has, in every pane.
+    // sets touch-action:none on mobile while the terminal is what you see, so
+    // neither xterm nor the browser will pan: this is the only touch scrolling
+    // a phone has, in every pane. Reader mode is the exception at both ends —
+    // it hands touch-action back (.term-host.reading) and these handlers stand
+    // down — because there the scroller you mean to drag is its own.
     //
     // Convert the drag to whole rows and carry the remainder in `residual`.
     // Quantising each event to a fixed notch instead silently drops whatever
     // does not fill one — a 96px drag moved the view 68px — and that shortfall
     // is what reads as lag, because the text trails the finger by design.
     // scrollLines moves ydisp, the authority the viewport follows.
-    // The frame, not the inner measurement box: .term-host is what carries
-    // touch-action:none and what the user actually drags, and it stays the
+    // The frame, not the inner measurement box: .term-host is what carries the
+    // touch-action rule and what the user actually drags, and it stays the
     // gesture target however the box inside it is nested.
     const frame = frameRef.current ?? host;
     const viewport = host.querySelector<HTMLElement>('.xterm-viewport');
@@ -656,7 +664,14 @@ export default function TerminalPane({
       return rows;
     };
     const stopGlide = () => { if (glideFrame) { cancelAnimationFrame(glideFrame); glideFrame = 0; } };
+    stopGlideRef.current = stopGlide;
+    // Reader mode covers this frame with its own scroller. These listeners sit
+    // on .term-host in CAPTURE and preventDefault, so without this guard every
+    // drag over the conversation was eaten here and spent on the hidden
+    // terminal's scrollback: the trace could not be scrolled back at all on a
+    // phone, which is the only place this gesture exists.
     const onTouchStart = (e: TouchEvent) => {
+      if (modeRef.current === 'reader') return;
       stopGlide();               // a new touch takes over from any coasting
       velocity = 0;
       residual = 0;
@@ -664,6 +679,7 @@ export default function TerminalPane({
       lastMoveAt = e.timeStamp;
     };
     const onTouchMove = (e: TouchEvent) => {
+      if (modeRef.current === 'reader') return;
       if (touchY == null || !e.touches.length) return;
       const y = e.touches[0].clientY;
       const deltaY = touchY - y;
@@ -691,6 +707,10 @@ export default function TerminalPane({
       touchY = null;
       const v0 = velocity;
       velocity = 0;
+      // A drag that began on the terminal and ended after the switch flipped
+      // must not launch anything: the mode is broadcast app-wide, so the flip
+      // can come from another pane rather than from this hand.
+      if (modeRef.current === 'reader') return;
       // Only a flick coasts. A slow, deliberate drag through history must land
       // exactly where the finger left it — drifting past the line someone was
       // reading is worse than having no momentum at all. 0.4px/ms is about
@@ -803,13 +823,17 @@ export default function TerminalPane({
   // with focus swallows every keystroke into the agent's TTY, invisibly. Hand
   // focus back when the terminal is on top again.
   useEffect(() => {
-    if (reading) termRef.current?.blur();
+    // The glide too: a flick left coasting under the reader keeps moving a
+    // viewport nobody can see, and no touch can catch it — the handler that
+    // would stop it now stands down in this mode.
+    if (reading) { termRef.current?.blur(); stopGlideRef.current(); }
     else if (focused) termRef.current?.focus();
   }, [reading, focused]);
 
   // Focused panes tint toward THEIR agent's brand color, not the app accent.
   const tint = cli?.color;
   const pathLabel = workspaceLabel(session.path);
+  const group = groupLabel(groupName);
   return (
     <div
       className={`slot${focused ? ' focused' : ''}`}
@@ -840,7 +864,17 @@ export default function TerminalPane({
             onKeyDown={(e) => { if (e.key === 'Enter') commitName(); if (e.key === 'Escape') setEditing(false); }}
           />
         ) : (
-          <span className="ph-title" title={`${pathLabel} · double-click to rename`} onDoubleClick={() => { setDraft(session.name); setEditing(true); }}>{session.name}</span>
+          // Two spans, not one string: the group is a prefix that must give way
+          // before the agent's own name does (see .ph-group in styles.css), and
+          // the rename below still edits the name alone.
+          <span
+            className="ph-title"
+            title={`${sessionTitle(session.name, groupName)} · ${pathLabel} · double-click to rename`}
+            onDoubleClick={() => { setDraft(session.name); setEditing(true); }}
+          >
+            {group && <span className="ph-group">[{group}]</span>}
+            <span className="ph-name">{session.name}</span>
+          </span>
         )}
         <div className="ph-right">
           <span className="ph-path" title={pathLabel}>{pathLabel}</span>
@@ -849,7 +883,11 @@ export default function TerminalPane({
           <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
-      <div className="term-host" ref={frameRef}>
+      {/* `reading` releases the frame's touch-action: the phone rule pins it to
+          `none` so the drag handler above owns terminal panning, and that also
+          forbids the browser from panning anything nested inside — including
+          the reader's own scroller. */}
+      <div className={`term-host${reading ? ' reading' : ''}`} ref={frameRef}>
         <div className="term-fill" ref={hostRef} />
         {/* Reader mode draws OVER the terminal rather than replacing it: xterm needs
             layout to fit, and detaching tmux costs a repaint and can trip the

@@ -81,8 +81,14 @@ body {
 .bkfail-link:hover { color: var(--danger); text-decoration-style: solid; }
 .zoombar { display: flex; align-items: center; gap: 4px; padding: 4px 8px; margin-top: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); flex: none; }
 .zoombar .spacer { flex: 1; }
-/* overview bottom bar: filter + view segments, centered */
-.zoombar.ov-bar { justify-content: center; gap: 8px; }
+/* overview bottom bar: filter · sort · view segments, centered — three of them
+   don't fit a phone on one line, so it wraps rather than overflowing */
+.zoombar.ov-bar { justify-content: center; gap: 8px; flex-wrap: wrap; row-gap: 5px; }
+/* the sort segment needs to say what it is — "prompt"/"answer" next to a row of
+   filter words would otherwise read as two more filters — so a glyph sits beside
+   it, outside the segment (inside, it read as a fourth disabled button) */
+.ov-sortmark { display: inline-flex; align-items: center; color: var(--muted); margin-right: -3px; }
+.ov-sortmark svg { width: 12px; height: 12px; display: block; }
 .ov-viewseg button { display: inline-flex; align-items: center; padding: 4.5px 9px; }
 .ov-viewseg svg { width: 13px; height: 13px; }
 
@@ -234,6 +240,29 @@ body {
 .ov-seg button { padding: 3px 11px; }
 
 .ov-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); }
+
+/* ---- sorted feed: labelled blocks instead of group capsules ---- */
+/* The labels are SIBLINGS of the cards, not wrappers around them — a card that
+   changes section must keep its parent or React remounts it and the reply box
+   loses what you were typing (see rankedBlocks() in Overview.tsx). So the
+   spacing is done with margins on the label rather than a flex gap on a box.
+   In the list that is the feed's own 18px rhythm; in the grid the label is a
+   full-width row. */
+.ov-feed > .ov-sortlbl { margin: 4px 0 -8px; }
+.ovt-grid > .ov-sortlbl { grid-column: 1 / -1; margin: 6px 0 -1px; }
+.ovt-grid > .ov-sortlbl:first-child { margin-top: 0; }
+.ov-sortlbl { display: flex; align-items: center; gap: 9px; padding: 0 12px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; color: var(--muted); }
+.ov-sortrule { flex: 1; height: 1px; background: var(--border); }
+/* --border-strong is a BORDER token: as text on the page background it lands at
+   ~1.4:1 in either theme, i.e. a count nobody can read. */
+.ov-sortn { color: var(--muted); }
+/* The group an agent is in, when the feed is flat and no capsule says it.
+   In a list card it rides the name row and gives up its pixels first (shrink
+   5×, never more than half the row): the prefix is context, the name is the
+   thing you are looking for. In a tile there is no room to share, so it takes
+   its own line above the name — see the comment in Overview.tsx. */
+.ov-gtag { flex: 0 5 auto; min-width: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-weight: 500; font-size: 11.5px; }
+.ovt-gline { font-size: 10px; letter-spacing: 0.04em; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: -3px; }
 
 /* group capsule: header bar / spaced flat slabs / footer strip that merges away */
 .ov-sec { display: flex; flex-direction: column; }
@@ -523,6 +552,14 @@ body {
 /* transient error toast */
 .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 300; max-width: 90vw; padding: 9px 14px; background: color-mix(in srgb, var(--danger) 92%, #000); color: #fff; border-radius: var(--r-md); font-size: 12.5px; box-shadow: 0 8px 28px rgb(0 0 0 / 0.3); animation: rise-in 0.16s ease-out; }
 
+/* ?vvdebug=1 — the mobile viewport readout. Above everything, transparent to
+   touch so it never becomes the reason a gesture misbehaves. */
+.vvdebug {
+  position: fixed; top: 0; left: 0; z-index: 999; margin: 0; padding: 4px 6px;
+  pointer-events: none; font-family: var(--font-mono); font-size: 9px; line-height: 1.35;
+  white-space: pre; color: #9ff; background: rgb(0 0 0 / 0.72); border-bottom-right-radius: 4px;
+}
+
 /* first-run welcome card */
 .welcome-backdrop { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center; padding: 20px; background: color-mix(in srgb, #000 55%, transparent); backdrop-filter: blur(3px); animation: rise-in 0.16s ease-out; }
 .welcome-card { width: 100%; max-width: 560px; max-height: 88vh; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); padding: 22px; box-shadow: 0 24px 60px rgb(0 0 0 / 0.35); }
@@ -560,15 +597,39 @@ body {
 .welcome-reopen { font-size: 11px; color: var(--muted); }
 .welcome-foot .btn-primary { flex: none; padding: 8px 18px; }
 
-.pane-head { container-type: inline-size; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr); align-items: center; gap: 9px; padding: 7px 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
+/* The side columns keep a min-content floor. Without one the centre track is
+   sized to its max-content BEFORE the two `1fr` tracks get anything, so a wide
+   title takes its width out of its neighbours: the logo and the close button
+   keep their place in the flow but the title's box grows over them. That was
+   already reachable with a long enough agent name; putting the group in front
+   of the name made it reachable at ordinary ones. With the floor the title is
+   capped at what is actually free and ellipsises instead. */
+.pane-head { container-type: inline-size; display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr); align-items: center; gap: 9px; padding: 7px 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
 .pane-head .ph-left { grid-column: 1; justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
-.pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; text-align: center; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+.pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 5px; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; cursor: text; }
+/* `[Group] name` is one title in two parts, and the group is the only part that
+   gives way: a tile too narrow for both truncates the context, never the thing
+   you are looking for. The squeeze passes through a band where the prefix reads
+   as a stub (`[Agent-man…`); below a tile width where that is all it could ever
+   be, it drops out entirely and the name has the header to itself. */
+.pane-head .ph-group { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-weight: 500; }
+/* flex-shrink 0, not a small weight: shrinking is proportional, so ANY shared
+   deficit takes a sliver off the name too — and a name that misses by 0.03px
+   still renders an ellipsis. So the name never shrinks, and `max-width` is what
+   bounds it: it can fill the whole title but no more, which is what puts the
+   ellipsis on the name itself when the name alone is too long for the header. */
+.pane-head .ph-name { flex: 0 0 auto; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; }
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }
 @container (max-width: 520px) {
   .pane-head .ph-path { display: none; }
+}
+/* Narrower than this the prefix could only ever be a stub, and a header that
+   reads "[A… name" is worse than one that just reads "name". */
+@container (max-width: 260px) {
+  .pane-head .ph-group { display: none; }
 }
 .slot { transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out; }
 /* fallback focus tint (terminal panes override with their agent's color inline) */
@@ -1094,6 +1155,13 @@ a.btn-ghost { text-decoration: none; }
     overflow: hidden;
   }
   .term-host { touch-action: none; overscroll-behavior: contain; }
+  /* touch-action is intersected down the ancestor chain, so `none` here would
+     also forbid panning anything nested inside — the reader's scroller, and the
+     code blocks and tables inside it, which are `overflow-x: auto`. Hence
+     `auto` and not `pan-y`: a trace holds wide output, and pinning the axis
+     here would leave that unreachable sideways, the same bug one axis over.
+     The terminal's own drag handler is inert in this mode. */
+  .term-host.reading { touch-action: auto; }
   /* Keep xterm's transparent real input at the visible prompt edge. xterm
      normally parks/moves it for desktop IME behavior; on phones this element
      is also the browser's only clue about what must remain above the OSK. */

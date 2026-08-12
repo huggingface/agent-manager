@@ -34,6 +34,7 @@ import { startWatchdog } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
+import * as runstate from './runstate.js';
 
 ensureDirs();
 refreshVersions();
@@ -270,6 +271,19 @@ async function deliver(session, text, from) {
   return started;
 }
 
+// When you last sent this session something. Typing in the pane is the only
+// signal a plain shell leaves — it has no transcript to read a prompt out of —
+// and it's what the boot-time revive uses to tell a session you're still working
+// in from one you abandoned months ago (see runstate.js). Throttled: this is
+// called per keystroke and each write lands on the FUSE bucket.
+const inputTouched = new Map(); // session id -> ms of the last recorded touch
+function touchInput(id) {
+  const now = Date.now();
+  if (now - (inputTouched.get(id) || 0) < 60_000) return;
+  inputTouched.set(id, now);
+  store.update(id, { lastInputAt: now });
+}
+
 // Type a prompt into a session's terminal from the Overview — no pane needed.
 // If the agent is stopped, start its backend PTY and give the resumed CLI a
 // moment to boot before the keystrokes land.
@@ -281,6 +295,7 @@ app.post('/api/sessions/:id/input', async (req, res) => {
   if (!text) return res.status(400).json({ error: 'empty' });
   try {
     const started = await deliver(s, text);
+    touchInput(s.id);
     res.json({ ok: true, started });
   } catch (e) {
     res.status(409).json({ error: String(e.message || e) });
@@ -913,6 +928,13 @@ function loadAmConfig() {
     archive: {
       after: ['week', 'month', 'never'].includes(saved.archive?.after) ? saved.archive.after : 'month',
     },
+    // After a restart, start the sessions that were running again — the ones you
+    // prompted within `days`, plus any that still had work in flight (see
+    // runstate.js). `days` is only read when enabled.
+    revive: {
+      enabled: saved.revive?.enabled !== false,
+      days: [1, 3, 7].includes(saved.revive?.days) ? saved.revive.days : 3,
+    },
     // How often the bucket is copied to private Hub storage. Off by default: it
     // copies this machine's contents — saved logins included — into another Hub
     // resource, which is the operator's call to make. docs/bucket-backup.md
@@ -937,6 +959,10 @@ app.put('/api/config', (req, res) => {
     },
     jobs: { askAboveUsd: Math.max(0, Number(b.jobs?.askAboveUsd) || 0) },
     archive: { after: ['week', 'month', 'never'].includes(b.archive?.after) ? b.archive.after : 'month' },
+    revive: {
+      enabled: !!(b.revive?.enabled ?? true),
+      days: [1, 3, 7].includes(b.revive?.days) ? b.revive.days : 3,
+    },
     backup: {
       every: backup.INTERVALS.includes(b.backup?.every) ? b.backup.every : 'never',
       dataset: typeof b.backup?.dataset === 'string' ? b.backup.dataset.trim() : '',
@@ -2276,7 +2302,13 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
-    if (msg.t === 'i') handle.write(msg.d);
+    if (msg.t === 'i') {
+      handle.write(msg.d);
+      // Not every frame on this channel is you: the emulator answers the TUI's
+      // device-attribute and cursor queries down the same path, instantly on
+      // attach. Opening a pane is not sending it something.
+      if (!runstate.isTerminalReply(msg.d)) touchInput(session.id);
+    }
     else if (msg.t === 'r') handle.resize(msg.cols, msg.rows);
     else if (msg.t === 'claim') handle.claim();
   });
@@ -2316,6 +2348,20 @@ backup.startBackupTimer(loadAmConfig);
 // Off-thread stall detector — must start early so it's watching before the
 // first heavy build. Logs any event-loop wedge to the run logs (see watchdog.js).
 startWatchdog();
+
+// Start the sessions that were running before this Space went down. init() must
+// read the previous snapshot BEFORE the watch starts overwriting it, so it
+// happens here, synchronously; the decision itself waits for the trace digests
+// it judges "recent" with.
+runstate.init();
+setTimeout(() => {
+  // A locked (public) Space serves no terminals, so it starts nothing — but it
+  // still records what's running, so the snapshot stays true for the next boot.
+  const done = isPublic()
+    ? Promise.resolve([])
+    : runstate.reviveOnBoot(loadAmConfig().revive).catch((e) => console.error('[revive]', e && e.message));
+  done.then(() => runstate.startRunstateWatch());
+}, 8000);
 
 server.listen(PORT, () => {
   console.log(`Agent Manager :${PORT}  engine=libghostty${ghosttyReady() ? '' : ' (UNAVAILABLE)'}  data=${DATA_DIR}`);
