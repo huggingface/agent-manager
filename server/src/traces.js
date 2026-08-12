@@ -1634,14 +1634,22 @@ function unmarkTrailingFinal(parsed) {
 // rollout at 128 KB windows: 955 stitched turns against the full parse's 953,
 // two answers shown twice.
 //
-// The fix is not to dedupe the symptom but to stop cutting mid-reference. A
-// rollout describes its own unit — `task_started` … `task_complete` — and every
-// backward reference lives inside one task. So a codex window begins at a
-// `task_started` line: each task, with its answer, its reasoning and its token
-// count, lands whole in exactly one window, and stitching reproduces the full
-// parse exactly. Measured over every rollout on this Space: 339 `task_started`,
-// 333 `task_complete`, no `task_complete` outside a started task, largest task
-// 768 KB — comfortably inside the growth ceiling.
+// Two things make it right, and it is worth being precise about which does what,
+// because a review found the code claiming more than it delivers.
+//
+//  1. A window PREFERS to begin at a `task_started` line. When the window holds
+//     one, the task it opens — with its answer, its reasoning and its token
+//     count — lands whole, and the turn grouping is not split at the seam.
+//  2. When it holds none (any window smaller than the task it lands in, which at
+//     64 KB is most of them), the window is cut mid-task anyway, and what keeps
+//     the output correct is that a `task_complete` whose answer is NOT in this
+//     window is treated as a marker only — see `danglingTaskComplete`. That
+//     fallback is load-bearing, not a corner case.
+//
+// Measured over every rollout on this Space: 339 `task_started`, 333
+// `task_complete`, no `task_complete` outside a started task, largest task
+// 768 KB. Stitching every window back together reproduces the full parse exactly
+// — turns, blocks and `final` accents — at 64 KB, 128 KB and 384 KB.
 const TASK_MARK = '"task_started"';
 
 /** Byte offset of the first `task_started` line at or after `buf`'s first whole
@@ -1670,12 +1678,13 @@ function firstWholeLine(buf, aligned) {
   return nl < 0 ? buf.length : nl + 1;
 }
 
-async function oneWindow(harness, file, sessionId, range, size) {
+async function oneWindow(harness, file, sessionId, range, size, prebuilt) {
   let taskAligned = false;
+  if (prebuilt) range.buf = prebuilt;
   if (harness === 'codex' && range.from > 0) {
     // Read once, align, then parse the same bytes — `range.buf` keeps this to a
     // single read of the window.
-    const buf = await rangeBuf(file, range.from, range.to);
+    const buf = range.buf || await rangeBuf(file, range.from, range.to);
     const at = codexTaskStart(buf, range.from, firstWholeLine(buf, range.aligned));
     if (at >= 0) {
       range.buf = buf.subarray(at - range.from);
@@ -1733,14 +1742,24 @@ async function readWindow(harness, file, sessionId, size, req) {
   // Turns vary wildly in size — one window can hold 200 of them or one 300 KB
   // tool result. Grow the span until it holds a readable number of turns, or
   // until it reaches the start of the file / the per-window ceiling.
+  //
+  // Growing EXTENDS the buffer downwards rather than reading the wider span from
+  // scratch: doubling and re-reading turned one response into 384K + 768K + 1.5M
+  // + 3M of reads (5.76 MB for a single window, and 28 MB to page a 19 MB file
+  // back to its start — more bytes than the file has). On the bucket this
+  // reader exists for, those are the expensive ones.
   let span = bytes;
+  let buf = null;
+  let bufFrom = to;
   for (;;) {
     const from = Math.max(0, to - span);
-    const w = await oneWindow(harness, file, sessionId, { from, to, aligned: from === 0, eof }, size);
-    // A codex window that holds no task boundary had to cut a task in half; grow
-    // rather than serve a window whose references point outside it.
-    const unaligned = harness === 'codex' && from > 0 && w.cur.start <= from;
-    if ((w.parsed.messages.length >= min && !unaligned) || from === 0 || span >= WINDOW_MAX_BYTES) {
+    if (from < bufFrom) {
+      const head = await rangeBuf(file, from, bufFrom);
+      buf = buf && buf.length ? Buffer.concat([head, buf]) : head;
+      bufFrom = from;
+    }
+    const w = await oneWindow(harness, file, sessionId, { from, to, aligned: from === 0, eof }, size, buf);
+    if (w.parsed.messages.length >= min || from === 0 || span >= WINDOW_MAX_BYTES) {
       // A window that consumed nothing at all has hit a single line longer than
       // the ceiling (a file-history blob), and no amount of asking again will
       // get past it. Say that, rather than let the reader conclude it has

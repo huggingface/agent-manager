@@ -8,12 +8,16 @@
 // racing the first, a pointer to a window nobody read), so it lives here once
 // rather than twice.
 //
+// `src` MUST be memoized by the caller (all three call sites use useMemo on the
+// session id or path): the reset effect depends on it, so a fresh object per
+// render would refetch the tail forever.
+//
 // What stays with the caller is everything about presentation: how a row is
 // measured, what is virtualized, and how the reading position is anchored when
 // older turns arrive. The hook says WHEN turns are about to be prepended
 // (`onPrepend`) and when everything has been replaced (`onReset`); the caller
 // decides what that means for its own scroller.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../api';
 import type { TraceCursor, TraceSummary, TraceTurn, TraceWindow } from '../api';
 
@@ -51,16 +55,20 @@ export type TraceHeadInfo = Meta & {
 // Keep whichever value actually says something: a window that doesn't reach the
 // start of the trace reports no session start and no session cost, and must not
 // blank out what an earlier response already told us. Identity is preserved when
-// nothing changed — a poll that learns nothing must not look like new state.
+// no SCALAR changed, which is what keeps a poll that learns nothing from looking
+// like new state; an object-valued field (`usage`, `source`) compares by
+// identity and would churn, so those only ever arrive once per source today.
 export const mergeMeta = (prev: Meta | null, next: Meta): Meta => {
   if (!prev) return next;
   const out = { ...prev } as Record<string, unknown>;
   let changed = false;
   for (const [k, v] of Object.entries(next)) {
     // A window OLDER than what we hold describes an older stretch of the same
-    // conversation. Two of its facts must not travel backwards: `lastTs` drives
-    // how often we look for new turns (scrolling back would otherwise slow the
-    // live tail to a crawl), and `model` is the one the session is running now.
+    // conversation. `lastTs` must not travel backwards — it drives how often we
+    // look for new turns, and scrolling back would otherwise slow the live tail
+    // to a crawl. `model` is simply first-one-wins: the tail is read first, so
+    // that is the model the session is running now, and an older window's model
+    // does not replace it.
     if ((k === 'lastTs' || k === 'model') && out[k] && (k !== 'lastTs' || (v as number) <= (out[k] as number))) continue;
     if ((v || !(k in out)) && out[k] !== v) { out[k] = v; changed = true; }
   }
@@ -76,6 +84,10 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
   onReset?: () => void;
   /** The surface is off-screen: stop asking for turns nobody is looking at. */
   paused?: boolean;
+  /** The host knows the session is running. `false` means it is not, and a trace
+   *  that has also been quiet for a while is then left alone entirely — which is
+   *  what reader mode did before it had windows. Omit to decide on recency only. */
+  live?: boolean;
 } = {}) {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [summary, setSummary] = useState<TraceSummary | null>(null);
@@ -235,21 +247,37 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
   const lastTs = meta ? meta.lastTs : 0;
   const seekable = cursor.current ? cursor.current.mode === 'bytes' : true;
   const paused = !!opts.paused;
+  const live = opts.live;
+  const [hidden, setHidden] = useState(() => (typeof document === 'undefined' ? false : document.hidden));
   useEffect(() => {
-    if (!seekable || paused) return undefined;
-    const h = window.setInterval(loadNewer, lastTs && Date.now() - lastTs < FRESH_MS ? LIVE_MS : IDLE_MS);
+    const onVis = () => setHidden(document.hidden);
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, []);
+  useEffect(() => {
+    const fresh = !!lastTs && Date.now() - lastTs < FRESH_MS;
+    // Nothing to follow: the host says the session is not running and the trace
+    // has not moved in a while. A pane behind another browser tab is the same
+    // case — the reader is not looking, so nobody is waiting for the turn.
+    if (!seekable || paused || hidden || (live === false && !fresh)) return undefined;
+    const h = window.setInterval(loadNewer, fresh ? LIVE_MS : IDLE_MS);
     return () => window.clearInterval(h);
-  }, [loadNewer, lastTs, seekable, paused]);
+  }, [loadNewer, lastTs, seekable, paused, hidden, live]);
 
   const atStart = !!cursor.current?.atStart;
   const blocked = !!cursor.current?.blocked;
+  // MEMOIZED, and it has to be: a host that lifts this into its own state — the
+  // Trace pane does, `onHead={setHead}` — turns a fresh object per render into
+  // effect → setState → render → fresh object, a loop that never trips React's
+  // update-depth guard because it goes through an effect. It just spins: measured
+  // at 98% of a core with an untouched pane open.
   // What the pane knows about the trace: whatever this window could tell us,
   // filled in from the summary for everything a window cannot know. That is not
   // only the counts — a window of a codex rollout cannot count the session's
   // encrypted reasoning steps (`note`), and a window of an STS file never sees
   // the `{type:'session'}` first line that carries the title, the harness and
   // the session id.
-  const head: TraceHeadInfo | null = meta ? {
+  const head: TraceHeadInfo | null = useMemo(() => (meta ? {
     ...meta,
     total: summary ? summary.total : null,
     userTurns: summary ? summary.userTurns : null,
@@ -267,7 +295,7 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
     loaded: turns.current.length,
     atStart,
     blocked,
-  } : null;
+  } : null), [meta, summary, version, atStart, blocked]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { turns, head, meta, error, version, atStart, blocked, loadOlder, loadNewer, reload: loadTail };
 }

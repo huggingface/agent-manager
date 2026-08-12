@@ -783,6 +783,12 @@ export default function App() {
             ) : (
               <TracePane
                 session={s}
+                // A trace pane follows its SOURCE session: whether that agent is
+                // still writing decides how hard this pane looks for new turns.
+                sourceLive={(() => {
+                  const ref = s.traceSource?.kind === 'session' ? s.traceSource.ref : null;
+                  return ref ? sessById[ref]?.state === 'working' : false;
+                })()}
                 zoom={zoom}
                 focused={visibleSessions.length > 1 && s.id === focusedId}
                 dragId={canDrag ? `p:${s.id}` : undefined}

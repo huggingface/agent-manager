@@ -415,6 +415,7 @@ on screen" is Playwright, median of 5–9 opens of the pane.
 | server time, transcript changed since the last request | 160 ms | **6 ms** | 46 ms | **6 ms** |
 | server time, transcript unchanged (parse memo hit) | 6 ms | 6 ms | 5 ms | 6 ms |
 | the `?summary=1` read, 400 ms after the paint | — | 176 ms | — | 46 ms |
+| bytes `pread` to page the whole trace back | — | 20.8 MB / 35 windows | — | 5.7 MB / 13 windows |
 | first turn on screen, localhost | 181 ms | **167 ms** | 172 ms | 189 ms |
 | first turn on screen, 10 Mbps / 40 ms link | 866 ms | **267 ms** | 868 ms | **355 ms** |
 | opens on | oldest turn | **newest turn** | oldest turn | **newest turn** |
@@ -489,9 +490,16 @@ cannot be aligned; there the pointer is treated as a marker only, since the answ
 is rendered (and marked) in the window that holds it. Verified: a synthetic 10 MB
 single-task rollout yields exactly one copy of its answer.
 
-With that, stitching every window of a codex rollout reproduces the full parse **exactly** —
+Be precise about which half does what, because the first version of this section claimed
+more than the code delivers. Alignment is an *optimization*: when a window happens to hold a
+`task_started` it begins there and the task's grouping is not split at the seam. Most windows
+hold none (at 64 KB, with tasks up to 768 KB, almost none do) and are cut mid-task anyway —
+what keeps those correct is the second rule, that a `task_complete` whose answer is not in
+this window is treated as a marker and never emitted. **That fallback is load-bearing.**
+
+With both, stitching every window of a codex rollout reproduces the full parse **exactly** —
 same turns, same blocks, same `final` accents — at 64 KB, 128 KB and 384 KB windows, on all
-six rollouts on this Space.
+eight rollouts on this Space (24 runs, independently reproduced in review).
 
 **The one behavioural difference, and it is Claude's:** a harness message whose lines
 straddle a window boundary is split into two turns instead of merged into one. Stitching every window of

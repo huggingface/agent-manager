@@ -82,10 +82,10 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
     stick.current = false;
   }, []);
 
-  const onReset = useCallback(() => { anchor.current = null; stick.current = true; }, []);
+  const onReset = useCallback(() => { anchor.current = null; stick.current = true; fills.current = 0; }, []);
 
   const { turns: turnsRef, head, error, version, atStart, blocked, loadOlder, loadNewer } =
-    useTraceWindows(src, session.id, { onPrepend, onReset, paused });
+    useTraceWindows(src, session.id, { onPrepend, onReset, paused, live });
 
   const turns: TraceTurn[] = turnsRef.current;
   const exchanges = useMemo(() => splitExchanges(turns), [version, turns]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -181,6 +181,27 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   // had just said, and behind what you were watching in the terminal a moment
   // earlier. `stick` goes false the instant you scroll up, so following the end
   // never fights a decision to read further back.
+  // A window that does not fill the pane leaves nothing to scroll, and paging is
+  // driven by scrolling — so on a tall display the reader would sit on the last
+  // few exchanges of a long conversation with no gesture that reaches the rest.
+  // (Measured: at a 2200 px viewport the first window was 2007 px and no wheel
+  // event could ever fire.)
+  //
+  // Fetching until it overflows is NOT the fix: this view collapses an agent's
+  // steps into one line, so a window of sixty turns can add almost no height,
+  // and "keep going until you can scroll" walked back through twelve windows of
+  // a conversation nobody had asked to see. So: a couple of attempts to make the
+  // pane scrollable, and past that the line at the top becomes the way to ask.
+  const fills = useRef(0);
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || !head || atStart || blocked) return;
+    if (el.scrollHeight > el.clientHeight) { fills.current = 0; return; }
+    if (fills.current >= 2) return;
+    fills.current += 1;
+    loadOlder();
+  }, [version, head, atStart, blocked, loadOlder]);
+
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el) return;
@@ -191,7 +212,7 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
     if (a == null) return;
     el.scrollTop = el.scrollHeight - a;
     anchor.current = null;
-  }, [version, live]);
+  }, [version, live, sent]);
 
   if (!head) return <div className="cxv-empty mono">{error || 'reading the trace…'}</div>;
 
@@ -230,17 +251,24 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
         }}>
         <div className="cxv-col">
           {error && <div className="cxv-msg bad mono">{error} · showing the last read</div>}
-          <div className="cxv-msg mono cxv-top">
+          <button
+            type="button"
+            className="cxv-msg mono cxv-top"
+            disabled={atStart || blocked}
+            onClick={() => loadOlder()}
+            title={atStart || blocked ? undefined : 'Load the previous stretch of the conversation'}
+          >
             {blocked
               ? 'earlier turns can’t be read — one line here is larger than the reader’s window'
               : atStart
                 ? 'beginning of the conversation'
-                : 'earlier turns load as you scroll up…'}
-          </div>
+                : 'earlier turns load as you scroll up — or click here'}
+          </button>
           {head.note && <div className="cxv-msg mono">{head.note}</div>}
           {q && (
             <div className="cxv-msg mono">
-              {shown.length} of {exchanges.length} turns match “{query}”
+              {shown.length} of the {exchanges.length} turn{exchanges.length === 1 ? '' : 's'} loaded
+              so far match “{query}”{atStart ? '' : ' — scroll up to load more'}
               {hits ? ` · ${hits} highlighted, ▲▼ walks them` : ''}
             </div>
           )}

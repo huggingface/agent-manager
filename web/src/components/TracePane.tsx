@@ -200,12 +200,15 @@ function Row({ turn, index }: { turn: TraceTurn; index: number }) {
 // can use the same ones — see lib/traceWindows.ts.
 export type { TraceSource, TraceHeadInfo } from '../lib/traceWindows';
 
-export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }: {
+export function TraceView({ src, srcKey, zoom = 100, query = '', live, onHead, onNav }: {
   src: TraceSource;
   /** Changing this resets the loaded turns — a different session or file. */
   srcKey: string;
   zoom?: number;
   query?: string;
+  /** The agent behind this trace is running. `false` means it is not, and a
+   *  trace that has also been quiet is then not polled at all. */
+  live?: boolean;
   onHead?: (head: TraceHeadInfo | null) => void;
   onNav?: (go: (dir: -1 | 1) => void) => void;
 }) {
@@ -310,7 +313,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
   }, []);
 
   const { turns, head, error, version: tick, atStart, blocked, loadOlder } =
-    useTraceWindows(src, srcKey, { onPrepend, onReset });
+    useTraceWindows(src, srcKey, { onPrepend, onAppend, onReset, live });
 
   // Prefix sums over measured (or estimated) row heights. n is bounded by what
   // the reader has actually loaded, so a full recompute is cheap and happens
@@ -326,14 +329,6 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
   const offsetsRef = useRef(offsets);
   offsetsRef.current = offsets;
 
-  // heights are index-aligned with turns; the hook only ever prepends or appends,
-  // so re-derive the array length from it rather than tracking every mutation.
-  if (heights.current.length !== turns.current.length) {
-    const grew = turns.current.length - heights.current.length;
-    heights.current = grew > 0 && heights.current.length
-      ? [...new Array(grew), ...heights.current]   // older turns arrived on top
-      : new Array(turns.current.length);
-  }
 
   const recompute = useCallback(() => {
     const el = scroller.current;
@@ -574,10 +569,12 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', onHead, onNav }
 }
 
 export default function TracePane({
-  session, focused, zoom = 100, dragId, onDragActive, onFocus, onClose,
+  session, focused, zoom = 100, dragId, sourceLive, onDragActive, onFocus, onClose,
 }: {
   session: Session;
   focused?: boolean;
+  /** Is the session this trace came from still running? */
+  sourceLive?: boolean;
   zoom?: number;
   dragId?: string;
   onDragActive?: (dragging: boolean) => void;
@@ -635,7 +632,7 @@ export default function TracePane({
         <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
       </div>
 
-      <TraceView src={src} srcKey={session.id} zoom={zoom} query={query} onHead={setHead} onNav={onNav} />
+      <TraceView src={src} srcKey={session.id} zoom={zoom} query={query} live={sourceLive} onHead={setHead} onNav={onNav} />
     </div>
   );
 }
