@@ -21,10 +21,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../api';
 import type { TraceCursor, TraceSummary, TraceTurn, TraceWindow } from '../api';
 
-/** How much transcript the first request asks for. Measured on the longest trace
- *  on this box (19 MB / 1,420 turns): 384 KB is ~60 turns, ~84 KB of JSON and
- *  ~6 ms of server time, and renders in a frame — the smallest window that still
- *  opens on a complete-looking conversation rather than a stub. */
+/** The first paint is deliberately smaller than an ordinary page. A turn floor
+ *  made a nominal 384 KB tail grow to 1.5 MB / 737 KB of JSON on a real Codex
+ *  trace before the reader could show anything. Two messages are enough to paint
+ *  the latest exchange; the host can fill above it after that first paint. */
+export const INITIAL_WINDOW_BYTES = 128 * 1024;
+export const INITIAL_WINDOW_TURNS = 2;
+/** Once something is on screen, larger pages make scrolling back efficient. */
 export const WINDOW_BYTES = 384 * 1024;
 // Following a trace that is still being written. Nothing in here knows whether
 // an agent is running — but a transcript whose newest turn is seconds old is one
@@ -36,7 +39,7 @@ const FRESH_MS = 120_000;
 const SUMMARY_DELAY_MS = 400; // let the first paint happen before the whole-file read
 
 export interface TraceSource {
-  window: (req: api.TraceReq, bytes?: number) => Promise<TraceWindow>;
+  window: (req: api.TraceReq, bytes?: number, min?: number) => Promise<TraceWindow>;
   summary: () => Promise<TraceSummary>;
 }
 
@@ -112,10 +115,13 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
   cb.current = opts;
 
   const loadTail = useCallback(async () => {
+    if (cb.current.paused) return;
     loading.current = true;
     const mine = gen.current;
     try {
-      const { turns: got, window: win, ...m } = await src.window({ at: 'tail' }, WINDOW_BYTES);
+      const { turns: got, window: win, ...m } = await src.window(
+        { at: 'tail' }, INITIAL_WINDOW_BYTES, INITIAL_WINDOW_TURNS,
+      );
       if (mine !== gen.current) return;
       turns.current = got;
       cursor.current = win;
@@ -142,7 +148,7 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
   /** Fetch the window before the oldest turn held. Returns how many arrived. */
   const loadOlder = useCallback(async () => {
     const cur = cursor.current;
-    if (loading.current || !cur || cur.atStart || cur.blocked) return 0;
+    if (cb.current.paused || loading.current || !cur || cur.atStart || cur.blocked) return 0;
     loading.current = true;
     const mine = gen.current;
     try {
@@ -184,7 +190,7 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
   /** Whatever the agent has written since we last looked. */
   const loadNewer = useCallback(async () => {
     const cur = cursor.current;
-    if (loading.current || !cur) return 0;
+    if (cb.current.paused || loading.current || !cur) return 0;
     loading.current = true;
     const mine = gen.current;
     try {
@@ -215,6 +221,8 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
     }
   }, [src, bump]);
 
+  const paused = !!opts.paused;
+
   useEffect(() => {
     gen.current += 1;
     loading.current = false;
@@ -224,8 +232,8 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
     setMeta(null);
     setSummary(null);
     setError(null);
-    loadTail();
-  }, [srcKey, loadTail]);
+    if (!paused) loadTail();
+  }, [srcKey, loadTail, paused]);
 
   // The one read that touches the whole file, fired AFTER the first paint: it
   // buys the header a real turn count, the session's token total, the date the
@@ -233,12 +241,17 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
   // a window can know. If it fails or is slow, the header simply says how much
   // is loaded.
   useEffect(() => {
+    // `meta` is set by the tail response and this effect runs after that render
+    // commits. Starting the clock on mount let a slow tail lose a race to every
+    // pane's full-file summary — exactly the work the delay meant to keep away
+    // from first paint. A paused/hidden reader does no summary work at all.
+    if (paused || !meta || summary) return undefined;
     let dead = false;
     const h = window.setTimeout(() => {
       src.summary().then((s) => { if (!dead) setSummary(s); }).catch(() => {});
     }, SUMMARY_DELAY_MS);
     return () => { dead = true; window.clearTimeout(h); };
-  }, [src, srcKey]);
+  }, [src, srcKey, paused, meta, summary]);
 
   // The transcript may still be being written — see LIVE_MS above. Except when
   // "a window" costs a whole-file read: the SQLite harnesses have no byte
@@ -246,7 +259,6 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
   // evict the Overview's memo doing it). They are not polled at all.
   const lastTs = meta ? meta.lastTs : 0;
   const seekable = cursor.current ? cursor.current.mode === 'bytes' : true;
-  const paused = !!opts.paused;
   const live = opts.live;
   const [hidden, setHidden] = useState(() => (typeof document === 'undefined' ? false : document.hidden));
   useEffect(() => {

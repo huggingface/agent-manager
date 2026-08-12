@@ -120,8 +120,20 @@ export default function App() {
   // How every pane is read — the terminal itself, or reader mode over the same
   // session. App-wide, like zoom, and remembered the same way.
   const [paneMode, setPaneMode] = useState(readPaneMode);
-  useEffect(() => onPaneMode(setPaneMode), []);
-  const showPaneMode = (m: 'terminal' | 'reader') => { setPaneMode(m); writePaneMode(m); };
+  // Which visible batch has let its focused reader paint. Reset before entering
+  // reader mode; a batch key below also prevents readiness leaking across pages.
+  const [readerReadyFor, setReaderReadyFor] = useState('');
+  const paneModeRef = useRef(paneMode);
+  paneModeRef.current = paneMode;
+  useEffect(() => onPaneMode((m) => {
+    if (m === 'reader' && paneModeRef.current !== 'reader') setReaderReadyFor('');
+    paneModeRef.current = m;
+    setPaneMode(m);
+  }), []);
+  const showPaneMode = (m: 'terminal' | 'reader') => {
+    if (m === 'reader' && paneMode !== 'reader') setReaderReadyFor('');
+    setPaneMode(m); writePaneMode(m);
+  };
   const [zoom, setZoom] = useState<number>(() => {
     const z = parseInt(localStorage.getItem('am-zoom') || '100', 10);
     return Number.isFinite(z) ? z : 100;
@@ -515,6 +527,13 @@ export default function App() {
     .filter((s) => !isPassive(s.cli) && !isRemote(s.cli))
     .map((s) => s.id);
   const visibleTerminalKey = visibleTerminalIds.join(',');
+  const readerLeadId = focusedId && visibleTerminalIds.includes(focusedId)
+    ? focusedId : visibleTerminalIds[0] || null;
+  // Focus can move after the batch is ready; that must not tear down and
+  // re-fetch every sibling reader. A different visible page/group is a new
+  // batch, while focus only chooses which member gets its critical path.
+  const readerBatch = visibleTerminalKey;
+  const readerFollowersReady = readerReadyFor === readerBatch;
   const sessionIdsKey = tree.sessions.map((s) => s.id).join(',');
   const [warmTerminalIds, setWarmTerminalIds] = useState<string[]>([]);
   useEffect(() => {
@@ -807,6 +826,9 @@ export default function App() {
                 theme={theme}
                 zoom={zoom}
                 mode={paneMode}
+                readerEnabled={shown && deckVisible && (id === readerLeadId || readerFollowersReady)}
+                onReaderReady={id === readerLeadId ? () => setReaderReadyFor(readerBatch) : undefined}
+                readerReadyKey={readerBatch}
                 groupName={groupNameOf[s.id]}
                 focused={shown && sessions.length > 1 && s.id === focusedId}
                 visible={shown && deckVisible}

@@ -451,14 +451,17 @@ const traceFetch = async <T>(url: string): Promise<T> => {
   return r.json();
 };
 
-export const getTraceWindow = (id: string, req: TraceReq, bytes?: number): Promise<TraceWindow> =>
-  traceFetch(`/api/trace/${id}?${traceRange(req)}${bytes ? `&bytes=${bytes}` : ''}`);
+const windowSize = (bytes?: number, min?: number) =>
+  `${bytes ? `&bytes=${bytes}` : ''}${min ? `&min=${min}` : ''}`;
+
+export const getTraceWindow = (id: string, req: TraceReq, bytes?: number, min?: number): Promise<TraceWindow> =>
+  traceFetch(`/api/trace/${id}?${traceRange(req)}${windowSize(bytes, min)}`);
 
 export const getTraceSummary = (id: string): Promise<TraceSummary> =>
   traceFetch(`/api/trace/${id}?summary=1`);
 
-export const getFileTraceWindow = (id: string, p: string, req: TraceReq, bytes?: number): Promise<TraceWindow> =>
-  traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&${traceRange(req)}${bytes ? `&bytes=${bytes}` : ''}`);
+export const getFileTraceWindow = (id: string, p: string, req: TraceReq, bytes?: number, min?: number): Promise<TraceWindow> =>
+  traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&${traceRange(req)}${windowSize(bytes, min)}`);
 
 export const getFileTraceSummary = (id: string, p: string): Promise<TraceSummary> =>
   traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&summary=1`);

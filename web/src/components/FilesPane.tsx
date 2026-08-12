@@ -766,7 +766,7 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   // The reader opens on the tail of the transcript and pages backwards from
   // there; the summary is the one call that reads all of it.
   const traceSrc = useMemo<TraceSource>(() => ({
-    window: (req, bytes) => api.getFileTraceWindow(sessionId, path, req, bytes),
+    window: (req, bytes, min) => api.getFileTraceWindow(sessionId, path, req, bytes, min),
     summary: () => api.getFileTraceSummary(sessionId, path),
   }), [sessionId, path]);
 
