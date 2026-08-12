@@ -2,8 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { CSSProperties, ReactNode } from 'react';
 import * as api from '../api';
 import type { MetaSession, TraceTurn } from '../api';
-import type { Cli, OverviewFilter, OverviewSort, Session, SessionState, Tree } from '../types';
-import { isPassive, isRemote } from '../types';
+import type { Cli, OverviewChip, OverviewFilter, OverviewSort, Session, SessionState, Tree } from '../types';
+import { chipBuckets, isPassive, isRemote } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import { rankSessions, sortLabel } from '../lib/overviewSort';
 import type { Rankable } from '../lib/overviewSort';
@@ -399,10 +399,10 @@ function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color
 /** Mission control: one reading column — group capsules with their agents as
  *  slabs, loose agents as standalone panels. Unless a sort is on, in which case
  *  it is one flat ranked column instead (see §"sorted feed" below). */
-export default function Overview({ clis, tree, filter, sort, view, archived, showArchived, meta, metaReady, isMobile, onOpen }: {
+export default function Overview({ clis, tree, chip, sort, view, archived, showArchived, meta, metaReady, isMobile, onOpen }: {
   clis: Cli[];
   tree: Tree;
-  filter: OverviewFilter; // controlled by the bottom bar in App
+  chip: OverviewChip;     // controlled by the bottom bar in App
   sort: OverviewSort;     // ditto, and independent of the filter
   view: 'tiles' | 'list'; // controlled by the bottom bar in App
   archived: Set<string>;
@@ -430,8 +430,11 @@ export default function Overview({ clis, tree, filter, sort, view, archived, sho
   // session is in `meta` (or genuinely has no digest).
   const pending = (id: string) => !metaReady && !meta[id];
 
+  // One chip can stand for several buckets ('started' is waiting AND working), so
+  // this is set membership, not equality.
+  const buckets = chipBuckets(chip);
   const visible = (s: MetaSession) =>
-    (filter === 'all' || bucket(s.state) === filter) && (showArchived || !archived.has(s.id));
+    buckets.includes(bucket(s.state)) && (showArchived || !archived.has(s.id));
 
   // Which group each agent is in, by name. Only the sorted feed needs it: the
   // manual feed draws the group as a frame around its members and would be
@@ -470,10 +473,14 @@ export default function Overview({ clis, tree, filter, sort, view, archived, sho
           m,
           lastPromptTs: m.digest?.lastPromptTs || 0,
           lastAssistantTs: m.digest?.lastAssistantTs || 0,
-          // Don't pin under the `running` filter: `visible()` has already kept
-          // ONLY working sessions, so pinning them all would empty the sorted
-          // block and make the sort a no-op that still looks selected.
-          running: filter !== 'working' && atWork(m),
+          // Don't pin when the chip has already kept ONLY working sessions
+          // (`running`): `visible()` has kept nothing else, so pinning them all
+          // would empty the sorted block and make the sort a no-op that still
+          // looks selected. Asked as a question about the BUCKET SET rather than
+          // about the chip's name, so a chip that merely includes working —
+          // `started`, `all` — still pins, and the working agents float to the top
+          // of the wider set instead of being lost in it.
+          running: !(buckets.length === 1 && buckets[0] === 'working') && atWork(m),
         });
       }
     }
@@ -483,7 +490,7 @@ export default function Overview({ clis, tree, filter, sort, view, archived, sho
     if (!metaReady) return { running: [], dated: items, undated: [] };
     return rankSessions(items, sort);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sorted, sort, tree.order, sessById, groupById, meta, metaReady, filter, archived, showArchived]);
+  }, [sorted, sort, tree.order, sessById, groupById, meta, metaReady, chip, archived, showArchived]);
 
   // Collapse at constant velocity: duration follows the group's height.
   const toggleGroup = (gid: string, el: HTMLElement) => {
@@ -602,7 +609,15 @@ export default function Overview({ clis, tree, filter, sort, view, archived, sho
     </div>
   );
 
-  const empty = <div className="usage-msg mono">{filter === 'all' ? 'no agents yet — shells and file panes don’t appear here.' : 'nothing in this state.'}</div>;
+  // "nothing in this state" is still true of the chips that mean exactly one
+  // state; `started` means two, so it says what it actually looked for.
+  const empty = (
+    <div className="usage-msg mono">
+      {chip === 'all' ? 'no agents yet — shells and file panes don’t appear here.'
+        : chip === 'started' ? 'nothing started — no agent is running or waiting on you.'
+        : 'nothing in this state.'}
+    </div>
+  );
 
   if (view === 'tiles') {
     const content = sorted ? rankedBlocks() : tileBlocks;
