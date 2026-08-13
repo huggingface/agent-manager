@@ -44,6 +44,19 @@ assert.equal(tail.firstTs, 0);
 assert.equal(tail.usage, null);
 assert.equal(tail.total, null);
 
+// The reader's FIRST paint asks for a strict, small floor. A sparse tail must
+// stop as soon as it has enough to render instead of growing to the ordinary
+// twelve-message page and putting megabytes in front of the first pixel.
+const sparse = path.join(TMP, 'sparse.jsonl');
+fs.writeFileSync(sparse, `${Array.from({ length: 20 }, (_, i) => claudeLine(i, 50_000)).join('\n')}\n`);
+const firstPaint = await readTraceByPath(sparse, { window: { at: 'tail', bytes: 32 * 1024, min: 2 } });
+const ordinary = await readTraceByPath(sparse, { window: { at: 'tail', bytes: 32 * 1024 } });
+assert.ok(firstPaint.turns.length >= 2, 'the strict tail still has enough messages to paint');
+assert.ok(firstPaint.turns.length < ordinary.turns.length,
+  `the first paint stops before an ordinary page (${firstPaint.turns.length} vs ${ordinary.turns.length})`);
+assert.ok(firstPaint.window.end - firstPaint.window.start < ordinary.window.end - ordinary.window.start,
+  'the strict tail reads a smaller byte range');
+
 // ---- paging back reproduces the conversation exactly ----
 let page = tail;
 let stitched = [];

@@ -181,7 +181,8 @@ if (typeof window !== 'undefined') {
 }
 
 export default function TerminalPane({
-  session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', dragId, isMobile, groupName, onDragActive, onFocus, onRename, onClose,
+  session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', readerEnabled,
+  readerReadyKey, onReaderReady, dragId, isMobile, groupName, onDragActive, onFocus, onRename, onClose,
 }: {
   session: Session;
   cli?: Cli;
@@ -192,6 +193,9 @@ export default function TerminalPane({
   active?: boolean;
   zoom?: number;
   mode?: PaneMode;          // app-wide reading mode, from the bottom bar
+  readerEnabled?: boolean;  // focused reader paints before visible followers
+  readerReadyKey?: string;  // visible batch whose first paint is being awaited
+  onReaderReady?: () => void;
   dragId?: string;          // set when the pane can be rearranged (group view)
   isMobile?: boolean;       // show the on-screen control-key bar
   onDragActive?: (dragging: boolean) => void;
@@ -892,9 +896,11 @@ export default function TerminalPane({
         {/* Reader mode draws OVER the terminal rather than replacing it: xterm needs
             layout to fit, and detaching tmux costs a repaint and can trip the
             handoff path. The terminal stays mounted and connected underneath. */}
-        {reading && (
+        {reading && visible !== false && (
           <div className="pane-reader" onMouseDown={(e) => e.stopPropagation()}>
-            <ConversationView session={session} paused={visible === false} isMobile={isMobile} />
+            {readerEnabled === false
+              ? <div className="cxv-empty mono">reading the trace…</div>
+              : <ConversationView session={session} isMobile={isMobile} onReady={onReaderReady} readyKey={readerReadyKey} />}
           </div>
         )}
       </div>
