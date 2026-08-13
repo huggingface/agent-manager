@@ -5,6 +5,7 @@ colorFrom: gray
 colorTo: indigo
 sdk: docker
 app_port: 7860
+fullWidth: true
 pinned: false
 license: apache-2.0
 short_description: Private cloud manager for AI coding CLI sessions
