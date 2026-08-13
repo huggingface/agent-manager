@@ -227,6 +227,18 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    content would not show through a floating band, and over .cxv-body's --panel
    the base transparent tint composites to the same colour. */
 
+/* …and it spans the pane. Reaching into the left gutter but stopping at the
+   text column on the right made it read as a card floating over the answer
+   rather than as the head of it. Full bleed both sides, with the text inside
+   still on the column. */
+.cxv-col .cx-prompt { margin-right: -14px; padding-right: 14px; }
+.cxv-body > .cxv-col > .cx { padding-left: 16px; }
+
+/* Grouping: the meta row is the prompt's, not the answer's, so it sits tight
+   under the band — and one exchange ends well before the next begins. */
+.cxv-col .cx-prompt + .cx-meta { margin-top: -3px; }
+.cxv-col > .cx + .cx { margin-top: 15px; }
+
 /* ---------- phone ---------- */
 @media (max-width: 720px) {
   .cxv-body { padding: 4px 8px 24px; }
@@ -235,7 +247,12 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 
 /* ---------- reader mode inside a session pane ---------- */
 /* Drawn over the live terminal, which stays mounted underneath. */
-.pane-reader { position: absolute; inset: 0; z-index: 3; display: flex; background: var(--panel); }
+/* Above the terminal's own covers (.term-preview/.term-boot/.term-exit sit at
+   4), not just above the terminal. Those are gated off while reading, but the
+   overlay outranking anything the terminal can raise is the belt to that
+   brace: a cover winning here does not look like a bug, it looks like the
+   reader turning into a terminal. */
+.pane-reader { position: absolute; inset: 0; z-index: 6; display: flex; background: var(--panel); }
 .pane-reader > .cxv { flex: 1; min-width: 0; }
 /* The one thing the reader can render that is not inside .cxv — so it reads the
    base itself rather than inheriting a size from it. */

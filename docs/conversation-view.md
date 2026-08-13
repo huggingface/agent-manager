@@ -215,6 +215,12 @@ pane with nothing to render (a shell) simply stays a terminal.
   `.markdown` rules are absolute px and would otherwise stay put while the prose grew.
   Spacing does not scale, but anything that lines a column up with a glyph — the prompt's `❯`
   gutter, the step rail, the tool-field labels — is in `em`, or it stops lining up when zoomed.
+- **Nothing of the terminal's may paint over the reader.** Its covers — `restoring last view…`,
+  `starting claude…`, `stopped · output preserved` — sit at `z-index: 4` and were drawn straight
+  over the conversation, so a reconnect turned the reader into a terminal screen with a reader
+  toolbar on top. They are gated off while reading (they belong to the terminal, and the reader
+  is reading a file that does not care whether the PTY is up), and the overlay now outranks
+  anything the terminal can raise.
 - The terminal element stays mounted and connected underneath; the reader draws over it. Toggling
   must not detach tmux — a reattach costs a repaint and can trip the handoff path
   (`HANDOFF_CODE`, `TerminalPane.tsx`). **Verify** this before shipping: xterm needs layout to
@@ -247,6 +253,10 @@ pane with nothing to render (a shell) simply stays a terminal.
   tool call is unusable while a task runs; one that never moves makes you chase it.
 - **The prompt band sticks to the top** while you read a long turn. What you want overhead deep
   in someone's 67-step answer is the question it is answering — not a row of numbers.
+- **The prompt band spans the pane.** Reaching into the left gutter but stopping at the text
+  column on the right made it read as a card floating over the answer rather than as the head of
+  it. Full bleed both sides; the meta row sits tight under the band it belongs to, and one
+  exchange ends well before the next begins.
 - **The reader fills the pane.** A fixed reading column left a gutter of nothing on each
   side while the prompt band still spanned the full width, so the two disagreed about where the
   conversation began. The pane is the measure: narrow the pane and the conversation narrows.
@@ -254,8 +264,17 @@ pane with nothing to render (a shell) simply stays a terminal.
   card has always known that, and a rendered session that could only be read would send you back
   to the terminal to type. It is the card's own composer (`.ov-live`), the same `sendInput`, and the
   same optimistic echo: your prompt appears at the bottom with a `working` line until the
-  transcript catches up. Only a trace with **no agent behind it** — a shared file, an import — is
-  read-only, which is what `readOnly` is for.
+  transcript catches up. Optimistic means *before* the POST returns — it used to wait for the
+  round trip, which left a beat where the box was still full and nothing had happened. A failed
+  send withdraws the echo and puts the text back in the box.
+
+  Only a trace with **no agent behind it** — a shared file, an import — is read-only, which is
+  what `readOnly` is for.
+
+  Both surfaces use one `Composer` component. A composer accretes features — paste-to-attach,
+  history recall, a slash-command menu — and duplicated markup is how one surface quietly gets
+  them and the other does not. `onPasteFiles` and `above` are the seam an attachment strip plugs
+  into, so it arrives in both places at once or in neither.
 - **A half-typed reply is kept** (`drafts.ts`, `useDraft.ts`). Reported from a phone: start typing
   an answer, switch apps, come back, and the text is gone. The pane is not what loses it — App.tsx
   keeps a dozen panes warm, so an in-app trip to the session list already survived — the
@@ -450,6 +469,15 @@ components against **captured conversations** in phone, tablet and desktop frame
 themes, with six scenarios — done, running, just-sent, failed tool, truncated, never-prompted.
 Fixtures are captured by running the app's own reader (`readTraceByPath`), so the harness cannot
 drift from the payload shape.
+
+A second local harness (`web/app-shots.mjs`, with `web/fixtures.mjs` for its fleet — both
+excluded for the same reason) drives a *running* instance rather than rendered components: it
+asserts what the UI actually does on click. Checks today — the list view reads no traces
+and opening a card reads exactly one, `full history ↗` flips an already-open pane, focus stays
+out of the covered terminal, nothing of the terminal's paints over the reader, the bottom bar is
+one height, a sent prompt echoes before the POST returns, a shell keeps its terminal, a failed
+refresh keeps the conversation, and merging two agents switches to their group layout. `fixtures.mjs` writes a Claude transcript and the
+sessions to read it from, so the counts it asserts are the same on every machine.
 
 It also **replays a turn block by block** — a tool call lands, its result comes back, thinking
 between them, the answer only at the end — which is how the live rules in §3.2 and §3.3 were

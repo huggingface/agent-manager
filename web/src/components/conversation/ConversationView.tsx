@@ -22,7 +22,7 @@ import { recallReading, rememberReading } from './readingPosition';
 import { useDraft } from './useDraft';
 import { fmtTok, splitExchanges } from './exchanges';
 import ExchangeView from './Exchange';
-import { SendGlyph } from '../icons';
+import Composer from './Composer';
 
 const NEAR_TOP_PX = 300;   // start fetching older turns before the reader arrives
 
@@ -124,14 +124,21 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   const send = async () => {
     const text = draft.trim();
     if (!text || sending) return;
+    // Optimistic, and it has to be: the prompt belongs on screen the moment you
+    // send it, not when the POST comes back. Waiting for the round trip left a
+    // beat where the box was still full and nothing had happened. If the send
+    // fails, the echo is withdrawn and the text goes back in the box.
     setSending(true); setFailed(false);
+    setDraft(''); setSent({ text, at: Date.now() });
+    if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
+    stick.current = true;
     try {
       await api.sendInput(session.id, text);
-      setDraft(''); setSent({ text, at: Date.now() });
-      if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
-      stick.current = true;
       loadNewer();
-    } catch { setFailed(true); window.setTimeout(() => setFailed(false), 4000); }
+    } catch {
+      setSent(null); setDraft(text); setFailed(true);
+      window.setTimeout(() => setFailed(false), 4000);
+    }
     setSending(false);
   };
   const q = query.trim().toLowerCase();
@@ -441,25 +448,15 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
       </div>
 
       {!readOnly && (
-        <div className="ov-live cxv-live">
-          <span className="ov-p mono">❯</span>
-          <textarea
-            ref={inputRef}
-            rows={1}
-            value={draft}
-            disabled={sending}
-            placeholder={sending ? 'sending…' : 'reply…'}
-            autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
-            onChange={(e) => { setDraft(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
-            onKeyDown={(e) => {
-              // Desktop: Enter sends, Shift+Enter newlines. Mobile keyboards
-              // cannot do Shift+Enter, so there the button sends.
-              if (e.key === 'Enter' && !e.shiftKey && !isMobile) { e.preventDefault(); send(); }
-              if (e.key === 'Escape') { setDraft(''); inputRef.current?.blur(); }
-            }}
-          />
-          {draft.trim() && <button className="ov-send" title="Send" onClick={send} disabled={sending}><SendGlyph /></button>}
-        </div>
+        <Composer
+          className="cxv-live"
+          draft={draft}
+          sending={sending}
+          isMobile={isMobile}
+          inputRef={inputRef}
+          onChange={setDraft}
+          onSend={send}
+        />
       )}
       {failed && <div className="ov-note cxv-note">failed to reach the agent</div>}
 

@@ -939,7 +939,7 @@ export default function TerminalPane({
           >paste</button>
         </div>
       )}
-      {pasteOpen && (
+      {!reading && pasteOpen && (
         // Reached when the clipboard read was blocked (cross-origin iframe) or
         // came back empty. The textarea is the whole point: long-press inside it
         // and the OS offers Paste, which fires a `paste` event we can read.
@@ -971,18 +971,23 @@ export default function TerminalPane({
           <button className="tp-x" onClick={() => { setPasteOpen(false); focusTerm(); }}>cancel</button>
         </div>
       )}
-      {booting && preview && conn !== 'exited' && (
+      {/* The terminal's own covers — restoring, booting, exited — belong to the
+          terminal. Reader mode is a complete surface over it, reading a file
+          that does not care whether the PTY is reconnecting, and these paint
+          ABOVE the overlay (z-index 4 vs 3): a reconnect turned the reader
+          into a terminal screen with a reader toolbar on top. */}
+      {!reading && booting && preview && conn !== 'exited' && (
         <div className="term-preview mono" aria-label="Restoring terminal">
           <pre style={{ fontSize: `${Math.round((13 * zoom) / 100)}px` }}>{preview.rows.join('\n')}</pre>
           <span>restoring last view…</span>
         </div>
       )}
-      {booting && !preview && conn !== 'exited' && (
+      {!reading && booting && !preview && conn !== 'exited' && (
         <div className="term-boot mono">
           {conn === 'connecting' ? 'connecting' : `starting ${cli?.label || session.cli}`}<span className="et-cursor" />
         </div>
       )}
-      {conn === 'exited' && (
+      {!reading && conn === 'exited' && (
         <div className="term-exit mono">
           <div className="tx-row">
             <span>{cli?.label || session.cli} stopped · output preserved</span>
