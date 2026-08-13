@@ -74,11 +74,12 @@ The **file vs database** split drives most of the design:
 - Codex is the same shape via `codexSessionId` + `codexRollout` (`runner.js:319-321`), and
   as of `1dfb753` **opencode too**, via `opencodeSessionId`. Three of the five harnesses now
   carry a per-session conversation pin that import can simply set.
-- opencode's and Hermes' SQLite live on **local disk via symlink** (also `1dfb753`), with a
-  durable copy synced to the bucket every 60s — because a synchronous read of a FUSE-backed
-  sqlite could stall the event loop and freeze the whole server. Extraction still goes
-  through `opencodeDbPath()`, so §6 is unaffected, but **never** read these DBs
-  synchronously on a request path.
+- opencode's and Hermes' SQLite live on **local disk via symlink**. Durable
+  checkpoints are made through SQLite's online backup API and validated before
+  upload; raw DB/WAL/SHM copies are not transactionally safe. This also keeps a
+  synchronous FUSE read from stalling the event loop and freezing the whole
+  server. Extraction still goes through `opencodeDbPath()`, so §6 is
+  unaffected, but **never** read these DBs synchronously on a request path.
 
 ## 3. Verified Hub behaviour
 

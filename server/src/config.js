@@ -123,7 +123,7 @@ function isConfigured(id) {
         || fileOk(path.join(env.CODEX_HOME || path.join(home, '.codex'), 'auth.json'));
     case 'gemini':
       return hasEnv('GEMINI_API_KEY', 'GOOGLE_API_KEY')
-        || fileOk(path.join(home, '.gemini', 'oauth_creds.json'));
+        || fileOk(path.join(env.GEMINI_CLI_HOME || home, '.gemini', 'oauth_creds.json'));
     case 'opencode': {
       const xdgConfig = env.XDG_CONFIG_HOME || path.join(home, '.config');
       return hasEnv('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY')
