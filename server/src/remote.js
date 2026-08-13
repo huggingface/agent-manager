@@ -439,6 +439,7 @@ export function remoteInfo(session) {
  */
 export function promptText(name, host, operator) {
   const base = `https://${host}/api/remote/${name}`;
+  const origin = `remote:${name}`;
   const who = operator ? ` (${operator})` : '';
   return `You are the remote agent "${name}" for an Agent Manager${who} running at
 https://${host}. Your job: take work from that pane, do it here on this
@@ -474,7 +475,7 @@ even if you own the Space.
      curl -sS -X POST -H "authorization: Bearer $HF_TOKEN" \\
        -H 'content-type: application/json' \\
        -d '{"harness":"<your cli>","cwd":"'"$PWD"'","host":"'"$(hostname)"'"}' \\
-       "$AM/hello"
+       "$AM/hello?from=${origin}"
 
 3. Then loop. One blocking call waits for work; it returns as soon as there is
    any, or empty when the wait expires:
@@ -501,7 +502,7 @@ even if you own the Space.
 
      curl -sS -X POST -H "authorization: Bearer $HF_TOKEN" \\
        -H 'content-type: text/plain' \\
-       --data-binary @- "$AM/messages" <<'EOF'
+       --data-binary @- "$AM/messages?from=${origin}" <<'EOF'
      Fixed the fixture — pad_token was None on the Qwen config. Suite is green.
      EOF
 

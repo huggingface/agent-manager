@@ -1,6 +1,15 @@
 import type { Cli, Group, MoveTarget, RemoteInfo, RemoteMessage, Session, Tree } from './types';
 
 const HEADERS = { 'content-type': 'application/json' };
+// The browser is the single human operator. Stamp every state-changing request
+// in one place so new API helpers cannot accidentally create unattributed work.
+const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+  const method = String(init?.method || 'GET').toUpperCase();
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) return globalThis.fetch(input, init);
+  const headers = new Headers(init?.headers);
+  headers.set('x-am-origin', 'operator');
+  return globalThis.fetch(input, { ...init, headers });
+};
 // Like `json`, but keeps the server's own words — these routes fail for reasons
 // worth reading ("already exists here").
 const jsonOrError = async (r: Response) => {
