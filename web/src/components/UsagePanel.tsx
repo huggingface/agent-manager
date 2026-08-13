@@ -6,11 +6,15 @@ import Logo from './Logo';
 const PROVS = [
   { id: 'claude', label: 'Claude Code', color: '#d97757' },
   { id: 'codex', label: 'Codex', color: '#5eb6a6' },
+  { id: 'opencode', label: 'OpenCode', color: '#8a93a0' },
+  { id: 'hermes', label: 'Hermes', color: '#a78bfa' },
+  { id: 'openclaw', label: 'OpenClaw', color: '#c83636' },
   { id: 'gemini', label: 'Gemini CLI', color: '#4796e3' },
 ];
 
 const fmtTok = (n = 0) =>
   n >= 1e9 ? `${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n);
+const fmtCost = (n: number) => `$${n >= 100 ? n.toFixed(0) : n >= 1 ? n.toFixed(2) : n.toFixed(3)}`;
 const resetStr = (s?: number) => {
   if (!s) return '';
   const mins = Math.round((s * 1000 - Date.now()) / 60000);
@@ -101,8 +105,16 @@ export default function UsagePanel() {
             ) : (
               <>
                 <div className="usage-stats">
-                  <div><span className="s-muted">Today</span><b>{d.tokensToday == null ? '—' : `${fmtTok(d.tokensToday)} tok`}</b></div>
-                  <div><span className="s-muted">This week</span><b>{d.tokensWeek == null ? '—' : `${fmtTok(d.tokensWeek)} tok`}</b></div>
+                  <div>
+                    <span className="s-muted">Today</span>
+                    <b>{d.tokensToday == null ? '—' : `${fmtTok(d.tokensToday)} tok`}</b>
+                    {d.costToday != null && <span className="s-muted">{fmtCost(d.costToday)} est.</span>}
+                  </div>
+                  <div>
+                    <span className="s-muted">This week</span>
+                    <b>{d.tokensWeek == null ? '—' : `${fmtTok(d.tokensWeek)} tok`}</b>
+                    {d.costWeek != null && <span className="s-muted">{fmtCost(d.costWeek)} est.</span>}
+                  </div>
                 </div>
                 {q ? (
                   <div className="usage-quota">
@@ -112,6 +124,8 @@ export default function UsagePanel() {
                   </div>
                 ) : p.id === 'gemini' ? (
                   <div className="s-help">No quota (consumer tier deprecated — uses an API key).</div>
+                ) : ['opencode', 'hermes', 'openclaw'].includes(p.id) ? (
+                  <div className="s-help">No single quota — cost depends on the model provider used by each session.</div>
                 ) : (
                   <div className="s-help">No quota yet — run a session to populate.</div>
                 )}

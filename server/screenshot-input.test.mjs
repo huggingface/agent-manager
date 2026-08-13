@@ -18,6 +18,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { chromiumLaunchOptions } from '../scripts/test-chromium.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
@@ -65,6 +66,7 @@ const backend = spawn('node', ['src/index.js'], {
   env: {
     ...process.env,
     PORT: '7896', DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '',
+    AM_ALLOW_MISSING_ORIGIN: '1',
     AM_TEST_REPAINT_CMD: 'bash --noprofile --norc',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -156,13 +158,7 @@ try {
   check('remote uploads are rejected with an actionable reason',
     remoteUpload.status === 400 && remoteUploadBody.error.includes('cannot read files stored on this Space'));
 
-  const bakedChromium = '/opt/pw-browsers/chromium-1208/chrome-linux64/chrome';
-  const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-    || (fs.existsSync(bakedChromium) ? bakedChromium : undefined);
-  browser = await chromium.launch({
-    headless: true,
-    ...(chromiumExecutable ? { executablePath: chromiumExecutable } : {}),
-  });
+  browser = await chromium.launch(chromiumLaunchOptions());
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await page.goto(API, { waitUntil: 'domcontentloaded' });
   await page.locator('.sidebar .row[title^="screenshot-e2e"]').first().click();

@@ -19,7 +19,8 @@ import * as demo from './demo.js';
 import * as hidden from './hidden.js';
 import {
   attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning,
-  capturePane, ghosttyReady, ghosttyError, installClaudeRepinHook, installOpencodeRepinPlugin,
+  waitForInputReady, capturePane, ghosttyReady, ghosttyError,
+  installClaudeRepinHook, installOpencodeRepinPlugin,
 } from './runner.js';
 
 // Control frames ride the terminal socket behind a leading NUL pair, which real
@@ -41,6 +42,7 @@ import {
 } from './attachments.js';
 import * as runstate from './runstate.js';
 import { installSlowFsProbe } from './slowfs.js';
+import { operationMiddleware, readOperations } from './operations.js';
 
 // Before anything else touches the mount: a sync fs call to /data is ~85ms of
 // frozen event loop here, and nothing else in the stack can see it. See slowfs.js.
@@ -163,8 +165,14 @@ await Promise.race([
 // running instead of exiting.
 // No tmux to outlive us any more: kill the PTYs we hold on the way out so a
 // restart can't leave orphaned agents writing into the workspace.
+let shutdownStarted = false;
 for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, () => { try { stopAll(); } catch {} process.exit(0); });
+  process.on(sig, async () => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    try { await stopAll(); } catch {}
+    process.exit(0);
+  });
 }
 
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
@@ -191,6 +199,39 @@ app.use((req, res, next) => {
   return res.status(403).json({ error: 'locked', reason: 'public-space' });
 });
 
+// Every state-changing call has an attributable origin and a durable outcome.
+// The private Space has one human operator, represented by the stable
+// `operator` id. Local agents use their session id; remote agents use their
+// immutable remote name. The remote route fallback keeps already-running poll
+// loops compatible while newly generated prompts send the id explicitly.
+const resolveOperationOrigin = (raw, req) => {
+  if (raw === 'operator') {
+    return { id: 'operator', type: 'operator', name: process.env.SPACE_AUTHOR_NAME || process.env.AM_USER || 'operator' };
+  }
+  if (raw) {
+    const session = store.get(raw);
+    if (session) return { id: session.id, type: 'agent', name: session.name, cli: session.cli };
+    if (raw.startsWith('remote:')) {
+      const name = raw.slice('remote:'.length);
+      const remoteSession = store.list().find((s) => s.remote?.name === name);
+      if (remoteSession) return { id: raw, type: 'remote', name, cli: remoteSession.remote?.peer?.harness || 'remote' };
+    }
+    return null;
+  }
+  const match = req.path.match(/^\/api\/remote\/([^/]+)\/(?:hello|messages)$/);
+  if (!match) return null;
+  let name;
+  try { name = decodeURIComponent(match[1]); } catch { return null; }
+  const remoteSession = store.list().find((s) => s.remote?.name === name);
+  return remoteSession ? { id: `remote:${name}`, type: 'remote', name, cli: remoteSession.remote?.peer?.harness || 'remote' } : null;
+};
+app.use(operationMiddleware({
+  resolveOrigin: resolveOperationOrigin,
+  // Test servers explicitly opt out so old endpoint-focused fixtures do not
+  // have to pretend to be the operator. Production never sets this switch.
+  allowMissing: process.env.AM_ALLOW_MISSING_ORIGIN === '1',
+}));
+
 app.get('/api/visibility', (_req, res) => res.json(visibility()));
 
 app.get('/api/health', (_req, res) =>
@@ -199,6 +240,13 @@ app.get('/api/health', (_req, res) =>
 app.get('/api/clis', (_req, res) => res.json(cliCatalog()));
 
 app.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.debug === '1', req.query.provider || null)));
+
+// Newest first. The JSONL source lives under DATA_DIR; this bounded API is the
+// stable way for the operator or an agent to reconstruct manager operations.
+app.get('/api/operations', (req, res) => {
+  const before = typeof req.query.before === 'string' && req.query.before ? req.query.before : null;
+  res.json({ operations: readOperations(req.query.limit, before), generatedAt: new Date().toISOString() });
+});
 
 app.get('/api/traces', async (_req, res) => res.json(await buildTraces()));
 
@@ -302,12 +350,14 @@ async function deliver(session, { text, attachments = [] }, from) {
     return ensureRunning(store.get(session.id) || session);
   }
   const started = ensureRunning(session);
-  if (started) await sleep(3500); // let the CLI boot before the keystrokes land
+  if (started && !await waitForInputReady(session.id)) {
+    throw new Error('session did not become ready for input within 30 seconds — prompt was not sent');
+  }
   for (const command of prelude) {
     await sendInput(session.id, command);
     await sleep(500);
   }
-  await sendInput(session.id, prompt);
+  await sendInput(session.id, prompt, { confirmEcho: started && session.cli === 'opencode' });
   return started;
 }
 
@@ -867,9 +917,14 @@ const BUILD_ENV_KEYS = (() => {
 // after the build-time snapshot, so its vars would otherwise be misdetected as
 // injected secrets. Keep this list in sync with entrypoint.sh.
 const NON_SECRET = new Set([
-  'HOME', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'NPM_CONFIG_PREFIX', 'PWD', 'OLDPWD', 'SHLVL', '_', 'HOSTNAME',
+  'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_DURABLE', 'CODEX_HOME', 'CODEX_DURABLE',
+  'GEMINI_CLI_HOME', 'GEMINI_LIVE', 'GEMINI_DURABLE',
+  'OPENCLAW_STATE_DIR', 'OPENCLAW_HOME', 'OPENCLAW_DURABLE',
+  'OPENCODE_LIVE', 'OPENCODE_DURABLE', 'HERMES_LIVE', 'HERMES_DURABLE',
+  'AGENT_STATE_SCRIPT', 'AGENT_STATE_CHECKPOINT_SECONDS', 'DATA_DIR',
+  'NPM_CONFIG_PREFIX', 'PWD', 'OLDPWD', 'SHLVL', '_', 'HOSTNAME',
   'ACCELERATOR', 'COMMIT_SHA', 'CPU_CORES', 'HF_DATASETS_TRUST_REMOTE_CODE', 'IMAGE_SHA', 'MEMORY', 'OMP_NUM_THREADS',
-  'UV_CACHE_DIR', 'PIP_CACHE_DIR', 'PYTHONPYCACHEPREFIX', 'PYTHONUSERBASE', 'OPENCLAW_STATE_DIR', 'OPENCLAW_HOME',
+  'UV_CACHE_DIR', 'PIP_CACHE_DIR', 'PYTHONPYCACHEPREFIX', 'PYTHONUSERBASE',
 ]);
 const NON_SECRET_PREFIX = ['SPACE_', 'KUBERNETES_', 'NVIDIA_', 'CUDA_', 'NV_', 'AM_'];
 function injectedEnvKeys() {
@@ -1195,6 +1250,7 @@ Hermes — alongside plain shells and a file browser.
 - \`/data\` is **durable storage** (a mounted bucket). Files under \`/data/workspaces/…\` and \`/data/home/…\` survive restarts and sleep.
 - **Empty directories are not persisted** — only files. If a folder must exist, keep a file in it.
 - Sessions are held by the Agent Manager backend and keep running when the browser disconnects. A backend restart or Space sleep ends live processes; retained workspace files still persist.
+- \`$AM_LOCAL\` (\`/home/node/local\`) is the container's own disk: fast, and **not durable**. A rebuild or a restart wipes it, along with anything you cloned or built there. It is still the right home for git checkouts and build output — see [Git repos](#git-repos-clone-on-local-disk-push-before-you-stop).
 - Exception: OpenClaw runs with its own \`$HOME\` on local disk for filesystem compatibility; that state is backed up to the bucket every minute.
 
 ## You may not be alone
@@ -1206,7 +1262,14 @@ Hermes — alongside plain shells and a file browser.
 The manager exposes a small HTTP API on \`localhost:\${AM_PORT:-${PORT}}\`. You are \`$AM_ID\`
 (\`$AM_NAME\` is your display name). Every call that changes something takes
 \`?from=$AM_ID\` so the other agent, and the operator reading the log later, can
-tell who asked.
+tell who asked. The manager durably records these operations and their outcomes;
+prompt and file contents are hashed rather than copied into the audit log.
+
+To reconstruct recent manager operations (newest first):
+
+\`\`\`sh
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/operations?limit=100" | jq .operations
+\`\`\`
 
 Your session exports the port as \`$AM_PORT\` — read it rather than trusting a
 number you remember, and check it before you believe an empty answer: \`curl -s\`
@@ -1214,6 +1277,24 @@ to a port nothing is listening on prints **nothing at all**, and in some agent
 sandboxes it exits 0 rather than failing. A wrong port therefore reads as "the
 roster is empty, I have no peers" instead of an error. \`curl -sS --fail\` will
 tell you what actually happened.
+
+### Check harness usage and quota
+The same API exposes usage from harness logs on this Space. Claude and Codex
+include their latest 5-hour and weekly quota snapshots. OpenCode, Hermes, and
+OpenClaw expose tokens and estimated model cost; they have no single quota
+because sessions may use different providers:
+
+\`\`\`sh
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=claude" | jq .providers.claude
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=codex" | jq .providers.codex
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=opencode" | jq .providers.opencode
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=hermes" | jq .providers.hermes
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=openclaw" | jq .providers.openclaw
+\`\`\`
+
+These values reflect local calls made from this Space, as of each harness's
+last model call here; activity on another machine is not included. This is a
+read-only call, so it does not take \`?from=\`.
 
 ### See who is here
 \`\`\`sh
@@ -1352,8 +1433,31 @@ What is different about them:
 - Network access is available; API keys are provided via the environment (below) or your home config.
 
 ## Working well here
-- Keep work inside your workspace folder; use absolute paths under \`/data/workspaces/\` when in doubt.
+- Keep work inside your workspace folder; use absolute paths under \`/data/workspaces/\` when in doubt. Git checkouts are the exception — see the next section.
 - Prefer small, verifiable steps and leave the workspace tidy — the operator browses these files directly in the file viewer.
+
+## Git repos: clone on local disk, push before you stop
+- **Clone into \`$AM_LOCAL/git/<repo>\`, not under \`/data\`.** A checkout on the
+  bucket is slow — every object read is a round trip to object storage — and
+  quietly broken in ways that cost hours: object storage holds no exec bit, so
+  git hooks never fire (a \`git push\` from there sends LFS *pointers* with no
+  objects behind them), and the mount has broken \`git commit\` outright by
+  materializing a directory where git expected a hook file.
+- **That disk is not durable.** \`$AM_LOCAL\` dies with the container, without
+  warning. The hourly backup copies the \`/data\` bucket and nothing else, so
+  whatever exists only as a clone or an uncommitted diff there is one restart
+  from gone. (OpenClaw's \`$HOME\` is the single exception, and it is copied out
+  by a job written for it alone.)
+- **So push before you stop.** Not once at the end of the task: at the end of
+  every turn that produced work worth keeping. Commit it, push it, and let the
+  remote be the copy that survives. Half-finished is fine — push it on a branch.
+- **No remote to push to?** Say so plainly in your answer rather than leaving the
+  only copy on a disk that evaporates, and leave something durable behind:
+  \`git bundle create /data/workspaces/$AM_SESSION/<repo>.bundle --all\` writes the
+  whole history to one file on the bucket, which a later \`git clone\` restores from.
+- Files the operator reads — notes, reports, generated docs — still belong in your
+  workspace folder under \`/data/workspaces/\`. It is the *checkout* that lives on
+  local disk, not the deliverable.
 
 ## Notifying the operator
 The operator's devices receive push notifications. Use this ONLY when the
@@ -1361,7 +1465,7 @@ operator explicitly asked for it in their prompt (e.g. "notify me when the
 tests pass") — send exactly ONE message when that condition is met:
 
 \`\`\`sh
-curl -s -X POST http://localhost:\${AM_PORT:-${PORT}}/api/notify \\
+curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/notify?from=$AM_ID" \\
   -H 'content-type: application/json' \\
   -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"<one-line outcome>\\"}"
 \`\`\`
@@ -1374,14 +1478,14 @@ For DELAYED notifications ("notify me in 10 minutes"), do not block on a long
 immediately (long-running foreground execs can destabilize some sessions):
 
 \`\`\`sh
-(sleep 600 && curl -s -X POST http://localhost:\${AM_PORT:-${PORT}}/api/notify \\
+(sleep 600 && curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/notify?from=$AM_ID" \\
   -H 'content-type: application/json' \\
   -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"reminder\\"}") >/dev/null 2>&1 &
 \`\`\`
 
 ## Custom tools & Python environments
 - Custom tools are installed at startup by \`/data/install.sh\` (edit it to add packages; it re-runs on every restart). Progress/errors: \`/data/install.log\`.
-- \`$AM_LOCAL\` is a **fast local disk** for tools, envs, and caches. Build Python envs there, **never** as a \`.venv\` on the \`/data\` bucket (object storage is slow and can't lock/mmap well). From a workspace:
+- \`$AM_LOCAL\` is a **fast local disk** for tools, envs, caches and git checkouts. Build Python envs there, **never** as a \`.venv\` on the \`/data\` bucket (object storage is slow and can't lock/mmap well). From a workspace:
   \`UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/<name>" uv sync\`
 - Keep \`pyproject.toml\` / \`uv.lock\` / \`requirements.txt\` in the workspace — they're the durable source of truth; the env rebuilds from them in seconds after a restart.
 ${artifactsSection(amCfg)}${jobsSection(amCfg)}
@@ -1420,10 +1524,14 @@ function skillTargetDirs() {
   const home = process.env.HOME || os.homedir();
   const claudeCfg = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
   const dirs = [
-    path.join(home, '.agents', 'skills'),   // Codex, Gemini, opencode
+    path.join(home, '.agents', 'skills'),   // Codex and opencode
     path.join(claudeCfg, 'skills'),          // Claude Code
     path.join(home, '.hermes', 'skills'),    // Hermes
   ];
+  // GEMINI_CLI_HOME deliberately changes the home Gemini resolves its global
+  // .agents directory against; fan skills into that local/checkpointed home as
+  // well as the ordinary durable HOME.
+  if (process.env.GEMINI_CLI_HOME) dirs.push(path.join(process.env.GEMINI_CLI_HOME, '.agents', 'skills'));
   // OpenClaw runs with its own HOME (see entrypoint.sh) and reads managed
   // skills from ~/.agents/skills resolved against THAT home. Recreated on
   // every boot, so it needs no backup coverage.

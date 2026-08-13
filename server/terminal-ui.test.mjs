@@ -14,6 +14,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { chromiumLaunchOptions } from '../scripts/test-chromium.mjs';
 import { WebSocket } from 'ws';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -49,7 +50,7 @@ if (!process.env.TERMUI_PUBLIC_DIR) {
 
 const backend = spawn('node', ['src/index.js'], {
   cwd: HERE,
-  env: { ...process.env, PORT: '7897', DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '' },
+  env: { ...process.env, PORT: '7897', DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '', AM_ALLOW_MISSING_ORIGIN: '1' },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let logs = '';
@@ -102,13 +103,7 @@ try {
   }));
   await sleep(600);
 
-  const bakedChromium = '/opt/pw-browsers/chromium-1208/chrome-linux64/chrome';
-  const chromiumExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
-    || (fs.existsSync(bakedChromium) ? bakedChromium : undefined);
-  browser = await chromium.launch({
-    headless: true,
-    ...(chromiumExecutable ? { executablePath: chromiumExecutable } : {}),
-  });
+  browser = await chromium.launch(chromiumLaunchOptions());
   const context = await browser.newContext({
     viewport: { width: 1280, height: 800 },
     permissions: ['clipboard-read', 'clipboard-write'],

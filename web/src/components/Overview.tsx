@@ -9,13 +9,12 @@ import { rankSessions, sortLabel } from '../lib/overviewSort';
 import { hiddenSessionIds } from '../lib/overviewHidden';
 import type { Rankable } from '../lib/overviewSort';
 import {
-  defaultAttachmentPrompt, filesFromTransfer, pendingAttachmentsFromFiles, revokePendingAttachments,
-  transferMayContainFile, uploadPendingAttachments,
+  defaultAttachmentPrompt, pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
 } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
 import Attachments from './Attachments';
 import Logo from './Logo';
-import { SendGlyph } from './icons';
+import Composer from './conversation/Composer';
 import ExchangeView from './conversation/Exchange';
 import { useDraft } from './conversation/useDraft';
 import { writePaneMode } from '../lib/paneMode';
@@ -146,7 +145,6 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   const [images, setImages] = useState<PendingAttachment[]>([]);
   const imagesRef = useRef<PendingAttachment[]>([]);
   const [imageError, setImageError] = useState<string | null>(null);
-  const [dropActive, setDropActive] = useState(false);
   const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   // Optimistic echo: the sent text becomes the prompt line the moment the
@@ -221,21 +219,23 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
     const text = draft.trim();
     const batch = imagesRef.current;
     if ((!text && !batch.length) || sending) return;
+    const optimisticText = text || defaultAttachmentPrompt(batch.length);
     setSending(true);
     setFailed(null);
+    setDraft('');
+    setSent({ text: optimisticText, at: Date.now() });
+    setHistIdx(0);
+    if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     try {
       const attachments = await uploadPendingAttachments(s.id, batch, updateImage);
       await api.sendInput(s.id, text, attachments.map((image) => image.id));
-      const optimisticText = text || defaultAttachmentPrompt(batch.length);
-      setDraft('');
       revokePendingAttachments(batch);
       imagesRef.current = [];
       setImages([]);
       setImageError(null);
-      setSent({ text: optimisticText, at: Date.now() });
-      setHistIdx(0);
-      if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     } catch (error) {
+      setSent(null);
+      setDraft(text);
       setFailed(error instanceof Error ? error.message : 'failed to reach the agent');
       setTimeout(() => setFailed(null), 5000);
     }
@@ -371,55 +371,23 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
         )}
       </div>
 
-      <div
-        className={`ov-composer${dropActive ? ' image-drop' : ''}`}
-        onDragEnter={(event) => { if (allowAttachments && !sending && transferMayContainFile(event.dataTransfer)) { event.preventDefault(); setDropActive(true); } }}
-        onDragOver={(event) => { if (allowAttachments && !sending && transferMayContainFile(event.dataTransfer)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
-        onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropActive(false); }}
-        onDrop={(event) => {
-          if (!allowAttachments || sending || !transferMayContainFile(event.dataTransfer)) return;
-          event.preventDefault(); event.stopPropagation(); setDropActive(false);
-          addImages(filesFromTransfer(event.dataTransfer));
-        }}
-      >
-        <Attachments
+      <Composer
+        draft={draft}
+        sending={sending}
+        isMobile={isMobile}
+        inputRef={inputRef}
+        canSend={!!draft.trim() || images.length > 0}
+        above={<Attachments
           attachments={images}
           disabled={sending || !allowAttachments}
           disabledReason={!allowAttachments ? 'Files are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
           onFiles={addImages}
           onRemove={removeImage}
-        />
-        <div className="ov-live">
-          <span className="ov-p mono">❯</span>
-          <textarea
-            ref={inputRef}
-            rows={1}
-            value={draft}
-            disabled={sending}
-            placeholder={sending ? 'sending…' : 'reply…'}
-            autoComplete="off"
-            autoCorrect="off"
-            autoCapitalize="off"
-            spellCheck={false}
-            onPaste={(event) => {
-              const files = filesFromTransfer(event.clipboardData);
-              if (!allowAttachments || sending || !files.length) return;
-              event.preventDefault(); addImages(files);
-            }}
-            onChange={(e) => { setDraft(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
-            // iOS doesn't resize the layout for the keyboard — scroll the
-            // input into view once the keyboard has animated in.
-            onFocus={(e) => { const el = e.currentTarget; setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300); }}
-            onKeyDown={(e) => {
-              // Desktop: Enter sends, Shift+Enter newlines. Mobile keyboards can't
-              // do Shift+Enter, so Enter always newlines there and the button sends.
-              if (e.key === 'Enter' && !e.shiftKey && !isMobile) { e.preventDefault(); send(); }
-              if (e.key === 'Escape') { setDraft(''); inputRef.current?.blur(); }
-            }}
-          />
-          {(draft.trim() || images.length > 0) && <button className="ov-send" title="Send" onClick={send} disabled={sending}><SendGlyph /></button>}
-        </div>
-      </div>
+        />}
+        onChange={setDraft}
+        onSend={send}
+        onPasteFiles={allowAttachments ? addImages : undefined}
+      />
       {(imageError || failed) && <div className="ov-note" role="alert">{imageError || failed}</div>}
     </div>
   );

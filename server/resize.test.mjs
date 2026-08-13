@@ -54,6 +54,7 @@ const srv = spawn('node', ['src/index.js'], {
     PORT: String(PORT),
     DATA_DIR,
     AM_BASHRC: '/nonexistent',
+    AM_ALLOW_MISSING_ORIGIN: '1',
     AM_HISTORY_SAVE_MS: '50',
     AM_STARTUP_CAPTURE_IDLE_MS: '700',
     AM_STARTUP_CAPTURE_MAX_MS: '3000',

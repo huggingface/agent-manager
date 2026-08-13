@@ -20,8 +20,7 @@ import { useTraceWindows, type TraceSource } from '../../lib/traceWindows';
 import type { Session } from '../../types';
 import { isRemote } from '../../types';
 import {
-  defaultAttachmentPrompt, filesFromTransfer, pendingAttachmentsFromFiles, revokePendingAttachments,
-  transferMayContainFile, uploadPendingAttachments,
+  defaultAttachmentPrompt, pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
 } from '../../lib/attachments';
 import type { PendingAttachment } from '../../lib/attachments';
 import { recallReading, rememberReading } from './readingPosition';
@@ -29,7 +28,7 @@ import { useDraft } from './useDraft';
 import { fmtTok, splitExchanges } from './exchanges';
 import ExchangeView from './Exchange';
 import Attachments from '../Attachments';
-import { SendGlyph } from '../icons';
+import Composer from './Composer';
 
 const NEAR_TOP_PX = 300;   // start fetching older turns before the reader arrives
 
@@ -69,7 +68,6 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const attachmentsRef = useRef<PendingAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
-  const [dropActive, setDropActive] = useState(false);
   const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   const [sent, setSent] = useState<{ text: string; at: number } | null>(null);
@@ -167,20 +165,21 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
     const text = draft.trim();
     const batch = attachmentsRef.current;
     if ((!text && !batch.length) || sending) return;
+    const optimisticText = text || defaultAttachmentPrompt(batch.length);
     setSending(true); setFailed(null);
+    setDraft(''); setSent({ text: optimisticText, at: Date.now() });
+    if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
+    stick.current = true;
     try {
       const uploaded = await uploadPendingAttachments(session.id, batch, updateAttachment);
       await api.sendInput(session.id, text, uploaded.map((attachment) => attachment.id));
-      const optimisticText = text || defaultAttachmentPrompt(batch.length);
-      setDraft(''); setSent({ text: optimisticText, at: Date.now() });
       revokePendingAttachments(batch);
       attachmentsRef.current = [];
       setAttachments([]);
       setAttachmentError(null);
-      if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
-      stick.current = true;
       loadNewer();
     } catch (error) {
+      setSent(null); setDraft(text);
       setFailed(error instanceof Error ? error.message : 'failed to reach the agent');
       window.setTimeout(() => setFailed(null), 5000);
     }
@@ -493,49 +492,25 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
       </div>
 
       {!readOnly && (
-        <div
-          className={`ov-composer cxv-composer${dropActive ? ' image-drop' : ''}`}
-          onDragEnter={(event) => { if (allowAttachments && !sending && transferMayContainFile(event.dataTransfer)) { event.preventDefault(); setDropActive(true); } }}
-          onDragOver={(event) => { if (allowAttachments && !sending && transferMayContainFile(event.dataTransfer)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }}
-          onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropActive(false); }}
-          onDrop={(event) => {
-            if (!allowAttachments || sending || !transferMayContainFile(event.dataTransfer)) return;
-            event.preventDefault(); event.stopPropagation(); setDropActive(false);
-            addAttachments(filesFromTransfer(event.dataTransfer));
-          }}
-        >
-          <Attachments
+        <Composer
+          className="cxv-live"
+          containerClassName="cxv-composer"
+          draft={draft}
+          sending={sending}
+          isMobile={isMobile}
+          inputRef={inputRef}
+          canSend={!!draft.trim() || attachments.length > 0}
+          above={<Attachments
             attachments={attachments}
             disabled={sending || !allowAttachments}
             disabledReason={!allowAttachments ? 'Files are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
             onFiles={addAttachments}
             onRemove={removeAttachment}
-          />
-          <div className="ov-live cxv-live">
-            <span className="ov-p mono">❯</span>
-            <textarea
-              ref={inputRef}
-              rows={1}
-              value={draft}
-              disabled={sending}
-              placeholder={sending ? 'sending…' : 'reply…'}
-              autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
-              onPaste={(event) => {
-                const files = filesFromTransfer(event.clipboardData);
-                if (!allowAttachments || sending || !files.length) return;
-                event.preventDefault(); addAttachments(files);
-              }}
-              onChange={(e) => { setDraft(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
-              onKeyDown={(e) => {
-                // Desktop: Enter sends, Shift+Enter newlines. Mobile keyboards
-                // cannot do Shift+Enter, so there the button sends.
-                if (e.key === 'Enter' && !e.shiftKey && !isMobile) { e.preventDefault(); send(); }
-                if (e.key === 'Escape') { setDraft(''); inputRef.current?.blur(); }
-              }}
-            />
-            {(draft.trim() || attachments.length > 0) && <button className="ov-send" title="Send" onClick={send} disabled={sending}><SendGlyph /></button>}
-          </div>
-        </div>
+          />}
+          onChange={setDraft}
+          onSend={send}
+          onPasteFiles={allowAttachments ? addAttachments : undefined}
+        />
       )}
       {(attachmentError || failed) && <div className="ov-note cxv-note" role="alert">{attachmentError || failed}</div>}
 

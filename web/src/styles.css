@@ -1090,7 +1090,7 @@ a.btn-ghost { text-decoration: none; }
 /* terminal zoom bar */
 .pane-foot { display: flex; align-items: center; gap: 4px; padding: 3px 8px; background: var(--panel); border-top: 1px solid var(--border); flex: none; }
 .pane-foot .spacer { flex: 1; }
-.zbtn { width: 22px; height: 20px; border: 1px solid var(--border); background: var(--panel-2); color: var(--muted); border-radius: var(--r-sm); cursor: pointer; font-size: 13px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; }
+.zbtn { width: 22px; height: 22px; border: 1px solid var(--border); background: var(--panel-2); color: var(--muted); border-radius: var(--r-sm); cursor: pointer; font-size: 13px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; }
 .zbtn:hover { color: var(--text); border-color: var(--border-strong); }
 .zlvl { min-width: 44px; background: none; border: none; color: var(--muted); font-size: 11px; cursor: pointer; font-variant-numeric: tabular-nums; }
 .zlvl:hover { color: var(--text); }
@@ -1188,9 +1188,10 @@ a.btn-ghost { text-decoration: none; }
 /* mobile stage top bar (back + agent chips) — rendered only on mobile */
 .mbar { display: flex; align-items: center; gap: 8px; padding: 0 0 8px; flex: none; }
 .mback { flex: none; font-size: 19px; padding-bottom: 3px; }
-/* Reading mode, in the zoom bar: the same weight as the controls beside it. */
-.modebar { flex: none; margin-right: 6px; }
-.modebar button { padding: 2px 8px; font-size: 10.5px; letter-spacing: 0.02em; }
+/* Reader mode, in the zoom bar: the same height as every control beside it —
+   the zoom keys and the layout picker are both 22px. */
+.modebar { flex: none; margin-right: 6px; align-self: stretch; }
+.modebar button { height: 22px; padding: 0 9px; font-size: 11px; line-height: 1; }
 
 .mtitle { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mchips { display: flex; gap: 6px; overflow-x: auto; flex: 1; padding: 2px; }
