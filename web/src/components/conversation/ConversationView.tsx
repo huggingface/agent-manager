@@ -30,7 +30,7 @@ const fmtNum = (n: number) => n.toLocaleString();
 const fmtUsage = (u?: { in: number; out: number } | null) =>
   (u ? `${fmtTok(u.in)}↓ ${fmtTok(u.out)}↑` : '');
 
-export default function ConversationView({ session, paused, isMobile, readOnly, onHandover }: {
+export default function ConversationView({ session, paused, isMobile, readOnly, onHandover, onReady, readyKey }: {
   session: Session;
   /** The pane is off-screen: stop asking the server for a trace nobody sees. */
   paused?: boolean;
@@ -38,6 +38,10 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   /** A trace with no agent behind it — a shared file, an import. Read-only. */
   readOnly?: boolean;
   onHandover?: () => void;
+  /** Called after the first tail page (or its terminal error) has painted. */
+  onReady?: () => void;
+  /** The visible batch this paint should release. */
+  readyKey?: string;
 }) {
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState(0);
@@ -62,8 +66,8 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   const live = session.state === 'working' && !paused;
 
   const src = useMemo<TraceSource>(() => ({
-    window: (req, bytes) => api.getTraceWindow(session.id, req, bytes),
-    summary: () => api.getTraceSummary(session.id),
+    window: (req, bytes, min, signal) => api.getTraceWindow(session.id, req, bytes, min, signal),
+    summary: (signal) => api.getTraceSummary(session.id, signal),
   }), [session.id]);
 
   // React keys for the exchanges, and the reading position across a prepend.
@@ -95,6 +99,20 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   const turns: TraceTurn[] = turnsRef.current;
   const exchanges = useMemo(() => splitExchanges(turns), [version, turns]); // eslint-disable-line react-hooks/exhaustive-deps
   const last = exchanges[exchanges.length - 1];
+
+  // Group reader mode gives the focused pane the critical path. Its siblings
+  // wait for this signal before mounting their own readers, so one click cannot
+  // turn twelve retained panes into twelve competing tail reads. useEffect runs
+  // after the head/error render commits: this is a paint barrier, not a timer.
+  const readySentFor = useRef('');
+  const ready = useRef(onReady);
+  ready.current = onReady;
+  useEffect(() => {
+    const key = `${session.id}:${readyKey || ''}`;
+    if (readySentFor.current === key || (!head && !error)) return;
+    readySentFor.current = key;
+    ready.current?.();
+  }, [head, error, readyKey, session.id]);
 
   // The optimistic echo stands until the transcript catches up: a CLI writes it,
   // the reader picks it up, the poll lands — seconds, during which a card that
@@ -200,12 +218,12 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   const fills = useRef(0);
   useEffect(() => {
     const el = scroller.current;
-    if (!el || !head || atStart || blocked) return;
+    if (paused || !el || !head || atStart || blocked) return;
     if (el.scrollHeight > el.clientHeight) { fills.current = 0; return; }
     if (fills.current >= 2) return;
     fills.current += 1;
     loadOlder();
-  }, [version, head, atStart, blocked, loadOlder]);
+  }, [version, head, atStart, blocked, loadOlder, paused]);
 
   useLayoutEffect(() => {
     const el = scroller.current;

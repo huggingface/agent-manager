@@ -766,8 +766,8 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   // The reader opens on the tail of the transcript and pages backwards from
   // there; the summary is the one call that reads all of it.
   const traceSrc = useMemo<TraceSource>(() => ({
-    window: (req, bytes) => api.getFileTraceWindow(sessionId, path, req, bytes),
-    summary: () => api.getFileTraceSummary(sessionId, path),
+    window: (req, bytes, min, signal) => api.getFileTraceWindow(sessionId, path, req, bytes, min, signal),
+    summary: (signal) => api.getFileTraceSummary(sessionId, path, signal),
   }), [sessionId, path]);
 
   // Rendered markdown and a rendered trace do their own wrapping; the toggle is
