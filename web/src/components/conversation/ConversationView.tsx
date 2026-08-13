@@ -18,10 +18,16 @@ import * as api from '../../api';
 import type { TraceTurn } from '../../api';
 import { useTraceWindows, type TraceSource } from '../../lib/traceWindows';
 import type { Session } from '../../types';
+import { isRemote } from '../../types';
+import {
+  defaultAttachmentPrompt, pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
+} from '../../lib/attachments';
+import type { PendingAttachment } from '../../lib/attachments';
 import { recallReading, rememberReading } from './readingPosition';
 import { useDraft } from './useDraft';
 import { fmtTok, splitExchanges } from './exchanges';
 import ExchangeView from './Exchange';
+import Attachments from '../Attachments';
 import Composer from './Composer';
 
 const NEAR_TOP_PX = 300;   // start fetching older turns before the reader arrives
@@ -59,9 +65,43 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   // and coming back is usually a cold mount — the tab was evicted, or the Hub
   // rebuilt the iframe — and plain state loses the text. drafts.ts.
   const [draft, setDraft] = useDraft(session.id, inputRef);
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const attachmentsRef = useRef<PendingAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
   const [sent, setSent] = useState<{ text: string; at: number } | null>(null);
+  const allowAttachments = !isRemote(session.cli);
+
+  useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
+  useEffect(() => () => revokePendingAttachments(attachmentsRef.current), []);
+
+  const addAttachments = (files: File[]) => {
+    if (!allowAttachments || sending || !files.length) return;
+    const next = pendingAttachmentsFromFiles(files, attachmentsRef.current.length);
+    const merged = [...attachmentsRef.current, ...next.attachments];
+    attachmentsRef.current = merged;
+    setAttachments(merged);
+    setAttachmentError(next.error);
+  };
+  const removeAttachment = (key: string) => {
+    if (sending) return;
+    setAttachments((current) => {
+      const removed = current.find((attachment) => attachment.key === key);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      const next = current.filter((attachment) => attachment.key !== key);
+      attachmentsRef.current = next;
+      return next;
+    });
+    setAttachmentError(null);
+  };
+  const updateAttachment = (key: string, patch: Partial<PendingAttachment>) => {
+    setAttachments((current) => {
+      const next = current.map((attachment) => attachment.key === key ? { ...attachment, ...patch } : attachment);
+      attachmentsRef.current = next;
+      return next;
+    });
+  };
 
   const live = session.state === 'working' && !paused;
 
@@ -119,25 +159,29 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   // showed nothing would read as "did that get lost?".
   const promptOf = (x?: typeof last) =>
     (x?.prompt?.blocks || []).filter((b) => b.type === 'text').map((b) => ('text' in b ? b.text : '')).join('').trim();
-  if (sent && promptOf(last) === sent.text) setSent(null);
+  if (sent && (last?.startTs || 0) >= sent.at - 60_000 && promptOf(last).startsWith(sent.text)) setSent(null);
 
   const send = async () => {
     const text = draft.trim();
-    if (!text || sending) return;
-    // Optimistic, and it has to be: the prompt belongs on screen the moment you
-    // send it, not when the POST comes back. Waiting for the round trip left a
-    // beat where the box was still full and nothing had happened. If the send
-    // fails, the echo is withdrawn and the text goes back in the box.
-    setSending(true); setFailed(false);
-    setDraft(''); setSent({ text, at: Date.now() });
+    const batch = attachmentsRef.current;
+    if ((!text && !batch.length) || sending) return;
+    const optimisticText = text || defaultAttachmentPrompt(batch.length);
+    setSending(true); setFailed(null);
+    setDraft(''); setSent({ text: optimisticText, at: Date.now() });
     if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     stick.current = true;
     try {
-      await api.sendInput(session.id, text);
+      const uploaded = await uploadPendingAttachments(session.id, batch, updateAttachment);
+      await api.sendInput(session.id, text, uploaded.map((attachment) => attachment.id));
+      revokePendingAttachments(batch);
+      attachmentsRef.current = [];
+      setAttachments([]);
+      setAttachmentError(null);
       loadNewer();
-    } catch {
-      setSent(null); setDraft(text); setFailed(true);
-      window.setTimeout(() => setFailed(false), 4000);
+    } catch (error) {
+      setSent(null); setDraft(text);
+      setFailed(error instanceof Error ? error.message : 'failed to reach the agent');
+      window.setTimeout(() => setFailed(null), 5000);
     }
     setSending(false);
   };
@@ -450,15 +494,25 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
       {!readOnly && (
         <Composer
           className="cxv-live"
+          containerClassName="cxv-composer"
           draft={draft}
           sending={sending}
           isMobile={isMobile}
           inputRef={inputRef}
+          canSend={!!draft.trim() || attachments.length > 0}
+          above={<Attachments
+            attachments={attachments}
+            disabled={sending || !allowAttachments}
+            disabledReason={!allowAttachments ? 'Files are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
+            onFiles={addAttachments}
+            onRemove={removeAttachment}
+          />}
           onChange={setDraft}
           onSend={send}
+          onPasteFiles={allowAttachments ? addAttachments : undefined}
         />
       )}
-      {failed && <div className="ov-note cxv-note">failed to reach the agent</div>}
+      {(attachmentError || failed) && <div className="ov-note cxv-note" role="alert">{attachmentError || failed}</div>}
 
       <div className="cxv-foot mono">
         <span className="cxv-path" title={head.cwd || undefined}>

@@ -13,9 +13,10 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test:ui": "node terminal-ui.test.mjs",
+    "test:ui": "node terminal-ui.test.mjs && node screenshot-input.test.mjs",
+    "test:screenshots": "node screenshot-input.test.mjs",
     "test:mobile": "node mobile.test.mjs",
-    "test": "node state-checkpoint.test.mjs && node test/usage.test.mjs && node test/operations.test.mjs && node test/hidden.test.mjs && node test/slowfs.test.mjs && node test/spawn-group.test.mjs && node test/revive.test.mjs && node test/repin.test.mjs && node test/codex-repin.test.mjs && node test/opencode-resume.test.mjs && node test/terminal-modes.test.mjs && node test/trace-tail.test.mjs && node test/trace-window.test.mjs && node migration.test.mjs && node resize.test.mjs"
+    "test": "node test/attachments.test.mjs && node state-checkpoint.test.mjs && node test/usage.test.mjs && node test/operations.test.mjs && node test/hidden.test.mjs && node test/slowfs.test.mjs && node test/spawn-group.test.mjs && node test/revive.test.mjs && node test/repin.test.mjs && node test/codex-repin.test.mjs && node test/opencode-resume.test.mjs && node test/terminal-modes.test.mjs && node test/trace-tail.test.mjs && node test/trace-window.test.mjs && node migration.test.mjs && node resize.test.mjs"
   },
   "engines": {
     "node": ">=20.19"

@@ -7,19 +7,25 @@
  * the card (paste-to-attach, PR #39; a slash-command menu; history recall) and
  * quietly does not exist in the pane. Everything a composer can do belongs here.
  */
-import type { ClipboardEvent, KeyboardEvent, ReactNode, RefObject } from 'react';
+import { useState } from 'react';
+import type { ClipboardEvent, DragEvent, KeyboardEvent, ReactNode, RefObject } from 'react';
+import { filesFromTransfer, transferMayContainFile } from '../../lib/attachments';
 import { SendGlyph } from '../icons';
 
 export default function Composer({
-  draft, sending, isMobile, inputRef, className = '', above, onChange, onSend, onCancel, onPasteFiles,
+  draft, sending, isMobile, inputRef, className = '', containerClassName = '', above, canSend,
+  onChange, onSend, onCancel, onPasteFiles,
 }: {
   draft: string;
   sending?: boolean;
   isMobile?: boolean;
   inputRef?: RefObject<HTMLTextAreaElement | null>;
   className?: string;
+  containerClassName?: string;
   /** Rendered directly above the line — an attachment strip, when there is one. */
   above?: ReactNode;
+  /** Overrides the send-button condition, for example when files are attached without text. */
+  canSend?: boolean;
   onChange: (v: string) => void;
   onSend: () => void;
   onCancel?: () => void;
@@ -30,17 +36,21 @@ export default function Composer({
    */
   onPasteFiles?: (files: File[]) => void;
 }) {
+  const [dropActive, setDropActive] = useState(false);
+  const filesEnabled = !!onPasteFiles && !sending;
   const grow = (el: HTMLTextAreaElement) => {
     el.style.height = 'auto';
     el.style.height = `${el.scrollHeight}px`;
   };
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!onPasteFiles || sending) return;
-    const files = Array.from(e.clipboardData?.files || []);
+    if (!filesEnabled || !onPasteFiles) return;
+    const files = filesFromTransfer(e.clipboardData);
     if (!files.length) return;
     e.preventDefault();
     onPasteFiles(files);
   };
+  const acceptsDrop = (e: DragEvent<HTMLDivElement>) =>
+    filesEnabled && transferMayContainFile(e.dataTransfer);
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     // Desktop: Enter sends, Shift+Enter newlines. Mobile keyboards cannot do
     // Shift+Enter, so there Enter newlines and the button sends.
@@ -48,7 +58,19 @@ export default function Composer({
     if (e.key === 'Escape') { onChange(''); onCancel?.(); inputRef?.current?.blur(); }
   };
   return (
-    <>
+    <div
+      className={`ov-composer${containerClassName ? ` ${containerClassName}` : ''}${dropActive ? ' image-drop' : ''}`}
+      onDragEnter={(e) => { if (acceptsDrop(e)) { e.preventDefault(); setDropActive(true); } }}
+      onDragOver={(e) => { if (acceptsDrop(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } }}
+      onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropActive(false); }}
+      onDrop={(e) => {
+        if (!acceptsDrop(e) || !onPasteFiles) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setDropActive(false);
+        onPasteFiles(filesFromTransfer(e.dataTransfer));
+      }}
+    >
       {above}
       <div className={`ov-live ${className}`.trim()}>
       <span className="ov-p mono">❯</span>
@@ -66,10 +88,10 @@ export default function Composer({
         onFocus={(e) => { const el = e.currentTarget; setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300); }}
         onKeyDown={onKeyDown}
       />
-        {draft.trim() && (
+        {(canSend ?? !!draft.trim()) && (
           <button className="ov-send" title="Send" onClick={onSend} disabled={sending}><SendGlyph /></button>
         )}
       </div>
-    </>
+    </div>
   );
 }

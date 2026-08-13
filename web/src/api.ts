@@ -196,8 +196,40 @@ export const getRemotePrompt = (name: string): Promise<string> =>
 export const setRemotePaused = (id: string, paused: boolean): Promise<RemoteInfo> =>
   fetch(`/api/sessions/${id}/remote/paused`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ paused }) }).then(json);
 
-export const sendInput = (id: string, text: string): Promise<{ ok: boolean; started?: boolean }> =>
-  fetch(`/api/sessions/${id}/input`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ text }) }).then(json);
+export interface Attachment {
+  id: string;
+  kind: 'image' | 'file';
+  name: string;
+  mime: string;
+  bytes: number;
+  path: string;
+  previewUrl: string;
+  insertText: string;
+}
+
+export const uploadAttachment = async (id: string, file: File): Promise<Attachment> => {
+  const headers: Record<string, string> = {
+    'x-file-name': encodeURIComponent(file.name || 'Attachment'),
+  };
+  if (file.type) headers['content-type'] = file.type;
+  const response = await fetch(`/api/sessions/${id}/attachments`, {
+    method: 'POST',
+    headers,
+    body: file,
+  });
+  return jsonOrError(response);
+};
+
+export const insertAttachments = (
+  id: string,
+  attachmentIds: string[],
+): Promise<{ ok: boolean; mode: 'inserted' | 'attached'; repeated?: boolean }> =>
+  fetch(`/api/sessions/${id}/attachments/insert`, {
+    method: 'POST', headers: HEADERS, body: JSON.stringify({ attachmentIds }),
+  }).then(jsonOrError);
+
+export const sendInput = (id: string, text: string, attachmentIds: string[] = []): Promise<{ ok: boolean; started?: boolean }> =>
+  fetch(`/api/sessions/${id}/input`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ text, attachmentIds }) }).then(jsonOrError);
 
 // ---- push notifications ----
 export const getPushKey = (): Promise<{ publicKey: string; devices: number }> =>

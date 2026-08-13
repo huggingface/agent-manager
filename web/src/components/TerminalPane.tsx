@@ -13,6 +13,12 @@ import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
 import { CloseGlyph, RefreshGlyph } from './icons';
+import * as api from '../api';
+import type { Attachment } from '../api';
+import {
+  MAX_ATTACHMENTS, attachmentFileError, filesFromClipboardItems, filesFromTransfer,
+  transferMayContainFile,
+} from '../lib/attachments';
 
 const THEMES: Record<'light' | 'dark', ITheme> = {
   dark: {
@@ -215,6 +221,10 @@ export default function TerminalPane({
   const resyncRef = useRef<() => void>(() => {});
   const reconcileScrollRef = useRef<() => void>(() => {});
   const claimRef = useRef<() => void>(() => {});
+  const uploadImagesRef = useRef<(files: File[]) => void>(() => {});
+  const imagePickerRef = useRef<HTMLInputElement>(null);
+  const imageUploadBusyRef = useRef(false);
+  const imageStatusTimerRef = useRef<number | null>(null);
   // Reachable from the mode switch: a flick can still be coasting through the
   // terminal's scrollback when the reader covers it.
   const stopGlideRef = useRef<() => void>(() => {});
@@ -236,10 +246,21 @@ export default function TerminalPane({
   // something — byte counts lie because a blank-screen repaint can already be
   // kilobytes of escape sequences.
   const [booting, setBooting] = useState(true);
+  // The viewer badge is gone, but file insertion still needs the input lease:
+  // a watcher must never upload successfully and then have its terminal paste
+  // dropped because another browser owns the PTY.
+  const [hasInputControl, setHasInputControl] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(session.name);
   // Fallback paste sheet: shown only when we can't read the clipboard directly.
   const [pasteOpen, setPasteOpen] = useState(false);
+  const [imageDrop, setImageDrop] = useState(false);
+  const [imageStatus, setImageStatus] = useState<{ kind: 'uploading' | 'success' | 'error'; text: string } | null>(null);
+  const [imageUploadBusy, setImageUploadBusy] = useState(false);
+  const [pendingInsert, setPendingInsert] = useState<Attachment[]>([]);
+  const supportsAttachments = session.cli !== 'shell';
+  const canAttachFiles = supportsAttachments && conn === 'connected' && hasInputControl
+    && !imageUploadBusy && pendingInsert.length === 0;
   const commitName = () => {
     const v = draft.trim();
     if (v && v !== session.name) onRename?.(v);
@@ -256,6 +277,107 @@ export default function TerminalPane({
     focusTerm();
   };
 
+  const showImageStatus = (status: { kind: 'uploading' | 'success' | 'error'; text: string }, linger = 0) => {
+    if (imageStatusTimerRef.current) window.clearTimeout(imageStatusTimerRef.current);
+    setImageStatus(status);
+    if (linger) imageStatusTimerRef.current = window.setTimeout(() => setImageStatus(null), linger);
+  };
+
+  const insertTerminalAttachments = async (attachments: Attachment[]) => {
+    try {
+      const result = await api.insertAttachments(session.id, attachments.map((attachment) => attachment.id));
+      setPendingInsert([]);
+      const count = attachments.length;
+      showImageStatus({
+        kind: 'success',
+        text: result.mode === 'attached'
+          ? `${count === 1 ? 'File' : `${count} files`} attached — continue typing`
+          : `${count === 1 ? 'File' : `${count} files`} inserted — press Enter when ready`,
+      }, 3000);
+      termRef.current?.focus();
+      return true;
+    } catch {
+      setPendingInsert(attachments);
+      showImageStatus({
+        kind: 'error',
+        text: `${attachments.length === 1 ? 'File was' : 'Files were'} saved but not inserted`,
+      });
+      return false;
+    }
+  };
+
+  const retryTerminalInsert = async () => {
+    if (!pendingInsert.length || imageUploadBusyRef.current) return;
+    if (conn !== 'connected') {
+      showImageStatus({ kind: 'error', text: 'Restart or reconnect the agent before retrying' });
+      return;
+    }
+    if (!hasInputControl) {
+      showImageStatus({ kind: 'error', text: 'Interact with the terminal to take control before retrying' });
+      return;
+    }
+    imageUploadBusyRef.current = true;
+    setImageUploadBusy(true);
+    showImageStatus({ kind: 'uploading', text: 'inserting saved file…' });
+    try { await insertTerminalAttachments(pendingInsert); } finally {
+      imageUploadBusyRef.current = false;
+      setImageUploadBusy(false);
+    }
+  };
+
+  uploadImagesRef.current = (files: File[]) => {
+    if (!supportsAttachments) return;
+    if (conn !== 'connected') {
+      showImageStatus({ kind: 'error', text: 'Restart or reconnect the agent before attaching files' }, 5000);
+      return;
+    }
+    if (!hasInputControl) {
+      showImageStatus({ kind: 'error', text: 'Interact with the terminal to take control before attaching files' }, 5000);
+      return;
+    }
+    if (pendingInsert.length) {
+      showImageStatus({ kind: 'error', text: 'Retry the saved file before attaching another' });
+      return;
+    }
+    if (imageUploadBusyRef.current) return;
+    const candidates = files;
+    if (candidates.length > MAX_ATTACHMENTS) {
+      showImageStatus({ kind: 'error', text: `Attach at most ${MAX_ATTACHMENTS} files at a time` }, 4000);
+      return;
+    }
+    const images = candidates.slice(0, MAX_ATTACHMENTS);
+    if (!images.length) return;
+    const invalid = images.map((file) => attachmentFileError(file)).find(Boolean);
+    if (invalid) { showImageStatus({ kind: 'error', text: invalid }, 4000); return; }
+    imageUploadBusyRef.current = true;
+    setImageUploadBusy(true);
+    void (async () => {
+      const attachments: Attachment[] = [];
+      try {
+        for (let index = 0; index < images.length; index += 1) {
+          showImageStatus({ kind: 'uploading', text: `uploading file${images.length > 1 ? ` ${index + 1}/${images.length}` : ''}…` });
+          const attachment = await api.uploadAttachment(session.id, images[index]);
+          attachments.push(attachment);
+        }
+        showImageStatus({ kind: 'uploading', text: `inserting file${images.length === 1 ? '' : 's'}…` });
+        await insertTerminalAttachments(attachments);
+      } catch (error) {
+        if (attachments.length) {
+          setPendingInsert(attachments);
+          showImageStatus({
+            kind: 'error',
+            text: `${attachments.length} file${attachments.length === 1 ? '' : 's'} saved; another failed to upload`,
+          });
+        } else {
+          showImageStatus({ kind: 'error', text: error instanceof Error ? error.message : 'file upload failed' }, 5000);
+        }
+      } finally {
+        imageUploadBusyRef.current = false;
+        setImageUploadBusy(false);
+      }
+    })();
+  };
+
   // Phones have no Ctrl+V, so the key-bar needs an explicit paste. Two paths,
   // because the direct read is unavailable exactly where this app usually runs:
   //   1. navigator.clipboard.readText() — works top-level (iOS shows its own
@@ -266,12 +388,17 @@ export default function TerminalPane({
   //      not permissioned — so this works even when (1) is denied.
   // execCommand('paste') is not an option: unlike 'copy' it's disabled for web
   // content in every browser, so there is no synchronous legacy path.
-  const requestPaste = () => {
-    let p: Promise<string> | undefined;
-    try { p = navigator.clipboard?.readText?.(); } catch { p = undefined; }
-    if (!p) { setPasteOpen(true); return; }
-    p.then((text) => { if (text) commitPaste(text); else setPasteOpen(true); })
-      .catch(() => setPasteOpen(true));
+  const requestPaste = async () => {
+    try {
+      if (navigator.clipboard?.read) {
+        const items = await navigator.clipboard.read();
+        const files = await filesFromClipboardItems(items);
+        if (files.length && supportsAttachments) { uploadImagesRef.current(files); return; }
+      }
+      const text = await navigator.clipboard?.readText?.();
+      if (text) { commitPaste(text); return; }
+    } catch { /* cross-origin iframe / denied permission: use DOM paste below */ }
+    setPasteOpen(true);
   };
 
   useEffect(() => {
@@ -404,6 +531,7 @@ export default function TerminalPane({
       // Optimistic locally so the input event following this gesture is not
       // dropped. WebSocket ordering guarantees claim reaches the server first.
       controllerRef.current = true;
+      setHasInputControl(true);
       send({ t: 'claim' });
     };
     claimRef.current = claimControl;
@@ -412,9 +540,37 @@ export default function TerminalPane({
       // the gesture actually needs to drive an application's mouse mode.
       if (e.pointerType !== 'touch') claimControl();
     };
-    const onPaste = () => claimControl();
+    const onPaste = (event: ClipboardEvent) => {
+      const files = event.clipboardData ? filesFromTransfer(event.clipboardData) : [];
+      if (supportsAttachments && files.length) {
+        event.preventDefault(); event.stopImmediatePropagation();
+        uploadImagesRef.current(files);
+        return;
+      }
+      claimControl();
+    };
+    const onDragEnter = (event: DragEvent) => {
+      if (!supportsAttachments || !event.dataTransfer || !transferMayContainFile(event.dataTransfer)) return;
+      event.preventDefault(); event.stopPropagation(); setImageDrop(true);
+    };
+    const onDragOver = (event: DragEvent) => {
+      if (!supportsAttachments || !event.dataTransfer || !transferMayContainFile(event.dataTransfer)) return;
+      event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'copy';
+    };
+    const onDragLeave = (event: DragEvent) => {
+      if (!host.contains(event.relatedTarget as Node | null)) setImageDrop(false);
+    };
+    const onDrop = (event: DragEvent) => {
+      if (!supportsAttachments || !event.dataTransfer || !transferMayContainFile(event.dataTransfer)) return;
+      event.preventDefault(); event.stopPropagation(); setImageDrop(false);
+      uploadImagesRef.current(filesFromTransfer(event.dataTransfer));
+    };
     host.addEventListener('pointerdown', onPointerDown, true);
     host.addEventListener('paste', onPaste, true);
+    host.addEventListener('dragenter', onDragEnter, true);
+    host.addEventListener('dragover', onDragOver, true);
+    host.addEventListener('dragleave', onDragLeave, true);
+    host.addEventListener('drop', onDrop, true);
 
     // The mobile key-bar sends control sequences the on-screen keyboard can't.
     sendKeyRef.current = (d: string) => {
@@ -485,6 +641,7 @@ export default function TerminalPane({
     };
     const connect = () => {
       controllerRef.current = false;
+      setHasInputControl(false);
       setConn('connecting');
       // A reconnect keeps the already-rendered xterm visible. On a fresh page,
       // `booting` instead exposes the saved preview until canonical restore has
@@ -516,6 +673,7 @@ export default function TerminalPane({
             const m = JSON.parse(d.slice(MODE_CTRL.length));
             if (m.t === 'grid' || m.t === 'restore') {
               controllerRef.current = !!m.controller;
+              setHasInputControl(!!m.controller);
               const applyGrid = () => {
                 try {
                   // xterm can retain the old pixel scrollTop when the viewport
@@ -758,6 +916,10 @@ export default function TerminalPane({
       ro.disconnect();
       host.removeEventListener('pointerdown', onPointerDown, true);
       host.removeEventListener('paste', onPaste, true);
+      host.removeEventListener('dragenter', onDragEnter, true);
+      host.removeEventListener('dragover', onDragOver, true);
+      host.removeEventListener('dragleave', onDragLeave, true);
+      host.removeEventListener('drop', onDrop, true);
       document.removeEventListener('copy', onCopy, true);
       frame.removeEventListener('touchstart', onTouchStart);
       frame.removeEventListener('touchmove', onTouchMove, true);
@@ -776,6 +938,8 @@ export default function TerminalPane({
       resyncRef.current = () => {};
       reconcileScrollRef.current = () => {};
       claimRef.current = () => {};
+      uploadImagesRef.current = () => {};
+      if (imageStatusTimerRef.current) window.clearTimeout(imageStatusTimerRef.current);
     };
   }, [session.id]);
 
@@ -883,8 +1047,38 @@ export default function TerminalPane({
         )}
         <div className="ph-right">
           <span className="ph-path" title={pathLabel}>{pathLabel}</span>
-          {/* The trace stops being a separate thing you open: it is this
-              session, read instead of watched. */}
+          {supportsAttachments && !reading && (
+            <>
+              <button
+                className="mini-btn ph-image"
+                title={conn === 'connected'
+                  ? (!hasInputControl
+                    ? 'Interact with the terminal to take control before attaching files'
+                    : (pendingInsert.length ? 'Retry the saved file first' : 'Attach files'))
+                  : 'Restart or reconnect the agent to attach files'}
+                aria-label="Attach files"
+                disabled={!canAttachFiles}
+                draggable={false}
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => { event.stopPropagation(); imagePickerRef.current?.click(); }}
+              >
+                <svg viewBox="0 0 18 18" aria-hidden="true">
+                  <path d="M6.2 9.7 10.8 5a2.5 2.5 0 0 1 3.6 3.5l-6.2 6.3a4 4 0 0 1-5.7-5.7l6-6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </button>
+              <input
+                ref={imagePickerRef}
+                className="image-file-input"
+                type="file"
+                multiple
+                disabled={!canAttachFiles}
+                onChange={(event) => {
+                  uploadImagesRef.current(Array.from(event.currentTarget.files || []));
+                  event.currentTarget.value = '';
+                }}
+              />
+            </>
+          )}
           <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
@@ -892,7 +1086,7 @@ export default function TerminalPane({
           `none` so the drag handler above owns terminal panning, and that also
           forbids the browser from panning anything nested inside — including
           the reader's own scroller. */}
-      <div className={`term-host${reading ? ' reading' : ''}`} ref={frameRef}>
+      <div className={`term-host${reading ? ' reading' : ''}${imageDrop && !reading ? ' image-drop' : ''}`} ref={frameRef}>
         <div className="term-fill" ref={hostRef} />
         {/* Reader mode draws OVER the terminal rather than replacing it: xterm needs
             layout to fit, and detaching tmux costs a repaint and can trip the
@@ -913,7 +1107,19 @@ export default function TerminalPane({
           </div>
         )}
       </div>
-      {isMobile && conn === 'connected' && (
+      {imageStatus && !reading && (
+        <div
+          className={`term-image-status ${imageStatus.kind}${pendingInsert.length ? ' has-action' : ''} mono`}
+          role={imageStatus.kind === 'error' ? 'alert' : 'status'}
+          aria-live={imageStatus.kind === 'error' ? 'assertive' : 'polite'}
+        >
+          <span>{imageStatus.text}</span>
+          {pendingInsert.length > 0 && (
+            <button type="button" onClick={retryTerminalInsert} disabled={imageUploadBusy || conn !== 'connected' || !hasInputControl}>retry</button>
+          )}
+        </div>
+      )}
+      {isMobile && conn === 'connected' && !reading && (
         // Control keys the phone keyboard lacks — needed for TUI menus (model
         // pickers, etc.). preventDefault keeps terminal focus so the keyboard
         // stays up; the send also refocuses the terminal.
@@ -955,6 +1161,11 @@ export default function TerminalPane({
             // manual backup when they don't.
             placeholder="tap Paste — or long-press here"
             onPaste={(e) => {
+              const files = filesFromTransfer(e.clipboardData);
+              if (supportsAttachments && files.length) {
+                e.preventDefault(); setPasteOpen(false); uploadImagesRef.current(files);
+                return;
+              }
               const text = e.clipboardData.getData('text/plain');
               if (text) { e.preventDefault(); commitPaste(text); }
             }}

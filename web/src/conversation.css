@@ -290,7 +290,8 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 
 /* The reply line under a rendered conversation — the card's own composer, so
    answering an agent looks the same wherever you are reading it. */
-.cxv-live { flex: none; padding: 6px 12px; border-top: 1px solid var(--border); background: var(--panel); font-size: 1em; }
+.cxv-composer { flex: none; padding: 6px 12px; border-top: 1px solid var(--border); background: var(--panel); font-size: 1em; }
+.cxv-composer .cxv-live { padding: 0; border-top: 0; background: transparent; }
 /* The card's reply line is a fixed 13px; here it follows the conversation above
    it, the way the remote pane's composer follows its log. */
 .cxv-live .ov-p, .cxv-live textarea { font-size: 1em; }

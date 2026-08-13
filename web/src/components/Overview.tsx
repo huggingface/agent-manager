@@ -8,6 +8,11 @@ import { renderMarkdown } from '../lib/markdown';
 import { rankSessions, sortLabel } from '../lib/overviewSort';
 import { hiddenSessionIds } from '../lib/overviewHidden';
 import type { Rankable } from '../lib/overviewSort';
+import {
+  defaultAttachmentPrompt, pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
+} from '../lib/attachments';
+import type { PendingAttachment } from '../lib/attachments';
+import Attachments from './Attachments';
 import Logo from './Logo';
 import Composer from './conversation/Composer';
 import ExchangeView from './conversation/Exchange';
@@ -137,8 +142,11 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   // the same session, so the text you started in the card is the text the reader
   // hands back. See drafts.ts for what it survives.
   const [draft, setDraft] = useDraft(s.id, inputRef);
+  const [images, setImages] = useState<PendingAttachment[]>([]);
+  const imagesRef = useRef<PendingAttachment[]>([]);
+  const [imageError, setImageError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
   // Optimistic echo: the sent text becomes the prompt line the moment the
   // send succeeds — the digest round-trip (CLI writes transcript → rebuild →
   // poll) can take seconds, and a frozen card reads as "did that get lost?".
@@ -151,6 +159,37 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   // The window is the only place the card can grow; inline in the list it stays
   // a summary, so the answer is clamped and history stays behind the pane.
   const windowed = !!onClose;
+  const allowAttachments = !isRemote(s.cli);
+
+  useEffect(() => { imagesRef.current = images; }, [images]);
+  useEffect(() => () => revokePendingAttachments(imagesRef.current), []);
+
+  const addImages = (files: File[]) => {
+    if (!allowAttachments || sending || !files.length) return;
+    const next = pendingAttachmentsFromFiles(files, imagesRef.current.length);
+    const merged = [...imagesRef.current, ...next.attachments];
+    imagesRef.current = merged;
+    setImages(merged);
+    setImageError(next.error);
+  };
+  const removeImage = (key: string) => {
+    if (sending) return;
+    setImages((current) => {
+      const removed = current.find((image) => image.key === key);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      const next = current.filter((image) => image.key !== key);
+      imagesRef.current = next;
+      return next;
+    });
+    setImageError(null);
+  };
+  const updateImage = (key: string, patch: Partial<PendingAttachment>) => {
+    setImages((current) => {
+      const next = current.map((image) => image.key === key ? { ...image, ...patch } : image);
+      imagesRef.current = next;
+      return next;
+    });
+  };
 
   // After you send (or when the transcript shows a prompt newer than the last
   // answer), the old answer is stale — a spinner takes its place.
@@ -178,23 +217,27 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
 
   const send = async () => {
     const text = draft.trim();
-    if (!text || sending) return;
-    // Optimistic — see ConversationView.send: the echo goes up first, and is
-    // withdrawn if the send fails. The card and the reader answer the same way
-    // because they are the same composer.
+    const batch = imagesRef.current;
+    if ((!text && !batch.length) || sending) return;
+    const optimisticText = text || defaultAttachmentPrompt(batch.length);
     setSending(true);
-    setFailed(false);
+    setFailed(null);
     setDraft('');
-    setSent({ text, at: Date.now() });
+    setSent({ text: optimisticText, at: Date.now() });
     setHistIdx(0);
     if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     try {
-      await api.sendInput(s.id, text);
-    } catch {
+      const attachments = await uploadPendingAttachments(s.id, batch, updateImage);
+      await api.sendInput(s.id, text, attachments.map((image) => image.id));
+      revokePendingAttachments(batch);
+      imagesRef.current = [];
+      setImages([]);
+      setImageError(null);
+    } catch (error) {
       setSent(null);
       setDraft(text);
-      setFailed(true);
-      setTimeout(() => setFailed(false), 4000);
+      setFailed(error instanceof Error ? error.message : 'failed to reach the agent');
+      setTimeout(() => setFailed(null), 5000);
     }
     setSending(false);
   };
@@ -333,10 +376,19 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
         sending={sending}
         isMobile={isMobile}
         inputRef={inputRef}
+        canSend={!!draft.trim() || images.length > 0}
+        above={<Attachments
+          attachments={images}
+          disabled={sending || !allowAttachments}
+          disabledReason={!allowAttachments ? 'Files are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
+          onFiles={addImages}
+          onRemove={removeImage}
+        />}
         onChange={setDraft}
         onSend={send}
+        onPasteFiles={allowAttachments ? addImages : undefined}
       />
-      {failed && <div className="ov-note">failed to reach the agent</div>}
+      {(imageError || failed) && <div className="ov-note" role="alert">{imageError || failed}</div>}
     </div>
   );
 }
