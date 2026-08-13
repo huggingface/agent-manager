@@ -192,7 +192,11 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    you scan for — still spanned the full width, so the two disagreed about where
    the conversation began. The pane is the measure: make it narrow and the
    conversation is narrow. */
-.cxv-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px 14px 30px; }
+/* The gutter is a variable because the prompt band bleeds INTO it (below). A
+   hardcoded bleed against a padding that changes at a breakpoint drifts apart,
+   and the band ends up wider than the scroller it sits in — which is exactly
+   how the phone gained a sideways scroll: 14px of bleed, 8px of padding. */
+.cxv-body { --cx-gutter: 14px; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px var(--cx-gutter) 30px; }
 .cxv-col { display: flex; flex-direction: column; min-width: 0; }
 .cxv-msg { font-size: 0.85em; color: var(--muted); padding: 6px 0; }
 /* The line above the oldest loaded exchange. Fixed height on purpose: it sits
@@ -231,7 +235,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    text column on the right made it read as a card floating over the answer
    rather than as the head of it. Full bleed both sides, with the text inside
    still on the column. */
-.cxv-col .cx-prompt { margin-right: -14px; padding-right: 14px; }
+.cxv-col .cx-prompt { margin-right: calc(-1 * var(--cx-gutter)); padding-right: var(--cx-gutter); }
 .cxv-body > .cxv-col > .cx { padding-left: 16px; }
 
 /* Grouping: the meta row is the prompt's, not the answer's, so it sits tight
@@ -241,7 +245,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 
 /* ---------- phone ---------- */
 @media (max-width: 720px) {
-  .cxv-body { padding: 4px 8px 24px; }
+  .cxv-body { --cx-gutter: 8px; padding: 4px var(--cx-gutter) 24px; }
   .cs-detail { font-size: 1em; }
 }
 
