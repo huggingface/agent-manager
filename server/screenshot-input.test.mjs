@@ -61,10 +61,18 @@ if (!process.env.SCREENSHOT_PUBLIC_DIR) {
   if (build.status !== 0) throw new Error(`web build failed:\n${build.stdout}\n${build.stderr}`);
 }
 
+// A test server must not publish skills — the same strip migration.test.mjs,
+// resize.test.mjs and mobile.test.mjs do, for the same reason: `SPACE_ID` is set
+// when this runs inside the Space itself, and generateEnvSkill() then fans this
+// checkout's environment skill into every live agent's skills dir, over the
+// copies the running backend wrote. Those dirs come from $HOME, NOT from
+// DATA_DIR, so a throwaway DATA_DIR does not contain the damage.
+const { SPACE_ID, AM_DISTRIBUTE_SKILLS, ...BASE_ENV } = process.env;
+
 const backend = spawn('node', ['src/index.js'], {
   cwd: HERE,
   env: {
-    ...process.env,
+    ...BASE_ENV,
     PORT: '7896', DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '',
     AM_ALLOW_MISSING_ORIGIN: '1',
     AM_TEST_REPAINT_CMD: 'bash --noprofile --norc',
