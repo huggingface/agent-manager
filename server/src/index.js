@@ -1139,6 +1139,24 @@ sandboxes it exits 0 rather than failing. A wrong port therefore reads as "the
 roster is empty, I have no peers" instead of an error. \`curl -sS --fail\` will
 tell you what actually happened.
 
+### Check harness usage and quota
+The same API exposes usage from harness logs on this Space. Claude and Codex
+include their latest 5-hour and weekly quota snapshots. OpenCode, Hermes, and
+OpenClaw expose tokens and estimated model cost; they have no single quota
+because sessions may use different providers:
+
+\`\`\`sh
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=claude" | jq .providers.claude
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=codex" | jq .providers.codex
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=opencode" | jq .providers.opencode
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=hermes" | jq .providers.hermes
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=openclaw" | jq .providers.openclaw
+\`\`\`
+
+These values reflect local calls made from this Space, as of each harness's
+last model call here; activity on another machine is not included. This is a
+read-only call, so it does not take \`?from=\`.
+
 ### See who is here
 \`\`\`sh
 curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents?from=$AM_ID" | jq .
