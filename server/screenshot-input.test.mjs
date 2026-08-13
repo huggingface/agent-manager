@@ -7,6 +7,7 @@
  *   - attachment chips cannot mutate an in-flight send;
  *   - one clipboard image stays one chip across browser DataTransfer views;
  *   - document files stay inert downloads and can be sent beside images;
+ *   - both rendered reader and Overview composers send structured attachments;
  *   - the creation dialog has no redundant file picker.
  *
  * Set SCREENSHOT_PUBLIC_DIR to a prebuilt web/dist to skip the build.
@@ -219,11 +220,91 @@ try {
   const watcher = await browser.newPage({ viewport: { width: 1000, height: 700 } });
   await watcher.goto(API, { waitUntil: 'domcontentloaded' });
   await watcher.locator('.sidebar .row[title^="screenshot-e2e"]').first().click();
-  await watcher.locator('.ph-role', { hasText: 'watching' }).waitFor({ state: 'visible' });
+  await watcher.locator('.pane-head .ph-image').waitFor({ state: 'visible' });
+  await waitFor(() => watcher.locator('.pane-head .ph-image').isDisabled());
   check('a shared-terminal watcher cannot inject into the controller composer',
     await watcher.locator('.pane-head .ph-image').isDisabled()
       && (await watcher.locator('.pane-head .ph-image').getAttribute('title'))?.includes('take control'));
   await watcher.close();
+
+  // Reader mode is an overlay above the mounted terminal. Its own composer must
+  // own files while visible: inserting into the hidden xterm would leave an
+  // invisible half-written prompt, and the reply button would know nothing
+  // about the upload. A small synthetic trace makes the reader available for
+  // this terminal fixture without depending on a real provider transcript.
+  const traceAt = Date.now();
+  const traceTurns = [
+    { role: 'user', ts: traceAt - 1000, blocks: [{ type: 'text', text: 'fixture prompt' }] },
+    { role: 'assistant', kind: 'final', ts: traceAt, blocks: [{ type: 'text', text: 'fixture answer' }] },
+  ];
+  await page.route(`**/api/trace/${id}*`, async (route) => {
+    const common = {
+      harness: 'test-repaint', harnessLabel: 'Repaint fixture', sessionId: id,
+      title: 'screenshot-e2e', model: 'fixture', cwd: '.', firstTs: traceAt - 1000,
+      lastTs: traceAt, usage: null, note: null, total: traceTurns.length,
+      truncated: false, userTurns: [0],
+    };
+    if (new URL(route.request().url()).searchParams.has('summary')) {
+      await route.fulfill({ json: common });
+      return;
+    }
+    await route.fulfill({ json: {
+      ...common, turns: traceTurns, offset: 0, limit: traceTurns.length,
+      window: { mode: 'index', start: 0, end: traceTurns.length, atStart: true, atEnd: true },
+    } });
+  });
+  await page.locator('.modebar button', { hasText: 'reader' }).click();
+  const readerPicker = page.locator('.pane-reader .image-file-input');
+  await readerPicker.waitFor({ state: 'attached' });
+  check('reader owns the visible attachment picker instead of the hidden terminal',
+    await page.locator('.pane-reader .image-pick').isVisible()
+      && await page.locator('.pane-head .ph-image').count() === 0);
+  await readerPicker.setInputFiles({ name: 'reader.png', mimeType: 'image/png', buffer: png });
+  await page.locator('.pane-reader .image-chip').waitFor({ state: 'visible' });
+  let readerInput;
+  let sawReaderInput;
+  const readerInputReached = new Promise((resolve) => { sawReaderInput = resolve; });
+  await page.route(`**/api/sessions/${id}/input`, async (route) => {
+    readerInput = route.request().postDataJSON();
+    await route.fulfill({ json: { ok: true } });
+    sawReaderInput();
+  }, { times: 1 });
+  await page.locator('.pane-reader .ov-send').click();
+  await Promise.race([
+    readerInputReached,
+    sleep(10_000).then(() => { throw new Error('reader input did not send'); }),
+  ]);
+  check('reader sends an image-only structured turn',
+    readerInput?.text === '' && readerInput?.attachmentIds?.length === 1,
+    JSON.stringify(readerInput));
+
+  // Overview tiles open a conversation window. It uses the same structured
+  // delivery contract even though no terminal pane is mounted in that view.
+  await page.locator('.sidebar .ov-row').click();
+  await page.locator('.ovt-tile').filter({
+    has: page.locator('.ovt-name', { hasText: /^screenshot-e2e$/ }),
+  }).click();
+  const overviewPicker = page.locator('.ovw-win .image-file-input');
+  await overviewPicker.waitFor({ state: 'attached' });
+  await overviewPicker.setInputFiles({ name: 'overview.png', mimeType: 'image/png', buffer: png });
+  await page.locator('.ovw-win .image-chip').waitFor({ state: 'visible' });
+  let overviewInput;
+  let sawOverviewInput;
+  const overviewInputReached = new Promise((resolve) => { sawOverviewInput = resolve; });
+  await page.route(`**/api/sessions/${id}/input`, async (route) => {
+    overviewInput = route.request().postDataJSON();
+    await route.fulfill({ json: { ok: true } });
+    sawOverviewInput();
+  }, { times: 1 });
+  await page.locator('.ovw-win .ov-send').click();
+  await Promise.race([
+    overviewInputReached,
+    sleep(10_000).then(() => { throw new Error('overview input did not send'); }),
+  ]);
+  check('Overview sends an image-only structured turn',
+    overviewInput?.text === '' && overviewInput?.attachmentIds?.length === 1,
+    JSON.stringify(overviewInput));
+  await page.locator('.ovw-win .ov-x').click();
 
   // Keep the creation dialog focused on the prompt. Pasting still works, and
   // pasted chips remain removable, but choosing files belongs in live views.

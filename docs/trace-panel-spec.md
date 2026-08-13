@@ -369,3 +369,148 @@ dedupe per ENTRY, not per joined string; and web searches exist ONLY as `web_sea
 
 **Encrypted reasoning is normal.** 49 of 56 reasoning items carried only
 `encrypted_content`. Say so in the UI; do not leave the impression the model didn't think.
+
+## 13. Tail-first reading (2026-08-09)
+
+§5 shipped one way of asking for turns: `offset`/`limit` over a whole-file parse. It is
+the right shape for the surfaces that want a fixed slice (the Overview card, RENDER mode)
+and the wrong one for the reader, because it can only answer *any* question after
+normalizing the entire transcript — 19 MB and 1,395 turns for the longest session on this
+Space — and the pane then opened on the OLDEST turn, which is never the one you came for.
+
+The reader now opens at the end and pages backwards.
+
+**Wire.** Same endpoints, three modes (`server/src/index.js` `traceOpts`):
+
+| Request | Answers with |
+|---|---|
+| `?tail=1&bytes=` | the last window of the transcript |
+| `?before=<cursor>` | the window in front of one you hold |
+| `?after=<cursor>` | whatever has been appended since |
+| `?summary=1` | whole-trace facts (`total`, `userTurns`, `usage`, `firstTs`), no turns |
+| `?offset=&limit=` | unchanged — index paging over the full parse |
+
+A window is a byte range of the .jsonl run through the same normalizers
+(`rangeJsonLines`), and the cursors it hands back are line-aligned, so consecutive
+windows abut exactly: no line is read twice and none is skipped. A window that starts
+mid-line drops that fragment (the window before it owns the line); a window that ends at
+a half-written line stops before it, so a live tail picks it up once it is whole. The
+SQLite harnesses have no byte offsets to seek — they answer the same shape with message
+indices as cursors (`window.mode`), and the reader treats a cursor as opaque either way.
+
+**What a window cannot know**, and therefore does not claim: `total`, `userTurns`,
+`firstTs` and the session's `usage` are whole-trace facts. They arrive from `?summary=1`,
+which the reader asks for 400 ms after its first paint. Until it lands the header says
+`N turns loaded` rather than inventing a total.
+
+**Cost.** Measured against `upstream/main` built and served from the same files, on
+two real traces on this Space: a 19 MB / ~1,420-turn **Claude** transcript and a 4.8 MB /
+~1,200-turn **codex** rollout. Server time is `curl` against a local server; "first turn
+on screen" is Playwright, median of 5–9 opens of the pane.
+
+| | Claude 19 MB | | codex 4.8 MB | |
+|---|---|---|---|---|
+| | before | after | before | after |
+| bytes, first request | 676 KB | **82 KB** | 513 KB | **151 KB** |
+| server time, transcript changed since the last request | 160 ms | **6 ms** | 46 ms | **6 ms** |
+| server time, transcript unchanged (parse memo hit) | 6 ms | 6 ms | 5 ms | 6 ms |
+| the `?summary=1` read, 400 ms after the paint | — | 176 ms | — | 46 ms |
+| bytes `pread` to page the whole trace back | — | 20.8 MB / 35 windows | — | 5.7 MB / 13 windows |
+| first turn on screen, localhost | 181 ms | **167 ms** | 172 ms | 189 ms |
+| first turn on screen, 10 Mbps / 40 ms link | 866 ms | **267 ms** | 868 ms | **355 ms** |
+| opens on | oldest turn | **newest turn** | oldest turn | **newest turn** |
+
+Read that table with the summary row in view: the whole-file parse is **deferred, not
+removed**. The reader still asks for `?summary=1` once per pane open, and on a transcript
+being appended to (the memo is keyed on mtime) that is the same 160–176 ms parse as before,
+just after the first paint instead of in front of it. What the window buys is the first
+view and every subsequent page; what it does not buy is a server that never reads the whole
+file. The honest summary of the server work is: one bounded read on the critical path, one
+whole-file read off it, and none at all for the pages after the first.
+
+Read honestly: **on loopback this is a wash** — both are ~170–190 ms, dominated by render
+and app work, and the codex case is if anything marginally slower. The win is the bytes,
+and it shows the moment there is a real link between the browser and the Space (3.2× and
+2.4×), plus the server work that vanishes: the "changed since the last request" row is the
+one a *working* agent hits, because the parse memo is keyed on mtime and every append
+invalidates it. The memo-hit row is what an idle trace costs, and there the two are the
+same — main was never slow at *serving* a memoized parse, only at building one and at
+putting 676 KB on the wire to show you the wrong end of the conversation.
+
+The 384 KB default window was chosen by sweeping 128 KB – 1 MB in a browser: paint time is
+flat (155–171 ms median, since the list is virtualized either way) and only the payload
+moves, so the smallest window that still opens on a full-looking conversation wins. The
+turn floor that makes a window grow (`WINDOW_MIN_TURNS`) is deliberately low for the same
+reason: at 30 it grew the codex rollout's window to 1.5 MB and its response to 591 KB,
+which is the whole-file cost this exists to avoid.
+
+**Scroll anchoring is measured, not modelled.** The first version restored the reading
+position from the prefix-sum height model, which is only ever approximately right for rows
+it has not measured yet: on a codex rollout — whose collapsed tool groups are several
+times `ROW_EST` — a prepend moved the text under the reader by ~280 px on the Space and
+~30 px locally. The reader now records the anchor row's real `getBoundingClientRect()`
+position and re-applies *that* after the layout, falling back to the model only for a row
+that has scrolled out of the rendered window. Drift on both traces is 0 px.
+
+**"Am I at the top?" is only answerable after measurement.** The reader fetches the window
+above when `scrollTop` enters a 400 px band, and `scrollTop` means nothing until the rows
+have been measured: before the first measuring pass every row is `ROW_EST` (44 px), so a
+window of 19 dense codex turns models as 800 px when it is really 3,600 — inside the band,
+and one older window was fetched on every open. Paging is therefore gated on a flag that
+waits for both the first measurement and the first placement of the scroller. Opening a
+pane now costs exactly two requests, the tail and the summary, on both traces.
+
+**Things a review caught, all of them about a window claiming more than it knows.** The
+codex guardian guard read a fixed 16 KB and parsed the first line; a real `session_meta`
+carries `base_instructions` and runs 18–44 KB, so the parse always threw and the `catch`
+turned "I could not tell" into "not a subagent" — the guard never fired on a real rollout.
+It now grows the read until the line is whole, and a head it genuinely cannot read falls
+back to the whole-file reader rather than guessing. A window's `note` (codex's count of
+encrypted reasoning steps) is a per-parse number and was being rendered as a statement
+about the session, changing as you scrolled — it now travels with `usage`/`firstTs` as a
+summary-only fact. A single line larger than `WINDOW_MAX_BYTES` (a file-history blob)
+cannot be paged past; the reader used to conclude it had reached the beginning of the
+conversation, and now says what actually happened. A last line that never becomes valid
+JSON no longer costs the final answer its accent: having READ to EOF is what makes a
+window the end, not having consumed every byte. And in the pane, every load now carries a
+generation stamp, so a window in flight when you switch files cannot be spliced into the
+next transcript with the previous one's byte cursors.
+
+**codex windows are cut at task boundaries, not at arbitrary bytes.** A byte window is
+sound for a format whose lines stand alone. Codex's do not: `event_msg/task_complete`
+points BACK at the assistant message it marks, and a dangling pointer does not degrade —
+`normalizeCodex` cannot find the answer, so it pushes a verbatim second copy of it.
+Measured on a real 4.8 MB rollout at 128 KB windows: 955 stitched turns against the full
+parse's 953, two answers shown twice. A rollout describes its own unit
+(`task_started` … `task_complete`) and every backward reference lives inside one task, so a
+codex window now begins on a `task_started` line. Measured over every rollout on this
+Space: 339 `task_started`, 333 `task_complete`, none outside a started task, largest task
+768 KB — inside the 8 MB growth ceiling with room to spare. A task bigger than the ceiling
+cannot be aligned; there the pointer is treated as a marker only, since the answer it names
+is rendered (and marked) in the window that holds it. Verified: a synthetic 10 MB
+single-task rollout yields exactly one copy of its answer.
+
+Be precise about which half does what, because the first version of this section claimed
+more than the code delivers. Alignment is an *optimization*: when a window happens to hold a
+`task_started` it begins there and the task's grouping is not split at the seam. Most windows
+hold none (at 64 KB, with tasks up to 768 KB, almost none do) and are cut mid-task anyway —
+what keeps those correct is the second rule, that a `task_complete` whose answer is not in
+this window is treated as a marker and never emitted. **That fallback is load-bearing.**
+
+With both, stitching every window of a codex rollout reproduces the full parse **exactly** —
+same turns, same blocks, same `final` accents — at 64 KB, 128 KB and 384 KB windows, on all
+eight rollouts on this Space (24 runs, independently reproduced in review).
+
+**The one behavioural difference, and it is Claude's:** a harness message whose lines
+straddle a window boundary is split into two turns instead of merged into one. Stitching every window of
+that transcript gives 1,433 turns against the full parse's 1,420, with character-for-
+character identical content — thirteen turns show as two rows each. Checked as a multiset
+of blocks against the full parse across the six largest Claude transcripts and the six
+largest codex rollouts here, at three window sizes: **0 blocks missing and 0 duplicated in
+all 36 runs**. The `final` accent is withheld (never wrongly added) from a window that
+cannot see whether an answer is the last one before the next prompt: at the shipped 384 KB
+window the accents match the full parse exactly on both formats; at an unusually small
+64 KB window a 19 MB Claude transcript withholds 3 of 56. Covered by
+`server/test/trace-window.test.mjs`, which also pins the edges: paging back terminates at
+byte 0, an appended turn arrives exactly once, a torn last line is not a turn until it is
+whole, and a transcript with no trailing newline still ends in one.

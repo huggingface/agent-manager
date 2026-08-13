@@ -414,12 +414,11 @@ function readOpencode() {
   return rows;
 }
 
-// Newest opencode conversation in `directory` created at/after `sinceMs` and
-// not already claimed by another session. The runner calls this shortly after
-// launch to PIN a session to its own `ses_…` id — opencode has no
-// per-conversation handle of its own (unlike codex's rollout uuid), so two
-// agents sharing a folder would otherwise cross-attribute. Read straight from
-// the db (not the memoized rows) so a just-created session is seen immediately.
+// Fallback discovery for installations where the exact-event plugin is absent:
+// newest opencode conversation in `directory` created at/after `sinceMs` and
+// not already claimed by another session. This is deliberately used only for
+// unshared folders; same-folder panes cannot safely attribute a newest row.
+// Read straight from the db so a just-created session is seen immediately.
 export function captureOpencodeSession(directory, sinceMs, claimed) {
   if (!DatabaseSync || !directory) return null;
   let db;
@@ -446,6 +445,22 @@ export function opencodeSessionExists(id) {
   try {
     return !!db.prepare('select 1 from session where id = ?').get(id);
   } catch { return false; } finally { try { db.close(); } catch {} }
+}
+
+// Exact row metadata for a session id reported by the opencode plugin. The
+// plugin tells us which id the pane is using; the database remains the local
+// authority for its folder and whether it is a root conversation rather than a
+// task/subagent child.
+export function opencodeSessionInfo(id) {
+  if (!DatabaseSync || !id) return null;
+  let db;
+  try { db = new DatabaseSync(opencodeDbPath(), { readOnly: true }); } catch { return null; }
+  try {
+    const row = db.prepare(
+      'select id, directory, parent_id as parentId from session where id = ?',
+    ).get(id);
+    return row ? { id: row.id, directory: row.directory || null, parentId: row.parentId || null } : null;
+  } catch { return null; } finally { try { db.close(); } catch {} }
 }
 
 // ---------- Hermes (SQLite: ~/.hermes/state.db, WAL) ----------
@@ -914,7 +929,11 @@ function makeStitcher() {
 }
 
 // ---------- line-oriented harnesses ----------
-async function* jsonLines(file) {
+// `range` (optional) reads only a BYTE WINDOW of the file — see the window
+// reader below. Without it the whole file streams through, which is what the
+// index-mode readers and the summary pass still want.
+async function* jsonLines(file, range = null) {
+  if (range) { yield* rangeJsonLines(file, range); return; }
   const rl = readline.createInterface({
     input: fs.createReadStream(file, { encoding: 'utf8' }),
     crlfDelay: Infinity,
@@ -932,15 +951,71 @@ async function* jsonLines(file) {
   } finally { rl.close(); }
 }
 
+// Bytes [from, to) of a file, as one buffer. Callers bound the span themselves
+// (WINDOW_MAX_BYTES), so this never has to stream.
+async function rangeBuf(file, from, to) {
+  const len = Math.max(0, to - from);
+  if (!len) return Buffer.alloc(0);
+  const fh = await fsp.open(file, 'r');
+  try {
+    const buf = Buffer.alloc(len);
+    const { bytesRead } = await fh.read(buf, 0, len, from);
+    return bytesRead === len ? buf : buf.subarray(0, bytesRead);
+  } finally { await fh.close(); }
+}
+
+// One byte window of a .jsonl, aligned to line boundaries.
+//
+// `range` is { from, to, aligned, eof } and is FILLED IN with the { start, end }
+// this actually consumed, which is what the client gets back as a cursor:
+//   - a window that begins mid-line drops that fragment — the window BEFORE it
+//     ends at `start` and owns that line, so nothing is read twice or lost;
+//   - a file being appended to right now ends in a half-written line, which is
+//     nobody's yet: `end` stops before it, and the next `after: end` picks it up
+//     once it is whole.
+// Line splitting happens on the BUFFER, not on decoded text: an arbitrary byte
+// offset can cut a UTF-8 character in half, and offsets derived from the decoded
+// string would then be a byte or two off — enough to corrupt the next cursor.
+async function* rangeJsonLines(file, range) {
+  const buf = range.buf || await rangeBuf(file, range.from, range.to);
+  let i = 0;
+  if (!range.aligned) {
+    const nl = buf.indexOf(0x0a);
+    i = nl < 0 ? buf.length : nl + 1;
+  }
+  range.start = range.from + i;
+  range.end = range.start;
+  let n = 0;
+  while (i < buf.length) {
+    const nl = buf.indexOf(0x0a, i);
+    const last = nl < 0;
+    // Mid-file, an unterminated tail belongs to the next window.
+    if (last && !range.eof) break;
+    const line = buf.toString('utf8', i, last ? buf.length : nl);
+    i = last ? buf.length : nl + 1;
+    let j = null;
+    let whole = false;
+    if (line.trim()) { try { j = JSON.parse(line); whole = true; } catch { whole = false; } }
+    // A newline ends a line whether or not we could read it. The FINAL line of a
+    // file has no newline to prove it is finished, so it counts as consumed only
+    // if it parses: a transcript can legitimately end without a newline, and an
+    // agent halfway through writing one looks exactly the same until it does.
+    if (!last || whole) range.end = range.from + i;
+    if (!whole) continue;
+    yield j;
+    if (++n % VIEW_YIELD_LINES === 0) await yieldLoop();
+  }
+}
+
 // Claude Code — $CLAUDE_CONFIG_DIR/projects/<slug>/<uuid>.jsonl
 // Streaming writes the SAME message.id across several lines, each carrying the
 // same usage. parseClaude() above dedupes by dropping repeats; a viewer must
 // instead MERGE them, or half the assistant text disappears. So: first line for
 // an id creates the message and owns the usage, later lines append blocks.
-async function normalizeClaude(file, out) {
+async function normalizeClaude(file, out, range) {
   const stitch = makeStitcher();
   const byMsgId = new Map();
-  for await (const j of jsonLines(file)) {
+  for await (const j of jsonLines(file, range)) {
     // These embed whole file contents; share.js drops them and so do we.
     if (j.type === 'file-history-snapshot' || j.type === 'file-history-delta') continue;
     if (j.isMeta || j.sourceToolUseID) continue;
@@ -1035,7 +1110,7 @@ async function normalizeClaude(file, out) {
 // attach to it — so one row reads "text + 16 tool calls (exec_command,
 // apply_patch, write_stdin)" the way the Hub's own viewer shows it, instead of
 // 17 separate rows.
-async function normalizeCodex(file, out) {
+async function normalizeCodex(file, out, range) {
   const stitch = makeStitcher();
   const seenThinking = new Set();
   let cur = null;      // the assistant turn being built
@@ -1048,7 +1123,7 @@ async function normalizeCodex(file, out) {
   };
   const hasText = (m) => !!m && m.blocks.some((b) => b.type === 'text');
 
-  for await (const j of jsonLines(file)) {
+  for await (const j of jsonLines(file, range)) {
     const p = j.payload || {};
     const ts = j.timestamp ? Date.parse(j.timestamp) || undefined : undefined;
 
@@ -1163,6 +1238,13 @@ async function normalizeCodex(file, out) {
           // A capped block only holds a prefix, so compare as a prefix there.
           if (marked && shown.some((t) => t === text || (t.length >= VIEW_BLOCK_CAP && text.startsWith(t)))) {
             marked.kind = 'final';
+          } else if (range && range.danglingTaskComplete === 'ignore') {
+            // This window had to cut a task in half (one bigger than the growth
+            // ceiling), so the answer this event points at is in a window we did
+            // not read — where it is already rendered, and already marked. A
+            // pointer to something outside the window is not an answer; emitting
+            // it here would show the reader a copy of a turn that occurs once.
+            cur = null;
           } else {
             cur = null;
             out.push({ role: 'assistant', kind: 'final', ts, blocks: [textBlock('text', text)] });
@@ -1172,6 +1254,10 @@ async function normalizeCodex(file, out) {
       } else if (p.type === 'turn_aborted' || p.type === 'thread_rolled_back') {
         cur = null;
       }
+      // Did this window's last task close inside it? That is what decides
+      // whether its final answer is really final — see oneWindow.
+      if (p.type === 'task_started') out.taskOpen = true;
+      else if (p.type === 'task_complete' || p.type === 'turn_aborted') out.taskOpen = false;
       continue;
     }
   }
@@ -1179,9 +1265,9 @@ async function normalizeCodex(file, out) {
 }
 
 // OpenClaw — already close to STS: {type:'message', message:{role,content,usage}}
-async function normalizeOpenClaw(file, out) {
+async function normalizeOpenClaw(file, out, range) {
   const stitch = makeStitcher();
-  for await (const j of jsonLines(file)) {
+  for await (const j of jsonLines(file, range)) {
     if (j.type !== 'message' || !j.message) continue;
     const m = j.message;
     const ts = j.timestamp ? Date.parse(j.timestamp) || undefined : undefined;
@@ -1217,9 +1303,9 @@ async function normalizeOpenClaw(file, out) {
 // STS (Session Trace Simple Format) — what share-session.mjs emits for the
 // converted harnesses, so accepted bundles from hermes/opencode/openclaw come
 // back through this one reader.
-async function normalizeSts(file, out) {
+async function normalizeSts(file, out, range) {
   const stitch = makeStitcher();
-  for await (const j of jsonLines(file)) {
+  for await (const j of jsonLines(file, range)) {
     if (j.type === 'session') {
       out.harnessLabel = label(j.harness) || out.harnessLabel;
       out.sessionId = j.id || out.sessionId;
@@ -1344,7 +1430,24 @@ function flattenToolContent(value) {
 
 // Bundles have no session record telling us the harness, so sniff the first
 // lines — same trick as the Hub's detect.ts / sniffTraceHarness.
+// This is now on the path of EVERY window request (it decides whether the trace
+// can be seeked at all), so the answer is remembered rather than re-read off the
+// bucket each time. Briefly, though: a path is not permanently one format — a
+// bundle ref can be re-imported with a different harness underneath it.
+const harnessMemo = new Map(); // path -> { at, harness }
+const HARNESS_TTL = 60_000;
 async function sniffHarness(file) {
+  const hit = harnessMemo.get(file);
+  if (hit && Date.now() - hit.at < HARNESS_TTL) return hit.harness;
+  const found = await sniffHarnessUncached(file);
+  if (found) {
+    if (harnessMemo.size > 200) harnessMemo.clear();
+    harnessMemo.set(file, { at: Date.now(), harness: found });
+  }
+  return found;
+}
+
+async function sniffHarnessUncached(file) {
   let n = 0;
   for await (const j of jsonLines(file)) {
     if (j.type === 'session' && j.harness) return 'sts';
@@ -1403,14 +1506,14 @@ function markFinalTurns(out) {
   }
 }
 
-async function parseTraceFile(harness, file, sessionId) {
+async function parseTraceFile(harness, file, sessionId, range = null) {
   const out = newTrace(harness);
   out.sessionId = sessionId || null;
   switch (harness) {
-    case 'claude': await normalizeClaude(file, out); break;
-    case 'codex': await normalizeCodex(file, out); break;
-    case 'openclaw': await normalizeOpenClaw(file, out); break;
-    case 'sts': await normalizeSts(file, out); break;
+    case 'claude': await normalizeClaude(file, out, range); break;
+    case 'codex': await normalizeCodex(file, out, range); break;
+    case 'openclaw': await normalizeOpenClaw(file, out, range); break;
+    case 'sts': await normalizeSts(file, out, range); break;
     case 'opencode': normalizeOpencodeDb(file, sessionId, out); break;
     case 'hermes': normalizeHermesDb(file, sessionId, out); break;
     default: { const e = new Error(`no trace reader for '${harness}'`); e.code = 'unsupported-harness'; throw e; }
@@ -1423,6 +1526,18 @@ async function parseTraceFile(harness, file, sessionId) {
   return out;
 }
 
+// Everything a response says about the trace itself, as opposed to the turns in
+// it. Shared by pages, windows and the summary so the three can't drift.
+function headOf(parsed) {
+  return {
+    harness: parsed.harness, harnessLabel: parsed.harnessLabel, sessionId: parsed.sessionId,
+    title: parsed.title, model: parsed.model, cwd: parsed.cwd,
+    firstTs: parsed.firstTs, lastTs: parsed.lastTs, usage: parsed.usage,
+    source: parsed.source, sharedBy: parsed.sharedBy, note: parsed.note || null,
+    truncated: !!parsed.truncated,
+  };
+}
+
 function pageOf(parsed, offset, limit) {
   const total = parsed.messages.length;
   // Indices of the operator's own prompts, for the pane's prompt navigator.
@@ -1430,17 +1545,327 @@ function pageOf(parsed, offset, limit) {
   // before the page holding it has been fetched.
   const userTurns = [];
   for (let i = 0; i < total; i++) if (parsed.messages[i].role === 'user') userTurns.push(i);
-  const from = Math.max(0, Math.min(offset | 0, total));
+  // A negative offset reads from the END — what any surface showing the tail of
+  // a conversation wants (the Overview card, RENDER mode) without first making a
+  // round trip just to learn `total`.
+  const off = offset | 0;
+  const from = off < 0 ? Math.max(0, total + off) : Math.max(0, Math.min(off, total));
   const to = Math.min(total, from + Math.max(1, Math.min(limit | 0 || 200, 500)));
   return {
-    harness: parsed.harness, harnessLabel: parsed.harnessLabel, sessionId: parsed.sessionId,
-    title: parsed.title, model: parsed.model, cwd: parsed.cwd,
-    firstTs: parsed.firstTs, lastTs: parsed.lastTs, usage: parsed.usage,
-    source: parsed.source, sharedBy: parsed.sharedBy, note: parsed.note || null,
-    total, offset: from, limit: to - from, truncated: !!parsed.truncated,
+    ...headOf(parsed),
+    total, offset: from, limit: to - from,
     userTurns,
     turns: parsed.messages.slice(from, to),
   };
+}
+
+// ---------- windows: open at the END, page backwards ----------
+// Index-mode paging (above) can only answer "turns 400–600" after the whole file
+// has been normalized, because nothing else knows where turn 400 is. That is the
+// wrong bargain for a reader that opens on the last exchange: on a 19 MB
+// transcript it spends a full read + parse before the first pixel, and it spends
+// it again every time the file changes underneath (a working agent rewrites the
+// memo key on every append).
+//
+// A window is a BYTE RANGE of the transcript, parsed by the same normalizers,
+// with line-aligned cursors handed back to the caller. `tail` reads the last
+// WINDOW_BYTES; `before: <start we just gave you>` reads the stretch in front of
+// it; `after: <end>` picks up whatever the agent has written since. Windows abut
+// exactly, so a reader can stitch them into one conversation with no gaps and no
+// repeats — and never pays for the part of the trace nobody scrolled to.
+const WINDOWABLE = new Set(['claude', 'codex', 'openclaw', 'sts']);
+const WINDOW_BYTES = 384 * 1024;         // default span (see the PR for the measurements)
+const WINDOW_MIN_BYTES = 32 * 1024;
+const WINDOW_MAX_BYTES = 8 * 1024 * 1024; // a single window can't cost more than this
+// Grow the span until at least this many turns are in it — a floor against
+// opening on a stub, NOT a target. It is deliberately low, and growth doubles
+// rather than quadruples: a codex rollout packs ~20 turns into 384 KB, and
+// insisting on 30 grew that window to 1.5 MB and the response to 591 KB, which
+// is the whole-file cost this exists to avoid. Measured on `finetuning boy`
+// (2 MB rollout): 384 KB = 19 turns / 135 KB, 1.5 MB = 75 turns / 591 KB.
+const WINDOW_MIN_TURNS = 12;
+const clampN = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+
+function windowOf(parsed, cur) {
+  return {
+    ...headOf(parsed),
+    // `firstTs`, `usage` and `note` describe the WHOLE conversation. A window
+    // that doesn't span the whole file knows none of them, and reporting its own
+    // first line as the start of the session, its own tokens as the session's
+    // bill, or its own count of encrypted reasoning steps as the session's,
+    // would be a confident lie — the last one visibly so, since it would change
+    // every time you scrolled. The summary pass fills them in.
+    firstTs: cur.atStart ? parsed.firstTs : 0,
+    usage: cur.atStart && cur.atEnd ? parsed.usage : null,
+    note: cur.atStart && cur.atEnd ? parsed.note || null : null,
+    total: null,
+    userTurns: null,
+    turns: parsed.messages,
+    window: cur,
+  };
+}
+
+// The whole-trace facts a window can't know: how many turns there are, where the
+// prompts are, what the session cost. One full parse, memoized like any other —
+// the reader asks for it AFTER it has painted, so it never delays the first view.
+function summaryOf(parsed) {
+  const userTurns = [];
+  for (let i = 0; i < parsed.messages.length; i++) if (parsed.messages[i].role === 'user') userTurns.push(i);
+  return { ...headOf(parsed), total: parsed.messages.length, userTurns };
+}
+
+// A window that stops mid-conversation must not call its last assistant turn the
+// final answer — it isn't one; the window simply ran out.
+function unmarkTrailingFinal(parsed) {
+  const ms = parsed.messages;
+  for (let i = ms.length - 1; i >= 0; i--) {
+    if (ms[i].role === 'user') break;
+    if (ms[i].kind === 'final') delete ms[i].kind;
+  }
+}
+
+// ---------- codex: windows are cut at task boundaries ----------
+// A byte window is sound for a format whose lines stand alone. Codex's do not:
+// `event_msg/task_complete` POINTS BACK at the assistant message it marks, and
+// `agent_reasoning` is deduped against reasoning items earlier in the same turn.
+// Cut the file anywhere and those references dangle — and a dangling
+// `task_complete` does not degrade, it INVENTS: `normalizeCodex` cannot find the
+// answer, so it pushes a verbatim second copy of it. Measured on a real 4.8 MB
+// rollout at 128 KB windows: 955 stitched turns against the full parse's 953,
+// two answers shown twice.
+//
+// Two things make it right, and it is worth being precise about which does what,
+// because a review found the code claiming more than it delivers.
+//
+//  1. A window PREFERS to begin at a `task_started` line. When the window holds
+//     one, the task it opens — with its answer, its reasoning and its token
+//     count — lands whole, and the turn grouping is not split at the seam.
+//  2. When it holds none (any window smaller than the task it lands in, which at
+//     64 KB is most of them), the window is cut mid-task anyway, and what keeps
+//     the output correct is that a `task_complete` whose answer is NOT in this
+//     window is treated as a marker only — see `danglingTaskComplete`. That
+//     fallback is load-bearing, not a corner case.
+//
+// Measured over every rollout on this Space: 339 `task_started`, 333
+// `task_complete`, no `task_complete` outside a started task, largest task
+// 768 KB. Stitching every window back together reproduces the full parse exactly
+// — turns, blocks and `final` accents — at 64 KB, 128 KB and 384 KB.
+const TASK_MARK = '"task_started"';
+
+/** Byte offset of the first `task_started` line at or after `buf`'s first whole
+ *  line, or -1 if this window holds none. `base` is the file offset of buf[0]. */
+function codexTaskStart(buf, base, firstLine) {
+  let i = firstLine;
+  while (i < buf.length) {
+    let nl = buf.indexOf(0x0a, i);
+    if (nl < 0) nl = buf.length;
+    // Cheap filter first: parsing every line of every window to find a boundary
+    // would cost as much as the parse itself.
+    if (buf.includes(TASK_MARK, i) && buf.indexOf(TASK_MARK, i) < nl) {
+      let j = null;
+      try { j = JSON.parse(buf.toString('utf8', i, nl)); } catch { j = null; }
+      if (j && j.type === 'event_msg' && j.payload && j.payload.type === 'task_started') return base + i;
+    }
+    i = nl + 1;
+  }
+  return -1;
+}
+
+/** Where a window's first whole line begins inside `buf`. */
+function firstWholeLine(buf, aligned) {
+  if (aligned) return 0;
+  const nl = buf.indexOf(0x0a);
+  return nl < 0 ? buf.length : nl + 1;
+}
+
+async function oneWindow(harness, file, sessionId, range, size, prebuilt) {
+  let taskAligned = false;
+  if (prebuilt) range.buf = prebuilt;
+  if (harness === 'codex' && range.from > 0) {
+    // Read once, align, then parse the same bytes — `range.buf` keeps this to a
+    // single read of the window.
+    const buf = range.buf || await rangeBuf(file, range.from, range.to);
+    const at = codexTaskStart(buf, range.from, firstWholeLine(buf, range.aligned));
+    if (at >= 0) {
+      range.buf = buf.subarray(at - range.from);
+      range.from = at;
+      range.aligned = true;
+      taskAligned = true;
+    } else {
+      range.buf = buf;
+      // No boundary in reach: this window cuts a task in half, so a
+      // `task_complete` inside it may point at an answer we cannot see. Tell the
+      // normalizer to treat it as a marker only — pointing at something outside
+      // the window is not a reason to invent a copy of it.
+      range.danglingTaskComplete = 'ignore';
+    }
+  }
+  const parsed = await parseTraceFile(harness, file, sessionId, range);
+  const start = range.start ?? range.from;
+  const end = range.end ?? range.to;
+  // Having READ to the end of the file is what makes this the end of the
+  // conversation. `end` can legitimately stop short of `size` — a line the agent
+  // is halfway through writing, or one a killed writer left broken — and taking
+  // that as "there is more to come" would deny the last answer its accent
+  // forever. The cursor still stops in front of the fragment, so the next
+  // `after: end` picks it up if it ever becomes whole.
+  const atEnd = range.to >= size;
+  // Withhold the "final answer" accent only from a window that cannot know
+  // whether the answer is final. For codex that is precisely a window whose last
+  // task is still open at its edge — a closed task's answer is named by the
+  // harness itself. For the line-oriented formats it is any window that does not
+  // reach the end of the file, since "final" there means "no later answer before
+  // the next prompt", and the next prompt may be in the window after this one.
+  const openEdge = harness === 'codex' ? !!parsed.taskOpen : true;
+  if (!atEnd && openEdge) unmarkTrailingFinal(parsed);
+  return { parsed, cur: { mode: 'bytes', start, end, atStart: start <= 0, atEnd } };
+}
+
+async function readWindow(harness, file, sessionId, size, req) {
+  const bytes = clampN(Math.trunc(req.bytes) || WINDOW_BYTES, WINDOW_MIN_BYTES, WINDOW_MAX_BYTES);
+  const min = clampN(Math.trunc(req.min) || WINDOW_MIN_TURNS, 1, 500);
+  const cursor = clampN(Math.trunc(req.cursor) || 0, 0, size);
+
+  if (req.at === 'after') {
+    // A pane left open while the agent wrote megabytes: don't try to catch up in
+    // one window. Hand back the tail and flag the gap, so the reader replaces
+    // what it holds instead of splicing a hole into the middle of it.
+    if (size - cursor > WINDOW_MAX_BYTES) {
+      const w = await readWindow(harness, file, sessionId, size, { at: 'tail', bytes, min });
+      return { ...w, cur: { ...w.cur, gap: true } };
+    }
+    return oneWindow(harness, file, sessionId, { from: cursor, to: size, aligned: true, eof: true }, size);
+  }
+
+  const to = req.at === 'before' ? cursor : size;
+  const eof = to >= size;
+  // Turns vary wildly in size — one window can hold 200 of them or one 300 KB
+  // tool result. Grow the span until it holds a readable number of turns, or
+  // until it reaches the start of the file / the per-window ceiling.
+  //
+  // Growing EXTENDS the buffer downwards rather than reading the wider span from
+  // scratch: doubling and re-reading turned one response into 384K + 768K + 1.5M
+  // + 3M of reads (5.76 MB for a single window, and 28 MB to page a 19 MB file
+  // back to its start — more bytes than the file has). On the bucket this
+  // reader exists for, those are the expensive ones.
+  let span = bytes;
+  let buf = null;
+  let bufFrom = to;
+  for (;;) {
+    const from = Math.max(0, to - span);
+    if (from < bufFrom) {
+      const head = await rangeBuf(file, from, bufFrom);
+      buf = buf && buf.length ? Buffer.concat([head, buf]) : head;
+      bufFrom = from;
+    }
+    const w = await oneWindow(harness, file, sessionId, { from, to, aligned: from === 0, eof }, size, buf);
+    if (w.parsed.messages.length >= min || from === 0 || span >= WINDOW_MAX_BYTES) {
+      // A window that consumed nothing at all has hit a single line longer than
+      // the ceiling (a file-history blob), and no amount of asking again will
+      // get past it. Say that, rather than let the reader conclude it has
+      // reached the beginning of the conversation.
+      if (w.cur.start >= to && to > 0) w.cur.blocked = true;
+      return w;
+    }
+    span = Math.min(span * 2, WINDOW_MAX_BYTES);
+  }
+}
+
+// Harnesses whose conversation lives in SQLite have no byte offsets to seek, and
+// a bundle small enough not to matter doesn't need them. They answer the same
+// shape with message INDICES as cursors: the reader treats a cursor as opaque.
+const INDEX_WINDOW_TURNS = 100; // no bytes to seek: page by turns, as index mode always did
+
+function windowIndex(parsed, req) {
+  const total = parsed.messages.length;
+  const min = clampN(Math.trunc(req.min) || INDEX_WINDOW_TURNS, 1, 500);
+  const cursor = clampN(Math.trunc(req.cursor) || 0, 0, total);
+  let from; let to;
+  if (req.at === 'after') { from = cursor; to = total; } else if (req.at === 'before') { to = cursor; from = Math.max(0, to - min); } else { to = total; from = Math.max(0, total - min); }
+  return {
+    ...headOf(parsed),
+    total,
+    userTurns: null,
+    turns: parsed.messages.slice(from, to),
+    window: { mode: 'index', start: from, end: to, atStart: from <= 0, atEnd: to >= total },
+  };
+}
+
+// The subagent marker lives in `session_meta`, the FIRST line of a codex
+// rollout — a tail window never sees it, so a guardian thread would render as if
+// it were the operator's conversation. Check the head before serving a window.
+//
+// That line is NOT small: it carries `base_instructions.text`, and every real
+// rollout on this Space starts with 18–44 KB of it. Reading a fixed 16 KB and
+// parsing what came back therefore never parsed at all, and the `catch` turned
+// "I could not tell" into "not a subagent" — the guard silently never fired.
+// So: grow the read until the line is whole, and if it still cannot be read,
+// say so rather than assume the safe answer.
+const FIRST_LINE_MAX = 4 * 1024 * 1024;
+
+async function firstLine(file) {
+  for (let span = 64 * 1024; ; span *= 4) {
+    const buf = await rangeBuf(file, 0, span);
+    const nl = buf.indexOf(0x0a);
+    if (nl >= 0) return buf.toString('utf8', 0, nl);
+    // Shorter than the span means we read the whole file: it is one line.
+    if (buf.length < span) return buf.toString('utf8');
+    if (span >= FIRST_LINE_MAX) return null;
+  }
+}
+
+async function refuseCodexSubagent(file) {
+  const line = await firstLine(file);
+  let j = null;
+  try { j = line == null ? null : JSON.parse(line); } catch { j = null; }
+  if (!j) {
+    // Unreadable head: fall back to the reader that walks the whole rollout,
+    // which throws on the marker itself. Rare, and correctness beats the window.
+    const e = new Error('could not read the head of this rollout');
+    e.code = 'window-unavailable';
+    throw e;
+  }
+  const p = j.payload || {};
+  if (j.type === 'session_meta' && (p.thread_source === 'subagent' || p.source?.subagent)) {
+    const err = new Error('this rollout is an internal guardian/subagent thread, not the session');
+    err.code = 'trace-not-user-conversation';
+    throw err;
+  }
+}
+
+/**
+ * One request against one located trace. `opts` picks the mode:
+ *   { window: { at, cursor, bytes, min } } — a byte window (the reader's path)
+ *   { summary: true }                      — whole-trace facts, no turns
+ *   { offset, limit }                      — index paging (Overview, RENDER mode)
+ * `decorate` is the bundle manifest pass, applied to every fresh parse.
+ */
+async function serveTrace({ key, harness, file, sessionId, size, decorate }, opts) {
+  const full = async () => {
+    if (viewMemo.key !== key) {
+      const parsed = await tracked(PHASE.readTrace, () => parseTraceFile(harness, file, sessionId));
+      if (decorate) await decorate(parsed);
+      viewMemo = { key, val: parsed };
+    }
+    return viewMemo.val;
+  };
+
+  if (opts.summary) return summaryOf(await full());
+  if (!opts.window) return pageOf(await full(), opts.offset ?? 0, opts.limit ?? 200);
+  if (!WINDOWABLE.has(harness)) return windowIndex(await full(), opts.window);
+
+  if (harness === 'codex') {
+    try {
+      await refuseCodexSubagent(file);
+    } catch (e) {
+      if (e.code !== 'window-unavailable') throw e;
+      return windowIndex(await full(), opts.window); // whole-file read, which checks it properly
+    }
+  }
+  const { parsed, cur } = await tracked(PHASE.readTrace, () =>
+    readWindow(harness, file, sessionId, size, opts.window));
+  if (decorate) await decorate(parsed);
+  return windowOf(parsed, cur);
 }
 
 /**
@@ -1449,20 +1874,20 @@ function pageOf(parsed, offset, limit) {
  * already handles all five harnesses, per-session pins, cwd attribution,
  * ambiguity refusal and codex subagent rollouts. Do not reimplement it.
  */
-export async function readTrace(session, { offset = 0, limit = 200 } = {}) {
+export async function readTrace(session, opts = {}) {
   const hit = await findTrace(session, store.list());
   if (!hit) { const e = new Error('no trace found for this session'); e.code = 'no-trace'; throw e; }
 
   const st = await statRetry(hit.src);
   if (!st) { const e = new Error(`trace file unreadable: ${hit.src}`); e.code = 'no-trace'; throw e; }
 
-  const key = `s:${session.id}:${hit.src}:${hit.sessionId || ''}:${st.mtimeMs}:${st.size}`;
-  if (viewMemo.key !== key) {
-    const parsed = await tracked(PHASE.readTrace, () =>
-      parseTraceFile(session.cli, hit.src, hit.sessionId || session.sessionUuid || null));
-    viewMemo = { key, val: parsed };
-  }
-  return pageOf(viewMemo.val, offset, limit);
+  return serveTrace({
+    key: `s:${session.id}:${hit.src}:${hit.sessionId || ''}:${st.mtimeMs}:${st.size}`,
+    harness: session.cli,
+    file: hit.src,
+    sessionId: hit.sessionId || session.sessionUuid || null,
+    size: st.size,
+  }, opts);
 }
 
 /**
@@ -1479,18 +1904,20 @@ export async function traceHarnessOf(file) {
  * reader above locates a file for a session; this one is handed the file and
  * sniffs the format the same way an imported bundle does.
  */
-export async function readTraceByPath(file, { offset = 0, limit = 200 } = {}) {
+export async function readTraceByPath(file, opts = {}) {
   const st = await statRetry(file);
   if (!st) { const e = new Error('trace file unreadable'); e.code = 'no-trace'; throw e; }
 
-  const key = `f:${file}:${st.mtimeMs}:${st.size}`;
-  if (viewMemo.key !== key) {
-    const harness = await sniffHarness(file);
-    if (!harness) { const e = new Error('unrecognized trace format'); e.code = 'unsupported-harness'; throw e; }
-    const parsed = await tracked(PHASE.readTrace, () => parseTraceFile(harness, file, null));
-    viewMemo = { key, val: parsed };
-  }
-  return pageOf(viewMemo.val, offset, limit);
+  const harness = await sniffHarness(file);
+  if (!harness) { const e = new Error('unrecognized trace format'); e.code = 'unsupported-harness'; throw e; }
+
+  return serveTrace({
+    key: `f:${file}:${st.mtimeMs}:${st.size}`,
+    harness,
+    file,
+    sessionId: null,
+    size: st.size,
+  }, opts);
 }
 
 /**
@@ -1498,18 +1925,19 @@ export async function readTraceByPath(file, { offset = 0, limit = 200 } = {}) {
  * plus meta/. The harness is sniffed from the file, since a bundle carries
  * whatever format the sender's harness ships.
  */
-export async function readTraceBundle(dir, { offset = 0, limit = 200 } = {}) {
+export async function readTraceBundle(dir, opts = {}) {
   const names = (await fsp.readdir(dir).catch(() => [])).filter((n) => n.endsWith('.jsonl'));
   if (!names.length) { const e = new Error('bundle has no trace file'); e.code = 'no-trace'; throw e; }
   const file = path.join(dir, names[0]);
   const st = await statRetry(file);
   if (!st) { const e = new Error('bundle trace unreadable'); e.code = 'no-trace'; throw e; }
 
-  const key = `b:${file}:${st.mtimeMs}:${st.size}`;
-  if (viewMemo.key !== key) {
-    const harness = await sniffHarness(file);
-    if (!harness) { const e = new Error('unrecognized trace format'); e.code = 'unsupported-harness'; throw e; }
-    const parsed = await tracked(PHASE.readTrace, () => parseTraceFile(harness, file, null));
+  const harness = await sniffHarness(file);
+  if (!harness) { const e = new Error('unrecognized trace format'); e.code = 'unsupported-harness'; throw e; }
+
+  // Applied to every parse of this bundle — a window is as entitled to the
+  // sender's own description of it as a full read is.
+  const decorate = async (parsed) => {
     let manifest = null;
     try { manifest = JSON.parse(await fsp.readFile(path.join(dir, 'meta', 'manifest.json'), 'utf8')); } catch {}
     // The manifest is the sender's own description of the bundle
@@ -1534,7 +1962,14 @@ export async function readTraceBundle(dir, { offset = 0, limit = 200 } = {}) {
       const src = JSON.parse(await fsp.readFile(path.join(dir, 'meta', 'source.json'), 'utf8'));
       parsed.source = { repo: src.repo || null, url: src.url || null, importedAt: src.importedAt || null };
     } catch { /* hand-placed bundle, or an older import */ }
-    viewMemo = { key, val: parsed };
-  }
-  return pageOf(viewMemo.val, offset, limit);
+  };
+
+  return serveTrace({
+    key: `b:${file}:${st.mtimeMs}:${st.size}`,
+    harness,
+    file,
+    sessionId: null,
+    size: st.size,
+    decorate,
+  }, opts);
 }

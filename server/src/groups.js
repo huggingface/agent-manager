@@ -90,6 +90,36 @@ export function groupOf(sessionId) {
   return groups.find((g) => g.sessionIds.includes(sessionId)) || null;
 }
 
+/**
+ * Which group a newly spawned session should join, for the agent-facing spawn
+ * API. Mirrors how that route picks a folder: omitted means "same as the caller",
+ * because a peer you spawn is usually working on the same thing you are.
+ *
+ * `requested` is the raw ?group= value: omitted/blank inherits the caller's
+ * group, 'none' opts out and leaves the session loose in the sidebar, and
+ * anything else names a group — by id, or by the display name, which is the
+ * only form an agent ever sees (GET /api/agents reports `group` as a name).
+ *
+ * Returns {groupId} (null = ungrouped) or {error} for a name that matches
+ * nothing. An unknown group is refused rather than created: the sidebar is the
+ * operator's, and a typo should be loud instead of quietly fragmenting it.
+ */
+export function resolveSpawnGroup(requested, callerId) {
+  const raw = typeof requested === 'string' ? requested.trim() : '';
+  if (!raw) {
+    const g = groupOf(callerId);
+    return { groupId: g ? g.id : null };
+  }
+  if (raw.toLowerCase() === 'none') return { groupId: null };
+  const byId = get(raw);
+  if (byId) return { groupId: byId.id };
+  const lower = raw.toLowerCase();
+  const byName = groups.find((g) => (g.name || '').toLowerCase() === lower);
+  if (byName) return { groupId: byName.id };
+  const known = groups.map((g) => g.name).filter(Boolean).join(', ');
+  return { error: `unknown group '${raw}'${known ? ` — groups here: ${known}` : ' — no groups exist yet'}; pass group=none to stay ungrouped` };
+}
+
 /** Remove a session from every group (used on session delete). */
 export function detachSession(sessionId) {
   let changed = false;

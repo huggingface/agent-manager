@@ -1,11 +1,13 @@
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import pty from 'node-pty';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import { remoteState, setPaused } from './remote.js';
-import { cliById, isRemote, STATE_DIR, WORKSPACES_DIR } from './config.js';
+import { cliById, isRemote, PORT, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
-import { captureOpencodeSession, opencodeSessionExists, readTrace } from './traces.js';
+import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace } from './traces.js';
 import {
   buildPaletteIndex, snapshotToRestoreAnsi, styledSnapshotLines, textColumns,
 } from './snapshot.js';
@@ -660,13 +662,37 @@ async function hydrateTraceHistory(session, host) {
   }
 }
 
+// ---------- whose folder is this conversation in? ----------
+// Every pin path asks the same question of a candidate conversation: was it
+// started by THIS pane? The answer is the folder it was born in — and a pane's
+// folder is a tree, not one directory.
+//
+// This used to be `cwd === workdir`, and that quietly broke every agent that
+// works in a git worktree. The PTY starts in the session's folder, the agent
+// then enters `.claude/worktrees/<name>` (or just cd's somewhere below), and the
+// conversation a later `/clear` starts records that DEEPER cwd. Equality
+// rejected it from both directions — the SessionStart crumb as 'cwd mismatch',
+// the transcript scan by skipping the file — so the pin stayed on the abandoned
+// conversation for the rest of the pane's life. The reader kept showing the
+// pre-/clear thread while the terminal showed the new one, and the next launch
+// would `--resume` the old id and discard everything since. Observed live:
+// session claude-code-4 pinned edbfc11f… while claude wrote b1e23587… in
+// /data/workspaces/Agent-manager/.claude/worktrees/session-sharing.
+//
+// Containment, not prefix matching: `/w/proj-a2` must not count as inside
+// `/w/proj-a`. Exported for server/test/repin.test.mjs.
+export function cwdUnderWorkdir(cwd, workdir) {
+  if (typeof cwd !== 'string' || !cwd || typeof workdir !== 'string' || !workdir) return false;
+  const rel = path.relative(path.resolve(workdir), path.resolve(cwd));
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
 // ---------- Codex conversation pinning ----------
 // Codex picks its own conversation id at launch and doesn't accept one up
-// front — but it announces the pick immediately: a rollout file named
+// front. The managed SessionStart hook below is the primary source of its exact
+// choice. This rollout discovery remains the fallback: a file named
 // rollout-<ts>-<id>.jsonl appears under $CODEX_HOME/sessions with the cwd in
-// its first line. Capture that id shortly after launch and pin it on the
-// session, so restarts resume THIS agent's conversation — `resume --last`
-// would grab whichever Codex agent in the same folder ran last.
+// its first line, so an unshared pane can still recover when hooks are absent.
 const codexCapturing = new Map(); // id -> pending re-pin timer
 
 // Every harness's conversation pin is re-checked on this cadence for as long as
@@ -680,21 +706,35 @@ function codexSessionsRoot() {
 }
 
 // Rollout files touched since `sinceMs`, newest first.
-function codexRolloutsSince(sinceMs) {
+//
+// Async for the same reason as claudeTranscriptsSince, and it is the same bug:
+// this is a readdir per day-directory plus a stat per rollout, and although
+// CODEX_HOME is on local disk, its `sessions` child is a SYMLINK onto the FUSE
+// bucket — `stat -f` says fuseblk, and `find` without -L will tell you the
+// directory is empty, which is how this hid. A stat there costs ~85ms, so the
+// sync version froze every pane in the Space for 400-750ms on the REPIN_MS beat,
+// once per codex session. Measured: stalls >250ms at 2.5/min, worst 3.9s.
+//
+// Sequential rather than Promise.all, exactly as in claudeTranscriptsSince:
+// parallel FUSE stats would saturate the 4-thread libuv pool and push every
+// other fs operation in the process behind them, and nothing here is waiting on
+// the result.
+// Exported for server/test/codex-repin.test.mjs.
+export async function codexRolloutsSince(sinceMs) {
   const out = [];
-  const walk = (dir, depth) => {
+  const walk = async (dir, depth) => {
     if (depth > 5) return;
     let ents = [];
-    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
     for (const e of ents) {
       const p = path.join(dir, e.name);
-      if (e.isDirectory()) walk(p, depth + 1);
+      if (e.isDirectory()) await walk(p, depth + 1);
       else if (e.name.startsWith('rollout-') && e.name.endsWith('.jsonl')) {
-        try { const m = fs.statSync(p).mtimeMs; if (m >= sinceMs) out.push({ p, m }); } catch {}
+        try { const m = (await fsp.stat(p)).mtimeMs; if (m >= sinceMs) out.push({ p, m }); } catch {}
       }
     }
   };
-  walk(codexSessionsRoot(), 0);
+  await walk(codexSessionsRoot(), 0);
   return out.sort((a, b) => b.m - a.m);
 }
 
@@ -704,18 +744,21 @@ function codexRolloutsSince(sinceMs) {
 // truncate the JSON and make every capture silently fail.
 // The first line of a transcript that records a `cwd`, with its timestamp.
 // Bounded on lines AND bytes: a file-history-snapshot line can be megabytes.
-function transcriptHead(p) {
-  // openSync INSIDE the try: on the bucket mount a transcript can rotate away
+// Async, like the rest of the claude scan: every read here is against the FUSE
+// bucket, where a cold one costs tens of ms, and this is on the one event loop
+// that carries every session's PTY. See claudeTranscriptsSince.
+async function transcriptHead(p) {
+  // open() INSIDE the try: on the bucket mount a transcript can rotate away
   // between the stat that found it and this open, and the only caller runs in a
   // setTimeout where a throw is unhandled.
-  let fd = null;
+  let fh = null;
   try {
-    fd = fs.openSync(p, 'r');
+    fh = await fsp.open(p, 'r');
     const CHUNK = 65536, MAX_BYTES = 512 * 1024, MAX_LINES = 64;
     let carry = '', pos = 0, lines = 0;
     while (pos < MAX_BYTES && lines < MAX_LINES) {
       const b = Buffer.alloc(Math.min(CHUNK, MAX_BYTES - pos));
-      const n = fs.readSync(fd, b, 0, b.length, pos);
+      const { bytesRead: n } = await fh.read(b, 0, b.length, pos);
       if (!n) break;
       pos += n;
       carry += b.toString('utf8', 0, n);
@@ -732,36 +775,46 @@ function transcriptHead(p) {
       if (n < b.length) break; // EOF
     }
     return null;
-  } catch { return null; } finally { if (fd !== null) { try { fs.closeSync(fd); } catch {} } }
+  } catch { return null; } finally { if (fh) { try { await fh.close(); } catch {} } }
 }
 
-function firstLine(p) {
-  const fd = fs.openSync(p, 'r');
+// Async for the same reason as the walk above: these rollouts are on the bucket,
+// and reading up to a megabyte of one synchronously blocked the loop carrying
+// every session's PTY. Opened INSIDE the try, like transcriptHead: a rollout can
+// rotate away between the stat that found it and this open.
+async function firstLine(p) {
+  let fh = null;
   try {
+    fh = await fsp.open(p, 'r');
     const CHUNK = 65536, MAX = 1024 * 1024;
     let buf = Buffer.alloc(0);
     for (let pos = 0; pos < MAX; pos += CHUNK) {
       const b = Buffer.alloc(CHUNK);
-      const n = fs.readSync(fd, b, 0, CHUNK, pos);
+      const { bytesRead: n } = await fh.read(b, 0, CHUNK, pos);
       buf = Buffer.concat([buf, b.subarray(0, n)]);
       const nl = buf.indexOf(0x0a);
       if (nl >= 0) return buf.toString('utf8', 0, nl);
       if (n < CHUNK) break; // EOF
     }
     return buf.toString('utf8');
-  } finally { fs.closeSync(fd); }
+  } finally { if (fh) { try { await fh.close(); } catch {} } }
 }
 
-function tryCaptureCodexId(sessionId, workdir, sinceMs) {
-  const claimed = new Set(list().filter((s) => s.id !== sessionId && s.codexSessionId).map((s) => s.codexSessionId));
-  const pinned = (list().find((s) => s.id === sessionId) || {}).codexSessionId;
-  for (const c of codexRolloutsSince(sinceMs)) {
+// Read fresh at every use, never snapshotted: this awaits a bucket walk and then
+// a file read per candidate, so a claim or a pin taken before those resolve is a
+// stale view of the world by the time it is acted on. Same lesson as the claude
+// scan — see the note above the re-pin in scheduleClaudeCapture.
+async function tryCaptureCodexId(sessionId, workdir, sinceMs, stillOurs = () => true) {
+  const claimedByOthers = () =>
+    new Set(list().filter((s) => s.id !== sessionId && s.codexSessionId).map((s) => s.codexSessionId));
+  const currentPin = () => (list().find((s) => s.id === sessionId) || {}).codexSessionId;
+  for (const c of await codexRolloutsSince(sinceMs)) {
     const m = c.p.match(/rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/);
-    if (!m || claimed.has(m[1])) continue;
+    if (!m || claimedByOthers().has(m[1])) continue;
     let meta;
-    try { meta = JSON.parse(firstLine(c.p)); } catch { continue; }
+    try { meta = JSON.parse(await firstLine(c.p)); } catch { continue; }
     const mp = (meta && meta.payload) || {};
-    if (mp.cwd !== workdir) continue;
+    if (!cwdUnderWorkdir(mp.cwd, workdir)) continue;
     // A sibling's ongoing conversation in the same folder gets fresh writes
     // (mtime) during our capture window — require the rollout to have been
     // CREATED after this launch so we never claim someone else's thread.
@@ -771,9 +824,23 @@ function tryCaptureCodexId(sessionId, workdir, sinceMs) {
     // aren't this agent's conversation, so pinning one would break resume and
     // the Overview digest.
     if (mp.thread_source === 'subagent' || (mp.source && mp.source.subagent)) continue;
+    // Re-read now that the walk and the head read have both resolved: this
+    // rollout may since have been claimed by the session it actually belongs to,
+    // and taking it anyway would strand that session on a conversation it cannot
+    // reclaim.
+    if (claimedByOthers().has(m[1])) continue;
+    const pinned = currentPin();
     // The watcher re-runs for the life of the pane, so the usual outcome is
     // "still the same conversation" — don't rewrite sessions.json for that.
     if (m[1] === pinned) return true;
+    // Both of these were checked before the walk, and the walk plus the head
+    // read above have been awaiting the bucket for ~a second since. In that
+    // window a relaunch spawns a new host whose watch owns the pin from then on,
+    // and a sibling can go live in this folder — precisely the case
+    // folderIsShared refuses to guess at. Writing on the strength of the
+    // pre-walk answer lets a disposed chain overwrite a correct pin or claim a
+    // sibling's rollout. Same re-check the claude re-pin does before its write.
+    if (!stillOurs() || folderIsShared(sessionId, workdir, 'codex')) return false;
     if (pinned) console.warn(`[codex] re-pinning ${sessionId}: ${pinned} -> ${m[1]} (conversation was replaced)`);
     update(sessionId, { codexSessionId: m[1], codexRollout: c.p });
     return true;
@@ -781,15 +848,33 @@ function tryCaptureCodexId(sessionId, workdir, sinceMs) {
   return false;
 }
 
+// How long a beat waits for its rollout scan before giving up on it and
+// rearming. Generous: a cold walk of a real sessions tree runs ~1s, and timing
+// one out early would only add a redundant walk, not fix anything.
+const SCAN_TIMEOUT_MS = 30_000;
+
+// Resolves true if `p` is still pending after `ms`, false if it settled first.
+// Never rejects and never leaves the process alive on the timer — the caller
+// wants to carry on, not to be told about a failure. `p` must already carry its
+// own .catch: once the race is lost, nothing else is watching it.
+function raceTimeout(p, ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(true), ms);
+    if (t.unref) t.unref();
+    p.then(() => { clearTimeout(t); resolve(false); }, () => { clearTimeout(t); resolve(false); });
+  });
+}
+
 // A pin captured before subagents were filtered out (or one whose rollout was
 // rotated away) may point at a guardian/missing rollout — clear it so we
 // re-capture the real conversation on this launch.
-function pinIsStale(session) {
+async function pinIsStale(session) {
   if (!session.codexSessionId) return false;
   const p = session.codexRollout;
-  if (!p || !fs.existsSync(p)) return true;
+  if (!p) return true;
+  try { await fsp.stat(p); } catch { return true; } // gone, or the bucket says so
   try {
-    const mp = (JSON.parse(firstLine(p)) || {}).payload || {};
+    const mp = (JSON.parse(await firstLine(p)) || {}).payload || {};
     return mp.thread_source === 'subagent' || !!(mp.source && mp.source.subagent);
   } catch { return false; }
 }
@@ -800,37 +885,108 @@ function pinIsStale(session) {
 // for as long as the pane is alive and follow the newest rollout this folder
 // produces. tryCaptureCodexId only writes when the id actually changes.
 function scheduleCodexCapture(session, workdir) {
-  if (session.codexSessionId && pinIsStale(session)) {
-    session = update(session.id, { codexSessionId: undefined, codexRollout: undefined }) || session;
-  }
   const prev = codexCapturing.get(session.id);
   if (prev) clearTimeout(prev);
   const since = Date.now() - 2000;
+  // The host this watch belongs to. A relaunch spawns a new host and a new
+  // watch, and that one owns the pin from then on — same identity guard the
+  // claude watcher uses, and it matters for the same reason now that a tick
+  // awaits and a relaunch can land mid-scan.
+  const host = hosts.get(session.id);
+  const stillOurs = () => hosts.get(session.id) === host;
   let warnedShared = false;
+  let checkedStale = false;
+  let scanInFlight = false;
+  let warnedSlow = false;
 
-  const tick = () => {
-    if (!isRunning(session.id)) { codexCapturing.delete(session.id); return; }
+  const tick = async () => {
+    // Clearing a stale pin used to run inline at schedule time, where its
+    // existsSync + whole-first-line read sat on the launch path. Both touch the
+    // bucket, so do it on the first beat instead — and read the session fresh,
+    // since the one passed in was captured before any of this awaited.
+    //
+    // Deliberately ABOVE the isRunning gate. Inline it ran once per launch,
+    // whatever the pane did next; behind the gate a pane that exits inside the
+    // first beat skipped it, and as this is now the only clear site in the tree
+    // the bad pin survived to the next launch. Nothing clears this timer on
+    // exit — only a relaunch does — so the beat still arrives and this still
+    // runs exactly once, with stillOurs() keeping a relaunch's fresh pin safe.
+    if (!checkedStale) {
+      checkedStale = true;
+      const live = list().find((s) => s.id === session.id);
+      if (live && live.codexSessionId && await pinIsStale(live) && stillOurs()) {
+        update(session.id, { codexSessionId: undefined, codexRollout: undefined });
+      }
+    }
+    if (!isRunning(session.id)) { codexCapturing.delete(session.id); return false; }
     if (folderIsShared(session.id, workdir, 'codex')) {
       if (!warnedShared) {
         warnedShared = true;
         console.warn(`[codex] ${session.id}: folder shared with another live session — not following thread resets here`);
       }
-    } else {
-      tryCaptureCodexId(session.id, workdir, since);
+    } else if (stillOurs()) {
+      // A walk that never comes back must not take the watcher with it. On a
+      // wedged mount fsp.stat neither resolves nor rejects, so without this the
+      // tick never settles, `run`'s .then never fires, rearm never runs, and
+      // this pane silently stops following thread resets for good.
+      //
+      // The timeout only lets the BEAT continue — the walk itself cannot be
+      // cancelled and keeps its libuv thread. So scanInFlight makes sure we
+      // never stack a second walk on top of a stuck one: with a 4-thread pool,
+      // one walk per beat on a hung mount would consume the pool within a
+      // minute and wedge every other fs call in the process.
+      if (scanInFlight) {
+        if (!warnedSlow) {
+          warnedSlow = true;
+          console.warn(`[codex] ${session.id}: rollout scan still outstanding — skipping this beat`);
+        }
+      } else {
+        scanInFlight = true;
+        const scan = tryCaptureCodexId(session.id, workdir, since, stillOurs)
+          .catch((e) => { console.warn(`[codex] ${session.id}: rollout scan failed (${e && e.message})`); })
+          .finally(() => { scanInFlight = false; });
+        if (await raceTimeout(scan, SCAN_TIMEOUT_MS)) {
+          console.warn(`[codex] ${session.id}: rollout scan past ${SCAN_TIMEOUT_MS}ms — rearming without it`);
+        }
+      }
     }
-    const t = setTimeout(tick, REPIN_MS);
-    if (t.unref) t.unref();
-    codexCapturing.set(session.id, t);
+    return true;
   };
 
-  const t0 = setTimeout(tick, 5000); // rollout appears ~instantly
-  if (t0.unref) t0.unref();
-  codexCapturing.set(session.id, t0);
+  // One rearm per tick, whatever the tick did. A tick that throws logs and keeps
+  // the watcher alive: dropping it would stop following thread resets for the
+  // rest of the pane's life, which is the failure this mechanism exists for.
+  const run = () => tick()
+    .catch((e) => {
+      console.warn(`[codex] ${session.id}: repin tick failed (${e && e.message}) — retrying next beat`);
+      return isRunning(session.id);
+    })
+    .then((again) => { if (again) rearm(); else codexCapturing.delete(session.id); });
+
+  let armed = null;
+  function rearm(ms = REPIN_MS) {
+    // Not the pane's watch any more: either a relaunch during an in-flight walk
+    // started a fresh one — which already owns the map entry, and arming here
+    // would leave BOTH chains beating with only one reachable by clearTimeout —
+    // or the pane exited and nothing replaced it.
+    if (!stillOurs()) {
+      // Drop OUR entry on the way out; a fired Timeout still retains its
+      // callback, and with it this closure and the disposed host. Only ours: a
+      // newer watch's timer has to survive untouched.
+      if (codexCapturing.get(session.id) === armed) codexCapturing.delete(session.id);
+      return;
+    }
+    armed = setTimeout(run, ms);
+    if (armed.unref) armed.unref();
+    codexCapturing.set(session.id, armed);
+  }
+
+  rearm(5000); // rollout appears ~instantly
 }
 
 // opencode has no per-conversation handle we can pass on launch, so we can't
-// mint an id like Claude's --session-id. Instead, capture the ses_ row opencode
-// writes to its db and pin it — mirrors the codex approach. The row appears
+// mint an id like Claude's --session-id. Its plugin reports the exact ses_ id;
+// this database discovery remains the unshared-folder fallback. A row appears
 // only once the conversation has content (the user's first message), so retry
 // on a longer, sparser schedule than codex.
 // ---------- Claude conversation re-pinning ----------
@@ -855,47 +1011,70 @@ function claudeProjectDirs() {
 }
 
 // Every transcript, newest first, touched since `sinceMs`.
-function claudeTranscriptsSince(sinceMs) {
+//
+// Async, and that is the point rather than a style choice. This is a readdir per
+// project dir plus a stat per transcript, and on the Space CLAUDE_CONFIG_DIR is
+// on the FUSE bucket. Measured there over 32 transcripts: ~3ms when the mount's
+// attribute cache is warm, 1.1-1.3s when it is cold (~37ms per stat round trip).
+// The sync version spent all of that ON the one event loop that also carries
+// every session's PTY, so a cold scan was a hard freeze of every terminal — at
+// the REPIN_MS beat, once per live pane, every ~20 seconds.
+//
+// The awaited version does the same I/O for the same wall time, but on the
+// libuv threadpool: measured over 302 files, 11.6s of wall time for 26ms of
+// event-loop block. Sequential rather than Promise.all on purpose — 32 parallel
+// FUSE stats would saturate the 4-thread pool and push every other fs
+// operation in the process behind them, and nothing here is waiting on the
+// result.
+async function claudeTranscriptsSince(sinceMs) {
   const out = [];
   for (const proj of claudeProjectDirs()) {
     let dirs = [];
-    try { dirs = fs.readdirSync(proj, { withFileTypes: true }); } catch { continue; }
+    try { dirs = await fsp.readdir(proj, { withFileTypes: true }); } catch { continue; }
     for (const d of dirs) {
       if (!d.isDirectory()) continue;
       let files = [];
-      try { files = fs.readdirSync(path.join(proj, d.name)); } catch { continue; }
+      try { files = await fsp.readdir(path.join(proj, d.name)); } catch { continue; }
       for (const f of files) {
         if (!f.endsWith('.jsonl')) continue;
         const p = path.join(proj, d.name, f);
-        try { const st = fs.statSync(p); if (st.mtimeMs >= sinceMs) out.push({ p, m: st.mtimeMs }); } catch {}
+        try { const st = await fsp.stat(p); if (st.mtimeMs >= sinceMs) out.push({ p, m: st.mtimeMs }); } catch {}
       }
     }
   }
   return out.sort((a, b) => b.m - a.m);
 }
 
-const transcriptExists = (uuid) =>
-  !!uuid && claudeProjectDirs().some((proj) => {
+// Async for the same reason as claudeTranscriptsSince — plain loops rather than
+// .some(), which cannot await a predicate. Only reached when a re-pin is about to
+// happen, and only to say which of the two reasons it is.
+async function transcriptExists(uuid) {
+  if (!uuid) return false;
+  for (const proj of claudeProjectDirs()) {
     let dirs = [];
-    try { dirs = fs.readdirSync(proj, { withFileTypes: true }); } catch { return false; }
-    return dirs.some((d) => {
-      if (!d.isDirectory()) return false;
-      try { return fs.readdirSync(path.join(proj, d.name)).some((f) => f.startsWith(uuid)); } catch { return false; }
-    });
-  });
+    try { dirs = await fsp.readdir(proj, { withFileTypes: true }); } catch { continue; }
+    for (const d of dirs) {
+      if (!d.isDirectory()) continue;
+      try {
+        const files = await fsp.readdir(path.join(proj, d.name));
+        if (files.some((f) => f.startsWith(uuid))) return true;
+      } catch { /* dir vanished mid-walk */ }
+    }
+  }
+  return false;
+}
 
 // A transcript's opening cwd/timestamp never changes once written, and the
 // filename IS the conversation id, so a path is never reused for a different
 // conversation. That makes the head safe to remember — which matters because the
-// watcher rescans every REPIN_MS for the life of every session, and on the Space
-// these are synchronous reads against a FUSE mount. Without this, every tick
-// re-read every transcript on disk and would show up as event-loop lag.
+// watcher rescans for the life of every session, and on the Space these are reads
+// against a FUSE mount. Without this, every tick re-read every transcript on disk.
 const headMemo = new Map(); // transcript path -> head
 
-function transcriptHeadCached(p) {
+async function transcriptHeadCached(p) {
   const hit = headMemo.get(p);
   if (hit) return hit;
-  const head = transcriptHead(p);
+  const head = await transcriptHead(p);
   // Only remember a definite answer: null can just mean the file has no cwd line
   // yet (still being written), and caching that would poison it for the process.
   if (head) {
@@ -910,10 +1089,10 @@ function transcriptHeadCached(p) {
 // what distinguishes a /clear-spawned successor from the thread it replaced —
 // both keep receiving mtime updates, only the successor is newly born.
 // Exported for server/test/repin.test.mjs.
-export function claudeCandidate(sessionId, workdir, sinceMs) {
+export async function claudeCandidate(sessionId, workdir, sinceMs) {
   const claimed = new Set(list().filter((s) => s.id !== sessionId && s.sessionUuid).map((s) => s.sessionUuid));
   let best = null;
-  for (const c of claudeTranscriptsSince(sinceMs)) {
+  for (const c of await claudeTranscriptsSince(sinceMs)) {
     const uuid = path.basename(c.p).replace(/\.jsonl$/, '');
     if (claimed.has(uuid)) continue;
     // The cwd is NOT on the first line: a transcript opens with metadata lines
@@ -921,9 +1100,11 @@ export function claudeCandidate(sessionId, workdir, sinceMs) {
     // that have no cwd, and only the conversation lines carry one — line 4 or 5
     // in every real transcript measured. Reading line 1 made this check always
     // fail, so the re-pin could never actually claim anything.
-    const head = transcriptHeadCached(c.p);
-    // Only claim a conversation started in THIS session's folder.
-    if (!head || head.cwd !== workdir) continue;
+    const head = await transcriptHeadCached(c.p);
+    // Only claim a conversation started in THIS session's folder — or in a
+    // directory below it, which is where an agent in a worktree lives (see
+    // cwdUnderWorkdir).
+    if (!head || !cwdUnderWorkdir(head.cwd, workdir)) continue;
     const start = Date.parse(head.timestamp || '') || 0;
     // Born in this launch window, or it's an older thread that merely received
     // writes — someone else's, or our own pre-relaunch one.
@@ -933,12 +1114,22 @@ export function claudeCandidate(sessionId, workdir, sinceMs) {
   return best;
 }
 
-// Another LIVE session of the same harness on the same folder makes a new
+// Another LIVE session of the same harness whose folder OVERLAPS ours makes a new
 // conversation there unattributable: we cannot tell whose /clear produced it.
 // Refuse to guess, the way share.js does when a folder has rivals.
+//
+// Overlap, not equality, because the scan now accepts a conversation born
+// anywhere below the folder (see cwdUnderWorkdir): a live sibling running in a
+// subdirectory of ours — or in a parent of it, which is what a session on the
+// workspaces root is — is exactly as ambiguous as one in the same directory.
+// Refusing here costs nothing where it fires: the breadcrumb path is unaffected,
+// and it is the mechanism now — the scan is its backstop.
 function folderIsShared(sessionId, workdir, cli) {
-  return list().some((s) => s.id !== sessionId && s.cli === cli
-    && path.join(WORKSPACES_DIR, s.path ?? s.id) === workdir && isRunning(s.id));
+  return list().some((s) => {
+    if (s.id === sessionId || s.cli !== cli || !isRunning(s.id)) return false;
+    const other = path.join(WORKSPACES_DIR, s.path ?? s.id);
+    return cwdUnderWorkdir(other, workdir) || cwdUnderWorkdir(workdir, other);
+  });
 }
 
 // Re-pinning is NOT a one-shot check, because the pin can go stale mid-session.
@@ -956,73 +1147,155 @@ function folderIsShared(sessionId, workdir, cli) {
 // honoured) and a /clear at any later point.
 
 // ---------- breadcrumbs: the pane tells us, so we don't have to guess ----------
-// The transcript scan above cannot attribute a new conversation when several
-// live claude panes share a folder — folderIsShared refuses, and a /clear in
-// such a folder was never followed. But the pane itself KNOWS: a SessionStart
-// hook (installed into settings.json below, script at scripts/am-repin-hook.sh)
-// runs inside the pane's process tree, where $AM_ID names the pane and the
-// payload carries the new conversation's id. It drops that as a breadcrumb
-// here; the watcher consumes it and re-pins with no guessing at all. The scan
-// stays as the fallback for panes without a breadcrumb (hook newly installed,
-// crumb lost) — and for codex/opencode, which have no hook mechanism.
+// Folder scans cannot attribute a new conversation when several live panes of
+// one harness share a folder. The harness itself does know the exact id, so the
+// three harnesses with lifecycle extension points report it directly:
+//
+//   Claude   SessionStart command hook
+//   Codex    managed SessionStart command hook
+//   OpenCode global plugin (session.created and chat.message)
+//
+// Each PTY launch gets a fresh AM_RUN_ID. A breadcrumb must match both AM_ID and
+// that nonce, so a delayed event from the pane's previous process can never
+// move its replacement — and two panes in one folder can never claim each
+// other's conversation. The existing transcript/rollout/database discovery
+// stays below as a fallback for installations where an adapter is unavailable.
 const REPIN_DIR = process.env.AM_REPIN_DIR || '/tmp/am-repin';
+const breadcrumbCapturing = new Map(); // session id -> pending exact-event poll
+const BREADCRUMB_MS = 250;
+const BREADCRUMB_RETRY_MS = 500;
+const BREADCRUMB_RETRIES = 20;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CONVERSATION_ID = { claude: UUID, codex: UUID, opencode: /^ses_[A-Za-z0-9_-]+$/ };
 
 // Read AND remove the pane's breadcrumb — consumed on read, so a stale crumb
 // can never flip a pin backwards after a later, scan-based re-pin.
-function takeClaudeBreadcrumb(sessionId) {
-  const p = path.join(REPIN_DIR, `${sessionId}.json`);
+function takeBreadcrumb(sessionId, cli) {
+  const p = path.join(REPIN_DIR, `${sessionId}.${cli}.json`);
   let raw;
   try { raw = fs.readFileSync(p, 'utf8'); } catch { return null; }
   try { fs.unlinkSync(p); } catch {}
   try { return JSON.parse(raw); } catch { return null; }
 }
 
-// The pane's root process (what tmux spawned). After `exec claude` this IS
-// claude; in the `claude --session-id … || exec claude` branch claude is a
-// child of it. Either way the hook's $CLAUDE_PID must descend from it.
-function paneRootPid(sessionId) {
-  try {
-    const out = execFileSync('tmux', ['list-panes', '-t', tmuxName(sessionId), '-F', '#{pane_pid}'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: TERM_ENV });
-    const pid = parseInt(out.trim().split('\n')[0], 10);
-    return Number.isInteger(pid) && pid > 1 ? pid : null;
-  } catch { return null; }
+// The pane's root process — the PTY this server spawned for the session. After
+// `exec claude` this IS claude; in the `claude --session-id … || exec claude`
+// branch claude is its direct child. Trusting ANY descendant is too broad: an
+// interactive agent started by the top-level agent's shell tool inherits AM_ID
+// too, and its lifecycle event must not move the pane's pin.
+//
+// This used to ask tmux for `#{pane_pid}`. Replacing tmux with a server-held grid
+// left the call behind referencing two identifiers that no longer exist here
+// (`tmuxName`, `execFileSync`), so it threw a ReferenceError into its own bare
+// `catch` on every tick and returned null. That failed EVERY breadcrumb as 'pid
+// not in pane' and silently disabled the whole hook path — observed live: the
+// only breadcrumb outcome in the Space logs was `breadcrumb rejected (pid not in
+// pane)`. The server owns the PTY now, so the pane root is a property read and
+// there is no subprocess per tick either.
+// Exported for server/test/repin.test.mjs.
+export function paneRootPid(sessionId) {
+  const pid = hosts.get(sessionId)?.pty?.pid;
+  return Number.isInteger(pid) && pid > 1 ? pid : null;
 }
 
-// Walk /proc ppid links. comm in /proc/<pid>/stat may contain spaces and
-// parens, so split after the LAST ') '.
-function pidHasAncestor(pid, ancestor, readStat = (p) => fs.readFileSync(`/proc/${p}/stat`, 'utf8')) {
-  for (let p = pid, hops = 0; Number.isInteger(p) && p > 1 && hops < 64; hops++) {
-    if (p === ancestor) return true;
-    let stat;
-    try { stat = readStat(p); } catch { return false; }
-    const tail = stat.slice(stat.lastIndexOf(') ') + 2).split(' ');
-    p = parseInt(tail[1], 10); // state ppid …
+// comm in /proc/<pid>/stat may itself contain spaces and parens, so split after
+// the LAST ') '. Tests inject readStat; production reads the live process tree.
+function procIdentity(pid, readStat) {
+  let stat;
+  try { stat = readStat(pid); } catch { return null; }
+  const close = stat.lastIndexOf(') ');
+  const open = stat.indexOf('(');
+  if (open < 0 || close < open) return null;
+  const tail = stat.slice(close + 2).split(' ');
+  const ppid = parseInt(tail[1], 10); // state ppid …
+  return Number.isInteger(ppid) ? { comm: stat.slice(open + 1, close), ppid } : null;
+}
+
+export function pidIsPaneRootOrDirectChild(pid, root,
+  readStat = (p) => fs.readFileSync(`/proc/${p}/stat`, 'utf8')) {
+  if (!Number.isInteger(pid) || !Number.isInteger(root) || pid <= 1 || root <= 1) return false;
+  if (pid === root) return true;
+  return procIdentity(pid, readStat)?.ppid === root;
+}
+
+// Usually the npm launcher replaces the pane root and starts Codex's native
+// binary as its direct child. The `resume --last || fresh` compatibility path
+// must retain bash, so there the npm launcher is the direct child and native
+// Codex is the grandchild. Accept that one known `node` launcher layer. A
+// nested Codex has a tool shell above its launcher and cannot pass this check.
+export function codexProcessPidTrusted(codexPid, root,
+  readStat = (p) => fs.readFileSync(`/proc/${p}/stat`, 'utf8')) {
+  for (let p = codexPid, hops = 0; Number.isInteger(p) && p > 1 && hops < 64; hops++) {
+    const identity = procIdentity(p, readStat);
+    if (!identity) return false;
+    if (identity.comm.startsWith('codex')) {
+      if (p === root || identity.ppid === root) return true;
+      const launcher = procIdentity(identity.ppid, readStat);
+      return launcher?.comm === 'node' && launcher.ppid === root;
+    }
+    p = identity.ppid;
   }
   return false;
 }
 
 // Pure verdict on one breadcrumb, exported for server/test/repin.test.mjs.
-// `facts` carries everything environmental: { workdir, pinned, claimed (Set of
-// uuids other sessions pin), pidTrusted (bool: claudePid descends from the
-// pane) }. Returns { repin: uuid } or { repin: null, why }.
+// `facts` carries everything environmental: { cli, runId, workdir, pinned,
+// claimed (ids other sessions pin), pidTrusted }. Returns
+// { repin: conversationId } or { repin: null, why }.
 export function breadcrumbVerdict(crumb, sessionId, facts) {
   if (!crumb || typeof crumb !== 'object') return { repin: null, why: 'unreadable' };
   if (crumb.amId !== sessionId) return { repin: null, why: 'amId mismatch' };
-  const uuid = crumb.payload?.session_id;
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(uuid || ''))
+  if (crumb.cli !== facts.cli) return { repin: null, why: 'cli mismatch' };
+  if (!facts.runId || crumb.runId !== facts.runId) return { repin: null, why: 'runId mismatch' };
+  const conversationId = crumb.payload?.session_id;
+  if (!CONVERSATION_ID[facts.cli]?.test(conversationId || ''))
     return { repin: null, why: 'no session_id' };
   // A crumb written before a pane was moved to another folder must not follow
-  // it there — same folder-scoping rule the transcript scan applies.
-  if (crumb.payload?.cwd !== facts.workdir) return { repin: null, why: 'cwd mismatch' };
-  // Nested `claude -p` runs inherit $AM_ID and fire SessionStart too (verified
-  // on 2.1.220 — the docs say -p skips hooks; it does not). The hook filters
-  // on CLAUDE_CODE_ENTRYPOINT, and this is the backstop: only a process that
-  // descends from the pane speaks for the pane.
-  if (!facts.pidTrusted) return { repin: null, why: 'pid not in pane' };
-  if (facts.claimed?.has(uuid)) return { repin: null, why: 'claimed by another session' };
-  if (uuid === facts.pinned) return { repin: null, why: 'already pinned' };
-  return { repin: uuid };
+  // it there — same folder-scoping rule the transcript scan applies, and the
+  // same tree (a worktree under the folder is still this pane's work).
+  if (!cwdUnderWorkdir(crumb.payload?.cwd, facts.workdir))
+    return { repin: null, why: 'cwd outside the session folder' };
+  // Every supported adapter inherits the pane markers into child processes.
+  // Only the top-level agent process may speak for the pane; nested agents can
+  // otherwise re-pin their parent's Overview, trace and next resume target.
+  if (!facts.pidTrusted) return { repin: null, why: 'pid not top-level pane agent' };
+  if (facts.claimed?.has(conversationId)) return { repin: null, why: 'claimed by another session' };
+  if (conversationId === facts.pinned) return { repin: null, why: 'already pinned' };
+  return { repin: conversationId };
+}
+
+// Codex gives the exact transcript path with SessionStart. Keep only paths that
+// are under this CODEX_HOME's sessions tree and whose rollout filename encodes
+// the reported id; the hook's payload is data, never an arbitrary resume path.
+export function codexRolloutForBreadcrumb(crumb) {
+  const id = crumb?.payload?.session_id;
+  const raw = crumb?.payload?.transcript_path;
+  if (!UUID.test(id || '') || typeof raw !== 'string' || !raw) return null;
+  const resolved = path.resolve(raw);
+  const roots = [path.resolve(codexSessionsRoot())];
+  const targets = [resolved];
+  // CODEX_HOME/sessions is commonly a symlink to durable storage. Codex may
+  // report either spelling, so compare both lexical and canonical paths while
+  // retaining the same containment and exact-id checks.
+  try { roots.push(fs.realpathSync(roots[0])); } catch {}
+  try { targets.push(fs.realpathSync(resolved)); } catch {}
+  const contained = roots.some((root) => targets.some((target) => {
+    const rel = path.relative(root, target);
+    return !!rel && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+  }));
+  return contained && path.basename(resolved).endsWith(`-${id}.jsonl`) ? resolved : null;
+}
+
+// SessionStart permits transcript_path=null. Resolve that case by the exact id
+// encoded in Codex's rollout filename — deterministic even in a shared folder.
+// Async because the walk it uses is: this landed on main while the walk was
+// being moved off the event loop, and the two met at the rebase. Keeping it
+// synchronous would mean a second sync walk of the whole rollout tree — the
+// exact stall this branch exists to remove.
+export async function codexRolloutForId(id) {
+  if (!UUID.test(id || '')) return null;
+  const suffix = `-${id}.jsonl`;
+  return (await codexRolloutsSince(0)).find((item) => path.basename(item.p).endsWith(suffix))?.p || null;
 }
 
 // Register the SessionStart hook in $CLAUDE_CONFIG_DIR/settings.json. Merge,
@@ -1059,62 +1332,301 @@ export function installClaudeRepinHook(hookCmd = '/app/scripts/am-repin-hook.sh'
   } catch (e) { console.warn(`[claude] repin hook install failed: ${e.message}`); return false; }
 }
 
+// OpenCode automatically loads global plugins from this directory. The plugin
+// is an app-owned file, so upgrades replace only that one file while all user
+// plugins and opencode.json settings remain untouched. This config directory
+// can be on the Space's FUSE bucket, whose rename semantics are unreliable;
+// install before launching OpenCode and write the app-owned file directly.
+export function installOpencodeRepinPlugin(source = '/app/scripts/am-opencode-repin.js') {
+  const base = process.env.OPENCODE_CONFIG_DIR
+    || path.join(process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || os.homedir(), '.config'), 'opencode');
+  const dir = path.join(base, 'plugins');
+  const file = path.join(dir, 'am-agent-manager.js');
+  let body;
+  try { body = fs.readFileSync(source, 'utf8'); }
+  catch (e) { console.warn(`[opencode] repin plugin source unavailable: ${e.message}`); return false; }
+  try {
+    if (fs.readFileSync(file, 'utf8') === body) return true;
+  } catch { /* install or upgrade it below */ }
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, body);
+    console.warn(`[opencode] repin plugin installed in ${file}`);
+    return true;
+  } catch (e) { console.warn(`[opencode] repin plugin install failed: ${e.message}`); return false; }
+}
+
+function exactPinFacts(session, host, workdir, pinField) {
+  return {
+    cli: session.cli,
+    runId: host.runId,
+    workdir,
+    pinned: (list().find((s) => s.id === session.id) || session)[pinField],
+    claimed: new Set(list().filter((s) => s.id !== session.id && s[pinField]).map((s) => s[pinField])),
+  };
+}
+
+// Apply one event from the pane's own adapter. This path never asks which file
+// or database row is newest: the reported id is the lookup key, and local state
+// is used only to validate that exact key before persisting it.
+async function applyBreadcrumb(session, host, workdir, crumb) {
+  let facts;
+  let patch;
+  if (session.cli === 'claude') {
+    facts = exactPinFacts(session, host, workdir, 'sessionUuid');
+    const root = paneRootPid(session.id);
+    facts.pidTrusted = !!root && (pidIsPaneRootOrDirectChild(crumb.claudePid, root)
+      || (Number.isInteger(host.exactAgentPid) && host.exactAgentPid === crumb.claudePid));
+    patch = (id) => ({ sessionUuid: id });
+  } else if (session.cli === 'codex') {
+    facts = exactPinFacts(session, host, workdir, 'codexSessionId');
+    const root = paneRootPid(session.id);
+    facts.pidTrusted = !!root && (codexProcessPidTrusted(crumb.codexPid, root)
+      || (Number.isInteger(host.exactAgentPid) && host.exactAgentPid === crumb.codexPid));
+  } else if (session.cli === 'opencode') {
+    facts = exactPinFacts(session, host, workdir, 'opencodeSessionId');
+    facts.pidTrusted = crumb.pluginPid === paneRootPid(session.id);
+  } else {
+    return { repin: null, why: 'unsupported cli' };
+  }
+
+  const verdict = breadcrumbVerdict(crumb, session.id, facts);
+  if (!verdict.repin && verdict.why !== 'already pinned') return verdict;
+
+  if (session.cli === 'codex') {
+    const reported = crumb?.payload?.transcript_path;
+    const rollout = codexRolloutForBreadcrumb(crumb)
+      || (reported == null ? await codexRolloutForId(crumb?.payload?.session_id) : null);
+    // That fallback awaits a walk of the rollout tree, and the pane's own exit
+    // handler calls in here and then deletes the host on the next line. If a
+    // relaunch got a new host in the meantime, this crumb describes a launch
+    // that is over and writing it would overwrite the new one's pin — the same
+    // re-check tryCaptureCodexId and the claude re-pin both make.
+    if (hosts.get(session.id) !== host) return { repin: null, why: 'relaunched during rollout lookup' };
+    if (!rollout) return {
+      repin: null,
+      why: reported == null ? 'rollout not available yet' : 'invalid transcript_path',
+      retry: reported == null,
+    };
+    patch = (id) => ({ codexSessionId: id, codexRollout: rollout });
+    // A same-id resume is normally a no-op, but an older pin may lack the path
+    // required by commandFor. Exact lifecycle data repairs that incomplete pin.
+    if (!verdict.repin && facts.pinned === crumb.payload.session_id) {
+      const current = list().find((s) => s.id === session.id) || session;
+      if (current.codexRollout !== rollout) update(session.id, patch(facts.pinned));
+    }
+  } else if (session.cli === 'opencode') {
+    const row = opencodeSessionInfo(crumb?.payload?.session_id);
+    if (!row) return { repin: null, why: 'session missing from database', retry: true };
+    if (row.parentId) return { repin: null, why: 'subagent session' };
+    if (!cwdUnderWorkdir(row.directory, workdir))
+      return { repin: null, why: 'database cwd outside the session folder' };
+    patch = (id) => ({ opencodeSessionId: id });
+  }
+
+  // Remember only a process that passed both tree attribution and adapter data
+  // validation. onExit runs after node-pty has reaped the process, so /proc may
+  // already be gone when it performs the promised final breadcrumb read; a
+  // later /clear crumb from this same long-lived agent remains attributable.
+  host.exactAgentPid = session.cli === 'claude' ? crumb.claudePid
+    : session.cli === 'codex' ? crumb.codexPid : crumb.pluginPid;
+  if (verdict.repin || verdict.why === 'already pinned') host.exactRepinProven = true;
+  if (verdict.repin) {
+    console.warn(`[${session.cli}] re-pinning ${session.id}: ${facts.pinned || '(none)'} -> ${verdict.repin} (exact ${crumb.payload?.source || 'event'})`);
+    update(session.id, patch(verdict.repin));
+  }
+  return verdict;
+}
+
+async function consumeBreadcrumb(session, host, workdir, force = false) {
+  const fresh = takeBreadcrumb(session.id, session.cli);
+  let pending = host.pendingExactBreadcrumb;
+  if (fresh) {
+    pending = { crumb: fresh, attempts: 0, nextAt: 0 };
+    host.pendingExactBreadcrumb = null;
+  }
+  if (!pending || (!fresh && !force && Date.now() < pending.nextAt)) return;
+  try {
+    const verdict = await applyBreadcrumb(session, host, workdir, pending.crumb);
+    if (verdict.retry && pending.attempts < BREADCRUMB_RETRIES) {
+      host.pendingExactBreadcrumb = {
+        crumb: pending.crumb,
+        attempts: pending.attempts + 1,
+        nextAt: Date.now() + BREADCRUMB_RETRY_MS,
+      };
+      return;
+    }
+    host.pendingExactBreadcrumb = null;
+    if (!verdict.repin && verdict.why !== 'already pinned')
+      console.warn(`[${session.cli}] ${session.id}: exact breadcrumb rejected (${verdict.why})`);
+  } catch (e) {
+    host.pendingExactBreadcrumb = null;
+    console.warn(`[${session.cli}] ${session.id}: exact breadcrumb failed (${e && e.message})`);
+  }
+}
+
+// Poll only a tiny file on local /tmp, frequently enough that a /clear followed
+// by an immediate pane exit still persists its new id. Expensive transcript,
+// rollout and database discovery retain their existing sparse cadence below.
+function scheduleBreadcrumbCapture(session, workdir) {
+  if (!CONVERSATION_ID[session.cli]) return;
+  const prev = breadcrumbCapturing.get(session.id);
+  if (prev) clearTimeout(prev);
+  const host = hosts.get(session.id);
+  let armed = null;
+  // One rearm per tick, after the beat finishes rather than alongside it: the
+  // codex fallback inside now awaits a walk of the rollout tree, and arming on
+  // a fixed interval regardless would stack beats on a slow mount. Same shape
+  // as the codex and claude watchers.
+  const tick = async () => {
+    if (hosts.get(session.id) !== host) {
+      if (breadcrumbCapturing.get(session.id) === armed) breadcrumbCapturing.delete(session.id);
+      return;
+    }
+    try { await consumeBreadcrumb(session, host, workdir); } catch { /* consumeBreadcrumb logs its own */ }
+    if (hosts.get(session.id) !== host) {
+      if (breadcrumbCapturing.get(session.id) === armed) breadcrumbCapturing.delete(session.id);
+      return;
+    }
+    armed = setTimeout(tick, BREADCRUMB_MS);
+    if (armed.unref) armed.unref();
+    breadcrumbCapturing.set(session.id, armed);
+  };
+  tick();
+}
+
+// Once the pane's SessionStart hook has proven itself, the transcript scan is a
+// backstop rather than the mechanism, so it runs on this cadence instead of
+// REPIN_MS. Now that the scan is awaited rather than synchronous this is no longer
+// about event-loop block time — it is only about not walking the bucket 3x a
+// minute per pane for an answer the breadcrumb already gave. So it can be short:
+// this also bounds how long a pin stays stale if a breadcrumb is ever LOST (the
+// hook fired but its crumb never reached us), and that staleness costs one late
+// Overview digest. Note the bound is this PLUS up to one beat, not exactly this:
+// only a tick can scan, ticks come every REPIN_MS, and each one is armed after the
+// previous finishes — so the first tick at or past the backstop can be as late as
+// SCAN_BACKSTOP_MS + REPIN_MS, plus the new scan's own duration.
+const SCAN_BACKSTOP_MS = 60_000;
+
+/**
+ * Should this tick run the transcript scan?
+ *
+ * Before the hook has proven itself the cadence is unchanged, so a pane with no
+ * working hook (hook newly installed, crumb lost, a harness with no hook at all)
+ * keeps the pre-existing behaviour and nothing regresses. Pure so the cadence is
+ * testable without a live pane; exported for server/test/repin.test.mjs.
+ */
+export function claudeScanDue({ hookProven, lastScanAt }, now = Date.now()) {
+  if (!hookProven) return true;
+  return now - (lastScanAt || 0) >= SCAN_BACKSTOP_MS;
+}
+
 function scheduleClaudeCapture(session, workdir) {
   // A relaunch restarts the watch with a fresh window, so `since` can't drift
   // older and start admitting pre-relaunch threads as candidates.
   const prev = claudeCapturing.get(session.id);
   if (prev) clearTimeout(prev);
   const since = Date.now() - 2000;
+  // The host this watch belongs to. Clearing `prev` above only cancels a PENDING
+  // beat; now that a tick awaits, one can be mid-scan when a relaunch calls this
+  // again, and that tick still has a rearm ahead of it — see rearm.
+  const host = hosts.get(session.id);
   let warnedShared = false;
+  // Has a breadcrumb from this pane ever named this pane's OWN conversation? That
+  // is what demotes the scan to a backstop — see claudeScanDue.
+  let hookProven = false;
+  let lastScanAt = 0;
 
-  const tick = () => {
-    if (!isRunning(session.id)) { claudeCapturing.delete(session.id); return; }
-    const pinned = (list().find((s) => s.id === session.id) || session).sessionUuid;
+  // Read fresh, never captured: the scan awaits, so anything read before it is a
+  // stale view of the world by the time it returns.
+  const currentPin = () => (list().find((s) => s.id === session.id) || session).sessionUuid;
+  const claimedByOthers = () =>
+    new Set(list().filter((s) => s.id !== session.id && s.sessionUuid).map((s) => s.sessionUuid));
+  // Is this watch still the pane's? A relaunch spawns a new host and a new watch,
+  // and that one owns the pin from then on.
+  const stillOurs = () => hosts.get(session.id) === host;
 
-    // Breadcrumb first: the pane's own SessionStart hook told us which
-    // conversation it is on, so no guessing — and no shared-folder refusal —
-    // is needed. Consumed on read; a rejected crumb falls through to the scan.
-    const crumb = takeClaudeBreadcrumb(session.id);
-    if (crumb) {
-      const root = paneRootPid(session.id);
-      const verdict = breadcrumbVerdict(crumb, session.id, {
-        workdir,
-        pinned,
-        claimed: new Set(list().filter((s) => s.id !== session.id && s.sessionUuid).map((s) => s.sessionUuid)),
-        pidTrusted: !!root && pidHasAncestor(crumb.claudePid, root),
-      });
-      if (verdict.repin) {
-        console.warn(`[claude] re-pinning ${session.id}: ${pinned} -> ${verdict.repin} (breadcrumb, source: ${crumb.payload?.source || '?'})`);
-        update(session.id, { sessionUuid: verdict.repin });
-        const t = setTimeout(tick, REPIN_MS);
-        if (t.unref) t.unref();
-        claudeCapturing.set(session.id, t);
-        return;
-      }
-      if (verdict.why !== 'already pinned') console.warn(`[claude] ${session.id}: breadcrumb rejected (${verdict.why})`);
-    }
-
+  // Returns whether to keep watching. Rearming is the caller's job (see `run`):
+  // the scan awaits now, so a throw lands as a rejected promise rather than as an
+  // exception in a setTimeout callback, and exactly one place deciding the next
+  // beat is what keeps a failed tick from either killing the watcher or arming
+  // two timers.
+  const tick = async () => {
+    if (!isRunning(session.id)) { claudeCapturing.delete(session.id); return false; }
+    hookProven ||= !!host.exactRepinProven;
     if (folderIsShared(session.id, workdir, 'claude')) {
       if (!warnedShared) {
         warnedShared = true;
         console.warn(`[claude] ${session.id}: folder shared with another live session — following /clear only via breadcrumbs here`);
       }
-    } else {
-      const hit = claudeCandidate(session.id, workdir, since);
-      if (hit && hit.uuid !== pinned) {
-        const why = transcriptExists(pinned) ? 'conversation was replaced (/clear)' : '--session-id was not honoured';
-        console.warn(`[claude] re-pinning ${session.id}: ${pinned} -> ${hit.uuid} (${why})`);
-        update(session.id, { sessionUuid: hit.uuid });
+    } else if (claudeScanDue({ hookProven, lastScanAt })) {
+      const hit = await claudeCandidate(session.id, workdir, since);
+      // Stamped AFTER the scan resolves, not before it. Nothing can overlap it —
+      // the next beat is armed only once this tick returns — and stamping first
+      // meant a scan that threw was not retried on the next beat the way `run`
+      // logs, but skipped until the backstop expired.
+      lastScanAt = Date.now();
+      // Every input that decision rests on was read BEFORE the scan awaited, so
+      // re-read them rather than mutating a world that has moved on:
+      //   - this pane may have been relaunched, and the new watch owns the pin now
+      //     (its `since` is newer, so `hit` may be pre-relaunch and wrong);
+      //   - another claude pane may have gone live in this folder, which is
+      //     precisely the case folderIsShared refuses to guess at — and it was
+      //     false when this tick started;
+      //   - `hit` may since have been pinned by the session it belongs to;
+      //     claudeCandidate snapshots `claimed` before it walks the disk, so a
+      //     conversation that was unclaimed then can be claimed now. Taking it
+      //     anyway would make the owner's own breadcrumb bounce off 'claimed by
+      //     another session' for good.
+      if (hit && stillOurs() && !claimedByOthers().has(hit.uuid)
+          && !folderIsShared(session.id, workdir, 'claude')) {
+        const pin = currentPin();
+        if (hit.uuid !== pin) {
+          const why = await transcriptExists(pin) ? 'conversation was replaced (/clear)' : '--session-id was not honoured';
+          // transcriptExists awaited too, so confirm ownership once more before
+          // the write itself.
+          if (stillOurs()) {
+            console.warn(`[claude] re-pinning ${session.id}: ${pin} -> ${hit.uuid} (${why})`);
+            update(session.id, { sessionUuid: hit.uuid });
+          }
+        }
       }
     }
-    const t = setTimeout(tick, REPIN_MS);
-    if (t.unref) t.unref();
-    claudeCapturing.set(session.id, t);
+    return true;
   };
 
-  const t0 = setTimeout(tick, 5000);
-  if (t0.unref) t0.unref();
-  claudeCapturing.set(session.id, t0);
+  // One rearm per tick, whatever the tick did. A tick that throws logs and keeps
+  // the watcher alive: dropping it would silently stop following /clear for the
+  // rest of the pane's life, which is the failure this whole mechanism exists for.
+  const run = () => tick()
+    .catch((e) => {
+      console.warn(`[claude] ${session.id}: repin tick failed (${e && e.message}) — retrying next beat`);
+      return isRunning(session.id);
+    })
+    .then((again) => { if (again) rearm(); else claudeCapturing.delete(session.id); });
+
+  let armed = null;
+  function rearm(ms = REPIN_MS) {
+    // This watch is no longer the pane's: either a relaunch during an in-flight
+    // scan started a fresh one — which already owns the map entry, and arming here
+    // would leave BOTH chains beating with only one reachable by clearTimeout, the
+    // orphan keeping its own hookProven/lastScanAt and its own pre-relaunch
+    // `since` — or the pane simply exited and nothing replaced it. Same
+    // host-identity guard the grid timers use.
+    if (!stillOurs()) {
+      // Drop OUR entry on the way out. A fired Timeout still holds its callback
+      // (node does not release `_onTimeout`), so leaving it in the map retains this
+      // closure and the disposed host until the session next starts. Only ours
+      // though: a newer watch's timer has to survive untouched.
+      if (claudeCapturing.get(session.id) === armed) claudeCapturing.delete(session.id);
+      return;
+    }
+    armed = setTimeout(run, ms);
+    if (armed.unref) armed.unref();
+    claudeCapturing.set(session.id, armed);
+  }
+
+  rearm(5000);
 }
 
 const opencodeCapturing = new Map(); // id -> pending re-pin timer
@@ -1285,16 +1797,27 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   const folder = session.path ?? session.id;
   const workdir = path.join(WORKSPACES_DIR, folder);
   fs.mkdirSync(workdir, { recursive: true });
-  const full = commandFor(session);
+  // The login shell knows its own PTY-root pid before any `exec`. Adapters use
+  // this marker to discard nested agent lifecycle events BEFORE they can
+  // overwrite the top-level pane's breadcrumb; runner validation repeats the
+  // process-tree check before persisting anything.
+  const full = `export AM_PANE_PID=$$; ${commandFor(session)}`;
   const captureResize = cliById(session.cli)?.resizeMode === 'repaint';
+  const runId = crypto.randomUUID();
 
   const env = {
     ...TERM_ENV,
     AM_SESSION: folder,
     AM_NAME: session.name,
     AM_ID: session.id,
+    AM_RUN_ID: runId,
+    AM_CLI: session.cli,
     AM_USER,
     AM_ROOT: WORKSPACES_DIR, // prompt shows $PWD relative to this
+    // The port the agent API answers on. PORT is configurable, so a session
+    // must be able to READ it rather than trust a number baked into a doc when
+    // that doc was generated.
+    AM_PORT: String(PORT),
   };
   const term = pty.spawn('bash', ['-lc', full], {
     name: 'xterm-256color', cols, rows, cwd: workdir, env,
@@ -1318,6 +1841,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   }
   const host = {
     id: session.id,
+    runId,
     pty: term,
     vt,
     cols,
@@ -1400,6 +1924,15 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   });
 
   term.onExit(() => {
+    // Do one final local read before releasing this launch's nonce. In
+    // particular, `/clear` followed immediately by quit must still persist the
+    // conversation that was on screen when the pane ended.
+    // Not awaited — onExit is synchronous and the teardown below must not wait
+    // on a bucket walk. The write it may perform re-checks host ownership
+    // first, so landing after the hosts.delete below (or after a relaunch) is
+    // safe: it either still owns the pin or declines to touch it.
+    consumeBreadcrumb(session, host, workdir, true)
+      .catch((e) => console.warn(`[${session.cli}] ${session.id}: final breadcrumb read failed (${e && e.message})`));
     hosts.delete(session.id);
     stopping.delete(session.id);
     if (host.gridTimer) { clearTimeout(host.gridTimer); host.gridTimer = null; }
@@ -1421,6 +1954,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   if (!session.everStarted) update(session.id, {
     everStarted: true, pendingPrompt: undefined, pendingImagePaths: undefined,
   });
+  scheduleBreadcrumbCapture(session, workdir);
   if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
   if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
   if (session.cli === 'claude') scheduleClaudeCapture(session, workdir);

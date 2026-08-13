@@ -16,7 +16,11 @@ import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
 import * as demo from './demo.js';
-import { attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning, capturePane, ghosttyReady, ghosttyError, installClaudeRepinHook } from './runner.js';
+import * as hidden from './hidden.js';
+import {
+  attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning,
+  capturePane, ghosttyReady, ghosttyError, installClaudeRepinHook, installOpencodeRepinPlugin,
+} from './runner.js';
 
 // Control frames ride the terminal socket behind a leading NUL pair, which real
 // PTY output never begins with. Same sentinel the old copy-mode hint used, so the
@@ -35,6 +39,12 @@ import {
   formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeSessionAttachments,
   resolveAttachment, resolveAttachments,
 } from './attachments.js';
+import * as runstate from './runstate.js';
+import { installSlowFsProbe } from './slowfs.js';
+
+// Before anything else touches the mount: a sync fs call to /data is ~85ms of
+// frozen event loop here, and nothing else in the stack can see it. See slowfs.js.
+installSlowFsProbe();
 
 ensureDirs();
 refreshVersions();
@@ -44,10 +54,15 @@ pruneAttachmentDirs(store.list().map((session) => session.id))
 groups.init();
 order.init();
 demo.init();
-// Claude panes report conversation resets (e.g. /clear) through a SessionStart
-// hook, so the re-pin watcher can follow them even in shared folders where the
-// transcript scan must refuse to guess. Non-fatal if it can't be installed.
+hidden.init();
+// Lifecycle adapters report conversation resets (e.g. /clear) with the exact
+// id, so re-pin watchers can follow them even in shared folders where storage
+// discovery must refuse to guess. Both installers are non-fatal; the existing
+// fallback remains available if either cannot be installed.
 installClaudeRepinHook();
+// OpenCode's global plugin reports the root session chosen by /new (/clear),
+// and the next prompt after switching to an existing session.
+installOpencodeRepinPlugin();
 
 // One-time migration to the explicit-path model: sessions used to own a folder
 // named after them (renamed along with them), or inherit their group's shared
@@ -296,6 +311,19 @@ async function deliver(session, { text, attachments = [] }, from) {
   return started;
 }
 
+// When you last sent this session something. Typing in the pane is the only
+// signal a plain shell leaves — it has no transcript to read a prompt out of —
+// and it's what the boot-time revive uses to tell a session you're still working
+// in from one you abandoned months ago (see runstate.js). Throttled: this is
+// called per keystroke and each write lands on the FUSE bucket.
+const inputTouched = new Map(); // session id -> ms of the last recorded touch
+function touchInput(id) {
+  const now = Date.now();
+  if (now - (inputTouched.get(id) || 0) < 60_000) return;
+  inputTouched.set(id, now);
+  store.update(id, { lastInputAt: now });
+}
+
 // Type a prompt into a session's terminal from the Overview — no pane needed.
 // If the agent is stopped, start its backend PTY and give the resumed CLI a
 // moment to boot before the keystrokes land.
@@ -309,6 +337,7 @@ app.post('/api/sessions/:id/input', async (req, res) => {
   try {
     const attachments = resolveAttachments(s.id, attachmentIds);
     const started = await deliver(s, { text, attachments });
+    touchInput(s.id);
     res.json({ ok: true, started });
   } catch (e) {
     res.status(e.statusCode || 409).json({ error: String(e.message || e) });
@@ -613,16 +642,24 @@ app.post('/api/agents', promptBody, (req, res) => {
   if (!prompt) return res.status(400).json({ error: 'a spawned agent needs a task — send the prompt as the request body' });
   // Default to the caller's own folder: peers usually work on the same thing.
   const where = typeof q.path === 'string' && q.path.trim() ? q.path : (from.session.path ?? from.session.id);
+  // …and into the caller's own group, by the same reasoning: a peer spawned to
+  // work alongside you belongs beside you in the sidebar, not loose at the top
+  // of it. ?group= overrides (id or display name); ?group=none opts out.
+  const g = groups.resolveSpawnGroup(q.group, from.session.id);
+  if (g.error) return res.status(400).json({ error: g.error });
   const s = createSession({
     name: typeof q.name === 'string' ? q.name : '',
     cli,
+    groupId: g.groupId,
     path: where,
     prompt: `[message from ${from.session.name}:] ${prompt}`,
   });
   if (!s) return res.status(400).json({ error: 'bad path' });
   if (s.error) return res.status(400).json({ error: s.error });
+  const joined = g.groupId ? groups.get(g.groupId) : null;
   res.status(201).json({
     id: s.id, name: s.name, cli: s.cli, path: s.path, workdir: workspacePath(s.path),
+    group: joined ? joined.name : null,
     ...(cat.ready ? {} : { warning: `${def.label} has no credential configured — it may stop at a sign-in prompt` }),
   });
 });
@@ -1023,12 +1060,18 @@ function loadAmConfig() {
     archive: {
       after: ['week', 'month', 'never'].includes(saved.archive?.after) ? saved.archive.after : 'month',
     },
+    // After a restart, start the sessions that were running again — the ones you
+    // prompted within `days`, plus any that still had work in flight (see
+    // runstate.js). `days` is only read when enabled.
+    revive: {
+      enabled: saved.revive?.enabled !== false,
+      days: [1, 3, 7].includes(saved.revive?.days) ? saved.revive.days : 3,
+    },
     // How often the bucket is copied to private Hub storage. Off by default: it
     // copies this machine's contents — saved logins included — into another Hub
     // resource, which is the operator's call to make. docs/bucket-backup.md
     backup: {
       every: backup.INTERVALS.includes(saved.backup?.every) ? saved.backup.every : 'never',
-      mirror: (saved.backup?.mirror || '').trim(),
       dataset: (saved.backup?.dataset || '').trim(),
       // Folder names to keep out of the history — the slow, regenerable kind.
       // Prepopulated on a config that has never set one, so a fresh install is
@@ -1048,9 +1091,12 @@ app.put('/api/config', (req, res) => {
     },
     jobs: { askAboveUsd: Math.max(0, Number(b.jobs?.askAboveUsd) || 0) },
     archive: { after: ['week', 'month', 'never'].includes(b.archive?.after) ? b.archive.after : 'month' },
+    revive: {
+      enabled: !!(b.revive?.enabled ?? true),
+      days: [1, 3, 7].includes(b.revive?.days) ? b.revive.days : 3,
+    },
     backup: {
       every: backup.INTERVALS.includes(b.backup?.every) ? b.backup.every : 'never',
-      mirror: typeof b.backup?.mirror === 'string' ? b.backup.mirror.trim() : '',
       dataset: typeof b.backup?.dataset === 'string' ? b.backup.dataset.trim() : '',
       // Normalized here, not trusted: these end up in a Job's argument list.
       // Same undefined-vs-empty rule as the read path: a body that omits the key
@@ -1157,14 +1203,21 @@ Hermes — alongside plain shells and a file browser.
 - You can see them, watch them, and talk to them — see the next section.
 
 ## Working with the other agents
-The manager exposes a small HTTP API on \`localhost:${PORT}\`. You are \`$AM_ID\`
+The manager exposes a small HTTP API on \`localhost:\${AM_PORT:-${PORT}}\`. You are \`$AM_ID\`
 (\`$AM_NAME\` is your display name). Every call that changes something takes
 \`?from=$AM_ID\` so the other agent, and the operator reading the log later, can
 tell who asked.
 
+Your session exports the port as \`$AM_PORT\` — read it rather than trusting a
+number you remember, and check it before you believe an empty answer: \`curl -s\`
+to a port nothing is listening on prints **nothing at all**, and in some agent
+sandboxes it exits 0 rather than failing. A wrong port therefore reads as "the
+roster is empty, I have no peers" instead of an error. \`curl -sS --fail\` will
+tell you what actually happened.
+
 ### See who is here
 \`\`\`sh
-curl -s "http://localhost:${PORT}/api/agents?from=$AM_ID" | jq .
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents?from=$AM_ID" | jq .
 \`\`\`
 Each entry carries \`id\`, \`name\`, \`cli\`, \`state\`, \`workdir\`, \`sharesFolderWith\`,
 a one-line \`lastPrompt\`/\`lastAnswer\`, \`recentFiles\`, and \`trace\` — the path to
@@ -1179,8 +1232,8 @@ digest for one agent. Read \`state\` before you do anything:
 
 ### Watch instead of asking
 \`\`\`sh
-curl -s "http://localhost:${PORT}/api/agents/$ID/tail?lines=120" | jq -r .text
-curl -s "http://localhost:${PORT}/api/agents/$ID/wait?timeout=120"   # blocks
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/tail?lines=120" | jq -r .text
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=120"   # blocks
 \`\`\`
 \`tail\` returns that agent's screen and scrollback — exactly what a human would
 see in its pane. \`wait\` blocks until it stops working (default: any of
@@ -1195,7 +1248,7 @@ loop asking it whether it's done.
 ### Send an agent a prompt
 Send the text as the request **body** so quoting and newlines never bite you:
 \`\`\`sh
-curl -s -X POST "http://localhost:${PORT}/api/agents/$ID/prompt?from=$AM_ID" \\
+curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/prompt?from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary @- <<'EOF'
 Please run the test suite in your folder and fix whatever fails.
 EOF
@@ -1219,20 +1272,42 @@ Rules that matter, because nothing enforces them for you:
 
 ### Launch a new agent
 \`\`\`sh
-curl -s -X POST "http://localhost:${PORT}/api/agents?cli=claude&name=reviewer&from=$AM_ID" \\
+curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents?cli=claude&name=reviewer&from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary @- <<'EOF'
 Review the diff in /data/workspaces/api and report anything that would break in production.
 EOF
 \`\`\`
 \`cli\` is required (the roster's \`clis\` array lists what's installed and
 credentialed). \`path\` defaults to **your own folder**; pass it to put the new
-agent somewhere else. The prompt is required — it starts working on it
+agent somewhere else. \`group\` likewise defaults to **your own group**, so the
+new agent lands beside you in the sidebar — pass \`group=<name>\` to put it in a
+different one (the names are the \`group\` field in the roster), or \`group=none\`
+to leave it ungrouped. The prompt is required — it starts working on it
 immediately. Spawn one agent for one clearly separable job; several agents in
 one folder is fine, but this Space is a small CPU box, so don't build a fleet.
 
+**Into a NEW group** — e.g. "start four agents in a group called taskforce".
+\`group=\` only ever selects a group that already exists; an unknown name is
+refused rather than created, so a typo can't quietly fragment the sidebar. Make
+the group first, then spawn into it:
+
+\`\`\`sh
+GID=$(curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/groups?from=$AM_ID" \\
+  -H 'content-type: application/json' -d '{"name":"taskforce"}' | jq -r .id)
+
+curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents?cli=claude&group=$GID&from=$AM_ID" \\
+  -H 'content-type: text/plain' --data-binary 'Draft the migration plan.'
+\`\`\`
+
+Spawn them one at a time, each with its own prompt, reusing \`$GID\`. Prefer the
+returned id over the name here: nothing stops two groups sharing a name, and
+\`group=<name>\` takes the first match. Group creation changes manager state, so
+it carries \`?from=$AM_ID\` like every other mutating agent call; this preserves
+the origin for the operation log.
+
 ### Stop an agent
 \`\`\`sh
-curl -s -X POST "http://localhost:${PORT}/api/agents/$ID/stop?from=$AM_ID"
+curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/stop?from=$AM_ID"
 \`\`\`
 **Only when the operator asked you to.** It kills that agent's CLI mid-thought.
 Files and conversation survive, and a later prompt resumes it, but work in
@@ -1244,7 +1319,7 @@ a GPU box — not in this container. They appear in the roster like anyone else 
 you message them the same way:
 
 \`\`\`sh
-curl -s -X POST "http://localhost:${PORT}/api/agents/$ID/prompt?from=$AM_ID" \\
+curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/prompt?from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary 'can you check the tokenizer?'
 \`\`\`
 
@@ -1286,7 +1361,7 @@ operator explicitly asked for it in their prompt (e.g. "notify me when the
 tests pass") — send exactly ONE message when that condition is met:
 
 \`\`\`sh
-curl -s -X POST http://localhost:${PORT}/api/notify \\
+curl -s -X POST http://localhost:\${AM_PORT:-${PORT}}/api/notify \\
   -H 'content-type: application/json' \\
   -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"<one-line outcome>\\"}"
 \`\`\`
@@ -1299,7 +1374,7 @@ For DELAYED notifications ("notify me in 10 minutes"), do not block on a long
 immediately (long-running foreground execs can destabilize some sessions):
 
 \`\`\`sh
-(sleep 600 && curl -s -X POST http://localhost:${PORT}/api/notify \\
+(sleep 600 && curl -s -X POST http://localhost:\${AM_PORT:-${PORT}}/api/notify \\
   -H 'content-type: application/json' \\
   -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"reminder\\"}") >/dev/null 2>&1 &
 \`\`\`
@@ -1746,20 +1821,41 @@ app.delete('/api/files/:id/entry', (req, res) => {
 // One page of an on-disk transcript, rendered by the same reader the Trace pane
 // uses. Paged rather than whole: these files reach tens of MB, and the viewer
 // only ever has a window of them on screen.
+// Which slice of a trace the caller is asking for. Three modes, one endpoint:
+//
+//   ?tail=1 | ?before=<cursor> | ?after=<cursor>   a window (the reader's path):
+//       the last stretch of the conversation, the stretch in front of one it
+//       already holds, or whatever has been written since — each answered from a
+//       byte range of the transcript rather than a parse of all of it.
+//   ?summary=1                                     whole-trace facts, no turns.
+//   ?offset=&limit=                                index paging, as before.
+function traceOpts(q) {
+  if (q.summary !== undefined) return { summary: true };
+  const at = q.tail !== undefined ? 'tail' : q.before !== undefined ? 'before' : q.after !== undefined ? 'after' : null;
+  if (!at) return { offset: Number(q.offset) || 0, limit: Number(q.limit) || 200 };
+  return {
+    window: {
+      at,
+      cursor: Number(at === 'before' ? q.before : q.after) || 0,
+      bytes: Number(q.bytes) || 0,
+      min: Number(q.min) || 0,
+    },
+  };
+}
+
 app.get('/api/files/:id/trace', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const f = resolveSafe(folderPathOf(s), req.query.path);
   if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) return res.status(404).json({ error: 'not found' });
   try {
-    res.json(await readTraceByPath(f, {
-      offset: Number(req.query.offset) || 0,
-      limit: Number(req.query.limit) || 200,
-    }));
+    res.json(await readTraceByPath(f, traceOpts(req.query)));
   } catch (e) {
     // "not a transcript" is an ordinary answer here, not a failure: the pane
-    // falls back to showing the file as text.
-    if (['no-trace', 'unsupported-harness'].includes(e && e.code)) {
+    // falls back to showing the file as text. A codex guardian rollout is the
+    // same kind of answer — the session route already says so, and a 500 here
+    // would replace the reason with "could not read the trace".
+    if (['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(e && e.code)) {
       return res.status(404).json({ error: e.message, code: e.code });
     }
     console.error('[trace file]', e && e.message);
@@ -1838,6 +1934,13 @@ app.get('/api/tree', (_req, res) => {
   ].sort((a, b) => (a.t < b.t ? 1 : a.t > b.t ? -1 : 0)); // newest first
   order.normalize(refsMeta.map((x) => x.ref));
   let orderList = order.list();
+  // Overview-hidden refs, pruned against everything that still exists — every
+  // group and EVERY session, before demo mode narrows the view (see hidden.js).
+  hidden.retain(new Set([
+    ...groupList.map((g) => `g:${g.id}`),
+    ...store.list().map((s) => `s:${s.id}`),
+  ]));
+  const hiddenRefs = hidden.list();
   // Demo mode hides the snapshotted sessions/groups from the view (sessions
   // created after activation aren't in the snapshot, so they show through).
   if (demo.active()) {
@@ -1849,7 +1952,27 @@ app.get('/api/tree', (_req, res) => {
     orderList = orderList.filter((ref) =>
       ref.startsWith('g:') ? !hg.has(ref.slice(2)) : !hs.has(ref.slice(2)));
   }
-  res.json({ order: orderList, groups: groupList, sessions });
+  res.json({ order: orderList, groups: groupList, sessions, hidden: hiddenRefs });
+});
+
+/**
+ * Hide (or unhide) a group or a single agent in the Overview.
+ *
+ * A view choice, but a persisted, cross-device one — so it is server state, and
+ * it takes `from` like every other mutating call so the operation log can say who
+ * asked. It deliberately does NOT touch the sidebar: that is the way back.
+ */
+app.post('/api/overview/hidden', (req, res) => {
+  const { ref, hidden: want } = req.body || {};
+  if (typeof ref !== 'string') return res.status(400).json({ error: 'bad ref' });
+  // Only HIDING has to name something real. Unhiding a ref whose group is already
+  // gone must keep working — that is how a stale entry gets cleared by hand.
+  if (want) {
+    const live = ref.startsWith('g:') ? groups.get(ref.slice(2)) : store.get(ref.slice(2));
+    if (!live) return res.status(404).json({ error: 'no such group or agent' });
+  }
+  if (!hidden.set(ref, !!want)) return res.status(400).json({ error: 'bad ref' });
+  res.json({ ok: true, hidden: hidden.list() });
 });
 
 // Backwards-compatible flat list (used by probes/tests).
@@ -2090,17 +2213,16 @@ app.get('/api/trace/:id', async (req, res) => {
   if (!pane) return res.status(404).json({ error: 'not found' });
 
   const source = pane.traceSource || { kind: 'session', ref: pane.id };
-  const offset = Number(req.query.offset) || 0;
-  const limit = Number(req.query.limit) || 200;
+  const opts = traceOpts(req.query);
 
   try {
     if (source.kind === 'bundle') {
       if (!/^[\w.-]+$/.test(String(source.ref))) return res.status(400).json({ error: 'bad bundle ref' });
-      return res.json(await readTraceBundle(path.join(DATA_DIR, 'traces', source.ref), { offset, limit }));
+      return res.json(await readTraceBundle(path.join(DATA_DIR, 'traces', source.ref), opts));
     }
     const target = store.get(source.ref);
     if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
-    res.json(await readTrace(target, { offset, limit }));
+    res.json(await readTrace(target, opts));
   } catch (e) {
     // These are expected states, not failures: no transcript yet, an
     // unsupported CLI, or a codex guardian rollout. The pane renders the reason.
@@ -2341,7 +2463,13 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
-    if (msg.t === 'i') handle.write(msg.d);
+    if (msg.t === 'i') {
+      handle.write(msg.d);
+      // Not every frame on this channel is you: the emulator answers the TUI's
+      // device-attribute and cursor queries down the same path, instantly on
+      // attach. Opening a pane is not sending it something.
+      if (!runstate.isTerminalReply(msg.d)) touchInput(session.id);
+    }
     else if (msg.t === 'r') handle.resize(msg.cols, msg.rows);
     else if (msg.t === 'claim') handle.claim();
   });
@@ -2381,6 +2509,20 @@ backup.startBackupTimer(loadAmConfig);
 // Off-thread stall detector — must start early so it's watching before the
 // first heavy build. Logs any event-loop wedge to the run logs (see watchdog.js).
 startWatchdog();
+
+// Start the sessions that were running before this Space went down. init() must
+// read the previous snapshot BEFORE the watch starts overwriting it, so it
+// happens here, synchronously; the decision itself waits for the trace digests
+// it judges "recent" with.
+runstate.init();
+setTimeout(() => {
+  // A locked (public) Space serves no terminals, so it starts nothing — but it
+  // still records what's running, so the snapshot stays true for the next boot.
+  const done = isPublic()
+    ? Promise.resolve([])
+    : runstate.reviveOnBoot(loadAmConfig().revive).catch((e) => console.error('[revive]', e && e.message));
+  done.then(() => runstate.startRunstateWatch());
+}, 8000);
 
 server.listen(PORT, () => {
   console.log(`Agent Manager :${PORT}  engine=libghostty${ghosttyReady() ? '' : ' (UNAVAILABLE)'}  data=${DATA_DIR}`);

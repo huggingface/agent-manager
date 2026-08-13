@@ -46,6 +46,12 @@ ENV LANG=C.UTF-8
 # Pinned to @latest so a factory reboot (no-cache rebuild) reinstalls the newest
 # published versions — that's what the "Relaunch & update" button triggers.
 RUN npm install -g @anthropic-ai/claude-code@latest @openai/codex@latest
+# This image is the administrator of its own Codex runtime. Install Agent
+# Manager's lifecycle adapter as a managed hook so it runs deterministically
+# without weakening trust for any user/project hooks.
+COPY codex-requirements.toml /etc/codex/requirements.toml
+COPY scripts/am-codex-repin-hook.sh /etc/codex/hooks/am-codex-repin-hook.sh
+RUN chmod 755 /etc/codex/hooks/am-codex-repin-hook.sh
 # Newer agents, best-effort so a publish hiccup can't break the image build;
 # the app marks any missing binary "unavailable" gracefully.
 RUN npm install -g @google/gemini-cli@latest || echo "gemini-cli install failed"
@@ -72,9 +78,31 @@ RUN env UV_TOOL_BIN_DIR=/usr/local/bin UV_TOOL_DIR=/opt/uv-tools \
 # Headless Chromium for Playwright, shared by every agent and both language
 # bindings via PLAYWRIGHT_BROWSERS_PATH (world-writable so a binding pinned to
 # a different build can add its revision without root).
+#
+# The browser revision must match the playwright the app pins. A bare
+# `npx -y playwright install` fetches whatever is newest on the day the image
+# is built, and playwright refuses a revision it wasn't built against — so the
+# image shipped a chromium nothing could launch, and every browser test failed
+# with "Executable doesn't exist" until someone downloaded 114MB by hand. Take
+# the version from web/package.json so the two cannot drift apart again.
+#
+# PLAYWRIGHT_SKIP_BROWSER_GC is what makes the sharing above actually work. A
+# `playwright install` does not only add its own revision: unless this is set,
+# it also garbage-collects every revision its version doesn't know about
+# (registry `_validateInstallationCache`, logged as "Removing unused browser").
+# The Hermes installer further down runs its own pinned playwright against this
+# same directory, so without this it deletes the revision installed here and
+# leaves the image with a chromium the app cannot launch — which is exactly
+# what a test build showed, 47 seconds after this step succeeded.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-RUN npx -y playwright install --with-deps chromium \
+ENV PLAYWRIGHT_SKIP_BROWSER_GC=1
+COPY web/package.json /tmp/web-package.json
+RUN PW="$(node -p 'require("/tmp/web-package.json").devDependencies.playwright.replace(/^\D*/, "")')" \
+      && echo "installing chromium for playwright@$PW" \
+      && npx -y "playwright@$PW" install --with-deps chromium \
       && chmod -R a+rwX /opt/pw-browsers \
+      && rm -f /tmp/web-package.json \
+      && ls /opt/pw-browsers \
       || echo "playwright chromium install failed"
 
 # Batteries-included default python: a dedicated venv first on PATH (system
@@ -132,7 +160,21 @@ COPY --chown=node:node session.bashrc /app/
 ENV PORT=7860 \
     DATA_DIR=/data \
     PUBLIC_DIR=/app/public \
-    DISABLE_AUTOUPDATER=1
+    DISABLE_AUTOUPDATER=1 \
+    UV_THREADPOOL_SIZE=16
+
+# Why 16 and not libuv's default 4: /data is a FUSE bucket, and moving the
+# re-pin walks off the event loop moved them onto that pool instead — one
+# outstanding op per watching pane, and panes launched together stay in phase,
+# so their beats land together. Measured on the bucket, one stat on an unrelated
+# file while N panes walk (p95 / worst):
+#
+#   pool  4:  N=4  0.2ms / 8ms      N=8  99.6ms / 177ms
+#   pool 16:  N=4  0.2ms / 5ms      N=8   0.3ms /  89ms
+#
+# At 4 the pool is oversubscribed by the walks and everything else fs-shaped in
+# the process queues behind them. The isolated worst-case outliers are the mount
+# hiccuping and survive any pool size — it's the p95 that this fixes.
 
 # Snapshot the env var NAMES present at build time. HF injects Space secrets and
 # variables only at runtime, so anything in the runtime env that's absent here

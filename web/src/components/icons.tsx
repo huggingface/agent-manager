@@ -229,6 +229,13 @@ export const GridGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+// Overview order: lines stepping down, longest first — a list that is ranked.
+export const SortGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M2.6 4h10.8M2.6 8h7.2M2.6 12h3.6" />
+  </G>
+);
+
 export const PlusGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <path d="M8 3.2v9.6M3.2 8h9.6" />
@@ -253,6 +260,21 @@ export const KeyGlyph = ({ className }: { className?: string }) => (
 export const BellGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <path d="M4 11.2V7.2a4 4 0 0 1 8 0v4M2.8 11.2h10.4M6.6 13.4a1.6 1.6 0 0 0 2.8 0" />
+  </G>
+);
+
+// Hiding a group from the Overview, and the button that shows it again.
+export const EyeGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M1.4 8S3.8 3.8 8 3.8 14.6 8 14.6 8 12.2 12.2 8 12.2 1.4 8 1.4 8Z" />
+    <circle cx="8" cy="8" r="2.1" />
+  </G>
+);
+
+export const EyeOffGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M6.3 4.2A6.6 6.6 0 0 1 8 4c4.2 0 6.6 4 6.6 4a12 12 0 0 1-2 2.4M4 5.3A12.4 12.4 0 0 0 1.4 8S3.8 12 8 12a6.9 6.9 0 0 0 2.1-.3" />
+    <path d="M6.6 6.7a2.1 2.1 0 0 0 2.9 2.9M2.6 2.6l10.8 10.8" />
   </G>
 );
 
@@ -284,4 +306,14 @@ export const HandoverGlyph = ({ className }: { className?: string }) => (
     <path d="M3 3.2v3.1A2.7 2.7 0 0 0 5.7 9h6.4" />
     <path d="M8.9 5.8 12.1 9l-3.2 3.2" />
   </G>
+);
+
+// Send: an upward arrow with a little more weight than the rest of the set —
+// it sits alone on a filled button, where 1.2px reads as thin.
+export const SendGlyph = ({ className }: { className?: string }) => (
+  <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor"
+    strokeWidth="1.9" strokeLinejoin="round" strokeLinecap="round" aria-hidden="true">
+    <path d="M8 12.8V3.6" />
+    <path d="M4.1 7.4 8 3.4l3.9 4" />
+  </svg>
 );

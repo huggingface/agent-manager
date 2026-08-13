@@ -7,7 +7,7 @@ import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
 import CodeView from './CodeView';
 import PdfView from './PdfView';
-import { TraceView, type TraceSource } from './TracePane';
+import { TraceView, type TraceHeadInfo, type TraceSource } from './TracePane';
 import {
   FolderGlyph, FileGlyph, CloseGlyph, UpGlyph, UploadGlyph, BackGlyph, DownloadGlyph,
   RefreshGlyph, ImageGlyph, CodeGlyph, DocGlyph, GlobeGlyph,
@@ -479,8 +479,13 @@ type ViewInfo = {
 export type TraceInfo = {
   harnessLabel?: string;
   model?: string | null;
+  /** whole-trace turn count once the summary lands, else what is loaded */
   turns?: number;
+  /** true while `turns` is only what the reader holds so far */
+  partial?: boolean;
   prompts: number;
+  /** the reader has something on screen — the jump buttons mean something */
+  ready: boolean;
   query: string;
   setQuery: (q: string) => void;
   go: (dir: -1 | 1) => void;
@@ -527,7 +532,7 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   const [source, setSource] = useState<string | null>(null);
   const [dims, setDims] = useState<string | null>(null);
   const [pages, setPages] = useState<number | null>(null);
-  const [traceHead, setTraceHead] = useState<{ harnessLabel?: string; model?: string | null; total?: number; userTurns?: number[] } | null>(null);
+  const [traceHead, setTraceHead] = useState<TraceHeadInfo | null>(null);
   const [traceQuery, setTraceQuery] = useState('');
   const traceNav = useRef<((dir: -1 | 1) => void) | null>(null);
   const theme = useTheme();
@@ -749,15 +754,21 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   const traceInfo = useMemo<TraceInfo | undefined>(() => (meta?.kind === 'trace' && !raw ? {
     harnessLabel: traceHead?.harnessLabel,
     model: traceHead?.model,
-    turns: traceHead?.total,
+    turns: traceHead ? (traceHead.total ?? traceHead.loaded) : undefined,
+    partial: !!traceHead && traceHead.total == null,
     prompts: traceHead?.userTurns?.length || 0,
+    ready: !!traceHead,
     query: traceQuery,
     setQuery: setTraceQuery,
     go: (d: -1 | 1) => traceNav.current?.(d),
   } : undefined), [meta?.kind, raw, traceHead, traceQuery]);
 
-  const traceSrc = useCallback<TraceSource>(
-    (offset, limit) => api.getFileTracePage(sessionId, path, offset, limit), [sessionId, path]);
+  // The reader opens on the tail of the transcript and pages backwards from
+  // there; the summary is the one call that reads all of it.
+  const traceSrc = useMemo<TraceSource>(() => ({
+    window: (req, bytes, min, signal) => api.getFileTraceWindow(sessionId, path, req, bytes, min, signal),
+    summary: (signal) => api.getFileTraceSummary(sessionId, path, signal),
+  }), [sessionId, path]);
 
   // Rendered markdown and a rendered trace do their own wrapping; the toggle is
   // for the surfaces that actually scroll sideways.
@@ -1172,12 +1183,14 @@ export default function FilesPane({
               <span className="fv-trace-tools">
                 {info.trace.harnessLabel && <span className="tv-chip">{info.trace.harnessLabel}</span>}
                 {info.trace.model && <span className="tv-chip">{info.trace.model}</span>}
-                {info.trace.turns != null && <span className="fi-stat">{info.trace.turns.toLocaleString()} turns</span>}
+                {info.trace.turns != null && (
+                  <span className="fi-stat">{info.trace.turns.toLocaleString()} turns{info.trace.partial ? ' loaded' : ''}</span>
+                )}
                 <span className="tv-nav">
-                  <button className="mini-btn" disabled={!info.trace.prompts} onClick={() => info.trace!.go(-1)}
-                    title={info.trace.prompts ? `Previous prompt (${info.trace.prompts})` : 'No prompts in this trace'}>▲</button>
-                  <button className="mini-btn" disabled={!info.trace.prompts} onClick={() => info.trace!.go(1)}
-                    title={info.trace.prompts ? `Next prompt (${info.trace.prompts})` : 'No prompts in this trace'}>▼</button>
+                  <button className="mini-btn" disabled={!info.trace.ready} onClick={() => info.trace!.go(-1)}
+                    title={info.trace.prompts ? `Previous prompt (${info.trace.prompts})` : 'Previous prompt'}>▲</button>
+                  <button className="mini-btn" disabled={!info.trace.ready} onClick={() => info.trace!.go(1)}
+                    title={info.trace.prompts ? `Next prompt (${info.trace.prompts})` : 'Next prompt'}>▼</button>
                 </span>
                 <input
                   className="tv-search fi-extra" placeholder="Search…"

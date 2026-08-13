@@ -145,6 +145,14 @@ are pinned right after first launch (the id is captured from the rollout file
 Codex creates) — so agents sharing a folder never resume each other's
 conversations.
 
+A backend restart or sleep is survivable in practice. The server snapshots which
+sessions are alive — and which have a command or background job actually running
+in them — and on the next boot starts the ones that were still yours: those you
+prompted inside the configured window, plus any that had work in flight. Their
+scrollback comes back from the terminal history checkpoint, so a reopened pane
+reads as you left it. Settings → General → *Restart sessions after a reboot*
+sets the window (1 / 3 / 7 days, or off).
+
 ## Configuration (env)
 
 | Var | Default | Purpose |

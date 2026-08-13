@@ -105,16 +105,16 @@ tools.
 
 ### 5.1 Composers
 
-The Sidebar quickstart and Overview reply textarea share the same paste/drop
-behavior:
+The Sidebar quickstart, Overview reply, and rendered reader composer share the
+same paste/drop behavior:
 
 - Pasting a file adds a chip and does not insert binary or fake text
   into the textarea.
 - Dropping files over the composer shows a restrained dashed highlight and
   adds the same chips.
-- Overview and live terminal views expose a file button with an unrestricted
-  `<input type="file" multiple>`; quick creation intentionally stays prompt-first
-  and accepts paste/drop without another picker.
+- Overview, rendered reader, and live terminal views expose a file button with
+  an unrestricted `<input type="file" multiple>`; quick creation intentionally
+  stays prompt-first and accepts paste/drop without another picker.
 - Image chips show thumbnails; other files show a compact extension badge.
 - The prompt may contain text plus files or files alone.
 - A files-only submission uses `Please inspect the attached file.` (or `files`
@@ -130,7 +130,20 @@ means abandoning or editing a draft does not create server-side orphan files.
 `URL.createObjectURL()` supplies local previews and is revoked when a chip is
 removed or the component unmounts.
 
-### 5.2 Live terminal panes
+### 5.2 Rendered terminal reader
+
+Reader mode covers a still-mounted terminal with a structured conversation and
+its own reply composer. While that overlay is visible, its composer owns file
+pick, paste, drop, chips, upload, and structured `/input` delivery. The terminal
+header's attachment button, terminal upload status, mobile key bar, and fallback
+paste sheet stay hidden. Otherwise a file chosen while reading would be inserted
+into the invisible xterm prompt instead of being part of the visible reply.
+
+The rendered reader and Overview both permit text-plus-file and file-only turns,
+preserve the text draft behavior introduced by the reader, and keep failed
+uploads available for retry.
+
+### 5.3 Live terminal panes
 
 xterm owns the visible composer, so Agent Manager cannot reliably place its own
 persistent attachment chips inside it. File paste/drop therefore behaves as a
@@ -150,7 +163,7 @@ Only file-bearing drag events are claimed. Session/pane drag data continues to
 reach the existing group layout handlers. The terminal drop target sets
 `dropEffect='copy'`; pane reordering keeps `move`.
 
-### 5.3 Mobile paste
+### 5.4 Mobile paste
 
 The existing key-bar Paste action becomes file-aware:
 
@@ -166,7 +179,7 @@ The existing key-bar Paste action becomes file-aware:
 This keeps the cross-origin iframe fallback as the load-bearing path rather than
 assuming async Clipboard API permission.
 
-### 5.4 Remote panes
+### 5.5 Remote panes
 
 The attachment affordance is disabled for remote sessions in phase one, with:
 
@@ -472,6 +485,7 @@ Expected file changes:
 | `web/src/components/Sidebar.tsx` | quickstart paste/drop and two-step submit |
 | `web/src/components/Overview.tsx` | reply attachments and file-only send |
 | `web/src/components/TerminalPane.tsx` | capture-phase file paste/drop and mobile file paste |
+| `web/src/components/conversation/ConversationView.tsx` | rendered-reader attachments and structured send |
 | `web/src/styles.css` | chips, drop highlight, terminal upload overlay |
 | `server/src/attachments.js` | storage, validation, lookup, preview, cleanup |
 | `server/src/index.js` | routes and structured delivery |
@@ -599,6 +613,10 @@ may reuse already uploaded ids while uploading only failed files.
 - A terminal stopped after upload reports saved-but-not-inserted, disables new
   attachments, and can retry the stored attachment after restart.
 - Remote live composers explain that Space-local files are unavailable.
+- Reader mode owns its visible attachment picker and never inserts into the
+  covered terminal.
+- Reader and Overview image-only replies send attachment ids through the same
+  structured `/input` route.
 - Terminal file drop does not trigger pane movement.
 - Pane movement data does not trigger the file drop UI.
 - The mobile fallback textarea handles both file and text paste.

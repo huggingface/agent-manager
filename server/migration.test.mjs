@@ -20,8 +20,15 @@ const check = (name, ok, detail = '') => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// A test server must not publish skills. `SPACE_ID` is set when this runs inside
+// the Space itself, and it makes generateEnvSkill() fan the environment skill out
+// into every live agent's skills dir — from THIS checkout's template, over the
+// copies the running backend wrote. Those dirs are outside DATA_DIR, so a
+// throwaway DATA_DIR does not contain the damage. Strip both switches.
+const { SPACE_ID, AM_DISTRIBUTE_SKILLS, ...BASE_ENV } = process.env;
+
 const srv = spawn('node', ['src/index.js'], {
-  env: { ...process.env, PORT: String(PORT), DATA_DIR, AM_BASHRC: '/nonexistent' },
+  env: { ...BASE_ENV, PORT: String(PORT), DATA_DIR, AM_BASHRC: '/nonexistent' },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let bootLog = '';

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { Cli } from '../types';
+import { isPassive, isRemote, type Cli } from '../types';
 import * as api from '../api';
 import SkillsEditor from './SkillsEditor';
 import UsagePanel from './UsagePanel';
@@ -291,7 +291,11 @@ export default function SettingsView({
             <h3>Agents</h3>
             <div className="s-help">A coloured dot means the agent is configured and ready. Log in once inside a session (or set a key as a Space secret) — credentials persist on the bucket across restarts and all sessions.</div>
             <div className="agent-rows">
-              {clis.filter((c) => c.id !== 'shell' && c.id !== 'files').map((c) => {
+              {/* Only the CLIs this Space installs and you sign into. Shell needs
+                  no credentials; files/trace are panels rather than processes; a
+                  remote agent authenticates wherever it actually runs, so its
+                  readiness was never ours to report. */}
+              {clis.filter((c) => c.id !== 'shell' && !isPassive(c.id) && !isRemote(c.id)).map((c) => {
                 const ready = c.available && c.ready;
                 return (
                   <div key={c.id} className="agent-row">
@@ -399,15 +403,19 @@ export default function SettingsView({
                   </span>
                 </div>
 
-                <div className="setting-row">
+                {/* row-top: the description runs four lines, and the interval is
+                    the thing you read it for — it belongs level with the text, not
+                    floating halfway down beside it. */}
+                <div className="setting-row row-top">
                   <div>
                     <div className="s-label">Back up the bucket</div>
                     <div className="s-help">
-                      Copies your whole bucket — workspaces, history, saved logins — to private Hub storage:
-                      a bucket you can restore from instantly, and a dataset that keeps version history.
-                      Nothing is ever deleted from your bucket.
+                      Snapshots your work — workspaces, transcripts, config — to a private dataset on
+                      the Hub every hour, so you can get back any past version. Caches and dependency
+                      folders are skipped, and saved logins are left out: a snapshot is never a place
+                      to keep credentials. Nothing is ever written to or deleted from your bucket.
                     </div>
-                    {/* A kv table, not a run-on sentence: three destinations and a
+                    {/* A kv table, not a run-on sentence: the destinations and a
                         timestamp are things you scan, not read. The two repos
                         default to the same id string — one a dataset, one a
                         bucket — so each row says which it is. */}
@@ -429,21 +437,6 @@ export default function SettingsView({
                             )}
                           </b>
                         </div>
-                        {(bk.mirror || bk.defaults.mirror) && (
-                          <div>
-                            <span>Mirror bucket</span>
-                            <b>
-                              <a
-                                className="mono"
-                                href={`https://huggingface.co/buckets/${bk.mirror || bk.defaults.mirror}`}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                {bk.mirror || bk.defaults.mirror}
-                              </a>
-                            </b>
-                          </div>
-                        )}
                         <div>
                           <span>Backup jobs</span>
                           <b><a href={bk.jobsUrl} target="_blank" rel="noreferrer">{bk.jobName}</a></b>
@@ -457,18 +450,22 @@ export default function SettingsView({
                         </div>
                         {/* The dashboard strip says a backup is failing; this says
                             what the Job actually reported, which is what tells you
-                            whether it is yours to fix. */}
+                            whether it is yours to fix. The message and the Job's own
+                            reason are a paragraph you read once, so they hang off the
+                            timestamp as a tooltip rather than wrapping across the
+                            table and pushing every other row around. */}
                         {bk.lastFailure && (
                           <div>
                             <span>Last failure</span>
-                            <b style={{ color: 'var(--danger)', whiteSpace: 'normal', textAlign: 'right' }}>
+                            <b className="kv-fail">
                               {new Date(bk.lastFailure.at).toLocaleString()}
-                              {bk.lastFailure.message ? ` — ${bk.lastFailure.message}` : ''}
                               {bk.failures > 1 ? ` (${bk.failures} in a row)` : ''}
-                              {bk.lastFailure.reason && (
-                                <div className="mono" style={{ fontWeight: 400, color: 'var(--muted)', fontSize: 11.5, marginTop: 2 }}>
-                                  {bk.lastFailure.reason}
-                                </div>
+                              {(bk.lastFailure.message || bk.lastFailure.reason) && (
+                                <span
+                                  className="tip"
+                                  tabIndex={0}
+                                  data-tip={[bk.lastFailure.message, bk.lastFailure.reason].filter(Boolean).join(' — ')}
+                                ><InfoGlyph className="tip-i" /></span>
                               )}
                             </b>
                           </div>
@@ -481,65 +478,6 @@ export default function SettingsView({
                         )}
                       </div>
                     )}
-                    {/* On demand regardless of the interval: taking one backup
-                        before a risky change should not mean switching on a
-                        schedule. Disabled while a run is in flight — two Jobs
-                        uploading to one dataset would race. */}
-                    {/* Folders to keep out of the history. An env directory is
-                        thousands of files the backup has to hash and none of them
-                        worth keeping — measured, that is 7s of work versus 1s. */}
-                    {bk?.canRunNow && (
-                      <>
-                        <div className="s-help" style={{ marginTop: 10 }}>
-                          Skip these folders — type a name and press Enter. Anywhere they appear
-                          (<span className="mono">node_modules</span>, <span className="mono">.venv</span>),
-                          they stay out of the history and the backup gets quicker. The list starts
-                          on the caches a package manager can rebuild; remove any you want kept.
-                        </div>
-                        <div className="tagf" onClick={(e) => {
-                          if (e.target === e.currentTarget) (e.currentTarget.querySelector('input') as HTMLInputElement)?.focus();
-                        }}>
-                          {cfg.backup.exclude.map((t) => (
-                            <span className="tagf-chip mono" key={t}>
-                              {t}
-                              <button
-                                className="tagf-x"
-                                aria-label={`Stop skipping ${t}`}
-                                onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, exclude: cfg.backup.exclude.filter((x) => x !== t) } })}
-                              >×</button>
-                            </span>
-                          ))}
-                          <input
-                            className="tagf-input mono"
-                            placeholder={cfg.backup.exclude.length ? 'add another…' : 'node_modules'}
-                            value={skipDraft}
-                            onChange={(e) => setSkipDraft(e.target.value)}
-                            onKeyDown={(e) => {
-                              // Enter or comma commits; Backspace on an empty box
-                              // takes the last chip back, as tag fields do.
-                              if (e.key === 'Enter' || e.key === ',') {
-                                e.preventDefault();
-                                addSkip();
-                              } else if (e.key === 'Backspace' && !skipDraft && cfg.backup.exclude.length) {
-                                setCfg({ ...cfg, backup: { ...cfg.backup, exclude: cfg.backup.exclude.slice(0, -1) } });
-                              }
-                            }}
-                            onBlur={addSkip}
-                          />
-                        </div>
-                      </>
-                    )}
-                    {bk?.canRunNow && (
-                      <button
-                        className="btn-ghost"
-                        style={{ marginTop: 8 }}
-                        disabled={bkBusy || bk.running}
-                        onClick={doBackup}
-                      >
-                        {bkBusy ? 'Launching…' : bk.running ? 'Backing up…' : 'Back up now'}
-                      </button>
-                    )}
-                    {bkMsg && <div className="s-help" style={{ marginTop: 6 }}>{bkMsg}</div>}
                   </div>
                   <span className="cfg-ctl">
                     <div className="seg cfg-seg">
@@ -572,6 +510,110 @@ export default function SettingsView({
                     of your bucket). Every 1h means 24 runs a day.
                   </div>
                 )}
+
+                {/* Folders to keep out of the history. An env directory is
+                    thousands of files the backup has to hash and none of them
+                    worth keeping — measured, that is 7s of work versus 1s.
+                    Full width, outside the row: thirty chips wrapping inside the
+                    label column read as a wall, and the field they belong to is a
+                    text input, which wants the whole measure. */}
+                {bk?.canRunNow && (
+                  <>
+                    <div className="s-help skiphead" style={{ marginTop: 10 }}>
+                      <span>
+                        Skip these folders — type a name and press Enter. Anywhere they appear
+                        (<span className="mono">node_modules</span>, <span className="mono">.venv</span>),
+                        they stay out of the history. Everything here is something a command puts
+                        back; nothing is skipped for being large. Remove any you want kept.
+                      </span>
+                      {/* The default list is long and picked from measurements, so an operator
+                          who trims it has no way back without retyping 30 names. Hidden when
+                          the list already matches the defaults, so it is never a no-op —
+                          compared against the local edit rather than the server's copy, or it
+                          would linger until the next status poll. */}
+                      {bk.excludeDefaults?.length > 0
+                        && (cfg.backup.exclude.length !== bk.excludeDefaults.length
+                          || cfg.backup.exclude.some((t, i) => t !== bk.excludeDefaults[i])) && (
+                        <button
+                          className="btn-ghost skiprestore"
+                          onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, exclude: [...bk.excludeDefaults] } })}
+                        >Restore defaults</button>
+                      )}
+                    </div>
+                    <div className="tagf" onClick={(e) => {
+                      if (e.target === e.currentTarget) (e.currentTarget.querySelector('input') as HTMLInputElement)?.focus();
+                    }}>
+                      {cfg.backup.exclude.map((t) => (
+                        <span className="tagf-chip mono" key={t}>
+                          {t}
+                          <button
+                            className="tagf-x"
+                            aria-label={`Stop skipping ${t}`}
+                            onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, exclude: cfg.backup.exclude.filter((x) => x !== t) } })}
+                          >×</button>
+                        </span>
+                      ))}
+                      <input
+                        className="tagf-input mono"
+                        placeholder={cfg.backup.exclude.length ? 'add another…' : 'node_modules'}
+                        value={skipDraft}
+                        onChange={(e) => setSkipDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          // Enter or comma commits; Backspace on an empty box
+                          // takes the last chip back, as tag fields do.
+                          if (e.key === 'Enter' || e.key === ',') {
+                            e.preventDefault();
+                            addSkip();
+                          } else if (e.key === 'Backspace' && !skipDraft && cfg.backup.exclude.length) {
+                            setCfg({ ...cfg, backup: { ...cfg.backup, exclude: cfg.backup.exclude.slice(0, -1) } });
+                          }
+                        }}
+                        onBlur={addSkip}
+                      />
+                    </div>
+                  </>
+                )}
+                {/* On demand regardless of the interval: taking one backup
+                    before a risky change should not mean switching on a
+                    schedule. Disabled while a run is in flight — two Jobs
+                    uploading to one dataset would race. */}
+                {bk?.canRunNow && (
+                  <button
+                    className="btn-ghost"
+                    style={{ marginTop: 8 }}
+                    disabled={bkBusy || bk.running}
+                    onClick={doBackup}
+                  >
+                    {bkBusy ? 'Launching…' : bk.running ? 'Backing up…' : 'Back up now'}
+                  </button>
+                )}
+                {bkMsg && <div className="s-help" style={{ marginTop: 6 }}>{bkMsg}</div>}
+
+                <div className="setting-row">
+                  <div>
+                    <div className="s-label">Restart sessions after a reboot</div>
+                    <div className="s-help">
+                      When the Space wakes or reboots, sessions that were running come back on their own: the ones
+                      you sent something to within this window, plus any that still had a command or background
+                      job running. Agents resume their own conversation and wait for you; nothing is re-sent.
+                    </div>
+                  </div>
+                  <span className="cfg-ctl">
+                    <div className="seg cfg-seg">
+                      {([1, 3, 7] as const).map((d) => (
+                        <button
+                          key={d}
+                          className={cfg.revive.enabled && cfg.revive.days === d ? 'on' : ''}
+                          onClick={() => setCfg({ ...cfg, revive: { enabled: true, days: d } })}
+                        >{d === 1 ? '1 day' : `${d} days`}</button>
+                      ))}
+                      <button
+                        className={!cfg.revive.enabled ? 'on' : ''}
+                        onClick={() => setCfg({ ...cfg, revive: { ...cfg.revive, enabled: false } })}
+                      >off</button>
+                    </div>
+                  </span>
+                </div>
 
                 <div className="setting-row">
                   <div>

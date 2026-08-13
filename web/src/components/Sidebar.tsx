@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Cli, MoveTarget, Group, Session, Tree } from '../types';
 import { STATE_LABEL, REMOTE_STATE_LABEL, isPassive, isRemote } from '../types';
+import { hiddenSessionIds } from '../lib/overviewHidden';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
@@ -9,7 +10,7 @@ import {
   filesFromTransfer, pendingAttachmentsFromFiles, revokePendingAttachments, transferMayContainFile,
 } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph, HandoverGlyph, ListGlyph } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph, HandoverGlyph, ListGlyph, EyeGlyph, EyeOffGlyph } from './icons';
 
 type Zone = 'before' | 'after' | 'on';
 
@@ -25,6 +26,9 @@ export interface QuickStartAttachmentOptions {
   onAttachmentUpdate: (key: string, patch: Partial<PendingAttachment>) => void;
 }
 
+// Folded groups, remembered across reloads.
+const COLLAPSED_KEY = 'am-collapsed';
+
 const fmtAgo = (ts?: number) => {
   if (!ts) return '';
   const m = Math.round((Date.now() - ts) / 60000);
@@ -39,6 +43,7 @@ export default function Sidebar({
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
   onStopSession, onSetRemotePaused, onDeleteSession, onShareSession, onShareTrace, onTraceHandover, onOpenTrace, onOpenSharedTrace, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
   archived, showArchived, onToggleArchived,
+  overviewHidden, onToggleOverviewHidden,
 }: {
   clis: Cli[];
   tree: Tree;
@@ -70,6 +75,11 @@ export default function Sidebar({
   archived: Set<string>;
   showArchived: boolean;
   onToggleArchived: () => void;
+  // Refs hidden from the OVERVIEW. The sidebar keeps showing them — it is where
+  // you hide a group and the only way back to one — so this only drives the
+  // per-group button and the overview row's count.
+  overviewHidden: Set<string>;
+  onToggleOverviewHidden: (ref: string, hidden: boolean) => void;
 }) {
   const [panel, setPanel] = useState<'none' | 'create' | 'quick'>('none');
   const [quickMode, setQuickMode] = useState<'agent' | 'group'>('agent');
@@ -91,7 +101,18 @@ export default function Sidebar({
   const [cart, setCart] = useState<Record<string, number>>({});
   const [editRef, setEditRef] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Which groups are folded. Kept per browser (like the theme and the zoom):
+  // it's how you've arranged THIS screen, and a phone and a desktop want
+  // different answers.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(COLLAPSED_KEY) || '[]');
+      return new Set(Array.isArray(saved) ? saved.filter((x): x is string => typeof x === 'string') : []);
+    } catch { return new Set(); }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed])); } catch { /* private mode */ }
+  }, [collapsed]);
   const [dragRef, setDragRef] = useState<string | null>(null);
   const [drop, setDrop] = useState<{ ref: string; zone: Zone } | null>(null);
   // "Open a shared trace": paste a dataset id/URL, we pull it and show it.
@@ -102,7 +123,13 @@ export default function Sidebar({
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
   const colorOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c.color])), [clis]);
-  const waiting = tree.sessions.filter((s) => s.state === 'waiting').length;
+  // This badge sits ON the overview row, so it has to count what the overview
+  // would actually show: not a hidden group's agents (being told about the group
+  // you hid is exactly what you hid it to stop), and not archived ones either,
+  // which the feed has always dropped while this number quietly included them.
+  const hiddenIds = useMemo(() => hiddenSessionIds(tree), [tree]);
+  const waiting = tree.sessions.filter((s) =>
+    s.state === 'waiting' && !hiddenIds.has(s.id) && !archived.has(s.id)).length;
 
   useEffect(() => { quickImagesRef.current = quickImages; }, [quickImages]);
   useEffect(() => () => revokePendingAttachments(quickImagesRef.current), []);
@@ -388,7 +415,14 @@ export default function Sidebar({
             <>
               <span className="name">{g.name}</span>
               {!open && <span className="count">{g.sessionIds.length}</span>}
+              {/* Hidden from the OVERVIEW, not from here: the sidebar row is
+                  both where you hide a group and how you get back to it. */}
+              {overviewHidden.has(ref) && <span className="ov-hidden-tag mono" title="Hidden from the overview">hidden</span>}
               <span className="row-actions">
+                <button className="mini-btn" title={overviewHidden.has(ref) ? 'Show in the overview' : 'Hide from the overview'}
+                  onClick={(e) => { e.stopPropagation(); onToggleOverviewHidden(ref, !overviewHidden.has(ref)); }}>
+                  {overviewHidden.has(ref) ? <EyeOffGlyph /> : <EyeGlyph />}
+                </button>
                 <button className="mini-btn" title="Rename" onClick={(e) => { e.stopPropagation(); startEdit(ref, g.name); }}><PencilGlyph /></button>
                 <button className="mini-btn" title="Delete group" onClick={(e) => { e.stopPropagation(); onDeleteGroup(g.id); }}><CloseGlyph /></button>
               </span>

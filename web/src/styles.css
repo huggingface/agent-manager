@@ -81,10 +81,30 @@ body {
 .bkfail-link:hover { color: var(--danger); text-decoration-style: solid; }
 .zoombar { display: flex; align-items: center; gap: 4px; padding: 4px 8px; margin-top: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); flex: none; }
 .zoombar .spacer { flex: 1; }
-/* overview bottom bar: filter + view segments, centered */
-.zoombar.ov-bar { justify-content: center; gap: 8px; }
+/* overview bottom bar: filter · sort · view segments, centered — three of them
+   don't fit a phone on one line, so it wraps rather than overflowing */
+.zoombar.ov-bar { justify-content: center; gap: 8px; flex-wrap: wrap; row-gap: 5px; }
+/* the sort segment needs to say what it is — "prompt"/"answer" next to a row of
+   filter words would otherwise read as two more filters — so a glyph sits beside
+   it, outside the segment (inside, it read as a fourth disabled button) */
+.ov-sortmark { display: inline-flex; align-items: center; color: var(--muted); margin-right: -3px; }
+.ov-sortmark svg { width: 12px; height: 12px; display: block; }
 .ov-viewseg button { display: inline-flex; align-items: center; padding: 4.5px 9px; }
 .ov-viewseg svg { width: 13px; height: 13px; }
+/* "n hidden": present only when something is, and deliberately quiet — it is the
+   way back, not a notification. `on` = you are currently looking at them. */
+/* nowrap + no shrink: as the last item in a wrapping bar it would otherwise be
+   squeezed into the leftover sliver, break "2 hidden" over two lines and spill
+   out of the bar at phone widths. It has to take a new row instead. */
+/* `.zbtn.ov-hidebtn`, not `.ov-hidebtn`: .zbtn's own `width: 22px` is declared
+   further down this file, so a single-class rule here loses to it and the button
+   renders 22px wide with "2 hidden" spilling out past its border. */
+.zbtn.ov-hidebtn { width: auto; height: 22px; padding: 0 8px; gap: 5px; font-size: 11px; white-space: nowrap; flex: 0 0 auto; }
+.zbtn.ov-hidebtn svg { width: 12px; height: 12px; display: block; }
+.zbtn.ov-hidebtn.on { color: var(--text); border-color: var(--border-strong); background: var(--panel); }
+/* the sidebar's own mark on a group that the overview is not showing */
+.row.group-head .ov-hidden-tag { font-size: 9.5px; letter-spacing: 0.02em; color: var(--muted); opacity: 0.75; margin-left: 4px; }
+.row.group-head:hover .ov-hidden-tag { display: none; }
 
 /* transparent CLI logos; invert the mostly-black ones in dark mode */
 .cli-logo { flex: none; display: inline-flex; align-items: center; justify-content: center; }
@@ -262,6 +282,29 @@ body {
 
 .ov-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); }
 
+/* ---- sorted feed: labelled blocks instead of group capsules ---- */
+/* The labels are SIBLINGS of the cards, not wrappers around them — a card that
+   changes section must keep its parent or React remounts it and the reply box
+   loses what you were typing (see rankedBlocks() in Overview.tsx). So the
+   spacing is done with margins on the label rather than a flex gap on a box.
+   In the list that is the feed's own 18px rhythm; in the grid the label is a
+   full-width row. */
+.ov-feed > .ov-sortlbl { margin: 4px 0 -8px; }
+.ovt-grid > .ov-sortlbl { grid-column: 1 / -1; margin: 6px 0 -1px; }
+.ovt-grid > .ov-sortlbl:first-child { margin-top: 0; }
+.ov-sortlbl { display: flex; align-items: center; gap: 9px; padding: 0 12px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; color: var(--muted); }
+.ov-sortrule { flex: 1; height: 1px; background: var(--border); }
+/* --border-strong is a BORDER token: as text on the page background it lands at
+   ~1.4:1 in either theme, i.e. a count nobody can read. */
+.ov-sortn { color: var(--muted); }
+/* The group an agent is in, when the feed is flat and no capsule says it.
+   In a list card it rides the name row and gives up its pixels first (shrink
+   5×, never more than half the row): the prefix is context, the name is the
+   thing you are looking for. In a tile there is no room to share, so it takes
+   its own line above the name — see the comment in Overview.tsx. */
+.ov-gtag { flex: 0 5 auto; min-width: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-weight: 500; font-size: 11.5px; }
+.ovt-gline { font-size: 10px; letter-spacing: 0.04em; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: -3px; }
+
 /* group capsule: header bar / spaced flat slabs / footer strip that merges away */
 .ov-sec { display: flex; flex-direction: column; }
 .ov-sechead { display: flex; align-items: center; gap: 7px; width: 100%; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-xl) var(--r-xl) 0 0; padding: 8px 14px; font: inherit; color: var(--text); cursor: pointer; text-align: left; transition: border-radius var(--dur, 0.36s) ease; }
@@ -378,7 +421,10 @@ body {
 .ov-live textarea::placeholder { color: var(--muted); opacity: 0.7; }
 .ov-hint { font-size: 10.5px; color: var(--muted); flex: none; }
 /* send button — essential on mobile (no Shift+Enter), handy on desktop */
-.ov-send { flex: none; width: 26px; height: 26px; border: none; border-radius: 999px; background: var(--accent); color: var(--accent-fg); font-size: 14px; line-height: 1; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+/* A square key, not a bubble: it sits at the end of a line of type, and the
+   rounded pill read as a chat app rather than as a prompt. */
+.ov-send { flex: none; width: 26px; height: 26px; padding: 0; border: none; border-radius: 7px; background: var(--accent); color: var(--accent-fg); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.ov-send svg { width: 15px; height: 15px; }
 .ov-send:disabled { opacity: 0.5; cursor: default; }
 .ov-note { font-size: 11px; color: var(--danger); }
 
@@ -537,19 +583,30 @@ body {
 .term-preview pre { height: 100%; margin: 0; padding: 10px 8px 8px 12px; overflow: hidden; font: inherit; line-height: 1.15; white-space: pre; }
 .term-preview > span { position: absolute; right: 9px; bottom: 7px; padding: 3px 6px; border: 1px solid var(--border); border-radius: var(--r-sm); background: color-mix(in srgb, var(--term-bg) 88%, transparent); color: var(--muted); font-size: 10px; }
 /* terminal "process exited" overlay */
-/* Non-blocking banner so the agent's last output (e.g. a login error) stays readable. */
-/* stopped state: quiet line centered in the pane, in the boot-cover's voice */
-.term-exit { position: absolute; inset: 34px 0 0 0; display: flex; align-items: center; justify-content: center; z-index: 5; pointer-events: none; }
-.term-exit .tx-row { display: flex; align-items: center; gap: 14px; padding: 9px 16px; border-radius: var(--r-lg); background: color-mix(in srgb, var(--term-bg) 82%, transparent); backdrop-filter: blur(3px); color: var(--muted); font-size: 12.5px; }
-.term-exit .tx-btn { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px; background: none; border: none; padding: 2px 4px; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; }
+/* stopped state: an opaque card on a dimmed pane, so a stopped session reads as
+   stopped from across the room. The scrim is light enough that the agent's last
+   output (e.g. a login error) is still readable underneath, and the overlay
+   stays click-through except for the button itself. */
+.term-exit { position: absolute; inset: 34px 0 0 0; display: flex; align-items: center; justify-content: center; z-index: 5; pointer-events: none; background: color-mix(in srgb, var(--term-bg) 45%, transparent); animation: rise-in 0.16s ease-out; }
+.term-exit .tx-row { display: flex; align-items: center; gap: 12px; max-width: calc(100% - 20px); padding: 8px 8px 8px 14px; border: 1px solid var(--border-strong); border-radius: var(--r-lg); background: var(--panel); color: var(--text); font-size: 12.5px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.28); }
+.term-exit .tx-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-exit .tx-btn { pointer-events: auto; flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border: 1px solid var(--accent); border-radius: var(--r-md); background: var(--accent); color: var(--accent-fg); font: inherit; font-weight: 600; cursor: pointer; transition: background 0.12s ease-out; }
 .term-exit .tx-btn svg { width: 13px; height: 13px; }
-.term-exit .tx-btn:hover { text-decoration: underline; }
+.term-exit .tx-btn:hover { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }
 
 /* settings inline warning (e.g. unverifiable bucket) */
 .s-warn { margin: 6px 0 2px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); background: color-mix(in srgb, var(--danger) 10%, transparent); border-radius: var(--r-md); font-size: 12px; line-height: 1.5; color: var(--text); }
 
 /* transient error toast */
 .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 300; max-width: 90vw; padding: 9px 14px; background: color-mix(in srgb, var(--danger) 92%, #000); color: #fff; border-radius: var(--r-md); font-size: 12.5px; box-shadow: 0 8px 28px rgb(0 0 0 / 0.3); animation: rise-in 0.16s ease-out; }
+
+/* ?vvdebug=1 — the mobile viewport readout. Above everything, transparent to
+   touch so it never becomes the reason a gesture misbehaves. */
+.vvdebug {
+  position: fixed; top: 0; left: 0; z-index: 999; margin: 0; padding: 4px 6px;
+  pointer-events: none; font-family: var(--font-mono); font-size: 9px; line-height: 1.35;
+  white-space: pre; color: #9ff; background: rgb(0 0 0 / 0.72); border-bottom-right-radius: 4px;
+}
 
 /* first-run welcome card */
 .welcome-backdrop { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center; padding: 20px; background: color-mix(in srgb, #000 55%, transparent); backdrop-filter: blur(3px); animation: rise-in 0.16s ease-out; }
@@ -588,17 +645,39 @@ body {
 .welcome-reopen { font-size: 11px; color: var(--muted); }
 .welcome-foot .btn-primary { flex: none; padding: 8px 18px; }
 
-.pane-head { container-type: inline-size; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr); align-items: center; gap: 9px; padding: 7px 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
+/* The side columns keep a min-content floor. Without one the centre track is
+   sized to its max-content BEFORE the two `1fr` tracks get anything, so a wide
+   title takes its width out of its neighbours: the logo and the close button
+   keep their place in the flow but the title's box grows over them. That was
+   already reachable with a long enough agent name; putting the group in front
+   of the name made it reachable at ordinary ones. With the floor the title is
+   capped at what is actually free and ellipsises instead. */
+.pane-head { container-type: inline-size; display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr); align-items: center; gap: 9px; padding: 7px 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
 .pane-head .ph-left { grid-column: 1; justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
-.pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; text-align: center; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+.pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 5px; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; cursor: text; }
+/* `[Group] name` is one title in two parts, and the group is the only part that
+   gives way: a tile too narrow for both truncates the context, never the thing
+   you are looking for. The squeeze passes through a band where the prefix reads
+   as a stub (`[Agent-man…`); below a tile width where that is all it could ever
+   be, it drops out entirely and the name has the header to itself. */
+.pane-head .ph-group { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-weight: 500; }
+/* flex-shrink 0, not a small weight: shrinking is proportional, so ANY shared
+   deficit takes a sliver off the name too — and a name that misses by 0.03px
+   still renders an ellipsis. So the name never shrinks, and `max-width` is what
+   bounds it: it can fill the whole title but no more, which is what puts the
+   ellipsis on the name itself when the name alone is too long for the header. */
+.pane-head .ph-name { flex: 0 0 auto; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; }
-.pane-head .ph-role { flex: none; padding: 2px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-family: var(--font-mono); font-size: 9.5px; line-height: 1.2; }
-.pane-head .ph-role.controller { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }
 @container (max-width: 520px) {
   .pane-head .ph-path { display: none; }
+}
+/* Narrower than this the prefix could only ever be a stub, and a header that
+   reads "[A… name" is worse than one that just reads "name". */
+@container (max-width: 260px) {
+  .pane-head .ph-group { display: none; }
 }
 .slot { transition: border-color 0.15s ease-out, box-shadow 0.15s ease-out; }
 /* fallback focus tint (terminal panes override with their agent's color inline) */
@@ -913,6 +992,9 @@ body {
 .settings-page h3 { margin: 24px 0 8px; font-size: 14px; }
 /* plain rows, not cards: the bold label is the section header */
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 2px; }
+/* a row whose description runs several lines: the control sits level with the
+   text instead of centring against it, so the eye finds it where it starts */
+.setting-row.row-top { align-items: flex-start; }
 /* right-side controls share one width so the column reads as one rail */
 .setting-row > .btn-ghost, .setting-row .confirm-del { flex: none; }
 /* operator config (artifacts, jobs): every control sits in the same-width
@@ -978,6 +1060,10 @@ a.btn-ghost { text-decoration: none; }
    and only take the accent on hover. */
 .kv a { color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
 .kv a:hover { color: var(--accent); text-decoration-style: solid; }
+/* A failure value: the timestamp is the row, and what went wrong hangs off the
+   (i) beside it. overflow is visible because .kv b clips for its ellipsis, and
+   that clipping would eat the tooltip card. */
+.kv b.kv-fail { display: inline-flex; align-items: center; gap: 6px; overflow: visible; color: var(--danger); }
 /* A kv used inside a setting's description sits tighter than a section-level one. */
 .kv-inline { margin-top: 8px; }
 .kv-inline > div { padding: 6px 2px; font-size: 12.5px; }
@@ -1102,6 +1188,10 @@ a.btn-ghost { text-decoration: none; }
 /* mobile stage top bar (back + agent chips) — rendered only on mobile */
 .mbar { display: flex; align-items: center; gap: 8px; padding: 0 0 8px; flex: none; }
 .mback { flex: none; font-size: 19px; padding-bottom: 3px; }
+/* Reading mode, in the zoom bar: the same weight as the controls beside it. */
+.modebar { flex: none; margin-right: 6px; }
+.modebar button { padding: 2px 8px; font-size: 10.5px; letter-spacing: 0.02em; }
+
 .mtitle { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mchips { display: flex; gap: 6px; overflow-x: auto; flex: 1; padding: 2px; }
 .mchip { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; flex: none; }
@@ -1122,6 +1212,13 @@ a.btn-ghost { text-decoration: none; }
     overflow: hidden;
   }
   .term-host { touch-action: none; overscroll-behavior: contain; }
+  /* touch-action is intersected down the ancestor chain, so `none` here would
+     also forbid panning anything nested inside — the reader's scroller, and the
+     code blocks and tables inside it, which are `overflow-x: auto`. Hence
+     `auto` and not `pan-y`: a trace holds wide output, and pinning the axis
+     here would leave that unreachable sideways, the same bug one axis over.
+     The terminal's own drag handler is inert in this mode. */
+  .term-host.reading { touch-action: auto; }
   /* Keep xterm's transparent real input at the visible prompt edge. xterm
      normally parks/moves it for desktop IME behavior; on phones this element
      is also the browser's only clue about what must remain above the OSK. */
@@ -1140,6 +1237,17 @@ a.btn-ghost { text-decoration: none; }
   .tree { padding-top: 6px; }
   .group { margin: 13px 0 5px; }
   .row .row-actions { opacity: 1; pointer-events: auto; position: static; transform: none; margin-left: 4px; background: transparent; }
+  /* A group's actions were hover-only, which a touch device can never satisfy:
+     on a phone they were simply unreachable. That was survivable while they were
+     rename/delete (both reachable other ways) and is not now that hiding a group
+     from the overview is offered here and nowhere else. The eye already shows the
+     state, so the `hidden` word gives up its space to the buttons. */
+  .row.group-head .row-actions { display: flex; }
+  .row.group-head .ov-hidden-tag { display: none; }
+  /* Four controls do not fit across 390px. The escape hatch takes the row it
+     needs instead of being wedged against the view toggle — it only exists while
+     something is hidden, so the extra row is never in the way otherwise. */
+  .zbtn.ov-hidebtn { flex: 0 0 100%; justify-content: center; }
   .row .cli-logo, .row .count { opacity: 1 !important; }
   .row .age { display: none; } /* actions are always visible on touch — no room */
   .g-add { opacity: 1; }
@@ -1207,6 +1315,10 @@ a.btn-ghost { text-decoration: none; }
 .trace-hint { flex: none; padding: 5px 10px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 11px; font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .tv-msg { color: var(--muted); font-size: 0.85em; padding: 0.3em 0.1em; }
+/* The line above the oldest loaded turn. Its height is fixed on purpose: it
+   sits above every row offset, so a line that grew or vanished when the reader
+   reached the start of the trace would shove the whole conversation. */
+.tv-top { height: 1.6em; line-height: 1.6em; padding: 0 0.1em; overflow: hidden; text-align: center; opacity: 0.75; }
 
 .tv-row { padding: 5px 0; border-bottom: 1px solid var(--border); }
 .tv-row.placeholder { opacity: 0.25; }
@@ -1395,3 +1507,10 @@ a.btn-ghost { text-decoration: none; }
   padding: 5px 9px; border-top: 1px solid var(--border);
   font-size: 10.5px; color: var(--muted);
 }
+
+/* Skip-list header: help text with the restore control pinned to its right, so
+   the button sits with the list it resets rather than in the row of buttons that
+   run backups. */
+.skiphead { display: flex; align-items: flex-start; gap: 12px; }
+.skiphead > span { flex: 1; min-width: 0; }
+.skiprestore { flex: none; font-size: 11.5px; padding: 3px 8px; white-space: nowrap; }

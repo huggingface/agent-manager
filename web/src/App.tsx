@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import type { QuickStartAttachmentOptions } from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
@@ -15,10 +15,19 @@ import Locked from './components/Locked';
 import BackupBanner from './components/BackupBanner';
 import Welcome from './components/Welcome';
 import * as api from './api';
-import type { Cli, GridSpec, MoveTarget, OverviewFilter, Session, Tree } from './types';
+import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
+import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
+import { hiddenSessionIds } from './lib/overviewHidden';
+import { useReaderBatch } from './lib/readerBatch';
 import { isPassive, isRemote } from './types';
-import { GridGlyph, ListGlyph } from './components/icons';
+import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
 import { uploadPendingAttachments } from './lib/attachments';
+
+// `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
+// when the app is embedded cross-origin. Read once: it never changes mid-run,
+// and lazily imported so a debug surface is not part of the shipped bundle.
+const VV_DEBUG = new URLSearchParams(location.search).has('vvdebug');
+const ViewportDebug = lazy(() => import('./components/ViewportDebug'));
 
 // Phone-sized viewport: the app becomes two full-screen views (list ⇄ pane).
 function useIsMobile() {
@@ -45,6 +54,17 @@ type SettingsPage = 'general' | 'usage' | 'skills';
 const ROOT_PATH = '.';
 const WARM_TERMINAL_LIMIT = 12;
 const normalizePath = (p?: string | null) => (p && p.trim() ? p : ROOT_PATH);
+// The Overview's filter chips. The label IS the chip, so there is no second
+// display string that can drift from the value; the tooltips carry the rest.
+// `started` is the union of the two before it, not a fifth state of its own —
+// see chipBuckets in types.ts.
+const OV_CHIPS: { chip: OverviewChip; title: string }[] = [
+  { chip: 'all', title: 'Every agent' },
+  { chip: 'done', title: 'Answered and waiting on you' },
+  { chip: 'running', title: 'Working right now' },
+  { chip: 'started', title: 'Anything still up — running or waiting on you' },
+  { chip: 'stopped', title: 'Not running' },
+];
 
 function initialTheme(): 'light' | 'dark' {
   const stored = localStorage.getItem('am-theme');
@@ -52,11 +72,34 @@ function initialTheme(): 'light' | 'dark' {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
+// Where you left off. A phone evicts a backgrounded tab, and the Hub embeds the
+// Space in an iframe it rebuilds on every visit — so "coming back" is almost
+// always a cold mount, not a resume. Without this, the restored app has no
+// selection and mobile opens on the sidebar list, however deep in an agent you
+// were. The URL can't carry it (the Hub controls the iframe's src), so it has
+// to be storage.
+//
+// Storage can be denied outright — private mode, or a third-party iframe under
+// cross-site tracking prevention. That's a "don't remember" fallback to the
+// behaviour we already had, never a crash, so both sides swallow.
+const readStored = (k: string): string | null => {
+  try { return localStorage.getItem(k); } catch { return null; }
+};
+const writeStored = (k: string, v: string | null) => {
+  try {
+    if (v === null) localStorage.removeItem(k);
+    else localStorage.setItem(k, v);
+  } catch { /* storage denied — the selection just won't survive a reload */ }
+};
+
 export default function App() {
   const [clis, setClis] = useState<Cli[]>([]);
-  const [tree, setTree] = useState<Tree>({ order: [], groups: [], sessions: [] });
-  const [activeRef, setActiveRef] = useState<string | null>(null);
-  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const [tree, setTree] = useState<Tree>({ order: [], groups: [], sessions: [], hidden: [] });
+  // Restored from the last visit, then re-validated against the tree once it
+  // loads (the agent may be long gone). focusedId comes back too, so a group
+  // reopens on the pane you were actually reading rather than its first.
+  const [activeRef, setActiveRef] = useState<string | null>(() => readStored('am-active-ref'));
+  const [focusedId, setFocusedId] = useState<string | null>(() => readStored('am-focused-id'));
   const [theme, setTheme] = useState<'light' | 'dark'>(initialTheme);
   const [dropMain, setDropMain] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -75,11 +118,33 @@ export default function App() {
   const [ovView, setOvViewRaw] = useState<'tiles' | 'list'>(() =>
     (localStorage.getItem('am-ov-view') === 'list' ? 'list' : 'tiles'));
   const setOvView = (v: 'tiles' | 'list') => { setOvViewRaw(v); localStorage.setItem('am-ov-view', v); };
+  // Overview order: the tree's own arrangement (default) or ranked by a
+  // timestamp. A view preference like the two above it — per browser, and it
+  // survives a reload, because re-picking your order on every visit is the
+  // thing that makes a sort control feel like a toy.
+  const [ovSort, setOvSortRaw] = useState<OverviewSort>(() => {
+    const s = localStorage.getItem('am-ov-sort');
+    return s === 'prompt' || s === 'answer' ? s : 'manual';
+  });
+  const setOvSort = (v: OverviewSort) => { setOvSortRaw(v); localStorage.setItem('am-ov-sort', v); };
   // Archiving: sessions quiet for longer than the configured window are hidden
   // from the sidebar and overview unless "archived" is checked. Derived, never
   // stored — flipping the setting instantly (un)archives.
   const [showArchived, setShowArchived] = useState(false);
   const [archiveAfter, setArchiveAfter] = useState<'week' | 'month' | 'never'>('month');
+  // Hiding a group from the Overview is a standing choice and lives on the server
+  // (tree.hidden). REVEALING it is a glance, so that half stays here and resets on
+  // reload — otherwise "show hidden" becomes a mode you forget you left on, and
+  // hiding reads as broken.
+  const [showHidden, setShowHidden] = useState(false);
+  // How every pane is read — the terminal itself, or reader mode over the same
+  // session. App-wide, like zoom, and remembered the same way.
+  const [paneMode, setPaneMode] = useState(readPaneMode);
+  // Which continuous appearance of a visible batch has let its focused reader
+  // paint. The activation key below changes across page/group/hide transitions.
+  const [readerReadyFor, setReaderReadyFor] = useState('');
+  useEffect(() => onPaneMode(setPaneMode), []);
+  const showPaneMode = (m: 'terminal' | 'reader') => { setPaneMode(m); writePaneMode(m); };
   const [zoom, setZoom] = useState<number>(() => {
     const z = parseInt(localStorage.getItem('am-zoom') || '100', 10);
     return Number.isFinite(z) ? z : 100;
@@ -91,8 +156,12 @@ export default function App() {
   // Mobile navigation: false = the sidebar is the (full-screen) home view,
   // true = the selected session/group fills the screen. Desktop ignores this.
   const isMobile = useIsMobile();
-  const [mobileStage, setMobileStage] = useState(false);
-  const [ovFilter, setOvFilter] = useState<OverviewFilter>('all');
+  const [mobileStage, setMobileStage] = useState(() => readStored('am-mobile-stage') === '1');
+  // Which chip the Overview's bottom bar is on. A chip is coarser than a bucket
+  // (`started` = waiting or working) — see chipBuckets in types.ts. Not persisted,
+  // unlike the sort beside it: "show me only the stopped ones" is a thing you do
+  // for a moment, not a standing preference.
+  const [ovChip, setOvChip] = useState<OverviewChip>('all');
   const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
   const rememberPath = (p?: string | null) => {
     const next = normalizePath(p);
@@ -105,12 +174,21 @@ export default function App() {
     localStorage.setItem('am-theme', theme);
   }, [theme]);
 
+  // Write the selection through on every change rather than on unload: a phone
+  // killing a backgrounded tab does not reliably run unload handlers.
+  useEffect(() => { writeStored('am-active-ref', activeRef); }, [activeRef]);
+  useEffect(() => { writeStored('am-focused-id', focusedId); }, [focusedId]);
+  useEffect(() => { writeStored('am-mobile-stage', mobileStage ? '1' : '0'); }, [mobileStage]);
+
   // Track the visual viewport so the mobile layout can sit above the on-screen
   // keyboard (which shrinks visualViewport but not the layout viewport on iOS).
-  // The CSS variables pin the app to that viewport's exact rectangle. The Hub
-  // page embeds the app in a cross-origin iframe; mobile Safari leaves that
-  // child viewport unchanged when its keyboard opens. In that one no-signal
-  // case, fall back to a conservative focus-derived visible height.
+  // The CSS variables pin the app to that viewport's exact rectangle.
+  //
+  // Where there is no signal — the Hub page embeds the app in a cross-origin
+  // iframe, and mobile Safari leaves that child viewport unchanged when its
+  // keyboard opens — the app reports the viewport it can see and stops there.
+  // It does not estimate one. Nothing here knows how tall a keyboard is, and
+  // the browser that does already scrolls a focused field into view.
   useEffect(() => {
     const vv = window.visualViewport;
     type VirtualKeyboardLike = EventTarget & { boundingRect?: DOMRectReadOnly };
@@ -123,11 +201,12 @@ export default function App() {
     };
     const root = document.documentElement;
     const keyboardSignalThreshold = 80;
-    const embedded = window.self !== window.top;
-    let focusedInput: Element | null = null;
+    // The viewport as it was before a field took focus — the only thing left
+    // that needs remembering, because a keyboard is detected as the SHRINK from
+    // it (hasKeyboardGeometry), not as an absolute height. Since the estimate
+    // was deleted this feeds no layout at all: its one consumer is the
+    // keyboardLayout label, which only ?vvdebug=1 reads.
     let focusBaseline: ViewportBaseline | null = null;
-    let focusFallback = false;
-    let focusFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
     const acceptsKeyboardInput = (target: Element | null): target is HTMLElement => {
       if (!(target instanceof HTMLElement)) return false;
@@ -137,9 +216,6 @@ export default function App() {
       return !['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit']
         .includes(target.type);
     };
-    const embeddedTouchLayout = () => embedded
-      && window.matchMedia('(max-width: 720px)').matches
-      && (navigator.maxTouchPoints > 0 || window.matchMedia('(pointer: coarse)').matches);
     const captureViewport = (): ViewportBaseline => ({
       width: vv?.width ?? document.documentElement.clientWidth,
       height: vv?.height ?? window.innerHeight,
@@ -168,20 +244,25 @@ export default function App() {
       if (keyboardRect && keyboardRect.height > 0 && keyboardRect.top > top) {
         height = Math.min(height, keyboardRect.top - top);
       }
-      if (hasKeyboardGeometry()) focusFallback = false;
-      if (focusFallback && focusBaseline && acceptsKeyboardInput(document.activeElement)) {
-        // The parent page owns the real visual viewport, but cross-origin frame
-        // isolation prevents us from reading it. A phone keyboard typically
-        // consumes roughly the lower half; 54% visible keeps the xterm prompt
-        // above it without disturbing direct-app browsers with real geometry.
-        const visibleRatio = focusBaseline.width > focusBaseline.height ? 0.48 : 0.54;
-        height = Math.min(height, Math.round(focusBaseline.height * visibleRatio));
-        root.dataset.keyboardLayout = 'focus-fallback';
-      } else if (hasKeyboardGeometry()) {
-        root.dataset.keyboardLayout = 'browser-geometry';
-      } else {
-        delete root.dataset.keyboardLayout;
-      }
+      // When the browser reports no keyboard geometry — a cross-origin frame on
+      // mobile Safari, which the Hub page is — the app does NOT invent a height.
+      // It used to assume a keyboard ate 46% and shrink to fit, and a guess that
+      // is wrong in the safe direction is still wrong: the abandoned strip does
+      // not stay hidden behind the keyboard, because the browser scroll-reveals
+      // a focused field and drags it back into view. That strip is the blank
+      // band under the reader's composer.
+      //
+      // What replaces it is the PARENT page's scroll, not ours: measured at
+      // 390x844, every box in this document — html, body, #root, .app, .main,
+      // .term-host, .pane-reader, .cxv — has a scroll range of exactly 0, so a
+      // scroll-into-view in here moves nothing. The reveal is entirely the
+      // embedder's, and this document's job is to not fight it by resizing
+      // itself against a keyboard it cannot see.
+      //
+      // Nothing below sizes anything: with the estimate gone, keyboardLayout is
+      // a label for ?vvdebug=1 to read. No CSS matches it.
+      if (hasKeyboardGeometry()) root.dataset.keyboardLayout = 'browser-geometry';
+      else delete root.dataset.keyboardLayout;
       root.style.setProperty('--vvw', `${Math.round(width)}px`);
       root.style.setProperty('--vvh', `${Math.round(height)}px`);
       root.style.setProperty('--vv-top', `${Math.round(top)}px`);
@@ -213,54 +294,29 @@ export default function App() {
         focusTimers.add(timer);
       }
     };
-    const scheduleEmbeddedFallback = () => {
-      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
-      focusFallbackTimer = null;
-      if (!embeddedTouchLayout() || !acceptsKeyboardInput(document.activeElement)) return;
-      focusFallbackTimer = setTimeout(() => {
-        focusFallbackTimer = null;
-        if (document.activeElement === focusedInput && !hasKeyboardGeometry()) {
-          focusFallback = true;
-          apply();
-        }
-      }, 500);
-    };
     const onFocusIn = (event: FocusEvent) => {
       const target = event.target instanceof Element ? event.target : null;
-      if (acceptsKeyboardInput(target)) {
-        focusedInput = target;
-        focusBaseline = captureViewport();
-        focusFallback = false;
-        stabilizeFocus();
-        scheduleEmbeddedFallback();
-        return;
-      }
+      // Only when there is no baseline yet: tapping from one field straight to
+      // another keeps the keyboard up, and re-reading here would take the
+      // shrunk viewport as the "before" — after which the shrink measures zero
+      // and a keyboard that is plainly up reads as absent. focusout clears it
+      // when focus really leaves, so this stays fresh without being re-taken.
+      if (acceptsKeyboardInput(target) && !focusBaseline) focusBaseline = captureViewport();
       stabilizeFocus();
     };
     const onFocusOut = () => {
-      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
-      focusFallbackTimer = null;
       const timer = setTimeout(() => {
         focusTimers.delete(timer);
         if (!acceptsKeyboardInput(document.activeElement)) {
-          focusedInput = null;
           focusBaseline = null;
-          focusFallback = false;
           apply();
         }
       }, 0);
       focusTimers.add(timer);
     };
     const onOrientationChange = () => {
-      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
-      focusFallbackTimer = null;
-      focusFallback = false;
-      if (acceptsKeyboardInput(document.activeElement)) {
-        focusedInput = document.activeElement;
-        focusBaseline = captureViewport();
-      }
+      if (acceptsKeyboardInput(document.activeElement)) focusBaseline = captureViewport();
       stabilizeFocus();
-      scheduleEmbeddedFallback();
     };
     apply();
     vv?.addEventListener('resize', onViewportChange);
@@ -274,7 +330,6 @@ export default function App() {
     return () => {
       for (const timer of settleTimers) clearTimeout(timer);
       for (const timer of focusTimers) clearTimeout(timer);
-      if (focusFallbackTimer) clearTimeout(focusFallbackTimer);
       vv?.removeEventListener('resize', onViewportChange);
       vv?.removeEventListener('scroll', onViewportChange);
       vv?.removeEventListener('scrollend', onViewportChange);
@@ -329,9 +384,24 @@ export default function App() {
     } catch (e) { showErr('Couldn’t toggle demo mode')(e); }
   };
 
+  // treeLoaded gates the selection check below: until the first tree actually
+  // arrives, "your agent isn't in this tree" only means the tree is still empty.
+  const [treeLoaded, setTreeLoaded] = useState(false);
   const refresh = useCallback(async () => {
-    try { setTree(await api.getTree()); } catch { /* offline */ }
+    try { setTree(await api.getTree()); setTreeLoaded(true); } catch { /* offline */ }
   }, []);
+
+  // Hide/unhide a group (or one agent) in the Overview. Optimistic, because the
+  // tree poll is up to 2.5s away and a control that does nothing for two seconds
+  // reads as broken; the server's own list replaces this on the next poll.
+  const toggleOverviewHidden = (ref: string, hide: boolean) => {
+    setTree((t) => {
+      const next = new Set(t.hidden);
+      if (hide) next.add(ref); else next.delete(ref);
+      return { ...t, hidden: [...next] };
+    });
+    api.setOverviewHidden(ref, hide).then(refresh).catch(showErr('could not change what the overview shows'));
+  };
 
   useEffect(() => {
     api.getClis().then(setClis).catch(() => {});
@@ -400,16 +470,40 @@ export default function App() {
     return out;
   }, [tree.sessions, ages, archiveAfter]);
 
+  // What the operator hid from the Overview, as refs (`g:<id>` / `s:<id>`). The
+  // server owns the list; this is just the shape the sidebar wants for a lookup.
+  const hiddenRefs = useMemo(() => new Set(tree.hidden), [tree.hidden]);
+  // The bar's button counts AGENTS, not refs: "1 hidden" for a six-agent group
+  // would understate what is missing from the feed.
+  const hiddenCount = useMemo(() => hiddenSessionIds(tree).size, [tree]);
+
   const cliMap = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c])), [clis]);
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
+  // Which group an agent belongs to, by name — the one fact a pane header needs
+  // to title itself. It rides the tree poll, so renaming a group or dragging an
+  // agent into another one retitles its pane on the next refresh, with no
+  // reload and nothing to keep in sync by hand.
+  const groupNameOf = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const g of tree.groups) for (const id of g.sessionIds) m[id] = g.name;
+    return m;
+  }, [tree.groups]);
 
-  // Keep a valid selection ('overview' is always valid).
+  // Keep a valid selection ('overview' is always valid). Waits for the first
+  // tree: running against the empty initial one would discard a restored
+  // selection as "missing" a beat before the agents arrive.
   useEffect(() => {
+    if (!treeLoaded) return;
     const ok = activeRef && (activeRef === 'overview'
       || (activeRef.startsWith('g:') ? groupById[activeRef.slice(2)] : sessById[activeRef.slice(2)]));
-    if (!ok) setActiveRef(tree.order[0] ?? null);
-  }, [tree.order, groupById, sessById, activeRef]);
+    if (!ok) {
+      setActiveRef(tree.order[0] ?? null);
+      // The remembered agent is gone (deleted, or a different Space). Land on
+      // the list rather than full-screening whichever agent happens to be first.
+      setMobileStage(false);
+    }
+  }, [tree.order, groupById, sessById, activeRef, treeLoaded]);
 
   const activeGroup = activeRef?.startsWith('g:') ? groupById[activeRef.slice(2)] : null;
   const activeSingle = activeRef?.startsWith('s:') ? sessById[activeRef.slice(2)] : null;
@@ -427,6 +521,30 @@ export default function App() {
   // activeRef would clobber openSession's "land on this agent's pane").
   const [pageRaw, setPage] = useState(0);
   const page = Math.min(pageRaw, pageCount - 1); // clamp when agents/layout change
+  // Restoring a group has to restore its page too: mobile shows one pane per
+  // page, so the remembered pane would otherwise sit behind page 0. Fires once,
+  // on the first loaded tree — a standing effect would be exactly the activeRef
+  // clobber the note above warns about.
+  //
+  // It reads the remembered pane from a ref, NOT from focusedId, because
+  // focusedId does not survive to here: "keep a focused pane within the visible
+  // set" below runs on the mount commit, when the tree is still empty and the
+  // visible set with it, and nulls focusedId — which the write-through then
+  // erases from storage. The ref is out of that effect's reach. Restoring the
+  // page puts the remembered pane in the visible set, and that same effect then
+  // focuses it (on mobile the page IS the pane, so it lands exactly).
+  const restoredFocus = useRef(readStored('am-focused-id'));
+  const pageRestored = useRef(false);
+  useEffect(() => {
+    if (pageRestored.current || !treeLoaded) return;
+    pageRestored.current = true;
+    const want = restoredFocus.current;
+    if (!activeGroup || !want) return;
+    const idx = activeGroup.sessionIds.indexOf(want);
+    if (idx < 0) return; // remembered a pane this group no longer has
+    setPage(Math.floor(idx / cap));
+    setFocusedId(want);
+  }, [treeLoaded, activeGroup, cap]);
   const pageSessions = activeGroup ? groupSessions.slice(page * cap, (page + 1) * cap) : [];
 
   const visibleSessions = activeGroup ? pageSessions : activeSingle ? [activeSingle] : [];
@@ -443,6 +561,13 @@ export default function App() {
     .filter((s) => !isPassive(s.cli) && !isRemote(s.cli))
     .map((s) => s.id);
   const visibleTerminalKey = visibleTerminalIds.join(',');
+  const readerLeadId = focusedId && visibleTerminalIds.includes(focusedId)
+    ? focusedId : visibleTerminalIds[0] || null;
+  // A batch is one continuous on-screen appearance, not merely a set of ids:
+  // opening Settings/mobile home unmounts readers, so returning to the same ids
+  // must gate them again. Focus only chooses the leader and does not change it.
+  const readerBatch = useReaderBatch(paneMode === 'reader' ? visibleTerminalKey : '');
+  const readerFollowersReady = readerReadyFor === readerBatch;
   const sessionIdsKey = tree.sessions.map((s) => s.id).join(',');
   const [warmTerminalIds, setWarmTerminalIds] = useState<string[]>([]);
   useEffect(() => {
@@ -547,7 +672,21 @@ export default function App() {
       setActiveRef(`g:${g.id}`);
     } catch (e) { showErr('Couldn’t create the group')(e); }
   };
-  const doMove = (ref: string, to: MoveTarget) => api.move(ref, to).then(refresh).catch(showErr('Couldn’t move that'));
+  // Merging two agents, or dropping one into a group, changes what the pane you
+  // are looking at IS — it is now part of a grid. Follow it there rather than
+  // leaving you on a single view of a session that has moved.
+  const doMove = (ref: string, to: MoveTarget) => api.move(ref, to)
+    .then(async () => {
+      const next = await api.getTree().catch(() => null);
+      if (!next) return refresh();
+      setTree(next);
+      const watching = activeRef?.startsWith('s:') ? activeRef.slice(2) : null;
+      if (!watching) return undefined;
+      const home = next.groups.find((g) => g.sessionIds.includes(watching));
+      if (home) setActiveRef(`g:${home.id}`);
+      return undefined;
+    })
+    .catch(showErr('Couldn’t move that'));
   const renameGroup = (id: string, name: string) => api.renameGroup(id, name).then(refresh).catch(showErr('Couldn’t rename'));
   const renameSession = (id: string, name: string) => { if (name.trim()) api.renameSession(id, name.trim()).then(refresh).catch(showErr('Couldn’t rename')); };
   const deleteGroup = (id: string) => api.deleteGroup(id).then(() => { if (activeRef === `g:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the group'));
@@ -750,6 +889,11 @@ export default function App() {
                 cli={cliMap[s.cli]}
                 theme={theme}
                 zoom={zoom}
+                mode={paneMode}
+                readerEnabled={shown && deckVisible && (id === readerLeadId || readerFollowersReady)}
+                onReaderReady={id === readerLeadId ? () => setReaderReadyFor(readerBatch) : undefined}
+                readerReadyKey={readerBatch}
+                groupName={groupNameOf[s.id]}
                 focused={shown && sessions.length > 1 && s.id === focusedId}
                 visible={shown && deckVisible}
                 active={shown && deckVisible && s.id === focusedId}
@@ -784,6 +928,7 @@ export default function App() {
               <RemotePane
                 session={s}
                 zoom={zoom}
+                groupName={groupNameOf[s.id]}
                 focused={visibleSessions.length > 1 && s.id === focusedId}
                 dragId={canDrag ? `p:${s.id}` : undefined}
                 onDragActive={setPaneDrag}
@@ -794,6 +939,12 @@ export default function App() {
             ) : (
               <TracePane
                 session={s}
+                // A trace pane follows its SOURCE session: whether that agent is
+                // still writing decides how hard this pane looks for new turns.
+                sourceLive={(() => {
+                  const ref = s.traceSource?.kind === 'session' ? s.traceSource.ref : null;
+                  return ref ? sessById[ref]?.state === 'working' : false;
+                })()}
                 zoom={zoom}
                 focused={visibleSessions.length > 1 && s.id === focusedId}
                 dragId={canDrag ? `p:${s.id}` : undefined}
@@ -834,6 +985,10 @@ export default function App() {
         onToggleDemo={toggleDemo}
       />
       )}
+    {/* Outside .app: it reports where .app was put. That does not make it
+        immune — it is fixed too, so a displaced fixed subtree would carry it
+        along — but the history it keeps still shows the displacement happening. */}
+    {VV_DEBUG && <Suspense fallback={null}><ViewportDebug /></Suspense>}
     <div className={`app${settingsOpen ? ' app-suspended' : ''}${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
       {showWelcome && <Welcome onClose={dismissWelcome} />}
       {toast && <div className="toast mono" role="alert">{toast}</div>}
@@ -899,6 +1054,8 @@ export default function App() {
         archived={archivedIds}
         showArchived={showArchived}
         onToggleArchived={() => setShowArchived((v) => !v)}
+        overviewHidden={hiddenRefs}
+        onToggleOverviewHidden={toggleOverviewHidden}
       />
 
       <div className="main">
@@ -935,10 +1092,12 @@ export default function App() {
             <Overview
               clis={clis}
               tree={tree}
-              filter={ovFilter}
+              chip={ovChip}
+              sort={ovSort}
               view={ovView}
               archived={archivedIds}
               showArchived={showArchived}
+              showHidden={showHidden}
               meta={meta}
               metaReady={metaReady}
               isMobile={isMobile}
@@ -972,16 +1131,40 @@ export default function App() {
         {activeRef === 'overview' && (
           <div className="zoombar ov-bar">
             <div className="seg ov-seg">
-              {(['all', 'waiting', 'working', 'quiet'] as OverviewFilter[]).map((f) => (
-                <button key={f} className={ovFilter === f ? 'on' : ''} onClick={() => setOvFilter(f)}>
-                  {f === 'waiting' ? 'done' : f === 'working' ? 'running' : f === 'quiet' ? 'stopped' : 'all'}
-                </button>
+              {OV_CHIPS.map(({ chip, title }) => (
+                <button key={chip} className={ovChip === chip ? 'on' : ''} title={title}
+                  onClick={() => setOvChip(chip)}>{chip}</button>
               ))}
+            </div>
+            {/* Sort, independent of the filter beside it: one says WHICH agents
+                you are looking at, the other WHERE each one is in the feed.
+                The glyph sits OUTSIDE the segment: inside it read as a fourth,
+                permanently-disabled option. */}
+            <span className="ov-sortmark" aria-hidden="true" title="Order"><SortGlyph /></span>
+            <div className="seg ov-seg ov-sortseg">
+              <button className={ovSort === 'manual' ? 'on' : ''} title="Your own order — the sidebar's groups and arrangement"
+                onClick={() => setOvSort('manual')}>manual</button>
+              <button className={ovSort === 'prompt' ? 'on' : ''} title="Newest message from you first"
+                onClick={() => setOvSort('prompt')}>prompt</button>
+              <button className={ovSort === 'answer' ? 'on' : ''} title="Newest reply from an agent first"
+                onClick={() => setOvSort('answer')}>answer</button>
             </div>
             <div className="seg ov-seg ov-viewseg">
               <button className={ovView === 'tiles' ? 'on' : ''} title="Tiles" onClick={() => setOvView('tiles')}><GridGlyph /></button>
               <button className={ovView === 'list' ? 'on' : ''} title="List" onClick={() => setOvView('list')}><ListGlyph /></button>
             </div>
+            {/* The way back. It appears only once something IS hidden, so the bar
+                costs nothing until you use the feature — and it counts groups and
+                agents, never "1 waiting", because being told about the group you
+                hid is the thing you were trying to stop. */}
+            {hiddenCount > 0 && (
+              <button className={`zbtn ov-hidebtn${showHidden ? ' on' : ''}`}
+                title={showHidden ? 'Hide them again' : 'Show what you hid from the overview'}
+                onClick={() => setShowHidden((v) => !v)}>
+                {showHidden ? <EyeGlyph /> : <EyeOffGlyph />}
+                <span className="mono">{hiddenCount} hidden</span>
+              </button>
+            )}
           </div>
         )}
         {showZoom && (
@@ -997,6 +1180,15 @@ export default function App() {
               </span>
             )}
             <span className="spacer" />
+            {/* Reader mode sits with zoom because it is the same kind of
+                setting: how you are looking at everything, not what any one
+                pane is. The content is identical either way — this is form. */}
+            <span className="seg modebar">
+              <button className={paneMode === 'terminal' ? 'on' : ''} title="The terminal itself"
+                onClick={() => showPaneMode('terminal')}>terminal</button>
+              <button className={paneMode === 'reader' ? 'on' : ''} title="Reader mode — the same session, laid out"
+                onClick={() => showPaneMode('reader')}>reader</button>
+            </span>
             <button className="zbtn" title="Zoom out" onClick={() => setZoom((z) => Math.max(50, z - 10))}>−</button>
             <button className="zlvl" title="Reset to 100%" onClick={() => setZoom(100)}>{zoom}%</button>
             <button className="zbtn" title="Zoom in" onClick={() => setZoom((z) => Math.min(200, z + 10))}>+</button>

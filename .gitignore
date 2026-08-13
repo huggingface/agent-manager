@@ -1,4 +1,7 @@
-node_modules/
+# No trailing slash: `node_modules/` matches directories only, so a SYMLINK
+# named node_modules slips past it and gets committed as a blob. That is how
+# machine-local links to /app and /home/node/local reached main once already.
+node_modules
 dist/
 data/
 *.log

@@ -17,6 +17,11 @@ const json = (r: Response) => {
 export const getClis = (): Promise<Cli[]> => fetch('/api/clis').then(json);
 export const getTree = (): Promise<Tree> => fetch('/api/tree').then(json);
 
+// Hide a group (or one agent) from the Overview. `ref` is a tree ref — `g:<id>`
+// or `s:<id>`. Persisted server-side, so it holds on every device.
+export const setOverviewHidden = (ref: string, hidden: boolean): Promise<{ hidden: string[] }> =>
+  fetch('/api/overview/hidden', { method: 'POST', headers: HEADERS, body: JSON.stringify({ ref, hidden }) }).then(json);
+
 // path: '.' = the workspaces root; anything else is a workspace-relative dir.
 const normalizePath = (path?: string) => (path && path.trim() ? path : '.');
 // Quickstart: create at the workspaces root, boot the CLI, and type the prompt
@@ -86,7 +91,10 @@ export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
   jobs: { askAboveUsd: number };
   archive: { after: 'week' | 'month' | 'never' };
-  backup: { every: BackupEvery; mirror: string; dataset: string; exclude: string[] };
+  // After a restart, sessions that were running come back if you prompted them
+  // within `days` (or had work still in flight).
+  revive: { enabled: boolean; days: 1 | 3 | 7 };
+  backup: { every: BackupEvery; dataset: string; exclude: string[] };
   defaultArtifactsSpace?: string;
 }
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
@@ -98,9 +106,9 @@ export type BackupEvery = 'never' | '1h' | '3h' | '24h';
 export interface BackupStatus {
   every: BackupEvery;
   source: string | null;
-  mirror: string;
+  staging: string;
   dataset: string;
-  defaults: { mirror: string; dataset: string };
+  defaults: { dataset: string; staging: string };
   hasToken: boolean;
   canRunNow: boolean;
   running: boolean;
@@ -113,7 +121,8 @@ export interface BackupStatus {
   jobsUrl: string;
   // The tokens as stored, and the globs they expand to.
   exclude: string[];
-  excludePatterns: string[];
+  excludeDefaults: string[];
+  excludeIsDefault: boolean;
   health: BackupHealth | null;
   failures: number;
   lastFailure: { at: number; jobId: string; stage: string; message: string | null; reason: string | null } | null;
@@ -435,6 +444,64 @@ export const getTracePage = async (id: string, offset = 0, limit = 200): Promise
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
   return r.json();
 };
+
+// ---- windows: how the reader actually reads ----
+// A conversation is read from its END. `tail` is the last stretch of it,
+// `before` the stretch in front of one you already hold, `after` whatever has
+// been written since — each answered from a byte range of the transcript
+// instead of a parse of the whole thing. Cursors are opaque: hand back the
+// `start`/`end` the server gave you.
+export type TraceReq = { at: 'tail' } | { at: 'before' | 'after'; cursor: number };
+
+export interface TraceCursor {
+  /** byte offsets for a .jsonl, message indices for the SQLite harnesses */
+  mode: 'bytes' | 'index';
+  start: number;
+  end: number;
+  atStart: boolean;
+  atEnd: boolean;
+  /** the trace grew more than one window while we were away: replace, don't splice */
+  gap?: boolean;
+  /** one line here is bigger than a window: nothing older can be reached */
+  blocked?: boolean;
+}
+
+export interface TraceWindow extends Omit<TracePage, 'total' | 'offset' | 'limit' | 'userTurns'> {
+  /** null when the window doesn't span the whole trace — ask for the summary */
+  total: number | null;
+  userTurns: number[] | null;
+  window: TraceCursor;
+}
+
+/** Whole-trace facts a single window cannot know. One full parse, off the paint path. */
+export type TraceSummary = Omit<TracePage, 'turns' | 'offset' | 'limit'>;
+
+const traceRange = (req: TraceReq) => (req.at === 'tail' ? 'tail=1' : `${req.at}=${req.cursor}`);
+
+const traceFetch = async <T>(url: string, signal?: AbortSignal): Promise<T> => {
+  const r = await fetch(url, { signal });
+  if (r.status === 404) {
+    const d = await r.json().catch(() => ({}));
+    throw new TraceUnavailable(d.error || 'no trace for this session yet', d.code || 'no-trace');
+  }
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
+  return r.json();
+};
+
+const windowSize = (bytes?: number, min?: number) =>
+  `${bytes ? `&bytes=${bytes}` : ''}${min ? `&min=${min}` : ''}`;
+
+export const getTraceWindow = (id: string, req: TraceReq, bytes?: number, min?: number, signal?: AbortSignal): Promise<TraceWindow> =>
+  traceFetch(`/api/trace/${id}?${traceRange(req)}${windowSize(bytes, min)}`, signal);
+
+export const getTraceSummary = (id: string, signal?: AbortSignal): Promise<TraceSummary> =>
+  traceFetch(`/api/trace/${id}?summary=1`, signal);
+
+export const getFileTraceWindow = (id: string, p: string, req: TraceReq, bytes?: number, min?: number, signal?: AbortSignal): Promise<TraceWindow> =>
+  traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&${traceRange(req)}${windowSize(bytes, min)}`, signal);
+
+export const getFileTraceSummary = (id: string, p: string, signal?: AbortSignal): Promise<TraceSummary> =>
+  traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&summary=1`, signal);
 
 export interface TraceLocation {
   path: string;

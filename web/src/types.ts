@@ -44,6 +44,12 @@ export interface Tree {
   order: string[]; // refs: "g:<id>" | "s:<id>"
   groups: Group[];
   sessions: Session[];
+  // Refs the operator hid from the OVERVIEW — same vocabulary as `order`, so one
+  // list covers a whole group and a single agent. Server-side and deliberate:
+  // unlike archiving it never expires and does not care what state the agent is
+  // in. The sidebar ignores it entirely; that is the way back. See
+  // server/src/hidden.js.
+  hidden: string[];
 }
 
 export const STATE_LABEL: Record<SessionState, string> = {
@@ -101,7 +107,38 @@ export interface RemoteInfo {
   state: SessionState;
 }
 
+// Which bucket an agent falls in — one per meaningful state, plus `all`. This is
+// the granular representation and it stays granular: bucket() in
+// components/Overview.tsx puts a session in one, and the working/waiting split is
+// load-bearing well outside the filter (atWork(), the card's "running" line, the
+// sorted feed's pinned block).
 export type OverviewFilter = 'all' | 'waiting' | 'working' | 'quiet';
+
+// What the Overview's bottom bar OFFERS. A chip is something you can click; a
+// bucket is a state an agent can be in, and the two are NOT one-to-one: `started`
+// covers the same agents as `done` and `running` together, the way `all` covers
+// everything. Chips may overlap because exactly one is ever selected.
+//
+// Deliberately a separate type rather than two more OverviewFilter members: on
+// one type `started` and `working` would both be selectable spellings of an
+// overlapping set, and every consumer of the granular value (atWork(), the card's
+// "running" line, the pinned at-work block) would have to know which spelling it
+// was handed. Here the widening lives in one function and nothing downstream
+// changes.
+export type OverviewChip = 'all' | 'done' | 'running' | 'started' | 'stopped';
+
+// The buckets a chip covers. Pure, and the only place the widening happens.
+export const chipBuckets = (chip: OverviewChip): OverviewFilter[] =>
+  chip === 'done' ? ['waiting']
+  : chip === 'running' ? ['working']
+  : chip === 'started' ? ['waiting', 'working']
+  : chip === 'stopped' ? ['quiet']
+  : ['waiting', 'working', 'quiet'];
+
+// How the Overview is ordered. `manual` is the tree's own arrangement — groups
+// as capsules, agents where you put them; the other two flatten that and rank
+// every agent by a timestamp from its digest. See web/src/lib/overviewSort.ts.
+export type OverviewSort = 'manual' | 'prompt' | 'answer';
 
 export type MoveTarget =
   | { kind: 'into'; groupId: string }
