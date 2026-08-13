@@ -705,21 +705,35 @@ function codexSessionsRoot() {
 }
 
 // Rollout files touched since `sinceMs`, newest first.
-function codexRolloutsSince(sinceMs) {
+//
+// Async for the same reason as claudeTranscriptsSince, and it is the same bug:
+// this is a readdir per day-directory plus a stat per rollout, and although
+// CODEX_HOME is on local disk, its `sessions` child is a SYMLINK onto the FUSE
+// bucket — `stat -f` says fuseblk, and `find` without -L will tell you the
+// directory is empty, which is how this hid. A stat there costs ~85ms, so the
+// sync version froze every pane in the Space for 400-750ms on the REPIN_MS beat,
+// once per codex session. Measured: stalls >250ms at 2.5/min, worst 3.9s.
+//
+// Sequential rather than Promise.all, exactly as in claudeTranscriptsSince:
+// parallel FUSE stats would saturate the 4-thread libuv pool and push every
+// other fs operation in the process behind them, and nothing here is waiting on
+// the result.
+// Exported for server/test/codex-repin.test.mjs.
+export async function codexRolloutsSince(sinceMs) {
   const out = [];
-  const walk = (dir, depth) => {
+  const walk = async (dir, depth) => {
     if (depth > 5) return;
     let ents = [];
-    try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
     for (const e of ents) {
       const p = path.join(dir, e.name);
-      if (e.isDirectory()) walk(p, depth + 1);
+      if (e.isDirectory()) await walk(p, depth + 1);
       else if (e.name.startsWith('rollout-') && e.name.endsWith('.jsonl')) {
-        try { const m = fs.statSync(p).mtimeMs; if (m >= sinceMs) out.push({ p, m }); } catch {}
+        try { const m = (await fsp.stat(p)).mtimeMs; if (m >= sinceMs) out.push({ p, m }); } catch {}
       }
     }
   };
-  walk(codexSessionsRoot(), 0);
+  await walk(codexSessionsRoot(), 0);
   return out.sort((a, b) => b.m - a.m);
 }
 
@@ -763,31 +777,41 @@ async function transcriptHead(p) {
   } catch { return null; } finally { if (fh) { try { await fh.close(); } catch {} } }
 }
 
-function firstLine(p) {
-  const fd = fs.openSync(p, 'r');
+// Async for the same reason as the walk above: these rollouts are on the bucket,
+// and reading up to a megabyte of one synchronously blocked the loop carrying
+// every session's PTY. Opened INSIDE the try, like transcriptHead: a rollout can
+// rotate away between the stat that found it and this open.
+async function firstLine(p) {
+  let fh = null;
   try {
+    fh = await fsp.open(p, 'r');
     const CHUNK = 65536, MAX = 1024 * 1024;
     let buf = Buffer.alloc(0);
     for (let pos = 0; pos < MAX; pos += CHUNK) {
       const b = Buffer.alloc(CHUNK);
-      const n = fs.readSync(fd, b, 0, CHUNK, pos);
+      const { bytesRead: n } = await fh.read(b, 0, CHUNK, pos);
       buf = Buffer.concat([buf, b.subarray(0, n)]);
       const nl = buf.indexOf(0x0a);
       if (nl >= 0) return buf.toString('utf8', 0, nl);
       if (n < CHUNK) break; // EOF
     }
     return buf.toString('utf8');
-  } finally { fs.closeSync(fd); }
+  } finally { if (fh) { try { await fh.close(); } catch {} } }
 }
 
-function tryCaptureCodexId(sessionId, workdir, sinceMs) {
-  const claimed = new Set(list().filter((s) => s.id !== sessionId && s.codexSessionId).map((s) => s.codexSessionId));
-  const pinned = (list().find((s) => s.id === sessionId) || {}).codexSessionId;
-  for (const c of codexRolloutsSince(sinceMs)) {
+// Read fresh at every use, never snapshotted: this awaits a bucket walk and then
+// a file read per candidate, so a claim or a pin taken before those resolve is a
+// stale view of the world by the time it is acted on. Same lesson as the claude
+// scan — see the note above the re-pin in scheduleClaudeCapture.
+async function tryCaptureCodexId(sessionId, workdir, sinceMs, stillOurs = () => true) {
+  const claimedByOthers = () =>
+    new Set(list().filter((s) => s.id !== sessionId && s.codexSessionId).map((s) => s.codexSessionId));
+  const currentPin = () => (list().find((s) => s.id === sessionId) || {}).codexSessionId;
+  for (const c of await codexRolloutsSince(sinceMs)) {
     const m = c.p.match(/rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/);
-    if (!m || claimed.has(m[1])) continue;
+    if (!m || claimedByOthers().has(m[1])) continue;
     let meta;
-    try { meta = JSON.parse(firstLine(c.p)); } catch { continue; }
+    try { meta = JSON.parse(await firstLine(c.p)); } catch { continue; }
     const mp = (meta && meta.payload) || {};
     if (!cwdUnderWorkdir(mp.cwd, workdir)) continue;
     // A sibling's ongoing conversation in the same folder gets fresh writes
@@ -799,9 +823,23 @@ function tryCaptureCodexId(sessionId, workdir, sinceMs) {
     // aren't this agent's conversation, so pinning one would break resume and
     // the Overview digest.
     if (mp.thread_source === 'subagent' || (mp.source && mp.source.subagent)) continue;
+    // Re-read now that the walk and the head read have both resolved: this
+    // rollout may since have been claimed by the session it actually belongs to,
+    // and taking it anyway would strand that session on a conversation it cannot
+    // reclaim.
+    if (claimedByOthers().has(m[1])) continue;
+    const pinned = currentPin();
     // The watcher re-runs for the life of the pane, so the usual outcome is
     // "still the same conversation" — don't rewrite sessions.json for that.
     if (m[1] === pinned) return true;
+    // Both of these were checked before the walk, and the walk plus the head
+    // read above have been awaiting the bucket for ~a second since. In that
+    // window a relaunch spawns a new host whose watch owns the pin from then on,
+    // and a sibling can go live in this folder — precisely the case
+    // folderIsShared refuses to guess at. Writing on the strength of the
+    // pre-walk answer lets a disposed chain overwrite a correct pin or claim a
+    // sibling's rollout. Same re-check the claude re-pin does before its write.
+    if (!stillOurs() || folderIsShared(sessionId, workdir, 'codex')) return false;
     if (pinned) console.warn(`[codex] re-pinning ${sessionId}: ${pinned} -> ${m[1]} (conversation was replaced)`);
     update(sessionId, { codexSessionId: m[1], codexRollout: c.p });
     return true;
@@ -809,15 +847,33 @@ function tryCaptureCodexId(sessionId, workdir, sinceMs) {
   return false;
 }
 
+// How long a beat waits for its rollout scan before giving up on it and
+// rearming. Generous: a cold walk of a real sessions tree runs ~1s, and timing
+// one out early would only add a redundant walk, not fix anything.
+const SCAN_TIMEOUT_MS = 30_000;
+
+// Resolves true if `p` is still pending after `ms`, false if it settled first.
+// Never rejects and never leaves the process alive on the timer — the caller
+// wants to carry on, not to be told about a failure. `p` must already carry its
+// own .catch: once the race is lost, nothing else is watching it.
+function raceTimeout(p, ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(true), ms);
+    if (t.unref) t.unref();
+    p.then(() => { clearTimeout(t); resolve(false); }, () => { clearTimeout(t); resolve(false); });
+  });
+}
+
 // A pin captured before subagents were filtered out (or one whose rollout was
 // rotated away) may point at a guardian/missing rollout — clear it so we
 // re-capture the real conversation on this launch.
-function pinIsStale(session) {
+async function pinIsStale(session) {
   if (!session.codexSessionId) return false;
   const p = session.codexRollout;
-  if (!p || !fs.existsSync(p)) return true;
+  if (!p) return true;
+  try { await fsp.stat(p); } catch { return true; } // gone, or the bucket says so
   try {
-    const mp = (JSON.parse(firstLine(p)) || {}).payload || {};
+    const mp = (JSON.parse(await firstLine(p)) || {}).payload || {};
     return mp.thread_source === 'subagent' || !!(mp.source && mp.source.subagent);
   } catch { return false; }
 }
@@ -828,32 +884,103 @@ function pinIsStale(session) {
 // for as long as the pane is alive and follow the newest rollout this folder
 // produces. tryCaptureCodexId only writes when the id actually changes.
 function scheduleCodexCapture(session, workdir) {
-  if (session.codexSessionId && pinIsStale(session)) {
-    session = update(session.id, { codexSessionId: undefined, codexRollout: undefined }) || session;
-  }
   const prev = codexCapturing.get(session.id);
   if (prev) clearTimeout(prev);
   const since = Date.now() - 2000;
+  // The host this watch belongs to. A relaunch spawns a new host and a new
+  // watch, and that one owns the pin from then on — same identity guard the
+  // claude watcher uses, and it matters for the same reason now that a tick
+  // awaits and a relaunch can land mid-scan.
+  const host = hosts.get(session.id);
+  const stillOurs = () => hosts.get(session.id) === host;
   let warnedShared = false;
+  let checkedStale = false;
+  let scanInFlight = false;
+  let warnedSlow = false;
 
-  const tick = () => {
-    if (!isRunning(session.id)) { codexCapturing.delete(session.id); return; }
+  const tick = async () => {
+    // Clearing a stale pin used to run inline at schedule time, where its
+    // existsSync + whole-first-line read sat on the launch path. Both touch the
+    // bucket, so do it on the first beat instead — and read the session fresh,
+    // since the one passed in was captured before any of this awaited.
+    //
+    // Deliberately ABOVE the isRunning gate. Inline it ran once per launch,
+    // whatever the pane did next; behind the gate a pane that exits inside the
+    // first beat skipped it, and as this is now the only clear site in the tree
+    // the bad pin survived to the next launch. Nothing clears this timer on
+    // exit — only a relaunch does — so the beat still arrives and this still
+    // runs exactly once, with stillOurs() keeping a relaunch's fresh pin safe.
+    if (!checkedStale) {
+      checkedStale = true;
+      const live = list().find((s) => s.id === session.id);
+      if (live && live.codexSessionId && await pinIsStale(live) && stillOurs()) {
+        update(session.id, { codexSessionId: undefined, codexRollout: undefined });
+      }
+    }
+    if (!isRunning(session.id)) { codexCapturing.delete(session.id); return false; }
     if (folderIsShared(session.id, workdir, 'codex')) {
       if (!warnedShared) {
         warnedShared = true;
         console.warn(`[codex] ${session.id}: folder shared with another live session — not following thread resets here`);
       }
-    } else {
-      tryCaptureCodexId(session.id, workdir, since);
+    } else if (stillOurs()) {
+      // A walk that never comes back must not take the watcher with it. On a
+      // wedged mount fsp.stat neither resolves nor rejects, so without this the
+      // tick never settles, `run`'s .then never fires, rearm never runs, and
+      // this pane silently stops following thread resets for good.
+      //
+      // The timeout only lets the BEAT continue — the walk itself cannot be
+      // cancelled and keeps its libuv thread. So scanInFlight makes sure we
+      // never stack a second walk on top of a stuck one: with a 4-thread pool,
+      // one walk per beat on a hung mount would consume the pool within a
+      // minute and wedge every other fs call in the process.
+      if (scanInFlight) {
+        if (!warnedSlow) {
+          warnedSlow = true;
+          console.warn(`[codex] ${session.id}: rollout scan still outstanding — skipping this beat`);
+        }
+      } else {
+        scanInFlight = true;
+        const scan = tryCaptureCodexId(session.id, workdir, since, stillOurs)
+          .catch((e) => { console.warn(`[codex] ${session.id}: rollout scan failed (${e && e.message})`); })
+          .finally(() => { scanInFlight = false; });
+        if (await raceTimeout(scan, SCAN_TIMEOUT_MS)) {
+          console.warn(`[codex] ${session.id}: rollout scan past ${SCAN_TIMEOUT_MS}ms — rearming without it`);
+        }
+      }
     }
-    const t = setTimeout(tick, REPIN_MS);
-    if (t.unref) t.unref();
-    codexCapturing.set(session.id, t);
+    return true;
   };
 
-  const t0 = setTimeout(tick, 5000); // rollout appears ~instantly
-  if (t0.unref) t0.unref();
-  codexCapturing.set(session.id, t0);
+  // One rearm per tick, whatever the tick did. A tick that throws logs and keeps
+  // the watcher alive: dropping it would stop following thread resets for the
+  // rest of the pane's life, which is the failure this mechanism exists for.
+  const run = () => tick()
+    .catch((e) => {
+      console.warn(`[codex] ${session.id}: repin tick failed (${e && e.message}) — retrying next beat`);
+      return isRunning(session.id);
+    })
+    .then((again) => { if (again) rearm(); else codexCapturing.delete(session.id); });
+
+  let armed = null;
+  function rearm(ms = REPIN_MS) {
+    // Not the pane's watch any more: either a relaunch during an in-flight walk
+    // started a fresh one — which already owns the map entry, and arming here
+    // would leave BOTH chains beating with only one reachable by clearTimeout —
+    // or the pane exited and nothing replaced it.
+    if (!stillOurs()) {
+      // Drop OUR entry on the way out; a fired Timeout still retains its
+      // callback, and with it this closure and the disposed host. Only ours: a
+      // newer watch's timer has to survive untouched.
+      if (codexCapturing.get(session.id) === armed) codexCapturing.delete(session.id);
+      return;
+    }
+    armed = setTimeout(run, ms);
+    if (armed.unref) armed.unref();
+    codexCapturing.set(session.id, armed);
+  }
+
+  rearm(5000); // rollout appears ~instantly
 }
 
 // opencode has no per-conversation handle we can pass on launch, so we can't
@@ -1160,10 +1287,14 @@ export function codexRolloutForBreadcrumb(crumb) {
 
 // SessionStart permits transcript_path=null. Resolve that case by the exact id
 // encoded in Codex's rollout filename — deterministic even in a shared folder.
-export function codexRolloutForId(id) {
+// Async because the walk it uses is: this landed on main while the walk was
+// being moved off the event loop, and the two met at the rebase. Keeping it
+// synchronous would mean a second sync walk of the whole rollout tree — the
+// exact stall this branch exists to remove.
+export async function codexRolloutForId(id) {
   if (!UUID.test(id || '')) return null;
   const suffix = `-${id}.jsonl`;
-  return codexRolloutsSince(0).find((item) => path.basename(item.p).endsWith(suffix))?.p || null;
+  return (await codexRolloutsSince(0)).find((item) => path.basename(item.p).endsWith(suffix))?.p || null;
 }
 
 // Register the SessionStart hook in $CLAUDE_CONFIG_DIR/settings.json. Merge,
@@ -1237,7 +1368,7 @@ function exactPinFacts(session, host, workdir, pinField) {
 // Apply one event from the pane's own adapter. This path never asks which file
 // or database row is newest: the reported id is the lookup key, and local state
 // is used only to validate that exact key before persisting it.
-function applyBreadcrumb(session, host, workdir, crumb) {
+async function applyBreadcrumb(session, host, workdir, crumb) {
   let facts;
   let patch;
   if (session.cli === 'claude') {
@@ -1264,7 +1395,13 @@ function applyBreadcrumb(session, host, workdir, crumb) {
   if (session.cli === 'codex') {
     const reported = crumb?.payload?.transcript_path;
     const rollout = codexRolloutForBreadcrumb(crumb)
-      || (reported == null ? codexRolloutForId(crumb?.payload?.session_id) : null);
+      || (reported == null ? await codexRolloutForId(crumb?.payload?.session_id) : null);
+    // That fallback awaits a walk of the rollout tree, and the pane's own exit
+    // handler calls in here and then deletes the host on the next line. If a
+    // relaunch got a new host in the meantime, this crumb describes a launch
+    // that is over and writing it would overwrite the new one's pin — the same
+    // re-check tryCaptureCodexId and the claude re-pin both make.
+    if (hosts.get(session.id) !== host) return { repin: null, why: 'relaunched during rollout lookup' };
     if (!rollout) return {
       repin: null,
       why: reported == null ? 'rollout not available yet' : 'invalid transcript_path',
@@ -1300,7 +1437,7 @@ function applyBreadcrumb(session, host, workdir, crumb) {
   return verdict;
 }
 
-function consumeBreadcrumb(session, host, workdir, force = false) {
+async function consumeBreadcrumb(session, host, workdir, force = false) {
   const fresh = takeBreadcrumb(session.id, session.cli);
   let pending = host.pendingExactBreadcrumb;
   if (fresh) {
@@ -1309,7 +1446,7 @@ function consumeBreadcrumb(session, host, workdir, force = false) {
   }
   if (!pending || (!fresh && !force && Date.now() < pending.nextAt)) return;
   try {
-    const verdict = applyBreadcrumb(session, host, workdir, pending.crumb);
+    const verdict = await applyBreadcrumb(session, host, workdir, pending.crumb);
     if (verdict.retry && pending.attempts < BREADCRUMB_RETRIES) {
       host.pendingExactBreadcrumb = {
         crumb: pending.crumb,
@@ -1336,12 +1473,20 @@ function scheduleBreadcrumbCapture(session, workdir) {
   if (prev) clearTimeout(prev);
   const host = hosts.get(session.id);
   let armed = null;
-  const tick = () => {
+  // One rearm per tick, after the beat finishes rather than alongside it: the
+  // codex fallback inside now awaits a walk of the rollout tree, and arming on
+  // a fixed interval regardless would stack beats on a slow mount. Same shape
+  // as the codex and claude watchers.
+  const tick = async () => {
     if (hosts.get(session.id) !== host) {
       if (breadcrumbCapturing.get(session.id) === armed) breadcrumbCapturing.delete(session.id);
       return;
     }
-    consumeBreadcrumb(session, host, workdir);
+    try { await consumeBreadcrumb(session, host, workdir); } catch { /* consumeBreadcrumb logs its own */ }
+    if (hosts.get(session.id) !== host) {
+      if (breadcrumbCapturing.get(session.id) === armed) breadcrumbCapturing.delete(session.id);
+      return;
+    }
     armed = setTimeout(tick, BREADCRUMB_MS);
     if (armed.unref) armed.unref();
     breadcrumbCapturing.set(session.id, armed);
@@ -1778,7 +1923,12 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     // Do one final local read before releasing this launch's nonce. In
     // particular, `/clear` followed immediately by quit must still persist the
     // conversation that was on screen when the pane ended.
-    consumeBreadcrumb(session, host, workdir, true);
+    // Not awaited — onExit is synchronous and the teardown below must not wait
+    // on a bucket walk. The write it may perform re-checks host ownership
+    // first, so landing after the hosts.delete below (or after a relaunch) is
+    // safe: it either still owns the pin or declines to touch it.
+    consumeBreadcrumb(session, host, workdir, true)
+      .catch((e) => console.warn(`[${session.cli}] ${session.id}: final breadcrumb read failed (${e && e.message})`));
     hosts.delete(session.id);
     if (host.gridTimer) { clearTimeout(host.gridTimer); host.gridTimer = null; }
     if (host.traceHistoryTimer) { clearTimeout(host.traceHistoryTimer); host.traceHistoryTimer = null; }
