@@ -203,6 +203,18 @@ pane with nothing to render (a shell) simply stays a terminal.
   The two modes show the *same content*; what differs is the form, which is why the labels name
   the form. "Conversation" would have described the terminal just as well.
 - The mode is a **view preference**, kept in `localStorage` for the app, not in the store.
+- **The zoom beside the switch works in both modes.** It is one number for how big everything is,
+  not a terminal setting that happens to sit in the same bar: the terminal spends it on its font
+  size, the reader on `--cx-base`, the single size every type size in the conversation grammar is
+  an `em` of (`conversation.css`; `TerminalPane` sets it on `.pane-reader`). 13px at 100% either
+  way, so switching modes does not change how big the session reads. The reader scales as one
+  surface — toolbar, turns, reply line, footer — because a 10.5px toolbar left behind at 150% is
+  the part you could not read in the first place. Two consequences worth keeping: the Overview
+  card shares the grammar and must not move, which is why the base defaults to 13px rather than
+  being inherited; and the answer's markdown needs its own heading sizes here, since the shared
+  `.markdown` rules are absolute px and would otherwise stay put while the prose grew.
+  Spacing does not scale, but anything that lines a column up with a glyph — the prompt's `❯`
+  gutter, the step rail, the tool-field labels — is in `em`, or it stops lining up when zoomed.
 - The terminal element stays mounted and connected underneath; the reader draws over it. Toggling
   must not detach tmux — a reattach costs a repaint and can trip the handoff path
   (`HANDOFF_CODE`, `TerminalPane.tsx`). **Verify** this before shipping: xterm needs layout to

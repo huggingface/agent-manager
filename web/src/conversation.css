@@ -1,13 +1,22 @@
 /* The conversation grammar (docs/conversation-view.md §4.3), shared by the
    Overview card and the pane's RENDER mode. App tokens only — --panel, --border,
    --accent, --muted, --font-mono. Nothing terminal-flavoured: no --term-bg, no
-   uppercase role pills, no per-row chips. */
+   uppercase role pills, no per-row chips.
+
+   ONE base size, and every type size below in em of it. --cx-base is 13px
+   everywhere by default — the size the card has always been — and reader mode
+   hands it the bottom bar's zoom instead (set on .pane-reader, TerminalPane), so
+   the zoom control moves a rendered conversation the way it moves a terminal.
+   Type scales; the spacing between it does not, same as everywhere else in the
+   app. Anything that lines a column up with a glyph (the step rail, the field
+   labels) is in em too, or it would stop lining up when zoomed. */
 
 /* ---------- one exchange ---------- */
 /* padding-left is the gutter the prompt's ❯ hangs into. Everything else —
    answer, work, fold control — starts at the content edge, so the arrow is the
    only mark outside the column and turns are findable while scrolling. */
-.cx { display: flex; flex-direction: column; gap: 7px; min-width: 0; padding: 2px 0 2px 16px; }
+.cx { display: flex; flex-direction: column; gap: 7px; min-width: 0; padding: 2px 0 2px 1.23em;
+  font-size: var(--cx-base, 13px); }
 .cx.dim { opacity: 0.72; }
 .cx.dim .cx-answer { -webkit-line-clamp: 6; }
 
@@ -15,7 +24,7 @@
    Nothing sits above the prompt any more. */
 .cx-meta {
   display: flex; align-items: baseline; gap: 8px; min-width: 0;
-  font-size: 11px; color: var(--muted);
+  font-size: 0.85em; color: var(--muted);
 }
 .cx-meta .spacer { flex: 1; min-width: 4px; }
 .cx-n, .cx-time, .cx-model { flex: none; font-variant-numeric: tabular-nums; }
@@ -23,16 +32,18 @@
 .cx-model { opacity: 0.8; }
 
 /* the prompt: a lightly tinted band between hairlines, with the chevron hanging
-   in the gutter — what your eye lands on when scrolling a long conversation */
+   in the gutter — what your eye lands on when scrolling a long conversation.
+   The gutter is em: it holds the ❯, so a zoomed conversation widens it instead
+   of running the glyph into the first word. */
 .cx-prompt {
-  position: relative; margin-left: -16px; padding: 6px 10px 7px 16px;
+  position: relative; margin-left: -1.23em; padding: 6px 10px 7px 1.23em;
   background: color-mix(in srgb, var(--accent) 7%, transparent);
   border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
-  font-size: 13px; font-weight: 550; color: var(--text);
+  font-size: 1em; font-weight: 550; color: var(--text);
   white-space: pre-wrap; overflow-wrap: break-word;
 }
 .cx-prompt::before {
-  content: '❯'; position: absolute; left: 3px; top: 6px;
+  content: '❯'; position: absolute; left: 0.23em; top: 6px;
   font-family: var(--font-mono); color: var(--accent); font-weight: 700;
 }
 
@@ -43,10 +54,14 @@
   font: inherit; color: var(--muted); cursor: pointer; text-align: left;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.cx-fold.flat { cursor: default; padding-left: 19px; }
+/* the inset a folded row's ▸ takes up, so a flat summary starts at the same
+   column — in em, because the triangle is a glyph and grows with the text */
+.cx-fold.flat { cursor: default; padding-left: 1.75em; }
 .cx-fold:hover { color: var(--text); }
 .cx-fold.on { color: var(--text); }
-.cx-fold .cs-tri { color: var(--muted); }
+/* the rail's triangle, borrowed into the smaller meta row: it steps down from
+   .cs-head's type there, so name the ratio that keeps it the same glyph here */
+.cx-fold .cs-tri { color: var(--muted); font-size: 0.9em; }
 .cx-fold.on .cs-tri { color: var(--accent); }
 
 /* ---------- the work: a rail of one-line steps ---------- */
@@ -55,7 +70,7 @@
 .cs-head {
   display: flex; align-items: baseline; gap: 6px; width: 100%; min-width: 0;
   background: none; border: none; padding: 2px 4px 2px 0; margin: 0;
-  font: inherit; font-size: 12px; color: var(--text); text-align: left; cursor: pointer;
+  font: inherit; font-size: 0.92em; color: var(--text); text-align: left; cursor: pointer;
   border-radius: var(--r-sm);
 }
 .cs-head:hover:not(:disabled) { background: color-mix(in srgb, var(--border) 45%, transparent); }
@@ -63,30 +78,33 @@
 /* one column, two meanings: a tool reports its outcome, everything else offers
    to open. Greyed triangle = nothing more to see. */
 .cs-tri, .cs-mark {
-  flex: none; width: 13px; font-size: 10px; line-height: 1.6;
+  flex: none; width: 1.1em; font-size: 0.85em; line-height: 1.6;
   font-family: var(--font-mono); color: var(--muted);
 }
 .cs-tri.off { color: color-mix(in srgb, var(--border-strong) 65%, transparent); }
-.cs-mark { font-size: 11px; }
+.cs-mark { font-size: 0.92em; }
 .cs-mark.ok { color: color-mix(in srgb, var(--ok, #4b9e6a) 85%, var(--muted)); }
 .cs-mark.bad { color: var(--danger, #c05353); }
-.cs-label { flex: none; font-size: 11px; font-weight: 600; color: var(--muted); }
+.cs-label { flex: none; font-size: 0.92em; font-weight: 600; color: var(--muted); }
 .cs.tools .cs-label { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
 .cs.think .cs-label { color: #8b73c4; }
 .cs-detail {
-  min-width: 0; flex: 1; font-size: 11.5px; color: var(--muted);
+  min-width: 0; flex: 1; font-size: 0.96em; color: var(--muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 /* expanded in place: same font, same colour, just no longer cut */
 .cs-detail.full { white-space: pre-wrap; overflow: visible; text-overflow: clip; overflow-wrap: break-word; }
 .cs.note .cs-detail { color: var(--text); opacity: 0.78; }
-.cs-more { font-size: 10px; color: var(--muted); padding: 2px 0 0; }
-.cs-body { padding: 2px 0 6px 13px; }
+.cs-more { font-size: 0.77em; color: var(--muted); padding: 2px 0 0; }
+/* left inset = the rail column above it, so a body hangs under its own row */
+.cs-body { padding: 2px 0 6px 1em; }
 .cs-pre {
   white-space: pre-wrap; word-break: break-word; margin: 3px 0; padding: 6px 8px;
   background: var(--panel-2); border-radius: var(--r-sm);
-  font-family: var(--font-mono); font-size: 11px; line-height: 1.5;
-  max-height: 20rem; overflow: auto;
+  font-family: var(--font-mono); font-size: 0.85em; line-height: 1.5;
+  /* em, not rem: the cap is really "about twenty lines", and that should stay
+     twenty lines when the conversation is zoomed rather than becoming ten */
+  max-height: 29em; overflow: auto;
 }
 .cs-pre.out { color: var(--muted); }
 .cs-pre.out.bad {
@@ -98,14 +116,21 @@
 
 /* ---------- the answer: the one thing written for the reader ---------- */
 .cx-answer { min-width: 0; }
-.markdown.cx-md { border: none; background: none; padding: 0; font-size: 12.5px; line-height: 1.55; }
+.markdown.cx-md { border: none; background: none; padding: 0; font-size: 0.96em; line-height: 1.55; }
 .cx-md > :first-child { margin-top: 0; }
 .cx-md > :last-child { margin-bottom: 0; }
-.cx-md pre { font-size: 11px; }
-.cx-note { font-size: 10.5px; color: var(--muted); padding-top: 4px; }
+.cx-md pre { font-size: 0.88em; }
+/* The shared .markdown heading sizes are absolute px, which would leave an
+   answer's headings behind when the rest of it scales. Same proportions, in em
+   of the answer's own size — and this file loads after styles.css, so these win
+   at equal specificity. */
+.cx-md h1 { font-size: 1.76em; }
+.cx-md h2 { font-size: 1.44em; }
+.cx-md h3 { font-size: 1.2em; }
+.cx-note { font-size: 0.81em; color: var(--muted); padding-top: 4px; }
 
 .cx-running {
-  display: flex; align-items: baseline; min-width: 0; font-size: 12.5px; color: var(--muted);
+  display: flex; align-items: baseline; min-width: 0; font-size: 0.96em; color: var(--muted);
 }
 .cx-running-at { margin-left: 7px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }
 .cx-running::before {
@@ -114,9 +139,9 @@
 }
 
 /* ---------- card: history grows upward, one exchange at a time ---------- */
-.cx-earlier { display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 11px; }
+.cx-earlier { display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 0.85em; }
 .cx-earlier-btn {
-  background: none; border: none; padding: 0; font: inherit; font-size: 10.5px;
+  background: none; border: none; padding: 0; font: inherit; font-size: 0.95em;
   color: var(--accent); cursor: pointer;
 }
 .cx-earlier-btn:hover { text-decoration: underline; }
@@ -131,14 +156,18 @@ mark.cx-hit {
 mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 
 /* ---------- RENDER mode: the same thing, stacked ---------- */
-.cxv { display: flex; flex-direction: column; min-height: 0; }
+/* The reader is one surface: its bar, its turns, its reply line and its footer
+   all take their size from the same base, so the zoom control moves the whole
+   thing. A toolbar left at 10.5px while the conversation grew would be the part
+   you zoomed in because you could not read. */
+.cxv { display: flex; flex-direction: column; min-height: 0; font-size: var(--cx-base, 13px); }
 
 .cxv-bar {
   /* wraps at ANY width, not behind a media query: a pane is a container, and
      a 390px pane on a desktop never triggers a viewport media query */
   display: flex; align-items: center; gap: 7px 8px; flex: none; flex-wrap: wrap;
   padding: 5px 9px; background: var(--panel-2); border-bottom: 1px solid var(--border);
-  font-size: 10.5px; color: var(--muted);
+  font-size: 0.81em; color: var(--muted);
 }
 .cxv-bar .spacer { flex: 1; }
 .cxv-chip { padding: 0 5px; border: 1px solid var(--border); border-radius: var(--r-sm); white-space: nowrap; }
@@ -146,7 +175,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 .cxv-tok { flex: 0 1 auto; }
 .cxv-mini {
   flex: none; white-space: nowrap; background: none; border: 1px solid transparent; border-radius: var(--r-sm);
-  padding: 1px 5px; font: inherit; font-size: 10.5px; color: var(--muted); cursor: pointer;
+  padding: 1px 5px; font: inherit; font-size: 1em; color: var(--muted); cursor: pointer;
 }
 .cxv-mini:hover { color: var(--text); border-color: var(--border); }
 .cxv-mini.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
@@ -154,7 +183,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 .cxv-hits { flex: none; font-variant-numeric: tabular-nums; color: var(--muted); }
 .cxv-search {
   flex: 1 1 7rem; width: auto; min-width: 4.5rem; max-width: 22rem;
-  padding: 2px 6px; font: inherit; font-size: 11px;
+  padding: 2px 6px; font: inherit; font-size: 1.05em;
   background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-sm);
 }
 
@@ -165,21 +194,26 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    conversation is narrow. */
 .cxv-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px 14px 30px; }
 .cxv-col { display: flex; flex-direction: column; min-width: 0; }
-.cxv-msg { font-size: 11px; color: var(--muted); padding: 6px 0; }
+.cxv-msg { font-size: 0.85em; color: var(--muted); padding: 6px 0; }
 /* The line above the oldest loaded exchange. Fixed height on purpose: it sits
    above everything in the column, so a line that grew or vanished when the
-   reader reached the start would shove the whole conversation. */
+   reader reached the start would shove the whole conversation. Its em height and
+   `font: inherit` mean it follows the zoom with the column, so the space it
+   holds open stays one line at any size. */
 .cxv-top {
   height: 1.5em; line-height: 1.5em; padding: 0; text-align: center; opacity: 0.75;
   display: block; width: 100%; background: none; border: 0; color: inherit;
-  font: inherit; cursor: pointer;
+  /* `font: inherit` is here to shed the button's UA font, but it also resets the
+     size this element gets from .cxv-msg — it was landing on the app's 16px in a
+     column of 11px messages. Say the size it is one of. */
+  font: inherit; font-size: 0.85em; cursor: pointer;
 }
 .cxv-top:disabled { cursor: default; }
 .cxv-top:not(:disabled):hover { opacity: 1; text-decoration: underline; }
 .cxv-foot {
   display: flex; align-items: center; gap: 8px; flex: none;
   padding: 5px 10px; border-top: 1px solid var(--border); background: var(--panel);
-  color: var(--muted); font-size: 10.5px; overflow: hidden;
+  color: var(--muted); font-size: 0.81em; overflow: hidden;
 }
 .cxv-foot .cxv-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cxv-foot .spacer { flex: 1; min-width: 4px; }
@@ -196,14 +230,16 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 /* ---------- phone ---------- */
 @media (max-width: 720px) {
   .cxv-body { padding: 4px 8px 24px; }
-  .cs-detail { font-size: 12px; }
+  .cs-detail { font-size: 1em; }
 }
 
 /* ---------- reader mode inside a session pane ---------- */
 /* Drawn over the live terminal, which stays mounted underneath. */
 .pane-reader { position: absolute; inset: 0; z-index: 3; display: flex; background: var(--panel); }
 .pane-reader > .cxv { flex: 1; min-width: 0; }
-.cxv-empty { margin: auto; padding: 24px; font-size: 11.5px; color: var(--muted); text-align: center; }
+/* The one thing the reader can render that is not inside .cxv — so it reads the
+   base itself rather than inheriting a size from it. */
+.cxv-empty { margin: auto; padding: 24px; font-size: calc(var(--cx-base, 13px) * 0.885); color: var(--muted); text-align: center; }
 .ph-modes { flex: none; }
 .ph-modes button { padding: 1px 7px; font-size: 9.5px; letter-spacing: 0.06em; }
 
@@ -219,20 +255,32 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 
 /* ---------- an expanded tool call ---------- */
 .cs-call { display: flex; flex-direction: column; }
-.ct-cap { font-size: 10.5px; color: var(--muted); padding: 3px 0 1px; overflow-wrap: anywhere; }
-.ct-note { font-size: 11px; color: var(--muted); padding: 1px 0 2px; }
+.ct-cap { font-size: 0.81em; color: var(--muted); padding: 3px 0 1px; overflow-wrap: anywhere; }
+.ct-note { font-size: 0.85em; color: var(--muted); padding: 1px 0 2px; }
 .cs-pre.ct-cmd { color: var(--text); }
 .cs-pre.ct-cmd::before { content: '$ '; color: var(--accent); }
 /* a before and an after — tinted, not barred */
 .cs-pre.ct-was { background: color-mix(in srgb, var(--danger, #c05353) 8%, var(--panel-2)); }
 .cs-pre.ct-now { background: color-mix(in srgb, var(--ok, #4b9e6a) 9%, var(--panel-2)); }
-.ct-fields { margin: 3px 0 0; font-size: 11px; }
-.ct-row { display: grid; grid-template-columns: minmax(4.5rem, auto) 1fr; gap: 8px; padding: 1px 0; align-items: baseline; }
+.ct-fields { margin: 3px 0 0; font-size: 0.85em; }
+/* the label column is em, not rem: it holds field names, so it has to grow with
+   them rather than stay 72px wide while the text zooms past it */
+.ct-row { display: grid; grid-template-columns: minmax(6.5em, auto) 1fr; gap: 8px; padding: 1px 0; align-items: baseline; }
 .ct-row dt { color: var(--muted); }
 .ct-row dd { margin: 0; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
-.ct-row dd .cs-pre { margin: 2px 0; }
+/* already inside .ct-fields' smaller type — don't step down a second time */
+.ct-row dd .cs-pre { margin: 2px 0; font-size: 1em; }
 
 /* The reply line under a rendered conversation — the card's own composer, so
    answering an agent looks the same wherever you are reading it. */
-.cxv-live { flex: none; padding: 6px 12px; border-top: 1px solid var(--border); background: var(--panel); }
+.cxv-live { flex: none; padding: 6px 12px; border-top: 1px solid var(--border); background: var(--panel); font-size: 1em; }
+/* The card's reply line is a fixed 13px; here it follows the conversation above
+   it, the way the remote pane's composer follows its log. */
+.cxv-live .ov-p, .cxv-live textarea { font-size: 1em; }
 .cxv-note { flex: none; padding: 0 12px 6px; }
+@media (max-width: 720px) and (pointer: coarse) {
+  /* Restating styles.css's iOS guard: 16px is what stops zoom-on-focus, and the
+     rule above is later in the cascade, so it would otherwise win. A phone
+     keyboard field is the one place the zoom does not reach. */
+  .cxv-live textarea { font-size: 16px; }
+}

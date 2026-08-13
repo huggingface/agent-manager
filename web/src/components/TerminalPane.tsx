@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { ClipboardAddon, Base64 } from '@xterm/addon-clipboard';
@@ -897,7 +898,15 @@ export default function TerminalPane({
             layout to fit, and detaching tmux costs a repaint and can trip the
             handoff path. The terminal stays mounted and connected underneath. */}
         {reading && visible !== false && (
-          <div className="pane-reader" onMouseDown={(e) => e.stopPropagation()}>
+          // The zoom is one number for both modes: the terminal spends it on its
+          // font size, the reader on --cx-base — the size every type size in the
+          // conversation grammar is expressed against (conversation.css). Same
+          // 13px at 100%, so the two forms of the same session read alike.
+          <div
+            className="pane-reader"
+            style={{ '--cx-base': `${(13 * zoom) / 100}px` } as CSSProperties}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
             {readerEnabled === false
               ? <div className="cxv-empty mono">reading the trace…</div>
               : <ConversationView session={session} isMobile={isMobile} onReady={onReaderReady} readyKey={readerReadyKey} />}
