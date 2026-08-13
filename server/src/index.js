@@ -16,6 +16,7 @@ import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
 import * as demo from './demo.js';
+import * as hidden from './hidden.js';
 import {
   attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, isRunning,
   capturePane, ghosttyReady, ghosttyError, installClaudeRepinHook, installOpencodeRepinPlugin,
@@ -42,6 +43,7 @@ store.init();
 groups.init();
 order.init();
 demo.init();
+hidden.init();
 // Lifecycle adapters report conversation resets (e.g. /clear) with the exact
 // id, so re-pin watchers can follow them even in shared folders where storage
 // discovery must refuse to guess. Both installers are non-fatal; the existing
@@ -1802,6 +1804,13 @@ app.get('/api/tree', (_req, res) => {
   ].sort((a, b) => (a.t < b.t ? 1 : a.t > b.t ? -1 : 0)); // newest first
   order.normalize(refsMeta.map((x) => x.ref));
   let orderList = order.list();
+  // Overview-hidden refs, pruned against everything that still exists — every
+  // group and EVERY session, before demo mode narrows the view (see hidden.js).
+  hidden.retain(new Set([
+    ...groupList.map((g) => `g:${g.id}`),
+    ...store.list().map((s) => `s:${s.id}`),
+  ]));
+  const hiddenRefs = hidden.list();
   // Demo mode hides the snapshotted sessions/groups from the view (sessions
   // created after activation aren't in the snapshot, so they show through).
   if (demo.active()) {
@@ -1813,7 +1822,27 @@ app.get('/api/tree', (_req, res) => {
     orderList = orderList.filter((ref) =>
       ref.startsWith('g:') ? !hg.has(ref.slice(2)) : !hs.has(ref.slice(2)));
   }
-  res.json({ order: orderList, groups: groupList, sessions });
+  res.json({ order: orderList, groups: groupList, sessions, hidden: hiddenRefs });
+});
+
+/**
+ * Hide (or unhide) a group or a single agent in the Overview.
+ *
+ * A view choice, but a persisted, cross-device one — so it is server state, and
+ * it takes `from` like every other mutating call so the operation log can say who
+ * asked. It deliberately does NOT touch the sidebar: that is the way back.
+ */
+app.post('/api/overview/hidden', (req, res) => {
+  const { ref, hidden: want } = req.body || {};
+  if (typeof ref !== 'string') return res.status(400).json({ error: 'bad ref' });
+  // Only HIDING has to name something real. Unhiding a ref whose group is already
+  // gone must keep working — that is how a stale entry gets cleared by hand.
+  if (want) {
+    const live = ref.startsWith('g:') ? groups.get(ref.slice(2)) : store.get(ref.slice(2));
+    if (!live) return res.status(404).json({ error: 'no such group or agent' });
+  }
+  if (!hidden.set(ref, !!want)) return res.status(400).json({ error: 'bad ref' });
+  res.json({ ok: true, hidden: hidden.list() });
 });
 
 // Backwards-compatible flat list (used by probes/tests).

@@ -17,6 +17,11 @@ const json = (r: Response) => {
 export const getClis = (): Promise<Cli[]> => fetch('/api/clis').then(json);
 export const getTree = (): Promise<Tree> => fetch('/api/tree').then(json);
 
+// Hide a group (or one agent) from the Overview. `ref` is a tree ref — `g:<id>`
+// or `s:<id>`. Persisted server-side, so it holds on every device.
+export const setOverviewHidden = (ref: string, hidden: boolean): Promise<{ hidden: string[] }> =>
+  fetch('/api/overview/hidden', { method: 'POST', headers: HEADERS, body: JSON.stringify({ ref, hidden }) }).then(json);
+
 // path: '.' = the workspaces root; anything else is a workspace-relative dir.
 const normalizePath = (path?: string) => (path && path.trim() ? path : '.');
 // Quickstart: create at the workspaces root, boot the CLI, and type the prompt

@@ -91,6 +91,20 @@ body {
 .ov-sortmark svg { width: 12px; height: 12px; display: block; }
 .ov-viewseg button { display: inline-flex; align-items: center; padding: 4.5px 9px; }
 .ov-viewseg svg { width: 13px; height: 13px; }
+/* "n hidden": present only when something is, and deliberately quiet — it is the
+   way back, not a notification. `on` = you are currently looking at them. */
+/* nowrap + no shrink: as the last item in a wrapping bar it would otherwise be
+   squeezed into the leftover sliver, break "2 hidden" over two lines and spill
+   out of the bar at phone widths. It has to take a new row instead. */
+/* `.zbtn.ov-hidebtn`, not `.ov-hidebtn`: .zbtn's own `width: 22px` is declared
+   further down this file, so a single-class rule here loses to it and the button
+   renders 22px wide with "2 hidden" spilling out past its border. */
+.zbtn.ov-hidebtn { width: auto; height: 22px; padding: 0 8px; gap: 5px; font-size: 11px; white-space: nowrap; flex: 0 0 auto; }
+.zbtn.ov-hidebtn svg { width: 12px; height: 12px; display: block; }
+.zbtn.ov-hidebtn.on { color: var(--text); border-color: var(--border-strong); background: var(--panel); }
+/* the sidebar's own mark on a group that the overview is not showing */
+.row.group-head .ov-hidden-tag { font-size: 9.5px; letter-spacing: 0.02em; color: var(--muted); opacity: 0.75; margin-left: 4px; }
+.row.group-head:hover .ov-hidden-tag { display: none; }
 
 /* transparent CLI logos; invert the mostly-black ones in dark mode */
 .cli-logo { flex: none; display: inline-flex; align-items: center; justify-content: center; }
@@ -1180,6 +1194,17 @@ a.btn-ghost { text-decoration: none; }
   .tree { padding-top: 6px; }
   .group { margin: 13px 0 5px; }
   .row .row-actions { opacity: 1; pointer-events: auto; position: static; transform: none; margin-left: 4px; background: transparent; }
+  /* A group's actions were hover-only, which a touch device can never satisfy:
+     on a phone they were simply unreachable. That was survivable while they were
+     rename/delete (both reachable other ways) and is not now that hiding a group
+     from the overview is offered here and nowhere else. The eye already shows the
+     state, so the `hidden` word gives up its space to the buttons. */
+  .row.group-head .row-actions { display: flex; }
+  .row.group-head .ov-hidden-tag { display: none; }
+  /* Four controls do not fit across 390px. The escape hatch takes the row it
+     needs instead of being wedged against the view toggle — it only exists while
+     something is hidden, so the extra row is never in the way otherwise. */
+  .zbtn.ov-hidebtn { flex: 0 0 100%; justify-content: center; }
   .row .cli-logo, .row .count { opacity: 1 !important; }
   .row .age { display: none; } /* actions are always visible on touch — no room */
   .g-add { opacity: 1; }
