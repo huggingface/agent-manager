@@ -65,7 +65,7 @@ const OV_CHIPS: { chip: OverviewChip; title: string }[] = [
 ];
 
 function initialTheme(): 'light' | 'dark' {
-  const stored = localStorage.getItem('am-theme');
+  const stored = readStored('am-theme');
   if (stored === 'light' || stored === 'dark') return stored;
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
@@ -78,8 +78,12 @@ function initialTheme(): 'light' | 'dark' {
 // to be storage.
 //
 // Storage can be denied outright — private mode, or a third-party iframe under
-// cross-site tracking prevention. That's a "don't remember" fallback to the
-// behaviour we already had, never a crash, so both sides swallow.
+// cross-site tracking prevention (the Hub embeds this Space in exactly such an
+// iframe). Reading it then THROWS rather than returning null, so every access in
+// this file goes through these two: a raw localStorage call in a useState
+// initializer took the whole app down to its error boundary — "Something broke in
+// the UI" — for a preference as incidental as which zoom you last used. A
+// "don't remember" fallback, never a crash, so both sides swallow.
 const readStored = (k: string): string | null => {
   try { return localStorage.getItem(k); } catch { return null; }
 };
@@ -114,17 +118,17 @@ export default function App() {
   const showErr = (msg: string) => (e: unknown) => { console.error(msg, e); setToast(msg); window.setTimeout(() => setToast(null), 4000); };
   // Overview presentation: tiles (default) or the classic list.
   const [ovView, setOvViewRaw] = useState<'tiles' | 'list'>(() =>
-    (localStorage.getItem('am-ov-view') === 'list' ? 'list' : 'tiles'));
-  const setOvView = (v: 'tiles' | 'list') => { setOvViewRaw(v); localStorage.setItem('am-ov-view', v); };
+    (readStored('am-ov-view') === 'list' ? 'list' : 'tiles'));
+  const setOvView = (v: 'tiles' | 'list') => { setOvViewRaw(v); writeStored('am-ov-view', v); };
   // Overview order: the tree's own arrangement (default) or ranked by a
   // timestamp. A view preference like the two above it — per browser, and it
   // survives a reload, because re-picking your order on every visit is the
   // thing that makes a sort control feel like a toy.
   const [ovSort, setOvSortRaw] = useState<OverviewSort>(() => {
-    const s = localStorage.getItem('am-ov-sort');
+    const s = readStored('am-ov-sort');
     return s === 'prompt' || s === 'answer' ? s : 'manual';
   });
-  const setOvSort = (v: OverviewSort) => { setOvSortRaw(v); localStorage.setItem('am-ov-sort', v); };
+  const setOvSort = (v: OverviewSort) => { setOvSortRaw(v); writeStored('am-ov-sort', v); };
   // Archiving: sessions quiet for longer than the configured window are hidden
   // from the sidebar and overview unless "archived" is checked. Derived, never
   // stored — flipping the setting instantly (un)archives.
@@ -144,13 +148,13 @@ export default function App() {
   useEffect(() => onPaneMode(setPaneMode), []);
   const showPaneMode = (m: 'terminal' | 'reader') => { setPaneMode(m); writePaneMode(m); };
   const [zoom, setZoom] = useState<number>(() => {
-    const z = parseInt(localStorage.getItem('am-zoom') || '100', 10);
+    const z = parseInt(readStored('am-zoom') || '100', 10);
     return Number.isFinite(z) ? z : 100;
   });
   const [info, setInfo] = useState<Awaited<ReturnType<typeof api.getInfo>> | null>(null);
   // Default location for the next agent = where the last one was created,
   // falling back to the workspaces root.
-  const [lastPath, setLastPath] = useState(() => normalizePath(localStorage.getItem('am-last-path')));
+  const [lastPath, setLastPath] = useState(() => normalizePath(readStored('am-last-path')));
   // Mobile navigation: false = the sidebar is the (full-screen) home view,
   // true = the selected session/group fills the screen. Desktop ignores this.
   const isMobile = useIsMobile();
@@ -164,12 +168,12 @@ export default function App() {
   const rememberPath = (p?: string | null) => {
     const next = normalizePath(p);
     setLastPath(next);
-    localStorage.setItem('am-last-path', next);
+    writeStored('am-last-path', next);
   };
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    localStorage.setItem('am-theme', theme);
+    writeStored('am-theme', theme);
   }, [theme]);
 
   // Write the selection through on every change rather than on unload: a phone
@@ -352,7 +356,7 @@ export default function App() {
     const t = setInterval(() => api.getInfo().then(setInfo).catch(() => {}), 15_000);
     return () => clearInterval(t);
   }, [info?.locked]);
-  useEffect(() => { localStorage.setItem('am-zoom', String(zoom)); }, [zoom]);
+  useEffect(() => { writeStored('am-zoom', String(zoom)); }, [zoom]);
 
   // Show the welcome once, when /api/info first loads: on first run (never seen)
   // or whenever demo mode is active (so the Space reads like a fresh install).
