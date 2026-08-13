@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { chromium } from 'playwright';
+import { chromiumLaunchOptions } from '../../scripts/test-chromium.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-windows-web-'));
@@ -89,13 +90,11 @@ await build({
 });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-// CI normally uses Playwright's matching download. The development Space keeps
-// a shared Chromium revision instead, so allow that executable to be supplied
-// without baking an environment-specific path into the test.
-const browser = await chromium.launch({
-  headless: true,
-  executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
-});
+// CI uses Playwright's matching download; this workspace keeps a shared Chromium
+// of a different revision. The helper resolves whichever is actually installed
+// (and still honours PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) so neither environment
+// needs a path baked into the test.
+const browser = await chromium.launch(chromiumLaunchOptions());
 try {
   const page = await browser.newPage();
   await page.setContent('<div id="root"></div>');

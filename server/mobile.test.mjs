@@ -12,6 +12,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { chromiumLaunchOptions } from '../scripts/test-chromium.mjs';
 import { WebSocket } from 'ws';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -46,12 +47,19 @@ if (!process.env.MOBILE_PUBLIC_DIR) {
   }
 }
 
+// A test server must not publish skills — the same strip migration.test.mjs and
+// resize.test.mjs already do, and for the same reason: `SPACE_ID` is set when this
+// runs inside the Space itself, and skillTargetDirs() then fans this checkout's
+// skill templates into every live agent's skills dir. Those paths come from $HOME,
+// NOT from DATA_DIR, so a throwaway DATA_DIR does not contain the damage.
+const { SPACE_ID, AM_DISTRIBUTE_SKILLS, ...BASE_ENV } = process.env;
+
 const backend = spawn('node', ['src/index.js'], {
   cwd: HERE,
   // Do not inherit the production Space hostname: this backend is deliberately
   // reached through localhost, and the origin guard should validate it as such.
   env: {
-    ...process.env,
+    ...BASE_ENV,
     PORT: '7896', DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '', AM_ALLOW_MISSING_ORIGIN: '1',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
@@ -106,7 +114,7 @@ try {
   });
   if (!historyReady) throw new Error('history did not reach the terminal');
 
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch(chromiumLaunchOptions());
   const context = await browser.newContext({
     viewport: { width: 375, height: 667 },
     screen: { width: 375, height: 667 },
@@ -532,8 +540,14 @@ try {
   await embeddedFrame.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
   await embeddedFrame.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
   await embeddedFrame.locator('.tile-terminal:not(.tile-cached) .term-host').click();
-  const embeddedFallback = await waitFor(() => embeddedFrame.evaluate(() =>
-    document.documentElement.dataset.keyboardLayout === 'focus-fallback'));
+  // 07ad947 "Mobile keyboard: stop estimating a height nobody can measure"
+  // deliberately DELETED the focus fallback: when the browser reports no keyboard
+  // geometry the app must not guess one, because the strip it hid behind an
+  // imagined keyboard was visibly abandoned. This check kept asserting the removed
+  // behaviour and could not pass — it went unnoticed because the suite could not
+  // launch a browser here at all. Same purpose, current contract: no guess.
+  const embeddedNoGuess = await waitFor(() => embeddedFrame.evaluate(() =>
+    !document.documentElement.dataset.keyboardLayout));
   const embeddedLayout = await embeddedFrame.locator('.app').evaluate((node) => {
     const app = node.getBoundingClientRect();
     const keybar = document.querySelector('.tile-terminal:not(.tile-cached) .term-keybar')
@@ -547,9 +561,11 @@ try {
       innerHeight: window.innerHeight,
     };
   });
-  check('Hub iframe uses a focus fallback when keyboard geometry is unavailable',
-    embeddedFallback
-      && Math.abs(embeddedLayout.height - 360) < 1
+  check('a Hub iframe with no keyboard geometry does not guess one',
+    embeddedNoGuess
+      // Full height: the app leaves the frame alone rather than shrinking to a
+      // made-up 54%, and the keybar stays inside it.
+      && Math.abs(embeddedLayout.height - 667) < 1
       && embeddedLayout.keybarBottom <= embeddedLayout.bottom
       && embeddedLayout.visualViewportHeight === 667
       && embeddedLayout.innerHeight === 667,
@@ -573,6 +589,11 @@ try {
   }, id), 5_000);
   await page.evaluate(() => localStorage.setItem('__am_test_offline_sockets', '1'));
   await page.reload({ waitUntil: 'domcontentloaded' });
+  // Coming back on a phone restores the pane you were reading, so `.app.m-stage`
+  // hides the sidebar and its rows are unclickable. Return to the list the way a
+  // user does. (The app gained that restore after this check was written.)
+  const backToList = page.locator('.mback');
+  if (await backToList.isVisible().catch(() => false)) await backToList.click();
   await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
   const previewVisible = await page.locator('.term-preview').filter({ hasText: 'MOBILE-HISTORY-0280' })
     .isVisible().catch(() => false);

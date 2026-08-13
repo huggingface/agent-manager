@@ -14,6 +14,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { chromiumLaunchOptions } from '../scripts/test-chromium.mjs';
 import { WebSocket } from 'ws';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -102,7 +103,7 @@ try {
   }));
   await sleep(600);
 
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch(chromiumLaunchOptions());
   const context = await browser.newContext({
     viewport: { width: 1280, height: 800 },
     permissions: ['clipboard-read', 'clipboard-write'],
