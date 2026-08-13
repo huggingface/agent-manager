@@ -256,10 +256,30 @@ try {
   // OpenCode paints its stable welcome screen before its keyboard handler is
   // always ready. The first typed attempt is silently drained here; delivery
   // must wait for the composer to echo the real prompt before pressing Enter.
+  //
+  // The pane has to have run once before for that to be the path under test: a
+  // never-started pane whose CLI has `withPrompt` takes its first prompt as a
+  // launch ARGUMENT instead (deliver() in src/index.js), which never reaches the
+  // keyboard at all. So boot it, stop it, and type into the wake — which is also
+  // where an operator meets this: the pane they left running yesterday.
   const openCode = await (await fetch(`${base}/api/sessions`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ cli: 'opencode', name: 'opencode-input-readiness', path: '.' }),
   })).json();
+  await fetch(`${base}/api/sessions/${openCode.id}/input`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: 'opencode-launch-argument' }),
+  });
+  // Wait for the first boot to paint rather than sleeping a guess at it: the
+  // stop below has to land on a running pty for the wake to be a real wake.
+  let openCodeBooted = false;
+  for (let i = 0; i < 40 && !openCodeBooted; i++) {
+    const booting = await (await fetch(`${base}/api/agents/${openCode.id}/tail?lines=40`)).json();
+    openCodeBooted = (booting.text || '').includes('OPENCODE-SCREEN-READY');
+    if (!openCodeBooted) await sleep(150);
+  }
+  await fetch(`${base}/api/sessions/${openCode.id}/stop`, { method: 'POST' });
+  await sleep(600);
   const openCodeInput = 'opencode-delivery-survived';
   const openCodeDelivered = await fetch(`${base}/api/sessions/${openCode.id}/input`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -269,9 +289,10 @@ try {
   const openCodeTail = await (await fetch(`${base}/api/agents/${openCode.id}/tail?lines=120`)).json();
   const executed = (openCodeTail.text || '').match(new RegExp(`OPENCODE-EXECUTED:${openCodeInput}`, 'g')) || [];
   check('OpenCode delivery waits for the real input handler after stable paint',
-    openCodeDelivered.ok
+    openCodeBooted
+      && openCodeDelivered.ok
       && executed.length === 1,
-    `${openCodeDelivered.status} ${JSON.stringify(openCodeTail.text || '')}`);
+    `booted=${openCodeBooted} ${openCodeDelivered.status} ${JSON.stringify(openCodeTail.text || '')}`);
   await fetch(`${base}/api/sessions/${openCode.id}`, { method: 'DELETE' }).catch(() => {});
 } catch (err) {
   check('no exceptions', false, String(err && err.message ? err.message : err));
