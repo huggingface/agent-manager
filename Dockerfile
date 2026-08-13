@@ -78,9 +78,31 @@ RUN env UV_TOOL_BIN_DIR=/usr/local/bin UV_TOOL_DIR=/opt/uv-tools \
 # Headless Chromium for Playwright, shared by every agent and both language
 # bindings via PLAYWRIGHT_BROWSERS_PATH (world-writable so a binding pinned to
 # a different build can add its revision without root).
+#
+# The browser revision must match the playwright the app pins. A bare
+# `npx -y playwright install` fetches whatever is newest on the day the image
+# is built, and playwright refuses a revision it wasn't built against — so the
+# image shipped a chromium nothing could launch, and every browser test failed
+# with "Executable doesn't exist" until someone downloaded 114MB by hand. Take
+# the version from web/package.json so the two cannot drift apart again.
+#
+# PLAYWRIGHT_SKIP_BROWSER_GC is what makes the sharing above actually work. A
+# `playwright install` does not only add its own revision: unless this is set,
+# it also garbage-collects every revision its version doesn't know about
+# (registry `_validateInstallationCache`, logged as "Removing unused browser").
+# The Hermes installer further down runs its own pinned playwright against this
+# same directory, so without this it deletes the revision installed here and
+# leaves the image with a chromium the app cannot launch — which is exactly
+# what a test build showed, 47 seconds after this step succeeded.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-RUN npx -y playwright install --with-deps chromium \
+ENV PLAYWRIGHT_SKIP_BROWSER_GC=1
+COPY web/package.json /tmp/web-package.json
+RUN PW="$(node -p 'require("/tmp/web-package.json").devDependencies.playwright.replace(/^\D*/, "")')" \
+      && echo "installing chromium for playwright@$PW" \
+      && npx -y "playwright@$PW" install --with-deps chromium \
       && chmod -R a+rwX /opt/pw-browsers \
+      && rm -f /tmp/web-package.json \
+      && ls /opt/pw-browsers \
       || echo "playwright chromium install failed"
 
 # Batteries-included default python: a dedicated venv first on PATH (system
