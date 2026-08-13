@@ -1070,6 +1070,7 @@ Hermes — alongside plain shells and a file browser.
 - \`/data\` is **durable storage** (a mounted bucket). Files under \`/data/workspaces/…\` and \`/data/home/…\` survive restarts and sleep.
 - **Empty directories are not persisted** — only files. If a folder must exist, keep a file in it.
 - Sessions are held by the Agent Manager backend and keep running when the browser disconnects. A backend restart or Space sleep ends live processes; retained workspace files still persist.
+- \`$AM_LOCAL\` (\`/home/node/local\`) is the container's own disk: fast, and **not durable**. A rebuild or a restart wipes it, along with anything you cloned or built there. It is still the right home for git checkouts and build output — see [Git repos](#git-repos-clone-on-local-disk-push-before-you-stop).
 - Exception: OpenClaw runs with its own \`$HOME\` on local disk for filesystem compatibility; that state is backed up to the bucket every minute.
 
 ## You may not be alone
@@ -1227,8 +1228,31 @@ What is different about them:
 - Network access is available; API keys are provided via the environment (below) or your home config.
 
 ## Working well here
-- Keep work inside your workspace folder; use absolute paths under \`/data/workspaces/\` when in doubt.
+- Keep work inside your workspace folder; use absolute paths under \`/data/workspaces/\` when in doubt. Git checkouts are the exception — see the next section.
 - Prefer small, verifiable steps and leave the workspace tidy — the operator browses these files directly in the file viewer.
+
+## Git repos: clone on local disk, push before you stop
+- **Clone into \`$AM_LOCAL/git/<repo>\`, not under \`/data\`.** A checkout on the
+  bucket is slow — every object read is a round trip to object storage — and
+  quietly broken in ways that cost hours: object storage holds no exec bit, so
+  git hooks never fire (a \`git push\` from there sends LFS *pointers* with no
+  objects behind them), and the mount has broken \`git commit\` outright by
+  materializing a directory where git expected a hook file.
+- **That disk is not durable.** \`$AM_LOCAL\` dies with the container, without
+  warning. The hourly backup copies the \`/data\` bucket and nothing else, so
+  whatever exists only as a clone or an uncommitted diff there is one restart
+  from gone. (OpenClaw's \`$HOME\` is the single exception, and it is copied out
+  by a job written for it alone.)
+- **So push before you stop.** Not once at the end of the task: at the end of
+  every turn that produced work worth keeping. Commit it, push it, and let the
+  remote be the copy that survives. Half-finished is fine — push it on a branch.
+- **No remote to push to?** Say so plainly in your answer rather than leaving the
+  only copy on a disk that evaporates, and leave something durable behind:
+  \`git bundle create /data/workspaces/$AM_SESSION/<repo>.bundle --all\` writes the
+  whole history to one file on the bucket, which a later \`git clone\` restores from.
+- Files the operator reads — notes, reports, generated docs — still belong in your
+  workspace folder under \`/data/workspaces/\`. It is the *checkout* that lives on
+  local disk, not the deliverable.
 
 ## Notifying the operator
 The operator's devices receive push notifications. Use this ONLY when the
@@ -1256,7 +1280,7 @@ immediately (long-running foreground execs can destabilize some sessions):
 
 ## Custom tools & Python environments
 - Custom tools are installed at startup by \`/data/install.sh\` (edit it to add packages; it re-runs on every restart). Progress/errors: \`/data/install.log\`.
-- \`$AM_LOCAL\` is a **fast local disk** for tools, envs, and caches. Build Python envs there, **never** as a \`.venv\` on the \`/data\` bucket (object storage is slow and can't lock/mmap well). From a workspace:
+- \`$AM_LOCAL\` is a **fast local disk** for tools, envs, caches and git checkouts. Build Python envs there, **never** as a \`.venv\` on the \`/data\` bucket (object storage is slow and can't lock/mmap well). From a workspace:
   \`UV_PROJECT_ENVIRONMENT="$AM_LOCAL/envs/<name>" uv sync\`
 - Keep \`pyproject.toml\` / \`uv.lock\` / \`requirements.txt\` in the workspace — they're the durable source of truth; the env rebuilds from them in seconds after a restart.
 ${artifactsSection(amCfg)}${jobsSection(amCfg)}
