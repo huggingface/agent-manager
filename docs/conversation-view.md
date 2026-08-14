@@ -256,7 +256,17 @@ pane with nothing to render (a shell) simply stays a terminal.
 - **The prompt band spans the pane.** Reaching into the left gutter but stopping at the text
   column on the right made it read as a card floating over the answer rather than as the head of
   it. Full bleed both sides; the meta row sits tight under the band it belongs to, and one
-  exchange ends well before the next begins.
+  exchange ends well before the next begins. The bleed is `var(--cx-gutter)`, the same variable
+  `.cxv-body` pays out as padding, because the phone breakpoint narrows that padding: a bleed
+  that restated the desktop number stayed 14px against 8px of gutter and made the conversation
+  column scroll sideways on a phone.
+- **Nothing in the conversation scrolls sideways except the things meant to.** A code block and a
+  wide table each scroll inside their own box (`overflow-x: auto` on `pre` and `table`); the page,
+  the reading column and the answer do not. Prose therefore has to *wrap*, including a long URL
+  or an unbroken identifier — one long word is enough to push a paragraph wider than a phone, and
+  `.markdown` turns that into a sideways drag because a scroller in one axis makes the other axis
+  a scroller too. `overflow-x: hidden` on a parent is not the fix: it hides the symptom and clips
+  content people need to read.
 - **The reader fills the pane.** A fixed reading column left a gutter of nothing on each
   side while the prompt band still spanned the full width, so the two disagreed about where the
   conversation began. The pane is the measure: narrow the pane and the conversation narrows.

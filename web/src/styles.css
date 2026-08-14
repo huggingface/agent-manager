@@ -1147,6 +1147,17 @@ a.btn-ghost { text-decoration: none; }
 .markdown th, .markdown td { border: 1px solid var(--border); padding: 6px 10px; }
 .markdown img { max-width: 100%; }
 .markdown hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+/* Prose wraps; only genuinely wide content scrolls. A URL or an unbroken
+   identifier is one long word, and a long word made the paragraph wider than
+   the pane — which .markdown then scrolled sideways, because a scroller in one
+   axis makes the other axis a scroller too (overflow-y: auto above). Reported
+   on a phone, where the pane is narrow enough for ordinary prose to do it.
+   `pre` and `table` keep their own overflow-x: auto: a code block or a wide
+   table is meant to scroll, inside its own box, and breaking a line of code to
+   fit would change what it says. */
+.markdown p, .markdown li, .markdown blockquote,
+.markdown h1, .markdown h2, .markdown h3, .markdown h4 { overflow-wrap: anywhere; }
+.markdown :not(pre) > code { overflow-wrap: anywhere; }
 
 /* usage page */
 .usage { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
