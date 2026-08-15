@@ -19,7 +19,10 @@ active; direct terminal input remains available.
 The reader does not answer the dialog in this version. The CLIs have different
 choice identifiers, validation, queueing, "allow once/always" semantics, and
 secret-handling rules. Translating a reader form to raw keystrokes would be
-unsafe; doing this later requires a typed response API from each adapter.
+unsafe. OpenCode already exposes typed permission/question replies keyed by the
+request id tracked here, but Agent Manager has no authenticated client to that
+pane's OpenCode server. Other adapters would likewise need a typed, pane-scoped
+response path before reader-side answers are safe.
 
 ## Detection coverage
 
@@ -30,7 +33,7 @@ which native states emit each signal.
 
 | CLI | Signal used | Confidence | Deliberate misses |
 | --- | --- | --- | --- |
-| OpenCode | The plugin tracks `permission.asked`/`permission.replied` and `question.asked`/`question.replied`/`question.rejected`. It keeps the full pending queue and mirrors OpenCode's recovery when a Question tool completes without `question.replied`. | High, with paired open/close events. | Dialogs outside those two event families; a request already open before the plugin observes its event. |
+| OpenCode | The plugin tracks `permission.asked`/`permission.replied` and `question.asked`/`question.replied`/`question.rejected`. It keeps the full pending queue and mirrors OpenCode's recovery when a Question tool completes without `question.replied`. | High, with paired open/close events. | Dialogs outside those two event families; a request already open before the plugin observes its event. A missing close event expires after 30 minutes, which can hide a genuinely long-lived dialog. |
 | Claude Code | Observation-only `Notification` hooks for `permission_prompt`, MCP elicitation dialogs, and `agent_needs_input`. Unlike `PermissionRequest`, these fire after the actual UI has remained unanswered for about six seconds and cannot decide the permission. Native batch/stop/session/elicitation events and operator input clear the marker. | High once reported; intentionally delayed about six seconds. | The first six seconds; main-session choice UIs for which Claude exposes no matching notification (including versions where `AskUserQuestion` has no attention event); unlisted onboarding/configuration dialogs. |
 | Codex | Each managed invocation enables only the TUI's `approval-requested` and `plan-mode-prompt` OSC 9 notifications. Codex emits them from the TUI handlers that install exec/edit/MCP approval and request-user-input views. | High for the listed views. | `RequestPermissionsEvent` and generic queued approval paths that do not call Codex's notifier; onboarding/configuration dialogs. Codex exposes no paired close event, so input clears the signal and a 30-minute safety expiry prevents a stale badge. |
 | Gemini CLI | An observation-only `Notification` hook reports `ToolPermission`, including `ask_user`. Gemini's native attention notification additionally covers command, auth, filesystem, extension-update and loop-detection confirmations through OSC 9 when enabled. | High: both signals originate from Gemini's actual pending-confirmation state. | Non-tool attention notifications when a higher-precedence user/project setting disables notifications or Gemini suppresses them for terminal focus; other unlisted UI dialogs. Native completion/session events, input, and the safety expiry clear one-shot signals. |
@@ -75,13 +78,15 @@ Gemini hooks reject nested agent processes; OpenCode's plugin requires the pane
 root process. Marker files live on local `/tmp`, not the durable bucket, and are
 removed at process exit.
 
-OpenCode's paired event is authoritative until the final queued request closes.
-For CLIs without a paired close event, an actual operator key, a native
-completion event, process exit, or the 30-minute safety limit clears the signal.
-Automatic terminal query replies do not count as operator input. The safety
-limit can create a false negative for a dialog left open longer than 30 minutes;
-that is intentional because an indefinitely stale warning is the more damaging
-failure mode.
+OpenCode's paired event remains authoritative through menu-navigation input and
+closes immediately when the final queued request closes. Every marker, including
+OpenCode's, also has a 30-minute ceiling so a lost close event cannot disable
+reader prompting indefinitely. For unpaired CLIs, an actual operator key or a
+native completion event can clear the signal sooner; process exit clears every
+kind. Automatic terminal query replies do not count as operator input. The
+ceiling can create a false negative for a dialog left open longer than 30
+minutes; that is intentional because an indefinitely stale warning is the more
+damaging failure mode.
 
 ## Verification
 
@@ -92,9 +97,16 @@ nested-process rejection, preservation of existing Claude settings, reader/web
 typechecking, and the full terminal migration/resize suite. No assertion relies
 on screen text or process idleness.
 
-The installed Codex binary accepted the invocation-local notification settings,
-and the installed Gemini binary loaded the proposed system settings file. This
-branch was not deployed and did not drive authenticated live permission dialogs;
-the native event payloads and terminal sequences are exercised by automated
-fixtures. A deployment smoke test should deliberately trigger each covered
-dialog before release, especially after a CLI version update.
+The installed Codex 0.147.0 TUI was driven to a real command approval with only
+`approval-requested` enabled. Its raw PTY output contained
+`ESC ] 9 ; Approval requested: ... BEL` immediately before the menu. Repeating
+the approval with only `approval-request` reached the same menu without an OSC 9
+notification, confirming the configured spelling rather than merely confirming
+that Codex accepts arbitrary list values. The installed Gemini binary loaded the
+proposed system settings file.
+
+This branch was not deployed and did not drive authenticated live dialogs for
+the other adapters; their native event payloads and terminal sequences are
+exercised by automated fixtures. A deployment smoke test should deliberately
+trigger each covered dialog before release, especially after a CLI version
+update.

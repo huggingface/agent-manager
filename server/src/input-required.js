@@ -44,6 +44,10 @@ function readMarker(id, runId, cli, now) {
 function removeMatchingMarker(id, runId, cli, { oneShotOnly = false } = {}) {
   const marker = readMarker(id, runId, cli, Date.now());
   if (!marker || (oneShotOnly && marker.source === 'opencode-event')) return;
+  removeMarker(marker);
+}
+
+function removeMarker(marker) {
   try { fs.unlinkSync(marker.file); } catch {}
 }
 
@@ -76,9 +80,8 @@ export function createInputRequiredTracker({ id, runId, cli, now = () => Date.no
     const time = now();
     const marker = readMarker(id, runId, cli, time);
     if (marker) {
-      const paired = marker.source === 'opencode-event';
-      if (!paired && time - marker.at > ONE_SHOT_MAX_AGE_MS) {
-        removeMatchingMarker(id, runId, cli);
+      if (time - marker.at > ONE_SHOT_MAX_AGE_MS) {
+        removeMarker(marker);
         if (current?.transport === 'marker') current = null;
       } else {
         const token = `${marker.source}:${marker.at}:${marker.requestId}:${marker.kind}`;
@@ -128,12 +131,13 @@ export function createInputRequiredTracker({ id, runId, cli, now = () => Date.no
 
   const observeInput = () => {
     // OpenCode has paired asked/replied events. Cursor movement in its menu is
-    // still input but does not resolve the request, so only the paired event may
-    // clear it. The other CLIs expose an exact open signal but no exact close;
-    // any operator key clears them conservatively (a false negative is safer).
+    // still input but does not resolve the request, so only the paired event or
+    // the finite safety ceiling clears it. The other CLIs expose an exact open
+    // signal but no exact close; any operator key clears them conservatively (a
+    // false negative is safer).
     const marker = readMarker(id, runId, cli, now());
     if (current?.source === 'opencode-event' || marker?.source === 'opencode-event') return;
-    removeMatchingMarker(id, runId, cli, { oneShotOnly: true });
+    if (marker) removeMarker(marker);
     current = null;
   };
 

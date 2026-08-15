@@ -159,7 +159,7 @@ try {
   const codexQuickstart = cliById('codex').withPrompt(
     "'compare  both'", ["'/tmp/first image.png'", "'/tmp/second.png'"],
   );
-  assert.match(codexQuickstart, /tui\.notifications=/);
+  assert.match(codexQuickstart, /tui\.notifications=\["approval-requested","plan-mode-prompt"\]/);
   assert.match(codexQuickstart, /tui\.notification_method="osc9"/);
   assert.ok(codexQuickstart.endsWith("-i '/tmp/first image.png' -i '/tmp/second.png' 'compare  both'"));
   const codexFirst = commandFor({

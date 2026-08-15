@@ -39,15 +39,27 @@ try {
   assert.equal(claude.get(), null, 'one-shot signals clear conservatively on operator input');
   assert.equal(fs.existsSync(path.join(root, 'claude-pane.json')), false);
 
+  let opencodeNow = Date.now();
   marker('oc-pane', 'opencode', {
-    kind: 'question', source: 'opencode-event', requestId: 'que_1',
+    kind: 'question', source: 'opencode-event', requestId: 'que_1', at: opencodeNow,
   });
-  const opencode = createInputRequiredTracker({ id: 'oc-pane', runId: RUN, cli: 'opencode' });
+  const opencode = createInputRequiredTracker({
+    id: 'oc-pane', runId: RUN, cli: 'opencode', now: () => opencodeNow,
+  });
   assert.equal(opencode.get()?.kind, 'question');
   opencode.observeInput();
   assert.equal(opencode.get()?.kind, 'question', 'menu navigation cannot clear a paired OpenCode request');
-  fs.unlinkSync(path.join(root, 'oc-pane.json'));
-  assert.equal(opencode.get(), null, 'the paired reply/removal clears OpenCode');
+  opencodeNow += 30 * 60_000 + 1;
+  assert.equal(opencode.get(), null, 'a missing OpenCode close event cannot leave an unbounded marker');
+  assert.equal(fs.existsSync(path.join(root, 'oc-pane.json')), false, 'expiry removes the stale paired marker');
+
+  marker('oc-reply', 'opencode', {
+    kind: 'permission', source: 'opencode-event', requestId: 'per_1',
+  });
+  const opencodeReply = createInputRequiredTracker({ id: 'oc-reply', runId: RUN, cli: 'opencode' });
+  assert.equal(opencodeReply.get()?.kind, 'permission');
+  fs.unlinkSync(path.join(root, 'oc-reply.json'));
+  assert.equal(opencodeReply.get(), null, 'the paired reply/removal still clears OpenCode immediately');
 
   let now = 1_800_000_000_000;
   const codex = createInputRequiredTracker({ id: 'codex-pane', runId: RUN, cli: 'codex', now: () => now });
