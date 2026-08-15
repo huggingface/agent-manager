@@ -452,9 +452,9 @@ body {
 .empty-hint { color: var(--muted); font-size: 12px; padding: 12px 10px; line-height: 1.5; }
 .empty-hint.nested { padding: 6px 10px 8px 38px; font-size: 11.5px; }
 
-.gap { height: 8px; }
-.gap.over { position: relative; }
-.gap.over::after { content: ''; position: absolute; left: 8px; right: 8px; top: 3px; height: 2px; border-radius: 2px; background: var(--accent); }
+/* While something is in flight the tree keeps a landing strip below the last
+   item, so "put this back at the top level" is always reachable. */
+.tree.dragging { padding-bottom: 40px; }
 
 .row { position: relative; display: flex; align-items: center; gap: 7px; padding: 3.5px 8px; border-radius: var(--r-sm); cursor: pointer; border: 1px solid transparent; }
 .row.session { cursor: grab; }
@@ -488,7 +488,14 @@ body {
 .group.closed { padding: 6px 3px; }
 .group.active { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .group.drop-into { background: var(--drop); outline: 1px dashed var(--accent); }
-.row.group-head { position: absolute; top: -10px; left: 8px; max-width: calc(100% - 52px); padding: 0 6px 0 3px; gap: 4px; background: var(--panel); border: none; border-radius: 0; cursor: pointer; z-index: 1; }
+/* a whole frame's worth of target: its edges place a neighbour, its middle takes
+   an agent in — drawn in the margin so the frame's own border stays readable */
+.group.drop-before::before, .group.drop-after::before { content: ''; position: absolute; left: 0; right: 0; height: 2px; background: var(--accent); border-radius: 2px; }
+/* clear of the name chip, which rides 10px above the frame's own top border —
+   a line drawn any lower reads as underlining the label instead of preceding it */
+.group.drop-before::before { top: -13px; }
+.group.drop-after::before { bottom: -5px; }
+.row.group-head { position: absolute; top: -10px; left: 8px; max-width: calc(100% - 52px); padding: 0 6px 0 3px; gap: 4px; background: var(--panel); border: none; border-radius: 0; cursor: grab; z-index: 1; }
 .row.group-head:hover, .group.active .row.group-head { background: var(--panel); }
 .row.group-head .name { flex: initial; font-size: 11.5px; font-weight: 400; color: var(--text); }
 .row.group-head:hover .name { color: var(--accent); }
