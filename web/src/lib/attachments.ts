@@ -12,6 +12,7 @@ export interface PendingAttachment {
   file: File;
   previewUrl?: string;
   status: PendingAttachmentStatus;
+  uploadedBytes?: number;
   error?: string;
   attachment?: Attachment;
 }
@@ -136,24 +137,33 @@ export async function uploadPendingAttachments(
   update: (key: string, patch: Partial<PendingAttachment>) => void,
 ) {
   const uploaded: Attachment[] = [];
+  let firstFailure: Error | null = null;
   for (const attachment of attachments) {
     if (attachment.attachment) {
       uploaded.push(attachment.attachment);
       continue;
     }
-    if (attachmentFileError(attachment.file)) {
-      throw new Error(attachment.error || 'invalid file');
+    const invalid = attachmentFileError(attachment.file);
+    if (invalid) {
+      update(attachment.key, { status: 'error', error: invalid });
+      firstFailure ??= new Error(invalid);
+      continue;
     }
-    update(attachment.key, { status: 'uploading', error: undefined });
+    update(attachment.key, { status: 'uploading', uploadedBytes: 0, error: undefined });
     try {
-      const stored = await api.uploadAttachment(sessionId, attachment.file);
-      update(attachment.key, { status: 'uploaded', attachment: stored });
+      const stored = await api.uploadAttachment(sessionId, attachment.file, ({ loaded }) => {
+        update(attachment.key, { uploadedBytes: loaded });
+      });
+      update(attachment.key, {
+        status: 'uploaded', uploadedBytes: attachment.file.size, attachment: stored,
+      });
       uploaded.push(stored);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'upload failed';
       update(attachment.key, { status: 'error', error: message });
-      throw error;
+      firstFailure ??= error instanceof Error ? error : new Error(message);
     }
   }
+  if (firstFailure) throw firstFailure;
   return uploaded;
 }

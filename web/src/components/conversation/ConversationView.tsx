@@ -106,6 +106,9 @@ export default function ConversationView({
     attachmentsRef.current = merged;
     setAttachments(merged);
     setAttachmentError(next.error);
+    void uploadPendingAttachments(session.id, next.attachments, updateAttachment).catch(() => {
+      // The affected chip owns the persistent, actionable error and retry.
+    });
   };
   const removeAttachment = (key: string) => {
     if (sending) return;
@@ -124,6 +127,11 @@ export default function ConversationView({
       attachmentsRef.current = next;
       return next;
     });
+  };
+  const retryAttachment = (key: string) => {
+    const attachment = attachmentsRef.current.find((item) => item.key === key);
+    if (!attachment || sending) return;
+    void uploadPendingAttachments(session.id, [attachment], updateAttachment).catch(() => {});
   };
 
   // Closing the search CLEARS it. A query filters the reader to matching turns,
@@ -196,14 +204,14 @@ export default function ConversationView({
     const text = draft.trim();
     const batch = attachmentsRef.current;
     if ((!text && !batch.length) || sending) return;
+    if (batch.some((attachment) => !attachment.attachment)) return;
     const optimisticText = text || defaultAttachmentPrompt(batch.length);
     setSending(true); setFailed(null);
     setDraft(''); setSent({ text: optimisticText, at: Date.now() });
     if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     stick.current = true;
     try {
-      const uploaded = await uploadPendingAttachments(session.id, batch, updateAttachment);
-      await api.sendInput(session.id, text, uploaded.map((attachment) => attachment.id));
+      await api.sendInput(session.id, text, batch.map((attachment) => attachment.attachment!.id));
       revokePendingAttachments(batch);
       attachmentsRef.current = [];
       setAttachments([]);
@@ -562,7 +570,8 @@ export default function ConversationView({
           sending={sending}
           isMobile={isMobile}
           inputRef={inputRef}
-          canSend={!!draft.trim() || attachments.length > 0}
+          canSend={(!!draft.trim() || attachments.length > 0)
+            && attachments.every((attachment) => !!attachment.attachment)}
           above={<Attachments
             showPicker={false}
             attachments={attachments}
@@ -570,6 +579,7 @@ export default function ConversationView({
             disabledReason={!allowAttachments ? 'Files are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
             onFiles={addAttachments}
             onRemove={removeAttachment}
+            onRetry={retryAttachment}
           />}
           onChange={setDraft}
           onSend={send}

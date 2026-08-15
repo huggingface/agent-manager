@@ -385,18 +385,23 @@ export default function TerminalPane({
       const attachments: Attachment[] = [];
       try {
         for (let index = 0; index < images.length; index += 1) {
-          showImageStatus({ kind: 'uploading', text: `uploading file${images.length > 1 ? ` ${index + 1}/${images.length}` : ''}…` });
-          const attachment = await api.uploadAttachment(session.id, images[index]);
+          const fileLabel = `file${images.length > 1 ? ` ${index + 1}/${images.length}` : ''}`;
+          showImageStatus({ kind: 'uploading', text: `uploading ${fileLabel} · 0%` });
+          const attachment = await api.uploadAttachment(session.id, images[index], ({ loaded, total }) => {
+            const progress = total ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+            showImageStatus({ kind: 'uploading', text: `uploading ${fileLabel} · ${progress}%` });
+          });
           attachments.push(attachment);
         }
         showImageStatus({ kind: 'uploading', text: `inserting file${images.length === 1 ? '' : 's'}…` });
         await insertTerminalAttachments(attachments);
       } catch (error) {
         if (attachments.length) {
+          const reason = error instanceof Error ? error.message : 'upload failed';
           setPendingInsert(attachments);
           showImageStatus({
             kind: 'error',
-            text: `${attachments.length} file${attachments.length === 1 ? '' : 's'} saved; another failed to upload`,
+            text: `${attachments.length} file${attachments.length === 1 ? '' : 's'} saved; another failed: ${reason}`,
           });
         } else {
           showImageStatus({ kind: 'error', text: error instanceof Error ? error.message : 'file upload failed' }, 5000);

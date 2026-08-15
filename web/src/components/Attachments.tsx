@@ -1,8 +1,9 @@
 import { useId, useRef } from 'react';
+import { attachmentFileError } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
 
 const fmtBytes = (bytes: number) => bytes < 1024 * 1024
-  ? `${Math.max(1, Math.round(bytes / 1024))} KB`
+  ? `${bytes ? Math.max(1, Math.round(bytes / 1024)) : 0} KB`
   : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 
 const fileLabel = (name: string) => {
@@ -10,13 +11,14 @@ const fileLabel = (name: string) => {
   return extension && extension !== name ? extension.slice(0, 4).toUpperCase() : 'FILE';
 };
 
-export default function Attachments({ attachments, disabled, disabledReason, showPicker = true, onFiles, onRemove }: {
+export default function Attachments({ attachments, disabled, disabledReason, showPicker = true, onFiles, onRemove, onRetry }: {
   attachments: PendingAttachment[];
   disabled?: boolean;
   disabledReason?: string;
   showPicker?: boolean;
   onFiles: (files: File[]) => void;
   onRemove: (key: string) => void;
+  onRetry?: (key: string) => void;
 }) {
   const picker = useRef<HTMLInputElement>(null);
   const reasonId = useId();
@@ -53,25 +55,45 @@ export default function Attachments({ attachments, disabled, disabledReason, sho
         </>
       )}
       {showReason && <span id={reasonId} className="image-attachments-note">{disabledReason}</span>}
-      {attachments.map((attachment) => (
-        <div key={attachment.key} className={`image-chip ${attachment.status}`}>
-          {attachment.previewUrl ? (
-            <a className="image-chip-preview" href={attachment.previewUrl} target="_blank" rel="noreferrer" title={`Preview ${attachment.file.name || 'image'}`}>
-              <img src={attachment.previewUrl} alt="" />
-            </a>
-          ) : (
-            <span className="image-chip-placeholder mono" aria-hidden="true">{fileLabel(attachment.file.name || '')}</span>
-          )}
-          <span className="image-chip-copy">
-            <span className="image-chip-name">{attachment.file.name || 'Attachment'}</span>
-            <span className="image-chip-meta" aria-live="polite">
-              {attachment.status === 'uploading' ? 'uploading…'
-                : attachment.error || (attachment.status === 'uploaded' ? 'uploaded' : fmtBytes(attachment.file.size))}
+      {attachments.map((attachment) => {
+        const loaded = Math.min(attachment.file.size, attachment.uploadedBytes || 0);
+        const progress = attachment.file.size ? Math.round((loaded / attachment.file.size) * 100) : 0;
+        const retryable = attachment.status === 'error' && !attachmentFileError(attachment.file) && !!onRetry;
+        return (
+          <div key={attachment.key} className={`image-chip ${attachment.status}`}>
+            {attachment.previewUrl ? (
+              <a className="image-chip-preview" href={attachment.previewUrl} target="_blank" rel="noreferrer" title={`Preview ${attachment.file.name || 'image'}`}>
+                <img src={attachment.previewUrl} alt="" />
+              </a>
+            ) : (
+              <span className="image-chip-placeholder mono" aria-hidden="true">{fileLabel(attachment.file.name || '')}</span>
+            )}
+            <span className="image-chip-copy">
+              <span className="image-chip-name">{attachment.file.name || 'Attachment'}</span>
+              <span className="image-chip-meta" aria-live="polite" title={attachment.error}>
+                {attachment.status === 'uploading' ? `${progress}% · ${fmtBytes(loaded)} / ${fmtBytes(attachment.file.size)}`
+                  : attachment.error || (attachment.status === 'uploaded' ? 'uploaded' : fmtBytes(attachment.file.size))}
+              </span>
+              {attachment.status === 'uploading' && (
+                <span
+                  className="image-chip-progress"
+                  role="progressbar"
+                  aria-label={`Uploading ${attachment.file.name || 'file'}`}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={progress}
+                >
+                  <span style={{ width: `${progress}%` }} />
+                </span>
+              )}
             </span>
-          </span>
-          <button type="button" onClick={() => onRemove(attachment.key)} disabled={disabled || attachment.status === 'uploading'} aria-label={`Remove ${attachment.file.name || 'file'}`}>×</button>
-        </div>
-      ))}
+            {retryable && (
+              <button type="button" className="image-chip-retry" onClick={() => onRetry(attachment.key)} disabled={disabled} aria-label={`Retry ${attachment.file.name || 'file'}`}>retry</button>
+            )}
+            <button type="button" onClick={() => onRemove(attachment.key)} disabled={disabled || attachment.status === 'uploading'} aria-label={`Remove ${attachment.file.name || 'file'}`}>×</button>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -121,14 +121,17 @@ same paste/drop behavior:
   for several) as its text. Image-only server delivery retains the more specific
   `screenshot` wording.
 - At most five files may be attached to one prompt.
-- The send button is disabled while an upload is active.
-- A failed upload leaves the draft and pending files intact and names the
-  failure next to the affected chip.
+- Choosing, pasting, or dropping a file starts its upload immediately. Each
+  chip shows transferred bytes, percentage, and server-confirmed success.
+- The send button is disabled until every upload has succeeded.
+- A failed upload leaves the draft and pending files intact, names the exact
+  server/connection failure next to the affected chip, and offers retry when
+  retrying the same bytes can help.
 
-Pending files remain browser `File` objects until the operator submits. This
-means abandoning or editing a draft does not create server-side orphan files.
-`URL.createObjectURL()` supplies local previews and is revoked when a chip is
-removed or the component unmounts.
+Pending files remain browser `File` objects for retry even after the server has
+stored them. `URL.createObjectURL()` supplies local previews and is revoked when
+a chip is removed or the component unmounts. Successful files are session-owned
+and follow that session's existing deletion/pruning lifecycle.
 
 ### 5.2 Rendered terminal reader
 
@@ -149,7 +152,8 @@ xterm owns the visible composer, so Agent Manager cannot reliably place its own
 persistent attachment chips inside it. File paste/drop therefore behaves as a
 short transaction:
 
-1. Show `uploading file…` over the bottom of the pane.
+1. Show `uploading file · 0%` over the bottom of the pane and update it as bytes
+   transfer.
 2. Upload the file without sending a prompt.
 3. On success, attach it through the harness adapter or paste a formatted path
    reference into the CLI composer.
@@ -235,9 +239,11 @@ session's own directory, and never join an arbitrary browser-supplied filename.
 
 ### 6.3 Lifecycle
 
-- Composer files are uploaded only on submit.
-- Terminal files are uploaded immediately because xterm needs a server path to
-  insert.
+- Composer and terminal files are uploaded immediately on attachment. Prompt
+  delivery only reuses server-confirmed attachment ids; it never starts an
+  upload.
+- Quick creation first allocates a stopped session because attachment ids are
+  session-scoped, then immediately uploads into it without launching the CLI.
 - Successful attachments remain while the session exists, including while it
   is stopped.
 - Deleting a session removes its managed attachment directory. It does not
@@ -415,13 +421,14 @@ file.
 ### 8.3 First prompt without a boot race
 
 The quickstart path currently places an initial prompt on the CLI launch command
-because typing into a booting TUI could lose it. Attachment quickstart needs a
-two-step browser flow—create the session, then upload to its attachment scope—so
-`deliver()` must preserve that property:
+because typing into a booting TUI could lose it. On the first attachment it uses
+a two-step browser flow—create a stopped session, then upload to its attachment
+scope—so `deliver()` must preserve that property:
 
 1. `POST /api/sessions` without a prompt creates a stopped session.
-2. Upload all pending files to the returned session id.
-3. `POST /api/sessions/:id/input` with text and attachment ids.
+2. Upload each file immediately to the returned session id, with byte progress.
+3. When the operator launches, `POST /api/sessions/:id/input` with text and the
+   already-uploaded attachment ids.
 4. If the session has never started and its CLI has `withPrompt`, store the
    fully formatted prompt as `pendingPrompt`; for Codex, also retain the
    validated image paths as `pendingImagePaths`; then call `ensureRunning()`.
@@ -467,7 +474,7 @@ Add a small module, `web/src/lib/attachments.ts`, containing:
 - `transferMayContainFile(DataTransfer)`;
 - duplicate suppression across `items` and `files`;
 - local preview creation/revocation; and
-- sequential or bounded-concurrency upload helpers.
+- sequential upload helpers that report progress and preserve per-file errors.
 
 Use sequential uploads initially. Five files is the maximum, bucket writes are
 the bottleneck, and simpler ordering makes chip status deterministic.
@@ -479,10 +486,10 @@ Expected file changes:
 
 | File | Change |
 |---|---|
-| `web/src/api.ts` | attachment types, upload, preview URL, `sendInput(..., attachmentIds)` |
+| `web/src/api.ts` | attachment types, progress-aware XHR upload, preview URL, `sendInput(..., attachmentIds)` |
 | `web/src/lib/attachments.ts` | clipboard/drop extraction and pending-file lifecycle |
 | `web/src/components/Attachments.tsx` | image previews, file badges, picker, progress/error states |
-| `web/src/components/Sidebar.tsx` | quickstart paste/drop and two-step submit |
+| `web/src/components/Sidebar.tsx` | quickstart paste/drop, stopped-target creation, and immediate upload |
 | `web/src/components/Overview.tsx` | reply attachments and file-only send |
 | `web/src/components/TerminalPane.tsx` | capture-phase file paste/drop and mobile file paste |
 | `web/src/components/conversation/ConversationView.tsx` | rendered-reader attachments and structured send |
@@ -568,7 +575,8 @@ Markdown logs, and needlessly injects binary material into traces.
 |---|---|---|
 | clipboard contains no file | ordinary text paste continues, or no-op | no |
 | file larger than limit | chip says `too large (100 MB max)` | no |
-| network/write failure | chip or terminal overlay says upload failed | no |
+| interrupted/offline connection | chip or terminal overlay names the connection failure and offers retry | no |
+| non-JSON proxy rejection | chip classifies the HTTP status (including proxy `413`) | no |
 | one of several uploads fails | successful files remain, all chips stay for retry | no |
 | attachment id missing at send | `attachment no longer exists`; retain draft | no |
 | terminal socket closes after upload | say file was saved but not inserted; offer retry | no |
@@ -576,8 +584,8 @@ Markdown logs, and needlessly injects binary material into traces.
 | CLI cannot inspect path | agent sees explicit path and can report the limitation | yes |
 
 For multi-file composer sends, atomicity applies to delivery, not storage: files
-may upload one by one, but `/input` runs only after all have succeeded. A retry
-may reuse already uploaded ids while uploading only failed files.
+start uploading when attached, but `/input` runs only after all have succeeded.
+A retry reuses already uploaded ids and transfers only failed files.
 
 ## 13. Testing
 
@@ -607,8 +615,12 @@ may reuse already uploaded ids while uploading only failed files.
   chip.
 - Plain-text paste is unchanged.
 - Removing a chip revokes its preview and excludes it from upload.
-- A multi-file submission waits for every upload before `/input`.
-- Every chip mutation remains disabled for the complete multi-file send.
+- Upload starts when a file is attached, before `/input` or launch.
+- Progress exposes transferred bytes/percentage and waits for server confirmation
+  at 100%.
+- Interrupted connections and non-JSON proxy errors remain actionable at the
+  affected chip, with retry where appropriate.
+- A multi-file submission remains disabled until every upload succeeds.
 - Terminal paste receives a server acknowledgement and inserts without Return.
 - A terminal stopped after upload reports saved-but-not-inserted, disables new
   attachments, and can retry the stored attachment after restart.

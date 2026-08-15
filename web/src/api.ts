@@ -207,18 +207,62 @@ export interface Attachment {
   insertText: string;
 }
 
-export const uploadAttachment = async (id: string, file: File): Promise<Attachment> => {
-  const headers: Record<string, string> = {
-    'x-file-name': encodeURIComponent(file.name || 'Attachment'),
-  };
-  if (file.type) headers['content-type'] = file.type;
-  const response = await fetch(`/api/sessions/${id}/attachments`, {
-    method: 'POST',
-    headers,
-    body: file,
-  });
-  return jsonOrError(response);
+export interface AttachmentUploadProgress { loaded: number; total: number }
+
+const attachmentUploadError = (request: XMLHttpRequest) => {
+  let detail = '';
+  try {
+    const body = JSON.parse(request.responseText || '{}');
+    if (typeof body?.error === 'string') detail = body.error;
+  } catch { /* An ingress/proxy error can be HTML. Classify it by status below. */ }
+  if (detail) return detail;
+  if (request.status === 413) return 'The server or its proxy rejected this file as too large (HTTP 413). Try a smaller file.';
+  if (request.status === 408 || request.status === 504) return `The upload timed out (HTTP ${request.status}). Check the connection and retry.`;
+  if (request.status === 429) return 'Too many uploads at once (HTTP 429). Wait a minute, then retry.';
+  if (request.status >= 500) return `The upload server failed (HTTP ${request.status}). Retry in a moment.`;
+  return `Upload failed (HTTP ${request.status}${request.statusText ? ` ${request.statusText}` : ''}).`;
 };
+
+/** XMLHttpRequest is intentional: fetch has no browser upload-progress API. */
+export const uploadAttachment = (
+  id: string,
+  file: File,
+  onProgress?: (progress: AttachmentUploadProgress) => void,
+): Promise<Attachment> => new Promise((resolve, reject) => {
+  const request = new XMLHttpRequest();
+  request.open('POST', `/api/sessions/${encodeURIComponent(id)}/attachments`);
+  request.setRequestHeader('x-am-origin', 'operator');
+  request.setRequestHeader('x-file-name', encodeURIComponent(file.name || 'Attachment'));
+  if (file.type) request.setRequestHeader('content-type', file.type);
+  request.upload.onprogress = (event) => onProgress?.({
+    loaded: event.loaded,
+    total: event.lengthComputable && event.total ? event.total : file.size,
+  });
+  // Some browsers coalesce every progress event for a fast/small body. The
+  // upload-side load event still fires before the response, so 100% means
+  // "bytes sent, awaiting server confirmation", not prematurely "stored".
+  request.upload.onload = () => onProgress?.({ loaded: file.size, total: file.size });
+  request.onload = () => {
+    if (request.status < 200 || request.status >= 300) {
+      reject(new Error(attachmentUploadError(request)));
+      return;
+    }
+    try {
+      resolve(JSON.parse(request.responseText) as Attachment);
+    } catch {
+      reject(new Error('The upload completed, but the server returned an unreadable response. Retry the file.'));
+    }
+  };
+  request.onerror = () => reject(new Error(
+    typeof navigator !== 'undefined' && navigator.onLine === false
+      ? 'Upload stopped because this device is offline. Reconnect and retry.'
+      : 'Upload connection was interrupted before the server confirmed the file. Check the connection and retry.',
+  ));
+  request.onabort = () => reject(new Error('Upload was canceled before it completed. Retry the file.'));
+  request.ontimeout = () => reject(new Error('Upload timed out before it completed. Check the connection and retry.'));
+  onProgress?.({ loaded: 0, total: file.size });
+  request.send(file);
+});
 
 export const insertAttachments = (
   id: string,
