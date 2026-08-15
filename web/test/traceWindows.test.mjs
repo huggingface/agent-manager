@@ -26,6 +26,7 @@ await build({
 
       const calls = [];
       const tails = [];
+      const summaries = [];
       // What the agent has written since the reader last looked, and a switch
       // that leaves such a request outstanding forever: a connection frozen
       // along with the tab, which is what iOS Safari does to a backgrounded one.
@@ -57,7 +58,9 @@ await build({
           const call = { kind: 'summary', at: performance.now(), aborted: false };
           calls.push(call);
           signal?.addEventListener('abort', () => { call.aborted = true; }, { once: true });
-          return new Promise(() => {});
+          // Unresolved by default — the whole-file read is slow by nature, and
+          // several checks depend on it still being outstanding.
+          return new Promise((resolve) => summaries.push({ resolve, call }));
         },
       };
 
@@ -90,6 +93,15 @@ await build({
           ));
         },
         setFrozen(next) { freeze = next; },
+        /** Answer the newest live whole-file read, the way a server would. */
+        resolveSummary(total) {
+          const pending = [...summaries].reverse().find((x) => !x.call.aborted);
+          pending?.resolve({
+            total, userTurns: 3, usage: null, firstTs: 1, truncated: false,
+            note: null, title: '', harnessLabel: 'Claude Code', sessionId: 's',
+            model: null, cwd: null, source: null, sharedBy: null,
+          });
+        },
         resolveTail() {
           const pending = [...tails].reverse().find((x) => !x.call.aborted);
           pending?.resolve(page([
@@ -245,6 +257,25 @@ try {
   await page.evaluate(() => window.__traceHarness.writeWhileAway(1));
   await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
   await page.waitForFunction(() => document.getElementById('head').textContent === '8', null, { timeout: 2_000 });
+
+  // The frozen request can be the whole-file summary rather than a window. That
+  // read is single-flight through a ref, so if it is the one the app switch
+  // killed, the header keeps its partial counts for the life of this source —
+  // turns arriving on every return, but never a turn total or a session cost.
+  await page.waitForFunction(() =>
+    window.__traceHarness.calls.some((c) => c.kind === 'summary' && !c.aborted), null, { timeout: 3_000 });
+  const summaryIndex = await page.evaluate(() =>
+    window.__traceHarness.calls.findIndex((c) => c.kind === 'summary' && !c.aborted));
+  assert.equal(await page.evaluate(() => window.__traceHead?.total ?? null), null,
+    'the header has no whole-file counts while that read is outstanding');
+  await setVisibility('hidden');
+  await setVisibility('visible');
+  await page.waitForFunction((n) => window.__traceHarness.calls[n].aborted, summaryIndex, { timeout: 2_000 });
+  await page.waitForFunction((n) => window.__traceHarness.calls
+    .some((call, index) => index > n && call.kind === 'summary'), summaryIndex, { timeout: 3_000 });
+  // And the retry is a real one: answering it fills the header in.
+  await page.evaluate(() => window.__traceHarness.resolveSummary(41));
+  await page.waitForFunction(() => window.__traceHead?.total === 41, null, { timeout: 3_000 });
 } finally {
   await browser.close();
   fs.rmSync(tmp, { recursive: true, force: true });

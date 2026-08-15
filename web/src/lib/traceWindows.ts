@@ -269,6 +269,10 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
   // a window can know. If it fails or is slow, the header simply says how much
   // is loaded.
   const summaryReady = !!meta;
+  // Bumped when a return to the foreground abandons a summary that was in
+  // flight. `summaryStarted` is a ref, so clearing it alone would not re-run the
+  // effect below — nothing else in its deps changes when a tab comes back.
+  const [summaryEpoch, setSummaryEpoch] = useState(0);
   useEffect(() => {
     // `meta` is set by the tail response and this effect runs after that render
     // commits. Starting the clock on mount let a slow tail lose a race to every
@@ -287,7 +291,7 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
         .finally(() => { if (summaryAbort.current === abort) summaryAbort.current = null; });
     }, SUMMARY_DELAY_MS);
     return () => { dead = true; window.clearTimeout(h); };
-  }, [src, srcKey, paused, summaryReady, summary]);
+  }, [src, srcKey, paused, summaryReady, summary, summaryEpoch]);
 
   // The transcript may still be being written — see LIVE_MS above. Except when
   // "a window" costs a whole-file read: the SQLite harnesses have no byte
@@ -339,6 +343,18 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
         outstanding.abort();
       }
       loading.current = false;
+      // The whole-file summary can be the frozen request instead of a window.
+      // It is single-flight through `summaryStarted`, which nothing else clears,
+      // so the header would keep its "loaded so far" counts — no turn total, no
+      // user turns, no session cost — for the life of this source, while the
+      // turns below it updated normally on every return.
+      const outstandingSummary = summaryAbort.current;
+      if (outstandingSummary) {
+        summaryAbort.current = null;
+        summaryStarted.current = false;
+        outstandingSummary.abort();
+        setSummaryEpoch((epoch) => epoch + 1);
+      }
       void (cursor.current ? loadNewer() : loadTail());
     };
     const onVisible = () => { if (!document.hidden) resync(); };
