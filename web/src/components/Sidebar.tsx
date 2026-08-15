@@ -12,7 +12,8 @@ import {
 import type { PendingAttachment } from '../lib/attachments';
 import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph, HandoverGlyph, ListGlyph, EyeGlyph, EyeOffGlyph } from './icons';
 
-type Zone = 'before' | 'after' | 'on';
+import { dropZone, backgroundAnchor, isBackgroundTarget } from './sidebar-dnd';
+import type { Zone, Kind } from './sidebar-dnd';
 
 // Harnesses whose traces the Hub renders natively, so a share ships the file
 // verbatim (mirrors SHAREABLE_CLIS in server/src/share.js). The others need
@@ -294,35 +295,68 @@ export default function Sidebar({
     setEditRef(null);
   };
 
-  // shared drag-and-drop wiring for any row
-  const dndProps = (ref: string, kind: 'group' | 'session', nested: boolean) => ({
+  const zoneFor = (ref: string, kind: Kind, nested: boolean, rect: DOMRect, clientY: number): Zone | null =>
+    dropZone({
+      dragRef, ref, kind, nested, box: rect, clientY,
+      isMember: kind === 'group' && !!dragRef && groupById[ref.slice(2)]?.sessionIds.includes(dragRef.slice(2)),
+    });
+
+  const applyDrop = (ref: string, kind: Kind, zone: Zone) => {
+    const id = ref.slice(2);
+    if (zone === 'on') {
+      if (kind === 'group') onMove(dragRef!, { kind: 'into', groupId: id });
+      else onMove(dragRef!, { kind: 'pair', sessionId: id });
+    } else {
+      onMove(dragRef!, { kind: zone, ref });
+    }
+    clearDrag();
+  };
+
+  // The tree's own background — the margins between frames, and the empty space
+  // below the list. Without this there is no way to pull an agent out of a group
+  // once every agent is in one: the top level would have no row left to aim at.
+  const treeAnchor = (el: HTMLElement, clientY: number) => backgroundAnchor(
+    Array.from(el.querySelectorAll<HTMLElement>(':scope > [data-ref]')).map((k) => ({ ref: k.dataset.ref!, box: k.getBoundingClientRect() })),
+    dragRef,
+    clientY,
+  );
+  const treeDnd = {
+    onDragEnd: clearDrag,
+    onDragLeave: (e: React.DragEvent) => { if (e.currentTarget === e.target) setDrop(null); },
+    onDragOver: (e: React.DragEvent) => {
+      // Only the background: anything over a row or a frame is theirs to answer.
+      if (!dragRef || !isBackgroundTarget(e.target as HTMLElement, e.currentTarget)) return;
+      const a = treeAnchor(e.currentTarget as HTMLElement, e.clientY);
+      if (!a) return;
+      e.preventDefault();
+      setDrop(a);
+    },
+    onDrop: (e: React.DragEvent) => {
+      if (!dragRef || !isBackgroundTarget(e.target as HTMLElement, e.currentTarget)) return;
+      const a = treeAnchor(e.currentTarget as HTMLElement, e.clientY);
+      if (!a) { clearDrag(); return; }
+      e.preventDefault();
+      onMove(dragRef, { kind: a.zone, ref: a.ref });
+      clearDrag();
+    },
+  };
+
+  // shared drag-and-drop wiring for any row or group frame
+  const dndProps = (ref: string, kind: Kind, nested: boolean) => ({
     draggable: editRef !== ref,
     onDragStart: (e: React.DragEvent) => { e.dataTransfer.setData('text/plain', ref); e.dataTransfer.effectAllowed = 'move'; setDragRef(ref); onDragState?.(ref); },
     onDragEnd: clearDrag,
     onDragOver: (e: React.DragEvent) => {
-      if (!dragRef || dragRef === ref) return;
-      const draggingGroup = dragRef.startsWith('g:');
-      if (nested && draggingGroup) return; // can't nest a group
+      const zone = zoneFor(ref, kind, nested, e.currentTarget.getBoundingClientRect(), e.clientY);
+      if (!zone) return; // let it bubble — an enclosing frame may still take it
       e.preventDefault(); e.stopPropagation();
-      const rect = e.currentTarget.getBoundingClientRect();
-      const y = e.clientY - rect.top;
-      let zone: Zone;
-      if (draggingGroup) zone = y < rect.height / 2 ? 'before' : 'after';
-      else { const th = rect.height / 3; zone = y < th ? 'before' : y > 2 * th ? 'after' : 'on'; }
       setDrop({ ref, zone });
     },
     onDrop: (e: React.DragEvent) => {
-      if (!dragRef || dragRef === ref) { clearDrag(); return; }
+      const zone = zoneFor(ref, kind, nested, e.currentTarget.getBoundingClientRect(), e.clientY);
+      if (!zone) return;
       e.preventDefault(); e.stopPropagation();
-      const zone = drop && drop.ref === ref ? drop.zone : 'after';
-      const id = ref.slice(2);
-      if (zone === 'on') {
-        if (kind === 'group') onMove(dragRef, { kind: 'into', groupId: id });
-        else onMove(dragRef, { kind: 'pair', sessionId: id });
-      } else {
-        onMove(dragRef, { kind: zone, ref });
-      }
-      clearDrag();
+      applyDrop(ref, kind, zone);
     },
     className: drop && drop.ref === ref ? ` drop-${drop.zone}` : '',
   });
@@ -337,6 +371,7 @@ export default function Sidebar({
     return (
       <div
         key={s.id}
+        data-ref={ref}
         className={`row session${active ? ' active' : ''}${nested ? ' nested' : ''}${archived.has(s.id) ? ' archived' : ''}${dragRef === ref ? ' dragging' : ''}${dnd.className}`}
         draggable={dnd.draggable}
         onDragStart={dnd.onDragStart} onDragEnd={dnd.onDragEnd} onDragOver={dnd.onDragOver} onDrop={dnd.onDrop}
@@ -389,16 +424,35 @@ export default function Sidebar({
 
   const GroupBlock = (g: Group) => {
     const ref = `g:${g.id}`;
+    // The whole frame takes drops — its edges place a neighbour, its middle
+    // takes an agent in. The name chip is only ~17px tall and no wider than the
+    // name, far too small to be the group's only target.
     const dnd = dndProps(ref, 'group', false);
     const open = !collapsed.has(g.id);
     const editing = editRef === ref;
+    const at = drop && drop.ref === ref ? drop.zone : null;
+    // The chip rides *above* the frame, so it can't share the frame's geometry:
+    // it simply reads as the group itself. An agent dropped on the name goes in;
+    // a group dropped on it lands above.
+    const headZone = (): Zone | null => {
+      if (!dragRef || dragRef === ref) return null;
+      if (dragRef.startsWith('g:')) return 'before';
+      return g.sessionIds.includes(dragRef.slice(2)) ? null : 'on';
+    };
     return (
-      <div key={g.id} className={`group${activeRef === ref ? ' active' : ''}${!open ? ' closed' : ''}${drop && drop.ref === ref && drop.zone === 'on' ? ' drop-into' : ''}`}>
+      <div
+        key={g.id}
+        data-ref={ref}
+        className={`group${activeRef === ref ? ' active' : ''}${!open ? ' closed' : ''}${at ? ` drop-${at === 'on' ? 'into' : at}` : ''}`}
+        onDragOver={dnd.onDragOver} onDrop={dnd.onDrop} onDragEnd={dnd.onDragEnd}
+      >
         {/* the group's name rides its frame — still the drag handle / click target */}
         <div
-          className={`row group-head${dragRef === ref ? ' dragging' : ''}${dnd.className}`}
+          className={`row group-head${dragRef === ref ? ' dragging' : ''}`}
           draggable={dnd.draggable}
-          onDragStart={dnd.onDragStart} onDragEnd={dnd.onDragEnd} onDragOver={dnd.onDragOver} onDrop={dnd.onDrop}
+          onDragStart={dnd.onDragStart} onDragEnd={dnd.onDragEnd}
+          onDragOver={(e) => { const z = headZone(); if (!z) return; e.preventDefault(); e.stopPropagation(); setDrop({ ref, zone: z }); }}
+          onDrop={(e) => { const z = headZone(); if (!z) return; e.preventDefault(); e.stopPropagation(); applyDrop(ref, 'group', z); }}
           onClick={() => onActivate(ref)}
           onDoubleClick={(e) => { e.stopPropagation(); startEdit(ref, g.name); }}
         >
@@ -637,7 +691,7 @@ export default function Sidebar({
         </div>
       </div>
 
-      <div className="tree" onDragEnd={clearDrag}>
+      <div className={`tree${dragRef ? ' dragging' : ''}`} {...treeDnd}>
         {tree.order.length === 0 && (
           <div className="empty-hint">Nothing yet. Add an agent with the + above.<br />Drag an agent onto another to group them.</div>
         )}
