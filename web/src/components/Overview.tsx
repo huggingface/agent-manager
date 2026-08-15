@@ -367,30 +367,29 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
         )}
       </div>
 
-      {s.inputRequired ? (
+      {s.inputRequired && (
         <InputRequiredNotice
           input={s.inputRequired}
           onOpenTerminal={() => { writePaneMode('terminal'); onOpen(s.id); }}
         />
-      ) : (
-        <Composer
-          draft={draft}
-          sending={sending}
-          isMobile={isMobile}
-          inputRef={inputRef}
-          canSend={!!draft.trim() || images.length > 0}
-          above={<Attachments
-            attachments={images}
-            disabled={sending || !allowAttachments}
-            disabledReason={!allowAttachments ? 'Files are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
-            onFiles={addImages}
-            onRemove={removeImage}
-          />}
-          onChange={setDraft}
-          onSend={send}
-          onPasteFiles={allowAttachments ? addImages : undefined}
-        />
       )}
+      <Composer
+        draft={draft}
+        sending={sending}
+        isMobile={isMobile}
+        inputRef={inputRef}
+        canSend={!!draft.trim() || images.length > 0}
+        above={<Attachments
+          attachments={images}
+          disabled={sending || !allowAttachments}
+          disabledReason={!allowAttachments ? 'Files are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
+          onFiles={addImages}
+          onRemove={removeImage}
+        />}
+        onChange={setDraft}
+        onSend={send}
+        onPasteFiles={allowAttachments ? addImages : undefined}
+      />
       {(imageError || failed) && <div className="ov-note" role="alert">{imageError || failed}</div>}
     </div>
   );

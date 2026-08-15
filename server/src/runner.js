@@ -2095,11 +2095,6 @@ export function attach(session, cols, rows) {
 export async function sendInput(id, text, { confirmEcho = false } = {}) {
   const host = hosts.get(id);
   if (!host || stopping.has(id)) throw new Error('session is not running');
-  if (host.inputRequired.get()) {
-    const error = new Error('session needs input in its terminal — a normal prompt was not sent into the open dialog');
-    error.statusCode = 409;
-    throw error;
-  }
   host.inputRequired.observeInput();
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
   // the inner newlines as soft line breaks instead of submitting early.
@@ -2150,11 +2145,6 @@ export async function sendInput(id, text, { confirmEcho = false } = {}) {
 export function pasteInput(id, text) {
   const host = hosts.get(id);
   if (!host || stopping.has(id)) throw new Error('session is not running');
-  if (host.inputRequired.get()) {
-    const error = new Error('session needs input in its terminal — text was not pasted into the open dialog');
-    error.statusCode = 409;
-    throw error;
-  }
   const value = String(text || '');
   if (!value) return;
   host.inputRequired.observeInput();

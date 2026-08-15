@@ -346,7 +346,10 @@ export default function Sidebar({
       >
         {/* The same three lights, but for a remote agent they mean connection,
             not process: working / listening / not connected. */}
-        <span className={`status ${s.state}`} title={s.inputRequired ? 'needs input in terminal' : (isRemote(s.cli) ? REMOTE_STATE_LABEL : STATE_LABEL)[s.state]} />
+        <span
+          className={`status ${s.inputRequired ? 'needs-input' : s.state}`}
+          title={s.inputRequired ? 'needs input in terminal' : (isRemote(s.cli) ? REMOTE_STATE_LABEL : STATE_LABEL)[s.state]}
+        />
         <Logo cli={s.cli} size={12} tint={colorOf[s.cli]} />
         {editing ? (
           <input

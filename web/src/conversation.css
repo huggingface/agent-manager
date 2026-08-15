@@ -401,6 +401,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
   padding: 4px 8px; background: var(--panel-2); color: var(--text); font: inherit; cursor: pointer;
 }
 .input-required button:hover { border-color: var(--accent); }
+.input-required + .ov-composer { border-top: 0; }
 @media (max-width: 720px) and (pointer: coarse) {
   /* Restating styles.css's iOS guard: 16px is what stops zoom-on-focus, and the
      rule above is later in the cascade, so it would otherwise win. A phone

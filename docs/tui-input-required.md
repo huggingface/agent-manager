@@ -9,12 +9,12 @@ such as `Allow` in terminal text. Those heuristics cannot distinguish a dialog
 from thinking, a completed turn, documentation, or agent-produced output; a
 false "blocked" badge would be worse than a missed prompt.
 
-The pane reader and Overview card replace their reply composer with a **Needs
-input** banner and an **open terminal** action. The session tile and sidebar
-also identify the condition. The normal composer is hidden because submitting
-text while a choice menu owns stdin can select the wrong option. The prompt and
-attachment APIs refuse the same operation with HTTP 409 while the signal is
-active; direct terminal input remains available.
+The pane reader and Overview card show a **Needs input** banner and an **open
+terminal** action above their normal reply composer. The session tile and
+sidebar also identify the condition. Detection is advisory: the composer,
+prompt API, and attachment delivery stay available while a signal is active.
+A false-positive warning is recoverable; turning it into a write denial would
+make detector error an availability bug.
 
 The reader does not answer the dialog in this version. The CLIs have different
 choice identifiers, validation, queueing, "allow once/always" semantics, and
@@ -80,13 +80,19 @@ removed at process exit.
 
 OpenCode's paired event remains authoritative through menu-navigation input and
 closes immediately when the final queued request closes. Every marker, including
-OpenCode's, also has a 30-minute ceiling so a lost close event cannot disable
-reader prompting indefinitely. For unpaired CLIs, an actual operator key or a
+OpenCode's, also has a 30-minute ceiling so a lost close event cannot leave a
+stale warning indefinitely. For unpaired CLIs, an actual operator key or a
 native completion event can clear the signal sooner; process exit clears every
 kind. Automatic terminal query replies do not count as operator input. The
 ceiling can create a false negative for a dialog left open longer than 30
 minutes; that is intentional because an indefinitely stale warning is the more
 damaging failure mode.
+
+Enforcement remains a possible later step per adapter, after every covered
+dialog and subtype has been observed end-to-end in the deployed environment.
+It should not be enabled globally: a notification such as Claude's
+`agent_needs_input` may describe a teammate that needs attention rather than a
+modal dialog owning the main pane's input.
 
 ## Verification
 

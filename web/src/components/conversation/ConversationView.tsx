@@ -559,7 +559,7 @@ export default function ConversationView({
       {!readOnly && session.inputRequired && (
         <InputRequiredNotice input={session.inputRequired} onOpenTerminal={() => writePaneMode('terminal')} />
       )}
-      {!readOnly && !session.inputRequired && (
+      {!readOnly && (
         <Composer
           className="cxv-live"
           containerClassName="cxv-composer"
