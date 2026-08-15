@@ -408,15 +408,30 @@ body {
 .ov-x:hover { color: var(--text); }
 
 /* reply: a quiet, always-there input line — its ❯ mirrors the prompt's */
-.ov-composer { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 7px 8px; border-top: 1px solid var(--border); padding-top: 7px; }
+/* Controls sit on the FIRST line of the draft, not in the middle of it. A
+   composer grows downward as you type, and centred controls drift down with it
+   — at six lines on a phone the ❯ and the paperclip ended up 56px below the
+   line they belong to, next to the middle of a sentence. Alignment is start,
+   and each control is then nudged to the centre of that first line box (its
+   height is the textarea's line-height plus the textarea's 2px padding), so a
+   one-line composer looks exactly as it always has. */
+.ov-composer { --ov-first-line: calc(1.45 * 13px + 4px); display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 7px 8px; border-top: 1px solid var(--border); padding-top: 7px; }
 .ov-composer.image-drop { outline: 1px dashed var(--accent); outline-offset: 5px; background: var(--drop); }
 .ov-composer .image-attachments.has-images { grid-column: 1 / -1; }
 .ov-composer .image-attachments.has-note { grid-column: 1 / -1; }
 .ov-composer .image-attachments.has-images + .ov-live,
 .ov-composer .image-attachments.has-note + .ov-live { grid-column: 1 / -1; }
 .ov-composer .ov-live { border-top: none; padding-top: 0; }
-.ov-live { display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--border); padding-top: 7px; font-size: 13px; }
-.ov-live .ov-p { color: var(--accent); font-weight: 700; font-size: 13px; }
+.ov-live { display: flex; gap: 8px; align-items: flex-start; border-top: 1px solid var(--border); padding-top: 7px; font-size: 13px; }
+/* Each control is centred on the first line rather than on the whole box. The
+   offset is the same expression every time — half the difference between the
+   line and the control — so a control keeps its own size and still lands on the
+   line. --ov-first-line is restated wherever the textarea's size is (below, and
+   in conversation.css for the reader), because that is what it measures. */
+.ov-live .ov-p {
+  color: var(--accent); font-weight: 700; font-size: 13px; line-height: 1.45; padding: 2px 0;
+  margin-top: calc((var(--ov-first-line) - (1.45em + 4px)) / 2);
+}
 .ov-live textarea { flex: 1; min-width: 0; border: none; background: none; font: inherit; font-size: 13px; line-height: 1.45; color: var(--text); outline: none; padding: 2px 0; resize: none; overflow: hidden; max-height: 140px; }
 .ov-live textarea::placeholder { color: var(--muted); opacity: 0.7; }
 .ov-hint { font-size: 10.5px; color: var(--muted); flex: none; }
@@ -424,6 +439,9 @@ body {
 /* A square key, not a bubble: it sits at the end of a line of type, and the
    rounded pill read as a chat app rather than as a prompt. */
 .ov-send { flex: none; width: 26px; height: 26px; padding: 0; border: none; border-radius: 7px; background: var(--accent); color: var(--accent-fg); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+/* the two square controls, centred on the first line by the same expression */
+.ov-live .ov-send { margin-top: calc((var(--ov-first-line, calc(1.45 * 13px + 4px)) - 26px) / 2); }
+.ov-composer .image-pick { margin-top: calc((var(--ov-first-line, calc(1.45 * 13px + 4px)) - 28px) / 2); }
 .ov-send svg { width: 15px; height: 15px; }
 .ov-send:disabled { opacity: 0.5; cursor: default; }
 .ov-note { font-size: 11px; color: var(--danger); }
@@ -1283,6 +1301,7 @@ a.btn-ghost { text-decoration: none; }
      DESKTOP window keeps the reply line at card size */
   @media (pointer: coarse) {
     .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input, .ov-live textarea { font-size: 16px; }
+    .ov-composer { --ov-first-line: calc(1.45 * 16px + 4px); }
   }
   .ov-headrow { flex-wrap: wrap; }
   /* install page: the decorative sidebar makes no sense on a phone */

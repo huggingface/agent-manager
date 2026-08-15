@@ -278,8 +278,29 @@ pane with nothing to render (a shell) simply stays a terminal.
   round trip, which left a beat where the box was still full and nothing had happened. A failed
   send withdraws the echo and puts the text back in the box.
 
+  The echo is a `PendingExchange` — a `.cx` section, the same shape as the turn it becomes a
+  second later — and not a loose `.cx-prompt`. Written out by hand it was neither: the band's
+  `margin-left` exists to cancel `.cx`'s matching padding, so with no `.cx` around it the newest
+  prompt in a conversation hung a gutter's width left of every prompt above it, its `❯` half off
+  the pane on a phone. One component, both surfaces, so it cannot drift apart again.
+
   Only a trace with **no agent behind it** — a shared file, an import — is read-only, which is
   what `readOnly` is for.
+
+- **The composer's controls sit on the draft's first line.** A composer grows downward as you
+  type; controls centred in it drift down with the text, so at six lines on a phone the `❯` and
+  the paperclip ended up 56px below the line they belong to, level with the middle of a sentence.
+  Alignment is `start`, and each control is then offset by half the difference between its own
+  height and the first line's — `--ov-first-line`, restated wherever the textarea's size is
+  decided (13px in the card, `--cx-base` in the reader, 16px on a touch phone, where iOS demands
+  it). A one-line composer looks exactly as it did.
+
+- **Below the composer, only an action earns the space.** The reader used to end in a strip of
+  grey: the workspace's absolute path and the date the conversation started, printed under a reply
+  box. The path is in the pane header a few centimetres above and in the Files pane; the date —
+  the one fact nothing else showed, since turn times are clock-only — now rides on the turn
+  count's tooltip. What is left is `continue in a new agent`, and when there is no handover to
+  offer the footer does not render at all rather than leaving an empty bordered strip.
 
   Both surfaces use one `Composer` component. A composer accretes features — paste-to-attach,
   history recall, a slash-command menu — and duplicated markup is how one surface quietly gets

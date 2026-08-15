@@ -26,7 +26,7 @@ import type { PendingAttachment } from '../../lib/attachments';
 import { recallReading, rememberReading } from './readingPosition';
 import { useDraft } from './useDraft';
 import { fmtTok, splitExchanges } from './exchanges';
-import ExchangeView from './Exchange';
+import ExchangeView, { PendingExchange } from './Exchange';
 import Attachments from '../Attachments';
 import Composer from './Composer';
 
@@ -410,7 +410,13 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
           header above has no spare width. */}
       <div className="cxv-bar mono">
         {head.model && <span className="cxv-chip">{head.model}</span>}
-        <span className="cxv-count" title={head.total != null ? `${fmtNum(head.total)} messages in this conversation` : `${fmtNum(head.loaded)} messages loaded`}>
+        <span className="cxv-count" title={[
+          head.total != null ? `${fmtNum(head.total)} messages in this conversation` : `${fmtNum(head.loaded)} messages loaded`,
+          // The one fact the footer line below the composer carried that
+          // nothing else shows: turn times are clock-only, so a conversation
+          // read on Friday never says which day it started.
+          head.firstTs ? `started ${new Date(head.firstTs).toLocaleDateString()}` : '',
+        ].filter(Boolean).join(' · ')}>
           {fmtNum(exchanges.length)} turn{exchanges.length === 1 ? '' : 's'}
           {head.total != null && head.loaded < head.total ? ` of ${fmtNum(head.total)} messages` : ''}
         </span>
@@ -481,12 +487,7 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
               />
             </div>
           ))}
-          {sent && (
-            <>
-              <div className="cx-prompt">{sent.text}</div>
-              <div className="cx-running mono">working</div>
-            </>
-          )}
+          {sent && <PendingExchange text={sent.text} />}
           {!exchanges.length && !sent && <div className="cxv-msg mono">nothing in this trace yet</div>}
         </div>
       </div>
@@ -514,18 +515,20 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
       )}
       {(attachmentError || failed) && <div className="ov-note cxv-note" role="alert">{attachmentError || failed}</div>}
 
-      <div className="cxv-foot mono">
-        <span className="cxv-path" title={head.cwd || undefined}>
-          {head.cwd}
-          {head.firstTs ? ` · ${new Date(head.firstTs).toLocaleDateString()}` : ''}
-        </span>
-        <span className="spacer" />
-        {onHandover && (
+      {/* Below the composer, only an action earns the space. What used to live
+          here — the workspace's absolute path and the date the conversation
+          started — was reference material printed under a reply box: the path
+          is in the pane header a few centimetres above (and in the Files pane),
+          and the date now rides on the turn-count's tooltip. A reader that ends
+          in a strip of grey path is a reader that ends in nothing to do. */}
+      {onHandover && (
+        <div className="cxv-foot mono">
+          <span className="spacer" />
           <button className="cxv-mini" onClick={onHandover} title="Start a new agent from this conversation">
             continue in a new agent ↗
           </button>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

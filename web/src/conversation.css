@@ -219,7 +219,6 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
   padding: 5px 10px; border-top: 1px solid var(--border); background: var(--panel);
   color: var(--muted); font-size: 0.81em; overflow: hidden;
 }
-.cxv-foot .cxv-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cxv-foot .spacer { flex: 1; min-width: 4px; }
 
 /* The prompt band used to stick to the top of this scroller, on the theory that
@@ -236,7 +235,11 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    rather than as the head of it. Full bleed both sides, with the text inside
    still on the column. */
 .cxv-col .cx-prompt { margin-right: calc(-1 * var(--cx-gutter)); padding-right: var(--cx-gutter); }
-.cxv-body > .cxv-col > .cx { padding-left: 16px; }
+/* No px restatement of .cx's own 1.23em gutter here. The rule that used to sit
+   on this line never matched anything (every exchange is wrapped in a row div,
+   so no .cx is a direct child of .cxv-col) — and the moment one was, it would
+   have pinned the newest turn to 16px while every turn above it kept the em and
+   moved under zoom. */
 
 /* Grouping: the meta row is the prompt's, not the answer's, so it sits tight
    under the band — and one exchange ends well before the next begins. */
@@ -299,10 +302,14 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 /* The card's reply line is a fixed 13px; here it follows the conversation above
    it, the way the remote pane's composer follows its log. */
 .cxv-live .ov-p, .cxv-live textarea { font-size: 1em; }
+.cxv-composer { --ov-first-line: calc(1.45em + 4px); }
 .cxv-note { flex: none; padding: 0 12px 6px; }
 @media (max-width: 720px) and (pointer: coarse) {
   /* Restating styles.css's iOS guard: 16px is what stops zoom-on-focus, and the
      rule above is later in the cascade, so it would otherwise win. A phone
      keyboard field is the one place the zoom does not reach. */
   .cxv-live textarea { font-size: 16px; }
+  /* …and the first line the controls align to is that pinned 16px one, not the
+     conversation's own type size, or they sit a couple of pixels high of it. */
+  .cxv-composer { --ov-first-line: calc(1.45 * 16px + 4px); }
 }
