@@ -269,6 +269,10 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
   // a window can know. If it fails or is slow, the header simply says how much
   // is loaded.
   const summaryReady = !!meta;
+  // Bumped when a return to the foreground abandons a summary that was in
+  // flight. `summaryStarted` is a ref, so clearing it alone would not re-run the
+  // effect below — nothing else in its deps changes when a tab comes back.
+  const [summaryEpoch, setSummaryEpoch] = useState(0);
   useEffect(() => {
     // `meta` is set by the tail response and this effect runs after that render
     // commits. Starting the clock on mount let a slow tail lose a race to every
@@ -287,7 +291,7 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
         .finally(() => { if (summaryAbort.current === abort) summaryAbort.current = null; });
     }, SUMMARY_DELAY_MS);
     return () => { dead = true; window.clearTimeout(h); };
-  }, [src, srcKey, paused, summaryReady, summary]);
+  }, [src, srcKey, paused, summaryReady, summary, summaryEpoch]);
 
   // The transcript may still be being written — see LIVE_MS above. Except when
   // "a window" costs a whole-file read: the SQLite harnesses have no byte
@@ -311,6 +315,61 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
     const h = window.setInterval(loadNewer, fresh ? LIVE_MS : IDLE_MS);
     return () => window.clearInterval(h);
   }, [loadNewer, lastTs, seekable, paused, hidden, live]);
+
+  // Coming back from another app has to show what happened while away, and none
+  // of the loop above survives the trip. The interval is cleared while hidden,
+  // and the effect that would restore it schedules NOTHING when the host says
+  // the session stopped and the trace has been quiet — so a reader left on a
+  // finished session shows the turns from before the operator switched away,
+  // for as long as they keep looking at it. Even when a poll is scheduled, an
+  // interval's first tick is one whole interval late.
+  //
+  // A frozen request makes it worse. iOS Safari suspends a backgrounded tab, so
+  // a window request that was in flight when the operator left may never settle
+  // — and `loading` is released only in that request's `finally`, so every later
+  // read returns early against a latch nothing will ever release. That is a
+  // reader which stays stale even once polling resumes.
+  //
+  // So a return reads immediately: abandon whatever was outstanding (bumping the
+  // generation, which is what makes its response and its `finally` no longer
+  // ours), release the latch, and ask for the turns written while away.
+  useEffect(() => {
+    const resync = () => {
+      if (document.hidden || cb.current.paused) return;
+      const outstanding = windowAbort.current;
+      if (outstanding) {
+        gen.current += 1;
+        windowAbort.current = null;
+        outstanding.abort();
+      }
+      loading.current = false;
+      // The whole-file summary can be the frozen request instead of a window.
+      // It is single-flight through `summaryStarted`, which nothing else clears,
+      // so the header would keep its "loaded so far" counts — no turn total, no
+      // user turns, no session cost — for the life of this source, while the
+      // turns below it updated normally on every return.
+      const outstandingSummary = summaryAbort.current;
+      if (outstandingSummary) {
+        summaryAbort.current = null;
+        summaryStarted.current = false;
+        outstandingSummary.abort();
+        setSummaryEpoch((epoch) => epoch + 1);
+      }
+      void (cursor.current ? loadNewer() : loadTail());
+    };
+    const onVisible = () => { if (!document.hidden) resync(); };
+    // Restoring a page from the back/forward cache fires no visibilitychange:
+    // the tab was never hidden, the whole page was frozen and thawed. Safari
+    // leans on this hard — a swipe back, or an app switch that outlived the
+    // renderer, comes back this way.
+    const onShow = (e: PageTransitionEvent) => { if (e.persisted) resync(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', onShow);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pageshow', onShow);
+    };
+  }, [loadNewer, loadTail]);
 
   const atStart = !!cursor.current?.atStart;
   const blocked = !!cursor.current?.blocked;
