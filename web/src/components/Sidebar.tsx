@@ -12,7 +12,7 @@ import {
 import type { PendingAttachment } from '../lib/attachments';
 import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph, HandoverGlyph, ListGlyph, EyeGlyph, EyeOffGlyph } from './icons';
 
-import { dropZone, backgroundAnchor } from './sidebar-dnd';
+import { dropZone, backgroundAnchor, isBackgroundTarget } from './sidebar-dnd';
 import type { Zone, Kind } from './sidebar-dnd';
 
 // Harnesses whose traces the Hub renders natively, so a share ships the file
@@ -325,14 +325,14 @@ export default function Sidebar({
     onDragLeave: (e: React.DragEvent) => { if (e.currentTarget === e.target) setDrop(null); },
     onDragOver: (e: React.DragEvent) => {
       // Only the background: anything over a row or a frame is theirs to answer.
-      if (!dragRef || e.target !== e.currentTarget) return;
+      if (!dragRef || !isBackgroundTarget(e.target as HTMLElement, e.currentTarget)) return;
       const a = treeAnchor(e.currentTarget as HTMLElement, e.clientY);
       if (!a) return;
       e.preventDefault();
       setDrop(a);
     },
     onDrop: (e: React.DragEvent) => {
-      if (!dragRef || e.target !== e.currentTarget) return;
+      if (!dragRef || !isBackgroundTarget(e.target as HTMLElement, e.currentTarget)) return;
       const a = treeAnchor(e.currentTarget as HTMLElement, e.clientY);
       if (!a) { clearDrag(); return; }
       e.preventDefault();

@@ -79,3 +79,25 @@ export function backgroundAnchor(
   }
   return { ref: rest[rest.length - 1].ref, zone: 'after' };
 }
+
+/** The bit of `closest` we need, so this stays testable without a DOM. */
+type Closest = { closest(selector: string): unknown };
+
+/**
+ * Is this event the tree's to answer, rather than a row's or a frame's?
+ *
+ * "The target is the tree itself" is the obvious test and it is wrong: the tree
+ * has children that are not items — the archived-sessions note, which
+ * `margin-top: auto` parks at the bottom directly over the landing strip, and
+ * the empty-list hint. Those are background as far as a drag is concerned, and
+ * treating them as someone else's turf puts a dead patch exactly where a drop
+ * meaning "take this out of its group" would land.
+ *
+ * So: the tree answers unless a row or frame encloses the target, since those
+ * carry `data-ref` and stop the event themselves when they want it.
+ */
+export function isBackgroundTarget(target: Closest | null, tree: unknown): boolean {
+  if (!target) return false;
+  if (target === tree) return true;
+  return !target.closest('[data-ref]');
+}

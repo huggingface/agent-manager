@@ -20,7 +20,7 @@ await build({
   entryPoints: [path.join(HERE, '../src/components/sidebar-dnd.ts')],
   outfile: out, format: 'esm', bundle: false, logLevel: 'error',
 });
-const { dropZone, backgroundAnchor } = await import(pathToFileURL(out).href);
+const { dropZone, backgroundAnchor, isBackgroundTarget } = await import(pathToFileURL(out).href);
 
 let failed = 0;
 const check = (what, fn) => {
@@ -141,6 +141,35 @@ check('a dragged top-level item is never its own anchor', () => {
 
 check('nothing in flight, nothing to anchor', () => {
   assert.equal(backgroundAnchor(ITEMS, null, 110), null);
+});
+
+// Which events the tree answers. A tiny stand-in for the DOM: `owner` is the
+// nearest ancestor carrying data-ref, which is what .closest('[data-ref]') finds.
+const TREE = { closest: () => null };
+const node = (owner) => ({ closest: (sel) => (sel === '[data-ref]' ? owner : null) });
+
+check('the tree answers for its own background', () => {
+  assert.equal(isBackgroundTarget(TREE, TREE), true);
+});
+
+check('a row or frame keeps its own events', () => {
+  // Both the item itself and anything inside it (a name, a mini-button).
+  assert.equal(isBackgroundTarget(node({}), TREE), false);
+});
+
+check('the archived note is background, not someone else\'s turf', () => {
+  // Regression: this note carries no data-ref, and `margin-top: auto` parks it
+  // at the BOTTOM of the tree — directly over the landing strip. Testing for
+  // "the target is the tree itself" made the one place a user aims for when
+  // pulling an agent out of a group silently ignore the drop.
+  const archNote = node(null); // a direct child of .tree with no data-ref above it
+  assert.equal(isBackgroundTarget(archNote, TREE), true);
+  const emptyHint = node(null);
+  assert.equal(isBackgroundTarget(emptyHint, TREE), true);
+});
+
+check('no target, no answer', () => {
+  assert.equal(isBackgroundTarget(null, TREE), false);
 });
 
 if (failed) { console.error(`\n${failed} failing`); process.exit(1); }
