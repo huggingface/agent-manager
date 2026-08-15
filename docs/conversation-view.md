@@ -297,10 +297,17 @@ pane with nothing to render (a shell) simply stays a terminal.
 
 - **Below the composer, only an action earns the space.** The reader used to end in a strip of
   grey: the workspace's absolute path and the date the conversation started, printed under a reply
-  box. The path is in the pane header a few centimetres above and in the Files pane; the date —
-  the one fact nothing else showed, since turn times are clock-only — now rides on the turn
-  count's tooltip. What is left is `continue in a new agent`, and when there is no handover to
-  offer the footer does not render at all rather than leaving an empty bordered strip.
+  box. The path goes for good — on a desktop it is in the pane header and the Files pane, and on a
+  phone `.ph-path` is hidden by `@container (max-width: 520px)`, so there it is simply nowhere in
+  the reader, which is the right amount of nowhere for a path under a reply box. The date stays,
+  because turn times are clock-only and nothing else says which *day*; it is text in `.cxv-bar`
+  beside the other conversation-level facts. **Not a `title`** — a tooltip cannot be opened by
+  touch at all (iOS long-press opens the callout menu instead), so parking it there amounts to
+  deleting the fact on the device these items were filed from while claiming to keep it. The bar
+  wraps at any width, so the date costs no height: the reader body measures the same at 320 and
+  390 with it as without. What is left below the composer is `continue in a new agent`, and with
+  no handover to offer the footer does not render at all rather than leaving an empty bordered
+  strip.
 
   Both surfaces use one `Composer` component. A composer accretes features — paste-to-attach,
   history recall, a slash-command menu — and duplicated markup is how one surface quietly gets

@@ -35,6 +35,15 @@ const NEAR_TOP_PX = 300;   // start fetching older turns before the reader arriv
 const fmtNum = (n: number) => n.toLocaleString();
 const fmtUsage = (u?: { in: number; out: number } | null) =>
   (u ? `${fmtTok(u.in)}↓ ${fmtTok(u.out)}↑` : '');
+/** The day a conversation started: "14 Aug", and the year too when it is not
+ *  this one. Turn times are clock-only, so this is the only place a reader can
+ *  learn which day — it has to be readable, not hidden behind a hover. */
+const fmtStarted = (ms: number) => {
+  const d = new Date(ms);
+  return d.toLocaleDateString(undefined, d.getFullYear() === new Date().getFullYear()
+    ? { month: 'short', day: 'numeric' }
+    : { year: 'numeric', month: 'short', day: 'numeric' });
+};
 
 export default function ConversationView({ session, paused, isMobile, readOnly, onHandover, onReady, readyKey }: {
   session: Session;
@@ -410,19 +419,24 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
           header above has no spare width. */}
       <div className="cxv-bar mono">
         {head.model && <span className="cxv-chip">{head.model}</span>}
-        <span className="cxv-count" title={[
-          head.total != null ? `${fmtNum(head.total)} messages in this conversation` : `${fmtNum(head.loaded)} messages loaded`,
-          // The one fact the footer line below the composer carried that
-          // nothing else shows: turn times are clock-only, so a conversation
-          // read on Friday never says which day it started.
-          head.firstTs ? `started ${new Date(head.firstTs).toLocaleDateString()}` : '',
-        ].filter(Boolean).join(' · ')}>
+        <span className="cxv-count" title={head.total != null ? `${fmtNum(head.total)} messages in this conversation` : `${fmtNum(head.loaded)} messages loaded`}>
           {fmtNum(exchanges.length)} turn{exchanges.length === 1 ? '' : 's'}
           {head.total != null && head.loaded < head.total ? ` of ${fmtNum(head.total)} messages` : ''}
         </span>
         {head.usage && (
           <span className="cxv-tok" title={head.usage.cacheRead ? `${fmtNum(head.usage.cacheRead)} cached` : undefined}>
             {fmtUsage(head.usage)}
+          </span>
+        )}
+        {/* When the conversation started. It used to be printed under the
+            composer, and briefly lived on the tooltip above — which a phone
+            cannot open at all, so on the device these items were filed from the
+            fact was nowhere. Here it is text among the other conversation-level
+            facts, and the bar wraps at any width, so it costs no height: the
+            reader body measures the same at 320 and 390 with it as without. */}
+        {head.firstTs != null && (
+          <span className="cxv-when" title={new Date(head.firstTs).toLocaleString()}>
+            {fmtStarted(head.firstTs)}
           </span>
         )}
         <span className="spacer" />

@@ -171,7 +171,9 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 }
 .cxv-bar .spacer { flex: 1; }
 .cxv-chip { padding: 0 5px; border: 1px solid var(--border); border-radius: var(--r-sm); white-space: nowrap; }
-.cxv-count, .cxv-tok { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cxv-count, .cxv-tok, .cxv-when { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* the day it started — the last of the bar's facts to give up room */
+.cxv-when { flex: 0 1 auto; }
 .cxv-tok { flex: 0 1 auto; }
 .cxv-mini {
   flex: none; white-space: nowrap; background: none; border: 1px solid transparent; border-radius: var(--r-sm);
@@ -242,9 +244,12 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    moved under zoom. */
 
 /* Grouping: the meta row is the prompt's, not the answer's, so it sits tight
-   under the band — and one exchange ends well before the next begins. */
+   under the band. What separates one exchange from the next is the band itself
+   — its top hairline and tint — not a margin: the rule that used to add 15px
+   here needed two .cx siblings directly under .cxv-col, and there has never
+   been one pair (every exchange sits in its own row div). Removed with the
+   other dead gutter rule above rather than left to be read as live. */
 .cxv-col .cx-prompt + .cx-meta { margin-top: -3px; }
-.cxv-col > .cx + .cx { margin-top: 15px; }
 
 /* ---------- phone ---------- */
 @media (max-width: 720px) {
@@ -302,7 +307,12 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 /* The card's reply line is a fixed 13px; here it follows the conversation above
    it, the way the remote pane's composer follows its log. */
 .cxv-live .ov-p, .cxv-live textarea { font-size: 1em; }
-.cxv-composer { --ov-first-line: calc(1.45em + 4px); }
+/* Two selectors set this on the SAME element — the reader's composer carries
+   both classes — so this one is written to win on specificity (0,2,0 against
+   styles.css's 0,1,0) rather than on which stylesheet main.tsx imports second.
+   Swapping those two imports would otherwise drop the reader back to a
+   hardcoded 13px line and mis-centre the controls at every zoom but 100%. */
+.ov-composer.cxv-composer { --ov-first-line: calc(1.45em + 4px); }
 .cxv-note { flex: none; padding: 0 12px 6px; }
 @media (max-width: 720px) and (pointer: coarse) {
   /* Restating styles.css's iOS guard: 16px is what stops zoom-on-focus, and the
@@ -311,5 +321,5 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
   .cxv-live textarea { font-size: 16px; }
   /* …and the first line the controls align to is that pinned 16px one, not the
      conversation's own type size, or they sit a couple of pixels high of it. */
-  .cxv-composer { --ov-first-line: calc(1.45 * 16px + 4px); }
+  .ov-composer.cxv-composer { --ov-first-line: calc(1.45 * 16px + 4px); }
 }
