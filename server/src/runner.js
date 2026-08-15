@@ -16,6 +16,7 @@ import {
   traceHistoryLines,
 } from './history-store.js';
 import { createTerminalModeTracker } from './terminal-modes.js';
+import { createInputRequiredTracker } from './input-required.js';
 
 // libghostty-vt ships prebuilts for linux x64/arm64 and macOS arm64. Loading it
 // is guarded so a platform without a prebuilt still boots and says so, rather
@@ -153,7 +154,11 @@ export function agentInfo() {
   const now = Date.now();
   for (const [id, host] of hosts) {
     const changedAt = host.screenChangedAt || host.startedAt;
-    map.set(id, { age: Math.round((now - changedAt) / 1000), bells: host.bells || 0 });
+    map.set(id, {
+      age: Math.round((now - changedAt) / 1000),
+      bells: host.bells || 0,
+      inputRequired: host.inputRequired.get(),
+    });
   }
   return map;
 }
@@ -1311,7 +1316,10 @@ export async function codexRolloutForId(id) {
 // not parse is left alone (clobbering the user's settings to install a hook
 // would be a terrible trade), and every failure is non-fatal: without the
 // hook the watcher simply keeps today's behaviour.
-export function installClaudeRepinHook(hookCmd = '/app/scripts/am-repin-hook.sh') {
+export function installClaudeRepinHook(
+  hookCmd = '/app/scripts/am-repin-hook.sh',
+  inputRequiredCmd = '/app/scripts/am-input-required-hook.sh',
+) {
   const dir = process.env.CLAUDE_CONFIG_DIR;
   if (!dir) return false;
   const file = path.join(dir, 'settings.json');
@@ -1322,19 +1330,49 @@ export function installClaudeRepinHook(hookCmd = '/app/scripts/am-repin-hook.sh'
     if (e.code !== 'ENOENT') { console.warn(`[claude] not installing repin hook: ${file} unreadable (${e.message})`); return false; }
   }
   if (typeof cfg !== 'object' || cfg === null || Array.isArray(cfg)) { console.warn(`[claude] not installing repin hook: ${file} is not an object`); return false; }
+  if (cfg.hooks !== undefined && (typeof cfg.hooks !== 'object' || cfg.hooks === null || Array.isArray(cfg.hooks))) {
+    console.warn(`[claude] not installing lifecycle hooks: ${file} hooks is not an object`);
+    return false;
+  }
   const entries = Array.isArray(cfg.hooks?.SessionStart) ? cfg.hooks.SessionStart : [];
   const present = entries.some((m) => (m?.hooks || []).some((h) => String(h?.command || '').includes('am-repin-hook.sh')));
-  if (present) return true;
+  const notifications = Array.isArray(cfg.hooks?.Notification) ? cfg.hooks.Notification : [];
+  const inputPresent = notifications.some((m) => (m?.hooks || [])
+    .some((h) => String(h?.command || '').includes('am-input-required-hook.sh')));
+  const clearEvents = ['PostToolBatch', 'Stop', 'SessionEnd', 'ElicitationResult', 'UserPromptSubmit'];
+  const missingClear = clearEvents.some((event) => {
+    const eventEntries = Array.isArray(cfg.hooks?.[event]) ? cfg.hooks[event] : [];
+    return !eventEntries.some((m) => (m?.hooks || [])
+      .some((h) => String(h?.command || '').includes('am-input-required-hook.sh')));
+  });
+  if (present && inputPresent && !missingClear) return true;
   // No matcher: fire for every source. `startup` replaces the "--session-id
   // not honoured" heuristic with a fact, `resume` is a proven no-op (same id),
   // and `clear` is the case this exists for. Filtering happens server-side.
   cfg.hooks = cfg.hooks || {};
-  cfg.hooks.SessionStart = [...entries, { hooks: [{ type: 'command', command: hookCmd, timeout: 5 }] }];
+  if (!present) cfg.hooks.SessionStart = [...entries, { hooks: [{ type: 'command', command: hookCmd, timeout: 5 }] }];
+  // Notification is deliberately later than PermissionRequest: it fires only
+  // after the actual permission/elicitation UI has remained unanswered for
+  // about six seconds, and cannot be intercepted by another decision hook.
+  if (!inputPresent) cfg.hooks.Notification = [...notifications, {
+    matcher: 'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|agent_completed',
+    hooks: [{ type: 'command', command: inputRequiredCmd, timeout: 5 }],
+  }];
+  // These events prove the associated interaction has moved on. They only
+  // remove a marker carrying this pane launch's nonce; hook output stays empty.
+  for (const event of clearEvents) {
+    const eventEntries = Array.isArray(cfg.hooks[event]) ? cfg.hooks[event] : [];
+    const clearPresent = eventEntries.some((m) => (m?.hooks || [])
+      .some((h) => String(h?.command || '').includes('am-input-required-hook.sh')));
+    if (!clearPresent) cfg.hooks[event] = [...eventEntries, {
+      hooks: [{ type: 'command', command: inputRequiredCmd, timeout: 5 }],
+    }];
+  }
   try {
     const tmp = `${file}.am-tmp`;
     fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + '\n');
     fs.renameSync(tmp, file);
-    console.warn(`[claude] repin hook installed in ${file}`);
+    console.warn(`[claude] lifecycle hooks installed in ${file}`);
     return true;
   } catch (e) { console.warn(`[claude] repin hook install failed: ${e.message}`); return false; }
 }
@@ -1726,7 +1764,7 @@ export function commandFor(session) {
   // pane instead of respawning. Unpinned sessions fall through to the generic
   // `resume --last` below (correct while the agent has its folder to itself).
   if (cli.id === 'codex' && session.codexSessionId && session.codexRollout) {
-    return `if [ -f '${session.codexRollout}' ]; then exec codex resume ${session.codexSessionId}; else exec codex; fi`;
+    return `if [ -f '${session.codexRollout}' ]; then exec ${cli.resume(session.codexSessionId)}; else exec ${cli.run}; fi`;
   }
 
   // opencode (seen on 1.17.13): at startup it creates a DIRECTORY named
@@ -1876,6 +1914,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     screenChangedAt: Date.now(),
     bells: 0,
   };
+  host.inputRequired = createInputRequiredTracker({ id: session.id, runId, cli: session.cli });
   host.historyCheckpoint = createTerminalHistoryCheckpoint({
     directory: HISTORY_DIR,
     id: host.id,
@@ -1900,6 +1939,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     host.lastOutputAt = Date.now();
     host.outputSeq++;
     host.terminalModes.feed(chunk);
+    host.inputRequired.observeOutput(chunk);
     if (host.traceHistoryTimer) {
       clearTimeout(host.traceHistoryTimer);
       host.traceHistoryTimer = null;
@@ -1947,6 +1987,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     consumeBreadcrumb(session, host, workdir, true)
       .catch((e) => console.warn(`[${session.cli}] ${session.id}: final breadcrumb read failed (${e && e.message})`));
     hosts.delete(session.id);
+    host.inputRequired.close();
     stopping.delete(session.id);
     if (host.gridTimer) { clearTimeout(host.gridTimer); host.gridTimer = null; }
     if (host.traceHistoryTimer) { clearTimeout(host.traceHistoryTimer); host.traceHistoryTimer = null; }
@@ -2007,8 +2048,9 @@ export function attach(session, cols, rows) {
     onExit: (cb) => { sub.onExit = () => { try { cb(); } catch {} }; },
     onGrid: (cb) => { sub.onGrid = (c, r, controller, viewers, reset) => { try { cb(c, r, controller, viewers, reset); } catch {} }; },
     // Input and terminal-query responses are accepted from one emulator only.
-    write: (d) => {
+    write: (d, { terminalReply = false } = {}) => {
       if (host.controller !== sub) return;
+      if (!terminalReply) host.inputRequired.observeInput();
       try { host.pty.write(d); } catch {}
     },
     // Every viewer remembers what it can display, but only the current
@@ -2053,6 +2095,12 @@ export function attach(session, cols, rows) {
 export async function sendInput(id, text, { confirmEcho = false } = {}) {
   const host = hosts.get(id);
   if (!host || stopping.has(id)) throw new Error('session is not running');
+  if (host.inputRequired.get()) {
+    const error = new Error('session needs input in its terminal — a normal prompt was not sent into the open dialog');
+    error.statusCode = 409;
+    throw error;
+  }
+  host.inputRequired.observeInput();
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
   // the inner newlines as soft line breaks instead of submitting early.
   const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
@@ -2102,8 +2150,14 @@ export async function sendInput(id, text, { confirmEcho = false } = {}) {
 export function pasteInput(id, text) {
   const host = hosts.get(id);
   if (!host || stopping.has(id)) throw new Error('session is not running');
+  if (host.inputRequired.get()) {
+    const error = new Error('session needs input in its terminal — text was not pasted into the open dialog');
+    error.statusCode = 409;
+    throw error;
+  }
   const value = String(text || '');
   if (!value) return;
+  host.inputRequired.observeInput();
   const payload = value.includes('\n') ? `\x1b[200~${value}\x1b[201~` : value;
   host.pty.write(payload);
 }

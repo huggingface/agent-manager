@@ -422,6 +422,7 @@ body {
 .ovt-prompt.none::before { color: var(--border-strong); }
 .ovt-state { font-size: 10.5px; color: var(--muted); }
 .ovt-state.running { color: var(--accent); }
+.ovt-state.input { color: var(--accent); font-weight: 650; }
 .ovt-state.running::before {
   content: '⠋'; display: inline-flex; align-items: center;
   width: var(--mark-w); height: var(--mark-h);

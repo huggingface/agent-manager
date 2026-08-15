@@ -29,6 +29,8 @@ import { fmtTok, splitExchanges } from './exchanges';
 import ExchangeView, { PendingExchange } from './Exchange';
 import Attachments from '../Attachments';
 import Composer from './Composer';
+import InputRequiredNotice from './InputRequiredNotice';
+import { writePaneMode } from '../../lib/paneMode';
 
 const NEAR_TOP_PX = 300;   // start fetching older turns before the reader arrives
 
@@ -554,7 +556,10 @@ export default function ConversationView({
         </div>
       </div>
 
-      {!readOnly && (
+      {!readOnly && session.inputRequired && (
+        <InputRequiredNotice input={session.inputRequired} onOpenTerminal={() => writePaneMode('terminal')} />
+      )}
+      {!readOnly && !session.inputRequired && (
         <Composer
           className="cxv-live"
           containerClassName="cxv-composer"

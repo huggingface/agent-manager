@@ -1,0 +1,47 @@
+{
+  "general": {
+    "enableNotifications": true,
+    "notificationMethod": "osc9"
+  },
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "ToolPermission",
+        "hooks": [
+          {
+            "name": "agent-manager-input-required",
+            "type": "command",
+            "command": "/app/scripts/am-input-required-hook.sh",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "agent-manager-input-resolved",
+            "type": "command",
+            "command": "/app/scripts/am-input-required-hook.sh",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "agent-manager-input-session-end",
+            "type": "command",
+            "command": "/app/scripts/am-input-required-hook.sh",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}

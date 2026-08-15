@@ -14,6 +14,7 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'oc-resume-'));
 const XDG = path.join(TMP, 'xdg');
 const DATA = path.join(TMP, 'data');
 const REPIN = path.join(TMP, 'repin');
+const INPUT_REQUIRED = path.join(TMP, 'input-required');
 fs.mkdirSync(path.join(XDG, 'opencode'), { recursive: true });
 fs.mkdirSync(DATA, { recursive: true });
 
@@ -21,6 +22,7 @@ process.env.XDG_DATA_HOME = XDG;
 process.env.XDG_CONFIG_HOME = path.join(TMP, 'config');
 process.env.DATA_DIR = DATA;
 process.env.AM_REPIN_DIR = REPIN;
+process.env.AM_INPUT_REQUIRED_DIR = INPUT_REQUIRED;
 process.env.AM_ID = 'pane-1';
 process.env.AM_RUN_ID = '11111111-2222-4333-8444-555555555555';
 process.env.AM_CLI = 'opencode';
@@ -89,6 +91,37 @@ check('subagent create ignored', fs.existsSync(path.join(REPIN, 'pane-1.opencode
 await hooks['chat.message']({ sessionID: LIVE });
 crumb = JSON.parse(fs.readFileSync(path.join(REPIN, 'pane-1.opencode.json'), 'utf8'));
 check('message hook follows selected existing session', crumb.payload.session_id, LIVE);
+
+console.log('\nthe plugin tracks exact pending permissions and questions');
+const attentionFile = path.join(INPUT_REQUIRED, 'pane-1.json');
+await hooks.event({ event: { type: 'question.asked', properties: {
+  id: 'que_1', sessionID: LIVE, questions: [], tool: { messageID: 'msg_1', callID: 'call_1' },
+} } });
+let attention = JSON.parse(fs.readFileSync(attentionFile, 'utf8'));
+check('question asked writes a question marker', attention.kind, 'question');
+check('attention marker is tied to this launch', attention.runId, process.env.AM_RUN_ID);
+await hooks.event({ event: { type: 'permission.asked', properties: {
+  id: 'per_1', sessionID: LIVE, permission: 'bash', patterns: ['*'],
+} } });
+await hooks.event({ event: { type: 'question.replied', properties: {
+  sessionID: LIVE, requestID: 'que_1', answers: [],
+} } });
+attention = JSON.parse(fs.readFileSync(attentionFile, 'utf8'));
+check('resolving one queued item leaves the next one', attention.requestId, 'per_1');
+await hooks.event({ event: { type: 'permission.replied', properties: {
+  sessionID: LIVE, requestID: 'per_1', reply: 'once',
+} } });
+check('last paired reply removes the marker', fs.existsSync(attentionFile), false);
+
+await hooks.event({ event: { type: 'question.asked', properties: {
+  id: 'que_2', sessionID: LIVE, questions: [], tool: { messageID: 'msg_2', callID: 'call_2' },
+} } });
+await hooks.event({ event: { type: 'message.part.updated', properties: { part: {
+  id: 'part_2', type: 'tool', tool: 'question', messageID: 'msg_2', callID: 'call_2',
+  state: { status: 'completed' },
+} } } });
+check('completed Question tool clears a missing reply event', fs.existsSync(attentionFile), false);
+
 const shellOutput = { env: { KEEP: 'yes' } };
 await hooks['shell.env']({}, shellOutput);
 check('shell keeps unrelated environment', shellOutput.env.KEEP, 'yes');
