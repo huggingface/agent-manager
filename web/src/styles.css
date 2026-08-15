@@ -652,7 +652,11 @@ body {
    already reachable with a long enough agent name; putting the group in front
    of the name made it reachable at ordinary ones. With the floor the title is
    capped at what is actually free and ellipsises instead. */
-.pane-head { container-type: inline-size; display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr); align-items: center; gap: 9px; padding: 7px 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
+/* The vertical padding is a variable because .ph-back cancels it to reach the
+   header's full height without adding any (below). A bleed that restated the
+   number would drift the first time this padding changed — the same way a
+   hardcoded 14px against an 8px gutter gave the phone a sideways scroll. */
+.pane-head { --ph-pad-y: 7px; container-type: inline-size; display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr); align-items: center; gap: 9px; padding: var(--ph-pad-y) 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
 .pane-head .ph-left { grid-column: 1; justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
 .pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 5px; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; cursor: text; }
 /* `[Group] name` is one title in two parts, and the group is the only part that
@@ -671,6 +675,12 @@ body {
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }
+/* The way back on a phone, left of the agent's logo. It stretches to the
+   header's own height — cancelling that height's padding rather than adding any
+   — because a taller header would hand straight back the row that dropping the
+   bar above it won (see .mbar). */
+.pane-head .ph-back { align-self: stretch; margin: calc(-1 * var(--ph-pad-y)) 1px calc(-1 * var(--ph-pad-y)) -5px; padding: 0 8px; }
+.pane-head .ph-back svg { width: 15px; height: 15px; }
 @container (max-width: 520px) {
   .pane-head .ph-path { display: none; }
 }
@@ -1240,6 +1250,11 @@ a.btn-ghost { text-decoration: none; }
     width: 1px !important;
     height: 1px !important;
   }
+  /* Reading mode is the switch you reach for most on a phone, and it sat adrift
+     in the middle of the bar: the spacer that pushes the zoom keys right on a
+     wide window was pushing this too. Order it ahead of the spacer instead, so
+     it takes the left edge and zoom keeps the right. */
+  .zoombar .modebar { order: -1; }
   .app.m-home .main { display: none; }
   .app.m-home .sidebar { width: 100%; border-right: none; }
   .app.m-stage .sidebar { display: none; }
