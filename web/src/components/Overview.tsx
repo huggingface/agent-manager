@@ -15,7 +15,7 @@ import type { PendingAttachment } from '../lib/attachments';
 import Attachments from './Attachments';
 import Logo from './Logo';
 import Composer from './conversation/Composer';
-import ExchangeView from './conversation/Exchange';
+import ExchangeView, { PendingExchange } from './conversation/Exchange';
 import { useDraft } from './conversation/useDraft';
 import { writePaneMode } from '../lib/paneMode';
 import { splitExchanges } from './conversation/exchanges';
@@ -324,12 +324,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
             </div>
             {/* Optimistic echo: the digest round-trip can take seconds, and a
                 frozen card reads as "did that get lost?". */}
-            {justSent && sent && (
-              <>
-                <div className="cx-prompt">{sent.text}</div>
-                <div className="cx-running mono">working</div>
-              </>
-            )}
+            {justSent && sent && <PendingExchange text={sent.text} />}
           </>
         ) : (
           /* No transcript to read yet (never started, or a harness with no

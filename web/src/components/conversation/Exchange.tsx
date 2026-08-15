@@ -233,4 +233,23 @@ export function ExchangeView({
   );
 }
 
+/**
+ * The prompt you just sent, before the transcript has caught up.
+ *
+ * It is laid out as an exchange — a `.cx` section, exactly like the turn it
+ * becomes a second later — and not as a loose band. Written out by hand at both
+ * call sites it was neither: `.cx-prompt`'s `margin-left: -1.23em` exists to
+ * cancel `.cx`'s matching padding, and with no `.cx` around it there was
+ * nothing to cancel, so the newest prompt in a conversation hung 16px left of
+ * every prompt above it — in the reader and in the card alike.
+ */
+export function PendingExchange({ text }: { text: string }) {
+  return (
+    <section className="cx">
+      <div className="cx-prompt">{text}</div>
+      <div className="cx-running mono">working</div>
+    </section>
+  );
+}
+
 export default ExchangeView;
