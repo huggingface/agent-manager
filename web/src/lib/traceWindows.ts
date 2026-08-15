@@ -312,6 +312,49 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
     return () => window.clearInterval(h);
   }, [loadNewer, lastTs, seekable, paused, hidden, live]);
 
+  // Coming back from another app has to show what happened while away, and none
+  // of the loop above survives the trip. The interval is cleared while hidden,
+  // and the effect that would restore it schedules NOTHING when the host says
+  // the session stopped and the trace has been quiet — so a reader left on a
+  // finished session shows the turns from before the operator switched away,
+  // for as long as they keep looking at it. Even when a poll is scheduled, an
+  // interval's first tick is one whole interval late.
+  //
+  // A frozen request makes it worse. iOS Safari suspends a backgrounded tab, so
+  // a window request that was in flight when the operator left may never settle
+  // — and `loading` is released only in that request's `finally`, so every later
+  // read returns early against a latch nothing will ever release. That is a
+  // reader which stays stale even once polling resumes.
+  //
+  // So a return reads immediately: abandon whatever was outstanding (bumping the
+  // generation, which is what makes its response and its `finally` no longer
+  // ours), release the latch, and ask for the turns written while away.
+  useEffect(() => {
+    const resync = () => {
+      if (document.hidden || cb.current.paused) return;
+      const outstanding = windowAbort.current;
+      if (outstanding) {
+        gen.current += 1;
+        windowAbort.current = null;
+        outstanding.abort();
+      }
+      loading.current = false;
+      void (cursor.current ? loadNewer() : loadTail());
+    };
+    const onVisible = () => { if (!document.hidden) resync(); };
+    // Restoring a page from the back/forward cache fires no visibilitychange:
+    // the tab was never hidden, the whole page was frozen and thawed. Safari
+    // leans on this hard — a swipe back, or an app switch that outlived the
+    // renderer, comes back this way.
+    const onShow = (e: PageTransitionEvent) => { if (e.persisted) resync(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', onShow);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pageshow', onShow);
+    };
+  }, [loadNewer, loadTail]);
+
   const atStart = !!cursor.current?.atStart;
   const blocked = !!cursor.current?.blocked;
   // MEMOIZED, and it has to be: a host that lifts this into its own state — the
