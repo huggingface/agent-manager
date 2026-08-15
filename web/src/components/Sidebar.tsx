@@ -6,8 +6,8 @@ import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
 import Attachments from './Attachments';
 import {
-  attachmentFileError, filesFromTransfer, pendingAttachmentsFromFiles, revokePendingAttachments,
-  transferMayContainFile, uploadPendingAttachments,
+  attachmentFileError, discardPendingAttachment, discardPendingAttachments, filesFromTransfer,
+  pendingAttachmentsFromFiles, revokePendingAttachments, transferMayContainFile, uploadPendingAttachments,
 } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
 import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph, HandoverGlyph, ListGlyph, EyeGlyph, EyeOffGlyph } from './icons';
@@ -38,6 +38,7 @@ export default function Sidebar({
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
   onStopSession, onSetRemotePaused, onDeleteSession, onShareSession, onShareTrace, onTraceHandover, onOpenTrace, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
   onPrepareQuickStart,
+  onAbandonQuickStart,
   archived, showArchived, onToggleArchived,
   overviewHidden, onToggleOverviewHidden,
 }: {
@@ -68,6 +69,7 @@ export default function Sidebar({
   onToggleTheme: () => void;
   onQuickStart: (cli: string, prompt: string, name?: string, path?: string, attachmentOptions?: QuickStartAttachmentOptions) => Promise<void>;
   onPrepareQuickStart: (cli: string, name?: string, path?: string) => Promise<Session>;
+  onAbandonQuickStart: (id: string) => Promise<void>;
   archived: Set<string>;
   showArchived: boolean;
   onToggleArchived: () => void;
@@ -121,7 +123,6 @@ export default function Sidebar({
   const quickFilesBlocked = quickImages.some((image) => !image.attachment);
 
   useEffect(() => { quickImagesRef.current = quickImages; }, [quickImages]);
-  useEffect(() => () => revokePendingAttachments(quickImagesRef.current), []);
 
   const rememberQuickSession = (id: string | null) => {
     quickSessionIdRef.current = id;
@@ -135,6 +136,27 @@ export default function Sidebar({
       return next;
     });
   };
+  const abandonQuickTarget = (
+    sessionId: string | null,
+    preparing: Promise<Session> | null,
+    attachments: PendingAttachment[],
+  ) => {
+    discardPendingAttachments(sessionId || '', attachments);
+    const discard = sessionId
+      ? onAbandonQuickStart(sessionId)
+      : preparing?.then((created) => onAbandonQuickStart(created.id));
+    // App owns the visible cleanup error because this panel is intentionally
+    // already gone. The server-side condition makes this safe if the operator
+    // opened the target while its upload was still pending.
+    void discard?.catch(() => {});
+  };
+  useEffect(() => () => {
+    abandonQuickTarget(
+      quickSessionIdRef.current,
+      quickPrepareRef.current,
+      quickImagesRef.current,
+    );
+  }, []);
   const prepareQuickTarget = async (generation: number) => {
     if (quickSessionIdRef.current) return quickSessionIdRef.current;
     if (!quickCli || isRemote(quickCli)) throw new Error('Choose a local agent before attaching files.');
@@ -188,7 +210,7 @@ export default function Sidebar({
     if (quickSending) return;
     setQuickImages((current) => {
       const removed = current.find((image) => image.key === key);
-      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      if (removed) discardPendingAttachment(quickSessionIdRef.current || '', removed);
       const next = current.filter((image) => image.key !== key);
       quickImagesRef.current = next;
       return next;
@@ -203,9 +225,13 @@ export default function Sidebar({
   // A retry may reuse uploaded ids only while it still targets the same
   // server-created session. Changing its identity starts a fresh target.
   const resetQuickTarget = () => {
+    const sessionId = quickSessionIdRef.current;
+    const preparing = quickPrepareRef.current;
+    const attachments = quickImagesRef.current;
     quickGenerationRef.current += 1;
     quickPrepareRef.current = null;
     rememberQuickSession(null);
+    abandonQuickTarget(sessionId, preparing, attachments);
     setQuickImages((current) => {
       const next = current.map((image) => image.attachment
         ? { ...image, attachment: undefined, status: 'pending' as const, error: undefined }
@@ -219,10 +245,14 @@ export default function Sidebar({
   // Archived sessions vanish from the tree unless the legend checkbox is on.
   const isHidden = (id: string) => !showArchived && archived.has(id);
   const bump = (id: string, d: number) => setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
-  const closePanel = () => {
+  const finishPanel = (keepQuickTarget: boolean) => {
     if (panel === 'quick') {
+      const sessionId = quickSessionIdRef.current;
+      const preparing = quickPrepareRef.current;
+      const attachments = quickImagesRef.current;
       quickGenerationRef.current += 1;
-      revokePendingAttachments(quickImagesRef.current);
+      if (keepQuickTarget) revokePendingAttachments(attachments);
+      else abandonQuickTarget(sessionId, preparing, attachments);
       quickImagesRef.current = [];
       setQuickImages([]);
       quickPrepareRef.current = null;
@@ -232,6 +262,8 @@ export default function Sidebar({
     }
     setPanel('none'); setCreateTarget(null);
   };
+  const closePanel = () => finishPanel(false);
+  const completePanel = () => finishPanel(true);
   const openCreate = (target: string | null = null) => {
     setCreateTarget(target);
     setPanel('create');
@@ -283,7 +315,7 @@ export default function Sidebar({
       setQuickSending(true);
       try {
         await onQuickStart(quickCli, p, quickName.trim(), '.');
-        setQuickPrompt(''); setQuickName(''); closePanel();
+        setQuickPrompt(''); setQuickName(''); completePanel();
       } catch (error) {
         setQuickError(error instanceof Error ? error.message : 'could not create the remote agent');
       } finally { setQuickSending(false); }
@@ -303,7 +335,7 @@ export default function Sidebar({
       );
       setQuickPrompt('');
       setQuickName('');
-      closePanel();
+      completePanel();
     } catch (error) {
       setQuickError(error instanceof Error ? error.message : 'could not quickstart the agent');
     } finally { setQuickSending(false); }
@@ -573,7 +605,7 @@ export default function Sidebar({
                 className={`quick-cli quick-grp${quickMode === 'group' ? ' on' : ''}`}
                 title="New group"
                 disabled={quickSending || quickImages.length > 0}
-                onClick={() => setQuickMode('group')}
+                onClick={() => { resetQuickTarget(); setQuickMode('group'); }}
               >
                 <span className="grp-mini">
                   <Logo cli="claude" size={8} />
@@ -589,9 +621,7 @@ export default function Sidebar({
                   disabled={quickSending || quickImages.length > 0}
                   style={quickMode === 'agent' && quickCli === 'remote' ? { borderColor: remoteCli.color } : undefined}
                   onClick={() => {
-                    setQuickMode('agent'); setQuickCli('remote'); quickGenerationRef.current += 1;
-                    quickPrepareRef.current = null; rememberQuickSession(null);
-                    revokePendingAttachments(quickImagesRef.current); quickImagesRef.current = []; setQuickImages([]); setQuickError(null);
+                    resetQuickTarget(); setQuickMode('agent'); setQuickCli('remote'); setQuickError(null);
                   }}
                 ><Logo cli="remote" size={14} /></button>
               )}

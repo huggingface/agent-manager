@@ -9,7 +9,8 @@ import { rankSessions, sortLabel } from '../lib/overviewSort';
 import { hiddenSessionIds } from '../lib/overviewHidden';
 import type { Rankable } from '../lib/overviewSort';
 import {
-  defaultAttachmentPrompt, pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
+  defaultAttachmentPrompt, discardPendingAttachment, discardPendingAttachments,
+  pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
 } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
 import Attachments from './Attachments';
@@ -162,7 +163,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   const allowAttachments = !isRemote(s.cli);
 
   useEffect(() => { imagesRef.current = images; }, [images]);
-  useEffect(() => () => revokePendingAttachments(imagesRef.current), []);
+  useEffect(() => () => discardPendingAttachments(s.id, imagesRef.current), [s.id]);
 
   const addImages = (files: File[]) => {
     if (!allowAttachments || sending || !files.length) return;
@@ -179,7 +180,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
     if (sending) return;
     setImages((current) => {
       const removed = current.find((image) => image.key === key);
-      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      if (removed) discardPendingAttachment(s.id, removed);
       const next = current.filter((image) => image.key !== key);
       imagesRef.current = next;
       return next;

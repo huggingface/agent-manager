@@ -194,7 +194,9 @@ try {
   await page.locator('.pane-head .image-file-input').setInputFiles({
     name: 'disconnect.png', mimeType: 'image/png', buffer: png,
   });
-  const retryStatus = page.locator('.term-image-status.has-action');
+  const retryStatus = page.locator('.term-image-status.has-action').filter({
+    has: page.getByRole('button', { name: 'retry' }),
+  });
   await retryStatus.waitFor({ state: 'visible' });
   const failedText = await retryStatus.textContent();
   check('a stopped terminal reports saved-but-not-inserted, never success',
@@ -206,7 +208,7 @@ try {
 
   await page.locator('.term-exit .tx-btn').click();
   await waitFor(() => page.locator('.pane-head .ph-image').isEnabled(), 20_000);
-  const retry = retryStatus.locator('button');
+  const retry = retryStatus.getByRole('button', { name: 'retry' });
   await retry.click();
   await page.locator('.term-image-status.success').waitFor({ state: 'visible' });
   const successText = await page.locator('.term-image-status.success').textContent();
@@ -230,7 +232,7 @@ try {
   await watcher.goto(API, { waitUntil: 'domcontentloaded' });
   await watcher.locator('.sidebar .row[title^="screenshot-e2e"]').first().click();
   await watcher.locator('.pane-head .ph-image').waitFor({ state: 'visible' });
-  await waitFor(() => watcher.locator('.pane-head .ph-image').isDisabled());
+  await waitFor(async () => (await watcher.locator('.pane-head .ph-image').getAttribute('title'))?.includes('take control'));
   const watcherPickerDisabled = await watcher.locator('.pane-head .ph-image').isDisabled();
   const watcherPickerTitle = await watcher.locator('.pane-head .ph-image').getAttribute('title');
   check('a shared-terminal watcher cannot inject into the controller composer',
@@ -275,6 +277,38 @@ try {
       && await page.locator('.pane-reader .image-pick').count() === 0
       && await page.locator('.pane-reader .image-file-input').count() === 1);
 
+  // Keep the request outside the server until the operator cancels it. The
+  // composer must become usable immediately; it cannot be held hostage by a
+  // slow transfer that the operator no longer wants to send.
+  let releaseCanceledUpload;
+  let sawCanceledUpload;
+  const canceledUploadReached = new Promise((resolve) => { sawCanceledUpload = resolve; });
+  const canceledUploadHold = new Promise((resolve) => { releaseCanceledUpload = resolve; });
+  await page.route(`**/api/sessions/${id}/attachments`, async (route) => {
+    sawCanceledUpload();
+    await canceledUploadHold;
+    await route.continue().catch(() => {});
+  }, { times: 1 });
+  await readerPicker.setInputFiles({
+    name: 'cancel-me.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(512 * 1024),
+  });
+  await Promise.race([
+    canceledUploadReached,
+    sleep(10_000).then(() => { throw new Error('cancel fixture upload did not start'); }),
+  ]);
+  const canceledChip = page.locator('.pane-reader .image-chip', { hasText: 'cancel-me.bin' });
+  const cancelUpload = canceledChip.getByRole('button', { name: 'Cancel upload cancel-me.bin' });
+  await cancelUpload.waitFor({ state: 'visible' });
+  const cancelWasEnabled = await cancelUpload.isEnabled();
+  await cancelUpload.click();
+  releaseCanceledUpload();
+  await canceledChip.waitFor({ state: 'detached' });
+  const readerReply = page.locator('.pane-reader .ov-live textarea');
+  await readerReply.fill('send without the canceled upload');
+  check('an in-flight upload can be canceled and no longer blocks Send',
+    cancelWasEnabled && await page.locator('.pane-reader .ov-send').isVisible());
+  await readerReply.fill('');
+
   // The failure that motivated immediate uploads: once the HTTP connection is
   // cut, fetch used to surface only "Failed to fetch" after Send. The XHR
   // transport must classify it at attachment time and keep a retry beside it.
@@ -291,7 +325,13 @@ try {
     JSON.stringify({ interruptedText }));
   await interruptedChip.locator('.image-chip-retry').click();
   await interruptedChip.filter({ has: page.locator('.image-chip-meta', { hasText: 'uploaded' }) }).waitFor();
+  const attachmentDir = path.join(DATA_DIR, 'state', 'attachments', id);
+  const interruptedStored = await waitFor(() => fs.readdirSync(attachmentDir)
+    .some((name) => name.endsWith('-interrupted.bin')));
   await interruptedChip.getByRole('button', { name: 'Remove interrupted.bin' }).click();
+  const interruptedRemoved = await waitFor(() => !fs.existsSync(attachmentDir)
+    || !fs.readdirSync(attachmentDir).some((name) => name.endsWith('-interrupted.bin')));
+  check('removing a successful unsent chip deletes its stored file', interruptedStored && interruptedRemoved);
 
   // Hugging Face's ingress may answer before Express with an HTML error page.
   // Preserve the status as a useful diagnosis instead of reducing it to "413".
@@ -370,7 +410,7 @@ try {
   await page.locator('.sidebar .ov-row').click();
   await page.locator('.ovt-tile').filter({
     has: page.locator('.ovt-name', { hasText: /^screenshot-e2e$/ }),
-  }).last().click();
+  }).click();
   const overviewPicker = page.locator('.ovw-win .image-file-input');
   await overviewPicker.waitFor({ state: 'attached' });
   await overviewPicker.setInputFiles({ name: 'overview.png', mimeType: 'image/png', buffer: png });
@@ -461,13 +501,68 @@ try {
   check('quick creation uploads before launch and shows progress while pending',
     uploadCount === 2
       && await quickChips.nth(1).locator('.image-chip-progress').isVisible()
-      && await quickChips.nth(1).getByRole('button', { name: 'Remove requirements.docx' }).isDisabled());
+      && await quickChips.nth(1).getByRole('button', { name: 'Cancel upload requirements.docx' }).isEnabled());
   releaseSecond();
   await quickChips.nth(1).filter({ has: page.locator('.image-chip-meta', { hasText: 'uploaded' }) }).waitFor();
   const uploadsBeforeLaunch = uploadCount;
   await page.locator('.quick-prompt').press('Enter');
   await page.locator('.controls').waitFor({ state: 'hidden', timeout: 30_000 });
   check('launch reuses already-uploaded attachment ids', uploadCount === uploadsBeforeLaunch);
+
+  // Reproduce the blocking review case from a truly fresh browser: before the
+  // fix, the attachment-created target became tree.order[0], its pane mounted,
+  // and Escape left that running target (and its file) behind after reload.
+  await page.close();
+  const existing = await (await fetch(`${API}/api/sessions`)).json();
+  for (const session of existing) {
+    await fetch(`${API}/api/sessions/${session.id}`, { method: 'DELETE' });
+  }
+  const freshContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const fresh = await freshContext.newPage();
+  await fresh.goto(API, { waitUntil: 'domcontentloaded' });
+  await fresh.locator('.bolt-btn').click();
+  await fresh.locator('.quick-cli[title="Repaint fixture"]').click();
+  await fresh.locator('.quick-prompt').evaluate((element, bytes) => {
+    const raw = atob(bytes);
+    const data = Uint8Array.from(raw, (character) => character.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([data], 'abandon.png', { type: 'image/png' }));
+    element.dispatchEvent(new ClipboardEvent('paste', {
+      bubbles: true, cancelable: true, clipboardData: transfer,
+    }));
+  }, png.toString('base64'));
+  const abandonChip = fresh.locator('.quick .image-chip', { hasText: 'abandon.png' });
+  await abandonChip.filter({ has: fresh.locator('.image-chip-meta', { hasText: 'uploaded' }) }).waitFor();
+  const stagedSessions = await (await fetch(`${API}/api/sessions`)).json();
+  check('fresh-visit attachment creates only a stopped target and keeps Overview selected',
+    stagedSessions.length === 1
+      && stagedSessions[0].everStarted === false
+      && stagedSessions[0].running === false
+      && await fresh.locator('.sidebar .ov-row').getAttribute('class').then((value) => value?.includes('active'))
+      && await fresh.locator('.tile-terminal').count() === 0,
+    JSON.stringify(stagedSessions.map((session) => ({ id: session.id, running: session.running, everStarted: session.everStarted }))));
+  await fresh.locator('.quick-prompt').press('Escape');
+  const abandonedRemoved = await waitFor(async () => (await (await fetch(`${API}/api/sessions`)).json()).length === 0);
+  await fresh.reload({ waitUntil: 'domcontentloaded' });
+  const afterReload = await (await fetch(`${API}/api/sessions`)).json();
+  check('Escape discards the unlaunched target and its upload across reload',
+    abandonedRemoved && afterReload.length === 0);
+
+  const retained = await apiJson('/api/sessions', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cli: 'test-repaint', name: 'retain-started', path: '.' }),
+  });
+  await apiJson(`/api/sessions/${retained.body.id}/input`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: 'start it' }),
+  });
+  const conditionalDelete = await apiJson(`/api/sessions/${retained.body.id}?ifNeverStarted=1`, { method: 'DELETE' });
+  const afterConditionalDelete = await (await fetch(`${API}/api/sessions`)).json();
+  check('conditional cleanup cannot delete a target that has started',
+    conditionalDelete.response.status === 409
+      && afterConditionalDelete.some((session) => session.id === retained.body.id));
+  await fetch(`${API}/api/sessions/${retained.body.id}`, { method: 'DELETE' });
+  await freshContext.close();
 } finally {
   try { await browser?.close(); } catch {}
   backend.kill('SIGKILL');

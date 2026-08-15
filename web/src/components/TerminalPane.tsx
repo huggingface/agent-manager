@@ -228,6 +228,7 @@ export default function TerminalPane({
   const uploadImagesRef = useRef<(files: File[]) => void>(() => {});
   const imagePickerRef = useRef<HTMLInputElement>(null);
   const imageUploadBusyRef = useRef(false);
+  const imageUploadAbortRef = useRef<AbortController | null>(null);
   const imageStatusTimerRef = useRef<number | null>(null);
   // Reachable from the mode switch: a flick can still be coasting through the
   // terminal's scrollback when the reader covers it.
@@ -261,6 +262,7 @@ export default function TerminalPane({
   const [imageDrop, setImageDrop] = useState(false);
   const [imageStatus, setImageStatus] = useState<{ kind: 'uploading' | 'success' | 'error'; text: string } | null>(null);
   const [imageUploadBusy, setImageUploadBusy] = useState(false);
+  const [imageUploadCancelable, setImageUploadCancelable] = useState(false);
   // The reader's search bar is hidden until asked for; the header owns the
   // switch because the icon that reveals it lives there.
   const [searchOpen, setSearchOpen] = useState(false);
@@ -355,6 +357,14 @@ export default function TerminalPane({
     }
   };
 
+  const discardTerminalInsert = () => {
+    const discarded = pendingInsert;
+    setPendingInsert([]);
+    void Promise.all(discarded.map((attachment) =>
+      api.deleteAttachment(session.id, attachment.id).catch(() => undefined)));
+    showImageStatus({ kind: 'success', text: `${discarded.length === 1 ? 'File' : 'Files'} removed` }, 2500);
+  };
+
   uploadImagesRef.current = (files: File[]) => {
     if (!supportsAttachments) return;
     if (conn !== 'connected') {
@@ -381,22 +391,39 @@ export default function TerminalPane({
     if (invalid) { showImageStatus({ kind: 'error', text: invalid }, 4000); return; }
     imageUploadBusyRef.current = true;
     setImageUploadBusy(true);
+    const uploadController = new AbortController();
+    imageUploadAbortRef.current = uploadController;
+    setImageUploadCancelable(true);
     void (async () => {
       const attachments: Attachment[] = [];
       try {
         for (let index = 0; index < images.length; index += 1) {
           const fileLabel = `file${images.length > 1 ? ` ${index + 1}/${images.length}` : ''}`;
           showImageStatus({ kind: 'uploading', text: `uploading ${fileLabel} · 0%` });
-          const attachment = await api.uploadAttachment(session.id, images[index], ({ loaded, total }) => {
-            const progress = total ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
-            showImageStatus({ kind: 'uploading', text: `uploading ${fileLabel} · ${progress}%` });
+          const attachment = await api.uploadAttachment(session.id, images[index], {
+            signal: uploadController.signal,
+            onProgress: ({ loaded, total }) => {
+              const progress = total ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+              showImageStatus({ kind: 'uploading', text: `uploading ${fileLabel} · ${progress}%` });
+            },
           });
+          if (uploadController.signal.aborted) {
+            await api.deleteAttachment(session.id, attachment.id).catch(() => undefined);
+            throw new Error('Upload was canceled before it completed.');
+          }
           attachments.push(attachment);
         }
+        imageUploadAbortRef.current = null;
+        setImageUploadCancelable(false);
         showImageStatus({ kind: 'uploading', text: `inserting file${images.length === 1 ? '' : 's'}…` });
         await insertTerminalAttachments(attachments);
       } catch (error) {
-        if (attachments.length) {
+        if (uploadController.signal.aborted) {
+          await Promise.all(attachments.map((attachment) =>
+            api.deleteAttachment(session.id, attachment.id).catch(() => undefined)));
+          setPendingInsert([]);
+          showImageStatus({ kind: 'success', text: 'Upload canceled' }, 2500);
+        } else if (attachments.length) {
           const reason = error instanceof Error ? error.message : 'upload failed';
           setPendingInsert(attachments);
           showImageStatus({
@@ -407,11 +434,15 @@ export default function TerminalPane({
           showImageStatus({ kind: 'error', text: error instanceof Error ? error.message : 'file upload failed' }, 5000);
         }
       } finally {
+        if (imageUploadAbortRef.current === uploadController) imageUploadAbortRef.current = null;
         imageUploadBusyRef.current = false;
         setImageUploadBusy(false);
+        setImageUploadCancelable(false);
       }
     })();
   };
+
+  useEffect(() => () => imageUploadAbortRef.current?.abort(), []);
 
   // Phones have no Ctrl+V, so the key-bar needs an explicit paste. Two paths,
   // because the direct read is unavailable exactly where this app usually runs:
@@ -1030,7 +1061,11 @@ export default function TerminalPane({
     // The glide too: a flick left coasting under the reader keeps moving a
     // viewport nobody can see, and no touch can catch it — the handler that
     // would stop it now stands down in this mode.
-    if (reading) { termRef.current?.blur(); stopGlideRef.current(); }
+    if (reading) {
+      termRef.current?.blur();
+      stopGlideRef.current();
+      imageUploadAbortRef.current?.abort();
+    }
     else if (focused) termRef.current?.focus();
   }, [reading, focused]);
 
@@ -1199,13 +1234,19 @@ export default function TerminalPane({
       </div>
       {imageStatus && !reading && (
         <div
-          className={`term-image-status ${imageStatus.kind}${pendingInsert.length ? ' has-action' : ''} mono`}
+          className={`term-image-status ${imageStatus.kind}${pendingInsert.length || imageUploadCancelable ? ' has-action' : ''} mono`}
           role={imageStatus.kind === 'error' ? 'alert' : 'status'}
           aria-live={imageStatus.kind === 'error' ? 'assertive' : 'polite'}
         >
           <span>{imageStatus.text}</span>
+          {imageUploadCancelable && (
+            <button type="button" onClick={() => imageUploadAbortRef.current?.abort()}>cancel</button>
+          )}
           {pendingInsert.length > 0 && (
-            <button type="button" onClick={retryTerminalInsert} disabled={imageUploadBusy || conn !== 'connected' || !hasInputControl}>retry</button>
+            <>
+              <button type="button" onClick={retryTerminalInsert} disabled={imageUploadBusy || conn !== 'connected' || !hasInputControl}>retry</button>
+              <button type="button" onClick={discardTerminalInsert} disabled={imageUploadBusy}>remove</button>
+            </>
           )}
         </div>
       )}

@@ -9,7 +9,7 @@ process.env.DATA_DIR = root;
 
 const {
   ATTACHMENT_LIMIT, SESSION_ATTACHMENT_LIMIT, detectImageMime, formatAttachmentDelivery,
-  formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeSessionAttachments,
+  formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeAttachment, removeSessionAttachments,
   resolveAttachment, resolveAttachments,
 } = await import('../src/attachments.js');
 const { cliById } = await import('../src/config.js');
@@ -87,6 +87,10 @@ try {
     'application/x-custom-format', 'model.blend');
   assert.equal(opaque.kind, 'file');
   assert.equal(opaque.mime, 'application/octet-stream');
+  const discarded = await receive(Buffer.from('discard me'), 'discard-123abc',
+    'application/octet-stream', 'discard.bin');
+  await removeAttachment('discard-123abc', discarded.id);
+  assert.throws(() => resolveAttachment('discard-123abc', discarded.id), /not found/);
   await assert.rejects(
     receive(png.subarray(0, 24), 'codex-123abc', 'image/png', 'broken.png'),
     (error) => error.statusCode === 415 && /malformed/.test(error.message),

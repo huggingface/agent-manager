@@ -37,7 +37,8 @@ import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revo
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
 import {
-  formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeSessionAttachments,
+  formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeAttachment,
+  removeSessionAttachments,
   resolveAttachment, resolveAttachments,
 } from './attachments.js';
 import * as runstate from './runstate.js';
@@ -457,6 +458,17 @@ app.post('/api/sessions/:id/attachments/insert', async (req, res) => {
     return res.json({ ok: true, mode });
   } catch (e) {
     return res.status(e.statusCode || 409).json({ error: String(e.message || e) });
+  }
+});
+
+app.delete('/api/sessions/:id/attachments/:attachmentId', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  try {
+    await removeAttachment(s.id, req.params.attachmentId);
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({ error: String(e.message || e) });
   }
 });
 
@@ -2415,6 +2427,9 @@ app.put('/api/trace/:id/source', (req, res) => {
 app.delete('/api/sessions/:id', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
+  if (req.query.ifNeverStarted === '1' && s.everStarted) {
+    return res.status(409).json({ error: 'session has already started' });
+  }
   stop(s.id);
   // Close the agent's poll and drop the in-memory log, so a pane later created
   // with the same name reads the folder fresh instead of inheriting a ghost.

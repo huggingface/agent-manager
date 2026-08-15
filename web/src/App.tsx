@@ -502,7 +502,7 @@ export default function App() {
     const ok = activeRef && (activeRef === 'overview'
       || (activeRef.startsWith('g:') ? groupById[activeRef.slice(2)] : sessById[activeRef.slice(2)]));
     if (!ok) {
-      setActiveRef(tree.order[0] ?? null);
+      setActiveRef('overview');
       // The remembered agent is gone (deleted, or a different Space). Land on
       // the list rather than full-screening whichever agent happens to be first.
       setMobileStage(false);
@@ -632,6 +632,22 @@ export default function App() {
     rememberPath(created.path);
     await refresh();
     return created;
+  };
+  const abandonQuickStart = async (id: string) => {
+    try {
+      await api.discardUnstartedSession(id);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      // A target the operator deliberately opened is no longer placeholder
+      // state. The conditional DELETE makes that decision atomically server-side.
+      if (detail.includes('session has already started') || detail === 'not found') return;
+      console.error('Couldn’t discard the unstarted agent', error);
+      setToast(`Couldn’t discard the unstarted agent: ${detail}`);
+      window.setTimeout(() => setToast(null), 5000);
+      throw error;
+    } finally {
+      await refresh();
+    }
   };
   const quickStart = async (cli: string, prompt: string, name = '', path = '.', attachmentOptions?: QuickStartAttachmentOptions) => {
     try {
@@ -1070,6 +1086,7 @@ export default function App() {
         onToggleTheme={toggleTheme}
         onQuickStart={quickStart}
         onPrepareQuickStart={prepareQuickStart}
+        onAbandonQuickStart={abandonQuickStart}
         archived={archivedIds}
         showArchived={showArchived}
         onToggleArchived={() => setShowArchived((v) => !v)}

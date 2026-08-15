@@ -20,7 +20,8 @@ import { useTraceWindows, type TraceHeadInfo, type TraceSource } from '../../lib
 import type { Session } from '../../types';
 import { isRemote } from '../../types';
 import {
-  defaultAttachmentPrompt, pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
+  defaultAttachmentPrompt, discardPendingAttachment, discardPendingAttachments,
+  pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
 } from '../../lib/attachments';
 import type { PendingAttachment } from '../../lib/attachments';
 import { recallReading, rememberReading } from './readingPosition';
@@ -97,7 +98,7 @@ export default function ConversationView({
   const allowAttachments = !isRemote(session.cli);
 
   useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
-  useEffect(() => () => revokePendingAttachments(attachmentsRef.current), []);
+  useEffect(() => () => discardPendingAttachments(session.id, attachmentsRef.current), [session.id]);
 
   const addAttachments = (files: File[]) => {
     if (!allowAttachments || sending || !files.length) return;
@@ -114,7 +115,7 @@ export default function ConversationView({
     if (sending) return;
     setAttachments((current) => {
       const removed = current.find((attachment) => attachment.key === key);
-      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      if (removed) discardPendingAttachment(session.id, removed);
       const next = current.filter((attachment) => attachment.key !== key);
       attachmentsRef.current = next;
       return next;

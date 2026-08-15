@@ -127,6 +127,9 @@ same paste/drop behavior:
 - A failed upload leaves the draft and pending files intact, names the exact
   server/connection failure next to the affected chip, and offers retry when
   retrying the same bytes can help.
+- The chip's × remains available during transfer. It aborts an in-flight upload;
+  removing a server-confirmed but unsent chip also deletes that stored file and
+  immediately lets the remaining text/files send.
 
 Pending files remain browser `File` objects for retry even after the server has
 stored them. `URL.createObjectURL()` supplies local previews and is revoked when
@@ -159,6 +162,10 @@ short transaction:
    reference into the CLI composer.
 4. Return focus to xterm. The operator can keep typing and presses Enter when
    ready.
+
+The upload status includes a Cancel action while bytes are transferring. A
+saved-but-not-inserted file offers both Retry and Remove, so an insertion failure
+does not trap the terminal attachment affordance.
 
 An upload must never auto-submit the agent's prompt. Inserting the attachment and
 submitting are separate actions, matching native TUI image paste behavior.
@@ -244,6 +251,13 @@ session's own directory, and never join an arbitrary browser-supplied filename.
   upload.
 - Quick creation first allocates a stopped session because attachment ids are
   session-scoped, then immediately uploads into it without launching the CLI.
+- Closing quick creation aborts its transfers and conditionally deletes that
+  placeholder session. The server refuses the conditional delete once the
+  session has ever started, so a target the operator deliberately opened is
+  retained. An invalid/restored selection falls back to Overview rather than to
+  the new placeholder, preventing its terminal pane from mounting implicitly.
+- Removing a successful unsent chip, or unmounting its composer, deletes the
+  stored file. A successful send deliberately keeps it for the session.
 - Successful attachments remain while the session exists, including while it
   is stopped.
 - Deleting a session removes its managed attachment directory. It does not
@@ -344,6 +358,17 @@ Attachments may contain sensitive material, so use `Cache-Control: no-store` in
 the first version. If bucket reads become measurable, a short private cache can
 be evaluated later without making year-long browser retention the default.
 
+### 7.3 Remove unsent state
+
+```http
+DELETE /api/sessions/:id/attachments/:attachmentId
+DELETE /api/sessions/:id?ifNeverStarted=1
+```
+
+The first route removes one canceled/unsent stored file. The second is the quick
+creation cleanup guard: it returns `409` rather than deleting a session whose
+`everStarted` flag is true. Ordinary session deletion remains unchanged.
+
 ### 7.3 Send a structured prompt
 
 Extend the existing route without breaking text-only callers:
@@ -437,7 +462,8 @@ scope—so `deliver()` must preserve that property:
 
 Only resumed or already-started sessions use the existing boot-then-type path.
 If attachment upload fails after session creation, keep the stopped session and
-the browser draft. Automatically deleting it would make recovery surprising.
+the browser draft while the dialog remains open so Retry can reuse it. Closing
+the dialog abandons that work and conditionally deletes the never-started target.
 
 ### 8.4 Terminal insertion
 
@@ -576,6 +602,7 @@ Markdown logs, and needlessly injects binary material into traces.
 | clipboard contains no file | ordinary text paste continues, or no-op | no |
 | file larger than limit | chip says `too large (100 MB max)` | no |
 | interrupted/offline connection | chip or terminal overlay names the connection failure and offers retry | no |
+| operator cancels an upload | abort transfer, remove its chip, and unblock the remaining draft | no |
 | non-JSON proxy rejection | chip classifies the HTTP status (including proxy `413`) | no |
 | one of several uploads fails | successful files remain, all chips stay for retry | no |
 | attachment id missing at send | `attachment no longer exists`; retain draft | no |
@@ -615,6 +642,8 @@ A retry reuses already uploaded ids and transfers only failed files.
   chip.
 - Plain-text paste is unchanged.
 - Removing a chip revokes its preview and excludes it from upload.
+- Canceling a held upload removes its chip and immediately re-enables sending;
+  removing an uploaded unsent chip deletes the server file.
 - Upload starts when a file is attached, before `/input` or launch.
 - Progress exposes transferred bytes/percentage and waits for server confirmation
   at 100%.
@@ -634,6 +663,9 @@ A retry reuses already uploaded ids and transfers only failed files.
 - The mobile fallback textarea handles both file and text paste.
 - Clipboard API denial reaches the fallback sheet.
 - Upload failure preserves the draft and shows the server's reason.
+- On a fresh visit, quick attachment creation stays stopped on Overview; Escape
+  removes the placeholder across reload, while conditional cleanup retains a
+  target that has actually started.
 
 `server/terminal-ui.test.mjs` already supplies a Chromium/xterm harness and
 clipboard permissions; extend it for the live-terminal cases. Add a focused

@@ -90,7 +90,12 @@ export default function Attachments({ attachments, disabled, disabledReason, sho
             {retryable && (
               <button type="button" className="image-chip-retry" onClick={() => onRetry(attachment.key)} disabled={disabled} aria-label={`Retry ${attachment.file.name || 'file'}`}>retry</button>
             )}
-            <button type="button" onClick={() => onRemove(attachment.key)} disabled={disabled || attachment.status === 'uploading'} aria-label={`Remove ${attachment.file.name || 'file'}`}>×</button>
+            <button
+              type="button"
+              onClick={() => onRemove(attachment.key)}
+              disabled={disabled}
+              aria-label={`${attachment.status === 'uploading' ? 'Cancel upload' : 'Remove'} ${attachment.file.name || 'file'}`}
+            >×</button>
           </div>
         );
       })}
