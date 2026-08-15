@@ -21,7 +21,7 @@ await build({
     contents: `
       import React, { useEffect } from 'react';
       import { createRoot } from 'react-dom/client';
-      import { useTraceWindows } from './src/lib/traceWindows.ts';
+      import { tracePollIntervalMs, useTraceWindows } from './src/lib/traceWindows.ts';
       import { useReaderBatch } from './src/lib/readerBatch.ts';
 
       const calls = [];
@@ -32,6 +32,8 @@ await build({
       // along with the tab, which is what iOS Safari does to a backgrounded one.
       let pending = [];
       let freeze = false;
+      const indexCalls = [];
+      let indexText = 'streaming first';
       const page = (turns, end = 20, lastTs = Date.now()) => ({
         harness: 'claude', harnessLabel: 'Claude Code', sessionId: 's',
         title: '', model: null, cwd: null, firstTs: 0, lastTs,
@@ -64,6 +66,21 @@ await build({
         },
       };
 
+      const indexSource = {
+        window(req) {
+          indexCalls.push(req);
+          const from = req.at === 'after' ? req.cursor : 0;
+          const turns = from < 1
+            ? [{ role: 'assistant', ts: 2, blocks: [{ type: 'text', text: indexText }] }]
+            : [];
+          return Promise.resolve({
+            ...page([]), turns,
+            window: { mode: 'index', start: from, end: 1, atStart: from === 0, atEnd: true },
+          });
+        },
+        summary() { return Promise.resolve({ ...page([]), total: 1, userTurns: [] }); },
+      };
+
       function Probe({ paused }) {
         const { head, loadNewer } = useTraceWindows(source, 'session-a', { paused, live: false });
         useEffect(() => { window.__traceHead = head; }, [head]);
@@ -78,12 +95,25 @@ await build({
         return <div id="follower">{readyFor === batch ? 'ready' : 'gated'}</div>;
       }
 
+      function IndexProbe() {
+        const { turns, version } = useTraceWindows(indexSource, 'index-session', { live: true });
+        const text = turns.current[0]?.blocks[0]?.text || '';
+        return <div id="index-reader" data-version={version}>{text}</div>;
+      }
+
       const root = createRoot(document.getElementById('root'));
       let paused = true;
       let surfaceKey = '';
-      const render = () => root.render(<><Probe paused={paused} /><BatchProbe surfaceKey={surfaceKey} /></>);
+      const render = () => root.render(<><Probe paused={paused} /><BatchProbe surfaceKey={surfaceKey} /><IndexProbe /></>);
       window.__traceHarness = {
         calls,
+        indexCalls,
+        setIndexText(next) { indexText = next; },
+        pollIntervals: {
+          staleWaiting: tracePollIntervalMs(1, false, 300_000),
+          staleWorking: tracePollIntervalMs(1, true, 300_000),
+          freshWaiting: tracePollIntervalMs(299_000, false, 300_000),
+        },
         setPaused(next) { paused = next; render(); },
         setSurface(next) { surfaceKey = next; render(); },
         /** Turns the agent writes while the operator is looking at another app. */
@@ -135,6 +165,19 @@ try {
   await sleep(100);
   assert.deepEqual(await page.evaluate(() => window.__traceHarness.calls), [],
     'a paused reader performs no initial or summary request');
+  assert.deepEqual(await page.evaluate(() => window.__traceHarness.pollIntervals), {
+    staleWaiting: 10_000,
+    staleWorking: 3_000,
+    freshWaiting: 3_000,
+  }, 'a visible waiting reader keeps a slow catch-up heartbeat');
+
+  // OpenCode updates the current SQLite message in place. Its index cursor must
+  // overlap that final message, and index-backed readers must actually poll.
+  await page.waitForFunction(() => document.getElementById('index-reader').textContent === 'streaming first');
+  await page.evaluate(() => window.__traceHarness.setIndexText('streaming second'));
+  await page.waitForFunction(() => document.getElementById('index-reader').textContent === 'streaming second', null, { timeout: 4500 });
+  assert.ok(await page.evaluate(() => window.__traceHarness.indexCalls.some((c) => c.at === 'after' && c.cursor === 0)),
+    'an index poll re-reads the mutable final message');
 
   // This is the same activation hook App uses to gate follower panes. Merely
   // focusing within one surface keeps it ready; hiding and returning to the
