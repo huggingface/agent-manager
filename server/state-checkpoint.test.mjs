@@ -191,6 +191,47 @@ try {
   check('SQLite snapshot restores without stale WAL state',
     sql(path.join(env.OPENCODE_LIVE, 'opencode.db'), 'SELECT body FROM message ORDER BY id;') === openRowsBeforeCorruption
       && !fs.existsSync(path.join(env.OPENCODE_LIVE, 'opencode.db-wal')));
+  // rsync exit 24 = "partial transfer due to vanished source files". A restore
+  // walks the bucket for minutes while a harness prunes its transcript scratch,
+  // so the listing names files that are gone by the time they are read. This
+  // once aborted the boot outright. Exit code handling is pinned with a stub so
+  // the check does not depend on winning a race against a real transfer; a
+  // fresh DATA_DIR keeps the strict single-file SQLite copies out of the way.
+  const vanishRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'am-agent-state-24-'));
+  const stubDir = path.join(vanishRoot, 'bin');
+  const stubRsync = (code) => {
+    fs.mkdirSync(stubDir, { recursive: true });
+    fs.writeFileSync(path.join(stubDir, 'rsync'), [
+      '#!/bin/sh',
+      'echo \'file has vanished: "tool-results/toolu_01.txt"\' >&2',
+      `echo 'rsync warning: vanished/error stub (code ${code})' >&2`,
+      `exit ${code}`,
+    ].join('\n'));
+    fs.chmodSync(path.join(stubDir, 'rsync'), 0o755);
+  };
+  const restoreStatus = (code) => {
+    stubRsync(code);
+    const stubEnv = { ...env, PATH: `${stubDir}:${env.PATH}` };
+    for (const [key, value] of Object.entries(stubEnv)) {
+      if (typeof value === 'string' && value.startsWith(root)) {
+        stubEnv[key] = value.replace(root, vanishRoot);
+      }
+    }
+    try {
+      execFileSync('sh', [script, 'restore'], { env: stubEnv, encoding: 'utf8', stdio: 'pipe' });
+      return { status: 0, local: stubEnv.AM_LOCAL };
+    } catch (error) {
+      return { status: error.status ?? 1, local: stubEnv.AM_LOCAL };
+    }
+  };
+
+  const vanished = restoreStatus(24);
+  check('restore survives rsync vanished-source warning (exit 24)', vanished.status === 0);
+  check('a tolerated exit 24 still takes the restore success path',
+    fs.existsSync(path.join(vanished.local, 'agent-state-stamps/claude')));
+  check('restore still fails on a genuine rsync error (exit 23)',
+    restoreStatus(23).status === 1);
+  fs.rmSync(vanishRoot, { recursive: true, force: true });
 } catch (error) {
   check('no unexpected exception', false, error?.stack || String(error));
 } finally {

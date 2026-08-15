@@ -53,6 +53,21 @@ mark_checkpoint_floor() {
   touch -d '2 seconds ago' "$1" 2>/dev/null || touch "$1"
 }
 
+# rsync exit 24 is "partial transfer due to vanished source files": between
+# building its file list and reading them, something deleted files the listing
+# still named. Both tree copies are exposed to it — a restore walks the bucket
+# for minutes while a harness prunes transcript scratch, and a checkpoint copies
+# a live tree the harnesses are still writing. What vanishes is the scratch
+# itself, so nothing durable is lost and the copy is otherwise complete.
+# Treating it as a failure once refused to boot the Space at all.
+# Single-file copies below keep the strict test: there, a vanished source is
+# exactly the file we were asked for.
+rsync_tree() {
+  rsync "$@"; _rs_rc=$?
+  [ "$_rs_rc" -eq 24 ] && _rs_rc=0
+  return "$_rs_rc"
+}
+
 restore_tree() {
   key="$1" durable="$2" live="$3"; shift 3
   mkdir -p "$durable" "$live"
@@ -63,7 +78,7 @@ restore_tree() {
   # --update matters for hot/dev restarts: local disk survives those and can be
   # newer than the last completed bucket checkpoint. A fresh container starts
   # with an empty destination, so the same command performs a full restore.
-  if rsync -a --update "$@" "$durable/" "$live/"; then
+  if rsync_tree -a --update "$@" "$durable/" "$live/"; then
     mkdir -p "$stamp_dir"
     if [ ! -e "$stamp" ]; then
       if [ "$had_local" = true ]; then
@@ -102,7 +117,7 @@ checkpoint_tree() {
     # the remote tree every 15 seconds — a critical property on the bucket
     # mount. Destination temporaries close before rename, retaining the prior
     # object if this process dies during transfer.
-    if ! rsync -a -r --from0 --files-from="$list" --delay-updates \
+    if ! rsync_tree -a -r --from0 --files-from="$list" --delay-updates \
       "$@" "$live/" "$durable/"; then
       rm -f "$next" "$list"
       return 1
