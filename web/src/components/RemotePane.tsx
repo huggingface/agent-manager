@@ -5,7 +5,7 @@ import * as api from '../api';
 import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
-import { CloseGlyph, StopGlyph, PlayGlyph, ShareGlyph, AckGlyph } from './icons';
+import { BackGlyph, CloseGlyph, StopGlyph, PlayGlyph, ShareGlyph, AckGlyph } from './icons';
 
 // Looks like the terminal, is not one: no PTY, no xterm.js, no WebSocket. The
 // agent's real TUI is running on its own machine — what crosses the wire is
@@ -25,13 +25,14 @@ const fmtAgo = (ts?: number | null) => {
 };
 
 export default function RemotePane({
-  session, focused, zoom = 100, dragId, groupName, onDragActive, onFocus, onClose, onRename,
+  session, focused, zoom = 100, dragId, groupName, onBack, onDragActive, onFocus, onClose, onRename,
 }: {
   session: Session;
   groupName?: string | null; // the group this pane belongs to, if any
   focused?: boolean;
   zoom?: number;
   dragId?: string;
+  onBack?: () => void;       // mobile: leave the pane for the list (see .ph-back)
   onDragActive?: (dragging: boolean) => void;
   onFocus?: () => void;
   onClose: () => void;
@@ -207,6 +208,20 @@ export default function RemotePane({
         onDragEnd={dragId ? () => onDragActive?.(false) : undefined}
       >
         <div className="ph-left">
+          {onBack && (
+            // See TerminalPane: on a phone the way back rides in the header
+            // rather than costing the pane a bar of its own.
+            <button
+              className="mini-btn ph-back"
+              title="Back to list"
+              aria-label="Back to list"
+              draggable={false}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); onBack(); }}
+            >
+              <BackGlyph />
+            </button>
+          )}
           <Logo cli="remote" size={16} tint="#5ec2e0" />
           <span className={`status ${state}`} title={stateLabel} />
         </div>

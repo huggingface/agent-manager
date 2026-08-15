@@ -12,7 +12,7 @@ import ConversationView from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
-import { CloseGlyph, RefreshGlyph } from './icons';
+import { BackGlyph, CloseGlyph, RefreshGlyph } from './icons';
 import * as api from '../api';
 import type { Attachment } from '../api';
 import {
@@ -189,7 +189,7 @@ if (typeof window !== 'undefined') {
 
 export default function TerminalPane({
   session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', readerEnabled,
-  readerReadyKey, onReaderReady, dragId, isMobile, groupName, onDragActive, onFocus, onRename, onClose,
+  readerReadyKey, onReaderReady, dragId, isMobile, groupName, onBack, onDragActive, onFocus, onRename, onClose,
 }: {
   session: Session;
   cli?: Cli;
@@ -205,6 +205,7 @@ export default function TerminalPane({
   onReaderReady?: () => void;
   dragId?: string;          // set when the pane can be rearranged (group view)
   isMobile?: boolean;       // show the on-screen control-key bar
+  onBack?: () => void;      // mobile: leave the pane for the list (see .ph-back)
   onDragActive?: (dragging: boolean) => void;
   onFocus?: () => void;
   onRename?: (name: string) => void;
@@ -1021,6 +1022,20 @@ export default function TerminalPane({
         onMouseDown={(e) => { if (!dragId) e.preventDefault(); onFocus?.(); focusTerm(); }}
       >
         <div className="ph-left">
+          {onBack && (
+            // Sits in the header rather than in a bar of its own above it: a
+            // phone pays for that bar in the one dimension the terminal needs.
+            <button
+              className="mini-btn ph-back"
+              title="Back to list"
+              aria-label="Back to list"
+              draggable={false}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); onBack(); }}
+            >
+              <BackGlyph />
+            </button>
+          )}
           <Logo cli={session.cli} size={16} tint={tint} />
           <span className={`status ${session.state}`} title={`${STATE_LABEL[session.state]} · ${conn}`} />
         </div>

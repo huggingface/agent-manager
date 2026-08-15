@@ -19,6 +19,7 @@ import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tr
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { hiddenSessionIds } from './lib/overviewHidden';
 import { useReaderBatch } from './lib/readerBatch';
+import { paneOwnsBack } from './lib/mobileBack';
 import { isPassive, isRemote } from './types';
 import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
 import { uploadPendingAttachments } from './lib/attachments';
@@ -516,6 +517,13 @@ export default function App() {
     [activeGroup, sessById],
   );
 
+  // A staged agent carries its own way back, in its header left of the logo, and
+  // the bar above it goes away with the row it cost. See mobileBack.ts for which
+  // surfaces still need the bar and why.
+  const ownsBack = paneOwnsBack({
+    isMobile, staged: mobileStage, inGroup: !!activeGroup, cli: activeSingle?.cli,
+  });
+
   // Tile grid for the active group: the chosen layout, or auto (fit the count).
   // On mobile it's always a single pane — the chip strip switches between them.
   const grid: GridSpec = activeGroup && !isMobile ? (activeGroup.layout ?? autoGrid(groupSessions.length)) : { cols: 1, rows: 1 };
@@ -903,6 +911,7 @@ export default function App() {
                 active={shown && deckVisible && s.id === focusedId}
                 dragId={shown && canDrag ? `p:${s.id}` : undefined}
                 isMobile={isMobile}
+                onBack={ownsBack ? () => setMobileStage(false) : undefined}
                 onDragActive={setPaneDrag}
                 onFocus={() => setFocusedId(s.id)}
                 onRename={(name) => renameSession(s.id, name)}
@@ -935,6 +944,7 @@ export default function App() {
                 groupName={groupNameOf[s.id]}
                 focused={visibleSessions.length > 1 && s.id === focusedId}
                 dragId={canDrag ? `p:${s.id}` : undefined}
+                onBack={ownsBack ? () => setMobileStage(false) : undefined}
                 onDragActive={setPaneDrag}
                 onFocus={() => setFocusedId(s.id)}
                 onRename={(name) => renameSession(s.id, name)}
@@ -1063,7 +1073,7 @@ export default function App() {
       />
 
       <div className="main">
-        {isMobile && mobileStage && (
+        {isMobile && mobileStage && !ownsBack && (
           <div className="mbar">
             <button className="icon-btn mback" onClick={() => setMobileStage(false)} title="Back to list">‹</button>
             {activeGroup ? (
