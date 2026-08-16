@@ -12,6 +12,14 @@ export interface Exchange {
   steps: TraceTurn[];
   /** Everything the agent said after its last action — usually one turn. */
   answer: TraceTurn[];
+  /**
+   * Where the answer sits among the steps, when it is NOT last: the index in
+   * `steps` the answer was lifted from. An agent that answered and then went
+   * back to work leaves its reply in the middle of the turn, and a reader that
+   * prints it under the tools that ran after it is telling the story in the
+   * wrong order. Undefined — the usual case — means the answer is simply last.
+   */
+  answerAt?: number;
   startTs: number;
   endTs: number;
   tokens: number;
@@ -80,11 +88,15 @@ export function splitExchanges(turns: TraceTurn[]): Exchange[] {
       continue;
     }
     // Nothing at the end: an agent that answered and then went back to work
-    // (a resumed task) still answered. Its last `final` stands, where it is.
+    // (a resumed task) still answered. Its last `final` stands — and `answerAt`
+    // remembers WHERE, because it is not the last thing that happened. The
+    // steps that follow it are the work it did afterwards, and they belong
+    // below it, not above.
     for (let i = x.steps.length - 1; i >= 0; i--) {
       if (x.steps[i].kind === 'final' && saidSomething(x.steps[i])) {
         x.answer = [x.steps[i]];
         x.steps.splice(i, 1);
+        x.answerAt = i;
         break;
       }
     }

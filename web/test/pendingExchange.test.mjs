@@ -9,7 +9,10 @@
 // was live in both the reader and the Overview card, and nothing failed.
 //
 // So this pins the nesting, not the pixels: the echo is a `.cx` section with the
-// band inside it, the same shape ExchangeView gives a real turn. Same style as
+// band inside it, the same shape ExchangeView gives a real turn. The rest of the
+// file pins the other two things about an exchange that are order, not style:
+// where the answer sits among the steps, and that the turn column does not step
+// sideways when the count gains a digit. Same style as
 // exchanges.test.mjs — esbuild is already here for vite, so the component is
 // transpiled and rendered with react-dom/server. Run with:
 //   node test/pendingExchange.test.mjs
@@ -27,10 +30,22 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.join(HERE, '../node_modules/.test-build');
 fs.mkdirSync(outDir, { recursive: true });
 const out = path.join(outDir, 'exchange.mjs');
+// Markdown is stubbed, not rendered: sanitising wants a DOM, and what these
+// checks are about is which order the blocks come out in, not what marked does
+// with a paragraph. Everything else is the real component.
+const stubMarkdown = {
+  name: 'stub-markdown',
+  setup(b) {
+    b.onResolve({ filter: /lib\/markdown$/ }, () => ({ path: 'markdown-stub', namespace: 'stub' }));
+    b.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({
+      contents: 'export const renderMarkdown = (md) => `<p>${md}</p>`;', loader: 'js',
+    }));
+  },
+};
 await build({
   entryPoints: [path.join(HERE, '../src/components/conversation/Exchange.tsx')],
   outfile: out, format: 'esm', bundle: true, jsx: 'automatic', logLevel: 'error',
-  external: ['react', 'react-dom', 'react/jsx-runtime'],
+  external: ['react', 'react-dom', 'react/jsx-runtime'], plugins: [stubMarkdown],
 });
 const { PendingExchange, ExchangeView } = await import(pathToFileURL(out).href);
 
@@ -73,6 +88,47 @@ check('with its prompt band in the same place',
   () => assert.match(real, /^<section class="cx">\s*<div class="cx-prompt">/));
 check('so the echo and the turn share one left edge',
   () => assert.equal(html.slice(0, html.indexOf('cx-prompt')), real.slice(0, real.indexOf('cx-prompt'))));
+
+console.log('\nand an answer that was not last renders where it was said');
+// The agent answered and then kept working: `answerAt` puts the reply between
+// the work it followed and the work it promised, instead of under both.
+const midTurn = {
+  key: 'x2', at: 2, startTs: 1_700_000_000_000, endTs: 1_700_000_090_000, tokens: 0, toolCalls: 2,
+  prompt: { role: 'user', ts: 1_700_000_000_000, blocks: [{ type: 'text', text: 'fix the nightly job' }] },
+  steps: [
+    { role: 'assistant', ts: 1_700_000_010_000, blocks: [{ type: 'tool_use', name: 'Bash', text: '{"command":"explain analyze"}' }] },
+    { role: 'assistant', ts: 1_700_000_050_000, blocks: [{ type: 'tool_use', name: 'Edit', text: '{"file_path":"014.sql"}' }] },
+  ],
+  answer: [{ role: 'assistant', ts: 1_700_000_030_000, kind: 'final', blocks: [{ type: 'text', text: 'Found it — adding the index now.' }] }],
+  answerAt: 1,
+};
+const mid = render(ExchangeView, { x: midTurn, n: 2, total: 2, open: true });
+check('the work it followed is above the answer',
+  () => assert.ok(mid.indexOf('explain analyze') < mid.indexOf('Found it'), 'Bash should precede the answer'));
+check('the work it promised is below the answer',
+  () => assert.ok(mid.indexOf('Found it') < mid.indexOf('014.sql'), 'the Edit should follow the answer'));
+check('so the steps render as two runs, not one',
+  () => assert.equal((mid.match(/class="cx-steps"/g) || []).length, 2));
+check('an answer that IS last still renders one run of steps', () => {
+  const plain = render(ExchangeView, { x: { ...midTurn, answerAt: undefined, answer: midTurn.answer }, n: 2, total: 2, open: true });
+  assert.equal((plain.match(/class="cx-steps"/g) || []).length, 1);
+});
+
+console.log('\nand the turn column holds still as the count gains a digit');
+const turnCell = (n, total) => {
+  const html = render(ExchangeView, { x: { ...midTurn, answerAt: undefined }, n, total });
+  return (html.match(/class="cx-n">([^<]*)</) || [])[1];
+};
+check('a single digit is padded to the width of the total', () => {
+  const nine = turnCell(9, 10);
+  assert.ok(nine.includes('\u2007'), `expected a figure space in ${JSON.stringify(nine)}`);
+  assert.equal(nine.replace(/\u2007/g, '').trim(), 'turn 9/10');
+});
+check('and the padded cell is exactly as wide as the widest one', () => {
+  assert.equal(turnCell(9, 10).length, turnCell(10, 10).length);
+});
+check('a session that never reaches ten pads nothing',
+  () => assert.equal(turnCell(3, 9), 'turn 3/9'));
 
 console.log('\nand the CSS pair the nesting exists for is still a pair');
 const css = fs.readFileSync(path.join(HERE, '../src/conversation.css'), 'utf8');

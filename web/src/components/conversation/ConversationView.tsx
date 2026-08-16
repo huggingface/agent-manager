@@ -497,7 +497,13 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
                 total={exchanges.length}
                 q={q || undefined}
                 baseModel={head.model || undefined}
-                running={live && x === exchanges[exchanges.length - 1]}
+                // One working line in the reader, and it is the last thing on
+                // the page. While an echo is pending it owns that spot — the
+                // agent is one process working on one thing, and two `working`
+                // lines stacked (the live turn's and the echo's) is what read
+                // as the widget being "sometimes below and above". The card has
+                // had this guard since it grew an echo; the reader had not.
+                running={live && x === exchanges[exchanges.length - 1] && !sent}
               />
             </div>
           ))}
