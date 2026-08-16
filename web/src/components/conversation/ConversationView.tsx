@@ -491,12 +491,18 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
                   harness's directory, outside the workspace, so the Files pane
                   cannot open it — this is the only way to hold the bytes. */}
               <div className="cxv-info-actions">
+                {/* "Download" rather than "Download trace": the pair has to
+                    read as one size, and the panel is already about this
+                    conversation. The longer phrase is on the aria-label, which
+                    costs a screen reader nothing and adds no hover dependency —
+                    there is still not one `title` inside this panel. */}
                 <a
                   className="btn-ghost"
                   href={api.traceDownloadUrl(session.id)}
                   download
+                  aria-label="Download this conversation's transcript"
                   onClick={() => setInfoOpen(false)}
-                ><DownloadGlyph /> Download trace</a>
+                ><DownloadGlyph /> Download</a>
                 {onShare && (
                   <button
                     type="button"
