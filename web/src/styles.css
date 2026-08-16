@@ -800,6 +800,8 @@ body {
    the right — the corner that used to be blank. */
 .files-info { flex: none; container-type: inline-size; display: flex; align-items: center; gap: 10px; padding: 4px 11px; background: var(--panel-2); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; }
 .files-info .spacer { flex: 1; }
+.file-wrap-toggle { flex: none; }
+.files-info .file-wrap-toggle button { height: 20px; padding: 0 8px; font-size: 10.5px; line-height: 1; }
 .fi-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); font-size: 10.5px; color: var(--text); }
 .fi-stat { flex: none; font-variant-numeric: tabular-nums; }
 .fi-stat + .fi-stat::before { content: '·'; margin-right: 7px; color: var(--border-strong); }

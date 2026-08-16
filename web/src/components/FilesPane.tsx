@@ -1164,14 +1164,17 @@ export default function FilesPane({
               </button>
             )}
             {info.showWrap && edit && (
-              <button
-                className={`mini-btn${edit.wrap ? ' on' : ''}`}
-                onClick={() => edit.setWrap(!edit.wrap)}
-                title={edit.wrap ? 'Long lines are wrapped — click to let them run' : 'Wrap long lines'}
-                aria-pressed={edit.wrap}
-              >
-                Wrap
-              </button>
+              <span className="seg file-wrap-toggle mono">
+                <button
+                  type="button"
+                  className={edit.wrap ? 'on' : ''}
+                  onClick={() => edit.setWrap(!edit.wrap)}
+                  title={edit.wrap ? 'Long lines are wrapped — click to let them run' : 'Wrap long lines'}
+                  aria-pressed={edit.wrap}
+                >
+                  wrap
+                </button>
+              </span>
             )}
             {edit && !edit.can && edit.why && (
               <span className="fi-stat fi-extra" title={edit.why}>read-only</span>
