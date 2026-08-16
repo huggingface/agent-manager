@@ -2292,6 +2292,22 @@ app.get('/api/trace/bundles', async (_req, res) => {
 // Resolve the concrete local source behind a trace pane. Handover uses this to
 // seed the next agent with a path it can inspect directly, whether the pane
 // points at one of this Manager's sessions or at an imported Hub bundle.
+// Which directory a bundle ref names — the ONE place that decides. The shape
+// check alone admits `..`, and `path.join(DATA_DIR, 'traces', '..')` is
+// DATA_DIR: a pane whose ref is `..` served the first *.jsonl in the data
+// directory, as a file from /download and as a rendered conversation from
+// /api/trace/:id. These refs arrive from the browser, so resolve and require
+// the result to be a direct child of the bundle root.
+const TRACES_DIR = path.join(DATA_DIR, 'traces');
+function bundleDir(ref) {
+  const name = String(ref ?? '');
+  if (!/^[\w.-]+$/.test(name)) return null;
+  const dir = path.resolve(TRACES_DIR, name);
+  const rel = path.relative(TRACES_DIR, dir);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || rel.includes(path.sep)) return null;
+  return dir;
+}
+
 // Where the transcript behind a pane actually lives. A trace pane reads someone
 // else's file (an imported bundle) or another session's; any other session reads
 // its own. Reports "no trace" as a value rather than throwing, because an agent
@@ -2301,8 +2317,8 @@ async function traceFileOf(s) {
     ? (s.traceSource || { kind: 'session', ref: s.id })
     : { kind: 'session', ref: s.id };
   if (source.kind === 'bundle') {
-    if (!/^[\w.-]+$/.test(String(source.ref))) return { status: 400, error: 'bad bundle ref' };
-    const dir = path.join(DATA_DIR, 'traces', source.ref);
+    const dir = bundleDir(source.ref);
+    if (!dir) return { status: 400, error: 'bad bundle ref' };
     const names = (await fs.promises.readdir(dir)).filter((n) => n.endsWith('.jsonl'));
     if (!names.length) return { status: 404, error: 'bundle has no trace file', code: 'no-trace' };
     return { path: path.join(dir, names[0]), sessionId: null, source };
@@ -2360,8 +2376,9 @@ app.get('/api/trace/:id', async (req, res) => {
 
   try {
     if (source.kind === 'bundle') {
-      if (!/^[\w.-]+$/.test(String(source.ref))) return res.status(400).json({ error: 'bad bundle ref' });
-      return res.json(await readTraceBundle(path.join(DATA_DIR, 'traces', source.ref), opts));
+      const dir = bundleDir(source.ref);
+      if (!dir) return res.status(400).json({ error: 'bad bundle ref' });
+      return res.json(await readTraceBundle(dir, opts));
     }
     const target = store.get(source.ref);
     if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
@@ -2389,7 +2406,7 @@ app.put('/api/trace/:id/source', (req, res) => {
   if (!ref) return res.status(400).json({ error: 'ref required' });
   // A bundle ref becomes a path segment under DATA_DIR/traces — validate it here
   // too, so a traversal attempt never gets persisted in the session record.
-  if (kind === 'bundle' && !/^[\w.-]+$/.test(ref)) return res.status(400).json({ error: 'bad bundle ref' });
+  if (kind === 'bundle' && !bundleDir(ref)) return res.status(400).json({ error: 'bad bundle ref' });
   if (kind === 'session' && !store.get(ref)) return res.status(404).json({ error: 'no such session' });
   store.update(pane.id, { traceSource: { kind, ref } });
   res.json({ ok: true, traceSource: { kind, ref } });

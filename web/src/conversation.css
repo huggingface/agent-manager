@@ -246,8 +246,16 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
   flex: none; width: 1.6em; height: 1.6em; display: inline-flex; align-items: center; justify-content: center;
   padding: 0; border: 1px solid var(--border); border-radius: 50%; background: var(--panel);
   color: var(--muted); font: inherit; font-size: 1em; font-style: italic; font-weight: 700; line-height: 1;
-  cursor: pointer;
+  cursor: pointer; position: relative;
 }
+/* The tap target, which is not the circle. At the bar's scale the circle is
+   17px across; WCAG 2.2 SC 2.5.8 floors a target at 24 and iOS asks for 44, and
+   this one button is now the only way to five facts that used to need no tap at
+   all — on the phone the item was filed from. #75 pads `.ph-back` out and pulls
+   the padding back with a negative margin, but that button has no drawn box;
+   this one IS a circle, so padding would inflate the circle. An overlay grows
+   what the finger has to hit and leaves the ink alone. */
+.cxv-info-btn::before { content: ''; position: absolute; inset: -8px -9px; border-radius: inherit; }
 .cxv-info-btn:hover { color: var(--text); border-color: var(--border-strong); }
 .cxv-info-btn.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
 .cxv-info {

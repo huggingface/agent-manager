@@ -31,30 +31,40 @@ const check = (name, ok, detail = '') => {
 // generateEnvSkill() then fans this checkout's environment skill into every live
 // agent's skills dir, which comes from $HOME rather than DATA_DIR.
 const { SPACE_ID, AM_DISTRIBUTE_SKILLS, ...BASE_ENV } = process.env;
-const backend = spawn('node', ['src/index.js'], {
-  cwd: ROOT,
-  env: {
-    ...BASE_ENV,
-    PORT, DATA_DIR, HOME, CLAUDE_CONFIG_DIR: path.join(HOME, '.claude'),
-    AM_BASHRC: '/nonexistent', SPACE_HOST: '', AM_ALLOW_MISSING_ORIGIN: '1',
-  },
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
 let logs = '';
-backend.stdout.on('data', (d) => { logs += d; });
-backend.stderr.on('data', (d) => { logs += d; });
+let backend = null;
+const start = async () => {
+  backend = spawn('node', ['src/index.js'], {
+    cwd: ROOT,
+    env: {
+      ...BASE_ENV,
+      PORT, DATA_DIR, HOME, CLAUDE_CONFIG_DIR: path.join(HOME, '.claude'),
+      AM_BASHRC: '/nonexistent', SPACE_HOST: '', AM_ALLOW_MISSING_ORIGIN: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  backend.stdout.on('data', (d) => { logs += d; });
+  backend.stderr.on('data', (d) => { logs += d; });
+  for (let i = 0; i < 300; i += 1) {
+    if (await fetch(`${API}/api/health`).then((r) => r.ok).catch(() => false)) return;
+    await sleep(200);
+  }
+  throw new Error(`server did not start:\n${logs.slice(-2000)}`);
+};
+const stop = async () => {
+  if (!backend) return;
+  const dead = new Promise((r) => backend.on('exit', r));
+  backend.kill('SIGTERM');
+  await Promise.race([dead, sleep(4_000)]);
+  backend = null;
+};
 
 const post = (url, body) => fetch(`${API}${url}`, {
   method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
 });
 
 try {
-  let up = false;
-  for (let i = 0; i < 300 && !up; i += 1) {
-    up = await fetch(`${API}/api/health`).then((r) => r.ok).catch(() => false);
-    if (!up) await sleep(200);
-  }
-  if (!up) throw new Error(`server did not start:\n${logs.slice(-2000)}`);
+  await start();
 
   const made = await (await post('/api/sessions', { cli: 'claude', name: 'Download me', path: 'dl' })).json();
 
@@ -114,11 +124,64 @@ try {
 
   const unknown = await fetch(`${API}/api/trace/does-not-exist/download`);
   check('an unknown id is a 404, not a crash', unknown.status === 404);
+
+  // ---- a bundle ref is a directory NAME, never a path -----------------------
+  // `/^[\w.-]+$/` matches `..`, and `path.join(DATA_DIR, 'traces', '..')` is
+  // DATA_DIR: without a containment check this route serves the first *.jsonl
+  // in the data directory — the operations log, whatever lands there next — as
+  // an attachment, and `GET /api/trace/:id` renders the same file as a
+  // conversation. A canary that sorts first is what `readdir` reaches for.
+  fs.writeFileSync(path.join(DATA_DIR, 'aa-canary.jsonl'), `${JSON.stringify({
+    type: 'user', cwd: workdir, timestamp: '2026-01-01T00:00:00.000Z',
+    message: { role: 'user', content: [{ type: 'text', text: 'CANARY-NOT-A-TRACE' }] },
+  })}\n`);
+  const escapes = ['..', '.', '../..', 'a/../..'];
+  const refused = [];
+  for (const ref of escapes) {
+    const put = await fetch(`${API}/api/trace/${pane.id}/source`, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'bundle', ref }),
+    });
+    refused.push({ ref, status: put.status });
+  }
+  check('a traversing bundle ref is refused before it is stored',
+    refused.every((r) => r.status === 400), JSON.stringify(refused));
+
+  // And independently of that gate: a ref already in the store must not resolve
+  // either. Written straight into sessions.json, which is the state a Space
+  // upgraded from a build that accepted `..` would boot with.
+  await stop();
+  const store = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'sessions.json'), 'utf8'));
+  const paneRecord = store.find((entry) => entry.id === pane.id);
+  paneRecord.traceSource = { kind: 'bundle', ref: '..' };
+  // The property the whole route rests on: a NON-trace session reads its own
+  // transcript and nothing else. `traceFileOf` hard-codes `ref = s.id` for
+  // those, so a planted source must be ignored rather than followed.
+  store.find((entry) => entry.id === made.id).traceSource = { kind: 'bundle', ref: '..' };
+  fs.writeFileSync(path.join(DATA_DIR, 'sessions.json'), JSON.stringify(store, null, 2));
+  await start();
+
+  const escaped = await fetch(`${API}/api/trace/${pane.id}/download`);
+  const escapedBody = await escaped.text();
+  check('a stored traversing ref cannot be downloaded',
+    escaped.status === 400 && !escapedBody.includes('CANARY-NOT-A-TRACE'),
+    JSON.stringify({ status: escaped.status, leaked: escapedBody.includes('CANARY-NOT-A-TRACE') }));
+  const escapedWindow = await fetch(`${API}/api/trace/${pane.id}?tail=1`);
+  const escapedWindowBody = await escapedWindow.text();
+  check('nor rendered as a conversation by the reader',
+    escapedWindow.status === 400 && !escapedWindowBody.includes('CANARY-NOT-A-TRACE'),
+    JSON.stringify({ status: escapedWindow.status, leaked: escapedWindowBody.includes('CANARY-NOT-A-TRACE') }));
+
+  const own = await fetch(`${API}/api/trace/${made.id}/download`);
+  const ownBody = await own.text();
+  check('a non-trace session downloads its own transcript, whatever source is planted on it',
+    own.status === 200 && ownBody === body && !ownBody.includes('CANARY-NOT-A-TRACE'),
+    JSON.stringify({ status: own.status, bytes: ownBody.length, expected: body.length }));
 } catch (e) {
   check('no exceptions', false, String(e && e.message ? e.message : e));
   console.log(`--- server log tail ---\n${logs.slice(-1200)}`);
 } finally {
-  backend.kill('SIGTERM');
+  backend?.kill('SIGTERM');
   fs.rmSync(TMP, { recursive: true, force: true });
 }
 

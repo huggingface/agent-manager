@@ -131,7 +131,30 @@ try {
     await page.locator('.cxv-bar .cxv-search').isVisible()
       && await page.locator('.cxv-bar .cxv-nav').isVisible());
 
-  // 2. It opens by touch, and holds what the bar used to.
+  // 2. The tap target is bigger than the circle it draws. WCAG 2.2 SC 2.5.8
+  //    floors a target at 24x24, and this button is the only route to five
+  //    facts that used to need no tap at all. Measured by hit-testing rather
+  //    than by reading the CSS: an overlay counts as its own element, so this
+  //    stays honest if the technique changes.
+  const target = await page.evaluate(() => {
+    const btn = document.querySelector('.cxv-info-btn');
+    const r = btn.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const hits = (dx, dy) => {
+      const el = document.elementFromPoint(cx + dx, cy + dy);
+      return !!el && (el === btn || btn.contains(el));
+    };
+    let halfW = 0;
+    while (halfW < 40 && hits(halfW + 1, 0) && hits(-(halfW + 1), 0)) halfW += 1;
+    let halfH = 0;
+    while (halfH < 40 && hits(0, halfH + 1) && hits(0, -(halfH + 1))) halfH += 1;
+    return { w: halfW * 2, h: halfH * 2, circle: Math.round(r.width) };
+  });
+  check('the i is a 24px-plus tap target, whatever size the circle is drawn at',
+    target.w >= 24 && target.h >= 24, JSON.stringify(target));
+
+  // 3. It opens by touch, and holds what the bar used to.
   check('the info panel is shut until asked', await page.locator('.cxv-info').count() === 0);
   await page.locator('.cxv-info-btn').tap();
   await page.locator('.cxv-info').waitFor({ state: 'visible' });
@@ -154,7 +177,7 @@ try {
   check('the full timestamp is spelled out rather than hovered',
     /\d{1,2}:\d{2}/.test(startedLine), JSON.stringify({ startedLine }));
 
-  // 3. The transcript, as a file — and the URL really answers.
+  // 4. The transcript, as a file — and the URL really answers.
   const href = await page.locator('.cxv-info-actions a[download]').getAttribute('href');
   const downloaded = await fetch(`${API}${href}`);
   const downloadedText = await downloaded.text();
@@ -163,7 +186,7 @@ try {
       && downloadedText === fs.readFileSync(transcript, 'utf8'),
     JSON.stringify({ href, status: downloaded.status, bytes: downloadedText.length }));
 
-  // 4. Dismissal, both ways.
+  // 5. Dismissal, both ways.
   await page.keyboard.press('Escape');
   check('Escape closes the panel', await page.locator('.cxv-info').count() === 0);
   await page.locator('.cxv-info-btn').tap();
@@ -172,7 +195,7 @@ try {
   check('a press outside closes the panel',
     await waitFor(async () => await page.locator('.cxv-info').count() === 0, 2_000));
 
-  // 5. Share, from the reader — the same dialog the sidebar row opens.
+  // 6. Share, from the reader — the same dialog the sidebar row opens.
   await page.locator('.cxv-info-btn').tap();
   await page.locator('.cxv-info-actions button', { hasText: 'Share' }).tap();
   const shareOpen = await waitFor(async () => await page.locator('.share-card').isVisible(), 5_000);
@@ -181,7 +204,7 @@ try {
     await page.locator('.share-card a[download]').getAttribute('href') === `/api/trace/${id}/download`);
   await page.keyboard.press('Escape');
 
-  // 6. The sidebar widget is gone, and its one irreplaceable function is not.
+  // 7. The sidebar widget is gone, and its one irreplaceable function is not.
   check('the sidebar has no trace widget left',
     await page.locator('.quick-add button', { hasText: 'Trace' }).count() === 0
       && await page.locator('.open-trace').count() === 0);
