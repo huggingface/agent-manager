@@ -6,6 +6,7 @@ import type { FileEntry, FileKind, FilePreview } from '../api';
 import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
 import CodeView from './CodeView';
+import FileWrapToggle from './FileWrapToggle';
 import PdfView from './PdfView';
 import { TraceView, type TraceHeadInfo, type TraceSource } from './TracePane';
 import {
@@ -1164,14 +1165,7 @@ export default function FilesPane({
               </button>
             )}
             {info.showWrap && edit && (
-              <button
-                className={`mini-btn${edit.wrap ? ' on' : ''}`}
-                onClick={() => edit.setWrap(!edit.wrap)}
-                title={edit.wrap ? 'Long lines are wrapped — click to let them run' : 'Wrap long lines'}
-                aria-pressed={edit.wrap}
-              >
-                Wrap
-              </button>
+              <FileWrapToggle wrap={edit.wrap} onChange={edit.setWrap} />
             )}
             {edit && !edit.can && edit.why && (
               <span className="fi-stat fi-extra" title={edit.why}>read-only</span>
