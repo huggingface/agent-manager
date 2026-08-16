@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Cli, MoveTarget, Group, Session, Tree } from '../types';
 import { STATE_LABEL, REMOTE_STATE_LABEL, isPassive, isRemote } from '../types';
-import { hiddenSessionIds } from '../lib/overviewHidden';
 import Logo from './Logo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
@@ -78,7 +77,7 @@ export default function Sidebar({
   onToggleArchived: () => void;
   // Refs hidden from the OVERVIEW. The sidebar keeps showing them — it is where
   // you hide a group and the only way back to one — so this only drives the
-  // per-group button and the overview row's count.
+  // per-group button.
   overviewHidden: Set<string>;
   onToggleOverviewHidden: (ref: string, hidden: boolean) => void;
 }) {
@@ -124,14 +123,6 @@ export default function Sidebar({
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
   const colorOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c.color])), [clis]);
-  // This badge sits ON the overview row, so it has to count what the overview
-  // would actually show: not a hidden group's agents (being told about the group
-  // you hid is exactly what you hid it to stop), and not archived ones either,
-  // which the feed has always dropped while this number quietly included them.
-  const hiddenIds = useMemo(() => hiddenSessionIds(tree), [tree]);
-  const waiting = tree.sessions.filter((s) =>
-    s.state === 'waiting' && !hiddenIds.has(s.id) && !archived.has(s.id)).length;
-
   useEffect(() => { quickImagesRef.current = quickImages; }, [quickImages]);
   useEffect(() => () => revokePendingAttachments(quickImagesRef.current), []);
 
@@ -675,9 +666,11 @@ export default function Sidebar({
         </div>
       )}
 
-      {/* Overview: pinned above the tree with the row anatomy (tile · name ·
-          right slot) so it reads as clickable; the right slot counts agents
-          waiting on you. */}
+      {/* Overview: pinned above the tree with the row anatomy (tile · name) so
+          it reads as clickable. It used to carry an "N waiting" count in a
+          right slot; the rows directly below already show each of those agents
+          with its own state mark, so the number was a second, vaguer telling of
+          what the list says exactly. */}
       <div className="ov-fixed">
         <div
           className={`row session ov-row${activeRef === 'overview' ? ' active' : ''}`}
@@ -687,7 +680,6 @@ export default function Sidebar({
           <span className="status ov-spacer" />
           <span className="ov-tile"><GridGlyph /></span>
           <span className="name">overview</span>
-          {waiting > 0 && <span className="ov-wait">{waiting} waiting</span>}
         </div>
       </div>
 

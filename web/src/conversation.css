@@ -134,7 +134,11 @@
 }
 .cx-running-at { margin-left: 7px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }
 .cx-running::before {
-  content: '⠋'; display: inline-block; width: 1.2em; color: var(--accent);
+  /* --mark-w rather than a second 1.2em: the spinner's cell is declared with
+     the animation in styles.css and read by everything that draws it — this,
+     .ov-busy, and the static state marks that stand in for it while an agent
+     is not working. */
+  content: '⠋'; display: inline-block; width: var(--mark-w); color: var(--accent);
   animation: ov-spin 0.9s steps(1) infinite;
 }
 

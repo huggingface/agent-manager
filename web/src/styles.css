@@ -274,7 +274,6 @@ body {
 .ov-tile { flex: none; box-sizing: content-box; width: 12px; height: 12px; padding: 3px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; }
 .ov-tile svg { width: 100%; height: 100%; display: block; }
 .ov-row .name { color: var(--text); }
-.ov-wait { flex: none; font-family: var(--font-mono); font-size: 10px; color: var(--accent); }
 /* ---- Overview: one reading column of capsules (design mock v4.12) ---- */
 .ov-wrap { height: 100%; overflow-y: auto; }
 .ov-feed { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; padding: 2px 2px 40px; }
@@ -358,9 +357,17 @@ body {
 .markdown.ov-md { border: none; background: none; padding: 0; font-size: 12.5px; }
 .ov-md pre { font-size: 11px; }
 
-/* braille spinner: unmistakably a process, never an input line */
+/* braille spinner: unmistakably a process, never an input line.
+
+   Its cell is declared here, with the animation, because everything that draws
+   this spinner — and everything that stands in for it while an agent is NOT
+   working (see `.status.waiting` and friends) — sizes itself from these two
+   numbers. Change the glyph, the font or the spinner's box and the static
+   marks follow, instead of being left behind at a size that used to match.
+   em, so each surface gets the cell at its own type size. */
+:root { --mark-w: 1.2em; --mark-h: 1.05em; }
 .ov-busy { font-size: 12.5px; color: var(--muted); }
-.ov-busy::before { content: '⠋'; display: inline-block; width: 1.2em; color: var(--accent); animation: ov-spin 0.9s steps(1) infinite; }
+.ov-busy::before { content: '⠋'; display: inline-block; width: var(--mark-w); color: var(--accent); animation: ov-spin 0.9s steps(1) infinite; }
 @keyframes ov-spin {
   0% { content: '⠋'; } 12.5% { content: '⠙'; } 25% { content: '⠹'; } 37.5% { content: '⠸'; }
   50% { content: '⠼'; } 62.5% { content: '⠴'; } 75% { content: '⠦'; } 87.5% { content: '⠧'; }
@@ -465,8 +472,8 @@ body {
 .row.drop-before::after { top: -1px; }
 .row.drop-after::after { bottom: -1px; }
 .row.drop-on { background: var(--drop); outline: 1px solid var(--accent); outline-offset: -1px; }
-/* the dot column is a size down from the app-wide 8px dots */
-.row .status { width: 6px; height: 6px; }
+/* No size override here any more: the mark is em-based, so a sidebar row's own
+   type size already makes it a size down from a card's. See .status. */
 /* mono for THINGS (session names, counts), sans for commentary. Member names
    speak in the muted voice — state (dot) and place (frame) carry the color. */
 .row .name { flex: 1; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -512,13 +519,57 @@ body {
 .g-add svg { width: 11px; height: 11px; display: block; }
 .row.nested { margin-left: 0; padding-left: 8px; }
 
-/* status dots */
+/* A bare `.status` is a plain colour dot and has to stay one: UsagePanel and
+   SettingsView use it with an inline `background` to carry a provider's or a
+   CLI's own colour, and no state class at all. The state vocabulary below is a
+   specialisation of this, never a replacement — anything drawn on bare
+   `.status` paints over those colours and they lose their identity. */
 .status { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; transition: background 0.2s, box-shadow 0.2s, opacity 0.2s; }
-.status.working { background: var(--accent); animation: breathe 2.2s ease-in-out infinite; }
-/* your turn: hollow ring in the primary color — "paused, waiting on you" */
-.status.waiting { background: transparent; border: 1.5px solid var(--accent); }
-.status.idle { background: var(--muted); opacity: 0.5; }
-.status.stopped { background: transparent; border: 1.5px solid var(--muted); opacity: 0.5; }
+
+/* ---- agent state: one mark, one footprint ----
+   A working agent shows the braille spinner the reader and the cards already
+   run (`ov-spin`) — the same animation, not a second thing that also means
+   "busy". Every other state is that same cell standing still: a rectangle,
+   filled, or outlined for stopped.
+
+   The cell is `--mark-w` by `--mark-h`, declared once beside `ov-spin` itself
+   and consumed by every renderer of that animation as well as by these four
+   states. That is the whole point: the static mark cannot drift away from the
+   animation it stands in for, because there is one box and everyone reads it.
+   Same shape as --cx-gutter (#71) and --ph-pad-y (#75).
+
+   `font-size` is the only thing these states set for themselves — a size down
+   from the surrounding type — which is what lets one cell work in a sidebar
+   row and in a card header alike without either restating a geometry. */
+.status.working, .status.waiting, .status.idle, .status.stopped {
+  width: var(--mark-w); height: var(--mark-h);
+  font-size: 0.62em; font-family: var(--font-mono); line-height: 1;
+  border-radius: 0; background: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: color 0.2s, opacity 0.2s;
+}
+.status.working::before, .status.waiting::before,
+.status.idle::before, .status.stopped::before {
+  content: ''; display: block; box-sizing: border-box;
+  width: 100%; height: 100%; background: currentColor;
+}
+/* The same spinner, in the same cell. `overflow: hidden` keeps the glyph from
+   painting outside the footprint the other three fill, whatever a font does
+   with it. Under prefers-reduced-motion the global animation kill freezes it
+   at ⠋ — a part-filled cell, still not the full rectangle a ready agent
+   shows. */
+.status.working { overflow: hidden; }
+.status.working::before {
+  content: '⠋'; background: none;
+  animation: ov-spin 0.9s steps(1) infinite;
+}
+/* working and your-turn are both the accent: one is moving, one is not. */
+.status.working, .status.waiting { color: var(--accent); }
+.status.idle, .status.stopped { color: var(--muted); opacity: 0.5; }
+/* stopped is the cell's outline. An inset shadow, not a border: a border is
+   laid OUTSIDE a percentage height, so the stopped mark painted 2px taller
+   than the three it claims to match (and flex-shrank narrower to compensate). */
+.status.stopped::before { background: none; box-shadow: inset 0 0 0 1.5px currentColor; }
 
 /* quick-add utilities (shell / files) pinned above the legend */
 .quick-add { display: flex; gap: 6px; padding: 10px 10px; border-top: 1px solid var(--border); }

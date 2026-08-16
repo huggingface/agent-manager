@@ -13,7 +13,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node test/mobileBack.test.mjs && node test/pendingExchange.test.mjs && node test/composerAlign.test.mjs && node test/fileWrapToggle.test.mjs && node test/exchanges.test.mjs && node test/sessionTitle.test.mjs && node test/overviewSort.test.mjs && node test/drafts.test.mjs && node test/traceWindows.test.mjs && node test/sidebar-dnd.test.mjs",
+    "test": "node test/statusMark.test.mjs && node test/mobileBack.test.mjs && node test/pendingExchange.test.mjs && node test/composerAlign.test.mjs && node test/fileWrapToggle.test.mjs && node test/exchanges.test.mjs && node test/sessionTitle.test.mjs && node test/overviewSort.test.mjs && node test/drafts.test.mjs && node test/traceWindows.test.mjs && node test/sidebar-dnd.test.mjs",
+    "test:render": "node test/statusMark.render.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
