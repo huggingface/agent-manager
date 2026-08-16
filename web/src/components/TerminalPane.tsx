@@ -190,6 +190,7 @@ if (typeof window !== 'undefined') {
 export default function TerminalPane({
   session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', readerEnabled,
   readerReadyKey, onReaderReady, dragId, isMobile, groupName, onBack, onDragActive, onFocus, onRename, onClose,
+  onShare,
 }: {
   session: Session;
   cli?: Cli;
@@ -203,6 +204,7 @@ export default function TerminalPane({
   readerEnabled?: boolean;  // focused reader paints before visible followers
   readerReadyKey?: string;  // visible batch whose first paint is being awaited
   onReaderReady?: () => void;
+  onShare?: () => void;      // reader info panel: publish this session
   dragId?: string;          // set when the pane can be rearranged (group view)
   isMobile?: boolean;       // show the on-screen control-key bar
   onBack?: () => void;      // mobile: leave the pane for the list (see .ph-back)
@@ -1118,7 +1120,7 @@ export default function TerminalPane({
           >
             {readerEnabled === false
               ? <div className="cxv-empty mono">reading the trace…</div>
-              : <ConversationView session={session} isMobile={isMobile} onReady={onReaderReady} readyKey={readerReadyKey} />}
+              : <ConversationView session={session} isMobile={isMobile} onShare={onShare} onReady={onReaderReady} readyKey={readerReadyKey} />}
           </div>
         )}
       </div>

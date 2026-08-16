@@ -250,11 +250,28 @@ pane with nothing to render (a shell) simply stays a terminal.
   (`HANDOFF_CODE`, `TerminalPane.tsx`). **Verify** this before shipping: xterm needs layout to
   fit, so "cover, don't unmount" is the low-risk option, and a refit on return is required.
 - The reader's toolbar is a second header row, not a squeeze into the first — on a phone the
-  first row has no spare width. It carries only what is true of the whole session and said
-  nowhere else: the model, `13 turns`, the token totals abbreviated (`2.2M↓ 654k↑`), `▲▼`, and
-  the search box. The harness is the logo in the row above; the raw message count and the cached
-  tokens are details, so they live in `title` attributes. There is no "expand everything" — each
-  turn folds itself, and search opens what it needs to.
+  first row has no spare width. It carries the reader's **controls**: `▲▼` and the search box.
+  There is no "expand everything" — each turn folds itself, and search opens what it needs to.
+- **The facts live behind one `i`, in the bar's leading corner** (2026-08-16). They were spread
+  across the bar — model chip, `13 turns`, `2.2M↓ 654k↑`, the day it started — which is a lot of
+  standing furniture for things you read once, and on a narrow pane they pushed search to the
+  edge. Tapping the `i` opens a small panel over the conversation (it overlays, so opening it
+  does not move the text under your thumb), and it closes on Escape or a press anywhere else.
+  Nothing was dropped, and two things got **better**: the raw message count and the cached
+  tokens used to be `title` attributes, and so did the full timestamp behind the short date —
+  a phone cannot open any of those. They are plain text in the panel. The panel is also where
+  the session's transcript is offered as a **file** (`/api/trace/:id/download`) and where
+  **Share…** opens the same dialog the sidebar row opens.
+
+  | Was on the bar | Now |
+  |---|---|
+  | model chip | panel — `Model` |
+  | `13 turns` + `of N messages` | panel — `Turns`, with the message total once the summary lands |
+  | token totals `2.2M↓ 654k↑` | panel — `Tokens` |
+  | cached tokens (`title` only) | panel — text beside the totals |
+  | day started, e.g. `14 Aug` | panel — `Started` |
+  | full timestamp (`title` only) | panel — text beside the day |
+  | `▲▼`, search box, hit counter | **unchanged, still on the bar** |
 - **Search has to be followable.** Filtering to matching turns is not finding: the term is
   highlighted wherever it lands, a turn whose only match is inside its folded work *unfolds it*
   (and opens the step holding it, body included), the box reports `3/17`, and `▲▼` switch from
@@ -427,12 +444,17 @@ pane with nothing to render (a shell) simply stays a terminal.
 | A `trace` **session row per read** (`App.tsx:openTrace`) | **gone** — no duplicate rows |
 | Trace row's `Share` (`Sidebar.tsx:237`) | trace pane header (imported traces keep a pane) |
 | Trace row's `Handover` (`Sidebar.tsx:238`) | reader / trace-pane footer |
-| Quick-add **Trace** = open a shared dataset (`Sidebar.tsx:482`) | **stays** |
+| Quick-add **Trace** = open a shared dataset (`Sidebar.tsx:482`) | **Settings → Open a shared trace** (2026-08-16) |
 
-The last row is deliberate: an **imported** trace has no session behind it, so it is a genuine
-object that needs a row of its own. Same for a transcript opened from the Files pane
-(`getFileTracePage`). What disappears is the *local* trace pane — a session's own history is
-now a mode of its own pane, not a second entity.
+The last row was `stays` until the operator asked for the sidebar's trace widget to go
+(improv.md, iteration two). It moved rather than went away, because it is the one trace
+affordance nothing else replaces: the Files pane's trace viewer reads files **in the
+workspace**, and this pulls a dataset **off the Hub**. An imported trace still gets a pane and
+a row of its own once it is here — what left the sidebar is the standing *form* for typing a
+dataset id, which is furniture for something you do when a link arrives.
+
+What disappears is the *local* trace pane — a session's own history is now a mode of its own
+pane, not a second entity.
 
 Agent rows keep stop/play and delete. Three glyphs less per row, which is most visible exactly
 where the sidebar is worst: on a phone.

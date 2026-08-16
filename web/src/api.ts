@@ -251,6 +251,10 @@ export interface SessionTraces extends TraceStats { id: string; name: string; cl
 export interface Traces { sessions: SessionTraces[]; totals: TraceStats; generatedAt: string; }
 export const getTraces = (): Promise<Traces> => fetch('/api/traces').then(json);
 
+/** The transcript file behind a session or trace pane. A URL, not a fetch: the
+ *  browser saves it, so a 6 MB transcript never lands in a JS string first. */
+export const traceDownloadUrl = (id: string) => `/api/trace/${encodeURIComponent(id)}/download`;
+
 // ---- files ----
 // 'trace' is content-detected, not name-detected: a transcript is a .jsonl like
 // any other until /preview reads a line of it (see the route).
