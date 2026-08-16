@@ -2173,6 +2173,35 @@ app.put('/api/sessions/:id', (req, res) => {
   res.json(store.update(existing.id, { name: name.trim() }));
 });
 
+// ---------- archiving ----------
+//
+// Archiving is how a session leaves the working list, and it is STORED rather
+// than derived. The idle window (`archive.after`) measures an absence of
+// activity; "I am finished with this one" cannot be expressed that way — an
+// agent you retire the moment it answers is as active as it will ever be.
+//
+// The two roads meet in the sidebar's archived view, but they are not the same
+// road: the window's verdict changes when the setting changes, and this one
+// does not. Only this one unlocks delete — see the DELETE route below.
+app.post('/api/sessions/:id/archive', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  // Archiving stops the agent. Putting a session away while its CLI keeps
+  // running is how you end up paying for work behind a row you can no longer
+  // see. A remote agent has no process here — its connection is a separate
+  // control that stays where it is, so archiving one only files it away.
+  if (!isRemote(s.cli) && !PASSIVE_CLIS.includes(s.cli)) stop(s.id);
+  res.json(store.update(s.id, { archivedAt: new Date().toISOString() }));
+});
+
+// Restore. Deliberately does NOT start the agent again: unarchiving says "I
+// want to see this again", and starting is what opening the pane does.
+app.post('/api/sessions/:id/unarchive', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  return res.json(store.update(s.id, { archivedAt: undefined }));
+});
+
 app.post('/api/sessions/:id/stop', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
@@ -2415,6 +2444,22 @@ app.put('/api/trace/:id/source', (req, res) => {
 app.delete('/api/sessions/:id', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
+  // Delete is an archived-only action: retire a session, then remove it. That
+  // is what keeps the one destructive control out of the working list, and it
+  // is enforced here rather than only in the sidebar so the rule holds for any
+  // caller. Being quiet for a month is NOT this flag — see the archive route.
+  //
+  // #76 adds `?ifNeverStarted=1` for the wrong-CLI mistake: a session that has
+  // never run has nothing worth archiving and should go in one step. When that
+  // lands, the exemption belongs on this guard and `everStarted` already
+  // carries the answer:
+  //     if (!s.archivedAt && !(req.query.ifNeverStarted === '1' && !s.everStarted)) …
+  if (!s.archivedAt) {
+    return res.status(409).json({
+      error: 'archive this session before deleting it',
+      code: 'not-archived',
+    });
+  }
   stop(s.id);
   // Close the agent's poll and drop the in-memory log, so a pane later created
   // with the same name reads the folder fresh instead of inheriting a ghost.

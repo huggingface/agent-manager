@@ -474,14 +474,17 @@ pane with nothing to render (a shell) simply stays a terminal.
 
 ### 3.4 What leaves the sidebar
 
-| Today | Tomorrow |
+| Was on the row | Where it is now |
 |---|---|
-| `Read this session's trace` on every agent row (`Sidebar.tsx:245`) | bottom bar → **reader** |
-| `Share this session` on every agent row (`Sidebar.tsx:246`) | pane header → **share** |
-| A `trace` **session row per read** (`App.tsx:openTrace`) | **gone** — no duplicate rows |
-| Trace row's `Share` (`Sidebar.tsx:237`) | trace pane header (imported traces keep a pane) |
-| Trace row's `Handover` (`Sidebar.tsx:238`) | reader / trace-pane footer |
-| Quick-add **Trace** = open a shared dataset (`Sidebar.tsx:482`) | **Settings → Open a shared trace** (2026-08-16) |
+| `Read this session's trace` on every agent row | **reader mode** — a session's own history is a mode of its pane (done, #86) |
+| `Share this session` on every agent row | **pane header → `i` → Share** (done, #86) |
+| A `trace` **session row per read** (`App.tsx:openTrace`) | **gone**, with `openTrace` itself — no duplicate rows (done, #86) |
+| Trace row's `Share` | **trace pane header** — imported traces keep a pane (done, #86) |
+| Trace row's `Handover` | **trace pane header**, beside Share. Not the reader's `i`: that panel is `TraceInfo`, which a trace pane does not use (done, #86) |
+| Quick-add **Trace** = open a shared dataset | **Settings → Open a shared trace** (2026-08-16) |
+| `Start` | the row's own click already opened the pane (done, #86) |
+| `Stop` | **nowhere, deliberately.** An idle CLI costs nothing; a runaway one is interrupted in its pane, where Ctrl-C carries the CLI's own semantics (done, #86) |
+| `Delete` | **the archived view only** — archive a session, then remove it; the server enforces it (done, #86) |
 
 The last row was `stays` until the operator asked for the sidebar's trace widget to go
 (improv.md, iteration two). It moved rather than went away, because it is the one trace
@@ -493,8 +496,10 @@ dataset id, which is furniture for something you do when a link arrives.
 What disappears is the *local* trace pane — a session's own history is now a mode of its own
 pane, not a second entity.
 
-Agent rows keep stop/play and delete. Three glyphs less per row, which is most visible exactly
-where the sidebar is worst: on a phone.
+An agent row is now **one** control: `×`, which archives — it stops the agent and files it
+away, and it is the only route to deleting one. A remote agent keeps its reconnect/disconnect
+pair beside it, because that is a line to another machine rather than a local process. Up to
+four glyphs less per row, which is most visible exactly where the sidebar is worst: on a phone.
 
 ---
 
@@ -585,7 +590,7 @@ the block model already supports.
 - One component to style, so "the overview is more pleasant" becomes true everywhere at once.
 - The card answers "what did it actually do?" without leaving the Overview.
 - A session's history is reachable from the session, not from a second sidebar row.
-- Three glyphs less per sidebar row, and a full-screen card on a phone.
+- A sidebar row down to one control, and a full-screen card on a phone.
 - Removed code: the `turnsLog` stepper in the card, `openTrace`'s pane-creation path, two
   sidebar buttons, `.tv-badge` and the terminal-styled viewer chrome.
 
@@ -668,11 +673,13 @@ Built (this branch):
 5. Tests for the one piece of judgement in the renderer — what counts as the answer, and what
    stays in the work (`web/test/exchanges.test.mjs`, `npm test` in `web/`).
 
+7. The sidebar lost its trace buttons and `openTrace`, and the row came down to one control
+   (#86, §3.4). Share moved into the pane header's `i` with #84.
+
 Not yet, in the order I would do it:
 
 6. `head.prompts[]` (§5) — index, first line and timestamp per prompt, so a surface can draw the
    skeleton and label "show previous turn" before fetching the page that holds it.
-7. The sidebar loses its trace buttons and `openTrace`; share moves into the pane header (§3.4).
 8. Windowing by exchange in reader mode: a collapsed turn is 2–3 rows, so the DOM stays small,
    `head.prompts[]` gives the skeleton up front, and only an opened turn needs its page. The
    measured-height machinery in `TraceView` is reused as-is — what changes is what a "row" means.

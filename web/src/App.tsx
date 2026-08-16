@@ -132,10 +132,18 @@ export default function App() {
     return s === 'prompt' || s === 'answer' ? s : 'manual';
   });
   const setOvSort = (v: OverviewSort) => { setOvSortRaw(v); writeStored('am-ov-sort', v); };
-  // Archiving: sessions quiet for longer than the configured window are hidden
-  // from the sidebar and overview unless "archived" is checked. Derived, never
-  // stored — flipping the setting instantly (un)archives.
+  // Archiving takes two roads into the same view, and they are not the same
+  // thing. The operator archives a session deliberately (`archivedAt` on the
+  // record, server-side, and the agent is stopped); separately, a session quiet
+  // for longer than the configured window is hidden the way it always was —
+  // derived, so flipping the setting instantly (un)archives it again.
+  // Both are hidden unless "archived" is checked. Only the stored one can be
+  // deleted, which is why the two sets stay distinguishable below.
   const [showArchived, setShowArchived] = useState(false);
+  // A trace pane asking to be continued in a new agent. The prefilled create
+  // panel belongs to the sidebar, so the request is passed there and cleared
+  // once it has been picked up.
+  const [handoverFor, setHandoverFor] = useState<string | null>(null);
   const [archiveAfter, setArchiveAfter] = useState<'week' | 'month' | 'never'>('month');
   // Hiding a group from the Overview is a standing choice and lives on the server
   // (tree.hidden). REVEALING it is a glance, so that half stays here and resets on
@@ -462,18 +470,33 @@ export default function App() {
     if (settingsOpen) return;
     api.getConfig().then((c) => setArchiveAfter(c.archive?.after ?? 'month')).catch(() => {});
   }, [settingsOpen]);
-  const archivedIds = useMemo(() => {
+  // Road one: the operator said so. The server holds it, so it survives a
+  // reload and means the same thing on every device.
+  const retiredIds = useMemo(
+    () => new Set(tree.sessions.filter((s) => s.archivedAt).map((s) => s.id)),
+    [tree.sessions],
+  );
+  // Road two: quiet for longer than the window. Unchanged, and still derived —
+  // it is a statement about the clock, so it has to be recomputed against the
+  // clock rather than written down once.
+  const quietIds = useMemo(() => {
     const out = new Set<string>();
     if (archiveAfter === 'never') return out;
     const cut = Date.now() - (archiveAfter === 'week' ? 7 : 30) * 864e5;
     for (const s of tree.sessions) {
       // Shells and passive panels have no trace clock — never archive them.
       if (s.cli === 'shell' || isPassive(s.cli) || s.state === 'working') continue;
+      if (s.archivedAt) continue;                       // already on road one
       const last = ages[s.id] || Date.parse(s.createdAt) || 0;
       if (last && last < cut) out.add(s.id);
     }
     return out;
   }, [tree.sessions, ages, archiveAfter]);
+  // What the sidebar and overview leave out of the working list.
+  const archivedIds = useMemo(
+    () => new Set([...retiredIds, ...quietIds]),
+    [retiredIds, quietIds],
+  );
 
   // What the operator hid from the Overview, as refs (`g:<id>` / `s:<id>`). The
   // server owns the list; this is just the shape the sidebar wants for a lookup.
@@ -702,12 +725,24 @@ export default function App() {
   const renameGroup = (id: string, name: string) => api.renameGroup(id, name).then(refresh).catch(showErr('Couldn’t rename'));
   const renameSession = (id: string, name: string) => { if (name.trim()) api.renameSession(id, name.trim()).then(refresh).catch(showErr('Couldn’t rename')); };
   const deleteGroup = (id: string) => api.deleteGroup(id).then(() => { if (activeRef === `g:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the group'));
-  const stopSession = (id: string) => api.stopSession(id).then(refresh).catch(showErr('Couldn’t stop the agent'));
+  // Archiving stops the agent server-side, so there is no separate stop call
+  // left in the UI — `api.stopSession` stays for the archive route's own use
+  // and for anything that needs to end a process without filing it away.
+  const archiveSession = (id: string) => api.archiveSession(id)
+    .then(() => { if (activeRef === `s:${id}`) setActiveRef(null); closePane(id); refresh(); })
+    .catch(showErr('Couldn’t archive that agent'));
+  const unarchiveSession = (id: string) => api.unarchiveSession(id).then(refresh)
+    .catch(showErr('Couldn’t restore that agent'));
   // A remote agent has no process: "stopped" is a closed connection, so the
   // sidebar's stop/play pair disconnects and reconnects instead.
   const setRemotePaused = (id: string, paused: boolean) =>
     api.setRemotePaused(id, paused).then(refresh).catch(showErr(paused ? 'Couldn’t disconnect' : 'Couldn’t reconnect'));
-  const deleteSession = (id: string) => api.deleteSession(id).then(() => { if (activeRef === `s:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the agent'));
+  // The server refuses to delete anything that has not been archived, and says
+  // so in words worth passing on — a generic toast here would leave the reader
+  // guessing at a rule the UI is meant to be teaching.
+  const deleteSession = (id: string) => api.deleteSession(id)
+    .then(() => { if (activeRef === `s:${id}`) setActiveRef(null); refresh(); })
+    .catch((e: unknown) => showErr(e instanceof Error && e.message ? e.message : 'Couldn’t delete the agent')(e));
   const shareTrace = async (id: string) => {
     const pane = sessById[id];
     if (!pane || pane.cli !== 'trace') return;
@@ -749,26 +784,6 @@ export default function App() {
     setActiveRef(ref);
     setPage(0);
     if (isMobile) setMobileStage(true);
-  };
-  // Read an agent's own transcript in a read-only trace pane. The pane is a
-  // session record like any other (so it survives reload, tiles, and drag), and
-  // it's REUSED per source — clicking Trace twice reopens the same pane instead
-  // of littering the sidebar with duplicates.
-  const openTrace = async (sid: string) => {
-    const src = sessById[sid];
-    if (!src) return;
-    const existing = tree.sessions.find((p) => p.cli === 'trace' && p.traceSource?.kind === 'session' && p.traceSource.ref === sid);
-    if (existing) { openSession(existing.id, tree.groups.find((g) => g.sessionIds.includes(existing.id))?.id); return; }
-    try {
-      // '.' = the workspaces root: a trace pane reads a transcript, so it owns no
-      // folder and must not create one.
-      const pane = await api.createSession(`Trace: ${src.name}`, 'trace', undefined, '.');
-      await api.setTraceSource(pane.id, 'session', sid);
-      await refresh();
-      setActiveRef(`s:${pane.id}`);
-      setPage(0);
-      if (isMobile) setMobileStage(true);
-    } catch (e) { showErr('Couldn’t open the trace')(e); }
   };
   // Someone shared a session as a Hub dataset: pull it down, then open a pane on
   // it. Errors propagate so the sidebar can show the server's own reason inline
@@ -965,6 +980,10 @@ export default function App() {
                 dragId={canDrag ? `p:${s.id}` : undefined}
                 onDragActive={setPaneDrag}
                 onFocus={() => setFocusedId(s.id)}
+                onShare={() => shareTrace(s.id)}
+                // The prefilled create panel lives in the sidebar, so the
+                // request travels there rather than the panel moving here.
+                onHandover={() => setHandoverFor(s.id)}
                 onClose={() => closePane(s.id)}
               />
             ))}
@@ -1049,16 +1068,16 @@ export default function App() {
         onActivate={activate}
         onOpenSession={openSession}
         onNewSession={newSession}
-        onShareSession={setShareId}
-        onShareTrace={shareTrace}
         onTraceHandover={api.getTraceLocation}
-        onOpenTrace={openTrace}
+        handoverFor={handoverFor}
+        onHandoverHandled={() => setHandoverFor(null)}
         onNewGroup={newGroup}
         onRenameGroup={renameGroup}
         onRenameSession={renameSession}
         onDeleteGroup={deleteGroup}
         onSetRemotePaused={setRemotePaused}
-        onStopSession={stopSession}
+        onArchiveSession={archiveSession}
+        onUnarchiveSession={unarchiveSession}
         onDeleteSession={deleteSession}
         onMove={doMove}
         onDragState={setSessionDrag}
@@ -1067,6 +1086,7 @@ export default function App() {
         onToggleTheme={toggleTheme}
         onQuickStart={quickStart}
         archived={archivedIds}
+        retired={retiredIds}
         showArchived={showArchived}
         onToggleArchived={() => setShowArchived((v) => !v)}
         overviewHidden={hiddenRefs}

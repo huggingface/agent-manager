@@ -47,8 +47,18 @@ export const listFolders = (p = ''): Promise<{ path: string; folders: string[] }
 export const stopSession = (id: string) =>
   fetch(`/api/sessions/${id}/stop`, { method: 'POST' }).then(json);
 
+// Put a session away: it stops, and it leaves the working list. The server
+// refuses to delete anything that has not been through here first.
+export const archiveSession = (id: string) =>
+  fetch(`/api/sessions/${id}/archive`, { method: 'POST' }).then(json);
+
+export const unarchiveSession = (id: string) =>
+  fetch(`/api/sessions/${id}/unarchive`, { method: 'POST' }).then(json);
+
+// Keeps the server's own words: refusing to delete a session that is not
+// archived is an ordinary, explainable answer, not a failure.
 export const deleteSession = (id: string) =>
-  fetch(`/api/sessions/${id}`, { method: 'DELETE' }).then(json);
+  fetch(`/api/sessions/${id}`, { method: 'DELETE' }).then(jsonOrError);
 
 export const renameSession = (id: string, name: string) =>
   fetch(`/api/sessions/${id}`, { method: 'PUT', headers: HEADERS, body: JSON.stringify({ name }) }).then(json);

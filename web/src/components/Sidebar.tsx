@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Cli, MoveTarget, Group, Session, Tree } from '../types';
-import { STATE_LABEL, REMOTE_STATE_LABEL, isPassive, isRemote, isShareable } from '../types';
+import { STATE_LABEL, REMOTE_STATE_LABEL, isPassive, isRemote } from '../types';
 import { hiddenSessionIds } from '../lib/overviewHidden';
 import Logo from './Logo';
 import NewSession from './NewSession';
@@ -10,7 +10,7 @@ import {
   filesFromTransfer, pendingAttachmentsFromFiles, revokePendingAttachments, transferMayContainFile,
 } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph, HandoverGlyph, ListGlyph, EyeGlyph, EyeOffGlyph } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, EyeGlyph, EyeOffGlyph } from './icons';
 
 import { dropZone, backgroundAnchor, isBackgroundTarget } from './sidebar-dnd';
 import type { Zone, Kind } from './sidebar-dnd';
@@ -37,8 +37,8 @@ const fmtAgo = (ts?: number) => {
 export default function Sidebar({
   clis, tree, activeRef, focusedId, defaultPath, ages,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
-  onStopSession, onSetRemotePaused, onDeleteSession, onShareSession, onShareTrace, onTraceHandover, onOpenTrace, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
-  archived, showArchived, onToggleArchived,
+  onArchiveSession, onUnarchiveSession, onSetRemotePaused, onDeleteSession, onTraceHandover, handoverFor, onHandoverHandled, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
+  archived, retired, showArchived, onToggleArchived,
   overviewHidden, onToggleOverviewHidden,
 }: {
   clis: Cli[];
@@ -55,19 +55,28 @@ export default function Sidebar({
   onRenameGroup: (id: string, name: string) => void;
   onRenameSession: (id: string, name: string) => void;
   onDeleteGroup: (id: string) => void;
-  onStopSession: (id: string) => void;
+  // Archiving stops the agent and takes it out of the working list; it is
+  // also the only route to deleting one (the server enforces that).
+  onArchiveSession: (id: string) => void;
+  onUnarchiveSession: (id: string) => void;
   onSetRemotePaused: (id: string, paused: boolean) => void;
   onDeleteSession: (id: string) => void;
-  onShareSession: (id: string) => void;
-  onShareTrace: (id: string) => void;
+  // Continuing from a trace is triggered on the trace's own pane now, but the
+  // prefilled create panel it opens lives here — so the request arrives as an
+  // id, and is handed back once this has acted on it.
   onTraceHandover: (id: string) => Promise<{ path: string; sessionId?: string | null }>;
-  onOpenTrace: (id: string) => void;
+  handoverFor: string | null;
+  onHandoverHandled: () => void;
   onMove: (ref: string, to: MoveTarget) => void;
   onDragState?: (ref: string | null) => void; // lets the stage offer per-tile drop targets
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
   onQuickStart: (cli: string, prompt: string, name?: string, path?: string, attachmentOptions?: QuickStartAttachmentOptions) => Promise<void>;
+  // Everything kept out of the working list, by either road…
   archived: Set<string>;
+  // …and the subset the operator archived on purpose. Only these can be
+  // deleted; the rest are merely quiet and are offered the archive instead.
+  retired: Set<string>;
   showArchived: boolean;
   onToggleArchived: () => void;
   // Refs hidden from the OVERVIEW. The sidebar keeps showing them — it is where
@@ -155,6 +164,16 @@ export default function Sidebar({
       return next;
     });
   };
+
+  // A trace pane asked to be continued in a new agent: open the create panel
+  // prefilled, exactly as the old per-row button did, then release the request
+  // so re-opening it later fires again.
+  useEffect(() => {
+    if (!handoverFor) return;
+    const s = sessById[handoverFor];
+    onHandoverHandled();
+    if (s) openHandover(s);
+  }, [handoverFor]);
 
   const clearDrag = () => { setDragRef(null); setDrop(null); onDragState?.(null); };
   // Archived sessions vanish from the tree unless the legend checkbox is on.
@@ -360,28 +379,37 @@ export default function Sidebar({
           <span className="name">{s.name}</span>
         )}
         <span className="age">{fmtAgo(ages?.[s.id])}</span>
+        {/* One button on a live row, and it files the agent away. Start was the
+            row's own onClick spelled twice; stop went because an idle CLI costs
+            nothing and a runaway one is interrupted in its pane, where Ctrl-C
+            has the CLI's own semantics. A remote agent keeps its connection
+            pair: that is a line to another machine, not a local process. */}
         <span className="row-actions">
-          {s.cli === 'trace' ? (
-            <>
-              <button className="mini-btn" title="Share this trace" onClick={(e) => { e.stopPropagation(); onShareTrace(s.id); }}><ShareGlyph /></button>
-              <button className="mini-btn" title="Continue from this trace in a new agent" onClick={(e) => { e.stopPropagation(); openHandover(s); }}><HandoverGlyph /></button>
-            </>
-          ) : isRemote(s.cli) ? (
-            // No process to kill: stop/play are disconnect/reconnect, and
-            // "reconnect" must not try to open a terminal for this pane.
+          {isRemote(s.cli) && (
             s.remote?.paused
               ? <button className="mini-btn" title="Reconnect" onClick={(e) => { e.stopPropagation(); onSetRemotePaused(s.id, false); }}><PlayGlyph /></button>
               : <button className="mini-btn" title="Disconnect" onClick={(e) => { e.stopPropagation(); onSetRemotePaused(s.id, true); }}><StopGlyph /></button>
-          ) : s.running
-            ? <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}><StopGlyph /></button>
-            : <button className="mini-btn" title="Start" onClick={(e) => { e.stopPropagation(); onOpenSession(s.id, groupId); }}><PlayGlyph /></button>}
-          {isShareable(s.cli) && (
-            <>
-              <button className="mini-btn" title="Read this session's trace" onClick={(e) => { e.stopPropagation(); onOpenTrace(s.id); }}><ListGlyph /></button>
-              <button className="mini-btn" title="Share this session" onClick={(e) => { e.stopPropagation(); onShareSession(s.id); }}><ShareGlyph /></button>
-            </>
           )}
-          <button className="mini-btn" title="Delete" onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><CloseGlyph /></button>
+          {showArchived && archived.has(s.id) ? (
+            // The archived view, where the two roads show themselves. A session
+            // the operator retired can come back or be removed; one that is
+            // merely quiet has not been decided about, so it is offered the
+            // decision rather than the delete.
+            retired.has(s.id) ? (
+              <>
+                <button className="mini-btn" title="Restore to the working list"
+                  onClick={(e) => { e.stopPropagation(); onUnarchiveSession(s.id); }}><PlayGlyph /></button>
+                <button className="mini-btn danger-hover" title="Delete — the folder on disk is kept"
+                  onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><CloseGlyph /></button>
+              </>
+            ) : (
+              <button className="mini-btn" title="Quiet for a while. Archive it to stop it and be able to delete it."
+                onClick={(e) => { e.stopPropagation(); onArchiveSession(s.id); }}><CloseGlyph /></button>
+            )
+          ) : (
+            <button className="mini-btn" title="Archive — stops the agent and files it away"
+              onClick={(e) => { e.stopPropagation(); onArchiveSession(s.id); }}><CloseGlyph /></button>
+          )}
         </span>
       </div>
     );

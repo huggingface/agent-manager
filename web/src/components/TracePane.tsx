@@ -21,7 +21,7 @@ import type { TraceBlock, TraceTurn } from '../api';
 import { useTraceWindows, type TraceHeadInfo, type TraceSource } from '../lib/traceWindows';
 import { renderMarkdown } from '../lib/markdown';
 import Logo from './Logo';
-import { CloseGlyph } from './icons';
+import { CloseGlyph, ShareGlyph, HandoverGlyph } from './icons';
 
 const ROW_EST = 44;        // unmeasured row height, collapsed
 const OVERSCAN_PX = 600;
@@ -569,7 +569,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', live, onHead, o
 }
 
 export default function TracePane({
-  session, focused, zoom = 100, dragId, sourceLive, onDragActive, onFocus, onClose,
+  session, focused, zoom = 100, dragId, sourceLive, onDragActive, onFocus, onShare, onHandover, onClose,
 }: {
   session: Session;
   focused?: boolean;
@@ -579,6 +579,12 @@ export default function TracePane({
   dragId?: string;
   onDragActive?: (dragging: boolean) => void;
   onFocus?: () => void;
+  /** Publish this trace, and continue from it in a new agent. Both used to be
+   *  buttons on the sidebar row; they belong to the trace, so they live on the
+   *  pane that shows it. (The reader's `i` panel is ConversationView's, and a
+   *  trace pane does not use ConversationView.) */
+  onShare?: () => void;
+  onHandover?: () => void;
   onClose: () => void;
 }) {
   const [head, setHead] = useState<TraceHeadInfo | null>(null);
@@ -629,6 +635,14 @@ export default function TracePane({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
+        {onShare && (
+          <button className="mini-btn" title="Share this trace"
+            onClick={(e) => { e.stopPropagation(); onShare(); }}><ShareGlyph /></button>
+        )}
+        {onHandover && (
+          <button className="mini-btn" title="Continue from this trace in a new agent"
+            onClick={(e) => { e.stopPropagation(); onHandover(); }}><HandoverGlyph /></button>
+        )}
         <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
       </div>
 
