@@ -1,14 +1,18 @@
-// The state mark has ONE footprint, declared once.
+// One geometry contract for the working animation and everything that stands
+// in for it.
 //
 // A working agent shows the braille spinner; every other state is that same
-// cell as a rectangle. The two only read as the same mark while they are the
-// same size, and the way that quietly breaks is a second rule elsewhere giving
-// `.status` its own width/height for one surface — which is exactly what
-// `.row .status { width: 6px; height: 6px }` used to do for the sidebar.
+// cell standing still. They only read as the same mark while they are the same
+// box, and the way that quietly breaks is someone giving one of them its own
+// number — which is what the first cut of this change did: the static states
+// measured a copy of the glyph instead of reading the spinner's own cell, so a
+// font or spinner change would have left the rectangles behind.
 //
-// So this is a lint on the stylesheet, not a rendering test: it pins that the
-// box is declared in one place. What it LOOKS like was checked with playwright
-// against a live app (see the PR), which this cannot do.
+// So this lints the contract, not the numbers: --mark-w/--mark-h are declared
+// once, and every renderer of the spinner AND every static state reads them
+// rather than restating a length. What the marks actually PAINT is a separate
+// question this cannot answer — a border sits outside a percentage height and
+// the source still says `100%`. That is statusMark.render.test.mjs.
 //
 // Run with:  node test/statusMark.test.mjs
 import assert from 'node:assert/strict';
@@ -17,7 +21,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const css = fs.readFileSync(path.join(HERE, '../src/styles.css'), 'utf8');
+const read = (f) => fs.readFileSync(path.join(HERE, '../src', f), 'utf8');
+const styles = read('styles.css');
+const conversation = read('conversation.css');
+const css = `${styles}\n${conversation}`;
 
 let failed = 0;
 const check = (what, fn) => {
@@ -27,53 +34,101 @@ const check = (what, fn) => {
   }
 };
 
-// Every rule whose selector targets .status, with its body.
-const rules = [...css.matchAll(/([^{}]*\.status[^{}]*)\{([^}]*)\}/g)]
-  .map(([, selector, body]) => ({ selector: selector.trim().split('\n').pop().trim(), body }));
+const rulesOf = (text) => [...text.matchAll(/([^{}]*)\{([^}]*)\}/g)]
+  .map(([, selector, body]) => ({ selector: selector.trim().split('\n').pop().trim(), body }))
+  .filter((r) => r.selector && !r.selector.startsWith('@'));
+const rules = rulesOf(css);
+const LENGTH = /(?:^|[\s:])-?\d*\.?\d+(?:px|em|rem|%)/;
 
-console.log('the state mark is declared once');
+console.log('the cell is declared once');
 
-check('the .status rule declares the box', () => {
-  const base = rules.find((r) => r.selector === '.status');
-  assert.ok(base, 'no bare `.status` rule found');
-  assert.match(base.body, /--st-w:/, 'the width variable is not declared there');
-  assert.match(base.body, /--st-h:/, 'the height variable is not declared there');
-  assert.match(base.body, /width:\s*var\(--st-w\)/, 'width does not come from the variable');
-  assert.match(base.body, /height:\s*var\(--st-h\)/, 'height does not come from the variable');
+check('--mark-w and --mark-h are declared exactly once each', () => {
+  for (const name of ['--mark-w', '--mark-h']) {
+    const declarations = [...css.matchAll(new RegExp(`${name}\\s*:`, 'g'))].length;
+    assert.equal(declarations, 1, `${name} is declared ${declarations} times`);
+  }
 });
 
-check('no other rule gives .status its own width or height', () => {
-  const offenders = rules
-    .filter((r) => r.selector !== '.status')
-    .filter((r) => /(^|;|\s)(width|height)\s*:/.test(r.body))
-    // ::before is the mark inside the box: it fills it (100%) or is the glyph
-    // (auto). Neither is a second opinion about how big the box is.
+check('they are declared with the animation, not with one of its consumers', () => {
+  const decl = rules.find((r) => /--mark-w\s*:/.test(r.body));
+  assert.equal(decl.selector, ':root', `declared on \`${decl.selector}\``);
+  // ov-spin's keyframes and the :root declaration should be neighbours, so the
+  // next person to touch the animation sees the box it promises.
+  const gap = Math.abs(styles.indexOf('--mark-w') - styles.indexOf('@keyframes ov-spin'));
+  assert.ok(gap < 800, `the declaration is ${gap} chars from @keyframes ov-spin`);
+});
+
+console.log('\nevery renderer of the spinner reads it');
+
+const spinners = rules.filter((r) => /animation:\s*ov-spin/.test(r.body));
+check('there is more than one spinner renderer to keep in step', () => {
+  assert.ok(spinners.length >= 3, `found ${spinners.length}`);
+});
+check('none of them restates a width', () => {
+  const offenders = spinners
+    .filter((r) => /(?:^|;|\s)width\s*:/.test(r.body))
+    .filter((r) => !/width\s*:\s*var\(--mark-w\)/.test(r.body))
+    .map((r) => r.selector);
+  assert.deepEqual(offenders, [], `these size the spinner themselves: ${offenders.join(', ')}`);
+});
+
+console.log('\nand so does every state that stands in for it');
+
+const STATES = ['working', 'waiting', 'idle', 'stopped'];
+const stateRules = rules.filter((r) => STATES.some((s) => r.selector.includes(`.status.${s}`)));
+check('the four states are sized from the cell', () => {
+  const sized = stateRules.filter((r) => /width\s*:\s*var\(--mark-w\)/.test(r.body)
+    && /height\s*:\s*var\(--mark-h\)/.test(r.body));
+  assert.ok(sized.length >= 1, 'no state rule takes its box from --mark-w/--mark-h');
+  for (const s of STATES) {
+    assert.ok(sized.some((r) => r.selector.includes(`.${s}`)), `${s} is not covered by that rule`);
+  }
+});
+check('no state rule restates a length for its box', () => {
+  const offenders = stateRules
+    // ::before is the mark INSIDE the cell; that it fills it (100%) is the next
+    // check's business, not a second opinion about how big the cell is.
     .filter((r) => !/::before/.test(r.selector))
+    .filter((r) => [...r.body.matchAll(/(?:^|;|\s)(width|height)\s*:\s*([^;]+)/g)]
+      .some(([, , value]) => LENGTH.test(value) && !/var\(--mark-[wh]\)/.test(value)))
     .map((r) => r.selector);
   assert.deepEqual(offenders, [], `these restate the box: ${offenders.join(', ')}`);
 });
-
-check('the mark inside the box only ever fills it or is the glyph', () => {
-  for (const r of rules.filter((x) => /::before/.test(x.selector))) {
-    const sizes = [...r.body.matchAll(/(?:^|;|\s)(?:width|height)\s*:\s*([^;]+)/g)].map((m) => m[1].trim());
-    for (const v of sizes) {
-      assert.ok(['100%', 'auto'].includes(v), `${r.selector} sizes the mark to ${v}`);
+check('the mark inside the cell only fills it', () => {
+  for (const r of stateRules.filter((x) => /::before/.test(x.selector))) {
+    for (const [, , value] of r.body.matchAll(/(?:^|;|\s)(width|height)\s*:\s*([^;]+)/g)) {
+      assert.equal(value.trim(), '100%', `${r.selector} sizes the mark to ${value.trim()}`);
     }
   }
 });
 
-check('working is the spinner the rest of the app already runs', () => {
-  const w = rules.find((r) => r.selector === '.status.working::before');
-  assert.ok(w, 'no `.status.working::before` rule');
-  assert.match(w.body, /animation:\s*ov-spin/, 'working does not use the ov-spin animation');
-  assert.ok(/content:\s*'⠋'/.test(w.body), 'working does not render the braille frame');
+console.log('\nand the plain colour dot is left alone');
+
+check('bare .status draws nothing of its own', () => {
+  const bare = rules.filter((r) => /(^|,\s*)\.status::before\s*$/.test(r.selector));
+  assert.deepEqual(bare.map((r) => r.selector), [],
+    'a pseudo-element on bare `.status` paints over the inline provider/CLI colours '
+    + 'in UsagePanel.tsx and SettingsView.tsx');
 });
+check('bare .status keeps a box of its own for those callers', () => {
+  const base = rules.find((r) => r.selector === '.status');
+  assert.ok(base, 'no bare `.status` rule');
+  assert.match(base.body, /width:\s*8px/, 'the plain dot lost its size');
+});
+
+console.log('\nand only working animates');
 
 check('the states that are not working carry no animation', () => {
   for (const state of ['waiting', 'idle', 'stopped']) {
-    const own = rules.filter((r) => r.selector.includes(`.status.${state}`));
-    for (const r of own) assert.doesNotMatch(r.body, /animation:/, `.status.${state} animates`);
+    for (const r of rules.filter((x) => x.selector.includes(`.status.${state}`))) {
+      assert.doesNotMatch(r.body, /animation:/, `.status.${state} animates`);
+    }
   }
+});
+check('working runs the same animation the rest of the app runs', () => {
+  const w = rules.find((r) => r.selector === '.status.working::before');
+  assert.ok(w, 'no `.status.working::before` rule');
+  assert.match(w.body, /animation:\s*ov-spin/, 'working does not use ov-spin');
 });
 
 console.log(failed ? `\n${failed} failed` : '\nall checks passed');
