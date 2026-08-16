@@ -511,6 +511,25 @@ export default function SettingsView({
                   </div>
                 )}
 
+                {/* On demand regardless of the interval: taking one backup
+                    before a risky change should not mean switching on a
+                    schedule. It belongs directly under the intervals it stands
+                    beside — it used to sit past the skip-folders field, a screen
+                    away from the control it relates to. The cost note stays
+                    above it: that is what you want to have read before pressing
+                    a button that starts a billed Job. Disabled while a run is in
+                    flight — two Jobs uploading to one dataset would race. */}
+                {bk?.canRunNow && (
+                  <button
+                    className="btn-ghost bk-now"
+                    disabled={bkBusy || bk.running}
+                    onClick={doBackup}
+                  >
+                    {bkBusy ? 'Launching…' : bk.running ? 'Backing up…' : 'Back up now'}
+                  </button>
+                )}
+                {bkMsg && <div className="s-help" style={{ marginTop: 6 }}>{bkMsg}</div>}
+
                 {/* Folders to keep out of the history. An env directory is
                     thousands of files the backup has to hash and none of them
                     worth keeping — measured, that is 7s of work versus 1s.
@@ -573,22 +592,6 @@ export default function SettingsView({
                     </div>
                   </>
                 )}
-                {/* On demand regardless of the interval: taking one backup
-                    before a risky change should not mean switching on a
-                    schedule. Disabled while a run is in flight — two Jobs
-                    uploading to one dataset would race. */}
-                {bk?.canRunNow && (
-                  <button
-                    className="btn-ghost"
-                    style={{ marginTop: 8 }}
-                    disabled={bkBusy || bk.running}
-                    onClick={doBackup}
-                  >
-                    {bkBusy ? 'Launching…' : bk.running ? 'Backing up…' : 'Back up now'}
-                  </button>
-                )}
-                {bkMsg && <div className="s-help" style={{ marginTop: 6 }}>{bkMsg}</div>}
-
                 <div className="setting-row">
                   <div>
                     <div className="s-label">Restart sessions after a reboot</div>
