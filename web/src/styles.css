@@ -1074,8 +1074,20 @@ body {
 .settings-navitem { text-align: left; background: none; border: 1px solid transparent; border-radius: var(--r-md); padding: 9px 12px; font: inherit; font-size: 13px; color: var(--text); cursor: pointer; }
 .settings-navitem:hover { background: var(--panel-2); }
 .settings-navitem.active { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--accent); font-weight: 600; }
-.settings-main { overflow-y: auto; }
-.settings-page { max-width: 640px; margin: 0 auto; padding: 6px 4px 30px; }
+/* The settings page reacts to the width of its own pane, not the window: with
+   the nav rail beside it a 768px tablet leaves the page 486px — as tight as a
+   phone — while a phone in the stacked layout gets the whole viewport. One
+   container query covers both, and the split-pane case nobody has asked for yet.
+   (Container queries are older than the color-mix() this sheet already relies
+   on, so this is not a new baseline.) */
+.settings-main { overflow-y: auto; container-type: inline-size; }
+/* width:100% is load-bearing. `.settings-main` is a column flex container, and
+   `margin: 0 auto` on a flex item switches off the cross-axis stretch: the page
+   box then sized itself from its widest content (524px) rather than from the
+   pane, so on anything narrower than that it hung over the right edge of the
+   scroller — controls off screen, descriptions cut mid-sentence — while the
+   centring still looked correct on a desktop wider than 524. */
+.settings-page { width: 100%; max-width: 640px; margin: 0 auto; padding: 6px 4px 30px; }
 .settings-page h2 { margin: 6px 0 18px; font-size: 22px; }
 .settings-page h3 { margin: 24px 0 8px; font-size: 14px; }
 /* plain rows, not cards: the bold label is the section header */
@@ -1085,9 +1097,14 @@ body {
 .setting-row.row-top { align-items: flex-start; }
 /* right-side controls share one width so the column reads as one rail */
 .setting-row > .btn-ghost, .setting-row .confirm-del { flex: none; }
+/* The text column may shrink. Without this a long mono value inside it (a
+   dataset id, a path) sets a min-content floor, the row cannot render under
+   ~524px, and anything narrower than that — a tablet, a phone, a split window —
+   pushes the control rail off the edge of the scroller instead of wrapping. */
+.setting-row > div { min-width: 0; }
 /* operator config (artifacts, jobs): every control sits in the same-width
    right-hand slot so the column lines up */
-.cfg-ctl { flex: none; width: 232px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.cfg-ctl { flex: 0 1 232px; width: 232px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .cfg-seg { display: flex; width: 100%; }
 .cfg-seg button { flex: 1; padding: 6px 0; }
 .cfg-input { width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--text); font-size: 12.5px; }
@@ -1105,18 +1122,36 @@ body {
 .cfg-num { width: 90px; flex: none; text-align: right; }
 /* artifacts sub-settings stay visible when off, just clearly inert */
 .cfg-off { opacity: 0.45; pointer-events: none; }
+/* "Back up now" hangs off the interval control above it, so it sits on the page
+   rail rather than in the row's right-hand slot. */
+.bk-now { margin-top: 10px; }
 .setting-row > .btn-ghost, .setting-row > a.btn-ghost { min-width: 180px; white-space: nowrap; }
 a.btn-ghost { text-decoration: none; }
 .s-label { font-weight: 600; font-size: 14px; }
 .s-help { color: var(--muted); font-size: 12.5px; line-height: 1.5; margin: 2px 0 0; }
 .s-muted { color: var(--muted); }
+/* One voice for this page. Everywhere else in the app prose is sans and machine
+   values are mono at ~11.5px — the sidebar's session name and age (.row .name,
+   .row .age), the overview's state word (.ov-wait), the toolbar's segmented
+   options (.controls .seg button). Settings had drifted: option tokens and an
+   agent's state were sans while the version beside them was mono, and prose sat
+   at 12, 12.5 and 13 in adjacent blocks. Same split, one size for each role. */
+.settings-page .seg button { font-family: var(--font-mono); font-size: 11.5px; }
+.ar-state { font-family: var(--font-mono); }
+.kv b { font-family: var(--font-mono); }
+.kv > div { font-size: 12.5px; }
+.s-warn { font-size: 12.5px; }
+.tagf-chip { font-size: 11.5px; }
 /* agents: one hairline row per CLI — dot · logo · name · version · state */
 /* plain hairline rows — no box (sidebar voice: boundaries only where they mean something) */
 .agent-rows { display: flex; flex-direction: column; margin-top: 4px; }
 .agent-row { display: flex; align-items: center; gap: 10px; padding: 9px 2px; font-size: 13px; }
 .agent-row + .agent-row { border-top: 1px solid var(--border); }
 .agent-row .spacer { flex: 1; }
-.ar-name { white-space: nowrap; font-weight: 500; }
+/* The name is the only elastic thing in the row: it ellipsizes so the
+   version/state rail keeps its alignment in a narrow pane instead of pushing
+   the row past the edge. */
+.ar-name { white-space: nowrap; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ar-ver { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .ar-state { flex: none; width: 88px; text-align: right; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 .ar-state.ok { color: var(--go); }
@@ -1182,6 +1217,44 @@ a.btn-ghost { text-decoration: none; }
 .zbtn:hover { color: var(--text); border-color: var(--border-strong); }
 .zlvl { min-width: 44px; background: none; border: none; color: var(--muted); font-size: 11px; cursor: pointer; font-variant-numeric: tabular-nums; }
 .zlvl:hover { color: var(--text); }
+
+/* ---- settings, narrow pane (phone, or a tablet beside the nav rail) ---- */
+@container (max-width: 560px) {
+  .settings-page { padding: 6px 14px 30px; }
+  /* A setting row is a text column plus a 232px control rail: it cannot render
+     much under ~450px, so in a 292px pane every control sat off the right edge
+     and the descriptions were cut mid-sentence. Stack instead — the control
+     lands under the text it belongs to, on the same rail as everything else. */
+  .settings-page .setting-row { flex-direction: column; align-items: stretch; gap: 9px; padding: 12px 0; }
+  /* flex:none, or the 232px basis inherited from the two-column layout becomes
+     a 232px-TALL control block once the row stacks and the main axis is vertical. */
+  .settings-page .cfg-ctl { flex: none; width: 100%; justify-content: flex-start; }
+  /* Options size to themselves. Stretching a two-word on/off across the pane
+     makes a toggle look like a banner; the intervals still line up because
+     every button in a group shares its width. */
+  .settings-page .cfg-seg { width: auto; }
+  .settings-page .cfg-seg button { white-space: nowrap; }
+  /* Buttons keep their own width and start at the rail rather than stretching:
+     a full-bleed "Show guide" reads as a banner, not as this row's control. */
+  .settings-page .setting-row > .btn-ghost,
+  .settings-page .setting-row > a.btn-ghost,
+  .settings-page .setting-row > .btn-primary { align-self: flex-start; }
+  .settings-page .setting-row .confirm-del { flex-wrap: wrap; }
+  /* Rows drop the 2px inset that put every label out of line with its heading. */
+  .settings-page .agent-row, .settings-page .kv > div { padding-left: 0; padding-right: 0; }
+  /* The 88px state rail plus a version string leaves ~45px for the name in a
+     320px pane, which ellipsises "Claude Code" to two letters. Drop the fixed
+     rail here: the states still end flush right, and the name is the part you
+     actually read. */
+  .settings-page .agent-row { gap: 8px; }
+  .settings-page .ar-state { width: auto; }
+  /* 22px against a 12.5px description is a magazine headline on a phone. */
+  .settings-page h2 { font-size: 18px; margin: 4px 0 14px; }
+  .settings-page h3 { margin: 22px 0 8px; }
+  /* Restore-defaults sits under its paragraph instead of squeezing it. */
+  .skiphead { flex-direction: column; gap: 8px; }
+  .skiprestore { align-self: flex-start; }
+}
 
 /* settings: skills editor */
 .settings-page.wide { max-width: 980px; }
@@ -1369,9 +1442,9 @@ a.btn-ghost { text-decoration: none; }
   /* settings stacks vertically */
   .app.settings { flex-direction: column; }
   .app.settings .sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
-  .app.settings .settings-nav { flex-direction: row; gap: 6px; padding: 8px 10px; }
+  /* 14px, so the header (.brand), these tabs and the page below share one rail. */
+  .app.settings .settings-nav { flex-direction: row; gap: 6px; padding: 8px 14px; }
   .app.settings .settings-main { flex: 1; }
-  .settings-page { padding: 6px 12px 30px; }
   /* wide pages (usage / skills) must never scroll the whole page sideways */
   .settings-page.wide { max-width: 100%; }
   .skills { flex-direction: column; }
