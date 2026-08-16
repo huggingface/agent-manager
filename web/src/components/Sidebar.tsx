@@ -342,14 +342,11 @@ export default function Sidebar({
         onDragStart={dnd.onDragStart} onDragEnd={dnd.onDragEnd} onDragOver={dnd.onDragOver} onDrop={dnd.onDrop}
         onClick={() => onOpenSession(s.id, groupId)}
         onDoubleClick={(e) => { e.stopPropagation(); startEdit(ref, s.name); }}
-        title={s.inputRequired ? `${s.name} · needs input in terminal` : (s.path ? `${s.name} · ${s.path}` : s.name)}
+        title={s.path ? `${s.name} · ${s.path}` : s.name}
       >
         {/* The same three lights, but for a remote agent they mean connection,
             not process: working / listening / not connected. */}
-        <span className="row-status">
-          <span className={`status ${s.state}`} title={(isRemote(s.cli) ? REMOTE_STATE_LABEL : STATE_LABEL)[s.state]} />
-          {s.inputRequired && <span className="row-input-required" aria-hidden="true">!</span>}
-        </span>
+        <span className={`status ${s.state}`} title={(isRemote(s.cli) ? REMOTE_STATE_LABEL : STATE_LABEL)[s.state]} />
         <Logo cli={s.cli} size={12} tint={colorOf[s.cli]} />
         {editing ? (
           <input

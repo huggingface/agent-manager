@@ -399,6 +399,14 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 }
 .input-required button:hover { color: var(--text); border-color: var(--border-strong); }
 .input-required + .ov-composer { border-top: 0; }
+.cxv-col > .input-required {
+  align-self: flex-start; max-width: calc(100% - 1.23em); min-height: 0;
+  margin: 8px 0 2px 1.23em; padding: 5px 6px 5px 8px; border: 0; border-radius: var(--r-md);
+  background: var(--accent); color: var(--accent-fg);
+}
+.cxv-col > .input-required :is(.input-required-mark, .input-required-label, button) { color: inherit; }
+.cxv-col > .input-required button { height: 18px; border-color: color-mix(in srgb, var(--accent-fg) 40%, transparent); background: transparent; }
+.cxv-col > .input-required button:hover { color: inherit; border-color: var(--accent-fg); background: color-mix(in srgb, var(--accent-fg) 12%, transparent); }
 @media (max-width: 720px) and (pointer: coarse) {
   /* Restating styles.css's iOS guard: 16px is what stops zoom-on-focus, and the
      rule above is later in the cascade, so it would otherwise win. A phone
