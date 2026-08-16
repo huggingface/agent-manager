@@ -1444,7 +1444,13 @@ a.btn-ghost { text-decoration: none; }
   .app.settings .sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
   /* 14px, so the header (.brand), these tabs and the page below share one rail. */
   .app.settings .settings-nav { flex-direction: row; gap: 6px; padding: 8px 14px; }
-  .app.settings .settings-main { flex: 1; }
+  /* ONE owner for that gutter, and it is `.settings-page`. `.main` gives every
+     pane 12px (line 72) and the page then adds its own 14px on top, which put
+     the body on a 26px rail while the header and tabs sat at 14 — two
+     contributors, so tuning either drifts them apart again. The main gives up
+     its horizontal padding here; the vertical padding stays, since only the
+     side rail had a second claimant. Pinned by test/settingsMobile.test.mjs. */
+  .app.settings .settings-main { flex: 1; padding-left: 0; padding-right: 0; }
   /* wide pages (usage / skills) must never scroll the whole page sideways */
   .settings-page.wide { max-width: 100%; }
   .skills { flex-direction: column; }
