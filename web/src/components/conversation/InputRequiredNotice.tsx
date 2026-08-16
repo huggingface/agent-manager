@@ -1,9 +1,9 @@
 import type { InputRequired } from '../../types';
 
 const detail = (kind: InputRequired['kind']) => {
-  if (kind === 'permission') return 'A permission prompt is waiting in the terminal.';
-  if (kind === 'question') return 'A question or choice menu is waiting in the terminal.';
-  return 'A confirmation dialog is waiting in the terminal.';
+  if (kind === 'permission') return 'permission prompt waiting in the terminal';
+  if (kind === 'question') return 'question or choice menu waiting in the terminal';
+  return 'confirmation dialog waiting in the terminal';
 };
 
 export default function InputRequiredNotice({ input, onOpenTerminal }: {
@@ -14,8 +14,7 @@ export default function InputRequiredNotice({ input, onOpenTerminal }: {
     <div className="input-required" role="status">
       <span className="input-required-mark" aria-hidden="true">!</span>
       <span className="input-required-copy">
-        <strong>Needs input</strong>
-        <span>{detail(input.kind)}</span>
+        <span className="input-required-label">needs input</span> · {detail(input.kind)}
       </span>
       <button type="button" onClick={onOpenTerminal}>open terminal</button>
     </div>
