@@ -1,12 +1,10 @@
-// What the state marks actually PAINT, in a browser.
+// What the state marks actually render, in a browser.
 //
 // The source lint next door cannot answer this. Both of the bugs this test
 // exists for were invisible to it and to reading the CSS:
 //
-//   · `.status.stopped::before` drew its outline with a border on a
-//     `content-box` pseudo-element, so the border was laid OUTSIDE `height:
-//     100%`. The source said 100% like the other three; Chromium painted
-//     8 x 18.8px against their 8 x 16.8, and flex-shrank the width to boot.
+//   · static states used to draw filled/outlined CSS boxes beside a light
+//     braille working glyph, despite occupying the same outer cell.
 //   · an unconditional `.status::before` painted `currentColor` over the
 //     inline provider and CLI colours that UsagePanel and SettingsView put on
 //     a bare `.status`, which have no state class at all.
@@ -60,6 +58,12 @@ const marks = await page.evaluate((ids) => {
       painted: b.content === 'none' ? null
         : (b.boxSizing === 'border-box' ? [w, h] : [w + 2 * border, h + 2 * border]),
       content: b.content,
+      fontFamily: b.fontFamily,
+      fontSize: b.fontSize,
+      color: b.color,
+      background: b.backgroundColor,
+      borderStyle: b.borderTopStyle,
+      boxShadow: b.boxShadow,
       elementBackground: getComputedStyle(el).backgroundColor,
       cell: (() => { const r = el.getBoundingClientRect(); return [r.width, r.height]; })(),
     };
@@ -71,7 +75,7 @@ await browser.close();
 const round = (xs) => xs.map((n) => Math.round(n * 100) / 100);
 const STATES = ['working', 'waiting', 'idle', 'stopped'];
 
-console.log('every state paints the same cell');
+console.log('every state occupies the same cell');
 const ref = round(marks.waiting.painted);
 for (const s of STATES) {
   check(`${s} paints ${ref.join(' x ')}`, () => {
@@ -82,12 +86,36 @@ check('and the cells themselves agree', () => {
   for (const s of STATES) assert.deepEqual(round(marks[s].cell), round(marks.waiting.cell));
 });
 
-console.log('\nworking is the only one drawing a glyph');
-check('working renders a braille frame', () => {
-  assert.match(marks.working.content, /[⠋⠙⠹⠸⠼⠴⠦⠧]/);
+console.log('\nevery state is a distinct glyph in the spinner\'s braille cell');
+const GLYPHS = { waiting: '⠿', idle: '⠶', stopped: '⠤' };
+check('the four glyphs are distinct', () => {
+  const animated = new Set(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧']);
+  assert.equal(new Set(['animated', ...Object.values(GLYPHS)]).size, STATES.length);
+  for (const glyph of Object.values(GLYPHS)) assert.ok(!animated.has(glyph));
 });
-check('the other three render an empty box', () => {
-  for (const s of ['waiting', 'idle', 'stopped']) assert.equal(marks[s].content, '""');
+check('working renders one of the animation frames with the shared font and no box', () => {
+  assert.match(marks.working.content, /[⠋⠙⠹⠸⠼⠴⠦⠧]/);
+  assert.equal(marks.working.fontSize, '12.5px');
+  assert.match(marks.working.fontFamily, /Geist Mono/);
+  assert.equal(marks.working.background, 'rgba(0, 0, 0, 0)');
+  assert.equal(marks.working.borderStyle, 'none');
+  assert.equal(marks.working.boxShadow, 'none');
+});
+for (const [state, glyph] of Object.entries(GLYPHS)) {
+  check(`${state} renders ${glyph} with the shared font and no box`, () => {
+    assert.equal(marks[state].content, `"${glyph}"`);
+    assert.equal(marks[state].fontSize, '12.5px');
+    assert.match(marks[state].fontFamily, /Geist Mono/);
+    assert.equal(marks[state].background, 'rgba(0, 0, 0, 0)');
+    assert.equal(marks[state].borderStyle, 'none');
+    assert.equal(marks[state].boxShadow, 'none');
+  });
+}
+check('working and your-turn share the accent treatment', () => {
+  assert.equal(marks.working.color, marks.waiting.color);
+});
+check('idle and stopped share the muted treatment', () => {
+  assert.equal(marks.idle.color, marks.stopped.color);
 });
 
 console.log('\nand a bare .status keeps the colour its caller gave it');

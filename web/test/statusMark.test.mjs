@@ -8,11 +8,10 @@
 // measured a copy of the glyph instead of reading the spinner's own cell, so a
 // font or spinner change would have left the rectangles behind.
 //
-// So this lints the contract, not the numbers: --mark-w/--mark-h are declared
-// once, and every renderer of the spinner AND every static state reads them
-// rather than restating a length. What the marks actually PAINT is a separate
-// question this cannot answer — a border sits outside a percentage height and
-// the source still says `100%`. That is statusMark.render.test.mjs.
+// So this lints the contract, not the numbers: --mark-size/--mark-w/--mark-h
+// are declared once, and every renderer of the spinner AND every static state
+// reads them rather than restating a length. What the marks actually PAINT is a
+// separate question this cannot answer. That is statusMark.render.test.mjs.
 //
 // Run with:  node test/statusMark.test.mjs
 import assert from 'node:assert/strict';
@@ -42,8 +41,8 @@ const LENGTH = /(?:^|[\s:])-?\d*\.?\d+(?:px|em|rem|%)/;
 
 console.log('the cell is declared once');
 
-check('--mark-w and --mark-h are declared exactly once each', () => {
-  for (const name of ['--mark-w', '--mark-h']) {
+check('--mark-size, --mark-w and --mark-h are declared exactly once each', () => {
+  for (const name of ['--mark-size', '--mark-w', '--mark-h']) {
     const declarations = [...css.matchAll(new RegExp(`${name}\\s*:`, 'g'))].length;
     assert.equal(declarations, 1, `${name} is declared ${declarations} times`);
   }
@@ -71,6 +70,17 @@ check('none of them restates a width', () => {
     .map((r) => r.selector);
   assert.deepEqual(offenders, [], `these size the spinner themselves: ${offenders.join(', ')}`);
 });
+check('every spinner consumes the shared type-and-cell contract', () => {
+  for (const spinner of spinners) {
+    if (spinner.selector === '.status.working::before') {
+      assert.match(spinner.body, /content:\s*'⠋'/, 'working lost the shared braille family');
+      continue; // its parent owns the contract; the mark fills it below
+    }
+    assert.match(spinner.body, /font-size\s*:\s*var\(--mark-size\)/, `${spinner.selector} has its own type size`);
+    assert.match(spinner.body, /width\s*:\s*var\(--mark-w\)/, `${spinner.selector} has its own width`);
+    assert.match(spinner.body, /height\s*:\s*var\(--mark-h\)/, `${spinner.selector} has its own height`);
+  }
+});
 
 console.log('\nand so does every state that stands in for it');
 
@@ -78,7 +88,8 @@ const STATES = ['working', 'waiting', 'idle', 'stopped'];
 const stateRules = rules.filter((r) => STATES.some((s) => r.selector.includes(`.status.${s}`)));
 check('the four states are sized from the cell', () => {
   const sized = stateRules.filter((r) => /width\s*:\s*var\(--mark-w\)/.test(r.body)
-    && /height\s*:\s*var\(--mark-h\)/.test(r.body));
+    && /height\s*:\s*var\(--mark-h\)/.test(r.body)
+    && /font-size\s*:\s*var\(--mark-size\)/.test(r.body));
   assert.ok(sized.length >= 1, 'no state rule takes its box from --mark-w/--mark-h');
   for (const s of STATES) {
     assert.ok(sized.some((r) => r.selector.includes(`.${s}`)), `${s} is not covered by that rule`);
@@ -100,6 +111,26 @@ check('the mark inside the cell only fills it', () => {
       assert.equal(value.trim(), '100%', `${r.selector} sizes the mark to ${value.trim()}`);
     }
   }
+});
+check('the four states are unique braille glyphs, never boxes', () => {
+  const expected = { working: '⠋', waiting: '⠿', idle: '⠶', stopped: '⠤' };
+  const animated = new Set(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧']);
+  const seen = new Set();
+  for (const [state, glyph] of Object.entries(expected)) {
+    const own = rules.find((r) => r.selector === `.status.${state}::before`);
+    assert.ok(own, `no pseudo-element for ${state}`);
+    assert.match(own.body, new RegExp(`content:\\s*['"]${glyph}['"]`), `${state} does not use ${glyph}`);
+    seen.add(glyph);
+
+    if (state !== 'working') assert.ok(!animated.has(glyph), `${state} can look identical to a working frame`);
+
+    const bodies = stateRules.filter((r) => r.selector.includes(`.status.${state}`) && /::before/.test(r.selector))
+      .map((r) => r.body).join('\n');
+    for (const [, prop, value] of bodies.matchAll(/(?:^|;)\s*(background|border(?:-[\w-]+)?|box-shadow)\s*:\s*([^;]+)/g)) {
+      assert.equal(value.trim(), 'none', `${state} paints ${prop}: ${value.trim()}`);
+    }
+  }
+  assert.equal(seen.size, 4, 'two states share a glyph');
 });
 
 console.log('\nand the plain colour dot is left alone');
