@@ -268,7 +268,9 @@ pane with nothing to render (a shell) simply stays a terminal.
   above. Only the last exchange shows it, and while an optimistic echo is pending the echo owns
   the spot: the agent is one process working on one thing, and two `working` lines stacked (the
   live turn's and the echo's) is what read as the indicator being "sometimes below and above".
-  The card has had this guard since it grew an echo; the reader had not.
+  The card has had this guard since it grew an echo; the reader had not. The cost of choosing the
+  echo's line is that it is the bare one — the live turn's carries `· what it is doing now`, and
+  that detail is gone for the second or two until the transcript catches up and the echo clears.
 - **The turn column holds still.** `turn 9/10` and `turn 10/10` are different widths, so the whole
   right-hand cluster stepped sideways the moment a session passed nine turns. The number is padded
   to the width of the total with figure spaces (U+2007) — the row is mono and tabular, so a figure

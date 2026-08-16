@@ -191,6 +191,13 @@ export function ExchangeView({
   const answerHtml = useMemo(
     () => (answer ? highlightHtml(renderMarkdown(answer), q) : ''), [answer, q]);
   const answerMore = moreOf(x.answer);
+  // Counted over the split, deliberately: the fold control says how many rows
+  // are behind it, so "2 steps" has to mean two rows when you open it. The cost
+  // is that a turn whose answer landed mid-work can report one row more than an
+  // identical turn whose answer came last — same tools, same time, different
+  // grouping. `stepSummary(x, stepsOf(x.steps))` would count the whole turn
+  // instead and disagree with what unfolds; between the two, the number that
+  // matches what you are about to see wins.
   const summary = stepSummary(x, steps);
   const latest = running ? nowDoing(steps[steps.length - 1]) : '';
   // Naming the model on every turn is noise when it never changes; when it DOES

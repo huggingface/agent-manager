@@ -182,6 +182,26 @@ const kinds = (steps) => steps.map((s) => (s.kind === 'tools' ? `${s.name}×${s.
     'and the work it promised stays below it');
 }
 
+// The other end of the same rule: an agent that answers FIRST and then does the
+// work — "I will add one now", then the edit and the run, and it never speaks
+// again. markFinalTurns marks that text at index 0, so answerAt is 0 and every
+// step belongs below it. Zero is the value a falsy check silently loses: swap
+// `at == null` for `!at` in Exchange.tsx and this turn renders its answer under
+// both tool rows again, which is the bug this whole change exists to remove.
+{
+  const [x] = splitExchanges([
+    user('add an index for the nightly job'),
+    agent([text('I will add one now.')], 'final'),
+    agent([call('Edit', { file_path: 'migrations/014_usage_index.sql' }), result('created')]),
+    agent([call('Bash', { command: 'node scripts/nightly.mjs' }), result('ok · 12.4s')]),
+  ]);
+  assert.match(said(x.answer), /^I will add one now/);
+  assert.equal(x.answerAt, 0, 'answered before doing anything: index zero, not undefined');
+  assert.deepEqual(kinds(stepsOf(x.steps.slice(0, x.answerAt))), [], 'nothing above it');
+  assert.deepEqual(kinds(stepsOf(x.steps.slice(x.answerAt))), ['Edit×1', 'Bash×1'],
+    'and all of the work below it');
+}
+
 // An answer that really is last says so by leaving answerAt unset, which is
 // what keeps the ordinary turn one plain block of steps.
 {

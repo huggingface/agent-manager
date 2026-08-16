@@ -109,6 +109,22 @@ check('the work it promised is below the answer',
   () => assert.ok(mid.indexOf('Found it') < mid.indexOf('014.sql'), 'the Edit should follow the answer'));
 check('so the steps render as two runs, not one',
   () => assert.equal((mid.match(/class="cx-steps"/g) || []).length, 2));
+// answerAt can be 0 — the agent answered before it did anything — and 0 is the
+// value a falsy guard drops. With `!at` in place of `at == null` every other
+// check here still passes and this one does not, which is the point of it.
+check('an answer given BEFORE the work renders above all of it', () => {
+  const first = render(ExchangeView, {
+    x: { ...midTurn, answerAt: 0, answer: [{ role: 'assistant', ts: 1_700_000_005_000, kind: 'final', blocks: [{ type: 'text', text: 'I will add one now.' }] }] },
+    n: 2, total: 2, open: true,
+  });
+  assert.ok(first.indexOf('I will add one now') < first.indexOf('explain analyze'),
+    'the answer should precede the first tool row');
+  assert.ok(first.indexOf('explain analyze') < first.indexOf('014.sql'),
+    'and the work should stay in its own order below it');
+  assert.equal((first.match(/class="cx-steps"/g) || []).length, 1,
+    'nothing above the answer, so one run of steps below it');
+});
+
 check('an answer that IS last still renders one run of steps', () => {
   const plain = render(ExchangeView, { x: { ...midTurn, answerAt: undefined, answer: midTurn.answer }, n: 2, total: 2, open: true });
   assert.equal((plain.match(/class="cx-steps"/g) || []).length, 1);
