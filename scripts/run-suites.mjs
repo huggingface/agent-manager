@@ -27,10 +27,19 @@
 // OPTING OUT. A suite that must not run in the default set says so in its own
 // header, on a line containing `am-test: manual` plus the reason. It is declared
 // where a reader will see it rather than by absence from a list somewhere else,
-// and every run prints what it skipped and why, so coverage cannot go quiet.
+// and every run prints what it skipped and why — on the failure path too, since
+// that is the moment someone is actually reading this output.
 //
-// Usage:  node ../scripts/run-suites.mjs [substring …]
-//         (a substring filters to matching suites — for running one by hand)
+// DISCOVERY IS TWO DEEP, ON PURPOSE: `test/` and the package root, so a
+// `test/fixtures/` directory is fixtures rather than a source of surprise runs.
+// A `*.test.mjs` anywhere below that is reported at the end of every run instead
+// of being ignored — a file that looks like a suite and never runs is the exact
+// failure this script exists to end, and it does not matter that the cause is a
+// subdirectory rather than a hand-edited list.
+//
+// Usage:  node ../scripts/run-suites.mjs [substring …] [--manual]
+//         a substring filters to matching suites — for running one by hand;
+//         --manual lets that filter reach the suites marked manual.
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -53,7 +62,10 @@ const listDir = (dir) => {
 // test/) at the front of the run.
 const found = [...listDir('test'), ...listDir('.')];
 
-const filters = process.argv.slice(2);
+const args = process.argv.slice(2);
+const wantManual = args.includes('--manual');
+const filters = args.filter((a) => !a.startsWith('--'));
+const matches = (file) => !filters.length || filters.some((f) => file.includes(f));
 const suites = [];
 const skipped = [];
 for (const file of found) {
@@ -65,17 +77,55 @@ for (const file of found) {
     fs.closeSync(fd);
   } catch { /* unreadable: let node report it */ }
   const manual = head.match(MANUAL);
-  if (manual) { skipped.push({ file, why: manual[1].trim() }); continue; }
-  if (filters.length && !filters.some((f) => file.includes(f))) continue;
+  // Named explicitly with --manual, a manual suite runs: the filter is the
+  // run-one-by-hand path, and the suites worth running by hand are mostly these.
+  if (manual && !(wantManual && filters.length && matches(file))) {
+    if (matches(file)) skipped.push({ file, why: manual[1].trim() });
+    continue;
+  }
+  if (!matches(file)) continue;
   suites.push(file);
 }
 
+// Anything that looks like a suite but sits below the two scanned depths.
+const stray = [];
+(function walk(dir, depth) {
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      if (['node_modules', '.git', 'dist', 'coverage'].includes(e.name)) continue;
+      walk(p, depth + 1);
+    } else if (e.name.endsWith('.test.mjs') && depth > 0 && path.dirname(p) !== 'test') {
+      stray.push(p);
+    }
+  }
+}('.', 0));
+
+const plural = (n) => `${n} suite${n === 1 ? '' : 's'}`;
+// Printed by BOTH exits. What did not run is most worth saying when something
+// failed, and that is exactly when an early `process.exit` used to swallow it.
+const report = () => {
+  for (const { file, why } of skipped) console.log(`  skipped ${file} — ${why || 'marked manual'}`);
+  for (const file of stray) {
+    console.log(`  NOT RUN ${file} — below \`test/\` and the package root, where discovery looks.`);
+    console.log('          Move it up, or mark it `am-test: manual` with a reason, or rename it.');
+  }
+};
+
 const pkg = path.basename(process.cwd());
 if (!suites.length) {
-  console.error(`no suites found in ${pkg}/${filters.length ? ` matching ${filters.join(', ')}` : ''}`);
+  // Blaming the filter here sends people looking for a typo when the file was
+  // found and deliberately excluded.
+  const manualOnly = skipped.length && filters.length;
+  console.error(manualOnly
+    ? `${pkg}/: ${plural(skipped.length)} matched ${filters.join(', ')}, all marked manual:`
+    : `no suites found in ${pkg}/${filters.length ? ` matching ${filters.join(', ')}` : ''}`);
+  report();
+  if (manualOnly) console.error(`Run one anyway with: npm test -- ${filters.join(' ')} --manual`);
   process.exit(1);
 }
-const plural = (n) => `${n} suite${n === 1 ? '' : 's'}`;
 console.log(`${pkg}: ${plural(suites.length)}\n`);
 
 for (const [i, file] of suites.entries()) {
@@ -85,10 +135,11 @@ for (const [i, file] of suites.entries()) {
   if (code !== 0) {
     console.error(`\n${file} FAILED (${r.signal ? `signal ${r.signal}` : `exit ${code}`})`);
     console.error(`${plural(i)} had passed before it; the rest were not started.`);
+    report();
     process.exit(code);
   }
   console.log('');
 }
 
 console.log(`${pkg}: ${plural(suites.length)} passed`);
-for (const { file, why } of skipped) console.log(`  skipped ${file} — ${why || 'marked manual'}`);
+report();
