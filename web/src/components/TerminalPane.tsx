@@ -1232,6 +1232,9 @@ export default function TerminalPane({
           </div>
         )}
       </div>
+      {/* The header starts this flow, but xterm has no Agent Manager draft row
+          for operational chips. Keep progress and recovery over the terminal
+          itself, below the compact attach/search/info/close cluster. */}
       {imageStatus && !reading && (
         <div
           className={`term-image-status ${imageStatus.kind}${pendingInsert.length || imageUploadCancelable ? ' has-action' : ''} mono`}

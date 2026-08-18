@@ -112,8 +112,10 @@ same paste/drop behavior:
   into the textarea.
 - Dropping files over the composer shows a restrained dashed highlight and
   adds the same chips.
-- Overview, rendered reader, and live terminal views expose a file button with
-  an unrestricted `<input type="file" multiple>`; quick creation intentionally
+- Overview exposes a file button in its reply row. Reader and live-terminal
+  views share the pane header's attachment button; it targets the reader draft
+  or terminal insertion flow according to the visible mode. Each uses an
+  unrestricted `<input type="file" multiple>`. Quick creation intentionally
   stays prompt-first and accepts paste/drop without another picker.
 - Image chips show thumbnails; other files show a compact extension badge.
 - The prompt may contain text plus files or files alone.
@@ -139,11 +141,14 @@ and follow that session's existing deletion/pruning lifecycle.
 ### 5.2 Rendered terminal reader
 
 Reader mode covers a still-mounted terminal with a structured conversation and
-its own reply composer. While that overlay is visible, its composer owns file
-pick, paste, drop, chips, upload, and structured `/input` delivery. The terminal
-header's attachment button, terminal upload status, mobile key bar, and fallback
-paste sheet stay hidden. Otherwise a file chosen while reading would be inserted
-into the invisible xterm prompt instead of being part of the visible reply.
+its own reply composer. The pane header keeps one attachment button in both
+views; while the reader is visible it opens the reader's hidden picker instead
+of the terminal's. The resulting chips, byte progress, failure reason, Cancel,
+and Retry stay above the fixed composer because they belong to—and gate—that
+draft. Paste, drop, upload, and structured `/input` delivery use the same queue.
+Terminal upload status, the mobile key bar, and fallback paste sheet stay hidden.
+Otherwise a file chosen while reading would be inserted into the invisible
+xterm prompt instead of being part of the visible reply.
 
 The rendered reader and Overview both permit text-plus-file and file-only turns,
 preserve the text draft behavior introduced by the reader, and keep failed
@@ -166,6 +171,11 @@ short transaction:
 The upload status includes a Cancel action while bytes are transferring. A
 saved-but-not-inserted file offers both Retry and Remove, so an insertion failure
 does not trap the terminal attachment affordance.
+
+The pane header's attachment button starts that transaction. Progress and
+recovery remain in the terminal overlay rather than competing with the header's
+compact attach/search/info/close cluster; unlike the reader, xterm has no visible
+Agent Manager draft queue to hold chips.
 
 An upload must never auto-submit the agent's prompt. Inserting the attachment and
 submitting are separate actions, matching native TUI image paste behavior.
@@ -654,8 +664,9 @@ A retry reuses already uploaded ids and transfers only failed files.
 - A terminal stopped after upload reports saved-but-not-inserted, disables new
   attachments, and can retry the stored attachment after restart.
 - Remote live composers explain that Space-local files are unavailable.
-- Reader mode owns its visible attachment picker and never inserts into the
-  covered terminal.
+- Reader mode owns the pane header's one attachment button, opens its hidden
+  picker, and keeps progress/error/retry chips in the visible composer rather
+  than inserting into the covered terminal.
 - Reader and Overview image-only replies send attachment ids through the same
   structured `/input` route.
 - Terminal file drop does not trigger pane movement.

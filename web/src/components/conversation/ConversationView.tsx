@@ -564,6 +564,9 @@ export default function ConversationView({
       </div>
 
       {!readOnly && (
+        // Selection starts from the pane header, but transfer state belongs to
+        // this always-visible draft: progress, failure, Cancel, and Retry stay
+        // beside the message whose Send action they gate.
         <Composer
           className="cxv-live"
           containerClassName="cxv-composer"

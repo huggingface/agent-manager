@@ -272,10 +272,17 @@ try {
   // The pane header owns ONE paperclip in both views now (2026-08-18): in the
   // reader it opens the composer's own picker, which is the input used below, so
   // the files still land in the draft. The composer no longer draws its own.
+  const [readerChooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.locator('.pane-head .ph-image').click(),
+  ]);
+  const readerChooserIsInComposer = await readerChooser.element().evaluate((element) =>
+    !!element.closest('.pane-reader'));
   check('one paperclip, in the header, wired to the reader composer',
     await page.locator('.pane-head .ph-image').isVisible()
       && await page.locator('.pane-reader .image-pick').count() === 0
-      && await page.locator('.pane-reader .image-file-input').count() === 1);
+      && await page.locator('.pane-reader .image-file-input').count() === 1
+      && readerChooserIsInComposer);
 
   // Keep the request outside the server until the operator cancels it. The
   // composer must become usable immediately; it cannot be held hostage by a
@@ -296,7 +303,7 @@ try {
     canceledUploadReached,
     sleep(10_000).then(() => { throw new Error('cancel fixture upload did not start'); }),
   ]);
-  const canceledChip = page.locator('.pane-reader .image-chip', { hasText: 'cancel-me.bin' });
+  const canceledChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'cancel-me.bin' });
   const cancelUpload = canceledChip.getByRole('button', { name: 'Cancel upload cancel-me.bin' });
   await cancelUpload.waitFor({ state: 'visible' });
   const cancelWasEnabled = await cancelUpload.isEnabled();
@@ -316,7 +323,7 @@ try {
   await readerPicker.setInputFiles({
     name: 'interrupted.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(256 * 1024),
   });
-  const interruptedChip = page.locator('.pane-reader .image-chip', { hasText: 'interrupted.bin' });
+  const interruptedChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'interrupted.bin' });
   await interruptedChip.filter({ has: page.locator('.image-chip-retry') }).waitFor({ state: 'visible' });
   const interruptedText = await interruptedChip.locator('.image-chip-meta').textContent();
   check('an interrupted upload fails immediately with a reason and retry',
@@ -341,7 +348,7 @@ try {
   await readerPicker.setInputFiles({
     name: 'proxy-limit.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(1024),
   });
-  const proxyChip = page.locator('.pane-reader .image-chip', { hasText: 'proxy-limit.bin' });
+  const proxyChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'proxy-limit.bin' });
   await proxyChip.filter({ has: page.locator('.image-chip-retry') }).waitFor();
   const proxyText = await proxyChip.locator('.image-chip-meta').textContent();
   check('a non-JSON proxy rejection keeps an actionable HTTP reason',
@@ -355,7 +362,7 @@ try {
   fs.writeFileSync(tooLargePath, '');
   fs.truncateSync(tooLargePath, 101 * 1024 * 1024);
   await readerPicker.setInputFiles(tooLargePath);
-  const tooLargeChip = page.locator('.pane-reader .image-chip', { hasText: 'too-large.bin' });
+  const tooLargeChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'too-large.bin' });
   await tooLargeChip.filter({ has: page.locator('.image-chip-meta', { hasText: 'too large' }) }).waitFor();
   check('a large file is rejected before upload with its 100 MB limit',
     (await tooLargeChip.locator('.image-chip-meta').textContent())?.includes('100 MB max')
@@ -379,7 +386,7 @@ try {
     readerUploadReached,
     sleep(10_000).then(() => { throw new Error('reader upload did not start on attachment'); }),
   ]);
-  const readerChip = page.locator('.pane-reader .image-chip', { hasText: 'reader.png' });
+  const readerChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'reader.png' });
   await readerChip.locator('.image-chip-progress').waitFor({ state: 'visible' });
   const readerProgress = await readerChip.locator('.image-chip-progress').getAttribute('aria-valuenow');
   const readerProgressText = await readerChip.locator('.image-chip-meta').textContent();
