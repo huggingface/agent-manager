@@ -7,6 +7,7 @@
  *   - ...without letting that lingering selection shadow Ctrl+C's SIGINT
  *
  * Set TERMUI_PUBLIC_DIR to a prebuilt web/dist to skip the build.
+ * am-test: manual — Chromium, a full web build and port 7897; `npm run test:ui`.
  */
 import fs from 'node:fs';
 import os from 'node:os';

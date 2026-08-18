@@ -11,6 +11,7 @@
  *
  * Set READER_INFO_PUBLIC_DIR to a prebuilt web/dist to skip the build, and
  * READER_INFO_PORT to move off the default when suites run in parallel.
+ * am-test: manual — Chromium, a full web build and READER_INFO_PORT; `npm run test:ui`.
  */
 import fs from 'node:fs';
 import os from 'node:os';
