@@ -22,6 +22,10 @@ const textOf = (t: TraceTurn | TraceTurn[] | null) =>
 const moreOf = (t: TraceTurn | TraceTurn[] | null) =>
   blocksOf(t).reduce((n, b) => n + (('more' in b && b.more) || 0), 0);
 
+/** `9` under `10` — a figure space (U+2007) is a digit wide in tabular figures. */
+const padTurn = (n: number, total?: number) =>
+  String(n).padStart(String(total ?? n).length, '\u2007');
+
 const moreLabel = (more?: number) =>
   (more ? `+${more > 1024 ? `${Math.round(more / 1024)} KB` : `${more} chars`} not retained` : '');
 
@@ -169,7 +173,14 @@ export function ExchangeView({
   const [selfOpen, setSelfOpen] = useState(false);
   const toggle = onToggle ?? (() => setSelfOpen((o) => !o));
 
-  const steps = useMemo(() => stepsOf(x.steps), [x.steps]);
+  // The work, split where the answer belongs. Grouping runs over each side
+  // separately on purpose: two Reads either side of the agent's reply are two
+  // things it did, before and after saying it, and collapsing them into one
+  // `Read ×2` row would erase exactly the sequence this is here to keep.
+  const at = x.answerAt;
+  const stepsBefore = useMemo(() => stepsOf(at == null ? x.steps : x.steps.slice(0, at)), [x.steps, at]);
+  const stepsAfter = useMemo(() => (at == null ? [] : stepsOf(x.steps.slice(at))), [x.steps, at]);
+  const steps = useMemo(() => [...stepsBefore, ...stepsAfter], [stepsBefore, stepsAfter]);
   // A turn whose match is buried in the work unfolds it, or the search would
   // report a hit with nothing on screen to look at.
   const hitInWork = useMemo(
@@ -180,6 +191,13 @@ export function ExchangeView({
   const answerHtml = useMemo(
     () => (answer ? highlightHtml(renderMarkdown(answer), q) : ''), [answer, q]);
   const answerMore = moreOf(x.answer);
+  // Counted over the split, deliberately: the fold control says how many rows
+  // are behind it, so "2 steps" has to mean two rows when you open it. The cost
+  // is that a turn whose answer landed mid-work can report one row more than an
+  // identical turn whose answer came last — same tools, same time, different
+  // grouping. `stepSummary(x, stepsOf(x.steps))` would count the whole turn
+  // instead and disagree with what unfolds; between the two, the number that
+  // matches what you are about to see wins.
   const summary = stepSummary(x, steps);
   const latest = running ? nowDoing(steps[steps.length - 1]) : '';
   // Naming the model on every turn is noise when it never changes; when it DOES
@@ -206,22 +224,33 @@ export function ExchangeView({
           <>
             <span className="spacer" />
             {model && <span className="cx-model">{model}</span>}
-            <span className="cx-n">turn {n}{total ? `/${total}` : ''}</span>
+            {/* Padded to the width of the total, in FIGURE spaces: the row is
+                mono and tabular, so one figure space is exactly one digit, and
+                "turn  9/10" lines up under "turn 10/10" instead of the whole
+                right cluster stepping left the moment a session passes nine
+                turns. A plain space would collapse in HTML. */}
+            <span className="cx-n">turn {padTurn(n, total)}{total ? `/${total}` : ''}</span>
             {x.startTs ? <span className="cx-time">{fmtClock(x.startTs)}</span> : null}
           </>
         )}
       </div>
       )}
-      {isOpen && steps.length > 0 && (
-        <div className="cx-steps">{steps.map((s, i) => <StepRow key={i} s={s} q={q} />)}</div>
+      {isOpen && stepsBefore.length > 0 && (
+        <div className="cx-steps">{stepsBefore.map((s, i) => <StepRow key={i} s={s} q={q} />)}</div>
       )}
 
+      {/* The answer sits where it was said. Usually that is after all the work;
+          when the agent answered and then kept going, `answerAt` puts it back
+          between the two runs of steps instead of under work it predates. */}
       {answerHtml ? (
         <div className="cx-answer">
           <div className="markdown cx-md" dangerouslySetInnerHTML={{ __html: answerHtml }} />
           {!!answerMore && <div className="cx-note mono">…{moreLabel(answerMore)}</div>}
         </div>
       ) : null}
+      {isOpen && stepsAfter.length > 0 && (
+        <div className="cx-steps">{stepsAfter.map((s, i) => <StepRow key={`a${i}`} s={s} q={q} />)}</div>
+      )}
       {/* Mid-task there is no answer — an agent's aside is not a reply — so the
           running line carries the latest thing that happened instead. */}
       {running && (

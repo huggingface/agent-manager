@@ -253,6 +253,28 @@ pane with nothing to render (a shell) simply stays a terminal.
   tool call is unusable while a task runs; one that never moves makes you chase it.
 - **The prompt band sticks to the top** while you read a long turn. What you want overhead deep
   in someone's 67-step answer is the question it is answering — not a row of numbers.
+- **An exchange reads in the order it happened.** Usually the answer is the last thing the agent
+  said, so it goes under the work. But an agent that answers and then keeps going — a resumed
+  task, a reply followed by more tool calls — leaves its answer in the *middle* of the turn, and
+  the reader used to lift it out and print it under work it predates. With the steps expanded that
+  reads as nonsense: "I will add the index and re-run" sitting below the edit and the re-run.
+  `answerAt` (exchanges.ts) remembers the index the answer was lifted from, and the work renders as
+  two runs of steps with the answer between them. Grouping runs over each side separately, so two
+  `Read`s either side of the reply stay two rows rather than collapsing into `Read ×2` and erasing
+  the sequence.
+- **One working line, and it is the last thing in the reader.** It carries what the agent is doing
+  *now* (`working · Bash …`), so it belongs at the end of the rail it continues — putting it above
+  the steps would report the present before the past, which is the same disorder as the bullet
+  above. Only the last exchange shows it, and while an optimistic echo is pending the echo owns
+  the spot: the agent is one process working on one thing, and two `working` lines stacked (the
+  live turn's and the echo's) is what read as the indicator being "sometimes below and above".
+  The card has had this guard since it grew an echo; the reader had not. The cost of choosing the
+  echo's line is that it is the bare one — the live turn's carries `· what it is doing now`, and
+  that detail is gone for the second or two until the transcript catches up and the echo clears.
+- **The turn column holds still.** `turn 9/10` and `turn 10/10` are different widths, so the whole
+  right-hand cluster stepped sideways the moment a session passed nine turns. The number is padded
+  to the width of the total with figure spaces (U+2007) — the row is mono and tabular, so a figure
+  space is exactly a digit — and the clock beside it was already stable.
 - **The prompt band spans the pane.** Reaching into the left gutter but stopping at the text
   column on the right made it read as a card floating over the answer rather than as the head of
   it. Full bleed both sides; the meta row sits tight under the band it belongs to, and one
