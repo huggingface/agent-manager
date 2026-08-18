@@ -136,11 +136,12 @@
 .cx-running::before {
   /* The spinner's type and cell are declared with the animation in styles.css
      and read by everything that draws it — this, .ov-busy, and the static
-     state glyphs that stand in for it while an agent is not working. */
+     path that stands in for it while an agent is not working. */
   content: '⠋'; display: inline-flex; align-items: center;
   width: var(--mark-w); height: var(--mark-h);
-  font-family: var(--font-mono); font-size: var(--mark-size); line-height: 1;
-  color: var(--accent);
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
+  color: var(--accent); transform: translateY(var(--mark-optical-y));
   animation: ov-spin 0.9s steps(1) infinite;
 }
 

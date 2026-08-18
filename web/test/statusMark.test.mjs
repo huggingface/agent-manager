@@ -42,6 +42,7 @@ console.log('the cell is declared once');
 check('the type, cell and measured path values are declared exactly once each', () => {
   for (const name of [
     '--mark-size', '--mark-w', '--mark-h',
+    '--mark-weight', '--mark-optical-y',
     '--mark-ink-x', '--mark-ink-y', '--mark-ink-w', '--mark-ink-h', '--mark-stroke',
   ]) {
     const declarations = [...css.matchAll(new RegExp(`${name}\\s*:`, 'g'))].length;
@@ -71,15 +72,20 @@ check('none of them restates a width', () => {
     .map((r) => r.selector);
   assert.deepEqual(offenders, [], `these size the spinner themselves: ${offenders.join(', ')}`);
 });
-check('every spinner consumes the shared type-and-cell contract', () => {
+check('every spinner consumes the shared type, weight and cell contract', () => {
   for (const spinner of spinners) {
     if (spinner.selector === '.status.working::before') {
       assert.match(spinner.body, /content:\s*'⠋'/, 'working lost the shared braille family');
+      assert.match(spinner.body, /translateY\(var\(--mark-optical-y\)\)/, 'working lost the optical correction');
       continue; // its parent owns the contract; the mark fills it below
     }
+    assert.match(spinner.body, /font-family\s*:\s*var\(--font-mono\)/, `${spinner.selector} inherits its font family`);
     assert.match(spinner.body, /font-size\s*:\s*var\(--mark-size\)/, `${spinner.selector} has its own type size`);
+    assert.match(spinner.body, /font-weight\s*:\s*var\(--mark-weight\)/, `${spinner.selector} inherits its weight`);
+    assert.match(spinner.body, /line-height\s*:\s*1/, `${spinner.selector} inherits its line height`);
     assert.match(spinner.body, /width\s*:\s*var\(--mark-w\)/, `${spinner.selector} has its own width`);
     assert.match(spinner.body, /height\s*:\s*var\(--mark-h\)/, `${spinner.selector} has its own height`);
+    assert.match(spinner.body, /translateY\(var\(--mark-optical-y\)\)/, `${spinner.selector} lost the optical correction`);
   }
 });
 
@@ -94,6 +100,16 @@ check('the four states are sized from the cell', () => {
   assert.ok(sized.length >= 1, 'no state rule takes its box from --mark-w/--mark-h');
   for (const s of STATES) {
     assert.ok(sized.some((r) => r.selector.includes(`.${s}`)), `${s} is not covered by that rule`);
+  }
+});
+check('the four states own their typography instead of inheriting it', () => {
+  const typed = stateRules.filter((r) => !/::before/.test(r.selector)
+    && /font-family\s*:\s*var\(--font-mono\)/.test(r.body)
+    && /font-size\s*:\s*var\(--mark-size\)/.test(r.body)
+    && /font-weight\s*:\s*var\(--mark-weight\)/.test(r.body)
+    && /line-height\s*:\s*1/.test(r.body));
+  for (const s of STATES) {
+    assert.ok(typed.some((r) => r.selector.includes(`.${s}`)), `${s} inherits surrounding typography`);
   }
 });
 check('no state rule restates a length for its box', () => {

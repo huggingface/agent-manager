@@ -2,8 +2,9 @@
 //
 // This complements statusMark.test.mjs by proving three things source lint
 // cannot: the static rectangle follows Geist Mono's real braille ink, its
-// stroke is one braille dot thick, and a state pseudo-element never paints
-// over the inline provider/CLI colours carried by bare `.status` dots.
+// stroke is one braille dot thick, surrounding title weight cannot change a
+// mark, and a state pseudo-element never paints over the inline provider/CLI
+// colours carried by bare `.status` dots.
 //
 // Needs Chromium; run with:  node test/statusMark.render.test.mjs
 // (not in `npm test`, which stays browser-free — see package.json's test:render)
@@ -25,7 +26,12 @@ const embeddedFont = `@font-face {
   font-family: 'Geist Mono Test'; font-style: normal; font-weight: 100 900;
   src: url(data:font/woff2;base64,${geistMono}) format('woff2');
 }
-:root { --font-mono: 'Geist Mono Test'; }`;
+:root { --font-mono: 'Geist Mono Test'; }
+.parity-sidebar { display:flex; align-items:center; font-weight:400; }
+.parity-overview { display:flex; align-items:center; font-weight:700; }
+.mark-baseline { display:inline-block; width:0; height:0; padding:0; margin:0; }
+.status.working::before, .ov-busy::before, .cx-running::before,
+.ovt-state.running::before { animation:none !important; }`;
 
 let failed = 0;
 const check = (what, fn) => {
@@ -47,14 +53,38 @@ await page.setContent(`<style>${css}\n${embeddedFont}</style>
     <span class="status stopped" id="stopped"></span>
     <span class="status" id="provider" style="background: rgb(214, 69, 69)"></span>
     <span class="status" id="ready" style="background: rgb(46, 158, 91)"></span>
-  </div>`);
+  </div>
+  <div class="parity-sidebar"><span class="status working" id="sidebar-working"></span></div>
+  <div class="parity-overview">
+    <span class="status working" id="overview-working"></span>
+    <span class="status waiting" id="overview-waiting"></span>
+  </div>
+  <div class="pane-head" style="width:600px">
+    <span class="ph-left"></span>
+    <span class="ph-title">
+      <span class="status working" id="header-working"></span>
+      <span class="ph-name">claude-code-4</span>
+    </span>
+    <span class="ph-right"></span>
+  </div>
+  <div class="pane-head" style="width:600px">
+    <span class="ph-left"></span>
+    <span class="ph-title" id="header-static-wrap">
+      <span class="status waiting" id="header-waiting"></span>
+      <span class="ph-name">claude-code-4<span class="mark-baseline" id="header-baseline"></span></span>
+    </span>
+    <span class="ph-right"></span>
+  </div>
+  <div class="ov-busy" id="overview-busy">running</div>
+  <div class="ovt-state running" id="overview-group-working"></div>
+  <div class="cx-running" id="reader-working">working</div>`);
 await page.evaluate(async () => {
   await document.fonts.load('12.5px "Geist Mono Test"', '⠿⠁');
   await document.fonts.ready;
 });
 await page.waitForTimeout(150);
 
-const { marks, ink } = await page.evaluate((ids) => {
+const { marks, ink, optics } = await page.evaluate((ids) => {
   const out = {};
   for (const id of ids) {
     const el = document.getElementById(id);
@@ -70,6 +100,8 @@ const { marks, ink } = await page.evaluate((ids) => {
       content: b.content,
       fontFamily: b.fontFamily,
       fontSize: b.fontSize,
+      fontWeight: b.fontWeight,
+      lineHeight: b.lineHeight,
       color: b.color,
       background: b.backgroundColor,
       borderStyle: b.borderTopStyle,
@@ -79,6 +111,8 @@ const { marks, ink } = await page.evaluate((ids) => {
       left: parseFloat(b.left),
       top: parseFloat(b.top),
       position: b.position,
+      transform: b.transform,
+      parentWeight: getComputedStyle(el.parentElement).fontWeight,
       elementBackground: style.backgroundColor,
       elementOpacity: parseFloat(style.opacity),
       cell: (() => { const r = el.getBoundingClientRect(); return [r.width, r.height]; })(),
@@ -112,8 +146,33 @@ const { marks, ink } = await page.evaluate((ids) => {
       height: (maxY - minY + 1) / scale,
     };
   };
-  return { marks: out, ink: { full: measure('⠿'), dot: measure('⠁') } };
-}, ['working', 'waiting', 'idle', 'stopped', 'provider', 'ready']);
+  const headerMark = document.getElementById('header-waiting');
+  const headerBefore = getComputedStyle(headerMark, '::before');
+  const headerRect = headerMark.getBoundingClientRect();
+  const baseline = document.getElementById('header-baseline').getBoundingClientRect().top;
+  const nameStyle = getComputedStyle(document.querySelector('#header-static-wrap .ph-name'));
+  const ctx = document.createElement('canvas').getContext('2d');
+  ctx.font = `${nameStyle.fontWeight} ${nameStyle.fontSize} "Geist Mono Test"`;
+  const x = ctx.measureText('x');
+  const xTop = baseline - x.actualBoundingBoxAscent;
+  const xBottom = baseline + x.actualBoundingBoxDescent;
+  const markTop = headerRect.top + parseFloat(headerBefore.top);
+  const markBottom = markTop + parseFloat(headerBefore.height);
+  return {
+    marks: out,
+    ink: { full: measure('⠿'), dot: measure('⠁') },
+    optics: {
+      markCenter: (markTop + markBottom) / 2,
+      xHeightCenter: (xTop + xBottom) / 2,
+      delta: (markTop + markBottom - xTop - xBottom) / 2,
+    },
+  };
+}, [
+  'working', 'waiting', 'idle', 'stopped', 'provider', 'ready',
+  'sidebar-working', 'overview-working', 'overview-waiting',
+  'header-working', 'header-waiting', 'overview-busy',
+  'overview-group-working', 'reader-working',
+]);
 await browser.close();
 
 const round = (xs) => xs.map((n) => Math.round(n * 100) / 100);
@@ -135,6 +194,8 @@ check('it renders one frame with the shared font and no box', () => {
   assert.match(marks.working.content, /[⠋⠙⠹⠸⠼⠴⠦⠧]/);
   assert.equal(marks.working.fontSize, '12.5px');
   assert.match(marks.working.fontFamily, /Geist Mono Test/);
+  assert.equal(marks.working.fontWeight, '400');
+  assert.equal(marks.working.lineHeight, '12.5px');
   assert.equal(marks.working.background, 'rgba(0, 0, 0, 0)');
   assert.equal(marks.working.borderStyle, 'none');
   assert.equal(marks.working.boxShadow, 'none');
@@ -166,9 +227,9 @@ for (const state of STATIC) {
     // than letting Chromium floor a fractional declaration to 1px.
     assert.equal(marks[state].borderWidth, Math.round(ink.dot.width));
   });
-  check(`${state} starts at the measured ink offset`, () => {
+  check(`${state} starts at the optically corrected ink offset`, () => {
     close(marks[state].left, 1.8125);
-    close(marks[state].top, 1.25);
+    close(marks[state].top, 2.65625);
   });
 }
 check('all three static rectangles have identical geometry', () => {
@@ -188,6 +249,47 @@ check('idle and stopped share the muted colour', () => {
 check('stopped is dimmer than idle', () => {
   assert.equal(marks.idle.elementOpacity, 1);
   assert.equal(marks.stopped.elementOpacity, 0.5);
+});
+
+console.log('\ntypography and optical alignment survive every real context');
+const STATUS_WORKING = ['sidebar-working', 'overview-working', 'header-working'];
+check('the fixture actually stresses normal, heavy and header typography', () => {
+  assert.equal(marks['sidebar-working'].parentWeight, '400');
+  assert.equal(marks['overview-working'].parentWeight, '700');
+  assert.equal(marks['header-working'].parentWeight, '600');
+});
+for (const id of [...STATUS_WORKING, 'overview-waiting', 'header-waiting']) {
+  check(`${id} owns the same type regardless of its parent`, () => {
+    assert.match(marks[id].fontFamily, /Geist Mono Test/);
+    assert.equal(marks[id].fontSize, '12.5px');
+    assert.equal(marks[id].fontWeight, '400');
+    assert.equal(marks[id].lineHeight, '12.5px');
+  });
+}
+check('sidebar, Overview and header working marks paint the same cell', () => {
+  for (const id of STATUS_WORKING) {
+    assert.deepEqual(round(marks[id].painted), round(marks['sidebar-working'].painted));
+  }
+});
+check('Overview and header static paths have identical geometry', () => {
+  assert.deepEqual(round(marks['overview-waiting'].painted), round(marks['header-waiting'].painted));
+  close(marks['overview-waiting'].top, marks['header-waiting'].top, 0.001);
+  close(marks['overview-waiting'].left, marks['header-waiting'].left, 0.001);
+});
+for (const id of [
+  ...STATUS_WORKING, 'overview-busy', 'overview-group-working', 'reader-working',
+]) {
+  check(`${id} uses the same normal-weight, optically corrected spinner`, () => {
+    assert.match(marks[id].content, /[⠋⠙⠹⠸⠼⠴⠦⠧]/);
+    assert.match(marks[id].fontFamily, /Geist Mono Test/);
+    assert.equal(marks[id].fontSize, '12.5px');
+    assert.equal(marks[id].fontWeight, '400');
+    assert.equal(marks[id].lineHeight, '12.5px');
+    assert.match(marks[id].transform, /^matrix\(1, 0, 0, 1, 0, 1\.40625\)$/);
+  });
+}
+check('the static path centre meets the 600-weight title x-height centre', () => {
+  close(optics.markCenter, optics.xHeightCenter, 0.2);
 });
 
 console.log('\na bare .status keeps the colour its caller gave it');

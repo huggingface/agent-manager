@@ -369,23 +369,31 @@ body {
    The path values are measured from the bundled Geist Mono at --mark-size in
    Chromium, rasterised 16x (alpha >= 16): ⠿ ink is 5.5 x 8.8125px, one dot is
    1.875px, and the ink begins 1.8125px from the cell's left edge. A DOM raster
-   puts its top at 1.25px. Chromium quantises CSS border widths to whole CSS
+   puts its natural top at 1.25px. That natural ink sits 0.90625px high inside
+   the cell; the adjacent 600-weight 12px title's x-height centre sits another
+   0.5px below the cell centre. --mark-optical-y applies the full 1.40625px
+   correction, and the static path starts at the same corrected 2.65625px.
+
+   Chromium quantises CSS border widths to whole CSS
    pixels (1.875px paints as 1px), so --mark-stroke uses the nearest paintable
    diameter, 2px. Ratios keep those measurements tied to --mark-size.
    If the font fails and the mono fallback has different braille metrics, the
    spinner may briefly drift; the rectangle deliberately stays on the bundled
    font's measured path rather than guessing from an unknown fallback. */
 :root {
-  --mark-size: 12.5px; --mark-w: 1.2em; --mark-h: 1.05em;
-  --mark-ink-x: 0.145em; --mark-ink-y: 0.1em;
+  --mark-size: 12.5px; --mark-weight: 400;
+  --mark-w: 1.2em; --mark-h: 1.05em; --mark-optical-y: 0.1125em;
+  --mark-ink-x: 0.145em; --mark-ink-y: 0.2125em;
   --mark-ink-w: 0.44em; --mark-ink-h: 0.705em; --mark-stroke: 0.16em;
 }
 .ov-busy { font-size: 12.5px; color: var(--muted); }
 .ov-busy::before {
   content: '⠋'; display: inline-flex; align-items: center;
   width: var(--mark-w); height: var(--mark-h);
-  font-family: var(--font-mono); font-size: var(--mark-size); line-height: 1;
-  color: var(--accent); animation: ov-spin 0.9s steps(1) infinite;
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
+  color: var(--accent); transform: translateY(var(--mark-optical-y));
+  animation: ov-spin 0.9s steps(1) infinite;
 }
 @keyframes ov-spin {
   0% { content: '⠋'; } 12.5% { content: '⠙'; } 25% { content: '⠹'; } 37.5% { content: '⠸'; }
@@ -417,7 +425,9 @@ body {
 .ovt-state.running::before {
   content: '⠋'; display: inline-flex; align-items: center;
   width: var(--mark-w); height: var(--mark-h);
-  font-family: var(--font-mono); font-size: var(--mark-size); line-height: 1;
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
+  transform: translateY(var(--mark-optical-y));
   animation: ov-spin 0.9s steps(1) infinite;
 }
 .ovt-state.stopped { opacity: 0.7; }
@@ -563,7 +573,8 @@ body {
    Same principle as --cx-gutter (#71) and --ph-pad-y (#75). */
 .status.working, .status.waiting, .status.idle, .status.stopped {
   width: var(--mark-w); height: var(--mark-h);
-  font-size: var(--mark-size); font-family: var(--font-mono); line-height: 1;
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
   border-radius: 0; background: none;
   display: inline-flex; align-items: center; position: relative;
   transition: color 0.2s, opacity 0.2s;
@@ -575,7 +586,8 @@ body {
 /* The same spinner, in the same cell. */
 .status.working { overflow: hidden; }
 .status.working::before {
-  content: '⠋'; animation: ov-spin 0.9s steps(1) infinite;
+  content: '⠋'; transform: translateY(var(--mark-optical-y));
+  animation: ov-spin 0.9s steps(1) infinite;
 }
 .status.waiting::before, .status.idle::before, .status.stopped::before {
   content: ''; position: absolute;
