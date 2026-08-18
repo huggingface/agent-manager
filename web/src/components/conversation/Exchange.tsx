@@ -225,14 +225,38 @@ export function ExchangeView({
   // Naming the model on every turn is noise when it never changes; when it DOES
   // change mid-session that is worth a word, so say it only then.
   const model = x.model && x.model !== baseModel ? x.model : '';
+  // Which turn, when, and on what — the viewer's business. A card shows one
+  // turn, dated in its own header, so it says none of this. It is one fragment
+  // because two rows can carry it: the meta row normally, and the working line
+  // when the turn has nothing else to say yet.
+  const facts = (
+    <>
+      <span className="spacer" />
+      {model && <span className="cx-model">{model}</span>}
+      {/* Padded to the width of the total, in FIGURE spaces: the row is mono and
+          tabular, so one figure space is exactly one digit, and "turn  9/10"
+          lines up under "turn 10/10" instead of the whole right cluster stepping
+          left the moment a session passes nine turns. A plain space would
+          collapse in HTML. */}
+      <span className="cx-n">turn {padTurn(n ?? 0, total)}{total ? `/${total}` : ''}</span>
+      {x.startTs ? <span className="cx-time">{fmtClock(x.startTs)}</span> : null}
+    </>
+  );
+  const factsOnRunningRow = !summary && !!running && n != null;
 
   return (
     <section className={`cx${dim ? ' dim' : ''}`}>
       {prompt ? <div className="cx-prompt"><Hi text={prompt} q={q} /></div> : null}
 
       {/* Everything about the turn on ONE line, under the prompt: what the work
-          was on the left, which turn it is on the right. Nothing above. */}
-      {(summary || n != null) && (
+          was on the left, which turn it is on the right. Nothing above.
+          A turn that has not done anything yet has no left half — no steps, no
+          duration, no tokens — and rendering the row anyway left an empty line
+          above the `working` line, which is what read as the widget sitting
+          "weirdly low". In that state the facts ride on the working line itself,
+          so there is one row instead of one and a half. The working line does not
+          move: it is the last row either way, at the text column. */}
+      {(summary || (n != null && !factsOnRunningRow)) && (
       <div className="cx-meta mono">
         {steps.length > 0 ? (
           <button className={`cx-fold${isOpen ? ' on' : ''}`} onClick={toggle} title={isOpen ? 'Hide the work' : 'Show the work'}>
@@ -242,19 +266,7 @@ export function ExchangeView({
         ) : <span className="cx-fold flat">{summary}</span>}
         {/* Which turn, when, and on what — the viewer's business. A card shows one
             turn, dated in its own header, so it says none of this. */}
-        {n != null && (
-          <>
-            <span className="spacer" />
-            {model && <span className="cx-model">{model}</span>}
-            {/* Padded to the width of the total, in FIGURE spaces: the row is
-                mono and tabular, so one figure space is exactly one digit, and
-                "turn  9/10" lines up under "turn 10/10" instead of the whole
-                right cluster stepping left the moment a session passes nine
-                turns. A plain space would collapse in HTML. */}
-            <span className="cx-n">turn {padTurn(n, total)}{total ? `/${total}` : ''}</span>
-            {x.startTs ? <span className="cx-time">{fmtClock(x.startTs)}</span> : null}
-          </>
-        )}
+        {n != null && facts}
       </div>
       )}
       {isOpen && stepsBefore.length > 0 && (
@@ -278,6 +290,7 @@ export function ExchangeView({
       {running && (
         <div className="cx-running mono">
           working{latest && <span className="cx-running-at">· {latest}</span>}
+          {factsOnRunningRow && facts}
         </div>
       )}
     </section>

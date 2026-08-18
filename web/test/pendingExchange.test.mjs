@@ -48,6 +48,15 @@ await build({
   external: ['react', 'react-dom', 'react/jsx-runtime'], plugins: [stubMarkdown],
 });
 const { PendingExchange, ExchangeView } = await import(pathToFileURL(out).href);
+// stepSummary decides whether a turn has a left half at all, so the two live in
+// the same check: no summary → the facts ride the working line.
+const exOut = path.join(outDir, 'exchanges-meta.mjs');
+await build({
+  entryPoints: [path.join(HERE, '../src/components/conversation/exchanges.ts')],
+  outfile: exOut, format: 'esm', bundle: false, logLevel: 'error',
+});
+const { stepSummary, stepsOf: stepsOfEx } = await import(pathToFileURL(exOut).href);
+const stepSummaryOf = (x) => stepSummary(x, stepsOfEx(x.steps));
 
 let failed = 0;
 const check = (what, fn) => {
@@ -145,6 +154,73 @@ check('and the padded cell is exactly as wide as the widest one', () => {
 });
 check('a session that never reaches ten pads nothing',
   () => assert.equal(turnCell(3, 9), 'turn 3/9'));
+
+console.log('\nand the meta row lines up in the two states that have no work');
+// Both reported from dev. A turn with nothing yet — no steps, no duration, no
+// tokens — used to render an empty meta row above the working line, which read
+// as the widget sitting "weirdly low"; and a finished turn with no tool calls
+// used to indent its summary into the gutter where the expand triangle would be,
+// for a triangle that cannot exist in that state.
+const emptyTurn = {
+  key: 'x9', at: 9, startTs: 1_700_000_000_000, endTs: 1_700_000_000_000, tokens: 0, toolCalls: 0,
+  prompt: { role: 'user', ts: 1_700_000_000_000, blocks: [{ type: 'text', text: 'now look at the packer' }] },
+  steps: [], answer: [],
+};
+const quietTurn = {
+  ...emptyTurn, key: 'x8', at: 8, endTs: 1_700_000_013_000, tokens: 188,
+  prompt: { role: 'user', ts: 1_700_000_000_000, blocks: [{ type: 'text', text: "that's nice" }] },
+  answer: [{ role: 'assistant', ts: 1_700_000_013_000, kind: 'final', blocks: [{ type: 'text', text: 'Quiet turn, then.' }] }],
+};
+check('a turn with nothing yet has no summary to show', () => {
+  assert.equal(stepSummaryOf(emptyTurn), '', 'an empty turn should summarise to nothing');
+});
+check('so while it works, the facts ride the working line and there is no empty row', () => {
+  const html = render(ExchangeView, { x: emptyTurn, n: 9, total: 9, running: true });
+  assert.ok(!html.includes('class="cx-meta'), 'no meta row should be rendered');
+  const run = html.slice(html.indexOf('cx-running'));
+  assert.match(run, /class="cx-n"/, 'the turn number should be on the working line');
+  assert.match(run, /class="cx-time"/, 'and the clock with it');
+});
+check('the working line is still the last thing in the turn', () => {
+  const html = render(ExchangeView, { x: emptyTurn, n: 9, total: 9, running: true });
+  assert.ok(html.lastIndexOf('cx-running') > html.lastIndexOf('cx-prompt'));
+});
+check('once there is a summary the facts are back on the meta row', () => {
+  const html = render(ExchangeView, { x: { ...emptyTurn, endTs: emptyTurn.startTs + 31_000, tokens: 4300 }, n: 9, total: 9, running: true });
+  const meta = html.slice(html.indexOf('cx-meta'), html.indexOf('cx-running'));
+  assert.match(meta, /class="cx-n"/, 'the facts belong to the meta row as soon as it exists');
+  const run = html.slice(html.indexOf('cx-running'));
+  assert.ok(!run.includes('class="cx-n"'), 'and not on the working line as well');
+});
+check('a finished turn with no tool calls says so with a flat fold', () => {
+  const html = render(ExchangeView, { x: quietTurn, n: 8, total: 9 });
+  assert.match(html, /class="cx-fold flat"/, 'no steps means nothing to unfold');
+  assert.match(html, /13s/);
+});
+
+console.log('\nand nothing reserves the gutter for a control that cannot exist');
+{
+  const css = fs.readFileSync(path.join(HERE, '../src/conversation.css'), 'utf8');
+  const rule = (sel) => { const i = css.indexOf(sel); return i < 0 ? null : css.slice(i, css.indexOf('}', i) + 1); };
+  check('a flat fold has no left padding at all', () => {
+    const r = rule('.cx-fold.flat {');
+    assert.ok(r, 'no .cx-fold.flat rule');
+    assert.doesNotMatch(r, /padding-left/, `a flat summary must start on the text column: ${r}`);
+  });
+  check('and an expandable one hangs its triangle by exactly the mark cell', () => {
+    assert.match(rule('.cx-fold {') || '', /margin-left:\s*calc\(-1 \* var\(--cx-mark\)\)/);
+    assert.match(rule('.cx-meta {') || '', /--cx-mark:/);
+  });
+  check('the facts on the working line are pushed right, like on the meta row', () => {
+    // the DOM assertions above pass whether or not this exists; without it the
+    // row renders "workingturn 3/301:02 PM", which only a screenshot shows
+    assert.match(rule('.cx-meta .spacer, .cx-running .spacer {') || '', /flex:\s*1/);
+    assert.match(rule('.cx-running .cx-model, .cx-running .cx-n, .cx-running .cx-time {') || '', /margin-left/);
+  });
+  check('the working line hangs its spinner the same way', () => {
+    assert.match(rule('.cx-running {') || '', /margin-left:\s*calc\(-1 \* var\(--mark-w\)\)/);
+  });
+}
 
 console.log('\nand the CSS pair the nesting exists for is still a pair');
 const css = fs.readFileSync(path.join(HERE, '../src/conversation.css'), 'utf8');

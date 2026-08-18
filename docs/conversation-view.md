@@ -286,6 +286,19 @@ pane with nothing to render (a shell) simply stays a terminal.
   two runs of steps with the answer between them. Grouping runs over each side separately, so two
   `Read`s either side of the reply stay two rows rather than collapsing into `Read ×2` and erasing
   the sequence.
+- **One column, and only marks outside it.** The prompt's `❯`, a fold's `▸` and the working line's
+  spinner all hang in the gutter; the summary, the answer, the step rows and the word `working` all
+  start on the same text column. A mark that sits *inside* the column pushes its own row's text
+  sideways, which is what made a turn with no tool calls indent its `13s · 188 tok` by 19px — the
+  row reserved the gutter for a triangle that cannot exist in that state (`.cx-fold.flat` used to
+  pay `padding-left: 1.75em`). The cell is one number, `--cx-mark` on `.cx-meta`, read by both the
+  hang and the glyph's width so they cannot drift apart.
+- **A turn with nothing yet has no meta row.** No steps, no duration, no tokens means no left half,
+  and rendering the row anyway left an empty line above the working line — which read as the widget
+  sitting low, dropped rather than placed. In that state the turn's facts ride on the working line
+  itself, so there is one row instead of one and a half. The working line does not move for this:
+  it is the last row at the text column either way, before and after the first step arrives
+  (checked live, not inferred — the facts move up into the new meta row, the line stays put).
 - **One working line, and it is the last thing in the reader.** It carries what the agent is doing
   *now* (`working · Bash …`), so it belongs at the end of the rail it continues — putting it above
   the steps would report the present before the past, which is the same disorder as the bullet
