@@ -1,17 +1,15 @@
 // One geometry contract for the working animation and everything that stands
 // in for it.
 //
-// A working agent shows the braille spinner; every other state is that same
-// cell standing still. They only read as the same mark while they are the same
-// box, and the way that quietly breaks is someone giving one of them its own
-// number — which is what the first cut of this change did: the static states
-// measured a copy of the glyph instead of reading the spinner's own cell, so a
-// font or spinner change would have left the rectangles behind.
+// A working agent shows the braille spinner; every other state shows the hollow
+// rectangle traced by those dots. They only read as one system while the
+// rectangle is derived from the glyph's real ink instead of from a visually
+// similar box someone guessed by eye.
 //
-// So this lints the contract, not the numbers: --mark-size/--mark-w/--mark-h
-// are declared once, and every renderer of the spinner AND every static state
-// reads them rather than restating a length. What the marks actually PAINT is a
-// separate question this cannot answer. That is statusMark.render.test.mjs.
+// So this lints the contract, not the numbers: type, cell, measured ink box and
+// derived stroke are declared once, and every spinner/static renderer reads them.
+// What the marks actually PAINT is a separate question this cannot answer. That
+// is statusMark.render.test.mjs.
 //
 // Run with:  node test/statusMark.test.mjs
 import assert from 'node:assert/strict';
@@ -41,8 +39,11 @@ const LENGTH = /(?:^|[\s:])-?\d*\.?\d+(?:px|em|rem|%)/;
 
 console.log('the cell is declared once');
 
-check('--mark-size, --mark-w and --mark-h are declared exactly once each', () => {
-  for (const name of ['--mark-size', '--mark-w', '--mark-h']) {
+check('the type, cell and measured path values are declared exactly once each', () => {
+  for (const name of [
+    '--mark-size', '--mark-w', '--mark-h',
+    '--mark-ink-x', '--mark-ink-y', '--mark-ink-w', '--mark-ink-h', '--mark-stroke',
+  ]) {
     const declarations = [...css.matchAll(new RegExp(`${name}\\s*:`, 'g'))].length;
     assert.equal(declarations, 1, `${name} is declared ${declarations} times`);
   }
@@ -105,32 +106,30 @@ check('no state rule restates a length for its box', () => {
     .map((r) => r.selector);
   assert.deepEqual(offenders, [], `these restate the box: ${offenders.join(', ')}`);
 });
-check('the mark inside the cell only fills it', () => {
-  for (const r of stateRules.filter((x) => /::before/.test(x.selector))) {
-    for (const [, , value] of r.body.matchAll(/(?:^|;|\s)(width|height)\s*:\s*([^;]+)/g)) {
-      assert.equal(value.trim(), '100%', `${r.selector} sizes the mark to ${value.trim()}`);
-    }
-  }
+check('working fills the shared cell', () => {
+  const working = rules.find((r) => r.selector === '.status.working::before' && /width\s*:\s*100%/.test(r.body));
+  assert.ok(working, 'working does not fill the shared cell');
+  assert.match(working.body, /height\s*:\s*100%/);
 });
-check('the four states are unique braille glyphs, never boxes', () => {
-  const expected = { working: '⠋', waiting: '⠿', idle: '⠶', stopped: '⠤' };
-  const animated = new Set(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧']);
-  const seen = new Set();
-  for (const [state, glyph] of Object.entries(expected)) {
-    const own = rules.find((r) => r.selector === `.status.${state}::before`);
-    assert.ok(own, `no pseudo-element for ${state}`);
-    assert.match(own.body, new RegExp(`content:\\s*['"]${glyph}['"]`), `${state} does not use ${glyph}`);
-    seen.add(glyph);
-
-    if (state !== 'working') assert.ok(!animated.has(glyph), `${state} can look identical to a working frame`);
-
-    const bodies = stateRules.filter((r) => r.selector.includes(`.status.${state}`) && /::before/.test(r.selector))
-      .map((r) => r.body).join('\n');
-    for (const [, prop, value] of bodies.matchAll(/(?:^|;)\s*(background|border(?:-[\w-]+)?|box-shadow)\s*:\s*([^;]+)/g)) {
-      assert.equal(value.trim(), 'none', `${state} paints ${prop}: ${value.trim()}`);
-    }
+check('every non-working state uses one measured hollow rectangle', () => {
+  const statics = rules.filter((r) => ['waiting', 'idle', 'stopped'].every((s) => r.selector.includes(`.status.${s}::before`)));
+  assert.equal(statics.length, 1, `found ${statics.length} shared static path rules`);
+  const body = statics[0].body;
+  for (const [prop, variable] of [
+    ['left', '--mark-ink-x'], ['top', '--mark-ink-y'],
+    ['width', '--mark-ink-w'], ['height', '--mark-ink-h'],
+  ]) {
+    assert.match(body, new RegExp(`${prop}\\s*:\\s*var\\(${variable}\\)`), `${prop} does not read ${variable}`);
   }
-  assert.equal(seen.size, 4, 'two states share a glyph');
+  assert.match(body, /content\s*:\s*['"]{2}/, 'the static path is still a glyph');
+  assert.match(body, /border\s*:\s*var\(--mark-stroke\)\s+solid\s+currentColor/, 'the path does not use the derived dot stroke');
+  assert.match(body, /background\s*:\s*none/, 'the path has a fill');
+  assert.match(body, /border-radius\s*:\s*0/, 'the path is rounded');
+});
+check('no non-working state overrides that rectangle with its own shape', () => {
+  const offenders = rules.filter((r) => /\.status\.(waiting|idle|stopped)::before/.test(r.selector))
+    .filter((r) => !['waiting', 'idle', 'stopped'].every((s) => r.selector.includes(`.status.${s}::before`)));
+  assert.deepEqual(offenders.map((r) => r.selector), []);
 });
 
 console.log('\nand the plain colour dot is left alone');
@@ -157,7 +156,7 @@ check('the states that are not working carry no animation', () => {
   }
 });
 check('working runs the same animation the rest of the app runs', () => {
-  const w = rules.find((r) => r.selector === '.status.working::before');
+  const w = rules.find((r) => r.selector === '.status.working::before' && /animation:/.test(r.body));
   assert.ok(w, 'no `.status.working::before` rule');
   assert.match(w.body, /animation:\s*ov-spin/, 'working does not use ov-spin');
 });

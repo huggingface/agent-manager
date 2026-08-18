@@ -362,10 +362,24 @@ body {
    Its type and cell are declared here, with the animation, because everything
    that draws this spinner — and everything that stands in for it while an
    agent is NOT working (see `.status.waiting` and friends) — reads the same
-   three values. Change the glyph, font size or cell and every renderer follows,
+   values. Change the glyph, font size or cell and every renderer follows,
    instead of leaving a static approximation behind. The cell remains em-based
-   on the shared mark size. */
-:root { --mark-size: 12.5px; --mark-w: 1.2em; --mark-h: 1.05em; }
+   on the shared mark size.
+
+   The path values are measured from the bundled Geist Mono at --mark-size in
+   Chromium, rasterised 16x (alpha >= 16): ⠿ ink is 5.5 x 8.8125px, one dot is
+   1.875px, and the ink begins 1.8125px from the cell's left edge. A DOM raster
+   puts its top at 1.25px. Chromium quantises CSS border widths to whole CSS
+   pixels (1.875px paints as 1px), so --mark-stroke uses the nearest paintable
+   diameter, 2px. Ratios keep those measurements tied to --mark-size.
+   If the font fails and the mono fallback has different braille metrics, the
+   spinner may briefly drift; the rectangle deliberately stays on the bundled
+   font's measured path rather than guessing from an unknown fallback. */
+:root {
+  --mark-size: 12.5px; --mark-w: 1.2em; --mark-h: 1.05em;
+  --mark-ink-x: 0.145em; --mark-ink-y: 0.1em;
+  --mark-ink-w: 0.44em; --mark-ink-h: 0.705em; --mark-stroke: 0.16em;
+}
 .ov-busy { font-size: 12.5px; color: var(--muted); }
 .ov-busy::before {
   content: '⠋'; display: inline-flex; align-items: center;
@@ -536,44 +550,44 @@ body {
    `.status` paints over those colours and they lose their identity. */
 .status { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; transition: background 0.2s, box-shadow 0.2s, opacity 0.2s; }
 
-/* ---- agent state: one braille mark, one footprint ----
+/* ---- agent state: one path, moving or still ----
    A working agent shows the braille spinner the reader and the cards already
    run (`ov-spin`) — the same animation, not a second thing that also means
-   "busy". Every other state is a distinct, stationary arrangement of those
-   same braille dots: your-turn ⠿ (full attention), idle ⠶ (a settled pair of
-   rows), and stopped ⠤ (the final bottom row). Their density and silhouettes
-   stay legible when colour is not, none occurs in the animation, and
-   reduced-motion working freezes on ⠋, so no two states collapse.
+   "busy". Every other state shows that motion's completed path: the same
+   square-cornered hollow rectangle, measured from the six-dot ink rather than
+   from the much larger layout cell. State comes only from colour/intensity.
 
-   `--mark-size`, `--mark-w` and `--mark-h` are declared once beside `ov-spin`
-   and consumed by every renderer of that animation as well as by these four
-   states. That is the whole point: the static glyph cannot drift away from the
-   animation it stands in for, because there is one type-and-cell contract and
-   everyone reads it. Same principle as --cx-gutter (#71) and --ph-pad-y (#75). */
+   The type/cell/path values are declared once beside `ov-spin` and consumed by
+   every renderer. The static path cannot drift away from the animation it
+   stands in for because there is one measured contract and everyone reads it.
+   Same principle as --cx-gutter (#71) and --ph-pad-y (#75). */
 .status.working, .status.waiting, .status.idle, .status.stopped {
   width: var(--mark-w); height: var(--mark-h);
   font-size: var(--mark-size); font-family: var(--font-mono); line-height: 1;
   border-radius: 0; background: none;
-  display: inline-flex; align-items: center;
+  display: inline-flex; align-items: center; position: relative;
   transition: color 0.2s, opacity 0.2s;
 }
-.status.working::before, .status.waiting::before,
-.status.idle::before, .status.stopped::before {
+.status.working::before {
   display: inline-flex; align-items: center; box-sizing: border-box;
   width: 100%; height: 100%; background: none; border: none; box-shadow: none;
 }
-/* The same spinner, in the same cell. Under prefers-reduced-motion the global
-   animation kill freezes it at ⠋, which is deliberately not used below. */
+/* The same spinner, in the same cell. */
 .status.working { overflow: hidden; }
 .status.working::before {
   content: '⠋'; animation: ov-spin 0.9s steps(1) infinite;
 }
-.status.waiting::before { content: '⠿'; }
-.status.idle::before { content: '⠶'; }
-.status.stopped::before { content: '⠤'; }
-/* working and your-turn are both the accent: one is moving, one is not. */
+.status.waiting::before, .status.idle::before, .status.stopped::before {
+  content: ''; position: absolute;
+  left: var(--mark-ink-x); top: var(--mark-ink-y);
+  width: var(--mark-ink-w); height: var(--mark-ink-h);
+  box-sizing: border-box; background: none;
+  border: var(--mark-stroke) solid currentColor; border-radius: 0; box-shadow: none;
+}
+/* working and your-turn are both the accent: one moves, one is asking. */
 .status.working, .status.waiting { color: var(--accent); }
-.status.idle, .status.stopped { color: var(--muted); opacity: 0.5; }
+.status.idle, .status.stopped { color: var(--muted); }
+.status.stopped { opacity: 0.5; }
 
 /* quick-add utilities (shell / files) pinned above the legend */
 .quick-add { display: flex; gap: 6px; padding: 10px 10px; border-top: 1px solid var(--border); }
