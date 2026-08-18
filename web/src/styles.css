@@ -773,8 +773,33 @@ body {
    bounds it: it can fill the whole title but no more, which is what puts the
    ellipsis on the name itself when the name alone is too long for the header. */
 .pane-head .ph-name { flex: 0 0 auto; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; }
+.pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 8px; }
+/* Attach, search, info, close: ONE contract, so they cannot drift apart the way
+   the `i` and the reader's nav keys did. No box — the operator asked for the
+   bounding box off the `i`, and a row where one of four is boxed is worse than
+   either — so the hit area is an overlay instead (below), which is why these are
+   22px of ink in a 28px target. The 8px gap is what makes that target real: at
+   4px the overlays of neighbouring buttons met over each other's ink and each
+   one measured 20px across, under the floor. Measured, not guessed. */
+.pane-head .ph-btn {
+  position: relative; flex: none; width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: var(--r-sm); background: none; color: var(--muted);
+  font: 700 12px/1 var(--font-mono); cursor: pointer;
+}
+.pane-head .ph-btn > svg { width: 14px; height: 14px; }
+.pane-head .ph-btn:hover:not(:disabled) { color: var(--text); background: var(--border); }
+.pane-head .ph-btn:disabled { opacity: 0.38; cursor: not-allowed; }
+.pane-head .ph-btn.on { color: var(--accent); }
+/* The tap target, which is not the ink. WCAG 2.2 SC 2.5.8 floors a target at
+   24x24 and iOS asks for 44; these are the only route to attach, search, the
+   conversation's facts and close, on a phone. Pinned by hit-testing in
+   server/reader-info.test.mjs — all four, in both views. */
+.pane-head .ph-btn::before { content: ''; position: absolute; inset: -4px -4px; }
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
+/* The state mark leads the name, inside the centred title: it never shrinks and
+   never wraps, so the name gives way first (see .ph-name). */
+.pane-head .ph-title > .status { flex: none; margin-right: 1px; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }
 /* The conversation's facts, behind one `i` in the pane header — the same place
@@ -784,28 +809,16 @@ body {
 /* NOT the positioning context for the panel — the header is. The `i` sits a
    back-button, a logo and a state dot into the row, so a panel anchored to the
    button itself starts ~100px in and runs off the right edge of a phone. */
+/* NOT the positioning context for the panel — the header is. The `i` sits in the
+   right-hand cluster, so a panel anchored to the button itself would hang off
+   the far edge of the pane. */
 .tinfo-wrap { flex: none; display: inline-flex; }
-.tinfo-btn {
-  position: relative; flex: none; width: 19px; height: 19px;
-  display: inline-flex; align-items: center; justify-content: center; padding: 0;
-  border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel);
-  color: var(--muted); font: 700 12px/1 var(--font-mono); cursor: pointer;
-}
-/* The tap target, which is bigger than the box. WCAG 2.2 SC 2.5.8 floors a
-   target at 24 and iOS asks for 44, and this one button is the only way to five
-   facts that used to need no tap at all — on the phone the item was filed from.
-   #75 pads `.ph-back` out and pulls the padding back with a negative margin, but
-   that button draws no box; this one does, and padding would inflate it. An
-   overlay grows what the finger has to hit and leaves the ink alone. It is
-   pinned by hit-testing in server/reader-info.test.mjs, in BOTH views. */
-.tinfo-btn::before { content: ''; position: absolute; inset: -8px -9px; }
-.tinfo-btn:hover { color: var(--text); border-color: var(--border-strong); }
-.tinfo-btn.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
 .tinfo {
-  /* Anchored to the pane header, so it opens inside the pane at any width and
-     lines up with the header's own left edge rather than with wherever the
-     button lands. */
-  position: absolute; z-index: 12; top: calc(100% + 4px); left: 8px;
+  /* Anchored to the pane header — not to the button — so it opens inside the
+     pane at any width. It hangs from the RIGHT edge now, under the cluster the
+     `i` belongs to, which is also the side with room on a phone: the left of
+     that row is a back arrow and a path. */
+  position: absolute; z-index: 12; top: calc(100% + 4px); right: 8px; left: auto;
   /* Wide enough that the two actions sit side by side on one line each — at a
      phone width that is what 78vw buys, and below it they stack rather than
      wrap a label in half. */

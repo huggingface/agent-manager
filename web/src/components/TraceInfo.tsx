@@ -30,12 +30,15 @@ const fmtStarted = (ms: number) => {
 
 type Load = 'idle' | 'loading' | 'ready' | 'none' | 'error';
 
-export default function TraceInfo({ session, facts, turnsLoaded, onShare }: {
+export default function TraceInfo({ session, facts, turnsLoaded, folder, onShare }: {
   session: Session;
   /** What the reader already holds. Present only while the reader is the view. */
   facts?: api.TraceSummary | null;
   /** Turns the reader is holding, for the window-only state before its summary. */
   turnsLoaded?: number;
+  /** Where the agent runs. The header shows this beside the logo on a desktop
+   *  and hides it on a phone, where this panel is the only place it is legible. */
+  folder?: string;
   /** Publish this session — the same dialog the sidebar row opens. */
   onShare?: () => void;
 }) {
@@ -99,7 +102,7 @@ export default function TraceInfo({ session, facts, turnsLoaded, onShare }: {
     <div className="tinfo-wrap" ref={wrap} onMouseDown={(e) => e.stopPropagation()}>
       <button
         type="button"
-        className={`tinfo-btn${open ? ' on' : ''}`}
+        className={`ph-btn tinfo-btn${open ? ' on' : ''}`}
         aria-expanded={open}
         aria-haspopup="dialog"
         aria-label="About this conversation"
@@ -109,26 +112,18 @@ export default function TraceInfo({ session, facts, turnsLoaded, onShare }: {
       >i</button>
       {open && (
         <div className="tinfo" role="dialog" aria-label="About this conversation">
-          {pending && <div className="tinfo-state mono" aria-live="polite">reading the transcript…</div>}
-          {!known && load === 'none' && (
-            <div className="tinfo-state mono">
-              No transcript yet — this agent has not written one. It appears here once it answers.
-            </div>
-          )}
-          {!known && load === 'error' && (
-            <div className="tinfo-state mono">Could not read the transcript. Close this and try again.</div>
-          )}
-          {known && (
+          {(known || folder) && (
             <dl className="tinfo-facts">
-              {known.model && (<><dt>Model</dt><dd>{known.model}</dd></>)}
-              <dt>Turns</dt>
+              {folder && (<><dt>Folder</dt><dd>{folder}</dd></>)}
+              {known?.model && (<><dt>Model</dt><dd>{known.model}</dd></>)}
+              {known && <><dt>Turns</dt>
               <dd>
                 {prompts != null ? `${fmtNum(prompts)} turn${prompts === 1 ? '' : 's'}` : '—'}
                 {messages != null
                   ? ` · ${fmtNum(messages)} message${messages === 1 ? '' : 's'}`
                   : (turnsLoaded != null ? ` · ${fmtNum(turnsLoaded)} loaded` : '')}
-              </dd>
-              {known.usage && (
+              </dd></>}
+              {known?.usage && (
                 <>
                   <dt>Tokens</dt>
                   <dd>
@@ -137,7 +132,7 @@ export default function TraceInfo({ session, facts, turnsLoaded, onShare }: {
                   </dd>
                 </>
               )}
-              {!!known.firstTs && (
+              {!!known?.firstTs && (
                 <>
                   <dt>Started</dt>
                   <dd>
@@ -147,6 +142,15 @@ export default function TraceInfo({ session, facts, turnsLoaded, onShare }: {
                 </>
               )}
             </dl>
+          )}
+          {pending && <div className="tinfo-state mono" aria-live="polite">reading the transcript…</div>}
+          {!known && load === 'none' && (
+            <div className="tinfo-state mono">
+              No transcript yet — this agent has not written one. It appears here once it answers.
+            </div>
+          )}
+          {!known && load === 'error' && (
+            <div className="tinfo-state mono">Could not read the transcript. Close this and try again.</div>
           )}
           {/* The file itself. Offered once we know there IS one: a session that
               has not spoken would answer this link with `no-trace`, and a button

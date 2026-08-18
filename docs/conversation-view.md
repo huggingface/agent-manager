@@ -273,13 +273,35 @@ pane with nothing to render (a shell) simply stays a terminal.
   | full timestamp (`title` only) | panel — text beside the day |
   | `▲▼`, search box, hit counter | **unchanged, still on the bar** |
 
+  **The header's own layout (2026-08-18).** Left: the agent's logo, then the
+  working directory (`.ph-path`, which used to sit among the controls on the
+  right — it is not a control). Centre: the state mark immediately left of the
+  name, both centred as one title. Right: attach, search, `i`, close, in one
+  `.ph-btn` contract — 22px of ink, no boxes, 8px apart, and a `::before`
+  overlay that makes each a 28×28 target. The 8px is measured, not chosen: at
+  4px each overlay reached over its neighbour's ink and the middle two measured
+  20px across, under the 24px floor and invisibly so.
+
+  **The reader has no toolbar until search is asked for.** The header's search
+  switch reveals the bar (search box + `▲▼`) and closing it CLEARS the query —
+  a search filters the reader to matching turns, so hiding the box while the
+  filter stands leaves a reader showing three of forty turns with nothing to say
+  why. A phone gets a row of reading height back when it is closed.
+
+  **The paperclip is the header's, in both views.** While the reader is mounted
+  it registers its own picker upward (`onAttachPicker`), so the files still land
+  in the composer's draft; the composer no longer draws a picker of its own. The
+  search switch is reader-only: it searches a transcript, and the terminal view
+  has none.
+
   It sits in the header rather than the reader's toolbar because the operator
   asked for it from the terminal view too, and these are facts about the
   SESSION: a pane showing a terminal has the same model, the same token total
   and the same start date. One instance, in the pane's identity cluster beside
-  the logo and the state dot — not inside `.ph-title`, which is a rename field
-  whose width flexes with the name. The panel is anchored to `.pane-head`, not
-  to the button, so it opens inside the pane at any width.
+  the close button, in the right-hand cluster. The panel is anchored to
+  `.pane-head`, not to the button, and hangs from its right edge, so it opens
+  inside the pane at any width. It carries a `Folder` line: the working
+  directory is hidden on a phone, and this is where the fact stays reachable.
 
   **The whole-file read is lazy.** A terminal pane has parsed nothing, so the
   summary is fetched when the panel is first opened and once per session; while

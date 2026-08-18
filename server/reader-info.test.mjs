@@ -144,8 +144,11 @@ try {
   check('the reader is not mounted, so this is the terminal view',
     await page.locator('.cxv-bar').count() === 0);
 
-  const termTarget = await page.evaluate(() => {
-    const btn = document.querySelector('.pane-head .tinfo-btn');
+  // Every button in the header, not only the `i`: they lost their boxes, so the
+  // target is invisible and the only way to know it is there is to hit-test it.
+  // A neighbour's overlay can also steal an edge — at a 4px gap each of these
+  // measured 20 across, under the floor — so this measures all of them.
+  const sweep = () => page.evaluate(() => [...document.querySelectorAll('.pane-head .ph-btn')].map((btn) => {
     const r = btn.getBoundingClientRect();
     const cx = r.left + r.width / 2;
     const cy = r.top + r.height / 2;
@@ -157,10 +160,14 @@ try {
     while (hw < 40 && hits(hw + 1, 0) && hits(-(hw + 1), 0)) hw += 1;
     let hh = 0;
     while (hh < 40 && hits(0, hh + 1) && hits(0, -(hh + 1))) hh += 1;
-    return { w: hw * 2, h: hh * 2, box: Math.round(r.width) };
-  });
-  check('the header i is a 24px-plus tap target in the terminal view too',
-    termTarget.w >= 24 && termTarget.h >= 24, JSON.stringify(termTarget));
+    return { cls: btn.className.replace('ph-btn ', ''), w: hw * 2, h: hh * 2, ink: Math.round(r.width) };
+  }));
+  const termTargets = await sweep();
+  check('every header button is a 24px-plus tap target in the terminal view',
+    termTargets.length >= 3 && termTargets.every((b) => b.w >= 24 && b.h >= 24),
+    JSON.stringify(termTargets));
+  check('and they are all one size, with no boxes',
+    new Set(termTargets.map((b) => b.ink)).size === 1, JSON.stringify(termTargets.map((b) => b.ink)));
 
   // Hold the read so the in-flight state is observable: it must say what it is
   // doing rather than show a panel of blanks or a confident row of zeros.
@@ -173,7 +180,10 @@ try {
     JSON.stringify({ loadingText }));
   releaseSummary();
   summaryGate = null;
-  await page.locator('.tinfo-facts').waitFor({ state: 'visible', timeout: 5_000 });
+  // NOT `.tinfo-facts` — the Folder line renders that list before the read
+  // returns, so waiting for it would prove nothing. Wait for a fact the file
+  // has to answer for.
+  await waitFor(async () => /Model/.test(await page.locator('.tinfo').innerText()), 8_000);
   const termFacts = await page.locator('.tinfo').innerText();
   check('and then the terminal view has the same facts the reader does',
     termFacts.includes('claude-fixture-5') && termFacts.includes('2 messages')
@@ -191,40 +201,73 @@ try {
 
   // ---- and the reader, which hands its own head to the same panel ----------
   await page.locator('.modebar button', { hasText: 'reader' }).click();
-  await page.locator('.cxv-bar').waitFor({ state: 'visible', timeout: 20_000 });
+  // The reader has no toolbar until search is asked for, so wait for the body.
+  await page.locator('.cxv-body').waitFor({ state: 'visible', timeout: 20_000 });
 
-  // 1. The bar is controls now. Every fact below is asserted present in the
-  //    panel, so this cannot pass by the facts having been dropped.
+  // The rearrangement the operator asked for: the working directory beside the
+  // agent icon, the state mark immediately left of the centred name, and the
+  // four controls together on the right.
+  const layout = await page.evaluate(() => ({
+    pathInLeft: !!document.querySelector('.pane-head .ph-left .ph-path'),
+    pathInRight: !!document.querySelector('.pane-head .ph-right .ph-path'),
+    statusInTitle: !!document.querySelector('.pane-head .ph-title .status'),
+    statusLeftOfName: (() => {
+      const dot = document.querySelector('.pane-head .ph-title .status');
+      const name = document.querySelector('.pane-head .ph-name');
+      return !!dot && !!name && dot.getBoundingClientRect().right <= name.getBoundingClientRect().left + 1;
+    })(),
+    rightOrder: [...document.querySelectorAll('.pane-head .ph-right .ph-btn')]
+      .map((b) => b.className.replace('ph-btn ', '').split(' ')[0]),
+  }));
+  check('the working directory sits with the agent icon, not with the controls',
+    layout.pathInLeft && !layout.pathInRight, JSON.stringify(layout));
+  check('the state mark leads the centred name',
+    layout.statusInTitle && layout.statusLeftOfName, JSON.stringify(layout));
+  check('attach, search, info and close are one cluster in that order',
+    JSON.stringify(layout.rightOrder) === JSON.stringify(['ph-image', 'ph-search', 'tinfo-btn', 'ph-close']),
+    JSON.stringify(layout.rightOrder));
+
+  // 1. The reader opens with no bar at all: search is a tool the header's switch
+  //    reveals, and the facts left for the header's `i` (2026-08-18).
+  check('the reader opens with no toolbar of its own',
+    await page.locator('.cxv-bar').count() === 0);
+  await page.locator('.pane-head .ph-search').tap();
+  await page.locator('.cxv-bar .cxv-search').waitFor({ state: 'visible', timeout: 5_000 });
   const barText = (await page.locator('.cxv-bar').innerText()).trim();
-  check('the bar no longer carries the conversation facts',
-    !barText.includes('claude-fixture-5') && !/\bturns?\b/.test(barText) && !barText.includes('Jan'),
+  check('the revealed bar carries search and the turn keys, and no facts',
+    await page.locator('.cxv-bar .cxv-nav').isVisible()
+      && !barText.includes('claude-fixture-5') && !barText.includes('Jan'),
     JSON.stringify({ barText }));
-  check('search and turn navigation stay on the bar, not behind the i',
-    await page.locator('.cxv-bar .cxv-search').isVisible()
-      && await page.locator('.cxv-bar .cxv-nav').isVisible());
+  check('the search box takes focus when it appears',
+    await page.evaluate(() => document.activeElement?.className?.includes('cxv-search')));
+
+  // Closing search CLEARS the query. A live filter with no visible box is a
+  // reader that looks broken — which is how a reviewer read it last round.
+  await page.locator('.cxv-search').fill('nothing-matches-this');
+  await waitFor(async () => await page.locator('.cxv-body .cx').count() === 0, 4_000);
+  const filteredAway = await page.locator('.cxv-body .cx').count();
+  await page.locator('.pane-head .ph-search').tap();
+  await waitFor(async () => await page.locator('.cxv-bar').count() === 0, 4_000);
+  await waitFor(async () => await page.locator('.cxv-body .cx').count() > 0, 4_000);
+  const backAgain = await page.locator('.cxv-body .cx').count();
+  check('closing search clears the filter as well as the box',
+    filteredAway === 0 && backAgain > 0,
+    JSON.stringify({ filteredAway, backAgain }));
+  await page.locator('.pane-head .ph-search').tap();
+  await page.locator('.cxv-bar .cxv-search').waitFor({ state: 'visible' });
+  check('and it comes back empty, not with the old query',
+    (await page.locator('.cxv-search').inputValue()) === '');
+  await page.locator('.pane-head .ph-search').tap();
 
   // 2. The tap target is bigger than the circle it draws. WCAG 2.2 SC 2.5.8
   //    floors a target at 24x24, and this button is the only route to five
   //    facts that used to need no tap at all. Measured by hit-testing rather
   //    than by reading the CSS: an overlay counts as its own element, so this
   //    stays honest if the technique changes.
-  const target = await page.evaluate(() => {
-    const btn = document.querySelector('.tinfo-btn');
-    const r = btn.getBoundingClientRect();
-    const cx = r.left + r.width / 2;
-    const cy = r.top + r.height / 2;
-    const hits = (dx, dy) => {
-      const el = document.elementFromPoint(cx + dx, cy + dy);
-      return !!el && (el === btn || btn.contains(el));
-    };
-    let halfW = 0;
-    while (halfW < 40 && hits(halfW + 1, 0) && hits(-(halfW + 1), 0)) halfW += 1;
-    let halfH = 0;
-    while (halfH < 40 && hits(0, halfH + 1) && hits(0, -(halfH + 1))) halfH += 1;
-    return { w: halfW * 2, h: halfH * 2, circle: Math.round(r.width) };
-  });
-  check('the i is a 24px-plus tap target, whatever size the circle is drawn at',
-    target.w >= 24 && target.h >= 24, JSON.stringify(target));
+  const readerTargets = await sweep();
+  check('every header button keeps its target in the reader, search included',
+    readerTargets.length >= 4 && readerTargets.every((b) => b.w >= 24 && b.h >= 24),
+    JSON.stringify(readerTargets));
 
   // 3. It opens by touch, and holds what the bar used to.
   check('the info panel is shut until asked', await page.locator('.tinfo').count() === 0);
@@ -291,9 +334,10 @@ try {
   await page.locator('.tinfo').waitFor({ state: 'visible' });
   const quietText = await waitFor(async () =>
     /no transcript yet/i.test(await page.locator('.tinfo').innerText()), 8_000);
+  const quietFacts = (await page.locator('.tinfo').innerText()).trim();
   check('a session that has not spoken says so instead of showing zeros',
-    quietText && await page.locator('.tinfo-facts').count() === 0,
-    JSON.stringify({ text: (await page.locator('.tinfo').innerText()).trim(), id: quiet.id }));
+    quietText && !/Turns|Tokens|Started/.test(quietFacts) && /Folder/.test(quietFacts),
+    JSON.stringify({ text: quietFacts, id: quiet.id }));
   check('and offers no download for a file that is not there',
     await page.locator('.tinfo-actions a[download]').count() === 0);
   await page.keyboard.press('Escape');
