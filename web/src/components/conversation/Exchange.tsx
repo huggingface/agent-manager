@@ -12,7 +12,7 @@ import type { ReactNode } from 'react';
 import type { TraceTurn } from '../../api';
 import { renderMarkdown } from '../../lib/markdown';
 import type { Exchange, Step } from './exchanges';
-import { fmtClock, fmtDur, fmtTok, oneLine, stepSummary, stepText, stepsOf } from './exchanges';
+import { fmtClock, fmtDur, fmtTok, oneLine, proseOf, stepSummary, stepText, stepsOf } from './exchanges';
 import ToolCall from './ToolCall';
 
 const blocksOf = (t: TraceTurn | TraceTurn[] | null) =>
@@ -113,7 +113,23 @@ function StepRow({ s, q }: { s: Step; q?: string }) {
     : s.kind === 'shell' ? !!s.out.trim()
       : s.kind === 'image' ? true
         : full.trim().length > preview.length || more > 0;
-  const shown = open && full ? full : preview;
+  // Prose kinds — an aside, thinking out loud, a compaction — are markdown, and
+  // an agent writes them like markdown: headings, lists, code spans, links. Only
+  // the ANSWER used to be rendered, so the middle of a turn showed its syntax
+  // raw. It renders through the same path the answer takes, highlight and all.
+  //
+  // Not in the head row: that row is a <button>, and markdown carries links and
+  // block elements, neither of which is valid — or clickable — inside one. So the
+  // row keeps its one-line preview and the rendered prose goes in the body, the
+  // way every other expanded step already works (a tool's input, a shell's
+  // output). `shown` therefore stays the preview at every state.
+  const prose = proseOf(s);
+  const proseHtml = useMemo(
+    () => (open && prose.trim() ? highlightHtml(renderMarkdown(prose), q) : ''), [open, prose, q]);
+  // Open, the head row stops carrying the text: the rendered prose is below it,
+  // and the one-line preview above that would be the same words twice — once as
+  // syntax. Collapsed it is the row's whole content, so it stays.
+  const shown = proseHtml ? '' : preview;
 
   return (
     <div className={`cs${open ? ' open' : ''} ${s.kind}`}>
@@ -122,11 +138,17 @@ function StepRow({ s, q }: { s: Step; q?: string }) {
           ? <span className={`cs-mark ${s.failed ? 'bad' : 'ok'}`}>{s.failed ? '✗' : '✓'}</span>
           : <span className={`cs-tri${can ? '' : ' off'}`}>{open ? '▾' : '▸'}</span>}
         {label && <span className="cs-label mono">{label}</span>}
-        <span className={`cs-detail${open && full ? ' full' : ''}`}><Hi text={shown} q={q} /></span>
+        {shown ? <span className="cs-detail"><Hi text={shown} q={q} /></span> : <span className="cs-detail" />}
       </button>
       {open && (
         <div className="cs-body">
-          {/* the text already expanded above; only its cut tail is left to say */}
+          {/* Rendered, not raw. A truncated message can end mid-fence or
+              mid-table; marked closes both itself and DOMPurify reparses what it
+              emits, so a cut tail cannot leave an open block that swallows the
+              rest of the panel — pinned in test/stepMarkdown.test.mjs. */}
+          {proseHtml ? (
+            <div className="markdown cs-md" dangerouslySetInnerHTML={{ __html: proseHtml }} />
+          ) : null}
           {!!full && !!more && <div className="cs-more mono">…{moreLabel(more)}</div>}
           {s.kind === 'tools' && s.blocks.map((b, i) => (
             b.type === 'tool_use' ? (
@@ -203,14 +225,38 @@ export function ExchangeView({
   // Naming the model on every turn is noise when it never changes; when it DOES
   // change mid-session that is worth a word, so say it only then.
   const model = x.model && x.model !== baseModel ? x.model : '';
+  // Which turn, when, and on what — the viewer's business. A card shows one
+  // turn, dated in its own header, so it says none of this. It is one fragment
+  // because two rows can carry it: the meta row normally, and the working line
+  // when the turn has nothing else to say yet.
+  const facts = (
+    <>
+      <span className="spacer" />
+      {model && <span className="cx-model">{model}</span>}
+      {/* Padded to the width of the total, in FIGURE spaces: the row is mono and
+          tabular, so one figure space is exactly one digit, and "turn  9/10"
+          lines up under "turn 10/10" instead of the whole right cluster stepping
+          left the moment a session passes nine turns. A plain space would
+          collapse in HTML. */}
+      <span className="cx-n">turn {padTurn(n ?? 0, total)}{total ? `/${total}` : ''}</span>
+      {x.startTs ? <span className="cx-time">{fmtClock(x.startTs)}</span> : null}
+    </>
+  );
+  const factsOnRunningRow = !summary && !!running && n != null;
 
   return (
     <section className={`cx${dim ? ' dim' : ''}`}>
       {prompt ? <div className="cx-prompt"><Hi text={prompt} q={q} /></div> : null}
 
       {/* Everything about the turn on ONE line, under the prompt: what the work
-          was on the left, which turn it is on the right. Nothing above. */}
-      {(summary || n != null) && (
+          was on the left, which turn it is on the right. Nothing above.
+          A turn that has not done anything yet has no left half — no steps, no
+          duration, no tokens — and rendering the row anyway left an empty line
+          above the `working` line, which is what read as the widget sitting
+          "weirdly low". In that state the facts ride on the working line itself,
+          so there is one row instead of one and a half. The working line does not
+          move: it is the last row either way, at the text column. */}
+      {(summary || (n != null && !factsOnRunningRow)) && (
       <div className="cx-meta mono">
         {steps.length > 0 ? (
           <button className={`cx-fold${isOpen ? ' on' : ''}`} onClick={toggle} title={isOpen ? 'Hide the work' : 'Show the work'}>
@@ -220,19 +266,7 @@ export function ExchangeView({
         ) : <span className="cx-fold flat">{summary}</span>}
         {/* Which turn, when, and on what — the viewer's business. A card shows one
             turn, dated in its own header, so it says none of this. */}
-        {n != null && (
-          <>
-            <span className="spacer" />
-            {model && <span className="cx-model">{model}</span>}
-            {/* Padded to the width of the total, in FIGURE spaces: the row is
-                mono and tabular, so one figure space is exactly one digit, and
-                "turn  9/10" lines up under "turn 10/10" instead of the whole
-                right cluster stepping left the moment a session passes nine
-                turns. A plain space would collapse in HTML. */}
-            <span className="cx-n">turn {padTurn(n, total)}{total ? `/${total}` : ''}</span>
-            {x.startTs ? <span className="cx-time">{fmtClock(x.startTs)}</span> : null}
-          </>
-        )}
+        {n != null && facts}
       </div>
       )}
       {isOpen && stepsBefore.length > 0 && (
@@ -256,6 +290,7 @@ export function ExchangeView({
       {running && (
         <div className="cx-running mono">
           working{latest && <span className="cx-running-at">· {latest}</span>}
+          {factsOnRunningRow && facts}
         </div>
       )}
     </section>

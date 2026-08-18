@@ -128,9 +128,33 @@ Rules that keep this from becoming the ugly viewer in a small box:
 - **One left column, two meanings.** A tool reports its outcome there (`✓` / `✗`); everything
   else offers a disclosure triangle, greyed when there is nothing more to see. The fold control
   above uses the same column and the same triangle, so it reads as the head of the list.
-- **Expanding never repeats itself.** Text steps (thinking, an aside, a compaction) simply stop
-  being truncated — same font, same colour, more of it. Only a tool has genuinely *different*
-  material below: its input and what came back.
+- **Expanding never repeats itself.** A text step's one-line preview is the head row's whole
+  content while it is shut; opened, that row hands the text over and the step's body carries it
+  **rendered as markdown**. An agent writes an aside the way it writes an answer — headings, lists,
+  code spans, links — and for a long time only the answer was rendered, so the middle of a turn
+  showed its syntax raw (`## Plan`, `[the docs](https://…)`). The prose kinds — `note`, `think`,
+  `compact`, named by `proseOf()` — take the same path the answer does,
+  `highlightHtml(renderMarkdown(text), q)`, so a search term is still marked inside the rendered
+  blocks. Three consequences worth stating:
+    - **It renders in the body, not in the head row.** That row is a `<button>`; markdown carries
+      links and block elements, and neither is valid — or clickable — inside one.
+    - **An open `note` is two columns**, the disclosure gutter and the prose beside it. A note has
+      no label, so once its text moved to the body its head row held nothing but a triangle — and a
+      row whose only content is a triangle still takes a line, which read as *"it adds an empty line
+      at the beginning when expanded"*. Nothing was wrong with the rendering: no empty node, no
+      uncollapsed margin, and a leading newline in the source is dropped by markdown anyway (all
+      three are pinned in `stepMarkdown.test.mjs`). The blank line **was** the row. `think` and
+      `compact` keep the stacked layout, because their row says `thinking` or `context compacted`
+      and is therefore not an empty line.
+    - **The collapsed preview keeps its syntax.** `## Plan` says the message opens with a heading
+      and ` ``` ` says a code block is coming, which is more than `Plan` tells you, and stripping
+      it would mean a second markdown pass over a string that may be cut mid-token.
+    - **A cut message cannot take the panel with it.** These steps carry a `more` tail, so the text
+      can end mid-fence or mid-table; `marked` closes both itself and DOMPurify reparses what it
+      emits, so no unclosed block escapes to swallow what follows. Pinned in
+      `web/test/stepMarkdown.test.mjs`.
+  What must stay literal, stays literal: a tool's input is JSON, a shell's output and a tool result
+  are terminal bytes where two spaces mean two spaces, and an image is an image.
 - Consecutive calls to the same tool collapse (`✓ Read ×4  App.tsx, api.ts, +2`). The grouping
   logic exists — `ToolGroup` in `TracePane.tsx:86` — and gets reused, not rewritten.
 - **Thinking is one line** with a preview; system/harness turns are not shown at all in the card
@@ -262,6 +286,19 @@ pane with nothing to render (a shell) simply stays a terminal.
   two runs of steps with the answer between them. Grouping runs over each side separately, so two
   `Read`s either side of the reply stay two rows rather than collapsing into `Read ×2` and erasing
   the sequence.
+- **One column, and only marks outside it.** The prompt's `❯`, a fold's `▸` and the working line's
+  spinner all hang in the gutter; the summary, the answer, the step rows and the word `working` all
+  start on the same text column. A mark that sits *inside* the column pushes its own row's text
+  sideways, which is what made a turn with no tool calls indent its `13s · 188 tok` by 19px — the
+  row reserved the gutter for a triangle that cannot exist in that state (`.cx-fold.flat` used to
+  pay `padding-left: 1.75em`). The cell is one number, `--cx-mark` on `.cx-meta`, read by both the
+  hang and the glyph's width so they cannot drift apart.
+- **A turn with nothing yet has no meta row.** No steps, no duration, no tokens means no left half,
+  and rendering the row anyway left an empty line above the working line — which read as the widget
+  sitting low, dropped rather than placed. In that state the turn's facts ride on the working line
+  itself, so there is one row instead of one and a half. The working line does not move for this:
+  it is the last row at the text column either way, before and after the first step arrives
+  (checked live, not inferred — the facts move up into the new meta row, the line stays put).
 - **One working line, and it is the last thing in the reader.** It carries what the agent is doing
   *now* (`working · Bash …`), so it belongs at the end of the rail it continues — putting it above
   the steps would report the present before the past, which is the same disorder as the bullet

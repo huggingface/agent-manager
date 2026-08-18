@@ -114,6 +114,18 @@ export type Step =
   | { kind: 'image'; src: string }
   | { kind: 'compact'; text: string };
 
+/**
+ * The prose a step carries, or '' when it carries none.
+ *
+ * These three kinds are the agent writing for a reader — an aside, thinking out
+ * loud, a compaction summary — and it writes them in markdown, so the reader
+ * renders them. The others are not prose and must stay literal: a tool's input
+ * is JSON, a shell's output and a tool result are terminal bytes where two
+ * spaces mean two spaces, and an image is an image.
+ */
+export const proseOf = (s: Step): string =>
+  (s.kind === 'think' || s.kind === 'note' || s.kind === 'compact' ? s.text : '');
+
 // The one field of a tool call worth a line: what it acted on.
 const ARG_KEYS = ['file_path', 'path', 'notebook_path', 'command', 'pattern', 'glob', 'url', 'query', 'prompt', 'description', 'subagent_type'];
 const shortPath = (p: string) => {
