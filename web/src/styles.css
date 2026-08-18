@@ -728,11 +728,13 @@ body {
    already reachable with a long enough agent name; putting the group in front
    of the name made it reachable at ordinary ones. With the floor the title is
    capped at what is actually free and ellipsises instead. */
-/* The vertical padding is a variable because .ph-back cancels it to reach the
-   header's full height without adding any (below). A bleed that restated the
-   number would drift the first time this padding changed — the same way a
-   hardcoded 14px against an 8px gutter gave the phone a sideways scroll. */
-.pane-head { --ph-pad-y: 7px; container-type: inline-size; display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr); align-items: center; gap: 9px; padding: var(--ph-pad-y) 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
+/* Both paddings are variables because .ph-back is laid out against them: it
+   cancels the vertical one to reach the header's full height, and it spends the
+   horizontal one as its own left padding so its hit area fills the gutter. A
+   bleed that restated either number would drift the first time this padding
+   changed — the same way a hardcoded 14px against an 8px gutter gave the phone
+   a sideways scroll. */
+.pane-head { --ph-pad-y: 7px; --ph-pad-x: 11px; container-type: inline-size; display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr); align-items: center; gap: 9px; padding: var(--ph-pad-y) var(--ph-pad-x); background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
 .pane-head .ph-left { grid-column: 1; justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
 .pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 5px; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; cursor: text; }
 /* `[Group] name` is one title in two parts, and the group is the only part that
@@ -754,8 +756,20 @@ body {
 /* The way back on a phone, left of the agent's logo. It stretches to the
    header's own height — cancelling that height's padding rather than adding any
    — because a taller header would hand straight back the row that dropping the
-   bar above it won (see .mbar). */
-.pane-head .ph-back { align-self: stretch; margin: calc(-1 * var(--ph-pad-y)) 1px calc(-1 * var(--ph-pad-y)) -5px; padding: 0 8px; }
+   bar above it won (see .mbar).
+   Horizontally it is all left: the padding it needs to stay a thumb-sized
+   target is spent on the side away from the logo, and cancelled by an equal
+   negative margin on the side facing it. So the hit area REACHES INTO the space
+   between arrow and logo instead of MAKING that space, and what you see is the
+   7px .ph-left already puts between every other pair in the row — not 16px.
+   The left margin gives the same treatment to the header's own gutter: the
+   target starts at the very edge of the pane, which is where a thumb reaching
+   across a phone arrives first. */
+.pane-head .ph-back {
+  align-self: stretch;
+  margin: calc(-1 * var(--ph-pad-y)) -8px calc(-1 * var(--ph-pad-y)) calc(-1 * var(--ph-pad-x));
+  padding: 0 8px 0 var(--ph-pad-x);
+}
 .pane-head .ph-back svg { width: 15px; height: 15px; }
 @container (max-width: 520px) {
   .pane-head .ph-path { display: none; }
