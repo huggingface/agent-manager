@@ -6,8 +6,9 @@ import { ClipboardAddon, Base64 } from '@xterm/addon-clipboard';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { Cli, Session } from '../types';
-import { STATE_LABEL } from '../types';
+import { STATE_LABEL, isRemote } from '../types';
 import Logo from './Logo';
+import TraceInfo from './TraceInfo';
 import ConversationView from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
@@ -260,6 +261,11 @@ export default function TerminalPane({
   const [imageDrop, setImageDrop] = useState(false);
   const [imageStatus, setImageStatus] = useState<{ kind: 'uploading' | 'success' | 'error'; text: string } | null>(null);
   const [imageUploadBusy, setImageUploadBusy] = useState(false);
+  // What the reader already knows about this conversation. The header's `i`
+  // takes it as a gift when the reader is mounted, and reads the file itself
+  // only when it is not (a terminal pane has parsed nothing).
+  const [readerFacts, setReaderFacts] = useState<api.TraceSummary | null>(null);
+  const [readerLoaded, setReaderLoaded] = useState<number | undefined>(undefined);
   const [pendingInsert, setPendingInsert] = useState<Attachment[]>([]);
   const supportsAttachments = session.cli !== 'shell';
   const canAttachFiles = supportsAttachments && conn === 'connected' && hasInputControl
@@ -1040,6 +1046,19 @@ export default function TerminalPane({
           )}
           <Logo cli={session.cli} size={16} tint={tint} />
           <span className={`status ${session.state}`} title={`${STATE_LABEL[session.state]} · ${conn}`} />
+          {/* Beside the logo and the state dot rather than inside `.ph-title`:
+              that column is a rename field whose width flexes with the name, so
+              a control in it would drift as the name grows and fight the
+              double-click. This is the pane's identity cluster, and it is the
+              same spot in both views. */}
+          {!isRemote(session.cli) && (
+            <TraceInfo
+              session={session}
+              facts={reading ? readerFacts : undefined}
+              turnsLoaded={reading ? readerLoaded : undefined}
+              onShare={onShare}
+            />
+          )}
         </div>
         {editing ? (
           <input
@@ -1120,7 +1139,13 @@ export default function TerminalPane({
           >
             {readerEnabled === false
               ? <div className="cxv-empty mono">reading the trace…</div>
-              : <ConversationView session={session} isMobile={isMobile} onShare={onShare} onReady={onReaderReady} readyKey={readerReadyKey} />}
+              : <ConversationView
+                  session={session}
+                  isMobile={isMobile}
+                  onHead={(head) => { setReaderFacts(head); setReaderLoaded(head?.loaded); }}
+                  onReady={onReaderReady}
+                  readyKey={readerReadyKey}
+                />}
           </div>
         )}
       </div>

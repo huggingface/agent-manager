@@ -758,13 +758,7 @@ body {
    already reachable with a long enough agent name; putting the group in front
    of the name made it reachable at ordinary ones. With the floor the title is
    capped at what is actually free and ellipsises instead. */
-/* Both paddings are variables because .ph-back is laid out against them: it
-   cancels the vertical one to reach the header's full height, and it spends the
-   horizontal one as its own left padding so its hit area fills the gutter. A
-   bleed that restated either number would drift the first time this padding
-   changed — the same way a hardcoded 14px against an 8px gutter gave the phone
-   a sideways scroll. */
-.pane-head { --ph-pad-y: 7px; --ph-pad-x: 11px; container-type: inline-size; display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr); align-items: center; gap: 9px; padding: var(--ph-pad-y) var(--ph-pad-x); background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
+.pane-head { --ph-pad-y: 7px; --ph-pad-x: 11px; position: relative; container-type: inline-size; display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr); align-items: center; gap: 9px; padding: var(--ph-pad-y) var(--ph-pad-x); background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
 .pane-head .ph-left { grid-column: 1; justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
 .pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 5px; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; cursor: text; }
 /* `[Group] name` is one title in two parts, and the group is the only part that
@@ -783,6 +777,62 @@ body {
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }
+/* The conversation's facts, behind one `i` in the pane header — the same place
+   in the terminal view and the reader (docs/conversation-view.md §3.3). A square
+   mini-control in the app's --r-sm register, sized like the header's other mini
+   buttons rather than falling out of its own padding. */
+/* NOT the positioning context for the panel — the header is. The `i` sits a
+   back-button, a logo and a state dot into the row, so a panel anchored to the
+   button itself starts ~100px in and runs off the right edge of a phone. */
+.tinfo-wrap { flex: none; display: inline-flex; }
+.tinfo-btn {
+  position: relative; flex: none; width: 19px; height: 19px;
+  display: inline-flex; align-items: center; justify-content: center; padding: 0;
+  border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel);
+  color: var(--muted); font: 700 12px/1 var(--font-mono); cursor: pointer;
+}
+/* The tap target, which is bigger than the box. WCAG 2.2 SC 2.5.8 floors a
+   target at 24 and iOS asks for 44, and this one button is the only way to five
+   facts that used to need no tap at all — on the phone the item was filed from.
+   #75 pads `.ph-back` out and pulls the padding back with a negative margin, but
+   that button draws no box; this one does, and padding would inflate it. An
+   overlay grows what the finger has to hit and leaves the ink alone. It is
+   pinned by hit-testing in server/reader-info.test.mjs, in BOTH views. */
+.tinfo-btn::before { content: ''; position: absolute; inset: -8px -9px; }
+.tinfo-btn:hover { color: var(--text); border-color: var(--border-strong); }
+.tinfo-btn.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+.tinfo {
+  /* Anchored to the pane header, so it opens inside the pane at any width and
+     lines up with the header's own left edge rather than with wherever the
+     button lands. */
+  position: absolute; z-index: 12; top: calc(100% + 4px); left: 8px;
+  /* Wide enough that the two actions sit side by side on one line each — at a
+     phone width that is what 78vw buys, and below it they stack rather than
+     wrap a label in half. */
+  min-width: min(19rem, calc(100% - 16px)); max-width: min(23rem, calc(100% - 16px));
+  display: flex; flex-direction: column; gap: 8px; padding: 9px 10px;
+  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.18);
+}
+/* Reading the transcript, or nothing to read: the panel says which. A terminal
+   pane has parsed nothing, so opening this is the first read — and a whole-file
+   one — which is exactly why it must not pretend to have the answer already. */
+.tinfo-state { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.tinfo-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; margin: 0; }
+.tinfo-facts dt { color: var(--muted); }
+.tinfo-facts dd { margin: 0; color: var(--text); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.tinfo-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 7px; border-top: 1px solid var(--border); }
+/* Download is an <a download> and Share is a <button> — two elements that match
+   only if they are told to. Same padding, same weight, and an equal share of
+   the row, so the panel reads as one pair of actions rather than a long control
+   and a short one. */
+.tinfo-actions .btn-ghost {
+  flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  padding: 5px 8px; font: inherit; font-size: 1em; font-weight: 600; line-height: 1.35; text-decoration: none;
+  white-space: nowrap;
+}
+.tinfo-actions svg { width: 13px; height: 13px; }
+
 /* The way back on a phone, left of the agent's logo. It stretches to the
    header's own height — cancelling that height's padding rather than adding any
    — because a taller header would hand straight back the row that dropping the

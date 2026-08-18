@@ -241,58 +241,11 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 /* The facts panel. Anchored to the `i` in the bar's leading corner, and it
    OVERLAYS the conversation instead of pushing it down: opening it must not
    move the text under the reader's thumb. */
-.cxv-info-wrap { position: relative; flex: none; display: inline-flex; }
-/* One size and one shape for everything on this bar. The `i` was a filled
-   circle at 17px next to 18px nav keys — the only round control in an app built
-   from square hairlines (the terminal|reader selector, the search field beside
-   it, the wrap toggle, the Overview chips), and the odd one out twice over. It
-   is now the same square mini-control as `▲▼`, in the same --r-sm register, and
-   measurably the same box: both are sized here rather than falling out of their
-   own padding, so they cannot drift apart again. */
-.cxv-bar .cxv-mini, .cxv-info-btn {
+.cxv-bar .cxv-mini {
   flex: none; min-width: 1.75em; height: 1.75em;
   display: inline-flex; align-items: center; justify-content: center;
   padding: 0 4px; border-radius: var(--r-sm);
 }
-.cxv-info-btn {
-  position: relative; border: 1px solid var(--border); background: var(--panel);
-  color: var(--muted); font: inherit; font-size: 1em; font-weight: 700; line-height: 1;
-  cursor: pointer;
-}
-/* The tap target, which is not the circle. At the bar's scale the circle is
-   17px across; WCAG 2.2 SC 2.5.8 floors a target at 24 and iOS asks for 44, and
-   this one button is now the only way to five facts that used to need no tap at
-   all — on the phone the item was filed from. #75 pads `.ph-back` out and pulls
-   the padding back with a negative margin, but that button has no drawn box;
-   this one IS a circle, so padding would inflate the circle. An overlay grows
-   what the finger has to hit and leaves the ink alone. */
-.cxv-info-btn::before { content: ''; position: absolute; inset: -8px -9px; }
-.cxv-info-btn:hover { color: var(--text); border-color: var(--border-strong); }
-.cxv-info-btn.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
-.cxv-info {
-  position: absolute; z-index: 12; top: calc(100% + 6px); left: 0;
-  /* Wide enough that the two actions sit side by side on one line each — at a
-     phone width that is what 78vw buys, and below it they stack rather than
-     wrap a label in half. */
-  min-width: min(19rem, 78vw); max-width: min(23rem, 78vw);
-  display: flex; flex-direction: column; gap: 8px; padding: 9px 10px;
-  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 0.18);
-}
-.cxv-info-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; margin: 0; }
-.cxv-info-facts dt { color: var(--muted); }
-.cxv-info-facts dd { margin: 0; color: var(--text); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-.cxv-info-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 7px; border-top: 1px solid var(--border); }
-/* Download is an <a download> and Share is a <button> — two elements that match
-   only if they are told to. Same padding, same weight, and an equal share of
-   the row, so the panel reads as one pair of actions rather than a long control
-   and a short one. */
-.cxv-info-actions .btn-ghost {
-  flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
-  padding: 5px 8px; font: inherit; font-size: 1em; font-weight: 600; line-height: 1.35; text-decoration: none;
-  white-space: nowrap;
-}
-.cxv-info-actions svg { width: 13px; height: 13px; }
 .cxv-mini {
   flex: none; white-space: nowrap; background: none; border: 1px solid transparent; border-radius: var(--r-sm);
   padding: 1px 5px; font: inherit; font-size: 1em; color: var(--muted); cursor: pointer;

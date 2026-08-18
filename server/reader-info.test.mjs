@@ -102,6 +102,10 @@ try {
     { role: 'user', ts: startedAt, blocks: [{ type: 'text', text: 'fixture prompt' }] },
     { role: 'assistant', kind: 'final', ts: startedAt + 1000, blocks: [{ type: 'text', text: 'fixture answer' }] },
   ];
+  let summaryCalls = 0;
+  let releaseSummary = null;
+  const holdSummary = () => new Promise((resolve) => { releaseSummary = resolve; });
+  let summaryGate = null;
   await page.route(`**/api/trace/${id}?*`, async (route) => {
     const common = {
       harness: 'claude', harnessLabel: 'Claude Code', sessionId: id,
@@ -109,15 +113,83 @@ try {
       lastTs: startedAt + 1000, usage: { in: 12_000, out: 3_400, cacheRead: 8_000 },
       note: null, total: 2, truncated: false, userTurns: [0],
     };
-    if (new URL(route.request().url()).searchParams.has('summary')) return route.fulfill({ json: common });
+    if (new URL(route.request().url()).searchParams.has('summary')) {
+      summaryCalls += 1;
+      if (summaryGate) await summaryGate;
+      return route.fulfill({ json: common });
+    }
     return route.fulfill({ json: {
       ...common, turns: traceTurns, offset: 0, limit: 2,
       window: { mode: 'index', start: 0, end: 2, atStart: true, atEnd: true },
     } });
   });
 
+  // Panes are retained, so once a second session is opened `.pane-head` matches
+  // more than one. Scope every header lookup to the pane that owns the name.
+  const paneOf = (name) => page.locator('.slot', { has: page.locator('.ph-name', { hasText: name }) });
+  const infoOf = (name) => paneOf(name).locator('.pane-head .tinfo-btn');
+
   await page.goto(API);
   await page.locator('.sidebar .row[title^="reader-info-e2e"]').first().click();
+
+  // ---- the terminal view, which is where this had to become reachable -------
+  // The pane opens on the terminal. The `i` is in the header, so it is here
+  // too — and nothing has read the transcript yet, which is the point of the
+  // lazy load: a whole-file parse for a panel nobody opened is a tax on every
+  // pane. (docs/conversation-view.md §5)
+  await infoOf('reader-info-e2e').waitFor({ state: 'visible', timeout: 20_000 });
+  await sleep(1_200);
+  check('a terminal pane reads nothing until the panel is opened',
+    summaryCalls === 0, JSON.stringify({ summaryCalls }));
+  check('the reader is not mounted, so this is the terminal view',
+    await page.locator('.cxv-bar').count() === 0);
+
+  const termTarget = await page.evaluate(() => {
+    const btn = document.querySelector('.pane-head .tinfo-btn');
+    const r = btn.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const hits = (dx, dy) => {
+      const el = document.elementFromPoint(cx + dx, cy + dy);
+      return !!el && (el === btn || btn.contains(el));
+    };
+    let hw = 0;
+    while (hw < 40 && hits(hw + 1, 0) && hits(-(hw + 1), 0)) hw += 1;
+    let hh = 0;
+    while (hh < 40 && hits(0, hh + 1) && hits(0, -(hh + 1))) hh += 1;
+    return { w: hw * 2, h: hh * 2, box: Math.round(r.width) };
+  });
+  check('the header i is a 24px-plus tap target in the terminal view too',
+    termTarget.w >= 24 && termTarget.h >= 24, JSON.stringify(termTarget));
+
+  // Hold the read so the in-flight state is observable: it must say what it is
+  // doing rather than show a panel of blanks or a confident row of zeros.
+  summaryGate = holdSummary();
+  await infoOf('reader-info-e2e').tap();
+  await page.locator('.tinfo').waitFor({ state: 'visible' });
+  const loadingText = (await page.locator('.tinfo').innerText()).trim();
+  check('while it reads, the panel says so instead of showing blanks',
+    /reading the transcript/i.test(loadingText) && !loadingText.includes('Model'),
+    JSON.stringify({ loadingText }));
+  releaseSummary();
+  summaryGate = null;
+  await page.locator('.tinfo-facts').waitFor({ state: 'visible', timeout: 5_000 });
+  const termFacts = await page.locator('.tinfo').innerText();
+  check('and then the terminal view has the same facts the reader does',
+    termFacts.includes('claude-fixture-5') && termFacts.includes('2 messages')
+      && /8\.0k\s+cached/i.test(termFacts) && termFacts.includes('Jan 14'),
+    JSON.stringify({ termFacts }));
+  check('with the transcript offered from here as well',
+    await page.locator('.tinfo-actions a[download]').getAttribute('href') === `/api/trace/${id}/download`);
+  const afterFirstOpen = summaryCalls;
+  await page.keyboard.press('Escape');
+  await infoOf('reader-info-e2e').tap();
+  await page.locator('.tinfo-facts').waitFor({ state: 'visible' });
+  await page.keyboard.press('Escape');
+  check('re-opening it does not read the file again', summaryCalls === afterFirstOpen,
+    JSON.stringify({ afterFirstOpen, summaryCalls }));
+
+  // ---- and the reader, which hands its own head to the same panel ----------
   await page.locator('.modebar button', { hasText: 'reader' }).click();
   await page.locator('.cxv-bar').waitFor({ state: 'visible', timeout: 20_000 });
 
@@ -137,7 +209,7 @@ try {
   //    than by reading the CSS: an overlay counts as its own element, so this
   //    stays honest if the technique changes.
   const target = await page.evaluate(() => {
-    const btn = document.querySelector('.cxv-info-btn');
+    const btn = document.querySelector('.tinfo-btn');
     const r = btn.getBoundingClientRect();
     const cx = r.left + r.width / 2;
     const cy = r.top + r.height / 2;
@@ -155,13 +227,13 @@ try {
     target.w >= 24 && target.h >= 24, JSON.stringify(target));
 
   // 3. It opens by touch, and holds what the bar used to.
-  check('the info panel is shut until asked', await page.locator('.cxv-info').count() === 0);
-  await page.locator('.cxv-info-btn').tap();
-  await page.locator('.cxv-info').waitFor({ state: 'visible' });
+  check('the info panel is shut until asked', await page.locator('.tinfo').count() === 0);
+  await page.locator('.tinfo-btn').tap();
+  await page.locator('.tinfo').waitFor({ state: 'visible' });
   // The whole-file summary lands a moment after the first paint; the panel
   // shows what is loaded until then, and the message total once it has it.
-  await waitFor(async () => (await page.locator('.cxv-info').innerText()).includes('2 messages'), 5_000);
-  const facts = await page.locator('.cxv-info').innerText();
+  await waitFor(async () => (await page.locator('.tinfo').innerText()).includes('2 messages'), 5_000);
+  const facts = await page.locator('.tinfo').innerText();
   check('the model is in the panel', facts.includes('claude-fixture-5'), JSON.stringify({ facts }));
   check('the turn and message counts are in the panel',
     /\b1 turn\b/.test(facts) && facts.includes('2 messages'), JSON.stringify({ facts }));
@@ -178,7 +250,7 @@ try {
     /\d{1,2}:\d{2}/.test(startedLine), JSON.stringify({ startedLine }));
 
   // 4. The transcript, as a file — and the URL really answers.
-  const href = await page.locator('.cxv-info-actions a[download]').getAttribute('href');
+  const href = await page.locator('.tinfo-actions a[download]').getAttribute('href');
   const downloaded = await fetch(`${API}${href}`);
   const downloadedText = await downloaded.text();
   check('the panel offers the transcript and that URL answers with the file',
@@ -188,20 +260,42 @@ try {
 
   // 5. Dismissal, both ways.
   await page.keyboard.press('Escape');
-  check('Escape closes the panel', await page.locator('.cxv-info').count() === 0);
-  await page.locator('.cxv-info-btn').tap();
-  await page.locator('.cxv-info').waitFor({ state: 'visible' });
+  check('Escape closes the panel', await page.locator('.tinfo').count() === 0);
+  await page.locator('.tinfo-btn').tap();
+  await page.locator('.tinfo').waitFor({ state: 'visible' });
   await page.locator('.cxv-body').tap({ position: { x: 20, y: 320 } });
   check('a press outside closes the panel',
-    await waitFor(async () => await page.locator('.cxv-info').count() === 0, 2_000));
+    await waitFor(async () => await page.locator('.tinfo').count() === 0, 2_000));
 
   // 6. Share, from the reader — the same dialog the sidebar row opens.
-  await page.locator('.cxv-info-btn').tap();
-  await page.locator('.cxv-info-actions button', { hasText: 'Share' }).tap();
+  await page.locator('.tinfo-btn').tap();
+  await page.locator('.tinfo-actions button', { hasText: 'Share' }).tap();
   const shareOpen = await waitFor(async () => await page.locator('.share-card').isVisible(), 5_000);
   check('Share in the panel opens the share dialog', shareOpen);
   check('the share dialog offers the same download',
     await page.locator('.share-card a[download]').getAttribute('href') === `/api/trace/${id}/download`);
+  await page.keyboard.press('Escape');
+
+  // An agent that has not spoken has no transcript, and the panel's actions are
+  // about a file that does not exist yet. Say that, and do not offer a link the
+  // route would answer with `no-trace` (server/test/trace-download.test.mjs).
+  const quiet = await (await fetch(`${API}/api/sessions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cli: 'claude', name: 'not-spoken-yet', path: 'ri2' }),
+  })).json();
+  await page.locator('.sidebar .row[title^="not-spoken-yet"]').first()
+    .waitFor({ state: 'visible', timeout: 15_000 });
+  await page.locator('.sidebar .row[title^="not-spoken-yet"]').first().click();
+  await infoOf('not-spoken-yet').waitFor({ state: 'visible', timeout: 15_000 });
+  await infoOf('not-spoken-yet').tap();
+  await page.locator('.tinfo').waitFor({ state: 'visible' });
+  const quietText = await waitFor(async () =>
+    /no transcript yet/i.test(await page.locator('.tinfo').innerText()), 8_000);
+  check('a session that has not spoken says so instead of showing zeros',
+    quietText && await page.locator('.tinfo-facts').count() === 0,
+    JSON.stringify({ text: (await page.locator('.tinfo').innerText()).trim(), id: quiet.id }));
+  check('and offers no download for a file that is not there',
+    await page.locator('.tinfo-actions a[download]').count() === 0);
   await page.keyboard.press('Escape');
 
   // 7. The sidebar widget is gone, and its one irreplaceable function is not.

@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../../api';
 import type { TraceTurn } from '../../api';
-import { useTraceWindows, type TraceSource } from '../../lib/traceWindows';
+import { useTraceWindows, type TraceHeadInfo, type TraceSource } from '../../lib/traceWindows';
 import type { Session } from '../../types';
 import { isRemote } from '../../types';
 import {
@@ -29,7 +29,6 @@ import { fmtTok, splitExchanges } from './exchanges';
 import ExchangeView, { PendingExchange } from './Exchange';
 import Attachments from '../Attachments';
 import Composer from './Composer';
-import { DownloadGlyph, ShareGlyph } from '../icons';
 
 const NEAR_TOP_PX = 300;   // start fetching older turns before the reader arrives
 
@@ -46,7 +45,7 @@ const fmtStarted = (ms: number) => {
     : { year: 'numeric', month: 'short', day: 'numeric' });
 };
 
-export default function ConversationView({ session, paused, isMobile, readOnly, onHandover, onShare, onReady, readyKey }: {
+export default function ConversationView({ session, paused, isMobile, readOnly, onHandover, onHead, onReady, readyKey }: {
   session: Session;
   /** The pane is off-screen: stop asking the server for a trace nobody sees. */
   paused?: boolean;
@@ -54,9 +53,9 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   /** A trace with no agent behind it — a shared file, an import. Read-only. */
   readOnly?: boolean;
   onHandover?: () => void;
-  /** Publish this session (the share dialog). Absent when there is nothing to
-   *  publish — an imported trace is already someone else's share. */
-  onShare?: () => void;
+  /** Hand the conversation's facts to the pane header, whose `i` shows them in
+   *  both views: the reader has already read them, so the header must not. */
+  onHead?: (head: TraceHeadInfo | null) => void;
   /** Called after the first tail page (or its terminal error) has painted. */
   onReady?: () => void;
   /** The visible batch this paint should release. */
@@ -65,8 +64,6 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState(0);
   const [hit, setHit] = useState(0);
-  const [infoOpen, setInfoOpen] = useState(false);
-  const infoRef = useRef<HTMLDivElement | null>(null);
   const scroller = useRef<HTMLDivElement | null>(null);
   const rows = useRef(new Map<number, HTMLElement>());
   // Follow the work while it arrives — but only while the reader is already at
@@ -417,22 +414,10 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   // anchor effect, so this has the last word on scrollTop.
   useLayoutEffect(() => { trySeek(); }, [version, trySeek]);
 
-  // The info panel closes the way a menu is expected to: Escape, or a press
-  // anywhere else. `pointerdown` rather than `click` so a press that starts on
-  // the reader below dismisses it before that press scrolls anything.
-  useEffect(() => {
-    if (!infoOpen) return undefined;
-    const onDown = (e: PointerEvent) => {
-      if (!infoRef.current?.contains(e.target as Node)) setInfoOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setInfoOpen(false); };
-    document.addEventListener('pointerdown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('pointerdown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [infoOpen]);
+  // The header's `i` shows these; while this reader is mounted it is the one
+  // that has them, and it keeps them current as the summary and windows land.
+  useEffect(() => { onHead?.(head); }, [head, onHead]);
+  useEffect(() => () => onHead?.(null), [onHead]);
 
   if (!head) return <div className="cxv-empty mono">{error || 'reading the trace…'}</div>;
 
@@ -440,81 +425,10 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
     <div className="cxv">
       {/* The reader's own controls, on their own row: on a phone the pane
           header above has no spare width. */}
+      {/* Search and turn navigation. The conversation's facts used to be here
+          too; they are in the pane header's `i` now, which is the one place they
+          are reachable from the terminal view as well. */}
       <div className="cxv-bar mono">
-        {/* Every conversation-level fact now lives behind this one button: model,
-            turn and message counts, tokens, and the day the conversation started.
-            They were a row of chips that pushed search to the edge on a phone.
-            The panel is opened by TAP, not hover — the facts that used to be
-            title attributes (the full timestamp, cached tokens) are plain text
-            inside it, so a touch device can read them for the first time. */}
-        <div className="cxv-info-wrap" ref={infoRef}>
-          <button
-            type="button"
-            className={`cxv-info-btn${infoOpen ? ' on' : ''}`}
-            aria-expanded={infoOpen}
-            aria-haspopup="dialog"
-            aria-label="About this conversation"
-            title="About this conversation"
-            onClick={() => setInfoOpen((open) => !open)}
-          >i</button>
-          {infoOpen && (
-            <div className="cxv-info" role="dialog" aria-label="About this conversation">
-              <dl className="cxv-info-facts">
-                {head.model && (<><dt>Model</dt><dd>{head.model}</dd></>)}
-                <dt>Turns</dt>
-                <dd>
-                  {fmtNum(exchanges.length)} turn{exchanges.length === 1 ? '' : 's'}
-                  {head.total != null
-                    ? ` · ${fmtNum(head.total)} message${head.total === 1 ? '' : 's'}`
-                    : ` · ${fmtNum(head.loaded)} message${head.loaded === 1 ? '' : 's'} loaded`}
-                </dd>
-                {head.usage && (
-                  <>
-                    <dt>Tokens</dt>
-                    <dd>
-                      {fmtUsage(head.usage)}
-                      {head.usage.cacheRead ? ` · ${fmtTok(head.usage.cacheRead)} cached` : ''}
-                    </dd>
-                  </>
-                )}
-                {head.firstTs != null && (
-                  <>
-                    <dt>Started</dt>
-                    <dd>
-                      <span className="cxv-when">{fmtStarted(head.firstTs)}</span>
-                      {' · '}{new Date(head.firstTs).toLocaleString()}
-                    </dd>
-                  </>
-                )}
-              </dl>
-              {/* The transcript, as a file. A session's own trace lives in its
-                  harness's directory, outside the workspace, so the Files pane
-                  cannot open it — this is the only way to hold the bytes. */}
-              <div className="cxv-info-actions">
-                {/* "Download" rather than "Download trace": the pair has to
-                    read as one size, and the panel is already about this
-                    conversation. The longer phrase is on the aria-label, which
-                    costs a screen reader nothing and adds no hover dependency —
-                    there is still not one `title` inside this panel. */}
-                <a
-                  className="btn-ghost"
-                  href={api.traceDownloadUrl(session.id)}
-                  download
-                  aria-label="Download this conversation's transcript"
-                  onClick={() => setInfoOpen(false)}
-                ><DownloadGlyph /> Download</a>
-                {onShare && (
-                  <button
-                    type="button"
-                    className="btn-ghost"
-                    onClick={() => { setInfoOpen(false); onShare(); }}
-                  ><ShareGlyph /> Share…</button>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-        <span className="spacer" />
         <span className="cxv-nav">
           <button className="cxv-mini" onClick={() => nav(-1)} title={q && hits ? 'Previous match' : 'Previous turn'}>▲</button>
           <button className="cxv-mini" onClick={() => nav(1)} title={q && hits ? 'Next match' : 'Next turn'}>▼</button>

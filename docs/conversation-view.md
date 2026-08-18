@@ -252,7 +252,7 @@ pane with nothing to render (a shell) simply stays a terminal.
 - The reader's toolbar is a second header row, not a squeeze into the first — on a phone the
   first row has no spare width. It carries the reader's **controls**: `▲▼` and the search box.
   There is no "expand everything" — each turn folds itself, and search opens what it needs to.
-- **The facts live behind one `i`, in the bar's leading corner** (2026-08-16). They were spread
+- **The facts live behind one `i` in the PANE HEADER** (2026-08-16, moved out of the reader's bar 2026-08-18). They were spread
   across the bar — model chip, `13 turns`, `2.2M↓ 654k↑`, the day it started — which is a lot of
   standing furniture for things you read once, and on a narrow pane they pushed search to the
   edge. Tapping the `i` opens a small panel over the conversation (it overlays, so opening it
@@ -272,6 +272,21 @@ pane with nothing to render (a shell) simply stays a terminal.
   | day started, e.g. `14 Aug` | panel — `Started` |
   | full timestamp (`title` only) | panel — text beside the day |
   | `▲▼`, search box, hit counter | **unchanged, still on the bar** |
+
+  It sits in the header rather than the reader's toolbar because the operator
+  asked for it from the terminal view too, and these are facts about the
+  SESSION: a pane showing a terminal has the same model, the same token total
+  and the same start date. One instance, in the pane's identity cluster beside
+  the logo and the state dot — not inside `.ph-title`, which is a rename field
+  whose width flexes with the name. The panel is anchored to `.pane-head`, not
+  to the button, so it opens inside the pane at any width.
+
+  **The whole-file read is lazy.** A terminal pane has parsed nothing, so the
+  summary is fetched when the panel is first opened and once per session; while
+  it is in flight the panel says `reading the transcript…`, and a session that
+  has not spoken says so instead of showing zeros — with no Download, since the
+  route would answer `no-trace`. When the reader IS mounted it hands its head
+  down (`onHead`), so opening the panel there costs no request at all.
 - **Search has to be followable.** Filtering to matching turns is not finding: the term is
   highlighted wherever it lands, a turn whose only match is inside its folded work *unfolds it*
   (and opens the step holding it, body included), the box reports `3/17`, and `▲▼` switch from
