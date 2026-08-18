@@ -138,6 +138,14 @@ Rules that keep this from becoming the ugly viewer in a small box:
   blocks. Three consequences worth stating:
     - **It renders in the body, not in the head row.** That row is a `<button>`; markdown carries
       links and block elements, and neither is valid — or clickable — inside one.
+    - **An open `note` is two columns**, the disclosure gutter and the prose beside it. A note has
+      no label, so once its text moved to the body its head row held nothing but a triangle — and a
+      row whose only content is a triangle still takes a line, which read as *"it adds an empty line
+      at the beginning when expanded"*. Nothing was wrong with the rendering: no empty node, no
+      uncollapsed margin, and a leading newline in the source is dropped by markdown anyway (all
+      three are pinned in `stepMarkdown.test.mjs`). The blank line **was** the row. `think` and
+      `compact` keep the stacked layout, because their row says `thinking` or `context compacted`
+      and is therefore not an empty line.
     - **The collapsed preview keeps its syntax.** `## Plan` says the message opens with a heading
       and ` ``` ` says a code block is coming, which is more than `Plan` tells you, and stripping
       it would mean a second markdown pass over a string that may be cut mid-token.

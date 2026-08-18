@@ -99,6 +99,21 @@
 .cs-more { font-size: 0.77em; color: var(--muted); padding: 2px 0 0; }
 /* left inset = the rail column above it, so a body hangs under its own row */
 .cs-body { padding: 2px 0 6px 1em; }
+/* An open note is TWO COLUMNS: the disclosure gutter, and the prose beside it.
+   A note has no label, so once its text moved to the body the head row had
+   nothing left in it — and a row whose only content is a 14px triangle still
+   takes a line, which is the "empty line at the beginning" it read as. Nothing
+   was wrong with the markdown: no empty node, no uncollapsed margin, no leading
+   newline in the source (markdown drops those anyway). The blank line WAS the
+   row. So the triangle now sits beside the first line it belongs to, and the
+   gutter it lives in is what you press to close the step again.
+   `think` and `compact` keep the stacked layout: their row says `thinking` or
+   `context compacted`, so it is not an empty line. */
+.cs.note.open { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+.cs.note.open > .cs-head { grid-column: 1; width: auto; align-self: stretch; padding-right: 0; }
+.cs.note.open > .cs-head .cs-detail { display: none; }
+.cs.note.open > .cs-body { grid-column: 2; padding: 0 0 6px 0.45em; }
+
 /* Prose inside a step — an aside, thinking, a compaction — is the same markdown
    as an answer, one register quieter. A step is a row in a rail, so its headings
    step down to something that reads as emphasis rather than as a title of the
