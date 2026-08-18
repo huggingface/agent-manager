@@ -256,7 +256,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 }
 .cxv-info-btn {
   position: relative; border: 1px solid var(--border); background: var(--panel);
-  color: var(--muted); font: inherit; font-size: 1em; font-style: italic; font-weight: 700; line-height: 1;
+  color: var(--muted); font: inherit; font-size: 1em; font-weight: 700; line-height: 1;
   cursor: pointer;
 }
 /* The tap target, which is not the circle. At the bar's scale the circle is
