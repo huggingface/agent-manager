@@ -6,8 +6,10 @@
 // mark, and a state pseudo-element never paints over the inline provider/CLI
 // colours carried by bare `.status` dots.
 //
-// Needs Chromium; run with:  node test/statusMark.render.test.mjs
-// (not in `npm test`, which stays browser-free — see package.json's test:render)
+// am-test: manual — needs Chromium; run with `npm run test:render`.
+// Kept out of the default suite as its own script, unchanged by the discovery
+// change. (The note that used to sit here said `npm test` stays browser-free;
+// that stopped being true when traceWindows.test.mjs joined it.)
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
