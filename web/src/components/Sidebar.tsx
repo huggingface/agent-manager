@@ -10,7 +10,7 @@ import {
   pendingAttachmentsFromFiles, revokePendingAttachments, transferMayContainFile, uploadPendingAttachments,
 } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, EyeGlyph, EyeOffGlyph } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, UpGlyph, TrashGlyph, GridGlyph, PlusGlyph, AmMark, EyeGlyph, EyeOffGlyph } from './icons';
 
 import { dropZone, backgroundAnchor, isBackgroundTarget } from './sidebar-dnd';
 import type { Zone, Kind } from './sidebar-dnd';
@@ -493,19 +493,28 @@ export default function Sidebar({
             // the operator retired can come back or be removed; one that is
             // merely quiet has not been decided about, so it is offered the
             // decision rather than the delete.
+            //
+            // Deleting is the one irreversible thing here, so it does NOT reuse
+            // the `×` that means archive on the row above — a reversible action
+            // and a permanent one must not share a mark. It is the same trash
+            // the Files pane and the skills editor use, so destructive looks the
+            // same wherever it appears. Restore is an arrow back up into the
+            // list rather than a ▷, which on this very row already means
+            // "reconnect" for a remote agent — and which would in any case
+            // promise a start that unarchiving deliberately does not do.
             retired.has(s.id) ? (
               <>
-                <button className="mini-btn" title="Restore to the working list"
-                  onClick={(e) => { e.stopPropagation(); onUnarchiveSession(s.id); }}><PlayGlyph /></button>
-                <button className="mini-btn danger-hover" title="Delete — the folder on disk is kept"
-                  onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><CloseGlyph /></button>
+                <button className="mini-btn" title="Restore to the working list" aria-label="Restore"
+                  onClick={(e) => { e.stopPropagation(); onUnarchiveSession(s.id); }}><UpGlyph /></button>
+                <button className="mini-btn danger-hover" title="Delete — the folder on disk is kept" aria-label="Delete"
+                  onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><TrashGlyph /></button>
               </>
             ) : (
-              <button className="mini-btn" title="Quiet for a while. Archive it to stop it and be able to delete it."
+              <button className="mini-btn" title="Quiet for a while. Archive it to stop it and be able to delete it." aria-label="Archive"
                 onClick={(e) => { e.stopPropagation(); onArchiveSession(s.id); }}><CloseGlyph /></button>
             )
           ) : (
-            <button className="mini-btn" title="Archive — stops the agent and files it away"
+            <button className="mini-btn" title="Archive — stops the agent and files it away" aria-label="Archive"
               onClick={(e) => { e.stopPropagation(); onArchiveSession(s.id); }}><CloseGlyph /></button>
           )}
         </span>
