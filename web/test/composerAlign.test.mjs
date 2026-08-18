@@ -67,6 +67,25 @@ check('and the row is top-aligned, or there is no first line to sit on',
 check('…including the strip the paperclip lives in',
   () => assert.match(css, /\.ov-composer \{[^}]*align-items:\s*start/));
 
+console.log('\nand the reply row is told which column it is in');
+// The composer is a two-column grid whose first column is the paperclip — and
+// only the Overview card still draws one. Auto-placed, the reader's reply row
+// dropped into that `auto` track and sized to its own content: a 210px line in
+// an 872px composer, send key 650px from the right edge. So the row names its
+// column, and this fails if that rule is dropped or stops reaching the end.
+check('the reply row takes the last column, whatever is (not) in the first', () => {
+  const rule = css.match(/\.ov-composer\s*>\s*\.ov-live \{[^}]*\}/);
+  assert.ok(rule, 'no `.ov-composer > .ov-live` rule at all');
+  assert.match(rule[0], /grid-column:\s*\d+\s*\/\s*-1/);
+});
+check('and the two-column template is still there for the card that needs it', () => {
+  // Anchored: `.ovw-win .ov-composer { flex: none }` contains this selector as
+  // a substring and would match first.
+  const rule = css.match(/^\.ov-composer \{[^}]*\}/m);
+  assert.ok(rule, 'no top-level `.ov-composer` rule');
+  assert.match(rule[0], /grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)/);
+});
+
 console.log('\nand the reader wins on specificity, not on import order');
 check('the reader restates it as .ov-composer.cxv-composer (0,2,0)', () => {
   assert.match(css, /\.ov-composer\.cxv-composer \{[^}]*--ov-first-line/);

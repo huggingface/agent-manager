@@ -462,6 +462,16 @@ body {
 .ov-composer .image-attachments.has-note { grid-column: 1 / -1; }
 .ov-composer .image-attachments.has-images + .ov-live,
 .ov-composer .image-attachments.has-note + .ov-live { grid-column: 1 / -1; }
+/* The reply row takes the LAST column, always — it is never the thing column 1
+   is for. Column 1 holds the paperclip, and only the Overview card still draws
+   one: the reader's moved to the pane header (2026-08-18), so `Attachments`
+   renders nothing there until a file is attached and the composer had a single
+   child. Auto-placed, that child landed in the `auto` track and sized itself to
+   its own content — a 210px reply line in an 872px composer, with the send key
+   marooned 650px from the right edge. Naming the column fixes both shapes at
+   once: in the card it sits beside the paperclip as before, and in the reader
+   the empty `auto` track measures 0 and this fills the row. */
+.ov-composer > .ov-live { grid-column: 2 / -1; }
 .ov-composer .ov-live { border-top: none; padding-top: 0; }
 .ov-live { display: flex; gap: 8px; align-items: flex-start; border-top: 1px solid var(--border); padding-top: 7px; font-size: 13px; }
 /* Each control is centred on the first line rather than on the whole box. The

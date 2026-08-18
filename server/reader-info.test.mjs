@@ -319,6 +319,35 @@ try {
     await page.locator('.share-card a[download]').getAttribute('href') === `/api/trace/${id}/download`);
   await page.keyboard.press('Escape');
 
+  // The reply row fills the composer. It stopped when the paperclip left column
+  // 1 of that grid: auto-placed, the row took the `auto` track and sized to its
+  // own content, leaving the send key stranded ~650px from the right edge. A
+  // rendered measurement, because the CSS pin in composerAlign.test.mjs cannot
+  // see what the browser actually laid out.
+  const reach = async (label) => page.evaluate(() => {
+    const comp = document.querySelector('.pane-reader .ov-composer');
+    const live = comp?.querySelector('.ov-live');
+    const send = comp?.querySelector('.ov-send');
+    if (!comp || !live) return null;
+    const c = comp.getBoundingClientRect();
+    const l = live.getBoundingClientRect();
+    const sd = send?.getBoundingClientRect();
+    return { toEdge: Math.round(c.right - l.right), sendToEdge: sd ? Math.round(c.right - sd.right) : null,
+      width: Math.round(l.width), of: Math.round(c.width) };
+  }).then((v) => ({ label, ...v }));
+  const emptyReach = await reach('empty');
+  await page.locator('.pane-reader .ov-live textarea').fill('hello');
+  await sleep(300);
+  const typedReach = await reach('typed');
+  check('the reply row reaches the composer edge, empty and typed',
+    emptyReach.toEdge <= 24 && typedReach.toEdge <= 24
+      && emptyReach.width > emptyReach.of / 2 && typedReach.width > typedReach.of / 2,
+    JSON.stringify([emptyReach, typedReach]));
+  check('so the send key sits at that edge, not in the middle of the row',
+    typedReach.sendToEdge != null && typedReach.sendToEdge <= 24,
+    JSON.stringify(typedReach));
+  await page.locator('.pane-reader .ov-live textarea').fill('');
+
   // An agent that has not spoken has no transcript, and the panel's actions are
   // about a file that does not exist yet. Say that, and do not offer a link the
   // route would answer with `no-trace` (server/test/trace-download.test.mjs).
