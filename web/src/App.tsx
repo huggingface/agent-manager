@@ -20,7 +20,7 @@ import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { hiddenSessionIds } from './lib/overviewHidden';
 import { useReaderBatch } from './lib/readerBatch';
 import { paneOwnsBack } from './lib/mobileBack';
-import { isPassive, isRemote } from './types';
+import { isPassive, isRemote, isShareable } from './types';
 import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
 import { uploadPendingAttachments } from './lib/attachments';
 
@@ -898,6 +898,7 @@ export default function App() {
             >
               <TerminalPane
                 session={s}
+                onShare={isShareable(s.cli) ? () => setShareId(s.id) : undefined}
                 cli={cliMap[s.cli]}
                 theme={theme}
                 zoom={zoom}
@@ -995,6 +996,7 @@ export default function App() {
         clis={clis}
         info={info}
         onShowWelcome={openWelcome}
+        onOpenSharedTrace={openSharedTrace}
         demoMode={!!info?.demoMode}
         onToggleDemo={toggleDemo}
       />
@@ -1051,7 +1053,6 @@ export default function App() {
         onShareTrace={shareTrace}
         onTraceHandover={api.getTraceLocation}
         onOpenTrace={openTrace}
-        onOpenSharedTrace={openSharedTrace}
         onNewGroup={newGroup}
         onRenameGroup={renameGroup}
         onRenameSession={renameSession}

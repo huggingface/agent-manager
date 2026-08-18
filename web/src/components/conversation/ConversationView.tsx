@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../../api';
 import type { TraceTurn } from '../../api';
-import { useTraceWindows, type TraceSource } from '../../lib/traceWindows';
+import { useTraceWindows, type TraceHeadInfo, type TraceSource } from '../../lib/traceWindows';
 import type { Session } from '../../types';
 import { isRemote } from '../../types';
 import {
@@ -45,7 +45,10 @@ const fmtStarted = (ms: number) => {
     : { year: 'numeric', month: 'short', day: 'numeric' });
 };
 
-export default function ConversationView({ session, paused, isMobile, readOnly, onHandover, onReady, readyKey }: {
+export default function ConversationView({
+  session, paused, isMobile, readOnly, onHandover, searchOpen, onCloseSearch, onAttachPicker, onHead,
+  onReady, readyKey,
+}: {
   session: Session;
   /** The pane is off-screen: stop asking the server for a trace nobody sees. */
   paused?: boolean;
@@ -53,12 +56,23 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   /** A trace with no agent behind it — a shared file, an import. Read-only. */
   readOnly?: boolean;
   onHandover?: () => void;
+  /** The header's search switch. Hidden by default: it is a tool, not furniture. */
+  searchOpen?: boolean;
+  /** Escape in the search box closes it from this side. */
+  onCloseSearch?: () => void;
+  /** Lend the header's paperclip this composer's file picker while mounted. */
+  onAttachPicker?: (picker: { open: () => void; disabled: boolean; reason?: string } | null) => void;
+  /** Hand the conversation's facts to the pane header, whose `i` shows them in
+   *  both views: the reader has already read them, so the header must not. */
+  onHead?: (head: TraceHeadInfo | null) => void;
   /** Called after the first tail page (or its terminal error) has painted. */
   onReady?: () => void;
   /** The visible batch this paint should release. */
   readyKey?: string;
 }) {
   const [query, setQuery] = useState('');
+  const searchBox = useRef<HTMLInputElement>(null);
+  const filePicker = useRef<HTMLInputElement>(null);
   const [hits, setHits] = useState(0);
   const [hit, setHit] = useState(0);
   const scroller = useRef<HTMLDivElement | null>(null);
@@ -111,6 +125,14 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
       return next;
     });
   };
+
+  // Closing the search CLEARS it. A query filters the reader to matching turns,
+  // so a hidden box with a live filter is a reader that looks broken — a
+  // reviewer read exactly that as the ▼ key being dead.
+  useEffect(() => {
+    if (searchOpen) searchBox.current?.focus();
+    else setQuery('');
+  }, [searchOpen]);
 
   const live = session.state === 'working' && !paused;
 
@@ -411,43 +433,63 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
   // anchor effect, so this has the last word on scrollTop.
   useLayoutEffect(() => { trySeek(); }, [version, trySeek]);
 
+  // The paperclip in the header opens THIS input while the reader is mounted:
+  // the files belong to the composer's draft, which is where the operator is
+  // typing, so the control moved but the thing it acts on did not.
+  useEffect(() => {
+    onAttachPicker?.({
+      open: () => filePicker.current?.click(),
+      disabled: sending || !allowAttachments,
+      reason: !allowAttachments
+        ? 'Files are not available for remote agents yet — that agent cannot read files stored on this Space.'
+        : (sending ? 'Wait for this message to send' : 'Attach files'),
+    });
+    return () => onAttachPicker?.(null);
+  }, [onAttachPicker, sending, allowAttachments]);
+
+  // The header's `i` shows these; while this reader is mounted it is the one
+  // that has them, and it keeps them current as the summary and windows land.
+  useEffect(() => { onHead?.(head); }, [head, onHead]);
+  useEffect(() => () => onHead?.(null), [onHead]);
+
   if (!head) return <div className="cxv-empty mono">{error || 'reading the trace…'}</div>;
 
   return (
     <div className="cxv">
       {/* The reader's own controls, on their own row: on a phone the pane
           header above has no spare width. */}
-      <div className="cxv-bar mono">
-        {head.model && <span className="cxv-chip">{head.model}</span>}
-        <span className="cxv-count" title={head.total != null ? `${fmtNum(head.total)} messages in this conversation` : `${fmtNum(head.loaded)} messages loaded`}>
-          {fmtNum(exchanges.length)} turn{exchanges.length === 1 ? '' : 's'}
-          {head.total != null && head.loaded < head.total ? ` of ${fmtNum(head.total)} messages` : ''}
-        </span>
-        {head.usage && (
-          <span className="cxv-tok" title={head.usage.cacheRead ? `${fmtNum(head.usage.cacheRead)} cached` : undefined}>
-            {fmtUsage(head.usage)}
+      {/* Search, and the turn keys that walk its hits — revealed by the header's
+          search switch, and gone otherwise. The conversation's facts left this
+          bar for the header's `i`; with search closed there is no bar at all,
+          which is a row of reading height back on a phone. */}
+      {searchOpen && (
+        <div className="cxv-bar mono">
+          <span className="cxv-nav">
+            <button className="cxv-mini" onClick={() => nav(-1)} title={q && hits ? 'Previous match' : 'Previous turn'}>▲</button>
+            <button className="cxv-mini" onClick={() => nav(1)} title={q && hits ? 'Next match' : 'Next turn'}>▼</button>
           </span>
-        )}
-        {/* When the conversation started. It used to be printed under the
-            composer, and briefly lived on the tooltip above — which a phone
-            cannot open at all, so on the device these items were filed from the
-            fact was nowhere. Here it is text among the other conversation-level
-            facts, and the bar wraps at any width, so it costs no height: the
-            reader body measures the same at 320 and 390 with it as without. */}
-        {head.firstTs != null && (
-          <span className="cxv-when" title={new Date(head.firstTs).toLocaleString()}>
-            {fmtStarted(head.firstTs)}
-          </span>
-        )}
-        <span className="spacer" />
-        <span className="cxv-nav">
-          <button className="cxv-mini" onClick={() => nav(-1)} title={q && hits ? 'Previous match' : 'Previous turn'}>▲</button>
-          <button className="cxv-mini" onClick={() => nav(1)} title={q && hits ? 'Next match' : 'Next turn'}>▼</button>
-        </span>
-        <input className="cxv-search" placeholder="Search…" value={query}
-          onChange={(e) => setQuery(e.target.value)} />
-        {q && <span className="cxv-hits">{hits ? `${hit + 1}/${hits}` : '0'}</span>}
-      </div>
+          <input
+            ref={searchBox}
+            className="cxv-search"
+            placeholder="Search this conversation…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Escape') onCloseSearch?.(); }}
+          />
+          {q && <span className="cxv-hits">{hits ? `${hit + 1}/${hits}` : '0'}</span>}
+        </div>
+      )}
+      <input
+        ref={filePicker}
+        className="image-file-input"
+        type="file"
+        multiple
+        disabled={sending || !allowAttachments}
+        onChange={(event) => {
+          addAttachments(Array.from(event.currentTarget.files || []));
+          event.currentTarget.value = '';
+        }}
+      />
 
       <div className="cxv-body" ref={scroller}
         onWheel={moved}
@@ -522,6 +564,7 @@ export default function ConversationView({ session, paused, isMobile, readOnly, 
           inputRef={inputRef}
           canSend={!!draft.trim() || attachments.length > 0}
           above={<Attachments
+            showPicker={false}
             attachments={attachments}
             disabled={sending || !allowAttachments}
             disabledReason={!allowAttachments ? 'Files are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}

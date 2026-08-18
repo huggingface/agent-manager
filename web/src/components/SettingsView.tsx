@@ -119,6 +119,7 @@ function PushRow() {
 
 export default function SettingsView({
   page, onPage, onClose, theme, onToggleTheme, clis, info, onShowWelcome, demoMode, onToggleDemo,
+  onOpenSharedTrace,
 }: {
   page: Page;
   onPage: (p: Page) => void;
@@ -128,10 +129,32 @@ export default function SettingsView({
   clis: Cli[];
   info: Info | null;
   onShowWelcome?: () => void;
+  /** Pull a session someone shared as a Hub dataset and open it as a trace. */
+  onOpenSharedTrace?: (repo: string) => Promise<void>;
   demoMode?: boolean;
   onToggleDemo?: () => void;
 }) {
   const [relaunch, setRelaunch] = useState<{ busy?: boolean; msg?: string; confirm?: boolean }>({});
+  const [sharedTrace, setSharedTrace] = useState('');
+  const [sharedTraceBusy, setSharedTraceBusy] = useState(false);
+  const [sharedTraceErr, setSharedTraceErr] = useState<string | null>(null);
+  // Failures here are ordinary and specific (no access, not a share, no token),
+  // so show what the server said: the fix is usually a different id.
+  const openSharedTrace = async () => {
+    const repo = sharedTrace.trim();
+    if (!repo || !onOpenSharedTrace) return;
+    setSharedTraceBusy(true);
+    setSharedTraceErr(null);
+    try {
+      await onOpenSharedTrace(repo);
+      setSharedTrace('');
+      onClose();
+    } catch (e) {
+      setSharedTraceErr(e instanceof Error ? e.message : 'could not open that trace');
+    } finally {
+      setSharedTraceBusy(false);
+    }
+  };
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [savedNotes, setSavedNotes] = useState<Record<string, string>>({});
@@ -268,6 +291,38 @@ export default function SettingsView({
               <div><div className="s-label">Theme</div><div className="s-help">Defaults to your system setting.</div></div>
               <button className="btn-ghost" onClick={onToggleTheme}>{theme === 'dark' ? <><MoonGlyph /> Dark</> : <><SunGlyph /> Light</>}</button>
             </div>
+
+            {/* Opening someone else's shared session. This used to be a widget
+                in the sidebar, which is a lot of standing furniture for
+                something you do when a link arrives — and the sidebar is for
+                agents that exist. It is the one thing the Files pane's trace
+                viewer cannot do (that reads files in the workspace; this pulls a
+                dataset off the Hub), so it moved rather than went away. */}
+            {onOpenSharedTrace && (
+              <div className="setting-row row-top">
+                <div>
+                  <div className="s-label">Open a shared trace</div>
+                  <div className="s-help">
+                    Paste the dataset id or URL someone sent you. Private and gated shares work
+                    too — this Space downloads with its own token.
+                  </div>
+                  <input
+                    className="cfg-input trace-open"
+                    placeholder="user/session-name — or the dataset URL"
+                    value={sharedTrace}
+                    disabled={sharedTraceBusy}
+                    onChange={(e) => { setSharedTrace(e.target.value); setSharedTraceErr(null); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') openSharedTrace(); }}
+                  />
+                  {sharedTraceErr && <div className="s-help s-err" role="alert">{sharedTraceErr}</div>}
+                </div>
+                <button
+                  className="btn-ghost"
+                  disabled={sharedTraceBusy || !sharedTrace.trim()}
+                  onClick={openSharedTrace}
+                >{sharedTraceBusy ? 'Fetching…' : 'Open'}</button>
+              </div>
+            )}
 
             {onShowWelcome && (
               <div className="setting-row">

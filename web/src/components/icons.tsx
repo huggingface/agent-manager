@@ -112,6 +112,14 @@ export const PencilGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+/** The header's search switch: a lens, at the same weight as the close cross. */
+export const SearchGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <circle cx="7.1" cy="7.1" r="3.5" />
+    <path d="M9.8 9.8 13 13" />
+  </G>
+);
+
 export const CloseGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <path d="M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6" />

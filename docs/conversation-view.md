@@ -250,11 +250,65 @@ pane with nothing to render (a shell) simply stays a terminal.
   (`HANDOFF_CODE`, `TerminalPane.tsx`). **Verify** this before shipping: xterm needs layout to
   fit, so "cover, don't unmount" is the low-risk option, and a refit on return is required.
 - The reader's toolbar is a second header row, not a squeeze into the first — on a phone the
-  first row has no spare width. It carries only what is true of the whole session and said
-  nowhere else: the model, `13 turns`, the token totals abbreviated (`2.2M↓ 654k↑`), `▲▼`, and
-  the search box. The harness is the logo in the row above; the raw message count and the cached
-  tokens are details, so they live in `title` attributes. There is no "expand everything" — each
-  turn folds itself, and search opens what it needs to.
+  first row has no spare width. It carries the reader's **controls**: `▲▼` and the search box.
+  There is no "expand everything" — each turn folds itself, and search opens what it needs to.
+- **The facts live behind one `i` in the PANE HEADER** (2026-08-16, moved out of the reader's bar 2026-08-18). They were spread
+  across the bar — model chip, `13 turns`, `2.2M↓ 654k↑`, the day it started — which is a lot of
+  standing furniture for things you read once, and on a narrow pane they pushed search to the
+  edge. Tapping the `i` opens a small panel over the conversation (it overlays, so opening it
+  does not move the text under your thumb), and it closes on Escape or a press anywhere else.
+  Nothing was dropped, and two things got **better**: the raw message count and the cached
+  tokens used to be `title` attributes, and so did the full timestamp behind the short date —
+  a phone cannot open any of those. They are plain text in the panel. The panel is also where
+  the session's transcript is offered as a **file** (`/api/trace/:id/download`) and where
+  **Share…** opens the same dialog the sidebar row opens.
+
+  | Was on the bar | Now |
+  |---|---|
+  | model chip | panel — `Model` |
+  | `13 turns` + `of N messages` | panel — `Turns`, with the message total once the summary lands |
+  | token totals `2.2M↓ 654k↑` | panel — `Tokens` |
+  | cached tokens (`title` only) | panel — text beside the totals |
+  | day started, e.g. `14 Aug` | panel — `Started` |
+  | full timestamp (`title` only) | panel — text beside the day |
+  | `▲▼`, search box, hit counter | **unchanged, still on the bar** |
+
+  **The header's own layout (2026-08-18).** Left: the agent's logo, then the
+  working directory (`.ph-path`, which used to sit among the controls on the
+  right — it is not a control). Centre: the state mark immediately left of the
+  name, both centred as one title. Right: attach, search, `i`, close, in one
+  `.ph-btn` contract — 22px of ink, no boxes, 8px apart, and a `::before`
+  overlay that makes each a 28×28 target. The 8px is measured, not chosen: at
+  4px each overlay reached over its neighbour's ink and the middle two measured
+  20px across, under the 24px floor and invisibly so.
+
+  **The reader has no toolbar until search is asked for.** The header's search
+  switch reveals the bar (search box + `▲▼`) and closing it CLEARS the query —
+  a search filters the reader to matching turns, so hiding the box while the
+  filter stands leaves a reader showing three of forty turns with nothing to say
+  why. A phone gets a row of reading height back when it is closed.
+
+  **The paperclip is the header's, in both views.** While the reader is mounted
+  it registers its own picker upward (`onAttachPicker`), so the files still land
+  in the composer's draft; the composer no longer draws a picker of its own. The
+  search switch is reader-only: it searches a transcript, and the terminal view
+  has none.
+
+  It sits in the header rather than the reader's toolbar because the operator
+  asked for it from the terminal view too, and these are facts about the
+  SESSION: a pane showing a terminal has the same model, the same token total
+  and the same start date. One instance, in the pane's identity cluster beside
+  the close button, in the right-hand cluster. The panel is anchored to
+  `.pane-head`, not to the button, and hangs from its right edge, so it opens
+  inside the pane at any width. It carries a `Folder` line: the working
+  directory is hidden on a phone, and this is where the fact stays reachable.
+
+  **The whole-file read is lazy.** A terminal pane has parsed nothing, so the
+  summary is fetched when the panel is first opened and once per session; while
+  it is in flight the panel says `reading the transcript…`, and a session that
+  has not spoken says so instead of showing zeros — with no Download, since the
+  route would answer `no-trace`. When the reader IS mounted it hands its head
+  down (`onHead`), so opening the panel there costs no request at all.
 - **Search has to be followable.** Filtering to matching turns is not finding: the term is
   highlighted wherever it lands, a turn whose only match is inside its folded work *unfolds it*
   (and opens the step holding it, body included), the box reports `3/17`, and `▲▼` switch from
@@ -427,12 +481,17 @@ pane with nothing to render (a shell) simply stays a terminal.
 | A `trace` **session row per read** (`App.tsx:openTrace`) | **gone** — no duplicate rows |
 | Trace row's `Share` (`Sidebar.tsx:237`) | trace pane header (imported traces keep a pane) |
 | Trace row's `Handover` (`Sidebar.tsx:238`) | reader / trace-pane footer |
-| Quick-add **Trace** = open a shared dataset (`Sidebar.tsx:482`) | **stays** |
+| Quick-add **Trace** = open a shared dataset (`Sidebar.tsx:482`) | **Settings → Open a shared trace** (2026-08-16) |
 
-The last row is deliberate: an **imported** trace has no session behind it, so it is a genuine
-object that needs a row of its own. Same for a transcript opened from the Files pane
-(`getFileTracePage`). What disappears is the *local* trace pane — a session's own history is
-now a mode of its own pane, not a second entity.
+The last row was `stays` until the operator asked for the sidebar's trace widget to go
+(improv.md, iteration two). It moved rather than went away, because it is the one trace
+affordance nothing else replaces: the Files pane's trace viewer reads files **in the
+workspace**, and this pulls a dataset **off the Hub**. An imported trace still gets a pane and
+a row of its own once it is here — what left the sidebar is the standing *form* for typing a
+dataset id, which is furniture for something you do when a link arrives.
+
+What disappears is the *local* trace pane — a session's own history is now a mode of its own
+pane, not a second entity.
 
 Agent rows keep stop/play and delete. Three glyphs less per row, which is most visible exactly
 where the sidebar is worst: on a phone.

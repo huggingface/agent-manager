@@ -2292,25 +2292,76 @@ app.get('/api/trace/bundles', async (_req, res) => {
 // Resolve the concrete local source behind a trace pane. Handover uses this to
 // seed the next agent with a path it can inspect directly, whether the pane
 // points at one of this Manager's sessions or at an imported Hub bundle.
+// Which directory a bundle ref names — the ONE place that decides. The shape
+// check alone admits `..`, and `path.join(DATA_DIR, 'traces', '..')` is
+// DATA_DIR: a pane whose ref is `..` served the first *.jsonl in the data
+// directory, as a file from /download and as a rendered conversation from
+// /api/trace/:id. These refs arrive from the browser, so resolve and require
+// the result to be a direct child of the bundle root.
+const TRACES_DIR = path.join(DATA_DIR, 'traces');
+function bundleDir(ref) {
+  const name = String(ref ?? '');
+  if (!/^[\w.-]+$/.test(name)) return null;
+  const dir = path.resolve(TRACES_DIR, name);
+  const rel = path.relative(TRACES_DIR, dir);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || rel.includes(path.sep)) return null;
+  return dir;
+}
+
+// Where the transcript behind a pane actually lives. A trace pane reads someone
+// else's file (an imported bundle) or another session's; any other session reads
+// its own. Reports "no trace" as a value rather than throwing, because an agent
+// that has not spoken yet is an ordinary state, not a failure.
+async function traceFileOf(s) {
+  const source = s.cli === 'trace'
+    ? (s.traceSource || { kind: 'session', ref: s.id })
+    : { kind: 'session', ref: s.id };
+  if (source.kind === 'bundle') {
+    const dir = bundleDir(source.ref);
+    if (!dir) return { status: 400, error: 'bad bundle ref' };
+    const names = (await fs.promises.readdir(dir)).filter((n) => n.endsWith('.jsonl'));
+    if (!names.length) return { status: 404, error: 'bundle has no trace file', code: 'no-trace' };
+    return { path: path.join(dir, names[0]), sessionId: null, source };
+  }
+  const target = store.get(source.ref);
+  if (!target) return { status: 404, error: 'source session is gone', code: 'no-trace' };
+  const hit = await findTrace(target, store.list());
+  if (!hit) return { status: 404, error: 'no trace found for this session', code: 'no-trace' };
+  return { path: hit.src, sessionId: hit.sessionId || null, source };
+}
+
 app.get('/api/trace/:id/location', async (req, res) => {
   const pane = store.get(req.params.id);
   if (!pane || pane.cli !== 'trace') return res.status(404).json({ error: 'not a trace pane' });
-  const source = pane.traceSource || { kind: 'session', ref: pane.id };
   try {
-    if (source.kind === 'bundle') {
-      if (!/^[\w.-]+$/.test(String(source.ref))) return res.status(400).json({ error: 'bad bundle ref' });
-      const dir = path.join(DATA_DIR, 'traces', source.ref);
-      const names = (await fs.promises.readdir(dir)).filter((n) => n.endsWith('.jsonl'));
-      if (!names.length) return res.status(404).json({ error: 'bundle has no trace file', code: 'no-trace' });
-      return res.json({ path: path.join(dir, names[0]), source });
-    }
-    const target = store.get(source.ref);
-    if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
-    const hit = await findTrace(target, store.list());
-    if (!hit) return res.status(404).json({ error: 'no trace found for this session', code: 'no-trace' });
-    return res.json({ path: hit.src, sessionId: hit.sessionId || null, source });
+    const found = await traceFileOf(pane);
+    if (found.error) return res.status(found.status).json({ error: found.error, code: found.code });
+    return res.json({ path: found.path, sessionId: found.sessionId, source: found.source });
   } catch (e) {
     res.status(500).json({ error: (e && e.message) || 'could not resolve trace path' });
+  }
+});
+
+// The transcript itself, as a file. The reader and the Files pane RENDER a
+// trace; this hands over the bytes — for an archive, an issue report, another
+// tool. Any session, not only a trace pane: a session's own transcript lives in
+// its harness's directory, OUTSIDE the workspace, so the Files pane cannot
+// reach it and a download is the only way to hold the file.
+//
+// No redaction gate, and that is deliberate: this returns the operator's own
+// file to the operator, over the session they are already authenticated on.
+// Publishing is /api/share, which does gate, because that is what puts a
+// transcript somewhere other people can read it.
+app.get('/api/trace/:id/download', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  try {
+    const found = await traceFileOf(s);
+    if (found.error) return res.status(found.status).json({ error: found.error, code: found.code });
+    const stem = slugify(s.name || '') || 'trace';
+    res.download(found.path, `${stem}${path.extname(found.path) || '.jsonl'}`);
+  } catch (e) {
+    res.status(500).json({ error: (e && e.message) || 'could not read that trace' });
   }
 });
 
@@ -2325,8 +2376,9 @@ app.get('/api/trace/:id', async (req, res) => {
 
   try {
     if (source.kind === 'bundle') {
-      if (!/^[\w.-]+$/.test(String(source.ref))) return res.status(400).json({ error: 'bad bundle ref' });
-      return res.json(await readTraceBundle(path.join(DATA_DIR, 'traces', source.ref), opts));
+      const dir = bundleDir(source.ref);
+      if (!dir) return res.status(400).json({ error: 'bad bundle ref' });
+      return res.json(await readTraceBundle(dir, opts));
     }
     const target = store.get(source.ref);
     if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
@@ -2354,7 +2406,7 @@ app.put('/api/trace/:id/source', (req, res) => {
   if (!ref) return res.status(400).json({ error: 'ref required' });
   // A bundle ref becomes a path segment under DATA_DIR/traces — validate it here
   // too, so a traversal attempt never gets persisted in the session record.
-  if (kind === 'bundle' && !/^[\w.-]+$/.test(ref)) return res.status(400).json({ error: 'bad bundle ref' });
+  if (kind === 'bundle' && !bundleDir(ref)) return res.status(400).json({ error: 'bad bundle ref' });
   if (kind === 'session' && !store.get(ref)) return res.status(404).json({ error: 'no such session' });
   store.update(pane.id, { traceSource: { kind, ref } });
   res.json({ ok: true, traceSource: { kind, ref } });

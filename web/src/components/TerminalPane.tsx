@@ -6,13 +6,14 @@ import { ClipboardAddon, Base64 } from '@xterm/addon-clipboard';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { Cli, Session } from '../types';
-import { STATE_LABEL } from '../types';
+import { STATE_LABEL, isRemote } from '../types';
 import Logo from './Logo';
+import TraceInfo from './TraceInfo';
 import ConversationView from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
-import { BackGlyph, CloseGlyph, RefreshGlyph } from './icons';
+import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph } from './icons';
 import * as api from '../api';
 import type { Attachment } from '../api';
 import {
@@ -190,6 +191,7 @@ if (typeof window !== 'undefined') {
 export default function TerminalPane({
   session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', readerEnabled,
   readerReadyKey, onReaderReady, dragId, isMobile, groupName, onBack, onDragActive, onFocus, onRename, onClose,
+  onShare,
 }: {
   session: Session;
   cli?: Cli;
@@ -203,6 +205,7 @@ export default function TerminalPane({
   readerEnabled?: boolean;  // focused reader paints before visible followers
   readerReadyKey?: string;  // visible batch whose first paint is being awaited
   onReaderReady?: () => void;
+  onShare?: () => void;      // reader info panel: publish this session
   dragId?: string;          // set when the pane can be rearranged (group view)
   isMobile?: boolean;       // show the on-screen control-key bar
   onBack?: () => void;      // mobile: leave the pane for the list (see .ph-back)
@@ -258,10 +261,36 @@ export default function TerminalPane({
   const [imageDrop, setImageDrop] = useState(false);
   const [imageStatus, setImageStatus] = useState<{ kind: 'uploading' | 'success' | 'error'; text: string } | null>(null);
   const [imageUploadBusy, setImageUploadBusy] = useState(false);
+  // The reader's search bar is hidden until asked for; the header owns the
+  // switch because the icon that reveals it lives there.
+  const [searchOpen, setSearchOpen] = useState(false);
+  // Who the header's paperclip talks to. The reader registers its own opener
+  // (its files go into the composer's draft); otherwise it is the terminal's.
+  const [readerAttach, setReaderAttach] = useState<{ open: () => void; disabled: boolean; reason?: string } | null>(null);
+
+  // What the reader already knows about this conversation. The header's `i`
+  // takes it as a gift when the reader is mounted, and reads the file itself
+  // only when it is not (a terminal pane has parsed nothing).
+  const [readerFacts, setReaderFacts] = useState<api.TraceSummary | null>(null);
+  const [readerLoaded, setReaderLoaded] = useState<number | undefined>(undefined);
   const [pendingInsert, setPendingInsert] = useState<Attachment[]>([]);
   const supportsAttachments = session.cli !== 'shell';
   const canAttachFiles = supportsAttachments && conn === 'connected' && hasInputControl
     && !imageUploadBusy && pendingInsert.length === 0;
+  // One paperclip, whichever view is showing. The reader's registration wins
+  // while it is mounted: its files land in the composer's draft, which is the
+  // thing the button is for.
+  const attach = reading
+    ? readerAttach
+    : (supportsAttachments ? {
+      open: () => imagePickerRef.current?.click(),
+      disabled: !canAttachFiles,
+      reason: conn === 'connected'
+        ? (!hasInputControl
+          ? 'Interact with the terminal to take control before attaching files'
+          : (pendingInsert.length ? 'Retry the saved file first' : 'Attach files'))
+        : 'Restart or reconnect the agent to attach files',
+    } : null);
   const commitName = () => {
     const v = draft.trim();
     if (v && v !== session.name) onRename?.(v);
@@ -1037,7 +1066,11 @@ export default function TerminalPane({
             </button>
           )}
           <Logo cli={session.cli} size={16} tint={tint} />
-          <span className={`status ${session.state}`} title={`${STATE_LABEL[session.state]} · ${conn}`} />
+          {/* Where the agent runs, beside what it is. It was on the right, in
+              among the controls; it is not a control. Still hidden on a phone —
+              moving it did not create room — where the `i` panel carries it
+              instead (see TraceInfo's Folder line). */}
+          <span className="ph-path" title={pathLabel}>{pathLabel}</span>
         </div>
         {editing ? (
           <input
@@ -1056,45 +1089,73 @@ export default function TerminalPane({
             title={`${sessionTitle(session.name, groupName)} · ${pathLabel} · double-click to rename`}
             onDoubleClick={() => { setDraft(session.name); setEditing(true); }}
           >
+            {/* The state mark reads as part of the name now: what this agent is
+                doing, immediately left of who it is, both centred together. */}
+            <span className={`status ${session.state}`} title={`${STATE_LABEL[session.state]} · ${conn}`} />
             {group && <span className="ph-group">[{group}]</span>}
             <span className="ph-name">{session.name}</span>
           </span>
         )}
         <div className="ph-right">
-          <span className="ph-path" title={pathLabel}>{pathLabel}</span>
-          {supportsAttachments && !reading && (
-            <>
-              <button
-                className="mini-btn ph-image"
-                title={conn === 'connected'
-                  ? (!hasInputControl
-                    ? 'Interact with the terminal to take control before attaching files'
-                    : (pendingInsert.length ? 'Retry the saved file first' : 'Attach files'))
-                  : 'Restart or reconnect the agent to attach files'}
-                aria-label="Attach files"
-                disabled={!canAttachFiles}
-                draggable={false}
-                onMouseDown={(event) => event.stopPropagation()}
-                onClick={(event) => { event.stopPropagation(); imagePickerRef.current?.click(); }}
-              >
-                <svg viewBox="0 0 18 18" aria-hidden="true">
-                  <path d="M6.2 9.7 10.8 5a2.5 2.5 0 0 1 3.6 3.5l-6.2 6.3a4 4 0 0 1-5.7-5.7l6-6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                </svg>
-              </button>
-              <input
-                ref={imagePickerRef}
-                className="image-file-input"
-                type="file"
-                multiple
-                disabled={!canAttachFiles}
-                onChange={(event) => {
-                  uploadImagesRef.current(Array.from(event.currentTarget.files || []));
-                  event.currentTarget.value = '';
-                }}
-              />
-            </>
+          {/* One style for all four: no boxes, one size, even spacing (.ph-btn).
+              The attachment picker belongs to whichever view is showing — the
+              terminal's insert flow, or the reader's composer, which registers
+              its own opener below. */}
+          {attach && (
+            <button
+              className="ph-btn ph-image"
+              title={attach.reason || 'Attach files'}
+              aria-label="Attach files"
+              disabled={attach.disabled}
+              draggable={false}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => { event.stopPropagation(); attach.open(); }}
+            >
+              <svg viewBox="0 0 18 18" aria-hidden="true">
+                <path d="M6.2 9.7 10.8 5a2.5 2.5 0 0 1 3.6 3.5l-6.2 6.3a4 4 0 0 1-5.7-5.7l6-6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            </button>
           )}
-          <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
+          {supportsAttachments && !reading && (
+            <input
+              ref={imagePickerRef}
+              className="image-file-input"
+              type="file"
+              multiple
+              disabled={!canAttachFiles}
+              onChange={(event) => {
+                uploadImagesRef.current(Array.from(event.currentTarget.files || []));
+                event.currentTarget.value = '';
+              }}
+            />
+          )}
+          {/* Search searches the TRANSCRIPT, so it is offered where there is one
+              to search. Closing it clears the query — a search filters the
+              reader to matching turns, and leaving that filter in place with no
+              visible search box is a reader that looks broken. */}
+          {reading && (
+            <button
+              className={`ph-btn ph-search${searchOpen ? ' on' : ''}`}
+              title={searchOpen ? 'Hide search' : 'Search this conversation'}
+              aria-label={searchOpen ? 'Hide search' : 'Search this conversation'}
+              aria-expanded={searchOpen}
+              draggable={false}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => { event.stopPropagation(); setSearchOpen((open) => !open); }}
+            >
+              <SearchGlyph />
+            </button>
+          )}
+          {!isRemote(session.cli) && (
+            <TraceInfo
+              session={session}
+              facts={reading ? readerFacts : undefined}
+              turnsLoaded={reading ? readerLoaded : undefined}
+              folder={pathLabel}
+              onShare={onShare}
+            />
+          )}
+          <button className="ph-btn ph-close" title="Close" aria-label="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
       {/* `reading` releases the frame's touch-action: the phone rule pins it to
@@ -1118,7 +1179,16 @@ export default function TerminalPane({
           >
             {readerEnabled === false
               ? <div className="cxv-empty mono">reading the trace…</div>
-              : <ConversationView session={session} isMobile={isMobile} onReady={onReaderReady} readyKey={readerReadyKey} />}
+              : <ConversationView
+                  session={session}
+                  isMobile={isMobile}
+                  searchOpen={searchOpen}
+                  onCloseSearch={() => setSearchOpen(false)}
+                  onAttachPicker={setReaderAttach}
+                  onHead={(head) => { setReaderFacts(head); setReaderLoaded(head?.loaded); }}
+                  onReady={onReaderReady}
+                  readyKey={readerReadyKey}
+                />}
           </div>
         )}
       </div>

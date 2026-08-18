@@ -69,6 +69,12 @@ export const isPassive = (cli: string) => PASSIVE_CLIS.includes(cli);
 // and NOT a terminal — see docs/remote-agents.md.
 export const isRemote = (cli: string) => cli === 'remote';
 
+// Harnesses whose traces the Hub renders natively, so a share ships the file
+// verbatim (mirrors SHAREABLE_CLIS in server/src/share.js). The others need
+// converters first, and a button that always fails is worse than no button.
+export const SHAREABLE_CLIS = ['claude', 'codex', 'hermes', 'opencode', 'openclaw'];
+export const isShareable = (cli: string) => SHAREABLE_CLIS.includes(cli);
+
 // The three states mean something different when the agent is elsewhere: there
 // is no process to be "stopped", only a connection that is or isn't there.
 export const REMOTE_STATE_LABEL: Record<SessionState, string> = {

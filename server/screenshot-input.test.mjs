@@ -260,9 +260,13 @@ try {
   await page.locator('.modebar button', { hasText: 'reader' }).click();
   const readerPicker = page.locator('.pane-reader .image-file-input');
   await readerPicker.waitFor({ state: 'attached' });
-  check('reader owns the visible attachment picker instead of the hidden terminal',
-    await page.locator('.pane-reader .image-pick').isVisible()
-      && await page.locator('.pane-head .ph-image').count() === 0);
+  // The pane header owns ONE paperclip in both views now (2026-08-18): in the
+  // reader it opens the composer's own picker, which is the input used below, so
+  // the files still land in the draft. The composer no longer draws its own.
+  check('one paperclip, in the header, wired to the reader composer',
+    await page.locator('.pane-head .ph-image').isVisible()
+      && await page.locator('.pane-reader .image-pick').count() === 0
+      && await page.locator('.pane-reader .image-file-input').count() === 1);
   await readerPicker.setInputFiles({ name: 'reader.png', mimeType: 'image/png', buffer: png });
   await page.locator('.pane-reader .image-chip').waitFor({ state: 'visible' });
   let readerInput;

@@ -462,6 +462,16 @@ body {
 .ov-composer .image-attachments.has-note { grid-column: 1 / -1; }
 .ov-composer .image-attachments.has-images + .ov-live,
 .ov-composer .image-attachments.has-note + .ov-live { grid-column: 1 / -1; }
+/* The reply row takes the LAST column, always — it is never the thing column 1
+   is for. Column 1 holds the paperclip, and only the Overview card still draws
+   one: the reader's moved to the pane header (2026-08-18), so `Attachments`
+   renders nothing there until a file is attached and the composer had a single
+   child. Auto-placed, that child landed in the `auto` track and sized itself to
+   its own content — a 210px reply line in an 872px composer, with the send key
+   marooned 650px from the right edge. Naming the column fixes both shapes at
+   once: in the card it sits beside the paperclip as before, and in the reader
+   the empty `auto` track measures 0 and this fills the row. */
+.ov-composer > .ov-live { grid-column: 2 / -1; }
 .ov-composer .ov-live { border-top: none; padding-top: 0; }
 .ov-live { display: flex; gap: 8px; align-items: flex-start; border-top: 1px solid var(--border); padding-top: 7px; font-size: 13px; }
 /* Each control is centred on the first line rather than on the whole box. The
@@ -758,13 +768,7 @@ body {
    already reachable with a long enough agent name; putting the group in front
    of the name made it reachable at ordinary ones. With the floor the title is
    capped at what is actually free and ellipsises instead. */
-/* Both paddings are variables because .ph-back is laid out against them: it
-   cancels the vertical one to reach the header's full height, and it spends the
-   horizontal one as its own left padding so its hit area fills the gutter. A
-   bleed that restated either number would drift the first time this padding
-   changed — the same way a hardcoded 14px against an 8px gutter gave the phone
-   a sideways scroll. */
-.pane-head { --ph-pad-y: 7px; --ph-pad-x: 11px; container-type: inline-size; display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr); align-items: center; gap: 9px; padding: var(--ph-pad-y) var(--ph-pad-x); background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
+.pane-head { --ph-pad-y: 7px; --ph-pad-x: 11px; position: relative; container-type: inline-size; display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr); align-items: center; gap: 9px; padding: var(--ph-pad-y) var(--ph-pad-x); background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
 .pane-head .ph-left { grid-column: 1; justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
 .pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 5px; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; cursor: text; }
 /* `[Group] name` is one title in two parts, and the group is the only part that
@@ -779,10 +783,79 @@ body {
    bounds it: it can fill the whole title but no more, which is what puts the
    ellipsis on the name itself when the name alone is too long for the header. */
 .pane-head .ph-name { flex: 0 0 auto; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; }
+.pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 8px; }
+/* Attach, search, info, close: ONE contract, so they cannot drift apart the way
+   the `i` and the reader's nav keys did. No box — the operator asked for the
+   bounding box off the `i`, and a row where one of four is boxed is worse than
+   either — so the hit area is an overlay instead (below), which is why these are
+   22px of ink in a 28px target. The 8px gap is what makes that target real: at
+   4px the overlays of neighbouring buttons met over each other's ink and each
+   one measured 20px across, under the floor. Measured, not guessed. */
+.pane-head .ph-btn {
+  position: relative; flex: none; width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: var(--r-sm); background: none; color: var(--muted);
+  font: 700 12px/1 var(--font-mono); cursor: pointer;
+}
+.pane-head .ph-btn > svg { width: 14px; height: 14px; }
+.pane-head .ph-btn:hover:not(:disabled) { color: var(--text); background: var(--border); }
+.pane-head .ph-btn:disabled { opacity: 0.38; cursor: not-allowed; }
+.pane-head .ph-btn.on { color: var(--accent); }
+/* The tap target, which is not the ink. WCAG 2.2 SC 2.5.8 floors a target at
+   24x24 and iOS asks for 44; these are the only route to attach, search, the
+   conversation's facts and close, on a phone. Pinned by hit-testing in
+   server/reader-info.test.mjs — all four, in both views. */
+.pane-head .ph-btn::before { content: ''; position: absolute; inset: -4px -4px; }
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
+/* The state mark leads the name, inside the centred title: it never shrinks and
+   never wraps, so the name gives way first (see .ph-name). */
+.pane-head .ph-title > .status { flex: none; margin-right: 1px; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }
+/* The conversation's facts, behind one `i` in the pane header — the same place
+   in the terminal view and the reader (docs/conversation-view.md §3.3). A square
+   mini-control in the app's --r-sm register, sized like the header's other mini
+   buttons rather than falling out of its own padding. */
+/* NOT the positioning context for the panel — the header is. The `i` sits a
+   back-button, a logo and a state dot into the row, so a panel anchored to the
+   button itself starts ~100px in and runs off the right edge of a phone. */
+/* NOT the positioning context for the panel — the header is. The `i` sits in the
+   right-hand cluster, so a panel anchored to the button itself would hang off
+   the far edge of the pane. */
+.tinfo-wrap { flex: none; display: inline-flex; }
+.tinfo {
+  /* Anchored to the pane header — not to the button — so it opens inside the
+     pane at any width. It hangs from the RIGHT edge now, under the cluster the
+     `i` belongs to, which is also the side with room on a phone: the left of
+     that row is a back arrow and a path. */
+  position: absolute; z-index: 12; top: calc(100% + 4px); right: 8px; left: auto;
+  /* Wide enough that the two actions sit side by side on one line each — at a
+     phone width that is what 78vw buys, and below it they stack rather than
+     wrap a label in half. */
+  min-width: min(19rem, calc(100% - 16px)); max-width: min(23rem, calc(100% - 16px));
+  display: flex; flex-direction: column; gap: 8px; padding: 9px 10px;
+  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.18);
+}
+/* Reading the transcript, or nothing to read: the panel says which. A terminal
+   pane has parsed nothing, so opening this is the first read — and a whole-file
+   one — which is exactly why it must not pretend to have the answer already. */
+.tinfo-state { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.tinfo-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; margin: 0; }
+.tinfo-facts dt { color: var(--muted); }
+.tinfo-facts dd { margin: 0; color: var(--text); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.tinfo-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 7px; border-top: 1px solid var(--border); }
+/* Download is an <a download> and Share is a <button> — two elements that match
+   only if they are told to. Same padding, same weight, and an equal share of
+   the row, so the panel reads as one pair of actions rather than a long control
+   and a short one. */
+.tinfo-actions .btn-ghost {
+  flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  padding: 5px 8px; font: inherit; font-size: 1em; font-weight: 600; line-height: 1.35; text-decoration: none;
+  white-space: nowrap;
+}
+.tinfo-actions svg { width: 13px; height: 13px; }
+
 /* The way back on a phone, left of the agent's logo. It stretches to the
    header's own height — cancelling that height's padding rather than adding any
    — because a taller header would hand straight back the row that dropping the
@@ -1172,6 +1245,10 @@ body {
 .setting-row > .btn-ghost, .setting-row > a.btn-ghost { min-width: 180px; white-space: nowrap; }
 a.btn-ghost { text-decoration: none; }
 .s-label { font-weight: 600; font-size: 14px; }
+/* the shared-trace id: wide enough for a dataset URL, capped so it does not
+   run the width of a desktop settings page */
+.trace-open { margin-top: 8px; max-width: 420px; }
+.s-err { color: var(--danger); }
 .s-help { color: var(--muted); font-size: 12.5px; line-height: 1.5; margin: 2px 0 0; }
 .s-muted { color: var(--muted); }
 /* One voice for this page. Everywhere else in the app prose is sans and machine
@@ -1601,7 +1678,6 @@ a.btn-ghost { text-decoration: none; }
 .tv-matches .tv-row:first-of-type { border-top: 1px solid var(--border); }
 
 /* "Open a shared trace" — the sidebar widget that pulls a bundle off the Hub. */
-.widget.open-trace { margin: 0 8px 8px; }
 .open-trace-err { color: var(--danger); font-size: 11.5px; line-height: 1.4; }
 .trace-hint a { color: inherit; text-decoration: underline; text-decoration-style: dotted; }
 .trace-hint a:hover { color: var(--accent); }
