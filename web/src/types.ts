@@ -18,6 +18,10 @@ export interface Session {
   everStarted: boolean;
   running: boolean;
   state: SessionState;
+  // Set when the operator archived this session — a stored decision, not the
+  // idle window's verdict, which is computed in App.tsx and expires when the
+  // setting changes. Only a session with this can be deleted (server-enforced).
+  archivedAt?: string;
   /** Native CLI event says an interactive TUI dialog is currently pending. */
   inputRequired?: InputRequired | null;
   // Only on `cli: 'trace'` panes: what the read-only trace view is pointed at.

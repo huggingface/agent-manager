@@ -1057,6 +1057,11 @@ body {
 .files-new.err { color: var(--danger); }
 .tw-confirm { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
 .tw-warn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A destructive ICON in a row turns red under the pointer, the way the Files
+   pane's trash does (.tw-act.danger). Distinct from .mini-btn.danger below,
+   which is the filled red button for a surface whose whole point is the
+   action — too loud for one glyph among others in a list row. */
+.mini-btn.danger-hover:hover { color: var(--danger); }
 .mini-btn.danger { background: var(--danger); color: #fff; border-color: transparent; }
 .mini-btn.danger:disabled { opacity: .5; }
 /* the one obvious action in a group — Create, Save and close */

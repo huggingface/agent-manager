@@ -6,7 +6,7 @@
  *     including the two that were title attributes a phone cannot open;
  *   - it closes on Escape and on a press outside it;
  *   - it offers the transcript as a file, and that URL really answers;
- *   - it offers Share, which is the same dialog the sidebar opens;
+ *   - it offers Share, which is the only place that dialog opens from now;
  *   - the sidebar no longer carries a trace widget, and Settings does.
  *
  * Set READER_INFO_PUBLIC_DIR to a prebuilt web/dist to skip the build, and
@@ -310,7 +310,8 @@ try {
   check('a press outside closes the panel',
     await waitFor(async () => await page.locator('.tinfo').count() === 0, 2_000));
 
-  // 6. Share, from the reader — the same dialog the sidebar row opens.
+  // 6. Share, from the reader. The sidebar row used to open this dialog too;
+  //    since #86 the panel is the one place it comes from.
   await page.locator('.tinfo-btn').tap();
   await page.locator('.tinfo-actions button', { hasText: 'Share' }).tap();
   const shareOpen = await waitFor(async () => await page.locator('.share-card').isVisible(), 5_000);
@@ -375,6 +376,17 @@ try {
   check('the sidebar has no trace widget left',
     await page.locator('.quick-add button', { hasText: 'Trace' }).count() === 0
       && await page.locator('.open-trace').count() === 0);
+  // …and the row is down to one control. Read-trace and Share left it because
+  // the panel above now holds both; start and stop left it because the row
+  // itself opens the pane and Ctrl-C interrupts a runaway better than a button.
+  // What remains is archive, which is also the only route to deleting a
+  // session. (docs/conversation-view.md §3.4)
+  const rowActions = page.locator('.sidebar .row[title^="reader-info-e2e"]')
+    .first().locator('.row-actions button');
+  check('the session row carries exactly one control', await rowActions.count() === 1,
+    `titles: ${JSON.stringify(await rowActions.evaluateAll((bs) => bs.map((b) => b.title)))}`);
+  check('and that control archives',
+    /archive/i.test(await rowActions.first().getAttribute('title') || ''));
   await page.locator('.sidebar .set-btn, .sidebar button[title="Settings"]').first().click();
   const traceRow = page.locator('.setting-row', { hasText: 'Open a shared trace' });
   await traceRow.waitFor({ state: 'visible', timeout: 10_000 });

@@ -522,6 +522,11 @@ try {
   await page.close();
   const existing = await (await fetch(`${API}/api/sessions`)).json();
   for (const session of existing) {
+    // Archive first: since #86 the server refuses to delete a session that has
+    // not been retired, so a bulk teardown has to go through the same door the
+    // sidebar does. These fixtures have started, so `?ifNeverStarted=1` is not
+    // the route for them — that one is for a session that never ran.
+    await fetch(`${API}/api/sessions/${session.id}/archive`, { method: 'POST' });
     await fetch(`${API}/api/sessions/${session.id}`, { method: 'DELETE' });
   }
   const freshContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
@@ -568,6 +573,9 @@ try {
   check('conditional cleanup cannot delete a target that has started',
     conditionalDelete.response.status === 409
       && afterConditionalDelete.some((session) => session.id === retained.body.id));
+  // Same reason as the teardown above: this one has started, so it is archived
+  // before it can be removed.
+  await fetch(`${API}/api/sessions/${retained.body.id}/archive`, { method: 'POST' });
   await fetch(`${API}/api/sessions/${retained.body.id}`, { method: 'DELETE' });
   await freshContext.close();
 } finally {
