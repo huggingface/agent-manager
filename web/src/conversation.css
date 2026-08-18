@@ -92,12 +92,35 @@
   min-width: 0; flex: 1; font-size: 0.96em; color: var(--muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-/* expanded in place: same font, same colour, just no longer cut */
-.cs-detail.full { white-space: pre-wrap; overflow: visible; text-overflow: clip; overflow-wrap: break-word; }
+/* No `.full` variant any more: a text step used to expand IN the head row, and
+   now the row hands its text to the body to be rendered (see .cs-md below), so
+   the detail is always the one truncated line. */
 .cs.note .cs-detail { color: var(--text); opacity: 0.78; }
 .cs-more { font-size: 0.77em; color: var(--muted); padding: 2px 0 0; }
 /* left inset = the rail column above it, so a body hangs under its own row */
 .cs-body { padding: 2px 0 6px 1em; }
+/* Prose inside a step — an aside, thinking, a compaction — is the same markdown
+   as an answer, one register quieter. A step is a row in a rail, so its headings
+   step down to something that reads as emphasis rather than as a title of the
+   page, and the margins are tight enough that a three-line aside does not
+   present itself as a reply. Same resets as .cx-md: the shared .markdown card
+   brings a border, a background and 14px, none of which belong in a rail. */
+.markdown.cs-md { flex: none; border: none; background: none; padding: 0; font-size: 0.96em; line-height: 1.5; }
+.cs-md > :first-child { margin-top: 0; }
+.cs-md > :last-child { margin-bottom: 0; }
+.cs-md p, .cs-md ul, .cs-md ol, .cs-md blockquote, .cs-md pre, .cs-md table { margin: 0 0 6px; }
+.cs-md ul, .cs-md ol { padding-left: 1.5em; }
+.cs-md h1, .cs-md h2, .cs-md h3, .cs-md h4 { margin: 7px 0 3px; line-height: 1.3; }
+.cs-md h1 { font-size: 1.15em; }
+.cs-md h2 { font-size: 1.08em; }
+.cs-md h3, .cs-md h4 { font-size: 1em; }
+.cs-md pre { font-size: 0.9em; }
+/* and each kind keeps the colour it had as plain text, or a rendered aside would
+   read as the agent's reply and rendered thinking would stop looking like
+   thinking (the same two colours .cs-detail and .cs-pre.think already use) */
+.cs.think .cs-md { color: color-mix(in srgb, #8b73c4 70%, var(--text)); }
+.cs.note .cs-md { color: var(--text); opacity: 0.85; }
+.cs.compact .cs-md { color: var(--muted); }
 .cs-pre {
   white-space: pre-wrap; word-break: break-word; margin: 3px 0; padding: 6px 8px;
   background: var(--panel-2); border-radius: var(--r-sm);

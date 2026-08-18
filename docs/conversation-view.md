@@ -128,9 +128,25 @@ Rules that keep this from becoming the ugly viewer in a small box:
 - **One left column, two meanings.** A tool reports its outcome there (`✓` / `✗`); everything
   else offers a disclosure triangle, greyed when there is nothing more to see. The fold control
   above uses the same column and the same triangle, so it reads as the head of the list.
-- **Expanding never repeats itself.** Text steps (thinking, an aside, a compaction) simply stop
-  being truncated — same font, same colour, more of it. Only a tool has genuinely *different*
-  material below: its input and what came back.
+- **Expanding never repeats itself.** A text step's one-line preview is the head row's whole
+  content while it is shut; opened, that row hands the text over and the step's body carries it
+  **rendered as markdown**. An agent writes an aside the way it writes an answer — headings, lists,
+  code spans, links — and for a long time only the answer was rendered, so the middle of a turn
+  showed its syntax raw (`## Plan`, `[the docs](https://…)`). The prose kinds — `note`, `think`,
+  `compact`, named by `proseOf()` — take the same path the answer does,
+  `highlightHtml(renderMarkdown(text), q)`, so a search term is still marked inside the rendered
+  blocks. Three consequences worth stating:
+    - **It renders in the body, not in the head row.** That row is a `<button>`; markdown carries
+      links and block elements, and neither is valid — or clickable — inside one.
+    - **The collapsed preview keeps its syntax.** `## Plan` says the message opens with a heading
+      and ` ``` ` says a code block is coming, which is more than `Plan` tells you, and stripping
+      it would mean a second markdown pass over a string that may be cut mid-token.
+    - **A cut message cannot take the panel with it.** These steps carry a `more` tail, so the text
+      can end mid-fence or mid-table; `marked` closes both itself and DOMPurify reparses what it
+      emits, so no unclosed block escapes to swallow what follows. Pinned in
+      `web/test/stepMarkdown.test.mjs`.
+  What must stay literal, stays literal: a tool's input is JSON, a shell's output and a tool result
+  are terminal bytes where two spaces mean two spaces, and an image is an image.
 - Consecutive calls to the same tool collapse (`✓ Read ×4  App.tsx, api.ts, +2`). The grouping
   logic exists — `ToolGroup` in `TracePane.tsx:86` — and gets reused, not rewritten.
 - **Thinking is one line** with a preview; system/harness turns are not shown at all in the card
