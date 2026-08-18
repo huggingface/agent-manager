@@ -385,6 +385,29 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    hardcoded 13px line and mis-centre the controls at every zoom but 100%. */
 .ov-composer.cxv-composer { --ov-first-line: calc(1.45em + 4px); }
 .cxv-note { flex: none; padding: 0 12px 6px; }
+.input-required {
+  flex: none; display: flex; align-items: center; gap: 5px; min-width: 0; min-height: 24px;
+  padding: 2px 9px; border-top: 1px solid var(--border); background: var(--panel-2);
+  color: var(--muted); font: 0.81em/1.2 var(--font-mono);
+}
+.input-required-mark, .input-required-label { color: var(--accent); font-weight: 700; }
+.input-required-copy { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.input-required button {
+  flex: none; margin-left: auto; height: 20px; padding: 0 7px;
+  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel);
+  color: var(--muted); font: inherit; line-height: 1; cursor: pointer;
+}
+.input-required button:hover { color: var(--text); border-color: var(--border-strong); }
+.input-required + .ov-composer { border-top: 0; }
+.cxv-col > .input-required {
+  align-self: stretch; max-width: none; min-height: 0;
+  margin: 8px calc(-1 * var(--cx-gutter)) 2px 0;
+  padding: 5px var(--cx-gutter) 5px 8px; border: 0; border-radius: 0;
+  background: var(--accent); color: var(--accent-fg);
+}
+.cxv-col > .input-required :is(.input-required-mark, .input-required-label, button) { color: inherit; }
+.cxv-col > .input-required button { height: 18px; border-color: color-mix(in srgb, var(--accent-fg) 40%, transparent); background: transparent; }
+.cxv-col > .input-required button:hover { color: inherit; border-color: var(--accent-fg); background: color-mix(in srgb, var(--accent-fg) 12%, transparent); }
 @media (max-width: 720px) and (pointer: coarse) {
   /* Restating styles.css's iOS guard: 16px is what stops zoom-on-focus, and the
      rule above is later in the cascade, so it would otherwise win. A phone
