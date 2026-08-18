@@ -1,5 +1,12 @@
 export type SessionState = 'working' | 'waiting' | 'idle' | 'stopped';
 
+export interface InputRequired {
+  kind: 'permission' | 'question' | 'confirmation';
+  cli: string;
+  confidence: 'high';
+  detectedAt: string;
+}
+
 export interface Session {
   id: string;
   name: string;
@@ -15,6 +22,8 @@ export interface Session {
   // idle window's verdict, which is computed in App.tsx and expires when the
   // setting changes. Only a session with this can be deleted (server-enforced).
   archivedAt?: string;
+  /** Native CLI event says an interactive TUI dialog is currently pending. */
+  inputRequired?: InputRequired | null;
   // Only on `cli: 'trace'` panes: what the read-only trace view is pointed at.
   // A regular agent session needs no such record — it reads its own transcript.
   traceSource?: { kind: 'session' | 'bundle'; ref: string } | null;

@@ -160,17 +160,18 @@ try {
   assert.deepEqual(formatAttachmentPrelude('hermes', [stored]), [`/image ${JSON.stringify(stored.path)}`]);
   assert.deepEqual(formatAttachmentPrelude('hermes', [docx, stored]), [`/image ${JSON.stringify(stored.path)}`]);
   assert.deepEqual(formatAttachmentPrelude('codex', [stored]), []);
-  assert.equal(
-    cliById('codex').withPrompt("'compare  both'", ["'/tmp/first image.png'", "'/tmp/second.png'"]),
-    "codex -i '/tmp/first image.png' -i '/tmp/second.png' 'compare  both'",
+  const codexQuickstart = cliById('codex').withPrompt(
+    "'compare  both'", ["'/tmp/first image.png'", "'/tmp/second.png'"],
   );
-  assert.equal(
-    commandFor({
-      id: 'codex-first-image', cli: 'codex', everStarted: false,
-      pendingPrompt: 'compare  both', pendingImagePaths: ['/tmp/first image.png'],
-    }),
-    "exec codex -i '/tmp/first image.png' 'compare  both'",
-  );
+  assert.match(codexQuickstart, /tui\.notifications=\["approval-requested","plan-mode-prompt"\]/);
+  assert.match(codexQuickstart, /tui\.notification_method="osc9"/);
+  assert.ok(codexQuickstart.endsWith("-i '/tmp/first image.png' -i '/tmp/second.png' 'compare  both'"));
+  const codexFirst = commandFor({
+    id: 'codex-first-image', cli: 'codex', everStarted: false,
+    pendingPrompt: 'compare  both', pendingImagePaths: ['/tmp/first image.png'],
+  });
+  assert.ok(codexFirst.startsWith('exec codex '));
+  assert.ok(codexFirst.endsWith("-i '/tmp/first image.png' 'compare  both'"));
 
   const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
   const oldPart = path.join(path.dirname(stored.path), '.crashed.part');

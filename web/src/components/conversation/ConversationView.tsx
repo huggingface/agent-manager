@@ -30,6 +30,8 @@ import { fmtTok, splitExchanges } from './exchanges';
 import ExchangeView, { PendingExchange } from './Exchange';
 import Attachments from '../Attachments';
 import Composer from './Composer';
+import InputRequiredNotice from './InputRequiredNotice';
+import { writePaneMode } from '../../lib/paneMode';
 
 const NEAR_TOP_PX = 300;   // start fetching older turns before the reader arrives
 
@@ -179,6 +181,8 @@ export default function ConversationView({
   const turns: TraceTurn[] = turnsRef.current;
   const exchanges = useMemo(() => splitExchanges(turns), [version, turns]); // eslint-disable-line react-hooks/exhaustive-deps
   const last = exchanges[exchanges.length - 1];
+  const inputRequiredKey = session.inputRequired
+    ? `${session.inputRequired.detectedAt}:${session.inputRequired.kind}` : '';
 
   // Group reader mode gives the focused pane the critical path. Its siblings
   // wait for this signal before mounting their own readers, so one click cannot
@@ -326,7 +330,7 @@ export default function ConversationView({
     if (a == null) return;
     el.scrollTop = el.scrollHeight - a;
     anchor.current = null;
-  }, [version, live, sent]);
+  }, [version, live, sent, inputRequiredKey]);
 
   // ---- where you had got to -----------------------------------------------
   // Opening on the end is right for a conversation you have not read; it is not
@@ -560,6 +564,9 @@ export default function ConversationView({
           ))}
           {sent && <PendingExchange text={sent.text} />}
           {!exchanges.length && !sent && <div className="cxv-msg mono">nothing in this trace yet</div>}
+          {!readOnly && session.inputRequired && (
+            <InputRequiredNotice input={session.inputRequired} onOpenTerminal={() => writePaneMode('terminal')} />
+          )}
         </div>
       </div>
 

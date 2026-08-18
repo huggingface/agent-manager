@@ -560,6 +560,7 @@ function agentRow(s, act, d, selfId, mates) {
     state: deriveState(s, act),
     // Seconds since its screen last changed. Small = actively working.
     idleFor: act ? act.age : null,
+    inputRequired: act?.inputRequired || null,
     workdir: workspacePath(folder),
     path: folder,
     // Who else writes to this same folder — the actual collision hazard.
@@ -2038,7 +2039,7 @@ function sessionsWithState() {
   const info = agentInfo();
   return store.list().map((s) => {
     const state = deriveState(s, info.get(s.id));
-    return { ...s, state, running: state !== 'stopped' };
+    return { ...s, state, running: state !== 'stopped', inputRequired: info.get(s.id)?.inputRequired || null };
   });
 }
 
@@ -2693,11 +2694,12 @@ wss.on('connection', (ws, req) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.t === 'i') {
-      handle.write(msg.d);
+      const terminalReply = runstate.isTerminalReply(msg.d);
+      handle.write(msg.d, { terminalReply });
       // Not every frame on this channel is you: the emulator answers the TUI's
       // device-attribute and cursor queries down the same path, instantly on
       // attach. Opening a pane is not sending it something.
-      if (!runstate.isTerminalReply(msg.d)) touchInput(session.id);
+      if (!terminalReply) touchInput(session.id);
     }
     else if (msg.t === 'r') handle.resize(msg.cols, msg.rows);
     else if (msg.t === 'claim') handle.claim();

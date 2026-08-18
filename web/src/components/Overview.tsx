@@ -16,6 +16,7 @@ import type { PendingAttachment } from '../lib/attachments';
 import Attachments from './Attachments';
 import Logo from './Logo';
 import Composer from './conversation/Composer';
+import InputRequiredNotice from './conversation/InputRequiredNotice';
 import ExchangeView, { PendingExchange } from './conversation/Exchange';
 import { useDraft } from './conversation/useDraft';
 import { writePaneMode } from '../lib/paneMode';
@@ -375,6 +376,12 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
         )}
       </div>
 
+      {s.inputRequired && (
+        <InputRequiredNotice
+          input={s.inputRequired}
+          onOpenTerminal={() => { writePaneMode('terminal'); onOpen(s.id); }}
+        />
+      )}
       <Composer
         draft={draft}
         sending={sending}
@@ -430,7 +437,9 @@ function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color
           {d?.lastPromptText
             ? <div className="ovt-prompt" title={d.lastPromptText}>{d.lastPromptText}</div>
             : <div className="ovt-prompt none">no prompt yet</div>}
-          {running
+          {s.inputRequired
+            ? <div className="ovt-state input mono">! needs input</div>
+            : running
             ? <div className="ovt-state running mono">running</div>
             : s.state === 'stopped'
               ? <div className="ovt-state stopped mono">stopped</div>
