@@ -359,15 +359,42 @@ body {
 
 /* braille spinner: unmistakably a process, never an input line.
 
-   Its cell is declared here, with the animation, because everything that draws
-   this spinner — and everything that stands in for it while an agent is NOT
-   working (see `.status.waiting` and friends) — sizes itself from these two
-   numbers. Change the glyph, the font or the spinner's box and the static
-   marks follow, instead of being left behind at a size that used to match.
-   em, so each surface gets the cell at its own type size. */
-:root { --mark-w: 1.2em; --mark-h: 1.05em; }
+   Its type and cell are declared here, with the animation, because everything
+   that draws this spinner — and everything that stands in for it while an
+   agent is NOT working (see `.status.waiting` and friends) — reads the same
+   values. Change the glyph, font size or cell and every renderer follows,
+   instead of leaving a static approximation behind. The cell remains em-based
+   on the shared mark size.
+
+   The path values are measured from the bundled Geist Mono at --mark-size in
+   Chromium, rasterised 16x (alpha >= 16): ⠿ ink is 5.5 x 8.8125px, one dot is
+   1.875px, and the ink begins 1.8125px from the cell's left edge. A DOM raster
+   puts its natural top at 1.25px. That natural ink sits 0.90625px high inside
+   the cell; the adjacent 600-weight 12px title's x-height centre sits another
+   0.5px below the cell centre. --mark-optical-y applies the full 1.40625px
+   correction, and the static path starts at the same corrected 2.65625px.
+
+   Chromium quantises CSS border widths to whole CSS
+   pixels (1.875px paints as 1px), so --mark-stroke uses the nearest paintable
+   diameter, 2px. Ratios keep those measurements tied to --mark-size.
+   If the font fails and the mono fallback has different braille metrics, the
+   spinner may briefly drift; the rectangle deliberately stays on the bundled
+   font's measured path rather than guessing from an unknown fallback. */
+:root {
+  --mark-size: 12.5px; --mark-weight: 400;
+  --mark-w: 1.2em; --mark-h: 1.05em; --mark-optical-y: 0.1125em;
+  --mark-ink-x: 0.145em; --mark-ink-y: 0.2125em;
+  --mark-ink-w: 0.44em; --mark-ink-h: 0.705em; --mark-stroke: 0.16em;
+}
 .ov-busy { font-size: 12.5px; color: var(--muted); }
-.ov-busy::before { content: '⠋'; display: inline-block; width: var(--mark-w); color: var(--accent); animation: ov-spin 0.9s steps(1) infinite; }
+.ov-busy::before {
+  content: '⠋'; display: inline-flex; align-items: center;
+  width: var(--mark-w); height: var(--mark-h);
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
+  color: var(--accent); transform: translateY(var(--mark-optical-y));
+  animation: ov-spin 0.9s steps(1) infinite;
+}
 @keyframes ov-spin {
   0% { content: '⠋'; } 12.5% { content: '⠙'; } 25% { content: '⠹'; } 37.5% { content: '⠸'; }
   50% { content: '⠼'; } 62.5% { content: '⠴'; } 75% { content: '⠦'; } 87.5% { content: '⠧'; }
@@ -395,7 +422,14 @@ body {
 .ovt-prompt.none::before { color: var(--border-strong); }
 .ovt-state { font-size: 10.5px; color: var(--muted); }
 .ovt-state.running { color: var(--accent); }
-.ovt-state.running::before { content: '⠋ '; display: inline-block; animation: ov-spin 0.9s steps(1) infinite; }
+.ovt-state.running::before {
+  content: '⠋'; display: inline-flex; align-items: center;
+  width: var(--mark-w); height: var(--mark-h);
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
+  transform: translateY(var(--mark-optical-y));
+  animation: ov-spin 0.9s steps(1) infinite;
+}
 .ovt-state.stopped { opacity: 0.7; }
 .ovt-group { position: relative; border: 1px solid var(--border); border-radius: 13px; padding: 12px 10px 10px; margin-top: 6px; }
 /* loose tiles align with tiles INSIDE group boxes (1px border + 10px padding),
@@ -526,50 +560,46 @@ body {
    `.status` paints over those colours and they lose their identity. */
 .status { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; transition: background 0.2s, box-shadow 0.2s, opacity 0.2s; }
 
-/* ---- agent state: one mark, one footprint ----
+/* ---- agent state: one path, moving or still ----
    A working agent shows the braille spinner the reader and the cards already
    run (`ov-spin`) — the same animation, not a second thing that also means
-   "busy". Every other state is that same cell standing still: a rectangle,
-   filled, or outlined for stopped.
+   "busy". Every other state shows that motion's completed path: the same
+   square-cornered hollow rectangle, measured from the six-dot ink rather than
+   from the much larger layout cell. State comes only from colour/intensity.
 
-   The cell is `--mark-w` by `--mark-h`, declared once beside `ov-spin` itself
-   and consumed by every renderer of that animation as well as by these four
-   states. That is the whole point: the static mark cannot drift away from the
-   animation it stands in for, because there is one box and everyone reads it.
-   Same shape as --cx-gutter (#71) and --ph-pad-y (#75).
-
-   `font-size` is the only thing these states set for themselves — a size down
-   from the surrounding type — which is what lets one cell work in a sidebar
-   row and in a card header alike without either restating a geometry. */
+   The type/cell/path values are declared once beside `ov-spin` and consumed by
+   every renderer. The static path cannot drift away from the animation it
+   stands in for because there is one measured contract and everyone reads it.
+   Same principle as --cx-gutter (#71) and --ph-pad-y (#75). */
 .status.working, .status.waiting, .status.idle, .status.stopped {
   width: var(--mark-w); height: var(--mark-h);
-  font-size: 0.62em; font-family: var(--font-mono); line-height: 1;
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
   border-radius: 0; background: none;
-  display: inline-flex; align-items: center; justify-content: center;
+  display: inline-flex; align-items: center; position: relative;
   transition: color 0.2s, opacity 0.2s;
 }
-.status.working::before, .status.waiting::before,
-.status.idle::before, .status.stopped::before {
-  content: ''; display: block; box-sizing: border-box;
-  width: 100%; height: 100%; background: currentColor;
+.status.working::before {
+  display: inline-flex; align-items: center; box-sizing: border-box;
+  width: 100%; height: 100%; background: none; border: none; box-shadow: none;
 }
-/* The same spinner, in the same cell. `overflow: hidden` keeps the glyph from
-   painting outside the footprint the other three fill, whatever a font does
-   with it. Under prefers-reduced-motion the global animation kill freezes it
-   at ⠋ — a part-filled cell, still not the full rectangle a ready agent
-   shows. */
+/* The same spinner, in the same cell. */
 .status.working { overflow: hidden; }
 .status.working::before {
-  content: '⠋'; background: none;
+  content: '⠋'; transform: translateY(var(--mark-optical-y));
   animation: ov-spin 0.9s steps(1) infinite;
 }
-/* working and your-turn are both the accent: one is moving, one is not. */
+.status.waiting::before, .status.idle::before, .status.stopped::before {
+  content: ''; position: absolute;
+  left: var(--mark-ink-x); top: var(--mark-ink-y);
+  width: var(--mark-ink-w); height: var(--mark-ink-h);
+  box-sizing: border-box; background: none;
+  border: var(--mark-stroke) solid currentColor; border-radius: 0; box-shadow: none;
+}
+/* working and your-turn are both the accent: one moves, one is asking. */
 .status.working, .status.waiting { color: var(--accent); }
-.status.idle, .status.stopped { color: var(--muted); opacity: 0.5; }
-/* stopped is the cell's outline. An inset shadow, not a border: a border is
-   laid OUTSIDE a percentage height, so the stopped mark painted 2px taller
-   than the three it claims to match (and flex-shrank narrower to compensate). */
-.status.stopped::before { background: none; box-shadow: inset 0 0 0 1.5px currentColor; }
+.status.idle, .status.stopped { color: var(--muted); }
+.status.stopped { opacity: 0.5; }
 
 /* quick-add utilities (shell / files) pinned above the legend */
 .quick-add { display: flex; gap: 6px; padding: 10px 10px; border-top: 1px solid var(--border); }
