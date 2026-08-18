@@ -22,7 +22,6 @@ import { useReaderBatch } from './lib/readerBatch';
 import { paneOwnsBack } from './lib/mobileBack';
 import { isPassive, isRemote, isShareable } from './types';
 import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
-import { uploadPendingAttachments } from './lib/attachments';
 
 // `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
 // when the app is embedded cross-origin. Read once: it never changes mid-run,
@@ -526,7 +525,7 @@ export default function App() {
     const ok = activeRef && (activeRef === 'overview'
       || (activeRef.startsWith('g:') ? groupById[activeRef.slice(2)] : sessById[activeRef.slice(2)]));
     if (!ok) {
-      setActiveRef(tree.order[0] ?? null);
+      setActiveRef('overview');
       // The remembered agent is gone (deleted, or a different Space). Land on
       // the list rather than full-screening whichever agent happens to be first.
       setMobileStage(false);
@@ -651,28 +650,48 @@ export default function App() {
   };
   // Quickstart: server boots the agent and types the prompt; we jump straight
   // to the new pane so you watch it happen.
+  const prepareQuickStart = async (cli: string, name = '', path = '.') => {
+    const created = await api.createSession(name, cli, undefined, path);
+    rememberPath(created.path);
+    await refresh();
+    return created;
+  };
+  const abandonQuickStart = async (id: string) => {
+    try {
+      await api.discardUnstartedSession(id);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      // A target the operator deliberately opened is no longer placeholder
+      // state. The conditional DELETE makes that decision atomically server-side.
+      if (detail.includes('session has already started') || detail === 'not found') return;
+      console.error('Couldn’t discard the unstarted agent', error);
+      setToast(`Couldn’t discard the unstarted agent: ${detail}`);
+      window.setTimeout(() => setToast(null), 5000);
+      throw error;
+    } finally {
+      await refresh();
+    }
+  };
   const quickStart = async (cli: string, prompt: string, name = '', path = '.', attachmentOptions?: QuickStartAttachmentOptions) => {
     try {
       let sessionId: string;
       let sessionPath: string | null = path;
-      if (attachmentOptions?.attachments.length) {
+      if (attachmentOptions && (attachmentOptions.sessionId || attachmentOptions.attachments.length)) {
         if (attachmentOptions.sessionId) {
           sessionId = attachmentOptions.sessionId;
         } else {
-          // Attachments are session-scoped, so create the stopped session first,
-          // then upload. If an upload fails the session remains visible and the
-          // sidebar retains its id for a retry.
-          const created = await api.createSession(name, cli, undefined, path);
+          // Defensive fallback for a submit racing the target-creation render.
+          // Normal attachment uploads create this stopped target immediately.
+          const created = await prepareQuickStart(cli, name, path);
           sessionId = created.id;
           sessionPath = created.path;
           attachmentOptions.onSessionCreated(created.id);
-          rememberPath(created.path);
-          await refresh();
         }
-        const attachments = await uploadPendingAttachments(
-          sessionId, attachmentOptions.attachments, attachmentOptions.onAttachmentUpdate,
-        );
-        await api.sendInput(sessionId, prompt, attachments.map((image) => image.id));
+        if (attachmentOptions.attachments.some((attachment) => !attachment.attachment)) {
+          throw new Error('Wait for every file to finish uploading, or retry/remove the failed file.');
+        }
+        await api.sendInput(sessionId, prompt,
+          attachmentOptions.attachments.map((attachment) => attachment.attachment!.id));
       } else {
         const created = await api.quickStart(cli, prompt, name, path);
         sessionId = created.id;
@@ -1085,6 +1104,8 @@ export default function App() {
         theme={theme}
         onToggleTheme={toggleTheme}
         onQuickStart={quickStart}
+        onPrepareQuickStart={prepareQuickStart}
+        onAbandonQuickStart={abandonQuickStart}
         archived={archivedIds}
         retired={retiredIds}
         showArchived={showArchived}

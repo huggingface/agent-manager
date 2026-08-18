@@ -12,6 +12,8 @@ export interface PendingAttachment {
   file: File;
   previewUrl?: string;
   status: PendingAttachmentStatus;
+  uploadedBytes?: number;
+  uploadController?: AbortController;
   error?: string;
   attachment?: Attachment;
 }
@@ -126,6 +128,19 @@ export function revokePendingAttachments(attachments: PendingAttachment[]) {
   }
 }
 
+/** Abandon an unsent chip: stop its transfer and remove any stored server file. */
+export function discardPendingAttachment(sessionId: string, attachment: PendingAttachment) {
+  attachment.uploadController?.abort();
+  if (attachment.attachment) {
+    void api.deleteAttachment(sessionId, attachment.attachment.id).catch(() => {});
+  }
+  if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+}
+
+export function discardPendingAttachments(sessionId: string, attachments: PendingAttachment[]) {
+  for (const attachment of attachments) discardPendingAttachment(sessionId, attachment);
+}
+
 export const defaultAttachmentPrompt = (count: number) =>
   `Please inspect the attached file${count === 1 ? '' : 's'}.`;
 
@@ -136,24 +151,55 @@ export async function uploadPendingAttachments(
   update: (key: string, patch: Partial<PendingAttachment>) => void,
 ) {
   const uploaded: Attachment[] = [];
+  let firstFailure: Error | null = null;
+  const controllers = new Map<string, AbortController>();
+  for (const attachment of attachments) {
+    if (attachment.attachment || attachmentFileError(attachment.file)) continue;
+    const controller = new AbortController();
+    controllers.set(attachment.key, controller);
+    update(attachment.key, { uploadController: controller });
+  }
   for (const attachment of attachments) {
     if (attachment.attachment) {
       uploaded.push(attachment.attachment);
       continue;
     }
-    if (attachmentFileError(attachment.file)) {
-      throw new Error(attachment.error || 'invalid file');
+    const invalid = attachmentFileError(attachment.file);
+    if (invalid) {
+      update(attachment.key, { status: 'error', error: invalid });
+      firstFailure ??= new Error(invalid);
+      continue;
     }
-    update(attachment.key, { status: 'uploading', error: undefined });
+    const controller = controllers.get(attachment.key)!;
+    if (controller.signal.aborted) continue;
+    update(attachment.key, { status: 'uploading', uploadedBytes: 0, error: undefined });
     try {
-      const stored = await api.uploadAttachment(sessionId, attachment.file);
-      update(attachment.key, { status: 'uploaded', attachment: stored });
+      const stored = await api.uploadAttachment(sessionId, attachment.file, {
+        signal: controller.signal,
+        onProgress: ({ loaded }) => update(attachment.key, { uploadedBytes: loaded }),
+      });
+      // An abort can race the final response: XHR may have settled while the
+      // click that removed the chip already marked the controller aborted.
+      // In that narrow window we learned the id, so remove the now-unsent file.
+      if (controller.signal.aborted) {
+        await api.deleteAttachment(sessionId, stored.id).catch(() => undefined);
+        continue;
+      }
+      update(attachment.key, {
+        status: 'uploaded', uploadedBytes: attachment.file.size,
+        uploadController: undefined, attachment: stored,
+      });
       uploaded.push(stored);
     } catch (error) {
+      if (controller.signal.aborted) {
+        update(attachment.key, { uploadController: undefined });
+        continue;
+      }
       const message = error instanceof Error ? error.message : 'upload failed';
-      update(attachment.key, { status: 'error', error: message });
-      throw error;
+      update(attachment.key, { status: 'error', uploadController: undefined, error: message });
+      firstFailure ??= error instanceof Error ? error : new Error(message);
     }
   }
+  if (firstFailure) throw firstFailure;
   return uploaded;
 }

@@ -37,7 +37,8 @@ import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revo
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
 import {
-  formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeSessionAttachments,
+  formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeAttachment,
+  removeSessionAttachments,
   resolveAttachment, resolveAttachments,
 } from './attachments.js';
 import * as runstate from './runstate.js';
@@ -457,6 +458,17 @@ app.post('/api/sessions/:id/attachments/insert', async (req, res) => {
     return res.json({ ok: true, mode });
   } catch (e) {
     return res.status(e.statusCode || 409).json({ error: String(e.message || e) });
+  }
+});
+
+app.delete('/api/sessions/:id/attachments/:attachmentId', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  try {
+    await removeAttachment(s.id, req.params.attachmentId);
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({ error: String(e.message || e) });
   }
 });
 
@@ -2444,17 +2456,29 @@ app.put('/api/trace/:id/source', (req, res) => {
 app.delete('/api/sessions/:id', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  // Delete is an archived-only action: retire a session, then remove it. That
-  // is what keeps the one destructive control out of the working list, and it
-  // is enforced here rather than only in the sidebar so the rule holds for any
-  // caller. Being quiet for a month is NOT this flag — see the archive route.
+  // Two guards, answering two different questions, and a session has to satisfy
+  // whichever one it is being asked.
   //
-  // #76 adds `?ifNeverStarted=1` for the wrong-CLI mistake: a session that has
-  // never run has nothing worth archiving and should go in one step. When that
-  // lands, the exemption belongs on this guard and `everStarted` already
-  // carries the answer:
-  //     if (!s.archivedAt && !(req.query.ifNeverStarted === '1' && !s.everStarted)) …
-  if (!s.archivedAt) {
+  // `?ifNeverStarted=1` is the caller saying "only if this never ran" — the
+  // wrong-CLI mistake, where an agent created by accident is abandoned before it
+  // has done anything. That is a precondition the CALLER set, so a session that
+  // has started is refused even though it might have been deletable without the
+  // flag, and refused in its own words.
+  //
+  // Otherwise delete is an archived-only action: retire a session, then remove
+  // it. That is what keeps the one destructive control out of the working list,
+  // and it is enforced here rather than only in the sidebar so the rule holds
+  // for any caller. Being quiet for a month is NOT this flag — see the archive
+  // route.
+  //
+  // The two compose into the exemption this guard was written expecting: a
+  // session that never ran has nothing worth archiving, so `ifNeverStarted=1`
+  // gets it in one step instead of two.
+  const claimedNeverStarted = req.query.ifNeverStarted === '1';
+  if (claimedNeverStarted && s.everStarted) {
+    return res.status(409).json({ error: 'session has already started' });
+  }
+  if (!claimedNeverStarted && !s.archivedAt) {
     return res.status(409).json({
       error: 'archive this session before deleting it',
       code: 'not-archived',

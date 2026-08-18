@@ -9,7 +9,8 @@ import { rankSessions, sortLabel } from '../lib/overviewSort';
 import { hiddenSessionIds } from '../lib/overviewHidden';
 import type { Rankable } from '../lib/overviewSort';
 import {
-  defaultAttachmentPrompt, pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
+  defaultAttachmentPrompt, discardPendingAttachment, discardPendingAttachments,
+  pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
 } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
 import Attachments from './Attachments';
@@ -162,7 +163,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   const allowAttachments = !isRemote(s.cli);
 
   useEffect(() => { imagesRef.current = images; }, [images]);
-  useEffect(() => () => revokePendingAttachments(imagesRef.current), []);
+  useEffect(() => () => discardPendingAttachments(s.id, imagesRef.current), [s.id]);
 
   const addImages = (files: File[]) => {
     if (!allowAttachments || sending || !files.length) return;
@@ -171,12 +172,15 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
     imagesRef.current = merged;
     setImages(merged);
     setImageError(next.error);
+    void uploadPendingAttachments(s.id, next.attachments, updateImage).catch(() => {
+      // The affected chip owns the persistent, actionable error and retry.
+    });
   };
   const removeImage = (key: string) => {
     if (sending) return;
     setImages((current) => {
       const removed = current.find((image) => image.key === key);
-      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      if (removed) discardPendingAttachment(s.id, removed);
       const next = current.filter((image) => image.key !== key);
       imagesRef.current = next;
       return next;
@@ -189,6 +193,11 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
       imagesRef.current = next;
       return next;
     });
+  };
+  const retryImage = (key: string) => {
+    const image = imagesRef.current.find((item) => item.key === key);
+    if (!image || sending) return;
+    void uploadPendingAttachments(s.id, [image], updateImage).catch(() => {});
   };
 
   // After you send (or when the transcript shows a prompt newer than the last
@@ -219,6 +228,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
     const text = draft.trim();
     const batch = imagesRef.current;
     if ((!text && !batch.length) || sending) return;
+    if (batch.some((image) => !image.attachment)) return;
     const optimisticText = text || defaultAttachmentPrompt(batch.length);
     setSending(true);
     setFailed(null);
@@ -227,8 +237,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
     setHistIdx(0);
     if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     try {
-      const attachments = await uploadPendingAttachments(s.id, batch, updateImage);
-      await api.sendInput(s.id, text, attachments.map((image) => image.id));
+      await api.sendInput(s.id, text, batch.map((image) => image.attachment!.id));
       revokePendingAttachments(batch);
       imagesRef.current = [];
       setImages([]);
@@ -371,13 +380,15 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
         sending={sending}
         isMobile={isMobile}
         inputRef={inputRef}
-        canSend={!!draft.trim() || images.length > 0}
+        canSend={(!!draft.trim() || images.length > 0)
+          && images.every((image) => !!image.attachment)}
         above={<Attachments
           attachments={images}
           disabled={sending || !allowAttachments}
           disabledReason={!allowAttachments ? 'Files are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
           onFiles={addImages}
           onRemove={removeImage}
+          onRetry={retryImage}
         />}
         onChange={setDraft}
         onSend={send}

@@ -100,6 +100,35 @@ try {
   check('and `stopped` is still the state it lands in', after?.state === 'stopped', `state ${after?.state}`);
   try { ws.close(); } catch { /* already gone */ }
 
+  // ---- where this meets #76: deleting a session that never ran ----
+  // The wrong-CLI mistake. `?ifNeverStarted=1` is the caller's own
+  // precondition, so it answers a different question from the archive guard and
+  // both have to keep working.
+  const fresh = await mkSession('never-ran');
+  const oneStep = await api(`/api/sessions/${fresh.id}?ifNeverStarted=1`, { method: 'DELETE' });
+  check('a session that never ran deletes in one step, no archiving first',
+    oneStep.status === 200, `status ${oneStep.status}`);
+  check('and it is gone', !(await sessionOf(fresh.id)));
+
+  // The same flag on a session that HAS run is refused — in #76's words, not
+  // the archive guard's, because the caller asked the other question.
+  const ran = await mkSession('has-run');
+  const ws2 = new WebSocket(`ws://localhost:${PORT}/ws?session=${ran.id}&cols=80&rows=24`);
+  await new Promise((r) => { ws2.onopen = r; ws2.onerror = r; });
+  await sleep(1200);
+  const startedRefusal = await api(`/api/sessions/${ran.id}?ifNeverStarted=1`, { method: 'DELETE' });
+  check('a started session is refused for ifNeverStarted',
+    startedRefusal.status === 409, `status ${startedRefusal.status}`);
+  check('and in #76\'s words rather than the archive guard\'s',
+    /already started/i.test(startedRefusal.body?.error || ''), JSON.stringify(startedRefusal.body));
+  // …and without the flag it is the archive rule that answers.
+  const plainRefusal = await api(`/api/sessions/${ran.id}`, { method: 'DELETE' });
+  check('without the flag, the archive rule still answers',
+    plainRefusal.status === 409 && plainRefusal.body?.code === 'not-archived',
+    JSON.stringify(plainRefusal.body));
+  check('so the session survives both refusals', !!(await sessionOf(ran.id)));
+  try { ws2.close(); } catch { /* already gone */ }
+
   // ---- unknown ids ----
   const missing = await api('/api/sessions/nope-nope/archive', { method: 'POST' });
   check('archiving something that does not exist is a 404', missing.status === 404, `status ${missing.status}`);

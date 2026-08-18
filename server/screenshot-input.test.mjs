@@ -7,6 +7,7 @@
  *   - attachment chips cannot mutate an in-flight send;
  *   - one clipboard image stays one chip across browser DataTransfer views;
  *   - document files stay inert downloads and can be sent beside images;
+ *   - attachment-time uploads expose progress and actionable transport errors;
  *   - both rendered reader and Overview composers send structured attachments;
  *   - the creation dialog has no redundant file picker.
  *
@@ -24,7 +25,8 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-screenshot-ui-'));
 const PUBLIC_DIR = process.env.SCREENSHOT_PUBLIC_DIR || path.join(DATA_DIR, 'public');
-const API = 'http://127.0.0.1:7896';
+const PORT = process.env.SCREENSHOT_PORT || '7896';
+const API = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const png = Buffer.alloc(45);
@@ -32,6 +34,9 @@ Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(png);
 png.writeUInt32BE(13, 8); Buffer.from('IHDR').copy(png, 12);
 png.writeUInt32BE(1, 16); png.writeUInt32BE(1, 20);
 Buffer.from('IEND').copy(png, 37);
+const progressPng = Buffer.alloc(2 * 1024 * 1024);
+png.subarray(0, png.length - 12).copy(progressPng);
+png.subarray(png.length - 12).copy(progressPng, progressPng.length - 12);
 const pdf = Buffer.from('%PDF-1.7\nopaque pdf data');
 const docx = Buffer.from('PK\x03\x04opaque office data');
 
@@ -73,7 +78,7 @@ const backend = spawn('node', ['src/index.js'], {
   cwd: HERE,
   env: {
     ...BASE_ENV,
-    PORT: '7896', DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '',
+    PORT, DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '',
     AM_ALLOW_MISSING_ORIGIN: '1',
     AM_TEST_REPAINT_CMD: 'bash --noprofile --norc',
   },
@@ -189,7 +194,9 @@ try {
   await page.locator('.pane-head .image-file-input').setInputFiles({
     name: 'disconnect.png', mimeType: 'image/png', buffer: png,
   });
-  const retryStatus = page.locator('.term-image-status.has-action');
+  const retryStatus = page.locator('.term-image-status.has-action').filter({
+    has: page.getByRole('button', { name: 'retry' }),
+  });
   await retryStatus.waitFor({ state: 'visible' });
   const failedText = await retryStatus.textContent();
   check('a stopped terminal reports saved-but-not-inserted, never success',
@@ -201,7 +208,7 @@ try {
 
   await page.locator('.term-exit .tx-btn').click();
   await waitFor(() => page.locator('.pane-head .ph-image').isEnabled(), 20_000);
-  const retry = retryStatus.locator('button');
+  const retry = retryStatus.getByRole('button', { name: 'retry' });
   await retry.click();
   await page.locator('.term-image-status.success').waitFor({ state: 'visible' });
   const successText = await page.locator('.term-image-status.success').textContent();
@@ -225,10 +232,12 @@ try {
   await watcher.goto(API, { waitUntil: 'domcontentloaded' });
   await watcher.locator('.sidebar .row[title^="screenshot-e2e"]').first().click();
   await watcher.locator('.pane-head .ph-image').waitFor({ state: 'visible' });
-  await waitFor(() => watcher.locator('.pane-head .ph-image').isDisabled());
+  await waitFor(async () => (await watcher.locator('.pane-head .ph-image').getAttribute('title'))?.includes('take control'));
+  const watcherPickerDisabled = await watcher.locator('.pane-head .ph-image').isDisabled();
+  const watcherPickerTitle = await watcher.locator('.pane-head .ph-image').getAttribute('title');
   check('a shared-terminal watcher cannot inject into the controller composer',
-    await watcher.locator('.pane-head .ph-image').isDisabled()
-      && (await watcher.locator('.pane-head .ph-image').getAttribute('title'))?.includes('take control'));
+    watcherPickerDisabled && !!watcherPickerTitle?.includes('take control'),
+    JSON.stringify({ watcherPickerDisabled, watcherPickerTitle }));
   await watcher.close();
 
   // Reader mode is an overlay above the mounted terminal. Its own composer must
@@ -263,12 +272,129 @@ try {
   // The pane header owns ONE paperclip in both views now (2026-08-18): in the
   // reader it opens the composer's own picker, which is the input used below, so
   // the files still land in the draft. The composer no longer draws its own.
+  const [readerChooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.locator('.pane-head .ph-image').click(),
+  ]);
+  const readerChooserIsInComposer = await readerChooser.element().evaluate((element) =>
+    !!element.closest('.pane-reader'));
   check('one paperclip, in the header, wired to the reader composer',
     await page.locator('.pane-head .ph-image').isVisible()
       && await page.locator('.pane-reader .image-pick').count() === 0
-      && await page.locator('.pane-reader .image-file-input').count() === 1);
-  await readerPicker.setInputFiles({ name: 'reader.png', mimeType: 'image/png', buffer: png });
-  await page.locator('.pane-reader .image-chip').waitFor({ state: 'visible' });
+      && await page.locator('.pane-reader .image-file-input').count() === 1
+      && readerChooserIsInComposer);
+
+  // Keep the request outside the server until the operator cancels it. The
+  // composer must become usable immediately; it cannot be held hostage by a
+  // slow transfer that the operator no longer wants to send.
+  let releaseCanceledUpload;
+  let sawCanceledUpload;
+  const canceledUploadReached = new Promise((resolve) => { sawCanceledUpload = resolve; });
+  const canceledUploadHold = new Promise((resolve) => { releaseCanceledUpload = resolve; });
+  await page.route(`**/api/sessions/${id}/attachments`, async (route) => {
+    sawCanceledUpload();
+    await canceledUploadHold;
+    await route.continue().catch(() => {});
+  }, { times: 1 });
+  await readerPicker.setInputFiles({
+    name: 'cancel-me.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(512 * 1024),
+  });
+  await Promise.race([
+    canceledUploadReached,
+    sleep(10_000).then(() => { throw new Error('cancel fixture upload did not start'); }),
+  ]);
+  const canceledChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'cancel-me.bin' });
+  const cancelUpload = canceledChip.getByRole('button', { name: 'Cancel upload cancel-me.bin' });
+  await cancelUpload.waitFor({ state: 'visible' });
+  const cancelWasEnabled = await cancelUpload.isEnabled();
+  await cancelUpload.click();
+  releaseCanceledUpload();
+  await canceledChip.waitFor({ state: 'detached' });
+  const readerReply = page.locator('.pane-reader .ov-live textarea');
+  await readerReply.fill('send without the canceled upload');
+  check('an in-flight upload can be canceled and no longer blocks Send',
+    cancelWasEnabled && await page.locator('.pane-reader .ov-send').isVisible());
+  await readerReply.fill('');
+
+  // The failure that motivated immediate uploads: once the HTTP connection is
+  // cut, fetch used to surface only "Failed to fetch" after Send. The XHR
+  // transport must classify it at attachment time and keep a retry beside it.
+  await page.route(`**/api/sessions/${id}/attachments`, (route) => route.abort('connectionreset'), { times: 1 });
+  await readerPicker.setInputFiles({
+    name: 'interrupted.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(256 * 1024),
+  });
+  const interruptedChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'interrupted.bin' });
+  await interruptedChip.filter({ has: page.locator('.image-chip-retry') }).waitFor({ state: 'visible' });
+  const interruptedText = await interruptedChip.locator('.image-chip-meta').textContent();
+  check('an interrupted upload fails immediately with a reason and retry',
+    !!interruptedText?.includes('connection was interrupted')
+      && await interruptedChip.locator('.image-chip-retry').isVisible(),
+    JSON.stringify({ interruptedText }));
+  await interruptedChip.locator('.image-chip-retry').click();
+  await interruptedChip.filter({ has: page.locator('.image-chip-meta', { hasText: 'uploaded' }) }).waitFor();
+  const attachmentDir = path.join(DATA_DIR, 'state', 'attachments', id);
+  const interruptedStored = await waitFor(() => fs.readdirSync(attachmentDir)
+    .some((name) => name.endsWith('-interrupted.bin')));
+  await interruptedChip.getByRole('button', { name: 'Remove interrupted.bin' }).click();
+  const interruptedRemoved = await waitFor(() => !fs.existsSync(attachmentDir)
+    || !fs.readdirSync(attachmentDir).some((name) => name.endsWith('-interrupted.bin')));
+  check('removing a successful unsent chip deletes its stored file', interruptedStored && interruptedRemoved);
+
+  // Hugging Face's ingress may answer before Express with an HTML error page.
+  // Preserve the status as a useful diagnosis instead of reducing it to "413".
+  await page.route(`**/api/sessions/${id}/attachments`, (route) => route.fulfill({
+    status: 413, contentType: 'text/html', body: '<h1>Payload Too Large</h1>',
+  }), { times: 1 });
+  await readerPicker.setInputFiles({
+    name: 'proxy-limit.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(1024),
+  });
+  const proxyChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'proxy-limit.bin' });
+  await proxyChip.filter({ has: page.locator('.image-chip-retry') }).waitFor();
+  const proxyText = await proxyChip.locator('.image-chip-meta').textContent();
+  check('a non-JSON proxy rejection keeps an actionable HTTP reason',
+    !!proxyText?.includes('proxy rejected this file as too large') && proxyText.includes('HTTP 413'),
+    JSON.stringify({ proxyText }));
+  await proxyChip.getByRole('button', { name: 'Remove proxy-limit.bin' }).click();
+
+  // Client-side size rejection happens at attachment time and never offers a
+  // futile retry. The server separately exercises its streaming 100 MiB cap.
+  const tooLargePath = path.join(DATA_DIR, 'too-large.bin');
+  fs.writeFileSync(tooLargePath, '');
+  fs.truncateSync(tooLargePath, 101 * 1024 * 1024);
+  await readerPicker.setInputFiles(tooLargePath);
+  const tooLargeChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'too-large.bin' });
+  await tooLargeChip.filter({ has: page.locator('.image-chip-meta', { hasText: 'too large' }) }).waitFor();
+  check('a large file is rejected before upload with its 100 MB limit',
+    (await tooLargeChip.locator('.image-chip-meta').textContent())?.includes('100 MB max')
+      && await tooLargeChip.locator('.image-chip-retry').count() === 0);
+  await tooLargeChip.getByRole('button', { name: 'Remove too-large.bin' }).click();
+
+  // Hold the intercepted request lifecycle so the progress surface can be
+  // inspected before the response changes the chip to server-confirmed success.
+  let releaseReaderUpload;
+  let sawReaderUpload;
+  const readerUploadReached = new Promise((resolve) => { sawReaderUpload = resolve; });
+  const readerUploadHold = new Promise((resolve) => { releaseReaderUpload = resolve; });
+  await page.route(`**/api/sessions/${id}/attachments`, async (route) => {
+    const response = await route.fetch();
+    sawReaderUpload();
+    await readerUploadHold;
+    await route.fulfill({ response });
+  }, { times: 1 });
+  await readerPicker.setInputFiles({ name: 'reader.png', mimeType: 'image/png', buffer: progressPng });
+  await Promise.race([
+    readerUploadReached,
+    sleep(10_000).then(() => { throw new Error('reader upload did not start on attachment'); }),
+  ]);
+  const readerChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'reader.png' });
+  await readerChip.locator('.image-chip-progress').waitFor({ state: 'visible' });
+  const readerProgress = await readerChip.locator('.image-chip-progress').getAttribute('aria-valuenow');
+  const readerProgressText = await readerChip.locator('.image-chip-meta').textContent();
+  check('reader upload starts before Send and reports byte progress',
+    readerProgress != null && !!readerProgressText?.includes('%') && readerProgressText.includes('/'),
+    JSON.stringify({ readerProgress, readerProgressText }));
+  releaseReaderUpload();
+  await readerChip.filter({ has: page.locator('.image-chip-meta', { hasText: 'uploaded' }) }).waitFor();
   let readerInput;
   let sawReaderInput;
   const readerInputReached = new Promise((resolve) => { sawReaderInput = resolve; });
@@ -295,7 +421,9 @@ try {
   const overviewPicker = page.locator('.ovw-win .image-file-input');
   await overviewPicker.waitFor({ state: 'attached' });
   await overviewPicker.setInputFiles({ name: 'overview.png', mimeType: 'image/png', buffer: png });
-  await page.locator('.ovw-win .image-chip').waitFor({ state: 'visible' });
+  const overviewChip = page.locator('.ovw-win .image-chip', { hasText: 'overview.png' });
+  await overviewChip.filter({ has: page.locator('.image-chip-meta', { hasText: 'uploaded' }) }).waitFor();
+  check('Overview uploads a file when attached, before Send', await overviewChip.isVisible());
   let overviewInput;
   let sawOverviewInput;
   const overviewInputReached = new Promise((resolve) => { sawOverviewInput = resolve; });
@@ -322,9 +450,22 @@ try {
       && await page.locator('.quick .image-file-input').count() === 0);
   await page.locator('.quick-cli[title="Repaint fixture"]').click();
 
-  // Hold the second upload. Once the first
-  // chip says uploaded, every attachment mutation must remain disabled until
-  // the single logical send transaction finishes.
+  // Quick creation has to allocate its stopped session first, but attachment
+  // selection still starts both uploads before the operator launches it. Hold
+  // the second request to make that ordering and the progress lock observable.
+  let releaseSecond;
+  let sawSecond;
+  const secondReached = new Promise((resolve) => { sawSecond = resolve; });
+  const secondHold = new Promise((resolve) => { releaseSecond = resolve; });
+  let uploadCount = 0;
+  await page.route('**/api/sessions/*/attachments', async (route) => {
+    uploadCount += 1;
+    if (uploadCount === 2) {
+      sawSecond();
+      await secondHold;
+    }
+    await route.continue();
+  });
   await page.locator('.quick-prompt').fill('inspect both files');
   await page.locator('.quick-prompt').evaluate((element, bytes) => {
     const raw = atob(bytes);
@@ -358,30 +499,77 @@ try {
   check('DOCX paste creates a generic file chip beside the image',
     await page.locator('.quick .image-chip').count() === 2
       && await page.locator('.quick .image-chip-placeholder', { hasText: 'DOCX' }).count() === 1);
-  let releaseSecond;
-  let sawSecond;
-  const secondReached = new Promise((resolve) => { sawSecond = resolve; });
-  const secondHold = new Promise((resolve) => { releaseSecond = resolve; });
-  let uploadCount = 0;
-  await page.route('**/api/sessions/*/attachments', async (route) => {
-    uploadCount += 1;
-    if (uploadCount === 2) {
-      sawSecond();
-      await secondHold;
-    }
-    await route.continue();
-  });
-  await page.locator('.quick-prompt').press('Enter');
   await Promise.race([
     secondReached,
-    sleep(20_000).then(() => { throw new Error('second upload did not start'); }),
+    sleep(20_000).then(() => { throw new Error('second upload did not start on attachment'); }),
   ]);
-  const removeButtons = page.locator('.quick .image-chip > button');
-  check('attachment removal stays locked for the full send transaction',
-    await removeButtons.nth(0).isDisabled()
-      && await removeButtons.nth(1).isDisabled());
+  const quickChips = page.locator('.quick .image-chip');
+  await quickChips.nth(0).filter({ has: page.locator('.image-chip-meta', { hasText: 'uploaded' }) }).waitFor();
+  check('quick creation uploads before launch and shows progress while pending',
+    uploadCount === 2
+      && await quickChips.nth(1).locator('.image-chip-progress').isVisible()
+      && await quickChips.nth(1).getByRole('button', { name: 'Cancel upload requirements.docx' }).isEnabled());
   releaseSecond();
+  await quickChips.nth(1).filter({ has: page.locator('.image-chip-meta', { hasText: 'uploaded' }) }).waitFor();
+  const uploadsBeforeLaunch = uploadCount;
+  await page.locator('.quick-prompt').press('Enter');
   await page.locator('.controls').waitFor({ state: 'hidden', timeout: 30_000 });
+  check('launch reuses already-uploaded attachment ids', uploadCount === uploadsBeforeLaunch);
+
+  // Reproduce the blocking review case from a truly fresh browser: before the
+  // fix, the attachment-created target became tree.order[0], its pane mounted,
+  // and Escape left that running target (and its file) behind after reload.
+  await page.close();
+  const existing = await (await fetch(`${API}/api/sessions`)).json();
+  for (const session of existing) {
+    await fetch(`${API}/api/sessions/${session.id}`, { method: 'DELETE' });
+  }
+  const freshContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const fresh = await freshContext.newPage();
+  await fresh.goto(API, { waitUntil: 'domcontentloaded' });
+  await fresh.locator('.bolt-btn').click();
+  await fresh.locator('.quick-cli[title="Repaint fixture"]').click();
+  await fresh.locator('.quick-prompt').evaluate((element, bytes) => {
+    const raw = atob(bytes);
+    const data = Uint8Array.from(raw, (character) => character.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([data], 'abandon.png', { type: 'image/png' }));
+    element.dispatchEvent(new ClipboardEvent('paste', {
+      bubbles: true, cancelable: true, clipboardData: transfer,
+    }));
+  }, png.toString('base64'));
+  const abandonChip = fresh.locator('.quick .image-chip', { hasText: 'abandon.png' });
+  await abandonChip.filter({ has: fresh.locator('.image-chip-meta', { hasText: 'uploaded' }) }).waitFor();
+  const stagedSessions = await (await fetch(`${API}/api/sessions`)).json();
+  check('fresh-visit attachment creates only a stopped target and keeps Overview selected',
+    stagedSessions.length === 1
+      && stagedSessions[0].everStarted === false
+      && stagedSessions[0].running === false
+      && await fresh.locator('.sidebar .ov-row').getAttribute('class').then((value) => value?.includes('active'))
+      && await fresh.locator('.tile-terminal').count() === 0,
+    JSON.stringify(stagedSessions.map((session) => ({ id: session.id, running: session.running, everStarted: session.everStarted }))));
+  await fresh.locator('.quick-prompt').press('Escape');
+  const abandonedRemoved = await waitFor(async () => (await (await fetch(`${API}/api/sessions`)).json()).length === 0);
+  await fresh.reload({ waitUntil: 'domcontentloaded' });
+  const afterReload = await (await fetch(`${API}/api/sessions`)).json();
+  check('Escape discards the unlaunched target and its upload across reload',
+    abandonedRemoved && afterReload.length === 0);
+
+  const retained = await apiJson('/api/sessions', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cli: 'test-repaint', name: 'retain-started', path: '.' }),
+  });
+  await apiJson(`/api/sessions/${retained.body.id}/input`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: 'start it' }),
+  });
+  const conditionalDelete = await apiJson(`/api/sessions/${retained.body.id}?ifNeverStarted=1`, { method: 'DELETE' });
+  const afterConditionalDelete = await (await fetch(`${API}/api/sessions`)).json();
+  check('conditional cleanup cannot delete a target that has started',
+    conditionalDelete.response.status === 409
+      && afterConditionalDelete.some((session) => session.id === retained.body.id));
+  await fetch(`${API}/api/sessions/${retained.body.id}`, { method: 'DELETE' });
+  await freshContext.close();
 } finally {
   try { await browser?.close(); } catch {}
   backend.kill('SIGKILL');
