@@ -1,21 +1,27 @@
 import type { SessionState } from '../types';
 import Logo, { logoTilePadding, logoTileRadius } from './Logo';
 
+type StateLogoProps = {
+  state: SessionState;
+  size?: number;
+  title?: string;
+} & (
+  | { frameOnly: true; cli?: never; tint?: never }
+  | { frameOnly?: false; cli: string; tint?: string }
+);
+
 /**
  * The CLI tile and the agent state are one mark. The 96-unit path is divided
  * into four exact 20 + 4 cells, so the working dash loop has no remainder (and
  * therefore no visible jump) at the rounded rectangle's origin.
  */
-export default function StateLogo({
-  cli, state, size = 18, tint, title,
-}: {
-  cli: string;
-  state: SessionState;
-  size?: number;
-  tint?: string;
-  title?: string;
-}) {
-  const padding = logoTilePadding(size, tint);
+export default function StateLogo(props: StateLogoProps) {
+  const { state, size = 18, title } = props;
+  // With a logo, `size` means glyph size and the shared tile padding completes
+  // the frame. With no logo there is no hidden glyph geometry, so it is the
+  // frame's outer size — exactly what a compact legend swatch needs.
+  const tint = props.frameOnly ? undefined : props.tint;
+  const padding = props.frameOnly ? 0 : logoTilePadding(size, tint);
   const frameSize = size + padding * 2;
 
   return (
@@ -24,7 +30,7 @@ export default function StateLogo({
       style={{ width: frameSize, height: frameSize }}
       title={title}
     >
-      <Logo cli={cli} size={size} tint={tint} />
+      {!props.frameOnly && <Logo cli={props.cli} size={size} tint={tint} />}
       <svg
         className="state-logo-frame"
         viewBox={`0 0 ${frameSize} ${frameSize}`}

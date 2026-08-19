@@ -51,6 +51,22 @@ for (const state of STATES) {
     state === 'working' ? 'state-logo-run' : 'state-logo-static');
 }
 
+// The legend uses the same SVG renderer at a true 12px outer size, but carries
+// no fake CLI identity. Regular rows above still prove the default keeps Logo.
+for (const state of STATES) {
+  const frame = StateLogo({ frameOnly: true, state, size: 12 });
+  assert.deepEqual(frame.props.style, { width: 12, height: 12 });
+  const children = Children.toArray(frame.props.children);
+  assert.equal(children.length, 1, `${state} legend frame contains no Logo`);
+  const [svg] = children;
+  assert.equal(svg.type, 'svg');
+  assert.equal(svg.props.viewBox, '0 0 12 12');
+  for (const rect of Children.toArray(svg.props.children)) {
+    assert.equal(rect.props.width, 11);
+    assert.equal(rect.props.height, 11);
+  }
+}
+
 const workingRects = Children.toArray(
   Children.toArray(rendered.working.props.children)[1].props.children,
 );
@@ -68,4 +84,4 @@ assert.equal(paintedLogo.props.style.height, 16);
 assert.equal(paintedLogo.props.style.padding, 3);
 assert.equal(headerSvg.props.viewBox, '0 0 22 22');
 
-console.log('state-logo: four states share exact tile geometry without source-text pins');
+console.log('state-logo: real tiles keep logos and 12px legend frames contain only the shared border');

@@ -27,6 +27,12 @@ await build({
         <StateLogo cli="codex" state="idle" size={size} tint="#5eb6a6" />
         <StateLogo cli="codex" state="stopped" size={size} tint="#5eb6a6" />
       </>;
+      const Legend = () => <div className="legend fixture-legend">
+        <span><StateLogo frameOnly state="working" size={12} /> working</span>
+        <span><StateLogo frameOnly state="waiting" size={12} /> your turn</span>
+        <span><StateLogo frameOnly state="idle" size={12} /> idle</span>
+        <span><StateLogo frameOnly state="stopped" size={12} /> stopped</span>
+      </div>;
       createRoot(document.getElementById('root')).render(<>
         <div className="row session fixture-sidebar"><States size={12} /><span className="name">codex-1</span></div>
         <div className="pane-head fixture-header">
@@ -34,6 +40,7 @@ await build({
           <span className="ph-title"><span className="ph-name">codex-1</span></span>
           <div className="ph-right" />
         </div>
+        <Legend />
       </>);
     `,
   },
@@ -63,13 +70,18 @@ try {
           rect: [rect.x.baseVal.value, rect.y.baseVal.value, rect.width.baseVal.value, rect.height.baseVal.value],
           stroke: rs.strokeWidth, dash: rs.strokeDasharray, animation: rs.animationName,
           color: es.color, animations: el.getAnimations({ subtree: true }).length,
+          logos: el.querySelectorAll('.cli-logo').length,
         };
       });
-      return { sidebar: inspect('.fixture-sidebar'), header: inspect('.fixture-header') };
+      return {
+        sidebar: inspect('.fixture-sidebar'),
+        header: inspect('.fixture-header'),
+        legend: inspect('.fixture-legend'),
+      };
     });
     const result = await inspect();
 
-    for (const [surface, size] of [['sidebar', 18], ['header', 22]]) {
+    for (const [surface, size] of [['sidebar', 18], ['header', 22], ['legend', 12]]) {
       const states = result[surface];
       assert.equal(states.length, 4);
       for (const mark of states) {
@@ -95,6 +107,10 @@ try {
       assert.notEqual(byState.idle.color, byState.stopped.color, `${theme} stopped is muted`);
       const signatures = states.map((mark) => `${mark.dash}|${mark.animation}|${mark.color}`);
       assert.equal(new Set(signatures).size, 4, `${theme} ${surface} has four distinct treatments`);
+      for (const mark of states) {
+        assert.equal(mark.logos, surface === 'legend' ? 0 : 1,
+          `${theme} ${surface} ${mark.state} ${surface === 'legend' ? 'is frame-only' : 'keeps its CLI logo'}`);
+      }
     }
 
     // Motion is only an enhancement. When the operator asks the OS to reduce
@@ -103,7 +119,7 @@ try {
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await page.waitForTimeout(20);
     const reduced = await inspect();
-    for (const surface of ['sidebar', 'header']) {
+    for (const surface of ['sidebar', 'header', 'legend']) {
       const states = reduced[surface];
       const byState = Object.fromEntries(states.map((mark) => [mark.state, mark]));
       assert.match(byState.working.dash, /20px,? 4px/);
@@ -124,4 +140,4 @@ try {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
-console.log('state-logo render: four solid/dashed states stay distinct across sizes, themes and reduced motion');
+console.log('state-logo render: frame-only legend stays distinct while real tiles keep their logos');
