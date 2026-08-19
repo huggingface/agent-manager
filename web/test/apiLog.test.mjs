@@ -44,6 +44,17 @@ const wait = (i, watcher, watched, ms) => ({
   status: 200, ok: true, durationMs: ms,
   result: { id: watched, state: 'waiting', matched: true, waited: Math.round(ms / 1000) },
 });
+// A wait the server accepted with no `?from=`: read-only, so it is never
+// refused, and every watch loop running today calls it that way. Nobody is
+// attributed, so there is no caller to draw an arrow from.
+// Its target is an agent nothing else in the fixture touches, so the mark it
+// leaves can only have come from this entry.
+const anonymousWait = {
+  id: 'w0', at: at(2), method: 'GET', path: '/api/agents/lonely/wait',
+  origin: null, target: { id: 'lonely', name: 'lonely', cli: 'claude' },
+  status: 200, ok: true, durationMs: 12000,
+  result: { id: 'lonely', state: 'waiting', matched: true, waited: 12 },
+};
 // Two identical prompts (same checksum) — what a repeating job looks like.
 const operations = [
   wait(9, 'manager', 'builder', 258000),
@@ -57,6 +68,7 @@ const operations = [
     target: { id: 'files-5', name: 'files-5' },
     request: { present: true, chars: 8400, sha256: 'sha-file' },
     status: 200, ok: true, durationMs: 41, result: { ok: true } },
+  anonymousWait,
 ];
 
 const stub = path.join(tmp, 'api-stub.ts');
@@ -145,18 +157,25 @@ try {
   const page = await open(1200);
   const list = await page.evaluate(() => {
     const cells = [...document.querySelectorAll('.al-tbl tbody tr')].map((r) => [...r.children].map((c) => c.textContent.trim()));
-    return { first: cells[0], repeats: [...document.querySelectorAll('.al-rep')].map((e) => e.textContent.trim()) };
+    return {
+      first: cells[0],
+      repeats: [...document.querySelectorAll('.al-rep')].map((e) => e.textContent.trim()),
+      whos: [...document.querySelectorAll('.al-who')].map((e) => e.textContent.trim()),
+    };
   });
   console.log('what a row says');
   check('a resolved wait reads as one, with the time it blocked for',
     () => assert.deepEqual(list.first.slice(2), ['GET /api/agents/builder/wait', '200', '4m 18s', 'resolved · waiting']));
   check('identical prompts are marked as repeats, since the text itself is never stored',
     () => assert.deepEqual(list.repeats, ['×2', '×2']));
+  check('an unattributed call still reads as a row, with an em dash for who',
+    () => assert.ok(list.whos.includes('—'), list.whos.join(', ')));
 
   await page.click('.al-view button:nth-child(2)');
   await page.waitForSelector('.al-map svg');
   const map = await page.evaluate(() => {
     const labels = [...document.querySelectorAll('.al-lane-lbl')];
+    const dotLanes = [...document.querySelectorAll('circle.al-dot')].map((c) => Number(c.getAttribute('cy')));
     const lanes = labels.map((t) => t.textContent);
     // Which lane an endpoint sits on: the arrow stops a few px short of the
     // hairline, so snap to the nearest lane label.
@@ -170,7 +189,7 @@ try {
       dst: lanes[laneAt(Number(l.getAttribute('y2')))],
       dashed: !!getComputedStyle(l).strokeDasharray && getComputedStyle(l).strokeDasharray !== 'none',
     }));
-    return { lanes, arrows };
+    return { lanes, arrows, dotLanes: dotLanes.map((y) => lanes[laneAt(y)]) };
   });
   console.log('\nthe map');
   check('callers are laid out above the agents they call',
@@ -191,6 +210,19 @@ try {
     });
   check('a failed call is visible in the shape too',
     () => assert.ok(map.arrows.some((a) => a.bad)));
+
+  // The em dash in the Who column is a display fallback, not an agent. Giving it
+  // a lane invented a caller the log never knew and drew a return arrow into it.
+  check('an unattributed wait does not invent a caller lane',
+    () => assert.ok(!map.lanes.includes('—'), map.lanes.join(' < ')));
+  check('nor an arrow to one',
+    () => assert.ok(!map.arrows.some((a) => a.src === '—' || a.dst === '—'), JSON.stringify(map.arrows)));
+  check('it is a mark on the lane of whoever was waited on',
+    () => {
+      assert.ok(map.lanes.includes('lonely'), map.lanes.join(' < '));
+      assert.ok(map.dotLanes.includes('lonely'), `dots on: ${map.dotLanes.join(', ')}`);
+      assert.ok(!map.arrows.some((a) => a.src === 'lonely' || a.dst === 'lonely'), 'and no arrow to or from it');
+    });
   await page.close();
 } finally {
   await browser.close();

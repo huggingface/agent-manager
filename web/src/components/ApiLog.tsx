@@ -77,7 +77,15 @@ function payloadOf(op: api.Operation): { text: string; sha?: string } {
 const statusClass = (op: api.Operation) =>
   (op.ok ? 'ok' : op.status >= 500 ? 'bad' : 'warn');
 
-const who = (op: api.Operation) => op.origin?.name || op.origin?.id || '—';
+/** For the MAP: the caller's lane, or nothing. These have to be different. A
+ *  `wait` may arrive with no origin — the server keeps that path working for
+ *  the watch loops already running — and the em dash is a display fallback, not
+ *  an agent. Treating it as one added a lane called "—" and drew a return arrow
+ *  into it, inventing a caller the log never knew. Unattributed means a mark on
+ *  the lane of whoever was waited ON, which is the one end that IS known. */
+const originLane = (op: api.Operation) => op.origin?.name || op.origin?.id || '';
+/** For the Who column: something readable, even when nobody was attributed. */
+const who = (op: api.Operation) => originLane(op) || '—';
 /** The id of whoever the call acted on. `target` is written into the log from
  *  this version on; entries recorded before it have the id in the path, which is
  *  worth digging out so the map is not empty on the day this ships. */
@@ -237,7 +245,7 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
     const made = new Map<string, number>();
     const got = new Map<string, number>();
     const bump = (m: Map<string, number>, name: string) => name && m.set(name, (m.get(name) || 0) + 1);
-    for (const op of recent) { bump(made, who(op)); bump(got, whom(op, names)); }
+    for (const op of recent) { bump(made, originLane(op)); bump(got, whom(op, names)); }
     const byCount = (m: Map<string, number>) => [...m].sort((a, b) => b[1] - a[1]).map(([n]) => n);
     const callers = byCount(made);
     const lanes = [...callers, ...byCount(got).filter((n) => !made.has(n))].slice(0, MAX_LANES);
@@ -250,7 +258,7 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
     const marks = recent.map((op, i) => ({
       op,
       x: recent.length < 2 ? 0.5 : i / (recent.length - 1),
-      a: lanes.indexOf(who(op)),
+      a: lanes.indexOf(originLane(op)),
       b: lanes.indexOf(whom(op, names)),
     })).filter((m) => m.a >= 0 || m.b >= 0);
     void t0; void t1;

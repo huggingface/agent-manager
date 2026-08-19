@@ -102,6 +102,13 @@ export function operationMiddleware({ resolveOrigin, resolveTarget, allowMissing
     }
 
     if (origin) req.operationOrigin = origin;
+    // BEFORE next(), not at response time: the handler for a delete removes the
+    // session from the store and only then answers, so resolving this later
+    // recorded `{id}` for a session whose name and cli had just been thrown
+    // away — the one operation where the roster can never fill them back in.
+    // A request-time snapshot also gives a rename the name it had when the call
+    // arrived, which is the state the entry is describing.
+    const target = resolveTarget ? resolveTarget(req) : null;
     const started = Date.now();
     const operationId = crypto.randomUUID();
     let responseBody;
@@ -125,10 +132,10 @@ export function operationMiddleware({ resolveOrigin, resolveTarget, allowMissing
         id: operationId,
         at: new Date(started).toISOString(),
         origin,
-        // Who it was done TO, resolved at write time. The id is in the path
-        // already, but a name read back later is the name the session has
-        // NOW — renamed or deleted, and the audit trail stops making sense.
-        ...(resolveTarget ? (() => { const t = resolveTarget(req); return t ? { target: t } : {}; })() : {}),
+        // Who it was done TO, snapshotted above. The id is in the path already,
+        // but a name read back later is the name the session has NOW — renamed
+        // or deleted, and the audit trail stops making sense.
+        ...(target ? { target } : {}),
         method: req.method,
         path: req.path,
         query: cleanQuery(req.query),
@@ -161,9 +168,17 @@ export function readOperations(limit = 200, before = null) {
     const rows = text.split('\n').filter(Boolean).flatMap((line) => {
       try { return [JSON.parse(line)]; } catch { return []; }
     });
+    // Sort, do not merely reverse. A record is appended when its response
+    // finishes, but `at` is when the request STARTED — and a `wait` can block
+    // for five minutes, so it lands in the file after calls that began later and
+    // finished sooner. Reversing append order therefore returned rows out of
+    // chronological order, which put an old wait above newer calls in the log
+    // and, because the map derives its x from rank, could run its time axis
+    // backwards. Ties keep newest-appended first, which is what reversing did.
     return rows
       .filter((row) => !before || row.at < before)
       .reverse()
+      .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
       .slice(0, take);
   } catch {
     return [];

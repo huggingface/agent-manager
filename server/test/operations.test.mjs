@@ -20,14 +20,23 @@ const middleware = operationMiddleware({
   resolveOrigin: (raw) => raw === 'operator'
     ? { id: 'operator', type: 'operator', name: 'test operator' }
     : raw === 'agent-1' ? { id: raw, type: 'agent', name: 'agent one', cli: 'codex' } : null,
-  // The manager resolves the session named in the path; here, anything called
-  // s-* exists and everything else does not.
+  // Stands in for the manager's store: a session exists until something deletes
+  // it. A resolver that always answers would hide the case this has to cover.
   resolveTarget: (req) => {
     const id = (req.path.match(/^\/api\/(?:agents|sessions)\/([^/]+)/) || [])[1];
     if (!id) return null;
-    return id.startsWith('s-') ? { id, name: `name of ${id}`, cli: 'claude' } : { id };
+    const known = sessions.get(id);
+    return known ? { id, ...known } : { id };
   },
 });
+
+// The fake store the resolver reads. Handlers below delete from it mid-request,
+// which is what the real delete route does before it answers.
+const sessions = new Map([
+  ['s-target', { name: 'name of s-target', cli: 'claude' }],
+  ['s-42', { name: 'name of s-42', cli: 'claude' }],
+  ['s-doomed', { name: 'deleted-agent', cli: 'codex' }],
+]);
 
 class Response extends EventEmitter {
   statusCode = 200;
@@ -116,6 +125,46 @@ try {
   const [ghost, named] = readOperations(2);
   check('the target name is resolved at write time, not read time', named?.target?.name === 'name of s-42');
   check('a target that no longer exists still records its id', ghost?.target?.id === 'ghost-9' && !ghost?.target?.name);
+
+  console.log('\ndeleting the thing being audited');
+  // The real route removes the session from the store and only then answers, so
+  // a target resolved from the response handler finds nothing left. This is the
+  // one operation where the roster can never fill the name back in afterwards.
+  invoke({ method: 'DELETE', path: '/api/sessions/s-doomed', query: { from: 'operator' } },
+    (_req, res) => { sessions.delete('s-doomed'); res.json({ ok: true }); });
+  const [deleted] = readOperations(1);
+  check('a delete keeps the name of what it deleted',
+    deleted?.target?.name === 'deleted-agent' && deleted?.target?.cli === 'codex',
+    JSON.stringify(deleted?.target));
+  check('and the session really was gone before the response', !sessions.has('s-doomed'));
+  invoke({ path: '/api/sessions/never-existed/input', query: { from: 'operator' }, body: { text: 'x' } },
+    (_req, res) => res.json({ ok: true }));
+  const [noSuchTarget] = readOperations(1);
+  check('a genuinely unknown target is still recorded as a bare id',
+    noSuchTarget?.target?.id === 'never-existed' && !noSuchTarget?.target?.name);
+
+  console.log('\nchronology, when a wait outlives the calls it overlaps');
+  // A record carries the time the request STARTED but is written when it
+  // finishes. A wait blocks for up to 300s, so it is appended after calls that
+  // began later — and `readOperations` used to just reverse the file.
+  const slowWait = { method: 'GET', path: '/api/agents/s-target/wait', query: { from: 'agent-1' }, headers: {}, body: undefined };
+  const waitRes = new Response();
+  middleware(slowWait, waitRes, () => {});                   // starts first…
+  await new Promise((r) => setTimeout(r, 25));
+  invoke({ path: '/api/sessions/s-42/input', query: { from: 'agent-1' }, body: { text: 'meanwhile' } },
+    (_req, res) => res.json({ ok: true }));                  // …a later call finishes first…
+  await new Promise((r) => setTimeout(r, 25));
+  waitRes.json({ id: 's-target', state: 'waiting', matched: true, waited: 0 });  // …and the wait resolves last
+
+  const feed = readOperations(50);
+  const iWait = feed.findIndex((r) => r.method === 'GET' && r.result?.waited === 0);
+  const iMeanwhile = feed.findIndex((r) => r.request?.text?.chars === 9);
+  check('the wait was appended last but is listed after the call it overlapped',
+    iWait > iMeanwhile && iMeanwhile >= 0, `wait at ${iWait}, overlapping call at ${iMeanwhile}`);
+  check('so every row is in order, newest first',
+    feed.every((r, i) => i === 0 || feed[i - 1].at >= r.at));
+  check('and the wait still carries how long it blocked',
+    feed[iWait]?.durationMs >= 40, `${feed[iWait]?.durationMs}ms`);
 
   console.log('\nand the guard that has to keep holding');
   const stillRefused = invoke({ path: '/api/groups', body: { name: 'nope' } }, () => {});
