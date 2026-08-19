@@ -126,6 +126,7 @@ function resetNext(job, now = new Date()) {
 
 export function init(now = new Date()) {
   for (const id of timers.keys()) clearTimer(id);
+  fireJob = null;
   try {
     const parsed = JSON.parse(fs.readFileSync(CRONS_FILE, 'utf8'));
     jobs = Array.isArray(parsed) ? parsed : [];
@@ -208,13 +209,24 @@ export function recordLast(id, last) {
 
 export function startScheduler(handler, { restartDelayMs = 1_500 } = {}) {
   fireJob = handler;
+  const restartAt = Date.now() + restartDelayMs;
+  // Capture the boot-time occurrence before arming it. By the restart callback
+  // it may already have fired and advanced `next`, which would hide the very
+  // collision this check prevents.
+  const restartJobs = jobs
+    .filter((job) => job.state === 'running' && job.runOnRestart)
+    .map((job) => ({ id: job.id, scheduledAt: Date.parse(job.next) }));
   for (const job of jobs) armExisting(job);
-  const restartJobs = jobs.filter((job) => job.state === 'running' && job.runOnRestart).map((job) => job.id);
   if (restartJobs.length) {
     const timer = setTimeout(() => {
-      for (const id of restartJobs) {
+      for (const { id, scheduledAt } of restartJobs) {
         const current = jobs.find((job) => job.id === id);
         if (!current || current.state !== 'running' || !current.runOnRestart) continue;
+        // One boot intent must not become two prompts. A scheduled occurrence
+        // within one restart-delay of the planned restart fire substitutes for
+        // it; this is startup de-duplication, not an overlap guard for ordinary
+        // runs. Use the captured time so this still holds if schedule fired first.
+        if (Number.isFinite(scheduledAt) && Math.abs(scheduledAt - restartAt) <= restartDelayMs) continue;
         Promise.resolve(fireJob(id, 'restart')).catch((e) =>
           console.error('[crons.restart]', id, e && e.message));
       }

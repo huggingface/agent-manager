@@ -109,8 +109,9 @@ that made the call.
 On server start, every running job gets a newly calculated future occurrence.
 Persisted times that passed while the Space was asleep are not replayed. A
 running job with `runOnRestart: true` also fires once shortly after the server
-starts; this is one fresh invocation, independent of its next scheduled time.
-Stopped jobs do not run on restart.
+starts. If its next scheduled occurrence falls in that same short startup
+window, the scheduled occurrence substitutes for the restart fire so one boot
+cannot send the prompt twice. Stopped jobs do not run on restart.
 
 There is deliberately no overlap guard and no spend ceiling. If a target is
 already working, another prompt may land in its input and be handled mid-task.

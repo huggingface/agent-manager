@@ -69,3 +69,45 @@ test('an older overlapping delivery cannot overwrite the newer last run', () => 
   assert.equal(crons.get(id).last.status, 'ok');
   assert.equal(crons.get(id).last.at, '2026-08-25T12:02:00.000Z');
 });
+
+test('run on restart coalesces with a schedule due in the same startup window', () => {
+  for (const job of crons.list()) crons.remove(job.id);
+  const boot = Date.parse('2026-08-19T21:54:57.600Z'); // 2.4s before the minute
+  crons.init(new Date(boot));
+  const job = crons.create({
+    name: 'minute boundary', agent: { name: 'boundary', cli: 'claude' }, prompt: 'Once.',
+    schedule: { cron: '* * * * *', tz: 'UTC' }, runOnRestart: true,
+  }, new Date(boot));
+  assert.equal(Date.parse(job.next) - boot, 2_400);
+
+  const originalNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  let now = boot;
+  let serial = 0;
+  const queued = [];
+  Date.now = () => now;
+  globalThis.setTimeout = (callback, delay = 0) => {
+    const timer = { id: ++serial, at: now + Number(delay), callback, canceled: false, unref() {} };
+    queued.push(timer);
+    return timer;
+  };
+  globalThis.clearTimeout = (timer) => { if (timer) timer.canceled = true; };
+  const fires = [];
+  try {
+    crons.startScheduler((id, trigger) => { fires.push({ id, trigger, at: now }); }, { restartDelayMs: 1_500 });
+    const end = boot + 2_500;
+    while (true) {
+      const due = queued.filter((timer) => !timer.canceled && timer.at <= end).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      due.canceled = true;
+      now = due.at;
+      due.callback();
+    }
+    assert.deepEqual(fires, [{ id: job.id, trigger: 'schedule', at: boot + 2_400 }]);
+  } finally {
+    Date.now = originalNow;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
