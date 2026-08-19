@@ -222,6 +222,40 @@ console.log('\nand nothing reserves the gutter for a control that cannot exist')
   });
 }
 
+console.log('\nand the end of the conversation is spaced like the conversation');
+// Reported from prod: "an additional newline at the end of the reader view".
+// It was not a margin and not an empty node — the last block already carries
+// `margin-bottom: 0` and the tail held no elements at all. It was `.cxv-body`'s
+// own bottom padding, 30px, chosen when the reader's bottom edge was the pane's
+// rather than a composer's border. These pin the three parts of the answer.
+{
+  const conv = fs.readFileSync(path.join(HERE, '../src/conversation.css'), 'utf8');
+  const shared = fs.readFileSync(path.join(HERE, '../src/styles.css'), 'utf8');
+  const rule = (css, sel) => { const i = css.indexOf(sel); return i < 0 ? null : css.slice(i, css.indexOf('}', i) + 1); };
+  check('the scroller pays its tail from a variable, not a number in the shorthand', () => {
+    const r = rule(conv, '.cxv-body {');
+    assert.ok(r, 'no .cxv-body rule');
+    assert.match(r, /--cx-tail:\s*12px/);
+    assert.match(r, /padding:\s*4px var\(--cx-gutter\) var\(--cx-tail\)/);
+  });
+  check('and that tail IS the paragraph rhythm, not a number that happens to be near it', () => {
+    const tail = (rule(conv, '.cxv-body {').match(/--cx-tail:\s*(\d+)px/) || [])[1];
+    const para = (rule(shared, '.markdown p {').match(/margin:\s*0 0 (\d+)px/) || [])[1];
+    assert.equal(tail, para, `tail ${tail}px vs paragraph spacing ${para}px — they must agree`);
+  });
+  check('the phone rule narrows the gutter and restates nothing else', () => {
+    const i = conv.indexOf('@media (max-width: 720px)');
+    const block = conv.slice(i, conv.indexOf('\n}', i));
+    const bodyRule = rule(block, '.cxv-body {');
+    assert.ok(bodyRule, 'the phone block should still set the gutter');
+    assert.match(bodyRule, /--cx-gutter:\s*8px/);
+    assert.doesNotMatch(bodyRule, /padding/, `a second padding here is how the phone drifts: ${bodyRule}`);
+  });
+  check('and the last rendered block still adds no margin of its own', () => {
+    assert.match(rule(conv, '.cx-md > :last-child {') || '', /margin-bottom:\s*0/);
+  });
+}
+
 console.log('\nand the CSS pair the nesting exists for is still a pair');
 const css = fs.readFileSync(path.join(HERE, '../src/conversation.css'), 'utf8');
 check('.cx pays out the gutter in em', () => assert.match(css, /\.cx\s*\{[^}]*padding:[^;]*1\.23em/));
