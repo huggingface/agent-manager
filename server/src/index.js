@@ -1327,17 +1327,42 @@ digest for one agent. Read \`state\` before you do anything:
 ### Watch instead of asking
 \`\`\`sh
 curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/tail?lines=120" | jq -r .text
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=120"   # blocks
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15"
 \`\`\`
 \`tail\` returns that agent's screen and scrollback — exactly what a human would
-see in its pane. \`wait\` blocks until it stops working (default: any of
-\`waiting,idle,stopped\`, \`timeout\` up to 300s) and answers
-\`{state, matched, timedOut}\`. Use \`wait\` instead of a \`sleep\` loop: long
-foreground sleeps can destabilize a session.
+see in its pane. \`wait\` BLOCKS until the agent has held one of \`state\`
+(default \`waiting,idle,stopped\`) for \`settle\` seconds, then answers
+\`{state, matched, waited}\`. Both knobs decide whether it works for you:
+
+- \`settle\` — seconds the state must HOLD (default 4, max 60). An agent goes
+  quiet between tool calls, so a bare match can fire in a gap in the middle of
+  the work and hand you half a result. Use 10–15 for a peer doing a real task.
+- \`timeout\` — seconds to block (default 60, **max 300**). One call rarely
+  covers a whole job; on expiry it answers \`{matched:false,timedOut:true}\` and
+  you reissue. That is the shape of the API, not a failure.
+
+Because of both, the correct form is a background loop rather than a call:
+reissue until it matches, started the way your harness runs a command in the
+background (Claude Code: \`run_in_background\`), so you stay free meanwhile and
+are woken once, when the peer is genuinely finished.
+
+\`\`\`sh
+( until curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15" \\
+        > /tmp/wait-$ID.json \\
+     && jq -e '.matched or .state == "gone" or has("error")' /tmp/wait-$ID.json >/dev/null
+  do sleep 2; done ) >/dev/null 2>&1 &
+\`\`\`
+When that exits, \`/tmp/wait-$ID.json\` holds the last answer: \`matched: true\`
+is finished, \`"state":"gone"\` means the session was deleted, \`error\` means the
+id is wrong. Read the file — do not start polling \`/api/agents\` instead. (The
+\`sleep 2\` costs nothing when \`wait\` is doing its job, and keeps the loop from
+spinning if the manager is briefly unreachable; it is inside the background
+subshell, so nothing of yours is blocked by it.)
 
 **This is the main pattern.** If you hand work to another agent, YOU watch it
-with \`tail\`/\`wait\`. It does not have to report back, and you must not sit in a
-loop asking it whether it's done.
+with \`tail\`/\`wait\` — start that loop as soon as you have its id. It does not
+have to report back, you must not sit in a loop asking it whether it's done, and
+never wait with \`sleep\`: long foreground sleeps can destabilize a session.
 
 ### Send an agent a prompt
 Send the text as the request **body** so quoting and newlines never bite you:
@@ -1379,6 +1404,11 @@ different one (the names are the \`group\` field in the roster), or \`group=none
 to leave it ungrouped. The prompt is required — it starts working on it
 immediately. Spawn one agent for one clearly separable job; several agents in
 one folder is fine, but this Space is a small CPU box, so don't build a fleet.
+
+The response carries the new agent's \`id\`. Capture it and start the background
+\`wait\` loop from **Watch instead of asking** right then: launching is the
+moment you choose how you will find out it finished, and nothing else will tell
+you.
 
 **Into a NEW group** — e.g. "start four agents in a group called taskforce".
 \`group=\` only ever selects a group that already exists; an unknown name is
