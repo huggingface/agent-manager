@@ -380,6 +380,15 @@ pane with nothing to render (a shell) simply stays a terminal.
   `.markdown` turns that into a sideways drag because a scroller in one axis makes the other axis
   a scroller too. `overflow-x: hidden` on a parent is not the fix: it hides the symptom and clips
   content people need to read.
+- **The conversation ends the way it flows.** The scroller's bottom padding is `--cx-tail`, and it
+  is the same 12px that separates two paragraphs — so the last line clears the composer's border by
+  a paragraph's worth of space and no more. It used to be 30px, a number from when the reader's
+  bottom edge was the pane's rather than a border 30px away, which put 32px under the last line of
+  every conversation and read as one blank line too many. Nothing else contributes: the last
+  rendered block already gives up its margin (`.cx-md > :last-child`), and the tail holds no
+  elements — the empty-element shape of this bug (a spacer, a blank meta half, a working line with
+  nothing to say) was checked for and is not what this was. The phone narrows `--cx-gutter` and
+  restates no padding, so the two cannot drift apart.
 - **The reader fills the pane.** A fixed reading column left a gutter of nothing on each
   side while the prompt band still spanned the full width, so the two disagreed about where the
   conversation began. The pane is the measure: narrow the pane and the conversation narrows.

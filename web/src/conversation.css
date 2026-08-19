@@ -269,7 +269,12 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    hardcoded bleed against a padding that changes at a breakpoint drifts apart,
    and the band ends up wider than the scroller it sits in — which is exactly
    how the phone gained a sideways scroll: 14px of bleed, 8px of padding. */
-.cxv-body { --cx-gutter: 14px; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px var(--cx-gutter) 30px; }
+/* The tail is the paragraph rhythm, not a reserve. 30px here — chosen when the
+   reader's bottom edge was the pane's, before a composer sat under it — put 32px
+   between the last line and the composer's border while the blocks above it are
+   12px apart, which reads as one blank line too many at the end of every
+   conversation. 12px makes the end of the flow spaced like the flow. */
+.cxv-body { --cx-gutter: 14px; --cx-tail: 12px; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px var(--cx-gutter) var(--cx-tail); }
 .cxv-col { display: flex; flex-direction: column; min-width: 0; }
 .cxv-msg { font-size: 0.85em; color: var(--muted); padding: 6px 0; }
 /* The line above the oldest loaded exchange. Fixed height on purpose: it sits
@@ -324,7 +329,9 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 
 /* ---------- phone ---------- */
 @media (max-width: 720px) {
-  .cxv-body { --cx-gutter: 8px; padding: 4px var(--cx-gutter) 24px; }
+  /* only the gutter narrows here: the padding itself is written once above, so a
+     phone cannot drift from the desktop tail the way it drifted from the bleed */
+  .cxv-body { --cx-gutter: 8px; }
   .cs-detail { font-size: 1em; }
 }
 
