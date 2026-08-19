@@ -118,16 +118,16 @@ body {
    The 0.5px inset centres a 1px SVG stroke on the pixel boundary, so its top
    and bottom edges paint at the same weight. Working uses four exact 20 + 4
    cells on a normalised 96-unit perimeter: the final gap ends exactly where
-   the first dash starts, with no remainder to jump at the path origin.
-   Waiting uses sixteen exact 2 + 4 cells on that path: static points make
-   "your turn" distinct from both the long working segments and solid idle. */
+   the first dash starts, with no remainder to jump at the path origin. The
+   other three states are solid frames: accent when waiting on the operator,
+   muted while idle, and the same muted hue dimmed further when stopped. */
 .state-logo { position: relative; flex: none; display: inline-flex; color: var(--accent); }
 .state-logo-frame { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
 .state-logo-frame rect { fill: none; stroke: currentColor; stroke-width: 1; vector-effect: non-scaling-stroke; stroke-linecap: butt; stroke-linejoin: round; }
 .state-logo-track { opacity: 0.22; }
 .state-logo-run { stroke-dasharray: 20 4; animation: state-logo-trace 0.92s linear infinite; }
-.state-logo.waiting .state-logo-static { stroke-dasharray: 2 4; stroke-linecap: round; }
-.state-logo.waiting, .state-logo.idle { color: var(--accent); }
+.state-logo.waiting { color: var(--accent); }
+.state-logo.idle { color: var(--muted); }
 .state-logo.stopped { color: color-mix(in srgb, var(--muted) 50%, transparent); }
 @keyframes state-logo-trace { to { stroke-dashoffset: -24; } }
 

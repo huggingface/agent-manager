@@ -50,7 +50,7 @@ try {
     await page.addScriptTag({ path: bundle });
     await page.waitForSelector('.fixture-header .state-logo');
 
-    const result = await page.evaluate(() => {
+    const inspect = () => page.evaluate(() => {
       const inspect = (surface) => [...document.querySelectorAll(`${surface} .state-logo`)].map((el) => {
         const svg = el.querySelector('svg');
         const rect = el.querySelector('rect:last-child');
@@ -61,13 +61,13 @@ try {
           state: el.classList[1], box: [box.width, box.height],
           viewBox: svg.getAttribute('viewBox'), pathLength: rect.getAttribute('pathLength'),
           rect: [rect.x.baseVal.value, rect.y.baseVal.value, rect.width.baseVal.value, rect.height.baseVal.value],
-          stroke: rs.strokeWidth, dash: rs.strokeDasharray, linecap: rs.strokeLinecap,
-          animation: rs.animationName,
+          stroke: rs.strokeWidth, dash: rs.strokeDasharray, animation: rs.animationName,
           color: es.color, animations: el.getAnimations({ subtree: true }).length,
         };
       });
       return { sidebar: inspect('.fixture-sidebar'), header: inspect('.fixture-header') };
     });
+    const result = await inspect();
 
     for (const [surface, size] of [['sidebar', 18], ['header', 22]]) {
       const states = result[surface];
@@ -83,8 +83,7 @@ try {
       assert.match(byState.working.dash, /20px,? 4px/);
       assert.equal(byState.working.animation, 'state-logo-trace');
       assert.equal(byState.working.animations, 1);
-      assert.match(byState.waiting.dash, /2px,? 4px/);
-      assert.equal(byState.waiting.linecap, 'round');
+      assert.equal(byState.waiting.dash, 'none');
       assert.equal(byState.idle.dash, 'none');
       assert.equal(byState.stopped.dash, 'none');
       for (const mark of [byState.waiting, byState.idle, byState.stopped]) {
@@ -92,9 +91,31 @@ try {
         assert.equal(mark.animations, 0);
       }
       assert.equal(byState.working.color, byState.waiting.color, `${theme} working and waiting share accent`);
-      assert.equal(byState.waiting.color, byState.idle.color, `${theme} waiting and idle share accent hue`);
+      assert.notEqual(byState.waiting.color, byState.idle.color, `${theme} your-turn and idle colours differ`);
       assert.notEqual(byState.idle.color, byState.stopped.color, `${theme} stopped is muted`);
-      assert.notEqual(byState.waiting.dash, byState.idle.dash, `${theme} your-turn and idle remain distinct`);
+      const signatures = states.map((mark) => `${mark.dash}|${mark.animation}|${mark.color}`);
+      assert.equal(new Set(signatures).size, 4, `${theme} ${surface} has four distinct treatments`);
+    }
+
+    // Motion is only an enhancement. When the operator asks the OS to reduce
+    // it, working freezes as four long dashes and remains distinct from all
+    // three solid frames.
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.waitForTimeout(20);
+    const reduced = await inspect();
+    for (const surface of ['sidebar', 'header']) {
+      const states = reduced[surface];
+      const byState = Object.fromEntries(states.map((mark) => [mark.state, mark]));
+      assert.match(byState.working.dash, /20px,? 4px/);
+      assert.equal(byState.working.animation, 'none');
+      assert.equal(byState.working.animations, 0);
+      for (const mark of [byState.waiting, byState.idle, byState.stopped]) {
+        assert.equal(mark.dash, 'none');
+        assert.equal(mark.animation, 'none');
+        assert.equal(mark.animations, 0);
+      }
+      const signatures = states.map((mark) => `${mark.dash}|${mark.color}`);
+      assert.equal(new Set(signatures).size, 4, `${theme} reduced-motion ${surface} has four distinct treatments`);
     }
     await page.close();
   }
@@ -103,4 +124,4 @@ try {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
-console.log('state-logo render: four distinct states pass at both sizes and in both themes');
+console.log('state-logo render: four solid/dashed states stay distinct across sizes, themes and reduced motion');
