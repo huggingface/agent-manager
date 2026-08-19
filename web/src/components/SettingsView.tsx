@@ -3,14 +3,16 @@ import { isPassive, isRemote, type Cli } from '../types';
 import * as api from '../api';
 import SkillsEditor from './SkillsEditor';
 import UsagePanel from './UsagePanel';
+import CronSettings from './CronSettings';
 import { SunGlyph, MoonGlyph, RefreshGlyph, InfoGlyph } from './icons';
 import Logo from './Logo';
 
-type Page = 'general' | 'usage' | 'skills';
+type Page = 'general' | 'usage' | 'skills' | 'cron';
 const PAGES: { id: Page; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'usage', label: 'Usage' },
   { id: 'skills', label: 'Skills' },
+  { id: 'cron', label: 'Cron' },
 ];
 
 interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; engine?: string; ghostty?: boolean; canRelaunch?: boolean; secrets?: string[]; bucketUnverified?: boolean; }
@@ -780,6 +782,14 @@ export default function SettingsView({
             <h2>Skills</h2>
             <p className="s-help">Reusable markdown/text skills. Saved skills are published as <span className="mono">SKILL.md</span> to every agent (Claude, Codex, Gemini, opencode, Hermes) and available in all new sessions. View renders markdown; Edit is plain text.</p>
             <SkillsEditor />
+          </div>
+        )}
+
+        {page === 'cron' && (
+          <div className="settings-page wide cron-page">
+            <h2>Cron</h2>
+            <p className="s-help cron-intro">Send a prompt to an agent on a schedule. Jobs persist across Space restarts; if the named agent does not exist when a job fires, it is created first.</p>
+            <CronSettings clis={clis} />
           </div>
         )}
       </div>

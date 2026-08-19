@@ -108,13 +108,14 @@ api.set_space_volumes(
 api.restart_space(space_id)
 ```
 
-Everything durable lives under `/data`: `sessions.json`, `groups.json`,
+Everything durable lives under `/data`: `sessions.json`, `groups.json`, `crons.json`,
 `workspaces/<path>/` (agent working dirs + shared `skills/`), and each
 CLI's closed state checkpoints under `/data/state`. Active harness state lives
 on local POSIX storage and is restored/checkpointed by
 [`scripts/agent-state.sh`](scripts/agent-state.sh); SQLite harnesses use online
 database backups rather than copying live WAL files. See
 [`docs/agent-state-checkpoints.md`](docs/agent-state-checkpoints.md).
+Scheduled prompts are documented in [`docs/cron-jobs.md`](docs/cron-jobs.md).
 
 ## Architecture
 

@@ -17,6 +17,7 @@ import * as groups from './groups.js';
 import * as order from './order.js';
 import * as demo from './demo.js';
 import * as hidden from './hidden.js';
+import * as crons from './crons.js';
 import {
   attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning,
   waitForInputReady, capturePane, ghosttyReady, ghosttyError,
@@ -52,6 +53,7 @@ installSlowFsProbe();
 ensureDirs();
 refreshVersions();
 store.init();
+crons.init();
 pruneAttachmentDirs(store.list().map((session) => session.id))
   .catch((e) => console.error('[attachments.prune]', e && e.message));
 groups.init();
@@ -210,6 +212,10 @@ const resolveOperationOrigin = (raw, req) => {
     return { id: 'operator', type: 'operator', name: process.env.SPACE_AUTHOR_NAME || process.env.AM_USER || 'operator' };
   }
   if (raw) {
+    if (raw.startsWith('cron:')) {
+      const job = crons.get(raw.slice('cron:'.length));
+      if (job) return { id: raw, type: 'cron', name: job.name };
+    }
     const session = store.get(raw);
     if (session) return { id: session.id, type: 'agent', name: session.name, cli: session.cli };
     if (raw.startsWith('remote:')) {
@@ -1284,6 +1290,33 @@ To reconstruct recent manager operations (newest first):
 curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/operations?limit=100" | jq .operations
 \`\`\`
 
+### Schedule recurring prompts
+A cron job sends a normal prompt on a five-field cron schedule. It survives
+Space restarts in durable storage; if the named agent does not exist when it
+fires, the manager creates it in \`workspaces/<agent-name>\` first. The timezone
+is required because the Space clock is UTC. Create one with your own id so the
+operation log records who asked:
+
+\`\`\`sh
+curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/crons?from=$AM_ID" \\
+  -H 'content-type: application/json' -d '{
+    "name":"weekday issue triage",
+    "agent":{"name":"triage","cli":"claude"},
+    "prompt":"Triage newly opened issues and report anything urgent.",
+    "schedule":{"cron":"0 9 * * 1-5","tz":"Europe/Zurich"},
+    "runOnRestart":true
+  }'
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/crons" | jq .crons
+\`\`\`
+
+Use \`POST /api/crons/$ID/run?from=$AM_ID\` to run now,
+\`PUT /api/crons/$ID?from=$AM_ID\` with \`{"state":"stopped"}\` (or
+\`"running"\`) to stop/start it, and \`DELETE /api/crons/$ID?from=$AM_ID\` to
+remove it. Run-on-restart is one fresh fire, never a replay of missed times.
+There is deliberately no overlap or spend guard: stop or delete jobs you no
+longer want. See \`docs/cron-jobs.md\` in the Agent Manager source for the full
+request and response shapes.
+
 Your session exports the port as \`$AM_PORT\` — read it rather than trusting a
 number you remember, and check it before you believe an empty answer: \`curl -s\`
 to a port nothing is listening on prints **nothing at all**, and in some agent
@@ -2207,6 +2240,128 @@ app.post('/api/sessions', (req, res) => {
   res.status(201).json({ ...s, running: false, state: 'stopped' });
 });
 
+// ---------- scheduled prompts (/api/crons) ----------
+//
+// A cron's agent type is only used when its named agent does not exist yet.
+// Existing names are deliberately reused (even if the session was created with
+// another CLI): the name is the idempotency key promised by the Settings form.
+const cronCliError = (cli) => {
+  const def = cliById(cli);
+  if (!def || !isAgentCli(cli) || isRemote(cli)) {
+    return `unknown agent type '${cli}' — use an agent from GET /api/clis (not shell, files, trace, or remote)`;
+  }
+  return null;
+};
+const cronAgentFolder = (name) => {
+  const readable = slugify(name);
+  if (readable) return readable;
+  // A perfectly valid display name can contain no ASCII characters. Do not
+  // collapse those agents into the workspaces root (or one shared `agent/`
+  // folder); a tiny deterministic suffix keeps the promised private folder.
+  let hash = 2_166_136_261;
+  for (const character of name) hash = Math.imul(hash ^ character.codePointAt(0), 16_777_619);
+  return `agent-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+};
+
+function beginCronFire(job, trigger) {
+  const at = new Date();
+  const started = Date.now();
+  const fail = (error) => {
+    const message = String(error && error.message || error).slice(0, 500);
+    crons.recordLast(job.id, {
+      at: at.toISOString(), status: 'failed', durationMs: Date.now() - started, trigger, error: message,
+    });
+    return message;
+  };
+
+  try {
+    let session = store.list().find((candidate) => candidate.name === job.agent.name) || null;
+    let agentCreated = false;
+    if (!session) {
+      const invalid = cronCliError(job.agent.cli);
+      if (invalid) throw new Error(invalid);
+      const catalog = cliCatalog().find((candidate) => candidate.id === job.agent.cli);
+      if (!catalog?.available) throw new Error(`${cliById(job.agent.cli).label} is not installed on this Space`);
+      session = createSession({
+        name: job.agent.name,
+        cli: job.agent.cli,
+        // Cron-created agents own a predictable workspace. A second job with
+        // the same name sees the session synchronously and cannot create it
+        // again, even while the first prompt is still being delivered.
+        path: cronAgentFolder(job.agent.name),
+      });
+      if (!session) throw new Error('could not create the agent workspace');
+      if (session.error) throw new Error(session.error);
+      agentCreated = true;
+    }
+    if (!promptable(session) || isRemote(session.cli)) {
+      throw new Error(`the existing '${session.name}' session (${session.cli}) cannot receive scheduled prompts`);
+    }
+    const text = `[message from cron "${job.name}":] ${job.prompt}`;
+    const completion = deliver(session, { text }, `cron: ${job.name}`)
+      .then(() => {
+        crons.recordLast(job.id, {
+          at: at.toISOString(), status: 'ok', durationMs: Date.now() - started, trigger,
+        });
+      })
+      .catch((error) => { fail(error); });
+    return { agentCreated, completion };
+  } catch (error) {
+    const message = fail(error);
+    throw Object.assign(new Error(message), { statusCode: 409 });
+  }
+}
+
+const validateCronCli = (body) => {
+  const cli = body?.agent?.cli;
+  return typeof cli === 'string' ? cronCliError(cli.trim()) : null;
+};
+
+app.get('/api/crons', (_req, res) => res.json({ crons: crons.list() }));
+
+app.post('/api/crons', (req, res) => {
+  const cliError = validateCronCli(req.body);
+  if (cliError) return res.status(400).json({ error: cliError });
+  try {
+    const job = crons.create(req.body || {});
+    return res.status(201).json(job);
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+app.put('/api/crons/:id', (req, res) => {
+  if (!crons.get(req.params.id)) return res.status(404).json({ error: 'not found' });
+  const cliError = validateCronCli(req.body);
+  if (cliError) return res.status(400).json({ error: cliError });
+  try {
+    return res.json(crons.update(req.params.id, req.body || {}));
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+app.delete('/api/crons/:id', (req, res) => {
+  if (!crons.remove(req.params.id)) return res.status(404).json({ error: 'not found' });
+  return res.json({ ok: true });
+});
+
+app.post('/api/crons/:id/run', (req, res) => {
+  const job = crons.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+  const requested = String(req.query.trigger || '');
+  const trigger = req.operationOrigin?.type === 'cron' && (requested === 'schedule' || requested === 'restart')
+    ? requested : 'manual';
+  try {
+    const run = beginCronFire(job, trigger);
+    // 202 means the prompt was accepted for delivery, not that the agent's work
+    // has finished. `last` is updated when delivery itself succeeds or fails.
+    return res.status(202).json({ ok: true, agentCreated: run.agentCreated });
+  } catch (e) {
+    return res.status(e.statusCode || 409).json({ error: String(e.message || e) });
+  }
+});
+
 // Rename = display label only. Folders are never renamed or moved.
 app.put('/api/sessions/:id', (req, res) => {
   const name = (req.body || {}).name;
@@ -2789,4 +2944,16 @@ server.listen(PORT, () => {
   console.log(`Agent Manager :${PORT}  engine=libghostty${ghosttyReady() ? '' : ' (UNAVAILABLE)'}  data=${DATA_DIR}`);
   console.log('⚠  No authentication: this app trusts whoever can reach it.');
   console.log('   Keep this Space PRIVATE — a public instance gives anyone a shell + your logged-in agents.');
+  // Scheduled fires use the public cron-run route too. That keeps one execution
+  // path and gives the operations log a first-class `cron:<id>` origin instead
+  // of inventing a session that does not exist.
+  crons.startScheduler(async (id, trigger) => {
+    const response = await fetch(`http://127.0.0.1:${PORT}/api/crons/${encodeURIComponent(id)}/run?trigger=${trigger}`, {
+      method: 'POST', headers: { 'x-am-origin': `cron:${id}` },
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `cron run returned HTTP ${response.status}`);
+    }
+  });
 });

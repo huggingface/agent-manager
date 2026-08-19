@@ -120,6 +120,38 @@ export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json
 export const saveConfig = (c: AmConfig) =>
   fetch('/api/config', { method: 'PUT', headers: HEADERS, body: JSON.stringify(c) }).then(json);
 
+// ---- durable scheduled prompts ----
+export type CronState = 'running' | 'stopped';
+export interface CronJob {
+  id: string;
+  name: string;
+  agent: { name: string; cli: string };
+  prompt: string;
+  schedule: { cron: string; tz: string };
+  runOnRestart: boolean;
+  state: CronState;
+  createdAt: string;
+  updatedAt: string;
+  next: string | null;
+  last?: {
+    at: string;
+    status: 'ok' | 'failed';
+    durationMs: number;
+    trigger?: 'schedule' | 'restart' | 'manual';
+    error?: string;
+  };
+}
+export type CronDraft = Pick<CronJob, 'name' | 'agent' | 'prompt' | 'schedule' | 'runOnRestart'>;
+export const getCrons = (): Promise<{ crons: CronJob[] }> => fetch('/api/crons').then(jsonOrError);
+export const createCron = (job: CronDraft): Promise<CronJob> =>
+  fetch('/api/crons', { method: 'POST', headers: HEADERS, body: JSON.stringify(job) }).then(jsonOrError);
+export const updateCron = (id: string, patch: Partial<CronDraft & { state: CronState }>): Promise<CronJob> =>
+  fetch(`/api/crons/${encodeURIComponent(id)}`, { method: 'PUT', headers: HEADERS, body: JSON.stringify(patch) }).then(jsonOrError);
+export const runCron = (id: string): Promise<{ ok: boolean; agentCreated: boolean }> =>
+  fetch(`/api/crons/${encodeURIComponent(id)}/run`, { method: 'POST' }).then(jsonOrError);
+export const deleteCron = (id: string): Promise<{ ok: boolean }> =>
+  fetch(`/api/crons/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(jsonOrError);
+
 // ---- bucket backup: a Job on the Hub does the copying (docs/bucket-backup.md) ----
 export type BackupEvery = 'never' | '1h' | '3h' | '24h';
 export interface BackupStatus {
