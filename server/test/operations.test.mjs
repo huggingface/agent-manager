@@ -20,6 +20,13 @@ const middleware = operationMiddleware({
   resolveOrigin: (raw) => raw === 'operator'
     ? { id: 'operator', type: 'operator', name: 'test operator' }
     : raw === 'agent-1' ? { id: raw, type: 'agent', name: 'agent one', cli: 'codex' } : null,
+  // The manager resolves the session named in the path; here, anything called
+  // s-* exists and everything else does not.
+  resolveTarget: (req) => {
+    const id = (req.path.match(/^\/api\/(?:agents|sessions)\/([^/]+)/) || [])[1];
+    if (!id) return null;
+    return id.startsWith('s-') ? { id, name: `name of ${id}`, cli: 'claude' } : { id };
+  },
 });
 
 class Response extends EventEmitter {
@@ -69,6 +76,50 @@ try {
   check('plain-text agent prompts are summarized too', rows[3]?.request?.present === true && rows[3]?.request?.chars === 26);
   check('origin is separate from the recorded query', rows[3]?.origin?.id === 'agent-1' && !('from' in (rows[3]?.query || {})));
   check('query parameters needed to replay the operation remain', rows[3]?.query?.cli === 'codex');
+
+  // The one read this log cares about. A `wait` is how one agent watches
+  // another, so it is the only GET recorded — and only when it RESOLVED, since
+  // a wait that timed out is a polling artefact, not an event.
+  console.log('\nthe wait that came back');
+  const before = readOperations(50).length;
+  invoke({ method: 'GET', path: '/api/agents/s-target/wait', query: { from: 'agent-1' } },
+    (_req, res) => res.json({ id: 's-target', state: 'waiting', matched: true, waited: 143 }));
+  invoke({ method: 'GET', path: '/api/agents/s-target/wait', query: { from: 'agent-1' } },
+    (_req, res) => res.json({ id: 's-target', state: 'working', matched: false, timedOut: true }));
+  invoke({ method: 'GET', path: '/api/agents/s-target/wait' },
+    (_req, res) => res.json({ id: 's-target', state: 'idle', matched: true, waited: 4 }));
+  let tailed = false;
+  invoke({ method: 'GET', path: '/api/agents/s-target/tail' }, (_req, res) => { tailed = true; res.json({ text: '' }); });
+  let rostered = false;
+  invoke({ method: 'GET', path: '/api/agents' }, (_req, res) => { rostered = true; res.json({ agents: [] }); });
+
+  const waits = readOperations(50).filter((r) => r.method === 'GET');
+  check('a resolved wait is recorded', waits.length === 2, `${waits.length} GET rows`);
+  check('a wait that only timed out is not', !waits.some((r) => r.result?.matched === false));
+  check('tail is never logged — every open pane polls it', tailed && !waits.some((r) => r.path.endsWith('/tail')));
+  check('nor is the roster, or any other read', rostered && readOperations(50).length === before + 2);
+
+  // `wait` is documented read-only and every watch loop running today calls it
+  // without ?from=. Refusing those would break them the moment this ships.
+  const anonymous = waits.find((r) => !r.origin);
+  check('an unattributed wait is accepted, not 400ed', !!anonymous);
+  check('and still records who it was waiting ON', anonymous?.target?.id === 's-target');
+  const attributed = waits.find((r) => r.origin?.id === 'agent-1');
+  check('an attributed wait keeps both ends', attributed?.origin?.id === 'agent-1' && attributed?.target?.name === 'name of s-target');
+  check('a wait is worth its duration, not just its timestamp', typeof attributed?.durationMs === 'number');
+
+  console.log('\nwho it was done to');
+  invoke({ path: '/api/sessions/s-42/input', query: { from: 'agent-1' }, body: { text: 'go' } },
+    (_req, res) => res.json({ ok: true }));
+  invoke({ path: '/api/sessions/ghost-9/input', query: { from: 'agent-1' }, body: { text: 'go' } },
+    (_req, res) => res.status(404).json({ error: 'not found' }));
+  const [ghost, named] = readOperations(2);
+  check('the target name is resolved at write time, not read time', named?.target?.name === 'name of s-42');
+  check('a target that no longer exists still records its id', ghost?.target?.id === 'ghost-9' && !ghost?.target?.name);
+
+  console.log('\nand the guard that has to keep holding');
+  const stillRefused = invoke({ path: '/api/groups', body: { name: 'nope' } }, () => {});
+  check('a mutating call with no origin is still refused', stillRefused.statusCode === 400);
 } finally {
   fs.rmSync(TMP, { recursive: true, force: true });
 }

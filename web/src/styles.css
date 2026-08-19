@@ -1398,6 +1398,76 @@ a.btn-ghost { text-decoration: none; }
   .skiprestore { align-self: flex-start; }
 }
 
+/* ---- settings: API log (docs: the approved cron-and-api-log mock) ---- */
+.al { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
+.al-head { display: flex; align-items: center; gap: 10px; }
+.al-count { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
+.al-view { margin-left: auto; }
+.al-refresh { padding: 4px 9px; font-size: 11.5px; }
+.al-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.al-gap { flex: 1 0 12px; }
+/* A filter is a chip: bordered, quiet until it is on, and never a coloured pill
+   sitting in a data row — the rows themselves carry no badges at all. */
+.al-chip { padding: 4px 9px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel); color: var(--muted); font: inherit; font-size: 11.5px; cursor: pointer; white-space: nowrap; }
+.al-chip:hover { border-color: var(--border-strong); color: var(--text); }
+.al-chip.on { border-color: var(--accent); color: var(--text); font-weight: 600; background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.al-find { flex: 1; min-width: 130px; padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel); color: var(--text); font-size: 11.5px; }
+.al-find:focus { outline: none; border-color: var(--accent); }
+.al-empty { padding: 14px 2px; }
+
+/* ONE CALL PER LINE. Every cell is nowrap and clips; the path is the only
+   column that may take the slack (max-width:0 + width:100% is what makes a
+   table cell shrink-to-fit-the-rest rather than push the row wide). Wrapping
+   would halve how many calls a screen holds, which is the whole point of it. */
+.al-tblwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-md); }
+.al-tbl { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+/* A floor, so a narrow pane scrolls the table sideways instead of crushing the
+   Call column — which is the one column worth reading — down to two letters.
+   The row stays one line either way; that is the rule this is protecting. */
+.al-tbl { min-width: 640px; }
+.al-tbl th { text-align: left; padding: 7px 10px; background: var(--panel-2); border-bottom: 1px solid var(--border); font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.al-tbl td { padding: 5px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.al-tbl tr:last-child td { border-bottom: none; }
+.al-tbl td.grow, .al-tbl th.grow { max-width: 0; width: 100%; }
+.al-tbl td.num, .al-tbl th.num { text-align: right; }
+.al-tbl tbody tr:hover { background: var(--panel-2); }
+.al-time { color: var(--muted); }
+.al-who { max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
+.al-meth { font-weight: 700; color: var(--accent); }
+/* the one logged read: attention coming back, not work going out */
+.al-meth.back { color: var(--muted); }
+.al-path { color: var(--text); }
+/* colour the text in the column, never a badge around it */
+.al-st { font-weight: 600; }
+.al-st.ok { color: var(--go); }
+.al-st.warn { color: #9a6212; }
+.al-st.bad { color: var(--danger); }
+.al-pay { color: var(--muted); max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+.al-rep { color: var(--accent); font-weight: 600; }
+
+/* the map */
+.al-map { display: flex; flex-direction: column; gap: 8px; }
+.al-mapwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); padding: 8px; }
+.al-map svg { display: block; width: 100%; min-width: 620px; height: auto; }
+.al-lane { stroke: var(--border); stroke-width: 1; }
+.al-lane-lbl { font-family: var(--font-mono); font-size: 9px; fill: var(--muted); }
+.al-axis { font-family: var(--font-mono); font-size: 8px; fill: var(--muted); }
+.al-arrow { stroke: var(--accent); stroke-width: 1.6; }
+.al-arrow.back { stroke: var(--muted); stroke-dasharray: 3 3; }
+/* a call that failed is worth seeing in the shape, not only in the list */
+.al-arrow.bad { stroke: var(--danger); }
+.al-dot.bad { fill: var(--danger); }
+.al-dot { fill: var(--accent); }
+.al-dot.back { fill: var(--muted); }
+.al-hit { stroke: transparent; stroke-width: 11; }
+.al-arrowg { cursor: default; }
+.al-arrowg.on .al-arrow { stroke-width: 2.6; }
+.al-readout { font-size: 11px; color: var(--muted); min-height: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.al-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 11.5px; color: var(--muted); }
+.al-legend i.al-key { display: inline-block; width: 16px; height: 0; border-top: 2px solid var(--accent); vertical-align: middle; margin-right: 5px; }
+.al-legend i.al-key.back { border-top-style: dashed; border-color: var(--muted); }
+.al-legend i.al-key.dot { width: 6px; height: 6px; border: none; border-radius: 50%; background: var(--accent); }
+
 /* settings: skills editor */
 .settings-page.wide { max-width: 980px; }
 

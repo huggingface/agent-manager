@@ -232,8 +232,20 @@ const resolveOperationOrigin = (raw, req) => {
   const remoteSession = store.list().find((s) => s.remote?.name === name);
   return remoteSession ? { id: `remote:${name}`, type: 'remote', name, cli: remoteSession.remote?.peer?.harness || 'remote' } : null;
 };
+// Who the call was aimed at. Every route that acts on one session names it in
+// the path; resolving the NAME here, at write time, is the difference between an
+// audit trail that still reads in a month and one full of ids whose sessions
+// have since been renamed or deleted.
+const TARGET_ROUTES = /^\/api\/(?:agents|sessions|trace|files)\/([^/]+)/;
+const resolveOperationTarget = (req) => {
+  const id = (req.path.match(TARGET_ROUTES) || [])[1];
+  if (!id) return null;
+  const s = store.get(id);
+  return s ? { id: s.id, name: s.name, cli: s.cli } : { id };
+};
 app.use(operationMiddleware({
   resolveOrigin: resolveOperationOrigin,
+  resolveTarget: resolveOperationTarget,
   // Test servers explicitly opt out so old endpoint-focused fixtures do not
   // have to pretend to be the operator. Production never sets this switch.
   allowMissing: process.env.AM_ALLOW_MISSING_ORIGIN === '1',
@@ -1360,7 +1372,7 @@ digest for one agent. Read \`state\` before you do anything:
 ### Watch instead of asking
 \`\`\`sh
 curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/tail?lines=120" | jq -r .text
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15"
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15&from=$AM_ID"
 \`\`\`
 \`tail\` returns that agent's screen and scrollback — exactly what a human would
 see in its pane. \`wait\` BLOCKS until the agent has held one of \`state\`
@@ -1374,13 +1386,17 @@ see in its pane. \`wait\` BLOCKS until the agent has held one of \`state\`
   covers a whole job; on expiry it answers \`{matched:false,timedOut:true}\` and
   you reissue. That is the shape of the API, not a failure.
 
+\`wait\` is read-only, so \`from=$AM_ID\` is optional on it — pass it anyway. It
+is what lets Settings → API log draw the arrow back from the agent you waited on
+to you; without it the log knows the wait finished but not who was watching.
+
 Because of both, the correct form is a background loop rather than a call:
 reissue until it matches, started the way your harness runs a command in the
 background (Claude Code: \`run_in_background\`), so you stay free meanwhile and
 are woken once, when the peer is genuinely finished.
 
 \`\`\`sh
-( until curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15" \\
+( until curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15&from=$AM_ID" \\
         > /tmp/wait-$ID.json \\
      && jq -e '.matched or .state == "gone" or has("error")' /tmp/wait-$ID.json >/dev/null
   do sleep 2; done ) >/dev/null 2>&1 &

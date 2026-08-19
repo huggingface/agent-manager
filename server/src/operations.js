@@ -6,6 +6,15 @@ import { DATA_DIR } from './config.js';
 export const OPERATIONS_FILE = path.join(DATA_DIR, 'operations.jsonl');
 
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+// Reads worth auditing. A GET is normally none of this log's business — it
+// changes nothing — but `wait` is the one read that IS an event between two
+// agents: A blocked on B until B stopped working. Without it the log records
+// work being handed out and nothing ever coming back, which is exactly half of
+// "who called whom". Deliberately NOT here: `tail`, which every open pane polls
+// constantly and which says nothing a resolved wait does not already say.
+const LOGGED_READS = [/^\/api\/agents\/[^/]+\/wait$/];
+const shouldLog = (req) => MUTATING.has(req.method)
+  || (req.method === 'GET' && LOGGED_READS.some((re) => re.test(req.path)));
 const MAX_TEXT = 500;
 const MAX_DEPTH = 5;
 const SENSITIVE_KEY = /(authorization|credential|password|secret|subscription|token|endpoint|private.?key)/i;
@@ -73,14 +82,18 @@ const cleanQuery = (query) => {
  * unknown. It may derive an identity from a protocol route (remote agents do
  * this for backwards compatibility with already-running polling loops).
  */
-export function operationMiddleware({ resolveOrigin, allowMissing = false } = {}) {
+export function operationMiddleware({ resolveOrigin, resolveTarget, allowMissing = false } = {}) {
   return (req, res, next) => {
-    if (!req.path.startsWith('/api/') || !MUTATING.has(req.method)) return next();
+    if (!req.path.startsWith('/api/') || !shouldLog(req)) return next();
 
     const raw = requestOrigin(req);
     let origin = resolveOrigin ? resolveOrigin(raw, req) : (raw ? { id: raw, type: 'unknown' } : null);
     if (!origin && allowMissing) origin = { id: 'test', type: 'test' };
-    if (!origin) {
+    // A logged READ is never refused for want of an origin. `wait` is documented
+    // as read-only and every watch loop running right now calls it without
+    // `?from=`; rejecting those would break them the moment this ships. An
+    // unattributed wait still records that someone finished waiting on B.
+    if (!origin && MUTATING.has(req.method)) {
       return res.status(400).json({
         error: raw
           ? `unknown origin '${raw}'`
@@ -88,7 +101,7 @@ export function operationMiddleware({ resolveOrigin, allowMissing = false } = {}
       });
     }
 
-    req.operationOrigin = origin;
+    if (origin) req.operationOrigin = origin;
     const started = Date.now();
     const operationId = crypto.randomUUID();
     let responseBody;
@@ -101,11 +114,21 @@ export function operationMiddleware({ resolveOrigin, allowMissing = false } = {}
     const record = () => {
       if (recorded) return;
       recorded = true;
+      // A wait is a polling loop: only the call that RESOLVED is an event. The
+      // ones that timed out say "still working", which the log already implies,
+      // and logging them would multiply the entries by however long the job ran.
+      // Same for a wait the caller abandoned (no body) or one whose target had
+      // already gone: nothing came back, so there is nothing to draw.
+      if (!MUTATING.has(req.method) && !(responseBody && responseBody.matched === true)) return;
       append({
         version: 1,
         id: operationId,
         at: new Date(started).toISOString(),
         origin,
+        // Who it was done TO, resolved at write time. The id is in the path
+        // already, but a name read back later is the name the session has
+        // NOW — renamed or deleted, and the audit trail stops making sense.
+        ...(resolveTarget ? (() => { const t = resolveTarget(req); return t ? { target: t } : {}; })() : {}),
         method: req.method,
         path: req.path,
         query: cleanQuery(req.query),
