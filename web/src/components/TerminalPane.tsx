@@ -7,7 +7,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { Cli, Session } from '../types';
 import { STATE_LABEL, isRemote } from '../types';
-import Logo from './Logo';
+import StateLogo from './StateLogo';
 import TraceInfo from './TraceInfo';
 import ConversationView from './conversation/ConversationView';
 import { isPassive } from '../types';
@@ -1105,7 +1105,10 @@ export default function TerminalPane({
               <BackGlyph />
             </button>
           )}
-          <Logo cli={session.cli} size={16} tint={tint} />
+          <StateLogo
+            cli={session.cli} state={session.state} size={16} tint={tint}
+            title={`${STATE_LABEL[session.state]} · ${conn}`}
+          />
           {/* Where the agent runs, beside what it is. It was on the right, in
               among the controls; it is not a control. Still hidden on a phone —
               moving it did not create room — where the `i` panel carries it
@@ -1129,9 +1132,6 @@ export default function TerminalPane({
             title={`${sessionTitle(session.name, groupName)} · ${pathLabel} · double-click to rename`}
             onDoubleClick={() => { setDraft(session.name); setEditing(true); }}
           >
-            {/* The state mark reads as part of the name now: what this agent is
-                doing, immediately left of who it is, both centred together. */}
-            <span className={`status ${session.state}`} title={`${STATE_LABEL[session.state]} · ${conn}`} />
             {group && <span className="ph-group">[{group}]</span>}
             <span className="ph-name">{session.name}</span>
           </span>

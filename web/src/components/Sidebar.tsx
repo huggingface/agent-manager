@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Cli, MoveTarget, Group, Session, Tree } from '../types';
 import { STATE_LABEL, REMOTE_STATE_LABEL, isPassive, isRemote } from '../types';
 import Logo from './Logo';
+import StateLogo from './StateLogo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
 import Attachments from './Attachments';
@@ -461,10 +462,12 @@ export default function Sidebar({
         onDoubleClick={(e) => { e.stopPropagation(); startEdit(ref, s.name); }}
         title={s.path ? `${s.name} · ${s.path}` : s.name}
       >
-        {/* The same three lights, but for a remote agent they mean connection,
-            not process: working / listening / not connected. */}
-        <span className={`status ${s.state}`} title={(isRemote(s.cli) ? REMOTE_STATE_LABEL : STATE_LABEL)[s.state]} />
-        <Logo cli={s.cli} size={12} tint={colorOf[s.cli]} />
+        {/* State rides the CLI tile itself. For a remote agent it means
+            connection, not process: working / listening / not connected. */}
+        <StateLogo
+          cli={s.cli} state={s.state} size={12} tint={colorOf[s.cli]}
+          title={(isRemote(s.cli) ? REMOTE_STATE_LABEL : STATE_LABEL)[s.state]}
+        />
         {editing ? (
           <input
             autoFocus className="rename" value={editName}
@@ -787,7 +790,7 @@ export default function Sidebar({
       {/* Overview: pinned above the tree with the row anatomy (tile · name) so
           it reads as clickable. It used to carry an "N waiting" count in a
           right slot; the rows directly below already show each of those agents
-          with its own state mark, so the number was a second, vaguer telling of
+          with state on its tile, so the number was a second, vaguer telling of
           what the list says exactly. */}
       <div className="ov-fixed">
         <div
@@ -795,7 +798,6 @@ export default function Sidebar({
           onClick={() => onActivate('overview')}
           title="All agents: digests, states, replies"
         >
-          <span className="status ov-spacer" />
           <span className="ov-tile"><GridGlyph /></span>
           <span className="name">overview</span>
         </div>
@@ -837,9 +839,10 @@ export default function Sidebar({
       </div>
 
       <div className="legend">
-        <span><span className="status working" /> working</span>
-        <span><span className="status waiting" /> idle</span>
-        <span><span className="status stopped" /> stopped</span>
+        <span><StateLogo cli="shell" state="working" size={12} tint="var(--muted)" /> working</span>
+        <span><StateLogo cli="shell" state="waiting" size={12} tint="var(--muted)" /> your turn</span>
+        <span><StateLogo cli="shell" state="idle" size={12} tint="var(--muted)" /> idle</span>
+        <span><StateLogo cli="shell" state="stopped" size={12} tint="var(--muted)" /> stopped</span>
         {archived.size > 0 && (
           <label className="legend-arch" title="Sessions with no activity beyond the archive window (Settings)">
             <input type="checkbox" checked={showArchived} onChange={onToggleArchived} />

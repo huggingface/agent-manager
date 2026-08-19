@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RemoteInfo, RemoteMessage, Session } from '../types';
 import { REMOTE_STATE_LABEL } from '../types';
 import * as api from '../api';
-import Logo from './Logo';
+import StateLogo from './StateLogo';
 import { renderMarkdown } from '../lib/markdown';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
 import { BackGlyph, CloseGlyph, StopGlyph, PlayGlyph, ShareGlyph, AckGlyph } from './icons';
@@ -222,8 +222,7 @@ export default function RemotePane({
               <BackGlyph />
             </button>
           )}
-          <Logo cli="remote" size={16} tint="#5ec2e0" />
-          <span className={`status ${state}`} title={stateLabel} />
+          <StateLogo cli="remote" state={state} size={16} tint="#5ec2e0" title={stateLabel} />
         </div>
         {editing ? (
           <input

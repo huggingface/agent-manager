@@ -114,6 +114,23 @@ body {
 [data-theme='dark'] .cli-logo.inv-dark img { filter: invert(1); }
 [data-theme='light'] .cli-logo.inv-light img { filter: invert(1); }
 
+/* Agent state follows the CLI tile instead of occupying a second mark slot.
+   The 0.5px inset centres a 1px SVG stroke on the pixel boundary, so its top
+   and bottom edges paint at the same weight. Working uses four exact 20 + 4
+   cells on a normalised 96-unit perimeter: the final gap ends exactly where
+   the first dash starts, with no remainder to jump at the path origin.
+   Waiting uses sixteen exact 2 + 4 cells on that path: static points make
+   "your turn" distinct from both the long working segments and solid idle. */
+.state-logo { position: relative; flex: none; display: inline-flex; color: var(--accent); }
+.state-logo-frame { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.state-logo-frame rect { fill: none; stroke: currentColor; stroke-width: 1; vector-effect: non-scaling-stroke; stroke-linecap: butt; stroke-linejoin: round; }
+.state-logo-track { opacity: 0.22; }
+.state-logo-run { stroke-dasharray: 20 4; animation: state-logo-trace 0.92s linear infinite; }
+.state-logo.waiting .state-logo-static { stroke-dasharray: 2 4; stroke-linecap: round; }
+.state-logo.waiting, .state-logo.idle { color: var(--accent); }
+.state-logo.stopped { color: color-mix(in srgb, var(--muted) 50%, transparent); }
+@keyframes state-logo-trace { to { stroke-dashoffset: -24; } }
+
 /* header */
 .brand { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 13px 14px; border-bottom: 1px solid var(--border); }
 .brand .logo { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; }
@@ -274,7 +291,6 @@ body {
 /* overview: pinned sidebar row (session-row anatomy) + cards view */
 .ov-fixed { padding: 5px 8px 6px; border-bottom: 1px solid var(--border); }
 .ov-row { cursor: pointer; padding-top: 6px; padding-bottom: 6px; }
-.ov-row .status.ov-spacer { visibility: hidden; }
 .ov-tile { flex: none; box-sizing: content-box; width: 12px; height: 12px; padding: 3px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; }
 .ov-tile svg { width: 100%; height: 100%; display: block; }
 .ov-row .name { color: var(--text); }
@@ -521,10 +537,8 @@ body {
 .row.drop-before::after { top: -1px; }
 .row.drop-after::after { bottom: -1px; }
 .row.drop-on { background: var(--drop); outline: 1px solid var(--accent); outline-offset: -1px; }
-/* No size override here any more: the mark is em-based, so a sidebar row's own
-   type size already makes it a size down from a card's. See .status. */
 /* mono for THINGS (session names, counts), sans for commentary. Member names
-   speak in the muted voice — state (dot) and place (frame) carry the color. */
+   speak in the muted voice — the CLI tile's state frame carries the color. */
 .row .name { flex: 1; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row.active .name, .row:hover .name { color: var(--text); }
 .row .rename { flex: 1; font: inherit; font-family: var(--font-mono); font-size: 11.5px; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
@@ -635,7 +649,7 @@ body {
 .controls .seg button { font-family: var(--font-mono); font-size: 11.5px; padding: 4px 8px; }
 
 .legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 16px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--muted); }
-.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend > span { display: inline-flex; align-items: center; gap: 5px; }
 /* archived toggle: a quiet custom checkbox speaking the app's language */
 .legend-arch { position: relative; display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
 .legend-arch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
@@ -644,7 +658,7 @@ body {
 .legend-arch input:checked ~ .lbox { background: var(--accent); border-color: var(--accent); }
 .legend-arch input:checked ~ .lbox::after { content: ''; width: 5px; height: 2.5px; border-left: 1.5px solid var(--accent-fg); border-bottom: 1.5px solid var(--accent-fg); transform: rotate(-45deg) translateY(-1px); }
 /* archived rows/tiles: present but visibly parked */
-.row.archived .name, .row.archived .cli-logo { opacity: 0.45; }
+.row.archived .name, .row.archived .state-logo, .row.archived > .cli-logo { opacity: 0.45; }
 .ovt-tile.archived .ovt-head { opacity: 0.55; }
 .arch-note { font-size: 10.5px; color: var(--muted); font-style: italic; text-align: center; padding: 14px 12px 4px; margin-top: auto; }
 
@@ -812,9 +826,6 @@ body {
    server/reader-info.test.mjs — all four, in both views. */
 .pane-head .ph-btn::before { content: ''; position: absolute; inset: -4px -4px; }
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
-/* The state mark leads the name, inside the centred title: it never shrinks and
-   never wraps, so the name gives way first (see .ph-name). */
-.pane-head .ph-title > .status { flex: none; margin-right: 1px; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }
 /* The conversation's facts, behind one `i` in the pane header — the same place
