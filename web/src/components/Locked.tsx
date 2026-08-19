@@ -64,6 +64,7 @@ function MockSidebar() {
       </div>
       <div className="legend">
         <span><StateLogo cli="shell" state="working" size={12} tint="var(--muted)" /> working</span>
+        <span><StateLogo cli="shell" state="waiting" size={12} tint="var(--muted)" /> your turn</span>
         <span><StateLogo cli="shell" state="idle" size={12} tint="var(--muted)" /> idle</span>
         <span><StateLogo cli="shell" state="stopped" size={12} tint="var(--muted)" /> stopped</span>
       </div>

@@ -1,5 +1,4 @@
-// Browser proof for the selected icon-frame status at its two production sizes.
-// am-test: manual — needs Chromium; run with `npm run test:render`.
+// Browser proof for all four icon-frame states at the two production sizes.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -24,6 +23,7 @@ await build({
       import StateLogo from './src/components/StateLogo.tsx';
       const States = ({ size }) => <>
         <StateLogo cli="codex" state="working" size={size} tint="#5eb6a6" />
+        <StateLogo cli="codex" state="waiting" size={size} tint="#5eb6a6" />
         <StateLogo cli="codex" state="idle" size={size} tint="#5eb6a6" />
         <StateLogo cli="codex" state="stopped" size={size} tint="#5eb6a6" />
       </>;
@@ -61,7 +61,8 @@ try {
           state: el.classList[1], box: [box.width, box.height],
           viewBox: svg.getAttribute('viewBox'), pathLength: rect.getAttribute('pathLength'),
           rect: [rect.x.baseVal.value, rect.y.baseVal.value, rect.width.baseVal.value, rect.height.baseVal.value],
-          stroke: rs.strokeWidth, dash: rs.strokeDasharray, animation: rs.animationName,
+          stroke: rs.strokeWidth, dash: rs.strokeDasharray, linecap: rs.strokeLinecap,
+          animation: rs.animationName,
           color: es.color, animations: el.getAnimations({ subtree: true }).length,
         };
       });
@@ -70,7 +71,7 @@ try {
 
     for (const [surface, size] of [['sidebar', 18], ['header', 22]]) {
       const states = result[surface];
-      assert.equal(states.length, 3);
+      assert.equal(states.length, 4);
       for (const mark of states) {
         assert.deepEqual(mark.box, [size, size], `${theme} ${surface} ${mark.state} box`);
         assert.equal(mark.viewBox, `0 0 ${size} ${size}`);
@@ -78,15 +79,22 @@ try {
         assert.deepEqual(mark.rect, [0.5, 0.5, size - 1, size - 1]);
         assert.equal(mark.stroke, '1px');
       }
-      assert.match(states[0].dash, /20px,? 4px/);
-      assert.equal(states[0].animation, 'state-logo-trace');
-      assert.equal(states[0].animations, 1);
-      for (const mark of states.slice(1)) {
+      const byState = Object.fromEntries(states.map((mark) => [mark.state, mark]));
+      assert.match(byState.working.dash, /20px,? 4px/);
+      assert.equal(byState.working.animation, 'state-logo-trace');
+      assert.equal(byState.working.animations, 1);
+      assert.match(byState.waiting.dash, /2px,? 4px/);
+      assert.equal(byState.waiting.linecap, 'round');
+      assert.equal(byState.idle.dash, 'none');
+      assert.equal(byState.stopped.dash, 'none');
+      for (const mark of [byState.waiting, byState.idle, byState.stopped]) {
         assert.equal(mark.animation, 'none');
         assert.equal(mark.animations, 0);
       }
-      assert.equal(states[0].color, states[1].color, `${theme} working and idle share accent`);
-      assert.notEqual(states[1].color, states[2].color, `${theme} stopped is muted`);
+      assert.equal(byState.working.color, byState.waiting.color, `${theme} working and waiting share accent`);
+      assert.equal(byState.waiting.color, byState.idle.color, `${theme} waiting and idle share accent hue`);
+      assert.notEqual(byState.idle.color, byState.stopped.color, `${theme} stopped is muted`);
+      assert.notEqual(byState.waiting.dash, byState.idle.dash, `${theme} your-turn and idle remain distinct`);
     }
     await page.close();
   }
@@ -95,4 +103,4 @@ try {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
-console.log('state-logo render: exact frame geometry and motion pass in both themes');
+console.log('state-logo render: four distinct states pass at both sizes and in both themes');

@@ -9,7 +9,7 @@ import SettingsView from './components/SettingsView';
 import NewSession from './components/NewSession';
 import LayoutPicker from './components/LayoutPicker';
 import ShareDialog from './components/ShareDialog';
-import Logo from './components/Logo';
+import StateLogo from './components/StateLogo';
 import Overview from './components/Overview';
 import Locked from './components/Locked';
 import BackupBanner from './components/BackupBanner';
@@ -1122,8 +1122,7 @@ export default function App() {
               <div className="mchips">
                 {groupSessions.map((s, i) => (
                   <button key={s.id} className={`mchip${i === page ? ' on' : ''}`} title={s.name} onClick={() => setPage(i)}>
-                    <Logo cli={s.cli} size={13} tint={cliMap[s.cli]?.color} />
-                    <span className={`status ${s.state}`} />
+                    <StateLogo cli={s.cli} state={s.state} size={13} tint={cliMap[s.cli]?.color} />
                   </button>
                 ))}
               </div>
