@@ -523,7 +523,7 @@ export type SaveState = {
 // The viewer for one file. Kinds it can't render fall back to an honest
 // "download it instead" card rather than an empty box. The view mode (`raw`,
 // `scripts`) belongs to the pane, which draws the toggles in its info strip.
-function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
+export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   sessionId: string; path: string; zoom: number; raw: boolean; scripts: boolean;
   onInfo: (info: ViewInfo) => void;
   onSaved?: () => void;
@@ -853,15 +853,22 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
     );
   };
 
-  // Only the code viewer follows the shared zoom; rendered markdown, images and
-  // framed pages carry their own typography.
+  // Text previews follow the shared zoom. Code/source keeps its compact 12.5px
+  // base; rendered markdown keeps its 14px reading base, with its nested type
+  // expressed in em below so headings, code and tables move with it. A rendered
+  // trace already spends the same zoom inside TraceView (13px, like the session
+  // reader). Images and PDF pages keep their intrinsic scale: a text-size control
+  // should not enlarge pixels. Rendered HTML lives in an opaque sandboxed frame,
+  // so the parent cannot safely reach in and restyle its document; its Source
+  // view still zooms as code.
   const isCode = meta.kind === 'text'
     || (raw && (meta.kind === 'markdown' || meta.kind === 'html' || meta.kind === 'trace'));
+  const textBase = isCode ? 12.5 : (meta.kind === 'markdown' ? 14 : null);
   // A capped read is a partial answer, so say so where the text ends rather than
   // only as a chip in the strip — and offer the whole file in the same breath.
   const headOnly = !!meta.truncated && (isCode || meta.kind === 'markdown');
   return (
-    <div className="fv-body" style={isCode ? { fontSize: `${(12.5 * zoom) / 100}px` } : undefined}>
+    <div className="fv-body" style={textBase ? { fontSize: `${(textBase * zoom) / 100}px` } : undefined}>
       {body()}
       {headOnly && (
         <div className="fv-foot">
