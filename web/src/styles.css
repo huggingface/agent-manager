@@ -1447,11 +1447,18 @@ a.btn-ghost { text-decoration: none; }
 .al-map { display: flex; flex-direction: column; gap: 8px; }
 .al-mapbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .al-scale button, .al-zoom button { padding: 3px 9px; font-size: 11px; }
-.al-zoom button { min-width: 26px; }
-.al-zoom-lvl { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.al-reset { padding: 3px 9px; font-size: 11px; }
+.al-window { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .al-scale-note { font-size: 11px; color: var(--muted); }
 .al-mapwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); padding: 6px; }
-.al-map svg { display: block; width: 100%; min-width: 620px; height: auto; }
+/* Drag horizontally to zoom into a slice of the axis. `col-resize` is the
+   cursor every charting brush uses; on a touch device none of this applies —
+   see the pointerType check in ApiLog.tsx — so the frame keeps its own
+   sideways scroll and the page keeps scrolling down. */
+.al-map svg { display: block; width: 100%; min-width: 620px; height: auto; cursor: col-resize; }
+.al-svg.brushing { user-select: none; }
+.al-brush { fill: color-mix(in srgb, var(--accent) 14%, transparent); stroke: var(--accent); stroke-width: 1; }
+.al-brush-lbl { font-family: var(--font-mono); font-size: 8px; fill: var(--accent); }
 .al-lane { stroke: var(--border); stroke-width: 1; }
 /* before the agent existed: barely there, so the line cannot claim it did */
 .al-lane.unborn { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.45; }

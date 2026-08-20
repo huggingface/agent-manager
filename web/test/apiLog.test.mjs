@@ -93,7 +93,7 @@ const operations = [
     status: 200, ok: true, durationMs: 41, result: { ok: true } },
   anonymousWait,
   // manager waits on the agent it just created; 258s of being blocked
-  { id: 'w9', at: at(2), method: 'GET', path: '/api/agents/poet-1/wait',
+  { id: 'w-poet', at: at(2), method: 'GET', path: '/api/agents/poet-1/wait',
     origin: { id: 'manager', type: 'agent', name: 'manager' },
     target: { id: 'poet-1', name: 'poet', cli: 'claude' },
     status: 200, ok: true, durationMs: 258000,
@@ -165,8 +165,12 @@ const check = (what, fn) => {
 };
 
 const browser = await chromium.launch(chromiumLaunchOptions());
+// A duplicate React key silently duplicates DOM nodes, which is how a fixture id
+// collision looked like a zoom bug for twenty minutes. Fail on it instead.
+const warnings = [];
 const open = async (width) => {
   const page = await browser.newPage({ viewport: { width, height: 900 } });
+  page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') warnings.push(m.text().slice(0, 120)); });
   await page.setContent(`<style>${css}</style><div id="root"></div>`);
   await page.addScriptTag({ path: bundle });
   await page.waitForFunction(() => !!document.querySelector('.al-tbl tbody tr'));
@@ -493,10 +497,7 @@ try {
     document.querySelectorAll('.al-scale button')[1].click();
     await new Promise((r) => setTimeout(r, 120));
     const clock = gaps([...new Set(xs())].sort((a, b) => a - b));
-    const before = svgWidth();
-    document.querySelector('.al-zoom button:last-child').click();
-    await new Promise((r) => setTimeout(r, 120));
-    return { even, clock, before, zoomed: svgWidth(), level: document.querySelector('.al-zoom-lvl')?.textContent };
+    return { even, clock, width: svgWidth() };
   });
   console.log('\ntwo ways to lay out the same calls');
   // Not every event draws an arrow, so consecutive arrows sit one OR SEVERAL
@@ -516,12 +517,107 @@ try {
       assert.ok(clockStep < evenStep / 4, `clock step ${clockStep}px vs even ${evenStep}px`);
       assert.ok(Math.max(...scaled.clock) > evenStep * 2, `widest clock gap ${Math.max(...scaled.clock)}px`);
     });
-  check('zoom widens the drawing inside the frame that already scrolls',
+  check('and the drawing still fits its frame in both — zoom is a window, not a stretch',
+    () => assert.equal(scaled.width, ''));
+
+  // "i meant more zooming into specific regions of the x-axis … drag
+  // horizontally a window to zoom in". Driven with a real mouse, not synthetic
+  // events, because pointer capture and the click that follows a drag are
+  // exactly what has to behave.
+  const { allMarks, fullAxisLeft } = await page.evaluate(() => ({
+    allMarks: document.querySelectorAll('.al-arrowg, circle.al-dot').length,
+    fullAxisLeft: document.querySelectorAll('.al-axis')[0]?.textContent,
+  }));
+  // release whatever the card tests pinned, so "the drag did not select" is
+  // about the drag rather than about leftover state
+  if (await page.$('.al-card-x')) await page.click('.al-card-x');
+  const plot = await page.evaluate(() => {
+    const box = document.querySelector('.al-map svg').getBoundingClientRect();
+    return { left: box.left, top: box.top, width: box.width, height: box.height };
+  });
+  const atFrac = (f) => plot.left + plot.width * f;
+  const midY = plot.top + plot.height * 0.35;
+  await page.mouse.move(atFrac(0.35), midY);
+  await page.mouse.down();
+  await page.mouse.move(atFrac(0.5), midY, { steps: 6 });
+  const midDrag = await page.evaluate(() => ({
+    brush: !!document.querySelector('.al-brush'),
+    label: document.querySelector('.al-brush-lbl')?.textContent,
+  }));
+  await page.mouse.move(atFrac(0.75), midY, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  const zoomed = await page.evaluate(() => ({
+    brush: !!document.querySelector('.al-brush'),
+    window: document.querySelector('.al-window')?.textContent?.trim(),
+    reset: !!document.querySelector('.al-reset'),
+    marks: document.querySelectorAll('.al-arrowg, circle.al-dot').length,
+    axisLeft: document.querySelectorAll('.al-axis')[0]?.textContent,
+    pinned: !!document.querySelector('.al-card.pinned'),
+  }));
+  console.log('\ndrag across the plot to zoom');
+  check('the selection is drawn while dragging, with the range on it',
+    () => { assert.ok(midDrag.brush); assert.match(midDrag.label || '', /\d\d:\d\d:\d\d → \d\d:\d\d:\d\d/, `label: ${midDrag.label}`); });
+  check('releasing keeps that window, and says which one it is',
     () => {
-      assert.equal(scaled.before, '100%');
-      assert.equal(scaled.zoomed, '150%');
-      assert.equal(scaled.level, '1.5×');
+      assert.ok(!zoomed.brush, 'the selection rectangle stayed up');
+      assert.match(zoomed.window || '', /\d\d:\d\d:\d\d → \d\d:\d\d:\d\d · \d+ of \d+ calls/, `window: ${zoomed.window}`);
     });
+  check('there are fewer calls in view than before', () => assert.ok(zoomed.marks < allMarks, `${zoomed.marks} of ${allMarks}`));
+  check('the axis names the slice, not the whole run', () => assert.notEqual(zoomed.axisLeft, fullAxisLeft));
+  check('and a drag that started on a mark did not also select it', () => assert.ok(!zoomed.pinned));
+  check('there is a way back out', () => assert.ok(zoomed.reset));
+
+  await page.click('.al-reset');
+  await page.waitForTimeout(120);
+  const out = await page.evaluate(() => ({
+    marks: document.querySelectorAll('.al-arrowg, circle.al-dot').length,
+    window: !!document.querySelector('.al-window'),
+    axisLeft: document.querySelectorAll('.al-axis')[0]?.textContent,
+  }));
+  check('reset puts everything back', () => {
+    assert.equal(out.marks, allMarks, `${out.marks} marks after reset vs ${allMarks} before`);
+    assert.ok(!out.window);
+    assert.equal(out.axisLeft, fullAxisLeft);
+  });
+
+  // and again, cleared by double-click
+  await page.mouse.move(atFrac(0.3), midY);
+  await page.mouse.down();
+  await page.mouse.move(atFrac(0.6), midY, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(120);
+  const beforeDouble = await page.evaluate(() => !!document.querySelector('.al-window'));
+  await page.mouse.dblclick(atFrac(0.5), midY);
+  await page.waitForTimeout(120);
+  const afterDouble = await page.evaluate(() => !!document.querySelector('.al-window'));
+  check('double-click clears it too', () => { assert.ok(beforeDouble); assert.ok(!afterDouble); });
+  // A horizontal drag on a phone is how you scroll — the frame scrolls sideways
+  // and the page scrolls down — so brushing is mouse and pen only rather than
+  // competing for the gesture.
+  const touched = await page.evaluate(async () => {
+    const svg = document.querySelector('.al-map svg');
+    const box = svg.getBoundingClientRect();
+    const at = (f) => box.left + box.width * f;
+    const opts = (x) => ({ pointerType: 'touch', pointerId: 7, clientX: x, clientY: box.top + 20, bubbles: true, isPrimary: true });
+    svg.dispatchEvent(new PointerEvent('pointerdown', opts(at(0.3))));
+    svg.dispatchEvent(new PointerEvent('pointermove', opts(at(0.6))));
+    const during = !!document.querySelector('.al-brush');
+    svg.dispatchEvent(new PointerEvent('pointerup', opts(at(0.6))));
+    await new Promise((r) => setTimeout(r, 100));
+    return { during, zoomed: !!document.querySelector('.al-window'), touchAction: getComputedStyle(svg).touchAction };
+  });
+  check('a touch drag does not brush, and the page keeps its own scrolling',
+    () => {
+      assert.ok(!touched.during, 'a touch started a selection');
+      assert.ok(!touched.zoomed, 'a touch zoomed the axis');
+      assert.notEqual(touched.touchAction, 'none');
+    });
+
+  // A duplicate key silently duplicates DOM nodes — a fixture id collision once
+  // read exactly like a zoom bug. Nothing in the map should be warning.
+  check('and the map renders without React complaining',
+    () => assert.deepEqual(warnings, [], warnings.join(' // ')));
   await page.close();
 } finally {
   await browser.close();

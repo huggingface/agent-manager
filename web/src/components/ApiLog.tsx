@@ -249,8 +249,6 @@ const FOOT = 40;       // axis + legend, both inside the frame
 const MAX_LANES = 14;
 const MAX_MARKS = 60;
 
-const ZOOMS = [1, 1.5, 2, 3, 4, 6];
-
 function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, string> }) {
   // Two ways to lay out the same calls. RANKED spaces events evenly, which is
   // what makes a sparse trace readable — a night of nothing does not eat the
@@ -258,7 +256,16 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
   // three prompts went out in the same second. Neither is a substitute for the
   // other, so both exist and ranked is the default.
   const [byClock, setByClock] = useState(false);
-  const [zoom, setZoom] = useState(1);
+  // The window you are looking at, in domain units [0,1] of all the data. null
+  // is "everything". Drag horizontally across the plot to set it — the brush
+  // every charting library has — double-click or the button to clear it.
+  const [win, setWin] = useState<{ a: number; b: number } | null>(null);
+  const [brush, setBrush] = useState<{ from: number; to: number } | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const dragRef = useRef<{ from: number; moved: boolean } | null>(null);
+  // A drag that happened to start on a mark must not also select it: the click
+  // arrives after the pointer is up, so it has to be swallowed once.
+  const swallowClick = useRef(false);
   // Hovering previews an entry; CLICKING keeps it. Both are needed: the card is
   // fixed below the plot and its JSON scrolls, so clearing on the mark's
   // mouseleave meant the pointer could never reach the card — the lower half of
@@ -269,6 +276,7 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
   const hideTimer = useRef<number>();
   useEffect(() => () => window.clearTimeout(hideTimer.current), []);
   const preview = (op: api.Operation) => {
+    if (dragRef.current) return;      // dragging out a window, not reading an entry
     window.clearTimeout(hideTimer.current);
     setSel((cur) => (cur?.pinned ? cur : { op, pinned: false }));
   };
@@ -276,10 +284,14 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
     window.clearTimeout(hideTimer.current);
     hideTimer.current = window.setTimeout(() => setSel((cur) => (cur?.pinned ? cur : null)), 220);
   };
-  const pin = (op: api.Operation) => { window.clearTimeout(hideTimer.current); setSel({ op, pinned: true }); };
+  const pin = (op: api.Operation) => {
+    if (swallowClick.current) { swallowClick.current = false; return; }
+    window.clearTimeout(hideTimer.current);
+    setSel({ op, pinned: true });
+  };
   const hover = sel?.op ?? null;
 
-  const { lanes, marks, born, from, to, dropped } = useMemo(() => {
+  const { lanes, marks, born, axis, dropped } = useMemo(() => {
     const recent = rows.slice(0, MAX_MARKS).slice().reverse();  // oldest first, left to right
     // Lanes: everything that CALLS above everything that is only called. Then a
     // prompt points down the picture and a resolved wait points back up it,
@@ -333,14 +345,24 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
       const c = created(op);
       if (c && !born.has(c.name)) born.set(c.name, x);
     }
+    // x → time, for labelling any point of the axis (including a brushed edge
+    // that falls between two events). In real time this is a straight line; in
+    // ranked mode it is piecewise, one segment per event.
+    const axis: Array<{ x: number; t: number }> = [];
+    events.forEach((e, i) => {
+      const x = byClock
+        ? (t1 === t0 ? 0.5 : (e.t - t0) / (t1 - t0))
+        : (events.length < 2 ? 0.5 : i / (events.length - 1));
+      if (!axis.length || axis[axis.length - 1].x !== x) axis.push({ x, t: e.t });
+    });
     return {
       lanes,
       marks,
       born,
-      // The axis spans the EVENTS on screen, so a wait that resolved after the
-      // last request still ends inside the frame rather than off it.
-      from: events.length ? new Date(events[0].t).toISOString() : '',
-      to: events.length ? new Date(events[events.length - 1].t).toISOString() : '',
+      // The axis spans the EVENTS on screen — so a wait that resolved after the
+      // last request still ends inside the frame — and `axis` is what turns any
+      // point of it back into a time, for the labels and the brush readout.
+      axis,
       dropped: Math.max(0, rows.length - MAX_MARKS),
     };
   }, [rows, names, byClock]);
@@ -350,7 +372,68 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
   const width = 760;
   const height = TOP + lanes.length * LANE_H + FOOT;
   const laneY = (i: number) => TOP + i * LANE_H + 6;
-  const xOf = (t: number) => LEFT + t * (width - LEFT - RIGHT);
+  const PLOT = width - LEFT - RIGHT;
+  // Everything is placed in DOMAIN units and then mapped through the window, so
+  // zooming is one function rather than a special case in every mark.
+  const lo = win ? win.a : 0;
+  const hi = win ? win.b : 1;
+  const inWin = (t: number) => t >= lo - 1e-9 && t <= hi + 1e-9;
+  const xOf = (t: number) => LEFT + ((t - lo) / (hi - lo)) * PLOT;
+  const clampX = (t: number) => LEFT + Math.min(1, Math.max(0, (t - lo) / (hi - lo))) * PLOT;
+  // A time for any point on the axis, so a brushed edge can be named.
+  const timeAt = (t: number) => {
+    if (!axis.length) return 0;
+    if (t <= axis[0].x) return axis[0].t;
+    for (let i = 1; i < axis.length; i++) {
+      if (t <= axis[i].x) {
+        const span = axis[i].x - axis[i - 1].x || 1;
+        return axis[i - 1].t + ((t - axis[i - 1].x) / span) * (axis[i].t - axis[i - 1].t);
+      }
+    }
+    return axis[axis.length - 1].t;
+  };
+  const clock = (ms: number) => HHMMSS(new Date(ms).toISOString());
+  // A wait counts as visible when any part of the stretch it blocked for is in
+  // the window, so zooming into the middle of a five-minute wait still shows it.
+  const visible = marks.filter((m) => inWin(m.x) || (m.x0 !== undefined && m.x0 <= hi && m.x >= lo));
+  const shown = visible.length;
+
+  // Brushing is MOUSE (and pen) only. A horizontal drag on a phone is how you
+  // scroll — the frame scrolls sideways and the page scrolls down — so touch is
+  // left alone entirely rather than fighting it for the gesture.
+  const domainAt = (clientX: number) => {
+    const box = svgRef.current?.getBoundingClientRect();
+    if (!box) return 0;
+    // through the SVG's own box, so a frame scrolled sideways needs no correction
+    const svgX = ((clientX - box.left) / box.width) * width;
+    return lo + Math.min(1, Math.max(0, (svgX - LEFT) / PLOT)) * (hi - lo);
+  };
+  const onDown = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (e.pointerType === 'touch' || e.button !== 0) return;
+    dragRef.current = { from: domainAt(e.clientX), moved: false };
+    svgRef.current?.setPointerCapture(e.pointerId);
+  };
+  const onMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const to = domainAt(e.clientX);
+    // a few pixels of slop, so a click on a mark stays a click
+    if (!d.moved && Math.abs(to - d.from) * PLOT < 5) return;
+    d.moved = true;
+    setBrush({ from: d.from, to });
+  };
+  const onUp = (e: React.PointerEvent<SVGSVGElement>) => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    setBrush(null);
+    swallowClick.current = !!d?.moved;
+    if (!d?.moved) return;
+    const to = domainAt(e.clientX);
+    const a = Math.min(d.from, to);
+    const b = Math.max(d.from, to);
+    // a window narrower than a couple of pixels is a slip, not an intention
+    if ((b - a) * PLOT > 4) setWin({ a, b });
+  };
 
 
   return (
@@ -360,20 +443,30 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
           <button className={byClock ? '' : 'on'} onClick={() => setByClock(false)}>even</button>
           <button className={byClock ? 'on' : ''} onClick={() => setByClock(true)}>real time</button>
         </div>
-        {/* Zoom is horizontal only: it widens the drawing inside a frame that
-            already scrolls sideways, so the lane cap and the 30px spacing are
-            untouched and nothing can overlap vertically at any level. */}
-        <div className="seg al-zoom">
-          <button disabled={zoom === ZOOMS[0]} onClick={() => setZoom((z) => ZOOMS[Math.max(0, ZOOMS.indexOf(z) - 1)])} aria-label="Zoom out">−</button>
-          <button onClick={() => setZoom(1)} className="al-zoom-lvl">{zoom}×</button>
-          <button disabled={zoom === ZOOMS[ZOOMS.length - 1]} onClick={() => setZoom((z) => ZOOMS[Math.min(ZOOMS.length - 1, ZOOMS.indexOf(z) + 1)])} aria-label="Zoom in">+</button>
-        </div>
-        <span className="al-scale-note">
-          {byClock ? 'spaced by the clock — zoom to open up a burst' : 'evenly spaced, one step per event'}
-        </span>
+        {win ? (
+          <>
+            <button className="btn-ghost al-reset" onClick={() => setWin(null)}>reset zoom</button>
+            <span className="al-scale-note al-window">
+              {clock(timeAt(win.a))} → {clock(timeAt(win.b))} · {shown} of {marks.length} calls
+            </span>
+          </>
+        ) : (
+          <span className="al-scale-note">
+            {byClock ? 'spaced by the clock' : 'evenly spaced, one step per event'} · drag across the plot to zoom
+          </span>
+        )}
       </div>
       <div className="al-mapwrap">
-        <svg viewBox={`0 0 ${width} ${height}`} style={{ width: `${100 * zoom}%` }} role="img"
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${width} ${height}`}
+          className={`al-svg${brush ? ' brushing' : ''}`}
+          onPointerDown={onDown}
+          onPointerMove={onMove}
+          onPointerUp={onUp}
+          onPointerCancel={onUp}
+          onDoubleClick={() => setWin(null)}
+          role="img"
           aria-label="Swimlanes: one lane per agent, prompts drawn from caller to target, resolved waits back the other way, and a lane drawn faint until the agent is created.">
           <defs>
             <marker id="al-ar" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="4.5" markerHeight="4.5" orient="auto">
@@ -388,17 +481,23 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
             return (
               <g key={name}>
                 <text x="2" y={laneY(i) - 5} className={`al-lane-lbl${b !== undefined ? ' new' : ''}`}>{name}</text>
-                {b !== undefined && <line x1="2" y1={laneY(i)} x2={xOf(b)} y2={laneY(i)} className="al-lane unborn" />}
-                <line x1={b === undefined ? 2 : xOf(b)} y1={laneY(i)} x2={width - 4} y2={laneY(i)} className="al-lane" />
+                {/* faint before the agent existed, solid after — clipped to the
+                    window, so zooming past the birth shows a solid lane and
+                    zooming before it shows a dashed one. */}
+                {b !== undefined && b > lo && <line x1={LEFT} y1={laneY(i)} x2={clampX(b)} y2={laneY(i)} className="al-lane unborn" />}
+                {b !== undefined && b > lo && <line x1="2" y1={laneY(i)} x2={LEFT} y2={laneY(i)} className="al-lane unborn" />}
+                {(b === undefined || b <= hi) && (
+                  <line x1={b === undefined || b <= lo ? 2 : clampX(b)} y1={laneY(i)} x2={width - 4} y2={laneY(i)} className="al-lane" />
+                )}
               </g>
             );
           })}
-          {marks.map(({ op, x, x0, a, b }) => {
+          {visible.map(({ op, x, x0, a, b }) => {
             const back = isWait(op);
             const isNew = !!created(op);
             const src = back ? (b >= 0 ? b : a) : a;
             const dst = back ? a : b;
-            const px = xOf(x);
+            const px = clampX(x);
             const on = hover?.id === op.id;
             const cls = `${back ? ' back' : ''}${op.ok ? '' : ' bad'}${isNew ? ' new' : ''}`;
             if (src < 0 || dst < 0 || src === dst) {
@@ -419,7 +518,7 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
                 <title>{`${HHMMSS(op.at)} ${op.method} ${op.path}`}</title>
                 {/* how long the caller was blocked, on the caller's own lane */}
                 {back && x0 !== undefined && x0 < x && (
-                  <line x1={xOf(x0)} y1={laneY(dst)} x2={px} y2={laneY(dst)} className="al-held" />
+                  <line x1={clampX(x0)} y1={laneY(dst)} x2={px} y2={laneY(dst)} className="al-held" />
                 )}
                 <line x1={px} y1={y1} x2={px} y2={y2}
                   className={`al-arrow${cls}`}
@@ -434,9 +533,29 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
               </g>
             );
           })}
-          {/* axis and legend, both inside the frame */}
-          {from && <text x="2" y={height - 22} className="al-axis">{`${DAY(from)} ${HHMMSS(from).slice(0, 5)} →`}</text>}
-          {to && <text x={width - 4} y={height - 22} textAnchor="end" className="al-axis">{HHMMSS(to).slice(0, 5)}</text>}
+          {/* what is being dragged out right now */}
+          {brush && (
+            <g className="al-brushg">
+              <rect
+                x={clampX(Math.min(brush.from, brush.to))}
+                y={TOP - 8}
+                width={Math.max(1, Math.abs(clampX(brush.to) - clampX(brush.from)))}
+                height={lanes.length * LANE_H + 10}
+                className="al-brush"
+              />
+              <text x={clampX(Math.min(brush.from, brush.to)) + 3} y={TOP - 11} className="al-brush-lbl">
+                {clock(timeAt(Math.min(brush.from, brush.to)))} → {clock(timeAt(Math.max(brush.from, brush.to)))}
+              </text>
+            </g>
+          )}
+          {/* axis and legend, both inside the frame. The ends follow the window,
+              so a zoomed plot says which slice of time it is showing. */}
+          <text x="2" y={height - 22} className="al-axis">
+            {`${DAY(new Date(timeAt(lo)).toISOString())} ${clock(timeAt(lo)).slice(0, 5)} →`}
+          </text>
+          <text x={width - 4} y={height - 22} textAnchor="end" className="al-axis">
+            {clock(timeAt(hi)).slice(0, 5)}
+          </text>
           <g className="al-key">
             <line x1="2" y1={height - 7} x2="18" y2={height - 7} className="al-arrow" markerEnd="url(#al-ar)" />
             <text x="22" y={height - 4}>prompt</text>
