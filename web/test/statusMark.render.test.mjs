@@ -24,11 +24,13 @@ const geistMono = fs.readFileSync(path.join(HERE, '../public/fonts/GeistMono.wof
 // The source stylesheet points at /fonts, which setContent cannot serve. Put an
 // otherwise identical face after it so this test measures the bundled font,
 // independent of whichever mono font happens to be installed on the runner.
+// Both tokens are set: the marks read --font-mark (so Settings → Appearance
+// cannot move them) and the rest of the app reads --font-mono.
 const embeddedFont = `@font-face {
   font-family: 'Geist Mono Test'; font-style: normal; font-weight: 100 900;
   src: url(data:font/woff2;base64,${geistMono}) format('woff2');
 }
-:root { --font-mono: 'Geist Mono Test'; }
+:root { --font-mono: 'Geist Mono Test'; --font-mark: 'Geist Mono Test'; }
 .parity-sidebar { display:flex; align-items:center; font-weight:400; }
 .parity-overview { display:flex; align-items:center; font-weight:700; }
 .mark-baseline { display:inline-block; width:0; height:0; padding:0; margin:0; }
@@ -174,7 +176,48 @@ const { marks, ink, optics } = await page.evaluate((ids) => {
   'header-working', 'header-waiting', 'overview-busy',
   'reader-working',
 ]);
+console.log('\nand a typeface change cannot reach them');
+// The point of --font-mark. Settings → Appearance swaps --font-sans and
+// --font-mono for the whole interface; the marks are measured geometry and must
+// not move with it. Swapping the mono font to something with quite different
+// metrics and re-measuring is the only way to know that stayed true.
+{
+  const after = await page.evaluate(async () => {
+    document.documentElement.style.setProperty('--font-mono', 'Times New Roman, serif');
+    await document.fonts.ready;
+    const out = {};
+    for (const id of ['sidebar-working', 'sidebar-waiting', 'overview-busy', 'reader-working']) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      const b = getComputedStyle(el, '::before');
+      const r = el.getBoundingClientRect();
+      out[id] = {
+        family: b.fontFamily, size: b.fontSize,
+        cell: [+r.width.toFixed(4), +r.height.toFixed(4)],
+        left: b.left, top: b.top, width: b.width, height: b.height, transform: b.transform,
+      };
+    }
+    return out;
+  });
+  for (const [id, m] of Object.entries(after)) {
+    check(`${id} keeps its own font when --font-mono changes`, () => {
+      assert.match(m.family, /Geist Mono Test/, `it followed --font-mono to ${m.family}`);
+      assert.equal(m.size, '12.5px');
+    });
+    check(`${id} keeps the shared cell when --font-mono changes`, () => {
+      // the MARK's cell, not the row's: .ov-busy and .cx-running are lines of
+      // text whose box follows the surrounding font, and should. What must not
+      // move is the ::before the glyph is drawn in — 1.2em x 1.05em of the
+      // pinned 12.5px, which is 15 x 13.125px whatever the interface is set in.
+      assert.equal(m.width, '15px', `the cell width moved to ${m.width}`);
+      assert.equal(m.height, '13.125px', `the cell height moved to ${m.height}`);
+    });
+  }
+  assert.ok(Object.keys(after).length >= 3, 'expected the sidebar, Overview and reader marks in the fixture');
+}
+
 await browser.close();
+
 
 const round = (xs) => xs.map((n) => Math.round(n * 100) / 100);
 const close = (actual, expected, tolerance = 0.07) => {

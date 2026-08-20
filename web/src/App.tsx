@@ -17,6 +17,11 @@ import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
+import { readStored, writeStored } from './lib/stored';
+import {
+  readPalette, readTypeface, writePalette, writeTypeface,
+  type PaletteId, type TypefaceId,
+} from './lib/appearance';
 import { hiddenSessionIds } from './lib/overviewHidden';
 import { useReaderBatch } from './lib/readerBatch';
 import { paneOwnsBack } from './lib/mobileBack';
@@ -77,24 +82,8 @@ function initialTheme(): 'light' | 'dark' {
 // always a cold mount, not a resume. Without this, the restored app has no
 // selection and mobile opens on the sidebar list, however deep in an agent you
 // were. The URL can't carry it (the Hub controls the iframe's src), so it has
-// to be storage.
-//
-// Storage can be denied outright — private mode, or a third-party iframe under
-// cross-site tracking prevention (the Hub embeds this Space in exactly such an
-// iframe). Reading it then THROWS rather than returning null, so every access in
-// this file goes through these two: a raw localStorage call in a useState
-// initializer took the whole app down to its error boundary — "Something broke in
-// the UI" — for a preference as incidental as which zoom you last used. A
-// "don't remember" fallback, never a crash, so both sides swallow.
-const readStored = (k: string): string | null => {
-  try { return localStorage.getItem(k); } catch { return null; }
-};
-const writeStored = (k: string, v: string | null) => {
-  try {
-    if (v === null) localStorage.removeItem(k);
-    else localStorage.setItem(k, v);
-  } catch { /* storage denied — the selection just won't survive a reload */ }
-};
+// to be storage. readStored/writeStored live in lib/stored.ts, because the
+// appearance settings persist through the same guarded pair.
 
 export default function App() {
   const [clis, setClis] = useState<Cli[]>([]);
@@ -105,6 +94,12 @@ export default function App() {
   const [activeRef, setActiveRef] = useState<string | null>(() => readStored('am-active-ref'));
   const [focusedId, setFocusedId] = useState<string | null>(() => readStored('am-focused-id'));
   const [theme, setTheme] = useState<'light' | 'dark'>(initialTheme);
+  // What the whole interface looks like. Both are read at boot the way the theme
+  // is, and both are only ever a data attribute on <html> — see lib/appearance.ts.
+  const [palette, setPaletteRaw] = useState<PaletteId>(readPalette);
+  const [typeface, setTypefaceRaw] = useState<TypefaceId>(readTypeface);
+  const setPalette = (v: PaletteId) => { setPaletteRaw(v); writePalette(v); };
+  const setTypeface = (v: TypefaceId) => { setTypefaceRaw(v); writeTypeface(v); };
   const [dropMain, setDropMain] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsPage, setSettingsPage] = useState<SettingsPage>('general');
@@ -185,6 +180,9 @@ export default function App() {
     document.documentElement.dataset.theme = theme;
     writeStored('am-theme', theme);
   }, [theme]);
+
+  useEffect(() => { document.documentElement.dataset.palette = palette; }, [palette]);
+  useEffect(() => { document.documentElement.dataset.typeface = typeface; }, [typeface]);
 
   // Write the selection through on every change rather than on unload: a phone
   // killing a backgrounded tab does not reliably run unload handlers.
@@ -1031,6 +1029,10 @@ export default function App() {
         onClose={() => setSettingsOpen(false)}
         theme={theme}
         onToggleTheme={toggleTheme}
+        palette={palette}
+        onPalette={setPalette}
+        typeface={typeface}
+        onTypeface={setTypeface}
         clis={clis}
         info={info}
         onShowWelcome={openWelcome}
