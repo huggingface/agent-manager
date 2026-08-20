@@ -1012,13 +1012,66 @@ async function* rangeJsonLines(file, range) {
 // same usage. parseClaude() above dedupes by dropping repeats; a viewer must
 // instead MERGE them, or half the assistant text disappears. So: first line for
 // an id creates the message and owns the usage, later lines append blocks.
+// A prompt typed while the agent is mid-turn is not written as a `user` message
+// at all. Claude Code queues it:
+//   {"type":"queue-operation","operation":"enqueue","content":"<the prompt>"}
+// and the text exists NOWHERE else until the queue is consumed. Two things then
+// happen, and they need opposite treatment:
+//   - `dequeue` (86 of 91 in the reference transcript): the prompt arrives as an
+//     ordinary user message afterwards, so the queued copy must give way to it
+//     or the reader shows the same prompt twice;
+//   - `remove` (5 of 91): it never arrives. The queue record is the only copy
+//     there will ever be — which is why those prompts were invisible in the
+//     reader, permanently, not late.
+// The two paths are distinguishable from the records alone, which matters
+// because a window can contain the enqueue and not the message that follows it:
+// `dequeue` carries no content and pops the oldest queued prompt (the real
+// message is coming, so the queued copy stands down), while `remove` names the
+// text it takes out (nothing else will carry it, so the queued copy is what the
+// reader gets). Text matching against later messages was the first attempt and
+// it double-rendered a prompt the operator had queued eight times in a loop:
+// the window held six enqueues and two of the messages.
+const queueKey = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+// The same filter the rest of this file applies to user text: an enqueued
+// `<task-notification>` is the harness talking to itself, not something the
+// operator typed. One of the five removes in the reference transcript is exactly
+// that, and showing it as a prompt would be a new bug in place of the old one.
+const isHarnessText = (t) => t.startsWith('<') || t.startsWith('[Request interrupted');
+
 async function normalizeClaude(file, out, range) {
   const stitch = makeStitcher();
   const byMsgId = new Map();
+  const pending = [];   // queued prompts, oldest first, until dequeued or removed
   for await (const j of jsonLines(file, range)) {
     // These embed whole file contents; share.js drops them and so do we.
     if (j.type === 'file-history-snapshot' || j.type === 'file-history-delta') continue;
     if (j.isMeta || j.sourceToolUseID) continue;
+    if (j.type === 'queue-operation') {
+      const text = queueKey(j.content);
+      if (j.operation === 'enqueue') {
+        // Harness noise is not a prompt: one of the five removes in the
+        // reference transcript is an enqueued <task-notification>, and showing
+        // that as something the operator typed would be a new bug for an old one.
+        if (!text || isHarnessText(text)) continue;
+        const msg = {
+          role: 'user',
+          ts: j.timestamp ? Date.parse(j.timestamp) || undefined : undefined,
+          queued: true,
+          blocks: [textBlock('text', String(j.content))],
+        };
+        out.push(msg);
+        pending.push({ text, msg });
+        msg.superseded = true;   // until a `remove` proves it is the only copy
+      } else if (j.operation === 'dequeue') {
+        // popped into a request: the ordinary user message is on its way, and
+        // that one keeps the prompt. Positional, because dequeue names no text.
+        pending.shift();
+      } else if (j.operation === 'remove') {
+        const at = pending.findIndex((p) => p.text === text);
+        if (at >= 0) pending.splice(at, 1)[0].msg.superseded = false;
+      }
+      continue;
+    }
     if (j.type !== 'user' && j.type !== 'assistant') continue;
 
     const m = j.message;
@@ -1083,6 +1136,14 @@ async function normalizeClaude(file, out, range) {
       if (id) byMsgId.set(id, msg);
     }
   }
+  // Dropped at the end rather than never pushed: which path a queued prompt took
+  // is not known until its dequeue or remove has been read. Anything still
+  // pending when the window ends stays dropped — it is about to be dequeued, and
+  // the message that follows is the copy the reader should have.
+  if (out.messages.some((m) => m.superseded)) {
+    out.messages = out.messages.filter((m) => !m.superseded);
+  }
+  for (const m of out.messages) delete m.superseded;
 }
 
 // Codex — $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl

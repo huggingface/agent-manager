@@ -490,6 +490,14 @@ export type TraceBlock =
 export interface TraceTurn {
   role: 'user' | 'assistant' | 'system';
   kind?: 'final' | 'update';
+  /**
+   * A prompt typed while the agent was mid-turn, read from Claude Code's queue
+   * records because it is written nowhere else (server/src/traces.js). The
+   * reader says so on the band: the records cannot tell a prompt that was
+   * consumed from one that was cancelled, so it reports what it knows — that
+   * this was typed and queued — rather than claiming it was answered.
+   */
+  queued?: boolean;
   ts?: number;
   model?: string;
   usage?: { in: number; out: number; cacheRead?: number };
