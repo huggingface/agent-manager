@@ -420,15 +420,25 @@ function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color
   // ring = waiting on you AND recent — a fleet where everything is "waiting
   // since last week" shouldn't glow everywhere
   const fresh = s.state === 'waiting' && Date.now() - last < 24 * 3600e3;
+  // Full or absent, never a stub: see the head row below.
+  const groupFits = !!group && group.length + s.name.length <= 19;
   return (
     <div className={`ovt-tile${fresh ? ' attn' : ''}${dim ? ' archived' : ''}`} onClick={onOpen}>
-      {/* A tile is ~225px: a group prefix INSIDE the name row would ellipsise,
-          and so would the name, leaving "[Age… trace reader pa…" — two clipped
-          strings and no legible fact. It gets its own line, where the full
-          width is available (the list card is wide enough to keep it inline). */}
-      {group && <div className="ovt-gline mono">[{group}]</div>}
+      {/* The group sits on the name's row, as it does on the list card — but a
+          tile is ~225px, so the two cannot always share it. The rule is that the
+          NAME is the identity and the group is context: the group gives way
+          first (`.ovt-gtag` shrinks 8x faster than the name), and a name long
+          enough to need the whole row keeps it while the group drops out
+          entirely. Either the group is legible or it is absent; what it never
+          does is sit as a stub beside a clipped name — "rl-ll… maybe-claude-be…"
+          was the reason this used to be on its own line.
+          The budget is measured, not guessed: on the narrowest tile the grid
+          produces (`minmax(225px, 1fr)`), the row holds 19 characters of group
+          plus name beside the logo and the age. 22 was tried first and clipped
+          the group on a 238px tile. */}
       <div className="ovt-head">
         <StateLogo cli={s.cli} state={s.state} size={12} tint={color} title={stateTitle(s)} />
+        {groupFits && <span className="ovt-gtag mono">{group}</span>}
         <span className="ovt-name mono">{s.name}</span>
         <span className="ovt-ago">{pending ? '' : fmtAgo(last)}</span>
       </div>
