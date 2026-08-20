@@ -73,11 +73,7 @@ const when = (iso: string | null, zone: string, now: number) => {
   const delta = value - now;
   if (delta > 0 && delta < 60 * 60_000) return `in ${Math.max(1, Math.round(delta / 60_000))}m`;
   if (delta > 0 && delta < 24 * 60 * 60_000) return `in ${Math.max(1, Math.round(delta / 3_600_000))}h`;
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      timeZone: zone, weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-    }).format(new Date(value));
-  } catch { return new Date(value).toLocaleString(); }
+  return compactWhen(iso, zone);
 };
 const compactWhen = (iso: string, zone: string) => {
   const value = Date.parse(iso);
@@ -290,19 +286,22 @@ export default function CronSettings({ clis }: { clis: Cli[] }) {
             <thead><tr><th>Job</th><th>Agent</th><th>Type</th><th>Interval</th><th>State</th><th>Next</th><th>Last run</th><th>Actions</th></tr></thead>
             <tbody>{jobs.map((job) => {
               const type = clis.find((candidate) => candidate.id === job.agent.cli)?.label || job.agent.cli;
+              const lastTitle = job.last
+                ? [duration(job.last.durationMs), job.last.error].filter(Boolean).join(' · ')
+                : '';
               return (
                 <tr
                   key={job.id} className={editingId === job.id ? 'editing' : ''} tabIndex={0}
                   aria-selected={editingId === job.id}
                   onClick={() => edit(job)} onKeyDown={(event) => editFromKeyboard(event, job)}
                 >
-                  <td title={job.name}>{job.name}</td>
-                  <td title={job.agent.name}>{job.agent.name}</td>
+                  <td className="cron-name" title={job.name}>{job.name}</td>
+                  <td className="cron-name" title={job.agent.name}>{job.agent.name}</td>
                   <td className="cron-type" aria-label={type} title={type}><Logo cli={job.agent.cli} size={14} /></td>
                   <td>{intervalName(job)}</td>
                   <td className={`cron-state ${job.state}`}>{job.state}</td>
                   <td className="cron-dim">{when(job.next, job.schedule.tz, now)}</td>
-                  <td title={job.last?.error || ''}>{job.last ? <><span className={`cron-last ${job.last.status}`}>{job.last.status}</span> <span className="cron-dim">{duration(job.last.durationMs)} · {compactWhen(job.last.at, job.schedule.tz)}</span></> : <span className="cron-dim">—</span>}</td>
+                  <td title={lastTitle}>{job.last ? <><span className={`cron-last ${job.last.status}`}>{job.last.status}</span> <span className="cron-dim">· {compactWhen(job.last.at, job.schedule.tz)}</span></> : <span className="cron-dim">—</span>}</td>
                   <td onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}><span className="cron-actions">
                     <button className="btn-ghost" disabled={busy === job.id} onClick={() => act(job.id, () => api.runCron(job.id))}>Run now</button>
                     <button className="btn-ghost" disabled={busy === job.id} onClick={() => act(job.id, () => api.updateCron(job.id, { state: job.state === 'running' ? 'stopped' : 'running' }))}>{job.state === 'running' ? 'Stop' : 'Start'}</button>

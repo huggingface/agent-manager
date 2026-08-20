@@ -1432,16 +1432,16 @@ a.btn-ghost { text-decoration: none; }
 .cron-message { margin-top: 14px; }
 .cron-page h3 { margin-top: 24px; }
 .cron-table-wrap { margin-top: 8px; border-top: 1px solid var(--border); }
-.cron-table { width: 100%; min-width: 900px; border-collapse: collapse; table-layout: fixed; font-size: 11.5px; }
-.cron-col-job, .cron-col-agent { width: auto; }
-.cron-col-type { width: 42px; }
-.cron-col-interval { width: 130px; }
-.cron-col-state { width: 62px; }
-.cron-col-next { width: 82px; }
-.cron-col-last { width: 158px; }
-.cron-col-actions { width: 174px; }
-.cron-table th { padding: 7px 8px; border-bottom: 1px solid var(--border); color: var(--muted); font: 500 10px var(--font-mono); letter-spacing: 0.045em; text-align: left; text-transform: uppercase; white-space: nowrap; }
-.cron-table td { padding: 7px 8px; border-bottom: 1px solid var(--border); overflow: hidden; color: var(--text); font-family: var(--font-mono); text-overflow: ellipsis; vertical-align: middle; white-space: nowrap; }
+.cron-table { width: 100%; border-collapse: collapse; table-layout: auto; font-size: 11.5px; }
+/* The two unbounded names share whatever is left. Every other column takes its
+   intrinsic, one-line width, so state/date/action labels cannot be sacrificed
+   to a long name or to widths tuned for one particular viewport. */
+.cron-col-job, .cron-col-agent { width: 50%; }
+.cron-col-type, .cron-col-interval, .cron-col-state, .cron-col-next,
+.cron-col-last, .cron-col-actions { width: 1%; }
+.cron-table th { padding: 7px 5px; border-bottom: 1px solid var(--border); color: var(--muted); font: 500 10px var(--font-mono); letter-spacing: 0.045em; text-align: left; text-transform: uppercase; white-space: nowrap; }
+.cron-table td { padding: 7px 5px; border-bottom: 1px solid var(--border); color: var(--text); font-family: var(--font-mono); vertical-align: middle; white-space: nowrap; }
+.cron-table td.cron-name { max-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cron-table tbody tr { cursor: pointer; }
 .cron-table tbody tr:hover, .cron-table tbody tr.editing { background: var(--panel-2); }
 .cron-table tbody tr:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
@@ -1452,7 +1452,7 @@ a.btn-ghost { text-decoration: none; }
 .cron-state.stopped { color: var(--muted); }
 .cron-last.failed { color: var(--danger); }
 .cron-actions { display: inline-flex; gap: 4px; white-space: nowrap; }
-.cron-actions .btn-ghost { padding: 4px 6px; border-radius: var(--r-sm); background: var(--panel); font: 500 10.5px var(--font-mono); }
+.cron-actions .btn-ghost { padding: 4px 5px; border-radius: var(--r-sm); background: var(--panel); font: 500 10.5px var(--font-mono); }
 .cron-actions .btn-ghost:disabled { cursor: wait; }
 
 @container (max-width: 560px) {
