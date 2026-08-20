@@ -113,6 +113,16 @@ const quietWait = {
 };
 operations.push({ ...prompt(599, 'watcher', 'quiet-1', 64), target: { id: 'quiet-1', name: 'quiet', cli: 'claude' } });
 operations.push(quietWait);
+// The log keeps whole bodies now, so the viewer has to cope with one this big.
+// Nothing is cut on disk; the card decides how much of it to paint.
+const HUGE = 'q'.repeat(400_000);
+operations.push({
+  id: 'big', at: at(601), method: 'PUT', path: '/api/files/files-9/write',
+  origin: { id: 'manager', type: 'agent', name: 'manager' },
+  target: { id: 'files-9', name: 'files-9' },
+  request: { present: true, chars: HUGE.length, sha256: 'sha-huge', text: HUGE },
+  status: 200, ok: true, durationMs: 88, result: { ok: true, size: HUGE.length },
+});
 
 operations.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));  // the endpoint's own order
 
@@ -243,16 +253,29 @@ try {
       repeats: [...document.querySelectorAll('.al-rep')].map((e) => e.textContent.trim()),
       whos: [...document.querySelectorAll('.al-who')].map((e) => e.textContent.trim()),
       newest: document.querySelector('.al-tbl tbody tr')?.getAttribute('title')?.split(' ')[0],
+      big: (() => {
+        const row = [...document.querySelectorAll('.al-tbl tbody tr')]
+          .find((r) => r.textContent.includes('/api/files/files-9/write'));
+        return row ? { payload: row.children[5].textContent.trim(), height: row.getBoundingClientRect().height } : null;
+      })(),
     };
   });
   console.log('what a row says');
   check('a resolved wait reads as one, with the time it blocked for',
     () => assert.deepEqual(list.first.slice(2), ['GET /api/agents/builder/wait', '200', '4m 18s', 'resolved · waiting']));
-  check('and the newest row really is the newest', () => assert.equal(list.newest, at(600)));
-  check('identical prompts are marked as repeats, since the text itself is never stored',
+  check('and the newest row really is the newest', () => assert.equal(list.newest, operations[0].at));
+  check('identical prompts are marked as repeats — the checksum still earns its place',
     () => assert.deepEqual(list.repeats, ['×2', '×2']));
   check('an unattributed call still reads as a row, with an em dash for who',
     () => assert.ok(list.whos.includes('—'), list.whos.join(', ')));
+  // "just store all the full api calls" — so the VIEWER is what has to stay
+  // usable when one of them is 400 KB. The row says how big, on one line.
+  check('a 400 KB body is a size in the list, not an attempt to show it',
+    () => {
+      assert.ok(list.big, 'the big entry is missing from the list');
+      assert.match(list.big.payload, /^file · \d+(\.\d+)? KB$/, `payload: ${list.big.payload}`);
+      assert.ok(list.big.height < 30, `row is ${list.big.height}px tall`);
+    });
 
   await page.click('.al-view button:nth-child(2)');
   await page.waitForSelector('.al-map svg');
@@ -436,6 +459,28 @@ try {
   check('with the checksum still in the entry, which is what spots a repeat',
     () => assert.match(words.json, /sha256/));
   check('and it can be selected', () => assert.ok(words.selectable));
+
+  const painted = await page.evaluate(async () => {
+    for (const g of document.querySelectorAll('.al-arrowg, circle.al-dot')) {
+      g.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      g.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+      g.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+      if (/files-9/.test(document.querySelector('.al-card-path')?.textContent || '')) {
+        return {
+          drawn: document.querySelector('.al-prompt-body')?.textContent.length,
+          note: document.querySelector('.al-clipped')?.textContent,
+        };
+      }
+    }
+    return null;
+  });
+  check('a 400 KB body is not painted whole, and the card says how much it is holding back',
+    () => {
+      assert.ok(painted, 'never found the big entry in the map');
+      assert.ok(painted.drawn <= 20_000, `painted ${painted.drawn} characters`);
+      assert.match(painted.note || '', /400,000 characters/, `note: ${painted.note}`);
+    });
 
   // "i want an option to show things in real time, now it seems all actions are
   // equi-distant" — and then: "maybe we need a way to zoom in and zoom out"

@@ -133,7 +133,7 @@ try {
   check('the target name is resolved at write time, not read time', named?.target?.name === 'name of s-42');
   check('a target that no longer exists still records its id', ghost?.target?.id === 'ghost-9' && !ghost?.target?.name);
 
-  console.log('\nprompts are kept, everything else is still a checksum');
+  console.log('\nthe body is kept whole, whatever route it came in on');
   invoke({ path: '/api/agents/s-target/prompt', query: { from: 'agent-1' }, body: 'Investigate the flaky test in web/.' },
     (_req, res) => res.json({ ok: true }));
   const [prompted] = readOperations(1);
@@ -144,21 +144,41 @@ try {
   invoke({ path: '/api/sessions/s-42/input', query: { from: 'agent-1' }, body: { text: 'run the tests' } },
     (_req, res) => res.json({ ok: true }));
   check('a prompt nested in a field is kept too', readOperations(1)[0]?.request?.text?.text === 'run the tests');
+  // This used to assert the opposite — that only prompt-carrying routes kept
+  // their text. The operator asked for the allowlist gone: "just store all the
+  // full api calls. why this arbitrary compression."
   invoke({ method: 'PUT', path: '/api/files/f-1/write', query: { from: 'agent-1' }, body: 'x'.repeat(4000) },
     (_req, res) => res.json({ ok: true }));
   const [written] = readOperations(1);
-  check('a file body is NOT — storing prompts is not storing every byte',
-    written?.request?.text === undefined && written?.request?.chars === 4000);
+  check('a file write body is kept too — no route allowlist any more',
+    written?.request?.text === 'x'.repeat(4000) && written?.request?.chars === 4000);
+  // …and this asserted a 64 KB cut. There is no cap now.
   invoke({ path: '/api/agents/s-target/prompt', query: { from: 'agent-1' }, body: 'y'.repeat(70 * 1024) },
     (_req, res) => res.json({ ok: true }));
   const [huge] = readOperations(1);
-  check('an enormous prompt is cut and says so, with the full size still recorded',
-    huge?.request?.truncated === true && huge?.request?.text?.length === 64 * 1024 && huge?.request?.chars === 70 * 1024);
+  check('nothing is truncated, however big',
+    huge?.request?.text?.length === 70 * 1024 && huge?.request?.truncated === undefined,
+    `kept ${huge?.request?.text?.length} of ${70 * 1024}`);
+  check('with the checksum of the whole thing beside it',
+    huge?.request?.sha256?.length === 64 && huge?.request?.chars === 70 * 1024);
   invoke({ path: '/api/sessions', query: { from: 'agent-1' }, body: { cli: 'claude', prompt: 'seed', token: 'hunter2' } },
     (_req, res) => res.status(201).json({ id: 's-new' }));
   const [seeded] = readOperations(1);
   check('a seed prompt is kept', seeded?.request?.prompt?.text === 'seed');
   check('and a credential beside it is still redacted', seeded?.request?.token === '[redacted]');
+
+  // One eight-megabyte line must not hide everything behind it: the tail window
+  // grows until it holds whole records rather than half of one.
+  console.log('\nreading past an enormous entry');
+  invoke({ method: 'PUT', path: '/api/files/f-2/write', query: { from: 'agent-1' }, body: 'z'.repeat(6 * 1024 * 1024) },
+    (_req, res) => res.json({ ok: true }));
+  invoke({ path: '/api/agents/s-target/prompt', query: { from: 'agent-1' }, body: 'after the big one' },
+    (_req, res) => res.json({ ok: true }));
+  const past = readOperations(20);
+  check('the entries behind it are still readable', past.length >= 5, `${past.length} rows`);
+  check('including the giant one itself',
+    past.some((r) => r.request?.chars === 6 * 1024 * 1024));
+  check('and the one after it', past[0]?.request?.text === 'after the big one');
 
   console.log('\ndeleting the thing being audited');
   // The real route removes the session from the store and only then answers, so

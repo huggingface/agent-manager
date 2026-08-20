@@ -15,59 +15,59 @@ const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const LOGGED_READS = [/^\/api\/agents\/[^/]+\/wait$/];
 const shouldLog = (req) => MUTATING.has(req.method)
   || (req.method === 'GET' && LOGGED_READS.some((re) => re.test(req.path)));
+// The body is stored WHOLE, on the operator's instruction: "just store all the
+// full api calls. why this arbitrary compression." So there is no allowlist of
+// routes, no size cap, and nothing is replaced by a summary of itself. The one
+// thing still withheld is a credential — that is not compression, it is not
+// writing secrets into a file that lives on the bucket.
+//
+// Above this length a string is stored as {present, chars, sha256, text} rather
+// than as a bare string. Nothing is lost either way: this only decides whether
+// the checksum travels beside the value, and `chars` is what the log's compact
+// list column reads.
 const MAX_TEXT = 500;
-// Prompt text IS kept, on the operator's instruction: a log that can say who
-// asked whom but never what they asked answers half the question. Only the
-// routes that carry a prompt are unwrapped this way — a file write goes through
-// the same summariser and its body stays a checksum, because "store the
-// prompts" is not "store every byte that ever crossed the API".
-const PROMPT_ROUTES = [
-  /^\/api\/agents$/,                          // spawn: the body IS the seed prompt
-  /^\/api\/sessions$/,                        // same, as a `prompt` field
-  /^\/api\/agents\/[^/]+\/prompt$/,
-  /^\/api\/sessions\/[^/]+\/input$/,
-  /^\/api\/remote\/[^/]+\/messages$/,        // the same act, for a remote agent
-];
-const carriesPrompt = (req) => req && PROMPT_ROUTES.some((re) => re.test(req.path));
-// A prompt is normally a screenful. This is not a cap on what an agent may send,
-// only on what the audit file keeps verbatim: past it the text is cut and says
-// so, while chars and sha256 still describe the whole thing.
-const MAX_PROMPT = 64 * 1024;
-const MAX_DEPTH = 5;
+// A backstop against a cyclic object, not a limit on how much is kept: a request
+// body is the output of a JSON or text parser and cannot contain a cycle, but
+// JSON.stringify throwing here would lose the whole entry.
+const MAX_DEPTH = 20;
+// How far back a read will go looking for complete records. One enormous entry
+// must not hide the log, and reading a whole year of it must not exhaust memory.
+const MAX_TAIL = 256 * 1024 * 1024;
 const SENSITIVE_KEY = /(authorization|credential|password|secret|subscription|token|endpoint|private.?key)/i;
 const CONTENT_KEY = /(body|content|data|prompt|text)/i;
 
 const digest = (value) => crypto.createHash('sha256').update(value).digest('hex');
 
-function textSummary(value, keepText = false) {
-  const summary = { present: value.length > 0, chars: value.length, sha256: digest(value) };
-  // sha256 stays even with the text beside it: equal checksums are how you spot
-  // the same prompt being sent again, which is what a schedule looks like.
-  if (!keepText) return summary;
-  return value.length > MAX_PROMPT
-    ? { ...summary, text: value.slice(0, MAX_PROMPT), truncated: true }
-    : { ...summary, text: value };
+// The value, plus the two things worth having beside it: sha256, because equal
+// checksums are how a repeated prompt or a scheduled job shows up, and chars,
+// because that is what the list column reads without touching the text.
+function textSummary(value) {
+  return { present: value.length > 0, chars: value.length, sha256: digest(value), text: value };
 }
 
 /**
- * Keep the parameters needed to reconstruct an operation without turning the
- * audit trail into a second store for prompts, file contents, or credentials.
+ * The call as it was made, whole, with a checksum attached to anything long
+ * enough to want one. Credentials are the single exception and are replaced by
+ * `[redacted]` wherever they appear.
  */
-export function summarizePayload(value, key = '', depth = 0, keepText = false) {
+export function summarizePayload(value, key = '', depth = 0) {
   if (value == null || typeof value === 'boolean' || typeof value === 'number') return value;
-  if (Buffer.isBuffer(value)) return { bytes: value.length, sha256: digest(value) };
+  // No route here parses a raw body today, but if one ever does, keep the bytes
+  // rather than a description of them.
+  if (Buffer.isBuffer(value)) {
+    return { bytes: value.length, sha256: digest(value), base64: value.toString('base64') };
+  }
   if (typeof value === 'string') {
-    // A credential is never kept, prompt route or not.
     if (SENSITIVE_KEY.test(key)) return '[redacted]';
-    if (CONTENT_KEY.test(key) || value.length > MAX_TEXT) return textSummary(value, keepText);
+    if (CONTENT_KEY.test(key) || value.length > MAX_TEXT) return textSummary(value);
     return value;
   }
   if (depth >= MAX_DEPTH) return '[max-depth]';
-  if (Array.isArray(value)) return value.slice(0, 100).map((v) => summarizePayload(v, key, depth + 1, keepText));
+  if (Array.isArray(value)) return value.map((v) => summarizePayload(v, key, depth + 1));
   if (typeof value === 'object') {
     const out = {};
-    for (const [k, v] of Object.entries(value).slice(0, 100)) {
-      out[k] = SENSITIVE_KEY.test(k) ? '[redacted]' : summarizePayload(v, k, depth + 1, keepText);
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = SENSITIVE_KEY.test(k) ? '[redacted]' : summarizePayload(v, k, depth + 1);
     }
     return out;
   }
@@ -163,7 +163,7 @@ export function operationMiddleware({ resolveOrigin, resolveTarget, allowMissing
         method: req.method,
         path: req.path,
         query: cleanQuery(req.query),
-        request: summarizePayload(req.body, 'body', 0, carriesPrompt(req)),
+        request: summarizePayload(req.body, 'body'),
         status: res.statusCode,
         ok: res.statusCode < 400,
         durationMs: Date.now() - started,
@@ -182,16 +182,24 @@ export function readOperations(limit = 200, before = null) {
   try {
     fd = fs.openSync(OPERATIONS_FILE, 'r');
     const size = fs.fstatSync(fd).size;
-    // A bounded tail keeps this endpoint cheap even after years of operations.
-    // Four MiB comfortably holds the maximum 1,000 compact records in normal use.
-    const start = Math.max(0, size - 4 * 1024 * 1024);
-    const buf = Buffer.alloc(size - start);
-    fs.readSync(fd, buf, 0, buf.length, start);
-    let text = buf.toString('utf8');
-    if (start > 0) text = text.slice(Math.max(0, text.indexOf('\n') + 1));
-    const rows = text.split('\n').filter(Boolean).flatMap((line) => {
-      try { return [JSON.parse(line)]; } catch { return []; }
-    });
+    // A bounded tail keeps this endpoint cheap after years of operations. But an
+    // entry is now as big as the call it records — a file write can be eight
+    // megabytes on one line — so a fixed window is not enough: it could contain
+    // no COMPLETE line at all and the log would read as empty. Grow it until
+    // there are enough whole records, or until the ceiling says stop.
+    let rows = [];
+    for (let window = 4 * 1024 * 1024; ; window *= 4) {
+      const start = Math.max(0, size - window);
+      const buf = Buffer.alloc(size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      let text = buf.toString('utf8');
+      // the first line is almost certainly cut in half by the window
+      if (start > 0) text = text.slice(Math.max(0, text.indexOf('\n') + 1));
+      rows = text.split('\n').filter(Boolean).flatMap((line) => {
+        try { return [JSON.parse(line)]; } catch { return []; }
+      });
+      if (rows.length >= take || start === 0 || window >= MAX_TAIL) break;
+    }
     // Sort, do not merely reverse. A record is appended when its response
     // finishes, but `at` is when the request STARTED — and a `wait` can block
     // for five minutes, so it lands in the file after calls that began later and

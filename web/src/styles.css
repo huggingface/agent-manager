@@ -1499,6 +1499,7 @@ a.btn-ghost { text-decoration: none; }
    line makes it unreadable. Selectable, wrapped, and never truncated here. */
 .al-prompt { display: flex; flex-direction: column; gap: 3px; }
 .al-prompt-lbl { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); }
+.al-clipped { color: var(--muted); text-transform: none; letter-spacing: 0; }
 .al-prompt-body { margin: 0; padding: 7px 9px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-sm); font-family: var(--font-mono); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text); }
 
 /* settings: skills editor */

@@ -784,8 +784,8 @@ export default function SettingsView({
             <h2>API log</h2>
             <p className="s-help">
               Every call that changed something, plus the waits that resolved — who asked whom to do
-              what, and when. Prompt text is never stored, only its length and a checksum, so this
-              says who prompted whom and how long the prompt was, never what it said.
+              what, when, and in their own words: each entry keeps the call whole, body included.
+              Credentials are the exception and are never written here.
             </p>
             <ApiLog />
           </div>

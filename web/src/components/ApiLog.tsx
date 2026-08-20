@@ -13,11 +13,12 @@
 //          reason reads are logged at all; without it the picture shows work
 //          going out and nothing ever coming back.
 //
-// What this cannot show, by design: the log stores {present, chars, sha256} for
-// prompt text and never the text. So this answers who asked whom to do
-// something, when, and how big the ask was — never what it said. Equal
-// checksums mean identical prompts, which is what a repeating job produces, so
-// repeats are marked rather than hidden.
+// The log stores each call WHOLE — body included, on the operator's instruction —
+// with credentials the one thing withheld. So this can answer who asked whom to
+// do what, when, and in their own words. Equal checksums still mean identical
+// prompts, which is what a repeating job produces, so repeats are marked; and
+// because an entry is now as big as the call it records, the card decides how
+// much of a body to paint rather than trying to paint all of it.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../api';
 
@@ -65,9 +66,8 @@ const created = (op: api.Operation): { id: string; name: string } | null => {
 export const isWait = (op: api.Operation) => op.method === 'GET' && /\/wait$/.test(op.path);
 const isPrompt = (op: api.Operation) => /\/(prompt|input)$/.test(op.path);
 
-/** The prompt as sent, when the log kept it. Prompt routes store the text
- *  beside its checksum; everything else is still summarised, so this is null for
- *  a file write and for any call that never carried a prompt. */
+/** The body as sent. Every route's body is kept now, so this is the prompt for a
+ *  prompt, the file for a write, and null only when the call carried no body. */
 export function promptText(op: api.Operation): string | null {
   const sum = textSummary(op.request) as (api.OperationSummary & { text?: string }) | null;
   return typeof sum?.text === 'string' ? sum.text : null;
@@ -84,8 +84,11 @@ function payloadOf(op: api.Operation): { text: string; sha?: string } {
   const sum = textSummary(op.request);
   if (!sum || !sum.chars) return { text: '—' };
   const what = isFileRoute(op.path) ? 'file' : isPrompt(op) ? 'prompt' : 'body';
+  // KB rather than a character count once it stops being something you read
   return {
-    text: isFileRoute(op.path) ? `${what} · ${KB(sum.chars)}` : `${what} · ${sum.chars.toLocaleString()} chars`,
+    text: isFileRoute(op.path) || sum.chars > 100_000
+      ? `${what} · ${KB(sum.chars)}`
+      : `${what} · ${sum.chars.toLocaleString()} chars`,
     sha: sum.sha256,
   };
 }
@@ -112,6 +115,13 @@ const whom = (op: api.Operation, names?: Map<string, string>) => {
   return op.target?.name || (id && names?.get(id)) || id;
 };
 
+// What the CARD is willing to paint. The log stores whole bodies now — a file
+// write is megabytes on one line — and a <pre> with five million characters in
+// it locks the tab. Nothing is truncated on disk; this is only how much of it
+// the viewer draws at once, and it says when it is holding some back.
+const SHOW_CHARS = 20_000;
+const clip = (text: string) => (text.length > SHOW_CHARS ? text.slice(0, SHOW_CHARS) : text);
+
 export default function ApiLog() {
   const [ops, setOps] = useState<api.Operation[] | null>(null);
   // id → name for sessions that still exist, so an older entry whose target was
@@ -125,7 +135,9 @@ export default function ApiLog() {
   // of controls for a screen of rows.
   const [withOperator, setWithOperator] = useState(false);
 
-  const load = () => api.getOperations(500)
+  // 200, not 500: entries carry their whole body now, so a page of them is
+  // measured in megabytes rather than kilobytes.
+  const load = () => api.getOperations(200)
     .then((d) => { setOps(d.operations); setError(''); })
     .catch(() => setError('could not read the log'));
   useEffect(() => { load(); }, []);
@@ -497,8 +509,15 @@ function HoverCard({ op, pinned, names, onEnter, onLeave, onClose }: {
       </div>
       {text !== null && (
         <div className="al-prompt">
-          <div className="al-prompt-lbl">prompt as sent</div>
-          <pre className="al-prompt-body">{text}</pre>
+          <div className="al-prompt-lbl">
+            body as sent
+            {text.length > SHOW_CHARS && (
+              <span className="al-clipped">
+                {' '}· showing the first {SHOW_CHARS.toLocaleString()} of {text.length.toLocaleString()} characters
+              </span>
+            )}
+          </div>
+          <pre className="al-prompt-body">{clip(text)}</pre>
         </div>
       )}
       <pre className="al-json">{json(body)}</pre>
@@ -517,7 +536,10 @@ function HoverCard({ op, pinned, names, onEnter, onLeave, onClose }: {
 function withoutText(request: unknown): unknown {
   if (!request || typeof request !== 'object') return request;
   const strip = (v: Record<string, unknown>) => {
-    const { text, ...rest } = v;
+    const { text, base64, ...rest } = v;
+    // base64 of an upload is not readable and not small; its bytes and checksum
+    // are in the entry, and the file itself is on disk.
+    if (typeof base64 === 'string') return { ...rest, base64: `[${base64.length.toLocaleString()} chars]` };
     return typeof text === 'string' ? rest : v;
   };
   const top = request as Record<string, unknown>;
