@@ -55,8 +55,29 @@ const anonymousWait = {
   status: 200, ok: true, durationMs: 12000,
   result: { id: 'lonely', state: 'waiting', matched: true, waited: 12 },
 };
+// The operator's own calls: most of a real log, and hidden by default because
+// this view is for what the AGENTS did to each other.
+const mine = (i) => ({
+  id: `m${i}`, at: at(20 + i), method: 'POST', path: '/api/sessions/shell-1/input',
+  origin: { id: 'lvwerra', type: 'operator', name: 'lvwerra' },
+  target: { id: 'shell-1', name: 'shell-1', cli: 'shell' },
+  request: { text: { present: true, chars: 30, sha256: `mine-${i}` } },
+  status: 200, ok: true, durationMs: 200, result: { ok: true },
+});
+// A create names nothing in its path: the session it made is in the result, and
+// the lane it brings into being must not look as though it was always there.
+const create = {
+  id: 'c1', at: at(1), method: 'POST', path: '/api/agents',
+  origin: { id: 'manager', type: 'agent', name: 'manager' },
+  query: { cli: 'claude', name: 'poet' },
+  request: { present: true, chars: 88, sha256: 'seed' },
+  status: 201, ok: true, durationMs: 452,
+  result: { id: 'poet-1', name: 'poet', cli: 'claude', path: 'poet' },
+};
 // Two identical prompts (same checksum) — what a repeating job looks like.
 const operations = [
+  mine(1), mine(2), mine(3),
+  create,
   wait(9, 'manager', 'builder', 258000),
   prompt(8, 'manager', 'builder', 1204),
   prompt(7, 'manager', 'ghost-1', 12, false),
@@ -69,7 +90,15 @@ const operations = [
     request: { present: true, chars: 8400, sha256: 'sha-file' },
     status: 200, ok: true, durationMs: 41, result: { ok: true } },
   anonymousWait,
+  // manager waits on the agent it just created; 258s of being blocked
+  { id: 'w9', at: at(2), method: 'GET', path: '/api/agents/poet-1/wait',
+    origin: { id: 'manager', type: 'agent', name: 'manager' },
+    target: { id: 'poet-1', name: 'poet', cli: 'claude' },
+    status: 200, ok: true, durationMs: 258000,
+    result: { id: 'poet-1', state: 'waiting', matched: true, waited: 258 } },
 ];
+
+operations.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));  // the endpoint's own order
 
 const stub = path.join(tmp, 'api-stub.ts');
 fs.writeFileSync(stub, `
@@ -119,6 +148,34 @@ const open = async (width) => {
 };
 
 try {
+  const page0 = await open(1200);
+  const filters = await page0.evaluate(() => {
+    const chips = [...document.querySelectorAll('.al-chip')];
+    return {
+      chips: chips.length,
+      label: chips[0]?.textContent.trim(),
+      whos: [...document.querySelectorAll('.al-who')].map((e) => e.textContent.trim()),
+      header: document.querySelector('.al-count')?.textContent.replace(/\s+/g, ' ').trim(),
+      finds: document.querySelectorAll('.al-find').length,
+    };
+  });
+  const mineCount = operations.filter((o) => o.origin?.type === 'operator').length;
+  console.log('the only filter there is');
+  check('one control, not a row of them', () => assert.equal(filters.chips, 1));
+  check('and no path search either', () => assert.equal(filters.finds, 0));
+  check('the operator\'s own calls are hidden by default, and it says how many',
+    () => {
+      assert.ok(!filters.whos.includes('lvwerra'), `whos: ${filters.whos.join(', ')}`);
+      assert.match(filters.label, new RegExp(`hidden \\(${mineCount}\\)`), `label: ${filters.label}`);
+    });
+  check('the failure count survives as a fact rather than a filter',
+    () => assert.match(filters.header, /1 failed/));
+  await page0.click('.al-chip');
+  await page0.waitForFunction(() => [...document.querySelectorAll('.al-who')].some((e) => e.textContent.trim() === 'lvwerra'));
+  check('and one click brings them back', () => true);
+  await page0.close();
+  console.log('');
+
   for (const width of [1200, 390]) {
     const page = await open(width);
     const m = await page.evaluate(() => {
@@ -174,6 +231,9 @@ try {
   await page.click('.al-view button:nth-child(2)');
   await page.waitForSelector('.al-map svg');
   const map = await page.evaluate(() => {
+    const birth = document.querySelectorAll('circle.al-birth').length;
+    const held = [...document.querySelectorAll('.al-held')].map((l) => Number(l.getAttribute('x2')) - Number(l.getAttribute('x1')));
+    const unborn = [...document.querySelectorAll('.al-lane.unborn')].map((l) => Number(l.getAttribute('x2')));
     const labels = [...document.querySelectorAll('.al-lane-lbl')];
     const dotLanes = [...document.querySelectorAll('circle.al-dot')].map((c) => Number(c.getAttribute('cy')));
     const lanes = labels.map((t) => t.textContent);
@@ -189,7 +249,7 @@ try {
       dst: lanes[laneAt(Number(l.getAttribute('y2')))],
       dashed: !!getComputedStyle(l).strokeDasharray && getComputedStyle(l).strokeDasharray !== 'none',
     }));
-    return { lanes, arrows, dotLanes: dotLanes.map((y) => lanes[laneAt(y)]) };
+    return { lanes, arrows, birth, held, unborn, dotLanes: dotLanes.map((y) => lanes[laneAt(y)]) };
   });
   console.log('\nthe map');
   check('callers are laid out above the agents they call',
@@ -217,12 +277,58 @@ try {
     () => assert.ok(!map.lanes.includes('—'), map.lanes.join(' < ')));
   check('nor an arrow to one',
     () => assert.ok(!map.arrows.some((a) => a.src === '—' || a.dst === '—'), JSON.stringify(map.arrows)));
+  // The operator's report: "create events are not shown … it's also not clear
+  // that the poet session didnt exist before that because the line already
+  // existed."
+  check('a create reaches the lane it brought into being',
+    () => {
+      assert.ok(map.arrows.some((a) => a.src === 'manager' && a.dst === 'poet'), JSON.stringify(map.arrows));
+      assert.ok(map.birth >= 1, `${map.birth} birth marks`);
+    });
+  check('and that lane is drawn faint until it exists',
+    () => assert.ok(map.unborn.some((x2) => x2 > 2), `unborn segments end at: ${map.unborn.join(', ')}`));
+  // "in the wait, i think it should also be visible when the wait started"
+  check('a wait is a span from where it started, not a point',
+    () => assert.ok(map.held.some((w) => w > 4), `spans: ${map.held.join(', ')}`));
   check('it is a mark on the lane of whoever was waited on',
     () => {
       assert.ok(map.lanes.includes('lonely'), map.lanes.join(' < '));
       assert.ok(map.dotLanes.includes('lonely'), `dots on: ${map.dotLanes.join(', ')}`);
       assert.ok(!map.arrows.some((a) => a.src === 'lonely' || a.dst === 'lonely'), 'and no arrow to or from it');
     });
+  // "a pretty view of the json when hovering so we could see the full call plus
+  // the metadata (duration, status)"
+  // mouse.move, not .hover(): the group's own box centre is empty space and
+  // Playwright reports the <svg> intercepting the click there.
+  const spot = await page.evaluate(() => {
+    const g = document.querySelector('.al-arrowg');
+    const r = g.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  });
+  await page.mouse.move(spot.x, spot.y);
+  await page.waitForFunction(() => !!document.querySelector('.al-json'), null, { timeout: 5000 });
+  const card = await page.evaluate(() => ({
+    method: document.querySelector('.al-card-head .al-meth')?.textContent.trim(),
+    path: document.querySelector('.al-card-path')?.textContent.trim(),
+    status: document.querySelector('.al-card-head .al-st')?.textContent.trim(),
+    tookText: document.querySelector('.al-card-took')?.textContent.trim(),
+    json: document.querySelector('.al-json')?.textContent,
+    keys: [...document.querySelectorAll('.al-json .al-k')].map((e) => e.textContent),
+    floating: getComputedStyle(document.querySelector('.al-card')).position,
+  }));
+  console.log('\nthe hover card');
+  check('shows the call, its status and how long it took',
+    () => {
+      assert.match(card.method, /^(POST|GET|PUT|DELETE)$/, `method: ${card.method}`);
+      assert.match(card.path, /^\/api\//, `path: ${card.path}`);
+      assert.match(card.status, /^\d{3}$/, `status: ${card.status}`);
+      assert.match(card.tookText, /^\d/, `took: ${card.tookText}`);
+    });
+  check('and the whole entry as JSON, with the metadata named',
+    () => ['at', 'call', 'from', 'to', 'status', 'took'].forEach((k) => assert.ok(card.keys.includes(k), `${k} missing from ${card.keys.join(', ')}`)));
+  check('still never the prompt text', () => assert.ok(!/"text":\s*"/.test(card.json)));
+  check('and it sits below the plot rather than covering it',
+    () => assert.equal(card.floating, 'static'));
   await page.close();
 } finally {
   await browser.close();

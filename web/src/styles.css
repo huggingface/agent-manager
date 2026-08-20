@@ -1402,17 +1402,15 @@ a.btn-ghost { text-decoration: none; }
 .al { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
 .al-head { display: flex; align-items: center; gap: 10px; }
 .al-count { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
+.al-fails { color: var(--danger); }
 .al-view { margin-left: auto; }
 .al-refresh { padding: 4px 9px; font-size: 11.5px; }
 .al-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.al-gap { flex: 1 0 12px; }
 /* A filter is a chip: bordered, quiet until it is on, and never a coloured pill
    sitting in a data row — the rows themselves carry no badges at all. */
 .al-chip { padding: 4px 9px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel); color: var(--muted); font: inherit; font-size: 11.5px; cursor: pointer; white-space: nowrap; }
 .al-chip:hover { border-color: var(--border-strong); color: var(--text); }
 .al-chip.on { border-color: var(--accent); color: var(--text); font-weight: 600; background: color-mix(in srgb, var(--accent) 10%, transparent); }
-.al-find { flex: 1; min-width: 130px; padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel); color: var(--text); font-size: 11.5px; }
-.al-find:focus { outline: none; border-color: var(--accent); }
 .al-empty { padding: 14px 2px; }
 
 /* ONE CALL PER LINE. Every cell is nowrap and clips; the path is the only
@@ -1447,26 +1445,43 @@ a.btn-ghost { text-decoration: none; }
 
 /* the map */
 .al-map { display: flex; flex-direction: column; gap: 8px; }
-.al-mapwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); padding: 8px; }
+.al-mapwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); padding: 6px; }
 .al-map svg { display: block; width: 100%; min-width: 620px; height: auto; }
 .al-lane { stroke: var(--border); stroke-width: 1; }
+/* before the agent existed: barely there, so the line cannot claim it did */
+.al-lane.unborn { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.45; }
 .al-lane-lbl { font-family: var(--font-mono); font-size: 9px; fill: var(--muted); }
+.al-lane-lbl.new { fill: var(--accent); }
 .al-axis { font-family: var(--font-mono); font-size: 8px; fill: var(--muted); }
-.al-arrow { stroke: var(--accent); stroke-width: 1.6; }
+/* slim: at 1px an arrow marks a moment instead of shouting about it */
+.al-arrow { stroke: var(--accent); stroke-width: 1; }
 .al-arrow.back { stroke: var(--muted); stroke-dasharray: 3 3; }
-/* a call that failed is worth seeing in the shape, not only in the list */
 .al-arrow.bad { stroke: var(--danger); }
-.al-dot.bad { fill: var(--danger); }
+.al-arrow.new { stroke-width: 1.5; }
+/* the stretch a caller spent blocked, on the caller's own lane */
+.al-held { stroke: var(--muted); stroke-width: 3; opacity: 0.28; stroke-linecap: round; }
 .al-dot { fill: var(--accent); }
 .al-dot.back { fill: var(--muted); }
-.al-hit { stroke: transparent; stroke-width: 11; }
+.al-dot.bad { fill: var(--danger); }
+.al-hit { stroke: transparent; stroke-width: 10; }
 .al-arrowg { cursor: default; }
-.al-arrowg.on .al-arrow { stroke-width: 2.6; }
-.al-readout { font-size: 11px; color: var(--muted); min-height: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.al-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 11.5px; color: var(--muted); }
-.al-legend i.al-key { display: inline-block; width: 16px; height: 0; border-top: 2px solid var(--accent); vertical-align: middle; margin-right: 5px; }
-.al-legend i.al-key.back { border-top-style: dashed; border-color: var(--muted); }
-.al-legend i.al-key.dot { width: 6px; height: 6px; border: none; border-radius: 50%; background: var(--accent); }
+/* a slight lift on hover, not a thickening — the card carries the detail */
+.al-arrowg.on .al-arrow { stroke-width: 1.6; }
+.al-arrowg.on .al-held { opacity: 0.45; }
+.al-key text { font-family: var(--font-mono); font-size: 8px; fill: var(--muted); }
+/* the moment a lane begins */
+.al-birth { fill: var(--panel); stroke: var(--accent); stroke-width: 1.4; }
+
+/* the hover card: the call as it is stored, plus what the body does not say */
+.al-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; min-height: 74px; }
+.al-card-idle { color: var(--muted); font-size: 11.5px; justify-content: center; }
+.al-card-head { display: flex; align-items: baseline; gap: 7px; font-family: var(--font-mono); font-size: 11px; }
+.al-card-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.al-card-took { color: var(--muted); margin-left: auto; white-space: nowrap; }
+.al-json { margin: 0; max-height: 210px; overflow: auto; white-space: pre; font-family: var(--font-mono); font-size: 10.5px; line-height: 1.45; color: var(--text); }
+.al-json .al-k { color: var(--accent); }
+.al-card-foot { font-size: 9.5px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 5px; }
 
 /* settings: skills editor */
 .settings-page.wide { max-width: 980px; }

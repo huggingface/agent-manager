@@ -22,7 +22,6 @@ import { useEffect, useMemo, useState } from 'react';
 import * as api from '../api';
 
 type View = 'list' | 'map';
-type Kind = 'fail' | 'prompt' | 'file';
 
 const HHMMSS = (iso: string) => new Date(iso).toLocaleTimeString([], { hour12: false });
 const DAY = (iso: string) => new Date(iso).toLocaleDateString([], { day: 'numeric', month: 'short' });
@@ -54,6 +53,15 @@ function textSummary(value: unknown): api.OperationSummary | null {
 }
 
 const isFileRoute = (p: string) => p.startsWith('/api/files') || p.startsWith('/api/skills');
+/** A create names nothing in its path — the session it made is in the RESULT.
+ *  Without this the call drew as a dot on the caller's lane and the agent it
+ *  brought into being appeared to have been there all along. */
+const created = (op: api.Operation): { id: string; name: string } | null => {
+  if (op.method !== 'POST' || !op.ok) return null;
+  if (op.path !== '/api/agents' && op.path !== '/api/sessions') return null;
+  const r = op.result as { id?: string; name?: string } | undefined;
+  return r?.id ? { id: r.id, name: r.name || r.id } : null;
+};
 export const isWait = (op: api.Operation) => op.method === 'GET' && /\/wait$/.test(op.path);
 const isPrompt = (op: api.Operation) => /\/(prompt|input)$/.test(op.path);
 
@@ -103,9 +111,11 @@ export default function ApiLog() {
   const [names, setNames] = useState<Map<string, string>>(new Map());
   const [error, setError] = useState('');
   const [view, setView] = useState<View>('list');
-  const [origin, setOrigin] = useState('');            // '' = everyone
-  const [kinds, setKinds] = useState<Kind[]>([]);
-  const [q, setQ] = useState('');
+  // The operator's own clicks are most of the log and none of the story: this
+  // view is for what the AGENTS did to each other. Off by default, and the only
+  // filter — the chips and the path search that used to sit here made a screen
+  // of controls for a screen of rows.
+  const [withOperator, setWithOperator] = useState(false);
 
   const load = () => api.getOperations(500)
     .then((d) => { setOps(d.operations); setError(''); })
@@ -117,21 +127,11 @@ export default function ApiLog() {
       .catch(() => {});
   }, []);
 
-  const origins = useMemo(() => {
-    const seen = new Map<string, string>();
-    for (const op of ops || []) if (op.origin) seen.set(op.origin.id, op.origin.name || op.origin.id);
-    return [...seen].sort((a, b) => a[1].localeCompare(b[1]));
-  }, [ops]);
-
-  const failures = (ops || []).filter((op) => !op.ok).length;
-  const toggle = (k: Kind) => setKinds((ks) => (ks.includes(k) ? ks.filter((x) => x !== k) : [...ks, k]));
-
-  const rows = useMemo(() => (ops || []).filter((op) => {
-    if (origin && op.origin?.id !== origin) return false;
-    if (q && !op.path.toLowerCase().includes(q.toLowerCase())) return false;
-    if (!kinds.length) return true;
-    return kinds.some((k) => (k === 'fail' ? !op.ok : k === 'prompt' ? isPrompt(op) : isFileRoute(op.path)));
-  }), [ops, origin, q, kinds]);
+  const rows = useMemo(() => (ops || []).filter(
+    (op) => withOperator || op.origin?.type !== 'operator',
+  ), [ops, withOperator]);
+  const hidden = (ops || []).length - rows.length;
+  const failures = rows.filter((op) => !op.ok).length;
 
   // Identical prompts have identical checksums. Counting them is the only thing
   // the log can honestly say about repetition, and it is enough to spot a job
@@ -145,14 +145,17 @@ export default function ApiLog() {
     return n;
   }, [rows]);
 
-  const span = ops && ops.length
-    ? `${DAY(ops[ops.length - 1].at)}–${DAY(ops[0].at)}`
-    : '';
+  const span = rows.length ? `${DAY(rows[rows.length - 1].at)}–${DAY(rows[0].at)}` : '';
 
   return (
     <div className="al">
       <div className="al-head">
-        <span className="al-count">{ops ? `${ops.length} calls` : 'loading…'}{span ? ` · ${span}` : ''}</span>
+        <span className="al-count">
+          {ops ? `${rows.length} call${rows.length === 1 ? '' : 's'}` : 'loading…'}
+          {span ? ` · ${span}` : ''}
+          {/* the failure count was a filter chip; it is more useful as a fact */}
+          {failures > 0 && <span className="al-fails"> · {failures} failed</span>}
+        </span>
         <div className="seg al-view">
           <button className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}>List</button>
           <button className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}>Map</button>
@@ -161,17 +164,9 @@ export default function ApiLog() {
       </div>
 
       <div className="al-filters">
-        <button className={`al-chip${origin ? '' : ' on'}`} onClick={() => setOrigin('')}>Everyone</button>
-        {origins.map(([id, name]) => (
-          <button key={id} className={`al-chip${origin === id ? ' on' : ''}`} onClick={() => setOrigin(id)}>{name}</button>
-        ))}
-        <span className="al-gap" />
-        <button className={`al-chip${kinds.includes('fail') ? ' on' : ''}`} onClick={() => toggle('fail')}>
-          Only failures ({failures})
+        <button className={`al-chip${withOperator ? ' on' : ''}`} onClick={() => setWithOperator((v) => !v)}>
+          {withOperator ? 'Including your own calls' : `Your own calls hidden${hidden ? ` (${hidden})` : ''}`}
         </button>
-        <button className={`al-chip${kinds.includes('prompt') ? ' on' : ''}`} onClick={() => toggle('prompt')}>Prompts</button>
-        <button className={`al-chip${kinds.includes('file') ? ' on' : ''}`} onClick={() => toggle('file')}>Files</button>
-        <input className="al-find mono" placeholder="path contains…" value={q} onChange={(e) => setQ(e.target.value)} />
       </div>
 
       {error && <div className="s-warn">{error}</div>}
@@ -225,46 +220,66 @@ function LogTable({ rows, repeats, names }: {
 // ---- the map ----------------------------------------------------------------
 // Geometry follows the approved mock: a labelled hairline per lane, arrows
 // drawn between lanes, a dot on the lane the call was made from.
-const LANE_H = 46;
-const TOP = 26;
-const LEFT = 108;      // room for the longest lane label
-const RIGHT = 26;
-const MAX_LANES = 12;
-const MAX_MARKS = 48;
+// Denser than the mock: at a real pane width its 46px lanes left the plot mostly
+// empty, and the point of the picture is to hold a lot of calls at once.
+const LANE_H = 30;
+const TOP = 18;
+const LEFT = 104;      // room for the longest lane label
+const RIGHT = 20;
+const FOOT = 40;       // axis + legend, both inside the frame
+const MAX_LANES = 14;
+const MAX_MARKS = 60;
 
 function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, string> }) {
   const [hover, setHover] = useState<api.Operation | null>(null);
 
-  const { lanes, marks, from, to, dropped } = useMemo(() => {
+  const { lanes, marks, born, from, to, dropped } = useMemo(() => {
     const recent = rows.slice(0, MAX_MARKS).slice().reverse();  // oldest first, left to right
     // Lanes: everything that CALLS above everything that is only called. Then a
     // prompt points down the picture and a resolved wait points back up it,
-    // which is the whole claim the legend makes. Sorting by traffic alone put
-    // targets above their callers and the two directions stopped meaning
-    // anything.
+    // which is the whole claim the legend makes.
     const made = new Map<string, number>();
     const got = new Map<string, number>();
     const bump = (m: Map<string, number>, name: string) => name && m.set(name, (m.get(name) || 0) + 1);
-    for (const op of recent) { bump(made, originLane(op)); bump(got, whom(op, names)); }
+    const other = (op: api.Operation) => created(op)?.name || whom(op, names);
+    for (const op of recent) { bump(made, originLane(op)); bump(got, other(op)); }
     const byCount = (m: Map<string, number>) => [...m].sort((a, b) => b[1] - a[1]).map(([n]) => n);
-    const callers = byCount(made);
-    const lanes = [...callers, ...byCount(got).filter((n) => !made.has(n))].slice(0, MAX_LANES);
-    const t0 = recent.length ? new Date(recent[0].at).getTime() : 0;
-    const t1 = recent.length ? new Date(recent[recent.length - 1].at).getTime() : 1;
+    const lanes = [...byCount(made), ...byCount(got).filter((n) => !made.has(n))].slice(0, MAX_LANES);
     // x is the call's RANK, not its clock position: real traffic arrives in
     // bursts, and spacing by time collapses a burst into one unreadable column
     // while leaving the quiet hours as empty space. The axis still says what
     // period is on screen.
-    const marks = recent.map((op, i) => ({
-      op,
-      x: recent.length < 2 ? 0.5 : i / (recent.length - 1),
-      a: lanes.indexOf(originLane(op)),
-      b: lanes.indexOf(whom(op, names)),
-    })).filter((m) => m.a >= 0 || m.b >= 0);
-    void t0; void t1;
+    const xs = new Map<string, number>();
+    const marks = recent.map((op, i) => {
+      const x = recent.length < 2 ? 0.5 : i / (recent.length - 1);
+      xs.set(op.id, x);
+      return { op, x, a: lanes.indexOf(originLane(op)), b: lanes.indexOf(other(op)) };
+    }).filter((m) => m.a >= 0 || m.b >= 0);
+    // When a lane came into being, if we watched it happen. Before that its line
+    // is drawn faint: the agent did not exist, and a solid line all the way to
+    // the left edge said it had been there the whole time.
+    const born = new Map<string, number>();
+    for (const { op, x } of marks) {
+      const c = created(op);
+      if (c && !born.has(c.name)) born.set(c.name, x);
+    }
+    // A wait BLOCKS, and that is the interesting thing about it. Its `at` is
+    // when it STARTED — which is where its rank puts it — and it resolved
+    // durationMs later. So the resolution is drawn where that moment falls in
+    // the sequence, and the stretch in between is the wait itself: a five-minute
+    // block reads as five minutes of the picture rather than as a point.
+    const endX = (op: api.Operation, own: number) => {
+      const ended = new Date(op.at).getTime() + (op.durationMs || 0);
+      let x = own;
+      for (const m of marks) if (new Date(m.op.at).getTime() <= ended) x = Math.max(x, m.x);
+      // resolved after everything else on screen: run to the right edge
+      return ended > new Date(marks[marks.length - 1].op.at).getTime() ? 1 : x;
+    };
     return {
       lanes,
-      marks,
+      marks: marks.map((m) => (isWait(m.op) ? { ...m, x0: m.x, x: endX(m.op, m.x) } : m)) as
+        Array<{ op: api.Operation; x: number; a: number; b: number; x0?: number }>,
+      born,
       from: recent.length ? recent[0].at : '',
       to: recent.length ? recent[recent.length - 1].at : '',
       dropped: Math.max(0, rows.length - MAX_MARKS),
@@ -274,77 +289,149 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
   if (!lanes.length) return <div className="s-muted al-empty">Nothing to draw yet.</div>;
 
   const width = 760;
-  const height = TOP + lanes.length * LANE_H + 34;
-  const laneY = (i: number) => TOP + i * LANE_H + 8;
+  const height = TOP + lanes.length * LANE_H + FOOT;
+  const laneY = (i: number) => TOP + i * LANE_H + 6;
   const xOf = (t: number) => LEFT + t * (width - LEFT - RIGHT);
+
 
   return (
     <div className="al-map">
       <div className="al-mapwrap">
         <svg viewBox={`0 0 ${width} ${height}`} role="img"
-          aria-label="Swimlanes: one lane per agent, prompts drawn from caller to target and resolved waits back the other way.">
+          aria-label="Swimlanes: one lane per agent, prompts drawn from caller to target, resolved waits back the other way, and a lane drawn faint until the agent is created.">
           <defs>
-            <marker id="al-ar" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+            <marker id="al-ar" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="4.5" markerHeight="4.5" orient="auto">
               <path d="M0 0 L8 4 L0 8 z" fill="var(--accent)" />
             </marker>
-            <marker id="al-arb" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+            <marker id="al-arb" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="4.5" markerHeight="4.5" orient="auto">
               <path d="M0 0 L8 4 L0 8 z" fill="var(--muted)" />
             </marker>
           </defs>
-          {lanes.map((name, i) => (
-            <g key={name}>
-              <text x="2" y={laneY(i) - 6} className="al-lane-lbl">{name}</text>
-              <line x1="2" y1={laneY(i)} x2={width - 4} y2={laneY(i)} className="al-lane" />
-            </g>
-          ))}
-          {marks.map(({ op, x, a, b }) => {
+          {lanes.map((name, i) => {
+            const b = born.get(name);
+            return (
+              <g key={name}>
+                <text x="2" y={laneY(i) - 5} className={`al-lane-lbl${b !== undefined ? ' new' : ''}`}>{name}</text>
+                {b !== undefined && <line x1="2" y1={laneY(i)} x2={xOf(b)} y2={laneY(i)} className="al-lane unborn" />}
+                <line x1={b === undefined ? 2 : xOf(b)} y1={laneY(i)} x2={width - 4} y2={laneY(i)} className="al-lane" />
+              </g>
+            );
+          })}
+          {marks.map(({ op, x, x0, a, b }) => {
             const back = isWait(op);
-            // A wait is attention coming BACK: it is drawn from the agent that
-            // was waited on to the one that waited.
+            const isNew = !!created(op);
             const src = back ? (b >= 0 ? b : a) : a;
             const dst = back ? a : b;
             const px = xOf(x);
             const on = hover?.id === op.id;
+            const cls = `${back ? ' back' : ''}${op.ok ? '' : ' bad'}${isNew ? ' new' : ''}`;
             if (src < 0 || dst < 0 || src === dst) {
               const lane = src >= 0 ? src : dst;
               return (
-                <circle key={op.id} cx={px} cy={laneY(lane)} r={on ? 4 : 2.6}
-                  className={`al-dot${back ? ' back' : ''}${op.ok ? '' : ' bad'}${on ? ' on' : ''}`}
+                <circle key={op.id} cx={px} cy={laneY(lane)} r={on ? 3.4 : 2}
+                  className={`al-dot${cls}${on ? ' on' : ''}`}
                   onMouseEnter={() => setHover(op)} onMouseLeave={() => setHover(null)}>
                   <title>{`${HHMMSS(op.at)} ${op.method} ${op.path}`}</title>
                 </circle>
               );
             }
-            const y1 = laneY(src) + (dst > src ? 5 : -5);
-            const y2 = laneY(dst) + (dst > src ? -7 : 7);
+            const y1 = laneY(src) + (dst > src ? 4 : -4);
+            const y2 = laneY(dst) + (dst > src ? -6 : 6);
             return (
               <g key={op.id} onMouseEnter={() => setHover(op)} onMouseLeave={() => setHover(null)}
                 className={`al-arrowg${on ? ' on' : ''}`}>
                 <title>{`${HHMMSS(op.at)} ${op.method} ${op.path}`}</title>
+                {/* how long the caller was blocked, on the caller's own lane */}
+                {back && x0 !== undefined && x0 < x && (
+                  <line x1={xOf(x0)} y1={laneY(dst)} x2={px} y2={laneY(dst)} className="al-held" />
+                )}
                 <line x1={px} y1={y1} x2={px} y2={y2}
-                  className={`al-arrow${back ? ' back' : ''}${op.ok ? '' : ' bad'}`}
+                  className={`al-arrow${cls}`}
                   markerEnd={`url(#${back ? 'al-arb' : 'al-ar'})`} />
-                <circle cx={px} cy={laneY(src)} r="2.6" className={`al-dot${back ? ' back' : ''}${op.ok ? '' : ' bad'}`} />
-                {/* a hit area wider than a 1.6px line, or nothing is hoverable */}
+                <circle cx={px} cy={laneY(src)} r="2" className={`al-dot${cls}`} />
+                {/* a create ends on a lane that did not exist a moment ago: an
+                    open mark says "this one begins here" where a filled dot
+                    would just be one more call */}
+                {isNew && <circle cx={px} cy={laneY(dst)} r="3.2" className="al-birth" />}
+                {/* a hit area wider than a 1px line, or nothing is hoverable */}
                 <line x1={px} y1={y1} x2={px} y2={y2} className="al-hit" />
               </g>
             );
           })}
-          {from && <text x="2" y={height - 8} className="al-axis">{`${DAY(from)} ${HHMMSS(from).slice(0, 5)} →`}</text>}
-          {to && <text x={width - 4} y={height - 8} textAnchor="end" className="al-axis">{HHMMSS(to).slice(0, 5)}</text>}
+          {/* axis and legend, both inside the frame */}
+          {from && <text x="2" y={height - 22} className="al-axis">{`${DAY(from)} ${HHMMSS(from).slice(0, 5)} →`}</text>}
+          {to && <text x={width - 4} y={height - 22} textAnchor="end" className="al-axis">{HHMMSS(to).slice(0, 5)}</text>}
+          <g className="al-key">
+            <line x1="2" y1={height - 7} x2="18" y2={height - 7} className="al-arrow" markerEnd="url(#al-ar)" />
+            <text x="22" y={height - 4}>prompt</text>
+            <line x1="72" y1={height - 7} x2="88" y2={height - 7} className="al-arrow back" markerEnd="url(#al-arb)" />
+            <text x="92" y={height - 4}>wait, from where it started</text>
+            <line x1="228" y1={height - 7} x2="240" y2={height - 7} className="al-arrow new" markerEnd="url(#al-ar)" />
+            <circle cx="245" cy={height - 7} r="3.2" className="al-birth" />
+            <text x="252" y={height - 4}>created</text>
+            <line x1="304" y1={height - 7} x2="320" y2={height - 7} className="al-lane unborn" />
+            <text x="324" y={height - 4}>before it existed</text>
+            {dropped > 0 && <text x={width - 4} y={height - 4} textAnchor="end">newest {MAX_MARKS} of {rows.length}</text>}
+          </g>
         </svg>
       </div>
-      <div className="al-readout mono">
-        {hover
-          ? `${HHMMSS(hover.at)}  ${who(hover)}${whom(hover, names) ? ` → ${whom(hover, names)}` : ''}  ${hover.method} ${hover.path}  ${hover.status}  ${took(hover.durationMs)}  ${payloadOf(hover).text}`
-          : 'Hover a line for its time, status and payload.'}
+      {/* Under the plot, not floating over it: a card that follows the cursor
+          covers the very lanes you are reading, and clips against a frame that
+          scrolls. This one is always the same size and in the same place. */}
+      <HoverCard op={hover} names={names} />
+    </div>
+  );
+}
+
+/** The whole call, pretty-printed, plus the metadata that is not in the body:
+ *  who, what it hit, the status and how long it took. The log's request/result
+ *  are already summaries — this shows them as they are stored rather than
+ *  paraphrasing them into a sentence. */
+function HoverCard({ op, names }: { op: api.Operation | null; names: Map<string, string> }) {
+  if (!op) {
+    return (
+      <div className="al-card al-card-idle">
+        Hover a call for the whole entry — who, what it hit, its status, how long it took.
       </div>
-      <div className="al-legend">
-        <span><i className="al-key" /> prompt (caller → target)</span>
-        <span><i className="al-key back" /> wait resolved (target → caller)</span>
-        <span><i className="al-key dot" /> the call&apos;s own lane</span>
-        {dropped > 0 && <span className="s-muted">newest {MAX_MARKS} of {rows.length} drawn</span>}
+    );
+  }
+  const body = {
+    at: op.at,
+    call: `${op.method} ${op.path}`,
+    from: op.origin ? `${op.origin.name || op.origin.id}${op.origin.type ? ` (${op.origin.type})` : ''}` : null,
+    to: whom(op, names) || created(op)?.name || null,
+    status: op.status,
+    took: took(op.durationMs),
+    ...(created(op) ? { created: created(op) } : {}),
+    ...(op.query && Object.keys(op.query).length ? { query: op.query } : {}),
+    ...(op.request === undefined ? {} : { request: op.request }),
+    ...(op.result === undefined ? {} : { result: op.result }),
+  };
+  return (
+    <div className="al-card">
+      <div className="al-card-head">
+        <span className={`al-meth${isWait(op) ? ' back' : ''}`}>{op.method}</span>
+        <span className="al-card-path">{op.path}</span>
+        <span className={`al-st ${statusClass(op)}`}>{op.status}</span>
+        <span className="al-card-took">{took(op.durationMs)}</span>
+      </div>
+      <pre className="al-json">{json(body)}</pre>
+      <div className="al-card-foot">
+        prompt text is not stored — {'{'}present, chars, sha256{'}'} only
       </div>
     </div>
   );
+}
+
+/** JSON with the keys tinted. Small enough not to want a highlighter. */
+function json(value: unknown) {
+  return JSON.stringify(value, null, 2).split('\n').map((line, i) => {
+    const m = line.match(/^(\s*)"([^"]+)":\s?(.*)$/);
+    return (
+      <span key={i}>
+        {m ? <>{m[1]}<span className="al-k">{m[2]}</span>: {m[3]}</> : line}
+        {'\n'}
+      </span>
+    );
+  });
 }
