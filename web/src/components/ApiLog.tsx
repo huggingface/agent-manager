@@ -18,7 +18,7 @@
 // something, when, and how big the ask was — never what it said. Equal
 // checksums mean identical prompts, which is what a repeating job produces, so
 // repeats are marked rather than hidden.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../api';
 
 type View = 'list' | 'map';
@@ -231,7 +231,25 @@ const MAX_LANES = 14;
 const MAX_MARKS = 60;
 
 function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, string> }) {
-  const [hover, setHover] = useState<api.Operation | null>(null);
+  // Hovering previews an entry; CLICKING keeps it. Both are needed: the card is
+  // fixed below the plot and its JSON scrolls, so clearing on the mark's
+  // mouseleave meant the pointer could never reach the card — the lower half of
+  // a long entry could not be read, scrolled or copied. A short grace period
+  // carries the pointer across the gap, and a click pins the entry so it
+  // survives the pointer going anywhere at all.
+  const [sel, setSel] = useState<{ op: api.Operation; pinned: boolean } | null>(null);
+  const hideTimer = useRef<number>();
+  useEffect(() => () => window.clearTimeout(hideTimer.current), []);
+  const preview = (op: api.Operation) => {
+    window.clearTimeout(hideTimer.current);
+    setSel((cur) => (cur?.pinned ? cur : { op, pinned: false }));
+  };
+  const release = () => {
+    window.clearTimeout(hideTimer.current);
+    hideTimer.current = window.setTimeout(() => setSel((cur) => (cur?.pinned ? cur : null)), 220);
+  };
+  const pin = (op: api.Operation) => { window.clearTimeout(hideTimer.current); setSel({ op, pinned: true }); };
+  const hover = sel?.op ?? null;
 
   const { lanes, marks, born, from, to, dropped } = useMemo(() => {
     const recent = rows.slice(0, MAX_MARKS).slice().reverse();  // oldest first, left to right
@@ -245,16 +263,36 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
     for (const op of recent) { bump(made, originLane(op)); bump(got, other(op)); }
     const byCount = (m: Map<string, number>) => [...m].sort((a, b) => b[1] - a[1]).map(([n]) => n);
     const lanes = [...byCount(made), ...byCount(got).filter((n) => !made.has(n))].slice(0, MAX_LANES);
-    // x is the call's RANK, not its clock position: real traffic arrives in
-    // bursts, and spacing by time collapses a burst into one unreadable column
-    // while leaving the quiet hours as empty space. The axis still says what
-    // period is on screen.
-    const xs = new Map<string, number>();
-    const marks = recent.map((op, i) => {
-      const x = recent.length < 2 ? 0.5 : i / (recent.length - 1);
-      xs.set(op.id, x);
-      return { op, x, a: lanes.indexOf(originLane(op)), b: lanes.indexOf(other(op)) };
-    }).filter((m) => m.a >= 0 || m.b >= 0);
+    // x is RANK, not clock position: real traffic arrives in bursts, and spacing
+    // by time collapses a burst into one unreadable column while leaving the
+    // quiet hours as empty space. The axis still says what period is on screen.
+    //
+    // The rank is over EVENTS, not calls, and a wait is two events — issued, and
+    // resolved. That is what makes a five-minute wait occupy five minutes' worth
+    // of the picture even when nothing else happens while it blocks: snapping its
+    // resolution to the nearest other call, as this did first, gave a wait in
+    // quiet traffic no span at all, which is the ordinary shape of waiting.
+    const events: Array<{ t: number; id: string; end?: boolean }> = [];
+    for (const op of recent) {
+      const t = new Date(op.at).getTime();
+      events.push({ t, id: op.id });
+      if (isWait(op) && op.durationMs > 0) events.push({ t: t + op.durationMs, id: op.id, end: true });
+    }
+    events.sort((a, b) => a.t - b.t);
+    const xStart = new Map<string, number>();
+    const xResolved = new Map<string, number>();
+    events.forEach((e, i) => {
+      const x = events.length < 2 ? 0.5 : i / (events.length - 1);
+      (e.end ? xResolved : xStart).set(e.id, x);
+    });
+    const marks = recent.map((op) => ({
+      op,
+      // a wait is DRAWN where it resolved; its span reaches back to where it began
+      x: xResolved.get(op.id) ?? xStart.get(op.id) ?? 0.5,
+      x0: xResolved.has(op.id) ? xStart.get(op.id) : undefined,
+      a: lanes.indexOf(originLane(op)),
+      b: lanes.indexOf(other(op)),
+    })).filter((m) => m.a >= 0 || m.b >= 0);
     // When a lane came into being, if we watched it happen. Before that its line
     // is drawn faint: the agent did not exist, and a solid line all the way to
     // the left edge said it had been there the whole time.
@@ -263,25 +301,14 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
       const c = created(op);
       if (c && !born.has(c.name)) born.set(c.name, x);
     }
-    // A wait BLOCKS, and that is the interesting thing about it. Its `at` is
-    // when it STARTED — which is where its rank puts it — and it resolved
-    // durationMs later. So the resolution is drawn where that moment falls in
-    // the sequence, and the stretch in between is the wait itself: a five-minute
-    // block reads as five minutes of the picture rather than as a point.
-    const endX = (op: api.Operation, own: number) => {
-      const ended = new Date(op.at).getTime() + (op.durationMs || 0);
-      let x = own;
-      for (const m of marks) if (new Date(m.op.at).getTime() <= ended) x = Math.max(x, m.x);
-      // resolved after everything else on screen: run to the right edge
-      return ended > new Date(marks[marks.length - 1].op.at).getTime() ? 1 : x;
-    };
     return {
       lanes,
-      marks: marks.map((m) => (isWait(m.op) ? { ...m, x0: m.x, x: endX(m.op, m.x) } : m)) as
-        Array<{ op: api.Operation; x: number; a: number; b: number; x0?: number }>,
+      marks,
       born,
-      from: recent.length ? recent[0].at : '',
-      to: recent.length ? recent[recent.length - 1].at : '',
+      // The axis spans the EVENTS on screen, so a wait that resolved after the
+      // last request still ends inside the frame rather than off it.
+      from: events.length ? new Date(events[0].t).toISOString() : '',
+      to: events.length ? new Date(events[events.length - 1].t).toISOString() : '',
       dropped: Math.max(0, rows.length - MAX_MARKS),
     };
   }, [rows, names]);
@@ -330,7 +357,7 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
               return (
                 <circle key={op.id} cx={px} cy={laneY(lane)} r={on ? 3.4 : 2}
                   className={`al-dot${cls}${on ? ' on' : ''}`}
-                  onMouseEnter={() => setHover(op)} onMouseLeave={() => setHover(null)}>
+                  onMouseEnter={() => preview(op)} onMouseLeave={release} onClick={() => pin(op)}>
                   <title>{`${HHMMSS(op.at)} ${op.method} ${op.path}`}</title>
                 </circle>
               );
@@ -338,7 +365,7 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
             const y1 = laneY(src) + (dst > src ? 4 : -4);
             const y2 = laneY(dst) + (dst > src ? -6 : 6);
             return (
-              <g key={op.id} onMouseEnter={() => setHover(op)} onMouseLeave={() => setHover(null)}
+              <g key={op.id} onMouseEnter={() => preview(op)} onMouseLeave={release} onClick={() => pin(op)}
                 className={`al-arrowg${on ? ' on' : ''}`}>
                 <title>{`${HHMMSS(op.at)} ${op.method} ${op.path}`}</title>
                 {/* how long the caller was blocked, on the caller's own lane */}
@@ -378,7 +405,14 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
       {/* Under the plot, not floating over it: a card that follows the cursor
           covers the very lanes you are reading, and clips against a frame that
           scrolls. This one is always the same size and in the same place. */}
-      <HoverCard op={hover} names={names} />
+      <HoverCard
+        op={hover}
+        pinned={!!sel?.pinned}
+        names={names}
+        onEnter={() => window.clearTimeout(hideTimer.current)}
+        onLeave={release}
+        onClose={() => setSel(null)}
+      />
     </div>
   );
 }
@@ -387,11 +421,18 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
  *  who, what it hit, the status and how long it took. The log's request/result
  *  are already summaries — this shows them as they are stored rather than
  *  paraphrasing them into a sentence. */
-function HoverCard({ op, names }: { op: api.Operation | null; names: Map<string, string> }) {
+function HoverCard({ op, pinned, names, onEnter, onLeave, onClose }: {
+  op: api.Operation | null;
+  pinned: boolean;
+  names: Map<string, string>;
+  onEnter: () => void;
+  onLeave: () => void;
+  onClose: () => void;
+}) {
   if (!op) {
     return (
       <div className="al-card al-card-idle">
-        Hover a call for the whole entry — who, what it hit, its status, how long it took.
+        Hover a call for the whole entry — who, what it hit, its status, how long it took. Click one to keep it here.
       </div>
     );
   }
@@ -408,16 +449,18 @@ function HoverCard({ op, names }: { op: api.Operation | null; names: Map<string,
     ...(op.result === undefined ? {} : { result: op.result }),
   };
   return (
-    <div className="al-card">
+    <div className={`al-card${pinned ? ' pinned' : ''}`} onMouseEnter={onEnter} onMouseLeave={onLeave}>
       <div className="al-card-head">
         <span className={`al-meth${isWait(op) ? ' back' : ''}`}>{op.method}</span>
         <span className="al-card-path">{op.path}</span>
         <span className={`al-st ${statusClass(op)}`}>{op.status}</span>
         <span className="al-card-took">{took(op.durationMs)}</span>
+        {pinned && <button type="button" className="al-card-x" onClick={onClose} aria-label="Release this entry">✕</button>}
       </div>
       <pre className="al-json">{json(body)}</pre>
       <div className="al-card-foot">
         prompt text is not stored — {'{'}present, chars, sha256{'}'} only
+        {!pinned && <span className="al-card-hint"> · click the call to keep this open</span>}
       </div>
     </div>
   );

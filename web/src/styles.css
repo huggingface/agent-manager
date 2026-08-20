@@ -1464,7 +1464,6 @@ a.btn-ghost { text-decoration: none; }
 .al-dot.back { fill: var(--muted); }
 .al-dot.bad { fill: var(--danger); }
 .al-hit { stroke: transparent; stroke-width: 10; }
-.al-arrowg { cursor: default; }
 /* a slight lift on hover, not a thickening — the card carries the detail */
 .al-arrowg.on .al-arrow { stroke-width: 1.6; }
 .al-arrowg.on .al-held { opacity: 0.45; }
@@ -1479,6 +1478,13 @@ a.btn-ghost { text-decoration: none; }
 .al-card-head { display: flex; align-items: baseline; gap: 7px; font-family: var(--font-mono); font-size: 11px; }
 .al-card-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .al-card-took { color: var(--muted); margin-left: auto; white-space: nowrap; }
+.al-card.pinned { border-color: var(--accent); }
+.al-card-x { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0 2px; line-height: 1; }
+.al-card-x:hover { color: var(--text); }
+.al-card-hint { color: var(--muted); opacity: 0.8; }
+/* the marks are clickable, and the whole point of the card is that you can
+   reach into it — so nothing here opts out of pointer events */
+.al-arrowg, .al-dot { cursor: pointer; }
 .al-json { margin: 0; max-height: 210px; overflow: auto; white-space: pre; font-family: var(--font-mono); font-size: 10.5px; line-height: 1.45; color: var(--text); }
 .al-json .al-k { color: var(--accent); }
 .al-card-foot { font-size: 9.5px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 5px; }

@@ -98,6 +98,20 @@ const operations = [
     result: { id: 'poet-1', state: 'waiting', matched: true, waited: 258 } },
 ];
 
+// The case the first span implementation dropped: five minutes of blocking with
+// no other call in between, and nothing after it either. Snapping the resolution
+// to the nearest neighbouring call gave this no span at all — which is the
+// normal shape of waiting, not an edge case.
+const quietWait = {
+  id: 'wq', at: at(600), method: 'GET', path: '/api/agents/quiet-1/wait',
+  origin: { id: 'watcher', type: 'agent', name: 'watcher' },
+  target: { id: 'quiet-1', name: 'quiet', cli: 'claude' },
+  status: 200, ok: true, durationMs: 300000,
+  result: { id: 'quiet-1', state: 'waiting', matched: true, waited: 300 },
+};
+operations.push({ ...prompt(599, 'watcher', 'quiet-1', 64), target: { id: 'quiet-1', name: 'quiet', cli: 'claude' } });
+operations.push(quietWait);
+
 operations.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));  // the endpoint's own order
 
 const stub = path.join(tmp, 'api-stub.ts');
@@ -215,14 +229,16 @@ try {
   const list = await page.evaluate(() => {
     const cells = [...document.querySelectorAll('.al-tbl tbody tr')].map((r) => [...r.children].map((c) => c.textContent.trim()));
     return {
-      first: cells[0],
+      first: cells.find((c) => c[2].includes('/api/agents/builder/wait')) || cells[0],
       repeats: [...document.querySelectorAll('.al-rep')].map((e) => e.textContent.trim()),
       whos: [...document.querySelectorAll('.al-who')].map((e) => e.textContent.trim()),
+      newest: document.querySelector('.al-tbl tbody tr')?.getAttribute('title')?.split(' ')[0],
     };
   });
   console.log('what a row says');
   check('a resolved wait reads as one, with the time it blocked for',
     () => assert.deepEqual(list.first.slice(2), ['GET /api/agents/builder/wait', '200', '4m 18s', 'resolved · waiting']));
+  check('and the newest row really is the newest', () => assert.equal(list.newest, at(600)));
   check('identical prompts are marked as repeats, since the text itself is never stored',
     () => assert.deepEqual(list.repeats, ['×2', '×2']));
   check('an unattributed call still reads as a row, with an em dash for who',
@@ -233,6 +249,7 @@ try {
   const map = await page.evaluate(() => {
     const birth = document.querySelectorAll('circle.al-birth').length;
     const held = [...document.querySelectorAll('.al-held')].map((l) => Number(l.getAttribute('x2')) - Number(l.getAttribute('x1')));
+    const heldEnds = [...document.querySelectorAll('.al-held')].map((l) => Number(l.getAttribute('x2')));
     const unborn = [...document.querySelectorAll('.al-lane.unborn')].map((l) => Number(l.getAttribute('x2')));
     const labels = [...document.querySelectorAll('.al-lane-lbl')];
     const dotLanes = [...document.querySelectorAll('circle.al-dot')].map((c) => Number(c.getAttribute('cy')));
@@ -249,7 +266,7 @@ try {
       dst: lanes[laneAt(Number(l.getAttribute('y2')))],
       dashed: !!getComputedStyle(l).strokeDasharray && getComputedStyle(l).strokeDasharray !== 'none',
     }));
-    return { lanes, arrows, birth, held, unborn, dotLanes: dotLanes.map((y) => lanes[laneAt(y)]) };
+    return { lanes, arrows, birth, held, heldEnds, unborn, dotLanes: dotLanes.map((y) => lanes[laneAt(y)]) };
   });
   console.log('\nthe map');
   check('callers are laid out above the agents they call',
@@ -288,8 +305,18 @@ try {
   check('and that lane is drawn faint until it exists',
     () => assert.ok(map.unborn.some((x2) => x2 > 2), `unborn segments end at: ${map.unborn.join(', ')}`));
   // "in the wait, i think it should also be visible when the wait started"
-  check('a wait is a span from where it started, not a point',
-    () => assert.ok(map.held.some((w) => w > 4), `spans: ${map.held.join(', ')}`));
+  const timedWaits = operations.filter((o) => o.method === 'GET' && o.durationMs > 0 && o.origin);
+  check(`every one of the ${timedWaits.length} waits that blocked draws a span`,
+    () => {
+      assert.equal(map.held.length, timedWaits.length, `spans: ${map.held.join(', ')}`);
+      assert.ok(map.held.every((w) => w > 1), `widths: ${map.held.join(', ')}`);
+    });
+  check('including the five-minute one that blocked with nothing else going on',
+    () => {
+      // That wait is the newest thing in the fixture and resolved last, so its
+      // span has to run to the right edge of the plot — 760 wide, 20 of margin.
+      assert.ok(map.heldEnds.some((x2) => x2 >= 760 - 20 - 1), `span ends: ${map.heldEnds.join(', ')}`);
+    });
   check('it is a mark on the lane of whoever was waited on',
     () => {
       assert.ok(map.lanes.includes('lonely'), map.lanes.join(' < '));
@@ -329,6 +356,49 @@ try {
   check('still never the prompt text', () => assert.ok(!/"text":\s*"/.test(card.json)));
   check('and it sits below the plot rather than covering it',
     () => assert.equal(card.floating, 'static'));
+
+  // A card you cannot reach is a card you cannot read: the JSON is capped and
+  // scrollable, so the pointer has to be able to travel from the mark into it.
+  const reach = await page.evaluate(async () => {
+    const card = document.querySelector('.al-card');
+    const before = card.querySelector('.al-card-path').textContent;
+    // leave the mark the way a pointer does, then arrive on the card
+    document.querySelector('.al-arrowg').dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: card }));
+    document.querySelector('.al-arrowg').dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }));
+    card.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    card.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+    await new Promise((r) => setTimeout(r, 400));
+    const still = document.querySelector('.al-card-path')?.textContent;
+    const pre = document.querySelector('.al-json');
+    let scrolled = null;
+    if (pre) { pre.scrollTop = 40; scrolled = pre.scrollTop; }
+    return { before, still, idle: !!document.querySelector('.al-card-idle'), scrolled,
+      overflows: pre ? pre.scrollHeight > pre.clientHeight : null };
+  });
+  check('the entry survives the pointer moving onto the card',
+    () => { assert.equal(reach.still, reach.before); assert.ok(!reach.idle); });
+  check('and the JSON can actually be scrolled when it overflows',
+    () => assert.ok(!reach.overflows || reach.scrolled > 0, `overflows: ${reach.overflows}, scrollTop: ${reach.scrolled}`));
+
+  // …and a click keeps it, so the pointer can go anywhere without losing it.
+  const pinned = await page.evaluate(async () => {
+    const g = document.querySelector('.al-arrowg');
+    g.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    g.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+    g.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const path = document.querySelector('.al-card-path')?.textContent;
+    g.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }));
+    document.body.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 500));
+    return {
+      path,
+      still: document.querySelector('.al-card-path')?.textContent,
+      marked: !!document.querySelector('.al-card.pinned'),
+      hasClose: !!document.querySelector('.al-card-x'),
+    };
+  });
+  check('clicking a call pins the entry, and it says so',
+    () => { assert.equal(pinned.still, pinned.path); assert.ok(pinned.marked && pinned.hasClose); });
   await page.close();
 } finally {
   await browser.close();
