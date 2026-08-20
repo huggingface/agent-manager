@@ -1400,6 +1400,68 @@ a.btn-ghost { text-decoration: none; }
 
 /* settings: skills editor */
 .settings-page.wide { max-width: 980px; }
+
+/* settings: cron jobs — a labelled form followed by the operational table from
+   the approved mock. State is plain coloured text; controls are controls, never
+   status pills, so "running" cannot be mistaken for something clickable. */
+.cron-intro { max-width: 680px; margin: -8px 0 18px; }
+.cron-form { display: grid; grid-template-columns: 128px minmax(0, 1fr); column-gap: 20px; row-gap: 16px; padding: 16px 2px 20px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.cron-form > label, .cron-label { padding-top: 8px; font-size: 13px; font-weight: 600; }
+.cron-form > div { min-width: 0; }
+.cron-form input, .cron-form textarea, .cron-form select { padding: 7px 9px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--text); font: inherit; font-size: 12.5px; }
+.cron-form input:focus, .cron-form textarea:focus, .cron-form select:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
+.cron-form > div > input, .cron-form textarea { display: block; width: 100%; }
+.cron-form textarea { resize: vertical; min-height: 82px; line-height: 1.45; }
+.cron-form p { margin: 5px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.cron-clis { display: flex; flex-wrap: wrap; gap: 5px; }
+.cron-clis button { min-height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel); color: var(--muted); font: 11.5px var(--font-mono); cursor: pointer; }
+.cron-clis button:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); }
+.cron-clis button.on { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+.cron-clis button:disabled { opacity: 0.34; cursor: not-allowed; }
+.cron-presets { display: flex; flex-wrap: wrap; border: 0; border-radius: 0; overflow: visible; gap: 4px; }
+.cron-presets button { border: 1px solid var(--border); border-radius: var(--r-sm); padding: 5px 9px; }
+.cron-schedule-fields { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: 9px; }
+.cron-schedule-fields label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
+.cron-schedule-fields input[type='time'] { width: 132px; font-family: var(--font-mono); }
+.cron-schedule-fields select { min-width: 112px; }
+.cron-schedule-fields .cron-expression { flex: 1 1 210px; }
+.cron-expression input { flex: 1; min-width: 140px; }
+.cron-schedule-fields .cron-zone { flex: 1 1 230px; }
+.cron-zone input { flex: 1; min-width: 160px; }
+.cron-form-actions { grid-column: 2; display: flex; gap: 8px; }
+.cron-message { margin-top: 14px; }
+.cron-page h3 { margin-top: 24px; }
+.cron-table-wrap { margin-top: 8px; border-top: 1px solid var(--border); }
+.cron-table { width: 100%; border-collapse: collapse; table-layout: auto; font-size: 11.5px; }
+/* Every data column takes its intrinsic one-line width. The final empty column
+   owns all surplus, keeping the useful columns grouped instead of stretching
+   Job and Agent across the table. */
+.cron-col-job, .cron-col-agent, .cron-col-type, .cron-col-interval,
+.cron-col-state, .cron-col-next, .cron-col-last, .cron-col-actions { width: 1%; }
+.cron-col-fill { width: auto; }
+.cron-table th { padding: 7px 5px; border-bottom: 1px solid var(--border); color: var(--muted); font: 500 10px var(--font-mono); letter-spacing: 0.045em; text-align: left; text-transform: uppercase; white-space: nowrap; }
+.cron-table td { padding: 7px 5px; border-bottom: 1px solid var(--border); color: var(--text); font-family: var(--font-mono); vertical-align: middle; white-space: nowrap; }
+.cron-table .cron-fill { padding: 0; }
+.cron-table tbody tr { cursor: pointer; }
+.cron-table tbody tr:hover, .cron-table tbody tr.editing { background: var(--panel-2); }
+.cron-table tbody tr:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.cron-table tbody tr.editing { box-shadow: inset 2px 0 var(--accent); }
+.cron-type .cli-logo { display: flex; }
+.cron-dim { color: var(--muted); }
+.cron-state.running, .cron-last.ok { color: var(--go); }
+.cron-state.stopped { color: var(--muted); }
+.cron-last.failed { color: var(--danger); }
+.cron-actions { display: inline-flex; gap: 4px; white-space: nowrap; }
+.cron-actions .btn-ghost { padding: 4px 5px; border-radius: var(--r-sm); background: var(--panel); font: 500 10.5px var(--font-mono); }
+.cron-actions .btn-ghost:disabled { cursor: wait; }
+
+@container (max-width: 560px) {
+  .cron-form { grid-template-columns: minmax(0, 1fr); row-gap: 5px; padding-left: 0; padding-right: 0; }
+  .cron-form > label, .cron-label { padding-top: 10px; }
+  .cron-form-actions { grid-column: 1; margin-top: 10px; }
+  .cron-schedule-fields { align-items: flex-start; flex-direction: column; }
+  .cron-schedule-fields .cron-expression, .cron-schedule-fields .cron-zone { flex: none; width: 100%; }
+}
 /* natural height — the settings page scrolls, not the preview */
 .skills { display: flex; gap: 14px; margin-top: 12px; align-items: flex-start; }
 .skills-list { width: 220px; flex: none; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; border-right: 1px solid var(--border); padding-right: 10px; }
