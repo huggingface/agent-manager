@@ -3,7 +3,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import * as api from '../api';
 import type { MetaSession, TraceTurn } from '../api';
 import type { Cli, OverviewChip, OverviewFilter, OverviewSort, Session, SessionState, Tree } from '../types';
-import { chipBuckets, isPassive, isRemote } from '../types';
+import { chipBuckets, isPassive, isRemote, STATE_LABEL, REMOTE_STATE_LABEL } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import { rankSessions, sortLabel } from '../lib/overviewSort';
 import { hiddenSessionIds } from '../lib/overviewHidden';
@@ -15,6 +15,7 @@ import {
 import type { PendingAttachment, PendingPrompt } from '../lib/attachments';
 import Attachments from './Attachments';
 import Logo from './Logo';
+import StateLogo from './StateLogo';
 import Composer from './conversation/Composer';
 import InputRequiredNotice from './conversation/InputRequiredNotice';
 import ExchangeView, { PendingExchange } from './conversation/Exchange';
@@ -62,6 +63,11 @@ const bucket = (state: SessionState): OverviewFilter =>
 const atWork = (m: MetaSession) =>
   m.state === 'working'
   || (!isRemote(m.cli) && m.state !== 'stopped' && !!m.digest?.running);
+
+// The same label rule the sidebar row uses: for a remote agent the frame means
+// connection, not process, so it must not borrow the local words.
+const stateTitle = (s: { cli: string; state: SessionState }) =>
+  (isRemote(s.cli) ? REMOTE_STATE_LABEL : STATE_LABEL)[s.state];
 
 /** How much of the conversation the card reads. Cheap: one page, from the end. */
 const CARD_TAIL = 120;
@@ -294,8 +300,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   return (
     <div className={`ov-card${windowed ? '' : ' ov-compact'}`}>
       <div className="ov-id" onClick={() => onOpen(s.id)} title="Open pane">
-        <span className={`status ${s.state}`} />
-        <Logo cli={s.cli} size={12} tint={color} />
+        <StateLogo cli={s.cli} state={s.state} size={12} tint={color} title={stateTitle(s)} />
         {group && <span className="ov-gtag mono">[{group}]</span>}
         <span className="ov-name mono">{s.name}</span>
         {ago && <span className="ov-ago">· {ago}</span>}
@@ -423,8 +428,7 @@ function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color
           width is available (the list card is wide enough to keep it inline). */}
       {group && <div className="ovt-gline mono">[{group}]</div>}
       <div className="ovt-head">
-        <span className={`status ${s.state}`} />
-        <Logo cli={s.cli} size={12} tint={color} />
+        <StateLogo cli={s.cli} state={s.state} size={12} tint={color} title={stateTitle(s)} />
         <span className="ovt-name mono">{s.name}</span>
         <span className="ovt-ago">{pending ? '' : fmtAgo(last)}</span>
       </div>
@@ -731,7 +735,10 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
             <span className="ov-sectitle">{g.name}</span>
             <span className="ov-secn mono">{shown.length}</span>
             <span className="ov-peek">
-              {shown.map(({ s }) => <span key={s.id} className={`status ${dataFor(s).state}`} />)}
+              {shown.map(({ s }) => (
+                <StateLogo key={s.id} frameOnly state={dataFor(s).state} size={12}
+                  title={`${s.name} · ${stateTitle({ cli: s.cli, state: dataFor(s).state })}`} />
+              ))}
             </span>
           </button>
           <div className="ov-drawer"><div className="ov-drawer-in">
