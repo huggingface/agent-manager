@@ -20,10 +20,10 @@ import { useTraceWindows, type TraceHeadInfo, type TraceSource } from '../../lib
 import type { Session } from '../../types';
 import { isRemote } from '../../types';
 import {
-  defaultAttachmentPrompt, discardPendingAttachment, discardPendingAttachments,
+  buildPendingPrompt, discardPendingAttachment, discardPendingAttachments,
   pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
 } from '../../lib/attachments';
-import type { PendingAttachment } from '../../lib/attachments';
+import type { PendingAttachment, PendingPrompt } from '../../lib/attachments';
 import { recallReading, rememberReading } from './readingPosition';
 import { useDraft } from './useDraft';
 import { fmtTok, splitExchanges } from './exchanges';
@@ -96,7 +96,7 @@ export default function ConversationView({
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
-  const [sent, setSent] = useState<{ text: string; at: number } | null>(null);
+  const [sent, setSent] = useState<(PendingPrompt & { at: number }) | null>(null);
   const allowAttachments = !isRemote(session.cli);
 
   useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
@@ -210,9 +210,10 @@ export default function ConversationView({
     const batch = attachmentsRef.current;
     if ((!text && !batch.length) || sending) return;
     if (batch.some((attachment) => !attachment.attachment)) return;
-    const optimisticText = text || defaultAttachmentPrompt(batch.length);
+    const uploaded = batch.map((attachment) => attachment.attachment!);
+    const optimistic = buildPendingPrompt(session.cli, text, uploaded);
     setSending(true); setFailed(null);
-    setDraft(''); setSent({ text: optimisticText, at: Date.now() });
+    setDraft(''); setSent({ ...optimistic, at: Date.now() });
     if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     stick.current = true;
     try {
@@ -562,7 +563,7 @@ export default function ConversationView({
               />
             </div>
           ))}
-          {sent && <PendingExchange text={sent.text} />}
+          {sent && <PendingExchange text={sent.displayText} />}
           {!exchanges.length && !sent && <div className="cxv-msg mono">nothing in this trace yet</div>}
           {!readOnly && session.inputRequired && (
             <InputRequiredNotice input={session.inputRequired} onOpenTerminal={() => writePaneMode('terminal')} />

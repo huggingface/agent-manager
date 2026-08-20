@@ -9,10 +9,10 @@ import { rankSessions, sortLabel } from '../lib/overviewSort';
 import { hiddenSessionIds } from '../lib/overviewHidden';
 import type { Rankable } from '../lib/overviewSort';
 import {
-  defaultAttachmentPrompt, discardPendingAttachment, discardPendingAttachments,
+  buildPendingPrompt, discardPendingAttachment, discardPendingAttachments,
   pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
 } from '../lib/attachments';
-import type { PendingAttachment } from '../lib/attachments';
+import type { PendingAttachment, PendingPrompt } from '../lib/attachments';
 import Attachments from './Attachments';
 import Logo from './Logo';
 import Composer from './conversation/Composer';
@@ -152,7 +152,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   // Optimistic echo: the sent text becomes the prompt line the moment the
   // send succeeds — the digest round-trip (CLI writes transcript → rebuild →
   // poll) can take seconds, and a frozen card reads as "did that get lost?".
-  const [sent, setSent] = useState<{ text: string; at: number } | null>(null);
+  const [sent, setSent] = useState<(PendingPrompt & { at: number }) | null>(null);
   const [histIdx, setHistIdx] = useState(0); // digest fallback only: n-th answer back
   const [back, setBack] = useState(0);       // how many earlier turns are shown
   const [openWork, setOpenWork] = useState(false);
@@ -230,11 +230,12 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
     const batch = imagesRef.current;
     if ((!text && !batch.length) || sending) return;
     if (batch.some((image) => !image.attachment)) return;
-    const optimisticText = text || defaultAttachmentPrompt(batch.length);
+    const uploaded = batch.map((image) => image.attachment!);
+    const optimistic = buildPendingPrompt(s.cli, text, uploaded);
     setSending(true);
     setFailed(null);
     setDraft('');
-    setSent({ text: optimisticText, at: Date.now() });
+    setSent({ ...optimistic, at: Date.now() });
     setHistIdx(0);
     if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     try {
@@ -269,7 +270,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   }, [back, sent, running, latestX]);
 
   const ago = fmtAgo(Math.max(d?.lastAssistantTs || 0, d?.lastPromptTs || 0) || Date.parse(s.createdAt) || 0);
-  const promptText = sent ? sent.text : d?.lastPromptText || '';
+  const promptText = sent ? sent.displayText : d?.lastPromptText || '';
   const answerText = entry ? entry.answer : d?.lastAssistantText || '';
   const answerMd = entry ? entry.answerMd : d?.lastAssistantMd || '';
   // Chronological position: hist is newest-first, live text is the newest turn.
@@ -334,14 +335,14 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
             </div>
             {/* Optimistic echo: the digest round-trip can take seconds, and a
                 frozen card reads as "did that get lost?". */}
-            {justSent && sent && <PendingExchange text={sent.text} />}
+            {justSent && sent && <PendingExchange text={sent.displayText} />}
           </>
         ) : (
           /* No transcript to read yet (never started, or a harness with no
              trace): the digest still knows the last prompt and answer. */
           <>
             {promptText ? (
-              <div className="ov-prompt">{sent ? sent.text : (d?.lastPromptRaw || promptText)}</div>
+              <div className="ov-prompt">{sent ? sent.displayText : (d?.lastPromptRaw || promptText)}</div>
             ) : pending ? (
               <div className="ov-prompt-skel"><span className="skel" style={{ width: '70%' }} /></div>
             ) : (
