@@ -48,6 +48,14 @@ await build({
   external: ['react', 'react-dom', 'react/jsx-runtime'], plugins: [stubMarkdown],
 });
 const { PendingExchange, ExchangeView } = await import(pathToFileURL(out).href);
+const attachmentsOut = path.join(outDir, 'attachments.mjs');
+await build({
+  entryPoints: [path.join(HERE, '../src/lib/attachments.ts')],
+  outfile: attachmentsOut, format: 'esm', bundle: true, logLevel: 'error',
+});
+const { buildPendingPrompt } = await import(pathToFileURL(attachmentsOut).href);
+const { formatAttachmentDelivery } = await import(
+  pathToFileURL(path.join(HERE, '../../server/src/attachments.js')).href);
 // stepSummary decides whether a turn has a left half at all, so the two live in
 // the same check: no summary → the facts ride the working line.
 const exOut = path.join(outDir, 'exchanges-meta.mjs');
@@ -80,6 +88,46 @@ check('the prompt text is the prompt you sent',
   () => assert.match(html, />what changed in the deploy config\?</));
 check('a working line rides inside the same section',
   () => assert.match(html, /<div class="cx-running mono">working<\/div>\s*<\/section>/));
+
+console.log('\nand an attached prompt is complete on its first paint');
+const screenshot = { kind: 'image', path: '/state/attachments/reader/Screenshot 1.png' };
+const pendingPrompt = buildPendingPrompt('codex', 'compare this with the mock', [screenshot]);
+const attachedHtml = render(PendingExchange, { text: pendingPrompt.displayText });
+check('the optimistic exchange includes the Attached files line immediately', () => {
+  assert.match(attachedHtml, /compare this with the mock/);
+  assert.match(attachedHtml, /Attached files:/);
+  assert.match(attachedHtml, /Screenshot 1\.png/);
+});
+check('transcript catch-up still matches the operator text, not CLI path syntax',
+  () => assert.equal(pendingPrompt.text, 'compare this with the mock'));
+check('an attachment-only image uses the same screenshot fallback as the server',
+  () => assert.match(buildPendingPrompt('claude', '', [screenshot]).displayText,
+    /^Please inspect the attached screenshot\.\n\nAttached files:/));
+check('Gemini gets its actual @ path form rather than an invented Attached files label', () => {
+  const gemini = buildPendingPrompt('gemini', 'inspect it', [screenshot]).displayText;
+  assert.match(gemini, /\n\n@"\/state\/attachments\/reader\/Screenshot 1\.png"$/);
+  assert.doesNotMatch(gemini, /Attached files:/);
+});
+check('the optimistic formatter stays identical to the server delivery contract', () => {
+  const file = { kind: 'file', path: '/state/attachments/reader/notes from review.md' };
+  for (const cli of ['claude', 'codex', 'gemini', 'hermes']) {
+    for (const [text, attachments] of [['look here', [screenshot, file]], ['', [screenshot]], ['', [file]]]) {
+      assert.equal(
+        buildPendingPrompt(cli, text, attachments).displayText,
+        formatAttachmentDelivery(cli, text, attachments),
+        `${cli}: ${text || '(attachment only)'}`,
+      );
+    }
+  }
+});
+check('both optimistic send surfaces render the complete display text', () => {
+  const reader = fs.readFileSync(path.join(HERE, '../src/components/conversation/ConversationView.tsx'), 'utf8');
+  const overview = fs.readFileSync(path.join(HERE, '../src/components/Overview.tsx'), 'utf8');
+  assert.match(reader, /buildPendingPrompt\(session\.cli, text, uploaded\)/);
+  assert.match(reader, /<PendingExchange text=\{sent\.displayText\}/);
+  assert.match(overview, /buildPendingPrompt\(s\.cli, text, uploaded\)/);
+  assert.match(overview, /<PendingExchange text=\{sent\.displayText\}/);
+});
 
 console.log('\nand it has the shape of the turn it becomes a second later');
 // A real turn at the same moment the echo represents: asked, not yet answered.

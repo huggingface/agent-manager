@@ -141,8 +141,36 @@ export function discardPendingAttachments(sessionId: string, attachments: Pendin
   for (const attachment of attachments) discardPendingAttachment(sessionId, attachment);
 }
 
-export const defaultAttachmentPrompt = (count: number) =>
-  `Please inspect the attached file${count === 1 ? '' : 's'}.`;
+export interface PendingPrompt {
+  /** The operator's words (or the attachment-only fallback), used to recognise
+   *  the real transcript turn when it arrives. */
+  text: string;
+  /** What the optimistic exchange shows until that transcript turn arrives. */
+  displayText: string;
+}
+
+/**
+ * The server sends the prompt and its attachment paths as one string. Mirror
+ * that small presentation rule in the optimistic exchange so the first paint
+ * says exactly what was sent, without making transcript catch-up depend on a
+ * CLI retaining the path syntax verbatim.
+ */
+export function buildPendingPrompt(
+  cli: string,
+  text: string,
+  attachments: Pick<Attachment, 'kind' | 'path'>[],
+): PendingPrompt {
+  const onlyImages = attachments.length > 0 && attachments.every((attachment) => attachment.kind === 'image');
+  const prompt = String(text || '').trim() || (onlyImages
+    ? `Please inspect the attached screenshot${attachments.length === 1 ? '' : 's'}.`
+    : `Please inspect the attached file${attachments.length === 1 ? '' : 's'}.`);
+  if (!attachments.length) return { text: prompt, displayText: prompt };
+  const paths = attachments.map((attachment) => attachment.path);
+  const attachmentText = cli === 'gemini'
+    ? paths.map((filePath) => `@${JSON.stringify(filePath)}`).join('\n')
+    : `Attached files:\n${paths.map((filePath) => `- ${JSON.stringify(filePath)}`).join('\n')}`;
+  return { text: prompt, displayText: `${prompt}\n\n${attachmentText}` };
+}
 
 /** Upload in display order. Already-successful items are reused on retry. */
 export async function uploadPendingAttachments(
