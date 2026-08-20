@@ -674,3 +674,27 @@ export const saveSkill = (name: string, content: string) =>
   fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'PUT', headers: { 'content-type': 'text/plain' }, body: content }).then(json);
 export const deleteSkill = (name: string) =>
   fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(json);
+
+// ---- the API log (Settings → API log) ----
+// Written by operationMiddleware: every mutating call, plus the one read that is
+// an event between two agents — a `wait` that resolved. Payloads are summarised
+// at write time, never stored: a prompt is {present, chars, sha256} and nothing
+// else, so this view can say who asked whom and how long the ask was, never what
+// it said.
+export interface OperationSummary { present?: boolean; chars?: number; sha256?: string; bytes?: number; }
+export interface Operation {
+  id: string;
+  at: string;
+  origin: { id: string; type: string; name?: string; cli?: string } | null;
+  target?: { id: string; name?: string; cli?: string };
+  method: string;
+  path: string;
+  query?: Record<string, unknown>;
+  request?: unknown;
+  status: number;
+  ok: boolean;
+  durationMs: number;
+  result?: unknown;
+}
+export const getOperations = (limit = 500): Promise<{ operations: Operation[]; generatedAt: string }> =>
+  fetch(`/api/operations?limit=${limit}`).then(json);

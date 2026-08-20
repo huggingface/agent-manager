@@ -2,17 +2,19 @@ import { useEffect, useState } from 'react';
 import { isPassive, isRemote, type Cli } from '../types';
 import * as api from '../api';
 import SkillsEditor from './SkillsEditor';
+import ApiLog from './ApiLog';
 import UsagePanel from './UsagePanel';
 import CronSettings from './CronSettings';
 import { SunGlyph, MoonGlyph, RefreshGlyph, InfoGlyph } from './icons';
 import Logo from './Logo';
 
-type Page = 'general' | 'usage' | 'skills' | 'cron';
+type Page = 'general' | 'usage' | 'skills' | 'cron' | 'apilog';
 const PAGES: { id: Page; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'usage', label: 'Usage' },
   { id: 'skills', label: 'Skills' },
   { id: 'cron', label: 'Cron' },
+  { id: 'apilog', label: 'API log' },
 ];
 
 interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; engine?: string; ghostty?: boolean; canRelaunch?: boolean; secrets?: string[]; bucketUnverified?: boolean; }
@@ -774,6 +776,18 @@ export default function SettingsView({
           <div className="settings-page wide">
             <h2>Usage</h2>
             <UsagePanel />
+          </div>
+        )}
+
+        {page === 'apilog' && (
+          <div className="settings-page wide">
+            <h2>API log</h2>
+            <p className="s-help">
+              Every call that changed something, plus the waits that resolved — who asked whom to do
+              what, when, and in their own words: each entry keeps the call whole, body included.
+              Credentials are the exception and are never written here.
+            </p>
+            <ApiLog />
           </div>
         )}
 

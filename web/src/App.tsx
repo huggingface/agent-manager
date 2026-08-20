@@ -50,7 +50,7 @@ function autoGrid(n: number): GridSpec {
   return { cols: 3, rows: 3 };
 }
 
-type SettingsPage = 'general' | 'usage' | 'skills' | 'cron';
+type SettingsPage = 'general' | 'usage' | 'skills' | 'cron' | 'apilog';
 const ROOT_PATH = '.';
 const WARM_TERMINAL_LIMIT = 12;
 const normalizePath = (p?: string | null) => (p && p.trim() ? p : ROOT_PATH);

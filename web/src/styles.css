@@ -1398,6 +1398,117 @@ a.btn-ghost { text-decoration: none; }
   .skiprestore { align-self: flex-start; }
 }
 
+/* ---- settings: API log (docs: the approved cron-and-api-log mock) ---- */
+.al { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
+.al-head { display: flex; align-items: center; gap: 10px; }
+.al-count { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
+.al-fails { color: var(--danger); }
+.al-view { margin-left: auto; }
+.al-refresh { padding: 4px 9px; font-size: 11.5px; }
+/* one plain control, on the same line as the buttons */
+.al-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); cursor: pointer; margin-left: 10px; }
+.al-check input { margin: 0; accent-color: var(--accent); }
+.al-check-n { color: var(--muted); font-family: var(--font-mono); font-size: 11px; }
+/* A filter is a chip: bordered, quiet until it is on, and never a coloured pill
+   sitting in a data row — the rows themselves carry no badges at all. */
+.al-empty { padding: 14px 2px; }
+
+/* ONE CALL PER LINE. Every cell is nowrap and clips; the path is the only
+   column that may take the slack (max-width:0 + width:100% is what makes a
+   table cell shrink-to-fit-the-rest rather than push the row wide). Wrapping
+   would halve how many calls a screen holds, which is the whole point of it. */
+.al-tblwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-md); }
+.al-tbl { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+/* A floor, so a narrow pane scrolls the table sideways instead of crushing the
+   Call column — which is the one column worth reading — down to two letters.
+   The row stays one line either way; that is the rule this is protecting. */
+.al-tbl { min-width: 640px; }
+.al-tbl th { text-align: left; padding: 7px 10px; background: var(--panel-2); border-bottom: 1px solid var(--border); font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.al-tbl td { padding: 5px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.al-tbl tr:last-child td { border-bottom: none; }
+.al-tbl td.grow, .al-tbl th.grow { max-width: 0; width: 100%; }
+.al-tbl td.num, .al-tbl th.num { text-align: right; }
+.al-tbl tbody tr:hover { background: var(--panel-2); }
+.al-time { color: var(--muted); }
+.al-who { max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
+.al-meth { font-weight: 700; color: var(--accent); }
+/* the one logged read: attention coming back, not work going out */
+.al-meth.back { color: var(--muted); }
+.al-path { color: var(--text); }
+/* colour the text in the column, never a badge around it */
+.al-st { font-weight: 600; }
+.al-st.ok { color: var(--go); }
+.al-st.warn { color: #9a6212; }
+.al-st.bad { color: var(--danger); }
+.al-pay { color: var(--muted); max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+.al-rep { color: var(--accent); font-weight: 600; }
+
+/* the map */
+.al-map { display: flex; flex-direction: column; gap: 8px; }
+.al-mapbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.al-scale button, .al-zoom button { padding: 3px 9px; font-size: 11px; }
+.al-reset { padding: 3px 9px; font-size: 11px; }
+.al-window { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.al-scale-note { font-size: 11px; color: var(--muted); }
+.al-mapwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); padding: 6px; }
+/* Drag horizontally to zoom into a slice of the axis. `col-resize` is the
+   cursor every charting brush uses; on a touch device none of this applies —
+   see the pointerType check in ApiLog.tsx — so the frame keeps its own
+   sideways scroll and the page keeps scrolling down. */
+.al-map svg { display: block; width: 100%; min-width: 620px; height: auto; cursor: col-resize; }
+.al-svg.brushing { user-select: none; }
+.al-brush { fill: color-mix(in srgb, var(--accent) 14%, transparent); stroke: var(--accent); stroke-width: 1; }
+.al-brush-lbl { font-family: var(--font-mono); font-size: 8px; fill: var(--accent); }
+.al-lane { stroke: var(--border); stroke-width: 1; }
+/* before the agent existed: barely there, so the line cannot claim it did */
+.al-lane.unborn { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.45; }
+.al-lane-lbl { font-family: var(--font-mono); font-size: 9px; fill: var(--muted); }
+.al-lane-lbl.new { fill: var(--accent); }
+.al-axis { font-family: var(--font-mono); font-size: 8px; fill: var(--muted); }
+/* slim: at 1px an arrow marks a moment instead of shouting about it */
+.al-arrow { stroke: var(--accent); stroke-width: 1; }
+.al-arrow.back { stroke: var(--muted); stroke-dasharray: 3 3; }
+.al-arrow.bad { stroke: var(--danger); }
+.al-arrow.new { stroke-width: 1.5; }
+/* the stretch a caller spent blocked, on the caller's own lane */
+.al-held { stroke: var(--muted); stroke-width: 3; opacity: 0.28; stroke-linecap: round; }
+.al-dot { fill: var(--accent); }
+.al-dot.back { fill: var(--muted); }
+.al-dot.bad { fill: var(--danger); }
+.al-hit { stroke: transparent; stroke-width: 10; }
+/* a slight lift on hover, not a thickening — the card carries the detail */
+.al-arrowg.on .al-arrow { stroke-width: 1.6; }
+.al-arrowg.on .al-held { opacity: 0.45; }
+.al-key text { font-family: var(--font-mono); font-size: 8px; fill: var(--muted); }
+/* the moment a lane begins */
+.al-birth { fill: var(--panel); stroke: var(--accent); stroke-width: 1.4; }
+
+/* the hover card: the call as it is stored, plus what the body does not say */
+.al-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; min-height: 74px; }
+.al-card-idle { color: var(--muted); font-size: 11.5px; justify-content: center; }
+.al-card-head { display: flex; align-items: baseline; gap: 7px; font-family: var(--font-mono); font-size: 11px; }
+.al-card-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.al-card-took { color: var(--muted); margin-left: auto; white-space: nowrap; }
+.al-card.pinned { border-color: var(--accent); }
+.al-card-x { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0 2px; line-height: 1; }
+.al-card-x:hover { color: var(--text); }
+.al-card-hint { color: var(--muted); opacity: 0.8; }
+/* the marks are clickable, and the whole point of the card is that you can
+   reach into it — so nothing here opts out of pointer events */
+.al-arrowg, .al-dot { cursor: pointer; }
+/* NOT scrollable, and not capped: a 210px window over 411px of JSON was a card
+   whose second half could not be read at all. The page scrolls instead. */
+.al-json { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 10.5px; line-height: 1.45; color: var(--text); }
+.al-json .al-k { color: var(--accent); }
+.al-card-foot { font-size: 9.5px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 5px; }
+/* the prompt as sent: its own block, because JSON-escaping a paragraph onto one
+   line makes it unreadable. Selectable, wrapped, and never truncated here. */
+.al-prompt { display: flex; flex-direction: column; gap: 3px; }
+.al-prompt-lbl { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); }
+.al-clipped { color: var(--muted); text-transform: none; letter-spacing: 0; }
+.al-prompt-body { margin: 0; padding: 7px 9px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-sm); font-family: var(--font-mono); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+
 /* settings: skills editor */
 .settings-page.wide { max-width: 980px; }
 

@@ -6,34 +6,67 @@ import { DATA_DIR } from './config.js';
 export const OPERATIONS_FILE = path.join(DATA_DIR, 'operations.jsonl');
 
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+// Reads worth auditing. A GET is normally none of this log's business — it
+// changes nothing — but `wait` is the one read that IS an event between two
+// agents: A blocked on B until B stopped working. Without it the log records
+// work being handed out and nothing ever coming back, which is exactly half of
+// "who called whom". Deliberately NOT here: `tail`, which every open pane polls
+// constantly and which says nothing a resolved wait does not already say.
+const LOGGED_READS = [/^\/api\/agents\/[^/]+\/wait$/];
+const shouldLog = (req) => MUTATING.has(req.method)
+  || (req.method === 'GET' && LOGGED_READS.some((re) => re.test(req.path)));
+// The body is stored WHOLE, on the operator's instruction: "just store all the
+// full api calls. why this arbitrary compression." So there is no allowlist of
+// routes, no size cap, and nothing is replaced by a summary of itself. The one
+// thing still withheld is a credential — that is not compression, it is not
+// writing secrets into a file that lives on the bucket.
+//
+// Above this length a string is stored as {present, chars, sha256, text} rather
+// than as a bare string. Nothing is lost either way: this only decides whether
+// the checksum travels beside the value, and `chars` is what the log's compact
+// list column reads.
 const MAX_TEXT = 500;
-const MAX_DEPTH = 5;
+// A backstop against a cyclic object, not a limit on how much is kept: a request
+// body is the output of a JSON or text parser and cannot contain a cycle, but
+// JSON.stringify throwing here would lose the whole entry.
+const MAX_DEPTH = 20;
+// How far back a read will go looking for complete records. One enormous entry
+// must not hide the log, and reading a whole year of it must not exhaust memory.
+const MAX_TAIL = 256 * 1024 * 1024;
 const SENSITIVE_KEY = /(authorization|credential|password|secret|subscription|token|endpoint|private.?key)/i;
 const CONTENT_KEY = /(body|content|data|prompt|text)/i;
 
 const digest = (value) => crypto.createHash('sha256').update(value).digest('hex');
 
+// The value, plus the two things worth having beside it: sha256, because equal
+// checksums are how a repeated prompt or a scheduled job shows up, and chars,
+// because that is what the list column reads without touching the text.
 function textSummary(value) {
-  return { present: value.length > 0, chars: value.length, sha256: digest(value) };
+  return { present: value.length > 0, chars: value.length, sha256: digest(value), text: value };
 }
 
 /**
- * Keep the parameters needed to reconstruct an operation without turning the
- * audit trail into a second store for prompts, file contents, or credentials.
+ * The call as it was made, whole, with a checksum attached to anything long
+ * enough to want one. Credentials are the single exception and are replaced by
+ * `[redacted]` wherever they appear.
  */
 export function summarizePayload(value, key = '', depth = 0) {
   if (value == null || typeof value === 'boolean' || typeof value === 'number') return value;
-  if (Buffer.isBuffer(value)) return { bytes: value.length, sha256: digest(value) };
+  // No route here parses a raw body today, but if one ever does, keep the bytes
+  // rather than a description of them.
+  if (Buffer.isBuffer(value)) {
+    return { bytes: value.length, sha256: digest(value), base64: value.toString('base64') };
+  }
   if (typeof value === 'string') {
     if (SENSITIVE_KEY.test(key)) return '[redacted]';
     if (CONTENT_KEY.test(key) || value.length > MAX_TEXT) return textSummary(value);
     return value;
   }
   if (depth >= MAX_DEPTH) return '[max-depth]';
-  if (Array.isArray(value)) return value.slice(0, 100).map((v) => summarizePayload(v, key, depth + 1));
+  if (Array.isArray(value)) return value.map((v) => summarizePayload(v, key, depth + 1));
   if (typeof value === 'object') {
     const out = {};
-    for (const [k, v] of Object.entries(value).slice(0, 100)) {
+    for (const [k, v] of Object.entries(value)) {
       out[k] = SENSITIVE_KEY.test(k) ? '[redacted]' : summarizePayload(v, k, depth + 1);
     }
     return out;
@@ -73,14 +106,18 @@ const cleanQuery = (query) => {
  * unknown. It may derive an identity from a protocol route (remote agents do
  * this for backwards compatibility with already-running polling loops).
  */
-export function operationMiddleware({ resolveOrigin, allowMissing = false } = {}) {
+export function operationMiddleware({ resolveOrigin, resolveTarget, allowMissing = false } = {}) {
   return (req, res, next) => {
-    if (!req.path.startsWith('/api/') || !MUTATING.has(req.method)) return next();
+    if (!req.path.startsWith('/api/') || !shouldLog(req)) return next();
 
     const raw = requestOrigin(req);
     let origin = resolveOrigin ? resolveOrigin(raw, req) : (raw ? { id: raw, type: 'unknown' } : null);
     if (!origin && allowMissing) origin = { id: 'test', type: 'test' };
-    if (!origin) {
+    // A logged READ is never refused for want of an origin. `wait` is documented
+    // as read-only and every watch loop running right now calls it without
+    // `?from=`; rejecting those would break them the moment this ships. An
+    // unattributed wait still records that someone finished waiting on B.
+    if (!origin && MUTATING.has(req.method)) {
       return res.status(400).json({
         error: raw
           ? `unknown origin '${raw}'`
@@ -88,7 +125,14 @@ export function operationMiddleware({ resolveOrigin, allowMissing = false } = {}
       });
     }
 
-    req.operationOrigin = origin;
+    if (origin) req.operationOrigin = origin;
+    // BEFORE next(), not at response time: the handler for a delete removes the
+    // session from the store and only then answers, so resolving this later
+    // recorded `{id}` for a session whose name and cli had just been thrown
+    // away — the one operation where the roster can never fill them back in.
+    // A request-time snapshot also gives a rename the name it had when the call
+    // arrived, which is the state the entry is describing.
+    const target = resolveTarget ? resolveTarget(req) : null;
     const started = Date.now();
     const operationId = crypto.randomUUID();
     let responseBody;
@@ -101,11 +145,21 @@ export function operationMiddleware({ resolveOrigin, allowMissing = false } = {}
     const record = () => {
       if (recorded) return;
       recorded = true;
+      // A wait is a polling loop: only the call that RESOLVED is an event. The
+      // ones that timed out say "still working", which the log already implies,
+      // and logging them would multiply the entries by however long the job ran.
+      // Same for a wait the caller abandoned (no body) or one whose target had
+      // already gone: nothing came back, so there is nothing to draw.
+      if (!MUTATING.has(req.method) && !(responseBody && responseBody.matched === true)) return;
       append({
         version: 1,
         id: operationId,
         at: new Date(started).toISOString(),
         origin,
+        // Who it was done TO, snapshotted above. The id is in the path already,
+        // but a name read back later is the name the session has NOW — renamed
+        // or deleted, and the audit trail stops making sense.
+        ...(target ? { target } : {}),
         method: req.method,
         path: req.path,
         query: cleanQuery(req.query),
@@ -128,19 +182,35 @@ export function readOperations(limit = 200, before = null) {
   try {
     fd = fs.openSync(OPERATIONS_FILE, 'r');
     const size = fs.fstatSync(fd).size;
-    // A bounded tail keeps this endpoint cheap even after years of operations.
-    // Four MiB comfortably holds the maximum 1,000 compact records in normal use.
-    const start = Math.max(0, size - 4 * 1024 * 1024);
-    const buf = Buffer.alloc(size - start);
-    fs.readSync(fd, buf, 0, buf.length, start);
-    let text = buf.toString('utf8');
-    if (start > 0) text = text.slice(Math.max(0, text.indexOf('\n') + 1));
-    const rows = text.split('\n').filter(Boolean).flatMap((line) => {
-      try { return [JSON.parse(line)]; } catch { return []; }
-    });
+    // A bounded tail keeps this endpoint cheap after years of operations. But an
+    // entry is now as big as the call it records — a file write can be eight
+    // megabytes on one line — so a fixed window is not enough: it could contain
+    // no COMPLETE line at all and the log would read as empty. Grow it until
+    // there are enough whole records, or until the ceiling says stop.
+    let rows = [];
+    for (let window = 4 * 1024 * 1024; ; window *= 4) {
+      const start = Math.max(0, size - window);
+      const buf = Buffer.alloc(size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      let text = buf.toString('utf8');
+      // the first line is almost certainly cut in half by the window
+      if (start > 0) text = text.slice(Math.max(0, text.indexOf('\n') + 1));
+      rows = text.split('\n').filter(Boolean).flatMap((line) => {
+        try { return [JSON.parse(line)]; } catch { return []; }
+      });
+      if (rows.length >= take || start === 0 || window >= MAX_TAIL) break;
+    }
+    // Sort, do not merely reverse. A record is appended when its response
+    // finishes, but `at` is when the request STARTED — and a `wait` can block
+    // for five minutes, so it lands in the file after calls that began later and
+    // finished sooner. Reversing append order therefore returned rows out of
+    // chronological order, which put an old wait above newer calls in the log
+    // and, because the map derives its x from rank, could run its time axis
+    // backwards. Ties keep newest-appended first, which is what reversing did.
     return rows
       .filter((row) => !before || row.at < before)
       .reverse()
+      .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
       .slice(0, take);
   } catch {
     return [];
