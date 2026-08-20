@@ -81,7 +81,14 @@ try {
   check('credentials are redacted', rows[1]?.request?.token === '[redacted]');
   check('session creation with a prompt records presence and size',
     rows[2]?.request?.prompt?.present === true && rows[2]?.request?.prompt?.chars === 27);
-  check('prompt content is not copied into the audit log', rows[2]?.request?.prompt?.sha256 && !JSON.stringify(rows[2]).includes('flaky test'));
+  // This assertion used to read "prompt content is not copied into the audit
+  // log". The operator asked for the opposite — a log that can say who asked
+  // whom but never what they asked answers half the question — so the rule is
+  // now: the prompt is kept, and everything that was never a prompt is not.
+  check('a prompt is kept as text, on the operator\'s instruction',
+    rows[2]?.request?.prompt?.text === 'Investigate the flaky test.');
+  check('with its checksum beside it, so a repeated prompt is still spottable',
+    rows[2]?.request?.prompt?.sha256?.length === 64);
   check('plain-text agent prompts are summarized too', rows[3]?.request?.present === true && rows[3]?.request?.chars === 26);
   check('origin is separate from the recorded query', rows[3]?.origin?.id === 'agent-1' && !('from' in (rows[3]?.query || {})));
   check('query parameters needed to replay the operation remain', rows[3]?.query?.cli === 'codex');
@@ -125,6 +132,33 @@ try {
   const [ghost, named] = readOperations(2);
   check('the target name is resolved at write time, not read time', named?.target?.name === 'name of s-42');
   check('a target that no longer exists still records its id', ghost?.target?.id === 'ghost-9' && !ghost?.target?.name);
+
+  console.log('\nprompts are kept, everything else is still a checksum');
+  invoke({ path: '/api/agents/s-target/prompt', query: { from: 'agent-1' }, body: 'Investigate the flaky test in web/.' },
+    (_req, res) => res.json({ ok: true }));
+  const [prompted] = readOperations(1);
+  check('a prompt is stored as text', prompted?.request?.text === 'Investigate the flaky test in web/.');
+  check('and still carries its checksum, which is how a repeat is spotted',
+    prompted?.request?.sha256?.length === 64 && prompted?.request?.chars === 35,
+    `chars ${prompted?.request?.chars}`);
+  invoke({ path: '/api/sessions/s-42/input', query: { from: 'agent-1' }, body: { text: 'run the tests' } },
+    (_req, res) => res.json({ ok: true }));
+  check('a prompt nested in a field is kept too', readOperations(1)[0]?.request?.text?.text === 'run the tests');
+  invoke({ method: 'PUT', path: '/api/files/f-1/write', query: { from: 'agent-1' }, body: 'x'.repeat(4000) },
+    (_req, res) => res.json({ ok: true }));
+  const [written] = readOperations(1);
+  check('a file body is NOT — storing prompts is not storing every byte',
+    written?.request?.text === undefined && written?.request?.chars === 4000);
+  invoke({ path: '/api/agents/s-target/prompt', query: { from: 'agent-1' }, body: 'y'.repeat(70 * 1024) },
+    (_req, res) => res.json({ ok: true }));
+  const [huge] = readOperations(1);
+  check('an enormous prompt is cut and says so, with the full size still recorded',
+    huge?.request?.truncated === true && huge?.request?.text?.length === 64 * 1024 && huge?.request?.chars === 70 * 1024);
+  invoke({ path: '/api/sessions', query: { from: 'agent-1' }, body: { cli: 'claude', prompt: 'seed', token: 'hunter2' } },
+    (_req, res) => res.status(201).json({ id: 's-new' }));
+  const [seeded] = readOperations(1);
+  check('a seed prompt is kept', seeded?.request?.prompt?.text === 'seed');
+  check('and a credential beside it is still redacted', seeded?.request?.token === '[redacted]');
 
   console.log('\ndeleting the thing being audited');
   // The real route removes the session from the store and only then answers, so

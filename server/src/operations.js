@@ -16,34 +16,58 @@ const LOGGED_READS = [/^\/api\/agents\/[^/]+\/wait$/];
 const shouldLog = (req) => MUTATING.has(req.method)
   || (req.method === 'GET' && LOGGED_READS.some((re) => re.test(req.path)));
 const MAX_TEXT = 500;
+// Prompt text IS kept, on the operator's instruction: a log that can say who
+// asked whom but never what they asked answers half the question. Only the
+// routes that carry a prompt are unwrapped this way — a file write goes through
+// the same summariser and its body stays a checksum, because "store the
+// prompts" is not "store every byte that ever crossed the API".
+const PROMPT_ROUTES = [
+  /^\/api\/agents$/,                          // spawn: the body IS the seed prompt
+  /^\/api\/sessions$/,                        // same, as a `prompt` field
+  /^\/api\/agents\/[^/]+\/prompt$/,
+  /^\/api\/sessions\/[^/]+\/input$/,
+  /^\/api\/remote\/[^/]+\/messages$/,        // the same act, for a remote agent
+];
+const carriesPrompt = (req) => req && PROMPT_ROUTES.some((re) => re.test(req.path));
+// A prompt is normally a screenful. This is not a cap on what an agent may send,
+// only on what the audit file keeps verbatim: past it the text is cut and says
+// so, while chars and sha256 still describe the whole thing.
+const MAX_PROMPT = 64 * 1024;
 const MAX_DEPTH = 5;
 const SENSITIVE_KEY = /(authorization|credential|password|secret|subscription|token|endpoint|private.?key)/i;
 const CONTENT_KEY = /(body|content|data|prompt|text)/i;
 
 const digest = (value) => crypto.createHash('sha256').update(value).digest('hex');
 
-function textSummary(value) {
-  return { present: value.length > 0, chars: value.length, sha256: digest(value) };
+function textSummary(value, keepText = false) {
+  const summary = { present: value.length > 0, chars: value.length, sha256: digest(value) };
+  // sha256 stays even with the text beside it: equal checksums are how you spot
+  // the same prompt being sent again, which is what a schedule looks like.
+  if (!keepText) return summary;
+  return value.length > MAX_PROMPT
+    ? { ...summary, text: value.slice(0, MAX_PROMPT), truncated: true }
+    : { ...summary, text: value };
 }
 
 /**
  * Keep the parameters needed to reconstruct an operation without turning the
  * audit trail into a second store for prompts, file contents, or credentials.
  */
-export function summarizePayload(value, key = '', depth = 0) {
+export function summarizePayload(value, key = '', depth = 0, keepText = false) {
   if (value == null || typeof value === 'boolean' || typeof value === 'number') return value;
   if (Buffer.isBuffer(value)) return { bytes: value.length, sha256: digest(value) };
   if (typeof value === 'string') {
+    // A credential is never kept, prompt route or not.
     if (SENSITIVE_KEY.test(key)) return '[redacted]';
-    if (CONTENT_KEY.test(key) || value.length > MAX_TEXT) return textSummary(value);
+    if (CONTENT_KEY.test(key) || value.length > MAX_TEXT) return textSummary(value, keepText);
     return value;
   }
   if (depth >= MAX_DEPTH) return '[max-depth]';
-  if (Array.isArray(value)) return value.slice(0, 100).map((v) => summarizePayload(v, key, depth + 1));
+  if (Array.isArray(value)) return value.slice(0, 100).map((v) => summarizePayload(v, key, depth + 1, keepText));
   if (typeof value === 'object') {
     const out = {};
     for (const [k, v] of Object.entries(value).slice(0, 100)) {
-      out[k] = SENSITIVE_KEY.test(k) ? '[redacted]' : summarizePayload(v, k, depth + 1);
+      out[k] = SENSITIVE_KEY.test(k) ? '[redacted]' : summarizePayload(v, k, depth + 1, keepText);
     }
     return out;
   }
@@ -139,7 +163,7 @@ export function operationMiddleware({ resolveOrigin, resolveTarget, allowMissing
         method: req.method,
         path: req.path,
         query: cleanQuery(req.query),
-        request: summarizePayload(req.body, 'body'),
+        request: summarizePayload(req.body, 'body', 0, carriesPrompt(req)),
         status: res.statusCode,
         ok: res.statusCode < 400,
         durationMs: Date.now() - started,

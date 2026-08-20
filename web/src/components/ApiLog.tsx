@@ -65,7 +65,15 @@ const created = (op: api.Operation): { id: string; name: string } | null => {
 export const isWait = (op: api.Operation) => op.method === 'GET' && /\/wait$/.test(op.path);
 const isPrompt = (op: api.Operation) => /\/(prompt|input)$/.test(op.path);
 
-/** What the Payload column says. Text length, never text. */
+/** The prompt as sent, when the log kept it. Prompt routes store the text
+ *  beside its checksum; everything else is still summarised, so this is null for
+ *  a file write and for any call that never carried a prompt. */
+export function promptText(op: api.Operation): string | null {
+  const sum = textSummary(op.request) as (api.OperationSummary & { text?: string }) | null;
+  return typeof sum?.text === 'string' ? sum.text : null;
+}
+
+/** What the Payload column says: how long the ask was. The words are in the card. */
 function payloadOf(op: api.Operation): { text: string; sha?: string } {
   if (isWait(op)) {
     const state = (op.result as { state?: string } | undefined)?.state;
@@ -130,6 +138,7 @@ export default function ApiLog() {
   const rows = useMemo(() => (ops || []).filter(
     (op) => withOperator || op.origin?.type !== 'operator',
   ), [ops, withOperator]);
+  // how many calls the checkbox is holding back, so ticking it is an informed act
   const hidden = (ops || []).length - rows.length;
   const failures = rows.filter((op) => !op.ok).length;
 
@@ -156,17 +165,15 @@ export default function ApiLog() {
           {/* the failure count was a filter chip; it is more useful as a fact */}
           {failures > 0 && <span className="al-fails"> · {failures} failed</span>}
         </span>
+        <label className="al-check">
+          <input type="checkbox" checked={withOperator} onChange={(e) => setWithOperator(e.target.checked)} />
+          show user calls{hidden ? <span className="al-check-n"> ({hidden})</span> : null}
+        </label>
         <div className="seg al-view">
           <button className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}>List</button>
           <button className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}>Map</button>
         </div>
         <button className="btn-ghost al-refresh" onClick={load}>Refresh</button>
-      </div>
-
-      <div className="al-filters">
-        <button className={`al-chip${withOperator ? ' on' : ''}`} onClick={() => setWithOperator((v) => !v)}>
-          {withOperator ? 'Including your own calls' : `Your own calls hidden${hidden ? ` (${hidden})` : ''}`}
-        </button>
       </div>
 
       {error && <div className="s-warn">{error}</div>}
@@ -230,7 +237,16 @@ const FOOT = 40;       // axis + legend, both inside the frame
 const MAX_LANES = 14;
 const MAX_MARKS = 60;
 
+const ZOOMS = [1, 1.5, 2, 3, 4, 6];
+
 function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, string> }) {
+  // Two ways to lay out the same calls. RANKED spaces events evenly, which is
+  // what makes a sparse trace readable — a night of nothing does not eat the
+  // plot. REAL TIME places them by the clock, which is the only way to see that
+  // three prompts went out in the same second. Neither is a substitute for the
+  // other, so both exist and ranked is the default.
+  const [byClock, setByClock] = useState(false);
+  const [zoom, setZoom] = useState(1);
   // Hovering previews an entry; CLICKING keeps it. Both are needed: the card is
   // fixed below the plot and its JSON scrolls, so clearing on the mark's
   // mouseleave meant the pointer could never reach the card — the lower half of
@@ -279,10 +295,14 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
       if (isWait(op) && op.durationMs > 0) events.push({ t: t + op.durationMs, id: op.id, end: true });
     }
     events.sort((a, b) => a.t - b.t);
+    const t0 = events.length ? events[0].t : 0;
+    const t1 = events.length ? events[events.length - 1].t : 1;
     const xStart = new Map<string, number>();
     const xResolved = new Map<string, number>();
     events.forEach((e, i) => {
-      const x = events.length < 2 ? 0.5 : i / (events.length - 1);
+      const x = byClock
+        ? (t1 === t0 ? 0.5 : (e.t - t0) / (t1 - t0))
+        : (events.length < 2 ? 0.5 : i / (events.length - 1));
       (e.end ? xResolved : xStart).set(e.id, x);
     });
     const marks = recent.map((op) => ({
@@ -311,7 +331,7 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
       to: events.length ? new Date(events[events.length - 1].t).toISOString() : '',
       dropped: Math.max(0, rows.length - MAX_MARKS),
     };
-  }, [rows, names]);
+  }, [rows, names, byClock]);
 
   if (!lanes.length) return <div className="s-muted al-empty">Nothing to draw yet.</div>;
 
@@ -323,8 +343,25 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
 
   return (
     <div className="al-map">
+      <div className="al-mapbar">
+        <div className="seg al-scale">
+          <button className={byClock ? '' : 'on'} onClick={() => setByClock(false)}>even</button>
+          <button className={byClock ? 'on' : ''} onClick={() => setByClock(true)}>real time</button>
+        </div>
+        {/* Zoom is horizontal only: it widens the drawing inside a frame that
+            already scrolls sideways, so the lane cap and the 30px spacing are
+            untouched and nothing can overlap vertically at any level. */}
+        <div className="seg al-zoom">
+          <button disabled={zoom === ZOOMS[0]} onClick={() => setZoom((z) => ZOOMS[Math.max(0, ZOOMS.indexOf(z) - 1)])} aria-label="Zoom out">−</button>
+          <button onClick={() => setZoom(1)} className="al-zoom-lvl">{zoom}×</button>
+          <button disabled={zoom === ZOOMS[ZOOMS.length - 1]} onClick={() => setZoom((z) => ZOOMS[Math.min(ZOOMS.length - 1, ZOOMS.indexOf(z) + 1)])} aria-label="Zoom in">+</button>
+        </div>
+        <span className="al-scale-note">
+          {byClock ? 'spaced by the clock — zoom to open up a burst' : 'evenly spaced, one step per event'}
+        </span>
+      </div>
       <div className="al-mapwrap">
-        <svg viewBox={`0 0 ${width} ${height}`} role="img"
+        <svg viewBox={`0 0 ${width} ${height}`} style={{ width: `${100 * zoom}%` }} role="img"
           aria-label="Swimlanes: one lane per agent, prompts drawn from caller to target, resolved waits back the other way, and a lane drawn faint until the agent is created.">
           <defs>
             <marker id="al-ar" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="4.5" markerHeight="4.5" orient="auto">
@@ -436,6 +473,7 @@ function HoverCard({ op, pinned, names, onEnter, onLeave, onClose }: {
       </div>
     );
   }
+  const text = promptText(op);
   const body = {
     at: op.at,
     call: `${op.method} ${op.path}`,
@@ -445,7 +483,7 @@ function HoverCard({ op, pinned, names, onEnter, onLeave, onClose }: {
     took: took(op.durationMs),
     ...(created(op) ? { created: created(op) } : {}),
     ...(op.query && Object.keys(op.query).length ? { query: op.query } : {}),
-    ...(op.request === undefined ? {} : { request: op.request }),
+    ...(op.request === undefined ? {} : { request: withoutText(op.request) }),
     ...(op.result === undefined ? {} : { result: op.result }),
   };
   return (
@@ -457,13 +495,40 @@ function HoverCard({ op, pinned, names, onEnter, onLeave, onClose }: {
         <span className="al-card-took">{took(op.durationMs)}</span>
         {pinned && <button type="button" className="al-card-x" onClick={onClose} aria-label="Release this entry">✕</button>}
       </div>
+      {text !== null && (
+        <div className="al-prompt">
+          <div className="al-prompt-lbl">prompt as sent</div>
+          <pre className="al-prompt-body">{text}</pre>
+        </div>
+      )}
       <pre className="al-json">{json(body)}</pre>
       <div className="al-card-foot">
-        prompt text is not stored — {'{'}present, chars, sha256{'}'} only
+        {text === null
+          ? 'no prompt on this call — bodies that are not prompts stay summarised'
+          : 'stored with the entry; the checksum beside it is what makes a repeated prompt visible'}
         {!pinned && <span className="al-card-hint"> · click the call to keep this open</span>}
       </div>
     </div>
   );
+}
+
+/** The prompt is shown as itself, above; JSON-escaped into one line it is
+ *  unreadable. Its length and checksum stay in the JSON. */
+function withoutText(request: unknown): unknown {
+  if (!request || typeof request !== 'object') return request;
+  const strip = (v: Record<string, unknown>) => {
+    const { text, ...rest } = v;
+    return typeof text === 'string' ? rest : v;
+  };
+  const top = request as Record<string, unknown>;
+  if (typeof top.text === 'string' && typeof top.chars === 'number') return strip(top);
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(top)) {
+    out[k] = v && typeof v === 'object' && typeof (v as Record<string, unknown>).text === 'string'
+      ? strip(v as Record<string, unknown>)
+      : v;
+  }
+  return out;
 }
 
 /** JSON with the keys tinted. Small enough not to want a highlighter. */

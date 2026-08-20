@@ -1405,12 +1405,12 @@ a.btn-ghost { text-decoration: none; }
 .al-fails { color: var(--danger); }
 .al-view { margin-left: auto; }
 .al-refresh { padding: 4px 9px; font-size: 11.5px; }
-.al-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+/* one plain control, on the same line as the buttons */
+.al-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); cursor: pointer; margin-left: 10px; }
+.al-check input { margin: 0; accent-color: var(--accent); }
+.al-check-n { color: var(--muted); font-family: var(--font-mono); font-size: 11px; }
 /* A filter is a chip: bordered, quiet until it is on, and never a coloured pill
    sitting in a data row — the rows themselves carry no badges at all. */
-.al-chip { padding: 4px 9px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel); color: var(--muted); font: inherit; font-size: 11.5px; cursor: pointer; white-space: nowrap; }
-.al-chip:hover { border-color: var(--border-strong); color: var(--text); }
-.al-chip.on { border-color: var(--accent); color: var(--text); font-weight: 600; background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .al-empty { padding: 14px 2px; }
 
 /* ONE CALL PER LINE. Every cell is nowrap and clips; the path is the only
@@ -1445,6 +1445,11 @@ a.btn-ghost { text-decoration: none; }
 
 /* the map */
 .al-map { display: flex; flex-direction: column; gap: 8px; }
+.al-mapbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.al-scale button, .al-zoom button { padding: 3px 9px; font-size: 11px; }
+.al-zoom button { min-width: 26px; }
+.al-zoom-lvl { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.al-scale-note { font-size: 11px; color: var(--muted); }
 .al-mapwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); padding: 6px; }
 .al-map svg { display: block; width: 100%; min-width: 620px; height: auto; }
 .al-lane { stroke: var(--border); stroke-width: 1; }
@@ -1485,9 +1490,16 @@ a.btn-ghost { text-decoration: none; }
 /* the marks are clickable, and the whole point of the card is that you can
    reach into it — so nothing here opts out of pointer events */
 .al-arrowg, .al-dot { cursor: pointer; }
-.al-json { margin: 0; max-height: 210px; overflow: auto; white-space: pre; font-family: var(--font-mono); font-size: 10.5px; line-height: 1.45; color: var(--text); }
+/* NOT scrollable, and not capped: a 210px window over 411px of JSON was a card
+   whose second half could not be read at all. The page scrolls instead. */
+.al-json { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 10.5px; line-height: 1.45; color: var(--text); }
 .al-json .al-k { color: var(--accent); }
 .al-card-foot { font-size: 9.5px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 5px; }
+/* the prompt as sent: its own block, because JSON-escaping a paragraph onto one
+   line makes it unreadable. Selectable, wrapped, and never truncated here. */
+.al-prompt { display: flex; flex-direction: column; gap: 3px; }
+.al-prompt-lbl { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); }
+.al-prompt-body { margin: 0; padding: 7px 9px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-sm); font-family: var(--font-mono); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text); }
 
 /* settings: skills editor */
 .settings-page.wide { max-width: 980px; }

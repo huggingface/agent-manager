@@ -30,11 +30,13 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'api-log-'));
 const bundle = path.join(tmp, 'app.js');
 
 const at = (s) => new Date(Date.UTC(2026, 7, 19, 21, 0, s)).toISOString();
+const PROMPT = 'Review the diff in web/ and\nreport anything that would break.';
 const prompt = (i, from, to, chars, ok = true) => ({
   id: `p${i}`, at: at(i), method: 'POST', path: `/api/agents/${to}/prompt`,
   origin: { id: from, type: 'agent', name: from },
   target: { id: to, name: to, cli: 'claude' },
-  request: { present: true, chars, sha256: `sha-${chars}` },
+  // as the log stores it now: the text, and the checksum that spots a repeat
+  request: { present: true, chars, sha256: `sha-${chars}`, text: PROMPT },
   status: ok ? 200 : 404, ok, durationMs: 303, result: { ok },
 });
 const wait = (i, watcher, watched, ms) => ({
@@ -70,7 +72,7 @@ const create = {
   id: 'c1', at: at(1), method: 'POST', path: '/api/agents',
   origin: { id: 'manager', type: 'agent', name: 'manager' },
   query: { cli: 'claude', name: 'poet' },
-  request: { present: true, chars: 88, sha256: 'seed' },
+  request: { present: true, chars: 88, sha256: 'seed', text: 'Write a poem about FUSE.' },
   status: 201, ok: true, durationMs: 452,
   result: { id: 'poet-1', name: 'poet', cli: 'claude', path: 'poet' },
 };
@@ -164,27 +166,35 @@ const open = async (width) => {
 try {
   const page0 = await open(1200);
   const filters = await page0.evaluate(() => {
-    const chips = [...document.querySelectorAll('.al-chip')];
+    const box = document.querySelector('.al-check input');
     return {
-      chips: chips.length,
-      label: chips[0]?.textContent.trim(),
+      isCheckbox: box?.type === 'checkbox',
+      checked: !!box?.checked,
+      inHeader: !!document.querySelector('.al-head .al-check'),
+      label: document.querySelector('.al-check')?.textContent.trim(),
       whos: [...document.querySelectorAll('.al-who')].map((e) => e.textContent.trim()),
       header: document.querySelector('.al-count')?.textContent.replace(/\s+/g, ' ').trim(),
       finds: document.querySelectorAll('.al-find').length,
     };
   });
   const mineCount = operations.filter((o) => o.origin?.type === 'operator').length;
-  console.log('the only filter there is');
-  check('one control, not a row of them', () => assert.equal(filters.chips, 1));
+  console.log('the only control there is');
+  check('a plain checkbox, unchecked, on the same line as the buttons',
+    () => {
+      assert.ok(filters.isCheckbox, 'not a checkbox');
+      assert.equal(filters.checked, false);
+      assert.ok(filters.inHeader, 'not on the header line');
+      assert.match(filters.label, /^show user calls/, `label: ${filters.label}`);
+    });
   check('and no path search either', () => assert.equal(filters.finds, 0));
-  check('the operator\'s own calls are hidden by default, and it says how many',
+  check('the user\'s own calls are out until it is ticked, and it says how many',
     () => {
       assert.ok(!filters.whos.includes('lvwerra'), `whos: ${filters.whos.join(', ')}`);
-      assert.match(filters.label, new RegExp(`hidden \\(${mineCount}\\)`), `label: ${filters.label}`);
+      assert.match(filters.label, new RegExp(`\\(${mineCount}\\)`), `label: ${filters.label}`);
     });
   check('the failure count survives as a fact rather than a filter',
     () => assert.match(filters.header, /1 failed/));
-  await page0.click('.al-chip');
+  await page0.click('.al-check input');
   await page0.waitForFunction(() => [...document.querySelectorAll('.al-who')].some((e) => e.textContent.trim() === 'lvwerra'));
   check('and one click brings them back', () => true);
   await page0.close();
@@ -377,8 +387,8 @@ try {
   });
   check('the entry survives the pointer moving onto the card',
     () => { assert.equal(reach.still, reach.before); assert.ok(!reach.idle); });
-  check('and the JSON can actually be scrolled when it overflows',
-    () => assert.ok(!reach.overflows || reach.scrolled > 0, `overflows: ${reach.overflows}, scrollTop: ${reach.scrolled}`));
+  check('and the JSON is shown whole rather than in a scrolling window',
+    () => assert.equal(reach.overflows, false, 'the card clips its own content'));
 
   // …and a click keeps it, so the pointer can go anywhere without losing it.
   const pinned = await page.evaluate(async () => {
@@ -399,6 +409,74 @@ try {
   });
   check('clicking a call pins the entry, and it says so',
     () => { assert.equal(pinned.still, pinned.path); assert.ok(pinned.marked && pinned.hasClose); });
+
+  // "why arent the prompts not stored? or just not shown? we should change that"
+  const words = await page.evaluate(async () => {
+    // click marks until the card is showing a call that carried a prompt
+    for (const g of document.querySelectorAll('.al-arrowg')) {
+      g.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      g.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+      g.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 30));
+      if (/\/prompt$/.test(document.querySelector('.al-card-path')?.textContent || '')) break;
+    }
+    const body = document.querySelector('.al-prompt-body');
+    return {
+      path: document.querySelector('.al-card-path')?.textContent,
+      prompt: body?.textContent,
+      json: document.querySelector('.al-json')?.textContent,
+      selectable: body ? getComputedStyle(body).userSelect !== 'none' : null,
+    };
+  });
+  console.log('\nthe prompt itself');
+  check('is shown as it was sent, newlines and all',
+    () => { assert.match(words.path || '', /\/prompt$/, `card shows ${words.path}`); assert.equal(words.prompt, PROMPT); });
+  check('as its own block rather than escaped into the JSON',
+    () => assert.ok(!words.json.includes('\\n'), 'the JSON carries an escaped prompt'));
+  check('with the checksum still in the entry, which is what spots a repeat',
+    () => assert.match(words.json, /sha256/));
+  check('and it can be selected', () => assert.ok(words.selectable));
+
+  // "i want an option to show things in real time, now it seems all actions are
+  // equi-distant" — and then: "maybe we need a way to zoom in and zoom out"
+  const scaled = await page.evaluate(async () => {
+    // .al-arrowg only: the legend's swatches are .al-arrow too
+    const xs = () => [...document.querySelectorAll('.al-arrowg .al-arrow')].map((l) => Math.round(Number(l.getAttribute('x1'))));
+    const gaps = (a) => a.slice(1).map((v, i) => v - a[i]).filter((g) => g > 0);
+    const even = gaps([...new Set(xs())].sort((a, b) => a - b));
+    const svgWidth = () => document.querySelector('.al-map svg').style.width;
+    document.querySelectorAll('.al-scale button')[1].click();
+    await new Promise((r) => setTimeout(r, 120));
+    const clock = gaps([...new Set(xs())].sort((a, b) => a - b));
+    const before = svgWidth();
+    document.querySelector('.al-zoom button:last-child').click();
+    await new Promise((r) => setTimeout(r, 120));
+    return { even, clock, before, zoomed: svgWidth(), level: document.querySelector('.al-zoom-lvl')?.textContent };
+  });
+  console.log('\ntwo ways to lay out the same calls');
+  // Not every event draws an arrow, so consecutive arrows sit one OR SEVERAL
+  // steps apart. What separates the modes is the smallest gap: evenly spaced,
+  // it is the grid step and nothing can be closer; by the clock, calls a second
+  // apart land on top of each other — which is the whole reason zoom exists.
+  const evenStep = Math.min(...scaled.even);
+  const clockStep = Math.min(...scaled.clock);
+  check('evenly spaced by default — every gap a whole number of steps',
+    () => {
+      assert.ok(evenStep > 20, `step ${evenStep}px`);
+      assert.ok(scaled.even.every((g) => Math.abs(g / evenStep - Math.round(g / evenStep)) < 0.08),
+        `gaps: ${scaled.even.join(', ')}`);
+    });
+  check('and by the clock on demand, where a burst collapses and a quiet spell opens up',
+    () => {
+      assert.ok(clockStep < evenStep / 4, `clock step ${clockStep}px vs even ${evenStep}px`);
+      assert.ok(Math.max(...scaled.clock) > evenStep * 2, `widest clock gap ${Math.max(...scaled.clock)}px`);
+    });
+  check('zoom widens the drawing inside the frame that already scrolls',
+    () => {
+      assert.equal(scaled.before, '100%');
+      assert.equal(scaled.zoomed, '150%');
+      assert.equal(scaled.level, '1.5×');
+    });
   await page.close();
 } finally {
   await browser.close();
