@@ -1432,20 +1432,28 @@ a.btn-ghost { text-decoration: none; }
 .cron-message { margin-top: 14px; }
 .cron-page h3 { margin-top: 24px; }
 .cron-table-wrap { margin-top: 8px; border-top: 1px solid var(--border); }
-.cron-table { width: 100%; min-width: 960px; border-collapse: collapse; font-size: 11.5px; }
+.cron-table { width: 100%; min-width: 900px; border-collapse: collapse; table-layout: fixed; font-size: 11.5px; }
+.cron-col-job, .cron-col-agent { width: auto; }
+.cron-col-type { width: 42px; }
+.cron-col-interval { width: 130px; }
+.cron-col-state { width: 62px; }
+.cron-col-next { width: 82px; }
+.cron-col-last { width: 158px; }
+.cron-col-actions { width: 174px; }
 .cron-table th { padding: 7px 8px; border-bottom: 1px solid var(--border); color: var(--muted); font: 500 10px var(--font-mono); letter-spacing: 0.045em; text-align: left; text-transform: uppercase; white-space: nowrap; }
-.cron-table td { padding: 9px 8px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); vertical-align: top; }
-.cron-table tbody tr:hover { background: var(--panel-2); }
-.cron-table td:nth-child(-n+3), .cron-table td:nth-child(5), .cron-table td:nth-child(6), .cron-table td:nth-child(8) { white-space: nowrap; }
+.cron-table td { padding: 7px 8px; border-bottom: 1px solid var(--border); overflow: hidden; color: var(--text); font-family: var(--font-mono); text-overflow: ellipsis; vertical-align: middle; white-space: nowrap; }
+.cron-table tbody tr { cursor: pointer; }
+.cron-table tbody tr:hover, .cron-table tbody tr.editing { background: var(--panel-2); }
+.cron-table tbody tr:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.cron-table tbody tr.editing { box-shadow: inset 2px 0 var(--accent); }
+.cron-type .cli-logo { display: flex; }
 .cron-dim { color: var(--muted); }
 .cron-state.running, .cron-last.ok { color: var(--go); }
 .cron-state.stopped { color: var(--muted); }
 .cron-last.failed { color: var(--danger); }
-.cron-actions { display: inline-flex; gap: 10px; white-space: nowrap; }
-.cron-actions button { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; }
-.cron-actions button:hover:not(:disabled) { text-decoration: underline; text-underline-offset: 2px; }
-.cron-actions button.danger { color: var(--danger); }
-.cron-actions button:disabled { opacity: 0.4; cursor: wait; }
+.cron-actions { display: inline-flex; gap: 4px; white-space: nowrap; }
+.cron-actions .btn-ghost { padding: 4px 6px; border-radius: var(--r-sm); background: var(--panel); font: 500 10.5px var(--font-mono); }
+.cron-actions .btn-ghost:disabled { cursor: wait; }
 
 @container (max-width: 560px) {
   .cron-form { grid-template-columns: minmax(0, 1fr); row-gap: 5px; padding-left: 0; padding-right: 0; }

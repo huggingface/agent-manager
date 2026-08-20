@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import * as api from '../api';
 import type { Cli, Session } from '../types';
 import Logo from './Logo';
@@ -35,6 +35,20 @@ const cronFor = (preset: Preset, time: string, weekday: string, custom: string) 
   if (preset === 'weekly') return `${minute} ${hour} * * ${weekday}`;
   return custom.trim().replace(/\s+/g, ' ');
 };
+const fieldsForCron = (cron: string): { preset: Preset; time: string; weekday: string; custom: string } => {
+  let match;
+  if (cron === '0 * * * *') return { preset: 'hourly', time: '09:00', weekday: '1', custom: cron };
+  if ((match = cron.match(/^(\d+) (\d+) \* \* 1-5$/))) {
+    return { preset: 'weekdays', time: `${match[2].padStart(2, '0')}:${match[1].padStart(2, '0')}`, weekday: '1', custom: cron };
+  }
+  if ((match = cron.match(/^(\d+) (\d+) \* \* ([0-6])$/))) {
+    return { preset: 'weekly', time: `${match[2].padStart(2, '0')}:${match[1].padStart(2, '0')}`, weekday: match[3], custom: cron };
+  }
+  if ((match = cron.match(/^(\d+) (\d+) \* \* \*$/))) {
+    return { preset: 'daily', time: `${match[2].padStart(2, '0')}:${match[1].padStart(2, '0')}`, weekday: '1', custom: cron };
+  }
+  return { preset: 'custom', time: '09:00', weekday: '1', custom: cron };
+};
 const intervalName = (job: api.CronJob) => {
   const c = job.schedule.cron;
   let match;
@@ -65,6 +79,16 @@ const when = (iso: string | null, zone: string, now: number) => {
     }).format(new Date(value));
   } catch { return new Date(value).toLocaleString(); }
 };
+const compactWhen = (iso: string, zone: string) => {
+  const value = Date.parse(iso);
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: zone, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(new Date(value));
+    const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((candidate) => candidate.type === type)?.value || '';
+    return `${part('day')} ${part('month')} ${part('hour')}:${part('minute')}`;
+  } catch { return new Date(value).toISOString().slice(5, 16).replace('T', ' '); }
+};
 
 export default function CronSettings({ clis }: { clis: Cli[] }) {
   const agents = useMemo(() => clis.filter((cli) => !EXCLUDED_CLIS.has(cli.id)), [clis]);
@@ -74,6 +98,8 @@ export default function CronSettings({ clis }: { clis: Cli[] }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState('');
   const [now, setNow] = useState(Date.now());
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
   const [jobName, setJobName] = useState('');
   const [agentName, setAgentName] = useState('');
   const [cli, setCli] = useState('');
@@ -101,7 +127,7 @@ export default function CronSettings({ clis }: { clis: Cli[] }) {
     return () => { window.clearInterval(poll); window.clearInterval(clock); };
   }, []);
   useEffect(() => {
-    if (!agents.some((agent) => agent.id === cli && agent.available)) {
+    if (!cli || !agents.some((agent) => agent.id === cli)) {
       setCli(agents.find((agent) => agent.available)?.id || '');
     }
   }, [agents, cli]);
@@ -111,21 +137,39 @@ export default function CronSettings({ clis }: { clis: Cli[] }) {
   const selected = agents.find((agent) => agent.id === cli);
   const reset = () => {
     setJobName(''); setAgentName(''); setPrompt(''); setPreset('daily'); setTime('09:00');
-    setWeekday('1'); setCustom('0 9 * * *'); setTz(browserZone()); setRunOnRestart(true); setMessage('');
+    setWeekday('1'); setCustom('0 9 * * *'); setTz(browserZone()); setRunOnRestart(true);
+    setCli(agents.find((agent) => agent.available)?.id || ''); setEditingId(null); setMessage('');
   };
-  const create = async (event: FormEvent) => {
+  const edit = (job: api.CronJob) => {
+    const schedule = fieldsForCron(job.schedule.cron);
+    setEditingId(job.id); setJobName(job.name); setAgentName(job.agent.name); setCli(job.agent.cli);
+    setPrompt(job.prompt); setPreset(schedule.preset); setTime(schedule.time); setWeekday(schedule.weekday);
+    setCustom(schedule.custom); setTz(job.schedule.tz); setRunOnRestart(job.runOnRestart); setMessage('');
+    window.requestAnimationFrame(() => {
+      formRef.current?.scrollIntoView({ block: 'start' });
+      formRef.current?.querySelector<HTMLInputElement>('#cron-job-name')?.focus({ preventScroll: true });
+    });
+  };
+  const editFromKeyboard = (event: KeyboardEvent<HTMLTableRowElement>, job: api.CronJob) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    edit(job);
+  };
+  const save = async (event: FormEvent) => {
     event.preventDefault();
     if (!jobName.trim() || !agentName.trim() || !cli || !prompt.trim() || !scheduleCron) return;
-    setBusy('create'); setMessage('');
+    const draft: api.CronDraft = {
+      name: jobName.trim(), agent: { name: agentName.trim(), cli }, prompt: prompt.trim(),
+      schedule: { cron: scheduleCron, tz: tz.trim() }, runOnRestart,
+    };
+    setBusy('save'); setMessage('');
     try {
-      await api.createCron({
-        name: jobName.trim(), agent: { name: agentName.trim(), cli }, prompt: prompt.trim(),
-        schedule: { cron: scheduleCron, tz: tz.trim() }, runOnRestart,
-      });
+      if (editingId) await api.updateCron(editingId, draft);
+      else await api.createCron(draft);
       reset();
       await load();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Could not create the job.');
+      setMessage(error instanceof Error ? error.message : `Could not ${editingId ? 'update' : 'create'} the job.`);
     } finally { setBusy(null); }
   };
   const act = async (id: string, action: () => Promise<unknown>) => {
@@ -148,7 +192,7 @@ export default function CronSettings({ clis }: { clis: Cli[] }) {
 
   return (
     <>
-      <form className="cron-form" onSubmit={create}>
+      <form className="cron-form" onSubmit={save} ref={formRef}>
         <label htmlFor="cron-job-name">Job name</label>
         <div>
           <input id="cron-job-name" value={jobName} onChange={(event) => setJobName(event.target.value)} placeholder="nightly deploy check" required />
@@ -177,7 +221,9 @@ export default function CronSettings({ clis }: { clis: Cli[] }) {
               </button>
             ))}
           </div>
-          <p>{selected?.available ? 'Used only if the named agent must be created.' : 'Unavailable agent types cannot be selected.'}</p>
+          <p>{selected?.available
+            ? 'Used only if the named agent must be created.'
+            : editingId && selected ? 'This saved type is unavailable here; updating preserves it.' : 'Unavailable agent types cannot be selected.'}</p>
         </div>
 
         <label htmlFor="cron-prompt">Prompt</label>
@@ -221,7 +267,9 @@ export default function CronSettings({ clis }: { clis: Cli[] }) {
         </div>
 
         <div className="cron-form-actions">
-          <button className="btn-primary" type="submit" disabled={busy === 'create' || !selected?.available}>{busy === 'create' ? 'Creating…' : 'Create job'}</button>
+          <button className="btn-primary" type="submit" disabled={busy === 'save' || !selected || (!editingId && !selected.available)}>
+            {busy === 'save' ? (editingId ? 'Updating…' : 'Creating…') : (editingId ? 'Update job' : 'Create job')}
+          </button>
           <button className="btn-ghost" type="button" onClick={reset}>Cancel</button>
         </div>
       </form>
@@ -234,22 +282,34 @@ export default function CronSettings({ clis }: { clis: Cli[] }) {
       ) : (
         <div className="table-scroll cron-table-wrap">
           <table className="cron-table">
+            <colgroup>
+              <col className="cron-col-job" /><col className="cron-col-agent" /><col className="cron-col-type" />
+              <col className="cron-col-interval" /><col className="cron-col-state" /><col className="cron-col-next" />
+              <col className="cron-col-last" /><col className="cron-col-actions" />
+            </colgroup>
             <thead><tr><th>Job</th><th>Agent</th><th>Type</th><th>Interval</th><th>State</th><th>Next</th><th>Last run</th><th>Actions</th></tr></thead>
             <tbody>{jobs.map((job) => {
               const type = clis.find((candidate) => candidate.id === job.agent.cli)?.label || job.agent.cli;
               return (
-                <tr key={job.id}>
-                  <td>{job.name}</td>
-                  <td>{job.agent.name}</td>
-                  <td className="cron-dim">{type}</td>
-                  <td>{intervalName(job)} <span className="cron-dim">· {job.schedule.tz}{job.runOnRestart ? ' · on restart' : ''}</span></td>
+                <tr
+                  key={job.id} className={editingId === job.id ? 'editing' : ''} tabIndex={0}
+                  aria-selected={editingId === job.id}
+                  onClick={() => edit(job)} onKeyDown={(event) => editFromKeyboard(event, job)}
+                >
+                  <td title={job.name}>{job.name}</td>
+                  <td title={job.agent.name}>{job.agent.name}</td>
+                  <td className="cron-type" aria-label={type} title={type}><Logo cli={job.agent.cli} size={14} /></td>
+                  <td>{intervalName(job)}</td>
                   <td className={`cron-state ${job.state}`}>{job.state}</td>
                   <td className="cron-dim">{when(job.next, job.schedule.tz, now)}</td>
-                  <td title={job.last?.error || ''}>{job.last ? <><span className={`cron-last ${job.last.status}`}>{job.last.status}</span> <span className="cron-dim">{job.last.error || `${duration(job.last.durationMs)} · ${when(job.last.at, job.schedule.tz, now)}`}</span></> : <span className="cron-dim">—</span>}</td>
-                  <td><span className="cron-actions">
-                    <button disabled={busy === job.id} onClick={() => act(job.id, () => api.runCron(job.id))}>Run now</button>
-                    <button disabled={busy === job.id} onClick={() => act(job.id, () => api.updateCron(job.id, { state: job.state === 'running' ? 'stopped' : 'running' }))}>{job.state === 'running' ? 'Stop' : 'Start'}</button>
-                    <button className="danger" disabled={busy === job.id} onClick={() => act(job.id, () => api.deleteCron(job.id))}>Delete</button>
+                  <td title={job.last?.error || ''}>{job.last ? <><span className={`cron-last ${job.last.status}`}>{job.last.status}</span> <span className="cron-dim">{duration(job.last.durationMs)} · {compactWhen(job.last.at, job.schedule.tz)}</span></> : <span className="cron-dim">—</span>}</td>
+                  <td onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}><span className="cron-actions">
+                    <button className="btn-ghost" disabled={busy === job.id} onClick={() => act(job.id, () => api.runCron(job.id))}>Run now</button>
+                    <button className="btn-ghost" disabled={busy === job.id} onClick={() => act(job.id, () => api.updateCron(job.id, { state: job.state === 'running' ? 'stopped' : 'running' }))}>{job.state === 'running' ? 'Stop' : 'Start'}</button>
+                    <button className="btn-ghost danger" disabled={busy === job.id} onClick={() => act(job.id, async () => {
+                      await api.deleteCron(job.id);
+                      if (editingId === job.id) reset();
+                    })}>Delete</button>
                   </span></td>
                 </tr>
               );

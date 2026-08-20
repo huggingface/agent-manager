@@ -17,7 +17,7 @@ const stub = path.join(tmp, 'api-stub.ts');
 fs.writeFileSync(stub, `
 export * from ${JSON.stringify(path.join(WEB, 'src/api.ts'))};
 let jobs = [{
-  id: 'cron_one', name: 'morning check', agent: { name: 'triage', cli: 'claude' }, prompt: 'Check.',
+  id: 'cron_one', name: 'morning check', agent: { name: 'triage', cli: 'codex' }, prompt: 'Check.',
   schedule: { cron: '0 9 * * *', tz: 'Europe/Zurich' }, runOnRestart: true,
   state: 'running', createdAt: '2026-08-19T00:00:00Z', updatedAt: '2026-08-19T00:00:00Z',
   next: '2026-08-20T07:00:00Z', last: { at: '2026-08-19T07:00:00Z', status: 'ok', durationMs: 258 },
@@ -96,6 +96,28 @@ try {
   assert.ok(overflow.table > 0, 'the table owns its horizontal overflow');
   assert.equal(overflow.stacked, true, 'phone form control sits below its label');
 
+  const firstRow = page.locator('.cron-table tbody tr').filter({ hasText: 'morning check' });
+  const compactRow = await firstRow.evaluate((row) => {
+    const cells = [...row.querySelectorAll('td')];
+    const buttons = [...row.querySelectorAll('button')];
+    return {
+      height: row.getBoundingClientRect().height,
+      noWrap: cells.every((cell) => getComputedStyle(cell).whiteSpace === 'nowrap'),
+      typeText: cells[2].textContent.trim(),
+      interval: cells[3].textContent.trim(),
+      last: cells[6].textContent.trim(),
+      buttonsFit: buttons.every((button) => button.scrollWidth <= button.clientWidth),
+      buttonBorders: buttons.map((button) => getComputedStyle(button).borderTopStyle),
+    };
+  });
+  assert.ok(compactRow.height < 40, `job row stays on one line at phone width (${compactRow.height}px)`);
+  assert.equal(compactRow.noWrap, true, 'every retained column is pinned to one line');
+  assert.equal(compactRow.typeText, '', 'type column is icon-only');
+  assert.equal(compactRow.interval, 'every day 09:00', 'interval omits timezone and restart detail');
+  assert.match(compactRow.last, /^ok 258ms · 19 Aug 09:00$/, 'last run uses the dense date');
+  assert.equal(compactRow.buttonsFit, true, 'action labels are not clipped');
+  assert.deepEqual(compactRow.buttonBorders, ['solid', 'solid', 'solid'], 'actions use button controls, not text links');
+
   await page.getByLabel('Job name', { exact: true }).fill('weekday digest');
   await page.getByLabel('Agent name', { exact: true }).fill('digest-agent');
   await page.getByLabel('Prompt', { exact: true }).fill('Summarize yesterday.');
@@ -112,9 +134,38 @@ try {
   });
 
   const row = page.locator('.cron-table tbody tr').filter({ hasText: 'morning check' });
+  await row.click();
+  await page.getByRole('button', { name: 'Update job' }).waitFor();
+  assert.equal(await page.getByLabel('Job name', { exact: true }).inputValue(), 'morning check');
+  assert.equal(await page.getByLabel('Agent name', { exact: true }).inputValue(), 'triage');
+  assert.equal(await page.getByLabel('Prompt', { exact: true }).inputValue(), 'Check.');
+  assert.equal(await page.locator('input[type="time"]').inputValue(), '09:00');
+  assert.equal(await page.getByLabel('timezone').inputValue(), 'Europe/Zurich');
+  assert.equal(await page.getByRole('button', { name: 'Every day' }).getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.getByRole('button', { name: 'Yes', exact: true }).getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.getByRole('button', { name: 'Codex' }).getAttribute('aria-pressed'), 'true');
+  assert.equal(await page.getByRole('button', { name: 'Update job' }).isDisabled(), false,
+    'an unavailable saved CLI is preserved without blocking edits to the other fields');
+
+  await page.getByLabel('Prompt', { exact: true }).fill('Check and summarize.');
+  await page.getByRole('button', { name: 'Weekly' }).click();
+  await page.locator('input[type="time"]').fill('10:15');
+  await page.locator('.cron-schedule-fields select').selectOption('4');
+  await page.getByLabel('timezone').fill('Asia/Tokyo');
+  await page.getByRole('button', { name: 'No', exact: true }).click();
+  await page.getByRole('button', { name: 'Update job' }).click();
+  await page.waitForFunction(() => window.__cronCalls.some((call) => call[0] === 'update' && call[2].prompt));
+  const edited = await page.evaluate(() => window.__cronCalls.find((call) => call[0] === 'update' && call[2].prompt));
+  assert.deepEqual(edited, ['update', 'cron_one', {
+    name: 'morning check', agent: { name: 'triage', cli: 'codex' }, prompt: 'Check and summarize.',
+    schedule: { cron: '15 10 * * 4', tz: 'Asia/Tokyo' }, runOnRestart: false,
+  }], 'row selection round-trips every persisted field through PUT');
+  assert.equal(await page.getByRole('button', { name: 'Create job' }).isVisible(), true, 'successful update returns the form to create mode');
+
   await row.getByRole('button', { name: 'Run now' }).click();
+  assert.equal(await page.getByRole('button', { name: 'Create job' }).isVisible(), true, 'an action click does not also select the row');
   await row.getByRole('button', { name: 'Stop' }).click();
-  await page.waitForFunction(() => window.__cronCalls.some((call) => call[0] === 'update'));
+  await page.waitForFunction(() => window.__cronCalls.some((call) => call[0] === 'update' && call[2].state));
   const actions = await page.evaluate(() => window.__cronCalls.map((call) => call[0]));
   assert.ok(actions.includes('run') && actions.includes('update'), 'Run now and Stop are separate wired actions');
   await row.getByRole('button', { name: 'Delete' }).click();
