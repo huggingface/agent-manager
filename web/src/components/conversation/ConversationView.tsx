@@ -373,6 +373,22 @@ export default function ConversationView({
     });
   }, [session.id]);
 
+  // The scrollbar shows only while the reader is moving (see .cxv-scrolling in
+  // conversation.css). Driven straight on the node rather than through state:
+  // this runs on every scroll frame, and re-rendering the whole conversation to
+  // change one class name would tax the one interaction that has to stay
+  // smooth. Any scroll counts — wheel, trackpad, touch, Page Down, and the
+  // reader's own jumps all raise the same event.
+  const barIdle = useRef<number>(0);
+  const showScrollbar = () => {
+    const el = scroller.current;
+    if (!el) return;
+    el.classList.add('cxv-scrolling');
+    window.clearTimeout(barIdle.current);
+    barIdle.current = window.setTimeout(() => el.classList.remove('cxv-scrolling'), 700);
+  };
+  useEffect(() => () => window.clearTimeout(barIdle.current), []);
+
   // Scroll fires in bursts; one write per quiet moment is plenty.
   const settle = useRef<number>(0);
   const onScrolled = () => {
@@ -516,6 +532,7 @@ export default function ConversationView({
           // Reading back into the conversation: fetch the stretch in front of
           // what we hold before the reader arrives at it.
           if (el.scrollTop < NEAR_TOP_PX) loadOlder();
+          showScrollbar();
           onScrolled();
         }}>
         <div className="cxv-col">

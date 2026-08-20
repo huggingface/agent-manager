@@ -280,6 +280,47 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    12px apart, which reads as one blank line too many at the end of every
    conversation. 12px makes the end of the flow spaced like the flow. */
 .cxv-body { --cx-gutter: 14px; --cx-tail: 12px; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px var(--cx-gutter) var(--cx-tail); }
+
+/* The scrollbar is invisible until something scrolls, then fades back out.
+   `.cxv-scrolling` is put on the node by the reader itself, on every scroll
+   event, so this answers to a wheel, a trackpad, a touch drag, Page Down, and
+   the reader's own jump to the newest exchange alike — they all scroll, and
+   scrolling is what the class listens to.
+
+   Only the THUMB'S COLOUR changes. No width is set here on purpose: the track
+   keeps whatever room the platform already gives it, so the reading column is
+   the same width whether the bar is showing or not and the text never steps
+   sideways as you scroll. On a platform with overlay scrollbars (macOS, iOS)
+   nothing is reserved before or after, and the thumb is transparent at rest —
+   which is what those platforms already do, so this does not fight them.
+
+   Appearing is immediate (`transition: none` on the way in); leaving is a fade
+   after a short hold, so a pause between two flicks does not blink at you.
+
+   The colour and the 8px width both come from the app-wide scrollbar in
+   styles.css, so the reader's bar is the same bar every other pane has — the
+   only difference is that this one is not there when you are not scrolling. */
+.cxv-body {
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 420ms ease 260ms;
+}
+.cxv-body.cxv-scrolling {
+  scrollbar-color: var(--border-strong) transparent;
+  transition: none;
+}
+.cxv-body::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  transition: background-color 420ms ease 260ms;
+}
+.cxv-body.cxv-scrolling::-webkit-scrollbar-thumb {
+  background-color: var(--border-strong);
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The global kill switch already removes animations; this drops the fade's
+     delay too, so the bar simply goes rather than lingering. */
+  .cxv-body, .cxv-body::-webkit-scrollbar-thumb { transition: none; }
+}
 .cxv-col { display: flex; flex-direction: column; min-width: 0; }
 .cxv-msg { font-size: 0.85em; color: var(--muted); padding: 6px 0; }
 /* The line above the oldest loaded exchange. Fixed height on purpose: it sits
