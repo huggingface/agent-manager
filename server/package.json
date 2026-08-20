@@ -16,7 +16,7 @@
     "test:ui": "node terminal-ui.test.mjs && node screenshot-input.test.mjs && node reader-info.test.mjs",
     "test:screenshots": "node screenshot-input.test.mjs",
     "test:mobile": "node mobile.test.mjs",
-    "test": "node ../scripts/run-suites.mjs"
+    "test": "node test/queued-prompts.test.mjs && node ../scripts/run-suites.mjs"
   },
   "engines": {
     "node": ">=20.19"

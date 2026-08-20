@@ -246,7 +246,15 @@ export function ExchangeView({
 
   return (
     <section className={`cx${dim ? ' dim' : ''}`}>
-      {prompt ? <div className="cx-prompt"><Hi text={prompt} q={q} /></div> : null}
+      {prompt ? (
+        <div className="cx-prompt">
+          <Hi text={prompt} q={q} />
+          {/* Read from a queue record rather than a message: it was typed while
+              the agent was working. Labelled because those records cannot say
+              whether it was then consumed or cancelled — see TraceTurn.queued. */}
+          {x.prompt?.queued ? <span className="cx-queued mono" title="Typed while the agent was working, so it waited in the queue">queued</span> : null}
+        </div>
+      ) : null}
 
       {/* Everything about the turn on ONE line, under the prompt: what the work
           was on the left, which turn it is on the right. Nothing above.

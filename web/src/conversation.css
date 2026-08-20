@@ -50,6 +50,11 @@
   font-size: 1em; font-weight: 550; color: var(--text);
   white-space: pre-wrap; overflow-wrap: break-word;
 }
+/* the queue marker: a quiet aside on the band, not a second voice */
+.cx-queued {
+  margin-left: 7px; padding: 0 4px; border: 1px solid var(--border); border-radius: var(--r-sm);
+  font-size: 0.78em; font-weight: 500; color: var(--muted); vertical-align: 1px; white-space: nowrap;
+}
 .cx-prompt::before {
   content: '❯'; position: absolute; left: 0.23em; top: 6px;
   font-family: var(--font-mono); color: var(--accent); font-weight: 700;

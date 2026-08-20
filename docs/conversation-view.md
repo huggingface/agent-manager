@@ -435,6 +435,28 @@ pane with nothing to render (a shell) simply stays a terminal.
   history recall, a slash-command menu — and duplicated markup is how one surface quietly gets
   them and the other does not. `onPasteFiles` and `above` are the seam an attachment strip plugs
   into, so it arrives in both places at once or in neither.
+- **A prompt typed mid-turn is still a prompt.** Claude Code does not write one as a `user`
+  message: while the agent is working it records `{"type":"queue-operation","operation":"enqueue",
+  "content":"…"}`, and the text exists nowhere else until the queue is consumed. `queue-operation`
+  appeared nowhere in this repo, so every such prompt was invisible in the reader — permanently,
+  not late. Two of the operator's own prompts were lost that way.
+
+  The two consumption paths need opposite treatment, and they are distinguishable from the records
+  alone (which matters, because a window can hold the enqueue and not what follows it): `dequeue`
+  carries no text and pops the oldest queued prompt — the prompt arrives as an ordinary message
+  right after, so the queued copy stands down; `remove` names the text it takes out, and nothing
+  else will ever carry it, so that copy is what the reader shows. In the reference transcript that
+  split is 86 dequeues to 5 removes, and the 5 are exactly the prompts with no message anywhere.
+  A prompt still in the queue when the window ends is left to its message for the same reason.
+
+  It is shown where it was typed — inside the turn it interrupted, which means it opens a new
+  exchange there and the interrupted turn keeps only the work it had done so far. That is the
+  honest order: the operator typed it then, and the answer that follows usually addresses it. And
+  the band says **queued**, because the records cannot tell a prompt that was consumed from one
+  that was cancelled — so the reader states what it knows rather than implying the agent replied.
+  Harness noise is filtered exactly as it is for ordinary user text: one of those five removes is
+  an enqueued `<task-notification>`, and showing that as something the operator typed would be a
+  new bug in place of the old one.
 - **A half-typed reply is kept** (`drafts.ts`, `useDraft.ts`). Reported from a phone: start typing
   an answer, switch apps, come back, and the text is gone. The pane is not what loses it — App.tsx
   keeps a dozen panes warm, so an in-app trip to the session list already survived — the
