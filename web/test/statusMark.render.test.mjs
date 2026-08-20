@@ -32,8 +32,8 @@ const embeddedFont = `@font-face {
 .parity-sidebar { display:flex; align-items:center; font-weight:400; }
 .parity-overview { display:flex; align-items:center; font-weight:700; }
 .mark-baseline { display:inline-block; width:0; height:0; padding:0; margin:0; }
-.status.working::before, .ov-busy::before, .cx-running::before,
-.ovt-state.running::before { animation:none !important; }`;
+.status.working::before, .ov-busy::before,
+.cx-running::before { animation:none !important; }`;
 
 let failed = 0;
 const check = (what, fn) => {
@@ -78,7 +78,6 @@ await page.setContent(`<style>${css}\n${embeddedFont}</style>
     <span class="ph-right"></span>
   </div>
   <div class="ov-busy" id="overview-busy">running</div>
-  <div class="ovt-state running" id="overview-group-working"></div>
   <div class="cx-running" id="reader-working">working</div>`);
 await page.evaluate(async () => {
   await document.fonts.load('12.5px "Geist Mono Test"', '⠿⠁');
@@ -173,7 +172,7 @@ const { marks, ink, optics } = await page.evaluate((ids) => {
   'working', 'waiting', 'idle', 'stopped', 'provider', 'ready',
   'sidebar-working', 'overview-working', 'overview-waiting',
   'header-working', 'header-waiting', 'overview-busy',
-  'overview-group-working', 'reader-working',
+  'reader-working',
 ]);
 await browser.close();
 
@@ -279,7 +278,7 @@ check('Overview and header static paths have identical geometry', () => {
   close(marks['overview-waiting'].left, marks['header-waiting'].left, 0.001);
 });
 for (const id of [
-  ...STATUS_WORKING, 'overview-busy', 'overview-group-working', 'reader-working',
+  ...STATUS_WORKING, 'overview-busy', 'reader-working',
 ]) {
   check(`${id} uses the same normal-weight, optically corrected spinner`, () => {
     assert.match(marks[id].content, /[⠋⠙⠹⠸⠼⠴⠦⠧]/);

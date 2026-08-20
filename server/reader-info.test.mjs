@@ -211,19 +211,23 @@ try {
   const layout = await page.evaluate(() => ({
     pathInLeft: !!document.querySelector('.pane-head .ph-left .ph-path'),
     pathInRight: !!document.querySelector('.pane-head .ph-right .ph-path'),
-    statusInTitle: !!document.querySelector('.pane-head .ph-title .status'),
-    statusLeftOfName: (() => {
-      const dot = document.querySelector('.pane-head .ph-title .status');
+    // #92 moved state off a standalone dot and onto the CLI tile's frame, so it
+    // now leads the row from `.ph-left` rather than the centred title. The old
+    // shape of this assertion has been failing on main since that merged.
+    stateOnTile: !!document.querySelector('.pane-head .ph-left .state-logo'),
+    strayStatusDot: !!document.querySelector('.pane-head .status'),
+    stateLeadsRow: (() => {
+      const frame = document.querySelector('.pane-head .ph-left .state-logo');
       const name = document.querySelector('.pane-head .ph-name');
-      return !!dot && !!name && dot.getBoundingClientRect().right <= name.getBoundingClientRect().left + 1;
+      return !!frame && !!name && frame.getBoundingClientRect().right <= name.getBoundingClientRect().left + 1;
     })(),
     rightOrder: [...document.querySelectorAll('.pane-head .ph-right .ph-btn')]
       .map((b) => b.className.replace('ph-btn ', '').split(' ')[0]),
   }));
   check('the working directory sits with the agent icon, not with the controls',
     layout.pathInLeft && !layout.pathInRight, JSON.stringify(layout));
-  check('the state mark leads the centred name',
-    layout.statusInTitle && layout.statusLeftOfName, JSON.stringify(layout));
+  check('state rides the CLI tile at the head of the row, with no dot left behind',
+    layout.stateOnTile && layout.stateLeadsRow && !layout.strayStatusDot, JSON.stringify(layout));
   check('attach, search, info and close are one cluster in that order',
     JSON.stringify(layout.rightOrder) === JSON.stringify(['ph-image', 'ph-search', 'tinfo-btn', 'ph-close']),
     JSON.stringify(layout.rightOrder));

@@ -84,4 +84,24 @@ assert.equal(paintedLogo.props.style.height, 16);
 assert.equal(paintedLogo.props.style.padding, 3);
 assert.equal(headerSvg.props.viewBox, '0 0 22 22');
 
-console.log('state-logo: real tiles keep logos and 12px legend frames contain only the shared border');
+// Which surfaces have opted in. #92 shipped the frame to the sidebar, both pane
+// headers and the mock, and deliberately left Overview on the old standalone
+// mark; the operator has since asked for Overview too, so all three of its
+// state slots — card, tile and the group's peek strip — are frames now, and the
+// state-classed `.status` has no renderer left anywhere in the app.
+//
+// This one reads source rather than rendering, because Overview needs the whole
+// API surface to mount. It is written to survive reformatting: it counts and
+// looks for absence, never for an attribute order or a whole JSX line.
+const overview = fs.readFileSync(path.join(HERE, '../src/components/Overview.tsx'), 'utf8');
+const frames = (overview.match(/<StateLogo\b/g) || []).length;
+assert.ok(frames >= 3, `Overview should draw a frame in all three slots, found ${frames}`);
+assert.ok(/frameOnly/.test(overview), 'the group strip has no icon to frame, so it needs the frame-only form');
+for (const file of ['components/Overview.tsx', 'components/Sidebar.tsx', 'components/TerminalPane.tsx',
+  'components/RemotePane.tsx', 'components/Locked.tsx']) {
+  const text = fs.readFileSync(path.join(HERE, '../src', file), 'utf8');
+  assert.doesNotMatch(text, /className=\{?[`"']status [^`"']*\$\{/,
+    `${file} still renders a state-classed .status mark`);
+}
+
+console.log('state-logo: real tiles keep logos, 12px legend frames are border-only, and every state slot is a frame');
