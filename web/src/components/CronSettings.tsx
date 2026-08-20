@@ -281,9 +281,9 @@ export default function CronSettings({ clis }: { clis: Cli[] }) {
             <colgroup>
               <col className="cron-col-job" /><col className="cron-col-agent" /><col className="cron-col-type" />
               <col className="cron-col-interval" /><col className="cron-col-state" /><col className="cron-col-next" />
-              <col className="cron-col-last" /><col className="cron-col-actions" />
+              <col className="cron-col-last" /><col className="cron-col-actions" /><col className="cron-col-fill" />
             </colgroup>
-            <thead><tr><th>Job</th><th>Agent</th><th>Type</th><th>Interval</th><th>State</th><th>Next</th><th>Last run</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Job</th><th>Agent</th><th>Type</th><th>Interval</th><th>State</th><th>Next</th><th>Last run</th><th>Actions</th><th className="cron-fill" aria-hidden="true" /></tr></thead>
             <tbody>{jobs.map((job) => {
               const type = clis.find((candidate) => candidate.id === job.agent.cli)?.label || job.agent.cli;
               const lastTitle = job.last
@@ -310,6 +310,7 @@ export default function CronSettings({ clis }: { clis: Cli[] }) {
                       if (editingId === job.id) reset();
                     })}>Delete</button>
                   </span></td>
+                  <td className="cron-fill" aria-hidden="true" />
                 </tr>
               );
             })}</tbody>

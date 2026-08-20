@@ -17,7 +17,7 @@ const stub = path.join(tmp, 'api-stub.ts');
 fs.writeFileSync(stub, `
 export * from ${JSON.stringify(path.join(WEB, 'src/api.ts'))};
 let jobs = [{
-  id: 'cron_one', name: 'morning check with a deliberately long job name', agent: { name: 'triage agent with a deliberately long name', cli: 'codex' }, prompt: 'Check.',
+  id: 'cron_one', name: 'morning check', agent: { name: 'triage', cli: 'codex' }, prompt: 'Check.',
   schedule: { cron: '0 9 * * *', tz: 'Europe/Zurich' }, runOnRestart: true,
   state: 'running', createdAt: '2026-08-19T00:00:00Z', updatedAt: '2026-08-19T00:00:00Z',
   next: '2026-08-20T07:00:00Z', last: { at: '2026-08-19T07:00:00Z', status: 'ok', durationMs: 258 },
@@ -118,6 +118,21 @@ try {
   assert.equal(compactRow.buttonsFit, true, 'action labels are not clipped');
   assert.deepEqual(compactRow.buttonBorders, ['solid', 'solid', 'solid'], 'actions use button controls, not text links');
 
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const contentFit = await firstRow.evaluate((row) => {
+    const cells = [...row.querySelectorAll('td')];
+    return cells.slice(0, 2).map((cell) => {
+      const range = document.createRange();
+      range.selectNodeContents(cell);
+      const textWidth = range.getBoundingClientRect().width;
+      const style = getComputedStyle(cell);
+      return cell.getBoundingClientRect().width - textWidth
+        - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    });
+  });
+  assert.equal(contentFit.every((slack) => Math.abs(slack) < 1), true,
+    `wide Job and Agent columns hug their content (${contentFit.join(', ')}px surplus)`);
+
   const widths = [];
   for (const width of [1200, 980, 760, 390]) {
     await page.setViewportSize({ width, height: 900 });
@@ -129,22 +144,38 @@ try {
         width: window.innerWidth,
         overflow: wrap.scrollWidth - wrap.clientWidth,
         clipped: cells.map((cell) => cell.scrollWidth > cell.clientWidth),
+        ellipsis: cells.slice(0, 8).some((cell) => getComputedStyle(cell).textOverflow === 'ellipsis'),
+        filler: cells[8].getBoundingClientRect().width,
         actionFits: buttons.every((button) => button.scrollWidth <= button.clientWidth)
           && cells[7].scrollWidth <= cells[7].clientWidth,
       };
     }));
   }
-  for (const layout of widths.slice(0, 2)) {
-    assert.equal(layout.overflow, 0, `${layout.width}px viewport needs no table scrollbar`);
-  }
+  assert.equal(widths[0].overflow, 0, 'the wide table needs no scrollbar');
+  assert.equal(widths[0].filler > 0, true, 'wide surplus lands in the empty column after Actions');
   for (const layout of widths) {
-    assert.deepEqual(layout.clipped.slice(2), [false, false, false, false, false, false],
-      `${layout.width}px keeps every bounded column intact`);
+    assert.deepEqual(layout.clipped.slice(0, 8), [false, false, false, false, false, false, false, false],
+      `${layout.width}px truncates no data column`);
+    assert.equal(layout.ellipsis, false, `${layout.width}px applies no ellipsis treatment`);
     assert.equal(layout.actionFits, true, `${layout.width}px keeps every action usable`);
   }
-  assert.equal(widths.at(-1).overflow > 0, true, 'the genuinely narrow table owns its overflow');
-  assert.equal(widths.at(-1).clipped.slice(0, 2).some(Boolean), true,
-    'at the narrow limit a name gives before a bounded column or action');
+  assert.equal(widths.at(-1).overflow > 0, true, 'the genuinely narrow table scrolls rather than truncating');
+  const synchronizedScroll = await firstRow.evaluate((row) => {
+    const wrap = row.closest('.cron-table-wrap');
+    const header = row.closest('table').querySelector('th');
+    const cell = row.querySelector('td');
+    const before = { header: header.getBoundingClientRect().left, cell: cell.getBoundingClientRect().left };
+    wrap.scrollLeft = wrap.scrollWidth;
+    const after = { header: header.getBoundingClientRect().left, cell: cell.getBoundingClientRect().left };
+    return {
+      moved: before.header - after.header,
+      aligned: Math.abs((before.header - before.cell) - (after.header - after.cell)),
+      scrollLeft: wrap.scrollLeft,
+    };
+  });
+  assert.equal(synchronizedScroll.scrollLeft > 0, true, 'phone table can scroll to the Actions column');
+  assert.equal(synchronizedScroll.moved > 0, true, 'the header moves with horizontal scrolling');
+  assert.equal(synchronizedScroll.aligned < 0.5, true, 'header and body columns stay aligned while scrolling');
 
   await page.getByLabel('Job name', { exact: true }).fill('weekday digest');
   await page.getByLabel('Agent name', { exact: true }).fill('digest-agent');
@@ -164,8 +195,8 @@ try {
   const row = page.locator('.cron-table tbody tr').filter({ hasText: 'morning check' });
   await row.click();
   await page.getByRole('button', { name: 'Update job' }).waitFor();
-  assert.equal(await page.getByLabel('Job name', { exact: true }).inputValue(), 'morning check with a deliberately long job name');
-  assert.equal(await page.getByLabel('Agent name', { exact: true }).inputValue(), 'triage agent with a deliberately long name');
+  assert.equal(await page.getByLabel('Job name', { exact: true }).inputValue(), 'morning check');
+  assert.equal(await page.getByLabel('Agent name', { exact: true }).inputValue(), 'triage');
   assert.equal(await page.getByLabel('Prompt', { exact: true }).inputValue(), 'Check.');
   assert.equal(await page.locator('input[type="time"]').inputValue(), '09:00');
   assert.equal(await page.getByLabel('timezone').inputValue(), 'Europe/Zurich');
@@ -185,7 +216,7 @@ try {
   await page.waitForFunction(() => window.__cronCalls.some((call) => call[0] === 'update' && call[2].prompt));
   const edited = await page.evaluate(() => window.__cronCalls.find((call) => call[0] === 'update' && call[2].prompt));
   assert.deepEqual(edited, ['update', 'cron_one', {
-    name: 'morning check with a deliberately long job name', agent: { name: 'triage agent with a deliberately long name', cli: 'codex' }, prompt: 'Check and summarize.',
+    name: 'morning check', agent: { name: 'triage', cli: 'codex' }, prompt: 'Check and summarize.',
     schedule: { cron: '15 10 * * 4', tz: 'Asia/Tokyo' }, runOnRestart: false,
   }], 'row selection round-trips every persisted field through PUT');
   assert.equal(await page.getByRole('button', { name: 'Create job' }).isVisible(), true, 'successful update returns the form to create mode');
