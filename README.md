@@ -166,12 +166,30 @@ sets the window (1 / 3 / 7 days, or off).
 | `DATA_DIR` | `/data` | Durable root (mounted private Storage Bucket) |
 | `AM_SCROLLBACK_BYTES` | `67108864` | Maximum Ghostty scrollback memory per session |
 | `AM_RESIZE_SETTLE_MS` | `120` | Quiet period before a resize is applied to the PTY |
+| `AM_MANAGE_GLOBAL_CONTEXT` | Docker/Space: `1`; direct Node: unset | Maintain Agent Manager's managed block in each supported CLI's user-level instruction file |
 | `ANTHROPIC_API_KEY` | — | Claude Code / opencode / Hermes (Space **secret**) |
 | `OPENAI_API_KEY` / `CODEX_API_KEY` | — | Codex (Space secret) |
 | `GEMINI_API_KEY` | — | Gemini CLI (Space secret) |
 
 Logging in interactively inside a terminal works too — credentials are written to
 `HOME`/state dirs on `/data` and persist across restarts.
+
+The Docker/Space entrypoint sets `AM_MANAGE_GLOBAL_CONTEXT=1` because it owns
+isolated CLI homes. A direct Node or systemd install deliberately leaves the
+operator's CLI configuration alone unless you opt in:
+
+```bash
+cd server && AM_MANAGE_GLOBAL_CONTEXT=1 npm start
+```
+
+In a systemd unit, use `Environment=AM_MANAGE_GLOBAL_CONTEXT=1`. With that flag,
+Agent Manager maintains a clearly delimited block in the user-level instruction
+files for Claude, Codex, Gemini, OpenCode, Hermes, and OpenClaw. Existing text
+outside that block is preserved, refreshes are idempotent, and project checkout
+files are never created or modified. OpenClaw is the one workspace-based CLI:
+Agent Manager writes only to its default private, non-Git state workspace and
+skips a custom, external, or Git-backed workspace. Set the variable to `0` to
+disable this behavior in the Docker/Space runtime.
 
 ## Local development
 
