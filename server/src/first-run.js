@@ -1,44 +1,39 @@
-// Pre-answering the first-run dialogs a new agent session would otherwise sit
-// in front of.
+// Pre-answering the dialogs a new agent session would otherwise stop at.
 //
-// Both Claude Code and Codex ask "do you trust this folder?" the first time
-// they run in a directory, keyed on the ABSOLUTE path — a trusted parent does
-// not cover its children, so every new session's workspace is a new question.
-// A dialog is not merely annoying here: the manager and other agents launch
-// sessions with the task as an argument and nobody is watching the pane.
+// Everything here is measured against the installed CLIs rather than read off
+// their docs; docs/first-run-dialogs.md records the runs. Three facts shape the
+// design, and each one narrows what has to be written at runtime:
 //
-// What that costs, measured rather than assumed (see docs/first-run-dialogs.md):
-//   · the launch prompt itself SURVIVES — it is queued and runs once the dialog
-//     is answered, for both CLIs;
-//   · but a prompt sent WHILE the dialog is up is partly eaten: the dialog's
-//     key handler consumes the leading characters and the trailing Enter
-//     dismisses it, so "reply with exactly SECOND" arrived as
-//     "with exactly SECOND";
-//   · and a freshly booted CLI reports `idle`, so a coordinator waiting on the
-//     session sees "finished" while the work has not started.
+//   1. Claude Code 2.1.232 INHERITS folder trust from a parent. Trusting the
+//      workspaces root once therefore covers every session under it, so nothing
+//      has to be written when a session starts.
+//   2. Codex 0.149.0 does NOT inherit, and it reads trust from config.toml
+//      itself — a `-c` override does not reach the check. So its answer has to
+//      be written, but it is APPENDED: a few bytes at the end, never a rewrite
+//      of anybody else's, which is the difference that matters below.
+//   3. Codex's blocking "Update available!" screen is driven by its own
+//      `version.json` cache and is suppressed by that file's `dismissed_version`
+//      — the same field its "Skip until next version" option writes.
 //
-// `waitForInputReady` cannot save us: it waits for the screen to go quiet, and
-// a dialog IS a quiet screen. So the answer is to have answered already.
-//
-// Everything here is idempotent, additive, and best-effort: a config we cannot
-// read or write must never stop a session from starting.
+// Why that matters: an earlier version of this file read all of `.claude.json`,
+// changed one entry and renamed the result over the live file on every new
+// session. Rename prevents a torn file; it is not a lock. A review reproduced a
+// lost concurrent write deterministically, and the loss is silent because
+// nothing ends up malformed. The rule now is: never rewrite CLI-owned state on
+// the session path, and when boot has to write, write once and only if needed.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { WORKSPACES_DIR } from './config.js';
 
 const homeDir = () => process.env.HOME || os.homedir();
 
-/** Where Claude keeps the state file that holds per-project trust. */
-export function claudeStateFile() {
-  const dir = process.env.CLAUDE_CONFIG_DIR;
-  return path.join(dir || homeDir(), '.claude.json');
-}
-
-/** Where Codex keeps its config, which holds per-project trust. */
-export function codexConfigFile() {
-  const home = process.env.CODEX_HOME || path.join(homeDir(), '.codex');
-  return path.join(home, 'config.toml');
-}
+export const claudeStateFile = () =>
+  path.join(process.env.CLAUDE_CONFIG_DIR || homeDir(), '.claude.json');
+export const codexConfigFile = () =>
+  path.join(process.env.CODEX_HOME || path.join(homeDir(), '.codex'), 'config.toml');
+export const codexVersionFile = () =>
+  path.join(process.env.CODEX_HOME || path.join(homeDir(), '.codex'), 'version.json');
 
 function writeAtomic(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -47,104 +42,172 @@ function writeAtomic(file, text) {
   fs.renameSync(tmp, file);
 }
 
+/** Read JSON, or null when it is absent or not an object we understand. */
+function readObject(file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return {};
+    throw e;
+  }
+  const parsed = JSON.parse(raw);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+  return parsed;
+}
+
 /**
- * Record `dir` as trusted for Claude. The file is the CLI's own state, so we
- * only ADD the one key: everything else in it is the CLI's business.
+ * Trust the workspaces ROOT for Claude, once.
+ *
+ * Claude inherits trust downwards, so this answers the folder question for
+ * every session that will ever run under it — which is the whole reason this
+ * can be a boot-time write rather than a per-session one. Called before the app
+ * spawns anything, and it rewrites nothing when the root is already trusted, so
+ * in practice it writes once in the life of a config.
+ *
+ * Returns 'already' | 'written' | 'skipped' so the caller can log honestly.
  */
-function trustClaude(dir) {
+export function trustWorkspacesRoot(dir = WORKSPACES_DIR) {
   const file = claudeStateFile();
-  let cfg = {};
   try {
-    cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const cfg = readObject(file);
+    if (cfg === null) { console.warn(`[first-run] ${file} is not an object; leaving it alone`); return 'skipped'; }
+    if (cfg.projects !== undefined
+      && (typeof cfg.projects !== 'object' || cfg.projects === null || Array.isArray(cfg.projects))) {
+      console.warn(`[first-run] ${file} has a projects field that is not an object; leaving it alone`);
+      return 'skipped';
+    }
+    const projects = cfg.projects || {};
+    if (projects[dir] && projects[dir].hasTrustDialogAccepted === true) return 'already';
+    cfg.projects = {
+      ...projects,
+      [dir]: { ...(typeof projects[dir] === 'object' && projects[dir] ? projects[dir] : {}), hasTrustDialogAccepted: true },
+    };
+    writeAtomic(file, `${JSON.stringify(cfg, null, 2)}\n`);
+    return 'written';
   } catch (e) {
-    if (e.code !== 'ENOENT') throw e;   // unreadable: leave it alone entirely
-  }
-  if (typeof cfg !== 'object' || cfg === null || Array.isArray(cfg)) return false;
-  if (typeof cfg.projects !== 'object' || cfg.projects === null || Array.isArray(cfg.projects)) {
-    if (cfg.projects !== undefined) return false;
-    cfg.projects = {};
-  }
-  const entry = cfg.projects[dir];
-  if (entry && entry.hasTrustDialogAccepted === true) return false;   // already answered
-  cfg.projects[dir] = { ...(entry && typeof entry === 'object' ? entry : {}), hasTrustDialogAccepted: true };
-  writeAtomic(file, `${JSON.stringify(cfg, null, 2)}\n`);
-  return true;
-}
-
-/**
- * Record `dir` as trusted for Codex. Appended as its own table: Codex writes
- * these itself in the same shape, and appending at the end of the file cannot
- * land inside somebody else's table.
- */
-function trustCodex(dir) {
-  const file = codexConfigFile();
-  let text = '';
-  try {
-    text = fs.readFileSync(file, 'utf8');
-  } catch (e) {
-    if (e.code !== 'ENOENT') throw e;
-  }
-  // The exact table header Codex uses. A basic TOML string, so a quote or a
-  // backslash in a folder name has to be escaped the same way.
-  const key = `[projects."${dir.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"]`;
-  if (text.includes(key)) return false;
-  const body = `${text.length && !text.endsWith('\n') ? '\n' : ''}\n${key}\ntrust_level = "trusted"\n`;
-  writeAtomic(file, text + body);
-  return true;
-}
-
-const TRUSTERS = { claude: trustClaude, codex: trustCodex };
-
-/**
- * Answer the folder-trust question for `cli` in `dir` before the CLI is asked
- * it. Returns true when something was written.
- */
-export function trustWorkspace(cli, dir) {
-  const trust = TRUSTERS[cli];
-  if (!trust || !dir || !path.isAbsolute(dir)) return false;
-  try {
-    return trust(dir);
-  } catch (e) {
-    // A session that starts with a dialog is worse than one that starts, so
-    // this is a warning and never a throw.
-    console.warn(`[first-run] could not pre-trust ${dir} for ${cli}: ${e && e.message}`);
-    return false;
+    console.warn(`[first-run] could not trust ${dir} for claude: ${e && e.message}`);
+    return 'skipped';
   }
 }
 
 /**
- * The one global dialog whose answer the repo should own rather than inherit.
- *
- * `skipDangerousModePermissionPrompt` suppresses the "running in Bypass
- * Permissions mode" warning, whose default button is *No, exit* — a blind Enter
- * on it kills the session. The live config has this key because somebody once
- * answered the dialog by hand; nothing guaranteed it, so a rebuilt config would
- * ask again. Written only when absent.
- *
- * Deliberately NOT touched here: anything that changes what an agent is allowed
- * to do (`permissions.defaultMode`, Codex's `approval_policy` / `sandbox_mode`),
- * and anything that stops the CLIs CHECKING for updates. Suppressing a question
- * we always answer the same way is not the same as granting a permission or
- * freezing a version.
+ * The bypass-permissions warning, whose default button is "No, exit" — a blind
+ * Enter on it quits the session, so it can never be answered by typing. This
+ * lives in settings.json, which the app already writes (the hooks installer),
+ * so it is not CLI-owned state.
  */
 export function ensureClaudeDialogDefaults() {
   const dir = process.env.CLAUDE_CONFIG_DIR;
   if (!dir) return false;
   const file = path.join(dir, 'settings.json');
-  let cfg = {};
   try {
-    cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (e) {
-    if (e.code !== 'ENOENT') { console.warn(`[first-run] ${file} unreadable: ${e.message}`); return false; }
-  }
-  if (typeof cfg !== 'object' || cfg === null || Array.isArray(cfg)) return false;
-  if (cfg.skipDangerousModePermissionPrompt === true) return false;
-  cfg.skipDangerousModePermissionPrompt = true;
-  try {
+    const cfg = readObject(file);
+    if (cfg === null) { console.warn(`[first-run] ${file} is not an object; leaving it alone`); return false; }
+    if (cfg.skipDangerousModePermissionPrompt === true) return false;
+    cfg.skipDangerousModePermissionPrompt = true;
     writeAtomic(file, `${JSON.stringify(cfg, null, 2)}\n`);
     return true;
   } catch (e) {
     console.warn(`[first-run] could not write ${file}: ${e && e.message}`);
+    return false;
+  }
+}
+
+/** Numeric compare of dotted versions; non-numeric parts sort as 0. */
+export function isNewer(candidate, current) {
+  const part = (v) => String(v || '').split('.').map((n) => Number.parseInt(n, 10) || 0);
+  const a = part(candidate);
+  const b = part(current);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0);
+  }
+  return false;
+}
+
+/**
+ * Codex's update screen blocks a session before it starts — on a launch with no
+ * prompt, which is exactly how a session created without a task starts. Mark
+ * the known version as dismissed so the screen does not open.
+ *
+ * This deliberately does NOT stop Codex checking. `latest_version` and
+ * `last_checked_at` are left exactly as Codex wrote them, so the cache still
+ * records what is available and `codex update` still works; the only thing
+ * suppressed is the modal. The version found is logged, so "we are behind" is
+ * something the operator can read rather than something we quietly swallowed.
+ *
+ * Writes at most one small file, and only when a newer version is present and
+ * not already dismissed.
+ */
+export function dismissCodexUpdatePrompt(currentVersion) {
+  const file = codexVersionFile();
+  try {
+    const cache = readObject(file);
+    if (cache === null || !cache.latest_version) return false;
+    if (!isNewer(cache.latest_version, currentVersion)) return false;
+    if (cache.dismissed_version === cache.latest_version) return false;
+    writeAtomic(file, `${JSON.stringify({ ...cache, dismissed_version: cache.latest_version })}\n`);
+    console.log(`[first-run] codex ${cache.latest_version} is available (running ${currentVersion}); `
+      + 'its update prompt is dismissed so it cannot block a session — run `codex update` or rebuild the image to take it');
+    return true;
+  } catch (e) {
+    console.warn(`[first-run] could not read/write ${file}: ${e && e.message}`);
+    return false;
+  }
+}
+
+
+/**
+ * TOML keys for the same path can be spelled several legal ways, and Codex's
+ * own serializer only writes one of them. Decode every `[projects.KEY]` header
+ * we can see so an existing entry is recognised however it was written —
+ * appending a second table for a path that already has one produces a file
+ * Codex cannot load ("declared twice").
+ */
+export function codexTrustedPaths(text) {
+  const found = new Set();
+  const header = /^[ \t]*\[projects\.(.+?)\][ \t]*$/gm;
+  for (const [, rawKey] of text.matchAll(header)) {
+    const key = rawKey.trim();
+    if (key.startsWith("'") && key.endsWith("'") && key.length >= 2) {
+      found.add(key.slice(1, -1));                      // literal string: no escapes
+    } else if (key.startsWith('"') && key.endsWith('"') && key.length >= 2) {
+      // basic string: undo the escapes Codex could have written
+      found.add(key.slice(1, -1).replace(/\\(["\\])/g, '$1'));
+    } else {
+      found.add(key);                                   // bare key
+    }
+  }
+  return found;
+}
+
+/**
+ * Trust one workspace for Codex.
+ *
+ * APPEND-ONLY, and that is the whole point. The version of this file that a
+ * review rejected read all of `.claude.json`, edited it, and renamed the result
+ * over the live file — which silently discarded whatever the CLI had written in
+ * between. An append never writes another process's bytes: at worst our own few
+ * bytes are lost if Codex rewrites the file at the same instant, and the only
+ * consequence of that is the dialog appearing once more.
+ */
+export function trustCodexWorkspace(dir) {
+  if (!dir || !path.isAbsolute(dir)) return false;
+  const file = codexConfigFile();
+  try {
+    let text = '';
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+    }
+    if (codexTrustedPaths(text).has(dir)) return false;
+    const key = dir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, `${text.length && !text.endsWith('\n') ? '\n' : ''}\n[projects."${key}"]\ntrust_level = "trusted"\n`);
+    return true;
+  } catch (e) {
+    console.warn(`[first-run] could not trust ${dir} for codex: ${e && e.message}`);
     return false;
   }
 }

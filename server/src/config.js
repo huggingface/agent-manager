@@ -46,6 +46,11 @@ export function refreshVersions() {
   }
 }
 
+/** The installed version of one CLI, once the boot-time pass has answered. */
+export function cliVersion(id) {
+  return versionCache.get(id) || null;
+}
+
 // tmux is no longer part of the terminal path: sessions are PTYs held by this
 // process with a libghostty-vt grid as the authoritative screen (see runner.js).
 
@@ -77,6 +82,9 @@ export const isRemote = (cli) => cli === 'remote';
 const CODEX_INPUT_SIGNALS = '-c \'tui.notifications=["approval-requested","plan-mode-prompt"]\''
   + ' -c \'tui.notification_method="osc9"\''
   + ' -c \'tui.notification_condition="always"\'';
+// A `-c 'projects."<dir>".trust_level="trusted"'` override was tried first and
+// does NOT reach Codex's trust check — it reads the config file itself, so the
+// answer has to be in the file (see trustCodexWorkspace in first-run.js).
 const codexCommand = (tail = '') => `codex ${CODEX_INPUT_SIGNALS}${tail ? ` ${tail}` : ''}`;
 
 export const CLIS = [
