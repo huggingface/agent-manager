@@ -65,7 +65,7 @@ check('missing exact row is null', traces.opencodeSessionInfo(GONE), null);
 console.log('\nthe global plugin reports exact root-session lifecycle events');
 const scripts = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts');
 const pluginSource = path.join(scripts, 'am-opencode-repin.js');
-check('plugin installs globally', runner.installOpencodeRepinPlugin(pluginSource), true);
+check('default plugin source resolves outside Docker', runner.installOpencodeRepinPlugin(), true);
 const installed = path.join(process.env.XDG_CONFIG_HOME, 'opencode', 'plugins', 'am-agent-manager.js');
 check('installed plugin is the app-owned source', fs.readFileSync(installed, 'utf8'), fs.readFileSync(pluginSource, 'utf8'));
 check('plugin install is idempotent', runner.installOpencodeRepinPlugin(pluginSource), true);
