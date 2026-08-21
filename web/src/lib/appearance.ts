@@ -14,7 +14,7 @@
 // typeface move it would break the sidebar and the Overview.
 import { readStored, writeStored } from './stored';
 
-export type PaletteId = 'teal' | 'indigo' | 'paper' | 'phosphor' | 'plum';
+export type PaletteId = 'teal' | 'indigo' | 'paper' | 'phosphor' | 'plum' | 'mono';
 export type TypefaceId = 'geist' | 'departure' | 'jetbrains' | 'plex';
 
 export interface Palette {
@@ -54,6 +54,14 @@ export const PALETTES: Palette[] = [
   {
     id: 'plum', name: 'Plum', note: 'Neutral greys with one loud colour in them.',
     swatch: ['#f3eef4', '#ffffff', '#9c2189'], swatchDark: ['#100b12', '#181320', '#e884d6'],
+  },
+  {
+    // No hue anywhere, the accent and danger included. What hue used to do,
+    // lightness does: the accent is the extreme of the one channel there is
+    // (21:1 on panel, 3.7:1 clear of muted, where a hued palette separates
+    // those two by 1.0–1.5:1 and leans on colour for the rest).
+    id: 'mono', name: 'Mono', note: 'Black and white. No hue at all — lightness does every job.',
+    swatch: ['#eeeeee', '#ffffff', '#000000'], swatchDark: ['#0a0a0a', '#141414', '#ffffff'],
   },
 ];
 

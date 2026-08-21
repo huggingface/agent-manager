@@ -30,6 +30,12 @@
   --accent-fg: #ffffff;
   --go: #1c8c57;
   --danger: #c2433a;
+  /* The ink that goes ON the danger colour. It was `#fff` written into three
+     rules, which is a safe assumption for every red and a wrong one the moment
+     a palette's danger is light — Mono's dark theme paints it white, and white
+     on white is an invisible delete button. A token because the assumption was
+     a palette's to make. */
+  --danger-fg: #ffffff;
 
   --bg: #eef1f3;
   --panel: #ffffff;
@@ -66,43 +72,102 @@
    checked in web/test/palette-contrast.test.mjs — text 7:1, muted 4.5:1,
    accent 3:1 against every surface it lands on, in both themes. */
 [data-palette='indigo'] {
-  --accent: #4b45d4; --accent-fg: #ffffff; --go: #1f8a5a; --danger: #c2433a; --bg: #edeff7; --panel: #ffffff; --panel-2: #f5f6fb; --border: #d8dbe8; --border-strong: #c1c6dd; --text: #14161f; --muted: #5f6580; --term-bg: #ffffff; --tile: #ffffff;
+  --accent: #4b45d4; --accent-fg: #ffffff; --go: #1f8a5a; --danger: #c2433a; --danger-fg: #ffffff; --bg: #edeff7; --panel: #ffffff; --panel-2: #f5f6fb; --border: #d8dbe8; --border-strong: #c1c6dd; --text: #14161f; --muted: #5f6580; --term-bg: #ffffff; --tile: #ffffff;
   --drop: #4b45d418;
 }
 [data-theme='dark'][data-palette='indigo'] {
-  --accent: #9a9bfb; --accent-fg: #0e0f24; --go: #43c98a; --danger: #e0726a; --bg: #0b0c14; --panel: #14161f; --panel-2: #101119; --border: #262a3a; --border-strong: #333850; --text: #e8eaf4; --muted: #9298b0; --term-bg: #101119; --tile: #f2f3f7;
+  --accent: #9a9bfb; --accent-fg: #0e0f24; --go: #43c98a; --danger: #e0726a; --danger-fg: #1a0e0c; --bg: #0b0c14; --panel: #14161f; --panel-2: #101119; --border: #262a3a; --border-strong: #333850; --text: #e8eaf4; --muted: #9298b0; --term-bg: #101119; --tile: #f2f3f7;
   --drop: #9a9bfb18;
 }
 [data-palette='paper'] {
-  --accent: #a94a17; --accent-fg: #ffffff; --go: #1c7a4a; --danger: #b23b2f; --bg: #f2ece1; --panel: #fbf7f0; --panel-2: #f6f0e6; --border: #ded3c2; --border-strong: #c7bba6; --text: #231f1a; --muted: #6b6357; --term-bg: #fbf7f0; --tile: #fbf7f0;
+  --accent: #a94a17; --accent-fg: #ffffff; --go: #1c7a4a; --danger: #b23b2f; --danger-fg: #ffffff; --bg: #f2ece1; --panel: #fbf7f0; --panel-2: #f6f0e6; --border: #ded3c2; --border-strong: #c7bba6; --text: #231f1a; --muted: #6b6357; --term-bg: #fbf7f0; --tile: #fbf7f0;
   --drop: #a94a1718;
 }
 [data-theme='dark'][data-palette='paper'] {
-  --accent: #e58f52; --accent-fg: #1c1208; --go: #5cc98d; --danger: #e57a63; --bg: #16130f; --panel: #1d1915; --panel-2: #191612; --border: #302a22; --border-strong: #3f382d; --text: #ece5da; --muted: #a0968a; --term-bg: #1a1713; --tile: #efe7da;
+  --accent: #e58f52; --accent-fg: #1c1208; --go: #5cc98d; --danger: #e57a63; --danger-fg: #1a0e0c; --bg: #16130f; --panel: #1d1915; --panel-2: #191612; --border: #302a22; --border-strong: #3f382d; --text: #ece5da; --muted: #a0968a; --term-bg: #1a1713; --tile: #efe7da;
   --drop: #e58f5218;
 }
 [data-palette='phosphor'] {
-  --accent: #0f7040; --accent-fg: #ffffff; --go: #0f7040; --danger: #b8382f; --bg: #e7efe9; --panel: #ffffff; --panel-2: #f1f7f3; --border: #ccdcd2; --border-strong: #b2c8bb; --text: #0d1712; --muted: #586e63; --term-bg: #ffffff; --tile: #ffffff;
+  --accent: #0f7040; --accent-fg: #ffffff; --go: #0f7040; --danger: #b8382f; --danger-fg: #ffffff; --bg: #e7efe9; --panel: #ffffff; --panel-2: #f1f7f3; --border: #ccdcd2; --border-strong: #b2c8bb; --text: #0d1712; --muted: #586e63; --term-bg: #ffffff; --tile: #ffffff;
   --drop: #0f704018;
 }
 [data-theme='dark'][data-palette='phosphor'] {
-  --accent: #3fdd86; --accent-fg: #04170c; --go: #3fdd86; --danger: #ff7a6b; --bg: #05080a; --panel: #0a1013; --panel-2: #080d10; --border: #1b2830; --border-strong: #243640; --text: #d6f5e3; --muted: #82a996; --term-bg: #060b0d; --tile: #dff5e8;
+  --accent: #3fdd86; --accent-fg: #04170c; --go: #3fdd86; --danger: #ff7a6b; --danger-fg: #1a0e0c; --bg: #05080a; --panel: #0a1013; --panel-2: #080d10; --border: #1b2830; --border-strong: #243640; --text: #d6f5e3; --muted: #82a996; --term-bg: #060b0d; --tile: #dff5e8;
   --drop: #3fdd8618;
 }
 [data-palette='plum'] {
-  --accent: #9c2189; --accent-fg: #ffffff; --go: #1f8a5a; --danger: #c2433a; --bg: #f3eef4; --panel: #ffffff; --panel-2: #faf6fb; --border: #e0d5e3; --border-strong: #cbbad0; --text: #1b141f; --muted: #6a6073; --term-bg: #ffffff; --tile: #ffffff;
+  --accent: #9c2189; --accent-fg: #ffffff; --go: #1f8a5a; --danger: #c2433a; --danger-fg: #ffffff; --bg: #f3eef4; --panel: #ffffff; --panel-2: #faf6fb; --border: #e0d5e3; --border-strong: #cbbad0; --text: #1b141f; --muted: #6a6073; --term-bg: #ffffff; --tile: #ffffff;
   --drop: #9c218918;
 }
 [data-theme='dark'][data-palette='plum'] {
-  --accent: #e884d6; --accent-fg: #250820; --go: #43c98a; --danger: #e0726a; --bg: #100b12; --panel: #181320; --panel-2: #141019; --border: #2f2639; --border-strong: #3d3149; --text: #efe6f3; --muted: #9b8fa6; --term-bg: #141019; --tile: #f3eef4;
+  --accent: #e884d6; --accent-fg: #250820; --go: #43c98a; --danger: #e0726a; --danger-fg: #1a0e0c; --bg: #100b12; --panel: #181320; --panel-2: #141019; --border: #2f2639; --border-strong: #3d3149; --text: #efe6f3; --muted: #9b8fa6; --term-bg: #141019; --tile: #f3eef4;
   --drop: #e884d618;
 }
+
+/* `:root[data-palette='mono']`, not `[data-palette='mono']`, and the extra
+   `:root` is load-bearing: the editor's syntax block is a THIRD `:root` further
+   down this file, so at equal specificity it wins on order and a plain
+   attribute selector's --cm-* overrides never applied. The light theme showed
+   purple keywords in a black-and-white app while dark looked right, because the
+   dark palette selector carries two attributes and out-specifies its own
+   generic block. Measured in the browser, not reasoned about: the computed
+   --cm-keyword was #8250df under mono/light. */
+:root[data-palette='mono'] {
+  --accent: #000000; --accent-fg: #ffffff; --go: #2b2b2b; --danger: #000000; --danger-fg: #ffffff; --bg: #eeeeee; --panel: #ffffff; --panel-2: #f8f8f8; --border: #d6d6d6; --border-strong: #b9b9b9; --text: #2b2b2b; --muted: #676767; --term-bg: #ffffff; --tile: #ffffff;
+  --drop: #00000018;
+  /* Syntax goes grey too, and this is the line between the two: the editor's
+     colours are OURS — our paint on someone's plain text — where the terminal's
+     sixteen are the program's own bytes and stay per-theme. A palette with no
+     hue in it cannot leave a rainbow in the file pane and call itself
+     monochrome. What is left is three steps of ink — structure, values, the
+     rest — plus the cues cm-core.ts already carries without colour: comments
+     italic, headings bold, links underlined. It reads; it does not sort code by
+     hue the way nine colours do, and that is the cost. */
+  --cm-keyword: #1f1f1f; --cm-tag: #1f1f1f; --cm-def: #1f1f1f; --cm-heading: #1f1f1f;
+  --cm-fn: #3d3d3d; --cm-type: #3d3d3d; --cm-prop: #3d3d3d;
+  --cm-string: #5a5a5a; --cm-number: #5a5a5a;
+}
+[data-theme='dark'][data-palette='mono'] {
+  --accent: #ffffff; --accent-fg: #0d0d0d; --go: #e6e6e6; --danger: #ffffff; --danger-fg: #0d0d0d; --bg: #0a0a0a; --panel: #141414; --panel-2: #101010; --border: #2a2a2a; --border-strong: #3c3c3c; --text: #e6e6e6; --muted: #8f8f8f; --term-bg: #101010; --tile: #f0f0f0;
+  --drop: #ffffff18;
+  --cm-keyword: #f5f5f5; --cm-tag: #f5f5f5; --cm-def: #f5f5f5; --cm-heading: #f5f5f5;
+  --cm-fn: #cfcfcf; --cm-type: #cfcfcf; --cm-prop: #cfcfcf;
+  --cm-string: #a8a8a8; --cm-number: #a8a8a8;
+}
+/* The one rule in this file scoped to a palette, and it is here because black
+   and white has a single channel that "primary" and "irreversible" both want
+   the heavy end of: with no hue, a filled delete button and a filled send
+   button are the same black rectangle. Danger keeps the fill and takes back a
+   pattern — the inset double line a warning border has always used. It covers
+   the filled controls only. Danger TEXT (an error line, a failed row) has
+   nowhere left to go in this palette and reads as ordinary ink; that is stated
+   in the study rather than papered over. */
+[data-palette='mono'] .btn-danger,
+[data-palette='mono'] .mini-btn.danger { box-shadow: inset 0 0 0 2px var(--panel); }
+/* And the brand marks. The line this palette draws is ours-versus-theirs by
+   SURFACE, not by origin: everything the app paints goes grey, including the
+   harness logos we draw in the sidebar, while everything that is content keeps
+   its colour — the terminal's sixteen ANSI colours, an attached image, a
+   preview. A black-and-white chrome with an orange sunburst in it is not the
+   thing that was asked for; a black-and-white chrome around a program's own red
+   error output is. Same shape as the two invert rules above, which already bend
+   a logo to fit the theme. */
+[data-palette='mono'] .cli-logo img { filter: grayscale(1); }
+[data-theme='dark'][data-palette='mono'] .cli-logo.inv-dark img { filter: invert(1) grayscale(1); }
+[data-theme='light'][data-palette='mono'] .cli-logo.inv-light img { filter: invert(1) grayscale(1); }
 
 [data-theme='dark'] {
   --accent: #2bb3bd;
   --accent-fg: #04181a;
   --go: #43c98a;
   --danger: #e0726a;
+  /* Dark ink, not white. The three rules this replaced painted #fff on the
+     danger fill in every theme, which in DARK is white on a light red: 3.10:1
+     for the default palette, 2.55:1 for Phosphor — under AA for a button label,
+     and it had been that way since the fill existed. Nobody spotted it because
+     no palette ever made the assumption visible; Mono did, by having a danger
+     colour that is white. Dark ink is 6.1–7.4:1 on the same fills. */
+  --danger-fg: #1a0e0c;
 
   --bg: #0b0f13;
   --panel: #11181e;
@@ -802,7 +867,7 @@ body {
 .s-warn { margin: 6px 0 2px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); background: color-mix(in srgb, var(--danger) 10%, transparent); border-radius: var(--r-md); font-size: 12px; line-height: 1.5; color: var(--text); }
 
 /* transient error toast */
-.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 300; max-width: 90vw; padding: 9px 14px; background: color-mix(in srgb, var(--danger) 92%, #000); color: #fff; border-radius: var(--r-md); font-size: 12.5px; box-shadow: 0 8px 28px rgb(0 0 0 / 0.3); animation: rise-in 0.16s ease-out; }
+.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 300; max-width: 90vw; padding: 9px 14px; background: color-mix(in srgb, var(--danger) 92%, #000); color: var(--danger-fg); border-radius: var(--r-md); font-size: 12.5px; box-shadow: 0 8px 28px rgb(0 0 0 / 0.3); animation: rise-in 0.16s ease-out; }
 
 /* ?vvdebug=1 — the mobile viewport readout. Above everything, transparent to
    touch so it never becomes the reason a gesture misbehaves. */
@@ -1142,7 +1207,7 @@ body {
    which is the filled red button for a surface whose whole point is the
    action — too loud for one glyph among others in a list row. */
 .mini-btn.danger-hover:hover { color: var(--danger); }
-.mini-btn.danger { background: var(--danger); color: #fff; border-color: transparent; }
+.mini-btn.danger { background: var(--danger); color: var(--danger-fg); border-color: transparent; }
 .mini-btn.danger:disabled { opacity: .5; }
 /* the one obvious action in a group — Create, Save and close */
 .mini-btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
@@ -1693,7 +1758,7 @@ a.btn-ghost { text-decoration: none; }
 .skills-toolbar .spacer { flex: 1; }
 .btn-ghost.danger { color: var(--danger); }
 .btn-ghost.danger:hover { border-color: var(--danger); }
-.btn-danger { background: var(--danger); color: #fff; border: 1px solid var(--danger); border-radius: var(--r-md); padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer; }
+.btn-danger { background: var(--danger); color: var(--danger-fg); border: 1px solid var(--danger); border-radius: var(--r-md); padding: 8px 12px; font-size: 13px; font-weight: 600; cursor: pointer; }
 .confirm-del { display: inline-flex; align-items: center; gap: 8px; }
 .confirm-del .s-muted { font-size: 12px; }
 .skill-title { font-size: 13px; font-weight: 600; }
