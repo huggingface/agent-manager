@@ -18,6 +18,7 @@ import * as order from './order.js';
 import * as demo from './demo.js';
 import * as hidden from './hidden.js';
 import * as crons from './crons.js';
+import { ensureClaudeDialogDefaults } from './first-run.js';
 import {
   attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning,
   waitForInputReady, capturePane, ghosttyReady, ghosttyError,
@@ -65,6 +66,10 @@ hidden.init();
 // discovery must refuse to guess. Both installers are non-fatal; the existing
 // fallback remains available if either cannot be installed.
 installClaudeRepinHook();
+// The bypass-mode warning's default button is "No, exit", so a blind Enter on
+// it kills the session. Own the answer rather than inheriting one somebody
+// typed once. See first-run.js.
+ensureClaudeDialogDefaults();
 // OpenCode's global plugin reports the root session chosen by /new (/clear),
 // and the next prompt after switching to an existing session.
 installOpencodeRepinPlugin();

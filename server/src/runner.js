@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import pty from 'node-pty';
+import { trustWorkspace } from './first-run.js';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { remoteState, setPaused } from './remote.js';
@@ -1842,6 +1843,12 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   const folder = session.path ?? session.id;
   const workdir = path.join(WORKSPACES_DIR, folder);
   fs.mkdirSync(workdir, { recursive: true });
+  // Answer "do you trust this folder?" before the CLI can ask it. Keyed on the
+  // absolute path, so a new session is always a new question — and nobody is
+  // watching a pane the manager or another agent just launched. Done here
+  // rather than at creation time because the folder can be chosen, changed, or
+  // deleted and recreated between the two. See first-run.js.
+  trustWorkspace(session.cli, workdir);
   // The login shell knows its own PTY-root pid before any `exec`. Adapters use
   // this marker to discard nested agent lifecycle events BEFORE they can
   // overwrite the top-level pane's breadcrumb; runner validation repeats the
