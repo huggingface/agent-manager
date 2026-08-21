@@ -73,7 +73,8 @@ boot has to write, write once and only when the answer is missing.
 |---|---|---|
 | Claude folder trust | **boot**, one entry on the workspaces root | it inherits, so this covers every session; boot runs before the app spawns anything |
 | Claude bypass warning | **boot**, `settings.json` | that file is already written by the app's hooks installer, so it is not CLI-owned state |
-| Codex folder trust | **per launch**, appended to `config.toml` | Codex neither inherits nor honours a `-c` override for trust, so the answer must be in the file — but it is **appended**, never rewritten |
+| Codex folder trust | **per launch**, appended to `config.toml` | Codex neither inherits nor honours a `-c` override for trust, so the answer must be in the file — but it is **appended**, never rewritten, and an existing entry is found by parsing the TOML rather than matching text |
+| a session whose path escapes the root | **refused at launch** | `path` is only checked lexically when recorded, so a symlink under a workspace can point out of the tree. Claude applies inherited trust to the RESOLVED directory, so an escaping link lands outside the one trusted root and stops on the dialog. Refusing keeps the boundary the recorded path already implies |
 | Codex update prompt | **per launch**, `dismissed_version` | the cache is refreshed in the background hours after boot, so once at boot is not enough |
 
 ### Why append instead of rewrite
@@ -88,6 +89,20 @@ An append cannot do that: it never writes another process's bytes. The worst
 case is that our own few bytes are lost if Codex rewrites the file at the same
 instant, and the only consequence is the dialog appearing once more.
 
+**One place still rewrites a whole file, and it is stated rather than hidden.**
+Setting a field in `version.json` means writing the JSON object back, and that
+write can lose a refresh Codex performs in the same instant — measured, not
+theoretical: with a review's repro the interceptor fires, our rename lands after
+it, and the newer `latest_version` is gone. A compare-and-set after the rename
+does not help, because by then the file holds our own snapshot.
+
+That is accepted here because of what the file is: a cache Codex rewrites on its
+own schedule. Losing one refresh means the operator learns about an update at the
+next background check rather than this one, and the modal may appear once. The
+guarantee the code and its test actually make is the narrow one — the file ends
+up self-consistent, so the blocking modal cannot open. `.claude.json` holds state
+the operator cannot reconstruct, which is why nothing rewrites that one.
+
 `codexTrustedPaths()` decodes every `[projects.KEY]` header — basic strings,
 literal strings (`[projects.'/path']`), and bare keys — because appending a
 second table for a path that already has one under a different legal spelling
@@ -95,10 +110,9 @@ produces a file Codex refuses to load ("declared twice").
 
 ### Suppressing a prompt is not the same as never updating
 
-`dismissCodexUpdatePrompt()` writes **only** `dismissed_version`.
-`latest_version` and `last_checked_at` are left exactly as Codex wrote them, so
-the background check keeps working, the cache keeps recording what is available,
-and `codex update` still does its job. The version found is logged at boot and
+`dismissCodexUpdatePrompt()` changes **only** `dismissed_version`: it never
+disables the check, never edits `latest_version` or `last_checked_at` itself, and
+`codex update` still does its job. The version found is logged at boot and
 before the launch that dismissed it:
 
 ```

@@ -24,6 +24,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { parse as tomlParse } from 'smol-toml';
 import { WORKSPACES_DIR } from './config.js';
 
 const homeDir = () => process.env.HOME || os.homedir();
@@ -140,6 +141,11 @@ export function isNewer(candidate, current) {
  * not already dismissed.
  */
 export function dismissCodexUpdatePrompt(currentVersion) {
+  // Without knowing what we are running, "newer" has no meaning: isNewer(x,
+  // null) is true, which would dismiss an update on a startup that has not yet
+  // resolved its versions (refreshVersions() is async and the server serves
+  // requests before it finishes). Do nothing; a later launch will have it.
+  if (!currentVersion) return false;
   const file = codexVersionFile();
   try {
     const cache = readObject(file);
@@ -156,40 +162,42 @@ export function dismissCodexUpdatePrompt(currentVersion) {
   }
 }
 
-
 /**
- * TOML keys for the same path can be spelled several legal ways, and Codex's
- * own serializer only writes one of them. Decode every `[projects.KEY]` header
- * we can see so an existing entry is recognised however it was written —
- * appending a second table for a path that already has one produces a file
- * Codex cannot load ("declared twice").
+ * Which paths this config already trusts.
+ *
+ * Parsed, not matched. An earlier version looked for a `[projects."<dir>"]`
+ * header with a regex anchored at end-of-line, which missed legal spellings — a
+ * trailing comment (`[projects."/p"] # note`) and whitespace inside the dotted
+ * key (`[projects . "/p"]`) among them. Appending a second table for a path that
+ * is already there produces a file Codex refuses to load ("declared twice"), so
+ * getting this wrong corrupts the operator's config rather than merely showing a
+ * dialog. TOML has a grammar; use it.
+ *
+ * Returns null when the file cannot be parsed — the caller must then leave it
+ * alone, because appending to a file we do not understand is how a broken config
+ * becomes a broken config with our text in it.
  */
 export function codexTrustedPaths(text) {
-  const found = new Set();
-  const header = /^[ \t]*\[projects\.(.+?)\][ \t]*$/gm;
-  for (const [, rawKey] of text.matchAll(header)) {
-    const key = rawKey.trim();
-    if (key.startsWith("'") && key.endsWith("'") && key.length >= 2) {
-      found.add(key.slice(1, -1));                      // literal string: no escapes
-    } else if (key.startsWith('"') && key.endsWith('"') && key.length >= 2) {
-      // basic string: undo the escapes Codex could have written
-      found.add(key.slice(1, -1).replace(/\\(["\\])/g, '$1'));
-    } else {
-      found.add(key);                                   // bare key
-    }
+  let parsed;
+  try {
+    parsed = tomlParse(text);
+  } catch {
+    return null;
   }
-  return found;
+  const projects = parsed && typeof parsed === 'object' ? parsed.projects : null;
+  if (!projects || typeof projects !== 'object' || Array.isArray(projects)) return new Set();
+  return new Set(Object.keys(projects));
 }
 
 /**
  * Trust one workspace for Codex.
  *
- * APPEND-ONLY, and that is the whole point. The version of this file that a
- * review rejected read all of `.claude.json`, edited it, and renamed the result
- * over the live file — which silently discarded whatever the CLI had written in
- * between. An append never writes another process's bytes: at worst our own few
- * bytes are lost if Codex rewrites the file at the same instant, and the only
- * consequence of that is the dialog appearing once more.
+ * APPEND-ONLY, and that is the point. The version of this a review rejected read
+ * all of `.claude.json`, edited it, and renamed the result over the live file —
+ * silently discarding whatever the CLI had written in between. An append never
+ * writes another process's bytes: at worst our own few are lost if Codex
+ * rewrites the file at that instant, and the only consequence is the dialog
+ * appearing once more.
  */
 export function trustCodexWorkspace(dir) {
   if (!dir || !path.isAbsolute(dir)) return false;
@@ -201,7 +209,12 @@ export function trustCodexWorkspace(dir) {
     } catch (e) {
       if (e.code !== 'ENOENT') throw e;
     }
-    if (codexTrustedPaths(text).has(dir)) return false;
+    const trusted = codexTrustedPaths(text);
+    if (trusted === null) {
+      console.warn(`[first-run] ${file} is not valid TOML; leaving it alone (codex will ask about ${dir})`);
+      return false;
+    }
+    if (trusted.has(dir)) return false;
     const key = dir.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.appendFileSync(file, `${text.length && !text.endsWith('\n') ? '\n' : ''}\n[projects."${key}"]\ntrust_level = "trusted"\n`);

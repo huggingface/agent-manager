@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { spawn } from 'node:child_process';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'first-run-'));
 process.env.DATA_DIR = path.join(root, 'data');
@@ -62,17 +63,37 @@ test('claude: a file we do not understand is left alone', () => {
 
 // ---- Codex: append-only, and an existing answer is recognised in any spelling ----
 
-test('codex: an existing entry is found however TOML spells the key', () => {
+test('codex: an existing entry is found however TOML legally spells the key', () => {
   const paths = fr.codexTrustedPaths([
     '[projects."/basic/string"]', 'trust_level = "trusted"',
     "[projects.'/literal/string']", 'trust_level = "trusted"',
-    '  [projects."/indented"]  ',
-    '[projects."/with\\"quote"]',
+    '  [projects."/indented"]  ', 'trust_level = "trusted"',
+    '[projects."/with\\"quote"]', 'trust_level = "trusted"',
+    // the two that an end-of-line regex missed, and that made the file unloadable
+    '[projects."/with/comment"] # retained comment', 'trust_level = "trusted"',
+    '[projects . "/spaced/key"]', 'trust_level = "trusted"',
   ].join('\n'));
   assert.ok(paths.has('/basic/string'));
   assert.ok(paths.has('/literal/string'), 'a literal-string key is the same key');
   assert.ok(paths.has('/indented'));
   assert.ok(paths.has('/with"quote'), 'escapes are undone before comparing');
+  assert.ok(paths.has('/with/comment'), 'a comment after the header does not hide it');
+  assert.ok(paths.has('/spaced/key'), 'whitespace inside a dotted key is legal');
+});
+
+test('codex: a header with a trailing comment is not duplicated', () => {
+  const before = '[projects."/work/legal"] # retained comment\ntrust_level = "trusted"\n';
+  fs.writeFileSync(fr.codexConfigFile(), before);
+  assert.equal(fr.trustCodexWorkspace('/work/legal'), false);
+  assert.equal(fs.readFileSync(fr.codexConfigFile(), 'utf8'), before, 'not one byte added');
+});
+
+test('codex: a file we cannot parse is left alone rather than appended to', () => {
+  const broken = 'this = is = not = toml\n';
+  fs.writeFileSync(fr.codexConfigFile(), broken);
+  assert.equal(fr.codexTrustedPaths(broken), null);
+  assert.equal(fr.trustCodexWorkspace('/work/anything'), false);
+  assert.equal(fs.readFileSync(fr.codexConfigFile(), 'utf8'), broken);
 });
 
 test('codex: a literal-string entry is not duplicated (this made the file unloadable)', () => {
@@ -125,7 +146,20 @@ test('nothing is written when there is no newer version, or it is already dismis
   assert.equal(fr.dismissCodexUpdatePrompt('0.149.0'), false, 'older');
   fs.writeFileSync(fr.codexVersionFile(), JSON.stringify({ latest_version: '0.200.0', dismissed_version: '0.200.0' }));
   assert.equal(fr.dismissCodexUpdatePrompt('0.149.0'), false, 'already dismissed');
-  assert.equal(fr.dismissCodexUpdatePrompt(null), false, 'unknown running version: leave it alone');
+});
+
+test('an unknown running version dismisses nothing', () => {
+  // A fresh fixture on purpose: with dismissed_version already set this would
+  // pass for the wrong reason. refreshVersions() is async and the server serves
+  // requests before it finishes, so cliVersion('codex') really can be null.
+  fs.writeFileSync(fr.codexVersionFile(), JSON.stringify({
+    latest_version: '0.200.0', last_checked_at: 'then', dismissed_version: null,
+  }));
+  assert.equal(fr.dismissCodexUpdatePrompt(null), false);
+  assert.equal(fr.dismissCodexUpdatePrompt(undefined), false);
+  assert.equal(fr.dismissCodexUpdatePrompt(''), false);
+  assert.equal(readJson(fr.codexVersionFile()).dismissed_version, null, 'nothing was written');
+  assert.equal(fr.isNewer('0.200.0', null), true, 'isNewer alone still says newer — the guard is in the caller');
 });
 
 test('versions compare by number, not by string', () => {
@@ -149,3 +183,43 @@ test('the bypass-mode warning is answered once and grants nothing', () => {
 });
 
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+test('a concurrent refresh can be lost, and the modal still cannot open', async () => {
+  // The review's repro, kept as a test of what actually happens rather than of
+  // what would be nice. A big cache widens the window and a second process
+  // rewrites the file the moment our temp file appears — which is what Codex's
+  // background refresh does. Measured outcome: our rename can land after theirs
+  // and their newer `latest_version` is gone. A compare-and-set after the rename
+  // does NOT catch that ordering, because by then the file holds our snapshot.
+  //
+  // So the guarantee is deliberately the narrow one: whatever the interleaving,
+  // the file ends up self-consistent and the blocking modal cannot open. Losing
+  // one refresh costs a delayed notification, and Codex's next check repairs it.
+  const file = fr.codexVersionFile();
+  fs.writeFileSync(file, JSON.stringify({
+    latest_version: '0.200.0', last_checked_at: '10:00', dismissed_version: null,
+    pad: 'x'.repeat(4 * 1024 * 1024),
+  }));
+  const racer = spawn(process.execPath, ['-e', `
+    const fs = require('node:fs');
+    const tmp = ${JSON.stringify(`${file}.am-tmp`)};
+    const deadline = Date.now() + 8000;
+    (function poll() {
+      if (fs.existsSync(tmp)) {
+        return fs.writeFileSync(${JSON.stringify(file)}, JSON.stringify({
+          latest_version: '0.201.0', last_checked_at: '11:00', dismissed_version: null,
+        }));
+      }
+      if (Date.now() < deadline) setImmediate(poll);
+    })();
+  `], { stdio: 'ignore' });
+  try {
+    assert.equal(fr.dismissCodexUpdatePrompt('0.149.0'), true);
+    const cache = readJson(file);
+    assert.equal(cache.dismissed_version, cache.latest_version,
+      `the modal opens unless the dismissal matches this file's own latest_version `
+      + `(saw ${cache.dismissed_version} against ${cache.latest_version})`);
+  } finally {
+    racer.kill();
+  }
+});
