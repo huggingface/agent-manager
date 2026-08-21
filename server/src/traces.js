@@ -337,6 +337,17 @@ function dbChangeKey(p) {
   };
 }
 
+// The on-demand Reader has its own one-session memo below. Keep its key on the
+// same WAL-aware contract as the Overview memo: SQLite writers usually touch
+// only <db>-wal, so main-file mtime/size alone freezes an open Reader forever.
+function traceChangeKey(p, harness, st) {
+  if (harness === 'opencode' || harness === 'hermes') {
+    const ck = dbChangeKey(p);
+    if (ck) return ck.key;
+  }
+  return `${st.mtimeMs}:${st.size}`;
+}
+
 let ocMemo = { key: '', rows: [] };
 
 function readOpencode() {
@@ -1943,7 +1954,7 @@ export async function readTrace(session, opts = {}) {
   if (!st) { const e = new Error(`trace file unreadable: ${hit.src}`); e.code = 'no-trace'; throw e; }
 
   return serveTrace({
-    key: `s:${session.id}:${hit.src}:${hit.sessionId || ''}:${st.mtimeMs}:${st.size}`,
+    key: `s:${session.id}:${hit.src}:${hit.sessionId || ''}:${traceChangeKey(hit.src, session.cli, st)}`,
     harness: session.cli,
     file: hit.src,
     sessionId: hit.sessionId || session.sessionUuid || null,
