@@ -14,7 +14,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "test:ui": "node terminal-ui.test.mjs",
-    "test": "node test/hidden.test.mjs && node test/spawn-group.test.mjs && node test/revive.test.mjs && node test/repin.test.mjs && node test/opencode-resume.test.mjs && node test/terminal-modes.test.mjs && node test/trace-tail.test.mjs && node test/trace-window.test.mjs && node migration.test.mjs && node resize.test.mjs"
+    "test": "node test/context-files.test.mjs && node test/hidden.test.mjs && node test/spawn-group.test.mjs && node test/revive.test.mjs && node test/repin.test.mjs && node test/opencode-resume.test.mjs && node test/terminal-modes.test.mjs && node test/trace-tail.test.mjs && node test/trace-window.test.mjs && node migration.test.mjs && node resize.test.mjs"
   },
   "engines": {
     "node": ">=20.19"

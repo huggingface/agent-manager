@@ -12,6 +12,7 @@ import {
   ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions, PASSIVE_CLIS, isRemote,
 } from './config.js';
 import * as remote from './remote.js';
+import { writeWorkspaceContextFiles } from './context-files.js';
 import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
@@ -2360,6 +2361,9 @@ wss.on('connection', (ws, req) => {
 });
 
 generateEnvSkill(loadSecretNotes()); // keep the environment skill current on boot
+// Root AGENTS.md/CLAUDE.md: the start-of-session pointer every CLI reads even
+// where skills distribution is unavailable (see context-files.js).
+writeWorkspaceContextFiles(WORKSPACES_DIR, PORT);
 
 // Warm ONLY the trace cache in the background (bounded: mtime-cached, tail-
 // capped, yields between files). The usage warmup is deliberately NOT run at
