@@ -30,7 +30,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'api-log-'));
 const bundle = path.join(tmp, 'app.js');
 
 const at = (s) => new Date(Date.UTC(2026, 7, 19, 21, 0, s)).toISOString();
-const PROMPT = 'Review the diff in web/ and\nreport anything that would break.';
+const PROMPT = '## Review\n\nRead the diff in `web/` and report:\n\n- anything that would **break**\n- anything undocumented\n';
 const prompt = (i, from, to, chars, ok = true) => ({
   id: `p${i}`, at: at(i), method: 'POST', path: `/api/agents/${to}/prompt`,
   origin: { id: from, type: 'agent', name: from },
@@ -164,6 +164,25 @@ const check = (what, fn) => {
   }
 };
 
+
+// A real press on the Nth mark. Selection is committed by the SVG's pointerup
+// (see ApiLog.tsx: brushing captures the pointer, so a mark's own click never
+// fires), which means a synthetic click cannot stand in for a user here.
+const pressMark = async (page, pick = 0) => {
+  const spot = await page.evaluate((n) => {
+    const marks = [...document.querySelectorAll('.al-arrowg, .al-dotg')];
+    const g = typeof n === 'number' ? marks[n] : marks.find((m) => new RegExp(n).test(m.querySelector('title')?.textContent || ''));
+    if (!g) return null;
+    const r = g.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  }, pick);
+  if (!spot) return false;
+  await page.mouse.move(spot.x, spot.y);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForTimeout(120);
+  return true;
+};
 const browser = await chromium.launch(chromiumLaunchOptions());
 // A duplicate React key silently duplicates DOM nodes, which is how a fixture id
 // collision looked like a zoom bug for twenty minutes. Fail on it instead.
@@ -418,12 +437,10 @@ try {
     () => assert.equal(reach.overflows, false, 'the card clips its own content'));
 
   // …and a click keeps it, so the pointer can go anywhere without losing it.
+  await pressMark(page, 0);
   const pinned = await page.evaluate(async () => {
-    const g = document.querySelector('.al-arrowg');
-    g.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    g.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
-    g.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     const path = document.querySelector('.al-card-path')?.textContent;
+    const g = document.querySelector('.al-arrowg, .al-dotg');
     g.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }));
     document.body.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 500));
@@ -437,51 +454,139 @@ try {
   check('clicking a call pins the entry, and it says so',
     () => { assert.equal(pinned.still, pinned.path); assert.ok(pinned.marked && pinned.hasClose); });
 
+  // "it is hard/impossible to select an element that then stays selected so i
+  // can easily scroll down and read the trace without being deselected."
+  console.log('\nkeeping an entry while you read it');
+  const gutter = await page.evaluate(() =>
+    getComputedStyle(document.querySelector('.settings-main')).scrollbarGutter);
+  check('the settings scroller reserves its scrollbar gutter, so appearing cannot move the plot',
+    () => assert.match(gutter, /stable/, `scrollbar-gutter: ${gutter}`));
+
+  await pressMark(page, 0);
+  const sticks = await page.evaluate(async () => {
+    const marks = [...document.querySelectorAll('.al-arrowg, .al-dotg')];
+    const first = marks[0];
+    const picked = document.querySelector('.al-card-path')?.textContent;
+    const ringed = document.querySelectorAll('.al-held-ring').length;
+    // the pointer wanders off the mark, and the page scrolls
+    first.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }));
+    document.querySelector('.settings-main').scrollTop = 120;
+    await new Promise((r) => setTimeout(r, 400));
+    const afterScroll = document.querySelector('.al-card-path')?.textContent;
+    // hovering ANOTHER mark must not steal a pinned selection
+    const other = marks.find((m) => m !== first);
+    other.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    other.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
+    await new Promise((r) => setTimeout(r, 120));
+    const afterHover = document.querySelector('.al-card-path')?.textContent;
+    return { picked, ringed, afterScroll, afterHover };
+  });
+  check('it survives the pointer leaving and the page scrolling',
+    () => { assert.equal(sticks.afterScroll, sticks.picked); assert.ok(sticks.picked); });
+  check('hovering another call does not steal it',
+    () => assert.equal(sticks.afterHover, sticks.picked));
+  check('and the mark it belongs to is ringed', () => assert.ok(sticks.ringed >= 1, `${sticks.ringed} rings`));
+
+  const escaped = await page.evaluate(async () => {
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise((r) => setTimeout(r, 80));
+    return { pinned: !!document.querySelector('.al-card.pinned'), rings: document.querySelectorAll('.al-held-ring').length,
+      card: document.querySelector('.al-card')?.className };
+  });
+  await pressMark(page, 0);
+  const closed = await page.evaluate(async () => {
+    document.querySelector('.al-card-x')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 80));
+    return { pinned: !!document.querySelector('.al-card.pinned'), rings: document.querySelectorAll('.al-held-ring').length };
+  });
+  const letGo = await page.evaluate(async () => {
+    return {};
+  });
+  // Whether the card then shows a preview depends on where the pointer happens
+  // to be — what must be gone is the PIN.
+  check('Escape lets go of it',
+    () => { assert.ok(!escaped.pinned, `card: ${escaped.card}`); assert.equal(escaped.rings, 0); });
+  check('so does the ✕', () => { assert.ok(!closed.pinned); assert.equal(closed.rings, 0); });
+
+  // The bug behind "impossible to select": a brush that ended on empty space
+  // left the swallow-the-next-click flag set, and the next click on a mark was
+  // eaten instead of selecting it.
+  const afterBrush = await page.evaluate(() => {
+    const b = document.querySelector('.al-map svg').getBoundingClientRect();
+    return { left: b.left, top: b.top, width: b.width, height: b.height };
+  });
+  const emptyY = afterBrush.top + afterBrush.height - 12;   // below the lanes
+  await page.mouse.move(afterBrush.left + afterBrush.width * 0.2, emptyY);
+  await page.mouse.down();
+  await page.mouse.move(afterBrush.left + afterBrush.width * 0.45, emptyY, { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  if (await page.$('.al-reset')) await page.click('.al-reset');
+  await page.waitForTimeout(120);
+  await pressMark(page, 0);
+  const clickAfterDrag = await page.evaluate(() => ({
+    pinned: !!document.querySelector('.al-card.pinned'),
+    card: document.querySelector('.al-card')?.className,
+    path: document.querySelector('.al-card-path')?.textContent,
+  }));
+  check('a click still selects after an unrelated drag',
+    () => assert.ok(clickAfterDrag.pinned, `card: ${clickAfterDrag.card} / ${clickAfterDrag.path}`));
+
   // "why arent the prompts not stored? or just not shown? we should change that"
-  const words = await page.evaluate(async () => {
-    // click marks until the card is showing a call that carried a prompt
-    for (const g of document.querySelectorAll('.al-arrowg')) {
-      g.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-      g.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
-      g.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await new Promise((r) => setTimeout(r, 30));
-      if (/\/prompt$/.test(document.querySelector('.al-card-path')?.textContent || '')) break;
-    }
-    const body = document.querySelector('.al-prompt-body');
+  await pressMark(page, '/prompt$');
+  const words = await page.evaluate(() => {
+    const md = document.querySelector('.markdown.al-md');
     return {
       path: document.querySelector('.al-card-path')?.textContent,
-      prompt: body?.textContent,
+      rendered: md ? { h: md.querySelectorAll('h2').length, li: md.querySelectorAll('li').length,
+        code: md.querySelectorAll('code').length, strong: md.querySelectorAll('strong').length,
+        text: md.textContent } : null,
+      rawShown: !!document.querySelector('.al-prompt-body'),
+      toggle: [...document.querySelectorAll('.al-md-toggle button')].map((b) => b.textContent.trim()),
+      on: document.querySelector('.al-md-toggle .on')?.textContent.trim(),
       json: document.querySelector('.al-json')?.textContent,
-      selectable: body ? getComputedStyle(body).userSelect !== 'none' : null,
+      selectable: md ? getComputedStyle(md).userSelect !== 'none' : null,
     };
   });
   console.log('\nthe prompt itself');
-  check('is shown as it was sent, newlines and all',
-    () => { assert.match(words.path || '', /\/prompt$/, `card shows ${words.path}`); assert.equal(words.prompt, PROMPT); });
+  check('is rendered as markdown by default — headings, list, code, emphasis',
+    () => {
+      assert.match(words.path || '', /\/prompt$/, `card shows ${words.path}`);
+      assert.ok(words.rendered, 'no rendered block');
+      assert.deepEqual(
+        { h: words.rendered.h > 0, li: words.rendered.li, code: words.rendered.code > 0, strong: words.rendered.strong > 0 },
+        { h: true, li: 2, code: true, strong: true },
+        JSON.stringify(words.rendered),
+      );
+      assert.ok(!words.rendered.text.includes('##'), 'the markup is showing through');
+    });
+  check('with the file viewer\'s own control and wording beside it',
+    () => { assert.deepEqual(words.toggle, ['Rendered', 'Source']); assert.equal(words.on, 'Rendered'); });
+  check('and no raw block until you ask for one', () => assert.ok(!words.rawShown));
   check('as its own block rather than escaped into the JSON',
     () => assert.ok(!words.json.includes('\\n'), 'the JSON carries an escaped prompt'));
   check('with the checksum still in the entry, which is what spots a repeat',
     () => assert.match(words.json, /sha256/));
   check('and it can be selected', () => assert.ok(words.selectable));
 
-  const painted = await page.evaluate(async () => {
-    for (const g of document.querySelectorAll('.al-arrowg, circle.al-dot')) {
-      g.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-      g.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }));
-      g.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      await new Promise((r) => setTimeout(r, 20));
-      if (/files-9/.test(document.querySelector('.al-card-path')?.textContent || '')) {
-        return {
-          drawn: document.querySelector('.al-prompt-body')?.textContent.length,
-          note: document.querySelector('.al-clipped')?.textContent,
-        };
-      }
-    }
-    return null;
+  const source = await page.evaluate(async () => {
+    [...document.querySelectorAll('.al-md-toggle button')].find((b) => b.textContent.trim() === 'Source')
+      ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 80));
+    return { raw: document.querySelector('.al-prompt-body')?.textContent, md: !!document.querySelector('.markdown.al-md') };
   });
+  check('Source shows the text exactly as sent, and nothing rendered',
+    () => { assert.equal(source.raw, PROMPT); assert.ok(!source.md); });
+
+  await pressMark(page, 'files-9');
+  const painted = await page.evaluate(() => ({
+    drawn: (document.querySelector('.al-prompt-body') || document.querySelector('.markdown.al-md'))?.textContent.length,
+    note: document.querySelector('.al-clipped')?.textContent,
+    path: document.querySelector('.al-card-path')?.textContent,
+  }));
   check('a 400 KB body is not painted whole, and the card says how much it is holding back',
     () => {
-      assert.ok(painted, 'never found the big entry in the map');
+      assert.match(painted.path || '', /files-9/, `card shows ${painted.path}`);
       assert.ok(painted.drawn <= 20_000, `painted ${painted.drawn} characters`);
       assert.match(painted.note || '', /400,000 characters/, `note: ${painted.note}`);
     });
