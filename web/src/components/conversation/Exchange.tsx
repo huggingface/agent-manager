@@ -179,6 +179,42 @@ function nowDoing(s?: Step): string {
   return oneLine(s.text, 70);
 }
 
+/**
+ * The prompt band — the one thing in a turn a person wrote.
+ *
+ * It renders as markdown now, like everything else in the reader: the answer
+ * always did, and an aside, thinking and a compaction since #88, so a typed
+ * `**important**` or a pasted fence was the last thing in the view still shown
+ * as syntax. It goes through the answer's exact path — renderMarkdown, then
+ * highlightHtml — so a search term lands in a rendered prompt the same way it
+ * lands in a rendered answer, rather than through a second mechanism that
+ * agrees with the first until it doesn't.
+ *
+ * ONE component for both call sites, deliberately. The band was written out by
+ * hand in two places — the real turn and the optimistic echo — and #77 was
+ * exactly those two drifting: the echo lost the `.cx` wrapper whose padding
+ * cancels `margin-left: -1.23em`, and the newest prompt in every conversation
+ * hung a gutter's width to the left. Two copies of markdown-plus-highlight is
+ * the same bug with more surface, so there is one.
+ */
+function PromptBand({ text, q, queued }: { text: string; q?: string; queued?: boolean }) {
+  // `breaks` because a prompt is typed, not authored — see renderMarkdown.
+  const html = useMemo(() => highlightHtml(renderMarkdown(text, { breaks: true }), q), [text, q]);
+  return (
+    <div className="cx-prompt">
+      <div className="markdown cx-pmd" dangerouslySetInnerHTML={{ __html: html }} />
+      {/* Read from a queue record rather than a message: it was typed while the
+          agent was working. Labelled because those records cannot say whether it
+          was then consumed or cancelled — see TraceTurn.queued. It stays a
+          sibling of the rendered block and still trails the last line: .cx-pmd
+          is an inline-block, so the pill sits on that line's baseline instead of
+          dropping below the block and making a queued one-liner a line taller
+          than every other prompt. */}
+      {queued ? <span className="cx-queued mono" title="Typed while the agent was working, so it waited in the queue">queued</span> : null}
+    </div>
+  );
+}
+
 export function ExchangeView({
   x, n, total, open, onToggle, running, dim, q, baseModel,
 }: {
@@ -246,15 +282,7 @@ export function ExchangeView({
 
   return (
     <section className={`cx${dim ? ' dim' : ''}`}>
-      {prompt ? (
-        <div className="cx-prompt">
-          <Hi text={prompt} q={q} />
-          {/* Read from a queue record rather than a message: it was typed while
-              the agent was working. Labelled because those records cannot say
-              whether it was then consumed or cancelled — see TraceTurn.queued. */}
-          {x.prompt?.queued ? <span className="cx-queued mono" title="Typed while the agent was working, so it waited in the queue">queued</span> : null}
-        </div>
-      ) : null}
+      {prompt ? <PromptBand text={prompt} q={q} queued={!!x.prompt?.queued} /> : null}
 
       {/* Everything about the turn on ONE line, under the prompt: what the work
           was on the left, which turn it is on the right. Nothing above.
@@ -313,12 +341,14 @@ export function ExchangeView({
  * call sites it was neither: `.cx-prompt`'s `margin-left: -1.23em` exists to
  * cancel `.cx`'s matching padding, and with no `.cx` around it there was
  * nothing to cancel, so the newest prompt in a conversation hung 16px left of
- * every prompt above it — in the reader and in the card alike.
+ * every prompt above it — in the reader and in the card alike. The band itself
+ * is PromptBand, the same component the real turn renders, so what it contains
+ * cannot drift either.
  */
 export function PendingExchange({ text }: { text: string }) {
   return (
     <section className="cx">
-      <div className="cx-prompt">{text}</div>
+      <PromptBand text={text} />
       <div className="cx-running mono">working</div>
     </section>
   );

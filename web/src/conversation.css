@@ -48,7 +48,60 @@
   background: color-mix(in srgb, var(--accent) 7%, transparent);
   border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
   font-size: 1em; font-weight: 550; color: var(--text);
-  white-space: pre-wrap; overflow-wrap: break-word;
+  overflow-wrap: break-word;
+}
+/* The prompt renders as markdown, and the band is a strip in a rhythm — not a
+   document. So:
+   - the shared .markdown card's border, background, 14px, 1.6 and scroller are
+     all reset. It is a card elsewhere; here it is the band's own text, at the
+     band's own size, in the band's weight.
+   - the first and last block give up their margins, so a one-line prompt is
+     exactly as tall as it was as raw text. Everything about this band's height
+     is read as rhythm, and a <p>'s 12px would have added an eighth of a line
+     top and bottom to every turn in the reader.
+   - inline-block, so the `queued` pill still trails the last line instead of
+     dropping below the block. It also means the band shrink-wraps its text,
+     which is why the pre/table rules below claim the width back.
+   - `white-space: normal`: the band no longer sets pre-wrap. It used to hold
+     raw text and the newlines were the text's own; they are <br>s now (marked
+     with `breaks`), and pre-wrap over rendered HTML would turn the newline
+     marked leaves between block tags into blank lines inside the band. */
+.markdown.cx-pmd {
+  display: inline-block; max-width: 100%; vertical-align: baseline;
+  flex: none; overflow: visible; border: none; background: none; padding: 0;
+  font-size: 1em; line-height: inherit; white-space: normal;
+}
+.cx-pmd > :first-child { margin-top: 0; }
+.cx-pmd > :last-child { margin-bottom: 0; }
+/* One block's worth of air between blocks — the same 6px a step's prose uses,
+   which is what a band-sized register asks for; 12px reads as a document. */
+.cx-pmd p, .cx-pmd ul, .cx-pmd ol, .cx-pmd blockquote, .cx-pmd pre, .cx-pmd table { margin: 0 0 6px; }
+.cx-pmd ul, .cx-pmd ol { padding-left: 1.5em; }
+/* A heading in a prompt is someone structuring a long ask, not titling a page:
+   the shared sizes are 22/18/15px absolute, which inside a band reads as a
+   different voice entirely and does not scale with the conversation. */
+.cx-pmd h1, .cx-pmd h2, .cx-pmd h3, .cx-pmd h4 { margin: 7px 0 3px; line-height: 1.3; font-size: 1.05em; }
+/* Mono at the band's 550 renders heavier than the same fence in an answer, and
+   a prompt is not more emphatic than the reply. The block keeps the band's tint
+   rather than taking --term-bg: a white slab inside a tinted strip reads as a
+   card dropped into the band, and this is the band's own content. */
+.cx-pmd code { font-weight: 450; }
+/* No width here: a percentage against a shrink-wrapping parent is circular, and
+   it does not need one — shrink-to-fit asks the content how wide it wants to be,
+   so a wide fence fills the band up to max-width while a short one stays a small
+   slab instead of a full-bleed strip.
+   A fence in a PROMPT wraps, where a fence in an answer scrolls. The two are
+   deliberately different: this band held the operator's own text as pre-wrap
+   until now, so every character of a pasted error was on screen, and trading
+   that for a horizontal swipe inside a slab is the same mistake as putting
+   something behind a hover — worst exactly where the band is widest relative to
+   the screen. An answer's fence is code an agent wrote, where the line structure
+   is the content and reflowing it lies about it; a prompt's is a paste. */
+.cx-pmd pre {
+  font-size: 0.88em;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  border-color: color-mix(in srgb, var(--border-strong) 60%, transparent);
+  white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible;
 }
 /* the queue marker: a quiet aside on the band, not a second voice */
 .cx-queued {

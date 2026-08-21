@@ -89,6 +89,27 @@ check('the prompt text is the prompt you sent',
 check('a working line rides inside the same section',
   () => assert.match(html, /<div class="cx-running mono">working<\/div>\s*<\/section>/));
 
+console.log('\nand the band is one component, not two copies of one');
+check('the echo renders its prompt through markdown, not as raw text',
+  () => assert.match(html, /<div class="cx-prompt"><div class="markdown cx-pmd">/));
+check('there is exactly ONE place in the file that writes the band', () => {
+  const src = fs.readFileSync(path.join(HERE, '../src/components/conversation/Exchange.tsx'), 'utf8');
+  const bands = (src.match(/className="cx-prompt"/g) || []).length;
+  assert.equal(bands, 1, `${bands} hand-written bands — #77 was two of them drifting`);
+  assert.equal((src.match(/<PromptBand /g) || []).length, 2, 'both call sites should use it');
+});
+check('and it renders through the answer’s own path — render, then highlight', () => {
+  const src = fs.readFileSync(path.join(HERE, '../src/components/conversation/Exchange.tsx'), 'utf8');
+  assert.match(src, /highlightHtml\(renderMarkdown\(text, \{ breaks: true \}\), q\)/);
+});
+check('a prompt’s newlines survive the render — `breaks` is on for it and off elsewhere', () => {
+  const md = fs.readFileSync(path.join(HERE, '../src/lib/markdown.ts'), 'utf8');
+  assert.match(md, /breaks: !!opts\?\.breaks/);
+  const src = fs.readFileSync(path.join(HERE, '../src/components/conversation/Exchange.tsx'), 'utf8');
+  const answer = src.slice(src.indexOf('const answerHtml'), src.indexOf('const answerMore'));
+  assert.doesNotMatch(answer, /breaks/, 'an agent writes markdown on purpose; a soft wrap is a soft wrap');
+});
+
 console.log('\nand an attached prompt is complete on its first paint');
 const screenshot = { kind: 'image', path: '/state/attachments/reader/Screenshot 1.png' };
 const pendingPrompt = buildPendingPrompt('codex', 'compare this with the mock', [screenshot]);
@@ -311,6 +332,24 @@ check('.cx-prompt takes it back, by the same amount',
   () => assert.match(css, /\.cx-prompt\s*\{[^}]*margin-left:\s*-1\.23em/));
 check('and no px restatement of that gutter has crept back in',
   () => assert.doesNotMatch(css, /\.cxv-body\s*>\s*\.cxv-col\s*>\s*\.cx\s*\{[^}]*padding-left/));
+
+console.log('\nand the rendered band keeps the height raw text had');
+const ruleOf = (sel) => { const i = css.indexOf(sel); return i < 0 ? '' : css.slice(i, css.indexOf('}', i) + 1); };
+const pmd = (css.match(/\.markdown\.cx-pmd\s*\{([^}]*)\}/) || [])[1] || '';
+check('the shared .markdown card does not bring its border, background or 14px into a band', () => {
+  for (const reset of [/border:\s*none/, /background:\s*none/, /padding:\s*0/, /font-size:\s*1em/, /line-height:\s*inherit/])
+    assert.match(pmd, reset, `missing reset ${reset}`);
+});
+check('the first block adds no margin above it',
+  () => assert.match(css, /\.cx-pmd\s*>\s*:first-child\s*\{[^}]*margin-top:\s*0/));
+check('and the last adds none below — a one-line prompt is one line tall',
+  () => assert.match(css, /\.cx-pmd\s*>\s*:last-child\s*\{[^}]*margin-bottom:\s*0/));
+check('the band stops declaring pre-wrap now that its content is HTML', () => {
+  assert.doesNotMatch(ruleOf('.cx-prompt {'), /white-space/);
+  assert.match(pmd, /white-space:\s*normal/);
+});
+check('and the pill can still sit on the last line rather than under it',
+  () => assert.match(pmd, /display:\s*inline-block/));
 
 console.log(failed ? `\n${failed} failed` : '\nall checks passed');
 process.exit(failed ? 1 : 0);

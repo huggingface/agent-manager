@@ -14,7 +14,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "node ../scripts/run-suites.mjs",
-    "test:render": "node test/statusMark.render.test.mjs && node test/stateLogo.render.test.mjs",
+    "test:render": "node test/statusMark.render.test.mjs && node test/stateLogo.render.test.mjs && node test/promptBand.render.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
