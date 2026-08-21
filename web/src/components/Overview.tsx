@@ -412,23 +412,100 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   );
 }
 
+/**
+ * Does everything on a tile's head row fit, with the group in it?
+ *
+ * The group is rendered first and the browser is asked: did any child have to
+ * truncate? If yes the group is dropped and the name gets the whole row; if no
+ * it stays. That is a question about SPACE, which is the thing that decides
+ * whether two strings can share 225px — a character count is not a proxy for it
+ * (`AM cowrite-add-agent` is 19 characters and clips both halves at 225px;
+ * `rl-llm-agents release` is 20 and fits at 276px).
+ *
+ * Measuring happens in a layout effect, before paint, so the group never
+ * flashes in and out. A ResizeObserver re-asks when the tile's width changes —
+ * the grid reflows on window resize and when the sidebar opens — and the group
+ * is put back for that one pass so the measurement is of the real row again.
+ * Web fonts land after first paint and change every width, so the first
+ * `document.fonts.ready` also re-asks.
+ */
+function useHeadFits(hasGroup: boolean) {
+  const head = useRef<HTMLDivElement | null>(null);
+  const probe = useRef<HTMLSpanElement | null>(null);
+  // `true` while measuring: the group has to be in the row to be measured.
+  const [show, setShow] = useState(true);
+  // The width the live decision belongs to. It is recorded on EVERY pass, not
+  // only the ones that could measure — `observe()` fires the callback once
+  // immediately, and a callback that cannot tell "same width" from "not decided
+  // yet" flips the group back on, which re-runs this effect, which re-observes,
+  // which fires again. That spins: 54k DOM writes in 1.5s when I got it wrong.
+  const decidedAt = useRef<number | null>(null);
+  // Once per mount, not once per pass, for the same reason.
+  const awaitedFonts = useRef(false);
+
+  useLayoutEffect(() => {
+    if (!hasGroup) return undefined;
+    const row = head.current;
+    if (!row) return undefined;
+    const width = row.clientWidth;
+    if (probe.current) {
+      const clipped = (el: Element | null) => !!el && el.scrollWidth > el.clientWidth + 0.5;
+      setShow(!clipped(probe.current) && !clipped(row.querySelector('.ovt-name')));
+    }
+    decidedAt.current = width;
+
+    const ro = new ResizeObserver(() => {
+      const now = head.current?.clientWidth ?? 0;
+      if (decidedAt.current !== null && Math.abs(now - decidedAt.current) < 0.5) return;
+      // The tile actually changed width: put the group back for one pass so the
+      // next measurement is of the real row again.
+      decidedAt.current = null;
+      setShow(true);
+    });
+    ro.observe(row);
+
+    let cancelled = false;
+    if (!awaitedFonts.current) {
+      awaitedFonts.current = true;
+      // Web fonts land after first paint and change every width, so the first
+      // decision was made on fallback metrics. Ask again, once.
+      document.fonts?.ready.then(() => {
+        if (cancelled) return;
+        decidedAt.current = null;
+        setShow(true);
+      });
+    }
+    return () => { cancelled = true; ro.disconnect(); };
+  }, [hasGroup, show]);
+
+  return { head, probe, show };
+}
+
 /** Compact tile: status + prompt + state; click opens the conversation window. */
-function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color?: string; group?: string | null; dim?: boolean; pending?: boolean; onOpen: () => void }) {
+export function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color?: string; group?: string | null; dim?: boolean; pending?: boolean; onOpen: () => void }) {
   const d = s.digest;
   const running = atWork(s);   // same definition as the card and the pinned block
   const last = Math.max(d?.lastAssistantTs || 0, d?.lastPromptTs || 0) || Date.parse(s.createdAt) || 0;
   // ring = waiting on you AND recent — a fleet where everything is "waiting
   // since last week" shouldn't glow everywhere
   const fresh = s.state === 'waiting' && Date.now() - last < 24 * 3600e3;
+  const groupFits = useHeadFits(!!group);
   return (
     <div className={`ovt-tile${fresh ? ' attn' : ''}${dim ? ' archived' : ''}`} onClick={onOpen}>
-      {/* A tile is ~225px: a group prefix INSIDE the name row would ellipsise,
-          and so would the name, leaving "[Age… trace reader pa…" — two clipped
-          strings and no legible fact. It gets its own line, where the full
-          width is available (the list card is wide enough to keep it inline). */}
-      {group && <div className="ovt-gline mono">[{group}]</div>}
-      <div className="ovt-head">
+      {/* The group rides the name's row, as it does on the list card. A tile is
+          only ~225px, so the two cannot always share it, and the rule is that
+          the NAME is the identity while the group is context: when the row is
+          short of space the group goes, whole, and the name keeps the width.
+          Which happens is decided by MEASURING this row, not by counting
+          characters — a character budget was tried first and failed in both
+          directions: at 225px it let a 19-character pair through that clipped
+          BOTH strings, and it dropped `rl-llm-agents release` at 276px where
+          there was room to spare. useHeadFits renders the group, asks the
+          browser whether anything in the row had to truncate, and drops it if
+          so. Either the group is fully legible or it is not there. */}
+      <div className="ovt-head" ref={groupFits.head}>
         <StateLogo cli={s.cli} state={s.state} size={12} tint={color} title={stateTitle(s)} />
+        {group && groupFits.show && <span className="ovt-gtag mono" ref={groupFits.probe}>{group}</span>}
         <span className="ovt-name mono">{s.name}</span>
         <span className="ovt-ago">{pending ? '' : fmtAgo(last)}</span>
       </div>
