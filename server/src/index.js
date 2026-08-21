@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import {
-  PORT, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR,
+  PORT, BIND_HOST, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR,
   ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions, PASSIVE_CLIS, isRemote,
 } from './config.js';
 import * as remote from './remote.js';
@@ -2809,7 +2809,7 @@ server.on('error', (e) => {
   // (Seen on Spaces dev mode: it restarts the app in the same container while
   // the previous, healthy node still holds the port.)
   if (e && e.syscall === 'listen') {
-    console.error(`[fatal] cannot listen on :${PORT} — something else is probably already bound to it. Exiting 1.`);
+    console.error(`[fatal] cannot listen on ${BIND_HOST}:${PORT} — something else is probably already bound to it. Exiting 1.`);
     process.exit(1);
   }
 });
@@ -2956,8 +2956,8 @@ setTimeout(() => {
   done.then(() => runstate.startRunstateWatch());
 }, 8000);
 
-server.listen(PORT, () => {
-  console.log(`Agent Manager :${PORT}  engine=libghostty${ghosttyReady() ? '' : ' (UNAVAILABLE)'}  data=${DATA_DIR}`);
+server.listen(PORT, BIND_HOST, () => {
+  console.log(`Agent Manager ${BIND_HOST}:${PORT}  engine=libghostty${ghosttyReady() ? '' : ' (UNAVAILABLE)'}  data=${DATA_DIR}`);
   console.log('⚠  No authentication: this app trusts whoever can reach it.');
   console.log('   Keep this Space PRIVATE — a public instance gives anyone a shell + your logged-in agents.');
   // Scheduled fires use the public cron-run route too. That keeps one execution

@@ -4,6 +4,10 @@ import fs from 'node:fs';
 import { execSync, execFile } from 'node:child_process';
 
 export const PORT = parseInt(process.env.PORT || '7860', 10);
+export function resolveBindHost(env = process.env) {
+  return env.BIND_HOST || '127.0.0.1';
+}
+export const BIND_HOST = resolveBindHost();
 export const DATA_DIR = process.env.DATA_DIR || path.resolve(process.cwd(), 'data');
 export const WORKSPACES_DIR = path.join(DATA_DIR, 'workspaces');
 export const STATE_DIR = path.join(DATA_DIR, 'state');
