@@ -1215,7 +1215,15 @@ body {
    container query covers both, and the split-pane case nobody has asked for yet.
    (Container queries are older than the color-mix() this sheet already relies
    on, so this is not a new baseline.) */
-.settings-main { overflow-y: auto; container-type: inline-size; }
+/* scrollbar-gutter, because the card growing the page must not move the graph.
+   The loop the operator found: hovering a mark shows the card → the page grows →
+   a scrollbar appears → the layout narrows → the plot shifts left → the cursor
+   is no longer on the mark → the card goes → the scrollbar goes → it shifts
+   back. Reserving the gutter always means step three changes nothing. Where this
+   property is unsupported (Safari before 18.2) the platform is using overlay
+   scrollbars anyway, which take no layout space and cannot start the loop; and
+   the card no longer empties on mouseleave, so it cannot oscillate either way. */
+.settings-main { overflow-y: auto; scrollbar-gutter: stable; container-type: inline-size; }
 /* width:100% is load-bearing. `.settings-main` is a column flex container, and
    `margin: 0 auto` on a flex item switches off the cross-axis stretch: the page
    box then sized itself from its widest content (524px) rather than from the
@@ -1475,6 +1483,11 @@ a.btn-ghost { text-decoration: none; }
 .al-hit { stroke: transparent; stroke-width: 10; }
 /* a slight lift on hover, not a thickening — the card carries the detail */
 .al-arrowg.on .al-arrow { stroke-width: 1.6; }
+/* the selected call, kept: a ring around its mark, so the card and the picture
+   agree about which entry you are reading */
+.al-held-ring { fill: none; stroke: var(--accent); stroke-width: 1.2; opacity: 0.75; }
+.al-arrowg.held .al-arrow, .al-dotg.held .al-dot { stroke: var(--accent); }
+.al-dotg { cursor: pointer; }
 .al-arrowg.on .al-held { opacity: 0.45; }
 .al-key text { font-family: var(--font-mono); font-size: 8px; fill: var(--muted); }
 /* the moment a lane begins */
@@ -1502,7 +1515,15 @@ a.btn-ghost { text-decoration: none; }
 /* the prompt as sent: its own block, because JSON-escaping a paragraph onto one
    line makes it unreadable. Selectable, wrapped, and never truncated here. */
 .al-prompt { display: flex; flex-direction: column; gap: 3px; }
-.al-prompt-lbl { font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); }
+.al-prompt-lbl { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); }
+.al-md-toggle button { padding: 1px 7px; font-size: 10px; }
+/* Rendered like the file viewer's markdown — same renderer, same 14px reading
+   base — but inside a card rather than a pane, so it does not scroll itself and
+   has no zoom to follow: Settings has no text-size control (see #102, which gave
+   the FILE pane's markdown the pane zoom). */
+.markdown.al-md { flex: none; overflow: visible; max-height: none; border: none; border-radius: var(--r-sm); background: var(--panel-2); padding: 8px 11px; font-size: 14px; }
+.markdown.al-md > :first-child { margin-top: 0; }
+.markdown.al-md > :last-child { margin-bottom: 0; }
 .al-clipped { color: var(--muted); text-transform: none; letter-spacing: 0; }
 .al-prompt-body { margin: 0; padding: 7px 9px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-sm); font-family: var(--font-mono); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text); }
 

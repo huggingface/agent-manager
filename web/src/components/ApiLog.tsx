@@ -21,6 +21,7 @@
 // much of a body to paint rather than trying to paint all of it.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../api';
+import { renderMarkdown } from '../lib/markdown';
 
 type View = 'list' | 'map';
 
@@ -262,10 +263,17 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
   const [win, setWin] = useState<{ a: number; b: number } | null>(null);
   const [brush, setBrush] = useState<{ from: number; to: number } | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const dragRef = useRef<{ from: number; moved: boolean } | null>(null);
+  const dragRef = useRef<{ from: number; moved: boolean; id: number } | null>(null);
   // A drag that happened to start on a mark must not also select it: the click
   // arrives after the pointer is up, so it has to be swallowed once.
-  const swallowClick = useRef(false);
+  // Selection is committed from the SVG's own pointerup, not from a mark's
+  // onClick: brushing captures the pointer, and a captured pointer retargets the
+  // trailing click to the capture element, so the mark's onClick never ran. That
+  // is why clicking an entry "did nothing" — the handler was on the wrong
+  // element, and the earlier test only ever proved a SYNTHETIC click worked.
+  // What was pressed is read from the event's own target rather than from
+  // mouseenter bookkeeping, which capture and re-renders can both invalidate.
+  const pressedRef = useRef<string | null>(null);
   // Hovering previews an entry; CLICKING keeps it. Both are needed: the card is
   // fixed below the plot and its JSON scrolls, so clearing on the mark's
   // mouseleave meant the pointer could never reach the card — the lower half of
@@ -280,15 +288,26 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
     window.clearTimeout(hideTimer.current);
     setSel((cur) => (cur?.pinned ? cur : { op, pinned: false }));
   };
-  const release = () => {
-    window.clearTimeout(hideTimer.current);
-    hideTimer.current = window.setTimeout(() => setSel((cur) => (cur?.pinned ? cur : null)), 220);
-  };
+  // Leaving a mark no longer empties the card. Two reasons, and the first is a
+  // bug the operator diagnosed exactly: the card appearing grows the page, the
+  // page growing can add a scrollbar, the scrollbar narrows the layout, the
+  // graph shifts left, the cursor is no longer over the mark, the card
+  // disappears — and back again, forever. If the card never empties, that loop
+  // cannot close. The second is simply that reading an entry means moving the
+  // pointer away from a 1px arrow. Hover swaps the card to another entry;
+  // nothing but Escape, the ✕, or picking another call takes it away.
+  const release = () => window.clearTimeout(hideTimer.current);
   const pin = (op: api.Operation) => {
-    if (swallowClick.current) { swallowClick.current = false; return; }
     window.clearTimeout(hideTimer.current);
     setSel({ op, pinned: true });
   };
+  // Escape lets go of a pinned entry without hunting for the ✕.
+  useEffect(() => {
+    if (!sel?.pinned) return undefined;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSel(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [sel?.pinned]);
   const hover = sel?.op ?? null;
 
   const { lanes, marks, born, axis, dropped } = useMemo(() => {
@@ -410,8 +429,11 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
   };
   const onDown = (e: React.PointerEvent<SVGSVGElement>) => {
     if (e.pointerType === 'touch' || e.button !== 0) return;
-    dragRef.current = { from: domainAt(e.clientX), moved: false };
-    svgRef.current?.setPointerCapture(e.pointerId);
+    pressedRef.current = (e.target as Element)?.closest?.('[data-op]')?.getAttribute('data-op') ?? null;
+    // Capture is taken when the drag STARTS, not on press: capturing here sends
+    // the mark under the cursor a mouseleave, and losing that would have thrown
+    // away the very thing the press is selecting.
+    dragRef.current = { from: domainAt(e.clientX), moved: false, id: e.pointerId };
   };
   const onMove = (e: React.PointerEvent<SVGSVGElement>) => {
     const d = dragRef.current;
@@ -419,6 +441,7 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
     const to = domainAt(e.clientX);
     // a few pixels of slop, so a click on a mark stays a click
     if (!d.moved && Math.abs(to - d.from) * PLOT < 5) return;
+    if (!d.moved) svgRef.current?.setPointerCapture(d.id);
     d.moved = true;
     setBrush({ from: d.from, to });
   };
@@ -426,8 +449,13 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
     const d = dragRef.current;
     dragRef.current = null;
     setBrush(null);
-    swallowClick.current = !!d?.moved;
-    if (!d?.moved) return;
+    if (!d) return;
+    // A press that did not travel is a selection of whatever it was pressed on.
+    if (!d.moved) {
+      const op = marks.find((m) => m.op.id === pressedRef.current)?.op;
+      if (op) pin(op);
+      return;
+    }
     const to = domainAt(e.clientX);
     const a = Math.min(d.from, to);
     const b = Math.max(d.from, to);
@@ -499,22 +527,25 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
             const dst = back ? a : b;
             const px = clampX(x);
             const on = hover?.id === op.id;
+            const held = on && !!sel?.pinned;   // selected and staying that way
             const cls = `${back ? ' back' : ''}${op.ok ? '' : ' bad'}${isNew ? ' new' : ''}`;
             if (src < 0 || dst < 0 || src === dst) {
               const lane = src >= 0 ? src : dst;
               return (
-                <circle key={op.id} cx={px} cy={laneY(lane)} r={on ? 3.4 : 2}
-                  className={`al-dot${cls}${on ? ' on' : ''}`}
-                  onMouseEnter={() => preview(op)} onMouseLeave={release} onClick={() => pin(op)}>
+                <g key={op.id} data-op={op.id} className={`al-dotg${held ? ' held' : ''}`}
+                  onMouseEnter={() => preview(op)} onMouseLeave={release}>
                   <title>{`${HHMMSS(op.at)} ${op.method} ${op.path}`}</title>
-                </circle>
+                  {held && <circle cx={px} cy={laneY(lane)} r="5" className="al-held-ring" />}
+                  <circle cx={px} cy={laneY(lane)} r={on ? 3.4 : 2} className={`al-dot${cls}${on ? ' on' : ''}`} />
+                </g>
               );
             }
             const y1 = laneY(src) + (dst > src ? 4 : -4);
             const y2 = laneY(dst) + (dst > src ? -6 : 6);
             return (
-              <g key={op.id} onMouseEnter={() => preview(op)} onMouseLeave={release} onClick={() => pin(op)}
-                className={`al-arrowg${on ? ' on' : ''}`}>
+              <g key={op.id} data-op={op.id}
+                onMouseEnter={() => preview(op)} onMouseLeave={release}
+                className={`al-arrowg${on ? ' on' : ''}${held ? ' held' : ''}`}>
                 <title>{`${HHMMSS(op.at)} ${op.method} ${op.path}`}</title>
                 {/* how long the caller was blocked, on the caller's own lane */}
                 {back && x0 !== undefined && x0 < x && (
@@ -523,6 +554,7 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
                 <line x1={px} y1={y1} x2={px} y2={y2}
                   className={`al-arrow${cls}`}
                   markerEnd={`url(#${back ? 'al-arb' : 'al-ar'})`} />
+                {held && <circle cx={px} cy={laneY(src)} r="5" className="al-held-ring" />}
                 <circle cx={px} cy={laneY(src)} r="2" className={`al-dot${cls}`} />
                 {/* a create ends on a lane that did not exist a moment ago: an
                     open mark says "this one begins here" where a filled dot
@@ -597,6 +629,11 @@ function HoverCard({ op, pinned, names, onEnter, onLeave, onClose }: {
   onLeave: () => void;
   onClose: () => void;
 }) {
+  // A prompt is written as markdown by the people and agents writing it, so it
+  // is read as markdown here. `Rendered`/`Source` is the file viewer's own
+  // control and wording (FilesPane's fv-toggles) rather than a second idiom for
+  // the same choice; unlike the file viewer there is nothing to edit.
+  const [raw, setRaw] = useState(false);
   if (!op) {
     return (
       <div className="al-card al-card-idle">
@@ -629,14 +666,28 @@ function HoverCard({ op, pinned, names, onEnter, onLeave, onClose }: {
       {text !== null && (
         <div className="al-prompt">
           <div className="al-prompt-lbl">
-            body as sent
-            {text.length > SHOW_CHARS && (
-              <span className="al-clipped">
-                {' '}· showing the first {SHOW_CHARS.toLocaleString()} of {text.length.toLocaleString()} characters
-              </span>
-            )}
+            <span>
+              body as sent
+              {text.length > SHOW_CHARS && (
+                <span className="al-clipped">
+                  {' '}· showing the first {SHOW_CHARS.toLocaleString()} of {text.length.toLocaleString()} characters
+                </span>
+              )}
+            </span>
+            <span className="seg al-md-toggle">
+              <button className={raw ? '' : 'on'} onClick={() => setRaw(false)}>Rendered</button>
+              <button className={raw ? 'on' : ''} onClick={() => setRaw(true)}>Source</button>
+            </span>
           </div>
-          <pre className="al-prompt-body">{clip(text)}</pre>
+          {raw
+            ? <pre className="al-prompt-body">{clip(text)}</pre>
+            : (
+              <div
+                className="markdown al-md"
+                /* renderMarkdown sanitizes; the same call the file viewer makes */
+                dangerouslySetInnerHTML={{ __html: renderMarkdown(clip(text)) }}
+              />
+            )}
         </div>
       )}
       <pre className="al-json">{json(body)}</pre>
