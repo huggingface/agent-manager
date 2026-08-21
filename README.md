@@ -183,6 +183,22 @@ cd server && npm install && npm run dev
 cd web && npm install && npm run dev
 ```
 
+For a persistent local deployment (rather than an offline development server),
+install and verify the agent CLIs explicitly. Docker image build steps do not
+run when the backend is launched directly by Node or systemd:
+
+```bash
+./scripts/install-local-clis.sh
+
+# Or install only selected CLIs:
+./scripts/install-local-clis.sh opencode codex
+```
+
+The script installs into `${NPM_CONFIG_PREFIX:-$HOME/.local}` and fails if a
+requested binary is not available on `PATH`. Include that prefix's `bin`
+directory in the service's `PATH`, then restart Agent Manager: CLI availability
+is cached for the lifetime of the backend process.
+
 This repo *is* the Space — the build runs the `Dockerfile`.
 
 ### Deploying a branch to a dev Space
