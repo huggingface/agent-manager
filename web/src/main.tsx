@@ -2,8 +2,15 @@ import { Component } from 'react';
 import type { ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
+import { applyAppearance, readPalette, readTypeface } from './lib/appearance';
 import './styles.css';
 import './conversation.css';
+
+// The palette and typeface are on <html> before the first render: the app would
+// otherwise paint one frame in the default palette, and a component that reads
+// the resolved tokens rather than inheriting them — TerminalPane, for xterm —
+// would read that frame's values. See lib/appearance.ts.
+applyAppearance(readPalette(), readTypeface());
 
 // Last-resort guard: React unmounts the WHOLE tree on an uncaught render
 // error, which reads as a blank white page. Show a reload card instead.

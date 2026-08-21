@@ -26,15 +26,49 @@ const ratio = (a, b) => {
   return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
 };
 
-/** The declarations of one rule, as {token: value}. */
-const tokensOf = (selector) => {
-  const i = css.indexOf(`${selector} {`);
-  if (i < 0) return null;
-  const body = css.slice(i, css.indexOf('}', i));
-  const out = {};
-  for (const m of body.matchAll(/--([\w-]+):\s*([^;]+);/g)) out[m[1]] = m[2].trim();
+/**
+ * Every declaration a selector makes, across EVERY rule with that selector.
+ *
+ * Aggregating matters: the stylesheet declares `:root` more than once — the core
+ * palette in one block, the mark geometry in another, the editor's syntax
+ * colours in a third, after the palettes. An earlier version of this test read
+ * only the first match and therefore could not see that no palette carried the
+ * syntax colours, so `--cm-link` stayed teal under all four. Whatever the
+ * cascade sees, this sees.
+ */
+const RULES = (() => {
+  // comments out first: a rule preceded by one is still a rule, and pattern
+  // matching on the raw text missed exactly that — the syntax block sits after a
+  // comment, so an earlier version of this test read no syntax tokens at all and
+  // reported the palettes complete.
+  const bare = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const out = [];
+  for (const m of bare.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    out.push({ selector: m[1].trim().split('\n').pop().trim(), body: m[2] });
+  }
   return out;
+})();
+
+const tokensOf = (selector) => {
+  const out = {};
+  let found = false;
+  for (const r of RULES) {
+    if (r.selector !== selector) continue;
+    found = true;
+    for (const d of r.body.matchAll(/--([\w-]+):\s*([^;]+);/g)) out[d[1]] = d[2].trim();
+  }
+  return found ? out : null;
 };
+
+/** A token whose value is written in other tokens follows them, wherever it lives. */
+const isDerived = (value) => /var\(--/.test(value);
+
+/**
+ * The syntax hues held invariant on purpose: a reading system for code, tuned
+ * per theme, not per palette. Listed here so that adding a new hardcoded colour
+ * token — or quietly dropping one of these into the invariant set — fails.
+ */
+const INVARIANT = ['cm-keyword', 'cm-string', 'cm-number', 'cm-fn', 'cm-type', 'cm-tag', 'cm-def', 'cm-heading', 'cm-prop'];
 
 let failed = 0;
 const check = (what, fn) => {
@@ -62,12 +96,20 @@ for (const id of PALETTES) {
     ['light', `[data-palette='${id}']`, BASE_LIGHT],
     ['dark', `[data-theme='dark'][data-palette='${id}']`, BASE_DARK],
   ]) {
-    check(`${id}/${theme} sets every token the default sets`, () => {
+    check(`${id}/${theme} leaves no colour of the default palette behind`, () => {
       const t = tokensOf(sel);
       assert.ok(t, `no rule for ${sel}`);
-      const colourTokens = Object.keys(base).filter((k) => /^(accent|accent-fg|go|danger|bg|panel|panel-2|border|border-strong|text|muted|term-bg|tile|drop)$/.test(k));
-      const missing = colourTokens.filter((k) => !(k in t));
-      assert.deepEqual(missing, [], `inherits ${missing.join(', ')} from the default palette`);
+      // every colour the default declares, not a whitelist of the ones we
+      // remembered: that whitelist is what hid the syntax colours before
+      const colourTokens = Object.entries(base)
+        .filter(([k, v]) => /^#|^color-mix|^var\(/.test(v) && !/^(mark|cx|ph|ov)-/.test(k))
+        .map(([k]) => k);
+      const unaccounted = colourTokens.filter((k) => (
+        !(k in t)                       // the palette states it
+        && !isDerived(base[k])          // or it is written in tokens that follow
+        && !INVARIANT.includes(k)       // or it is deliberately palette-invariant
+      ));
+      assert.deepEqual(unaccounted, [], `inherits ${unaccounted.join(', ')} from the default palette`);
     });
   }
 }
@@ -93,6 +135,27 @@ for (const id of [...PALETTES, 'default']) {
     }
     check(`${id}/${theme}`, () => assert.deepEqual(fails, []));
   }
+}
+
+console.log('\nand the syntax colours are split the way they claim to be');
+for (const [theme, base] of [['light', BASE_LIGHT], ['dark', BASE_DARK]]) {
+  check(`${theme}: link and error follow the palette`, () => {
+    assert.equal(base['cm-link'], 'var(--accent)', 'a link in code should be the app accent');
+    assert.equal(base['cm-invalid'], 'var(--danger)', 'an error in code should be the app danger colour');
+  });
+  check(`${theme}: the quiet ink follows the palette`, () => {
+    assert.equal(base['cm-comment'], 'var(--muted)');
+    assert.equal(base['cm-meta'], 'var(--muted)');
+    assert.match(base['cm-punct'], /var\(--muted\)/, 'punctuation should be derived from muted, a step darker');
+  });
+  check(`${theme}: exactly the nine hues stay invariant`, () => {
+    const hardcoded = Object.entries(base)
+      .filter(([k, v]) => k.startsWith('cm-') && /^#/.test(v))
+      .map(([k]) => k)
+      .sort();
+    assert.deepEqual(hardcoded, [...INVARIANT].sort(),
+      'the invariant syntax set changed — decide whether the new colour belongs to the palette');
+  });
 }
 
 console.log(failed ? `\n${failed} failed` : '\nall checks passed');

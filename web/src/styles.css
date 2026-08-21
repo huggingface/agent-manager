@@ -1184,36 +1184,50 @@ body {
    quiet — comments recede, strings and keywords carry the structure, everything
    else is close to body text. Tuned against WCAG AA on the pane background. */
 :root {
-  --cm-comment: #7b8794;
+  /* Code colour is TWO systems, and only one of them belongs to a palette.
+     Five of these carry app meaning, so they are written in app tokens and
+     follow whichever palette is on: a link is the accent, an error is danger,
+     and the quiet ink — comments, punctuation, metadata — is the muted grey
+     with punctuation a step darker, the relationship the hand-picked greys had.
+     `--cm-link` and `--cm-invalid` were literally the teal accent and danger
+     values typed out, which is how a palette used to leave teal in the editor.
+     The other nine are a HUE system for reading code: keyword purple, string
+     green, number orange and so on, distinguishable from each other and tuned
+     per theme rather than per palette. Re-hueing them five times over would
+     make every palette its own legibility problem and buy nothing — a green
+     string is not "the app's green". Held invariant on purpose, and asserted as
+     such in test/palette-contrast.test.mjs so a new hardcoded colour fails. */
+  --cm-comment: var(--muted);
+  --cm-punct:   color-mix(in srgb, var(--muted) 70%, var(--text));
+  --cm-meta:    var(--muted);
+  --cm-link:    var(--accent);
+  --cm-invalid: var(--danger);
   --cm-keyword: #8250df;
   --cm-string:  #0a7c42;
   --cm-number:  #b3541e;
   --cm-fn:      #1f6feb;
   --cm-type:    #953800;
-  --cm-prop:    #0550ae;
-  --cm-punct:   #57606a;
   --cm-tag:     #116329;
   --cm-def:     #1f6feb;
-  --cm-meta:    #6a737d;
   --cm-heading: #0550ae;
-  --cm-link:    #0e7c86;
-  --cm-invalid: #c2433a;
+  --cm-prop:    #0550ae;
 }
 [data-theme='dark'] {
-  --cm-comment: #7d8a97;
+  /* the same split, for the dark hues */
+  --cm-comment: var(--muted);
+  --cm-punct:   color-mix(in srgb, var(--muted) 70%, var(--text));
+  --cm-meta:    var(--muted);
+  --cm-link:    var(--accent);
+  --cm-invalid: var(--danger);
   --cm-keyword: #c39bff;
   --cm-string:  #6fd39b;
   --cm-number:  #ffab70;
   --cm-fn:      #79b8ff;
   --cm-type:    #ffcb8b;
-  --cm-prop:    #9fc6ff;
-  --cm-punct:   #9aa7b2;
   --cm-tag:     #7ee2a8;
   --cm-def:     #79b8ff;
-  --cm-meta:    #8b97a0;
   --cm-heading: #9fc6ff;
-  --cm-link:    #2bb3bd;
-  --cm-invalid: #e0726a;
+  --cm-prop:    #9fc6ff;
 }
 
 /* editing chrome: files are simply editable, so this is a status line rather

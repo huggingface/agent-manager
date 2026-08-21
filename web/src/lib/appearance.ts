@@ -94,3 +94,37 @@ export const readTypeface = (): TypefaceId => {
 
 export const writePalette = (v: PaletteId) => writeStored('am-palette', v);
 export const writeTypeface = (v: TypefaceId) => writeStored('am-typeface', v);
+
+/**
+ * Put the choice on <html>, from wherever it is decided.
+ *
+ * Called from main.tsx before the first render and from the setters, NOT only
+ * from an effect: React runs a child's effects before its parent's, so a
+ * component that reads the resolved tokens — TerminalPane, which has to hand
+ * xterm real colour values because a canvas inherits nothing — would otherwise
+ * read the previous palette on the render that changed it. Setting the
+ * attribute at the moment the value is decided keeps the DOM ahead of everyone
+ * who reads it, and doing it before the first render avoids a frame of teal.
+ */
+export const applyAppearance = (palette: PaletteId, typeface: TypefaceId) => {
+  const root = document.documentElement;
+  root.dataset.palette = palette;
+  root.dataset.typeface = typeface;
+};
+
+/** One root token, resolved, with a fallback for a denied or odd computed style. */
+export const token = (name: string, fallback: string): string => {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  } catch { return fallback; }
+};
+
+/**
+ * The same colour with an alpha suffix, for the handful of places that need a
+ * translucent version of a token (xterm's selection). Only #rrggbb is extended;
+ * anything else is returned untouched, because xterm parses its own colours and
+ * a `color-mix()` string is not something it understands.
+ */
+export const withAlpha = (colour: string, alphaHex: string): string =>
+  (/^#[0-9a-f]{6}$/i.test(colour) ? `${colour}${alphaHex}` : colour);

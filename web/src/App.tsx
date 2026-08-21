@@ -19,7 +19,7 @@ import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tr
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { readStored, writeStored } from './lib/stored';
 import {
-  readPalette, readTypeface, writePalette, writeTypeface,
+  applyAppearance, readPalette, readTypeface, writePalette, writeTypeface,
   type PaletteId, type TypefaceId,
 } from './lib/appearance';
 import { hiddenSessionIds } from './lib/overviewHidden';
@@ -98,8 +98,10 @@ export default function App() {
   // is, and both are only ever a data attribute on <html> — see lib/appearance.ts.
   const [palette, setPaletteRaw] = useState<PaletteId>(readPalette);
   const [typeface, setTypefaceRaw] = useState<TypefaceId>(readTypeface);
-  const setPalette = (v: PaletteId) => { setPaletteRaw(v); writePalette(v); };
-  const setTypeface = (v: TypefaceId) => { setTypefaceRaw(v); writeTypeface(v); };
+  // Applied here rather than in an effect: a child's effects run before its
+  // parent's, and TerminalPane resolves the tokens to hand xterm real values.
+  const setPalette = (v: PaletteId) => { setPaletteRaw(v); writePalette(v); applyAppearance(v, typeface); };
+  const setTypeface = (v: TypefaceId) => { setTypefaceRaw(v); writeTypeface(v); applyAppearance(palette, v); };
   const [dropMain, setDropMain] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsPage, setSettingsPage] = useState<SettingsPage>('general');
@@ -181,8 +183,9 @@ export default function App() {
     writeStored('am-theme', theme);
   }, [theme]);
 
-  useEffect(() => { document.documentElement.dataset.palette = palette; }, [palette]);
-  useEffect(() => { document.documentElement.dataset.typeface = typeface; }, [typeface]);
+  // Belt and braces: main.tsx sets these before the first render and the setters
+  // set them as they change, so this only matters if state moves another way.
+  useEffect(() => { applyAppearance(palette, typeface); }, [palette, typeface]);
 
   // Write the selection through on every change rather than on unload: a phone
   // killing a backgrounded tab does not reliably run unload handlers.
@@ -933,6 +936,8 @@ export default function App() {
                 onShare={isShareable(s.cli) ? () => setShareId(s.id) : undefined}
                 cli={cliMap[s.cli]}
                 theme={theme}
+                palette={palette}
+                typeface={typeface}
                 zoom={zoom}
                 mode={paneMode}
                 readerEnabled={shown && deckVisible && (id === readerLeadId || readerFollowersReady)}

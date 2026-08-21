@@ -11,6 +11,7 @@ import StateLogo from './StateLogo';
 import TraceInfo from './TraceInfo';
 import ConversationView from './conversation/ConversationView';
 import { isPassive } from '../types';
+import { token, withAlpha } from '../lib/appearance';
 import type { PaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
 import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph } from './icons';
@@ -21,7 +22,30 @@ import {
   transferMayContainFile,
 } from '../lib/attachments';
 
-const THEMES: Record<'light' | 'dark', ITheme> = {
+// xterm draws on a canvas, so it inherits nothing: its font and colours are
+// options, handed over in JS. Everything that can come from the active palette
+// does — the canvas, the text, the cursor, the selection — so Settings →
+// Appearance reaches the terminal like it reaches every CSS surface.
+//
+// The sixteen ANSI colours deliberately do NOT. They are the *program's*
+// palette, not the app's chrome: `ls` colours, a TUI's own theme, a diff's red
+// and green. They have to stay distinguishable from each other, and re-hueing
+// them per palette would collapse exactly that — under Phosphor, an accent-green
+// ANSI green would be indistinguishable from success, and under a monochrome
+// palette every stream would look alike. They stay tuned per theme, below.
+const xtermTheme = (theme: 'light' | 'dark'): ITheme => ({
+  ...ANSI[theme],
+  background: token('--term-bg', theme === 'dark' ? '#0e1217' : '#ffffff'),
+  foreground: token('--text', theme === 'dark' ? '#c6d0d8' : '#1b2329'),
+  cursor: token('--accent', theme === 'dark' ? '#43c98a' : '#0e7c86'),
+  cursorAccent: token('--term-bg', theme === 'dark' ? '#0e1217' : '#ffffff'),
+  selectionBackground: withAlpha(token('--accent', theme === 'dark' ? '#2bb3bd' : '#0e7c86'), '44'),
+});
+
+/** The interface's mono stack, for the same reason: xterm cannot read CSS. */
+const xtermFont = () => token('--font-mono', "'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace");
+
+const ANSI: Record<'light' | 'dark', ITheme> = {
   dark: {
     background: '#0e1217', foreground: '#c6d0d8',
     cursor: '#43c98a', cursorAccent: '#0e1217',
@@ -189,13 +213,16 @@ if (typeof window !== 'undefined') {
 }
 
 export default function TerminalPane({
-  session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', readerEnabled,
+  session, cli, theme, palette, typeface, focused, visible, active, zoom = 100, mode = 'terminal', readerEnabled,
   readerReadyKey, onReaderReady, dragId, isMobile, groupName, onBack, onDragActive, onFocus, onRename, onClose,
   onShare,
 }: {
   session: Session;
   cli?: Cli;
   theme: 'light' | 'dark';
+  /** Only to re-derive xterm's options when they change; the values live in CSS. */
+  palette?: string;
+  typeface?: string;
   groupName?: string | null; // the group this pane belongs to, if any
   focused?: boolean;
   visible?: boolean;
@@ -469,13 +496,13 @@ export default function TerminalPane({
 
   useEffect(() => {
     const term = new Terminal({
-      fontFamily: "'Geist Mono', ui-monospace, 'SF Mono', Menlo, 'Cascadia Code', monospace",
+      fontFamily: xtermFont(),
       // Start at the requested zoom so attachment does not briefly create a
       // 100% grid and then force an avoidable reflow as the session boots.
       fontSize: Math.round((13 * zoom) / 100),
       cursorBlink: true,
       scrollback: 20000,
-      theme: THEMES[theme],
+      theme: xtermTheme(theme),
       // Let users make a local selection even when an agent TUI has grabbed
       // the mouse: ⌥-drag on macOS, Shift-drag elsewhere.
       macOptionClickForcesSelection: true,
@@ -1009,10 +1036,32 @@ export default function TerminalPane({
     };
   }, [session.id]);
 
-  // Switch theme live without tearing down the terminal / connection.
+  // Switch theme, palette and typeface live without tearing down the terminal
+  // or its connection. Colours are a straight swap; a typeface is not — the cell
+  // size changes with it, so the grid this pane fits changes too, and that goes
+  // through the same claim/resync the zoom control uses. The font has to be
+  // LOADED first or xterm measures the fallback and the grid is wrong until the
+  // next resize.
   useEffect(() => {
-    if (termRef.current) termRef.current.options.theme = THEMES[theme];
-  }, [theme]);
+    const t = termRef.current;
+    if (!t) return;
+    t.options.theme = xtermTheme(theme);
+    const family = xtermFont();
+    if (t.options.fontFamily === family) return;
+    let cancelled = false;
+    const apply = () => {
+      if (cancelled || !termRef.current) return;
+      termRef.current.options.fontFamily = family;
+      if (active) claimRef.current();
+      resyncRef.current();
+    };
+    const first = family.split(',')[0].trim().replace(/^['"]|['"]$/g, '');
+    const size = Math.round((13 * zoom) / 100);
+    Promise.resolve(document.fonts?.load(`${size}px "${first}"`))
+      .catch(() => {})
+      .then(() => apply());
+    return () => { cancelled = true; };
+  }, [theme, palette, typeface, active, zoom]);
 
   // Font size and PTY geometry move together. The controller asks the server
   // for the grid that actually fits this pane; the confirmed grid then resizes
