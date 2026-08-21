@@ -1,9 +1,26 @@
 @font-face { font-family: 'Geist'; font-style: normal; font-weight: 100 900; font-display: swap; src: url('/fonts/Geist.woff2') format('woff2'); }
 @font-face { font-family: 'Geist Mono'; font-style: normal; font-weight: 100 900; font-display: swap; src: url('/fonts/GeistMono.woff2') format('woff2'); }
+/* Appearance study (Settings → Appearance). Self-hosted, like the two above: a
+   CDN would render a fallback here and the study would be of the fallback.
+   Licences and versions are recorded in public/fonts/LICENSES.md. */
+@font-face { font-family: 'Departure Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url('/fonts/DepartureMono.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url('/fonts/JetBrainsMono.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 600; font-display: swap; src: url('/fonts/JetBrainsMono-SemiBold.woff2') format('woff2'); }
+@font-face { font-family: 'IBM Plex Sans'; font-style: normal; font-weight: 400; font-display: swap; src: url('/fonts/IBMPlexSans.woff2') format('woff2'); }
+@font-face { font-family: 'IBM Plex Sans'; font-style: normal; font-weight: 600; font-display: swap; src: url('/fonts/IBMPlexSans-SemiBold.woff2') format('woff2'); }
+@font-face { font-family: 'IBM Plex Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url('/fonts/IBMPlexMono.woff2') format('woff2'); }
 
 :root {
   --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
   --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Cascadia Code', monospace;
+  /* The status marks' own font, and NOT --font-mono. The frames the static
+     states draw are measured from one glyph's ink box (see --mark-* below), and
+     that measurement is only true for the font it was taken in: rendered at
+     12.5px, the braille cell's ink sits 1.1875px from the top under Geist Mono
+     and 2.1875px under IBM Plex Mono — a 1px drift between the spinner and the
+     rectangle it is supposed to match. Pinning the cell means Settings →
+     Appearance can change every other letter in the app without touching them. */
+  --font-mark: 'Geist Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
   /* radius scale: soft, not bubbly */
   --r-sm: 4px;   /* mini buttons, chips, inline inputs */
   --r-md: 6px;   /* buttons, inputs, rows */
@@ -24,6 +41,61 @@
   --term-bg: #ffffff;
   --drop: #0e7c8618;
   --tile: #ffffff;
+}
+
+/* ---------- Appearance: typefaces (Settings → Appearance) ----------
+   Two stacks each, and nothing else: every surface reads --font-sans or
+   --font-mono already, so this is the whole mechanism. The marks are not here
+   on purpose — see --font-mark. */
+[data-typeface='departure'] {
+  --font-sans: 'Departure Mono', ui-monospace, monospace;
+  --font-mono: 'Departure Mono', ui-monospace, monospace;
+}
+[data-typeface='jetbrains'] {
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', monospace;
+}
+[data-typeface='plex'] {
+  --font-sans: 'IBM Plex Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+}
+
+/* ---------- Appearance: palettes ----------
+   Every value the default palette sets, restated per palette so nothing is
+   half-swapped: a palette that inherited --border from teal would look like
+   teal wherever a hairline meets a background. Contrast for each pair is
+   checked in web/test/palette-contrast.test.mjs — text 7:1, muted 4.5:1,
+   accent 3:1 against every surface it lands on, in both themes. */
+[data-palette='indigo'] {
+  --accent: #4b45d4; --accent-fg: #ffffff; --go: #1f8a5a; --danger: #c2433a; --bg: #edeff7; --panel: #ffffff; --panel-2: #f5f6fb; --border: #d8dbe8; --border-strong: #c1c6dd; --text: #14161f; --muted: #5f6580; --term-bg: #ffffff; --tile: #ffffff;
+  --drop: #4b45d418;
+}
+[data-theme='dark'][data-palette='indigo'] {
+  --accent: #9a9bfb; --accent-fg: #0e0f24; --go: #43c98a; --danger: #e0726a; --bg: #0b0c14; --panel: #14161f; --panel-2: #101119; --border: #262a3a; --border-strong: #333850; --text: #e8eaf4; --muted: #9298b0; --term-bg: #101119; --tile: #f2f3f7;
+  --drop: #9a9bfb18;
+}
+[data-palette='paper'] {
+  --accent: #a94a17; --accent-fg: #ffffff; --go: #1c7a4a; --danger: #b23b2f; --bg: #f2ece1; --panel: #fbf7f0; --panel-2: #f6f0e6; --border: #ded3c2; --border-strong: #c7bba6; --text: #231f1a; --muted: #6b6357; --term-bg: #fbf7f0; --tile: #fbf7f0;
+  --drop: #a94a1718;
+}
+[data-theme='dark'][data-palette='paper'] {
+  --accent: #e58f52; --accent-fg: #1c1208; --go: #5cc98d; --danger: #e57a63; --bg: #16130f; --panel: #1d1915; --panel-2: #191612; --border: #302a22; --border-strong: #3f382d; --text: #ece5da; --muted: #a0968a; --term-bg: #1a1713; --tile: #efe7da;
+  --drop: #e58f5218;
+}
+[data-palette='phosphor'] {
+  --accent: #0f7040; --accent-fg: #ffffff; --go: #0f7040; --danger: #b8382f; --bg: #e7efe9; --panel: #ffffff; --panel-2: #f1f7f3; --border: #ccdcd2; --border-strong: #b2c8bb; --text: #0d1712; --muted: #586e63; --term-bg: #ffffff; --tile: #ffffff;
+  --drop: #0f704018;
+}
+[data-theme='dark'][data-palette='phosphor'] {
+  --accent: #3fdd86; --accent-fg: #04170c; --go: #3fdd86; --danger: #ff7a6b; --bg: #05080a; --panel: #0a1013; --panel-2: #080d10; --border: #1b2830; --border-strong: #243640; --text: #d6f5e3; --muted: #82a996; --term-bg: #060b0d; --tile: #dff5e8;
+  --drop: #3fdd8618;
+}
+[data-palette='plum'] {
+  --accent: #9c2189; --accent-fg: #ffffff; --go: #1f8a5a; --danger: #c2433a; --bg: #f3eef4; --panel: #ffffff; --panel-2: #faf6fb; --border: #e0d5e3; --border-strong: #cbbad0; --text: #1b141f; --muted: #6a6073; --term-bg: #ffffff; --tile: #ffffff;
+  --drop: #9c218918;
+}
+[data-theme='dark'][data-palette='plum'] {
+  --accent: #e884d6; --accent-fg: #250820; --go: #43c98a; --danger: #e0726a; --bg: #100b12; --panel: #181320; --panel-2: #141019; --border: #2f2639; --border-strong: #3d3149; --text: #efe6f3; --muted: #9b8fa6; --term-bg: #141019; --tile: #f3eef4;
+  --drop: #e884d618;
 }
 
 [data-theme='dark'] {
@@ -410,7 +482,7 @@ body {
 .ov-busy::before {
   content: '⠋'; display: inline-flex; align-items: center;
   width: var(--mark-w); height: var(--mark-h);
-  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-family: var(--font-mark); font-size: var(--mark-size);
   font-weight: var(--mark-weight); line-height: 1;
   color: var(--accent); transform: translateY(var(--mark-optical-y));
   animation: ov-spin 0.9s steps(1) infinite;
@@ -599,7 +671,7 @@ body {
    Same principle as --cx-gutter (#71) and --ph-pad-y (#75). */
 .status.working, .status.waiting, .status.idle, .status.stopped {
   width: var(--mark-w); height: var(--mark-h);
-  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-family: var(--font-mark); font-size: var(--mark-size);
   font-weight: var(--mark-weight); line-height: 1;
   border-radius: 0; background: none;
   display: inline-flex; align-items: center; position: relative;
@@ -1112,36 +1184,50 @@ body {
    quiet — comments recede, strings and keywords carry the structure, everything
    else is close to body text. Tuned against WCAG AA on the pane background. */
 :root {
-  --cm-comment: #7b8794;
+  /* Code colour is TWO systems, and only one of them belongs to a palette.
+     Five of these carry app meaning, so they are written in app tokens and
+     follow whichever palette is on: a link is the accent, an error is danger,
+     and the quiet ink — comments, punctuation, metadata — is the muted grey
+     with punctuation a step darker, the relationship the hand-picked greys had.
+     `--cm-link` and `--cm-invalid` were literally the teal accent and danger
+     values typed out, which is how a palette used to leave teal in the editor.
+     The other nine are a HUE system for reading code: keyword purple, string
+     green, number orange and so on, distinguishable from each other and tuned
+     per theme rather than per palette. Re-hueing them five times over would
+     make every palette its own legibility problem and buy nothing — a green
+     string is not "the app's green". Held invariant on purpose, and asserted as
+     such in test/palette-contrast.test.mjs so a new hardcoded colour fails. */
+  --cm-comment: var(--muted);
+  --cm-punct:   color-mix(in srgb, var(--muted) 70%, var(--text));
+  --cm-meta:    var(--muted);
+  --cm-link:    var(--accent);
+  --cm-invalid: var(--danger);
   --cm-keyword: #8250df;
   --cm-string:  #0a7c42;
   --cm-number:  #b3541e;
   --cm-fn:      #1f6feb;
   --cm-type:    #953800;
-  --cm-prop:    #0550ae;
-  --cm-punct:   #57606a;
   --cm-tag:     #116329;
   --cm-def:     #1f6feb;
-  --cm-meta:    #6a737d;
   --cm-heading: #0550ae;
-  --cm-link:    #0e7c86;
-  --cm-invalid: #c2433a;
+  --cm-prop:    #0550ae;
 }
 [data-theme='dark'] {
-  --cm-comment: #7d8a97;
+  /* the same split, for the dark hues */
+  --cm-comment: var(--muted);
+  --cm-punct:   color-mix(in srgb, var(--muted) 70%, var(--text));
+  --cm-meta:    var(--muted);
+  --cm-link:    var(--accent);
+  --cm-invalid: var(--danger);
   --cm-keyword: #c39bff;
   --cm-string:  #6fd39b;
   --cm-number:  #ffab70;
   --cm-fn:      #79b8ff;
   --cm-type:    #ffcb8b;
-  --cm-prop:    #9fc6ff;
-  --cm-punct:   #9aa7b2;
   --cm-tag:     #7ee2a8;
   --cm-def:     #79b8ff;
-  --cm-meta:    #8b97a0;
   --cm-heading: #9fc6ff;
-  --cm-link:    #2bb3bd;
-  --cm-invalid: #e0726a;
+  --cm-prop:    #9fc6ff;
 }
 
 /* editing chrome: files are simply editable, so this is a status line rather
@@ -1226,6 +1312,30 @@ body {
 .settings-page h2 { margin: 6px 0 18px; font-size: 22px; }
 .settings-page h3 { margin: 24px 0 8px; font-size: 14px; }
 /* plain rows, not cards: the bold label is the section header */
+/* ---------- Settings → Appearance ----------
+   A row of real choices rather than a control panel: each card shows what it
+   does (three colours of the palette in the theme you are in, or the name set
+   in the typeface itself) and applies on press. */
+.setting-block { display: flex; flex-direction: column; gap: 4px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+.ap-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-top: 8px; }
+.ap-card {
+  display: flex; flex-direction: column; gap: 5px; align-items: flex-start; text-align: left;
+  padding: 9px 10px; border: 1px solid var(--border); border-radius: var(--r-lg);
+  background: var(--panel); color: var(--text); font: inherit; cursor: pointer;
+}
+.ap-card:hover { border-color: var(--border-strong); }
+.ap-card.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.ap-swatch { display: inline-flex; width: 100%; height: 22px; border-radius: var(--r-sm); overflow: hidden; border: 1px solid var(--border); }
+.ap-swatch span { flex: 1; }
+.ap-name { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; }
+.ap-note { font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+/* the sample is rendered in the face it offers, so the choice shows itself */
+.ap-sample { font-size: 15px; line-height: 1.4; letter-spacing: -0.01em; }
+.ap-sample-geist { font-family: 'Geist', sans-serif; }
+.ap-sample-departure { font-family: 'Departure Mono', monospace; }
+.ap-sample-jetbrains { font-family: 'JetBrains Mono', monospace; }
+.ap-sample-plex { font-family: 'IBM Plex Sans', sans-serif; }
+
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 2px; }
 /* a row whose description runs several lines: the control sits level with the
    text instead of centring against it, so the eye finds it where it starts */

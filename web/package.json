@@ -13,7 +13,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node ../scripts/run-suites.mjs",
+    "test": "node test/palette-contrast.test.mjs && node ../scripts/run-suites.mjs",
     "test:render": "node test/statusMark.render.test.mjs && node test/stateLogo.render.test.mjs",
     "preview": "vite preview"
   },

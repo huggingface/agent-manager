@@ -203,7 +203,9 @@
      path that stands in for it while an agent is not working. */
   content: '⠋'; display: inline-flex; align-items: center;
   width: var(--mark-w); height: var(--mark-h);
-  font-family: var(--font-mono); font-size: var(--mark-size);
+  /* --font-mark, not --font-mono: the glyph's cell is measured, and Settings →
+     Appearance can change --font-mono under it. See styles.css. */
+  font-family: var(--font-mark); font-size: var(--mark-size);
   font-weight: var(--mark-weight); line-height: 1;
   color: var(--accent); transform: translateY(var(--mark-optical-y));
   animation: ov-spin 0.9s steps(1) infinite;

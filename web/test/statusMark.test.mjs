@@ -79,7 +79,10 @@ check('every spinner consumes the shared type, weight and cell contract', () => 
       assert.match(spinner.body, /translateY\(var\(--mark-optical-y\)\)/, 'working lost the optical correction');
       continue; // its parent owns the contract; the mark fills it below
     }
-    assert.match(spinner.body, /font-family\s*:\s*var\(--font-mono\)/, `${spinner.selector} inherits its font family`);
+    // --font-mark, not --font-mono: Settings → Appearance can change the mono
+    // font of the whole app, and the mark's cell is measured, so it reads a
+    // token nothing else moves. Inheriting is still the failure being guarded.
+    assert.match(spinner.body, /font-family\s*:\s*var\(--font-mark\)/, `${spinner.selector} inherits its font family`);
     assert.match(spinner.body, /font-size\s*:\s*var\(--mark-size\)/, `${spinner.selector} has its own type size`);
     assert.match(spinner.body, /font-weight\s*:\s*var\(--mark-weight\)/, `${spinner.selector} inherits its weight`);
     assert.match(spinner.body, /line-height\s*:\s*1/, `${spinner.selector} inherits its line height`);
@@ -104,7 +107,7 @@ check('the four states are sized from the cell', () => {
 });
 check('the four states own their typography instead of inheriting it', () => {
   const typed = stateRules.filter((r) => !/::before/.test(r.selector)
-    && /font-family\s*:\s*var\(--font-mono\)/.test(r.body)
+    && /font-family\s*:\s*var\(--font-mark\)/.test(r.body)
     && /font-size\s*:\s*var\(--mark-size\)/.test(r.body)
     && /font-weight\s*:\s*var\(--mark-weight\)/.test(r.body)
     && /line-height\s*:\s*1/.test(r.body));

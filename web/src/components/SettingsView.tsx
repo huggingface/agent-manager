@@ -6,6 +6,7 @@ import ApiLog from './ApiLog';
 import UsagePanel from './UsagePanel';
 import CronSettings from './CronSettings';
 import { SunGlyph, MoonGlyph, RefreshGlyph, InfoGlyph } from './icons';
+import { PALETTES, TYPEFACES, type PaletteId, type TypefaceId } from '../lib/appearance';
 import Logo from './Logo';
 
 type Page = 'general' | 'usage' | 'skills' | 'cron' | 'apilog';
@@ -122,7 +123,8 @@ function PushRow() {
 }
 
 export default function SettingsView({
-  page, onPage, onClose, theme, onToggleTheme, clis, info, onShowWelcome, demoMode, onToggleDemo,
+  page, onPage, onClose, theme, onToggleTheme, palette, onPalette, typeface, onTypeface,
+  clis, info, onShowWelcome, demoMode, onToggleDemo,
   onOpenSharedTrace,
 }: {
   page: Page;
@@ -130,6 +132,10 @@ export default function SettingsView({
   onClose: () => void;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
+  palette: PaletteId;
+  onPalette: (p: PaletteId) => void;
+  typeface: TypefaceId;
+  onTypeface: (t: TypefaceId) => void;
   clis: Cli[];
   info: Info | null;
   onShowWelcome?: () => void;
@@ -294,6 +300,56 @@ export default function SettingsView({
             <div className="setting-row">
               <div><div className="s-label">Theme</div><div className="s-help">Defaults to your system setting.</div></div>
               <button className="btn-ghost" onClick={onToggleTheme}>{theme === 'dark' ? <><MoonGlyph /> Dark</> : <><SunGlyph /> Light</>}</button>
+            </div>
+
+            {/* Appearance. Both controls change the WHOLE interface the moment
+                you press them — sidebar, panes, the reader, Overview, and this
+                page — because all either one does is set a data attribute on
+                <html> that the custom properties hang off. Nothing here knows
+                what a component looks like. */}
+            <div className="setting-block">
+              <div className="s-label">Palette</div>
+              <div className="s-help">The colours of the whole interface. Each one is defined for light and dark.</div>
+              <div className="ap-grid">
+                {PALETTES.map((p) => (
+                  <button
+                    key={p.id}
+                    className={`ap-card${palette === p.id ? ' on' : ''}`}
+                    onClick={() => onPalette(p.id)}
+                    aria-pressed={palette === p.id}
+                  >
+                    <span className="ap-swatch" aria-hidden="true">
+                      {(theme === 'dark' ? p.swatchDark : p.swatch).map((c) => (
+                        <span key={c} style={{ background: c }} />
+                      ))}
+                    </span>
+                    <span className="ap-name">{p.name}{palette === p.id && <span className="save-flag">on</span>}</span>
+                    <span className="ap-note">{p.note}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="setting-block">
+              <div className="s-label">Typeface</div>
+              <div className="s-help">
+                Set in the app, not in your browser. The status marks keep their own font, so they
+                stay put whichever you choose.
+              </div>
+              <div className="ap-grid">
+                {TYPEFACES.map((t) => (
+                  <button
+                    key={t.id}
+                    className={`ap-card${typeface === t.id ? ' on' : ''}`}
+                    onClick={() => onTypeface(t.id)}
+                    aria-pressed={typeface === t.id}
+                  >
+                    <span className={`ap-sample ap-sample-${t.id}`}>{t.sample}</span>
+                    <span className="ap-name">{t.name}{typeface === t.id && <span className="save-flag">on</span>}</span>
+                    <span className="ap-note">{t.note}</span>
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Opening someone else's shared session. This used to be a widget
