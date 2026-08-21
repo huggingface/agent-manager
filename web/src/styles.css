@@ -1177,7 +1177,15 @@ body {
 .fv-pdf .pdf-page { border-radius: var(--r-sm); box-shadow: 0 1px 4px #0003; background: #fff; max-width: 100%; }
 
 /* the shared .markdown card is defined later in this file — win on specificity */
-.markdown.fv-md { flex: 1; min-height: 0; border: none; border-radius: 0; background: none; padding: 14px 18px 26px; }
+.markdown.fv-md { flex: 1; min-height: 0; border: none; border-radius: 0; background: none; padding: 14px 18px 26px; font-size: inherit; }
+/* The shared markdown rules use absolute sizes. In the file reader those would
+   leave headings fixed while the zoom changed only the body. Preserve the
+   existing 22/18/15px hierarchy at the 14px base, but make it one em cascade so
+   headings, inline/pre code and table text all follow the same reading size. */
+.markdown.fv-md h1 { font-size: 1.5714285714em; }
+.markdown.fv-md h2 { font-size: 1.2857142857em; }
+.markdown.fv-md h3 { font-size: 1.0714285714em; }
+.markdown.fv-md table { font-size: 1em; }
 .markdown.fv-md img { border-radius: var(--r-md); }
 
 /* A light checkerboard in BOTH themes: it says "transparent" without hiding the
