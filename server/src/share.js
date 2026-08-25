@@ -285,6 +285,40 @@ async function firstLineOf(p) {
   }
 }
 
+/**
+ * Locate an fx session's event log. The pin (fxSessionId, captured by
+ * runner.js) names the directory, so it is authoritative when the log is still
+ * there. Without a pin, fall back to the one session bound to this folder —
+ * and only when no sibling pane shares it, the same ambiguity guard the other
+ * harnesses use.
+ */
+async function findFxEvents(session, allSessions = []) {
+  const root = path.join(process.env.HOME || '', '.fx', 'sessions');
+  const eventsOf = (id) => path.join(root, id, 'events.jsonl');
+  if (session.fxSessionId) {
+    const p = eventsOf(session.fxSessionId);
+    try { if ((await fsp.stat(p)).isFile()) return p; } catch { /* purged */ }
+  }
+  const folder = session.path ?? session.id;
+  if (allSessions.some((o) => o.id !== session.id && o.cli === 'fx' && (o.path ?? o.id) === folder)) return null;
+  const dir = path.resolve(WORKSPACES_DIR, folder);
+  let ents = [];
+  try { ents = await fsp.readdir(root, { withFileTypes: true }); } catch { return null; }
+  let best = null;
+  for (const e of ents) {
+    if (!e.isDirectory()) continue;
+    let m;
+    try { m = JSON.parse(await fsp.readFile(path.join(root, e.name, 'session.json'), 'utf8')); } catch { continue; }
+    if (!m || !m.workspace_root || path.resolve(m.workspace_root) !== dir) continue;
+    const ts = m.updated_at_ms || m.created_at_ms || 0;
+    if (!best || ts > best.ts) best = { id: e.name, ts };
+  }
+  if (!best) return null;
+  const p = eventsOf(best.id);
+  try { if ((await fsp.stat(p)).isFile()) return p; } catch { /* raced */ }
+  return null;
+}
+
 const opencodeDbPath = () =>
   path.join(process.env.XDG_DATA_HOME || path.join(process.env.HOME || '', '.local', 'share'), 'opencode', 'opencode.db');
 const hermesDbPath = () => path.join(process.env.HOME || '', '.hermes', 'state.db');
@@ -365,6 +399,7 @@ export async function findTrace(session, allSessions = []) {
     case 'claude': { const p = await findTranscript(session, allSessions); return p && { src: p }; }
     case 'codex': { const p = await findRollout(session, allSessions); return p && { src: p }; }
     case 'openclaw': { const p = await findOpenClaw(session, allSessions); return p && { src: p }; }
+    case 'fx': { const p = await findFxEvents(session, allSessions); return p && { src: p }; }
     case 'opencode':
     case 'hermes': {
       const hit = await findDbSession(session, allSessions);
@@ -374,9 +409,13 @@ export async function findTrace(session, allSessions = []) {
   }
 }
 
+// fx is deliberately absent: scripts/share-session.mjs has no exporter for it
+// (native passthrough is Hub-specific, and there is no STS conversion yet), so
+// listing it here would ship a Share button that always fails. Its trace still
+// resolves through findTrace() for the reader.
 export const SHAREABLE_CLIS = ['claude', 'codex', 'hermes', 'opencode', 'openclaw'];
 export const HARNESS_LABEL = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes',
-                               opencode: 'opencode', openclaw: 'OpenClaw' };
+                               opencode: 'opencode', openclaw: 'OpenClaw', fx: 'fx' };
 
 /** Dataset card. `configs` pins the data file so meta/ can't collide on schema (§4). */
 function datasetCard({ title, visibility, traceName, stats, redaction, harnessLabel }) {

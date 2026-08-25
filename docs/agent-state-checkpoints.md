@@ -6,7 +6,10 @@ The Space's `/data` volume is an hf-mount FUSE view over mutable object
 storage, not a POSIX disk. Its default streaming writer buffers an open file in
 memory and uploads it on close. That is a bad match for Codex, which holds one
 rollout open for an entire resumed session: an unclean process/container stop
-can discard every append since the previous open epoch closed.
+can discard every append since the previous open epoch closed. fx is the same
+shape — one `events.jsonl` per conversation, appended to through a handle it
+keeps open — and it has no config-dir override at all, so `$HOME/.fx` is a
+symlink to local disk rather than an env var pointed there.
 
 The old layout also copied opencode and Hermes SQLite databases, WALs, and SHMs
 with `rsync`. Those files can be observed at different transaction boundaries;
@@ -36,6 +39,7 @@ having all three files is not proof that the copy is a consistent database.
 | OpenClaw | `$AM_LOCAL/oc-home/.openclaw` | `/data/state/openclaw-backup` | file tree |
 | opencode | `$AM_LOCAL/opencode-share` | `/data/state/opencode` | file tree plus online `opencode.db` backup |
 | Hermes | `$AM_LOCAL/hermes` | `/data/state/hermes` | file tree plus online `state.db` backup |
+| fx | `$AM_LOCAL/fx-home` | `/data/state/fx` | file tree; locks and `index.pending` excluded |
 
 Remote agents already use a good object-store pattern: one closed, immutable
 Markdown file per message. Shell sessions have no model transcript; workspace

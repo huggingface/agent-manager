@@ -5,11 +5,12 @@ import { AmMark } from './icons';
 // (see .welcome-diagram media query) where the labels would be too small.
 const HARNESSES: [name: string, logo: string, color: string, y: number, inv: string][] = [
   ['Claude Code', 'claude.png', '#d97757', 20, ''],
-  ['Codex', 'codex.png', '#5eb6a6', 58, ''],
-  ['Gemini', 'gemini.png', '#4796e3', 96, ''],
-  ['opencode', 'opencode.png', '#b9c2cc', 134, 'wd-inv-dark'],
-  ['Hermes', 'hermes.png', '#a78bfa', 172, 'wd-inv-light'],
-  ['OpenClaw', 'openclaw.png', '#e05a4e', 210, ''],
+  ['Codex', 'codex.png', '#5eb6a6', 52, ''],
+  ['Gemini', 'gemini.png', '#4796e3', 84, ''],
+  ['opencode', 'opencode.png', '#b9c2cc', 116, 'wd-inv-dark'],
+  ['Hermes', 'hermes.png', '#a78bfa', 148, 'wd-inv-light'],
+  ['OpenClaw', 'openclaw.png', '#e05a4e', 180, ''],
+  ['fx', 'fx.png', '#626262', 212, 'wd-inv-dark'],
 ];
 
 export default function WelcomeDiagram() {
@@ -20,13 +21,16 @@ export default function WelcomeDiagram() {
         <text className="wd-zone" x="320" y="12" textAnchor="middle">Your Space</text>
         <text className="wd-zone" x="568" y="12" textAnchor="middle">You</text>
 
-        {/* nested rounded routing, outer wires innermost so nothing crosses */}
-        <path className="wd-link" d="M172 32  H238 Q244 32 244 38  V100 Q244 106 250 106 H268" />
-        <path className="wd-link" d="M172 70  H226 Q232 70 232 76  V108 Q232 114 238 114 H268" />
-        <path className="wd-link" d="M172 108 H214 Q220 108 220 114 V116 Q220 122 226 122 H268" />
-        <path className="wd-link" d="M172 146 H214 Q220 146 220 140 V136 Q220 130 226 130 H268" />
-        <path className="wd-link" d="M172 184 H226 Q232 184 232 178 V144 Q232 138 238 138 H268" />
-        <path className="wd-link" d="M172 222 H238 Q244 222 244 216 V152 Q244 146 250 146 H268" />
+        {/* nested rounded routing, outer wires innermost so nothing crosses.
+            An odd number of harnesses puts one of them level with the hub, so
+            that wire is a straight line and the elbows pair up around it. */}
+        <path className="wd-link" d="M172 32  H238 Q244 32 244 38  V101 Q244 107 250 107 H268" />
+        <path className="wd-link" d="M172 64  H230 Q236 64 236 70  V108 Q236 114 242 114 H268" />
+        <path className="wd-link" d="M172 96  H222 Q228 96 228 102 V115 Q228 121 234 121 H268" />
+        <path className="wd-link" d="M172 128 H268" />
+        <path className="wd-link" d="M172 160 H222 Q228 160 228 154 V141 Q228 135 234 135 H268" />
+        <path className="wd-link" d="M172 192 H230 Q236 192 236 186 V148 Q236 142 242 142 H268" />
+        <path className="wd-link" d="M172 224 H238 Q244 224 244 218 V155 Q244 149 250 149 H268" />
         <path className="wd-link" d="M372 128 H428" />
         <path className="wd-link" d="M514 128 H528 Q534 128 534 120 V84 Q534 76 540 76 H542" />
         <path className="wd-link" d="M514 128 H528 Q534 128 534 136 V185 Q534 191 540 191 H554" />
