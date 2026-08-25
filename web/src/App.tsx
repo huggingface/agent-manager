@@ -13,6 +13,7 @@ import StateLogo from './components/StateLogo';
 import Overview from './components/Overview';
 import Locked from './components/Locked';
 import BackupBanner from './components/BackupBanner';
+import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
@@ -21,7 +22,7 @@ import { hiddenSessionIds } from './lib/overviewHidden';
 import { useReaderBatch } from './lib/readerBatch';
 import { paneOwnsBack } from './lib/mobileBack';
 import { isPassive, isRemote, isShareable } from './types';
-import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SearchGlyph, SortGlyph } from './components/icons';
+import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
 
 // `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
 // when the app is embedded cross-origin. Read once: it never changes mid-run,
@@ -1189,19 +1190,7 @@ export default function App() {
         </div>
         {activeRef === 'overview' && (
           <div className="zoombar ov-bar">
-            <div className={`ov-search${ovQuery ? ' has-query' : ''}`} title="Filter agent names and recent trace activity">
-              <SearchGlyph />
-              <input
-                value={ovQuery}
-                onChange={(e) => setOvQuery(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Escape') { setOvQuery(''); e.currentTarget.blur(); } }}
-                placeholder="Filter recent activity…"
-                aria-label="Filter agents by recent trace activity"
-                autoComplete="off"
-                spellCheck={false}
-              />
-              {ovQuery && <button type="button" aria-label="Clear search" title="Clear search" onClick={() => setOvQuery('')}>×</button>}
-            </div>
+            <OverviewSearchBox value={ovQuery} onChange={setOvQuery} />
             <div className="seg ov-seg">
               {OV_CHIPS.map(({ chip, title }) => (
                 <button key={chip} className={ovChip === chip ? 'on' : ''} title={title}

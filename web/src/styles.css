@@ -90,7 +90,8 @@ body {
 .ov-search > svg { width: 13px; height: 13px; flex: none; }
 .ov-search > input { min-width: 0; flex: 1; border: 0; outline: 0; padding: 0; background: transparent; color: var(--text); font: inherit; font-size: 11.5px; }
 .ov-search > input::placeholder { color: var(--muted); }
-.ov-search > button { width: 16px; height: 16px; flex: none; border: 0; padding: 0; border-radius: 50%; background: transparent; color: var(--muted); font: 15px/15px system-ui, sans-serif; cursor: pointer; }
+/* The mark stays small; its box is a real touch target. */
+.ov-search > button { width: 24px; height: 24px; flex: none; margin-right: -6px; border: 0; padding: 0; border-radius: 50%; background: transparent; color: var(--muted); font: 15px/15px system-ui, sans-serif; cursor: pointer; }
 .ov-search > button:hover { background: var(--hover); color: var(--text); }
 /* the sort segment needs to say what it is — "prompt"/"answer" next to a row of
    filter words would otherwise read as two more filters — so a glyph sits beside
@@ -1787,7 +1788,7 @@ a.btn-ghost { text-decoration: none; }
   /* 16px inputs stop iOS zoom-on-focus — touch devices only, so a narrow
      DESKTOP window keeps the reply line at card size */
   @media (pointer: coarse) {
-    .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input, .ov-live textarea { font-size: 16px; }
+    .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input, .ov-live textarea, .ov-search > input { font-size: 16px; }
     .ov-composer { --ov-first-line: calc(1.45 * 16px + 4px); }
   }
   .ov-headrow { flex-wrap: wrap; }
