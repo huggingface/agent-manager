@@ -45,6 +45,7 @@ import {
 import * as runstate from './runstate.js';
 import { installSlowFsProbe } from './slowfs.js';
 import { operationMiddleware, readOperations } from './operations.js';
+import { findByName, filterAgentsByGroup } from './agent-list.js';
 
 // Before anything else touches the mount: a sync fs call to /data is ~85ms of
 // frozen event loop here, and nothing else in the stack can see it. See slowfs.js.
@@ -593,6 +594,9 @@ function agentRow(s, act, d, selfId, mates) {
 }
 
 app.get('/api/agents', async (req, res) => {
+  // `?group=` narrows the roster to one sidebar group, by name, ignoring case.
+  const group = req.query.group === undefined ? null : String(req.query.group).trim();
+  if (group !== null && (!group || group.length > 120)) return res.status(400).json({ error: 'group filter is invalid' });
   const info = agentInfo();
   const digests = await traceDigests();
   const selfId = String(req.query.from || req.query.self || '').trim() || null;
@@ -610,7 +614,7 @@ app.get('/api/agents', async (req, res) => {
     agents.push(row);
   }
   res.json({
-    agents,
+    agents: filterAgentsByGroup(agents, group),
     // Which CLIs a spawn can ask for. `ready` = a credential was found.
     // Remote agents are absent from the spawn list on purpose: creating one
     // produces a pane waiting for a human to paste its prompt onto another
@@ -1361,7 +1365,8 @@ curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents?from=$AM_ID" | jq .
 Each entry carries \`id\`, \`name\`, \`cli\`, \`state\`, \`workdir\`, \`sharesFolderWith\`,
 a one-line \`lastPrompt\`/\`lastAnswer\`, \`recentFiles\`, and \`trace\` — the path to
 its raw conversation log, which you can read directly with \`jq\` when you need
-the full history rather than a summary. \`GET /api/agents/$ID\` adds the full
+the full history rather than a summary. \`?group=<name>\` keeps only one sidebar
+group (name matched ignoring case). \`GET /api/agents/$ID\` adds the full
 digest for one agent. Read \`state\` before you do anything:
 
 - \`working\` — thinking or running a tool right now. **Leave it alone.**
@@ -2291,7 +2296,7 @@ function beginCronFire(job, trigger) {
   };
 
   try {
-    let session = store.list().find((candidate) => candidate.name === job.agent.name) || null;
+    let session = findByName(store.list(), job.agent.name);
     let agentCreated = false;
     if (!session) {
       const invalid = cronCliError(job.agent.cli);
