@@ -13,6 +13,7 @@ import StateLogo from './components/StateLogo';
 import Overview from './components/Overview';
 import Locked from './components/Locked';
 import BackupBanner from './components/BackupBanner';
+import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
@@ -174,6 +175,9 @@ export default function App() {
   // unlike the sort beside it: "show me only the stopped ones" is a thing you do
   // for a moment, not a standing preference.
   const [ovChip, setOvChip] = useState<OverviewChip>('all');
+  // A glance, like the state chip: keep it while switching Overview layouts,
+  // but start clean on reload. Filtering reads only the digests already polled.
+  const [ovQuery, setOvQuery] = useState('');
   const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
   const rememberPath = (p?: string | null) => {
     const next = normalizePath(p);
@@ -1149,6 +1153,7 @@ export default function App() {
               tree={tree}
               chip={ovChip}
               sort={ovSort}
+              query={ovQuery}
               view={ovView}
               archived={archivedIds}
               showArchived={showArchived}
@@ -1185,6 +1190,7 @@ export default function App() {
         </div>
         {activeRef === 'overview' && (
           <div className="zoombar ov-bar">
+            <OverviewSearchBox value={ovQuery} onChange={setOvQuery} />
             <div className="seg ov-seg">
               {OV_CHIPS.map(({ chip, title }) => (
                 <button key={chip} className={ovChip === chip ? 'on' : ''} title={title}
