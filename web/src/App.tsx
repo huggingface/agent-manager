@@ -21,7 +21,7 @@ import { hiddenSessionIds } from './lib/overviewHidden';
 import { useReaderBatch } from './lib/readerBatch';
 import { paneOwnsBack } from './lib/mobileBack';
 import { isPassive, isRemote, isShareable } from './types';
-import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
+import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SearchGlyph, SortGlyph } from './components/icons';
 
 // `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
 // when the app is embedded cross-origin. Read once: it never changes mid-run,
@@ -174,6 +174,9 @@ export default function App() {
   // unlike the sort beside it: "show me only the stopped ones" is a thing you do
   // for a moment, not a standing preference.
   const [ovChip, setOvChip] = useState<OverviewChip>('all');
+  // A glance, like the state chip: keep it while switching Overview layouts,
+  // but start clean on reload. Filtering reads only the digests already polled.
+  const [ovQuery, setOvQuery] = useState('');
   const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
   const rememberPath = (p?: string | null) => {
     const next = normalizePath(p);
@@ -1149,6 +1152,7 @@ export default function App() {
               tree={tree}
               chip={ovChip}
               sort={ovSort}
+              query={ovQuery}
               view={ovView}
               archived={archivedIds}
               showArchived={showArchived}
@@ -1185,6 +1189,19 @@ export default function App() {
         </div>
         {activeRef === 'overview' && (
           <div className="zoombar ov-bar">
+            <div className={`ov-search${ovQuery ? ' has-query' : ''}`} title="Filter agent names and recent trace activity">
+              <SearchGlyph />
+              <input
+                value={ovQuery}
+                onChange={(e) => setOvQuery(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Escape') { setOvQuery(''); e.currentTarget.blur(); } }}
+                placeholder="Filter recent activity…"
+                aria-label="Filter agents by recent trace activity"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              {ovQuery && <button type="button" aria-label="Clear search" title="Clear search" onClick={() => setOvQuery('')}>×</button>}
+            </div>
             <div className="seg ov-seg">
               {OV_CHIPS.map(({ chip, title }) => (
                 <button key={chip} className={ovChip === chip ? 'on' : ''} title={title}

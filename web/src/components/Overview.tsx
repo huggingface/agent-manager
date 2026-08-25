@@ -6,6 +6,7 @@ import type { Cli, OverviewChip, OverviewFilter, OverviewSort, Session, SessionS
 import { chipBuckets, isPassive, isRemote, STATE_LABEL, REMOTE_STATE_LABEL } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import { rankSessions, sortLabel } from '../lib/overviewSort';
+import { matchesOverviewSearch } from '../lib/overviewSearch';
 import { hiddenSessionIds } from '../lib/overviewHidden';
 import type { Rankable } from '../lib/overviewSort';
 import {
@@ -537,11 +538,12 @@ export function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession
 /** Mission control: one reading column — group capsules with their agents as
  *  slabs, loose agents as standalone panels. Unless a sort is on, in which case
  *  it is one flat ranked column instead (see §"sorted feed" below). */
-export default function Overview({ clis, tree, chip, sort, view, archived, showArchived, showHidden, meta, metaReady, isMobile, onOpen }: {
+export default function Overview({ clis, tree, chip, sort, query, view, archived, showArchived, showHidden, meta, metaReady, isMobile, onOpen }: {
   clis: Cli[];
   tree: Tree;
   chip: OverviewChip;     // controlled by the bottom bar in App
   sort: OverviewSort;     // ditto, and independent of the filter
+  query: string;          // transient recent-activity filter in the bottom bar
   view: 'tiles' | 'list'; // controlled by the bottom bar in App
   archived: Set<string>;
   showArchived: boolean;
@@ -579,14 +581,6 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
   // hide a group and its working agent must not float back to the top.
   const hiddenIds = useMemo(() => hiddenSessionIds(tree), [tree]);
 
-  // One chip can stand for several buckets ('started' is waiting AND working), so
-  // this is set membership, not equality.
-  const buckets = chipBuckets(chip);
-  const visible = (s: MetaSession) =>
-    buckets.includes(bucket(s.state))
-    && (showArchived || !archived.has(s.id))
-    && (showHidden || !hiddenIds.has(s.id));
-
   // Which group each agent is in, by name. Only the sorted feed needs it: the
   // manual feed draws the group as a frame around its members and would be
   // saying it twice (the same rule the sidebar and pane headers follow —
@@ -596,6 +590,16 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
     for (const g of tree.groups) for (const id of g.sessionIds) m[id] = g.name;
     return m;
   }, [tree.groups]);
+
+  // One chip can stand for several buckets ('started' is waiting AND working), so
+  // this is set membership, not equality. Search is the final AND: it filters
+  // the same cards without changing their grouping or order.
+  const buckets = chipBuckets(chip);
+  const visible = (s: MetaSession) =>
+    buckets.includes(bucket(s.state))
+    && (showArchived || !archived.has(s.id))
+    && (showHidden || !hiddenIds.has(s.id))
+    && matchesOverviewSearch(s, groupNameOf[s.id] ?? '', query);
 
   // ---- sorted feed: flat, ranked, groups become a prefix ----
   //
@@ -641,7 +645,7 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
     if (!metaReady) return { running: [], dated: items, undated: [] };
     return rankSessions(items, sort);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sorted, sort, tree.order, sessById, groupById, meta, metaReady, chip, archived, showArchived, hiddenIds, showHidden]);
+  }, [sorted, sort, tree.order, sessById, groupById, meta, metaReady, chip, archived, showArchived, hiddenIds, showHidden, groupNameOf, query]);
 
   // Collapse at constant velocity: duration follows the group's height.
   const toggleGroup = (gid: string, el: HTMLElement) => {
@@ -769,7 +773,9 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
   const hiddenCount = hiddenIds.size;
   const empty = (
     <div className="usage-msg mono">
-      {!showHidden && hiddenCount > 0
+      {query.trim()
+        ? `no recent activity matches “${query.trim()}” with the current filters.`
+        : !showHidden && hiddenCount > 0
         ? `nothing to show — ${hiddenCount} hidden. reveal them from the bar below.`
         : chip === 'all' ? 'no agents yet — shells and file panes don’t appear here.'
         : chip === 'started' ? 'nothing started — no agent is running or waiting on you.'
