@@ -1045,7 +1045,14 @@ async function normalizeClaude(file, out, range) {
   for await (const j of jsonLines(file, range)) {
     // These embed whole file contents; share.js drops them and so do we.
     if (j.type === 'file-history-snapshot' || j.type === 'file-history-delta') continue;
-    if (j.isMeta || j.sourceToolUseID) continue;
+    // `isMeta` is the harness talking to itself, and dropped — with one
+    // exception, added for the reader's sub-agent strip: a `task-notification`
+    // is the ONLY record that says a sub-agent finished, and what it handed
+    // back. In a sub-agent's own transcript (CLI 2.1.209) those records carry
+    // isMeta, while in a parent's they do not, so dropping them meant a
+    // sub-agent that spawned sub-agents could never show any of them as done.
+    // It still renders as a `system` turn, which the reader does not draw.
+    if ((j.isMeta || j.sourceToolUseID) && j.origin?.kind !== 'task-notification') continue;
     if (j.type === 'queue-operation') {
       const text = queueKey(j.content);
       if (j.operation === 'enqueue') {
@@ -1107,7 +1114,12 @@ async function normalizeClaude(file, out, range) {
         // Injected environment/reminder blobs are not prompts — show them, but
         // as system so the conversation reads correctly (same rule the digest
         // uses to avoid counting them).
-        if (j.type === 'user' && (t.startsWith('<') || t.startsWith('[Request interrupted'))) {
+        // `[SYSTEM NOTIFICATION - NOT USER INPUT]` is how CLI 2.1.209 opens a
+        // task-notification inside a SUB-AGENT's transcript, where the parent's
+        // copy opens with the tag itself. It says so on the tin; without it in
+        // this list the record reads as something the operator typed, and the
+        // reader would open a new exchange with harness noise in the prompt band.
+        if (j.type === 'user' && (t.startsWith('<') || t.startsWith('[Request interrupted') || t.startsWith('[SYSTEM NOTIFICATION'))) {
           out.push({ role: 'system', ts, blocks: [textBlock('text', t)] });
           continue;
         }
@@ -1949,6 +1961,89 @@ export async function readTrace(session, opts = {}) {
     sessionId: hit.sessionId || session.sessionUuid || null,
     size: st.size,
   }, opts);
+}
+
+/**
+ * The sub-agents a Claude session spawned, from the directory beside its own
+ * transcript. (PoC — see docs/… nothing; this is the reader's sub-agent strip.)
+ *
+ *   <project>/<session-uuid>.jsonl          the parent, up to 292 MB here
+ *   <project>/<session-uuid>/subagents/
+ *       agent-<agentId>.jsonl               the child's transcript
+ *       agent-<agentId>.meta.json           187 bytes, and the whole point
+ *
+ * The roster is a directory listing plus a few kilobytes: the sidecar names the
+ * task (`description`), the exact spawning call (`toolUseId`), the parent agent
+ * and the depth. Nothing here opens the parent transcript, which is the only
+ * reason this can be asked for on a poll — reading the parent per poll is not
+ * survivable at 292 MB.
+ *
+ * Two timestamps come free from stat(), and they are not the same thing:
+ *   spawnedAt   — the sidecar's mtime. Written once, when the agent is created.
+ *   lastWroteAt — the transcript's mtime. Moves while it works, and then stops
+ *                 whether it finished or died. It is reported, never judged:
+ *                 measured gaps between consecutive records inside a LIVE
+ *                 sub-agent run to 601s (p99 112s), so "silent means dead" is
+ *                 wrong several times an hour. Whether one is finished is
+ *                 decided in the client from the parent's own records.
+ */
+export async function subagentRoster(session) {
+  const loc = await traceLocation(session);
+  if (!loc || session.cli !== 'claude' || loc.format !== 'jsonl') {
+    return { supported: false, reason: session.cli === 'claude' ? 'no transcript yet' : `${session.cli} keeps sub-agents elsewhere`, dir: null, agents: [] };
+  }
+  const dir = path.join(loc.path.replace(/\.jsonl$/, ''), 'subagents');
+  let names = [];
+  try { names = await fsp.readdir(dir); } catch { return { supported: true, dir, agents: [] }; }
+
+  const agents = [];
+  for (const name of names) {
+    const m = /^agent-([A-Za-z0-9_-]+)\.meta\.json$/.exec(name);
+    if (!m) continue;
+    const agentId = m[1];
+    const metaPath = path.join(dir, name);
+    const filePath = path.join(dir, `agent-${agentId}.jsonl`);
+    let meta = {};
+    try { meta = JSON.parse(await fsp.readFile(metaPath, 'utf8')) || {}; } catch { /* a half-written sidecar is still an agent */ }
+    const [metaSt, fileSt] = await Promise.all([statRetry(metaPath), statRetry(filePath)]);
+    agents.push({
+      agentId,
+      agentType: meta.agentType || null,
+      description: meta.description || null,
+      toolUseId: meta.toolUseId || null,
+      parentAgentId: meta.parentAgentId || null,
+      depth: Number.isFinite(meta.spawnDepth) ? meta.spawnDepth : null,
+      spawnedAt: metaSt ? Math.round(metaSt.mtimeMs) : null,
+      lastWroteAt: fileSt ? Math.round(fileSt.mtimeMs) : null,
+      bytes: fileSt ? fileSt.size : 0,
+      hasTranscript: !!fileSt,
+    });
+  }
+  agents.sort((a, b) => (a.spawnedAt || 0) - (b.spawnedAt || 0));
+  return { supported: true, dir, agents };
+}
+
+/**
+ * One sub-agent's transcript, read as an ordinary trace.
+ *
+ * It IS an ordinary trace — same records, same normalizer, so the reader can
+ * render a sub-agent with the component it already uses for a session. The file
+ * is small (11 MB across all 38 of the largest session here) where the parent
+ * is not, which is the other half of why this feature is affordable.
+ *
+ * `agentId` arrives from the browser and lands in a path, so it is matched
+ * against the id shape rather than trusted.
+ */
+export async function readSubagentTrace(session, agentId, opts = {}) {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(String(agentId || ''))) {
+    const e = new Error('not a sub-agent id'); e.code = 'no-trace'; throw e;
+  }
+  const loc = await traceLocation(session);
+  if (!loc || session.cli !== 'claude' || loc.format !== 'jsonl') {
+    const e = new Error('this session keeps no sub-agent transcripts'); e.code = 'unsupported-harness'; throw e;
+  }
+  const file = path.join(loc.path.replace(/\.jsonl$/, ''), 'subagents', `agent-${agentId}.jsonl`);
+  return readTraceByPath(file, opts);
 }
 
 /**

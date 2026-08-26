@@ -29,7 +29,7 @@ import {
 // frontend's framing is unchanged.
 const TERM_CTRL = '\x00\x00AM:';
 import { buildUsage } from './usage.js';
-import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, traceHarnessOf } from './traces.js';
+import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, traceHarnessOf, subagentRoster, readSubagentTrace } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 import { kindOfName, kindOfFile, mimeOf, readTextHead, TEXT_MAX } from './preview.js';
@@ -646,6 +646,40 @@ app.get('/api/agents/:id/tail', (req, res) => {
   const text = capturePane(s.id, lines);
   if (text === null) return res.json({ id: s.id, state: 'stopped', text: '', note: 'not running' });
   res.json({ id: s.id, state: deriveState(s, agentInfo().get(s.id)), text });
+});
+
+// The sub-agents this session spawned, and one sub-agent's own transcript.
+//
+// Both read the `subagents/` directory next to the session's transcript and
+// never the transcript itself: the parent is up to 292 MB on this machine and
+// the roster is a directory listing. Whether a sub-agent has FINISHED is not
+// answered here — that fact lives in the parent's own records, which the reader
+// already has for the window it is showing, and inventing an answer from file
+// mtime would be wrong several times an hour (measured: p99 silence 112s inside
+// a live sub-agent, max 601s).
+app.get('/api/agents/:id/subagents', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json({ id: s.id, ...(await subagentRoster(s)) });
+  } catch (e) {
+    console.error('[subagents]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'roster failed' });
+  }
+});
+
+app.get('/api/agents/:id/subagents/:agentId', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json(await readSubagentTrace(s, req.params.agentId, traceOpts(req.query)));
+  } catch (e) {
+    if (['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(e && e.code)) {
+      return res.status(404).json({ error: e.message, code: e.code });
+    }
+    console.error('[subagent-trace]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'sub-agent trace read failed' });
+  }
 });
 
 // Block until the target reaches one of `state` — so a coordinating agent makes

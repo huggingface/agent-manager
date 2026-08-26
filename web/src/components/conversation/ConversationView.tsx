@@ -577,6 +577,15 @@ export default function ConversationView({
                 // as the widget being "sometimes below and above". The card has
                 // had this guard since it grew an echo; the reader had not.
                 running={live && x === exchanges[exchanges.length - 1] && !sent}
+                // The sub-agent strip needs three things this component has and
+                // an exchange does not: the whole window (a background
+                // sub-agent's completion is recorded in a later turn), the
+                // session id (to read the roster and a child's transcript), and
+                // whether the pane is alive — which is what separates "running"
+                // from "never finished".
+                turns={turns}
+                sessionId={session.id}
+                live={live}
               />
             </div>
           ))}

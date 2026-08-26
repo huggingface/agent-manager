@@ -33,7 +33,8 @@ export const isOperatorPrompt = (t: TraceTurn) => {
   if (t.role !== 'user') return false;
   const text = t.blocks.filter((b) => b.type === 'text').map((b) => ('text' in b ? b.text : '')).join('').trim();
   if (!text) return t.blocks.some((b) => b.type === 'image');
-  return !text.startsWith('<') && !text.startsWith('[Request interrupted');
+  return !text.startsWith('<') && !text.startsWith('[Request interrupted')
+    && !text.startsWith('[SYSTEM NOTIFICATION');
 };
 
 const usageOf = (t: TraceTurn) => (t.usage ? (t.usage.in || 0) + (t.usage.out || 0) : 0);
@@ -235,6 +236,159 @@ export const fmtDur = (ms: number) => {
 
 export const fmtClock = (ms?: number) =>
   ms ? new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+
+// ---------- sub-agents ----------
+//
+// A Claude pane spawns a sub-agent with the `Agent` tool (named `Task` in older
+// CLIs; both are matched). Everything the reader needs about the SPAWN is in the
+// turn it is already showing: the call names the task, and the parent's own
+// later records say how it ended.
+//
+// The one trap, measured on this machine rather than assumed: for a BACKGROUND
+// spawn — which is all 22 of release-video's and all 38 of the-gatherer's — the
+// `tool_result` arrives two seconds after the call and says "Async agent
+// launched successfully". It is a receipt, not an outcome. Treating a result as
+// completion marks every sub-agent finished the moment it starts; on the agent
+// checked end to end that would have been 4m26s early:
+//
+//   08:36:05  Agent tool_use            spawn
+//   08:36:07  tool_result               "Async agent launched successfully… agentId: a000425…"
+//   08:40:31  (child's last record)
+//   08:40:33  <task-notification>       <tool-use-id>…</tool-use-id><status>completed</status>
+//
+// So the outcome is the NOTIFICATION for a background spawn, and the result
+// itself only when it is the agent's own report (a synchronous spawn). Observed
+// statuses: completed, failed, killed.
+const AGENT_TOOLS = new Set(['Agent', 'Task']);
+const LAUNCH_RECEIPT = /^Async agent launched successfully/;
+const AGENT_ID_IN_RECEIPT = /agentId:\s*([A-Za-z0-9_-]+)/;
+const NOTIFICATION_ID = /<tool-use-id>([^<]+)<\/tool-use-id>/;
+const NOTIFICATION_STATUS = /<status>([a-z]+)<\/status>/;
+// The notification also carries what the sub-agent SPENT, which is the only
+// place that number is written down: `<usage><subagent_tokens>41700</…>
+// <tool_uses>13</…><duration_ms>172127</…></usage>`. Reported as tokens and
+// calls rather than a cost — 554M of the 556M tokens read by the sub-agents on
+// this machine were cache reads, which are not billed like fresh input.
+const NOTIFICATION_TOKENS = /<subagent_tokens>(\d+)<\/subagent_tokens>/;
+const NOTIFICATION_CALLS = /<tool_uses>(\d+)<\/tool_uses>/;
+const NOTIFICATION_MS = /<duration_ms>(\d+)<\/duration_ms>/;
+
+export type AgentOutcome = 'completed' | 'failed' | 'killed' | 'reported';
+
+export interface AgentSpawn {
+  /** the parent's own call id — the join key the sidecar files carry too */
+  toolUseId: string;
+  description: string;
+  agentType: string;
+  /** from the launch receipt; the roster supplies it when the receipt is not in view */
+  agentId?: string;
+  spawnedAt?: number;
+  outcome?: AgentOutcome;
+  outcomeAt?: number;
+  /** from the completion notification: what it spent, as the harness counted it */
+  tokens?: number;
+  toolCalls?: number;
+  durationMs?: number;
+  /** a spawn whose receipt says it was launched into the background */
+  background: boolean;
+}
+
+const textOfTurn = (t: TraceTurn) =>
+  t.blocks.filter((b) => b.type === 'text').map((b) => ('text' in b ? b.text : '')).join('\n');
+
+/**
+ * What the parent said about the END of each of its spawns, across the whole
+ * window — not just this exchange. A background sub-agent outlives the turn
+ * that started it, so its notification lands in a later one; scoping the search
+ * to one exchange would report finished agents as unfinished forever.
+ */
+function outcomes(turns: TraceTurn[]) {
+  const byId = new Map<string, { outcome: AgentOutcome; at?: number; tokens?: number; toolCalls?: number; durationMs?: number }>();
+  const receipts = new Map<string, { text: string; at?: number; failed?: boolean }>();
+  for (const t of turns) {
+    for (const b of t.blocks) {
+      if (b.type === 'tool_result' && b.id) receipts.set(b.id, { text: b.text || '', at: t.ts, failed: b.failed });
+    }
+    // The harness's own completion messages arrive as user text and the trace
+    // reader keeps them as `system` turns, which is why they are readable here.
+    const text = textOfTurn(t);
+    if (!text.includes('<task-notification>')) continue;
+    for (const part of text.split('<task-notification>').slice(1)) {
+      const id = NOTIFICATION_ID.exec(part);
+      const st = NOTIFICATION_STATUS.exec(part);
+      if (!id) continue;
+      const status = st && ['completed', 'failed', 'killed'].includes(st[1]) ? (st[1] as AgentOutcome) : 'completed';
+      const num = (re: RegExp) => { const m = re.exec(part); return m ? Number(m[1]) : undefined; };
+      byId.set(id[1], {
+        outcome: status, at: t.ts,
+        tokens: num(NOTIFICATION_TOKENS), toolCalls: num(NOTIFICATION_CALLS), durationMs: num(NOTIFICATION_MS),
+      });
+    }
+  }
+  return { byId, receipts };
+}
+
+/** The sub-agents THIS exchange spawned, with whatever the parent knows of their end. */
+export function agentSpawnsOf(x: Exchange, turns: TraceTurn[]): AgentSpawn[] {
+  const { byId, receipts } = outcomes(turns);
+  const out: AgentSpawn[] = [];
+  for (const t of x.steps) {
+    for (const b of t.blocks) {
+      if (b.type !== 'tool_use' || !AGENT_TOOLS.has(b.name) || !b.id) continue;
+      let input: { description?: string; subagent_type?: string; prompt?: string } = {};
+      try { input = JSON.parse(b.text || '{}'); } catch { /* the input was capped mid-JSON */ }
+      const receipt = receipts.get(b.id);
+      const background = !!receipt && LAUNCH_RECEIPT.test(receipt.text);
+      const note = byId.get(b.id);
+      const spawn: AgentSpawn = {
+        toolUseId: b.id,
+        description: input.description || (b.text || '').slice(0, 80) || 'sub-agent',
+        agentType: input.subagent_type || 'agent',
+        spawnedAt: t.ts,
+        background,
+      };
+      const idInReceipt = receipt && AGENT_ID_IN_RECEIPT.exec(receipt.text);
+      if (idInReceipt) spawn.agentId = idInReceipt[1];
+      if (note) {
+        spawn.outcome = note.outcome; spawn.outcomeAt = note.at;
+        spawn.tokens = note.tokens; spawn.toolCalls = note.toolCalls; spawn.durationMs = note.durationMs;
+      }
+      else if (receipt && !background) {
+        // A synchronous spawn hands its report back AS the result, so this one
+        // is genuinely an outcome — and the only kind of result that is.
+        spawn.outcome = receipt.failed ? 'failed' : 'reported';
+        spawn.outcomeAt = receipt.at;
+      }
+      out.push(spawn);
+    }
+  }
+  return out;
+}
+
+export const isFinished = (s: AgentSpawn) => !!s.outcome;
+
+/**
+ * The count for the summary line, and the reason it needs the pane's state.
+ *
+ * Three states, not two. A sub-agent with no recorded outcome is running only
+ * if the pane that spawned it is alive; if the pane was killed mid-task its
+ * sub-agents never finish and never write again, and a UI without the third
+ * state says "2 running" forever — wrong in the direction that makes the
+ * operator wait for something that will never arrive.
+ */
+export function agentCounts(list: AgentSpawn[], live: boolean) {
+  const done = list.filter((s) => s.outcome === 'completed' || s.outcome === 'reported').length;
+  const bad = list.filter((s) => s.outcome === 'failed' || s.outcome === 'killed').length;
+  const open = list.length - done - bad;
+  const bits: string[] = [];
+  if (done) bits.push(`${done} done`);
+  if (bad) bits.push(`${bad} failed`);
+  if (open) bits.push(`${open} ${live ? 'running' : 'unfinished'}`);
+  return {
+    total: list.length, done, bad, open,
+    label: `${list.length} sub-agent${list.length === 1 ? '' : 's'}${bits.length ? ` · ${bits.join(' · ')}` : ''}`,
+  };
+}
 
 /**
  * "14 steps · 9 tools · 42s · 21.0k tok" — the whole turn in one line. There is

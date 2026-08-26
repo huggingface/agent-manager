@@ -141,6 +141,72 @@
 .cx-fold.on .cs-tri { color: var(--accent); }
 
 /* ---------- the work: a rail of one-line steps ---------- */
+/* ---------- sub-agents: the count in the meta row, and what it opens ---------- */
+/* A second control on the same line as the work fold. It is deliberately quiet
+   until there is something to say: the button only renders when the turn spawned
+   sub-agents, so a turn without them looks exactly as it did. */
+.cx-agents {
+  display: inline-flex; align-items: baseline; gap: 4px; flex: none;
+  margin-left: 10px; padding: 0; background: none; border: none;
+  font: inherit; color: var(--muted); cursor: pointer; white-space: nowrap;
+}
+.cx-agents:hover, .cx-agents.on { color: var(--text); }
+.cx-agents.on .cs-tri { color: var(--accent); }
+.cx-agents .cs-tri { font-size: 0.9em; }
+
+/* The list. Sized for tens of rows — three sessions on this machine hold 22, 38
+   and 10 — so it scrolls at about twelve rows rather than pushing the answer off
+   the screen. em, not px: a zoomed conversation should keep twelve rows. */
+.cx-agents-list {
+  display: flex; flex-direction: column; gap: 1px;
+  max-height: 24em; overflow-y: auto;
+  margin: 2px 0 4px; padding: 3px 0 3px 2px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+/* …but the cap lifts the moment a row is opened: a sub-agent's transcript inside
+   a 24em scroller is a window into a window, and the thing you just asked to
+   read arrives already cut off. The list is only long enough to need a cap while
+   it is a list. */
+.cx-agents-list:has(.ca-row.open) { max-height: none; overflow: visible; }
+.ca-row { display: flex; flex-direction: column; min-width: 0; }
+.ca-head {
+  display: flex; align-items: baseline; gap: 7px; min-width: 0; width: 100%;
+  padding: 2px 4px 2px 0; background: none; border: none; border-radius: var(--r-sm);
+  font: inherit; font-size: 0.96em; color: var(--text); text-align: left; cursor: pointer;
+}
+.ca-head:hover { background: var(--panel-2); }
+.ca-head:disabled { cursor: default; color: var(--muted); }
+.ca-head .spacer { flex: 1; min-width: 4px; }
+/* the task, in the reader's own voice — it is what a person wrote in the Agent
+   call, so it reads as prose and takes the room */
+.ca-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The status word carries the meaning, so it is a word and not a colour alone:
+   `running` is a claim about right now and only appears when the pane is alive. */
+.ca-state {
+  flex: none; font-family: var(--font-mono); font-size: 0.82em; letter-spacing: 0.01em;
+  padding: 0 5px; border-radius: var(--r-sm); border: 1px solid var(--border);
+  color: var(--muted);
+}
+.ca-state.done { color: var(--go); border-color: color-mix(in srgb, var(--go) 45%, var(--border)); }
+.ca-state.running {
+  color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.ca-state.failed, .ca-state.killed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+/* "no result" is the third state, and it is not a failure — it is the absence of
+   a record, which is what a pane killed mid-task leaves behind. */
+.ca-state.no-result { font-style: italic; }
+.ca-type, .ca-num, .ca-depth { flex: none; font-size: 0.82em; color: var(--muted); }
+.ca-depth { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
+.ca-num { font-variant-numeric: tabular-nums; }
+.ca-msg { padding: 3px 0 2px 1.2em; font-size: 0.82em; color: var(--muted); }
+/* One level down: the sub-agent's own transcript, rendered by the exchange
+   component that drew the row above it. The rule is the same one the step rail
+   uses — indent, hairline, and nothing else new. */
+.ca-body { padding: 2px 0 6px 1.2em; }
+.ca-trace { display: flex; flex-direction: column; gap: 2px; }
+.ca-trace .cx { padding-left: 1.23em; }
+
 .cx-steps { display: flex; flex-direction: column; padding: 1px 0; }
 .cs { min-width: 0; }
 .cs-head {
