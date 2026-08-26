@@ -38,6 +38,12 @@ const normalizePath = (path?: string) => (path && path.trim() ? path : '.');
 export const quickStart = (cli: string, prompt: string, name = '', path = '.'): Promise<Session> =>
   fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ cli, name: name || undefined, path: path || '.', prompt: prompt || undefined }) }).then(json);
 
+// The name this cli would get if created now. Used to prefill the create
+// panel; the panel only SENDS a name when the operator edits it, so the server
+// still decides for an untouched field.
+export const nextName = (cli: string): Promise<{ cli: string; name: string }> =>
+  fetch(`/api/next-name?cli=${encodeURIComponent(cli)}`).then(json);
+
 export const createSession = (name: string, cli: string, groupId?: string, path?: string): Promise<Session> =>
   fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ name, cli, groupId, path: normalizePath(path) }) }).then(json);
 

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Cli, MoveTarget, Group, Session, Tree } from '../types';
 import { STATE_LABEL, REMOTE_STATE_LABEL, isPassive, isRemote } from '../types';
+import * as api from '../api';
 import Logo from './Logo';
 import StateLogo from './StateLogo';
 import NewSession from './NewSession';
@@ -96,7 +97,6 @@ export default function Sidebar({
   const [quickMode, setQuickMode] = useState<'agent' | 'group'>('agent');
   const [quickCli, setQuickCli] = useState<string | null>(null);
   const [quickPrompt, setQuickPrompt] = useState('');
-  const [quickMore, setQuickMore] = useState(false); // reveals name + folder
   const [quickName, setQuickName] = useState('');
   const [quickLoc, setQuickLoc] = useState('.');
   const [quickError, setQuickError] = useState<string | null>(null);
@@ -175,7 +175,7 @@ export default function Sidebar({
     if (!quickCli || isRemote(quickCli)) throw new Error('Choose a local agent before attaching files.');
     if (!quickPrepareRef.current) {
       quickPrepareRef.current = onPrepareQuickStart(
-        quickCli, quickMore ? quickName.trim() : '', quickMore ? quickLoc : '.',
+        quickCli, quickName.trim(), quickLoc,
       );
     }
     const preparing = quickPrepareRef.current;
@@ -294,8 +294,52 @@ export default function Sidebar({
   // Quickstart: one harness pick + one prompt, agent launches in workspace/.
   // Every agent harness is shown; ones not installed here are greyed out.
   // "More options" adds a name + folder; the group tile flips to group creation.
+  // Row one is the agents you reach for; row two is everything else you can
+  // make from here. Shell and Files used to be buttons of their own below the
+  // tree — they are session types like any other, so they belong in the picker
+  // rather than in a second place that does the same job.
   const quickable = clis.filter((c) => c.id !== 'shell' && !isPassive(c.id) && !isRemote(c.id));
   const remoteCli = clis.find((c) => isRemote(c.id)) || null;
+  const shellCli = clis.find((c) => c.id === 'shell') || null;
+  const filesCli = clis.find((c) => c.id === 'files') || null;
+
+  // What each type can actually use. A field that makes no sense for the type
+  // is disabled with the reason in its own placeholder rather than hidden, so
+  // the panel keeps its shape as you click along the row.
+  const rules = (cli: string | null, mode: 'agent' | 'group') => {
+    if (mode === 'group') return { prompt: null, folder: 'ok', attach: null, promptLabel: '' };
+    if (cli === 'files') {
+      return {
+        prompt: 'a file browser takes no prompt',
+        folder: 'browses the whole workspace',
+        attach: 'attachments go to agents',
+        promptLabel: '',
+      };
+    }
+    if (cli === 'shell') {
+      return { prompt: null, folder: 'ok', attach: 'attachments go to agents', promptLabel: 'first command…' };
+    }
+    if (cli && isRemote(cli)) {
+      return { prompt: null, folder: 'the remote agent brings its own', attach: 'attachments go to local agents', promptLabel: 'first message…' };
+    }
+    return { prompt: null, folder: 'ok', attach: null, promptLabel: '' };
+  };
+  const rule = rules(quickCli, quickMode);
+
+  // The name the server WOULD choose, shown in the field so the panel says what
+  // is about to happen instead of showing an empty box. It is a display value:
+  // `quickName` stays empty until the operator types, and an untouched (or
+  // cleared) field still sends nothing, so the server names the session at
+  // creation time and two quick creations cannot collide on one prefill.
+  const [nameHint, setNameHint] = useState('');
+  useEffect(() => {
+    const target = quickMode === 'group' ? null : quickCli;
+    if (!target) { setNameHint(''); return undefined; }
+    let alive = true;
+    api.nextName(target).then((r) => { if (alive) setNameHint(r.name); }).catch(() => { if (alive) setNameHint(''); });
+    return () => { alive = false; };
+    // tree.sessions: after a create the next name moves on, so re-ask.
+  }, [quickCli, quickMode, tree.sessions.length]);
   const openQuick = () => {
     quickGenerationRef.current += 1;
     setQuickError(null);
@@ -316,7 +360,6 @@ export default function Sidebar({
         || quickable.find((c) => c.available);
       setQuickCli(selected?.id || null);
       setQuickMode('agent');
-      setQuickMore(false);
       setQuickName('');
       setQuickLoc(defaultPath || '.');
       setQuickPrompt(`In this session we will continue from the session traces at ${loc.path}${loc.sessionId ? ` (session ${loc.sessionId})` : ''}`);
@@ -344,12 +387,11 @@ export default function Sidebar({
       } finally { setQuickSending(false); }
       return;
     }
-    if (!p && !quickImages.length && !quickMore) return; // the bare quick path needs a prompt or file
     setQuickSending(true);
     setQuickError(null);
     try {
       await onQuickStart(
-        quickCli, p, quickMore ? quickName.trim() : '', quickMore ? quickLoc : '.',
+        quickCli, p, quickName.trim(), quickLoc,
         quickSessionId || quickImages.length ? {
           sessionId: quickSessionId,
           attachments: quickImages,
@@ -601,17 +643,12 @@ export default function Sidebar({
           <h1>Agent Manager</h1>
         </div>
         <div className="brand-actions">
-          <button
-            className={`icon-btn add-btn bolt-btn${panel === 'quick' ? ' on' : ''}`}
-            onClick={() => (panel === 'quick' ? closePanel() : openQuick())}
-            title="New agent or group"
-          ><PlusGlyph /></button>
           <button className="icon-btn" onClick={onOpenSettings} title="Settings"><SlidersGlyph /></button>
           <button className="icon-btn" onClick={onToggleTheme} title="Toggle light / dark">{theme === 'dark' ? <MoonGlyph /> : <SunGlyph />}</button>
         </div>
       </div>
 
-      {panel === 'quick' && (
+      {panel !== 'create' && (
         <div className="controls">
           <div
             className={`widget quick${quickDrop ? ' image-drop' : ''}`}
@@ -643,7 +680,8 @@ export default function Sidebar({
                   onClick={() => { setQuickMode('agent'); if (quickCli !== c.id) resetQuickTarget(); setQuickCli(c.id); }}
                 ><Logo cli={c.id} size={14} /></button>
               ))}
-              <span className="quick-sep" />
+            </div>
+            <div className="quick-clis quick-clis-2">
               <button
                 className={`quick-cli quick-grp${quickMode === 'group' ? ' on' : ''}`}
                 title="New group"
@@ -668,6 +706,16 @@ export default function Sidebar({
                   }}
                 ><Logo cli="remote" size={14} /></button>
               )}
+              {[shellCli, filesCli].filter(Boolean).map((c) => (
+                <button
+                  key={c!.id}
+                  className={`quick-cli${quickMode === 'agent' && quickCli === c!.id ? ' on' : ''}${c!.available ? '' : ' off'}`}
+                  title={c!.label}
+                  disabled={!c!.available || quickSending || quickImages.length > 0}
+                  style={quickMode === 'agent' && quickCli === c!.id ? { borderColor: c!.color } : undefined}
+                  onClick={() => { setQuickMode('agent'); if (quickCli !== c!.id) resetQuickTarget(); setQuickCli(c!.id); }}
+                ><Logo cli={c!.id} size={14} /></button>
+              ))}
             </div>
 
             {quickMode === 'agent' ? (
@@ -687,15 +735,33 @@ export default function Sidebar({
                         : 'Files are uploading to this stopped agent now; launch waits until they are ready.'}
                   </div>
                 )}
+                <input
+                  className="quick-name"
+                  placeholder={nameHint || 'Name'}
+                  title={nameHint ? `Leave it as it is and the agent is named ${nameHint}` : undefined}
+                  value={quickName}
+                  disabled={quickSending || quickImages.length > 0}
+                  onChange={(e) => { resetQuickTarget(); setQuickName(e.target.value); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') submitQuick(); }}
+                />
+                <FolderPicker
+                  disabled={quickSending || quickImages.length > 0 || rule.folder !== 'ok'}
+                  placeholder={rule.folder !== 'ok' ? rule.folder : undefined}
+                  value={quickLoc}
+                  onChange={(value) => { resetQuickTarget(); setQuickLoc(value); }}
+                />
                 <textarea
                   autoFocus
                   rows={1}
                   className="quick-prompt"
-                  placeholder={quickCli ? `prompt for ${clis.find((c) => c.id === quickCli)?.label ?? quickCli}…` : 'prompt…'}
-                  value={quickPrompt}
-                  disabled={quickSending}
+                  placeholder={rule.prompt
+                    || rule.promptLabel
+                    || (quickCli ? `prompt for ${clis.find((c) => c.id === quickCli)?.label ?? quickCli}…` : 'prompt…')}
+                  title={rule.prompt || undefined}
+                  value={rule.prompt ? '' : quickPrompt}
+                  disabled={quickSending || !!rule.prompt}
                   onPaste={(event) => {
-                    if (quickSending || !quickCli || isRemote(quickCli)) return;
+                    if (quickSending || !quickCli || rule.attach) return;
                     const files = filesFromTransfer(event.clipboardData);
                     if (!files.length) return;
                     event.preventDefault(); addQuickImages(files);
@@ -703,41 +769,23 @@ export default function Sidebar({
                   onChange={(e) => { setQuickPrompt(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitQuick(); }
-                    if (e.key === 'Escape') closePanel();
                   }}
                 />
                 <Attachments
                   attachments={quickImages}
-                  disabled={quickSending || !quickCli || isRemote(quickCli)}
+                  disabled={quickSending || !quickCli || !!rule.attach}
                   showPicker={false}
                   onFiles={addQuickImages}
                   onRemove={removeQuickImage}
                   onRetry={retryQuickImage}
                 />
-                {quickMore && (
-                  <>
-                    <input
-                      placeholder="Name (optional)"
-                      value={quickName}
-                      disabled={quickSending || quickImages.length > 0}
-                      onChange={(e) => { resetQuickTarget(); setQuickName(e.target.value); }}
-                      onKeyDown={(e) => { if (e.key === 'Enter') submitQuick(); if (e.key === 'Escape') closePanel(); }}
-                    />
-                    <FolderPicker disabled={quickSending || quickImages.length > 0} value={quickLoc} onChange={(value) => { resetQuickTarget(); setQuickLoc(value); }} />
-                    <div className="widget-actions">
-                      <button className="btn-primary" onClick={submitQuick} disabled={quickSending || quickFilesBlocked}>{quickSending ? 'Starting…' : `Create${quickPrompt.trim() || quickImages.length ? ' & send' : ''}`}</button>
-                      <button className="btn-ghost" onClick={closePanel} disabled={quickSending}>Cancel</button>
-                    </div>
-                  </>
-                )}
-                <div className="quick-foot">
-                  <button className="quick-more" onClick={() => setQuickMore((v) => !v)} disabled={quickSending || quickImages.length > 0}>{quickMore ? '▴ less' : '▾ more options'}</button>
-                  <span className="quick-hint mono">↵ launch · ⇧↵ newline</span>
+                <div className="widget-actions">
+                  <button className="btn-primary" onClick={submitQuick} disabled={quickSending || quickFilesBlocked}>{quickSending ? 'Starting…' : `Create${quickPrompt.trim() || quickImages.length ? ' & send' : ''}`}</button>
                 </div>
               </>
             ) : (
               <>
-                <input autoFocus placeholder="Group name" value={groupName}
+                <input autoFocus className="quick-name" placeholder="Group name" value={groupName}
                   onChange={(e) => setGroupName(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') submitGroup(); if (e.key === 'Escape') closePanel(); }} />
                 <FolderPicker value={groupLoc} onChange={setGroupLoc} />
@@ -822,35 +870,24 @@ export default function Sidebar({
           const anyVisible = agents.length === 0 || agents.some((s) => !isHidden(s.id));
           return anyVisible ? GroupBlock(g) : null;
         })}
-        {!showArchived && archived.size > 0 && (
-          <div className="arch-note">not showing {archived.size} archived session{archived.size === 1 ? '' : 's'}</div>
+        {archived.size > 0 && (
+          // Renders in BOTH states on purpose: this line is the switch now, so
+          // one that only appeared while archived were hidden would be a door
+          // that locks behind you.
+          <button className="arch-note arch-toggle" onClick={onToggleArchived}>
+            {showArchived ? 'hide' : 'show'} {archived.size} archived session{archived.size === 1 ? '' : 's'}
+          </button>
         )}
       </div>
 
       {/* Quick-add utilities: created instantly with a default name (double-
           click to rename afterwards). Both open at the workspaces root. */}
-      <div className="quick-add">
-        <button className="btn-ghost" title="New shell at the workspaces root" onClick={() => onNewSession('', 'shell', '.')}>
-          <Logo cli="shell" size={14} /> Shell
-        </button>
-        <button className="btn-ghost" title="New file browser (whole workspace)" onClick={() => onNewSession('', 'files', '.')}>
-          <Logo cli="files" size={14} /> Files
-        </button>
-      </div>
-
       <div className="legend">
         <span><StateLogo frameOnly state="working" size={12} /> working</span>
         <span><StateLogo frameOnly state="waiting" size={12} /> your turn</span>
         <span><StateLogo frameOnly state="idle" size={12} /> idle</span>
         <span><StateLogo frameOnly state="stopped" size={12} /> stopped</span>
-        {archived.size > 0 && (
-          <label className="legend-arch" title="Sessions with no activity beyond the archive window (Settings)">
-            <input type="checkbox" checked={showArchived} onChange={onToggleArchived} />
-            <span className="lbox" />
-            archived
-          </label>
-        )}
-      </div>
+              </div>
     </aside>
   );
 }

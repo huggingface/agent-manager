@@ -2190,6 +2190,20 @@ function nextName(cli) {
   return `${base}-${max + 1}`;
 }
 
+// The name a session WOULD get if it were created now, so the create panel can
+// prefill the field instead of showing an empty box. Deliberately a read from
+// the same nextName() the creation path uses: a second copy of the scheme in
+// the client drifts the first time either side changes.
+//
+// The panel treats this as a display value, not an answer — it only sends a
+// name when the operator edits it, so two creations racing on the same prefill
+// still get distinct names from the server (see Sidebar.tsx).
+app.get('/api/next-name', (req, res) => {
+  const cli = String(req.query.cli || '').trim();
+  if (!cliById(cli)) return res.status(400).json({ error: `unknown cli '${cli}'` });
+  res.json({ cli, name: nextName(cli) });
+});
+
 // Create a session and (optionally) start it on an initial prompt. Shared by
 // the UI's POST /api/sessions and the agent API's spawn — one creation path, so
 // quickstart behaves identically whoever asked. Returns null for a bad path.
