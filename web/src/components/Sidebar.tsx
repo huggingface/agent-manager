@@ -293,7 +293,6 @@ export default function Sidebar({
   };
   // Quickstart: one harness pick + one prompt, agent launches in workspace/.
   // Every agent harness is shown; ones not installed here are greyed out.
-  // "More options" adds a name + folder; the group tile flips to group creation.
   // Row one is the agents you reach for; row two is everything else you can
   // make from here. Shell and Files used to be buttons of their own below the
   // tree — they are session types like any other, so they belong in the picker
@@ -302,6 +301,29 @@ export default function Sidebar({
   const remoteCli = clis.find((c) => isRemote(c.id)) || null;
   const shellCli = clis.find((c) => c.id === 'shell') || null;
   const filesCli = clis.find((c) => c.id === 'files') || null;
+
+  // The picker is a row of logos, and a logo does not say what it is. Each button
+  // carries a sentence on hover: who makes it, or what the type does. Keyed by id
+  // with a fallback, so a harness added to the server without a line here still
+  // gets a usable tooltip rather than an empty one.
+  const blurbs: Record<string, string> = {
+    claude: "Anthropic's coding agent",
+    codex: "OpenAI's coding agent",
+    gemini: "Google's coding agent",
+    opencode: 'open-source agent, your choice of model',
+    hermes: "Nous Research's agent",
+    openclaw: 'open-source Claude Code fork',
+    qwen: "Alibaba's coding agent",
+    remote: 'an agent running on another machine',
+    // no em-dash in a blurb: the tooltip already joins label and blurb with one
+    shell: 'a plain terminal, no agent',
+    files: 'browse the workspace files',
+  };
+  const cliTitle = (c: { id: string; label: string; available?: boolean; version?: string | null }) => {
+    const what = blurbs[c.id] ? ` — ${blurbs[c.id]}` : '';
+    if (c.available === false) return `${c.label}${what} (not installed)`;
+    return `${c.label}${what}`;
+  };
 
   // What each type can actually use. A field that makes no sense for the type
   // is disabled with the reason in its own placeholder rather than hidden, so
@@ -643,12 +665,17 @@ export default function Sidebar({
           <h1>Agent Manager</h1>
         </div>
         <div className="brand-actions">
+          <button
+            className={`icon-btn add-btn bolt-btn${panel === 'quick' ? ' on' : ''}`}
+            onClick={() => (panel === 'quick' ? closePanel() : openQuick())}
+            title="New agent or group"
+          ><PlusGlyph /></button>
           <button className="icon-btn" onClick={onOpenSettings} title="Settings"><SlidersGlyph /></button>
           <button className="icon-btn" onClick={onToggleTheme} title="Toggle light / dark">{theme === 'dark' ? <MoonGlyph /> : <SunGlyph />}</button>
         </div>
       </div>
 
-      {panel !== 'create' && (
+      {panel === 'quick' && (
         <div className="controls">
           <div
             className={`widget quick${quickDrop ? ' image-drop' : ''}`}
@@ -674,7 +701,7 @@ export default function Sidebar({
                 <button
                   key={c.id}
                   className={`quick-cli${quickMode === 'agent' && quickCli === c.id ? ' on' : ''}${c.available ? '' : ' off'}`}
-                  title={c.available ? c.label : `${c.label} (not installed)`}
+                  title={cliTitle(c)}
                   disabled={!c.available || quickSending || quickImages.length > 0}
                   style={quickMode === 'agent' && quickCli === c.id ? { borderColor: c.color } : undefined}
                   onClick={() => { setQuickMode('agent'); if (quickCli !== c.id) resetQuickTarget(); setQuickCli(c.id); }}
@@ -684,7 +711,7 @@ export default function Sidebar({
             <div className="quick-clis quick-clis-2">
               <button
                 className={`quick-cli quick-grp${quickMode === 'group' ? ' on' : ''}`}
-                title="New group"
+                title="Group — several agents created together, sharing a folder"
                 disabled={quickSending || quickImages.length > 0}
                 onClick={() => { resetQuickTarget(); setQuickMode('group'); }}
               >
@@ -698,7 +725,7 @@ export default function Sidebar({
               {remoteCli && (
                 <button
                   className={`quick-cli${quickMode === 'agent' && quickCli === 'remote' ? ' on' : ''}`}
-                  title="Remote agent — an agent on another machine"
+                  title={cliTitle(remoteCli)}
                   disabled={quickSending || quickImages.length > 0}
                   style={quickMode === 'agent' && quickCli === 'remote' ? { borderColor: remoteCli.color } : undefined}
                   onClick={() => {
@@ -710,7 +737,7 @@ export default function Sidebar({
                 <button
                   key={c!.id}
                   className={`quick-cli${quickMode === 'agent' && quickCli === c!.id ? ' on' : ''}${c!.available ? '' : ' off'}`}
-                  title={c!.label}
+                  title={cliTitle(c!)}
                   disabled={!c!.available || quickSending || quickImages.length > 0}
                   style={quickMode === 'agent' && quickCli === c!.id ? { borderColor: c!.color } : undefined}
                   onClick={() => { setQuickMode('agent'); if (quickCli !== c!.id) resetQuickTarget(); setQuickCli(c!.id); }}
@@ -742,7 +769,7 @@ export default function Sidebar({
                   value={quickName}
                   disabled={quickSending || quickImages.length > 0}
                   onChange={(e) => { resetQuickTarget(); setQuickName(e.target.value); }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') submitQuick(); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') submitQuick(); if (e.key === 'Escape') closePanel(); }}
                 />
                 <FolderPicker
                   disabled={quickSending || quickImages.length > 0 || rule.folder !== 'ok'}
@@ -769,6 +796,7 @@ export default function Sidebar({
                   onChange={(e) => { setQuickPrompt(e.target.value); e.currentTarget.style.height = 'auto'; e.currentTarget.style.height = `${e.currentTarget.scrollHeight}px`; }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitQuick(); }
+                    if (e.key === 'Escape') closePanel();
                   }}
                 />
                 <Attachments
@@ -781,6 +809,7 @@ export default function Sidebar({
                 />
                 <div className="widget-actions">
                   <button className="btn-primary" onClick={submitQuick} disabled={quickSending || quickFilesBlocked}>{quickSending ? 'Starting…' : `Create${quickPrompt.trim() || quickImages.length ? ' & send' : ''}`}</button>
+                  <button className="btn-ghost" onClick={closePanel} disabled={quickSending}>Cancel</button>
                 </div>
               </>
             ) : (

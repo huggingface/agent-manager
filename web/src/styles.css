@@ -191,8 +191,12 @@ body {
 /* quickstart: one row of harnesses (+ the group tile), one prompt, go */
 /* Sized so every tile fits on ONE row at the sidebar's width; wrap stays as a
    fallback for a narrower viewport rather than overflowing. */
-.quick-clis { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
-.quick-cli { width: 25px; height: 25px; flex: none; display: inline-flex; align-items: center; justify-content: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; padding: 0; opacity: 0.65; }
+/* Six to a row, both rows on the same track size, so the picker fills the panel
+   instead of trailing off mid-width. A grid rather than flex: row two has fewer
+   buttons, and they must land on the same widths as row one rather than sizing
+   themselves. A seventh harness wraps onto a new line of the same grid. */
+.quick-clis { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; align-items: center; }
+.quick-cli { width: 100%; height: 30px; flex: none; display: inline-flex; align-items: center; justify-content: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; padding: 0; opacity: 0.65; }
 .quick-cli:hover:not(:disabled) { opacity: 1; border-color: var(--border-strong); }
 .quick-cli.on { opacity: 1; border-width: 1.5px; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
 .quick-cli.off { opacity: 0.25; cursor: default; }
