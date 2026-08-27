@@ -141,71 +141,64 @@
 .cx-fold.on .cs-tri { color: var(--accent); }
 
 /* ---------- the work: a rail of one-line steps ---------- */
-/* ---------- sub-agents: the count in the meta row, and what it opens ---------- */
-/* A second control on the same line as the work fold. It is deliberately quiet
-   until there is something to say: the button only renders when the turn spawned
-   sub-agents, so a turn without them looks exactly as it did. */
-.cx-agents {
-  display: inline-flex; align-items: baseline; gap: 4px; flex: none;
-  margin-left: 10px; padding: 0; background: none; border: none;
-  font: inherit; color: var(--muted); cursor: pointer; white-space: nowrap;
-}
-.cx-agents:hover, .cx-agents.on { color: var(--text); }
-.cx-agents.on .cs-tri { color: var(--accent); }
-.cx-agents .cs-tri { font-size: 0.9em; }
-
-/* The list. Sized for tens of rows — three sessions on this machine hold 22, 38
-   and 10 — so it scrolls at about twelve rows rather than pushing the answer off
-   the screen. em, not px: a zoomed conversation should keep twelve rows. */
-.cx-agents-list {
-  display: flex; flex-direction: column; gap: 1px;
-  max-height: 24em; overflow-y: auto;
-  margin: 2px 0 4px; padding: 3px 0 3px 2px;
-  border-left: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
-}
-/* …but the cap lifts the moment a row is opened: a sub-agent's transcript inside
-   a 24em scroller is a window into a window, and the thing you just asked to
-   read arrives already cut off. The list is only long enough to need a cap while
-   it is a list. */
-.cx-agents-list:has(.ca-row.open) { max-height: none; overflow: visible; }
-.ca-row { display: flex; flex-direction: column; min-width: 0; }
-.ca-head {
-  display: flex; align-items: baseline; gap: 7px; min-width: 0; width: 100%;
-  padding: 2px 4px 2px 0; background: none; border: none; border-radius: var(--r-sm);
-  font: inherit; font-size: 0.96em; color: var(--text); text-align: left; cursor: pointer;
-}
-.ca-head:hover { background: var(--panel-2); }
-.ca-head:disabled { cursor: default; color: var(--muted); }
-.ca-head .spacer { flex: 1; min-width: 4px; }
-/* the task, in the reader's own voice — it is what a person wrote in the Agent
-   call, so it reads as prose and takes the room */
-.ca-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The status word carries the meaning, so it is a word and not a colour alone:
-   `running` is a claim about right now and only appears when the pane is alive. */
-.ca-state {
-  flex: none; font-family: var(--font-mono); font-size: 0.82em; letter-spacing: 0.01em;
-  padding: 0 5px; border-radius: var(--r-sm); border: 1px solid var(--border);
-  color: var(--muted);
-}
-.ca-state.done { color: var(--go); border-color: color-mix(in srgb, var(--go) 45%, var(--border)); }
-.ca-state.running {
-  color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-}
-.ca-state.failed, .ca-state.killed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
-/* "no result" is the third state, and it is not a failure — it is the absence of
-   a record, which is what a pane killed mid-task leaves behind. */
-.ca-state.no-result { font-style: italic; }
-.ca-type, .ca-num, .ca-depth { flex: none; font-size: 0.82em; color: var(--muted); }
-.ca-depth { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
-.ca-num { font-variant-numeric: tabular-nums; }
+/* ---------- sub-agents ---------- */
+/* A sub-agent is a step row with a life of its own, so it borrows the rail's
+   own anatomy — mark, label, detail — and adds the facts its completion
+   notification reported. No second list, no second disclosure: the count reads
+   in the summary line and the rows are in the step list where the spawn is. */
+.cs.agent .cs-label { color: var(--accent); }
+.cs.agent .cs-detail { color: var(--text); }
+.cs.agent.no-result .cs-detail, .cs.agent.stalled .cs-detail { color: var(--muted); }
+.cs-facts { flex: none; display: flex; gap: 9px; font-family: var(--font-mono); font-size: 0.8em;
+  color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cs-facts .dim { color: color-mix(in srgb, var(--muted) 72%, transparent); }
+.cs-facts .depth { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
+/* The two states that are the ABSENCE of a record say so in words. Neither is a
+   failure: `failed` and `killed` are things the harness reported and keep the
+   red ✗; these are what a restarted pane or a lost notification leaves behind. */
+.cs-state { flex: none; font-family: var(--font-mono); font-size: 0.78em; padding: 0 5px;
+  border: 1px dashed var(--border); border-radius: var(--r-sm); color: var(--muted); white-space: nowrap; }
+/* the task the sub-agent was given, clamped: 3.4 kB is a normal prompt */
+.cs-task { margin: 2px 0 4px; padding: 6px 9px; border-radius: var(--r-sm); white-space: pre-wrap;
+  overflow-wrap: anywhere; font-size: 0.94em; color: var(--text);
+  background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.cs-task.clamp { max-height: 7.4em; overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 70%, transparent); }
+.cs-more-btn { display: block; margin: 0 0 6px; padding: 0; background: none; border: none;
+  font: inherit; font-size: 0.78em; color: var(--accent); cursor: pointer; }
 .ca-msg { padding: 3px 0 2px 1.2em; font-size: 0.82em; color: var(--muted); }
-/* One level down: the sub-agent's own transcript, rendered by the exchange
-   component that drew the row above it. The rule is the same one the step rail
-   uses — indent, hairline, and nothing else new. */
-.ca-body { padding: 2px 0 6px 1.2em; }
-.ca-trace { display: flex; flex-direction: column; gap: 2px; }
+/* one level down: the sub-agent's own transcript, drawn by the component that
+   drew the row — indent, hairline, nothing else new */
+.ca-trace { display: flex; flex-direction: column; gap: 2px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 30%, transparent); padding-left: 9px; }
 .ca-trace .cx { padding-left: 1.23em; }
+
+/* ---------- the live strip: what is working under the working line ---------- */
+/* Collapsed exchange, mid-turn. The pane's spinner says it is working; these
+   say what is working underneath it, one line each, without expanding
+   anything. Same left edge as the working line so the two read as one block. */
+.cx-live { display: flex; flex-direction: column; padding: 1px 0 0; }
+.cx-live .cs-head { padding-top: 1px; padding-bottom: 1px; }
+/* A row that has just finished holds its place for a beat with its ✓ and its
+   duration, then fades out — rows vanishing under a live spinner is the shape
+   that produced the API-log flicker, and a fade is the cheapest way to let the
+   eye see WHY the strip shrank. */
+.cs.agent.leaving { animation: agent-leave 6s ease-in forwards; }
+@keyframes agent-leave {
+  0%, 55% { opacity: 1; }
+  100% { opacity: 0.25; }
+}
+.cx-live-more { padding: 1px 0 1px 1.2em; font-size: 0.8em; color: var(--muted); }
+/* the spinner, borrowed from the working line: same cell, same animation, so a
+   sub-agent's "running" is the same statement the pane makes about itself */
+.cs-mark.spin::before {
+  content: '⠋'; display: inline-flex; align-items: center;
+  width: var(--mark-w); height: var(--mark-h);
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
+  color: var(--accent); transform: translateY(var(--mark-optical-y));
+  animation: ov-spin 0.9s steps(1) infinite;
+}
 
 .cx-steps { display: flex; flex-direction: column; padding: 1px 0; }
 .cs { min-width: 0; }

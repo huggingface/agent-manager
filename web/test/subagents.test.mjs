@@ -28,7 +28,7 @@ await build({
   entryPoints: [path.join(HERE, '../src/components/conversation/exchanges.ts')],
   outfile: out, format: 'esm', bundle: false, logLevel: 'error',
 });
-const { splitExchanges, agentSpawnsOf, agentCounts } = await import(pathToFileURL(out).href);
+const { splitExchanges, agentSpawnsOf, agentCounts, agentStatus, isLive, stepsOf, stepSummary, STALE_MS } = await import(pathToFileURL(out).href);
 
 let failed = 0;
 const check = (what, fn) => {
@@ -173,6 +173,78 @@ console.log('\nand a prompt-shaped harness notification is not a prompt');
     prompt(30, '[SYSTEM NOTIFICATION - NOT USER INPUT] This is an automated message.\n<task-notification>\n<tool-use-id>toolu_Z</tool-use-id>\n<status>completed</status>\n</task-notification>'),
   ];
   check('it does not open a second exchange', () => assert.equal(splitExchanges(turns).length, 1));
+}
+
+console.log('\nand a spawn is its own step row, never grouped into one');
+{
+  // Three spawns in a row is the real shape: release-video's turn 24 spawned
+  // three inside ninety seconds. Grouped, they would be one `Agent ×3` row.
+  // The server files a result next to the call that made it (the stitcher), so
+  // a real spawn turn carries both blocks — which is also what makes grouping
+  // dangerous: three of these in a row are three consecutive `Agent` calls.
+  const spawnTurn = (sec, id, description, agentId) => ({
+    role: 'assistant', ts: at(sec),
+    blocks: [...spawn(sec, id, description).blocks, ...receipt(sec + 2, id, agentId).blocks],
+  });
+  const turns = [
+    prompt(0, 'rebuild the three scenes'),
+    spawnTurn(4, 'toolu_A', 'Recapture second-agent sequence', 'aaa1'),
+    spawnTurn(8, 'toolu_B', 'Rapid-fire feature captures', 'aaa2'),
+    spawnTurn(12, 'toolu_C', 'Add step legend to comms animation', 'aaa3'),
+    { role: 'assistant', ts: at(20), blocks: [
+      { type: 'tool_use', id: 'toolu_D', name: 'Bash', text: '{"command":"ffmpeg -v error -y"}' },
+      { type: 'tool_use', id: 'toolu_E', name: 'Bash', text: '{"command":"du -sh sift"}' },
+    ] },
+  ];
+  const steps = stepsOf(turns.slice(1));
+  check('three spawns are three rows', () => {
+    const agents = steps.filter((s) => s.kind === 'agent');
+    assert.equal(agents.length, 3);
+    assert.deepEqual(agents.map((a) => a.description),
+      ['Recapture second-agent sequence', 'Rapid-fire feature captures', 'Add step legend to comms animation']);
+  });
+  check('…while two Bash calls still collapse into one, as they always did', () => {
+    const tools = steps.filter((s) => s.kind === 'tools');
+    assert.equal(tools.length, 1);
+    assert.equal(tools[0].count, 2);
+  });
+  check('and the summary line counts them as sub-agents rather than twice', () => {
+    const [x] = splitExchanges(turns);
+    const spawns = agentSpawnsOf(x, turns);
+    const line = stepSummary(x, stepsOf(x.steps), spawns.length);
+    assert.match(line, /3 sub-agents/);
+    assert.match(line, /2 tools/, `the two Bash calls, not the five tool_uses: ${line}`);
+    assert.doesNotMatch(line, /5 tools/);
+  });
+}
+
+console.log('\nand the live strip only claims what it can');
+{
+  const spawnOf = (outcome) => ({ toolUseId: 't', description: 'Capture group view in reader', agentType: 'general-purpose', background: true, spawnedAt: at(0), ...(outcome ? { outcome } : {}) });
+  const now = at(10_000);
+  check('a live pane with a recent write is running', () => {
+    assert.equal(agentStatus(spawnOf(), { live: true, lastWroteAt: now - 30_000, now }), 'running');
+  });
+  check('the same row on a pane that is not running says no result, never running', () => {
+    assert.equal(agentStatus(spawnOf(), { live: false, lastWroteAt: now - 30_000, now }), 'no-result');
+  });
+  check('a silence longer than the threshold stops the claim', () => {
+    assert.equal(agentStatus(spawnOf(), { live: true, lastWroteAt: now - STALE_MS - 1000, now }), 'stalled');
+  });
+  check('…and the threshold clears the longest silence ever measured inside a live run (601s)', () => {
+    assert.ok(STALE_MS > 601_000 * 1.4, `${STALE_MS}ms must clear the 601s worst case with room`);
+    assert.equal(agentStatus(spawnOf(), { live: true, lastWroteAt: now - 601_000, now }), 'running');
+  });
+  check('an outcome always wins over any amount of silence', () => {
+    assert.equal(agentStatus(spawnOf('completed'), { live: true, lastWroteAt: now - 9e6, now }), 'done');
+    assert.equal(agentStatus(spawnOf('killed'), { live: true, lastWroteAt: now, now }), 'killed');
+  });
+  check('the strip shows the two live states and nothing else', () => {
+    assert.deepEqual(['running', 'stalled', 'done', 'failed', 'killed', 'no-result'].filter(isLive), ['running', 'stalled']);
+  });
+  check('with no roster to read, a live pane still says running rather than guessing quiet', () => {
+    assert.equal(agentStatus(spawnOf(), { live: true, now }), 'running');
+  });
 }
 
 console.log(failed ? `\n${failed} failed` : '\nall checks passed');

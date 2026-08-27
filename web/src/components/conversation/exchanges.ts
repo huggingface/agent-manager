@@ -109,6 +109,15 @@ export function splitExchanges(turns: TraceTurn[]): Exchange[] {
 
 export type Step =
   | { kind: 'think'; text: string; more?: number }
+  /**
+   * A sub-agent spawn. Its own kind, and NOT a `tools` row, for two reasons:
+   * consecutive calls to one tool collapse into `Read ×4`, and spawns arrive
+   * consecutively — three in a row inside one real turn — so grouping would
+   * render four sub-agents as a single `Agent ×3` row with no state, no
+   * duration and nothing to open. And a sub-agent has a life after the call
+   * returns, which no other tool row has to represent.
+   */
+  | { kind: 'agent'; toolUseId: string; description: string; agentType: string; blocks: TraceBlock[] }
   | { kind: 'tools'; name: string; count: number; details: string[]; failed: boolean; blocks: TraceBlock[] }
   | { kind: 'note'; text: string; more?: number }
   | { kind: 'shell'; command: string; out: string; failed: boolean }
@@ -159,6 +168,9 @@ export function stepText(s: Step): string {
   if (s.kind === 'tools') return [s.name, ...s.details, ...s.blocks.map((b) => ('text' in b ? b.text : ''))].join('\n');
   if (s.kind === 'shell') return `${s.command}\n${s.out}`;
   if (s.kind === 'image') return '';
+  // A sub-agent row is searchable by the task it was given and by the call's
+  // own input; its transcript is a different file and is not in this window.
+  if (s.kind === 'agent') return [s.description, s.agentType, ...s.blocks.map((b) => ('text' in b ? b.text : ''))].join('\n');
   return s.text;
 }
 
@@ -198,6 +210,15 @@ export function stepsOf(turns: TraceTurn[]): Step[] {
           j++;
         }
         i = j - 1;
+        if (AGENT_TOOLS.has(b.name) && b.id) {
+          const input = agentInput(b.text);
+          out.push({
+            kind: 'agent', toolUseId: b.id, blocks: group,
+            description: input.description || argSummary(b.text) || 'sub-agent',
+            agentType: input.subagent_type || 'agent',
+          });
+          continue;
+        }
         pushTool(b.name, argSummary(b.text), group, failed);
       } else if (b.type === 'tool_result') {
         pushTool('result', oneLine(b.text, 60), [b], !!b.failed);
@@ -291,7 +312,19 @@ export interface AgentSpawn {
   durationMs?: number;
   /** a spawn whose receipt says it was launched into the background */
   background: boolean;
+  /** the task, verbatim from the call — what the row shows when it is opened */
+  prompt?: string;
 }
+
+/** The `Agent` call's input, which is JSON unless the block was capped mid-object. */
+export const agentInput = (text: string): { description?: string; subagent_type?: string; prompt?: string } => {
+  try { return JSON.parse(text || '{}'); } catch { /* capped */ }
+  const pick = (k: string) => {
+    const m = new RegExp(`"${k}":\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(text || '');
+    return m ? m[1].replace(/\\"/g, '"') : undefined;
+  };
+  return { description: pick('description'), subagent_type: pick('subagent_type'), prompt: pick('prompt') };
+};
 
 const textOfTurn = (t: TraceTurn) =>
   t.blocks.filter((b) => b.type === 'text').map((b) => ('text' in b ? b.text : '')).join('\n');
@@ -335,8 +368,7 @@ export function agentSpawnsOf(x: Exchange, turns: TraceTurn[]): AgentSpawn[] {
   for (const t of x.steps) {
     for (const b of t.blocks) {
       if (b.type !== 'tool_use' || !AGENT_TOOLS.has(b.name) || !b.id) continue;
-      let input: { description?: string; subagent_type?: string; prompt?: string } = {};
-      try { input = JSON.parse(b.text || '{}'); } catch { /* the input was capped mid-JSON */ }
+      const input = agentInput(b.text || '');
       const receipt = receipts.get(b.id);
       const background = !!receipt && LAUNCH_RECEIPT.test(receipt.text);
       const note = byId.get(b.id);
@@ -346,6 +378,7 @@ export function agentSpawnsOf(x: Exchange, turns: TraceTurn[]): AgentSpawn[] {
         agentType: input.subagent_type || 'agent',
         spawnedAt: t.ts,
         background,
+        prompt: input.prompt,
       };
       const idInReceipt = receipt && AGENT_ID_IN_RECEIPT.exec(receipt.text);
       if (idInReceipt) spawn.agentId = idInReceipt[1];
@@ -366,6 +399,51 @@ export function agentSpawnsOf(x: Exchange, turns: TraceTurn[]): AgentSpawn[] {
 }
 
 export const isFinished = (s: AgentSpawn) => !!s.outcome;
+
+/**
+ * How long a sub-agent may go without writing before the reader stops calling
+ * it "running".
+ *
+ * mtime is not a verdict on its own: measured across 8,757 gaps between
+ * consecutive records inside sub-agent transcripts, the median is 2.7s, p99 is
+ * 112s and the LONGEST silence inside a run that finished normally is 601s. So
+ * any threshold near ten minutes calls live sub-agents dead — a first draft of
+ * this constant was exactly 600s and the test caught it by one second. This one
+ * is 1.5× the worst silence observed, and still a guess: which is why the row
+ * that crosses it says how long it has been quiet rather than saying "dead",
+ * and keeps its transcript one click away.
+ *
+ * It exists because of the case it catches: 9 of release-video's 22 sub-agents
+ * have no recorded outcome at all, because the pane was restarted or the
+ * notification was lost to a compaction. Without this rule those rows spin
+ * under the working line forever — a phantom worker, which is worse than
+ * showing nothing.
+ */
+export const STALE_MS = 15 * 60 * 1000;
+
+export type AgentStatus = 'done' | 'failed' | 'killed' | 'running' | 'stalled' | 'no-result';
+
+/**
+ * One place decides what a row says, because three inputs decide it: what the
+ * parent recorded, whether the pane's own process is alive, and when the
+ * sub-agent's transcript last changed.
+ */
+export function agentStatus(
+  s: AgentSpawn,
+  opts: { live: boolean; lastWroteAt?: number | null; now?: number },
+): AgentStatus {
+  if (s.outcome === 'completed' || s.outcome === 'reported') return 'done';
+  if (s.outcome === 'failed') return 'failed';
+  if (s.outcome === 'killed') return 'killed';
+  // No outcome recorded. A pane that is not running cannot have anything
+  // running under it, whatever the files say.
+  if (!opts.live) return 'no-result';
+  const quiet = opts.lastWroteAt ? (opts.now ?? Date.now()) - opts.lastWroteAt : 0;
+  return quiet > STALE_MS ? 'stalled' : 'running';
+}
+
+/** The rows the collapsed exchange shows under its working line: the live ones. */
+export const isLive = (st: AgentStatus) => st === 'running' || st === 'stalled';
 
 /**
  * The count for the summary line, and the reason it needs the pane's state.
@@ -394,10 +472,15 @@ export function agentCounts(list: AgentSpawn[], live: boolean) {
  * "14 steps · 9 tools · 42s · 21.0k tok" — the whole turn in one line. There is
  * no header above the prompt any more, so this carries the numbers everywhere.
  */
-export function stepSummary(x: Exchange, steps: Step[]): string {
+export function stepSummary(x: Exchange, steps: Step[], subAgents = 0): string {
   const bits: string[] = [];
   if (steps.length) bits.push(`${steps.length} step${steps.length === 1 ? '' : 's'}`);
-  if (x.toolCalls) bits.push(`${x.toolCalls} tool${x.toolCalls === 1 ? '' : 's'}`);
+  // Sub-agents are counted as sub-agents and not also as tools. They ARE tool
+  // calls, but reporting one turn's four spawns inside "53 tools" and again as
+  // "4 sub-agents" makes the two numbers argue about the same work.
+  const tools = Math.max(0, x.toolCalls - subAgents);
+  if (tools) bits.push(`${tools} tool${tools === 1 ? '' : 's'}`);
+  if (subAgents) bits.push(`${subAgents} sub-agent${subAgents === 1 ? '' : 's'}`);
   const d = fmtDur(x.endTs - x.startTs);
   if (d) bits.push(d);
   if (x.tokens) bits.push(`${fmtTok(x.tokens)} tok`);
