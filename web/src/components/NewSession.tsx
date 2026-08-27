@@ -18,8 +18,9 @@ function defaultName(c: Cli, sessions: Session[]) {
   return `${base}-${max + 1}`;
 }
 
-// Creation widget for AI agents. Shell and Files are created via the quick-add
-// buttons at the bottom of the sidebar instead (rename after creation).
+// Creation widget used where the sidebar's own panel is not on screen: adding an
+// agent to a group, and the empty-workspace prompt. The sidebar panel offers
+// Shell and Files in its second picker row; this one is agents only.
 export default function NewSession({
   clis, sessions, defaultPath = '.', onCreate, onCancel,
 }: {

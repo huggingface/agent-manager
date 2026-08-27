@@ -83,19 +83,23 @@ function Level({ path, depth, value, onPick }: {
  * workspace root. Picking a not-yet-existing folder is fine: the server
  * creates it when the agent is created.
  */
-export default function FolderPicker({ value, onChange, disabled = false }: {
+export default function FolderPicker({ value, onChange, disabled = false, placeholder }: {
   value: string;
   onChange: (p: string) => void;
   disabled?: boolean;
+  /** Shown instead of the path when the picker is off, so a disabled folder
+   *  says why it is disabled rather than just going grey. */
+  placeholder?: string;
 }) {
   const [open, setOpen] = useState(false);
   const root = isRoot(value);
   return (
     <div className="fp">
-      <button className="fp-current" disabled={disabled} onClick={() => setOpen((o) => !o)} title="Choose where this agent runs">
+      <button className="fp-current" disabled={disabled} onClick={() => setOpen((o) => !o)}
+        title={placeholder || 'Choose where this agent runs'}>
         <FolderGlyph className="fp-ico" open={open || root} />
-        <span className="fp-path">{root ? 'workspaces' : value}</span>
-        <span className="fp-toggle">{open ? '▾' : '▸'}</span>
+        <span className={`fp-path${placeholder ? ' fp-why' : ''}`}>{placeholder || (root ? 'workspaces' : value)}</span>
+        {!placeholder && <span className="fp-toggle">{open ? '▾' : '▸'}</span>}
       </button>
       {open && !disabled && (
         <div className="fp-tree">
