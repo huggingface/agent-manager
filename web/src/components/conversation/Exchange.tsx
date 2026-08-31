@@ -311,6 +311,11 @@ function AgentRow({ spawn, entry, status, sessionId, live, rosterKnown, roster }
         {!can && rosterKnown ? <span className="cs-state">no transcript kept</span> : null}
         <span className="cs-facts mono">
           {entry?.depth && entry.depth > 1 ? <span className="depth">↳{entry.depth}</span> : null}
+          {/* codex names its sub-agents — Curie, Herschel, Boole — and that name
+              is a better handle than the task path. Shown only when it IS a
+              name: Claude's `general-purpose` is noise on every row. */}
+          {entry?.agentType && !['general-purpose', 'sub-agent', 'agent'].includes(entry.agentType)
+            ? <span className="who">{entry.agentType}</span> : null}
           {took ? <span>{took}</span> : going ? <span>{going}</span> : null}
           {/* Two different facts, and the second is not a verdict: `took` is what
               the parent recorded, `wrote` is when the file last changed. */}
@@ -436,13 +441,20 @@ export function ExchangeView({
   // that spawned it.
   const spawns = useMemo(() => agentSpawnsOf(x, turns || []), [x, turns]);
   const summary = stepSummary(x, steps, spawns.length);
+  // Two join keys, because the two harnesses record different things: Claude's
+  // sidecar carries the spawning call's id, codex's rollout header carries the
+  // task name and no id at all.
   const entryOf = useMemo(() => {
     const m = new Map<string, SubAgentEntry>();
-    for (const e of roster || []) if (e.toolUseId) m.set(e.toolUseId, e);
+    for (const e of roster || []) {
+      if (e.toolUseId) m.set(e.toolUseId, e);
+      const task = (e.taskName || '').split('/').filter(Boolean).pop();
+      if (task) m.set(`task:${task}`, e);
+    }
     return m;
   }, [roster]);
   const agentRows = useMemo(() => spawns.map((s) => {
-    const entry = entryOf.get(s.toolUseId);
+    const entry = entryOf.get(s.toolUseId) || (s.taskName ? entryOf.get(`task:${s.taskName}`) : undefined);
     return { spawn: s, entry, status: agentStatus(s, { live: !!live, lastWroteAt: entry?.lastWroteAt }) };
   }), [spawns, entryOf, live]);
   // The strip is all-or-nothing: while ANY sub-agent of this turn is still
@@ -481,7 +493,7 @@ export function ExchangeView({
     const r = rowByToolUse.get(s.toolUseId);
     return (
       <AgentRow key={key}
-                spawn={r?.spawn ?? { toolUseId: s.toolUseId, description: s.description, agentType: s.agentType, background: false }}
+                spawn={r?.spawn ?? { toolUseId: s.toolUseId, taskName: s.taskName, description: s.description, agentType: s.agentType, background: false }}
                 entry={r?.entry} status={r?.status ?? (live ? 'running' : 'no-result')}
                 sessionId={sessionId} live={!!live} rosterKnown={!!roster} roster={roster} />
     );

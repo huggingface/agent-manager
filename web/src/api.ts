@@ -650,6 +650,8 @@ export interface SubAgentEntry {
   agentType: string | null;
   description: string | null;
   toolUseId: string | null;
+  /** codex has no per-call id; its parent's records name the task instead */
+  taskName?: string | null;
   parentAgentId: string | null;
   depth: number | null;
   spawnedAt: number | null;

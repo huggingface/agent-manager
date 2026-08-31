@@ -117,7 +117,7 @@ export type Step =
    * duration and nothing to open. And a sub-agent has a life after the call
    * returns, which no other tool row has to represent.
    */
-  | { kind: 'agent'; toolUseId: string; description: string; agentType: string; blocks: TraceBlock[] }
+  | { kind: 'agent'; toolUseId: string; description: string; agentType: string; taskName?: string; blocks: TraceBlock[] }
   | { kind: 'tools'; name: string; count: number; details: string[]; failed: boolean; blocks: TraceBlock[] }
   | { kind: 'note'; text: string; more?: number }
   | { kind: 'shell'; command: string; out: string; failed: boolean }
@@ -212,10 +212,11 @@ export function stepsOf(turns: TraceTurn[]): Step[] {
         i = j - 1;
         if (AGENT_TOOLS.has(b.name) && b.id) {
           const input = agentInput(b.text);
+          const task = (input.task_name || '').split('/').filter(Boolean).pop() || '';
           out.push({
-            kind: 'agent', toolUseId: b.id, blocks: group,
-            description: input.description || argSummary(b.text) || 'sub-agent',
-            agentType: input.subagent_type || 'agent',
+            kind: 'agent', toolUseId: b.id, blocks: group, taskName: task || undefined,
+            description: input.description || task || argSummary(b.text) || 'sub-agent',
+            agentType: input.subagent_type || (task ? 'sub-agent' : 'agent'),
           });
           continue;
         }
@@ -280,7 +281,15 @@ export const fmtClock = (ms?: number) =>
 // So the outcome is the NOTIFICATION for a background spawn, and the result
 // itself only when it is the agent's own report (a synchronous spawn). Observed
 // statuses: completed, failed, killed.
-const AGENT_TOOLS = new Set(['Agent', 'Task']);
+// Claude spawns with `Agent` (older CLIs: `Task`); codex spawns with
+// `spawn_agent` in its `collaboration` namespace. The first cut of this feature
+// treated `collaboration.spawn_agent` as Agent Manager's own peer-spawning tool
+// and excluded codex on that basis. That was wrong: a real run on this machine
+// produced three rollouts whose headers name the pane as `parent_thread_id`
+// with `thread_source: "subagent"`, and codex itself called them "native
+// subagents in this conversation's subagent tree". Same facility, different
+// plumbing.
+const AGENT_TOOLS = new Set(['Agent', 'Task', 'spawn_agent']);
 const LAUNCH_RECEIPT = /^Async agent launched successfully/;
 const AGENT_ID_IN_RECEIPT = /agentId:\s*([A-Za-z0-9_-]+)/;
 const NOTIFICATION_ID = /<tool-use-id>([^<]+)<\/tool-use-id>/;
@@ -296,9 +305,42 @@ const NOTIFICATION_MS = /<duration_ms>(\d+)<\/duration_ms>/;
 
 export type AgentOutcome = 'completed' | 'failed' | 'killed' | 'reported';
 
+/**
+ * Codex's completion post, in the parent's own rollout:
+ *
+ *   Message Type: FINAL_ANSWER
+ *   Sender: /root/pty_summary
+ *   Payload: …the sub-agent's answer…
+ *
+ * This is codex's equivalent of Claude's `<task-notification>` — recorded by
+ * the parent, naming which sub-agent, timestamped, and carrying what it handed
+ * back. The feasibility study reported "no terminal event observed" because it
+ * looked for `sub_agent_activity` events, which CLI 0.149.1 does not emit at
+ * all; this is what it emits instead. `wait_agent` is NOT usable for this: its
+ * output is `{"message":"Wait completed.","timed_out":false}` and names no
+ * agent, so it says something finished without saying what.
+ */
+const FINAL_ANSWER = /Message Type:\s*FINAL_ANSWER/;
+// The type has to BE final, not listed among the options: codex documents this
+// very format in its own developer prompt — "Message Type: MESSAGE |
+// FINAL_ANSWER … Sender: <author>" — in the same thread the real posts arrive
+// in, so a looser match reads the explanation as an event. (A sender-shape
+// guard was tried too and removed: an unmatched name matches no spawn, so it
+// changed nothing and no test could tell the difference.)
+const POST_SENDER = /Sender:\s*(\S+)/;
+/** the parent's own path is `/root`; a child's is `/root/<task name>` */
+const taskOf = (p: string) => (p || '').split('/').filter(Boolean).pop() || '';
+
 export interface AgentSpawn {
   /** the parent's own call id — the join key the sidecar files carry too */
   toolUseId: string;
+  /**
+   * Codex's join key instead of an id: the `spawn_agent` call names a
+   * `task_name`, the child's rollout header repeats it as `agent_path`, and the
+   * completion post names it as `Sender:`. There is no shared id anywhere in
+   * that chain, so the name IS the link — exact, not a heuristic.
+   */
+  taskName?: string;
   description: string;
   agentType: string;
   /** from the launch receipt; the roster supplies it when the receipt is not in view */
@@ -317,13 +359,13 @@ export interface AgentSpawn {
 }
 
 /** The `Agent` call's input, which is JSON unless the block was capped mid-object. */
-export const agentInput = (text: string): { description?: string; subagent_type?: string; prompt?: string } => {
+export const agentInput = (text: string): { description?: string; subagent_type?: string; prompt?: string; task_name?: string } => {
   try { return JSON.parse(text || '{}'); } catch { /* capped */ }
   const pick = (k: string) => {
     const m = new RegExp(`"${k}":\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(text || '');
     return m ? m[1].replace(/\\"/g, '"') : undefined;
   };
-  return { description: pick('description'), subagent_type: pick('subagent_type'), prompt: pick('prompt') };
+  return { description: pick('description'), subagent_type: pick('subagent_type'), prompt: pick('prompt'), task_name: pick('task_name') };
 };
 
 const textOfTurn = (t: TraceTurn) =>
@@ -337,6 +379,7 @@ const textOfTurn = (t: TraceTurn) =>
  */
 function outcomes(turns: TraceTurn[]) {
   const byId = new Map<string, { outcome: AgentOutcome; at?: number; tokens?: number; toolCalls?: number; durationMs?: number }>();
+  const byTask = new Map<string, { outcome: AgentOutcome; at?: number }>();
   const receipts = new Map<string, { text: string; at?: number; failed?: boolean }>();
   for (const t of turns) {
     for (const b of t.blocks) {
@@ -345,6 +388,12 @@ function outcomes(turns: TraceTurn[]) {
     // The harness's own completion messages arrive as user text and the trace
     // reader keeps them as `system` turns, which is why they are readable here.
     const text = textOfTurn(t);
+    // codex: a sub-agent's own answer, posted back into the parent's thread
+    if (FINAL_ANSWER.test(text)) {
+      const who = POST_SENDER.exec(text);
+      const task = taskOf(who ? who[1] : '');
+      if (task) byTask.set(task, { outcome: 'reported', at: t.ts });
+    }
     if (!text.includes('<task-notification>')) continue;
     for (const part of text.split('<task-notification>').slice(1)) {
       const id = NOTIFICATION_ID.exec(part);
@@ -358,33 +407,54 @@ function outcomes(turns: TraceTurn[]) {
       });
     }
   }
-  return { byId, receipts };
+  return { byId, byTask, receipts };
 }
 
 /** The sub-agents THIS exchange spawned, with whatever the parent knows of their end. */
 export function agentSpawnsOf(x: Exchange, turns: TraceTurn[]): AgentSpawn[] {
-  const { byId, receipts } = outcomes(turns);
+  const { byId, byTask, receipts } = outcomes(turns);
   const out: AgentSpawn[] = [];
   for (const t of x.steps) {
     for (const b of t.blocks) {
       if (b.type !== 'tool_use' || !AGENT_TOOLS.has(b.name) || !b.id) continue;
       const input = agentInput(b.text || '');
+      const task = taskOf(input.task_name || '');
       const receipt = receipts.get(b.id);
-      const background = !!receipt && LAUNCH_RECEIPT.test(receipt.text);
+      // codex's `spawn_agent` answers `{"task_name":"/root/pty_summary"}` — an
+      // acknowledgement, exactly like Claude's async launch receipt, and never
+      // the sub-agent's work. Without this, every codex spawn read as finished
+      // the moment it started: the same trap as Claude's background receipt,
+      // one shape further along. Its sub-agents always run concurrently, so
+      // this path has no synchronous case at all.
+      const codex = b.name === 'spawn_agent';
+      const background = codex || (!!receipt && LAUNCH_RECEIPT.test(receipt.text));
       const note = byId.get(b.id);
       const spawn: AgentSpawn = {
         toolUseId: b.id,
-        description: input.description || (b.text || '').slice(0, 80) || 'sub-agent',
-        agentType: input.subagent_type || 'agent',
+        taskName: task || undefined,
+        // codex's spawn carries a task NAME and an encrypted message, so the
+        // name is the description there; Claude's carries a written description.
+        description: input.description || task || (b.text || '').slice(0, 80) || 'sub-agent',
+        agentType: input.subagent_type || (task ? 'sub-agent' : 'agent'),
         spawnedAt: t.ts,
         background,
+        // …and nothing readable to show as a task: codex encrypts the message it
+        // sends its sub-agent, so there is no prompt on this path. The child's
+        // own trace still opens.
         prompt: input.prompt,
       };
       const idInReceipt = receipt && AGENT_ID_IN_RECEIPT.exec(receipt.text);
       if (idInReceipt) spawn.agentId = idInReceipt[1];
+      const post = task ? byTask.get(task) : undefined;
       if (note) {
         spawn.outcome = note.outcome; spawn.outcomeAt = note.at;
         spawn.tokens = note.tokens; spawn.toolCalls = note.toolCalls; spawn.durationMs = note.durationMs;
+      } else if (post) {
+        // codex: the answer came back, which is the whole of what is recorded.
+        // No token count, no tool count — those are not written down on this
+        // path, and the row shows the span it can prove instead of inventing
+        // numbers.
+        spawn.outcome = post.outcome; spawn.outcomeAt = post.at;
       }
       else if (receipt && !background) {
         // A synchronous spawn hands its report back AS the result, so this one

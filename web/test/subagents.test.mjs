@@ -306,5 +306,96 @@ console.log('\nand the cap tells the truth about what it is holding back');
   });
 }
 
+console.log('\nand codex, whose plumbing is different in every part');
+{
+  // Record shapes from a real run on this machine (codex 0.149.1): three
+  // `collaboration.spawn_agent` calls, each answered with an acknowledgement,
+  // then one `agent_message` per child posting its FINAL_ANSWER back.
+  const spawnAgent = (sec, callId, task) => ({
+    role: 'assistant', ts: at(sec),
+    blocks: [
+      { type: 'tool_use', id: callId, name: 'spawn_agent', text: JSON.stringify({ task_name: task, fork_turns: 'all', message: 'gAAAAABqlYfWFbr-j04I4HN5d-YU…' }) },
+      { type: 'tool_result', id: callId, text: JSON.stringify({ task_name: `/root/${task}` }) },
+    ],
+  });
+  const waited = (sec, callId) => ({
+    role: 'assistant', ts: at(sec),
+    blocks: [
+      { type: 'tool_use', id: callId, name: 'wait_agent', text: '{"timeout_ms":3600000}' },
+      { type: 'tool_result', id: callId, text: '{"message":"Wait completed.","timed_out":false}' },
+    ],
+  });
+  const finalAnswer = (sec, task, payload) => ({
+    role: 'system', ts: at(sec),
+    blocks: [{ type: 'text', text: `Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/${task}\nPayload:\n${payload}` }],
+  });
+  // and the protocol documentation codex puts in its own developer prompt
+  const protocolDoc = {
+    role: 'system', ts: at(1),
+    blocks: [{ type: 'text', text: 'You are `/root`… Message Type: MESSAGE | FINAL_ANSWER\nTask name: <task>\nSender: <author>\nPayload: <text>' }],
+  };
+  // …and the same explanation written with a real task in it, which is what a
+  // loose match would happily read as "pty_summary finished".
+  const protocolDocWithExample = {
+    role: 'system', ts: at(1),
+    blocks: [{ type: 'text', text: 'Posts look like: Message Type: MESSAGE | FINAL_ANSWER\nTask name: /root\nSender: /root/pty_summary\nPayload: <text>' }],
+  };
+
+  const turns = [
+    protocolDoc,
+    prompt(2, 'spawn three subagents, one summary each'),
+    spawnAgent(18, 'call_nq41', 'pty_summary'),
+    spawnAgent(20, 'call_dYuG', 'jsonl_summary'),
+    spawnAgent(22, 'call_84zW', 'cron_summary'),
+    waited(25, 'call_zPXG'),
+    finalAnswer(28, 'pty_summary', 'A PTY is a software interface that behaves like a physical terminal.'),
+    finalAnswer(31, 'jsonl_summary', 'JSONL is a text format where each line is one JSON value.'),
+    said(40, 'All three are back.'),
+  ];
+  // codex opens with four system turns of its own, so the operator's prompt is
+  // not the first thing in the file — take the exchange the prompt opened.
+  const exchanges = splitExchanges(turns);
+  const x = exchanges[exchanges.length - 1];
+  const spawns = agentSpawnsOf(x, turns);
+  check('three spawn_agent calls are three sub-agents', () => {
+    assert.equal(spawns.length, 3);
+    assert.deepEqual(spawns.map((s) => s.description), ['pty_summary', 'jsonl_summary', 'cron_summary']);
+    assert.deepEqual(spawns.map((s) => s.taskName), ['pty_summary', 'jsonl_summary', 'cron_summary']);
+  });
+  check('the FINAL_ANSWER post is the completion, matched by task name', () => {
+    assert.equal(spawns[0].outcome, 'reported');
+    assert.equal(spawns[0].outcomeAt, at(28));
+    assert.equal(spawns[1].outcome, 'reported');
+  });
+  check('the spawn acknowledgement is NOT a completion', () => {
+    // `{"task_name":"/root/cron_summary"}` comes back instantly, like Claude's
+    // async receipt. Reading it as a result marks every codex sub-agent done
+    // the moment it starts.
+    assert.equal(spawns[2].outcome, undefined);
+    assert.equal(agentStatus(spawns[2], { live: true }), 'running');
+    assert.equal(agentStatus(spawns[2], { live: false }), 'no-result');
+  });
+  check('"Wait completed." marks nothing — it names no agent', () => {
+    const noPosts = agentSpawnsOf(x, turns.filter((t) => !(t.blocks[0].text || '').includes('FINAL_ANSWER')));
+    assert.deepEqual(noPosts.map((s) => s.outcome), [undefined, undefined, undefined]);
+  });
+  check('and the protocol documentation does not complete a phantom sub-agent', () => {
+    // "Message Type: MESSAGE | FINAL_ANSWER" with "Sender: <author>" is codex
+    // explaining the format to itself, in the same thread.
+    const noPostTurns = [protocolDoc, protocolDocWithExample, ...turns.slice(1, 6)];
+    const docEx = splitExchanges(noPostTurns);
+    const docOnly = agentSpawnsOf(docEx[docEx.length - 1], noPostTurns);
+    assert.deepEqual(docOnly.map((s) => s.outcome), [undefined, undefined, undefined]);
+  });
+  check('the count and the states read the same as Claude’s', () => {
+    assert.equal(agentCounts(spawns, true).label, '3 sub-agents · 2 done · 1 running');
+    assert.equal(agentCounts(spawns, false).label, '3 sub-agents · 2 done · 1 unfinished');
+  });
+  check('a wait_agent call is not itself a sub-agent row', () => {
+    const kinds = stepsOf(turns.slice(1)).filter((s) => s.kind === 'agent').map((s) => s.description);
+    assert.deepEqual(kinds, ['pty_summary', 'jsonl_summary', 'cron_summary']);
+  });
+}
+
 console.log(failed ? `\n${failed} failed` : '\nall checks passed');
 process.exit(failed ? 1 : 0);

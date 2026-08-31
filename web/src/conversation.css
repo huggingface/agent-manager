@@ -153,6 +153,7 @@
   color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cs-facts .dim { color: color-mix(in srgb, var(--muted) 72%, transparent); }
 .cs-facts .depth { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
+.cs-facts .who { color: color-mix(in srgb, var(--accent) 60%, var(--muted)); }
 /* The two states that are the ABSENCE of a record say so in words, in the same
    quiet mono as the rest of the row's facts. They were pills with a dashed
    border; a sub-agent does not get its own badge vocabulary — `failed` and
