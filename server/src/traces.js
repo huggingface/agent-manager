@@ -1038,7 +1038,18 @@ const queueKey = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 // that, and showing it as a prompt would be a new bug in place of the old one.
 const isHarnessText = (t) => t.startsWith('<') || t.startsWith('[Request interrupted');
 
-async function normalizeClaude(file, out, range) {
+async function normalizeClaude(file, out, range, allowSubagent = false) {
+  // Where a FORK's own conversation starts.
+  //
+  // `subagent_type: "fork"` inherits the parent's transcript — the harness says
+  // so itself, in the boilerplate that ends the inherited part: "You are a
+  // worker fork. The transcript above is the parent's history — inherited
+  // reference, not your situation." The last inherited record is the `Agent`
+  // call that created this fork, so rendering the file whole makes a fork
+  // appear to have spawned itself, with its own summary line crediting it with
+  // one sub-agent — and expanding that row opens the same transcript again,
+  // without bound. Same shape as codex's `fork_turns: "all"`, one harness over.
+  let forkEnd = null;
   const stitch = makeStitcher();
   const byMsgId = new Map();
   const pending = [];   // queued prompts, oldest first, until dequeued or removed
@@ -1120,6 +1131,7 @@ async function normalizeClaude(file, out, range) {
         // this list the record reads as something the operator typed, and the
         // reader would open a new exchange with harness noise in the prompt band.
         if (j.type === 'user' && (t.startsWith('<') || t.startsWith('[Request interrupted') || t.startsWith('[SYSTEM NOTIFICATION'))) {
+          if (allowSubagent && forkEnd === null && t.startsWith('<fork-boilerplate>')) forkEnd = out.messages.length;
           out.push({ role: 'system', ts, blocks: [textBlock('text', t)] });
           continue;
         }
@@ -1147,6 +1159,13 @@ async function normalizeClaude(file, out, range) {
       out.push(msg);
       if (id) byMsgId.set(id, msg);
     }
+  }
+  // A fork's inherited prelude goes now that the whole window has been read.
+  // Only when the boilerplate was actually seen: a general-purpose sub-agent
+  // inherits nothing and has none, and a fork whose boilerplate is outside this
+  // window is better shown whole than shown empty.
+  if (allowSubagent && forkEnd !== null && forkEnd > 0) {
+    out.messages = out.messages.slice(forkEnd);
   }
   // Dropped at the end rather than never pushed: which path a queued prompt took
   // is not known until its dequeue or remove has been read. Anything still
@@ -1638,7 +1657,7 @@ async function parseTraceFile(harness, file, sessionId, range = null, allowSubag
   const out = newTrace(harness);
   out.sessionId = sessionId || null;
   switch (harness) {
-    case 'claude': await normalizeClaude(file, out, range); break;
+    case 'claude': await normalizeClaude(file, out, range, allowSubagent); break;
     case 'codex': await normalizeCodex(file, out, range, allowSubagent); break;
     case 'openclaw': await normalizeOpenClaw(file, out, range); break;
     case 'sts': await normalizeSts(file, out, range); break;
@@ -2192,7 +2211,7 @@ export async function readSubagentTrace(session, agentId, opts = {}) {
     const e = new Error('this session keeps no sub-agent transcripts'); e.code = 'unsupported-harness'; throw e;
   }
   const file = path.join(loc.path.replace(/\.jsonl$/, ''), 'subagents', `agent-${agentId}.jsonl`);
-  return readTraceByPath(file, opts);
+  return readTraceByPath(file, opts, true);
 }
 
 /**

@@ -28,7 +28,7 @@ await build({
   entryPoints: [path.join(HERE, '../src/components/conversation/exchanges.ts')],
   outfile: out, format: 'esm', bundle: false, logLevel: 'error',
 });
-const { splitExchanges, agentSpawnsOf, agentCounts, agentStatus, isLive, anyLive, capRows, railIsLast, stepsOf, stepSummary, STALE_MS } = await import(pathToFileURL(out).href);
+const { splitExchanges, agentSpawnsOf, agentCounts, agentStatus, isLive, anyLive, canOpenAgent, capRows, railIsLast, stepsOf, stepSummary, MAX_NEST, STALE_MS } = await import(pathToFileURL(out).href);
 
 let failed = 0;
 const check = (what, fn) => {
@@ -303,6 +303,49 @@ console.log('\nand the cap tells the truth about what it is holding back');
     const { note } = capRows(rowsOf(...Array(12).fill('done')), 10);
     assert.match(note, /2 done/);
     assert.doesNotMatch(note, /running/);
+  });
+}
+
+console.log('\nand nothing can nest forever, whatever the data says');
+{
+  // The reader must not hang on a transcript that names itself as its own
+  // child. It happened for real: a Claude `fork` inherits the parent's history
+  // ending in the Agent call that created it, so the fork looked like its own
+  // sub-agent and every level below was the same file again. The parser no
+  // longer hands that over, and this is the backstop underneath it.
+  check('a row naming an agent already open above it cannot be opened', () => {
+    assert.equal(canOpenAgent('a69e', ['a69e']), false, 'itself');
+    assert.equal(canOpenAgent('a69e', ['root1', 'a69e']), false, 'an ancestor');
+  });
+  check('a fresh agent below one open row can', () => assert.equal(canOpenAgent('child', ['parent']), true));
+  check('and the nesting stops at the cap regardless', () => {
+    const deep = Array.from({ length: MAX_NEST }, (_, i) => `a${i}`);
+    assert.equal(canOpenAgent('fresh', deep), false, `${MAX_NEST} deep is as far as it goes`);
+    assert.equal(canOpenAgent('fresh', deep.slice(0, MAX_NEST - 1)), true);
+  });
+  check('a row with no agent id resolves to nothing openable',
+    () => assert.equal(canOpenAgent(undefined, []), false));
+}
+
+console.log('\nand a fork receipt is a receipt, not the fork\'s work');
+{
+  const spawnTurn = {
+    role: 'assistant', ts: at(4),
+    blocks: [
+      { type: 'tool_use', id: 'toolu_fork', name: 'Agent', text: JSON.stringify({ subagent_type: 'fork', description: 'Research Meta news' }) },
+      { type: 'tool_result', id: 'toolu_fork', text: 'Fork started — processing in background' },
+    ],
+  };
+  const turns = [prompt(0, 'research the week'), spawnTurn];
+  const [x] = splitExchanges(turns);
+  const [spawn] = agentSpawnsOf(x, turns);
+  check('"Fork started" does not mark it finished', () => {
+    assert.equal(spawn.outcome, undefined);
+    assert.equal(spawn.background, true);
+  });
+  check('so a live pane calls it running, and a dead one calls it unfinished', () => {
+    assert.equal(agentStatus(spawn, { live: true }), 'running');
+    assert.equal(agentCounts([spawn], false).label, '1 sub-agent · 1 unfinished');
   });
 }
 

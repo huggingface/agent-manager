@@ -290,7 +290,10 @@ export const fmtClock = (ms?: number) =>
 // subagents in this conversation's subagent tree". Same facility, different
 // plumbing.
 const AGENT_TOOLS = new Set(['Agent', 'Task', 'spawn_agent']);
-const LAUNCH_RECEIPT = /^Async agent launched successfully/;
+// Two launch acknowledgements, both of which arrive at once and neither of
+// which is the sub-agent's work: the background spawn's, and a fork's. Getting
+// the second one wrong marked every fork finished the moment it started.
+const LAUNCH_RECEIPT = /^(Async agent launched successfully|Fork started)/;
 const AGENT_ID_IN_RECEIPT = /agentId:\s*([A-Za-z0-9_-]+)/;
 const NOTIFICATION_ID = /<tool-use-id>([^<]+)<\/tool-use-id>/;
 const NOTIFICATION_STATUS = /<status>([a-z]+)<\/status>/;
@@ -510,6 +513,31 @@ export function agentStatus(
   if (!opts.live) return 'no-result';
   const quiet = opts.lastWroteAt ? (opts.now ?? Date.now()) - opts.lastWroteAt : 0;
   return quiet > STALE_MS ? 'stalled' : 'running';
+}
+
+/**
+ * How deep the reader will nest a sub-agent inside a sub-agent.
+ *
+ * The measured maximum on this machine is depth 2 (rl-llm-wiki: three agents
+ * that spawned seven), and nothing deeper exists in any of the sessions here,
+ * so this is a backstop rather than a limit anyone will meet. It is here
+ * because the reader must not hang on malformed data: a transcript that names
+ * itself as its own child — which a fork's inherited prelude did until the
+ * parser stopped handing it over — would otherwise open forever.
+ */
+export const MAX_NEST = 3;
+
+/**
+ * Whether a row may be opened, given who is already open above it.
+ *
+ * `ancestors` is the chain of agentIds from the outermost open row down to this
+ * one. A row that names an agent already in that chain is a cycle, and it
+ * renders as a row that cannot be opened rather than as infinite nesting.
+ */
+export function canOpenAgent(agentId: string | undefined, ancestors: string[], cap = MAX_NEST) {
+  if (!agentId) return false;
+  if (ancestors.includes(agentId)) return false;
+  return ancestors.length < cap;
 }
 
 /** A sub-agent the parent has not heard back from, on a pane that is alive. */

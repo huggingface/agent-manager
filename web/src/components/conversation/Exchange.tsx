@@ -14,7 +14,7 @@ import { getSubAgentTrace } from '../../api';
 import { Rails } from '../Rails';
 import { renderMarkdown } from '../../lib/markdown';
 import type { Exchange, Step } from './exchanges';
-import { agentSpawnsOf, agentStatus, anyLive, capRows, railIsLast, fmtClock, fmtDur, fmtTok, oneLine, proseOf, splitExchanges, stepSummary, stepText, stepsOf } from './exchanges';
+import { agentSpawnsOf, agentStatus, anyLive, canOpenAgent, capRows, railIsLast, fmtClock, fmtDur, fmtTok, oneLine, proseOf, splitExchanges, stepSummary, stepText, stepsOf } from './exchanges';
 import type { AgentSpawn, AgentStatus } from './exchanges';
 import ToolCall from './ToolCall';
 
@@ -243,8 +243,10 @@ function PromptBand({ text, q, queued }: { text: string; q?: string; queued?: bo
  * task at the top. On the few that overflow it, the tail keeps the report and
  * the row above still names the task.
  */
-function SubAgentTrace({ sessionId, agentId, live, roster }: {
+function SubAgentTrace({ sessionId, agentId, live, roster, ancestors }: {
   sessionId: string; agentId: string; live: boolean; roster?: SubAgentEntry[] | null;
+  /** the agentIds already open above this one, outermost first */
+  ancestors: string[];
 }) {
   const [state, setState] = useState<{ turns?: TraceTurn[]; error?: string }>({});
   useEffect(() => {
@@ -263,7 +265,8 @@ function SubAgentTrace({ sessionId, agentId, live, roster }: {
   return (
     <>
       {exchanges.map((ex) => (
-        <ExchangeView key={ex.key} x={ex} turns={state.turns} sessionId={sessionId} live={live} roster={roster} dim />
+        <ExchangeView key={ex.key} x={ex} turns={state.turns} sessionId={sessionId} live={live} roster={roster}
+                      ancestors={[...ancestors, agentId]} dim />
       ))}
     </>
   );
@@ -275,7 +278,7 @@ function SubAgentTrace({ sessionId, agentId, live, roster }: {
  * working line while it runs. Two renderings of the same thing was how the
  * count and the list drifted apart in the first cut of this feature.
  */
-function AgentRow({ spawn, entry, status, sessionId, live, rosterKnown, roster, rail }: {
+function AgentRow({ spawn, entry, status, sessionId, live, rosterKnown, roster, rail, ancestors }: {
   spawn: AgentSpawn; entry?: SubAgentEntry; status: AgentStatus;
   sessionId?: string; live: boolean; roster?: SubAgentEntry[] | null;
   /** the roster has answered, so "no entry" means "no transcript", not "not yet" */
@@ -286,15 +289,24 @@ function AgentRow({ spawn, entry, status, sessionId, live, rosterKnown, roster, 
    * among many and a rail would draw a hierarchy that is not there.
    */
   rail?: { isLast: boolean };
+  /** the agentIds open above this row, outermost first */
+  ancestors?: string[];
 }) {
   const [open, setOpen] = useState(false);
   const agentId = spawn.agentId || entry?.agentId;
+  const chain = ancestors || [];
+  // A row that names an agent already open above it is a cycle: it renders, and
+  // it does not open. So does one at the nesting cap. Both are backstops — the
+  // parser no longer hands a fork its own spawning call — and both are cheap.
+  const cyclic = !!agentId && chain.includes(agentId);
+  const deep = !cyclic && !!agentId && !canOpenAgent(agentId, chain);
   // Not every spawn has a transcript. the-gatherer's parent holds 168 `Agent`
   // calls and its `subagents/` directory holds 38 sidecars: the older CLI kept
   // no per-sub-agent file, so those turns can be counted and their outcomes
   // read from the notifications, but there is nothing to open. A row that
   // offers a triangle and then 404s is worse than a row that says so.
-  const can = !!agentId && !!sessionId && (entry ? entry.hasTranscript : !rosterKnown);
+  const can = !!agentId && !!sessionId && (entry ? entry.hasTranscript : !rosterKnown)
+    && canOpenAgent(agentId, chain);
   // The harness's own duration when the notification reported one; otherwise
   // how long it has been going. Never a guess from mtime — see agentStatus.
   const took = spawn.durationMs ? fmtDur(spawn.durationMs)
@@ -316,7 +328,9 @@ function AgentRow({ spawn, entry, status, sessionId, live, rosterKnown, roster, 
         {status === 'stalled' || status === 'no-result' ? (
           <span className={`cs-state ${status}`}>{status === 'stalled' ? 'no write in 15m' : 'no result'}</span>
         ) : null}
-        {!can && rosterKnown ? <span className="cs-state">no transcript kept</span> : null}
+        {cyclic ? <span className="cs-state">already open above</span>
+          : deep ? <span className="cs-state">nested too deep to open here</span>
+            : !can && rosterKnown ? <span className="cs-state">no transcript kept</span> : null}
         <span className="cs-facts mono">
           {entry?.depth && entry.depth > 1 ? <span className="depth">↳{entry.depth}</span> : null}
           {/* codex names its sub-agents — Curie, Herschel, Boole — and that name
@@ -339,7 +353,7 @@ function AgentRow({ spawn, entry, status, sessionId, live, rosterKnown, roster, 
         <div className="cs-body">
           {/* Its trace, drawn by the reader. The task arrives as that trace's own
               first prompt, so nothing here has to render it separately. */}
-          <SubAgentTrace sessionId={sessionId} agentId={agentId} live={live} roster={roster} />
+          <SubAgentTrace sessionId={sessionId} agentId={agentId} live={live} roster={roster} ancestors={chain} />
         </div>
       )}
     </div>
@@ -368,9 +382,10 @@ function AgentRow({ spawn, entry, status, sessionId, live, rosterKnown, roster, 
  */
 const LIVE_CAP = 10;
 
-function LiveAgents({ rows, sessionId, live, rosterKnown, roster }: {
+function LiveAgents({ rows, sessionId, live, rosterKnown, roster, ancestors }: {
   rows: { spawn: AgentSpawn; entry?: SubAgentEntry; status: AgentStatus }[];
   sessionId?: string; live: boolean; rosterKnown?: boolean; roster?: SubAgentEntry[] | null;
+  ancestors: string[];
 }) {
   const { shown, note } = capRows(rows, LIVE_CAP);
   if (!rows.length) return null;
@@ -378,7 +393,7 @@ function LiveAgents({ rows, sessionId, live, rosterKnown, roster }: {
     <div className="cx-live">
       {shown.map((r, i) => (
         <AgentRow key={r.spawn.toolUseId} spawn={r.spawn} entry={r.entry} status={r.status}
-                  sessionId={sessionId} live={live} rosterKnown={rosterKnown} roster={roster}
+                  sessionId={sessionId} live={live} rosterKnown={rosterKnown} roster={roster} ancestors={ancestors}
                   // …and the elbow belongs to whatever is actually last. With the
                   // cap in play that is the overflow line, not the last row.
                   rail={{ isLast: railIsLast(i, shown.length, !!note) }} />
@@ -394,7 +409,7 @@ function LiveAgents({ rows, sessionId, live, rosterKnown, roster }: {
 }
 
 export function ExchangeView({
-  x, n, total, open, onToggle, running, dim, q, baseModel, turns, sessionId, live, roster,
+  x, n, total, open, onToggle, running, dim, q, baseModel, turns, sessionId, live, roster, ancestors,
 }: {
   x: Exchange;
   n?: number;            // 1-based position — the viewer numbers turns, a card does not
@@ -423,6 +438,13 @@ export function ExchangeView({
    * the result away, so rows never got their `wrote 4m ago`.
    */
   roster?: SubAgentEntry[] | null;
+  /**
+   * The sub-agents already open above this exchange, outermost first. Empty at
+   * the top level; each nested trace adds its own id. It is what stops a cycle
+   * in the data from nesting forever, and what keeps a sub-agent from being
+   * counted as its own child.
+   */
+  ancestors?: string[];
 }) {
   const [selfOpen, setSelfOpen] = useState(false);
   const toggle = onToggle ?? (() => setSelfOpen((o) => !o));
@@ -455,11 +477,14 @@ export function ExchangeView({
   // The sub-agents this turn started. Computed over the whole window, not the
   // exchange, because a background one finishes in a later turn than the one
   // that spawned it.
-  const spawns = useMemo(() => agentSpawnsOf(x, turns || []), [x, turns]);
-  const summary = stepSummary(x, steps, spawns.length);
+  const chain = ancestors || [];
+  const allSpawns = useMemo(() => agentSpawnsOf(x, turns || []), [x, turns]);
   // Two join keys, because the two harnesses record different things: Claude's
   // sidecar carries the spawning call's id, codex's rollout header carries the
   // task name and no id at all.
+  // …minus any that resolve to an agent already open above: a transcript that
+  // names its own spawning call must not be credited with itself, in the count
+  // or anywhere else.
   const entryOf = useMemo(() => {
     const m = new Map<string, SubAgentEntry>();
     for (const e of roster || []) {
@@ -469,6 +494,12 @@ export function ExchangeView({
     }
     return m;
   }, [roster]);
+  const spawns = useMemo(() => allSpawns.filter((s) => {
+    const id = s.agentId || entryOf.get(s.toolUseId)?.agentId
+      || (s.taskName ? entryOf.get(`task:${s.taskName}`)?.agentId : undefined);
+    return !(id && chain.includes(id));
+  }), [allSpawns, entryOf, chain.join('|')]); // eslint-disable-line react-hooks/exhaustive-deps
+  const summary = stepSummary(x, steps, spawns.length);
   const agentRows = useMemo(() => spawns.map((s) => {
     const entry = entryOf.get(s.toolUseId) || (s.taskName ? entryOf.get(`task:${s.taskName}`) : undefined);
     return { spawn: s, entry, status: agentStatus(s, { live: !!live, lastWroteAt: entry?.lastWroteAt }) };
@@ -511,7 +542,7 @@ export function ExchangeView({
       <AgentRow key={key}
                 spawn={r?.spawn ?? { toolUseId: s.toolUseId, taskName: s.taskName, description: s.description, agentType: s.agentType, background: false }}
                 entry={r?.entry} status={r?.status ?? (live ? 'running' : 'no-result')}
-                sessionId={sessionId} live={!!live} rosterKnown={!!roster} roster={roster} />
+                sessionId={sessionId} live={!!live} rosterKnown={!!roster} roster={roster} ancestors={chain} />
     );
   };
 
@@ -576,7 +607,7 @@ export function ExchangeView({
           the ones still going and the ones that have landed. Each row is the row
           the step list shows, so opening one here costs no navigation. */}
       {liveNow && !isOpen && (
-        <LiveAgents rows={agentRows} sessionId={sessionId} live={!!live} rosterKnown={!!roster} roster={roster} />
+        <LiveAgents rows={agentRows} sessionId={sessionId} live={!!live} rosterKnown={!!roster} roster={roster} ancestors={chain} />
       )}
     </section>
   );

@@ -97,6 +97,45 @@ console.log('\nand a sub-agent rollout is still not a session view');
     () => assert.equal(code, 'trace-not-user-conversation'));
 }
 
+console.log('\nand a CLAUDE fork does not render itself as its own child');
+{
+  // `subagent_type: "fork"` inherits the parent's transcript, and the LAST
+  // inherited record is the Agent call that created this fork — so read whole,
+  // the fork appears to have spawned itself, and opening that row opens the
+  // same file again. The harness marks the boundary itself.
+  const fork = path.join(TMP, 'agent-a69e9dcf7fcc38c68.jsonl');
+  const spawnId = 'toolu_01EMfLbhWBZwwwT5dv5psJwS';
+  fs.writeFileSync(fork, [
+    JSON.stringify({ type: 'user', isSidechain: true, cwd: TMP, timestamp: at(5),
+      message: { role: 'user', content: 'THE PARENT PROMPT: research the week' } }),
+    JSON.stringify({ type: 'assistant', isSidechain: true, cwd: TMP, timestamp: at(6),
+      message: { id: 'p1', role: 'assistant', content: [
+        { type: 'tool_use', id: spawnId, name: 'Agent',
+          input: { subagent_type: 'fork', description: 'Research Meta news', prompt: 'Use WebSearch…' } }] } }),
+    JSON.stringify({ type: 'user', isSidechain: true, cwd: TMP, timestamp: at(6),
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: spawnId, content: 'Fork started — processing in background' }] } }),
+    JSON.stringify({ type: 'user', isSidechain: true, cwd: TMP, timestamp: at(7),
+      message: { role: 'user', content: '<fork-boilerplate>\nYou are a worker fork. The transcript above is the parent\u2019s history — inherited reference, not your situation.' } }),
+    JSON.stringify({ type: 'assistant', isSidechain: true, cwd: TMP, timestamp: at(9),
+      message: { id: 'c1', role: 'assistant', content: [{ type: 'text', text: 'ITS OWN ANSWER: Meta shipped three things.' }] } }),
+  ].join('\n') + '\n');
+
+  const w = await readTraceByPath(fork, { offset: 0, limit: 50 }, true);
+  const text = w.turns.flatMap((t) => t.blocks.filter((b) => b.type === 'text').map((b) => b.text)).join('\n');
+  const spawnsInside = w.turns.flatMap((t) => t.blocks.filter((b) => b.type === 'tool_use' && b.name === 'Agent'));
+  check('the inherited parent turns are gone', () => assert.doesNotMatch(text, /THE PARENT PROMPT/));
+  check('…including the Agent call that created it, so it is not its own child',
+    () => assert.deepEqual(spawnsInside, [], 'a fork must not carry its own spawning call'));
+  check('and its own answer is there', () => assert.match(text, /ITS OWN ANSWER/));
+  // (a fork's sidechain is not refused the way a codex subagent rollout is, so
+  // the untrimmed read is what any other caller still gets — awaited out here,
+  // because `check` runs its callback synchronously)
+  const whole = await readTraceByPath(fork, { offset: 0, limit: 50 });
+  const wholeText = whole.turns.flatMap((t) => t.blocks.filter((b) => b.type === 'text').map((b) => b.text)).join('\n');
+  check('read as a session, the same file is unchanged — the trim is opt-in',
+    () => assert.match(wholeText, /THE PARENT PROMPT/));
+}
+
 console.log('\nand a sub-agent with no fork is shown whole');
 {
   // Claude's children are not forks: their transcript begins with the task.
