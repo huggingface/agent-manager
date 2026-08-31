@@ -442,8 +442,44 @@ export function agentStatus(
   return quiet > STALE_MS ? 'stalled' : 'running';
 }
 
-/** The rows the collapsed exchange shows under its working line: the live ones. */
+/** A sub-agent the parent has not heard back from, on a pane that is alive. */
 export const isLive = (st: AgentStatus) => st === 'running' || st === 'stalled';
+
+/**
+ * The strip under the working line is all-or-nothing: while ANY sub-agent of the
+ * turn is still going it lists them all, finished ones included, and when the
+ * last one lands it is gone and they are in the collapsed work with every other
+ * step. One appearance and one disappearance per turn, instead of one per
+ * sub-agent.
+ */
+export const anyLive = (statuses: AgentStatus[]) => statuses.some(isLive);
+
+/**
+ * Which of those rows fit, and what the line at the bottom says about the rest.
+ *
+ * Rows accumulate now, so the cap does real work: a release-video turn ends at
+ * 22 sub-agents and the-gatherer's busiest at 40. What gives way is the
+ * FINISHED rows, oldest first — the strip is about what is still going, and a
+ * landed sub-agent is one click away in the work. Two consequences worth having:
+ * the strip's height stops growing at the cap instead of resizing every time one
+ * completes, and the overflow line has to describe what it is holding back by
+ * STATE. "…and 16 more running" would be a lie in the state the cap exists for,
+ * where most of the hidden rows are done.
+ */
+export function capRows<T extends { status: AgentStatus }>(rows: T[], cap: number) {
+  if (rows.length <= cap) return { shown: rows, hidden: [] as T[], note: '' };
+  const giveWay = new Set(
+    [...rows]
+      .sort((a, b) => Number(isLive(a.status)) - Number(isLive(b.status)))   // finished first, order otherwise kept
+      .slice(0, rows.length - cap),
+  );
+  const shown = rows.filter((r) => !giveWay.has(r));
+  const hidden = rows.filter((r) => giveWay.has(r));
+  const liveHidden = hidden.filter((r) => isLive(r.status)).length;
+  const bits = [hidden.length - liveHidden ? `${hidden.length - liveHidden} done` : '', liveHidden ? `${liveHidden} running` : '']
+    .filter(Boolean).join(', ');
+  return { shown, hidden, note: `…and ${hidden.length} more${bits ? ` — ${bits}` : ''} — open the work to see them all` };
+}
 
 /**
  * The count for the summary line, and the reason it needs the pane's state.

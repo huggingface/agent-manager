@@ -7,13 +7,13 @@
 // Left edge: the prompt's ❯ is the ONLY thing outside the text column. No rail
 // on the answer, no rail on the work — scrolling, you find turns by that arrow
 // and the tinted prompt bar, and everything else lines up in one column.
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { SubAgentEntry, TraceTurn } from '../../api';
-import { getSubAgents, getSubAgentTrace } from '../../api';
+import { getSubAgentTrace } from '../../api';
 import { renderMarkdown } from '../../lib/markdown';
 import type { Exchange, Step } from './exchanges';
-import { agentSpawnsOf, agentStatus, fmtClock, fmtDur, fmtTok, isLive, oneLine, proseOf, splitExchanges, stepSummary, stepText, stepsOf } from './exchanges';
+import { agentSpawnsOf, agentStatus, anyLive, capRows, fmtClock, fmtDur, fmtTok, oneLine, proseOf, splitExchanges, stepSummary, stepText, stepsOf } from './exchanges';
 import type { AgentSpawn, AgentStatus } from './exchanges';
 import ToolCall from './ToolCall';
 
@@ -221,22 +221,35 @@ function PromptBand({ text, q, queued }: { text: string; q?: string; queued?: bo
 }
 
 /**
- * What one sub-agent did — the reader, one level down.
+ * What one sub-agent did: the reader, one level down, and nothing else.
  *
- * A sub-agent's transcript is an ordinary trace: same records, same normalizer,
- * so it goes through splitExchanges and comes back out as exchanges that this
- * very component renders. Its first user message is the task it was given, so
- * the prompt band is already the right thing to show at the top. It is also why
- * a sub-agent that spawned sub-agents (rl-llm-wiki did, seven of them at depth
- * 2) unfolds the same way without a second implementation: the directory is
- * flat, so the same endpoint answers for a child of a child.
+ * A sub-agent's transcript is an ordinary trace — same records, same normalizer
+ * — so it goes through splitExchanges and comes back out as exchanges that this
+ * very component renders. Its first user message IS the task it was given, so
+ * the prompt band the reader already draws for a user prompt is exactly the
+ * right thing at the top of it: the task is highlighted because it is a prompt,
+ * not because sub-agents get special paint.
+ *
+ * There is deliberately no wrapper of its own — no rail, no badge, no bespoke
+ * task block. The step body it sits in already indents it, and that indent is
+ * the whole hierarchy. An earlier cut of this had a rail, a clamped task panel
+ * and a "show the whole task" button; all three were a second visual language
+ * for content the reader can already draw, and they are gone.
+ *
+ * The window is 2 MB rather than the reader's 384 KB default because a
+ * sub-agent's whole transcript is usually smaller than that (0.27–12 MB here,
+ * most under four), and a window that holds the whole file is what puts the
+ * task at the top. On the few that overflow it, the tail keeps the report and
+ * the row above still names the task.
  */
-function SubAgentTrace({ sessionId, agentId, live }: { sessionId: string; agentId: string; live: boolean }) {
+function SubAgentTrace({ sessionId, agentId, live, roster }: {
+  sessionId: string; agentId: string; live: boolean; roster?: SubAgentEntry[] | null;
+}) {
   const [state, setState] = useState<{ turns?: TraceTurn[]; error?: string }>({});
   useEffect(() => {
     const ac = new AbortController();
     setState({});
-    getSubAgentTrace(sessionId, agentId, 400_000, ac.signal)
+    getSubAgentTrace(sessionId, agentId, 2_000_000, ac.signal)
       .then((w) => setState({ turns: w.turns }))
       .catch((e) => { if (!ac.signal.aborted) setState({ error: e?.message || 'could not read it' }); });
     return () => ac.abort();
@@ -247,11 +260,11 @@ function SubAgentTrace({ sessionId, agentId, live }: { sessionId: string; agentI
   const exchanges = splitExchanges(state.turns);
   if (!exchanges.length) return <div className="ca-msg mono">nothing recorded yet</div>;
   return (
-    <div className="ca-trace">
+    <>
       {exchanges.map((ex) => (
-        <ExchangeView key={ex.key} x={ex} turns={state.turns} sessionId={sessionId} live={live} dim />
+        <ExchangeView key={ex.key} x={ex} turns={state.turns} sessionId={sessionId} live={live} roster={roster} dim />
       ))}
-    </div>
+    </>
   );
 }
 
@@ -261,9 +274,9 @@ function SubAgentTrace({ sessionId, agentId, live }: { sessionId: string; agentI
  * working line while it runs. Two renderings of the same thing was how the
  * count and the list drifted apart in the first cut of this feature.
  */
-function AgentRow({ spawn, entry, status, sessionId, live, leaving, rosterKnown }: {
+function AgentRow({ spawn, entry, status, sessionId, live, rosterKnown, roster }: {
   spawn: AgentSpawn; entry?: SubAgentEntry; status: AgentStatus;
-  sessionId?: string; live: boolean; leaving?: boolean;
+  sessionId?: string; live: boolean; roster?: SubAgentEntry[] | null;
   /** the roster has answered, so "no entry" means "no transcript", not "not yet" */
   rosterKnown?: boolean;
 }) {
@@ -286,7 +299,7 @@ function AgentRow({ spawn, entry, status, sessionId, live, leaving, rosterKnown 
       : status === 'failed' || status === 'killed' ? <span className="cs-mark bad">✗</span>
         : <span className="cs-tri off">–</span>;
   return (
-    <div className={`cs agent ${status}${open ? ' open' : ''}${leaving ? ' leaving' : ''}`}>
+    <div className={`cs agent ${status}${open ? ' open' : ''}`}>
       <button className="cs-head" disabled={!can} onClick={() => setOpen((o) => !o)}
               title={can ? 'Show the task and what it did' : 'no transcript on disk for this one'}>
         {open ? <span className="cs-tri">▾</span> : mark}
@@ -311,134 +324,56 @@ function AgentRow({ spawn, entry, status, sessionId, live, leaving, rosterKnown 
       </button>
       {open && agentId && sessionId && (
         <div className="cs-body">
-          {/* The task it was given, then what it did with it — the two things the
-              operator asked to see behind a row. */}
-          <AgentTask spawn={spawn} />
-          <SubAgentTrace sessionId={sessionId} agentId={agentId} live={live} />
+          {/* Its trace, drawn by the reader. The task arrives as that trace's own
+              first prompt, so nothing here has to render it separately. */}
+          <SubAgentTrace sessionId={sessionId} agentId={agentId} live={live} roster={roster} />
         </div>
       )}
     </div>
   );
 }
 
-/** The task, clamped. It is the `Agent` call's own prompt — 3.4 kB is normal. */
-function AgentTask({ spawn }: { spawn: AgentSpawn }) {
-  const [all, setAll] = useState(false);
-  if (!spawn.prompt) return null;
-  const long = spawn.prompt.length > 420;
-  return (
-    <>
-      <div className={`cs-task${all || !long ? '' : ' clamp'}`}>{spawn.prompt}</div>
-      {long && !all && (
-        <button className="cs-more-btn mono" onClick={() => setAll(true)}>
-          show the whole task ({Math.round(spawn.prompt.length / 100) / 10} kB)
-        </button>
-      )}
-    </>
-  );
-}
-
 /**
- * The sub-agents of THIS turn that are still going, listed under the working
- * line — the thing the feature is for. Collapsed exchange, nothing expanded:
- * the pane says it is working, and these say what is working underneath it.
+ * The sub-agents of this turn, listed under the working line — the thing the
+ * feature is for. Collapsed exchange, nothing expanded: the pane says it is
+ * working, and these say what is working underneath it.
  *
- * Running only. A finished sub-agent leaves, because a list that keeps them
- * grows for the length of the turn and stops being a glance; what persists is
- * the count in the summary line. It leaves on a fade rather than by vanishing:
- * rows appearing and disappearing under a live spinner is the shape that
- * produced the API-log flicker, so a row that has just finished holds its place
- * for a beat with its ✓ and its duration, then goes.
+ * ALL OF THEM, and the strip is the unit that comes and goes. A sub-agent that
+ * finishes stays in the strip with its finished mark for as long as any sibling
+ * is still running; when the last one finishes the whole strip goes, and the
+ * sub-agents are where every other step is — in the collapsed work. That is one
+ * appearance and one disappearance per turn instead of one per sub-agent, and it
+ * is why the six-second linger this file used to carry (and the client-side
+ * "first seen finished" bookkeeping behind it) is deleted rather than kept: it
+ * existed to soften rows leaving one at a time, which no longer happens.
  *
- * Capped, because the rail is not the place to discover that a turn spawned
- * twenty. Measured first: across the three sessions here the busiest single
- * exchange spawned FOUR (release-video's turn 24; the-gatherer's busiest is
- * three), so the cap is generous rather than tight — and the overflow line says
- * how many it is holding back.
+ * CAPPED, because rows now accumulate: a release-video turn ends at 22, and
+ * the-gatherer's busiest ends at 40. Over the cap, the rows that give way are
+ * the FINISHED ones, oldest first — the strip is about what is still going, and
+ * the finished ones are one click away in the work. The strip's height therefore
+ * stops growing at the cap instead of resizing every time one completes.
  */
-const LIVE_CAP = 6;
+const LIVE_CAP = 10;
 
-function LiveAgents({ rows, sessionId, live, rosterKnown }: {
-  rows: { spawn: AgentSpawn; entry?: SubAgentEntry; status: AgentStatus; leaving?: boolean }[];
-  sessionId?: string; live: boolean; rosterKnown?: boolean;
+function LiveAgents({ rows, sessionId, live, rosterKnown, roster }: {
+  rows: { spawn: AgentSpawn; entry?: SubAgentEntry; status: AgentStatus }[];
+  sessionId?: string; live: boolean; rosterKnown?: boolean; roster?: SubAgentEntry[] | null;
 }) {
+  const { shown, note } = capRows(rows, LIVE_CAP);
   if (!rows.length) return null;
-  const shown = rows.slice(0, LIVE_CAP);
-  const hidden = rows.length - shown.length;
   return (
     <div className="cx-live">
       {shown.map((r) => (
         <AgentRow key={r.spawn.toolUseId} spawn={r.spawn} entry={r.entry} status={r.status}
-                  sessionId={sessionId} live={live} leaving={r.leaving} rosterKnown={rosterKnown} />
+                  sessionId={sessionId} live={live} rosterKnown={rosterKnown} roster={roster} />
       ))}
-      {hidden > 0 && <div className="cx-live-more mono">…and {hidden} more running — open the work to see them all</div>}
+      {note ? <div className="cx-live-more mono">{note}</div> : null}
     </div>
   );
 }
 
-/**
- * The roster, for the facts the window cannot carry: the agentId of a spawn
- * whose launch receipt has scrolled away, the depth, and when each transcript
- * last changed. It is a directory listing plus 187 bytes per sub-agent — the
- * parent transcript it sits next to reaches 292 MB, and is never read here.
- *
- * Fetched only when this turn has a sub-agent whose end is unrecorded, and
- * polled only while the pane is alive, because `lastWroteAt` is the one value
- * that goes stale on its own.
- */
-function useRoster(sessionId: string | undefined, need: boolean, live: boolean) {
-  const [roster, setRoster] = useState<SubAgentEntry[] | null>(null);
-  useEffect(() => {
-    if (!sessionId || !need) return;
-    let done = false;
-    const load = () => getSubAgents(sessionId)
-      .then((r) => { if (!done) setRoster(r.agents); })
-      .catch(() => { /* the strip degrades to what the window knows */ });
-    load();
-    if (!live) return () => { done = true; };
-    const t = window.setInterval(load, 15_000);
-    return () => { done = true; window.clearInterval(t); };
-  }, [sessionId, need, live]);
-  return roster;
-}
-
-/**
- * A row that has just finished keeps its place for LINGER_MS, so the strip
- * shrinks after you have seen why rather than under your eyes.
- *
- * Two conditions, and the second one was a bug before it was a rule: the row
- * must have been LIVE in this client first. Keyed only on "first seen
- * finished", every sub-agent that completed hours ago flashed into the strip
- * for six seconds on page load — the exact jitter the linger exists to prevent.
- */
-const LINGER_MS = 6000;
-
-function useLinger(liveIds: string[], finishedIds: string[]) {
-  const wasLive = useRef(new Set<string>());
-  const leftAt = useRef(new Map<string, number>());
-  const [, tick] = useState(0);
-  const key = `${liveIds.join('|')}::${finishedIds.join('|')}`;
-  useEffect(() => {
-    for (const id of liveIds) { wasLive.current.add(id); leftAt.current.delete(id); }
-    const now = Date.now();
-    let soonest = Infinity;
-    for (const id of finishedIds) {
-      if (!wasLive.current.has(id)) continue;      // it was already done when we arrived
-      if (!leftAt.current.has(id)) leftAt.current.set(id, now);
-      soonest = Math.min(soonest, (leftAt.current.get(id) as number) + LINGER_MS);
-    }
-    if (!Number.isFinite(soonest)) return;
-    const t = window.setTimeout(() => tick((n) => n + 1), Math.max(0, soonest - now) + 40);
-    return () => window.clearTimeout(t);
-  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
-  return (id: string) => {
-    const at = leftAt.current.get(id);
-    return at != null && Date.now() - at < LINGER_MS;
-  };
-}
-
 export function ExchangeView({
-  x, n, total, open, onToggle, running, dim, q, baseModel, turns, sessionId, live,
+  x, n, total, open, onToggle, running, dim, q, baseModel, turns, sessionId, live, roster,
 }: {
   x: Exchange;
   n?: number;            // 1-based position — the viewer numbers turns, a card does not
@@ -456,8 +391,17 @@ export function ExchangeView({
    * finished.
    */
   turns?: TraceTurn[];
-  sessionId?: string;    // to fetch a sub-agent's roster and transcript
+  sessionId?: string;    // to fetch a sub-agent's transcript
   live?: boolean;        // the pane's own process is alive — gates the word "running"
+  /**
+   * The session's sub-agent roster, fetched ONCE by the reader rather than by
+   * each exchange. It carries what the window cannot: the agentId of a spawn
+   * whose launch receipt has scrolled away, the depth, and when each transcript
+   * last changed. Per-exchange fetching also lost the answer — an effect keyed
+   * on the pane's liveness re-ran the moment the pane started working and threw
+   * the result away, so rows never got their `wrote 4m ago`.
+   */
+  roster?: SubAgentEntry[] | null;
 }) {
   const [selfOpen, setSelfOpen] = useState(false);
   const toggle = onToggle ?? (() => setSelfOpen((o) => !o));
@@ -492,9 +436,6 @@ export function ExchangeView({
   // that spawned it.
   const spawns = useMemo(() => agentSpawnsOf(x, turns || []), [x, turns]);
   const summary = stepSummary(x, steps, spawns.length);
-  // The roster is only worth asking for while something might still be running.
-  const unresolved = spawns.some((s) => !s.outcome);
-  const roster = useRoster(sessionId, spawns.length > 0 && (unresolved || isOpen), !!live && unresolved);
   const entryOf = useMemo(() => {
     const m = new Map<string, SubAgentEntry>();
     for (const e of roster || []) if (e.toolUseId) m.set(e.toolUseId, e);
@@ -504,16 +445,11 @@ export function ExchangeView({
     const entry = entryOf.get(s.toolUseId);
     return { spawn: s, entry, status: agentStatus(s, { live: !!live, lastWroteAt: entry?.lastWroteAt }) };
   }), [spawns, entryOf, live]);
-  const lingering = useLinger(
-    agentRows.filter((r) => isLive(r.status)).map((r) => r.spawn.toolUseId),
-    agentRows.filter((r) => !isLive(r.status)).map((r) => r.spawn.toolUseId),
-  );
-  // What the collapsed turn shows under its working line: what is still going,
-  // plus whatever finished in the last few seconds, so the strip shrinks after
-  // you have seen why rather than under your eyes.
-  const liveRows = agentRows
-    .filter((r) => isLive(r.status) || lingering(r.spawn.toolUseId))
-    .map((r) => ({ ...r, leaving: !isLive(r.status) }));
+  // The strip is all-or-nothing: while ANY sub-agent of this turn is still
+  // going it lists them all, finished ones included, so the list a glance sees
+  // does not rearrange itself every time one lands. When none is live it is not
+  // rendered at all and they are in the work with every other step.
+  const liveNow = anyLive(agentRows.map((r) => r.status));
   const latest = running ? nowDoing(steps[steps.length - 1]) : '';
   // Naming the model on every turn is noise when it never changes; when it DOES
   // change mid-session that is worth a word, so say it only then.
@@ -547,7 +483,7 @@ export function ExchangeView({
       <AgentRow key={key}
                 spawn={r?.spawn ?? { toolUseId: s.toolUseId, description: s.description, agentType: s.agentType, background: false }}
                 entry={r?.entry} status={r?.status ?? (live ? 'running' : 'no-result')}
-                sessionId={sessionId} live={!!live} rosterKnown={!!roster} />
+                sessionId={sessionId} live={!!live} rosterKnown={!!roster} roster={roster} />
     );
   };
 
@@ -608,11 +544,11 @@ export function ExchangeView({
       )}
       {/* …and what is working underneath it. This is the point of the feature:
           the exchange is collapsed, nothing has been expanded, and the pane's
-          own `working` line is followed by one line per sub-agent still going.
-          Each row is the same row the step list shows, so opening one here
-          gives the task and the trace without leaving the glance. */}
-      {liveRows.length > 0 && !isOpen && (
-        <LiveAgents rows={liveRows} sessionId={sessionId} live={!!live} rosterKnown={!!roster} />
+          own `working` line is followed by every sub-agent this turn started —
+          the ones still going and the ones that have landed. Each row is the row
+          the step list shows, so opening one here costs no navigation. */}
+      {liveNow && !isOpen && (
+        <LiveAgents rows={agentRows} sessionId={sessionId} live={!!live} rosterKnown={!!roster} roster={roster} />
       )}
     </section>
   );

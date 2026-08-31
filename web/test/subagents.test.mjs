@@ -28,7 +28,7 @@ await build({
   entryPoints: [path.join(HERE, '../src/components/conversation/exchanges.ts')],
   outfile: out, format: 'esm', bundle: false, logLevel: 'error',
 });
-const { splitExchanges, agentSpawnsOf, agentCounts, agentStatus, isLive, stepsOf, stepSummary, STALE_MS } = await import(pathToFileURL(out).href);
+const { splitExchanges, agentSpawnsOf, agentCounts, agentStatus, isLive, anyLive, capRows, stepsOf, stepSummary, STALE_MS } = await import(pathToFileURL(out).href);
 
 let failed = 0;
 const check = (what, fn) => {
@@ -239,11 +239,70 @@ console.log('\nand the live strip only claims what it can');
     assert.equal(agentStatus(spawnOf('completed'), { live: true, lastWroteAt: now - 9e6, now }), 'done');
     assert.equal(agentStatus(spawnOf('killed'), { live: true, lastWroteAt: now, now }), 'killed');
   });
-  check('the strip shows the two live states and nothing else', () => {
+  check('two states count as still going, and four do not', () => {
     assert.deepEqual(['running', 'stalled', 'done', 'failed', 'killed', 'no-result'].filter(isLive), ['running', 'stalled']);
   });
   check('with no roster to read, a live pane still says running rather than guessing quiet', () => {
     assert.equal(agentStatus(spawnOf(), { live: true, now }), 'running');
+  });
+}
+
+console.log('\nand the strip comes and goes as one thing, not row by row');
+{
+  const rowsOf = (...statuses) => statuses.map((status, i) => ({ status, id: `t${i}` }));
+  check('while one is still going, the strip is shown', () => {
+    assert.equal(anyLive(['done', 'done', 'running']), true);
+    assert.equal(anyLive(['done', 'stalled']), true);
+  });
+  check('and when the last one lands it is gone — the rows are in the work', () => {
+    assert.equal(anyLive(['done', 'failed', 'killed']), false);
+    assert.equal(anyLive(['no-result']), false, 'a dead pane has nothing running under it');
+    assert.equal(anyLive([]), false);
+  });
+  check('a finished sub-agent does NOT leave while a sibling runs', () => {
+    // the rule the six-second linger used to soften, inverted: nothing is
+    // dropped for being finished, so there is nothing to soften.
+    const rows = rowsOf('done', 'running', 'done', 'running');
+    const { shown, hidden } = capRows(rows, 10);
+    assert.equal(shown.length, 4);
+    assert.equal(hidden.length, 0);
+  });
+}
+
+console.log('\nand the cap tells the truth about what it is holding back');
+{
+  const rowsOf = (...statuses) => statuses.map((status, i) => ({ status, id: `t${i}` }));
+  check('under the cap, everything shows and nothing is said', () => {
+    const { shown, note } = capRows(rowsOf('running', 'done'), 10);
+    assert.equal(shown.length, 2);
+    assert.equal(note, '');
+  });
+  check('over the cap, the finished rows give way and every live one is kept', () => {
+    // release-video's busiest turn: 22 sub-agents, 4 still going at the end
+    const rows = rowsOf(...Array(18).fill('done'), 'running', 'running', 'stalled', 'running');
+    const { shown, hidden, note } = capRows(rows, 10);
+    assert.equal(shown.length, 10);
+    assert.equal(shown.filter((r) => ['running', 'stalled'].includes(r.status)).length, 4, 'all four live rows survive');
+    assert.equal(hidden.length, 12);
+    assert.ok(hidden.every((r) => r.status === 'done'), 'only finished rows gave way');
+    assert.equal(note, '…and 12 more — 12 done — open the work to see them all');
+  });
+  check('…and the oldest finished go first, so the newest landings stay on screen', () => {
+    const rows = rowsOf('done', 'done', 'done', 'running');
+    const { shown } = capRows(rows, 2);
+    assert.deepEqual(shown.map((r) => r.id), ['t2', 't3'], 't0 and t1 are the oldest finished');
+  });
+  check('when even the live rows do not fit, the line counts them by state', () => {
+    const rows = rowsOf(...Array(6).fill('done'), ...Array(6).fill('running'));
+    const { shown, note } = capRows(rows, 4);
+    assert.equal(shown.length, 4);
+    assert.ok(shown.every((r) => r.status === 'running'), 'live rows are the last to go');
+    assert.equal(note, '…and 8 more — 6 done, 2 running — open the work to see them all');
+  });
+  check('and never says "running" about rows that are done', () => {
+    const { note } = capRows(rowsOf(...Array(12).fill('done')), 10);
+    assert.match(note, /2 done/);
+    assert.doesNotMatch(note, /running/);
   });
 }
 

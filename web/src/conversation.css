@@ -153,41 +153,31 @@
   color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cs-facts .dim { color: color-mix(in srgb, var(--muted) 72%, transparent); }
 .cs-facts .depth { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
-/* The two states that are the ABSENCE of a record say so in words. Neither is a
-   failure: `failed` and `killed` are things the harness reported and keep the
-   red ✗; these are what a restarted pane or a lost notification leaves behind. */
-.cs-state { flex: none; font-family: var(--font-mono); font-size: 0.78em; padding: 0 5px;
-  border: 1px dashed var(--border); border-radius: var(--r-sm); color: var(--muted); white-space: nowrap; }
-/* the task the sub-agent was given, clamped: 3.4 kB is a normal prompt */
-.cs-task { margin: 2px 0 4px; padding: 6px 9px; border-radius: var(--r-sm); white-space: pre-wrap;
-  overflow-wrap: anywhere; font-size: 0.94em; color: var(--text);
-  background: color-mix(in srgb, var(--accent) 5%, transparent); }
-.cs-task.clamp { max-height: 7.4em; overflow: hidden;
-  mask-image: linear-gradient(to bottom, #000 70%, transparent); }
-.cs-more-btn { display: block; margin: 0 0 6px; padding: 0; background: none; border: none;
-  font: inherit; font-size: 0.78em; color: var(--accent); cursor: pointer; }
+/* The two states that are the ABSENCE of a record say so in words, in the same
+   quiet mono as the rest of the row's facts. They were pills with a dashed
+   border; a sub-agent does not get its own badge vocabulary — `failed` and
+   `killed` are already the rail's red ✗, and these two are the cases where
+   nothing was recorded at all. */
+.cs-state { flex: none; font-family: var(--font-mono); font-size: 0.8em; color: var(--muted); white-space: nowrap; }
+.cs.agent.stalled .cs-state { color: color-mix(in srgb, var(--danger) 60%, var(--muted)); }
 .ca-msg { padding: 3px 0 2px 1.2em; font-size: 0.82em; color: var(--muted); }
-/* one level down: the sub-agent's own transcript, drawn by the component that
-   drew the row — indent, hairline, nothing else new */
-.ca-trace { display: flex; flex-direction: column; gap: 2px;
-  border-left: 2px solid color-mix(in srgb, var(--accent) 30%, transparent); padding-left: 9px; }
-.ca-trace .cx { padding-left: 1.23em; }
+/* Nothing wraps the nested trace. The step body it sits in already indents it,
+   and that indent IS the hierarchy: what renders inside is an ordinary
+   exchange — the task as its own prompt band, then steps, tools and timings
+   exactly as the reader draws them at the top level. The rail, the clamped task
+   panel and the "show the whole task" button that used to live here were a
+   second visual language for content the reader can already draw. */
+.cs-body > .cx { padding-left: 1.23em; }
 
 /* ---------- the live strip: what is working under the working line ---------- */
-/* Collapsed exchange, mid-turn. The pane's spinner says it is working; these
-   say what is working underneath it, one line each, without expanding
-   anything. Same left edge as the working line so the two read as one block. */
+/* Collapsed exchange, mid-turn. The pane's spinner says it is working; these say
+   what is working underneath it, one line each, without expanding anything.
+   The strip is all-or-nothing: it holds every sub-agent of the turn — finished
+   ones included — until the last one lands, and then it is gone and they are in
+   the work with every other step. One appearance and one disappearance per turn
+   is why there is no fade here any more. */
 .cx-live { display: flex; flex-direction: column; padding: 1px 0 0; }
 .cx-live .cs-head { padding-top: 1px; padding-bottom: 1px; }
-/* A row that has just finished holds its place for a beat with its ✓ and its
-   duration, then fades out — rows vanishing under a live spinner is the shape
-   that produced the API-log flicker, and a fade is the cheapest way to let the
-   eye see WHY the strip shrank. */
-.cs.agent.leaving { animation: agent-leave 6s ease-in forwards; }
-@keyframes agent-leave {
-  0%, 55% { opacity: 1; }
-  100% { opacity: 0.25; }
-}
 .cx-live-more { padding: 1px 0 1px 1.2em; font-size: 0.8em; color: var(--muted); }
 /* the spinner, borrowed from the working line: same cell, same animation, so a
    sub-agent's "running" is the same statement the pane makes about itself */
