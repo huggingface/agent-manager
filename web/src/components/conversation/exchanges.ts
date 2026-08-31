@@ -536,6 +536,15 @@ export const anyLive = (statuses: AgentStatus[]) => statuses.some(isLive);
  * STATE. "…and 16 more running" would be a lie in the state the cap exists for,
  * where most of the hidden rows are done.
  */
+/**
+ * Which row in the strip gets the `└`. The rails are the file browser's, and
+ * they only read as a tree if the elbow is on whatever is actually last — with
+ * the cap in play that is the overflow line, not the last sub-agent, and an
+ * unclosed `├` at the bottom looks like a row that failed to render.
+ */
+export const railIsLast = (index: number, shownCount: number, hasOverflow: boolean) =>
+  !hasOverflow && index === shownCount - 1;
+
 export function capRows<T extends { status: AgentStatus }>(rows: T[], cap: number) {
   if (rows.length <= cap) return { shown: rows, hidden: [] as T[], note: '' };
   const giveWay = new Set(

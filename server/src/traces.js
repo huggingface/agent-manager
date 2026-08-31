@@ -1184,6 +1184,23 @@ async function normalizeClaude(file, out, range) {
 // apply_patch, write_stdin)" the way the Hub's own viewer shows it, instead of
 // 17 separate rows.
 async function normalizeCodex(file, out, range, allowSubagent = false) {
+  // Where this sub-agent's OWN conversation starts.
+  //
+  // A codex sub-agent is spawned with `fork_turns: "all"`, so its rollout opens
+  // with the whole parent conversation copied into it — the operator's prompt,
+  // the parent's earlier turns, the lot — and only then the task it was given.
+  // Rendered whole, an expanded sub-agent shows the parent's history and reads
+  // as if the child had done the parent's work. It is the file that says this,
+  // not the renderer, so the fix is here: the boundary is the NEW_TASK post
+  // addressed to this thread, and everything before it is somebody else's.
+  //
+  //   0  session_meta (this child)      ← its own header
+  //   1  session_meta (the parent)      ┐
+  //   …  developer/user messages        │ the forked conversation
+  //  14  inter_agent_communication…     ┘
+  //  15  agent_message  NEW_TASK → /root/pty_summary   ← the child's own start
+  //  16… its reasoning, its tools, its answer
+  let forkEnd = null;
   const stitch = makeStitcher();
   const seenThinking = new Set();
   let cur = null;      // the assistant turn being built
@@ -1252,6 +1269,12 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
           assistant(ts).blocks.push(textBlock('thinking', text));
         }
       } else if (p.type === 'agent_message') {
+        // The task hand-off to THIS thread ends the forked prelude. Its payload
+        // is encrypted, so there is nothing to render from it either way.
+        if (allowSubagent && forkEnd === null && /Message Type:\s*NEW_TASK/.test(
+          (Array.isArray(p.content) ? p.content : []).map((c) => String((c && c.text) || '')).join('\n'))) {
+          forkEnd = out.messages.length;
+        }
         // Codex's sub-agent post. The parent's rollout carries one per child:
         //
         //   author: "/root/pty_summary"   recipient: "/root"
@@ -1360,6 +1383,13 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
     }
   }
   if (encrypted) out.note = `${encrypted} reasoning step${encrypted === 1 ? '' : 's'} were encrypted by the model and carry no readable text`;
+  // …and drop it, now that the whole file has been read. Only when a boundary
+  // was found: a sub-agent spawned without a fork, or one whose hand-off is
+  // outside this window, is better shown whole than shown empty.
+  if (allowSubagent && forkEnd !== null && forkEnd > 0) {
+    out.messages = out.messages.slice(forkEnd);
+  }
+
 }
 
 // OpenClaw — already close to STS: {type:'message', message:{role,content,usage}}

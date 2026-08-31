@@ -11,9 +11,10 @@ import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { SubAgentEntry, TraceTurn } from '../../api';
 import { getSubAgentTrace } from '../../api';
+import { Rails } from '../Rails';
 import { renderMarkdown } from '../../lib/markdown';
 import type { Exchange, Step } from './exchanges';
-import { agentSpawnsOf, agentStatus, anyLive, capRows, fmtClock, fmtDur, fmtTok, oneLine, proseOf, splitExchanges, stepSummary, stepText, stepsOf } from './exchanges';
+import { agentSpawnsOf, agentStatus, anyLive, capRows, railIsLast, fmtClock, fmtDur, fmtTok, oneLine, proseOf, splitExchanges, stepSummary, stepText, stepsOf } from './exchanges';
 import type { AgentSpawn, AgentStatus } from './exchanges';
 import ToolCall from './ToolCall';
 
@@ -274,11 +275,17 @@ function SubAgentTrace({ sessionId, agentId, live, roster }: {
  * working line while it runs. Two renderings of the same thing was how the
  * count and the list drifted apart in the first cut of this feature.
  */
-function AgentRow({ spawn, entry, status, sessionId, live, rosterKnown, roster }: {
+function AgentRow({ spawn, entry, status, sessionId, live, rosterKnown, roster, rail }: {
   spawn: AgentSpawn; entry?: SubAgentEntry; status: AgentStatus;
   sessionId?: string; live: boolean; roster?: SubAgentEntry[] | null;
   /** the roster has answered, so "no entry" means "no transcript", not "not yet" */
   rosterKnown?: boolean;
+  /**
+   * Set in the live strip, where the rows hang off the pane's own working line
+   * and the tree says so. Unset in the step list, where a sub-agent is one step
+   * among many and a rail would draw a hierarchy that is not there.
+   */
+  rail?: { isLast: boolean };
 }) {
   const [open, setOpen] = useState(false);
   const agentId = spawn.agentId || entry?.agentId;
@@ -300,8 +307,9 @@ function AgentRow({ spawn, entry, status, sessionId, live, rosterKnown, roster }
         : <span className="cs-tri off">–</span>;
   return (
     <div className={`cs agent ${status}${open ? ' open' : ''}`}>
-      <button className="cs-head" disabled={!can} onClick={() => setOpen((o) => !o)}
+      <button className={`cs-head${rail ? ' railed' : ''}`} disabled={!can} onClick={() => setOpen((o) => !o)}
               title={can ? 'Show the task and what it did' : 'no transcript on disk for this one'}>
+        {rail ? <Rails prefix={[]} isLast={rail.isLast} /> : null}
         {open ? <span className="cs-tri">▾</span> : mark}
         <span className="cs-label mono">sub-agent</span>
         <span className="cs-detail">{spawn.description}</span>
@@ -368,11 +376,19 @@ function LiveAgents({ rows, sessionId, live, rosterKnown, roster }: {
   if (!rows.length) return null;
   return (
     <div className="cx-live">
-      {shown.map((r) => (
+      {shown.map((r, i) => (
         <AgentRow key={r.spawn.toolUseId} spawn={r.spawn} entry={r.entry} status={r.status}
-                  sessionId={sessionId} live={live} rosterKnown={rosterKnown} roster={roster} />
+                  sessionId={sessionId} live={live} rosterKnown={rosterKnown} roster={roster}
+                  // …and the elbow belongs to whatever is actually last. With the
+                  // cap in play that is the overflow line, not the last row.
+                  rail={{ isLast: railIsLast(i, shown.length, !!note) }} />
       ))}
-      {note ? <div className="cx-live-more mono">{note}</div> : null}
+      {note ? (
+        <div className="cx-live-more mono">
+          <Rails prefix={[]} isLast />
+          {note}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -177,9 +177,19 @@
    ones included — until the last one lands, and then it is gone and they are in
    the work with every other step. One appearance and one disappearance per turn
    is why there is no fade here any more. */
-.cx-live { display: flex; flex-direction: column; padding: 1px 0 0; }
-.cx-live .cs-head { padding-top: 1px; padding-bottom: 1px; }
-.cx-live-more { padding: 1px 0 1px 1.2em; font-size: 0.8em; color: var(--muted); }
+.cx-live { display: flex; flex-direction: column; padding: 1px 0 0;
+  /* the tree hangs off the working line's spinner, which lives in the gutter,
+     so the strip starts there too and the rail column lands under it */
+  margin-left: calc(-1 * var(--mark-w)); }
+.cx-live .cs-head { padding-top: 1px; padding-bottom: 1px; position: relative; }
+.cx-live-more { position: relative; padding: 1px 0; font-size: 0.8em; color: var(--muted); }
+/* the rails themselves are the file browser's — .rails/.rail in styles.css — so
+   there is one implementation of the tree in the app, not two */
+.cx-live .rail { width: var(--mark-w); }
+/* the rail cell is the mark cell wide, so the row pays exactly that much for it
+   — the em padding the file browser uses would leave the text 0.1em short and
+   the elbow would touch the spinner */
+.cx-live .cs-head.railed, .cx-live-more { padding-left: var(--mark-w) !important; }
 /* the spinner, borrowed from the working line: same cell, same animation, so a
    sub-agent's "running" is the same statement the pane makes about itself */
 .cs-mark.spin::before {

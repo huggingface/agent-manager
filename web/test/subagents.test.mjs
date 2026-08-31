@@ -28,7 +28,7 @@ await build({
   entryPoints: [path.join(HERE, '../src/components/conversation/exchanges.ts')],
   outfile: out, format: 'esm', bundle: false, logLevel: 'error',
 });
-const { splitExchanges, agentSpawnsOf, agentCounts, agentStatus, isLive, anyLive, capRows, stepsOf, stepSummary, STALE_MS } = await import(pathToFileURL(out).href);
+const { splitExchanges, agentSpawnsOf, agentCounts, agentStatus, isLive, anyLive, capRows, railIsLast, stepsOf, stepSummary, STALE_MS } = await import(pathToFileURL(out).href);
 
 let failed = 0;
 const check = (what, fn) => {
@@ -304,6 +304,18 @@ console.log('\nand the cap tells the truth about what it is holding back');
     assert.match(note, /2 done/);
     assert.doesNotMatch(note, /running/);
   });
+}
+
+console.log('\nand the tree closes on whatever is actually last');
+{
+  check('with no overflow line, the last row carries the elbow', () => {
+    assert.deepEqual([0, 1, 2].map((i) => railIsLast(i, 3, false)), [false, false, true]);
+  });
+  check('with one, the rows all continue and the line closes the tree', () => {
+    // otherwise the strip ends on a `├` that points at nothing
+    assert.deepEqual([0, 1, 2].map((i) => railIsLast(i, 3, true)), [false, false, false]);
+  });
+  check('and a single row closes it by itself', () => assert.equal(railIsLast(0, 1, false), true));
 }
 
 console.log('\nand codex, whose plumbing is different in every part');
