@@ -325,12 +325,14 @@ function AgentRow({ spawn, entry, status, sessionId, live, rosterKnown, roster, 
         {open ? <span className="cs-tri">▾</span> : mark}
         <span className="cs-label mono">sub-agent</span>
         <span className="cs-detail">{spawn.description}</span>
-        {status === 'stalled' || status === 'no-result' ? (
-          <span className={`cs-state ${status}`}>{status === 'stalled' ? 'no write in 15m' : 'no result'}</span>
-        ) : null}
+        {/* One state word. A row that cannot be opened says why it cannot be
+            opened — that is the fact the reader needs — and "no result" beside
+            "already open above" reads as two verdicts about the same row. */}
         {cyclic ? <span className="cs-state">already open above</span>
           : deep ? <span className="cs-state">nested too deep to open here</span>
-            : !can && rosterKnown ? <span className="cs-state">no transcript kept</span> : null}
+            : status === 'stalled' || status === 'no-result' ? (
+              <span className={`cs-state ${status}`}>{status === 'stalled' ? 'no write in 15m' : 'no result'}</span>
+            ) : !can && rosterKnown ? <span className="cs-state">no transcript kept</span> : null}
         <span className="cs-facts mono">
           {entry?.depth && entry.depth > 1 ? <span className="depth">↳{entry.depth}</span> : null}
           {/* codex names its sub-agents — Curie, Herschel, Boole — and that name
@@ -482,9 +484,6 @@ export function ExchangeView({
   // Two join keys, because the two harnesses record different things: Claude's
   // sidecar carries the spawning call's id, codex's rollout header carries the
   // task name and no id at all.
-  // …minus any that resolve to an agent already open above: a transcript that
-  // names its own spawning call must not be credited with itself, in the count
-  // or anywhere else.
   const entryOf = useMemo(() => {
     const m = new Map<string, SubAgentEntry>();
     for (const e of roster || []) {
@@ -494,11 +493,12 @@ export function ExchangeView({
     }
     return m;
   }, [roster]);
-  const spawns = useMemo(() => allSpawns.filter((s) => {
-    const id = s.agentId || entryOf.get(s.toolUseId)?.agentId
-      || (s.taskName ? entryOf.get(`task:${s.taskName}`)?.agentId : undefined);
-    return !(id && chain.includes(id));
-  }), [allSpawns, entryOf, chain.join('|')]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Every spawn is a row, cycles included. A record that names an agent already
+  // open above it is malformed — no harness writes one now that a fork's
+  // inherited prelude is trimmed at the source — and the honest rendering of it
+  // is one row saying so, counted like any other, not a row quietly dropped
+  // from the list while its tool call is counted as something else.
+  const spawns = allSpawns;
   const summary = stepSummary(x, steps, spawns.length);
   const agentRows = useMemo(() => spawns.map((s) => {
     const entry = entryOf.get(s.toolUseId) || (s.taskName ? entryOf.get(`task:${s.taskName}`) : undefined);
