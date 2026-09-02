@@ -1,18 +1,16 @@
-// The remote pane's state line and its message receipts, in a browser.
+// The remote pane's running line and its message receipts, in a browser.
 //
-// Two things here cannot be checked by reading the source:
+// The running line is not a lookalike of the reader's — it is the reader's, the
+// same `.cx-running` class rendered inside the remote log, so there is one
+// spinner in the app rather than two that drift apart. What this pins is that
+// the two really do come out the same, and that the one declaration the remote
+// log neutralises (the reader's pull into its mark gutter) is the only
+// difference. A copy would pass a source lint and still look wrong; only a
+// layout engine can say the two lines match.
 //
-//   1. The receipt sits at the foot of the message it belongs to, and `pending`
-//      and the tick occupy exactly the same height. That equality is the whole
-//      reason a log pinned to the newest message does not jump when a receipt
-//      lands mid-read — the two states are different kinds of thing (small
-//      italic text, and a glyph box) and only a layout engine can say whether
-//      they came out the same size.
-//   2. The state mark scales with the pane's zoom. The pane threads one font
-//      size through log, state line and composer; the shared mark contract is
-//      em-based apart from one absolute anchor (--mark-size), so the state line
-//      redefines that anchor in em. If someone later gives it a px value the
-//      mark silently stops following the zoom control, and nothing else breaks.
+// It also pins the receipts: `pending` and the tick occupy exactly the same
+// height, which is what keeps a bottom-pinned log from jumping when a receipt
+// lands mid-read.
 //
 // am-test: manual — needs Chromium; run with `npm run test:render`.
 import assert from 'node:assert/strict';
@@ -30,8 +28,7 @@ const embeddedFont = `@font-face {
   font-family: 'Geist Mono Test'; font-style: normal; font-weight: 100 900;
   src: url(data:font/woff2;base64,${geistMono}) format('woff2');
 }
-:root { --font-mono: 'Geist Mono Test'; }
-.status.working::before, .rp-mark.working::before, .cx-running::before { animation: none !important; }`;
+:root { --font-mono: 'Geist Mono Test'; }`;
 
 let failed = 0;
 const check = (what, fn) => {
@@ -41,116 +38,124 @@ const check = (what, fn) => {
   }
 };
 
-// The markup RemotePane renders, at two zoom levels. `pending` and `ack` carry
-// the same message text so any height difference is the receipt's alone.
-const pane = (fontSize, id) => `
-  <div class="slot" id="${id}" style="width:420px">
-    <div class="rp-body" style="font-size:${fontSize}">
-      <div class="rp-user" id="${id}-pending">
-        <span class="rp-caret">❯</span>
-        <div class="rp-user-body">
-          <span class="rp-user-text">rerun the failing suite and paste the first error you see</span>
-          <span class="rp-receipt"><span class="rp-pending">pending</span></span>
-        </div>
-      </div>
-      <div class="rp-user" id="${id}-ack">
-        <span class="rp-caret">❯</span>
-        <div class="rp-user-body">
-          <span class="rp-user-text">rerun the failing suite and paste the first error you see</span>
-          <span class="rp-receipt"><svg class="rp-ack" viewBox="0 0 16 16"><path d="M2 9l3.5 3.5"/></svg></span>
-        </div>
-      </div>
-      <div class="rp-agent" id="${id}-agent"><p>on it</p></div>
+const message = (receipt) => `
+  <div class="rp-user">
+    <span class="rp-caret">❯</span>
+    <div class="rp-user-body">
+      <span class="rp-user-text">rerun the failing suite and paste the first error you see</span>
+      <span class="rp-receipt">${receipt}</span>
     </div>
-    <div class="rp-state-line" style="font-size:${fontSize}">
-      <span class="rp-mark working" id="${id}-mark"></span>
-      <span class="rp-state working" id="${id}-word">working</span>
-    </div>
-    <div class="rp-composer" style="font-size:${fontSize}"><span class="rp-caret">❯</span></div>
   </div>`;
+const TICK = '<svg class="rp-ack" viewBox="0 0 16 16"><path d="M2 9l3.5 3.5"/></svg>';
+const PENDING = '<span class="rp-pending">pending</span>';
+const RUN = '<div class="cx-running mono">working</div>';
 
 const browser = await chromium.launch(chromiumLaunchOptions());
 const page = await (await browser.newContext({ viewport: { width: 900, height: 900 } })).newPage();
+// The reader and the remote log, drawing the same line, at the same base size.
 await page.setContent(`<style>${css}\n${embeddedFont}</style>
-  ${pane('13px', 'z100')}
-  ${pane('26px', 'z200')}
-  <div class="cx-running mono" id="trace" style="font-size:13px">working</div>`);
-await page.waitForTimeout(120);
+  <div class="cxv" style="--cx-base:13px;width:420px">
+    <div class="cx">
+      <div class="cx-prompt">rerun the failing suite</div>
+      <div class="cx-answer"><div class="markdown cx-md"><p>Running it now.</p></div></div>
+      <div class="cx-running mono" id="reader-run">working</div>
+    </div>
+  </div>
+  <div class="rp-body" id="log" style="font-size:13px;width:420px;height:200px">
+    ${message(PENDING)}
+    <div class="rp-agent" id="last-msg"><p>Running it now.</p></div>
+    ${RUN.replace('class=', 'id="pane-run" class=')}
+  </div>
+  <div class="rp-body" id="log-quiet" style="font-size:13px;width:420px;height:200px">
+    ${message(TICK)}
+    <div class="rp-agent"><p>Running it now.</p></div>
+  </div>
+  <div class="rp-body" id="heights" style="font-size:13px;width:420px">
+    ${message(PENDING).replace('class="rp-user"', 'id="h-pending" class="rp-user"')}
+    ${message(TICK).replace('class="rp-user"', 'id="h-ack" class="rp-user"')}
+  </div>
+  <div class="rp-body" id="heights2" style="font-size:26px;width:420px">
+    ${message(PENDING).replace('class="rp-user"', 'id="h2-pending" class="rp-user"')}
+    ${message(TICK).replace('class="rp-user"', 'id="h2-ack" class="rp-user"')}
+  </div>`);
+await page.waitForTimeout(150);
 
 const m = await page.evaluate(() => {
-  const box = (sel) => {
-    const e = document.querySelector(sel);
-    const b = e.getBoundingClientRect();
-    return { w: b.width, h: b.height, left: b.left, top: b.top, bottom: b.bottom };
+  const box = (sel) => { const b = document.querySelector(sel).getBoundingClientRect(); return { w: b.width, h: b.height, top: b.top, left: b.left, bottom: b.bottom }; };
+  const read = (id) => {
+    const e = document.getElementById(id);
+    const cs = getComputedStyle(e);
+    const bf = getComputedStyle(e, '::before');
+    const r = document.createRange(); r.selectNodeContents(e);
+    const word = r.getBoundingClientRect();
+    return {
+      gapAbove: +(e.getBoundingClientRect().top - e.previousElementSibling.getBoundingClientRect().bottom).toFixed(2),
+      fontSize: cs.fontSize, color: cs.color, marginLeft: cs.marginLeft,
+      borderTopWidth: cs.borderTopWidth, background: cs.backgroundColor,
+      spinner: { content: bf.content, width: bf.width, height: bf.height, color: bf.color, animation: bf.animationName },
+      wordOffset: +(word.left - e.getBoundingClientRect().left).toFixed(2),
+    };
   };
-  const before = (sel, prop) => getComputedStyle(document.querySelector(sel), '::before').getPropertyValue(prop);
-  // The rendered text's own box, not its container's — the container is a flex
-  // column as wide as the block, so its edges say nothing about the glyphs.
-  const textBox = (sel) => {
-    const r = document.createRange();
-    r.selectNodeContents(document.querySelector(sel));
-    return r.getBoundingClientRect();
-  };
-  const textLeft = (sel) => textBox(sel).left;
+  const log = document.getElementById('log');
   return {
-    pend100: box('#z100-pending'), ack100: box('#z100-ack'),
-    pend200: box('#z200-pending'), ack200: box('#z200-ack'),
-    receipt100: box('#z100-pending .rp-receipt'),
-    msgText100: textLeft('#z100-pending .rp-user-text'),
-    msgTextBottom100: textBox('#z100-pending .rp-user-text').bottom,
-    receiptText100: textLeft('#z100-pending .rp-pending'),
-    mark100: box('#z100-mark'), mark200: box('#z200-mark'),
-    markContent: before('#z100-mark', 'content'),
-    traceContent: before('#trace', 'content'),
-    word100: box('#z100-word'),
-    line100: box('#z100 .rp-state-line'),
-    body100: box('#z100 .rp-body'),
-    composer100: box('#z100 .rp-composer'),
-    lineBg: getComputedStyle(document.querySelector('#z100 .rp-state-line')).backgroundColor,
-    bodyBg: getComputedStyle(document.querySelector('#z100 .rp-body')).backgroundColor,
-    lineBorderTop: getComputedStyle(document.querySelector('#z100 .rp-state-line')).borderTopWidth,
+    reader: read('reader-run'), pane: read('pane-run'),
+    lastChildIsRun: log.lastElementChild.id === 'pane-run',
+    runInsideLog: log.contains(document.getElementById('pane-run')),
+    quietHasNoRun: !document.getElementById('log-quiet').querySelector('.cx-running'),
+    pend: box('#h-pending'), ack: box('#h-ack'),
+    pend2: box('#h2-pending'), ack2: box('#h2-ack'),
+    receiptLeft: box('#h-pending .rp-receipt').left,
+    receiptTop: box('#h-pending .rp-receipt').top,
+    textLeft: (() => { const r = document.createRange(); r.selectNodeContents(document.querySelector('#h-pending .rp-user-text')); return r.getBoundingClientRect().left; })(),
+    textBottom: (() => { const r = document.createRange(); r.selectNodeContents(document.querySelector('#h-pending .rp-user-text')); return r.getBoundingClientRect().bottom; })(),
   };
+});
+
+console.log('\nthe running line is the reader\'s line, in this log');
+check('it lives inside the log, as its last child', () => {
+  assert.ok(m.runInsideLog, 'the line is not inside the scrollable log');
+  assert.ok(m.lastChildIsRun, 'the line is not the last thing in the log');
+});
+check('nothing divides it from the message above — no rule, no band', () => {
+  assert.equal(m.pane.borderTopWidth, '0px');
+  assert.equal(m.pane.background, 'rgba(0, 0, 0, 0)');
+});
+check('it sits exactly as far below its message as the reader\'s does', () => {
+  assert.equal(m.pane.gapAbove, m.reader.gapAbove);
+});
+check('same type size, same colour, same word position as the reader', () => {
+  assert.equal(m.pane.fontSize, m.reader.fontSize);
+  assert.equal(m.pane.color, m.reader.color);
+  assert.equal(m.pane.wordOffset, m.reader.wordOffset);
+});
+check('and literally the same spinner — glyph, cell, colour, animation', () => {
+  assert.deepEqual(m.pane.spinner, m.reader.spinner);
+  assert.equal(m.pane.spinner.animation, 'ov-spin');
+});
+check('the only declaration that differs is the reader\'s pull into its gutter', () => {
+  assert.notEqual(m.pane.marginLeft, m.reader.marginLeft);
+  assert.equal(m.pane.marginLeft, '0px');
+  assert.match(m.reader.marginLeft, /^-/);
+});
+check('a log that is not working carries no running line at all', () => {
+  assert.ok(m.quietHasNoRun, 'a resting state drew a line in the log');
 });
 
 console.log('\na receipt does not change the height of the message it is on');
-check('pending and acknowledged are the same height at 100%', () => {
-  assert.equal(Math.round(m.pend100.h), Math.round(m.ack100.h));
+check('pending and acknowledged are the same height', () => {
+  assert.equal(Math.round(m.pend.h), Math.round(m.ack.h));
 });
 check('…and at 200% zoom, where a fixed-px receipt would drift', () => {
-  assert.equal(Math.round(m.pend200.h), Math.round(m.ack200.h));
+  assert.equal(Math.round(m.pend2.h), Math.round(m.ack2.h));
 });
 check('the block really did grow with the zoom (so the check above is not vacuous)', () => {
-  assert.ok(m.pend200.h > m.pend100.h * 1.5, `${m.pend100.h} → ${m.pend200.h}`);
+  assert.ok(m.pend2.h > m.pend.h * 1.5, `${m.pend.h} → ${m.pend2.h}`);
 });
-
-console.log('\nthe receipt is under the message, on its text column');
-check('it starts below the last line of the message, not beside it', () => {
-  assert.ok(m.receipt100.top >= m.msgTextBottom100 - 0.5,
-    `receipt top ${m.receipt100.top.toFixed(1)} vs message text bottom ${m.msgTextBottom100.toFixed(1)}`);
-});
-check('and starts on the message text column, not the caret gutter', () => {
-  assert.ok(Math.abs(m.receiptText100 - m.msgText100) < 1.5,
-    `receipt at ${m.receiptText100}, text at ${m.msgText100}`);
-});
-
-console.log('\nthe state mark is the trace reader\'s braille, and it scales with the pane');
-check('the mark draws the same braille glyph the trace widget draws', () => {
-  assert.equal(m.markContent, m.traceContent);
-  assert.equal(m.markContent.replace(/"/g, ''), '⠋');
-});
-check('the mark doubles when the pane font doubles', () => {
-  const ratio = m.mark200.w / m.mark100.w;
-  assert.ok(Math.abs(ratio - 2) < 0.06, `width ratio ${ratio.toFixed(3)} (${m.mark100.w} → ${m.mark200.w})`);
-});
-
-console.log('\nthe line reads as the last line of the log, not as another bar');
-check('it sits between the log and the composer', () => {
-  assert.ok(m.line100.top >= m.body100.bottom - 1, `line ${m.line100.top} vs log bottom ${m.body100.bottom}`);
-  assert.ok(m.line100.bottom <= m.composer100.top + 1, `line ${m.line100.bottom} vs composer ${m.composer100.top}`);
-});
-check('on the log\'s own background, with no rule above it', () => {
-  assert.equal(m.lineBg, m.bodyBg);
-  assert.equal(m.lineBorderTop, '0px');
+check('the receipt starts below the message text, on its text column', () => {
+  assert.ok(m.receiptTop >= m.textBottom - 0.5,
+    `receipt top ${m.receiptTop.toFixed(1)} vs message text bottom ${m.textBottom.toFixed(1)}`);
+  assert.ok(Math.abs(m.receiptLeft - m.textLeft) < 0.5,
+    `receipt at ${m.receiptLeft}, text at ${m.textLeft}`);
 });
 
 await browser.close();

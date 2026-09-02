@@ -635,15 +635,7 @@ body {
    The type/cell/path values are declared once beside `ov-spin` and consumed by
    every renderer. The static path cannot drift away from the animation it
    stands in for because there is one measured contract and everyone reads it.
-   Same principle as --cx-gutter (#71) and --ph-pad-y (#75).
-
-   Two vocabularies read this and they are not interchangeable. A mark in a
-   cell is this; a pane's or row's own identity slot is StateLogo's frame
-   instead (#92), which is why no component renders a state-classed `.status`
-   any more (web/test/stateLogo.test.mjs pins that). The remote pane's state
-   line is a mark in a cell — the trace reader's `working` line generalised to
-   hold still as well as move — and it re-anchors the type size because it sits
-   inside a zoomable surface; see .rp-mark. */
+   Same principle as --cx-gutter (#71) and --ph-pad-y (#75). */
 .status.working, .status.waiting, .status.idle, .status.stopped {
   width: var(--mark-w); height: var(--mark-h);
   font-family: var(--font-mono); font-size: var(--mark-size);
@@ -2021,54 +2013,13 @@ a.btn-ghost { text-decoration: none; }
 .rp-agent table { border-collapse: collapse; margin: 0.4em 0; }
 .rp-agent th, .rp-agent td { border: 1px solid var(--border); padding: 2px 7px; text-align: left; }
 
-/* The state, between the log and the composer. Same shape as the trace reader's
-   `working` line: the mark hangs in the gutter so the word starts on the
-   message text column, and it sits on the log's own background with no rule
-   above it, so it reads as the last line of the conversation instead of a
-   second bar of chrome.
-
-   The mark below carries the zoom: see .rp-mark. */
-.rp-state-line {
-  display: flex; align-items: center;
-  padding: 1px 12px 7px; background: var(--term-bg);
-  font-family: var(--font-mono); color: var(--muted);
-}
-
-/* The state mark, on the shared contract with one difference: its type size is
-   the surface's, not the fixed chrome anchor.
-   Every other mark in the app is chrome at a constant size, so it takes
-   --mark-size. This one lives inside a surface the operator zooms from 50% to
-   200%, and a mark that stayed 12.5px would be twice the text at one end and
-   half of it at the other. `font-size: 1em` re-anchors only that: the cell, the
-   ink box, the stroke and the optical correction are the same em ratios as
-   everywhere else, so the drawing cannot drift from the animation it stands in
-   for. statusMark.test.mjs allows exactly this and no more. */
-.rp-mark { flex: none; }
-.rp-mark.working, .rp-mark.waiting, .rp-mark.idle, .rp-mark.stopped {
-  width: var(--mark-w); height: var(--mark-h);
-  font-family: var(--font-mono); font-size: 1em;
-  font-weight: var(--mark-weight); line-height: 1;
-  display: inline-flex; align-items: center; position: relative;
-}
-.rp-mark.working { overflow: hidden; }
-.rp-mark.working::before {
-  content: '⠋'; display: inline-flex; align-items: center; box-sizing: border-box;
-  width: 100%; height: 100%;
-  font-family: var(--font-mono); font-size: 1em;
-  font-weight: var(--mark-weight); line-height: 1;
-  transform: translateY(var(--mark-optical-y));
-  animation: ov-spin 0.9s steps(1) infinite;
-}
-.rp-mark.waiting::before, .rp-mark.idle::before, .rp-mark.stopped::before {
-  content: ''; position: absolute;
-  left: var(--mark-ink-x); top: var(--mark-ink-y);
-  width: var(--mark-ink-w); height: var(--mark-ink-h);
-  box-sizing: border-box; border: var(--mark-stroke) solid currentColor;
-}
-.rp-mark.working, .rp-mark.waiting { color: var(--accent); }
-.rp-mark.idle, .rp-mark.stopped { color: var(--muted); }
-.rp-mark.stopped { opacity: 0.5; }
-.rp-state-line .rp-state { font-size: 0.96em; }
+/* The reader's running line, drawn in this log. Not a copy of it — literally
+   `.cx-running` (conversation.css), so there is one spinner in the app and one
+   place to change it. The reader pulls it left by a cell so `working` lands on
+   its text column; this log has no mark gutter to pull into, so the pull would
+   hang the spinner outside the log's padding. Neutralising that one declaration
+   is the whole difference between the two homes. */
+.rp-body .cx-running { margin-left: 0; }
 
 /* Composer: inherits the log's font size (set inline from zoom) so the two
    surfaces match at every zoom level. */
@@ -2086,9 +2037,9 @@ a.btn-ghost { text-decoration: none; }
 }
 .rp-input::placeholder { color: var(--muted); opacity: 0.7; }
 
-/* Bottom context row: where the agent is and when it last spoke. The state used
-   to lead this row and now lives above the composer, next to the conversation
-   it describes. */
+/* Bottom context row: state, where the agent is, when it last spoke. The state
+   stays here — it is the connection's resting condition, and a condition is not
+   an event. What the log gets is the running line, and only while running. */
 .rp-status {
   display: flex; align-items: center; gap: 5px;
   padding: 4px 12px 5px; border-top: 1px solid var(--border);
