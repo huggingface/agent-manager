@@ -32,7 +32,7 @@ const embeddedFont = `@font-face {
 .parity-sidebar { display:flex; align-items:center; font-weight:400; }
 .parity-overview { display:flex; align-items:center; font-weight:700; }
 .mark-baseline { display:inline-block; width:0; height:0; padding:0; margin:0; }
-.status.working::before, .ov-busy::before,
+.state-mark.working::before, .ov-busy::before,
 .cx-running::before { animation:none !important; }`;
 
 let failed = 0;
@@ -49,22 +49,22 @@ const page = await (await browser.newContext({ viewport: { width: 900, height: 6
 // carry a colour of their own (UsagePanel.tsx, SettingsView.tsx).
 await page.setContent(`<style>${css}\n${embeddedFont}</style>
   <div class="row" style="font-size:16px">
-    <span class="status working" id="working"></span>
-    <span class="status waiting" id="waiting"></span>
-    <span class="status idle" id="idle"></span>
-    <span class="status stopped" id="stopped"></span>
+    <span class="state-mark working" id="working"></span>
+    <span class="state-mark waiting" id="waiting"></span>
+    <span class="state-mark idle" id="idle"></span>
+    <span class="state-mark stopped" id="stopped"></span>
     <span class="status" id="provider" style="background: rgb(214, 69, 69)"></span>
     <span class="status" id="ready" style="background: rgb(46, 158, 91)"></span>
   </div>
-  <div class="parity-sidebar"><span class="status working" id="sidebar-working"></span></div>
+  <div class="parity-sidebar"><span class="state-mark working" id="sidebar-working"></span></div>
   <div class="parity-overview">
-    <span class="status working" id="overview-working"></span>
-    <span class="status waiting" id="overview-waiting"></span>
+    <span class="state-mark working" id="overview-working"></span>
+    <span class="state-mark waiting" id="overview-waiting"></span>
   </div>
   <div class="pane-head" style="width:600px">
     <span class="ph-left"></span>
     <span class="ph-title">
-      <span class="status working" id="header-working"></span>
+      <span class="state-mark working" id="header-working"></span>
       <span class="ph-name">claude-code-4</span>
     </span>
     <span class="ph-right"></span>
@@ -72,7 +72,7 @@ await page.setContent(`<style>${css}\n${embeddedFont}</style>
   <div class="pane-head" style="width:600px">
     <span class="ph-left"></span>
     <span class="ph-title" id="header-static-wrap">
-      <span class="status waiting" id="header-waiting"></span>
+      <span class="state-mark waiting" id="header-waiting"></span>
       <span class="ph-name">claude-code-4<span class="mark-baseline" id="header-baseline"></span></span>
     </span>
     <span class="ph-right"></span>

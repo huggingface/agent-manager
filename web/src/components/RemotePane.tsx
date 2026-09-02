@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { RemoteInfo, RemoteMessage, Session } from '../types';
 import { REMOTE_STATE_LABEL } from '../types';
 import * as api from '../api';
@@ -57,8 +58,10 @@ export default function RemotePane({
   const atBottom = useRef(true);
   const autoOpened = useRef(false);
 
-  // One font size for the log, the composer and the status line, so the pane
-  // reads as one surface and the zoom control moves all of it together.
+  // One font size for the log, the state row, the composer and the status
+  // line, so the pane reads as one surface and the zoom control moves all of
+  // it together. The state row's braille mark restates --mark-size against
+  // this in CSS, since the shared contract declares it in absolute pixels.
   const fontSize = `${(13 * zoom) / 100}px`;
 
   const absorb = useCallback((incoming: RemoteMessage[]) => {
@@ -179,6 +182,15 @@ export default function RemotePane({
   const stateLabel = REMOTE_STATE_LABEL[state];
   const seenAgo = fmtAgo(info?.lastSeenAt);
 
+  // What the bottom row says about this agent, in order. Kept as a list so the
+  // dots between them can be interleaved and no leading dot is left behind when
+  // the peer has told us nothing yet.
+  const statusBits: { key: string; node: ReactNode }[] = [];
+  if (peer?.harness) statusBits.push({ key: 'harness', node: <span>{peer.harness}</span> });
+  if (peer?.cwd) statusBits.push({ key: 'cwd', node: <span className="rp-cwd" title={peer.cwd}>{peer.cwd}</span> });
+  if (peer?.host) statusBits.push({ key: 'host', node: <span>on {peer.host}</span> });
+  if (!peer) statusBits.push({ key: 'inbox', node: <span className="rp-cwd">remote-agents/{name}/</span> });
+
   const MAX_ROWS = 10;
   useEffect(() => {
     const el = inputRef.current;
@@ -198,9 +210,12 @@ export default function RemotePane({
   return (
     <div className={`slot${focused ? ' focused' : ''}`} onMouseDown={onFocus}>
       {/* The standard three-column pane header: identity left, name centred,
-          actions right — same as every other agent's pane. Everything else the
-          operator might want to know lives in the status line under the
-          composer, the way a CLI keeps its context on one bottom row. */}
+          actions right — same as every other agent's pane. The left mark is a
+          StateLogo, so the state rides on the CLI tile exactly as it does in
+          the sidebar and every other pane; the row above the composer is the
+          one that says the state in words. Two shapes at opposite ends of the
+          pane: which agent this is, and what it is doing. The rest of the
+          context stays on the bottom row, the way a CLI keeps it. */}
       <div
         className={`pane-head${dragId ? ' draggable' : ''}`}
         draggable={!!dragId}
@@ -288,19 +303,39 @@ export default function RemotePane({
           ) : m.role === 'user' ? (
             <div key={m.seq} className="rp-user">
               <span className="rp-caret">❯</span>
-              <span className="rp-user-text">{m.text}</span>
-              {/* Both states come from the highest seq a poll actually returned,
-                  and claim nothing beyond it: the agent either has this message
-                  or has not collected it yet. */}
-              {m.seq <= (info?.deliveredThrough ?? 0)
-                ? <AckGlyph className="rp-ack" />
-                : <span className="rp-pending" title="the agent has not collected this yet">pending</span>}
+              {/* The message is a column: its words, then its receipt on a line
+                  of its own beneath them. A long message wraps to many lines and
+                  the receipt still belongs to the whole block, so it sits under
+                  it rather than trailing the last word. */}
+              <div className="rp-user-body">
+                <span className="rp-user-text">{m.text}</span>
+                {/* Both states come from the highest seq a poll actually returned,
+                    and claim nothing beyond it: the agent either has this message
+                    or has not collected it yet. */}
+                {m.seq <= (info?.deliveredThrough ?? 0)
+                  ? <span className="rp-receipt ack" title="the agent has collected this"><AckGlyph /> delivered</span>
+                  : <span className="rp-receipt pending" title="the agent has not collected this yet">pending</span>}
+              </div>
             </div>
           ) : (
             <div key={m.seq} className="rp-agent" dangerouslySetInnerHTML={{ __html: m.html }} />
           )
         ))}
         {err && <div className="rp-err">{err}</div>}
+      </div>
+
+      {/* The state, between the log and the line you type on: it is what you
+          check before sending, so it belongs next to the send, not on the
+          bottom row with the identity. The mark is the app's `.state-mark`
+          vocabulary, so `working` runs the same braille spinner the reader and
+          the cards run and every other state draws that motion's completed
+          path — one contract, not a second spinner. The header's StateLogo is
+          the identity mark and keeps carrying the state on its frame; this row
+          is the other kind of indicator, the one that says what is happening
+          right now in a word. */}
+      <div className="rp-staterow" style={{ fontSize }}>
+        <span className={`state-mark ${state}`} />
+        <span className={`rp-state ${state}`}>{stateLabel}</span>
       </div>
 
       <div className="rp-composer" style={{ fontSize }}>
@@ -316,14 +351,21 @@ export default function RemotePane({
         />
       </div>
 
-      {/* The bottom status row: state, where the agent actually is, when we last
-          heard from it. */}
+      {/* The bottom status row: which harness this is, where the agent actually
+          is, when we last heard from it. The state is no longer here — it moved
+          above the composer, and saying it twice forty pixels apart would read
+          as two opinions. `last seen` stays: it is the one place that narrates
+          time, and pairing it with the state would say when in two voices.
+
+          The separators are interleaved rather than written into each item,
+          because which item comes first depends on what the peer reported. */}
       <div className="rp-status" style={{ fontSize }}>
-        <span className={`rp-state ${state}`}>{stateLabel}</span>
-        {peer?.harness && <><span className="rp-dot">·</span><span>{peer.harness}</span></>}
-        {peer?.cwd && <><span className="rp-dot">·</span><span className="rp-cwd" title={peer.cwd}>{peer.cwd}</span></>}
-        {peer?.host && <><span className="rp-dot">·</span><span>on {peer.host}</span></>}
-        {!peer && <><span className="rp-dot">·</span><span className="rp-cwd">remote-agents/{name}/</span></>}
+        {statusBits.map((bit, i) => (
+          <Fragment key={bit.key}>
+            {i > 0 && <span className="rp-dot">·</span>}
+            {bit.node}
+          </Fragment>
+        ))}
         <span className="spacer" />
         {seenAgo && <span className="rp-seen">last seen {seenAgo}</span>}
         <span className="rp-hint">↵ send · ⇧↵ newline</span>

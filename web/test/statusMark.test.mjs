@@ -74,7 +74,7 @@ check('none of them restates a width', () => {
 });
 check('every spinner consumes the shared type, weight and cell contract', () => {
   for (const spinner of spinners) {
-    if (spinner.selector === '.status.working::before') {
+    if (spinner.selector === '.state-mark.working::before') {
       assert.match(spinner.body, /content:\s*'⠋'/, 'working lost the shared braille family');
       assert.match(spinner.body, /translateY\(var\(--mark-optical-y\)\)/, 'working lost the optical correction');
       continue; // its parent owns the contract; the mark fills it below
@@ -92,7 +92,7 @@ check('every spinner consumes the shared type, weight and cell contract', () => 
 console.log('\nand so does every state that stands in for it');
 
 const STATES = ['working', 'waiting', 'idle', 'stopped'];
-const stateRules = rules.filter((r) => STATES.some((s) => r.selector.includes(`.status.${s}`)));
+const stateRules = rules.filter((r) => STATES.some((s) => r.selector.includes(`.state-mark.${s}`)));
 check('the four states are sized from the cell', () => {
   const sized = stateRules.filter((r) => /width\s*:\s*var\(--mark-w\)/.test(r.body)
     && /height\s*:\s*var\(--mark-h\)/.test(r.body)
@@ -123,12 +123,12 @@ check('no state rule restates a length for its box', () => {
   assert.deepEqual(offenders, [], `these restate the box: ${offenders.join(', ')}`);
 });
 check('working fills the shared cell', () => {
-  const working = rules.find((r) => r.selector === '.status.working::before' && /width\s*:\s*100%/.test(r.body));
+  const working = rules.find((r) => r.selector === '.state-mark.working::before' && /width\s*:\s*100%/.test(r.body));
   assert.ok(working, 'working does not fill the shared cell');
   assert.match(working.body, /height\s*:\s*100%/);
 });
 check('every non-working state uses one measured hollow rectangle', () => {
-  const statics = rules.filter((r) => ['waiting', 'idle', 'stopped'].every((s) => r.selector.includes(`.status.${s}::before`)));
+  const statics = rules.filter((r) => ['waiting', 'idle', 'stopped'].every((s) => r.selector.includes(`.state-mark.${s}::before`)));
   assert.equal(statics.length, 1, `found ${statics.length} shared static path rules`);
   const body = statics[0].body;
   for (const [prop, variable] of [
@@ -143,8 +143,8 @@ check('every non-working state uses one measured hollow rectangle', () => {
   assert.match(body, /border-radius\s*:\s*0/, 'the path is rounded');
 });
 check('no non-working state overrides that rectangle with its own shape', () => {
-  const offenders = rules.filter((r) => /\.status\.(waiting|idle|stopped)::before/.test(r.selector))
-    .filter((r) => !['waiting', 'idle', 'stopped'].every((s) => r.selector.includes(`.status.${s}::before`)));
+  const offenders = rules.filter((r) => /\.state-mark\.(waiting|idle|stopped)::before/.test(r.selector))
+    .filter((r) => !['waiting', 'idle', 'stopped'].every((s) => r.selector.includes(`.state-mark.${s}::before`)));
   assert.deepEqual(offenders.map((r) => r.selector), []);
 });
 
@@ -166,14 +166,14 @@ console.log('\nand only working animates');
 
 check('the states that are not working carry no animation', () => {
   for (const state of ['waiting', 'idle', 'stopped']) {
-    for (const r of rules.filter((x) => x.selector.includes(`.status.${state}`))) {
-      assert.doesNotMatch(r.body, /animation:/, `.status.${state} animates`);
+    for (const r of rules.filter((x) => x.selector.includes(`.state-mark.${state}`))) {
+      assert.doesNotMatch(r.body, /animation:/, `.state-mark.${state} animates`);
     }
   }
 });
 check('working runs the same animation the rest of the app runs', () => {
-  const w = rules.find((r) => r.selector === '.status.working::before' && /animation:/.test(r.body));
-  assert.ok(w, 'no `.status.working::before` rule');
+  const w = rules.find((r) => r.selector === '.state-mark.working::before' && /animation:/.test(r.body));
+  assert.ok(w, 'no `.state-mark.working::before` rule');
   assert.match(w.body, /animation:\s*ov-spin/, 'working does not use ov-spin');
 });
 

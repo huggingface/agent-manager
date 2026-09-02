@@ -620,23 +620,33 @@ body {
 
 /* A bare `.status` is a plain colour dot and has to stay one: UsagePanel and
    SettingsView use it with an inline `background` to carry a provider's or a
-   CLI's own colour, and no state class at all. The state vocabulary below is a
-   specialisation of this, never a replacement — anything drawn on bare
-   `.status` paints over those colours and they lose their identity. */
+   CLI's own colour, and no state class at all. Nothing else may draw on it —
+   anything painted here paints over those colours and they lose their
+   identity, which is why the state vocabulary below is a class of its own
+   rather than a `.status.working` specialisation of this one. */
 .status { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; transition: background 0.2s, box-shadow 0.2s, opacity 0.2s; }
 
 /* ---- agent state: one path, moving or still ----
-   A working agent shows the braille spinner the reader and the cards already
-   run (`ov-spin`) — the same animation, not a second thing that also means
-   "busy". Every other state shows that motion's completed path: the same
-   square-cornered hollow rectangle, measured from the six-dot ink rather than
-   from the much larger layout cell. State comes only from colour/intensity.
+   `.state-mark` plus a state class. A working agent shows the braille spinner
+   the reader and the cards already run (`ov-spin`) — the same animation, not a
+   second thing that also means "busy". Every other state shows that motion's
+   completed path: the same square-cornered hollow rectangle, measured from the
+   six-dot ink rather than from the much larger layout cell. State comes only
+   from colour/intensity.
+
+   It is drawn by the remote pane's state row. An agent's *identity* mark —
+   sidebar row, pane header, overview card and tile — carries its state on the
+   StateLogo frame instead (#92), and stateLogo.test.mjs holds those surfaces to
+   it. This is the other kind of indicator: a widget that says, in a word and a
+   mark, what is happening right now, the way the reader's `.cx-running` line
+   does mid-turn.
 
    The type/cell/path values are declared once beside `ov-spin` and consumed by
    every renderer. The static path cannot drift away from the animation it
    stands in for because there is one measured contract and everyone reads it.
    Same principle as --cx-gutter (#71) and --ph-pad-y (#75). */
-.status.working, .status.waiting, .status.idle, .status.stopped {
+.state-mark.working, .state-mark.waiting, .state-mark.idle, .state-mark.stopped {
+  flex: none;
   width: var(--mark-w); height: var(--mark-h);
   font-family: var(--font-mono); font-size: var(--mark-size);
   font-weight: var(--mark-weight); line-height: 1;
@@ -644,17 +654,17 @@ body {
   display: inline-flex; align-items: center; position: relative;
   transition: color 0.2s, opacity 0.2s;
 }
-.status.working::before {
+.state-mark.working::before {
   display: inline-flex; align-items: center; box-sizing: border-box;
   width: 100%; height: 100%; background: none; border: none; box-shadow: none;
 }
 /* The same spinner, in the same cell. */
-.status.working { overflow: hidden; }
-.status.working::before {
+.state-mark.working { overflow: hidden; }
+.state-mark.working::before {
   content: '⠋'; transform: translateY(var(--mark-optical-y));
   animation: ov-spin 0.9s steps(1) infinite;
 }
-.status.waiting::before, .status.idle::before, .status.stopped::before {
+.state-mark.waiting::before, .state-mark.idle::before, .state-mark.stopped::before {
   content: ''; position: absolute;
   left: var(--mark-ink-x); top: var(--mark-ink-y);
   width: var(--mark-ink-w); height: var(--mark-ink-h);
@@ -662,9 +672,9 @@ body {
   border: var(--mark-stroke) solid currentColor; border-radius: 0; box-shadow: none;
 }
 /* working and your-turn are both the accent: one moves, one is asking. */
-.status.working, .status.waiting { color: var(--accent); }
-.status.idle, .status.stopped { color: var(--muted); }
-.status.stopped { opacity: 0.5; }
+.state-mark.working, .state-mark.waiting { color: var(--accent); }
+.state-mark.idle, .state-mark.stopped { color: var(--muted); }
+.state-mark.stopped { opacity: 0.5; }
 
 /* the create panel speaks the same dense mono voice as the rows */
 .controls .widget { gap: 6px; padding: 8px; border-radius: var(--r-md); }
@@ -1981,19 +1991,27 @@ a.btn-ghost { text-decoration: none; }
   padding: 3px 8px 3px 6px; margin: 1px 0;
 }
 .rp-caret { color: var(--accent); font-weight: 700; flex: none; }
-/* Not flex:1 — the tick sits immediately after the words, not pushed to the
-   far edge where it reads as unrelated furniture. */
+/* A message is a column: its words, then its receipt on a line of its own.
+   align-items keeps the receipt on the text's left edge whether the message is
+   one word or twelve wrapped lines — a receipt that trailed the last word
+   would land in a different place in every message. */
+.rp-user-body { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; flex: 1; }
 .rp-user-text { white-space: pre-wrap; word-break: break-word; min-width: 0; }
-.rp-ack {
-  flex: none; width: 1.15em; height: 1.15em; color: var(--accent);
-  align-self: center; margin-left: 1px;
+
+/* pending -> delivered happens live, under a log that is pinned to the bottom.
+   Both receipts are this one element at this one line height, so the swap
+   changes the words and the colour and never the block's height: nothing below
+   it can shift, and a pinned log cannot jump. Sized in em, so it follows the
+   pane's zoom with the rest of the surface. */
+.rp-receipt {
+  display: inline-flex; align-items: center; gap: 4px; flex: none;
+  font-size: 0.78em; line-height: 1.5; height: 1.5em; white-space: nowrap;
 }
+.rp-receipt svg { width: 0.95em; height: 0.95em; }
+.rp-receipt.ack { color: var(--accent); }
 /* The other half of the tick: quiet, italic, and out of the way — it marks a
    normal waiting state, not a problem. */
-.rp-pending {
-  flex: none; font-style: italic; font-size: 0.8em; color: var(--muted);
-  opacity: 0.85; margin-left: 2px; white-space: nowrap;
-}
+.rp-receipt.pending { font-style: italic; color: var(--muted); opacity: 0.85; }
 
 .rp-agent { padding-left: 15px; word-break: break-word; }
 .rp-agent p { margin: 0 0 0.5em; }
@@ -2008,6 +2026,30 @@ a.btn-ghost { text-decoration: none; }
 .rp-agent ul, .rp-agent ol { margin: 0.3em 0; padding-left: 1.4em; }
 .rp-agent table { border-collapse: collapse; margin: 0.4em 0; }
 .rp-agent th, .rp-agent td { border: 1px solid var(--border); padding: 2px 7px; text-align: left; }
+
+/* The state, between the log and the line you type on. The mark is the shared
+   `.status` element, so `working` runs `ov-spin` and every other state draws
+   that motion's completed path — see the state vocabulary above.
+
+   --mark-size is the one absolute value in that contract: 12.5px, measured
+   against the bundled mono's braille ink, and declared exactly once (a lint
+   holds it to that). This pane zooms, so the mark is sized here as a ratio of
+   the pane's own font size instead — 0.96em of 13px is that same 12.5px at
+   100%, and every other --mark-* is already em against the mark, so the ink
+   follows on its own. Equal specificity with the vocabulary's own rule, won on
+   source order; what it actually computes to is measured in
+   remotePaneState.render.test.mjs rather than left to be assumed. */
+.rp-staterow {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border-top: 1px solid var(--border);
+  background: var(--term-bg); font-family: var(--font-mono);
+}
+.rp-staterow .state-mark { font-size: 0.96em; }
+.rp-staterow .rp-state { font-size: 0.9em; }
+/* The word takes the mark's colour, state for state, so the two never disagree:
+   working and your-turn are the accent, an idle or absent connection is muted. */
+.rp-state.working, .rp-state.waiting { color: var(--accent); }
+.rp-state.idle, .rp-state.stopped { color: var(--muted); }
 
 /* Composer: inherits the log's font size (set inline from zoom) so the two
    surfaces match at every zoom level. */
@@ -2025,7 +2067,8 @@ a.btn-ghost { text-decoration: none; }
 }
 .rp-input::placeholder { color: var(--muted); opacity: 0.7; }
 
-/* Bottom context row: state, where the agent is, when it last spoke. */
+/* Bottom context row: which harness this is, where the agent is, when it last
+   spoke. The state itself lives above the composer now. */
 .rp-status {
   display: flex; align-items: center; gap: 5px;
   padding: 4px 12px 5px; border-top: 1px solid var(--border);
@@ -2034,8 +2077,6 @@ a.btn-ghost { text-decoration: none; }
 }
 .rp-status .spacer { flex: 1; }
 .rp-status > span { font-size: 0.82em; }
-.rp-state.working, .rp-state.waiting { color: var(--accent); }
-.rp-state.stopped { color: var(--muted); }
 .rp-dot { opacity: 0.5; }
 .rp-cwd { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .rp-seen { opacity: 0.8; }
