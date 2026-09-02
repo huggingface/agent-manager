@@ -8,6 +8,10 @@
 // difference. A copy would pass a source lint and still look wrong; only a
 // layout engine can say the two lines match.
 //
+// Unlike the reader's, this line is always present: a remote agent always has a
+// state worth reading. So it also pins that only `working` moves, and that the
+// resting states are the same mark holding still rather than a second design.
+//
 // It also pins the receipts: `pending` and the tick occupy exactly the same
 // height, which is what keeps a bottom-pinned log from jumping when a receipt
 // lands mid-read.
@@ -28,7 +32,11 @@ const embeddedFont = `@font-face {
   font-family: 'Geist Mono Test'; font-style: normal; font-weight: 100 900;
   src: url(data:font/woff2;base64,${geistMono}) format('woff2');
 }
-:root { --font-mono: 'Geist Mono Test'; }`;
+:root { --font-mono: 'Geist Mono Test'; }
+/* Frozen, not disabled: the animation still reports its name (which is what the
+   "only working moves" checks read) but every frame reads as the first one, so
+   asserting the glyph is not a race against the clock. */
+.status.working::before, .cx-running::before { animation-play-state: paused; }`;
 
 let failed = 0;
 const check = (what, fn) => {
@@ -48,7 +56,7 @@ const message = (receipt) => `
   </div>`;
 const TICK = '<svg class="rp-ack" viewBox="0 0 16 16"><path d="M2 9l3.5 3.5"/></svg>';
 const PENDING = '<span class="rp-pending">pending</span>';
-const RUN = '<div class="cx-running mono">working</div>';
+const run = (state, label) => `<div class="cx-running mono rp-run"><span class="status ${state}"></span>${label}</div>`;
 
 const browser = await chromium.launch(chromiumLaunchOptions());
 const page = await (await browser.newContext({ viewport: { width: 900, height: 900 } })).newPage();
@@ -64,11 +72,15 @@ await page.setContent(`<style>${css}\n${embeddedFont}</style>
   <div class="rp-body" id="log" style="font-size:13px;width:420px;height:200px">
     ${message(PENDING)}
     <div class="rp-agent" id="last-msg"><p>Running it now.</p></div>
-    ${RUN.replace('class=', 'id="pane-run" class=')}
+    ${run('working', 'working').replace('<div class=', '<div id="pane-run" class=')}
   </div>
-  <div class="rp-body" id="log-quiet" style="font-size:13px;width:420px;height:200px">
-    ${message(TICK)}
-    <div class="rp-agent"><p>Running it now.</p></div>
+  <div class="rp-body" id="log-listening" style="font-size:13px;width:420px">
+    <div class="rp-agent"><p>Done.</p></div>
+    ${run('waiting', 'listening').replace('<div class=', '<div id="listening-run" class=')}
+  </div>
+  <div class="rp-body" id="log-off" style="font-size:13px;width:420px">
+    <div class="rp-agent"><p>Done.</p></div>
+    ${run('stopped', 'not connected').replace('<div class=', '<div id="off-run" class=')}
   </div>
   <div class="rp-body" id="heights" style="font-size:13px;width:420px">
     ${message(PENDING).replace('class="rp-user"', 'id="h-pending" class="rp-user"')}
@@ -85,14 +97,23 @@ const m = await page.evaluate(() => {
   const read = (id) => {
     const e = document.getElementById(id);
     const cs = getComputedStyle(e);
-    const bf = getComputedStyle(e, '::before');
-    const r = document.createRange(); r.selectNodeContents(e);
+    const markEl = e.querySelector('.status');
+    const bf = markEl ? getComputedStyle(markEl, '::before') : getComputedStyle(e, '::before');
+    const markCs = markEl ? getComputedStyle(markEl) : null;
+    // The word itself, not the element: the pane's line has the mark span as its
+    // first child, so selecting the whole element would start the range at the
+    // mark and report 0 where the reader reports the cell's width.
+    const textNode = [...e.childNodes].filter((n) => n.nodeType === 3 && n.textContent.trim()).pop();
+    const r = document.createRange(); r.selectNode(textNode);
     const word = r.getBoundingClientRect();
     return {
       gapAbove: +(e.getBoundingClientRect().top - e.previousElementSibling.getBoundingClientRect().bottom).toFixed(2),
       fontSize: cs.fontSize, color: cs.color, marginLeft: cs.marginLeft,
       borderTopWidth: cs.borderTopWidth, background: cs.backgroundColor,
-      spinner: { content: bf.content, width: bf.width, height: bf.height, color: bf.color, animation: bf.animationName },
+      spinner: { content: bf.content, width: bf.width, height: bf.height,
+        color: markCs ? markCs.color : bf.color, animation: bf.animationName },
+      markBox: markEl ? { w: +markEl.getBoundingClientRect().width.toFixed(2) } : null,
+      ownBefore: getComputedStyle(e, '::before').content,
       wordOffset: +(word.left - e.getBoundingClientRect().left).toFixed(2),
     };
   };
@@ -101,7 +122,7 @@ const m = await page.evaluate(() => {
     reader: read('reader-run'), pane: read('pane-run'),
     lastChildIsRun: log.lastElementChild.id === 'pane-run',
     runInsideLog: log.contains(document.getElementById('pane-run')),
-    quietHasNoRun: !document.getElementById('log-quiet').querySelector('.cx-running'),
+    listening: read('listening-run'), off: read('off-run'),
     pend: box('#h-pending'), ack: box('#h-ack'),
     pend2: box('#h2-pending'), ack2: box('#h2-ack'),
     receiptLeft: box('#h-pending .rp-receipt').left,
@@ -124,21 +145,50 @@ check('it sits exactly as far below its message as the reader\'s does', () => {
   assert.equal(m.pane.gapAbove, m.reader.gapAbove);
 });
 check('same type size, same colour, same word position as the reader', () => {
-  assert.equal(m.pane.fontSize, m.reader.fontSize);
-  assert.equal(m.pane.color, m.reader.color);
-  assert.equal(m.pane.wordOffset, m.reader.wordOffset);
+  assert.equal(m.pane.fontSize, m.reader.fontSize, 'type size');
+  assert.equal(m.pane.color, m.reader.color, 'colour');
+  assert.equal(m.pane.wordOffset, m.reader.wordOffset,
+    `word offset: reader ${m.reader.wordOffset}, pane ${m.pane.wordOffset}`);
 });
-check('and literally the same spinner — glyph, cell, colour, animation', () => {
-  assert.deepEqual(m.pane.spinner, m.reader.spinner);
-  assert.equal(m.pane.spinner.animation, 'ov-spin');
+check('and while working, literally the reader\'s spinner — glyph, cell, animation', () => {
+  assert.equal(m.pane.spinner.content, m.reader.spinner.content);
+  assert.equal(m.pane.spinner.width, m.reader.spinner.width);
+  assert.equal(m.pane.spinner.height, m.reader.spinner.height);
+  assert.equal(m.pane.spinner.color, m.reader.spinner.color);
+  assert.equal(m.pane.spinner.animation, m.reader.spinner.animation);
 });
 check('the only declaration that differs is the reader\'s pull into its gutter', () => {
   assert.notEqual(m.pane.marginLeft, m.reader.marginLeft);
   assert.equal(m.pane.marginLeft, '0px');
   assert.match(m.reader.marginLeft, /^-/);
 });
-check('a log that is not working carries no running line at all', () => {
-  assert.ok(m.quietHasNoRun, 'a resting state drew a line in the log');
+console.log('\nall three states use the line; only working moves');
+check('listening and not connected draw in the same place, the same way', () => {
+  for (const s of [m.listening, m.off]) {
+    assert.equal(s.fontSize, m.pane.fontSize);
+    assert.equal(s.wordOffset, m.pane.wordOffset);
+    assert.equal(s.color, m.pane.color);
+  }
+});
+check('only working animates — the resting states hold still', () => {
+  assert.equal(m.pane.spinner.animation, 'ov-spin');
+  assert.equal(m.listening.spinner.animation, 'none');
+  assert.equal(m.off.spinner.animation, 'none');
+});
+check('the resting mark is the traced path, not a frozen braille frame', () => {
+  for (const s of [m.listening, m.off]) assert.equal(s.spinner.content, '""');
+  assert.equal(m.pane.spinner.content, '"⠋"');
+});
+check('the mark carries the state: accent while the agent is there, grey once gone', () => {
+  assert.equal(m.listening.spinner.color, m.pane.spinner.color);
+  assert.notEqual(m.off.spinner.color, m.pane.spinner.color);
+});
+check('the line does not also draw the reader\'s own spinner behind the mark', () => {
+  assert.equal(m.pane.ownBefore, 'none');
+});
+check('every state occupies the same cell, so the word never shifts', () => {
+  assert.equal(m.listening.markBox.w, m.pane.markBox.w);
+  assert.equal(m.off.markBox.w, m.pane.markBox.w);
 });
 
 console.log('\na receipt does not change the height of the message it is on');

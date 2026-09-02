@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RemoteInfo, RemoteMessage, Session } from '../types';
 import { REMOTE_STATE_LABEL } from '../types';
 import * as api from '../api';
@@ -51,10 +51,6 @@ export default function RemotePane({
   const [copied, setCopied] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
-  // Declared up here rather than with the other derived values because the
-  // scroll-pinning effect below depends on it.
-  const state = info?.state || session.state;
-  const running = state === 'working';
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const popRef = useRef<HTMLDivElement | null>(null);
   const cursor = useRef(0);
@@ -99,18 +95,10 @@ export default function RemotePane({
   // Stay pinned to the newest message unless the operator has scrolled up to
   // read something — then leave their scroll position alone.
   //
-  // `running` is in here because the running line lives inside the log, so the
-  // log's height now changes on something other than a message. In practice
-  // every transition you can trigger by hand also delivers a message, so this
-  // is belt-and-braces rather than a fix for an observed jump: the flips it
-  // actually covers are the time-driven ones — a working agent going quiet for
-  // WORKING_WINDOW_MS, which drops the line with nothing else changing. Keeping
-  // it means the dependency list matches what the effect reads, so a later
-  // change to the state machine cannot quietly reintroduce the problem.
   useEffect(() => {
     const el = bodyRef.current;
     if (el && atBottom.current) el.scrollTop = el.scrollHeight;
-  }, [messages, running]);
+  }, [messages]);
 
   const loadPrompt = useCallback(async () => {
     if (!name) return;
@@ -186,10 +174,20 @@ export default function RemotePane({
     if (next && next !== session.name) onRename?.(next);
   };
 
+  const state = info?.state || session.state;
   const paused = info?.paused ?? !!session.remote?.paused;
   const peer = info?.peer || null;
   const stateLabel = REMOTE_STATE_LABEL[state];
   const seenAgo = fmtAgo(info?.lastSeenAt);
+
+  // Whichever of these the connection actually knows, in order — see the bottom
+  // row below for why they are a list rather than a run of conditionals.
+  const facts = [
+    peer?.harness && { key: 'harness', node: <span>{peer.harness}</span> },
+    peer?.cwd && { key: 'cwd', node: <span className="rp-cwd" title={peer.cwd}>{peer.cwd}</span> },
+    peer?.host && { key: 'host', node: <span>on {peer.host}</span> },
+    !peer && { key: 'path', node: <span className="rp-cwd">remote-agents/{name}/</span> },
+  ].filter((f): f is { key: string; node: JSX.Element } => !!f);
 
   const MAX_ROWS = 10;
   useEffect(() => {
@@ -322,18 +320,26 @@ export default function RemotePane({
         ))}
         {/* The reader's running line, in this log, as its last child — directly
             after the message it follows, with no rule, no gap and no container
-            of its own. Same class the reader renders (Exchange.tsx), so the two
-            are one spinner rather than two that resemble each other.
+            of its own. Same class the reader renders (Exchange.tsx), so the line
+            itself is one thing rather than two that resemble each other.
 
-            Only while working. In the reader this line exists only while a turn
-            is running; `listening` and `not connected` are resting conditions,
-            not events, so they stay on the bottom row rather than becoming a
-            braille glyph that holds still and pretends to spin.
+            Unlike the reader's, it is always here, because a remote agent always
+            has a state worth reading. Only `working` moves: the mark is the
+            app's settled state mark, which is the braille spinner while working
+            and that motion's completed path when it is not — accent while the
+            agent is there, grey once it is gone. Nothing else animates.
 
-            No second half either. The reader appends the latest step when it has
-            one and renders the bare word when it does not (Exchange.tsx:352);
-            a remote agent reports no steps, so the bare form is the honest one. */}
-        {running && <div className="cx-running mono">working</div>}
+            The mark is the line's content rather than its ::before, so the three
+            states share one drawing; .rp-run turns off the pseudo-element the
+            reader uses for its own spinner.
+
+            No second half. The reader appends the latest step when it has one
+            and renders the bare word when it does not (Exchange.tsx:352); a
+            remote agent reports no steps, so the bare form is the honest one. */}
+        <div className="cx-running mono rp-run">
+          <span className={`status ${state}`} aria-hidden="true" />
+          {stateLabel}
+        </div>
         {err && <div className="rp-err">{err}</div>}
       </div>
 
@@ -350,15 +356,22 @@ export default function RemotePane({
         />
       </div>
 
-      {/* The bottom status row: state, where the agent actually is, when we last
-          heard from it. The state stays here as the connection's resting
-          readout; the log carries the running line while it is working. */}
+      {/* The bottom context row: where the agent is, when we last heard from it,
+          and how to send. The state is NOT here any more — the log says it, and
+          the same word twice forty pixels apart is one of them being ignored.
+          What is left is the connection's standing facts, which the log never
+          carried.
+
+          The dots join the facts rather than prefixing them: with the state no
+          longer leading, a prefixing dot would leave whichever fact comes first
+          starting with a stray separator. */}
       <div className="rp-status" style={{ fontSize }}>
-        <span className={`rp-state ${state}`}>{stateLabel}</span>
-        {peer?.harness && <><span className="rp-dot">·</span><span>{peer.harness}</span></>}
-        {peer?.cwd && <><span className="rp-dot">·</span><span className="rp-cwd" title={peer.cwd}>{peer.cwd}</span></>}
-        {peer?.host && <><span className="rp-dot">·</span><span>on {peer.host}</span></>}
-        {!peer && <><span className="rp-dot">·</span><span className="rp-cwd">remote-agents/{name}/</span></>}
+        {facts.map((f, i) => (
+          <Fragment key={f.key}>
+            {i > 0 && <span className="rp-dot">·</span>}
+            {f.node}
+          </Fragment>
+        ))}
         <span className="spacer" />
         {seenAgo && <span className="rp-seen">last seen {seenAgo}</span>}
         <span className="rp-hint">↵ send · ⇧↵ newline</span>

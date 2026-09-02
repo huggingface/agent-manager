@@ -2014,12 +2014,27 @@ a.btn-ghost { text-decoration: none; }
 .rp-agent th, .rp-agent td { border: 1px solid var(--border); padding: 2px 7px; text-align: left; }
 
 /* The reader's running line, drawn in this log. Not a copy of it — literally
-   `.cx-running` (conversation.css), so there is one spinner in the app and one
-   place to change it. The reader pulls it left by a cell so `working` lands on
-   its text column; this log has no mark gutter to pull into, so the pull would
-   hang the spinner outside the log's padding. Neutralising that one declaration
-   is the whole difference between the two homes. */
+   `.cx-running` (conversation.css), so the line is one thing with one place to
+   change it. The reader pulls it left by a cell so `working` lands on its text
+   column; this log has no mark gutter to pull into, so the pull would hang the
+   mark outside the log's padding. Neutralising that one declaration is the
+   whole difference between the two homes.
+
+   Two things differ from the reader beyond that, both because a remote agent
+   always has a state worth reading while a reader turn is either running or
+   over: the line is always present, and its mark is a real element carrying the
+   state rather than the reader's always-spinning ::before. `.status` is that
+   mark — the app's settled one, spinner while working and the completed path
+   otherwise — so the three states are one drawing and only `working` moves. */
 .rp-body .cx-running { margin-left: 0; }
+/* The line's own mark is turned off, because here the mark is a real element
+   that carries the state. Two classes deep because `.cx-running::before` lives
+   in the other stylesheet and a single-class override would tie on specificity
+   and lose to whichever file loads last; and `animation: none` because
+   `ov-spin` sets `content` in its keyframes, and an animated declaration wins
+   over a plain one no matter how specific — without it the reader's spinner
+   kept drawing behind this line's mark. */
+.rp-body .rp-run::before { content: none; animation: none; }
 
 /* Composer: inherits the log's font size (set inline from zoom) so the two
    surfaces match at every zoom level. */
@@ -2037,9 +2052,9 @@ a.btn-ghost { text-decoration: none; }
 }
 .rp-input::placeholder { color: var(--muted); opacity: 0.7; }
 
-/* Bottom context row: state, where the agent is, when it last spoke. The state
-   stays here — it is the connection's resting condition, and a condition is not
-   an event. What the log gets is the running line, and only while running. */
+/* Bottom context row: where the agent is, when it last spoke, how to send. The
+   state is not here — the log's running line carries it, and saying the same
+   word twice forty pixels apart just teaches the eye to skip one of them. */
 .rp-status {
   display: flex; align-items: center; gap: 5px;
   padding: 4px 12px 5px; border-top: 1px solid var(--border);
