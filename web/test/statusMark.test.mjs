@@ -8,6 +8,9 @@
 //
 // So this lints the contract, not the numbers: type, cell, measured ink box and
 // derived stroke are declared once, and every spinner/static renderer reads them.
+// One value may be re-chosen and only one — the type anchor, and only between
+// the fixed chrome size and the surface's own size, for a mark that lives inside
+// something the operator zooms. See .rp-mark in styles.css.
 // What the marks actually PAINT is a separate question this cannot answer. That
 // is statusMark.render.test.mjs.
 //
@@ -62,30 +65,79 @@ check('they are declared with the animation, not with one of its consumers', () 
 console.log('\nevery renderer of the spinner reads it');
 
 const spinners = rules.filter((r) => /animation:\s*ov-spin/.test(r.body));
+// A spinner gets its box one of two legitimate ways: it takes the cell from
+// --mark-w/--mark-h, or it fills a parent that already did (100%). What it must
+// never do is name a length of its own — that is how a renderer drifts.
+const FILLS_PARENT = /width\s*:\s*100%/;
+// A mark's declarations are spread over several rules — `.status.working::before`
+// is two of them, and its cell is declared on a four-state list — so read the
+// cascade the way the browser does: everything targeting one element, merged.
+const declaredOn = (selector) => rules
+  .filter((r) => r.selector.split(',').some((sel) => sel.trim() === selector))
+  .map((r) => r.body).join(';');
+// Whichever element actually owns the cell: the pseudo-element itself, or — when
+// it fills 100% of its parent — the parent it fills.
+const cellOwnerOf = (spinner) => {
+  const own = declaredOn(spinner.selector);
+  if (!FILLS_PARENT.test(own)) return { selector: spinner.selector, body: own };
+  const parent = spinner.selector.replace(/::before\b/g, '').trim();
+  return { selector: parent, body: declaredOn(parent) };
+};
+
 check('there is more than one spinner renderer to keep in step', () => {
   assert.ok(spinners.length >= 3, `found ${spinners.length}`);
 });
-check('none of them restates a width', () => {
+check('none of them names a box size of its own', () => {
   const offenders = spinners
+    .map((r) => ({ selector: r.selector, body: declaredOn(r.selector) }))
     .filter((r) => /(?:^|;|\s)width\s*:/.test(r.body))
-    .filter((r) => !/width\s*:\s*var\(--mark-w\)/.test(r.body))
+    .filter((r) => !/width\s*:\s*var\(--mark-w\)/.test(r.body) && !FILLS_PARENT.test(r.body))
     .map((r) => r.selector);
   assert.deepEqual(offenders, [], `these size the spinner themselves: ${offenders.join(', ')}`);
 });
+check('a spinner that fills its parent gets the box from that parent', () => {
+  for (const spinner of spinners.filter((r) => FILLS_PARENT.test(declaredOn(r.selector)))) {
+    assert.match(declaredOn(spinner.selector), /height\s*:\s*100%/, `${spinner.selector} fills one axis only`);
+    const owner = cellOwnerOf(spinner);
+    assert.match(owner.body, /width\s*:\s*var\(--mark-w\)/,
+      `nothing sizes ${owner.selector} from the cell, so ${spinner.selector} fills nothing`);
+    assert.match(owner.body, /height\s*:\s*var\(--mark-h\)/, `${owner.selector} sizes one axis only`);
+  }
+});
+// The type anchor is the one value a renderer may re-choose, and only between
+// two options: the fixed chrome size, or the surface's own size. Every mark in
+// the app is constant-size chrome and takes --mark-size; the remote pane's
+// state line sits inside a surface the operator zooms 50%-200%, where a
+// constant mark would be twice the text at one end and half of it at the other.
+// Nothing else may vary — the cell, ink box, stroke and optical correction stay
+// the shared em ratios, which is what keeps the still path and the animation
+// the same drawing.
+const ANCHOR = /font-size\s*:\s*(var\(--mark-size\)|1em|inherit)\s*[;}]/;
 check('every spinner consumes the shared type, weight and cell contract', () => {
   for (const spinner of spinners) {
-    if (spinner.selector === '.status.working::before') {
-      assert.match(spinner.body, /content:\s*'⠋'/, 'working lost the shared braille family');
-      assert.match(spinner.body, /translateY\(var\(--mark-optical-y\)\)/, 'working lost the optical correction');
-      continue; // its parent owns the contract; the mark fills it below
-    }
-    assert.match(spinner.body, /font-family\s*:\s*var\(--font-mono\)/, `${spinner.selector} inherits its font family`);
-    assert.match(spinner.body, /font-size\s*:\s*var\(--mark-size\)/, `${spinner.selector} has its own type size`);
-    assert.match(spinner.body, /font-weight\s*:\s*var\(--mark-weight\)/, `${spinner.selector} inherits its weight`);
-    assert.match(spinner.body, /line-height\s*:\s*1/, `${spinner.selector} inherits its line height`);
-    assert.match(spinner.body, /width\s*:\s*var\(--mark-w\)/, `${spinner.selector} has its own width`);
-    assert.match(spinner.body, /height\s*:\s*var\(--mark-h\)/, `${spinner.selector} has its own height`);
+    assert.match(spinner.body, /content:\s*'⠋'/, `${spinner.selector} lost the shared braille family`);
     assert.match(spinner.body, /translateY\(var\(--mark-optical-y\)\)/, `${spinner.selector} lost the optical correction`);
+    // The type and cell are asserted on whichever rule owns them, so a mark
+    // drawn as cell + filling pseudo-element is held to the same contract as
+    // one drawn in a single rule.
+    const owner = cellOwnerOf(spinner);
+    assert.match(owner.body, ANCHOR, `${owner.selector} invents a type size`);
+    assert.match(owner.body, /font-family\s*:\s*var\(--font-mono\)/, `${owner.selector} inherits its font family`);
+    assert.match(owner.body, /font-weight\s*:\s*var\(--mark-weight\)/, `${owner.selector} inherits its weight`);
+    assert.match(owner.body, /line-height\s*:\s*1/, `${owner.selector} inherits its line height`);
+    assert.match(owner.body, /width\s*:\s*var\(--mark-w\)/, `${owner.selector} has its own width`);
+    assert.match(owner.body, /height\s*:\s*var\(--mark-h\)/, `${owner.selector} has its own height`);
+  }
+});
+check('a re-anchored mark still takes its cell and ink from the contract', () => {
+  const reanchored = rules.filter((r) => /font-size\s*:\s*(1em|inherit)\s*[;}]/.test(r.body)
+    && /var\(--mark-/.test(r.body));
+  assert.ok(reanchored.length >= 1, 'no renderer re-anchors its type size, so this allowance is dead');
+  for (const r of reanchored) {
+    const lengths = [...r.body.matchAll(/(?:^|;|\s)(width|height|left|top|border)\s*:\s*([^;]+)/g)]
+      .filter(([, , value]) => LENGTH.test(value) && !/var\(--mark-|100%/.test(value))
+      .map(([, prop]) => prop);
+    assert.deepEqual(lengths, [], `${r.selector} names its own ${lengths.join(', ')}`);
   }
 });
 
@@ -142,6 +194,31 @@ check('every non-working state uses one measured hollow rectangle', () => {
   assert.match(body, /background\s*:\s*none/, 'the path has a fill');
   assert.match(body, /border-radius\s*:\s*0/, 'the path is rounded');
 });
+// The check above is about `.status`, which also has a bare colour-dot form to
+// override. Any other family that draws the moving path must draw the still one
+// too, from the same measured ink — otherwise a second family could re-anchor
+// its type size legitimately and then guess its rectangle by eye, and the two
+// drawings would stop being one mark.
+check('every family that spins also stands still, from the same ink box', () => {
+  const familyOf = (selector) => selector.match(/(\.[a-z][a-z0-9-]*)\.working::before/)?.[1];
+  const spinning = [...new Set(spinners.map((r) => familyOf(r.selector)).filter(Boolean))];
+  assert.ok(spinning.length >= 2, `only ${spinning.length} state-classed spinner family; this allowance is dead`);
+  for (const family of spinning) {
+    const still = rules.filter((r) => ['waiting', 'idle', 'stopped']
+      .every((state) => r.selector.includes(`${family}.${state}::before`)));
+    assert.equal(still.length, 1, `${family} has ${still.length} still-path rules, not one shared`);
+    const body = still[0].body;
+    for (const [prop, variable] of [
+      ['left', '--mark-ink-x'], ['top', '--mark-ink-y'],
+      ['width', '--mark-ink-w'], ['height', '--mark-ink-h'],
+    ]) {
+      assert.match(body, new RegExp(`${prop}\\s*:\\s*var\\(${variable}\\)`), `${family} still path: ${prop} does not read ${variable}`);
+    }
+    assert.match(body, /border\s*:\s*var\(--mark-stroke\)\s+solid\s+currentColor/, `${family} still path does not use the derived dot stroke`);
+    assert.match(body, /content\s*:\s*['"]{2}/, `${family} still path is a glyph, not the traced box`);
+  }
+});
+
 check('no non-working state overrides that rectangle with its own shape', () => {
   const offenders = rules.filter((r) => /\.status\.(waiting|idle|stopped)::before/.test(r.selector))
     .filter((r) => !['waiting', 'idle', 'stopped'].every((s) => r.selector.includes(`.status.${s}::before`)));

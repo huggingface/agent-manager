@@ -635,7 +635,15 @@ body {
    The type/cell/path values are declared once beside `ov-spin` and consumed by
    every renderer. The static path cannot drift away from the animation it
    stands in for because there is one measured contract and everyone reads it.
-   Same principle as --cx-gutter (#71) and --ph-pad-y (#75). */
+   Same principle as --cx-gutter (#71) and --ph-pad-y (#75).
+
+   Two vocabularies read this and they are not interchangeable. A mark in a
+   cell is this; a pane's or row's own identity slot is StateLogo's frame
+   instead (#92), which is why no component renders a state-classed `.status`
+   any more (web/test/stateLogo.test.mjs pins that). The remote pane's state
+   line is a mark in a cell — the trace reader's `working` line generalised to
+   hold still as well as move — and it re-anchors the type size because it sits
+   inside a zoomable surface; see .rp-mark. */
 .status.working, .status.waiting, .status.idle, .status.stopped {
   width: var(--mark-w); height: var(--mark-h);
   font-family: var(--font-mono); font-size: var(--mark-size);
@@ -1981,18 +1989,22 @@ a.btn-ghost { text-decoration: none; }
   padding: 3px 8px 3px 6px; margin: 1px 0;
 }
 .rp-caret { color: var(--accent); font-weight: 700; flex: none; }
-/* Not flex:1 — the tick sits immediately after the words, not pushed to the
-   far edge where it reads as unrelated furniture. */
+/* The message and its receipt stack, so the receipt lands at the foot of the
+   block on the text column rather than trailing off the end of whatever line
+   the text happened to stop on. */
+.rp-user-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .rp-user-text { white-space: pre-wrap; word-break: break-word; min-width: 0; }
-.rp-ack {
-  flex: none; width: 1.15em; height: 1.15em; color: var(--accent);
-  align-self: center; margin-left: 1px;
-}
+/* One fixed height for both receipts. `pending` is small italic text and the
+   tick is a glyph box, so without this the block would change height the moment
+   a receipt lands — and a log pinned to the newest message would jump under the
+   operator while they were reading. */
+.rp-receipt { display: flex; align-items: center; height: 1.25em; margin-top: 1px; }
+.rp-ack { flex: none; width: 1.05em; height: 1.05em; color: var(--accent); }
 /* The other half of the tick: quiet, italic, and out of the way — it marks a
    normal waiting state, not a problem. */
 .rp-pending {
   flex: none; font-style: italic; font-size: 0.8em; color: var(--muted);
-  opacity: 0.85; margin-left: 2px; white-space: nowrap;
+  opacity: 0.85; white-space: nowrap;
 }
 
 .rp-agent { padding-left: 15px; word-break: break-word; }
@@ -2008,6 +2020,55 @@ a.btn-ghost { text-decoration: none; }
 .rp-agent ul, .rp-agent ol { margin: 0.3em 0; padding-left: 1.4em; }
 .rp-agent table { border-collapse: collapse; margin: 0.4em 0; }
 .rp-agent th, .rp-agent td { border: 1px solid var(--border); padding: 2px 7px; text-align: left; }
+
+/* The state, between the log and the composer. Same shape as the trace reader's
+   `working` line: the mark hangs in the gutter so the word starts on the
+   message text column, and it sits on the log's own background with no rule
+   above it, so it reads as the last line of the conversation instead of a
+   second bar of chrome.
+
+   The mark below carries the zoom: see .rp-mark. */
+.rp-state-line {
+  display: flex; align-items: center;
+  padding: 1px 12px 7px; background: var(--term-bg);
+  font-family: var(--font-mono); color: var(--muted);
+}
+
+/* The state mark, on the shared contract with one difference: its type size is
+   the surface's, not the fixed chrome anchor.
+   Every other mark in the app is chrome at a constant size, so it takes
+   --mark-size. This one lives inside a surface the operator zooms from 50% to
+   200%, and a mark that stayed 12.5px would be twice the text at one end and
+   half of it at the other. `font-size: 1em` re-anchors only that: the cell, the
+   ink box, the stroke and the optical correction are the same em ratios as
+   everywhere else, so the drawing cannot drift from the animation it stands in
+   for. statusMark.test.mjs allows exactly this and no more. */
+.rp-mark { flex: none; }
+.rp-mark.working, .rp-mark.waiting, .rp-mark.idle, .rp-mark.stopped {
+  width: var(--mark-w); height: var(--mark-h);
+  font-family: var(--font-mono); font-size: 1em;
+  font-weight: var(--mark-weight); line-height: 1;
+  display: inline-flex; align-items: center; position: relative;
+}
+.rp-mark.working { overflow: hidden; }
+.rp-mark.working::before {
+  content: '⠋'; display: inline-flex; align-items: center; box-sizing: border-box;
+  width: 100%; height: 100%;
+  font-family: var(--font-mono); font-size: 1em;
+  font-weight: var(--mark-weight); line-height: 1;
+  transform: translateY(var(--mark-optical-y));
+  animation: ov-spin 0.9s steps(1) infinite;
+}
+.rp-mark.waiting::before, .rp-mark.idle::before, .rp-mark.stopped::before {
+  content: ''; position: absolute;
+  left: var(--mark-ink-x); top: var(--mark-ink-y);
+  width: var(--mark-ink-w); height: var(--mark-ink-h);
+  box-sizing: border-box; border: var(--mark-stroke) solid currentColor;
+}
+.rp-mark.working, .rp-mark.waiting { color: var(--accent); }
+.rp-mark.idle, .rp-mark.stopped { color: var(--muted); }
+.rp-mark.stopped { opacity: 0.5; }
+.rp-state-line .rp-state { font-size: 0.96em; }
 
 /* Composer: inherits the log's font size (set inline from zoom) so the two
    surfaces match at every zoom level. */
@@ -2025,7 +2086,9 @@ a.btn-ghost { text-decoration: none; }
 }
 .rp-input::placeholder { color: var(--muted); opacity: 0.7; }
 
-/* Bottom context row: state, where the agent is, when it last spoke. */
+/* Bottom context row: where the agent is and when it last spoke. The state used
+   to lead this row and now lives above the composer, next to the conversation
+   it describes. */
 .rp-status {
   display: flex; align-items: center; gap: 5px;
   padding: 4px 12px 5px; border-top: 1px solid var(--border);
@@ -2035,6 +2098,7 @@ a.btn-ghost { text-decoration: none; }
 .rp-status .spacer { flex: 1; }
 .rp-status > span { font-size: 0.82em; }
 .rp-state.working, .rp-state.waiting { color: var(--accent); }
+.rp-state.idle { color: var(--muted); }
 .rp-state.stopped { color: var(--muted); }
 .rp-dot { opacity: 0.5; }
 .rp-cwd { overflow: hidden; text-overflow: ellipsis; min-width: 0; }

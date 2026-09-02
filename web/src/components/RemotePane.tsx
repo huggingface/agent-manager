@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RemoteInfo, RemoteMessage, Session } from '../types';
 import { REMOTE_STATE_LABEL } from '../types';
 import * as api from '../api';
@@ -179,6 +179,17 @@ export default function RemotePane({
   const stateLabel = REMOTE_STATE_LABEL[state];
   const seenAgo = fmtAgo(info?.lastSeenAt);
 
+  // Whichever of these the connection actually knows, in order. Built as a list
+  // so the dots can join them rather than prefix them: with the state gone from
+  // this row, a prefixing dot would leave whatever comes first starting with a
+  // stray separator.
+  const facts = [
+    peer?.harness && { key: 'harness', node: <span>{peer.harness}</span> },
+    peer?.cwd && { key: 'cwd', node: <span className="rp-cwd" title={peer.cwd}>{peer.cwd}</span> },
+    peer?.host && { key: 'host', node: <span>on {peer.host}</span> },
+    !peer && { key: 'path', node: <span className="rp-cwd">remote-agents/{name}/</span> },
+  ].filter((f): f is { key: string; node: JSX.Element } => !!f);
+
   const MAX_ROWS = 10;
   useEffect(() => {
     const el = inputRef.current;
@@ -288,19 +299,48 @@ export default function RemotePane({
           ) : m.role === 'user' ? (
             <div key={m.seq} className="rp-user">
               <span className="rp-caret">❯</span>
-              <span className="rp-user-text">{m.text}</span>
-              {/* Both states come from the highest seq a poll actually returned,
-                  and claim nothing beyond it: the agent either has this message
-                  or has not collected it yet. */}
-              {m.seq <= (info?.deliveredThrough ?? 0)
-                ? <AckGlyph className="rp-ack" />
-                : <span className="rp-pending" title="the agent has not collected this yet">pending</span>}
+              <div className="rp-user-body">
+                <span className="rp-user-text">{m.text}</span>
+                {/* The receipt sits at the foot of the message it is about, on
+                    the text column, so a wrapped message does not leave it
+                    stranded wherever the last line happened to end.
+
+                    Both states come from the highest seq a poll actually
+                    returned, and claim nothing beyond it: the agent either has
+                    this message or has not collected it yet. */}
+                <span className="rp-receipt">
+                  {m.seq <= (info?.deliveredThrough ?? 0)
+                    ? <AckGlyph className="rp-ack" />
+                    : <span className="rp-pending" title="the agent has not collected this yet">pending</span>}
+                </span>
+              </div>
             </div>
           ) : (
             <div key={m.seq} className="rp-agent" dangerouslySetInnerHTML={{ __html: m.html }} />
           )
         ))}
         {err && <div className="rp-err">{err}</div>}
+      </div>
+
+      {/* The one fact here that changes while you watch, so it sits against the
+          conversation rather than down in the context row. Drawn the way the
+          trace reader draws its `working` line: the mark hangs in the gutter and
+          the word starts on the message text column, on the log's own
+          background with no rule above it, so it reads as the last line of the
+          log rather than as a second bar of chrome.
+
+          The mark reads the app's one state-mark contract (--mark-* beside
+          ov-spin in styles.css): the braille spinner while working, and that
+          motion's completed path when it is not. It is `.rp-mark`, not
+          `.status` — a pane's own identity slot is a StateLogo frame (#92) and
+          no component renders a state-classed `.status` any more; this is the
+          other family, the one .cx-running and .ov-busy belong to.
+
+          Nothing follows the word: RemoteInfo carries no "what it is doing
+          now", and a made-up one would be worse than none. */}
+      <div className="rp-state-line" style={{ fontSize }}>
+        <span className={`rp-mark ${state}`} aria-hidden="true" />
+        <span className={`rp-state ${state}`}>{stateLabel}</span>
       </div>
 
       <div className="rp-composer" style={{ fontSize }}>
@@ -316,14 +356,21 @@ export default function RemotePane({
         />
       </div>
 
-      {/* The bottom status row: state, where the agent actually is, when we last
-          heard from it. */}
+      {/* The bottom context row: where the agent actually is, when we last heard
+          from it, and how to send. These are settings and facts about the
+          connection rather than things that change as you watch — the CLI
+          bottom row that carries them — so the state left and they did not.
+
+          The separators join the facts rather than prefixing them, so whichever
+          one comes first does not start with a stray dot now that the state is
+          no longer always there to lead. */}
       <div className="rp-status" style={{ fontSize }}>
-        <span className={`rp-state ${state}`}>{stateLabel}</span>
-        {peer?.harness && <><span className="rp-dot">·</span><span>{peer.harness}</span></>}
-        {peer?.cwd && <><span className="rp-dot">·</span><span className="rp-cwd" title={peer.cwd}>{peer.cwd}</span></>}
-        {peer?.host && <><span className="rp-dot">·</span><span>on {peer.host}</span></>}
-        {!peer && <><span className="rp-dot">·</span><span className="rp-cwd">remote-agents/{name}/</span></>}
+        {facts.map((f, i) => (
+          <Fragment key={f.key}>
+            {i > 0 && <span className="rp-dot">·</span>}
+            {f.node}
+          </Fragment>
+        ))}
         <span className="spacer" />
         {seenAgo && <span className="rp-seen">last seen {seenAgo}</span>}
         <span className="rp-hint">↵ send · ⇧↵ newline</span>
