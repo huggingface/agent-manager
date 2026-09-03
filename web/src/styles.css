@@ -1981,18 +1981,22 @@ a.btn-ghost { text-decoration: none; }
   padding: 3px 8px 3px 6px; margin: 1px 0;
 }
 .rp-caret { color: var(--accent); font-weight: 700; flex: none; }
-/* Not flex:1 — the tick sits immediately after the words, not pushed to the
-   far edge where it reads as unrelated furniture. */
+/* The message and its receipt stack, so the receipt lands at the foot of the
+   block on the text column rather than trailing off the end of whatever line
+   the text happened to stop on. */
+.rp-user-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .rp-user-text { white-space: pre-wrap; word-break: break-word; min-width: 0; }
-.rp-ack {
-  flex: none; width: 1.15em; height: 1.15em; color: var(--accent);
-  align-self: center; margin-left: 1px;
-}
+/* One fixed height for both receipts. `pending` is small italic text and the
+   tick is a glyph box, so without this the block would change height the moment
+   a receipt lands — and a log pinned to the newest message would jump under the
+   operator while they were reading. */
+.rp-receipt { display: flex; align-items: center; height: 1.25em; margin-top: 1px; }
+.rp-ack { flex: none; width: 1.05em; height: 1.05em; color: var(--accent); }
 /* The other half of the tick: quiet, italic, and out of the way — it marks a
    normal waiting state, not a problem. */
 .rp-pending {
   flex: none; font-style: italic; font-size: 0.8em; color: var(--muted);
-  opacity: 0.85; margin-left: 2px; white-space: nowrap;
+  opacity: 0.85; white-space: nowrap;
 }
 
 .rp-agent { padding-left: 15px; word-break: break-word; }
@@ -2008,6 +2012,29 @@ a.btn-ghost { text-decoration: none; }
 .rp-agent ul, .rp-agent ol { margin: 0.3em 0; padding-left: 1.4em; }
 .rp-agent table { border-collapse: collapse; margin: 0.4em 0; }
 .rp-agent th, .rp-agent td { border: 1px solid var(--border); padding: 2px 7px; text-align: left; }
+
+/* The reader's running line, drawn in this log. Not a copy of it — literally
+   `.cx-running` (conversation.css), so the line is one thing with one place to
+   change it. The reader pulls it left by a cell so `working` lands on its text
+   column; this log has no mark gutter to pull into, so the pull would hang the
+   mark outside the log's padding. Neutralising that one declaration is the
+   whole difference between the two homes.
+
+   Two things differ from the reader beyond that, both because a remote agent
+   always has a state worth reading while a reader turn is either running or
+   over: the line is always present, and its mark is a real element carrying the
+   state rather than the reader's always-spinning ::before. `.status` is that
+   mark — the app's settled one, spinner while working and the completed path
+   otherwise — so the three states are one drawing and only `working` moves. */
+.rp-body .cx-running { margin-left: 0; }
+/* The line's own mark is turned off, because here the mark is a real element
+   that carries the state. Two classes deep because `.cx-running::before` lives
+   in the other stylesheet and a single-class override would tie on specificity
+   and lose to whichever file loads last; and `animation: none` because
+   `ov-spin` sets `content` in its keyframes, and an animated declaration wins
+   over a plain one no matter how specific — without it the reader's spinner
+   kept drawing behind this line's mark. */
+.rp-body .rp-run::before { content: none; animation: none; }
 
 /* Composer: inherits the log's font size (set inline from zoom) so the two
    surfaces match at every zoom level. */
@@ -2025,7 +2052,9 @@ a.btn-ghost { text-decoration: none; }
 }
 .rp-input::placeholder { color: var(--muted); opacity: 0.7; }
 
-/* Bottom context row: state, where the agent is, when it last spoke. */
+/* Bottom context row: where the agent is, when it last spoke, how to send. The
+   state is not here — the log's running line carries it, and saying the same
+   word twice forty pixels apart just teaches the eye to skip one of them. */
 .rp-status {
   display: flex; align-items: center; gap: 5px;
   padding: 4px 12px 5px; border-top: 1px solid var(--border);
@@ -2035,6 +2064,7 @@ a.btn-ghost { text-decoration: none; }
 .rp-status .spacer { flex: 1; }
 .rp-status > span { font-size: 0.82em; }
 .rp-state.working, .rp-state.waiting { color: var(--accent); }
+.rp-state.idle { color: var(--muted); }
 .rp-state.stopped { color: var(--muted); }
 .rp-dot { opacity: 0.5; }
 .rp-cwd { overflow: hidden; text-overflow: ellipsis; min-width: 0; }

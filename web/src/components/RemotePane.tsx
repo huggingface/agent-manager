@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RemoteInfo, RemoteMessage, Session } from '../types';
 import { REMOTE_STATE_LABEL } from '../types';
 import * as api from '../api';
@@ -94,6 +94,7 @@ export default function RemotePane({
 
   // Stay pinned to the newest message unless the operator has scrolled up to
   // read something — then leave their scroll position alone.
+  //
   useEffect(() => {
     const el = bodyRef.current;
     if (el && atBottom.current) el.scrollTop = el.scrollHeight;
@@ -178,6 +179,15 @@ export default function RemotePane({
   const peer = info?.peer || null;
   const stateLabel = REMOTE_STATE_LABEL[state];
   const seenAgo = fmtAgo(info?.lastSeenAt);
+
+  // Whichever of these the connection actually knows, in order — see the bottom
+  // row below for why they are a list rather than a run of conditionals.
+  const facts = [
+    peer?.harness && { key: 'harness', node: <span>{peer.harness}</span> },
+    peer?.cwd && { key: 'cwd', node: <span className="rp-cwd" title={peer.cwd}>{peer.cwd}</span> },
+    peer?.host && { key: 'host', node: <span>on {peer.host}</span> },
+    !peer && { key: 'path', node: <span className="rp-cwd">remote-agents/{name}/</span> },
+  ].filter((f): f is { key: string; node: JSX.Element } => !!f);
 
   const MAX_ROWS = 10;
   useEffect(() => {
@@ -288,18 +298,48 @@ export default function RemotePane({
           ) : m.role === 'user' ? (
             <div key={m.seq} className="rp-user">
               <span className="rp-caret">❯</span>
-              <span className="rp-user-text">{m.text}</span>
-              {/* Both states come from the highest seq a poll actually returned,
-                  and claim nothing beyond it: the agent either has this message
-                  or has not collected it yet. */}
-              {m.seq <= (info?.deliveredThrough ?? 0)
-                ? <AckGlyph className="rp-ack" />
-                : <span className="rp-pending" title="the agent has not collected this yet">pending</span>}
+              <div className="rp-user-body">
+                <span className="rp-user-text">{m.text}</span>
+                {/* The receipt sits at the foot of the message it is about, on
+                    the text column, so a wrapped message does not leave it
+                    stranded wherever the last line happened to end.
+
+                    Both states come from the highest seq a poll actually
+                    returned, and claim nothing beyond it: the agent either has
+                    this message or has not collected it yet. */}
+                <span className="rp-receipt">
+                  {m.seq <= (info?.deliveredThrough ?? 0)
+                    ? <AckGlyph className="rp-ack" />
+                    : <span className="rp-pending" title="the agent has not collected this yet">pending</span>}
+                </span>
+              </div>
             </div>
           ) : (
             <div key={m.seq} className="rp-agent" dangerouslySetInnerHTML={{ __html: m.html }} />
           )
         ))}
+        {/* The reader's running line, in this log, as its last child — directly
+            after the message it follows, with no rule, no gap and no container
+            of its own. Same class the reader renders (Exchange.tsx), so the line
+            itself is one thing rather than two that resemble each other.
+
+            Unlike the reader's, it is always here, because a remote agent always
+            has a state worth reading. Only `working` moves: the mark is the
+            app's settled state mark, which is the braille spinner while working
+            and that motion's completed path when it is not — accent while the
+            agent is there, grey once it is gone. Nothing else animates.
+
+            The mark is the line's content rather than its ::before, so the three
+            states share one drawing; .rp-run turns off the pseudo-element the
+            reader uses for its own spinner.
+
+            No second half. The reader appends the latest step when it has one
+            and renders the bare word when it does not (Exchange.tsx:352); a
+            remote agent reports no steps, so the bare form is the honest one. */}
+        <div className="cx-running mono rp-run">
+          <span className={`status ${state}`} aria-hidden="true" />
+          {stateLabel}
+        </div>
         {err && <div className="rp-err">{err}</div>}
       </div>
 
@@ -316,14 +356,22 @@ export default function RemotePane({
         />
       </div>
 
-      {/* The bottom status row: state, where the agent actually is, when we last
-          heard from it. */}
+      {/* The bottom context row: where the agent is, when we last heard from it,
+          and how to send. The state is NOT here any more — the log says it, and
+          the same word twice forty pixels apart is one of them being ignored.
+          What is left is the connection's standing facts, which the log never
+          carried.
+
+          The dots join the facts rather than prefixing them: with the state no
+          longer leading, a prefixing dot would leave whichever fact comes first
+          starting with a stray separator. */}
       <div className="rp-status" style={{ fontSize }}>
-        <span className={`rp-state ${state}`}>{stateLabel}</span>
-        {peer?.harness && <><span className="rp-dot">·</span><span>{peer.harness}</span></>}
-        {peer?.cwd && <><span className="rp-dot">·</span><span className="rp-cwd" title={peer.cwd}>{peer.cwd}</span></>}
-        {peer?.host && <><span className="rp-dot">·</span><span>on {peer.host}</span></>}
-        {!peer && <><span className="rp-dot">·</span><span className="rp-cwd">remote-agents/{name}/</span></>}
+        {facts.map((f, i) => (
+          <Fragment key={f.key}>
+            {i > 0 && <span className="rp-dot">·</span>}
+            {f.node}
+          </Fragment>
+        ))}
         <span className="spacer" />
         {seenAgo && <span className="rp-seen">last seen {seenAgo}</span>}
         <span className="rp-hint">↵ send · ⇧↵ newline</span>
