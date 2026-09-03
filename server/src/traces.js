@@ -1038,14 +1038,32 @@ const queueKey = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 // that, and showing it as a prompt would be a new bug in place of the old one.
 const isHarnessText = (t) => t.startsWith('<') || t.startsWith('[Request interrupted');
 
-async function normalizeClaude(file, out, range) {
+async function normalizeClaude(file, out, range, allowSubagent = false) {
+  // Where a FORK's own conversation starts.
+  //
+  // `subagent_type: "fork"` inherits the parent's transcript — the harness says
+  // so itself, in the boilerplate that ends the inherited part: "You are a
+  // worker fork. The transcript above is the parent's history — inherited
+  // reference, not your situation." The last inherited record is the `Agent`
+  // call that created this fork, so rendering the file whole makes a fork
+  // appear to have spawned itself, with its own summary line crediting it with
+  // one sub-agent — and expanding that row opens the same transcript again,
+  // without bound. Same shape as codex's `fork_turns: "all"`, one harness over.
+  let forkEnd = null;
   const stitch = makeStitcher();
   const byMsgId = new Map();
   const pending = [];   // queued prompts, oldest first, until dequeued or removed
   for await (const j of jsonLines(file, range)) {
     // These embed whole file contents; share.js drops them and so do we.
     if (j.type === 'file-history-snapshot' || j.type === 'file-history-delta') continue;
-    if (j.isMeta || j.sourceToolUseID) continue;
+    // `isMeta` is the harness talking to itself, and dropped — with one
+    // exception, added for the reader's sub-agent strip: a `task-notification`
+    // is the ONLY record that says a sub-agent finished, and what it handed
+    // back. In a sub-agent's own transcript (CLI 2.1.209) those records carry
+    // isMeta, while in a parent's they do not, so dropping them meant a
+    // sub-agent that spawned sub-agents could never show any of them as done.
+    // It still renders as a `system` turn, which the reader does not draw.
+    if ((j.isMeta || j.sourceToolUseID) && j.origin?.kind !== 'task-notification') continue;
     if (j.type === 'queue-operation') {
       const text = queueKey(j.content);
       if (j.operation === 'enqueue') {
@@ -1107,7 +1125,13 @@ async function normalizeClaude(file, out, range) {
         // Injected environment/reminder blobs are not prompts — show them, but
         // as system so the conversation reads correctly (same rule the digest
         // uses to avoid counting them).
-        if (j.type === 'user' && (t.startsWith('<') || t.startsWith('[Request interrupted'))) {
+        // `[SYSTEM NOTIFICATION - NOT USER INPUT]` is how CLI 2.1.209 opens a
+        // task-notification inside a SUB-AGENT's transcript, where the parent's
+        // copy opens with the tag itself. It says so on the tin; without it in
+        // this list the record reads as something the operator typed, and the
+        // reader would open a new exchange with harness noise in the prompt band.
+        if (j.type === 'user' && (t.startsWith('<') || t.startsWith('[Request interrupted') || t.startsWith('[SYSTEM NOTIFICATION'))) {
+          if (allowSubagent && forkEnd === null && t.startsWith('<fork-boilerplate>')) forkEnd = out.messages.length;
           out.push({ role: 'system', ts, blocks: [textBlock('text', t)] });
           continue;
         }
@@ -1135,6 +1159,13 @@ async function normalizeClaude(file, out, range) {
       out.push(msg);
       if (id) byMsgId.set(id, msg);
     }
+  }
+  // A fork's inherited prelude goes now that the whole window has been read.
+  // Only when the boilerplate was actually seen: a general-purpose sub-agent
+  // inherits nothing and has none, and a fork whose boilerplate is outside this
+  // window is better shown whole than shown empty.
+  if (allowSubagent && forkEnd !== null && forkEnd > 0) {
+    out.messages = out.messages.slice(forkEnd);
   }
   // Dropped at the end rather than never pushed: which path a queued prompt took
   // is not known until its dequeue or remove has been read. Anything still
@@ -1171,7 +1202,24 @@ async function normalizeClaude(file, out, range) {
 // attach to it — so one row reads "text + 16 tool calls (exec_command,
 // apply_patch, write_stdin)" the way the Hub's own viewer shows it, instead of
 // 17 separate rows.
-async function normalizeCodex(file, out, range) {
+async function normalizeCodex(file, out, range, allowSubagent = false) {
+  // Where this sub-agent's OWN conversation starts.
+  //
+  // A codex sub-agent is spawned with `fork_turns: "all"`, so its rollout opens
+  // with the whole parent conversation copied into it — the operator's prompt,
+  // the parent's earlier turns, the lot — and only then the task it was given.
+  // Rendered whole, an expanded sub-agent shows the parent's history and reads
+  // as if the child had done the parent's work. It is the file that says this,
+  // not the renderer, so the fix is here: the boundary is the NEW_TASK post
+  // addressed to this thread, and everything before it is somebody else's.
+  //
+  //   0  session_meta (this child)      ← its own header
+  //   1  session_meta (the parent)      ┐
+  //   …  developer/user messages        │ the forked conversation
+  //  14  inter_agent_communication…     ┘
+  //  15  agent_message  NEW_TASK → /root/pty_summary   ← the child's own start
+  //  16… its reasoning, its tools, its answer
+  let forkEnd = null;
   const stitch = makeStitcher();
   const seenThinking = new Set();
   let cur = null;      // the assistant turn being built
@@ -1189,7 +1237,11 @@ async function normalizeCodex(file, out, range) {
     const ts = j.timestamp ? Date.parse(j.timestamp) || undefined : undefined;
 
     if (j.type === 'session_meta') {
-      if (p.thread_source === 'subagent' || p.source?.subagent) {
+      // A sub-agent's rollout is refused as a SESSION view — it is an internal
+      // thread, not the operator's conversation — but the sub-agent strip asks
+      // for it deliberately, by an id it resolved from this pane's own roster.
+      // Same file, two callers, one of which has the right to see it.
+      if (!allowSubagent && (p.thread_source === 'subagent' || p.source?.subagent)) {
         const err = new Error('this rollout is an internal guardian/subagent thread, not the session');
         err.code = 'trace-not-user-conversation';
         throw err;
@@ -1235,6 +1287,33 @@ async function normalizeCodex(file, out, range) {
           seenThinking.add(text.trim());
           assistant(ts).blocks.push(textBlock('thinking', text));
         }
+      } else if (p.type === 'agent_message') {
+        // The task hand-off to THIS thread ends the forked prelude. Its payload
+        // is encrypted, so there is nothing to render from it either way.
+        if (allowSubagent && forkEnd === null && /Message Type:\s*NEW_TASK/.test(
+          (Array.isArray(p.content) ? p.content : []).map((c) => String((c && c.text) || '')).join('\n'))) {
+          forkEnd = out.messages.length;
+        }
+        // Codex's sub-agent post. The parent's rollout carries one per child:
+        //
+        //   author: "/root/pty_summary"   recipient: "/root"
+        //   "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/pty_summary\nPayload: …"
+        //
+        // and that is the authoritative "this sub-agent finished, and here is
+        // what it handed back" — the same job Claude's `<task-notification>`
+        // does. The study reported no terminal event for codex because it was
+        // looking for `sub_agent_activity`, which CLI 0.149.1 does not emit at
+        // all; this is what it emits instead. Kept as `system` so the reader
+        // does not draw it and the strip can read it, exactly like Claude's.
+        // Encrypted parts are dropped: the NEW_TASK a parent sends a child
+        // carries its payload encrypted, so there is nothing to show.
+        const parts = (Array.isArray(p.content) ? p.content : [])
+          .map((c) => String((c && c.text) || ''))
+          .filter((t) => t.trim());
+        if (!parts.length) continue;
+        const from = p.author ? `Sender: ${p.author}` : '';
+        const text = parts.join('\n');
+        out.push({ role: 'system', ts, blocks: [textBlock('text', text.includes('Sender:') ? text : `${from}\n${text}`)] });
       } else if (['function_call', 'custom_tool_call', 'local_shell_call', 'web_search_call'].includes(p.type)) {
         const use = { type: 'tool_use', id: p.call_id || p.id, name: p.name || p.type, ...capText(p.arguments ?? p.input) };
         const msg = assistant(ts);
@@ -1323,6 +1402,13 @@ async function normalizeCodex(file, out, range) {
     }
   }
   if (encrypted) out.note = `${encrypted} reasoning step${encrypted === 1 ? '' : 's'} were encrypted by the model and carry no readable text`;
+  // …and drop it, now that the whole file has been read. Only when a boundary
+  // was found: a sub-agent spawned without a fork, or one whose hand-off is
+  // outside this window, is better shown whole than shown empty.
+  if (allowSubagent && forkEnd !== null && forkEnd > 0) {
+    out.messages = out.messages.slice(forkEnd);
+  }
+
 }
 
 // OpenClaw — already close to STS: {type:'message', message:{role,content,usage}}
@@ -1567,12 +1653,12 @@ function markFinalTurns(out) {
   }
 }
 
-async function parseTraceFile(harness, file, sessionId, range = null) {
+async function parseTraceFile(harness, file, sessionId, range = null, allowSubagent = false) {
   const out = newTrace(harness);
   out.sessionId = sessionId || null;
   switch (harness) {
-    case 'claude': await normalizeClaude(file, out, range); break;
-    case 'codex': await normalizeCodex(file, out, range); break;
+    case 'claude': await normalizeClaude(file, out, range, allowSubagent); break;
+    case 'codex': await normalizeCodex(file, out, range, allowSubagent); break;
     case 'openclaw': await normalizeOpenClaw(file, out, range); break;
     case 'sts': await normalizeSts(file, out, range); break;
     case 'opencode': normalizeOpencodeDb(file, sessionId, out); break;
@@ -1739,7 +1825,7 @@ function firstWholeLine(buf, aligned) {
   return nl < 0 ? buf.length : nl + 1;
 }
 
-async function oneWindow(harness, file, sessionId, range, size, prebuilt) {
+async function oneWindow(harness, file, sessionId, range, size, prebuilt, allowSubagent = false) {
   let taskAligned = false;
   if (prebuilt) range.buf = prebuilt;
   if (harness === 'codex' && range.from > 0) {
@@ -1761,7 +1847,7 @@ async function oneWindow(harness, file, sessionId, range, size, prebuilt) {
       range.danglingTaskComplete = 'ignore';
     }
   }
-  const parsed = await parseTraceFile(harness, file, sessionId, range);
+  const parsed = await parseTraceFile(harness, file, sessionId, range, allowSubagent);
   const start = range.start ?? range.from;
   const end = range.end ?? range.to;
   // Having READ to the end of the file is what makes this the end of the
@@ -1782,7 +1868,7 @@ async function oneWindow(harness, file, sessionId, range, size, prebuilt) {
   return { parsed, cur: { mode: 'bytes', start, end, atStart: start <= 0, atEnd } };
 }
 
-async function readWindow(harness, file, sessionId, size, req) {
+async function readWindow(harness, file, sessionId, size, req, allowSubagent = false) {
   const bytes = clampN(Math.trunc(req.bytes) || WINDOW_BYTES, WINDOW_MIN_BYTES, WINDOW_MAX_BYTES);
   const min = clampN(Math.trunc(req.min) || WINDOW_MIN_TURNS, 1, 500);
   const cursor = clampN(Math.trunc(req.cursor) || 0, 0, size);
@@ -1792,10 +1878,10 @@ async function readWindow(harness, file, sessionId, size, req) {
     // one window. Hand back the tail and flag the gap, so the reader replaces
     // what it holds instead of splicing a hole into the middle of it.
     if (size - cursor > WINDOW_MAX_BYTES) {
-      const w = await readWindow(harness, file, sessionId, size, { at: 'tail', bytes, min });
+      const w = await readWindow(harness, file, sessionId, size, { at: 'tail', bytes, min }, allowSubagent);
       return { ...w, cur: { ...w.cur, gap: true } };
     }
-    return oneWindow(harness, file, sessionId, { from: cursor, to: size, aligned: true, eof: true }, size);
+    return oneWindow(harness, file, sessionId, { from: cursor, to: size, aligned: true, eof: true }, size, undefined, allowSubagent);
   }
 
   const to = req.at === 'before' ? cursor : size;
@@ -1819,7 +1905,7 @@ async function readWindow(harness, file, sessionId, size, req) {
       buf = buf && buf.length ? Buffer.concat([head, buf]) : head;
       bufFrom = from;
     }
-    const w = await oneWindow(harness, file, sessionId, { from, to, aligned: from === 0, eof }, size, buf);
+    const w = await oneWindow(harness, file, sessionId, { from, to, aligned: from === 0, eof }, size, buf, allowSubagent);
     if (w.parsed.messages.length >= min || from === 0 || span >= WINDOW_MAX_BYTES) {
       // A window that consumed nothing at all has hit a single line longer than
       // the ceiling (a file-history blob), and no amount of asking again will
@@ -1901,10 +1987,10 @@ async function refuseCodexSubagent(file) {
  *   { offset, limit }                      — index paging (Overview, RENDER mode)
  * `decorate` is the bundle manifest pass, applied to every fresh parse.
  */
-async function serveTrace({ key, harness, file, sessionId, size, decorate }, opts) {
+async function serveTrace({ key, harness, file, sessionId, size, decorate, allowSubagent }, opts) {
   const full = async () => {
     if (viewMemo.key !== key) {
-      const parsed = await tracked(PHASE.readTrace, () => parseTraceFile(harness, file, sessionId));
+      const parsed = await tracked(PHASE.readTrace, () => parseTraceFile(harness, file, sessionId, null, allowSubagent));
       if (decorate) await decorate(parsed);
       viewMemo = { key, val: parsed };
     }
@@ -1915,7 +2001,7 @@ async function serveTrace({ key, harness, file, sessionId, size, decorate }, opt
   if (!opts.window) return pageOf(await full(), opts.offset ?? 0, opts.limit ?? 200);
   if (!WINDOWABLE.has(harness)) return windowIndex(await full(), opts.window);
 
-  if (harness === 'codex') {
+  if (harness === 'codex' && !allowSubagent) {
     try {
       await refuseCodexSubagent(file);
     } catch (e) {
@@ -1924,7 +2010,7 @@ async function serveTrace({ key, harness, file, sessionId, size, decorate }, opt
     }
   }
   const { parsed, cur } = await tracked(PHASE.readTrace, () =>
-    readWindow(harness, file, sessionId, size, opts.window));
+    readWindow(harness, file, sessionId, size, opts.window, allowSubagent));
   if (decorate) await decorate(parsed);
   return windowOf(parsed, cur);
 }
@@ -1952,6 +2038,183 @@ export async function readTrace(session, opts = {}) {
 }
 
 /**
+ * Codex keeps a sub-agent's transcript as an ordinary rollout, in the same tree
+ * as every other session, and says whose child it is in its own header:
+ *
+ *   "thread_source": "subagent",
+ *   "source": { "subagent": { "thread_spawn": {
+ *       "parent_thread_id": "01a0581a-5757-…", "depth": 1,
+ *       "agent_path": "/root/pty_summary", "agent_nickname": "Curie" } } }
+ *
+ * So the roster is: every rollout whose header names this session as its parent.
+ * That means reading first lines rather than a directory listing, which is why
+ * the header is memoized per file+mtime — a rollout's header never changes once
+ * written, and there are tens of files, not thousands.
+ *
+ * `agent_path` is the join key back to the parent's own records: the parent's
+ * `spawn_agent` call carries `{"task_name":"pty_summary"}` and its output
+ * `{"task_name":"/root/pty_summary"}`, and the completion post names the same
+ * path as `Sender:`. There is no shared id anywhere in the pair, so the name is
+ * the link — and it is exact, not a heuristic.
+ */
+const codexHeadMemo = new Map();   // file -> { key, head }
+
+async function codexSubagentHeader(file) {
+  const st = await statRetry(file);
+  if (!st) return null;
+  const key = `${st.mtimeMs}:${st.size}`;
+  const hit = codexHeadMemo.get(file);
+  if (hit && hit.key === key) return hit.head;
+  let head = null;
+  try {
+    for await (const j of jsonLines(file)) {
+      const p = j.payload || j;
+      if (j.type !== 'session_meta' && p?.type !== 'session_meta' && !p?.id) break;
+      const spawn = p?.source?.subagent?.thread_spawn;
+      head = {
+        threadId: p?.id || null,
+        parentThreadId: spawn?.parent_thread_id || null,
+        depth: Number.isFinite(spawn?.depth) ? spawn.depth : null,
+        agentPath: spawn?.agent_path || null,
+        nickname: spawn?.agent_nickname || null,
+        firstTs: j.timestamp ? Date.parse(j.timestamp) || null : null,
+        bytes: st.size,
+        mtimeMs: Math.round(st.mtimeMs),
+      };
+      break;                       // the first line is the header
+    }
+  } catch { /* unreadable file: not a sub-agent as far as we know */ }
+  if (codexHeadMemo.size > 400) codexHeadMemo.clear();
+  codexHeadMemo.set(file, { key, head });
+  return head;
+}
+
+async function codexSubagentRoster(session) {
+  const parentId = session.codexSessionId
+    || (session.codexRollout && (path.basename(session.codexRollout).match(UUID_RE) || [])[1])
+    || null;
+  if (!parentId) return { supported: true, reason: 'no rollout for this pane yet', dir: null, agents: [] };
+  const agents = [];
+  for (const file of await codexFiles()) {
+    const head = await codexSubagentHeader(file);
+    if (!head || head.parentThreadId !== parentId) continue;
+    const task = head.agentPath || '';
+    agents.push({
+      agentId: head.threadId,
+      agentType: head.nickname || 'sub-agent',
+      description: task.split('/').filter(Boolean).pop() || head.nickname || 'sub-agent',
+      /** codex has no per-call id; the task path is what the parent's records name */
+      toolUseId: null,
+      taskName: task || null,
+      parentAgentId: head.parentThreadId,
+      depth: head.depth,
+      spawnedAt: head.firstTs,
+      lastWroteAt: head.mtimeMs,
+      bytes: head.bytes,
+      hasTranscript: true,
+    });
+  }
+  agents.sort((a, b) => (a.spawnedAt || 0) - (b.spawnedAt || 0));
+  return { supported: true, dir: null, agents };
+}
+
+/**
+ * The sub-agents a Claude session spawned, from the directory beside its own
+ * transcript. (PoC — see docs/… nothing; this is the reader's sub-agent strip.)
+ *
+ *   <project>/<session-uuid>.jsonl          the parent, up to 292 MB here
+ *   <project>/<session-uuid>/subagents/
+ *       agent-<agentId>.jsonl               the child's transcript
+ *       agent-<agentId>.meta.json           187 bytes, and the whole point
+ *
+ * The roster is a directory listing plus a few kilobytes: the sidecar names the
+ * task (`description`), the exact spawning call (`toolUseId`), the parent agent
+ * and the depth. Nothing here opens the parent transcript, which is the only
+ * reason this can be asked for on a poll — reading the parent per poll is not
+ * survivable at 292 MB.
+ *
+ * Two timestamps come free from stat(), and they are not the same thing:
+ *   spawnedAt   — the sidecar's mtime. Written once, when the agent is created.
+ *   lastWroteAt — the transcript's mtime. Moves while it works, and then stops
+ *                 whether it finished or died. It is reported, never judged:
+ *                 measured gaps between consecutive records inside a LIVE
+ *                 sub-agent run to 601s (p99 112s), so "silent means dead" is
+ *                 wrong several times an hour. Whether one is finished is
+ *                 decided in the client from the parent's own records.
+ */
+export async function subagentRoster(session) {
+  if (session.cli === 'codex') return codexSubagentRoster(session);
+  const loc = await traceLocation(session);
+  if (!loc || session.cli !== 'claude' || loc.format !== 'jsonl') {
+    return { supported: false, reason: session.cli === 'claude' ? 'no transcript yet' : `${session.cli} keeps sub-agents elsewhere`, dir: null, agents: [] };
+  }
+  const dir = path.join(loc.path.replace(/\.jsonl$/, ''), 'subagents');
+  let names = [];
+  try { names = await fsp.readdir(dir); } catch { return { supported: true, dir, agents: [] }; }
+
+  const agents = [];
+  for (const name of names) {
+    const m = /^agent-([A-Za-z0-9_-]+)\.meta\.json$/.exec(name);
+    if (!m) continue;
+    const agentId = m[1];
+    const metaPath = path.join(dir, name);
+    const filePath = path.join(dir, `agent-${agentId}.jsonl`);
+    let meta = {};
+    try { meta = JSON.parse(await fsp.readFile(metaPath, 'utf8')) || {}; } catch { /* a half-written sidecar is still an agent */ }
+    const [metaSt, fileSt] = await Promise.all([statRetry(metaPath), statRetry(filePath)]);
+    agents.push({
+      agentId,
+      agentType: meta.agentType || null,
+      description: meta.description || null,
+      toolUseId: meta.toolUseId || null,
+      parentAgentId: meta.parentAgentId || null,
+      depth: Number.isFinite(meta.spawnDepth) ? meta.spawnDepth : null,
+      spawnedAt: metaSt ? Math.round(metaSt.mtimeMs) : null,
+      lastWroteAt: fileSt ? Math.round(fileSt.mtimeMs) : null,
+      bytes: fileSt ? fileSt.size : 0,
+      hasTranscript: !!fileSt,
+    });
+  }
+  agents.sort((a, b) => (a.spawnedAt || 0) - (b.spawnedAt || 0));
+  return { supported: true, dir, agents };
+}
+
+/**
+ * One sub-agent's transcript, read as an ordinary trace.
+ *
+ * It IS an ordinary trace — same records, same normalizer, so the reader can
+ * render a sub-agent with the component it already uses for a session. The file
+ * is small (11 MB across all 38 of the largest session here) where the parent
+ * is not, which is the other half of why this feature is affordable.
+ *
+ * `agentId` arrives from the browser and lands in a path, so it is matched
+ * against the id shape rather than trusted.
+ */
+export async function readSubagentTrace(session, agentId, opts = {}) {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(String(agentId || ''))) {
+    const e = new Error('not a sub-agent id'); e.code = 'no-trace'; throw e;
+  }
+  if (session.cli === 'codex') {
+    // The id IS a thread id, and a rollout's name carries it. Matched against
+    // the roster rather than pasted into a path, so a browser cannot ask for a
+    // file this session is not the parent of.
+    const { agents } = await codexSubagentRoster(session);
+    const mine = agents.find((a) => a.agentId === agentId);
+    if (!mine) { const e = new Error('not a sub-agent of this pane'); e.code = 'no-trace'; throw e; }
+    for (const file of await codexFiles()) {
+      if (path.basename(file).includes(agentId)) return readTraceByPath(file, opts, true);
+    }
+    const e = new Error('sub-agent rollout not found'); e.code = 'no-trace'; throw e;
+  }
+  const loc = await traceLocation(session);
+  if (!loc || session.cli !== 'claude' || loc.format !== 'jsonl') {
+    const e = new Error('this session keeps no sub-agent transcripts'); e.code = 'unsupported-harness'; throw e;
+  }
+  const file = path.join(loc.path.replace(/\.jsonl$/, ''), 'subagents', `agent-${agentId}.jsonl`);
+  return readTraceByPath(file, opts, true);
+}
+
+/**
  * Is this file a trace we can render? Cheap: reads at most the first few lines.
  * Returns the harness id, or null for "just a .jsonl".
  */
@@ -1965,7 +2228,7 @@ export async function traceHarnessOf(file) {
  * reader above locates a file for a session; this one is handed the file and
  * sniffs the format the same way an imported bundle does.
  */
-export async function readTraceByPath(file, opts = {}) {
+export async function readTraceByPath(file, opts = {}, allowSubagent = false) {
   const st = await statRetry(file);
   if (!st) { const e = new Error('trace file unreadable'); e.code = 'no-trace'; throw e; }
 
@@ -1973,11 +2236,12 @@ export async function readTraceByPath(file, opts = {}) {
   if (!harness) { const e = new Error('unrecognized trace format'); e.code = 'unsupported-harness'; throw e; }
 
   return serveTrace({
-    key: `f:${file}:${st.mtimeMs}:${st.size}`,
+    key: `f:${file}:${st.mtimeMs}:${st.size}${allowSubagent ? ':sub' : ''}`,
     harness,
     file,
     sessionId: null,
     size: st.size,
+    allowSubagent,
   }, opts);
 }
 

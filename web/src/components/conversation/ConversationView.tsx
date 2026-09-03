@@ -15,7 +15,7 @@
 // lib/traceWindows.ts, shared with the Trace pane.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../../api';
-import type { TraceTurn } from '../../api';
+import type { SubAgentEntry, TraceTurn } from '../../api';
 import { useTraceWindows, type TraceHeadInfo, type TraceSource } from '../../lib/traceWindows';
 import type { Session } from '../../types';
 import { isRemote } from '../../types';
@@ -27,6 +27,7 @@ import type { PendingAttachment, PendingPrompt } from '../../lib/attachments';
 import { recallReading, rememberReading } from './readingPosition';
 import { useDraft } from './useDraft';
 import { fmtTok, splitExchanges } from './exchanges';
+import { cachedRoster, loadRoster } from '../../lib/subagentRoster';
 import ExchangeView, { PendingExchange } from './Exchange';
 import Attachments from '../Attachments';
 import Composer from './Composer';
@@ -177,6 +178,23 @@ export default function ConversationView({
 
   const { turns: turnsRef, head, error, version, atStart, blocked, loadOlder, loadNewer } =
     useTraceWindows(src, session.id, { onPrepend, onReset, paused, live });
+
+  // The session's sub-agent roster: fetched here rather than by each exchange,
+  // and held in a module-level cache so a remount starts from what is already
+  // known (see lib/subagentRoster.ts — an effect that owned it lost every
+  // answer to its own cleanup). Refreshed while the pane is alive, because
+  // `lastWroteAt` is the one value on it that goes stale by itself.
+  const [roster, setRoster] = useState<SubAgentEntry[] | null>(() => cachedRoster(session.id));
+  useEffect(() => {
+    let alive = true;
+    const tick = () => loadRoster(session.id, true)
+      .then((agents) => { if (alive) setRoster(agents); })
+      .catch(() => { /* unreadable — the rows fall back to what the window knows */ });
+    tick();
+    if (!live) return () => { alive = false; };
+    const t = window.setInterval(tick, 15_000);
+    return () => { alive = false; window.clearInterval(t); };
+  }, [session.id, live]);
 
   const turns: TraceTurn[] = turnsRef.current;
   const exchanges = useMemo(() => splitExchanges(turns), [version, turns]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -577,6 +595,16 @@ export default function ConversationView({
                 // as the widget being "sometimes below and above". The card has
                 // had this guard since it grew an echo; the reader had not.
                 running={live && x === exchanges[exchanges.length - 1] && !sent}
+                // The sub-agent strip needs three things this component has and
+                // an exchange does not: the whole window (a background
+                // sub-agent's completion is recorded in a later turn), the
+                // session id (to read the roster and a child's transcript), and
+                // whether the pane is alive — which is what separates "running"
+                // from "never finished".
+                turns={turns}
+                sessionId={session.id}
+                live={live}
+                roster={roster}
               />
             </div>
           ))}

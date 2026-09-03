@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { recall, remember, readWrap, writeWrap } from './filesMemory';
 import type { Session } from '../types';
 import * as api from '../api';
+import { Rails, railPad } from './Rails';
 import type { FileEntry, FileKind, FilePreview } from '../api';
 import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
@@ -92,18 +93,9 @@ const KIND_LABEL: Record<FileKind, string> = {
   trace: 'trace',
 };
 
-// ASCII-tree rails: one cell per ancestor (vertical line if that ancestor has
-// more siblings below) plus the elbow cell for this row (├ normally, └ if last).
-// `prefix[i]` = "draw a continuation line at ancestor column i".
-function Rails({ prefix, isLast }: { prefix: boolean[]; isLast: boolean }) {
-  return (
-    <span className="rails" aria-hidden>
-      {prefix.map((cont, i) => <span key={i} className={`rail${cont ? ' v' : ''}`} />)}
-      <span className={`rail elbow${isLast ? ' last' : ''}`} />
-    </span>
-  );
-}
-const padFor = (prefix: boolean[]) => ({ paddingLeft: `${(prefix.length + 1) * 1.1}em` });
+// The rails live in components/Rails.tsx: the reader's sub-agent strip draws the
+// same tree, and one copy of six lines is better than two that drift.
+const padFor = railPad;
 
 // One directory listing, fetched once. Used by the pane for the current folder
 // and by every expanded FolderNode, so each level is loaded exactly once.

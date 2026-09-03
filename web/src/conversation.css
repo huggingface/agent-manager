@@ -141,6 +141,66 @@
 .cx-fold.on .cs-tri { color: var(--accent); }
 
 /* ---------- the work: a rail of one-line steps ---------- */
+/* ---------- sub-agents ---------- */
+/* A sub-agent is a step row with a life of its own, so it borrows the rail's
+   own anatomy — mark, label, detail — and adds the facts its completion
+   notification reported. No second list, no second disclosure: the count reads
+   in the summary line and the rows are in the step list where the spawn is. */
+.cs.agent .cs-label { color: var(--accent); }
+.cs.agent .cs-detail { color: var(--text); }
+.cs.agent.no-result .cs-detail, .cs.agent.stalled .cs-detail { color: var(--muted); }
+.cs-facts { flex: none; display: flex; gap: 9px; font-family: var(--font-mono); font-size: 0.8em;
+  color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cs-facts .dim { color: color-mix(in srgb, var(--muted) 72%, transparent); }
+.cs-facts .depth { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
+.cs-facts .who { color: color-mix(in srgb, var(--accent) 60%, var(--muted)); }
+/* The two states that are the ABSENCE of a record say so in words, in the same
+   quiet mono as the rest of the row's facts. They were pills with a dashed
+   border; a sub-agent does not get its own badge vocabulary — `failed` and
+   `killed` are already the rail's red ✗, and these two are the cases where
+   nothing was recorded at all. */
+.cs-state { flex: none; font-family: var(--font-mono); font-size: 0.8em; color: var(--muted); white-space: nowrap; }
+.cs.agent.stalled .cs-state { color: color-mix(in srgb, var(--danger) 60%, var(--muted)); }
+.ca-msg { padding: 3px 0 2px 1.2em; font-size: 0.82em; color: var(--muted); }
+/* Nothing wraps the nested trace. The step body it sits in already indents it,
+   and that indent IS the hierarchy: what renders inside is an ordinary
+   exchange — the task as its own prompt band, then steps, tools and timings
+   exactly as the reader draws them at the top level. The rail, the clamped task
+   panel and the "show the whole task" button that used to live here were a
+   second visual language for content the reader can already draw. */
+.cs-body > .cx { padding-left: 1.23em; }
+
+/* ---------- the live strip: what is working under the working line ---------- */
+/* Collapsed exchange, mid-turn. The pane's spinner says it is working; these say
+   what is working underneath it, one line each, without expanding anything.
+   The strip is all-or-nothing: it holds every sub-agent of the turn — finished
+   ones included — until the last one lands, and then it is gone and they are in
+   the work with every other step. One appearance and one disappearance per turn
+   is why there is no fade here any more. */
+.cx-live { display: flex; flex-direction: column; padding: 1px 0 0;
+  /* the tree hangs off the working line's spinner, which lives in the gutter,
+     so the strip starts there too and the rail column lands under it */
+  margin-left: calc(-1 * var(--mark-w)); }
+.cx-live .cs-head { padding-top: 1px; padding-bottom: 1px; position: relative; }
+.cx-live-more { position: relative; padding: 1px 0; font-size: 0.8em; color: var(--muted); }
+/* the rails themselves are the file browser's — .rails/.rail in styles.css — so
+   there is one implementation of the tree in the app, not two */
+.cx-live .rail { width: var(--mark-w); }
+/* the rail cell is the mark cell wide, so the row pays exactly that much for it
+   — the em padding the file browser uses would leave the text 0.1em short and
+   the elbow would touch the spinner */
+.cx-live .cs-head.railed, .cx-live-more { padding-left: var(--mark-w) !important; }
+/* the spinner, borrowed from the working line: same cell, same animation, so a
+   sub-agent's "running" is the same statement the pane makes about itself */
+.cs-mark.spin::before {
+  content: '⠋'; display: inline-flex; align-items: center;
+  width: var(--mark-w); height: var(--mark-h);
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
+  color: var(--accent); transform: translateY(var(--mark-optical-y));
+  animation: ov-spin 0.9s steps(1) infinite;
+}
+
 .cx-steps { display: flex; flex-direction: column; padding: 1px 0; }
 .cs { min-width: 0; }
 .cs-head {

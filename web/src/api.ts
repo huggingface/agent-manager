@@ -644,6 +644,43 @@ export const getTraceSummary = (id: string, signal?: AbortSignal): Promise<Trace
 export const getFileTraceWindow = (id: string, p: string, req: TraceReq, bytes?: number, min?: number, signal?: AbortSignal): Promise<TraceWindow> =>
   traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&${traceRange(req)}${windowSize(bytes, min)}`, signal);
 
+// ---- sub-agents ----
+// The roster comes from the `subagents/` directory beside the transcript, not
+// from the transcript: a parent here reaches 292 MB while its whole roster is a
+// directory listing plus 187 bytes per agent. `spawnedAt` is the sidecar's
+// mtime and `lastWroteAt` the transcript's — the second one says when it last
+// wrote, and nothing about whether it is alive (measured silence inside a live
+// sub-agent: p99 112s, max 601s).
+export interface SubAgentEntry {
+  agentId: string;
+  agentType: string | null;
+  description: string | null;
+  toolUseId: string | null;
+  /** codex has no per-call id; its parent's records name the task instead */
+  taskName?: string | null;
+  parentAgentId: string | null;
+  depth: number | null;
+  spawnedAt: number | null;
+  lastWroteAt: number | null;
+  bytes: number;
+  hasTranscript: boolean;
+}
+
+export interface SubAgentRoster {
+  id: string;
+  supported: boolean;
+  reason?: string;
+  dir: string | null;
+  agents: SubAgentEntry[];
+}
+
+export const getSubAgents = (id: string, signal?: AbortSignal): Promise<SubAgentRoster> =>
+  traceFetch(`/api/agents/${id}/subagents`, signal);
+
+/** A sub-agent's own transcript, in the same shape as any other trace. */
+export const getSubAgentTrace = (id: string, agentId: string, bytes?: number, signal?: AbortSignal): Promise<TraceWindow> =>
+  traceFetch(`/api/agents/${id}/subagents/${encodeURIComponent(agentId)}?tail=1${windowSize(bytes)}`, signal);
+
 export const getFileTraceSummary = (id: string, p: string, signal?: AbortSignal): Promise<TraceSummary> =>
   traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&summary=1`, signal);
 

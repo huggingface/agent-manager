@@ -44,6 +44,9 @@ const WIDTHS = [225, 238, 276, 340];
 fs.writeFileSync(stub, `
   export const getMetaOne = () => new Promise(() => {});
   export const previewFile = () => new Promise(() => {});
+  // the reader's sub-agent strip imports these; no tile here opens one
+  export const getSubAgents = () => Promise.resolve({ supported: true, agents: [] });
+  export const getSubAgentTrace = () => new Promise(() => {});
 `);
 
 await build({
