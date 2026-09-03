@@ -38,6 +38,15 @@ const IDLE_MS = 10_000;
 const FRESH_MS = 120_000;
 const SUMMARY_DELAY_MS = 400; // let the first paint happen before the whole-file read
 
+/** A visible reader must always retain a slow heartbeat. The manager's
+ *  `working` state is sampled, so a short turn can begin and end between samples;
+ *  a browser tab can also become visible after the work already finished. In
+ *  both cases stopping completely would strand the reader at its old cursor. */
+export const tracePollIntervalMs = (lastTs: number, live?: boolean, now = Date.now()): number => {
+  const fresh = !!lastTs && now - lastTs < FRESH_MS;
+  return fresh || live === true ? LIVE_MS : IDLE_MS;
+};
+
 export interface TraceSource {
   window: (req: api.TraceReq, bytes?: number, min?: number, signal?: AbortSignal) => Promise<TraceWindow>;
   summary: (signal?: AbortSignal) => Promise<TraceSummary>;
@@ -207,8 +216,14 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
     const abort = new AbortController();
     windowAbort.current = abort;
     try {
+      // SQLite messages are mutable while OpenCode streams: polling strictly
+      // after `end` can never see edits to the last message already in hand.
+      // Re-read that one index and replace it along with any newly appended
+      // messages. Byte traces are append-only and keep their exact EOF cursor.
+      const overlap = cur.mode === 'index' && cur.end > cur.start ? 1 : 0;
+      const after = overlap ? cur.end - overlap : cur.end;
       const { turns: got, window: win, ...m } = await src.window(
-        { at: 'after', cursor: cur.end }, undefined, undefined, abort.signal,
+        { at: 'after', cursor: after }, undefined, undefined, abort.signal,
       );
       if (mine !== gen.current) return 0;
       if (win.gap) {
@@ -218,16 +233,20 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
         turns.current = got;
         cursor.current = win;
         cb.current.onReset?.();
+        bump();
       } else {
-        if (got.length) {
-          cb.current.onAppend?.(got.length);
-          turns.current = [...turns.current, ...got];
+        const added = Math.max(0, got.length - overlap);
+        const prior = overlap ? turns.current.slice(-overlap) : [];
+        const replacementChanged = overlap > 0 && JSON.stringify(prior) !== JSON.stringify(got.slice(0, overlap));
+        if (got.length && (added > 0 || replacementChanged)) {
+          if (added) cb.current.onAppend?.(added);
+          turns.current = [...turns.current.slice(0, turns.current.length - overlap), ...got];
         }
         cursor.current = { ...cur, end: win.end, atEnd: win.atEnd };
+        if (added > 0 || replacementChanged) bump();
       }
       setMeta((p) => mergeMeta(p, m));
-      if (got.length) bump();
-      return got.length;
+      return Math.max(0, got.length - overlap);
     } catch {
       // A poll that fails must not throw away the conversation on screen.
       return 0;
@@ -293,12 +312,11 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
     return () => { dead = true; window.clearTimeout(h); };
   }, [src, srcKey, paused, summaryReady, summary, summaryEpoch]);
 
-  // The transcript may still be being written — see LIVE_MS above. Except when
-  // "a window" costs a whole-file read: the SQLite harnesses have no byte
-  // offsets to seek, so every poll would re-parse the entire conversation (and
-  // evict the Overview's memo doing it). They are not polled at all.
+  // The transcript may still be being written — see LIVE_MS above. SQLite
+  // harnesses use message indices rather than byte offsets, but the server memo
+  // makes an unchanged poll cheap and their WAL-aware key refreshes only the
+  // selected conversation when it actually moves.
   const lastTs = meta ? meta.lastTs : 0;
-  const seekable = cursor.current ? cursor.current.mode === 'bytes' : true;
   const live = opts.live;
   const [hidden, setHidden] = useState(() => (typeof document === 'undefined' ? false : document.hidden));
   useEffect(() => {
@@ -307,14 +325,14 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
     return () => document.removeEventListener('visibilitychange', onVis);
   }, []);
   useEffect(() => {
-    const fresh = !!lastTs && Date.now() - lastTs < FRESH_MS;
-    // Nothing to follow: the host says the session is not running and the trace
-    // has not moved in a while. A pane behind another browser tab is the same
-    // case — the reader is not looking, so nobody is waiting for the turn.
-    if (!seekable || paused || hidden || (live === false && !fresh)) return undefined;
-    const h = window.setInterval(loadNewer, fresh ? LIVE_MS : IDLE_MS);
+    // Hidden and off-screen readers stay silent. A visible reader keeps
+    // a slow heartbeat even while waiting: `live` is sampled by the host, so a
+    // short turn (or one completed in a hidden tab) may never be observed as
+    // working. Without this heartbeat its cursor would never catch up.
+    if (paused || hidden) return undefined;
+    const h = window.setInterval(loadNewer, tracePollIntervalMs(lastTs, live));
     return () => window.clearInterval(h);
-  }, [loadNewer, lastTs, seekable, paused, hidden, live]);
+  }, [loadNewer, lastTs, paused, hidden, live]);
 
   // Coming back from another app has to show what happened while away, and none
   // of the loop above survives the trip. The interval is cleared while hidden,
