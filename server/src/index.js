@@ -18,6 +18,7 @@ import * as order from './order.js';
 import * as demo from './demo.js';
 import * as hidden from './hidden.js';
 import * as crons from './crons.js';
+import { ensureClaudeDialogDefaults, trustWorkspacesRoot } from './first-run.js';
 import {
   attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning,
   waitForInputReady, capturePane, ghosttyReady, ghosttyError,
@@ -65,6 +66,14 @@ hidden.init();
 // discovery must refuse to guess. Both installers are non-fatal; the existing
 // fallback remains available if either cannot be installed.
 installClaudeRepinHook();
+// The two first-run answers that belong to the whole Space rather than to one
+// session: Claude's folder trust, which it inherits from the workspaces root
+// down to every session under it, and the bypass-mode warning whose default
+// button is "No, exit" (so a blind Enter on it kills the session). Both run
+// before anything is spawned, and neither writes if the answer is already
+// there. See first-run.js.
+trustWorkspacesRoot();
+ensureClaudeDialogDefaults();
 // OpenCode's global plugin reports the root session chosen by /new (/clear),
 // and the next prompt after switching to an existing session.
 installOpencodeRepinPlugin();
