@@ -6,6 +6,8 @@ import { Rails, railPad } from './Rails';
 import type { FileEntry, FileKind, FilePreview } from '../api';
 import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
+import FileLinkContent, { FileLinkScope } from './FileLinkContent';
+import { fileRequest, fileResourceUrl } from '../lib/fileLinks';
 import CodeView from './CodeView';
 import FileWrapToggle from './FileWrapToggle';
 import PdfView from './PdfView';
@@ -38,16 +40,6 @@ const fmtWhen = (ms: number) => {
 const fmtStamp = (ms: number) => (ms ? new Date(ms).toLocaleString() : 'unknown');
 
 const join = (a: string, b: string) => (a ? `${a}/${b}` : b);
-// Resolve a relative reference (from markdown) against a folder.
-const joinRel = (dir: string, rel: string) => {
-  const out = dir ? dir.split('/') : [];
-  for (const part of rel.split('/')) {
-    if (!part || part === '.') continue;
-    if (part === '..') out.pop();
-    else out.push(part);
-  }
-  return out.join('/');
-};
 const dirOf = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
 
 type SortKey = 'name' | 'size' | 'time';
@@ -429,19 +421,21 @@ function Cols({ sort, onSort }: { sort: Sort; onSort: (k: SortKey) => void }) {
 // Rendered markdown shares the document with the app, so its references have to
 // be repointed: a relative <img> means a sibling file in the workspace, and a
 // relative <a> must not navigate the app away.
-function resolveMarkdown(html: string, sessionId: string, filePath: string) {
+function resolveMarkdown(html: string, sessionId: string, filePath: string, source?: LinkedFileSource) {
   const base = dirOf(filePath);
   const host = document.createElement('div');
   host.innerHTML = html; // already sanitized by renderMarkdown
   const external = (u: string) => /^([a-z]+:|\/\/|\/)/i.test(u);
   host.querySelectorAll('img').forEach((img) => {
     const src = img.getAttribute('src') || '';
-    if (src && !external(src)) img.setAttribute('src', api.rawUrl(sessionId, joinRel(base, src)));
+    if (src && (!external(src) || src.startsWith('/') && !src.startsWith('//'))) {
+      const request = fileRequest(src, { session: source ? undefined : sessionId, root: source?.root, base });
+      if (request) img.setAttribute('src', fileResourceUrl('raw', request));
+    }
   });
   host.querySelectorAll('a').forEach((a) => {
     const href = a.getAttribute('href') || '';
     if (!href || href.startsWith('#')) return; // in-page anchors stay in-page
-    if (!external(href)) a.setAttribute('href', api.rawUrl(sessionId, joinRel(base, href)));
     a.setAttribute('target', '_blank');
     a.setAttribute('rel', 'noopener noreferrer');
   });
@@ -461,7 +455,7 @@ function useTheme(): 'light' | 'dark' {
   return theme;
 }
 
-type ViewInfo = {
+export type ViewInfo = {
   meta: FilePreview | null; extra: string[]; edit?: SaveState; trace?: TraceInfo;
   /** True when a text surface is on screen, so wrapping means something. */
   showWrap?: boolean;
@@ -515,11 +509,25 @@ export type SaveState = {
 // The viewer for one file. Kinds it can't render fall back to an honest
 // "download it instead" card rather than an empty box. The view mode (`raw`,
 // `scripts`) belongs to the pane, which draws the toggles in its info strip.
-export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
+export type LinkedFileSource = {
+  root: string;
+  preview: () => Promise<FilePreview>;
+  rawUrl: string;
+  downloadUrl: string;
+};
+
+export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved, source: linkedSource, line, column }: {
   sessionId: string; path: string; zoom: number; raw: boolean; scripts: boolean;
   onInfo: (info: ViewInfo) => void;
   onSaved?: () => void;
+  /** Shared file links are read-only and never adopt a Files pane's draft. */
+  source?: LinkedFileSource;
+  line?: number;
+  column?: number;
 }) {
+  const readOnly = !!linkedSource;
+  const rawSrc = linkedSource?.rawUrl ?? api.rawUrl(sessionId, path);
+  const downloadSrc = linkedSource?.downloadUrl ?? api.downloadUrl(sessionId, path);
   const [meta, setMeta] = useState<FilePreview | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [source, setSource] = useState<string | null>(null);
@@ -534,11 +542,11 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
   // always writable, but a file nobody touched has nothing to save.
   const [wrap, setWrapPref] = useState(readWrap);
   const [draft, setDraft] = useState<string | null>(() => {
-    const kept = recall(sessionId).draft;
+    const kept = readOnly ? null : recall(sessionId).draft;
     return kept && kept.path === path ? kept.text : null;
   });
   const [status, setStatus] = useState<SaveState['status']>(() => {
-    const kept = recall(sessionId).draft;
+    const kept = readOnly ? null : recall(sessionId).draft;
     return kept && kept.path === path ? 'dirty' : 'clean';
   });
   const [saveErr, setSaveErr] = useState<string | null>(null);
@@ -555,7 +563,7 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
   const restoredFor = useRef<string | null>(null);
   if (restoredFor.current !== path) {
     restoredFor.current = path;
-    const kept = recall(sessionId).draft;
+    const kept = readOnly ? null : recall(sessionId).draft;
     pending.current = kept && kept.path === path ? { text: kept.text, base: kept.base } : null;
   }
 
@@ -565,32 +573,32 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
     setSaveErr(null); setConflict(false); setFmtErr(null);
     // A buffer kept across a pane switch survives the reload of its own file —
     // dropping it here is exactly the loss this is meant to prevent.
-    const kept = recall(sessionId).draft;
+    const kept = readOnly ? null : recall(sessionId).draft;
     if (kept && kept.path === path) { setDraft(kept.text); setStatus('dirty'); }
     else { setDraft(null); setStatus('clean'); }
     setTraceHead(null); setTraceQuery('');
-    api.previewFile(sessionId, path)
+    (linkedSource ? linkedSource.preview() : api.previewFile(sessionId, path))
       .then((m) => { if (alive) setMeta(m); })
       .catch((e) => { if (alive) setErr(String(e?.message || e)); });
     return () => { alive = false; };
-  }, [sessionId, path]);
+  }, [sessionId, path, linkedSource, readOnly]);
 
   // html source isn't in the preview payload (the iframe reads the bytes
   // itself) — fetch it only if the source view is asked for.
   useEffect(() => {
     if (!raw || meta?.kind !== 'html' || source !== null) return;
     let alive = true;
-    fetch(api.rawUrl(sessionId, path)).then((r) => r.text())
+    fetch(rawSrc).then((r) => r.text())
       .then((t) => { if (alive) setSource(t.slice(0, 512 * 1024)); })
       .catch(() => { if (alive) setSource('(could not read source)'); });
     return () => { alive = false; };
-  }, [raw, meta?.kind, sessionId, path, source]);
+  }, [raw, meta?.kind, rawSrc, source]);
 
   const kind = meta?.kind;
   const md = useMemo(
     () => (kind === 'markdown' && meta?.text != null && !raw
-      ? resolveMarkdown(renderMarkdown(meta.text), sessionId, path) : ''),
-    [kind, meta?.text, raw, sessionId, path],
+      ? resolveMarkdown(renderMarkdown(meta.text), sessionId, path, linkedSource) : ''),
+    [kind, meta?.text, raw, sessionId, path, linkedSource],
   );
 
   // The text currently on screen: the draft while editing, the file otherwise.
@@ -617,7 +625,7 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
   // from, and an autosaving editor one stray keystroke away from it is a bad
   // trade for a file nobody needs to hand-edit.
   const editKind = !!meta && (meta.kind === 'text' || meta.kind === 'markdown' || meta.kind === 'html');
-  const canEdit = editKind && !meta?.truncated;
+  const canEdit = !readOnly && editKind && !meta?.truncated;
   const saved = meta?.kind === 'html' ? (source ?? '') : (meta?.text ?? '');
 
   // Read at fire time by a callback that outlives the render that made it.
@@ -773,11 +781,11 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
   if (err) return <div className="fv-empty">Could not open this file.<div className="fv-sub">{err}</div></div>;
   if (!meta) return <div className="fv-empty">Loading…</div>;
 
-  const rawSrc = api.rawUrl(sessionId, path);
   const code = (text: string) => (
     <CodeView
       text={text} name={meta.name} theme={theme}
       wrap={wrap}
+      line={line} column={column}
       editable={canEdit}
       onChange={onEdit}
       onSave={() => flush()}   // ⌘S still works; it just beats the timer
@@ -789,16 +797,18 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
       // face of the same file, one toggle away.
       return raw
         ? code(shown)
-        : <div className="markdown fv-md" dangerouslySetInnerHTML={{ __html: md }} />;
+        : <FileLinkScope session={linkedSource ? undefined : sessionId} root={linkedSource?.root} base={dirOf(path)}>
+            <FileLinkContent className="markdown fv-md" html={md} />
+          </FileLinkScope>;
     }
     if (meta.kind === 'trace') {
       // Same two faces as markdown: the rendered conversation, or the JSONL
       // underneath it.
       return raw ? code(shown) : (
-        <TraceView
+        <FileLinkScope unavailable><TraceView
           src={traceSrc} srcKey={`file:${sessionId}:${path}`} zoom={zoom} query={traceQuery}
           onHead={setTraceHead} onNav={(go) => { traceNav.current = go; }}
-        />
+        /></FileLinkScope>
       );
     }
     if (meta.kind === 'text') return code(shown);
@@ -838,7 +848,7 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
       <div className="fv-empty">
         No preview for this kind of file.
         <div className="fv-sub">{meta.reason || `${fmtSize(meta.size)} · ${meta.mime}`}</div>
-        <button className="mini-btn" onClick={() => triggerDownload(api.downloadUrl(sessionId, path), meta.name)}>
+        <button className="mini-btn" onClick={() => triggerDownload(downloadSrc, meta.name)}>
           <DownloadGlyph /> Download
         </button>
       </div>
@@ -865,7 +875,7 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
       {headOnly && (
         <div className="fv-foot">
           Showing the first {fmtSize((shown || '').length)} of {fmtSize(meta.size)}.{' '}
-          <button className="link-btn" onClick={() => triggerDownload(api.downloadUrl(sessionId, path), meta.name)}>
+          <button className="link-btn" onClick={() => triggerDownload(downloadSrc, meta.name)}>
             Download the whole file
           </button>
         </div>

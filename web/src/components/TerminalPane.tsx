@@ -4,6 +4,8 @@ import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { ClipboardAddon, Base64 } from '@xterm/addon-clipboard';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { FileLinkScope } from './FileLinkContent';
+import { installTerminalFileLinks, terminalLinkHandler, openTerminalLink } from '../lib/terminalFileLinks';
 import '@xterm/xterm/css/xterm.css';
 import type { Cli, Session } from '../types';
 import { STATE_LABEL, isRemote } from '../types';
@@ -479,6 +481,7 @@ export default function TerminalPane({
       // Let users make a local selection even when an agent TUI has grabbed
       // the mouse: ⌥-drag on macOS, Shift-drag elsewhere.
       macOptionClickForcesSelection: true,
+      linkHandler: terminalLinkHandler(session.id),
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -507,18 +510,9 @@ export default function TerminalPane({
     // succeeded or was blocked, so there is no way to tell, and layering a
     // fallback behind it opens the link twice. noopener/noreferrer keep the
     // opened page from reaching back into the app through window.opener.
-    term.loadAddon(new WebLinksAddon((event, uri) => {
-      if (event?.defaultPrevented) return;
-      const a = document.createElement('a');
-      a.href = uri;
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    }));
+    term.loadAddon(new WebLinksAddon((event, uri) => openTerminalLink(event, uri, session.id)));
     term.open(hostRef.current!);
+    installTerminalFileLinks(term, session.id);
     termRef.current = term;
     const host = hostRef.current!;
 
@@ -1072,6 +1066,7 @@ export default function TerminalPane({
   const pathLabel = workspaceLabel(session.path);
   const group = groupLabel(groupName);
   return (
+    <FileLinkScope session={session.id}>
     <div
       className={`slot${focused ? ' focused' : ''}`}
       style={focused && tint ? { borderColor: `color-mix(in srgb, ${tint} 45%, var(--border))` } : undefined}
@@ -1332,5 +1327,6 @@ export default function TerminalPane({
         </div>
       )}
     </div>
+    </FileLinkScope>
   );
 }
