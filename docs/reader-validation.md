@@ -7,15 +7,17 @@ Validated on 2026-09-04, based on main `705e32dc`.
 | Problem / contract | Implementation | Evidence |
 | --- | --- | --- |
 | Opening an existing reader briefly shows working | Reader never mounts a terminal/WebSocket or claims/resizes the PTY; the working line uses transcript activity | Real TerminalPane fixture: no socket on mount or activation, no working line for a completed trace even when session state says working |
+| Small tails miss lifecycle markers | Matching full summaries supply authoritative activity; newer revisions invalidate it | Null/carried window activity gives way to matching summary; newer waiting event overrides old summary; full Claude summaries report both working and waiting |
 | A long-open reader stays loading | Shared store has deadlines, cancellation, retry/backoff, visibility and page-restore recovery | Hanging initial request times out at 12 seconds even when abort does not settle it; explicit retry succeeds; existing visibility/frozen-summary tests pass |
 | One hung group pane blocks others | Removed focused-first readiness gate | Hung leader and independently readable follower render together; both retain usable composers |
 | Terminal bleeds in from below | Mutually exclusive surfaces, clipped non-scrolling host, scroller-local navigation | Search + resize/zoom at 1000×300, 390×844 and 844×390; host scroll offset stays zero and the reader covers its bottom edge |
 | A first prompt requires terminal mode | Composer is outside loading/empty/error branches | `no-trace` fixture sends its first prompt from reader without a terminal socket |
-| Returning refetches/rebuilds everything | Retained store, incremental refresh, inactive LRU | Switching A/B/A preserves A's history and makes no second tail request |
+| Returning refetches/rebuilds everything | Retained store, incremental refresh, inactive LRU | Switching A/B/A preserves A's history and makes no second tail request; returning to manually read history restores the same row and offset within 2 px |
 | Reading older text jumps on updates | Measured keyed row anchor; explicit latest action | Append and prepend preserve the same row and its pixel offset within 2 px |
+| Clearing search loses the reading position | Capture the original anchor before the filtered list commits | A search excluding the original row restores that row and its offset within 2 px when cleared |
 | Long history/search becomes expensive | Measured render window, cached text index, shared outcome index | 500 exchanges and an all-matching query each mount fewer than 60 rows; a 1,000-message outcome scan happens once across 500 exchanges |
 | Tool results, native fragments and final markers split across requests | Pure immutable reconciliation by tool/message identity | Forward and backward split points converge on the same conversation; no duplicated answer; unresolved tool is not marked successful |
-| Queue records split across pages | Replay enqueue/dequeue/remove events | Removed prompt retains enqueue position; consumed prompt does not reappear |
+| Queue records split across pages or cause idle rendering churn | Replay enqueue/dequeue/remove events with stable derived blocks | Removed prompt retains enqueue position; consumed prompt does not reappear; unchanged queued history preserves array/turn identity |
 | Codex catch-up loses a prior completion or skips a large backlog | v2 keeps lifecycle events and pages continuously | Prior task completion survives before next task; >8 MiB backlog is read continuously in requested 32 KiB pages, without gaps or duplicate messages |
 | Trace replaced/truncated under cursor | Source generation and explicit reset notice | Replacement discards stale content and reports a reset |
 | SQLite streaming remains stale | WAL-aware revisions, visible index polling, mutable replacement range | Real OpenCode WAL-only update leaves main DB mtime/size unchanged but refresh returns the updated same-index message |

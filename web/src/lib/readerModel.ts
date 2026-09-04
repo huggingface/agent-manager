@@ -7,6 +7,7 @@ const sameBlocks = (a: TraceBlock[], b: TraceBlock[]) => a.length === b.length &
  * Replayed in chronological order so prepends repair the same relationships as
  * appends. Linear in records/blocks, not exchanges × records. */
 export function reconcileTrace(raw: TraceTurn[], previous: TraceTurn[] = []): TraceTurn[] {
+  const old = new Map(previous.filter((t) => t.id).map((t) => [t.id, t]));
   const messages: TraceTurn[] = [];
   const byMessage = new Map<string, number>();
   const pending: { text: string; at: number; turn: TraceTurn }[] = [];
@@ -14,8 +15,12 @@ export function reconcileTrace(raw: TraceTurn[], previous: TraceTurn[] = []): Tr
     if (turn.event?.type === 'queue') {
       const event = turn.event;
       if (event.operation === 'enqueue') {
+        const prior = turn.id ? old.get(turn.id) : undefined;
+        const blocks: TraceBlock[] = prior?.queued && prior.blocks.length === 1
+          && prior.blocks[0].type === 'text' && prior.blocks[0].text === event.text
+          ? prior.blocks : [{ type: 'text', text: event.text }];
         pending.push({ text: queueKey(event.text), at: messages.length,
-          turn: { ...turn, event: undefined, role: 'user', queued: true, blocks: [{ type: 'text', text: event.text }] } });
+          turn: { ...turn, event: undefined, role: 'user', queued: true, blocks } });
         messages.push(turn); // reserve its chronological position; invisible until removed
       }
       else if (event.operation === 'dequeue') pending.shift();
@@ -56,7 +61,6 @@ export function reconcileTrace(raw: TraceTurn[], previous: TraceTurn[] = []): Tr
       const list = results.get(block.id) || []; list.push(block); results.set(block.id, list);
     }
   }
-  const old = new Map(previous.filter((t) => t.id).map((t) => [t.id, t]));
   const reconciled: TraceTurn[] = [];
   for (const turn of messages) {
     const blocks: TraceBlock[] = [];

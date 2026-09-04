@@ -39,6 +39,7 @@ try {
   const queued = reconcileTrace(queue);
   assert.deepEqual(queued.map((t) => t.id), ['u', 'enqueue', 'work'], 'removed queue prompt stays at enqueue time, not removal time');
   assert.equal(queued[1].queued, true);
+  assert.equal(reconcileTrace(queue, queued), queued, 'unchanged queued prompts preserve identity across polls');
   assert.equal(reconcileTrace([event('enqueue', 'enqueue'), event('dequeue', 'dequeue'), event('remove', 'remove')]).length, 0, 'a consumed queue item never reappears');
 
   const page = (turns, start, end, extra = {}) => ({
@@ -72,6 +73,22 @@ try {
   await recover.loadNewer(); assert.equal(recover.getSnapshot().phase, 'error');
   fail = false; await recover.refresh(); assert.equal(recover.getSnapshot().phase, 'ready');
   fail = true; await recover.loadNewer(); assert.equal(recover.getSnapshot().turns.length, 1, 'failed updates retain readable history');
+
+  // A small tail can miss the task lifecycle marker. Its null (or carried)
+  // activity must not mask the complete summary for the same source revision.
+  for (const activity of [null, 'waiting']) {
+    let activityPage = { ...page([raw[0]], 0, 1), activity };
+    const activityStore = new ReaderStore({ window: () => Promise.resolve(activityPage),
+      summary: () => Promise.resolve({ ...activityPage, activity: 'working' }) });
+    const release = activityStore.retain();
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      assert.equal(activityStore.getSnapshot().head.activity, 'working', 'same-revision summary supplies authoritative lifecycle state');
+      activityPage = { ...page([], 1, 1, { revision: 'r2' }), activity: 'waiting', revision: 'r2' };
+      await activityStore.loadNewer();
+      assert.equal(activityStore.getSnapshot().head.activity, 'waiting', 'a newer window invalidates old summary activity');
+    } finally { release(); }
+  }
 
   // Count global scans rather than timing on a shared CI host.
   let scans = 0;

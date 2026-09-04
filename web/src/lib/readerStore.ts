@@ -92,6 +92,8 @@ export class ReaderStore {
       userTurns: this.meta?.userTurns ?? summary?.userTurns ?? null,
       usage: this.meta?.usage || summary?.usage || null,
       firstTs: this.meta?.firstTs || summary?.firstTs || 0,
+      // The matching full summary sees lifecycle markers outside a small tail.
+      activity: summary?.activity ?? this.meta?.activity ?? null,
       loaded: turns.length, atStart: cursor.atStart, blocked: !!cursor.blocked } as TraceHeadInfo;
     for (const key of ['note', 'title', 'harnessLabel', 'sessionId', 'model', 'cwd', 'source', 'sharedBy'] as const) {
       if (!head[key] && summary?.[key]) (head as Record<string, unknown>)[key] = summary[key];

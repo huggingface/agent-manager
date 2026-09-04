@@ -139,12 +139,19 @@ export default function ConversationView({
   // Search navigates matching exchanges in the LOADED history. Only visible
   // matches render markdown, and navigation moves this scroller alone.
   const beforeSearch = useRef<{ key: string; offset: number; end: boolean } | null>(null);
+  const changeQuery = (value: string) => {
+    // Capture before filtering commits: the virtual list's layout effect will
+    // otherwise replace the anchor with a row from the filtered results.
+    if (value.trim() && !beforeSearch.current) beforeSearch.current = {
+      key: virtual.anchor.current?.key || '', offset: virtual.anchor.current?.offset || 0, end: following.current,
+    };
+    setQuery(value);
+  };
   useEffect(() => {
     if (searchOpen) searchBox.current?.focus(); else setQuery('');
   }, [searchOpen]);
   useEffect(() => {
     if (q) {
-      if (!beforeSearch.current) beforeSearch.current = { key: virtual.anchor.current?.key || '', offset: virtual.anchor.current?.offset || 0, end: following.current };
       following.current = false; setAtLatest(false); setHit(0); virtual.scrollTo(0);
     } else if (beforeSearch.current) {
       const saved = beforeSearch.current; beforeSearch.current = null;
@@ -205,7 +212,7 @@ export default function ConversationView({
     </div>
     {searchOpen && <div className="cxv-bar mono">
       <input ref={searchBox} className="cxv-search" aria-label="Search loaded conversation" placeholder="Search loaded conversation…" value={query}
-        onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') onCloseSearch?.(); if (event.key === 'Enter') nextHit(event.shiftKey ? -1 : 1); }} />
+        onChange={(event) => changeQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') onCloseSearch?.(); if (event.key === 'Enter') nextHit(event.shiftKey ? -1 : 1); }} />
       {q && <span className="cxv-hits">{shown.length ? `${Math.min(hit + 1, shown.length)}/${shown.length} turns` : 'No matches'}</span>}
       <button className="cxv-mini" disabled={!q || !shown.length} onClick={() => nextHit(-1)} aria-label="Previous matching turn">↑</button>
       <button className="cxv-mini" disabled={!q || !shown.length} onClick={() => nextHit(1)} aria-label="Next matching turn">↓</button>

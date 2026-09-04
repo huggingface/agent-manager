@@ -1167,12 +1167,14 @@ async function normalizeClaude(file, out, range, allowSubagent = false) {
       }
     }
 
-    if (range?.reader) {
-      if (m.stop_reason === 'end_turn' || m.stop_reason === 'stop_sequence') { msg.kind = 'final'; out.activity = 'waiting'; }
-      else if (m.stop_reason === 'tool_use' || items.some((c) => c?.type === 'thinking' || c?.type === 'tool_use')) out.activity = 'working';
-      else if (j.type === 'user' && items.some((c) => c?.type === 'text' && !isHarnessText(String(c.text || '')))) out.activity = 'working';
-      else if (j.type === 'assistant' && items.some((c) => c?.type === 'text')) out.activity = 'waiting';
+    // Full summaries and byte windows must report the same lifecycle state.
+    if (m.stop_reason === 'end_turn' || m.stop_reason === 'stop_sequence') {
+      if (range?.reader) msg.kind = 'final';
+      out.activity = 'waiting';
     }
+    else if (m.stop_reason === 'tool_use' || items.some((c) => c?.type === 'thinking' || c?.type === 'tool_use')) out.activity = 'working';
+    else if (j.type === 'user' && items.some((c) => c?.type === 'text' && !isHarnessText(String(c.text || '')))) out.activity = 'working';
+    else if (j.type === 'assistant' && items.some((c) => c?.type === 'text')) out.activity = 'waiting';
     if (!msg.blocks.length) continue;
     if (fresh) {
       out.push(msg);

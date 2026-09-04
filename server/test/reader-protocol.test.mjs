@@ -63,12 +63,14 @@ try {
   fs.writeFileSync(fragments, jsonl([claude('u', 'user', '<div>Please review this markup</div>'), claude('a', 'assistant', [{ type: 'thinking', thinking: 'inspect' }, { type: 'tool_use', id: 'tool', name: 'Read', input: { path: 'file' } }])]));
   const c1 = await read(fragments);
   assert.equal(c1.turns[0].role, 'user', 'operator markup is not harness metadata');
+  assert.equal((await readTraceByPath(fragments, { summary: true })).activity, 'working', 'full Claude summaries include lifecycle state');
   fs.appendFileSync(fragments, jsonl([claude('r', 'user', [{ type: 'tool_result', tool_use_id: 'tool', content: 'result' }]), claude('a', 'assistant', [{ type: 'text', text: 'done' }], { stop_reason: 'end_turn' }), { type: 'queue-operation', operation: 'enqueue', content: 'queued prompt' }]));
   const c2 = await read(fragments, { at: 'after', cursor: c1.window.end });
   assert.equal(c1.turns[1].messageId, c2.turns.find((t) => t.role === 'assistant').messageId, 'cross-request fragments retain the native message id');
   assert.ok(c2.turns.some((t) => t.blocks.some((b) => b.type === 'tool_result' && b.id === 'tool')));
   assert.ok(c2.turns.some((t) => t.event?.type === 'queue'));
   assert.equal(c2.activity, 'waiting');
+  assert.equal((await readTraceByPath(fragments, { summary: true })).activity, 'waiting');
 
   // Backward child paging stops at the handoff, not the start of inherited history.
   const child = path.join(tmp, 'child.jsonl');
