@@ -32,6 +32,10 @@ if ! mkdir -p "$AM_LOCAL/bin" 2>/dev/null; then
   mkdir -p "$AM_LOCAL/bin"
 fi
 export UV_CACHE_DIR="$AM_LOCAL/uv-cache"
+# This runtime owns the isolated CLI homes below, so it may install the
+# Agent Manager context block in their global instruction files. Direct
+# Node/systemd installs must opt in explicitly; see README.md.
+export AM_MANAGE_GLOBAL_CONTEXT="${AM_MANAGE_GLOBAL_CONTEXT:-1}"
 
 # One state model for every harness:
 #   * live files are ordinary local POSIX files under $AM_LOCAL;
