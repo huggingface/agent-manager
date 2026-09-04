@@ -56,11 +56,18 @@ export OPENCODE_LIVE="$AM_LOCAL/opencode-share"
 export OPENCODE_DURABLE="$DATA_DIR/state/opencode"
 export HERMES_LIVE="$AM_LOCAL/hermes"
 export HERMES_DURABLE="$DATA_DIR/state/hermes"
+# fx has no config-dir override at all — auth, settings and sessions are
+# hardcoded to ~/.fx — so the symlink is the only way to keep it off the
+# bucket. It must be: fx appends to a session's events.jsonl through one handle
+# held open for the whole conversation, exactly the shape that loses its open
+# epoch on the mount (see Codex above).
+export FX_LIVE="$AM_LOCAL/fx-home"
+export FX_DURABLE="$DATA_DIR/state/fx"
 
 mkdir -p "$CODEX_HOME" "$CODEX_DURABLE/sessions" "$CODEX_DURABLE/db-backups" \
   "$CLAUDE_CONFIG_DIR" "$CLAUDE_DURABLE" "$GEMINI_LIVE" "$GEMINI_DURABLE" \
   "$OPENCLAW_STATE_DIR" "$OPENCLAW_DURABLE" "$OPENCODE_LIVE" \
-  "$OPENCODE_DURABLE" "$HERMES_LIVE" "$HERMES_DURABLE"
+  "$OPENCODE_DURABLE" "$HERMES_LIVE" "$HERMES_DURABLE" "$FX_LIVE" "$FX_DURABLE"
 
 # Heal the old Codex layout on hot/dev restarts. Only unlink the known local
 # sessions symlink; never recursively remove its durable target.
@@ -95,13 +102,15 @@ for legacy in "$HOME/.openclaw.pre-symlink" "$HOME/.openclaw"; do
   fi
 done
 
-# opencode and Hermes expect their state at paths under HOME. The live targets
-# are local; legacy real directories are retained as rollback copies instead of
-# being deleted during migration.
+# opencode, Hermes and fx expect their state at paths under HOME. The live
+# targets are local; legacy real directories are retained as rollback copies
+# instead of being deleted during migration.
 OPENCODE_LINK="$HOME/.local/share/opencode"
 HERMES_LINK="$HOME/.hermes"
+FX_LINK="$HOME/.fx"
 mkdir -p "$(dirname "$OPENCODE_LINK")"
-for pair in "$OPENCODE_LINK|$OPENCODE_DURABLE" "$HERMES_LINK|$HERMES_DURABLE"; do
+for pair in "$OPENCODE_LINK|$OPENCODE_DURABLE" "$HERMES_LINK|$HERMES_DURABLE" \
+  "$FX_LINK|$FX_DURABLE"; do
   lnk="${pair%%|*}"; dur="${pair##*|}"
   if [ -e "$lnk" ] && [ ! -L "$lnk" ]; then
     if ! rsync -a --update "$lnk/" "$dur/"; then
@@ -120,6 +129,7 @@ for pair in "$OPENCODE_LINK|$OPENCODE_DURABLE" "$HERMES_LINK|$HERMES_DURABLE"; d
 done
 ln -sfn "$OPENCODE_LIVE" "$OPENCODE_LINK"
 ln -sfn "$HERMES_LIVE" "$HERMES_LINK"
+ln -sfn "$FX_LIVE" "$FX_LINK"
 
 # Restore after all one-time migrations have populated the durable side. On a
 # hot/dev restart, --update preserves newer local state.

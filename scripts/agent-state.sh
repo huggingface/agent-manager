@@ -31,6 +31,15 @@ OPENCODE_LIVE="${OPENCODE_LIVE:-$AM_LOCAL/opencode-share}"
 OPENCODE_DURABLE="${OPENCODE_DURABLE:-$DATA_DIR/state/opencode}"
 HERMES_LIVE="${HERMES_LIVE:-$AM_LOCAL/hermes}"
 HERMES_DURABLE="${HERMES_DURABLE:-$DATA_DIR/state/hermes}"
+# fx keeps its coordination files beside the transcripts it must never lose.
+# session.lock / commit.lock / subagent/*.lock name a live process, so a
+# restored one is a lock nobody holds; index.pending is a half-written index fx
+# rebuilds. Everything else under ~/.fx — auth, settings.json, mcp.json,
+# memories.json, sessions/*/events.jsonl — has to come back after a restart.
+# Both directions carry the excludes, so an older durable tree written before
+# they existed cannot hand a stale lock back on restore.
+FX_LIVE="${FX_LIVE:-$AM_LOCAL/fx-home}"
+FX_DURABLE="${FX_DURABLE:-$DATA_DIR/state/fx}"
 
 LOCK="$AM_LOCAL/agent-state-checkpoint.lock"
 mkdir -p "$AM_LOCAL"
@@ -257,6 +266,8 @@ if [ "$MODE" = restore ]; then
   restore_tree openclaw "$OPENCLAW_DURABLE" "$OPENCLAW_STATE_DIR" || failures=$((failures + 1))
   restore_sqlite_tree "$OPENCODE_DURABLE" "$OPENCODE_LIVE" opencode.db opencode.db || failures=$((failures + 1))
   restore_sqlite_tree "$HERMES_DURABLE" "$HERMES_LIVE" state.db state.db || failures=$((failures + 1))
+  restore_tree fx "$FX_DURABLE" "$FX_LIVE" \
+    --exclude '*.lock' --exclude 'index.pending' || failures=$((failures + 1))
 else
   checkpoint_tree codex "$CODEX_HOME" "$CODEX_DURABLE" \
     --exclude '*.sqlite*' --exclude '*.db' --exclude '*.db-*' \
@@ -267,6 +278,8 @@ else
   checkpoint_tree openclaw "$OPENCLAW_STATE_DIR" "$OPENCLAW_DURABLE" || failures=$((failures + 1))
   checkpoint_sqlite_tree "$OPENCODE_LIVE" "$OPENCODE_DURABLE" opencode.db opencode.db || failures=$((failures + 1))
   checkpoint_sqlite_tree "$HERMES_LIVE" "$HERMES_DURABLE" state.db state.db || failures=$((failures + 1))
+  checkpoint_tree fx "$FX_LIVE" "$FX_DURABLE" \
+    --exclude '*.lock' --exclude 'index.pending' || failures=$((failures + 1))
 fi
 
 [ "$failures" -eq 0 ] || {

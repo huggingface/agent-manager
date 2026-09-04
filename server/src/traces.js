@@ -314,6 +314,134 @@ async function openclawFilesUncached() {
   return out;
 }
 
+// ---------- fx sessions (~/.fx/sessions/<id>/events.jsonl) ----------
+// fx commits a whole exchange at once: ONE `history_turn_committed` event holds
+// both the prompt (payload.turn.user.text) and the final answer
+// (payload.turn.assistant). Nothing durable is written mid-turn except
+// `recovery_checkpoint_set`, a crash-recovery snapshot that carries the prompt
+// and only PARTIAL assistant text — so the prompt is taken from whichever came
+// last, and the answer only ever from a committed turn.
+//
+// Token totals on a committed event are cumulative for the session (fx assigns
+// them, it doesn't add), so the last one wins — same shape as Codex's
+// token_count.
+
+// Text is normally a JSON string, but fx's durable-byte codec encodes invalid
+// UTF-8 as {encoding:'base64', data:'…'}. Decode that instead of rendering
+// "[object Object]" into the Overview.
+// Same, but for values that are not necessarily text: anything structured is
+// handed on untouched so capText can render it as JSON rather than blanking it.
+function fxValue(v) {
+  if (v && typeof v === 'object' && v.encoding === 'base64') return fxText(v);
+  return v;
+}
+
+function fxText(v) {
+  if (typeof v === 'string') return v;
+  if (v && v.encoding === 'base64' && typeof v.data === 'string') {
+    try { return Buffer.from(v.data, 'base64').toString('utf8'); } catch { return ''; }
+  }
+  return '';
+}
+
+function parseFx(txt) {
+  const st = emptyStats();
+  const dg = emptyDigest();
+  st.files = 1;
+  let tokIn = 0;
+  let tokOut = 0;
+  let tokAtPrompt = 0; // cumulative total BEFORE the current turn (for sinceTokens)
+  let openTurn = null; // turn_id of the turn a checkpoint has already announced
+  for (const line of txt.split('\n')) {
+    if (!line) continue;
+    let j; try { j = JSON.parse(line); } catch { continue; }
+    // Epoch ms on every envelope; the digest helpers speak Date.parse.
+    const ts = j.timestamp_ms ? new Date(j.timestamp_ms).toISOString() : '';
+    if (ts) addTs(st, ts);
+    const p = j.payload || {};
+    switch (j.kind) {
+      case 'session_started':
+      case 'workspace_rebound':
+        // The CURRENT binding, for cwd-fallback attribution.
+        // origin_workspace_root records where the session began and does not
+        // move when it is rebound, so it is the wrong field to match on.
+        if (p.workspace_root) st.cwd = p.workspace_root;
+        break;
+      case 'recovery_checkpoint_set': {
+        // A turn is in flight. Show what was asked; its assistant_source is
+        // mid-stream text, never a final answer.
+        const c = p.checkpoint || {};
+        const prompt = fxText(c.user && c.user.text);
+        if (prompt.trim() && c.turn_id !== openTurn) {
+          openTurn = c.turn_id;
+          digestPrompt(dg, prompt, ts);
+          tokAtPrompt = tokIn + tokOut;
+        }
+        dg.running = true;
+        break;
+      }
+      case 'recovery_checkpoint_cleared':
+        // The turn ended WITHOUT committing — abandoned or failed. Without this
+        // the pane would read as running forever, since no commit ever arrives
+        // to turn it off. The prompt stands: it was still asked.
+        dg.running = false;
+        break;
+      case 'history_turn_committed': {
+        const turn = p.turn || {};
+        dg.running = false;
+        // Totals are cumulative for the session and ride EVERY commit, including
+        // a compaction marker. Read them before the turn shape decides whether
+        // there is a prompt to show, or a compacted session under-reports its
+        // tokens until the next ordinary turn.
+        const before = tokIn + tokOut;
+        if (typeof p.total_input_tokens === 'number') tokIn = p.total_input_tokens;
+        if (typeof p.total_output_tokens === 'number') tokOut = p.total_output_tokens;
+        // compacted_summary is a context-compaction marker with no user turn.
+        if (!turn.user) break;
+        const prompt = fxText(turn.user.text);
+        if (prompt.trim()) {
+          st.prompts++;
+          // Re-anchor the segment even when a checkpoint already announced this
+          // prompt — it is the same turn, so nothing is lost, and turns that
+          // never wrote a checkpoint still reset their counters here.
+          digestPrompt(dg, prompt, ts);
+          tokAtPrompt = before;
+        }
+        st.turns++;
+        dg.sinceTurns++;
+        // Only an `assistant` turn carries a completed answer. `interrupted` and
+        // `background_command` may hold partial text, which is not one.
+        if (turn.kind === 'assistant') {
+          const answer = fxText(turn.assistant);
+          if (answer.trim()) digestAssistant(dg, answer, ts);
+        }
+        const ex = turn.execution || {};
+        for (const step of Array.isArray(ex.tool_steps) ? ex.tool_steps : []) {
+          for (const call of Array.isArray(step.tool_calls) ? step.tool_calls : []) {
+            const name = fxText(call && call.name) || 'tool';
+            st.toolCalls++;
+            st.tools[name] = (st.tools[name] || 0) + 1;
+            if (/^web[_-]?(search|fetch)$/i.test(name)) st.web++;
+            digestTool(dg, name, null);
+          }
+        }
+        // fx records the files a turn touched as first-class evidence, so the
+        // digest doesn't have to guess them out of tool arguments.
+        for (const f of Array.isArray(ex.files) ? ex.files : []) {
+          const file = fxText(f && f.path);
+          if (file && !dg.sinceFiles.includes(file) && dg.sinceFiles.length < 12) dg.sinceFiles.push(file);
+        }
+        break;
+      }
+      default:
+    }
+  }
+  st.tokensIn = tokIn;
+  st.tokensOut = tokOut;
+  dg.sinceTokens = Math.max(0, tokIn + tokOut - tokAtPrompt);
+  return { stats: st, digest: dg };
+}
+
 // ---------- opencode (SQLite: ~/.local/share/opencode/opencode.db) ----------
 // v1.x keeps conversations in SQLite (session/message/part with JSON payloads).
 // Read-only via node:sqlite (node >= 22.5; degrades to "no digest" elsewhere).
@@ -462,6 +590,38 @@ export function opencodeSessionInfo(id) {
     ).get(id);
     return row ? { id: row.id, directory: row.directory || null, parentId: row.parentId || null } : null;
   } catch { return null; } finally { try { db.close(); } catch {} }
+}
+
+// Newest fx conversation rooted at `directory`, created at/after `sinceMs`,
+// skipping ids a sibling pane already claims. Each session's manifest carries
+// its binding and freshness, so this reads a few small JSON files instead of
+// spawning `fx sessions --json` on every repin beat.
+export function captureFxSession(directory, sinceMs, claimed) {
+  const root = path.join(process.env.HOME || '', '.fx', 'sessions');
+  const want = path.resolve(directory);
+  let ents = [];
+  try { ents = fs.readdirSync(root, { withFileTypes: true }); } catch { return null; }
+  let best = null;
+  for (const e of ents) {
+    if (!e.isDirectory()) continue;
+    if (claimed && claimed.has(e.name)) continue;
+    let m;
+    try { m = JSON.parse(fs.readFileSync(path.join(root, e.name, 'session.json'), 'utf8')); } catch { continue; }
+    // workspace_root is the CURRENT binding; origin_workspace_root does not
+    // move when a session is rebound, so matching on it would follow a
+    // conversation that has since left this folder.
+    if (!m || !m.workspace_root || path.resolve(m.workspace_root) !== want) continue;
+    if ((m.created_at_ms || 0) < sinceMs) continue;
+    const ts = m.updated_at_ms || m.created_at_ms || 0;
+    if (!best || ts > best.ts) best = { id: e.name, ts };
+  }
+  return best ? { id: best.id } : null;
+}
+
+/** Does a pinned fx conversation still exist? The launch line resumes by id and
+ *  fx exits 1 with "saved session not found." when it doesn't. */
+export function fxSessionExists(id) {
+  try { return fs.existsSync(fxEventsPath(id)); } catch { return false; }
 }
 
 // ---------- Hermes (SQLite: ~/.hermes/state.db, WAL) ----------
@@ -640,6 +800,30 @@ async function codexFilesUncached() {
   return out;
 }
 
+/** Transcript path for a pinned fx session — its id is its directory name. */
+function fxEventsPath(id) {
+  return path.join(process.env.HOME || '', '.fx', 'sessions', id, 'events.jsonl');
+}
+
+function fxFiles() {
+  return memoList('fx', fxFilesUncached);
+}
+async function fxFilesUncached() {
+  // One directory per session, named by the session id; the transcript inside
+  // is always events.jsonl. `sessions/latest` holds per-workspace pointers, not
+  // a session, and has no events.jsonl — so it drops out for free.
+  const root = path.join(process.env.HOME || '', '.fx', 'sessions');
+  let ents = [];
+  try { ents = await fsp.readdir(root, { withFileTypes: true }); } catch { return []; }
+  const out = [];
+  for (const e of ents) {
+    if (!e.isDirectory()) continue;
+    const p = path.join(root, e.name, 'events.jsonl');
+    try { await fsp.stat(p); out.push(p); } catch { /* not a session dir */ }
+  }
+  return out;
+}
+
 const UUID_RE = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\.jsonl)?$/;
 
 // Breadcrumb the whole build so a wedge anywhere in it is attributed to
@@ -695,6 +879,33 @@ async function buildImpl() {
     let session = m ? byCodexId.get(m[1]) : null;
     if (!session && parsed.stats.cwd) {
       const hit = byCodexCwd.get(parsed.stats.cwd);
+      if (hit && hit !== 'ambiguous') session = hit;
+    }
+    attribute(session, parsed);
+  }
+
+  // fx: pinned session id first (the runner captures it at launch — see
+  // scheduleFxCapture), then cwd for unpinned sessions that hold their folder
+  // alone. The session id IS the directory name, so the pin is read off the path.
+  const byFxId = new Map(sessions.filter((s) => s.fxSessionId).map((s) => [s.fxSessionId, s]));
+  // Only UNPINNED panes may claim a log by folder. A pinned pane already knows
+  // exactly which conversation is its own, and a folder can hold several fx
+  // sessions (older ones, or some started outside Agent Manager) — letting those
+  // land on the pinned tile merges foreign turns and tokens into it, and the
+  // newest of them would win the digest while the pane resumes something else.
+  const byFxCwd = new Map();
+  for (const s of sessions.filter((x) => x.cli === 'fx' && !x.fxSessionId)) {
+    const key = path.resolve(WORKSPACES_DIR, s.path ?? s.id);
+    byFxCwd.set(key, byFxCwd.has(key) ? 'ambiguous' : s);
+  }
+  for (const p of await fxFiles()) {
+    seenFiles.add(p);
+    const parsed = await statsFor(p, parseFx);
+    await yieldLoop();
+    if (!parsed) continue;
+    let session = byFxId.get(path.basename(path.dirname(p))) || null;
+    if (!session && parsed.stats.cwd) {
+      const hit = byFxCwd.get(path.resolve(parsed.stats.cwd));
       if (hit && hit !== 'ambiguous') session = hit;
     }
     attribute(session, parsed);
@@ -819,6 +1030,13 @@ export async function digestFor(s) {
       const parsed = await statsFor(s.codexRollout, parseCodex);
       if (parsed && !parsed.stats.subagent) return parsed.digest;
     }
+    if (s.cli === 'fx' && s.fxSessionId) {
+      const p = fxEventsPath(s.fxSessionId);
+      if (fs.existsSync(p)) {
+        const parsed = await statsFor(p, parseFx);
+        if (parsed) return parsed.digest;
+      }
+    }
   } catch { /* fall through to the bulk pass */ }
   return null;
 }
@@ -842,6 +1060,10 @@ export async function traceLocation(s) {
     if (s.cli === 'opencode' && s.opencodeSessionId) {
       const p = opencodeDbPath();
       if (fs.existsSync(p)) return { format: 'sqlite', path: p, sessionId: s.opencodeSessionId };
+    }
+    if (s.cli === 'fx' && s.fxSessionId) {
+      const p = fxEventsPath(s.fxSessionId);
+      if (fs.existsSync(p)) return { format: 'jsonl', path: p };
     }
   } catch {}
   return null;
@@ -1510,6 +1732,76 @@ async function normalizeSts(file, out, range) {
   }
 }
 
+// fx — one `history_turn_committed` event is a WHOLE exchange: the prompt, the
+// tool steps that ran, and the final answer. So each committed line expands into
+// a user message followed by the assistant turn that answered it, which is the
+// shape every other harness already produces.
+async function normalizeFx(file, out, range) {
+  const stitch = makeStitcher();
+  for await (const j of jsonLines(file, range)) {
+    const p = j.payload || {};
+    const ts = j.timestamp_ms || undefined;
+
+    if (j.kind === 'session_started') {
+      out.cwd = p.workspace_root || out.cwd;
+      out.sessionId = out.sessionId || p.id || null;
+      continue;
+    }
+    if (j.kind === 'workspace_rebound') { out.cwd = p.workspace_root || out.cwd; continue; }
+    if (j.kind !== 'history_turn_committed') continue;
+
+    // Cumulative session totals, reassigned on every commit — the last one is
+    // the session's usage. fx reports no cache-read figure.
+    if (typeof p.total_input_tokens === 'number' || typeof p.total_output_tokens === 'number') {
+      out.usage = { in: p.total_input_tokens || 0, out: p.total_output_tokens || 0, cacheRead: 0 };
+    }
+
+    const turn = p.turn || {};
+    // A compaction marker replaces earlier turns with a summary. It has no user
+    // turn; showing the summary keeps a compacted session readable.
+    if (turn.kind === 'compacted_summary') {
+      const summary = fxText(turn.summary);
+      // 'partial' keeps markFinalTurns from presenting a compaction summary as
+      // the model's answer to the prompt above it.
+      if (summary.trim()) out.push({ role: 'assistant', ts, kind: 'partial', blocks: [textBlock('text', summary)] });
+      continue;
+    }
+
+    const prompt = fxText(turn.user && turn.user.text);
+    if (prompt.trim()) out.push({ role: 'user', ts, blocks: [textBlock('text', prompt)] });
+
+    const msg = { role: 'assistant', ts, blocks: [] };
+    const ex = turn.execution || {};
+    for (const step of Array.isArray(ex.tool_steps) ? ex.tool_steps : []) {
+      const said = fxText(step && step.assistant);
+      if (said.trim()) msg.blocks.push(textBlock('text', said));
+      for (const call of Array.isArray(step.tool_calls) ? step.tool_calls : []) {
+        if (!call) continue;
+        const use = { type: 'tool_use', id: fxText(call.id), name: fxText(call.name) || 'tool', ...capText(fxValue(call.arguments_json)) };
+        msg.blocks.push(use);
+        stitch.register(use, msg);
+      }
+      // A step can hold SEVERAL calls, and the reader groups a result with the
+      // call it directly follows. Appending results after all the calls would
+      // hand every result to the last one, so file each beside its own call.
+      for (const res of Array.isArray(step.tool_results) ? step.tool_results : []) {
+        if (!res) continue;
+        const id = fxText(res.tool_call_id);
+        const block = { type: 'tool_result', id, ...capText(fxValue(res.output)) };
+        if (!stitch.file(id, block)) msg.blocks.push(block);
+      }
+    }
+    // `interrupted` and `background_command` turns may carry partial text; it is
+    // still what the model said, and the turn simply has no 'final' answer.
+    const answer = fxText(turn.assistant);
+    if (answer.trim()) msg.blocks.push(textBlock('text', answer));
+    // Only an `assistant` turn completed. `interrupted` and `background_command`
+    // can carry text, but it is what the model had got to — not an answer.
+    if (turn.kind !== 'assistant') msg.kind = 'partial';
+    if (msg.blocks.length) out.push(msg);
+  }
+}
+
 // ---------- SQLite harnesses ----------
 // One conversation, selected by id. NEVER copy the db: opencode's holds
 // account.access_token / refresh_token (spec §6). Read-only, off the hot path.
@@ -1626,6 +1918,9 @@ async function sniffHarnessUncached(file) {
   let n = 0;
   for await (const j of jsonLines(file)) {
     if (j.type === 'session' && j.harness) return 'sts';
+    // Every fx event has a `payload`, so it must be recognised before codex's
+    // bare-payload test claims it. `log_generation` + `event_id` are fx's own.
+    if (j.kind && j.event_id && j.log_generation !== undefined) return 'fx';
     if (j.type === 'session_meta' || j.payload) return 'codex';
     if (j.type === 'file-history-snapshot' || ((j.type === 'user' || j.type === 'assistant') && j.message)) return 'claude';
     if (j.type === 'message' && j.message) return 'openclaw';
@@ -1677,7 +1972,9 @@ function markFinalTurns(out) {
     if (m.role === 'user') { laterAnswer = false; continue; }
     if (m.role !== 'assistant') continue;
     if (!m.blocks.some((b) => b.type === 'text')) continue;
-    if (!laterAnswer) m.kind = 'final';
+    // A normalizer that already labelled the turn knows something this pass
+    // cannot see — that the turn was interrupted, or is a compaction summary.
+    if (!laterAnswer && !m.kind) m.kind = 'final';
     laterAnswer = true;
   }
 }
@@ -1689,6 +1986,7 @@ async function parseTraceFile(harness, file, sessionId, range = null, allowSubag
     case 'claude': await normalizeClaude(file, out, range, allowSubagent); break;
     case 'codex': await normalizeCodex(file, out, range, allowSubagent); break;
     case 'openclaw': await normalizeOpenClaw(file, out, range); break;
+    case 'fx': await normalizeFx(file, out, range); break;
     case 'sts': await normalizeSts(file, out, range); break;
     case 'opencode': normalizeOpencodeDb(file, sessionId, out); break;
     case 'hermes': normalizeHermesDb(file, sessionId, out); break;
