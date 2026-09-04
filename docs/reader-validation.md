@@ -9,11 +9,12 @@ Validated on 2026-09-04, based on main `705e32dc`.
 | Opening an existing reader briefly shows working | Reader never mounts a terminal/WebSocket or claims/resizes the PTY; the working line uses transcript activity | Real TerminalPane fixture: no socket on mount or activation, no working line for a completed trace even when session state says working |
 | Small tails miss lifecycle markers | Matching full summaries supply authoritative activity; newer revisions invalidate it | Null/carried window activity gives way to matching summary; newer waiting event overrides old summary; full Claude summaries report both working and waiting |
 | A long-open reader stays loading | Shared store has deadlines, cancellation, retry/backoff, visibility and page-restore recovery | Hanging initial request times out at 12 seconds even when abort does not settle it; explicit retry succeeds; existing visibility/frozen-summary tests pass |
+| Earlier paging competes with a refresh | Explicit backward paging cancels the lower-priority poll | Earlier stays enabled during a hung refresh; late canceled response cannot advance the cursor or overwrite history |
 | One hung group pane blocks others | Removed focused-first readiness gate | Hung leader and independently readable follower render together; both retain usable composers |
 | Terminal bleeds in from below | Mutually exclusive surfaces, clipped non-scrolling host, scroller-local navigation | Search + resize/zoom at 1000×300, 390×844 and 844×390; host scroll offset stays zero and the reader covers its bottom edge |
 | A first prompt requires terminal mode | Composer is outside loading/empty/error branches | `no-trace` fixture sends its first prompt from reader without a terminal socket |
 | Returning refetches/rebuilds everything | Retained store, incremental refresh, inactive LRU | Switching A/B/A preserves A's history and makes no second tail request; returning to manually read history restores the same row and offset within 2 px |
-| Reading older text jumps on updates | Measured keyed row anchor; explicit latest action | Append and prepend preserve the same row and its pixel offset within 2 px |
+| Reading older text jumps on updates | Measured keyed row anchor; explicit latest action; pending targets survive programmatic scroll events until measurement | Varied-height answers preserve row and pixel offset within 2 px through append, prepend and remount |
 | Clearing search loses the reading position | Capture the original anchor before the filtered list commits | A search excluding the original row restores that row and its offset within 2 px when cleared |
 | Long history/search becomes expensive | Measured render window, cached text index, shared outcome index | 500 exchanges and an all-matching query each mount fewer than 60 rows; a 1,000-message outcome scan happens once across 500 exchanges |
 | Tool results, native fragments and final markers split across requests | Pure immutable reconciliation by tool/message identity | Forward and backward split points converge on the same conversation; no duplicated answer; unresolved tool is not marked successful |
@@ -22,8 +23,10 @@ Validated on 2026-09-04, based on main `705e32dc`.
 | Trace replaced/truncated under cursor | Source generation and explicit reset notice | Replacement discards stale content and reports a reset |
 | SQLite streaming remains stale | WAL-aware revisions, visible index polling, mutable replacement range | Real OpenCode WAL-only update leaves main DB mtime/size unchanged but refresh returns the updated same-index message |
 | Whole-file reads repeat across readers | Bounded multi-entry cache and in-flight deduplication | Concurrent A reads parse once; A/B/A parses twice, not three times |
-| Child history stops at a fixed tail or includes inherited parent text | Shared store, child paging and logical fork boundary | Server backward-page fixture stops at the child handoff; existing Claude/Codex fork tests pass |
-| Operator HTML/XML disappears as harness text | Named harness envelopes instead of every leading `<` | `<div>Please review this markup</div>` remains a user prompt |
+| Live windows repeatedly parse full summaries | Five-minute automatic revalidation floor; explicit refresh bypass | Ten simulated minutes of writes produce three full summaries; explicit refresh can request a fourth |
+| Metadata-only touches throw away loaded history | Generation ignores ctime-only changes | Stable generation/revision under a metadata-only touch; rewrite/shrink detection still works |
+| Child history stops at a fixed tail or includes inherited parent text | Shared store, child paging and logical fork boundary; child opens at top of a 2 MiB context window | Child task is visible on opening; larger children disclose missing context and support paging; server backward-page fixture stops at the handoff |
+| Operator HTML/XML disappears as harness text | Named harness envelopes in parser and exchange grouping instead of every leading `<` | `<div>Please review this markup</div>` remains a user prompt and opens a prompt band |
 | Existing UI contracts | Retained shared composer, attachment flow and info panel | Full-app reader-info, attachment-input and terminal UI integration suites pass |
 
 ## Runs
@@ -37,8 +40,8 @@ Validated on 2026-09-04, based on main `705e32dc`.
 - Final targeted rerun: reader model/browser/protocol, legacy trace windows and
   child traces; TypeScript and `git diff --check`.
 - Browser fixtures use synthetic transcript/API data; integration suites use
-  isolated test servers and fixture sessions. No production session was prompted
-  or restarted, and the application was not deployed.
+  isolated test servers and fixture sessions. The regression fixtures prompted
+  or restarted no production session, and the application was not deployed.
 
 `npm test` in server is not fully green: `test/crons.test.mjs`, “run on restart
 fires once for enabled running jobs, not stopped ones”, receives an extra
@@ -48,6 +51,9 @@ the remaining suites were run explicitly. The Vite build also retains its
 existing large-chunk warning.
 
 ## Scope / follow-ups
+
+The independent review and all dispositions are recorded in
+[reader-review-followup.md](reader-review-followup.md).
 
 See [bounds and tradeoffs](reader-architecture.md#bounds-and-tradeoffs). In
 particular, SQLite still uses a synchronous full-conversation parser, search is

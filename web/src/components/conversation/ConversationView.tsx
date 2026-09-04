@@ -64,6 +64,7 @@ export default function ConversationView({
   const onReset = useCallback(() => { following.current = true; setAtLatest(true); }, []);
   const reader = useTraceWindows(src, `session:${session.id}`, { paused, onReset });
   const { head, error, phase, loading, notice, version, atStart, blocked, loadOlder, loadNewer, reload } = reader;
+  const loadingEarlier = loading === 'tail' || loading === 'before';
   const turns = reader.turns.current;
   const exchanges = useMemo(() => splitExchanges(turns), [turns]);
   const index = useMemo(() => searchIndex(exchanges), [exchanges]);
@@ -72,7 +73,7 @@ export default function ConversationView({
   const virtual = useVirtualRows(keys, scroller, following);
   // A terminal redraw is not evidence of work. Only transcript lifecycle
   // events light the working line; connection/recovery is separate chrome.
-  const live = !!session.running && head?.activity === 'working' && !session.inputRequired;
+  const live = !!session.running && reader.activityConfirmed && head?.activity === 'working' && !session.inputRequired;
   const [roster, setRoster] = useState<SubAgentEntry[] | null>(() => cachedRoster(session.id));
   useEffect(() => {
     if (paused) return;
@@ -188,6 +189,7 @@ export default function ConversationView({
     else if (exchange?.startTs) position.current = { ts: exchange.startTs, off: at!.offset, end: false };
   };
   const settle = useRef<ReturnType<typeof setTimeout>>();
+  const interact = () => { touched.current = true; virtual.cancelTarget(); };
   useEffect(() => () => { clearTimeout(settle.current); if (position.current) rememberReading(session.id, position.current); }, [session.id]);
   useLayoutEffect(() => {
     if (following.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
@@ -206,7 +208,7 @@ export default function ConversationView({
     <div className="cxv-bar cxv-status mono">
       <span>{head ? `${exchanges.length.toLocaleString()} turns loaded` : phase === 'loading' ? 'Reading transcript…' : 'Conversation'}</span>
       <span className="spacer" />
-      {head && !atStart && <button className="cxv-mini" disabled={!!loading || blocked} onClick={() => { following.current = false; void loadOlder(); }}>Earlier</button>}
+      {head && !atStart && <button className="cxv-mini" disabled={loadingEarlier || blocked} onClick={() => { following.current = false; void loadOlder(); }}>Earlier</button>}
       <button className="cxv-mini" onClick={() => { if (q) { setQuery(''); beforeSearch.current = null; } latest(); void loadNewer(); }} title="Follow the latest messages">{atLatest && !q ? 'At latest' : '↓ Latest'}</button>
       <button className="cxv-mini" onClick={() => void reload()} aria-label="Refresh transcript" title="Refresh transcript">↻</button>
     </div>
@@ -220,18 +222,18 @@ export default function ConversationView({
     <input ref={filePicker} className="image-file-input" type="file" multiple disabled={sending || !allowAttachments}
       onChange={(event) => { addAttachments(Array.from(event.currentTarget.files || [])); event.currentTarget.value = ''; }} />
     <div className="cxv-body cxv-windowed" ref={scroller} tabIndex={0} aria-label="Conversation transcript"
-      onWheel={() => { touched.current = true; }} onTouchStart={() => { touched.current = true; }} onPointerDown={() => { touched.current = true; }} onKeyDown={() => { touched.current = true; }}
+      onWheel={interact} onTouchStart={interact} onPointerDown={interact} onKeyDown={interact}
       onScroll={(event) => {
         const el = event.currentTarget;
         following.current = !q && el.scrollHeight - el.scrollTop - el.clientHeight < 48;
         setAtLatest(following.current); virtual.onScroll(); capture();
         clearTimeout(settle.current); settle.current = setTimeout(() => { if (position.current) rememberReading(session.id, position.current); }, 150);
-        if (touched.current && !q && el.scrollTop < 250 && !loading) void loadOlder();
+        if (touched.current && !q && el.scrollTop < 250 && !loadingEarlier) void loadOlder();
       }}>
       <div className="cxv-col">
         {error && <div className="cxv-msg bad mono" role="status">{error}{head ? ' · Your last read is still here.' : ''} <button className="cxv-mini" onClick={() => void reload()}>Retry now</button></div>}
         {(notice || restoreNotice) && <div className="cxv-msg mono" role="status">{notice || restoreNotice} <button className="cxv-mini" onClick={() => { reader.dismissNotice(); setRestoreNotice(null); }}>Dismiss</button></div>}
-        {head && <button className="cxv-msg mono cxv-top" disabled={atStart || blocked || !!loading} onClick={() => { following.current = false; void loadOlder(); }}>
+        {head && <button className="cxv-msg mono cxv-top" disabled={atStart || blocked || loadingEarlier} onClick={() => { following.current = false; void loadOlder(); }}>
           {blocked ? 'Earlier history contains a record too large to display' : atStart ? 'Beginning of the conversation' : loading === 'before' ? 'Loading earlier turns…' : 'Load earlier turns'}
         </button>}
         {head?.note && <div className="cxv-msg mono">{head.note}</div>}

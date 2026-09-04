@@ -10,7 +10,7 @@ process.env.XDG_DATA_HOME = path.join(tmp, 'xdg');
 fs.mkdirSync(process.env.DATA_DIR, { recursive: true });
 fs.mkdirSync(path.join(process.env.XDG_DATA_HOME, 'opencode'), { recursive: true });
 const { readTraceByPath, readTrace } = await import('../src/traces.js');
-const { cachedTrace } = await import('../src/trace-revision.js');
+const { cachedTrace, traceRevision } = await import('../src/trace-revision.js');
 const jsonl = (records) => records.map((r) => JSON.stringify(r)).join('\n') + '\n';
 const event = (type, payload) => ({ type, timestamp: '2026-09-04T00:00:00Z', payload });
 const message = (role, text) => event('response_item', { type: 'message', role, content: [{ type: 'text', text }] });
@@ -19,6 +19,19 @@ const text = (p) => p.turns.flatMap((t) => t.blocks.filter((b) => b.type === 'te
 const read = (file, window = {}) => readTraceByPath(file, { window: { version: 2, at: 'tail', bytes: 32 * 1024, min: 1, ...window } });
 let db;
 try {
+  const identityFile = path.join(tmp, 'identity.jsonl');
+  fs.writeFileSync(identityFile, 'x'.repeat(200));
+  const identityStat = fs.statSync(identityFile);
+  const identity = await traceRevision(identityFile, identityStat);
+  const touched = await traceRevision(identityFile, { ...identityStat, ctimeMs: identityStat.ctimeMs + 1000 });
+  assert.equal(touched.generation, identity.generation, 'metadata-only changes cannot reset readers');
+  assert.equal(touched.revision, identity.revision, 'metadata-only changes cannot invalidate parsed content');
+  const rewritten = await traceRevision(identityFile, { ...identityStat, mtimeMs: identityStat.mtimeMs + 1000 });
+  assert.notEqual(rewritten.generation, identity.generation, 'same-size mtime rewrites reset readers');
+  const appended = await traceRevision(identityFile, { ...identityStat, size: 300, mtimeMs: identityStat.mtimeMs + 1001 });
+  assert.equal(appended.generation, rewritten.generation, 'append keeps the generation after a rewrite');
+  const shrunk = await traceRevision(identityFile, { ...identityStat, size: 150, mtimeMs: identityStat.mtimeMs + 1001 });
+  assert.notEqual(shrunk.generation, appended.generation, 'size shrink resets even without a timestamp change');
   const file = path.join(tmp, 'rollout.jsonl');
   fs.writeFileSync(file, jsonl([event('session_meta', { id: 'test', cwd: tmp }), event('event_msg', { type: 'task_started' }), message('user', 'first prompt'), message('assistant', 'first answer')]));
   const first = await read(file);

@@ -22,25 +22,36 @@ await build({
     let config = {}, root;
     const records = (count) => Array.from({length:count}, (_,i) => [
       {id:'u'+i,role:'user',ts:100000+i*1000,blocks:[{type:'text',text:'Question '+i}]},
-      {id:'a'+i,role:'assistant',ts:100500+i*1000,kind:'final',blocks:[{type:'text',text:'Answer '+i+' — completed.\\n\\n'+('Some useful detail. '.repeat(18))}]},
+      {id:'a'+i,role:'assistant',ts:100500+i*1000,kind:'final',blocks:[{type:'text',text:'Answer '+i+' — completed.\\n\\n'+
+        Array.from({length:1+(i*37)%120},(_,k)=>'line '+k+' of answer '+i).join('\\n')}]},
     ]).flat();
     const page = (turns, from=0, end=turns.length) => ({
       harness:'claude',harnessLabel:'Fixture',sessionId:config.id,title:'',model:null,cwd:null,firstTs:100000,lastTs:100500,
-      usage:null,source:null,sharedBy:null,note:null,truncated:false,total:null,userTurns:null,activity:'waiting',generation:'fixture',revision:'r1',turns,
+      usage:null,source:null,sharedBy:null,note:null,truncated:false,total:null,userTurns:null,activity:config.activity||'waiting',generation:'fixture',revision:'r1',turns,
       window:{mode:'bytes',start:from,end,atStart:from===0,atEnd:true,generation:'fixture',revision:'r1'},
     });
     window.fixtureApi = {
       window(id,req,bytes,min,signal){
-        const call={id,req,aborted:false}; window.reads.push(call); signal?.addEventListener('abort',()=>call.aborted=true);
+        const call={id,req,bytes,aborted:false}; window.reads.push(call); signal?.addEventListener('abort',()=>call.aborted=true);
         if(config.behavior==='hang' && id!=='follower')return new Promise(()=>{});
+        if(config.hangAfter && req.at==='after')return new Promise(()=>{});
         if(config.behavior==='no-trace')return Promise.reject(new TraceUnavailable('No trace found','no-trace'));
-        const all=records(config.count||2);
+        if(config.child && id!=='child' && req.at==='tail')return Promise.resolve(page([
+          {id:'parent-u',role:'user',ts:100000,blocks:[{type:'text',text:'Delegate this task'}]},
+          {id:'parent-a',role:'assistant',ts:100500,blocks:[
+            {type:'tool_use',id:'spawn',name:'Agent',text:JSON.stringify({description:'Inspect fixture',prompt:'Task: inspect the fixture'})},
+            {type:'tool_result',id:'spawn',text:'Async agent launched successfully. agentId: child'}]},
+        ]));
+        const child=config.child && id==='child';
+        const all=records(child?100:config.count||2);
+        if(child)all[0].blocks[0].text='Task: inspect the fixture';
         if(req.at==='after')return Promise.resolve(config.incremental ? page(all.slice(req.cursor),req.cursor,all.length) : page([],req.cursor,req.cursor));
         if(req.at==='before')return Promise.resolve(page(all.slice(0,req.cursor),0,req.cursor));
-        const from=(config.from||0)*2;
+        const from=child ? (config.childEarlier ? 160 : bytes>=2*1024*1024 ? 0 : 196) : (config.from||0)*2;
         return Promise.resolve(page(all.slice(from),from,all.length));
       },
       summary(){return Promise.resolve({...page([]),total:2*(config.count||2),userTurns:[]});},
+      roster(){return config.child?[{agentId:'child',toolUseId:'spawn',hasTranscript:true}]:[];},
     };
     function Pane({id}) {return <div className="tile" style={{position:'relative',flex:1,minWidth:0}}><TerminalPane
       session={{id,cli:'claude',name:'Reader fixture',state:config.state||'waiting',running:true,everStarted:true,path:null,createdAt:new Date().toISOString()}}
@@ -59,7 +70,9 @@ await build({
       export * from ${JSON.stringify(path.join(web, 'src/api.ts'))};
       export const getTraceWindow=(id,...args)=>window.fixtureApi.window(id,...args);
       export const getTraceSummary=()=>window.fixtureApi.summary();
-      export const getSubAgents=()=>Promise.resolve({agents:[]});
+      export const getSubAgentWindow=(id,agentId,...args)=>window.fixtureApi.window(agentId,...args);
+      export const getSubAgentSummary=()=>window.fixtureApi.summary();
+      export const getSubAgents=()=>Promise.resolve({agents:window.fixtureApi.roster()});
       export const sendInput=(id,text)=>{window.sends.push({id,text});return Promise.resolve({});};
     ` }));
   } }],
@@ -99,6 +112,8 @@ try {
   await p.getByText('Question 499', { exact: true }).waitFor();
   assert.equal(await p.locator('.cx-running').count(), 0, 'a screen-derived working state does not animate a completed transcript');
   assert.ok(await p.locator('[data-x]').count() < 60, '500 exchanges have a bounded rendered window');
+  const heights = await p.locator('[data-x]').evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect().height));
+  assert.ok(Math.max(...heights)-Math.min(...heights)>100, 'the fixture stresses measured rows, not uniform estimated heights');
   assert.equal(await p.locator('.term-fill, .xterm').count(), 0, 'there is no terminal behind the reader');
   await p.evaluate(() => window.fixture.change({ active: false }));
   await p.evaluate(() => window.fixture.change({ active: true }));
@@ -180,6 +195,38 @@ try {
   const afterSwitch = await anchor();
   assert.equal(afterSwitch.key, beforeSwitch.key, 'returning to a retained reader restores the manually read row');
   assert.ok(Math.abs(afterSwitch.offset-beforeSwitch.offset)<2, 'returning restores the manual pixel offset after measuring rows again');
+  await p.evaluate(() => window.fixture.mount({ id: 'paging-priority', count: 500, from: 490, hangAfter: true }));
+  await p.getByText('Question 499', { exact: true }).waitFor();
+  await p.getByRole('button', { name: 'Refresh transcript', exact: true }).click();
+  await p.waitForFunction(() => window.reads.some((r) => r.id === 'paging-priority' && r.req.at === 'after'));
+  assert.ok(await p.getByRole('button', { name: 'Earlier', exact: true }).isEnabled(), 'background refresh does not disable backward paging');
+  await p.getByRole('button', { name: 'Earlier', exact: true }).click();
+  await p.getByText('500 turns loaded', { exact: true }).waitFor();
+  assert.ok(await p.evaluate(() => window.reads.some((r) => r.id === 'paging-priority' && r.req.at === 'after' && r.aborted)), 'the explicit page takes priority over a hung refresh');
+  await p.evaluate(() => window.fixture.mount({ id: 'stale-working', activity: 'working' }));
+  await p.locator('.cx-running').waitFor();
+  await p.evaluate(() => window.fixture.mount({ id: 'other', count: 2 }));
+  await p.evaluate(() => window.fixture.mount({ id: 'stale-working', activity: 'waiting', hangAfter: true }));
+  await p.waitForFunction(() => window.reads.some((r) => r.id === 'stale-working' && r.req.at === 'after'));
+  assert.equal(await p.locator('.cx-running').count(), 0, 'a hung warm refresh cannot animate retained working state');
+  await p.evaluate(() => window.fixture.mount({ id: 'child-parent', child: true }));
+  await p.getByTitle('Show the work', { exact: true }).click();
+  await p.getByTitle('Show the task and what it did', { exact: true }).click();
+  await p.getByText('Task: inspect the fixture', { exact: true }).waitFor();
+  await p.waitForTimeout(200);
+  assert.equal(await p.locator('.ca-reader').evaluate((el) => el.scrollTop), 0, 'child opens at the task, not at the bottom of its transcript');
+  assert.ok(await p.evaluate(() => window.reads.some((r) => r.id === 'child' && r.req.at === 'tail' && r.bytes === 2*1024*1024)), 'child first reads use the bounded context window');
+  await p.locator('.ca-reader').getByRole('button', { name: 'Latest', exact: true }).click();
+  assert.ok(await p.locator('.ca-reader').evaluate((el) => el.scrollTop>0), 'following the child tail is an explicit choice');
+  await p.evaluate(() => window.fixture.mount({ id: 'large-child-parent', child: true, childEarlier: true }));
+  await p.getByTitle('Show the work', { exact: true }).click();
+  await p.getByTitle('Show the task and what it did', { exact: true }).click();
+  await p.getByText('Earlier history isn’t loaded; the task may be there.', { exact: true }).waitFor();
+  await p.locator('.ca-reader').getByRole('button', { name: 'Load earlier', exact: true }).click();
+  await p.waitForFunction(() => document.querySelector('.ca-reader > .ca-msg')?.textContent.startsWith('100 turns loaded'));
+  await p.waitForTimeout(200);
+  await p.locator('.ca-reader').evaluate((el) => { el.scrollTop = 0; });
+  await p.getByText('Task: inspect the fixture', { exact: true }).waitFor();
   assert.deepEqual(errors, []);
   if (process.env.AM_READER_SCREENSHOT) await p.screenshot({ path: process.env.AM_READER_SCREENSHOT });
   console.log('reader-redesign: first prompt, independent loading, timeout/retry, no PTY, bounded DOM/search, layout and retained history passed');

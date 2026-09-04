@@ -87,9 +87,12 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
     el.scrollTop = origin() + positions[index] + offset;
     update();
   }, [following, origin, scroller, update]);
-  const onScroll = useCallback(() => { target.current = null; update(); }, [update]);
+  // scrollTo itself emits a scroll event. Keep its semantic target until the
+  // row is measured, even if its saved offset exceeds the initial estimate.
+  // Only fresh user input should cancel that pending restoration.
+  const cancelTarget = useCallback(() => { target.current = null; }, []);
   const start = lower(offsets, Math.max(0, viewport.top - OVERSCAN));
   const end = Math.min(keys.length, lower(offsets, viewport.top + viewport.height + OVERSCAN) + 1);
-  return { container, measure, scrollTo, onScroll, anchor, offsets,
+  return { container, measure, scrollTo, onScroll: update, cancelTarget, anchor, offsets,
     start, end, before: offsets[start], after: offsets[keys.length] - offsets[end] };
 }

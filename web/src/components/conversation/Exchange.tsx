@@ -248,7 +248,10 @@ function SubAgentTrace({ sessionId, agentId, live, roster, ancestors }: {
   ancestors: string[];
 }) {
   const source = useMemo<TraceSource>(() => ({
-    window: (req, bytes, min, signal) => getSubAgentWindow(sessionId, agentId, req, bytes, min, signal),
+    // Most child conversations fit here, so opening the row shows the task.
+    // Larger children stay bounded and disclose the still-unloaded history.
+    window: (req, bytes, min, signal) => getSubAgentWindow(sessionId, agentId, req,
+      req.at === 'tail' ? 2 * 1024 * 1024 : bytes, min, signal),
     summary: (signal) => getSubAgentSummary(sessionId, agentId, signal),
   }), [sessionId, agentId]);
   const reader = useTraceWindows(source, `child:${sessionId}:${agentId}`);
@@ -256,22 +259,26 @@ function SubAgentTrace({ sessionId, agentId, live, roster, ancestors }: {
   const exchanges = useMemo(() => splitExchanges(turns), [turns]);
   const keys = useMemo(() => exchanges.map((x) => x.key), [exchanges]);
   const scroller = useRef<HTMLDivElement>(null);
-  const following = useRef(true);
+  const following = useRef(false);
   const virtual = useVirtualRows(keys, scroller, following);
-  return <div className="ca-reader" ref={scroller} tabIndex={0} aria-label="Sub-agent transcript" onScroll={(event) => {
+  return <div className="ca-reader" ref={scroller} tabIndex={0} aria-label="Sub-agent transcript"
+    onWheel={virtual.cancelTarget} onTouchStart={virtual.cancelTarget} onPointerDown={virtual.cancelTarget} onKeyDown={virtual.cancelTarget}
+    onScroll={(event) => {
     const el = event.currentTarget; following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; virtual.onScroll();
   }}>
     <div className="ca-msg mono">
       {reader.head ? `${exchanges.length} turns loaded` : reader.phase === 'loading' ? 'Reading…' : 'Nothing recorded yet'}
-      {!reader.atStart && <button className="cxv-mini" disabled={!!reader.loading || reader.blocked} onClick={() => { following.current = false; void reader.loadOlder(); }}>Load earlier</button>}
+      {!reader.atStart && <button className="cxv-mini" disabled={reader.loading === 'tail' || reader.loading === 'before' || reader.blocked} onClick={() => { following.current = false; void reader.loadOlder(); }}>Load earlier</button>}
+      <button className="cxv-mini" onClick={() => { following.current = true; if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }}>Latest</button>
       <button className="cxv-mini" onClick={() => void reader.reload()}>Refresh</button>
     </div>
+    {reader.head && !reader.atStart && <div className="ca-msg mono">Earlier history isn’t loaded; the task may be there.</div>}
     {reader.error && <div className="ca-msg mono" role="status">{reader.error}</div>}
     <div ref={virtual.container}>
       <div aria-hidden="true" style={{ height: virtual.before }} />
       {exchanges.slice(virtual.start, virtual.end).map((ex) => <div key={ex.key} data-row-key={ex.key} ref={(node) => virtual.measure(ex.key, node)}>
         <ExchangeView x={ex} turns={turns} sessionId={sessionId} live={live} roster={roster}
-          running={live && reader.head?.activity === 'working' && ex === exchanges[exchanges.length - 1]}
+          running={live && reader.activityConfirmed && reader.head?.activity === 'working' && ex === exchanges[exchanges.length - 1]}
           ancestors={[...ancestors, agentId]} dim />
       </div>)}
       <div aria-hidden="true" style={{ height: virtual.after }} />
@@ -360,8 +367,8 @@ function AgentRow({ spawn, entry, status, sessionId, live, rosterKnown, roster, 
       </button>
       {open && agentId && sessionId && (
         <div className="cs-body">
-          {/* Its trace, drawn by the reader. The task arrives as that trace's own
-              first prompt, so nothing here has to render it separately. */}
+          {/* Its trace, drawn by the reader from the start of its loaded window.
+              Larger children explicitly offer paging back to the task. */}
           <SubAgentTrace sessionId={sessionId} agentId={agentId} live={live} roster={roster} ancestors={chain} />
         </div>
       )}

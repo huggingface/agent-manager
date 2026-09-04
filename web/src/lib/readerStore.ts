@@ -6,6 +6,13 @@ export const INITIAL_WINDOW_TURNS = 2;
 export const WINDOW_BYTES = 384 * 1024;
 export const REQUEST_TIMEOUT_MS = 12_000;
 export const SUMMARY_DELAY_MS = 400;
+export const SUMMARY_REFRESH_MS = 5 * 60_000;
+
+const sameFields = (a: object, b: object) => {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length
+    && keys.every((key) => Object.is((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]));
+};
 
 export interface TraceSource {
   window(req: TraceReq, bytes?: number, min?: number, signal?: AbortSignal): Promise<TraceWindow>;
@@ -24,6 +31,7 @@ export interface ReaderSnapshot {
   errorCode: string | null;
   notice: string | null;
   lastSuccess: number;
+  activityConfirmed: boolean;
   version: number;
 }
 
@@ -36,7 +44,7 @@ export function mergeMeta(prev: Meta | null, next: Meta): Meta {
     if (key === 'firstTs' && (!value || (prev.firstTs && (value as number) > prev.firstTs))) continue;
     (out as Record<string, unknown>)[key] = value;
   }
-  return JSON.stringify(prev) === JSON.stringify(out) ? prev : out;
+  return sameFields(prev, out) ? prev : out;
 }
 
 /** Deadlines race the operation, not just AbortSignal: suspended/fixture fetches
@@ -57,7 +65,7 @@ async function bounded<T>(run: (signal: AbortSignal) => Promise<T>, abort: Abort
 
 export class ReaderStore {
   private state: ReaderSnapshot = { turns: [], head: null, cursor: null, phase: 'loading', loading: null,
-    error: null, errorCode: null, notice: null, lastSuccess: 0, version: 0 };
+    error: null, errorCode: null, notice: null, lastSuccess: 0, activityConfirmed: false, version: 0 };
   private raw: TraceTurn[] = [];
   private meta: Meta | null = null;
   private summary: TraceSummary | null = null;
@@ -99,7 +107,7 @@ export class ReaderStore {
       if (!head[key] && summary?.[key]) (head as Record<string, unknown>)[key] = summary[key];
     }
     head.truncated = !!(this.meta?.truncated || summary?.truncated);
-    return JSON.stringify(head) === JSON.stringify(this.state.head) ? this.state.head : head;
+    return this.state.head && sameFields(head, this.state.head) ? this.state.head : head;
   }
 
   retain() {
@@ -112,6 +120,7 @@ export class ReaderStore {
         clearTimeout(this.poll); this.poll = null;
         clearTimeout(this.summaryTimer); this.summaryTimer = null;
         this.summaryRequest?.abort(); this.summaryRequest = null;
+        if (this.state.activityConfirmed) this.publish({ activityConfirmed: false });
         // React may be transferring ownership to a new mounted subscriber in
         // this same effect pass. Evict only after those retains have run.
         queueMicrotask(pruneReaders);
@@ -128,10 +137,16 @@ export class ReaderStore {
     this.cancel(); this.failures = 0;
     this.summaryRequest?.abort(); this.summaryRequest = null;
     clearTimeout(this.summaryTimer); this.summaryTimer = null;
-    this.summaryFailures = 0; this.scheduleSummary();
+    this.summaryFailures = 0; this.summaryAt = 0; this.scheduleSummary();
     return this.read(this.state.cursor ? 'after' : 'tail');
   };
-  loadOlder = () => this.read('before');
+  loadOlder = () => {
+    // A user paging backward must not inherit an unrelated poll's promise.
+    // Canceling leaves the accepted forward cursor intact for the next poll.
+    const cursor = this.state.cursor;
+    if (cursor && !cursor.atStart && !cursor.blocked && this.state.loading === 'after') this.cancel();
+    return this.read('before');
+  };
   loadNewer = () => this.read(this.state.cursor ? 'after' : 'tail');
   dismissNotice = () => this.publish({ notice: null });
 
@@ -143,9 +158,9 @@ export class ReaderStore {
     this.poll = setTimeout(() => { this.poll = null; void this.loadNewer(); }, delay ?? (this.failures ? Math.min(30_000, 1500 * 2 ** Math.min(this.failures, 5)) : cadence));
   }
   private read(direction: 'tail' | 'before' | 'after'): Promise<number> {
-    if (this.request) return this.request.promise;
     const cursor = this.state.cursor;
     if (direction === 'before' && (!cursor || cursor.atStart || cursor.blocked)) return Promise.resolve(0);
+    if (this.request) return this.request.promise;
     if (direction === 'after' && !cursor) direction = 'tail';
     const token = ++this.sequence;
     const abort = new AbortController();
@@ -189,6 +204,7 @@ export class ReaderStore {
         this.publish({ turns, cursor: nextCursor, head: this.head(turns, nextCursor), phase: turns.length ? 'ready' : 'empty',
           error: win.blocked && direction === 'after' ? 'A transcript record is too large to read. Download the raw trace to inspect it.' : null,
           errorCode: null, lastSuccess: Date.now(), version: this.state.version + (changed || reset ? 1 : 0),
+          activityConfirmed: direction !== 'before' ? !!win.atEnd : this.state.activityConfirmed,
           notice: reset && cursor ? 'The transcript changed or was replaced. Showing its current content.' : this.state.notice }, change);
         this.scheduleSummary();
         return Math.max(0, count);
@@ -197,7 +213,7 @@ export class ReaderStore {
         this.failures++;
         const code = typeof error?.code === 'string' ? error.code : null;
         this.publish({ error: code === 'no-trace' && !this.state.head ? null : error?.message || 'Could not read the transcript',
-          errorCode: code, phase: this.state.head ? this.state.phase : code === 'no-trace' ? 'empty' : 'error' });
+          errorCode: code, activityConfirmed: false, phase: this.state.head ? this.state.phase : code === 'no-trace' ? 'empty' : 'error' });
         return 0;
       }).finally(() => {
         if (token !== this.sequence) return;
@@ -212,7 +228,7 @@ export class ReaderStore {
   private scheduleSummary() {
     if (!this.active || !this.meta || this.summaryRequest || this.summaryTimer) return;
     if (this.summary && (!this.meta.revision || this.summary.revision === this.meta.revision)) return;
-    const wait = Math.max(SUMMARY_DELAY_MS, this.summaryAt + (this.summaryFailures ? Math.min(30_000, 2000 * 2 ** this.summaryFailures) : this.summary ? 30_000 : 0) - Date.now());
+    const wait = Math.max(SUMMARY_DELAY_MS, this.summaryAt + (this.summaryFailures ? Math.min(30_000, 2000 * 2 ** this.summaryFailures) : this.summary ? SUMMARY_REFRESH_MS : 0) - Date.now());
     this.summaryTimer = setTimeout(() => {
       this.summaryTimer = null;
       if (!this.active) return;
@@ -230,11 +246,13 @@ export class ReaderStore {
 
 const readers = new Map<string, ReaderStore>();
 function pruneReaders() {
-  let size = [...readers.values()].reduce((n, reader) => n + (reader.active ? 0 : reader.retainedSize), 0);
-  for (const [key, reader] of readers) {
-    if (reader.active) continue;
-    if (readers.size <= 8 && size <= 32 * 1024 * 1024) break;
+  const inactive = [...readers].filter(([, reader]) => !reader.active);
+  let count = inactive.length;
+  let size = inactive.reduce((n, [, reader]) => n + reader.retainedSize, 0);
+  for (const [key, reader] of inactive) {
+    if (count <= 8 && size <= 32 * 1024 * 1024) break;
     size -= reader.retainedSize; readers.delete(key);
+    count--;
   }
 }
 export function readerFor(key: string, source: TraceSource): ReaderStore {

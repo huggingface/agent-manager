@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 const identities = new Map();
 export async function traceRevision(file, stat, database = false) {
   const wal = database ? await fs.stat(`${file}-wal`).catch(() => null) : null;
-  const revision = `${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}:${wal?.mtimeMs || 0}:${wal?.size || 0}`;
+  const revision = `${stat.ino}:${stat.mtimeMs}:${stat.size}:${wal?.mtimeMs || 0}:${wal?.size || 0}`;
   const prior = identities.get(file);
   if (prior?.revision === revision && prior.ino === stat.ino) return prior;
   const handle = await fs.open(file, 'r');
@@ -22,11 +22,12 @@ export async function traceRevision(file, stat, database = false) {
     .update(database ? '' : prefix).digest('hex').slice(0, 24);
   const fingerprint = generation;
   if (!database && prior && prior.fingerprint === fingerprint) {
-    generation = stat.size <= prior.size
+    const replaced = stat.size < prior.size || (stat.size === prior.size && stat.mtimeMs !== prior.mtimeMs);
+    generation = replaced
       ? createHash('sha256').update(prior.generation + revision).digest('hex').slice(0, 24)
       : prior.generation;
   }
-  const value = { generation, fingerprint, revision, size: stat.size, ino: stat.ino };
+  const value = { generation, fingerprint, revision, size: stat.size, mtimeMs: stat.mtimeMs, ino: stat.ino };
   identities.delete(file);
   identities.set(file, value);
   while (identities.size > 128) identities.delete(identities.keys().next().value);

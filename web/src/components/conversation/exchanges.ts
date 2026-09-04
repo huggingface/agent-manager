@@ -27,13 +27,14 @@ export interface Exchange {
   model?: string;
 }
 
-// Mirrors the digest's rule in server/src/traces.js: a "user" line that opens
-// with a tag or an interrupt marker is the harness talking, not the operator.
+// Mirrors the trace normalizer's named harness envelopes. A leading '<' alone
+// can be an operator's HTML/XML prompt and must not hide its prompt band.
 export const isOperatorPrompt = (t: TraceTurn) => {
   if (t.role !== 'user') return false;
   const text = t.blocks.filter((b) => b.type === 'text').map((b) => ('text' in b ? b.text : '')).join('').trim();
   if (!text) return t.blocks.some((b) => b.type === 'image');
-  return !text.startsWith('<') && !text.startsWith('[Request interrupted')
+  return !/^<(?:task-notification|environment_context|system-reminder|app-context|recommended_plugins|fork-boilerplate)(?:\s|>)/.test(text)
+    && !text.startsWith('[Request interrupted')
     && !text.startsWith('[SYSTEM NOTIFICATION');
 };
 
@@ -44,6 +45,8 @@ export function splitExchanges(turns: TraceTurn[]): Exchange[] {
   let cur: Exchange | null = null;
   const open = (at: number, prompt: TraceTurn | null) => {
     cur = {
+      // v2 reader pages always have stable ids. Only legacy, non-paged
+      // snapshots (for example Overview cards) use the positional fallback.
       key: prompt?.id || turns[at]?.id || `x${at}`, at, prompt, steps: [], answer: [],
       startTs: prompt?.ts || 0, endTs: prompt?.ts || 0, tokens: 0, toolCalls: 0,
     };

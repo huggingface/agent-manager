@@ -56,10 +56,16 @@ needed: the store uses immutable snapshots and React's external-store adapter.
   the server can extend a page to finish a record, up to its existing 8 MiB
   ceiling. Forward catch-up preserves every intervening page, including backlogs
   larger than that ceiling. Oversized records produce an explicit recovery state.
+  Child readers use a bounded 2 MiB initial window, open at its top, and disclose
+  when earlier context (including the task) still needs paging. Latest opts into
+  following the child tail.
 - Window and summary requests time out after 12 seconds. Failed reads back off
   to 30 seconds. Visible readers poll every 3–10 seconds; SQLite uses 10 seconds.
   Hidden/inactive readers cancel outstanding requests and do not poll. A browser
   visibility return, persisted page restore or network return recovers the read.
+  Explicit backward paging takes priority over a background forward poll.
+  Summaries load after the first paint, then revalidate at most once every five
+  minutes automatically; explicit refresh bypasses that floor.
 - Retain up to eight stores / approximately 32 MiB of inactive transcript data.
   Active history grows only as pages are requested. This is not an on-disk
   transcript cache. A cold reload still restores a remembered position by paging
@@ -72,7 +78,10 @@ needed: the store uses immutable snapshots and React's external-store adapter.
 - SQLite replaces the last 100 loaded message positions during refresh, catching
   mutable streaming messages without duplicating them. Arbitrary edits to older
   database rows are outside that live-tail contract. JSONL generations detect
-  inode/header changes, observed shrinking and same-size rewrites. An unobserved
+  inode/header changes, observed shrinking and same-size rewrites with a changed
+  mtime. Metadata-only ctime changes do not reset the reader. Bucket-backed
+  filesystems may preserve timestamps across writes, making a same-size rewrite
+  undetectable from stats alone. An unobserved
   truncate-and-regrow with the same header/inode can still require a full browser
   reload; this is not a content-addressed log protocol.
 - Search means loaded content, not a server-side search of the entire trace. It
@@ -83,6 +92,8 @@ needed: the store uses immutable snapshots and React's external-store adapter.
   gated by the session process still being alive. Unknown activity is not promoted
   to working from a terminal repaint. Other formats can add explicit activity
   adapters without changing the store or view.
+  Retained activity is unconfirmed after leaving the reader or a failed read;
+  returning does not animate old working state before a successful refresh.
 - Switching back to terminal reconnects to the backend's preserved canonical
   output. Local terminal selection and scroll position are not retained across a
   mode switch. Existing terminal-to-terminal warm navigation is unchanged.
