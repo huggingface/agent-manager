@@ -345,6 +345,12 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    thing. A toolbar left at 10.5px while the conversation grew would be the part
    you zoomed in because you could not read. */
 .cxv { display: flex; flex-direction: column; min-height: 0; font-size: var(--cx-base, 13px); }
+.cxv-windowed { overflow-anchor: none; }
+.cxv-status { min-height: 29px; }
+.cxv-welcome { padding: 28px 8px; color: var(--text); }
+.cxv-welcome p { margin: 8px 0 0; color: var(--muted); font-size: 0.9em; line-height: 1.6; }
+.ca-reader { max-height: min(65vh, 600px); overflow: auto; overflow-anchor: none; overscroll-behavior: contain; }
+.cxv-windowed:focus-visible, .ca-reader:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 .cxv-bar {
   /* wraps at ANY width, not behind a media query: a pane is a container, and
@@ -360,7 +366,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    OVERLAYS the conversation instead of pushing it down: opening it must not
    move the text under the reader's thumb. */
 .cxv-bar .cxv-mini {
-  flex: none; min-width: 1.75em; height: 1.75em;
+  flex: none; min-width: max(24px, 1.75em); min-height: 24px; height: 1.75em;
   display: inline-flex; align-items: center; justify-content: center;
   padding: 0 4px; border-radius: var(--r-sm);
 }
@@ -501,7 +507,8 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    overlay outranking anything the terminal can raise is the belt to that
    brace: a cover winning here does not look like a bug, it looks like the
    reader turning into a terminal. */
-.pane-reader { position: absolute; inset: 0; z-index: 6; display: flex; background: var(--panel); }
+.term-host.reading { display: flex; overflow: clip; min-width: 0; }
+.pane-reader { flex: 1; min-width: 0; min-height: 0; display: flex; overflow: clip; background: var(--panel); }
 .pane-reader > .cxv { flex: 1; min-width: 0; }
 /* The one thing the reader can render that is not inside .cxv — so it reads the
    base itself rather than inheriting a size from it. */

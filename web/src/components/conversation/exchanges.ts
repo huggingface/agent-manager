@@ -44,7 +44,7 @@ export function splitExchanges(turns: TraceTurn[]): Exchange[] {
   let cur: Exchange | null = null;
   const open = (at: number, prompt: TraceTurn | null) => {
     cur = {
-      key: `x${at}`, at, prompt, steps: [], answer: [],
+      key: prompt?.id || turns[at]?.id || `x${at}`, at, prompt, steps: [], answer: [],
       startTs: prompt?.ts || 0, endTs: prompt?.ts || 0, tokens: 0, toolCalls: 0,
     };
     out.push(cur);
@@ -118,7 +118,7 @@ export type Step =
    * returns, which no other tool row has to represent.
    */
   | { kind: 'agent'; toolUseId: string; description: string; agentType: string; taskName?: string; blocks: TraceBlock[] }
-  | { kind: 'tools'; name: string; count: number; details: string[]; failed: boolean; blocks: TraceBlock[] }
+  | { kind: 'tools'; name: string; count: number; details: string[]; failed: boolean; pending: boolean; blocks: TraceBlock[] }
   | { kind: 'note'; text: string; more?: number }
   | { kind: 'shell'; command: string; out: string; failed: boolean }
   | { kind: 'image'; src: string }
@@ -182,6 +182,7 @@ export const oneLine = (s: string, n = 90) => {
 export function stepsOf(turns: TraceTurn[]): Step[] {
   const out: Step[] = [];
   const pushTool = (name: string, detail: string, blocks: TraceBlock[], failed: boolean) => {
+    const pending = blocks.some((b) => b.type === 'tool_use') && !blocks.some((b) => b.type === 'tool_result');
     const last = out[out.length - 1];
     // Consecutive calls to the SAME tool read as one line: "Read ×4".
     if (last && last.kind === 'tools' && last.name === name) {
@@ -189,9 +190,10 @@ export function stepsOf(turns: TraceTurn[]): Step[] {
       if (detail && last.details.length < 4) last.details.push(detail);
       last.blocks.push(...blocks);
       last.failed = last.failed || failed;
+      last.pending = last.pending || pending;
       return;
     }
-    out.push({ kind: 'tools', name, count: 1, details: detail ? [detail] : [], failed, blocks });
+    out.push({ kind: 'tools', name, count: 1, details: detail ? [detail] : [], failed, pending, blocks });
   };
 
   for (const t of turns) {
@@ -380,7 +382,13 @@ const textOfTurn = (t: TraceTurn) =>
  * that started it, so its notification lands in a later one; scoping the search
  * to one exchange would report finished agents as unfinished forever.
  */
+const outcomeCache = new WeakMap<TraceTurn[], ReturnType<typeof collectOutcomes>>();
 function outcomes(turns: TraceTurn[]) {
+  let index = outcomeCache.get(turns);
+  if (!index) { index = collectOutcomes(turns); outcomeCache.set(turns, index); }
+  return index;
+}
+function collectOutcomes(turns: TraceTurn[]) {
   const byId = new Map<string, { outcome: AgentOutcome; at?: number; tokens?: number; toolCalls?: number; durationMs?: number }>();
   const byTask = new Map<string, { outcome: AgentOutcome; at?: number }>();
   const receipts = new Map<string, { text: string; at?: number; failed?: boolean }>();

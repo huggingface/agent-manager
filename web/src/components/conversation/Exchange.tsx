@@ -7,10 +7,12 @@
 // Left edge: the prompt's ❯ is the ONLY thing outside the text column. No rail
 // on the answer, no rail on the work — scrolling, you find turns by that arrow
 // and the tinted prompt bar, and everything else lines up in one column.
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { SubAgentEntry, TraceTurn } from '../../api';
-import { getSubAgentTrace } from '../../api';
+import { getSubAgentWindow, getSubAgentSummary } from '../../api';
+import { useTraceWindows, type TraceSource } from '../../lib/traceWindows';
+import { useVirtualRows } from './useVirtualRows';
 import { Rails } from '../Rails';
 import { renderMarkdown } from '../../lib/markdown';
 import type { Exchange, Step } from './exchanges';
@@ -138,7 +140,7 @@ function StepRow({ s, q }: { s: Step; q?: string }) {
     <div className={`cs${open ? ' open' : ''} ${s.kind}`}>
       <button className="cs-head" disabled={!can} onClick={() => setSelfOpen((o) => !o)}>
         {s.kind === 'tools'
-          ? <span className={`cs-mark ${s.failed ? 'bad' : 'ok'}`}>{s.failed ? '✗' : '✓'}</span>
+          ? <span className={`cs-mark ${s.failed ? 'bad' : s.pending ? '' : 'ok'}`} title={s.pending ? 'No result recorded yet' : undefined}>{s.failed ? '✗' : s.pending ? '–' : '✓'}</span>
           : <span className={`cs-tri${can ? '' : ' off'}`}>{open ? '▾' : '▸'}</span>}
         {label && <span className="cs-label mono">{label}</span>}
         {shown ? <span className="cs-detail"><Hi text={shown} q={q} /></span> : <span className="cs-detail" />}
@@ -237,39 +239,44 @@ function PromptBand({ text, q, queued }: { text: string; q?: string; queued?: bo
  * and a "show the whole task" button; all three were a second visual language
  * for content the reader can already draw, and they are gone.
  *
- * The window is 2 MB rather than the reader's 384 KB default because a
- * sub-agent's whole transcript is usually smaller than that (0.27–12 MB here,
- * most under four), and a window that holds the whole file is what puts the
- * task at the top. On the few that overflow it, the tail keeps the report and
- * the row above still names the task.
+ * It uses the parent's store/window contract, including polling, paging and
+ * recovery. The nested reading area bounds both height and mounted content.
  */
 function SubAgentTrace({ sessionId, agentId, live, roster, ancestors }: {
   sessionId: string; agentId: string; live: boolean; roster?: SubAgentEntry[] | null;
   /** the agentIds already open above this one, outermost first */
   ancestors: string[];
 }) {
-  const [state, setState] = useState<{ turns?: TraceTurn[]; error?: string }>({});
-  useEffect(() => {
-    const ac = new AbortController();
-    setState({});
-    getSubAgentTrace(sessionId, agentId, 2_000_000, ac.signal)
-      .then((w) => setState({ turns: w.turns }))
-      .catch((e) => { if (!ac.signal.aborted) setState({ error: e?.message || 'could not read it' }); });
-    return () => ac.abort();
-  }, [sessionId, agentId]);
-
-  if (state.error) return <div className="ca-msg mono">{state.error}</div>;
-  if (!state.turns) return <div className="ca-msg mono">reading…</div>;
-  const exchanges = splitExchanges(state.turns);
-  if (!exchanges.length) return <div className="ca-msg mono">nothing recorded yet</div>;
-  return (
-    <>
-      {exchanges.map((ex) => (
-        <ExchangeView key={ex.key} x={ex} turns={state.turns} sessionId={sessionId} live={live} roster={roster}
-                      ancestors={[...ancestors, agentId]} dim />
-      ))}
-    </>
-  );
+  const source = useMemo<TraceSource>(() => ({
+    window: (req, bytes, min, signal) => getSubAgentWindow(sessionId, agentId, req, bytes, min, signal),
+    summary: (signal) => getSubAgentSummary(sessionId, agentId, signal),
+  }), [sessionId, agentId]);
+  const reader = useTraceWindows(source, `child:${sessionId}:${agentId}`);
+  const turns = reader.turns.current;
+  const exchanges = useMemo(() => splitExchanges(turns), [turns]);
+  const keys = useMemo(() => exchanges.map((x) => x.key), [exchanges]);
+  const scroller = useRef<HTMLDivElement>(null);
+  const following = useRef(true);
+  const virtual = useVirtualRows(keys, scroller, following);
+  return <div className="ca-reader" ref={scroller} tabIndex={0} aria-label="Sub-agent transcript" onScroll={(event) => {
+    const el = event.currentTarget; following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; virtual.onScroll();
+  }}>
+    <div className="ca-msg mono">
+      {reader.head ? `${exchanges.length} turns loaded` : reader.phase === 'loading' ? 'Reading…' : 'Nothing recorded yet'}
+      {!reader.atStart && <button className="cxv-mini" disabled={!!reader.loading || reader.blocked} onClick={() => { following.current = false; void reader.loadOlder(); }}>Load earlier</button>}
+      <button className="cxv-mini" onClick={() => void reader.reload()}>Refresh</button>
+    </div>
+    {reader.error && <div className="ca-msg mono" role="status">{reader.error}</div>}
+    <div ref={virtual.container}>
+      <div aria-hidden="true" style={{ height: virtual.before }} />
+      {exchanges.slice(virtual.start, virtual.end).map((ex) => <div key={ex.key} data-row-key={ex.key} ref={(node) => virtual.measure(ex.key, node)}>
+        <ExchangeView x={ex} turns={turns} sessionId={sessionId} live={live} roster={roster}
+          running={live && reader.head?.activity === 'working' && ex === exchanges[exchanges.length - 1]}
+          ancestors={[...ancestors, agentId]} dim />
+      </div>)}
+      <div aria-hidden="true" style={{ height: virtual.after }} />
+    </div>
+  </div>;
 }
 
 /**

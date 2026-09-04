@@ -45,7 +45,8 @@ fs.writeFileSync(stub, `
   export const getTracePage = () => Promise.reject(new Error('not used'));
   // the reader's sub-agent strip reaches for these two; nothing here opens it
   export const getSubAgents = () => Promise.resolve({ supported: true, agents: [] });
-  export const getSubAgentTrace = () => Promise.reject(new Error('not used'));
+  export const getSubAgentWindow = () => Promise.reject(new Error('not used'));
+  export const getSubAgentSummary = () => Promise.reject(new Error('not used'));
   export const sendInput = () => Promise.resolve({ ok: true });
 `);
 const sessions = [

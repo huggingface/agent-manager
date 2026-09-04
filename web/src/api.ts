@@ -526,6 +526,10 @@ export type TraceBlock =
   | { type: 'compaction'; text: string };
 
 export interface TraceTurn {
+  /** Stable record identity; messageId joins fragmented native messages. */
+  id?: string;
+  messageId?: string;
+  event?: { type: 'queue'; operation: string; text: string } | { type: 'task-complete'; text: string };
   role: 'user' | 'assistant' | 'system';
   kind?: 'final' | 'update';
   /**
@@ -543,6 +547,9 @@ export interface TraceTurn {
 }
 
 export interface TracePage {
+  generation?: string;
+  revision?: string;
+  activity?: 'working' | 'waiting' | null;
   harness: string;
   harnessLabel: string;
   sessionId: string | null;
@@ -595,9 +602,15 @@ export const getTracePage = async (id: string, offset = 0, limit = 200): Promise
 // been written since — each answered from a byte range of the transcript
 // instead of a parse of the whole thing. Cursors are opaque: hand back the
 // `start`/`end` the server gave you.
-export type TraceReq = { at: 'tail' } | { at: 'before' | 'after'; cursor: number };
+export type TraceReq = ({ at: 'tail' } | { at: 'before' | 'after'; cursor: number }) & { generation?: string };
 
 export interface TraceCursor {
+  generation?: string;
+  revision?: string;
+  /** Explicit source replacement; never an ordinary append. */
+  reset?: boolean;
+  /** Mutable index-backed tail replaces records starting at this index. */
+  replaceFrom?: number;
   /** byte offsets for a .jsonl, message indices for the SQLite harnesses */
   mode: 'bytes' | 'index';
   start: number;
@@ -620,7 +633,8 @@ export interface TraceWindow extends Omit<TracePage, 'total' | 'offset' | 'limit
 /** Whole-trace facts a single window cannot know. One full parse, off the paint path. */
 export type TraceSummary = Omit<TracePage, 'turns' | 'offset' | 'limit'>;
 
-const traceRange = (req: TraceReq) => (req.at === 'tail' ? 'tail=1' : `${req.at}=${req.cursor}`);
+const traceRange = (req: TraceReq) => (req.at === 'tail' ? 'tail=1' : `${req.at}=${req.cursor}`)
+  + `&v=2${req.generation ? `&generation=${encodeURIComponent(req.generation)}` : ''}`;
 
 const traceFetch = async <T>(url: string, signal?: AbortSignal): Promise<T> => {
   const r = await fetch(url, { signal });
@@ -680,6 +694,11 @@ export const getSubAgents = (id: string, signal?: AbortSignal): Promise<SubAgent
 /** A sub-agent's own transcript, in the same shape as any other trace. */
 export const getSubAgentTrace = (id: string, agentId: string, bytes?: number, signal?: AbortSignal): Promise<TraceWindow> =>
   traceFetch(`/api/agents/${id}/subagents/${encodeURIComponent(agentId)}?tail=1${windowSize(bytes)}`, signal);
+
+export const getSubAgentWindow = (id: string, agentId: string, req: TraceReq, bytes?: number, min?: number, signal?: AbortSignal): Promise<TraceWindow> =>
+  traceFetch(`/api/agents/${id}/subagents/${encodeURIComponent(agentId)}?${traceRange(req)}${windowSize(bytes, min)}`, signal);
+export const getSubAgentSummary = (id: string, agentId: string, signal?: AbortSignal): Promise<TraceSummary> =>
+  traceFetch(`/api/agents/${id}/subagents/${encodeURIComponent(agentId)}?summary=1`, signal);
 
 export const getFileTraceSummary = (id: string, p: string, signal?: AbortSignal): Promise<TraceSummary> =>
   traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&summary=1`, signal);
