@@ -3,6 +3,9 @@ import Sidebar from './components/Sidebar';
 import type { QuickStartAttachmentOptions } from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
 import FilesPane from './components/FilesPane';
+import PaneFilePreview from './components/PaneFilePreview';
+import { retainFileViewer } from './lib/fileViewer';
+import type { FileLinkRequest } from './lib/fileLinks';
 import TracePane from './components/TracePane';
 import RemotePane from './components/RemotePane';
 import SettingsView from './components/SettingsView';
@@ -777,12 +780,12 @@ export default function App() {
     }
   };
   // Clicking a session: nested → open its group with that pane focused; loose → solo view.
-  const openSession = (sid: string, groupId?: string) => {
+  const openSession = (sid: string, groupId?: string, navigationTree = tree) => {
     if (groupId) {
       setActiveRef(`g:${groupId}`);
       setFocusedId(sid);
       // Land on the page that actually contains this agent's pane.
-      const g = groupById[groupId];
+      const g = navigationTree.groups.find((group) => group.id === groupId);
       const idx = g?.sessionIds.indexOf(sid) ?? -1;
       const gg = isMobile ? { cols: 1, rows: 1 } : (g?.layout ?? autoGrid(g?.sessionIds.length ?? 1));
       setPage(idx >= 0 ? Math.floor(idx / (gg.cols * gg.rows)) : 0);
@@ -796,6 +799,16 @@ export default function App() {
     setActiveRef(ref);
     setPage(0);
     if (isMobile) setMobileStage(true);
+  };
+  const openInFileViewer = async (request: FileLinkRequest, sourceId: string) => {
+    const groupId = tree.groups.find((group) => group.sessionIds.includes(sourceId))?.id;
+    const pane = await retainFileViewer(request, tree.sessions, groupId);
+    const next = await api.getTree();
+    setTree(next);
+    const destination = next.groups.find((group) => group.sessionIds.includes(pane.id));
+    // Use the refreshed group to find the appended pane, including fixed grids
+    // whose new file viewer lands on a later page.
+    openSession(pane.id, destination?.id, next);
   };
   // Someone shared a session as a Hub dataset: pull it down, then open a pane on
   // it. Errors propagate so the sidebar can show the server's own reason inline
@@ -923,6 +936,7 @@ export default function App() {
               style={shown ? slotStyle(slot) : undefined}
               {...(shown && activeGroup ? tileDnd(slot, true) : {})}
             >
+              <PaneFilePreview onOpenInViewer={(request) => openInFileViewer(request, s.id)}>
               <TerminalPane
                 session={s}
                 onShare={isShareable(s.cli) ? () => setShareId(s.id) : undefined}
@@ -942,6 +956,7 @@ export default function App() {
                 onRename={(name) => renameSession(s.id, name)}
                 onClose={() => closePane(s.id)}
               />
+              </PaneFilePreview>
             </div>
           );
         })}
@@ -952,7 +967,7 @@ export default function App() {
             style={slotStyle(i)}
             {...(activeGroup ? tileDnd(i, !!s) : {})}
           >
-            {s && (s.cli === 'files' ? (
+            {s && <PaneFilePreview onOpenInViewer={(request) => openInFileViewer(request, s.id)}>{s.cli === 'files' ? (
               <FilesPane
                 session={s}
                 zoom={zoom}
@@ -995,7 +1010,7 @@ export default function App() {
                 onHandover={() => setHandoverFor(s.id)}
                 onClose={() => closePane(s.id)}
               />
-            ))}
+            )}</PaneFilePreview>}
           </div>
         )))}
         {ghost && (

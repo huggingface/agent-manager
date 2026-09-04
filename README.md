@@ -116,6 +116,8 @@ on local POSIX storage and is restored/checkpointed by
 database backups rather than copying live WAL files. See
 [`docs/agent-state-checkpoints.md`](docs/agent-state-checkpoints.md).
 Scheduled prompts are documented in [`docs/cron-jobs.md`](docs/cron-jobs.md).
+Reader and terminal file links open previews in new tabs; supported paths and
+additional file locations are documented in [`docs/file-links.md`](docs/file-links.md).
 
 ## Architecture
 

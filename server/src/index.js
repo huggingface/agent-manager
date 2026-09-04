@@ -46,6 +46,7 @@ import {
 import * as runstate from './runstate.js';
 import { installSlowFsProbe } from './slowfs.js';
 import { operationMiddleware, readOperations } from './operations.js';
+import { fileLinkRoots, fileLinksRouter } from './file-links.js';
 
 // Before anything else touches the mount: a sync fs call to /data is ~85ms of
 // frozen event loop here, and nothing else in the stack can see it. See slowfs.js.
@@ -1745,6 +1746,8 @@ app.delete('/api/skills/:name', (req, res) => {
 });
 
 // ---------- file browser (for the Files agent) ----------
+app.use('/api/file-links', fileLinksRouter({ roots: fileLinkRoots(WORKSPACES_DIR), getSession: store.get }));
+
 function folderPathOf(session) {
   // A Files agent without a chosen location browses the whole workspace root.
   if (session.cli === 'files' && !session.path) return WORKSPACES_DIR;

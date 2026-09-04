@@ -43,9 +43,11 @@ export type CodeViewProps = {
   theme: 'light' | 'dark';
   /** Soft-wrap long lines instead of scrolling sideways. */
   wrap?: boolean;
+  line?: number;
+  column?: number;
 };
 
-export default function CodeView({ text, name, editable, onChange, onSave, theme, wrap = false }: CodeViewProps) {
+export default function CodeView({ text, name, editable, onChange, onSave, theme, wrap = false, line, column }: CodeViewProps) {
   const host = useRef<HTMLDivElement | null>(null);
   const view = useRef<any>(null);
   const core = useRef<CM | null>(null);
@@ -97,6 +99,9 @@ export default function CodeView({ text, name, editable, onChange, onSave, theme
   useEffect(() => { if (view.current) core.current?.setEditable(view.current, editable); }, [editable]);
   useEffect(() => { if (view.current) core.current?.setWrap(view.current, wrap); }, [wrap]);
   useEffect(() => { if (view.current) core.current?.setTheme(view.current, theme); }, [theme]);
+  useEffect(() => {
+    if (ready && view.current && line) core.current?.revealLine(view.current, line, column);
+  }, [ready, line, column]);
 
   return (
     <div className="fv-code-host">
