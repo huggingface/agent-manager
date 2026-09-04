@@ -87,7 +87,10 @@ export async function resolveFileLink(request: FileLinkRequest, signal: AbortSig
   return body;
 }
 
-export function activateFileLink(_event: MouseEvent, request: FileLinkRequest) {
+export function activateFileLink(event: MouseEvent, request: FileLinkRequest, open?: (request: FileLinkRequest) => void) {
+  if (open && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+    event.preventDefault(); open(request); return;
+  }
   const anchor = document.createElement('a');
   anchor.href = fileLinkUrl(request); anchor.target = '_blank'; anchor.rel = 'noopener noreferrer';
   document.body.appendChild(anchor); anchor.click(); anchor.remove();

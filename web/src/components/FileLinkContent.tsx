@@ -1,5 +1,9 @@
 import { createContext, useContext, useMemo, type ReactNode } from 'react';
-import { fileLinkUrl, fileRequest, looksLikeFile, requestFromHash, type FileLinkContext } from '../lib/fileLinks';
+import { fileLinkUrl, fileRequest, looksLikeFile, requestFromHash, type FileLinkContext, type FileLinkRequest } from '../lib/fileLinks';
+
+// Separate from path resolution: nested Markdown scopes keep the pane's opener.
+export const FilePreviewContext = createContext<((request: FileLinkRequest) => void) | undefined>(undefined);
+export const useFilePreview = () => useContext(FilePreviewContext);
 
 const Context = createContext<FileLinkContext>({});
 export function FileLinkScope({ session, root, base, unavailable, children }: FileLinkContext & { children: ReactNode }) {
@@ -44,6 +48,13 @@ export function linkFileContent(html: string, context: FileLinkContext): string 
 
 export default function FileLinkContent({ html, className }: { html: string; className?: string }) {
   const context = useContext(Context);
+  const open = useFilePreview();
   const linked = useMemo(() => linkFileContent(html, context), [html, context]);
-  return <div className={className} dangerouslySetInnerHTML={{ __html: linked }} />;
+  return <div className={className} dangerouslySetInnerHTML={{ __html: linked }} onClick={(event) => {
+    if (!open || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const anchor = (event.target as Element).closest<HTMLAnchorElement>('a[data-file-link]');
+    const request = anchor && requestFromHash(anchor.hash);
+    if (!request) return;
+    event.preventDefault(); event.stopPropagation(); open(request);
+  }} />;
 }

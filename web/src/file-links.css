@@ -1,6 +1,7 @@
 .file-link-page { display: flex; flex-direction: column; width: 100%; height: 100%; min-height: 0; background: var(--panel); }
 .file-link-head { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
 .file-link-head > svg { width: 20px; height: 20px; flex: none; color: var(--muted); }
+.file-link-head.draggable { cursor: grab; }
 .file-link-title { flex: 1; min-width: 0; }
 .file-link-title h1 { margin: 0 0 5px; font-size: 16px; font-weight: 600; }
 .file-link-path { font: 11px var(--font-mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -8,6 +9,13 @@
 .file-link-page a.mini-btn { text-decoration: none; }
 .file-link-notice { padding: 5px 20px; font-size: 12px; color: var(--muted); }
 .file-link-page .fv-empty { flex: 1; }
+.pane-file-host, .pane-file-session { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+.pane-file-host { position: relative; height: 100%; }
+.pane-file-session > .slot { flex: 1; }
+.pane-file-overlay { position: absolute; inset: 0; z-index: 10; display: flex; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); overflow: hidden; outline: none; }
+.file-link-embedded .file-link-head { padding: 9px 12px; gap: 8px; }
+.file-link-embedded .file-link-title h1 { font-size: 13px; }
+.file-link-embedded .file-link-tools { padding: 6px 12px; gap: 8px; }
 @media (max-width: 720px) {
   .file-link-head { padding: 12px; gap: 8px; }
   .file-link-tools { padding: 8px 12px; gap: 8px; }

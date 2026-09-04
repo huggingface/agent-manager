@@ -1,17 +1,19 @@
 import type { Terminal, ILink, ILinkHandler } from '@xterm/xterm';
-import { activateFileLink, fileRequest, looksLikeFile } from './fileLinks';
+import { activateFileLink, fileRequest, looksLikeFile, type FileLinkRequest } from './fileLinks';
 
-export function terminalLinkHandler(session: string): ILinkHandler {
+type OpenPreview = (request: FileLinkRequest) => void;
+
+export function terminalLinkHandler(session: string, open?: OpenPreview): ILinkHandler {
   return {
     allowNonHttpProtocols: true,
-    activate: (event, text) => openTerminalLink(event, text, session),
+    activate: (event, text) => openTerminalLink(event, text, session, open),
   };
 }
 
-export function openTerminalLink(event: MouseEvent, text: string, session: string) {
+export function openTerminalLink(event: MouseEvent, text: string, session: string, open?: OpenPreview) {
   if (event.defaultPrevented) return;
   const request = fileRequest(text, { session });
-  if (request) return activateFileLink(event, request);
+  if (request) return activateFileLink(event, request, open);
   // OSC 8 can contain arbitrary protocols; only web links open externally.
   if (!/^https?:\/\//i.test(text)) return;
   const anchor = document.createElement('a');
@@ -19,7 +21,7 @@ export function openTerminalLink(event: MouseEvent, text: string, session: strin
   document.body.appendChild(anchor); anchor.click(); anchor.remove();
 }
 
-export function installTerminalFileLinks(term: Terminal, session: string) {
+export function installTerminalFileLinks(term: Terminal, session: string, open?: OpenPreview) {
   return term.registerLinkProvider({
     provideLinks(lineNumber, callback) {
       const buffer = term.buffer.active;
@@ -47,7 +49,7 @@ export function installTerminalFileLinks(term: Terminal, session: string) {
         const request = fileRequest(value, { session }, false);
         const start = positions[match.index!], end = positions[match.index! + value.length - 1];
         if (!request || !start || !end || lineNumber < start.y || lineNumber > end.y) continue;
-        links.push({ text: value, range: { start, end }, activate: (event) => activateFileLink(event, request) });
+        links.push({ text: value, range: { start, end }, activate: (event) => activateFileLink(event, request, open) });
       }
       callback(links);
     },

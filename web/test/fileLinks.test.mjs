@@ -1,5 +1,5 @@
-// Real Markdown, xterm hyperlinks and previews. Every activation must create a
-// new browser tab while preserving the originating reader/terminal and draft.
+// Standalone/copied-link fallback without a session preview host. The in-pane
+// flow is covered by sessionFilePreview.test.mjs; explicit tabs stay supported.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';

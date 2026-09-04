@@ -1,10 +1,25 @@
 # File links
 
-File references in the reader and terminal open a read-only preview in a **new
-browser tab**. Web links also open new tabs. The originating session, scroll
-position and composer stay in place; the preview does not start or attach to an
-agent. Markdown, source code, images, HTML and PDFs use the existing Files viewer.
+File references in the reader and terminal open a read-only preview **inside the
+originating session pane**. Back/Escape returns through followed links; Close
+returns directly to the session. The session stays mounted, at the same size,
+with its scroll position and composer intact. Other panes remain usable.
+Previewing does not create a session or start/attach to another agent.
+Markdown, source code, images, HTML and PDFs use the existing Files viewer.
 Unknown binary files offer a download. Transcript JSONL files open as source.
+
+**Open in file viewer** keeps the resolved file in a separate Files pane in the
+app, in the originating group when present. It creates a passive Files session
+(not a terminal), or reuses a pane already showing that file. It never replaces
+another pane's unsaved edits. The file selection is remembered in this browser
+across pane switches and reloads, like the existing Files browser; when browser
+storage is unavailable it lasts only until reload. Additional configured roots
+remain read-only in the retained viewer too.
+
+External web links still open new browser tabs with `noopener noreferrer`.
+Modifier-clicks on file links and copied preview URLs can explicitly open a
+standalone preview tab. Ordinary file clicks do not change the browser URL or
+replace the session.
 
 ## Supported references
 
@@ -25,7 +40,8 @@ imported traces and remote conversations report that their files are unavailable
 here. Shell `cd` commands and historical per-tool working directories are not
 inferred. Use an absolute path when an agent works outside its configured folder.
 
-After resolving a reference, the preview URL becomes, for example:
+After resolving a reference, “Copy link” provides a standalone preview URL, for
+example (an embedded preview does not change the app's URL):
 
 ```text
 /#file=my-project%2FREADME.md&root=workspace&line=42
@@ -67,10 +83,12 @@ link or a Markdown link for filenames with spaces or delimiter characters.
 ```sh
 cd server && node test/file-links.test.mjs
 cd ../web && node test/fileLinks.test.mjs
+node test/sessionFilePreview.test.mjs
 npm run build
 ```
 
 The server suite checks scope, additional roots, symlinks, missing files, special
 characters, truncation and raw/download headers. The browser suite clicks actual
-reader and xterm links and verifies new tabs, unchanged source state, file URI
+reader and xterm links and verifies in-pane previews, unchanged source state,
+back/close/focus, retained Files panes and reloads, external new tabs, file URI
 links, nested Markdown assets, source-line navigation, mobile layout and errors.

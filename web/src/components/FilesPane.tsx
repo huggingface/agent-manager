@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { recall, remember, readWrap, writeWrap } from './filesMemory';
 import type { Session } from '../types';
 import * as api from '../api';
@@ -6,7 +6,7 @@ import { Rails, railPad } from './Rails';
 import type { FileEntry, FileKind, FilePreview } from '../api';
 import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
-import FileLinkContent, { FileLinkScope } from './FileLinkContent';
+import FileLinkContent, { FileLinkScope, FilePreviewContext } from './FileLinkContent';
 import { fileRequest, fileResourceUrl } from '../lib/fileLinks';
 import CodeView from './CodeView';
 import FileWrapToggle from './FileWrapToggle';
@@ -884,7 +884,7 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved,
   );
 }
 
-export default function FilesPane({
+function FilesBrowser({
   session, focused, zoom = 100, dragId, onDragActive, onFocus, onClose,
 }: {
   session: Session;
@@ -1337,4 +1337,28 @@ export default function FilesPane({
       </div>
     </div>
   );
+}
+
+const LinkedFileView = lazy(() => import('./FileLinkPage'));
+
+export default function FilesPane(props: Parameters<typeof FilesBrowser>[0]) {
+  const linkedPane = useRef<HTMLDivElement>(null);
+  const [trail, setTrail] = useState(() => {
+    const request = recall(props.session.id).linkedFile;
+    return request ? [request] : [];
+  });
+  const current = trail[trail.length - 1];
+  useEffect(() => { remember(props.session.id, { linkedFile: current || null }); }, [props.session.id, current]);
+  useEffect(() => { if (current) linkedPane.current?.focus({ preventScroll: true }); }, [current]);
+  const back = () => setTrail((old) => old.slice(0, -1));
+  if (!current) return <FilesBrowser {...props} />;
+  return <FilePreviewContext.Provider value={(request) => setTrail((old) => [...old, request])}>
+    <div className={`slot${props.focused ? ' focused' : ''}`} ref={linkedPane} onMouseDown={props.onFocus} tabIndex={-1}
+      onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); back(); } }}>
+      <Suspense fallback={<div className="fv-empty">Loading file viewer…</div>}>
+        <LinkedFileView key={trail.length} embedded request={current} onBack={back} onClose={props.onClose}
+          dragId={props.dragId} onDragActive={props.onDragActive} closeLabel="Close file viewer" />
+      </Suspense>
+    </div>
+  </FilePreviewContext.Provider>;
 }

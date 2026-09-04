@@ -4,7 +4,7 @@ import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { ClipboardAddon, Base64 } from '@xterm/addon-clipboard';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { FileLinkScope } from './FileLinkContent';
+import { FileLinkScope, useFilePreview } from './FileLinkContent';
 import { installTerminalFileLinks, terminalLinkHandler, openTerminalLink } from '../lib/terminalFileLinks';
 import '@xterm/xterm/css/xterm.css';
 import type { Cli, Session } from '../types';
@@ -213,6 +213,7 @@ export default function TerminalPane({
   onRename?: (name: string) => void;
   onClose: () => void;
 }) {
+  const openFilePreview = useFilePreview();
   const hostRef = useRef<HTMLDivElement>(null);
   // Focus, unless the conversation is covering the terminal. Several paths grab
   // it — becoming active, the header, the key bar — and some fire after the mode
@@ -481,7 +482,7 @@ export default function TerminalPane({
       // Let users make a local selection even when an agent TUI has grabbed
       // the mouse: ⌥-drag on macOS, Shift-drag elsewhere.
       macOptionClickForcesSelection: true,
-      linkHandler: terminalLinkHandler(session.id),
+      linkHandler: terminalLinkHandler(session.id, openFilePreview),
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -510,9 +511,9 @@ export default function TerminalPane({
     // succeeded or was blocked, so there is no way to tell, and layering a
     // fallback behind it opens the link twice. noopener/noreferrer keep the
     // opened page from reaching back into the app through window.opener.
-    term.loadAddon(new WebLinksAddon((event, uri) => openTerminalLink(event, uri, session.id)));
+    term.loadAddon(new WebLinksAddon((event, uri) => openTerminalLink(event, uri, session.id, openFilePreview)));
     term.open(hostRef.current!);
-    installTerminalFileLinks(term, session.id);
+    installTerminalFileLinks(term, session.id, openFilePreview);
     termRef.current = term;
     const host = hostRef.current!;
 
