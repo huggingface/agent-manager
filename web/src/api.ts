@@ -61,6 +61,16 @@ export const archiveSession = (id: string) =>
 export const unarchiveSession = (id: string) =>
   fetch(`/api/sessions/${id}/unarchive`, { method: 'POST' }).then(json);
 
+// Pinning: keeps a session or a whole group above the sidebar's rule, and out of
+// the idle window's reach. One call per direction rather than a toggle, so a
+// double click or a stale row cannot flip it to the opposite of what was on
+// screen.
+export const pinSession = (id: string, pinned: boolean) =>
+  fetch(`/api/sessions/${id}/${pinned ? 'pin' : 'unpin'}`, { method: 'POST' }).then(json);
+
+export const pinGroup = (id: string, pinned: boolean) =>
+  fetch(`/api/groups/${id}/${pinned ? 'pin' : 'unpin'}`, { method: 'POST' }).then(json);
+
 // Keeps the server's own words: refusing to delete a session that is not
 // archived is an ordinary, explainable answer, not a failure.
 export const deleteSession = (id: string) =>

@@ -12,7 +12,8 @@ import {
   pendingAttachmentsFromFiles, revokePendingAttachments, transferMayContainFile, uploadPendingAttachments,
 } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, UpGlyph, TrashGlyph, GridGlyph, PlusGlyph, AmMark, EyeGlyph, EyeOffGlyph } from './icons';
+import { liftedSessions, partitionByPin, pinAfterDrop } from '../lib/pinned';
+import { PinGlyph, SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, UpGlyph, TrashGlyph, GridGlyph, PlusGlyph, AmMark, EyeGlyph, EyeOffGlyph } from './icons';
 
 import { dropZone, backgroundAnchor, isBackgroundTarget } from './sidebar-dnd';
 import type { Zone, Kind } from './sidebar-dnd';
@@ -42,7 +43,7 @@ export default function Sidebar({
   onPrepareQuickStart,
   onAbandonQuickStart,
   archived, retired, showArchived, onToggleArchived,
-  overviewHidden, onToggleOverviewHidden,
+  overviewHidden, onToggleOverviewHidden, onPinSession, onPinGroup,
 }: {
   clis: Cli[];
   tree: Tree;
@@ -92,6 +93,8 @@ export default function Sidebar({
   // per-group button.
   overviewHidden: Set<string>;
   onToggleOverviewHidden: (ref: string, hidden: boolean) => void;
+  onPinSession: (id: string, pinned: boolean) => void;
+  onPinGroup: (id: string, pinned: boolean) => void;
 }) {
   const [panel, setPanel] = useState<'none' | 'create' | 'quick'>('none');
   const [quickMode, setQuickMode] = useState<'agent' | 'group'>('agent');
@@ -132,6 +135,16 @@ export default function Sidebar({
 
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
+
+  // ---- pinning ----
+  // The rules, and the reasoning behind each, live in lib/pinned.ts so they can
+  // be read and tested in one piece rather than inferred from three components.
+  // This is the wiring.
+  const liftedFrom = useMemo(() => liftedSessions(tree.sessions, tree.groups), [tree.sessions, tree.groups]);
+  const blocks = useMemo(
+    () => partitionByPin(tree.order, tree.sessions, tree.groups),
+    [tree.order, tree.sessions, tree.groups],
+  );
   const colorOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c.color])), [clis]);
   const quickFilesBlocked = quickImages.some((image) => !image.attachment);
 
@@ -448,12 +461,31 @@ export default function Sidebar({
       isMember: kind === 'group' && !!dragRef && groupById[ref.slice(2)]?.sessionIds.includes(dragRef.slice(2)),
     });
 
+  const isPinnedRef = (ref: string) => (ref.startsWith('g:')
+    ? !!groupById[ref.slice(2)]?.pinnedAt
+    : !!sessById[ref.slice(2)]?.pinnedAt);
+
+  // Dragging and pinning are two ways of saying where something goes, so they
+  // must not be able to contradict each other. The rule they follow is
+  // pinAfterDrop (lib/pinned.ts); this applies its answer.
+  const carryPinAcross = (target: string) => {
+    if (!dragRef) return;
+    const want = pinAfterDrop(dragRef, target, isPinnedRef);
+    if (want === null) return;
+    const id = dragRef.slice(2);
+    if (dragRef.startsWith('g:')) onPinGroup(id, want);
+    else onPinSession(id, want);
+  };
+
   const applyDrop = (ref: string, kind: Kind, zone: Zone) => {
     const id = ref.slice(2);
     if (zone === 'on') {
+      // Into a group, or paired into a new one: membership decides which block
+      // draws it from now on, so its own pin has nothing left to say here.
       if (kind === 'group') onMove(dragRef!, { kind: 'into', groupId: id });
       else onMove(dragRef!, { kind: 'pair', sessionId: id });
     } else {
+      carryPinAcross(ref);
       onMove(dragRef!, { kind: zone, ref });
     }
     clearDrag();
@@ -483,6 +515,7 @@ export default function Sidebar({
       const a = treeAnchor(e.currentTarget as HTMLElement, e.clientY);
       if (!a) { clearDrag(); return; }
       e.preventDefault();
+      carryPinAcross(a.ref);
       onMove(dragRef, { kind: a.zone, ref: a.ref });
       clearDrag();
     },
@@ -508,7 +541,7 @@ export default function Sidebar({
     className: drop && drop.ref === ref ? ` drop-${drop.zone}` : '',
   });
 
-  const SessionRow = (s: Session, groupId?: string) => {
+  const SessionRow = (s: Session, groupId?: string, from?: Group) => {
     const ref = `s:${s.id}`;
     const nested = !!groupId;
     const dnd = dndProps(ref, 'session', nested);
@@ -543,6 +576,9 @@ export default function Sidebar({
         ) : (
           <span className="name">{s.name}</span>
         )}
+        {/* Lifted out of a group to sit above the rule: say which one, or the
+            group below looks as if it lost a member. */}
+        {from && <span className="from-group mono" title={`In the group ${from.name}`}>{from.name}</span>}
         <span className="age">{fmtAgo(ages?.[s.id])}</span>
         {/* One button on a live row, and it files the agent away. Start was the
             row's own onClick spelled twice; stop went because an idle CLI costs
@@ -554,6 +590,21 @@ export default function Sidebar({
             s.remote?.paused
               ? <button className="mini-btn" title="Reconnect" onClick={(e) => { e.stopPropagation(); onSetRemotePaused(s.id, false); }}><PlayGlyph /></button>
               : <button className="mini-btn" title="Disconnect" onClick={(e) => { e.stopPropagation(); onSetRemotePaused(s.id, true); }}><StopGlyph /></button>
+          )}
+          {/* Pin first, archive last: the reversible everyday control comes
+              before the one that files the agent away, which keeps its place at
+              the end of the row. Hover-only on a pointer and always visible on
+              touch — the stylesheet already makes that swap for this whole
+              strip, which is the only reason a phone can reach any of it. An
+              archived row has no pin: pinning is about the working list, and
+              archiving cleared it anyway. */}
+          {!archived.has(s.id) && (
+            <button
+              className={`mini-btn${s.pinnedAt ? ' on' : ''}`}
+              title={s.pinnedAt ? 'Unpin — let it fall back into the list' : 'Pin — keep it at the top, and out of the idle window'}
+              aria-label={s.pinnedAt ? 'Unpin' : 'Pin'}
+              onClick={(e) => { e.stopPropagation(); onPinSession(s.id, !s.pinnedAt); }}
+            ><PinGlyph off={!!s.pinnedAt} /></button>
           )}
           {showArchived && archived.has(s.id) ? (
             // The archived view, where the two roads show themselves. A session
@@ -640,6 +691,12 @@ export default function Sidebar({
                   both where you hide a group and how you get back to it. */}
               {overviewHidden.has(ref) && <span className="ov-hidden-tag mono" title="Hidden from the overview">hidden</span>}
               <span className="row-actions">
+                <button
+                  className={`mini-btn${g.pinnedAt ? ' on' : ''}`}
+                  title={g.pinnedAt ? 'Unpin the group' : 'Pin the group — it stays at the top and its agents stop ageing out'}
+                  aria-label={g.pinnedAt ? 'Unpin group' : 'Pin group'}
+                  onClick={(e) => { e.stopPropagation(); onPinGroup(g.id, !g.pinnedAt); }}
+                ><PinGlyph off={!!g.pinnedAt} /></button>
                 <button className="mini-btn" title={overviewHidden.has(ref) ? 'Show in the overview' : 'Hide from the overview'}
                   onClick={(e) => { e.stopPropagation(); onToggleOverviewHidden(ref, !overviewHidden.has(ref)); }}>
                   {overviewHidden.has(ref) ? <EyeOffGlyph /> : <EyeGlyph />}
@@ -651,10 +708,30 @@ export default function Sidebar({
           )}
         </div>
         <button className="g-add" title={`New agent in ${g.name}`} onClick={(e) => { e.stopPropagation(); openCreate(g.id); }}><PlusGlyph /></button>
-        {open && g.sessionIds.map((sid) => sessById[sid]).filter(Boolean).filter((s) => !isHidden((s as Session).id)).map((s) => SessionRow(s as Session, g.id))}
+        {open && g.sessionIds.map((sid) => sessById[sid]).filter(Boolean)
+          .filter((s) => !isHidden((s as Session).id))
+          // A member lifted into the pinned block is drawn there, not twice.
+          .filter((s) => !liftedFrom.has((s as Session).id))
+          .map((s) => SessionRow(s as Session, g.id))}
         {open && g.sessionIds.length === 0 && <div className="empty-hint nested">Drag agents here</div>}
       </div>
     );
+  };
+
+  const renderRef = (ref: string) => {
+    if (ref.startsWith('s:')) {
+      const s = sessById[ref.slice(2)];
+      return s && !isHidden(s.id) ? SessionRow(s, undefined, liftedFrom.get(s.id)) : null;
+    }
+    const g = groupById[ref.slice(2)];
+    if (!g) return null;
+    // A group whose AGENTS are all archived disappears with them — a leftover
+    // shell/file viewer alone doesn't keep it on screen. Groups with no agent
+    // members at all (pure utility) stay.
+    const members = g.sessionIds.map((sid) => sessById[sid]).filter(Boolean) as Session[];
+    const agents = members.filter((s) => s.cli !== 'shell' && !isPassive(s.cli));
+    const anyVisible = agents.length === 0 || agents.some((s) => !isHidden(s.id));
+    return anyVisible ? GroupBlock(g) : null;
   };
 
   return (
@@ -884,21 +961,12 @@ export default function Sidebar({
         {tree.order.length === 0 && (
           <div className="empty-hint">Nothing yet. Add an agent with the + above.<br />Drag an agent onto another to group them.</div>
         )}
-        {tree.order.map((ref) => {
-          if (ref.startsWith('s:')) {
-            const s = sessById[ref.slice(2)];
-            return s && !isHidden(s.id) ? SessionRow(s) : null;
-          }
-          const g = groupById[ref.slice(2)];
-          if (!g) return null;
-          // A group whose AGENTS are all archived disappears with them — a
-          // leftover shell/file viewer alone doesn't keep it on screen.
-          // Groups with no agent members at all (pure utility) stay.
-          const members = g.sessionIds.map((sid) => sessById[sid]).filter(Boolean) as Session[];
-          const agents = members.filter((s) => s.cli !== 'shell' && !isPassive(s.cli));
-          const anyVisible = agents.length === 0 || agents.some((s) => !isHidden(s.id));
-          return anyVisible ? GroupBlock(g) : null;
-        })}
+        {/* The block only exists when something is in it, so an unpinned
+            sidebar has no rule and no empty box to explain. */}
+        {blocks.pinned.length > 0 && (
+          <div className="pinned-block">{blocks.pinned.map(renderRef)}</div>
+        )}
+        {blocks.rest.map(renderRef)}
         {archived.size > 0 && (
           // Renders in BOTH states on purpose: this line is the switch now, so
           // one that only appeared while archived were hidden would be a door

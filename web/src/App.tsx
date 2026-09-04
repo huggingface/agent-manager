@@ -16,6 +16,7 @@ import BackupBanner from './components/BackupBanner';
 import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
 import * as api from './api';
+import { pinnedSessionIds } from './lib/pinned';
 import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { hiddenSessionIds } from './lib/overviewHidden';
@@ -478,6 +479,12 @@ export default function App() {
   // Road two: quiet for longer than the window. Unchanged, and still derived —
   // it is a statement about the clock, so it has to be recomputed against the
   // clock rather than written down once.
+  // Pinned, counting membership — see lib/pinned.ts for why a group's members
+  // inherit the exemption.
+  const pinnedIds = useMemo(
+    () => pinnedSessionIds(tree.sessions, tree.groups),
+    [tree.sessions, tree.groups],
+  );
   const quietIds = useMemo(() => {
     const out = new Set<string>();
     if (archiveAfter === 'never') return out;
@@ -486,11 +493,16 @@ export default function App() {
       // Shells and passive panels have no trace clock — never archive them.
       if (s.cli === 'shell' || isPassive(s.cli) || s.state === 'working') continue;
       if (s.archivedAt) continue;                       // already on road one
+      // Pinning suppresses THIS road and only this one. It is a statement about
+      // the clock, and pinning says the clock is not the point for this session;
+      // road one is the operator saying they are finished, which pinning has no
+      // business overriding (and which clears the pin server-side).
+      if (pinnedIds.has(s.id)) continue;
       const last = ages[s.id] || Date.parse(s.createdAt) || 0;
       if (last && last < cut) out.add(s.id);
     }
     return out;
-  }, [tree.sessions, ages, archiveAfter]);
+  }, [tree.sessions, ages, archiveAfter, pinnedIds]);
   // What the sidebar and overview leave out of the working list.
   const archivedIds = useMemo(
     () => new Set([...retiredIds, ...quietIds]),
@@ -743,6 +755,12 @@ export default function App() {
   const archiveSession = (id: string) => api.archiveSession(id)
     .then(() => { if (activeRef === `s:${id}`) setActiveRef(null); closePane(id); refresh(); })
     .catch(showErr('Couldn’t archive that agent'));
+  // Pinning changes nothing but where a row sits and whether the idle window
+  // reaches it, so a plain refresh is the whole update.
+  const pinSession = (id: string, pinned: boolean) => api.pinSession(id, pinned).then(refresh)
+    .catch(showErr(pinned ? 'Couldn’t pin that agent' : 'Couldn’t unpin that agent'));
+  const pinGroup = (id: string, pinned: boolean) => api.pinGroup(id, pinned).then(refresh)
+    .catch(showErr(pinned ? 'Couldn’t pin that group' : 'Couldn’t unpin that group'));
   const unarchiveSession = (id: string) => api.unarchiveSession(id).then(refresh)
     .catch(showErr('Couldn’t restore that agent'));
   // A remote agent has no process: "stopped" is a closed connection, so the
@@ -1101,6 +1119,8 @@ export default function App() {
         showArchived={showArchived}
         onToggleArchived={() => setShowArchived((v) => !v)}
         overviewHidden={hiddenRefs}
+        onPinSession={pinSession}
+        onPinGroup={pinGroup}
         onToggleOverviewHidden={toggleOverviewHidden}
       />
 

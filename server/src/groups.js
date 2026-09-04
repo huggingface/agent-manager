@@ -69,6 +69,19 @@ export function update(id, { name, sessionIds, layout }) {
   return g;
 }
 
+// Pinned is a standing choice about where the group sits and whether its
+// members age out, so it is stored on the record beside the name — not derived,
+// and not part of update()'s field set, which is the shape the tree editor
+// sends and would clear a pin it never knew about.
+export function setPinned(id, pinned) {
+  const g = get(id);
+  if (!g) return null;
+  if (pinned) g.pinnedAt = new Date().toISOString();
+  else delete g.pinnedAt;
+  persist();
+  return g;
+}
+
 export function remove(id) {
   groups = groups.filter((g) => g.id !== id);
   persist();
