@@ -9,6 +9,7 @@ import { mark, tracked, PHASE } from './watchdog.js';
 // The trace panel reader (bottom of this file) locates its file with the same
 // resolver sharing uses. share.js does not import traces.js, so no cycle.
 import { findTrace, HARNESS_LABEL } from './share.js';
+import { cachedTrace, traceRevision } from './trace-revision.js';
 
 // Workspace-wide trace analytics: parse every Claude transcript and Codex
 // rollout on the Space into per-conversation stats (turns, tool calls, web
@@ -882,7 +883,6 @@ export async function traceLocation(s) {
 const VIEW_BLOCK_CAP = 20_000;      // chars retained per block (spec §10 Q3)
 const VIEW_MAX_MESSAGES = 20_000;   // hard stop; a 6 MB session is ~40k lines
 const VIEW_YIELD_LINES = 2_000;     // hand the loop back every N lines
-let viewMemo = { key: '', val: null }; // exactly one session at a time
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -987,6 +987,8 @@ async function* rangeJsonLines(file, range) {
   range.end = range.start;
   let n = 0;
   while (i < buf.length) {
+    range.recordOffset = range.from + i;
+    range.recordPart = 0;
     const nl = buf.indexOf(0x0a, i);
     const last = nl < 0;
     // Mid-file, an unterminated tail belongs to the next window.
@@ -1036,7 +1038,8 @@ const queueKey = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 // `<task-notification>` is the harness talking to itself, not something the
 // operator typed. One of the five removes in the reference transcript is exactly
 // that, and showing it as a prompt would be a new bug in place of the old one.
-const isHarnessText = (t) => t.startsWith('<') || t.startsWith('[Request interrupted');
+const isHarnessText = (t) => /^<(?:task-notification|environment_context|system-reminder|app-context|recommended_plugins|fork-boilerplate)(?:\s|>)/.test(t.trimStart())
+  || t.startsWith('[Request interrupted') || t.startsWith('[SYSTEM NOTIFICATION');
 
 async function normalizeClaude(file, out, range, allowSubagent = false) {
   // Where a FORK's own conversation starts.
@@ -1066,6 +1069,12 @@ async function normalizeClaude(file, out, range, allowSubagent = false) {
     if ((j.isMeta || j.sourceToolUseID) && j.origin?.kind !== 'task-notification') continue;
     if (j.type === 'queue-operation') {
       const text = queueKey(j.content);
+      if (range?.reader) {
+        if (isHarnessText(text)) continue;
+        out.push({ role: 'system', ts: Date.parse(j.timestamp) || undefined, blocks: [],
+          event: { type: 'queue', operation: j.operation, text: String(j.content || '') } });
+        continue;
+      }
       if (j.operation === 'enqueue') {
         // Harness noise is not a prompt: one of the five removes in the
         // reference transcript is an enqueued <task-notification>, and showing
@@ -1102,6 +1111,7 @@ async function normalizeClaude(file, out, range, allowSubagent = false) {
     const fresh = !msg;
     if (!msg) {
       msg = { role: j.type, ts, blocks: [] };
+      if (range?.reader && id) msg.messageId = `claude:${id}`;
       if (j.type === 'assistant') {
         if (m.model) { msg.model = m.model; out.model = m.model; }
         const u = m.usage;
@@ -1130,8 +1140,11 @@ async function normalizeClaude(file, out, range, allowSubagent = false) {
         // copy opens with the tag itself. It says so on the tin; without it in
         // this list the record reads as something the operator typed, and the
         // reader would open a new exchange with harness noise in the prompt band.
-        if (j.type === 'user' && (t.startsWith('<') || t.startsWith('[Request interrupted') || t.startsWith('[SYSTEM NOTIFICATION'))) {
-          if (allowSubagent && forkEnd === null && t.startsWith('<fork-boilerplate>')) forkEnd = out.messages.length;
+        if (j.type === 'user' && isHarnessText(t)) {
+          if (allowSubagent && forkEnd === null && t.startsWith('<fork-boilerplate>')) {
+            forkEnd = out.messages.length;
+            if (range?.reader) { range.logicalStart = true; range.start = range.recordOffset; }
+          }
           out.push({ role: 'system', ts, blocks: [textBlock('text', t)] });
           continue;
         }
@@ -1154,6 +1167,14 @@ async function normalizeClaude(file, out, range, allowSubagent = false) {
       }
     }
 
+    // Full summaries and byte windows must report the same lifecycle state.
+    if (m.stop_reason === 'end_turn' || m.stop_reason === 'stop_sequence') {
+      if (range?.reader) msg.kind = 'final';
+      out.activity = 'waiting';
+    }
+    else if (m.stop_reason === 'tool_use' || items.some((c) => c?.type === 'thinking' || c?.type === 'tool_use')) out.activity = 'working';
+    else if (j.type === 'user' && items.some((c) => c?.type === 'text' && !isHarnessText(String(c.text || '')))) out.activity = 'working';
+    else if (j.type === 'assistant' && items.some((c) => c?.type === 'text')) out.activity = 'waiting';
     if (!msg.blocks.length) continue;
     if (fresh) {
       out.push(msg);
@@ -1270,7 +1291,7 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
         // `developer` is the harness talking to the model (app context, skills,
         // permissions) — system, not something the operator typed. Codex also
         // wraps environment blobs as role:'user' text starting with '<'.
-        const isEnv = p.role === 'developer' || text.trim().startsWith('<');
+        const isEnv = p.role === 'developer' || isHarnessText(text);
         cur = null;
         out.push({ role: isEnv ? 'system' : 'user', ts, blocks: [textBlock('text', text)] });
       } else if (p.type === 'reasoning') {
@@ -1293,6 +1314,8 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
         if (allowSubagent && forkEnd === null && /Message Type:\s*NEW_TASK/.test(
           (Array.isArray(p.content) ? p.content : []).map((c) => String((c && c.text) || '')).join('\n'))) {
           forkEnd = out.messages.length;
+          cur = null;
+          if (range?.reader) { range.logicalStart = true; range.start = range.recordOffset; }
         }
         // Codex's sub-agent post. The parent's rollout carries one per child:
         //
@@ -1362,6 +1385,11 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
         const res = { type: 'tool_result', id: p.call_id, ...capText(p.results) };
         if (!stitch.file(res.id, res)) msg.blocks.push(res);
       } else if (p.type === 'task_complete') {
+        if (range?.reader) {
+          out.push({ role: 'system', ts, blocks: [], event: { type: 'task-complete', text: String(p.last_agent_message || '') } });
+          out.activity = 'waiting'; out.taskOpen = false; cur = null;
+          continue;
+        }
         // In every task of the rollout I checked, `last_agent_message` was
         // byte-identical to the preceding assistant message — a POINTER to the
         // final answer, so marking it is right and emitting it would duplicate.
@@ -1396,8 +1424,8 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
       }
       // Did this window's last task close inside it? That is what decides
       // whether its final answer is really final — see oneWindow.
-      if (p.type === 'task_started') out.taskOpen = true;
-      else if (p.type === 'task_complete' || p.type === 'turn_aborted') out.taskOpen = false;
+      if (p.type === 'task_started') { out.taskOpen = true; out.activity = 'working'; }
+      else if (p.type === 'task_complete' || p.type === 'turn_aborted') { out.taskOpen = false; out.activity = 'waiting'; }
       continue;
     }
   }
@@ -1606,11 +1634,12 @@ async function sniffHarnessUncached(file) {
   return null;
 }
 
-function newTrace(harness) {
+function newTrace(harness, range) {
   const t = {
     harness, harnessLabel: HARNESS_LABEL[harness] || harness, sessionId: null, title: '', model: null, cwd: null,
     firstTs: 0, lastTs: 0, usage: null, usageSum: null, source: null, sharedBy: null, note: null, messages: [],
     push(msg) {
+      if (range?.reader && !msg.id) msg.id = `${harness}:${range.recordOffset ?? range.from}:${range.recordPart++ || 0}`;
       if (this.messages.length >= VIEW_MAX_MESSAGES) { this.truncated = true; return; }
       if (msg.ts) {
         if (!this.firstTs || msg.ts < this.firstTs) this.firstTs = msg.ts;
@@ -1654,7 +1683,7 @@ function markFinalTurns(out) {
 }
 
 async function parseTraceFile(harness, file, sessionId, range = null, allowSubagent = false) {
-  const out = newTrace(harness);
+  const out = newTrace(harness, range);
   out.sessionId = sessionId || null;
   switch (harness) {
     case 'claude': await normalizeClaude(file, out, range, allowSubagent); break;
@@ -1669,7 +1698,7 @@ async function parseTraceFile(harness, file, sessionId, range = null, allowSubag
   // token_count, the db-backed session rows) wins; otherwise use the sum of the
   // per-turn numbers.
   if (!out.usage) out.usage = out.usageSum;
-  markFinalTurns(out);
+  if (!range?.reader) markFinalTurns(out);
   return out;
 }
 
@@ -1682,6 +1711,7 @@ function headOf(parsed) {
     firstTs: parsed.firstTs, lastTs: parsed.lastTs, usage: parsed.usage,
     source: parsed.source, sharedBy: parsed.sharedBy, note: parsed.note || null,
     truncated: !!parsed.truncated,
+    activity: parsed.activity || null,
   };
 }
 
@@ -1828,7 +1858,7 @@ function firstWholeLine(buf, aligned) {
 async function oneWindow(harness, file, sessionId, range, size, prebuilt, allowSubagent = false) {
   let taskAligned = false;
   if (prebuilt) range.buf = prebuilt;
-  if (harness === 'codex' && range.from > 0) {
+  if (harness === 'codex' && range.from > 0 && !range.reader && !range.forward) {
     // Read once, align, then parse the same bytes — `range.buf` keeps this to a
     // single read of the window.
     const buf = range.buf || await rangeBuf(file, range.from, range.to);
@@ -1847,6 +1877,7 @@ async function oneWindow(harness, file, sessionId, range, size, prebuilt, allowS
       range.danglingTaskComplete = 'ignore';
     }
   }
+  if (range.forward && !range.reader) range.danglingTaskComplete = 'ignore';
   const parsed = await parseTraceFile(harness, file, sessionId, range, allowSubagent);
   const start = range.start ?? range.from;
   const end = range.end ?? range.to;
@@ -1864,8 +1895,8 @@ async function oneWindow(harness, file, sessionId, range, size, prebuilt, allowS
   // reach the end of the file, since "final" there means "no later answer before
   // the next prompt", and the next prompt may be in the window after this one.
   const openEdge = harness === 'codex' ? !!parsed.taskOpen : true;
-  if (!atEnd && openEdge) unmarkTrailingFinal(parsed);
-  return { parsed, cur: { mode: 'bytes', start, end, atStart: start <= 0, atEnd } };
+  if (!range.reader && !atEnd && openEdge) unmarkTrailingFinal(parsed);
+  return { parsed, cur: { mode: 'bytes', start, end, atStart: start <= 0 || !!range.logicalStart, atEnd } };
 }
 
 async function readWindow(harness, file, sessionId, size, req, allowSubagent = false) {
@@ -1874,6 +1905,19 @@ async function readWindow(harness, file, sessionId, size, req, allowSubagent = f
   const cursor = clampN(Math.trunc(req.cursor) || 0, 0, size);
 
   if (req.at === 'after') {
+    if (req.version === 2) {
+      // Forward paging is continuous, including after a long absence. Extend
+      // only to finish an oversized record, never to skip a backlog.
+      for (let span = bytes; ; span = Math.min(span * 2, WINDOW_MAX_BYTES)) {
+        const to = Math.min(size, cursor + span);
+        const w = await oneWindow(harness, file, sessionId,
+          { from: cursor, to, aligned: true, eof: to >= size, reader: true, forward: true }, size, undefined, allowSubagent);
+        if (w.cur.end > cursor || to >= size || span >= WINDOW_MAX_BYTES) {
+          if (w.cur.end === cursor && to < size) w.cur.blocked = true;
+          return w;
+        }
+      }
+    }
     // A pane left open while the agent wrote megabytes: don't try to catch up in
     // one window. Hand back the tail and flag the gap, so the reader replaces
     // what it holds instead of splicing a hole into the middle of it.
@@ -1881,7 +1925,7 @@ async function readWindow(harness, file, sessionId, size, req, allowSubagent = f
       const w = await readWindow(harness, file, sessionId, size, { at: 'tail', bytes, min }, allowSubagent);
       return { ...w, cur: { ...w.cur, gap: true } };
     }
-    return oneWindow(harness, file, sessionId, { from: cursor, to: size, aligned: true, eof: true }, size, undefined, allowSubagent);
+    return oneWindow(harness, file, sessionId, { from: cursor, to: size, aligned: true, eof: true, forward: true }, size, undefined, allowSubagent);
   }
 
   const to = req.at === 'before' ? cursor : size;
@@ -1905,8 +1949,8 @@ async function readWindow(harness, file, sessionId, size, req, allowSubagent = f
       buf = buf && buf.length ? Buffer.concat([head, buf]) : head;
       bufFrom = from;
     }
-    const w = await oneWindow(harness, file, sessionId, { from, to, aligned: from === 0, eof }, size, buf, allowSubagent);
-    if (w.parsed.messages.length >= min || from === 0 || span >= WINDOW_MAX_BYTES) {
+    const w = await oneWindow(harness, file, sessionId, { from, to, aligned: from === 0, eof, reader: req.version === 2 }, size, buf, allowSubagent);
+    if (w.parsed.messages.length >= min || w.cur.atStart || span >= WINDOW_MAX_BYTES) {
       // A window that consumed nothing at all has hit a single line longer than
       // the ceiling (a file-history blob), and no amount of asking again will
       // get past it. Say that, rather than let the reader conclude it has
@@ -1928,13 +1972,19 @@ function windowIndex(parsed, req) {
   const min = clampN(Math.trunc(req.min) || INDEX_WINDOW_TURNS, 1, 500);
   const cursor = clampN(Math.trunc(req.cursor) || 0, 0, total);
   let from; let to;
-  if (req.at === 'after') { from = cursor; to = total; } else if (req.at === 'before') { to = cursor; from = Math.max(0, to - min); } else { to = total; from = Math.max(0, total - min); }
+  const reset = req.version === 2 && req.cursor > total;
+  if (req.at === 'after' && !reset) {
+    from = req.version === 2 ? Math.max(0, cursor - INDEX_WINDOW_TURNS) : cursor;
+    to = req.version === 2 ? Math.min(total, cursor + min) : total;
+  } else if (req.at === 'before' && !reset) { to = cursor; from = Math.max(0, to - min); }
+  else { to = total; from = Math.max(0, total - min); }
   return {
     ...headOf(parsed),
     total,
     userTurns: null,
-    turns: parsed.messages.slice(from, to),
-    window: { mode: 'index', start: from, end: to, atStart: from <= 0, atEnd: to >= total },
+    turns: parsed.messages.slice(from, to).map((turn, i) => req.version === 2 ? { ...turn, id: `index:${from + i}` } : turn),
+    window: { mode: 'index', start: from, end: to, atStart: from <= 0, atEnd: to >= total,
+      ...(reset ? { reset: true } : req.version === 2 && req.at === 'after' ? { replaceFrom: from } : {}) },
   };
 }
 
@@ -1987,32 +2037,41 @@ async function refuseCodexSubagent(file) {
  *   { offset, limit }                      — index paging (Overview, RENDER mode)
  * `decorate` is the bundle manifest pass, applied to every fresh parse.
  */
-async function serveTrace({ key, harness, file, sessionId, size, decorate, allowSubagent }, opts) {
-  const full = async () => {
-    if (viewMemo.key !== key) {
+async function serveTrace({ key, harness, file, sessionId, size, stat, decorate, allowSubagent }, opts) {
+  const identity = await traceRevision(file, stat || await fsp.stat(file), !WINDOWABLE.has(harness));
+  const finish = (response) => ({ ...response, generation: identity.generation, revision: identity.revision,
+    ...(response.window ? { window: { ...response.window, generation: identity.generation, revision: identity.revision } } : {}) });
+  const full = () => cachedTrace(`${key}:${identity.revision}`, size, async () => {
       const parsed = await tracked(PHASE.readTrace, () => parseTraceFile(harness, file, sessionId, null, allowSubagent));
       if (decorate) await decorate(parsed);
-      viewMemo = { key, val: parsed };
-    }
-    return viewMemo.val;
-  };
+      return parsed;
+  });
 
-  if (opts.summary) return summaryOf(await full());
-  if (!opts.window) return pageOf(await full(), opts.offset ?? 0, opts.limit ?? 200);
-  if (!WINDOWABLE.has(harness)) return windowIndex(await full(), opts.window);
+  if (opts.summary) return finish(summaryOf(await full()));
+  if (!opts.window) return finish(pageOf(await full(), opts.offset ?? 0, opts.limit ?? 200));
+  const requested = opts.window;
+  const reset = requested.version === 2 && ((requested.generation && requested.generation !== identity.generation)
+    || (WINDOWABLE.has(harness) && requested.cursor > size));
+  const request = reset ? { ...requested, at: 'tail' } : requested;
+  if (!WINDOWABLE.has(harness)) {
+    const result = windowIndex(await full(), request);
+    if (reset) result.window.reset = true;
+    return finish(result);
+  }
 
   if (harness === 'codex' && !allowSubagent) {
     try {
       await refuseCodexSubagent(file);
     } catch (e) {
       if (e.code !== 'window-unavailable') throw e;
-      return windowIndex(await full(), opts.window); // whole-file read, which checks it properly
+      return finish(windowIndex(await full(), request)); // whole-file read, which checks it properly
     }
   }
   const { parsed, cur } = await tracked(PHASE.readTrace, () =>
-    readWindow(harness, file, sessionId, size, opts.window, allowSubagent));
+    readWindow(harness, file, sessionId, size, request, allowSubagent));
   if (decorate) await decorate(parsed);
-  return windowOf(parsed, cur);
+  if (reset) cur.reset = true;
+  return finish(windowOf(parsed, cur));
 }
 
 /**
@@ -2030,6 +2089,7 @@ export async function readTrace(session, opts = {}) {
 
   return serveTrace({
     key: `s:${session.id}:${hit.src}:${hit.sessionId || ''}:${st.mtimeMs}:${st.size}`,
+    stat: st,
     harness: session.cli,
     file: hit.src,
     sessionId: hit.sessionId || session.sessionUuid || null,
@@ -2237,6 +2297,7 @@ export async function readTraceByPath(file, opts = {}, allowSubagent = false) {
 
   return serveTrace({
     key: `f:${file}:${st.mtimeMs}:${st.size}${allowSubagent ? ':sub' : ''}`,
+    stat: st,
     harness,
     file,
     sessionId: null,
@@ -2291,6 +2352,7 @@ export async function readTraceBundle(dir, opts = {}) {
 
   return serveTrace({
     key: `b:${file}:${st.mtimeMs}:${st.size}`,
+    stat: st,
     harness,
     file,
     sessionId: null,

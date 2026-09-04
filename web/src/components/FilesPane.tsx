@@ -796,7 +796,7 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
       // underneath it.
       return raw ? code(shown) : (
         <TraceView
-          src={traceSrc} srcKey={`${sessionId}:${path}`} zoom={zoom} query={traceQuery}
+          src={traceSrc} srcKey={`file:${sessionId}:${path}`} zoom={zoom} query={traceQuery}
           onHead={setTraceHead} onNav={(go) => { traceNav.current = go; }}
         />
       );

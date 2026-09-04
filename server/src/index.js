@@ -2082,6 +2082,8 @@ function traceOpts(q) {
       cursor: Number(at === 'before' ? q.before : q.after) || 0,
       bytes: Number(q.bytes) || 0,
       min: Number(q.min) || 0,
+      version: q.v === '2' ? 2 : 1,
+      generation: typeof q.generation === 'string' ? q.generation.slice(0, 64) : undefined,
     },
   };
 }
