@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { DATA_DIR } from './config.js';
+import { findByName, normalizeName } from './agent-list.js';
 
 const GROUPS_FILE = path.join(DATA_DIR, 'groups.json');
 let groups = [];
@@ -110,11 +111,10 @@ export function resolveSpawnGroup(requested, callerId) {
     const g = groupOf(callerId);
     return { groupId: g ? g.id : null };
   }
-  if (raw.toLowerCase() === 'none') return { groupId: null };
+  if (normalizeName(raw) === 'none') return { groupId: null };
   const byId = get(raw);
   if (byId) return { groupId: byId.id };
-  const lower = raw.toLowerCase();
-  const byName = groups.find((g) => (g.name || '').toLowerCase() === lower);
+  const byName = findByName(groups, raw);
   if (byName) return { groupId: byName.id };
   const known = groups.map((g) => g.name).filter(Boolean).join(', ');
   return { error: `unknown group '${raw}'${known ? ` — groups here: ${known}` : ' — no groups exist yet'}; pass group=none to stay ungrouped` };
