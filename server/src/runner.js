@@ -5,6 +5,7 @@ import pty from 'node-pty';
 import { dismissCodexUpdatePrompt, trustCodexWorkspace } from './first-run.js';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { remoteState, setPaused } from './remote.js';
 import { cliById, cliVersion, isRemote, PORT, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
@@ -38,6 +39,12 @@ const TERM_ENV = {
   COLORTERM: 'truecolor',
   LANG: process.env.LANG || 'C.UTF-8',
 };
+
+// Resolve app-owned helpers from the checkout rather than assuming the Docker
+// layout. In the image this is /app/scripts; in a local install it is the
+// repository's scripts directory.
+const APP_SCRIPTS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts');
+const appScript = (name) => path.join(APP_SCRIPTS_DIR, name);
 
 const BASHRC = process.env.AM_BASHRC || '/app/session.bashrc';
 const AM_USER = process.env.SPACE_AUTHOR_NAME || process.env.AM_USER || os.userInfo().username || 'user';
@@ -1318,8 +1325,8 @@ export async function codexRolloutForId(id) {
 // would be a terrible trade), and every failure is non-fatal: without the
 // hook the watcher simply keeps today's behaviour.
 export function installClaudeRepinHook(
-  hookCmd = '/app/scripts/am-repin-hook.sh',
-  inputRequiredCmd = '/app/scripts/am-input-required-hook.sh',
+  hookCmd = appScript('am-repin-hook.sh'),
+  inputRequiredCmd = appScript('am-input-required-hook.sh'),
 ) {
   const dir = process.env.CLAUDE_CONFIG_DIR;
   if (!dir) return false;
@@ -1383,7 +1390,7 @@ export function installClaudeRepinHook(
 // plugins and opencode.json settings remain untouched. This config directory
 // can be on the Space's FUSE bucket, whose rename semantics are unreliable;
 // install before launching OpenCode and write the app-owned file directly.
-export function installOpencodeRepinPlugin(source = '/app/scripts/am-opencode-repin.js') {
+export function installOpencodeRepinPlugin(source = appScript('am-opencode-repin.js')) {
   const base = process.env.OPENCODE_CONFIG_DIR
     || path.join(process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || os.homedir(), '.config'), 'opencode');
   const dir = path.join(base, 'plugins');
