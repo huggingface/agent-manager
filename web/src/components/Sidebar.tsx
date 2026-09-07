@@ -12,7 +12,7 @@ import {
   pendingAttachmentsFromFiles, revokePendingAttachments, transferMayContainFile, uploadPendingAttachments,
 } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
-import { liftedSessions, partitionByPin, pinAfterDrop } from '../lib/pinned';
+import { canPin, partitionByPin, pinAfterDrop } from '../lib/pinned';
 import { PinGlyph, SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, UpGlyph, TrashGlyph, GridGlyph, PlusGlyph, AmMark, EyeGlyph, EyeOffGlyph } from './icons';
 
 import { dropZone, backgroundAnchor, isBackgroundTarget } from './sidebar-dnd';
@@ -140,7 +140,6 @@ export default function Sidebar({
   // The rules, and the reasoning behind each, live in lib/pinned.ts so they can
   // be read and tested in one piece rather than inferred from three components.
   // This is the wiring.
-  const liftedFrom = useMemo(() => liftedSessions(tree.sessions, tree.groups), [tree.sessions, tree.groups]);
   const blocks = useMemo(
     () => partitionByPin(tree.order, tree.sessions, tree.groups),
     [tree.order, tree.sessions, tree.groups],
@@ -461,14 +460,18 @@ export default function Sidebar({
       isMember: kind === 'group' && !!dragRef && groupById[ref.slice(2)]?.sessionIds.includes(dragRef.slice(2)),
     });
 
+  // A grouped session reads as unpinned whatever its record says, because the
+  // rule is that it cannot be pinned. That is what stops a stray `pinnedAt` —
+  // written before it joined a group, or by a path that did not clear it — from
+  // reappearing the moment the row is dragged back out.
   const isPinnedRef = (ref: string) => (ref.startsWith('g:')
     ? !!groupById[ref.slice(2)]?.pinnedAt
-    : !!sessById[ref.slice(2)]?.pinnedAt);
+    : canPin(ref, tree.groups) && !!sessById[ref.slice(2)]?.pinnedAt);
 
   // Dragging and pinning are two ways of saying where something goes, so they
   // must not be able to contradict each other. The rule they follow is
   // pinAfterDrop (lib/pinned.ts); this applies its answer.
-  const carryPinAcross = (target: string) => {
+  const carryPin = (target: { ref?: string; landsInGroup?: boolean }) => {
     if (!dragRef) return;
     const want = pinAfterDrop(dragRef, target, isPinnedRef);
     if (want === null) return;
@@ -480,12 +483,15 @@ export default function Sidebar({
   const applyDrop = (ref: string, kind: Kind, zone: Zone) => {
     const id = ref.slice(2);
     if (zone === 'on') {
-      // Into a group, or paired into a new one: membership decides which block
-      // draws it from now on, so its own pin has nothing left to say here.
+      // Into a group, or paired with a session into a new one. Either way it
+      // ends up grouped, where a pin cannot exist, so the pin it arrived with
+      // goes — otherwise it would sit there invisibly and come back the moment
+      // the row was dragged out again.
+      carryPin({ landsInGroup: true });
       if (kind === 'group') onMove(dragRef!, { kind: 'into', groupId: id });
       else onMove(dragRef!, { kind: 'pair', sessionId: id });
     } else {
-      carryPinAcross(ref);
+      carryPin({ ref });
       onMove(dragRef!, { kind: zone, ref });
     }
     clearDrag();
@@ -515,7 +521,7 @@ export default function Sidebar({
       const a = treeAnchor(e.currentTarget as HTMLElement, e.clientY);
       if (!a) { clearDrag(); return; }
       e.preventDefault();
-      carryPinAcross(a.ref);
+      carryPin({ ref: a.ref });
       onMove(dragRef, { kind: a.zone, ref: a.ref });
       clearDrag();
     },
@@ -541,7 +547,7 @@ export default function Sidebar({
     className: drop && drop.ref === ref ? ` drop-${drop.zone}` : '',
   });
 
-  const SessionRow = (s: Session, groupId?: string, from?: Group) => {
+  const SessionRow = (s: Session, groupId?: string) => {
     const ref = `s:${s.id}`;
     const nested = !!groupId;
     const dnd = dndProps(ref, 'session', nested);
@@ -576,9 +582,6 @@ export default function Sidebar({
         ) : (
           <span className="name">{s.name}</span>
         )}
-        {/* Lifted out of a group to sit above the rule: say which one, or the
-            group below looks as if it lost a member. */}
-        {from && <span className="from-group mono" title={`In the group ${from.name}`}>{from.name}</span>}
         <span className="age">{fmtAgo(ages?.[s.id])}</span>
         {/* One button on a live row, and it files the agent away. Start was the
             row's own onClick spelled twice; stop went because an idle CLI costs
@@ -595,10 +598,17 @@ export default function Sidebar({
               before the one that files the agent away, which keeps its place at
               the end of the row. Hover-only on a pointer and always visible on
               touch — the stylesheet already makes that swap for this whole
-              strip, which is the only reason a phone can reach any of it. An
-              archived row has no pin: pinning is about the working list, and
-              archiving cleared it anyway. */}
-          {!archived.has(s.id) && (
+              strip, which is the only reason a phone can reach any of it.
+
+              Two rows have no pin at all rather than a disabled one. An
+              archived row, because pinning is about the working list and
+              archiving cleared it anyway. And a row inside a group, because
+              pinning a group is a group-level action and those live on the
+              group's header — the same place as rename, hide-from-overview and
+              delete-group, none of which appear on a member either. A disabled
+              pin on every member would repeat what the header's one pin already
+              says, four times, and argue back when clicked. */}
+          {!archived.has(s.id) && canPin(ref, tree.groups) && (
             <button
               className={`mini-btn${s.pinnedAt ? ' on' : ''}`}
               title={s.pinnedAt ? 'Unpin — let it fall back into the list' : 'Pin — keep it at the top, and out of the idle window'}
@@ -708,11 +718,7 @@ export default function Sidebar({
           )}
         </div>
         <button className="g-add" title={`New agent in ${g.name}`} onClick={(e) => { e.stopPropagation(); openCreate(g.id); }}><PlusGlyph /></button>
-        {open && g.sessionIds.map((sid) => sessById[sid]).filter(Boolean)
-          .filter((s) => !isHidden((s as Session).id))
-          // A member lifted into the pinned block is drawn there, not twice.
-          .filter((s) => !liftedFrom.has((s as Session).id))
-          .map((s) => SessionRow(s as Session, g.id))}
+        {open && g.sessionIds.map((sid) => sessById[sid]).filter(Boolean).filter((s) => !isHidden((s as Session).id)).map((s) => SessionRow(s as Session, g.id))}
         {open && g.sessionIds.length === 0 && <div className="empty-hint nested">Drag agents here</div>}
       </div>
     );
@@ -721,7 +727,7 @@ export default function Sidebar({
   const renderRef = (ref: string) => {
     if (ref.startsWith('s:')) {
       const s = sessById[ref.slice(2)];
-      return s && !isHidden(s.id) ? SessionRow(s, undefined, liftedFrom.get(s.id)) : null;
+      return s && !isHidden(s.id) ? SessionRow(s) : null;
     }
     const g = groupById[ref.slice(2)];
     if (!g) return null;

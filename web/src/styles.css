@@ -566,10 +566,6 @@ body {
    height, padding or border here that could survive an empty one. */
 .pinned-block { display: flex; flex-direction: column; border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 6px; }
 .pinned-block:empty { display: none; }
-/* Which group a lifted row came from. Quiet, because it is provenance rather
-   than the row's name — but present, so the group below does not look as if it
-   has lost a member. */
-.from-group { font-size: 10px; color: var(--muted); opacity: 0.75; margin-left: 5px; flex: none; overflow: hidden; text-overflow: ellipsis; max-width: 78px; white-space: nowrap; }
 .row-actions .mini-btn.on { color: var(--accent); }
 
 .tree > * { flex: none; } /* rows keep their natural height; the arch-note's margin-top:auto sinks it */

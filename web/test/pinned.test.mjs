@@ -5,8 +5,9 @@
 // against the rule they implement, not against the code that happens to be
 // there:
 //
-//   1. a pinned session inside an unpinned group is LIFTED (not left, not
-//      duplicated), and one inside a pinned group is not — the group carries it
+//   1. a session inside a group cannot be pinned at all — its group is the
+//      thing that gets pinned, and a stray pinnedAt on one is ignored rather
+//      than honoured
 //   2. pinning a group exempts its MEMBERS from the idle window, or a pinned
 //      group hollows out and vanishes, which is what pinning it forbade
 //   3. pinning partitions the one manual order and preserves it inside each
@@ -27,7 +28,7 @@ await build({
   entryPoints: [path.join(HERE, '../src/lib/pinned.ts')],
   outfile: out, format: 'esm', bundle: true, logLevel: 'error',
 });
-const { pinnedSessionIds, liftedSessions, partitionByPin, pinAfterDrop } = await import(pathToFileURL(out).href);
+const { pinnedSessionIds, canPin, partitionByPin, pinAfterDrop } = await import(pathToFileURL(out).href);
 
 let failed = 0;
 const check = (what, fn) => {
@@ -53,28 +54,34 @@ const withPinned = (w, { sessions = [], groups = [] }) => ({
   groups: w.groups.map((g) => (groups.includes(g.id) ? { ...g, pinnedAt: '2026-01-01T00:00:00Z' } : g)),
 });
 
-console.log('\n1. a pinned session in an unpinned group is lifted, once');
+console.log('\n1. only an ungrouped session or a whole group can be pinned');
 {
-  const w = withPinned(world(), { sessions: ['billing'] });
-  const { pinned, rest } = partitionByPin(w.order, w.sessions, w.groups);
-  check('it rises to the pinned half', () => assert.ok(pinned.includes('s:billing')));
-  check('exactly once — never drawn in both places', () => {
-    assert.equal([...pinned, ...rest].filter((r) => r === 's:billing').length, 1);
+  const w = world();
+  check('an ungrouped session can be pinned', () => assert.equal(canPin('s:deploy', w.groups), true));
+  check('a group can be pinned', () => assert.equal(canPin('g:fleet', w.groups), true));
+  check('a session inside a group cannot', () => {
+    assert.equal(canPin('s:billing', w.groups), false);
+    assert.equal(canPin('s:triage', w.groups), false);
+    assert.equal(canPin('s:docs', w.groups), false);
   });
-  check('its group stays put, unpinned', () => assert.ok(rest.includes('g:fleet')));
-  check('and the row knows where it came from', () => {
-    assert.equal(liftedSessions(w.sessions, w.groups).get('billing').name, 'fleet');
-  });
+  check('a session in no group at all can', () => assert.equal(canPin('s:ghost', w.groups), true));
 }
 
-console.log('\n   …but one inside a PINNED group is not lifted — the group carries it');
+console.log('\n   a stray pinnedAt on a grouped session is ignored, never honoured');
 {
-  const w = withPinned(world(), { sessions: ['docs'], groups: ['release'] });
-  const { pinned, rest } = partitionByPin(w.order, w.sessions, w.groups);
-  check('the group is pinned', () => assert.ok(pinned.includes('g:release')));
-  check('the member is not lifted out of it', () => {
-    assert.equal(liftedSessions(w.sessions, w.groups).has('docs'), false);
-    assert.ok(!pinned.includes('s:docs') && !rest.includes('s:docs'));
+  // The state the rule says cannot exist: pinned, and in a group.
+  const w = withPinned(world(), { sessions: ['billing'] });
+  check('it buys no exemption from the idle window', () => {
+    assert.equal(pinnedSessionIds(w.sessions, w.groups).has('billing'), false);
+  });
+  check('and it cannot put the session above the rule — it is not in `order` to begin with', () => {
+    const { pinned, rest } = partitionByPin(w.order, w.sessions, w.groups);
+    assert.ok(!pinned.includes('s:billing'));
+    assert.ok(!rest.includes('s:billing'));
+  });
+  check('its group being pinned is what would exempt it', () => {
+    const w2 = withPinned(world(), { sessions: ['billing'], groups: ['fleet'] });
+    assert.ok(pinnedSessionIds(w2.sessions, w2.groups).has('billing'));
   });
 }
 
@@ -97,10 +104,11 @@ console.log('\n2. pinning a group exempts its members from the idle window');
   check('unpinning the group hands every member straight back', () => {
     assert.equal(pinnedSessionIds(world().sessions, world().groups).size, 0);
   });
-  check('a member pinned in its own right survives the group being unpinned', () => {
+  check('a member cannot hold a pin of its own to survive with', () => {
+    // The old design let a member be pinned individually; it cannot now, and a
+    // record that says otherwise is ignored.
     const w2 = withPinned(world(), { sessions: ['triage'] });
-    assert.ok(pinnedSessionIds(w2.sessions, w2.groups).has('triage'));
-    assert.equal(pinnedSessionIds(w2.sessions, w2.groups).has('billing'), false);
+    assert.equal(pinnedSessionIds(w2.sessions, w2.groups).has('triage'), false);
   });
 }
 
@@ -147,29 +155,45 @@ console.log('\n3b. dragging across the rule decides the side — the two axes ne
   const pinnedRefs = new Set(['s:deploy', 'g:release']);
   const isPinned = (ref) => pinnedRefs.has(ref);
   check('a pinned row dropped beside an unpinned one unpins', () => {
-    assert.equal(pinAfterDrop('s:deploy', 's:infra', isPinned), false);
+    assert.equal(pinAfterDrop('s:deploy', { ref: 's:infra' }, isPinned), false);
   });
   check('an unpinned row dropped beside a pinned one pins', () => {
-    assert.equal(pinAfterDrop('s:infra', 's:deploy', isPinned), true);
+    assert.equal(pinAfterDrop('s:infra', { ref: 's:deploy' }, isPinned), true);
   });
   check('a group crossing the rule crosses it too', () => {
-    assert.equal(pinAfterDrop('g:release', 'g:fleet', isPinned), false);
-    assert.equal(pinAfterDrop('g:fleet', 'g:release', isPinned), true);
+    assert.equal(pinAfterDrop('g:release', { ref: 'g:fleet' }, isPinned), false);
+    assert.equal(pinAfterDrop('g:fleet', { ref: 'g:release' }, isPinned), true);
   });
   check('reordering WITHIN a block changes nothing', () => {
-    assert.equal(pinAfterDrop('s:infra', 'g:fleet', isPinned), null);
-    assert.equal(pinAfterDrop('s:deploy', 'g:release', isPinned), null);
+    assert.equal(pinAfterDrop('s:infra', { ref: 'g:fleet' }, isPinned), null);
+    assert.equal(pinAfterDrop('s:deploy', { ref: 'g:release' }, isPinned), null);
   });
   check('a row dropped on itself changes nothing', () => {
-    assert.equal(pinAfterDrop('s:deploy', 's:deploy', isPinned), null);
+    assert.equal(pinAfterDrop('s:deploy', { ref: 's:deploy' }, isPinned), null);
   });
   check('the answer is always the side it landed on, never the side it left', () => {
     for (const dragged of ['s:deploy', 's:infra', 'g:release', 'g:fleet']) {
       for (const target of ['s:deploy', 's:infra', 'g:release', 'g:fleet']) {
-        const got = pinAfterDrop(dragged, target, isPinned);
+        const got = pinAfterDrop(dragged, { ref: target }, isPinned);
         if (got !== null) assert.equal(got, isPinned(target), `${dragged} -> ${target}`);
       }
     }
+  });
+
+  // The other boundary, and the same rule: it lands where pins cannot exist.
+  check('a pinned session dragged INTO a group unpins', () => {
+    assert.equal(pinAfterDrop('s:deploy', { landsInGroup: true }, isPinned), false);
+  });
+  check('an unpinned one dragged in needs no change', () => {
+    assert.equal(pinAfterDrop('s:infra', { landsInGroup: true }, isPinned), null);
+  });
+  check('dragging OUT of a group leaves it unpinned, not pinned', () => {
+    // A grouped session reads as unpinned however its record looks, so coming
+    // out it takes the state of wherever it lands — never a stale `true`.
+    const groupedReadsUnpinned = (ref) => (ref === 's:billing' ? false : pinnedRefs.has(ref));
+    assert.equal(pinAfterDrop('s:billing', { ref: 's:infra' }, groupedReadsUnpinned), null);
+    assert.equal(pinAfterDrop('s:billing', { ref: 's:deploy' }, groupedReadsUnpinned), true,
+      'dropping it into the pinned block is a deliberate act and should pin it');
   });
 }
 
@@ -179,9 +203,9 @@ check('a ref pointing at nothing is not pinned by accident', () => {
   assert.deepEqual(p.pinned, []);
   assert.deepEqual(p.rest, ['s:ghost', 'g:ghost']);
 });
-check('a session in no group is never lifted', () => {
-  const w = withPinned(world(), { sessions: ['infra'] });
-  assert.equal(liftedSessions(w.sessions, w.groups).has('infra'), false);
+check('canPin on a ref pointing at nothing does not throw', () => {
+  assert.equal(canPin('s:ghost', []), true);
+  assert.equal(canPin('g:ghost', []), true);
 });
 
 console.log(failed ? `\n${failed} failed` : '\nall checks passed');

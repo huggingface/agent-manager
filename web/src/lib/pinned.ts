@@ -7,53 +7,50 @@ import type { Group, Session } from '../types';
 // things and no others — a place above the sidebar's rule, and immunity from
 // the idle window. It is stored, like archiving, because the clock cannot say
 // it.
+//
+// What can be pinned: an ungrouped session, or a whole group. A session inside
+// a group cannot. Its group is the thing that gets pinned, and the pin lives on
+// the group's own row one line above it.
+
+/** Every session that belongs to some group. */
+function groupedIds(groups: Group[]): Set<string> {
+  const out = new Set<string>();
+  for (const g of groups) for (const id of g.sessionIds) out.add(id);
+  return out;
+}
 
 /**
- * Every session the idle window must leave alone: the ones pinned outright, and
- * every member of a pinned group.
+ * Every session the idle window must leave alone: the ungrouped ones pinned
+ * outright, and every member of a pinned group.
  *
  * Members inherit because the alternative eats itself. A group pinned to keep it
  * in view, whose agents each age out on their own schedule, empties one row at a
  * time and then vanishes — the sidebar drops a group once all its agents are
  * archived. Pinning it would have caused exactly what it was asked to prevent.
  *
- * Their own `pinnedAt` is untouched by the group's, so unpinning the group hands
- * every member back to the ordinary rules without anyone having to remember
- * which of them had been pinned individually first.
+ * A `pinnedAt` on a GROUPED session is ignored rather than honoured. The rule is
+ * that such a session cannot be pinned, so a stray value — written before it
+ * joined a group, or by some path that did not clear it — describes a state the
+ * rule says does not exist. Reading it would make the exemption depend on
+ * history the operator can no longer see or change.
  */
 export function pinnedSessionIds(sessions: Session[], groups: Group[]): Set<string> {
+  const grouped = groupedIds(groups);
   const out = new Set<string>();
-  for (const s of sessions) if (s.pinnedAt) out.add(s.id);
+  for (const s of sessions) if (s.pinnedAt && !grouped.has(s.id)) out.add(s.id);
   for (const g of groups) if (g.pinnedAt) for (const id of g.sessionIds) out.add(id);
   return out;
 }
 
 /**
- * Which pinned sessions are drawn out of the group they belong to, and which
- * group each came from.
+ * Can this ref be pinned at all? Only an ungrouped session or a group.
  *
- * A pinned session inside an UNPINNED group is lifted to the top block. The two
- * alternatives cost more than they save: leaving it in place makes pinning
- * useless in the one case you most want it — a single agent inside a long group,
- * far down the list — and drawing it in both places puts two live rows on screen
- * for one session, each with its own state and its own controls.
- *
- * A session inside a PINNED group is NOT lifted: the group is already at the top
- * and carrying it, so lifting would be that duplicate by another route.
- *
- * Lifting is a view. Membership is not touched, the row says which group it came
- * from, and unpinning drops it home.
+ * The sidebar asks so it can leave the control off a grouped row entirely,
+ * rather than offering one that argues back.
  */
-export function liftedSessions(sessions: Session[], groups: Group[]): Map<string, Group> {
-  const home = new Map<string, Group>();
-  for (const g of groups) for (const id of g.sessionIds) home.set(id, g);
-  const out = new Map<string, Group>();
-  for (const s of sessions) {
-    if (!s.pinnedAt) continue;
-    const g = home.get(s.id);
-    if (g && !g.pinnedAt) out.set(s.id, g);
-  }
-  return out;
+export function canPin(ref: string, groups: Group[]): boolean {
+  if (ref.startsWith('g:')) return true;
+  return !groupedIds(groups).has(ref.slice(2));
 }
 
 /**
@@ -63,13 +60,12 @@ export function liftedSessions(sessions: Session[], groups: Group[]): Map<string
  * one, it partitions this one and keeps each half in it. That is why dragging
  * and pinning cannot disagree about what comes first: there is nothing for them
  * to disagree about. (What happens when a row is dragged ACROSS the rule is the
- * other half of that answer, and lives in the sidebar: the row takes the pin
- * state of whatever it lands beside, the same way a row dropped into a group
- * takes that group's membership.)
+ * other half of that answer — see pinAfterDrop.)
  *
- * Lifted rows are appended to the pinned half in the order their groups appear,
- * because `order` holds top-level refs only and a grouped session has no
- * position of its own in it.
+ * `order` holds top-level refs only, so a grouped session is not in it and
+ * cannot land in either half however its record happens to read. That is the
+ * whole of "a grouped session is never drawn above the rule": there is no code
+ * here that could draw one.
  */
 export function partitionByPin(
   order: string[],
@@ -78,7 +74,6 @@ export function partitionByPin(
 ): { pinned: string[]; rest: string[] } {
   const sessById = new Map(sessions.map((s) => [s.id, s]));
   const groupById = new Map(groups.map((g) => [g.id, g]));
-  const lifted = liftedSessions(sessions, groups);
   const pinned: string[] = [];
   const rest: string[] = [];
   for (const ref of order) {
@@ -87,12 +82,6 @@ export function partitionByPin(
       : !!sessById.get(ref.slice(2))?.pinnedAt;
     (isPinned ? pinned : rest).push(ref);
   }
-  for (const ref of order) {
-    if (!ref.startsWith('g:')) continue;
-    const g = groupById.get(ref.slice(2));
-    if (!g || g.pinnedAt) continue;
-    for (const id of g.sessionIds) if (lifted.has(id)) pinned.push(`s:${id}`);
-  }
   return { pinned, rest };
 }
 
@@ -100,23 +89,24 @@ export function partitionByPin(
  * What a drop does to the dragged row's pin: `true` to pin, `false` to unpin,
  * `null` to leave it alone.
  *
- * This is the other half of "pinning does not introduce a second ordering". The
- * partition above keeps the two axes from disagreeing about order; this keeps
- * them from disagreeing about sides. A dropped row takes the pin state of
- * whatever it lands beside — the same way a row dropped into a group takes that
- * group's membership — so the rule is a boundary the operator can drag across
- * rather than a line that silently snaps their drop back where it came from.
+ * One rule, and it covers both boundaries the sidebar has. A dropped row takes
+ * the pin state of where it lands:
  *
- * Dropping ONTO something (into a group, or paired with a session) is not a
- * neighbour relationship and is not handled here: membership decides which
- * block draws it from then on, so its own pin has nothing left to say.
+ *   - beside a neighbour, it takes that neighbour's side of the rule, so the
+ *     rule is a boundary the operator can drag across rather than a line that
+ *     silently snaps their drop back where it came from;
+ *   - INTO a group (`landsInGroup`), it takes the only state available there,
+ *     which is unpinned — a grouped session cannot be pinned, so the pin it
+ *     arrived with has to go rather than linger and reappear if it is ever
+ *     dragged back out.
  */
 export function pinAfterDrop(
   draggedRef: string,
-  targetRef: string,
+  target: { ref?: string; landsInGroup?: boolean },
   isPinned: (ref: string) => boolean,
 ): boolean | null {
-  if (draggedRef === targetRef) return null;
-  const want = isPinned(targetRef);
+  if (target.landsInGroup) return isPinned(draggedRef) ? false : null;
+  if (!target.ref || draggedRef === target.ref) return null;
+  const want = isPinned(target.ref);
   return want === isPinned(draggedRef) ? null : want;
 }
