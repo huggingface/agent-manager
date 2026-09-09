@@ -1,5 +1,5 @@
 import * as api from '../api';
-import { createSaver, type SaverHandle, type SaverState } from './saveQueue';
+import { createSaver, type Reconciled, type SaverHandle, type SaverState } from './saveQueue';
 
 // The settings savers live here, not inside the panel.
 //
@@ -28,11 +28,13 @@ export type SettingsSlot = {
   derived: api.DerivedStatus | null;
   /** Why the saved file could not be read at all. */
   readError: string | null;
+  /** The derived update has been pending long enough to be worth saying so. */
+  derivedSlow: boolean;
 };
 
 const slots: Record<Kind, SettingsSlot> = {
-  config: { rev: null, conflict: null, derived: null, readError: null },
-  secrets: { rev: null, conflict: null, derived: null, readError: null },
+  config: { rev: null, conflict: null, derived: null, readError: null, derivedSlow: false },
+  secrets: { rev: null, conflict: null, derived: null, readError: null, derivedSlow: false },
 };
 
 const listeners = new Set<() => void>();
@@ -50,13 +52,85 @@ const TIMEOUT_MS = 15_000;
 const configShape = (c: any) => JSON.stringify({
   artifacts: c?.artifacts, jobs: c?.jobs, archive: c?.archive, revive: c?.revive, backup: c?.backup,
 });
-const notesShape = (n: any) => JSON.stringify(n || {});
+// Key order is not content: the same descriptions rebuilt by a form and the
+// same descriptions read back from disk must compare equal.
+const notesShape = (n: any) => JSON.stringify(Object.fromEntries(Object.entries(n || {}).sort()));
+
+/**
+ * What the server holds, after our own answer went missing.
+ *
+ * The revision is the dangerous part. Adopting it before knowing whose version
+ * it belongs to turns "somebody else wrote while we were waiting" into "here is
+ * a fresh base for our old value" — and the retry then replaces their change
+ * with ours and reports it saved. So the read-back decides first:
+ *
+ *  - same value as we sent → it was ours; it landed, and the revision is ours to take;
+ *  - different value, revision unchanged → nothing was committed; send it again
+ *    against the base we already hold;
+ *  - different value, revision moved → someone else is there. That is a
+ *    conflict, and replacing it is the operator's call, not a recovery step.
+ */
+async function reconcileWith<T, R extends { rev?: string | null; derived?: api.DerivedStatus }>(
+  kind: Kind,
+  sent: T,
+  read: () => Promise<R>,
+  shape: (v: any) => string,
+  valueOf: (r: R) => unknown,
+): Promise<Reconciled<R>> {
+  const slot = slots[kind];
+  const current = await read();
+  slot.derived = current.derived ?? slot.derived;
+  slot.readError = (current as any).readError ?? null;
+  if (shape(valueOf(current)) === shape(sent)) {
+    slot.rev = current.rev ?? null;
+    announce();
+    return { outcome: 'committed', result: current };
+  }
+  if ((current.rev ?? null) === slot.rev) {
+    announce();
+    return { outcome: 'lost' };
+  }
+  return {
+    outcome: 'conflict',
+    error: new api.SettingsConflict(
+      'these settings were changed somewhere else while this save was unanswered',
+      'stale', current.rev ?? null, valueOf(current),
+    ),
+  };
+}
 
 function noteCommit(kind: Kind, res: { rev?: string | null; derived?: api.DerivedStatus }) {
   slots[kind].rev = res.rev ?? null;
   slots[kind].derived = res.derived ?? slots[kind].derived;
   slots[kind].conflict = null;
   slots[kind].readError = null;
+  if (slots[kind].derived?.pending) followDerived();
+}
+
+// A save answers before the work it sets off has finished, so the answer can
+// only say "started". Without this the panel keeps a tick over a derived update
+// that failed afterwards — and the only other way to find out would be to send
+// the settings again, which is not a status check.
+let derivedWatch: ReturnType<typeof setTimeout> | null = null;
+let derivedTries = 0;
+function followDerived() {
+  if (derivedWatch) return;
+  derivedTries = 0;
+  const look = () => {
+    derivedWatch = null;
+    api.getDerivedStatus().then((report) => {
+      const slow = report.pending && derivedTries >= 2;
+      for (const kind of ['config', 'secrets'] as Kind[]) {
+        slots[kind].derived = report;
+        slots[kind].derivedSlow = slow;
+      }
+      announce();
+      // Bounded: a pass that never settles stops being asked about rather than
+      // being polled forever.
+      if (report.pending && ++derivedTries < 12) derivedWatch = setTimeout(look, 500);
+    }).catch(() => { /* the panel keeps what it last knew */ });
+  };
+  derivedWatch = setTimeout(look, 150);
 }
 function noteFailure(kind: Kind, err: Error) {
   if (err instanceof api.SettingsConflict) {
@@ -76,14 +150,7 @@ export const configSaver: SaverHandle<ConfigValue, api.AmConfig> = createSaver<C
   // A lost answer may have committed. Ask what is stored before sending
   // anything again: retrying blind either repeats a write that already landed or
   // walks over whatever replaced it.
-  reconcile: async (value) => {
-    const current = await api.getConfig();
-    slots.config.rev = current.rev ?? null;
-    slots.config.derived = current.derived ?? slots.config.derived;
-    return configShape(current) === configShape(value)
-      ? { outcome: 'committed', result: current }
-      : { outcome: 'lost' };
-  },
+  reconcile: (value) => reconcileWith('config', value, api.getConfig, configShape, (c) => c),
 });
 
 export const secretsSaver: SaverHandle<NotesValue, api.SecretsData> = createSaver<NotesValue, api.SecretsData>({
@@ -91,14 +158,7 @@ export const secretsSaver: SaverHandle<NotesValue, api.SecretsData> = createSave
   onCommit: (_v, res) => { noteCommit('secrets', res); announce(); },
   onFail: (err) => noteFailure('secrets', err),
   timeoutMs: TIMEOUT_MS,
-  reconcile: async (notes) => {
-    const current = await api.getSecrets();
-    slots.secrets.rev = current.rev ?? null;
-    slots.secrets.derived = current.derived ?? slots.secrets.derived;
-    return notesShape(current.notes) === notesShape(notes)
-      ? { outcome: 'committed', result: current }
-      : { outcome: 'lost' };
-  },
+  reconcile: (notes) => reconcileWith('secrets', notes, api.getSecrets, notesShape, (d) => d.notes),
 });
 
 export const saverFor = (kind: Kind) => (kind === 'config' ? configSaver : secretsSaver) as SaverHandle<any, any>;

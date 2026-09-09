@@ -166,6 +166,9 @@ const settingsWrite = async (route: string, body: unknown, base: string | null) 
   return payload;
 };
 
+// The outcome of the work a save sets off, asked for on its own. A save's
+// response can only say "started": the derived update runs after it.
+export const getDerivedStatus = (): Promise<DerivedStatus> => fetch('/api/settings/derived').then(json);
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
 export const saveConfig = (c: AmConfig, base: string | null): Promise<AmConfig & { ok: true }> =>
   settingsWrite('/api/config', c, base);

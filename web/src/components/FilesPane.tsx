@@ -648,25 +648,19 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
   // come through here. `force` drops the content precondition, which is what
   // "overwrite" means after a conflict.
   //
-  // The text is read as the write goes out rather than when it was asked for, so
-  // a save that waited behind another one carries the newest buffer and the base
-  // the earlier write just committed.
-  // The text is read as the write goes out rather than when it was asked for, so
-  // a save that waited behind another one carries the newest buffer and the base
-  // the earlier write just committed. The file it belongs to travels with it:
-  // by the time an answer comes back, this viewer may be showing something else.
-  const write = useCallback(async (job: { force: boolean; sessionId: string; path: string }) => {
-    const { force } = job;
+  // A Save commits the version that was asked for. Reading the live buffer when
+  // the request finally goes out would quietly widen every Save into "and
+  // everything typed since", which is the one thing the file policy is not:
+  // §1 keeps normal Save explicit, and text typed after it stays dirty until it
+  // is saved in its own right.
+  //
+  // The base is the exception, and is read as the write goes out: an earlier
+  // save of this same file may have committed in the meantime, and this text is
+  // now based on what it left behind.
+  const write = useCallback(async (job: { force: boolean; sessionId: string; path: string; text: string; base: string | null }) => {
+    const { force, text } = job;
     const here = job.sessionId === hereRef.current.sessionId && job.path === hereRef.current.path;
-    // A save asked for before navigating still belongs to the file it was asked
-    // for, and the remembered draft is where that buffer lives once the viewer
-    // has moved on (or gone).
-    const kept = recall(job.sessionId).draft;
-    const fromDraft = kept && kept.path === job.path ? kept : null;
-    const buffered = here ? pending.current : null;
-    const text = buffered ? buffered.text : fromDraft?.text;
-    if (text == null) return null;                       // nothing left to write
-    const base = buffered ? baseRef.current : (fromDraft?.base ?? null);
+    const base = here ? baseRef.current : job.base;
     // ⌘S fires two handlers (the editor's keymap and the pane's), so the second
     // one arrives behind the first with the same text. It is still a save — the
     // buffer it asked for is on disk — but it does not need a second round trip
@@ -681,7 +675,7 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
 
   type Written = { sessionId: string; path: string; text: string; after: Awaited<ReturnType<typeof api.writeFile>> | null };
 
-  const saver = useSaver<{ force: boolean; sessionId: string; path: string }, Written | null>({
+  const saver = useSaver<{ force: boolean; sessionId: string; path: string; text: string; base: string | null }, Written | null>({
     send: write,
     onCommit: (_req, result, superseded) => {
       if (!result) return;              // there was nothing left to write
@@ -757,9 +751,11 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
   // the error, and a write still queued behind another one keeps it up too.
   const saveRequest = saver.request;
   const flush = useCallback((force = false): Promise<boolean> => {
-    if (!pending.current) return Promise.resolve(true);   // nothing outstanding
+    const job = pending.current;
+    if (!job) return Promise.resolve(true);   // nothing outstanding
     setStatus('saving'); setSaveErr(null);
-    return saveRequest({ force, sessionId, path });
+    // The version asked for is fixed here, at the moment the operator asked.
+    return saveRequest({ force, sessionId, path, text: job.text, base: baseRef.current });
   }, [saveRequest, sessionId, path]);
 
   // Typing only fills the buffer. Writing it is a decision, taken with the Save
@@ -809,7 +805,12 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
   const edit = useMemo<SaveState>(() => ({
     can: canEdit,
     save: () => flush(),
-    saveNow: (force = false) => flush(force),
+    // "Save and close" asks a stricter question than Save: is the buffer as it
+    // stands now on disk? A write that succeeded for older text is not a yes.
+    saveNow: async (force = false) => {
+      const ok = await flush(force);
+      return ok && !pending.current;
+    },
     discard: () => {
       pending.current = null;
       saver.reset();
@@ -1057,6 +1058,9 @@ export default function FilesPane({
   // Dismissing the dialog has to hand focus back, or the keyboard is left on
   // <body> and the next Esc goes nowhere — which reads as the guard being broken.
   const backToEditing = () => {
+    // The dialog's own answer. A save that was already out when it was clicked
+    // must not come back and close the view anyway.
+    closeIntent.current = false;
     setConfirmClose(false);
     requestAnimationFrame(() => {
       const cm = paneRef.current?.querySelector<HTMLElement>('.fv-cm .cm-content');
@@ -1064,10 +1068,20 @@ export default function FilesPane({
     });
   };
 
+  // Whether the operator still wants to leave, read after the write settles
+  // rather than assumed from when it started.
+  const closeIntent = useRef(false);
   const saveAndClose = async () => {
     if (!edit) return;
+    closeIntent.current = true;
+    // saveNow answers the strict question — is the buffer as it stands on disk —
+    // so text typed while the write was out comes back as false rather than as
+    // permission to close over it. Keep editing withdraws the intent outright.
     const ok = await edit.saveNow(!!edit.conflict);
-    if (ok) { setConfirmClose(false); setViewing(null); }
+    if (!ok || !closeIntent.current) return;
+    closeIntent.current = false;
+    setConfirmClose(false);
+    setViewing(null);
   };
 
   // Create lands in the folder you are looking at, which is the one the

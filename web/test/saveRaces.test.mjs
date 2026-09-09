@@ -63,14 +63,25 @@ const clean = () => ({ pending: false, error: null, at: null });
 const state = { config: structuredClone(baseConfig), notes: { HF_TOKEN: '' }, configRev: 'rev-0', notesRev: 'nrev-0', derived: clean() };
 let revN = 0;
 window.__state = state;
+// Somebody else's client, committing while ours waits.
+window.__elsewhere = (patch) => {
+  state.config = { ...structuredClone(state.config), ...patch };
+  state.configRev = 'rev-elsewhere-' + (++revN);
+};
+// Reads the test can hold, for the case where the check on a lost answer is
+// itself the request that never comes back.
+window.__holdReads = (on) => { state.holdReads = on; };
+// The derived pass finishing, some time after the save that started it.
+window.__derived = (d) => { state.derived = d; };
 window.__commit = (kind, i) => {
   const req = net[kind][i];
   if (kind === 'configs') { state.config = structuredClone(req.body); state.configRev = ('rev-lost-' + (++revN)); }
   else { state.notes = structuredClone(req.body); state.notesRev = ('nrev-lost-' + (++revN)); }
 };
-export const getConfig = () => Promise.resolve({
+export const getConfig = () => (state.holdReads ? new Promise(() => {}) : Promise.resolve({
   ...structuredClone(state.config), rev: state.configRev, readError: state.configReadError || null, derived: state.derived,
-});
+}));
+export const getDerivedStatus = () => Promise.resolve(state.derived);
 export const saveConfig = (c, base) => park(net.configs, { body: structuredClone(c), base }).then((r) => {
   if (r && r.conflict) throw new SettingsConflict('these settings were changed somewhere else', 'stale', r.rev, r.value);
   state.config = structuredClone(c);
@@ -133,6 +144,7 @@ await build({
             // failure needs actually live. It opens on its own session so the
             // two never share a remembered draft.
             openPane: () => { remember('files-2', { viewing: '/notes.txt' }); setShowPane(true); },
+            closePane: () => setShowPane(false),
           };
         }, []);
         return <div>
@@ -529,7 +541,8 @@ try {
   await page.waitForTimeout(120);
   const settledStrip = await page.evaluate(() => document.querySelector('.files-info')?.textContent || '');
   check('and then it reads as saved', () => assert.match(settledStrip, /saved/));
-  await page.evaluate(() => window.__h.setShowPane && window.__h.setShowPane(false));
+  await page.evaluate(() => window.__h.closePane());
+  await page.waitForTimeout(80);
 
 
   // ---- an edit that is not finished being typed ----
@@ -696,6 +709,234 @@ try {
   await page.waitForTimeout(150);
   const done = await flagOf('Agent output');
   check('and it lands', () => assert.match(done, /saved/));
+
+
+  // ---- round two: the paths through the fixes themselves ----
+
+  console.log('\na lost answer while somebody else was writing');
+  await page.evaluate(() => window.__savers.config.configure({ timeoutMs: 250 }));
+  const r0 = (await net('configs')).length;
+  await page.locator('.cfg-num').fill('31');
+  await waitFor((n) => window.__net.configs.length === n + 1, r0, 600);
+  // Our answer is lost. Meanwhile another client saves something we have never
+  // seen — a different value AND a different revision.
+  await page.evaluate(() => window.__elsewhere({ artifacts: { enabled: true, space: 'other-client/valuable', visibility: 'private' } }));
+  await page.waitForTimeout(500);
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await page.waitForTimeout(300);
+  const afterCheck = await page.evaluate(() => ({
+    count: window.__net.configs.length,
+    stored: window.__state.config.artifacts.space,
+    flag: [...document.querySelectorAll('h3')].find((h) => h.textContent.includes('Agent output'))?.querySelector('.save-flag')?.textContent || '',
+  }));
+  check('a value we never saw is not overwritten to recover our own',
+    () => assert.equal(afterCheck.count, r0 + 1));
+  check('so their change is still on the server',
+    () => assert.equal(afterCheck.stored, 'other-client/valuable'));
+  check('and it is reported as a conflict, not as saved',
+    () => assert.ok(/changed elsewhere/.test(afterCheck.flag), afterCheck.flag));
+  await page.getByRole('button', { name: 'Keep mine', exact: true }).click();
+  const overwrote = await waitFor((n) => window.__net.configs.length === n + 2, r0, 800);
+  check('keeping mine is what sends it — a click, not a recovery step',
+    () => assert.ok(overwrote, 'nothing was sent'));
+  const mineWrite = (await net('configs')).at(-1);
+  check('against the revision the check found',
+    () => assert.match(String(mineWrite?.base), /^rev-elsewhere/));
+  await settle('configs', r0 + 1, { rev: 'rev-mine' });
+  await page.waitForTimeout(150);
+
+  console.log('\na check that is itself unanswered');
+  const r1 = (await net('configs')).length;
+  await page.locator('.cfg-num').fill('33');
+  await waitFor((n) => window.__net.configs.length === n + 1, r1, 600);
+  await page.waitForTimeout(500);                       // the write times out
+  await page.evaluate(() => window.__holdReads(true));  // and so does the read-back
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await page.waitForTimeout(600);                       // past the same window
+  const wedged = await page.evaluate(() => window.__savers.config.state());
+  check('a read-back that never answers gives the slot back too',
+    () => assert.notEqual(wedged.status, 'saving'));
+  check('and stays retryable', () => assert.ok(wedged.outstanding));
+  await page.evaluate(() => window.__holdReads(false));
+  await page.locator('.cfg-num').fill('35');
+  const freed = await waitFor((n) => window.__net.configs.length === n + 2, r1, 3000);
+  check('a later edit is not trapped behind it', () => assert.ok(freed, 'nothing was sent'));
+  const freedWrite = (await net('configs')).at(-1);
+  check('and it carries the newer value', () => assert.equal(freedWrite?.body?.jobs?.askAboveUsd, 35));
+  await settle('configs', r1 + 1, { rev: 'rev-35' });
+  await page.evaluate(() => window.__savers.config.configure({ timeoutMs: 15000 }));
+  await page.waitForTimeout(150);
+
+  console.log('\nreopening settings while a write is still out');
+  const r2 = (await net('configs')).length;
+  await page.locator('.cfg-num').fill('11');
+  await waitFor((n) => window.__net.configs.length === n + 1, r2, 600);
+  // The panel is closed and reopened before the first write has landed.
+  await page.evaluate(() => window.__h.setShowSettings(false));
+  await page.waitForTimeout(80);
+  await page.evaluate(() => window.__h.setShowSettings(true));
+  await page.waitForFunction(() => document.querySelector('textarea.secret-desc'), null, { timeout: 15000 });
+  const reopenedMid = await page.evaluate(() => document.querySelector('.cfg-num').value);
+  check('the value being written is what the panel comes back to',
+    () => assert.equal(reopenedMid, '11'));
+  // Now edit a different field. Whatever this carries for the first field is
+  // what will be stored.
+  await page.locator('.cfg-input:not(.cfg-num)').first().fill('me/second-field');
+  await waitFor((n) => window.__net.configs.length === n + 1, r2, 600);
+  await settle('configs', r2, { rev: 'rev-first' });
+  const follow = await waitFor((n) => window.__net.configs.length === n + 2, r2, 800);
+  check('the edit that followed it goes out', () => assert.ok(follow, 'nothing was sent'));
+  const bothFields = (await net('configs')).at(-1);
+  check('carrying both fields — the one still in flight is not reverted',
+    () => { assert.equal(bothFields?.body?.jobs?.askAboveUsd, 11); assert.equal(bothFields?.body?.artifacts?.space, 'me/second-field'); });
+  await settle('configs', r2 + 1, { rev: 'rev-second' });
+  await page.waitForTimeout(150);
+  const stored = await page.evaluate(() => window.__state.config.jobs.askAboveUsd);
+  check('and what ends up stored is the value that was made, not an older one',
+    () => assert.equal(stored, 11));
+
+  console.log('\na Save saves what was asked for, not what is typed after it');
+  const w3 = (await net('writes')).length;
+  await page.locator('.fv-cm .cm-content').fill('version A2');
+  await page.evaluate(() => { window.__edit.save(); });
+  await waitFor((n) => window.__net.writes.length === n + 1, w3, 800);
+  await page.locator('.fv-cm .cm-content').fill('version B2');
+  await page.evaluate(() => { window.__edit.save(); });     // explicitly asked for B2
+  await page.locator('.fv-cm .cm-content').fill('version C2');   // typed, never asked for
+  await waitFor(() => window.__h.draft('files-1')?.text === 'version C2', null, 800);
+  await settle('writes', w3, { size: 9, mtime: 20, tag: 'tag-A2' });
+  const queued = await waitFor((n) => window.__net.writes.length === n + 2, w3, 800);
+  check('the queued save goes out', () => assert.ok(queued, 'nothing was written'));
+  const asked = (await net('writes')).at(-1);
+  check('and it carries the version that was asked for',
+    () => assert.equal(asked?.text, 'version B2'));
+  await settle('writes', w3 + 1, { size: 9, mtime: 21, tag: 'tag-B2' });
+  await page.waitForTimeout(120);
+  const afterQueued = await page.evaluate(() => ({
+    status: window.__edit.status,
+    draft: window.__h.draft('files-1'),
+    editor: document.querySelector('.fv-cm .cm-content').textContent,
+  }));
+  check('text typed after that Save stays dirty rather than being committed by it',
+    () => assert.equal(afterQueued.status, 'dirty'));
+  check('with its draft intact', () => assert.equal(afterQueued.draft?.text, 'version C2'));
+  check('and still on screen', () => assert.match(afterQueued.editor, /version C2/));
+  await page.evaluate(() => { window.__edit.save(); });
+  await waitFor((n) => window.__net.writes.length === n + 3, w3, 800);
+  await settle('writes', w3 + 2, { size: 9, mtime: 22, tag: 'tag-C2' });
+  await page.waitForTimeout(120);
+
+
+  console.log('\nwhat save and close is told when the buffer moves on');
+  const w5 = (await net('writes')).length;
+  await page.locator('.fv-cm .cm-content').fill('closing X');
+  await page.evaluate(() => { window.__closing = { p: window.__edit.saveNow() }; });
+  await waitFor((n) => window.__net.writes.length === n + 1, w5, 800);
+  await page.locator('.fv-cm .cm-content').fill('closing Y');   // typed, not saved
+  await waitFor(() => window.__h.draft('files-1')?.text === 'closing Y', null, 800);
+  await settle('writes', w5, { size: 9, mtime: 40, tag: 'tag-X' });
+  const answer = await page.evaluate(() => Promise.race([
+    window.__closing.p.then((v) => `resolved:${v}`),
+    new Promise((r) => setTimeout(() => r('pending'), 300)),
+  ]));
+  check('a write that succeeded for older text is not a yes to "is the buffer saved?"',
+    () => assert.equal(answer, 'resolved:false'));
+  const stillDirty = await page.evaluate(() => ({ status: window.__edit.status, draft: window.__h.draft('files-1') }));
+  check('the newer text is still unsaved, and says so', () => assert.equal(stillDirty.status, 'dirty'));
+  check('with its draft kept', () => assert.equal(stillDirty.draft?.text, 'closing Y'));
+  await page.evaluate(() => { window.__edit.save(); });
+  await waitFor((n) => window.__net.writes.length === n + 2, w5, 800);
+  await settle('writes', w5 + 1, { size: 9, mtime: 41, tag: 'tag-Y' });
+  await page.waitForTimeout(120);
+
+  console.log('\nsave and close, and then changing your mind');
+  await page.evaluate(() => window.__h.openPane());
+  await page.waitForTimeout(200);
+  const paneCm = page.locator('.fv-cm .cm-content').last();
+  const w4 = (await net('writes')).length;
+  await paneCm.fill('closing A');
+  await page.waitForTimeout(80);
+  // Leaving with an unsaved buffer asks; "Save and close" waits for the write.
+  await page.getByTitle('Back to files (Esc)').click();
+  await page.waitForSelector('.fv-modal-acts', { timeout: 5000 });
+  await page.getByRole('button', { name: 'Save and close', exact: true }).click();
+  const sentClose = await waitFor((n) => window.__net.writes.length === n + 1, w4, 800);
+  check('save and close sends the buffer', () => assert.ok(sentClose, 'nothing was written'));
+  // The operator changes their mind while it is out, and keeps typing.
+  await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
+  await page.waitForTimeout(80);
+  await paneCm.fill('closing B');
+  await page.waitForTimeout(80);
+  await settle('writes', w4, { size: 9, mtime: 30, tag: 'tag-CA' });
+  await page.waitForTimeout(200);
+  const afterKeep = await page.evaluate(() => ({
+    open: !!document.querySelector('.fv-cm .cm-content'),
+    editors: document.querySelectorAll('.fv-cm .cm-content').length,
+    draft: window.__h.draft('files-2'),
+    strip: document.querySelector('.files-info')?.textContent || '',
+  }));
+  check('an older success does not reverse Keep editing',
+    () => assert.equal(afterKeep.editors, 2, `${afterKeep.editors} editors on screen`));
+  check('the newer text is still the buffer', () => assert.equal(afterKeep.draft?.text, 'closing B'));
+  check('and the file does not read as saved', () => assert.ok(!/\bsaved\b/.test(afterKeep.strip), afterKeep.strip));
+
+  // And with nothing typed after it: the write succeeds for exactly the buffer
+  // it was given, so only the withdrawn intent stands between the answer and a
+  // view that closes itself under the operator.
+  const w6 = (await net('writes')).length;
+  await paneCm.fill('closing C');
+  await page.waitForTimeout(80);
+  await page.getByTitle('Back to files (Esc)').click();
+  await page.waitForSelector('.fv-modal-acts', { timeout: 5000 });
+  await page.getByRole('button', { name: 'Save and close', exact: true }).click();
+  await waitFor((n) => window.__net.writes.length === n + 1, w6, 800);
+  await page.getByRole('button', { name: 'Keep editing', exact: true }).click();
+  await page.waitForTimeout(80);
+  await settle('writes', w6, { size: 9, mtime: 32, tag: 'tag-CC' });
+  await page.waitForTimeout(250);
+  const keptOpen = await page.evaluate(() => document.querySelectorAll('.fv-cm .cm-content').length);
+  check('Keep editing keeps the file open even when the save it interrupted succeeds',
+    () => assert.equal(keptOpen, 2, `${keptOpen} editors on screen`));
+
+  // Doing it properly: ask again, and this time let it finish untouched.
+  await paneCm.fill('closing B');
+  await page.waitForTimeout(80);
+  await page.getByTitle('Back to files (Esc)').click();
+  await page.waitForSelector('.fv-modal-acts', { timeout: 5000 });
+  await page.getByRole('button', { name: 'Save and close', exact: true }).click();
+  const sentClose2 = await waitFor((n) => window.__net.writes.length === n + 3, w4, 800);
+  check('save and close sends the newer buffer', () => assert.ok(sentClose2, 'nothing was written'));
+  const closeWrite = (await net('writes')).at(-1);
+  check('which is the text on screen', () => assert.equal(closeWrite?.text, 'closing B'));
+  await settle('writes', w4 + 2, { size: 9, mtime: 31, tag: 'tag-CB' });
+  await waitFor(() => document.querySelectorAll('.fv-cm .cm-content').length === 1, null, 2000);
+  const closed = await page.evaluate(() => ({
+    editors: document.querySelectorAll('.fv-cm .cm-content').length,
+    draft: window.__h.draft('files-2'),
+  }));
+  check('and then it does close', () => assert.equal(closed.editors, 1));
+  check('with nothing left unsaved', () => assert.equal(closed.draft, null));
+  await page.evaluate(() => window.__h.closePane());
+  await page.waitForTimeout(80);
+
+
+  console.log('\na derived update that fails after the save has landed');
+  const d0 = (await net('configs')).length;
+  await page.locator('.cfg-num').fill('55');
+  await waitFor((n) => window.__net.configs.length === n + 1, d0, 600);
+  // The save lands. All it can say about the work it starts is "started".
+  await settle('configs', d0, { rev: 'rev-derived', derived: { pending: true, error: null } });
+  await page.waitForTimeout(60);
+  await page.evaluate(() => window.__derived({ pending: false, error: "EACCES: permission denied, open 'environment.md'", at: 1 }));
+  const surfaced = await waitFor(() => /could not be\s+updated|could not be updated/.test(document.body.textContent || ''), null, 4000);
+  check('a derived failure that arrives after the save reaches the open panel',
+    () => assert.ok(surfaced, 'no derived failure shown'));
+  const noResave = (await net('configs')).length;
+  check('without sending the settings again to find out', () => assert.equal(noResave, d0 + 1));
+  const settingsSaidSaved = await flagOf('Agent output');
+  check('and the save itself still reads as saved — they are different outcomes',
+    () => assert.ok(!/not saved/.test(settingsSaidSaved), settingsSaidSaved));
+  await page.evaluate(() => window.__derived({ pending: false, error: null, at: 2 }));
 
 } finally {
   await browser.close();

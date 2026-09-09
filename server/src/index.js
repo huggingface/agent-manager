@@ -1314,6 +1314,12 @@ app.get('/api/config', (_req, res) => {
 });
 app.put('/api/config', (req, res) => {
   const b = req.body || {};
+  // Every field below is normalized, so a wrong shape cannot write nonsense —
+  // but it can write a whole file of defaults, and answering that with 200 would
+  // make a malformed request look like a deliberate reset.
+  if (typeof b !== 'object' || Array.isArray(b)) {
+    return res.status(400).json({ code: 'invalid', error: 'settings must be an object' });
+  }
   const cfg = {
     artifacts: {
       enabled: !!(b.artifacts?.enabled ?? true),
@@ -1362,6 +1368,12 @@ app.put('/api/config', (req, res) => {
     rev: commit.rev, derived: envSkillReport(),
   });
 });
+
+// The derived update finishes after the save it follows, so its outcome is not
+// in that save's response. This is how a client finds out what happened without
+// sending the settings again — resubmitting a committed write to learn the fate
+// of the work it triggered is not a status check.
+app.get('/api/settings/derived', (_req, res) => res.json(envSkillReport()));
 
 // ---------- bucket backup: status + run-now (docs/bucket-backup.md) ----------
 app.get('/api/backup/status', async (_req, res) => {
@@ -1819,8 +1831,29 @@ app.get('/api/secrets', (_req, res) => {
     derived: envSkillReport(),
   });
 });
+// `typeof [] === 'object'` is how an array became a settings object. Writing one
+// replaced every description with `[]`, which the reader then refuses to load —
+// so a permissive write turned into a file nobody could save to again. The shape
+// is checked before anything is replaced, not after.
+const NOTE_MAX = 2000;
+function readNotesPayload(body) {
+  const notes = body && body.notes;
+  if (notes === undefined || notes === null) return { error: 'notes is required' };
+  if (typeof notes !== 'object' || Array.isArray(notes)) return { error: 'notes must be an object of name → description' };
+  const out = {};
+  for (const [key, value] of Object.entries(notes)) {
+    if (typeof value !== 'string') return { error: `the description for ${key} must be text` };
+    if (key.length > 128) return { error: 'a name is too long to be an environment variable' };
+    if (value.length > NOTE_MAX) return { error: `the description for ${key} is longer than ${NOTE_MAX} characters` };
+    out[key] = value;
+  }
+  return { notes: out };
+}
+
 app.put('/api/secrets', (req, res) => {
-  const notes = (req.body && req.body.notes && typeof req.body.notes === 'object') ? req.body.notes : {};
+  const payload = readNotesPayload(req.body);
+  if (payload.error) return res.status(400).json({ code: 'invalid', error: payload.error });
+  const notes = payload.notes;
   // Same contract as /api/config, for the same reason: two tabs describing the
   // same keys must not overwrite each other's descriptions.
   let commit;

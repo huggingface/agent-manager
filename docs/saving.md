@@ -28,6 +28,17 @@ was away. Concretely, an older success may not:
 - report “Saved” over text that is still only in the buffer,
 - or touch a different file, or a file whose viewer has been closed.
 
+A **normal Save commits the version that was asked for**, not whatever the buffer
+holds by the time the request reaches the wire. Text typed after a Save stays
+dirty until it is saved in its own right; a Save that waits behind another one
+still carries the revision the operator asked to save. Only the base moves on,
+because an earlier save of the same file may have committed in the meantime.
+
+**Save and close** asks a stricter question — *is the buffer as it stands now on
+disk?* — and a write that succeeded for older text answers no. Choosing *Keep
+editing* while a save is out withdraws the close outright: an answer that arrives
+afterwards is not permission to leave.
+
 A file save carries the file it belongs to. When its answer arrives, the
 remembered draft is only released if it still *is* the text that was committed;
 otherwise it is kept and its base tag is advanced to the version that just
@@ -62,6 +73,13 @@ To change one field, read the resource, edit it, and send it back. The
 precondition is what keeps a second writer from posting its own stale copy of
 every other field.
 
+The body is validated before anything is replaced. `notes` must be an object of
+name → text (an array is not one, and `typeof [] === 'object'` is exactly how a
+permissive writer once replaced every description with `[]` — which the reader
+then refused to load, leaving a file nobody could save to); a settings body must
+be an object rather than something normalized into a file of defaults. Both are
+`400 {code:'invalid'}`, and nothing on disk is touched.
+
 ## Damaged settings are not empty settings
 
 If a settings file exists but cannot be read — invalid JSON, wrong permissions —
@@ -84,12 +102,22 @@ Every settings save has a finite window for an answer (15s; file writes get
 30s). When it passes, the slot is released — otherwise one request that never
 settles traps every later edit behind it — and the state becomes *not
 confirmed*, because a lost answer may mean the server committed. Before anything
-is sent again, the client reads the resource back:
+is sent again, the client reads the resource back. The same finite window covers
+that read: a check that hangs would wedge the resource exactly the way the write
+it was checking on would have.
 
-- if what is stored is what was sent, the write had landed: it is recorded as
-  saved and not repeated;
-- if it is not, the value is sent again through the ordinary path, precondition
-  and all. A recovery is never a forced overwrite.
+The read-back has three answers, not two:
+
+- **what is stored is what was sent** — the write had landed. It is recorded as
+  saved, its revision is adopted, and it is not repeated.
+- **something else is stored, at the revision we already held** — nothing was
+  committed. The value is sent again through the ordinary path, precondition and
+  all.
+- **something else is stored, at a revision we have never seen** — somebody else
+  wrote while we were waiting. That is a conflict, not a recovery: the value
+  stays put and the operator chooses. A different read-back value is never on its
+  own evidence that our write failed, and it is never authority to replace a
+  version we never saw.
 
 ## How long a save lives
 
@@ -113,7 +141,10 @@ rebuilt after the response rather than on the save path, coalesced to one pass a
 a time, and it reads the files rather than trusting what a request carried — so
 a burst of saves converges on the last committed value.
 
-Its outcome is reported separately, in `derived` on both settings reads:
-“settings saved” and “the agents have been told” are different states, and the
-panel says so when the second one fails. Skill distribution beyond this file is
-issue #121's.
+Its outcome is reported separately, in `derived` on both settings reads and on
+its own at `GET /api/settings/derived`. A save's response can only say
+*started* — the work runs after it — so the client follows that up with the
+status endpoint until it settles, rather than resubmitting a committed write to
+learn the fate of the work it triggered. “Settings saved” and “the agents have
+been told” are different states, and the panel says so when the second one
+fails. Skill distribution beyond this file is issue #121's.

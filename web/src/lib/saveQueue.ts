@@ -36,8 +36,18 @@ export type SaverState = {
   unresolved: boolean;
 };
 
-/** What the server turned out to hold after a response went missing. */
-export type Reconciled<R> = { outcome: 'committed'; result: R } | { outcome: 'lost' };
+/**
+ * What the server turned out to hold after a response went missing.
+ *
+ * Three answers, not two. A read-back that differs from what was sent is NOT
+ * evidence that the write never landed — somebody else may have written since —
+ * and 'conflict' is the difference between "send it again" and "quietly replace
+ * a version you never saw".
+ */
+export type Reconciled<R> =
+  | { outcome: 'committed'; result: R }
+  | { outcome: 'lost' }
+  | { outcome: 'conflict'; error: Error };
 
 export type SaverOptions<T, R> = {
   send: (value: T) => Promise<R>;
@@ -101,6 +111,10 @@ export function createSaver<T, R>(opts: SaverOptions<T, R>): SaverHandle<T, R> {
   let options = opts;
   let state: SaverState = IDLE;
   let active = false;
+  // The value currently on the wire. It is not in the slot any more, but it is
+  // still the newest thing this saver is trying to get to the server: a panel
+  // that reopens while it is out must show it rather than fetch over it.
+  let inflight: { value: T } | null = null;
   let slot: { value: T; waiters: ((ok: boolean) => void)[] } | null = null;
   let failed = false;
   // The value whose answer never arrived. Nothing else may be sent until we know
@@ -124,9 +138,12 @@ export function createSaver<T, R>(opts: SaverOptions<T, R>): SaverHandle<T, R> {
     waiters.forEach((w) => w(ok));
   };
 
-  const withTimeout = (p: Promise<R>): Promise<R> => (
+  // The finite window applies to every request this controller waits on. A
+  // read-back that hangs would otherwise wedge the resource exactly the way the
+  // write it was checking on would have.
+  const withTimeout = <V>(p: Promise<V>): Promise<V> => (
     options.timeoutMs
-      ? new Promise<R>((resolve, reject) => {
+      ? new Promise<V>((resolve, reject) => {
         const t = setTimeout(() => reject(new TimedOut()), options.timeoutMs);
         p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
       })
@@ -141,14 +158,25 @@ export function createSaver<T, R>(opts: SaverOptions<T, R>): SaverHandle<T, R> {
     let answer: Reconciled<R>;
     try {
       answer = options.reconcile
-        ? await options.reconcile(missing.value)
+        ? await withTimeout(options.reconcile(missing.value))
         : { outcome: 'lost' };
     } catch (e) {
+      // Still unresolved, and still retryable: the slot is given back so later
+      // edits are not trapped behind a read that is not coming either.
       active = false;
       emit({ status: 'error', error: `could not check whether that saved — ${String((e as Error)?.message || e)}`, outstanding: true, unresolved: true });
       return;
     }
     active = false;
+    if (answer.outcome === 'conflict') {
+      // Somebody else's version is on the server. Replacing it is a decision,
+      // not a recovery step: the value stays put and the caller is told.
+      if (!slot) { slot = { value: missing.value, waiters: [] }; failed = true; }
+      unresolved = null;
+      options.onFail?.(answer.error, missing.value);
+      emit({ status: 'error', error: answer.error.message, outstanding: true, unresolved: false });
+      return;
+    }
     unresolved = null;
     if (answer.outcome === 'committed') {
       // It had landed after all. Treat it exactly as a commit, so the base
@@ -175,12 +203,14 @@ export function createSaver<T, R>(opts: SaverOptions<T, R>): SaverHandle<T, R> {
     if (!job) return;
     slot = null;
     active = true;
+    inflight = { value: job.value };
     failed = false;
     emit({ status: 'saving', error: null, outstanding: true });
     void (async () => {
       try {
         const result = await withTimeout(options.send(job.value));
         active = false;
+        inflight = null;
         // Anything asked for while this was away outranks it.
         const superseded = !!slot;
         options.onCommit?.(job.value, result, superseded);
@@ -189,6 +219,7 @@ export function createSaver<T, R>(opts: SaverOptions<T, R>): SaverHandle<T, R> {
         emit({ status: 'saved', error: null, outstanding: false });
       } catch (e) {
         active = false;
+        inflight = null;
         const err = e instanceof Error ? e : new Error(String(e));
         const lost = err instanceof TimedOut;
         // A refused write must leave something behind to retry with — unless the
@@ -224,11 +255,14 @@ export function createSaver<T, R>(opts: SaverOptions<T, R>): SaverHandle<T, R> {
     reset: () => {
       if (slot) settleWaiters(slot, false);
       slot = null;
+      inflight = null;
       unresolved = null;
       failed = false;
       emit(IDLE);
     },
-    pending: () => (slot ? slot.value : (unresolved ? unresolved.value : null)),
+    // Newest first: what is queued, else what is on the wire, else what is owed
+    // after an answer went missing.
+    pending: () => (slot ? slot.value : (inflight ? inflight.value : (unresolved ? unresolved.value : null))),
     state: () => state,
     timeout: () => options.timeoutMs ?? null,
     subscribe: (fn) => { listeners.add(fn); return () => { listeners.delete(fn); }; },

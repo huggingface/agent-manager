@@ -32,9 +32,15 @@ const isRoot = !!(process.getuid && process.getuid() === 0);
 // SPACE_ID and AM_DISTRIBUTE_SKILLS are dropped on purpose: with either set, a
 // generated skill is fanned out into the real ~/.claude of whoever runs this.
 const { SPACE_ID, AM_DISTRIBUTE_SKILLS, ...BASE_ENV } = process.env;
+// The generated skill only lists environment variables the server considers
+// injected. Rather than depend on whatever credentials happen to be in the
+// ambient environment — the suite must say the same thing on a laptop with none
+// — it supplies one of its own with a value nothing reads.
+const PROBE_KEY = 'SETTINGS_WRITE_PROBE_KEY';
 const server = spawn('node', ['src/index.js'], {
   env: {
     ...BASE_ENV,
+    [PROBE_KEY]: 'unused-by-anything',
     PORT: String(PORT), DATA_DIR, HOME: path.join(DATA_DIR, 'home'),
     CLAUDE_CONFIG_DIR: path.join(DATA_DIR, 'home', '.claude'),
     AM_BASHRC: '/nonexistent',
@@ -168,11 +174,11 @@ try {
   fs.writeFileSync(CONFIG, before);
 
   // ---- descriptions, and the skill derived from them ----
-  const notesOne = await putNotes({ HF_TOKEN: 'mark-a' }, null);
-  check('descriptions save the same way', notesOne.status === 200 && notesOne.body?.notes?.HF_TOKEN === 'mark-a'
+  const notesOne = await putNotes({ [PROBE_KEY]: 'mark-a' }, null);
+  check('descriptions save the same way', notesOne.status === 200 && notesOne.body?.notes?.[PROBE_KEY] === 'mark-a'
     && typeof notesOne.body?.rev === 'string');
-  check('and land as whole JSON', JSON.parse(fs.readFileSync(NOTES, 'utf8')).HF_TOKEN === 'mark-a');
-  const staleNotes = await putNotes({ HF_TOKEN: 'mark-x' }, 'not-the-revision');
+  check('and land as whole JSON', JSON.parse(fs.readFileSync(NOTES, 'utf8'))[PROBE_KEY] === 'mark-a');
+  const staleNotes = await putNotes({ [PROBE_KEY]: 'mark-x' }, 'not-the-revision');
   check('a description written against a revision that has moved on is refused',
     staleNotes.status === 409 && staleNotes.body?.code === 'stale');
 
@@ -182,9 +188,12 @@ try {
   // prove nothing either way.
   let rev = notesOne.body.rev;
   for (const value of ['mark-b', 'mark-c', 'mark-d', 'mark-e']) {
-    const r = await putNotes({ HF_TOKEN: value }, rev);
+    const r = await putNotes({ [PROBE_KEY]: value }, rev);
     rev = r.body?.rev || rev;
   }
+  const detected = (await api('/api/secrets')).body?.detected || [];
+  check('the probe variable is detected, so the generated skill has something to describe',
+    detected.includes(PROBE_KEY), detected.length ? `${detected.length} detected` : 'none detected');
   const settled = await until(() => {
     try { return /mark-e/.test(fs.readFileSync(ENV_SKILL, 'utf8')); } catch { return false; }
   });
@@ -195,28 +204,59 @@ try {
     converged.body?.derived?.pending === false && converged.body?.derived?.error === null,
     JSON.stringify(converged.body?.derived));
 
+  // ---- a payload the writer accepts and the reader then refuses ----
+  const notesBefore = fs.readFileSync(NOTES, 'utf8');
+  const notesRev = (await api('/api/secrets')).body.rev;
+  const asArray = await api(`/api/secrets?base=${encodeURIComponent(notesRev)}`,
+    { method: 'PUT', body: JSON.stringify({ notes: [] }) });
+  check('an array is not an object of descriptions, and is refused',
+    asArray.status === 400 && asArray.body?.code === 'invalid',
+    `status ${asArray.status} ${JSON.stringify(asArray.body?.error)}`);
+  const asNumbers = await api(`/api/secrets?base=${encodeURIComponent(notesRev)}`,
+    { method: 'PUT', body: JSON.stringify({ notes: { [PROBE_KEY]: 42 } }) });
+  check('and neither is a description that is not text', asNumbers.status === 400);
+  check('the descriptions that were there are untouched',
+    fs.readFileSync(NOTES, 'utf8') === notesBefore);
+  const readsBack = await api('/api/secrets');
+  check('so the file still reads, and ordinary saves still work',
+    !readsBack.body?.readError && readsBack.body?.rev === notesRev,
+    JSON.stringify(readsBack.body?.readError));
+  const ordinary = await putNotes({ [PROBE_KEY]: 'mark-ok' }, readsBack.body.rev);
+  check('proved by making one', ordinary.status === 200 && ordinary.body?.notes?.[PROBE_KEY] === 'mark-ok');
+  rev = ordinary.body.rev;
+  const configArray = await api('/api/config', { method: 'PUT', body: JSON.stringify([]) });
+  check('a settings body that is not an object is refused rather than normalized to defaults',
+    configArray.status === 400, `status ${configArray.status}`);
+
+  // ---- the derived outcome, asked for on its own ----
+  const derivedNow = await api('/api/settings/derived');
+  check('the derived outcome can be read without sending the settings again',
+    derivedNow.status === 200 && typeof derivedNow.body?.pending === 'boolean'
+      && 'error' in (derivedNow.body || {}),
+    JSON.stringify(derivedNow.body));
+
   // ---- "saved" and "the agents have been told" are different states ----
   if (isRoot) {
     console.log('SKIP  derived-failure checks (running as root: the mode would not stop a write)');
   } else {
     fs.chmodSync(ENV_SKILL, 0o444);
     fs.chmodSync(path.dirname(ENV_SKILL), 0o555);
-    const savedAnyway = await putNotes({ HF_TOKEN: 'mark-f' }, rev);
+    const savedAnyway = await putNotes({ [PROBE_KEY]: 'mark-f' }, rev);
     check('a settings save still succeeds when the derived update cannot be written',
       savedAnyway.status === 200 && savedAnyway.body?.ok === true, `status ${savedAnyway.status}`);
     check('and the file it was asked to save really is saved',
-      JSON.parse(fs.readFileSync(NOTES, 'utf8')).HF_TOKEN === 'mark-f');
-    const reported = await until(async () => !!(await api('/api/secrets')).body?.derived?.error);
-    const derived = (await api('/api/secrets')).body?.derived;
+      JSON.parse(fs.readFileSync(NOTES, 'utf8'))[PROBE_KEY] === 'mark-f');
+    const reported = await until(async () => !!(await api('/api/settings/derived')).body?.error);
+    const derived = (await api('/api/settings/derived')).body;
     check('but the derived failure is reported, not swallowed into a fully applied state',
       reported && /permission denied|EACCES/i.test(derived?.error || ''), JSON.stringify(derived));
     fs.chmodSync(path.dirname(ENV_SKILL), 0o755);
     fs.chmodSync(ENV_SKILL, 0o644);
     rev = savedAnyway.body.rev;
-    const retried = await putNotes({ HF_TOKEN: 'mark-g' }, rev);
-    const cleared = await until(async () => (await api('/api/secrets')).body?.derived?.error === null);
+    const retried = await putNotes({ [PROBE_KEY]: 'mark-g' }, rev);
+    const cleared = await until(async () => (await api('/api/settings/derived')).body?.error === null);
     check('and it clears once a later save gets the derived update through',
-      retried.status === 200 && cleared, JSON.stringify((await api('/api/secrets')).body?.derived));
+      retried.status === 200 && cleared, JSON.stringify((await api('/api/settings/derived')).body));
     check('with the skill on the newest description', /mark-g/.test(fs.readFileSync(ENV_SKILL, 'utf8')));
   }
 } catch (error) {

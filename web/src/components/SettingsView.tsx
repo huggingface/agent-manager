@@ -59,13 +59,22 @@ function useSettingsSlot(kind: Kind) {
 // one of them is what "saved ✓" is about.
 function DerivedNote({ kind }: { kind: Kind }) {
   const slot = useSettingsSlot(kind);
-  if (!slot.derived?.error) return null;
-  return (
-    <div className="s-help save-derived" title={slot.derived.error}>
-      Saved — but the <span className="mono">environment</span> skill agents read could not be
-      updated: {slot.derived.error}
-    </div>
-  );
+  const derived = slot.derived;
+  if (!derived) return null;
+  if (derived.error) {
+    return (
+      <div className="s-help save-derived" title={derived.error}>
+        Saved — but the <span className="mono">environment</span> skill agents read could not be
+        updated: {derived.error}
+      </div>
+    );
+  }
+  // Rebuilding it takes a moment and normally says nothing. It says something
+  // when the moment has passed and it is still going.
+  if (derived.pending && slot.derivedSlow) {
+    return <div className="s-help">Saved. Still updating the <span className="mono">environment</span> skill agents read…</div>;
+  }
+  return null;
 }
 
 // A settings file that cannot be read is not a settings file that is empty.
