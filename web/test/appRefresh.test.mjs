@@ -74,16 +74,19 @@ class FakeClock {
   }, (value) => published.push(value), { clock, timeoutMs: 1_000 });
 
   const old = manager.refresh('poll');
+  let oldSettled = false;
+  void old.then(() => { oldSettled = true; });
   await turn();
   const fresh = manager.refresh('replace');
   await turn();
   assert.equal(reads.length, 2, 'foreground replacement does not wait for an old read');
   assert.equal(reads[0].signal.aborted, true, 'the superseded transport is aborted');
+  assert.equal(oldSettled, false, 'the superseded caller waits for the replacing read');
   reads[1].pending.resolve('fresh');
   assert.equal(await fresh, 'fresh');
+  assert.equal(await old, 'fresh', 'the superseded caller receives the published replacement');
   assert.deepEqual(published, ['fresh']);
   reads[0].pending.resolve('obsolete');
-  assert.equal(await old, null);
   assert.deepEqual(published, ['fresh'], 'a late obsolete response cannot publish');
 
   // A regular poll coalesces rather than churning an in-flight request. Once a
@@ -271,6 +274,7 @@ try {
     const state = {
       version: 1,
       groupName: 'Return tests',
+      created: false,
       freeze: { tree: 0, meta: 0 },
       fail: { tree: 0, meta: 0 },
       frozen: { tree: [], meta: [] },
@@ -286,9 +290,15 @@ try {
       running: i === 1 && version === 1,
       state: i === 1 ? (version === 1 ? 'working' : 'waiting') : 'idle',
     });
+    const createdSession = {
+      id: 's99', name: 'fresh-agent', cli: 'claude', path: 'fresh-agent',
+      createdAt: '2026-09-09T12:00:00.000Z', everStarted: true, running: true, state: 'working',
+    };
     const treeFor = (version) => {
       const sessions = Array.from({ length: 12 }, (_, i) => session(i + 1, version));
-      return { order: ['g:g1'], groups: [{ id: 'g1', name: state.groupName, sessionIds: sessions.map((s) => s.id) }], sessions, hidden: [] };
+      const order = ['g:g1'];
+      if (state.created) { sessions.push(createdSession); order.push('s:s99'); }
+      return { order, groups: [{ id: 'g1', name: state.groupName, sessionIds: sessions.filter((s) => s.id !== 's99').map((s) => s.id) }], sessions, hidden: [] };
     };
     const metaFor = (version) => ({
       generatedAt: new Date().toISOString(),
@@ -328,6 +338,12 @@ try {
         state.groupName = JSON.parse(init.body).name;
         return Promise.resolve(response({ ok: true }));
       }
+      if (url === '/api/sessions' && init.method === 'POST') {
+        state.created = true;
+        return Promise.resolve(response(createdSession));
+      }
+      if (url.startsWith('/api/next-name')) return Promise.resolve(response({ cli: 'claude', name: 'claude-13' }));
+      if (url.startsWith('/api/folders')) return Promise.resolve(response({ path: '', folders: [] }));
       return Promise.resolve(response({ ok: true, sessions: [], messages: [] }));
     };
     const counts = () => ({
@@ -342,6 +358,7 @@ try {
       failNext(kind) { state.fail[kind]++; },
       frozen(kind) { return state.frozen[kind].length; },
       resolveFrozen(kind) { state.frozen[kind].shift()?.resolve(); },
+      resolveFrozenAt(kind, index) { state.frozen[kind].splice(index, 1)[0]?.resolve(); },
       setHidden(hidden) {
         Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
         Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => hidden ? 'hidden' : 'visible' });
@@ -512,6 +529,38 @@ try {
     const now = window.__refreshHarness.counts();
     return now.tree === before.tree + 1 && now.meta === before.meta + 1;
   }, beforeReconnect);
+
+  // A mutation caller awaits its replacement tree before navigating. A return
+  // event during quickstart used to settle the superseded promise as null,
+  // select s99 against the stale tree, and let reconciliation bounce back to
+  // Overview before the replacement finally published s99.
+  await page.click('.ov-row');
+  await page.waitForSelector('.ov-card');
+  await page.click('.add-btn');
+  await page.waitForSelector('.quick-prompt');
+  await page.fill('.quick-prompt', 'run the synthetic task');
+  await page.evaluate(() => { window.__refreshHarness.state.freeze.tree = 2; });
+  await page.press('.quick-prompt', 'Enter');
+  await page.waitForFunction(() => window.__refreshHarness.frozen('tree') === 1, null, { timeout: 5_000 });
+  await page.evaluate(() => {
+    window.__refreshHarness.setHidden(true);
+    window.__refreshHarness.setHidden(false);
+  });
+  await page.waitForFunction(() => window.__refreshHarness.frozen('tree') === 2, null, { timeout: 5_000 });
+  assert.equal(await page.evaluate(() => window.__refreshHarness.state.frozen.tree[0].call.aborted), true,
+    'the return supersedes quickstart\'s tree transport');
+  await page.waitForTimeout(100);
+  assert.equal(await page.evaluate(() => localStorage.getItem('am-active-ref')), 'overview',
+    'navigation waits while the replacement tree is still unresolved');
+  await page.evaluate(() => {
+    window.__refreshHarness.resolveFrozenAt('tree', 1);
+    window.__refreshHarness.resolveFrozenAt('tree', 0);
+  });
+  await page.waitForSelector('[data-pane-name]');
+  assert.equal(await page.textContent('[data-pane-name]'), 'fresh-agent');
+  assert.equal(await page.evaluate(() => localStorage.getItem('am-active-ref')), 's:s99',
+    'quickstart keeps its selected session when a return supersedes its refresh');
+  assert.equal(await page.$('.ov-name'), null, 'selection did not fall back to Overview');
 
   // Unmount removes all timers/listeners/publication rights; remount creates one
   // fresh set rather than accumulating another loop.

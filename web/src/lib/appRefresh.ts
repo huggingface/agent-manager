@@ -24,8 +24,10 @@ const realClock: RefreshClock = {
  *
  * Polls coalesce behind a live read. Explicit refreshes replace it immediately:
  * abort is sent to the transport, while the local race and generation check
- * also retire transports/mocks that ignore abort. The deadline releases the
- * slot even if neither the request nor its abort ever settles.
+ * also retire transports/mocks that ignore abort. A superseded caller follows
+ * the replacing read, so mutation code awaiting freshness cannot continue
+ * against the stale tree merely because a return event arrived. The deadline
+ * releases the slot even if neither the request nor its abort ever settles.
  */
 export function createLatestRefresh<T>(
   read: (signal: AbortSignal) => Promise<T>,
@@ -36,15 +38,21 @@ export function createLatestRefresh<T>(
   const clock = options.clock ?? realClock;
   let disposed = false;
   let generation = 0;
-  let active: { generation: number; abort: AbortController; promise: Promise<T | null> } | null = null;
+  let active: {
+    generation: number;
+    abort: AbortController;
+    promise: Promise<T | null>;
+    supersedeWith(next: Promise<T | null>): void;
+  } | null = null;
 
   const refresh = (kind: RefreshKind = 'replace'): Promise<T | null> => {
     if (disposed) return Promise.resolve(null);
     if (kind === 'poll' && active) return Promise.resolve(null);
 
-    active?.abort.abort();
+    const previous = active;
     const mine = ++generation;
     const abort = new AbortController();
+    let supersededBy: Promise<T | null> | null = null;
     let timer: Timer;
     let rejectCanceled: (() => void) | null = null;
     const canceled = new Promise<never>((_, reject) => {
@@ -63,15 +71,25 @@ export function createLatestRefresh<T>(
       canceled,
       deadline,
     ]).then((value) => {
-      if (disposed || mine !== generation) return null;
+      if (disposed) return null;
+      if (mine !== generation) return supersededBy;
       publish(value);
       return value;
-    }).catch(() => null).finally(() => {
+    }).catch(() => supersededBy).finally(() => {
       clock.clearTimeout(timer);
       if (rejectCanceled) abort.signal.removeEventListener('abort', rejectCanceled);
       if (active?.generation === mine) active = null;
     });
-    active = { generation: mine, abort, promise };
+    active = {
+      generation: mine,
+      abort,
+      promise,
+      supersedeWith(next) {
+        supersededBy = next;
+        abort.abort();
+      },
+    };
+    previous?.supersedeWith(promise);
     return promise;
   };
 
