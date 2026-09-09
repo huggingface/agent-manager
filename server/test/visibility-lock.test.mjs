@@ -87,7 +87,8 @@ const stdinLog = path.join(DATA_DIR, 'fake-claude.stdin');
 fs.writeFileSync(path.join(bin, 'claude'), `#!/bin/sh
 echo "start $$ $AM_NAME" >> "${startLog}"
 echo "${MARKER}"
-if [ "$AM_NAME" = slow ]; then
+case "$AM_NAME" in slow*) SLOW=1;; esac
+if [ -n "$SLOW" ]; then
   ( for i in $(seq 1 15); do echo tick; sleep 0.2; done ) &
 else
   ( while :; do echo tick; sleep 0.2; done ) &
@@ -98,6 +99,12 @@ cat >> "${stdinLog}.$AM_NAME"
 kill $TICKER 2>/dev/null
 `, { mode: 0o755 });
 const stdinOf = (name) => (fs.existsSync(`${stdinLog}.${name}`) ? fs.readFileSync(`${stdinLog}.${name}`, 'utf8') : '');
+// Hermes is the CLI whose attachment insertion types one command per image and
+// whose quickstart has no prompt flag (typed after a boot wait): same fake.
+fs.copyFileSync(path.join(bin, 'claude'), path.join(bin, 'hermes'));
+fs.chmodSync(path.join(bin, 'hermes'), 0o755);
+// A valid 1x1 PNG (attachments are sniffed by magic bytes).
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 
 // Sessions run in a LOGIN shell, and /etc/profile rebuilds PATH — so the fake
 // binary must be put back by the fixture HOME's own profile.
@@ -233,7 +240,7 @@ try {
   r = await api('/API/Sessions', { method: 'POST', body: JSON.stringify({ name: 'nope2', cli: 'claude' }) });
   check('locked: a mutation through a routed spelling is refused before any effect', r.status === 403);
   const wsChecking = await attach('any');
-  check('terminal attach refused with code 4003 while checking', wsChecking.closed?.code === 4003 && /^locked:checking:\d+$/.test(wsChecking.closed?.reason || ''), JSON.stringify(wsChecking.closed));
+  check('terminal attach refused with code 4003 while checking', wsChecking.closed?.code === 4003 && /^locked:checking:\d+:[\w-]+$/.test(wsChecking.closed?.reason || ''), JSON.stringify(wsChecking.closed));
   const vis = (await api('/api/visibility')).body;
   check('/api/visibility is public-safe: verdicts and timestamps, no bucket ids while locked', vis.locked && vis.space?.verdict === 'unknown' && vis.buckets.length === 0 && !JSON.stringify(vis).includes('hf_fixture'));
 
@@ -280,22 +287,57 @@ try {
   await sleep(300);
   check('the stalled upload has not touched the target file', fs.readFileSync(path.join(filesDir, 'keep.txt'), 'utf8') === 'OLD-CONTENT-MUST-SURVIVE');
 
-  // A prompt to a stopped agent that takes a few seconds to become ready: the
-  // request is admitted now, its effect (typing) would land after the lock.
-  r = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ name: 'slow', cli: 'claude' }) });
-  const slowId = r.body?.id;
-  const slowFirst = await attach(slowId);
-  await waitFor(() => slowFirst.text.includes(MARKER), 8000);
-  slowFirst.ws.close();
-  r = await api(`/api/sessions/${slowId}/stop`, { method: 'POST' });
-  check('slow agent started once and stopped', r.status === 200 && !!(await waitFor(async () => ((await api('/api/sessions')).body || []).find((x) => x.id === slowId)?.state === 'stopped', 8000)), JSON.stringify(r.body));
-  const slowStarts0 = startsOf('slow');
-  const lateInput = fetch(`${API}/api/sessions/${slowId}/input`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-am-origin': 'operator' }, body: JSON.stringify({ text: 'late-input' }) })
+  // Four kinds of PTY work that are admitted now but whose effect would land
+  // AFTER the lock. Set them all up first, then fire them back to back right
+  // before the flip, so their agents' readiness (~3.5 s) falls after the lock.
+  //   - a prompt to a stopped agent that takes seconds to become ready
+  //   - a cron run: 202 now, delivery in the background
+  //   - a quickstart prompt for a CLI without a prompt flag (typed after boot)
+  //   - attachment insertion: one command per image with waits in between
+  const setupStopped = async (name) => {
+    const made = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ name, cli: 'claude' }) });
+    const id = made.body?.id;
+    const first = await attach(id);
+    await waitFor(() => first.text.includes(MARKER), 8000);
+    first.ws.close();
+    await api(`/api/sessions/${id}/stop`, { method: 'POST' });
+    const stopped = await waitFor(async () => ((await api('/api/sessions')).body || []).find((x) => x.id === id)?.state === 'stopped', 8000);
+    check(`${name} agent started once and stopped`, !!id && !!stopped && startsOf(name) === 1);
+    return id;
+  };
+  const slowId = await setupStopped('slow');
+  const cronSid = await setupStopped('slow-cron');
+  r = await api('/api/crons', { method: 'POST', body: JSON.stringify({ name: 'late cron', agent: { name: 'slow-cron', cli: 'claude' }, prompt: 'cron-late', schedule: { cron: '0 0 1 1 *', tz: 'UTC' }, runOnRestart: false }) });
+  check('cron job created', r.status === 201 || r.status === 200, JSON.stringify(r.body));
+  const cronId = r.body?.id || r.body?.cron?.id;
+  r = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ name: 'imgs', cli: 'hermes' }) });
+  const imgsId = r.body?.id;
+  const imgsFirst = await attach(imgsId);
+  await waitFor(() => imgsFirst.text.includes(MARKER), 8000);
+  const imageIds = [];
+  for (let k = 0; k < 5; k++) { // the per-session attachment cap is five
+    const up = await fetch(`${API}/api/sessions/${imgsId}/attachments`, { method: 'POST', headers: { 'content-type': 'image/png', 'x-file-name': `shot-${k}.png`, 'x-am-origin': 'operator' }, body: PNG });
+    const j = await up.json().catch(() => null);
+    if (up.status === 201 && j?.id) imageIds.push(j.id);
+  }
+  check('five image attachments stored', imageIds.length === 5);
+  const imagesTyped = () => (stdinOf('imgs').match(/\/image /g) || []).length;
+
+  // Fire.
+  const postJson = (route, body) => fetch(`${API}${route}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-am-origin': 'operator' }, body: JSON.stringify(body) })
     .then(async (x) => ({ status: x.status, body: await x.json().catch(() => null) })).catch((e) => ({ status: 0, error: e.cause?.code || e.message }));
-  await waitFor(() => startsOf('slow') > slowStarts0, 5000);
-  check('the delayed prompt restarted the slow agent and is waiting for readiness', startsOf('slow') === slowStarts0 + 1 && !stdinOf('slow').includes('late-input'));
+  const lateInput = postJson(`/api/sessions/${slowId}/input`, { text: 'late-input' });
+  const cronRun = await postJson(`/api/crons/${cronId}/run`, {});
+  check('cron run accepted with 202 while its delivery waits for readiness', cronRun.status === 202, JSON.stringify(cronRun));
+  const quick = await postJson('/api/sessions', { name: 'quick', cli: 'hermes', prompt: 'quick-late' });
+  check('quickstart session created (prompt to be typed after boot)', quick.status === 201, JSON.stringify(quick));
+  const insertion = postJson(`/api/sessions/${imgsId}/attachments/insert`, { attachmentIds: imageIds });
+  await waitFor(() => startsOf('slow') === 2 && startsOf('slow-cron') === 2 && startsOf('quick') === 1 && imagesTyped() >= 1, 6000);
+  check('all four are under way: two slow agents restarted, quickstart booted, first image command typed',
+    startsOf('slow') === 2 && startsOf('slow-cron') === 2 && startsOf('quick') === 1 && imagesTyped() >= 1 && imagesTyped() < 5,
+    `slow=${startsOf('slow')} cron=${startsOf('slow-cron')} quick=${startsOf('quick')} images=${imagesTyped()} insertion=${JSON.stringify(await Promise.race([insertion, sleep(50).then(() => 'pending')]))} stdin=${JSON.stringify(stdinOf('imgs').slice(-120))}`);
+  check('nothing has been typed into the slow agents yet', !stdinOf('slow').includes('late-input') && !stdinOf('slow-cron').includes('cron-late') && !stdinOf('quick').includes('quick-late'));
   const stream = openStream('laptop');
-  await waitFor(() => api('/api/sessions/' + sid + '/remote').then(() => true));
   await sleep(300);
   check('remote stream is open and heart-beating', !stream.done);
 
@@ -306,7 +348,7 @@ try {
   const lockLatency = Date.now() - t2;
   check(`lock observed within a check cycle (${lockLatency} ms)`, !!lockedInfo && lockedInfo.lockReason === 'public-space');
   await waitFor(() => controller.closed && watcher.close, 3000);
-  check('controller socket closed with 4003 locked:public-space', controller.closed?.code === 4003 && /^locked:public-space:\d+$/.test(controller.closed?.reason || ''), JSON.stringify(controller.closed));
+  check('controller socket closed with 4003 locked:public-space', controller.closed?.code === 4003 && /^locked:public-space:\d+:[\w-]+$/.test(controller.closed?.reason || ''), JSON.stringify(controller.closed));
   check('watcher socket got the same close frame', watcher.close?.code === 4003 && watcher.close?.reason === controller.closed?.reason, JSON.stringify(watcher.close));
   check(`revocation landed within ${lockLatency + 1500} ms of the verdict`, controller.closed && watcher.close);
   const wp = await waitFor(() => waitPoll.then((x) => x).catch(() => null), 3000);
@@ -316,16 +358,24 @@ try {
   const wpu = await waitFor(() => waitPollUpper.then((x) => x).catch(() => null), 3000);
   check('the long poll opened through a routed spelling was revoked too', wpu?.status === 403 && wpu?.body?.reason === 'public-space', JSON.stringify(wpu));
   check('the refusal body carries the lock seq', typeof wp?.body?.seq === 'number' && wp.body.seq === lockedInfo.visibility.seq, JSON.stringify(wp?.body));
-  check('the close reason carries the same seq', controller.closed?.reason === `locked:public-space:${lockedInfo.visibility.seq}`, JSON.stringify(controller.closed));
+  check('the close reason carries the same seq and generation', controller.closed?.reason === `locked:public-space:${lockedInfo.visibility.seq}:${lockedInfo.visibility.boot}`, JSON.stringify(controller.closed));
   const upCut = await waitFor(() => uploadOutcome.then((x) => x), 3000);
   check('the stalled upload was cut by the lock', !!upCut && upCut.status !== 200, JSON.stringify(upCut));
   check('the file it was replacing is intact', fs.readFileSync(path.join(filesDir, 'keep.txt'), 'utf8') === 'OLD-CONTENT-MUST-SURVIVE');
   check('no staging file left behind', fs.readdirSync(filesDir).filter((f) => f.includes('am-upload')).length === 0, fs.readdirSync(filesDir).join(','));
   const li = await waitFor(() => lateInput.then((x) => x), 3000);
   check('the delayed prompt request was cut by the lock', !!li && li.status !== 200, JSON.stringify(li));
-  await sleep(4500); // the slow agent becomes ready in here
+  const typedAtLock = imagesTyped();
+  await sleep(4500); // the slow agents become ready in here; the insertion would have finished
   check('a prompt still waiting for readiness when the lock landed is never typed', !stdinOf('slow').includes('late-input'), JSON.stringify(stdinOf('slow').slice(-80)));
-  check('...and the slow agent itself keeps running (one restart, from before the lock)', startsOf('slow') === slowStarts0 + 1);
+  check('...and the slow agent itself keeps running (one restart, from before the lock)', startsOf('slow') === 2);
+  check('a 202 cron delivery whose response closed long ago is cancelled too', !stdinOf('slow-cron').includes('cron-late'), JSON.stringify(stdinOf('slow-cron').slice(-80)));
+  check('the cron agent keeps running (started once for the delivery, never re-prompted)', startsOf('slow-cron') === 2);
+  check('a quickstart prompt waiting on its boot delay is dropped', !stdinOf('quick').includes('quick-late') && startsOf('quick') === 1, JSON.stringify(stdinOf('quick').slice(-80)));
+  check(`attachment insertion stops at the lock: ${typedAtLock} of 5 image commands typed, none after`, typedAtLock >= 1 && typedAtLock < 5 && imagesTyped() === typedAtLock, `now=${imagesTyped()}`);
+  const ins = await waitFor(() => insertion.then((x) => x), 3000);
+  check('the insertion request itself was cut', !!ins && ins.status !== 200, JSON.stringify(ins));
+  check('the refusal body carries the server generation', typeof wp?.body?.boot === 'string' && wp.body.boot === lockedInfo.visibility.boot, JSON.stringify(wp?.body));
 
   // The misbehaving watcher keeps writing: nothing may reach the PTY.
   const stdinBefore = stdinOf('agent');
@@ -343,7 +393,7 @@ try {
   r = await api(`/api/sessions/${sid}/input`, { method: 'POST', body: JSON.stringify({ text: 'nope' }) });
   check('input route refused while locked', r.status === 403 && r.body?.reason === 'public-space');
   const wsLocked = await attach(sid);
-  check('new attach refused with locked:public-space', wsLocked.closed?.code === 4003 && /^locked:public-space:\d+$/.test(wsLocked.closed?.reason || ''));
+  check('new attach refused with locked:public-space', wsLocked.closed?.code === 4003 && /^locked:public-space:\d+:[\w-]+$/.test(wsLocked.closed?.reason || ''));
   const s2 = openStream('laptop', 5);
   await waitFor(() => s2.done, 8000);
   check('a new remote poll is refused with the locked body', s2.status === 403);
@@ -364,6 +414,8 @@ try {
   again.ws.send(JSON.stringify({ t: 'i', d: 'after-unlock\n' }));
   check('input works again through the new connection', !!(await waitFor(() => stdinOf('agent').includes('after-unlock'))));
   check('the cancelled prompt is not replayed on reopening', !stdinOf('slow').includes('late-input'));
+  await sleep(1500);
+  check('neither are the cancelled cron, quickstart or insertion effects', !stdinOf('slow-cron').includes('cron-late') && !stdinOf('quick').includes('quick-late') && imagesTyped() === typedAtLock, `images now=${imagesTyped()} at lock=${typedAtLock}`);
   const uploadFull = await new Promise((resolve) => {
     const q = http.request({ host: '127.0.0.1', port: PORT, method: 'POST', path: `/api/files/${filesId}/upload?name=keep.txt`, headers: { 'content-type': 'application/octet-stream', 'x-am-origin': 'operator' } }, (x) => resolve({ status: x.statusCode }));
     q.on('error', (e) => resolve({ error: e.message }));
@@ -396,7 +448,7 @@ try {
   const lateBy = Date.now() - expectedExpiry;
   check(`grace expires into verification-unavailable (${lateBy} ms after the computed expiry)`, unavailable?.lockReason === 'verification-unavailable' && lateBy >= -300 && lateBy < 1500);
   await waitFor(() => again.closed, 3000);
-  check('the open terminal was revoked by the expiry with its own reason', again.closed?.code === 4003 && /^locked:verification-unavailable:\d+$/.test(again.closed?.reason || ''), JSON.stringify(again.closed));
+  check('the open terminal was revoked by the expiry with its own reason', again.closed?.code === 4003 && /^locked:verification-unavailable:\d+:[\w-]+$/.test(again.closed?.reason || ''), JSON.stringify(again.closed));
   await waitFor(() => s3.done, 3000);
   check('the remote poll was stopped by the expiry', s3.done && s3.final?.stop === true);
   check('unavailable is described as an outage, not as public', unavailable.visibility.space.verdict === 'private' && unavailable.visibility.verifiedAt === null);

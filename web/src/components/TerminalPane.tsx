@@ -793,7 +793,7 @@ export default function TerminalPane({
         if (e.code === LOCKED_CLOSE_CODE) {
           setConn('locked');
           const parsed = parseCloseReason(e.reason);
-          announceLock({ reason: parsed.reason, bucket: null, seq: parsed.seq });
+          announceLock({ reason: parsed.reason, bucket: null, seq: parsed.seq, boot: parsed.boot });
           return;
         }
         setConn('closed');

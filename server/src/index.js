@@ -215,6 +215,20 @@ app.use((req, res, next) => {
 const OPEN_WHEN_LOCKED = new Set(['/health', '/info', '/visibility']); // relative to the /api mount
 const admitted = new Set(); // revoke(eff) callbacks for live privileged connections
 const admitClient = (revoke) => { admitted.add(revoke); return () => admitted.delete(revoke); };
+// Work that performs PTY effects after a wait — typing a prompt once the agent
+// is ready, inserting attachments one by one — holds a scope for exactly as
+// long as it runs, whether or not the HTTP response that started it is still
+// open (a cron run answers 202 and delivers in the background). The lock
+// aborts every open scope; the work checks the signal before each effect.
+function lockScope() {
+  const cancel = new AbortController();
+  const revoke = (locked) => { try { cancel.abort(new Error(`locked:${locked.reason}`)); } catch {} };
+  const release = admitClient(revoke);
+  const eff = lockState();
+  if (eff.locked) revoke(eff); // opened while locked: nothing may happen
+  return { signal: cancel.signal, release };
+}
+const lockedError = () => Object.assign(new Error('the manager locked itself before this could be delivered'), { statusCode: 403, code: 'locked' });
 // Long polls sleep between looks; a lock must wake them instead of waiting the
 // sleep out. Resolves when `ms` elapse OR the lock lands, whichever is first.
 const lockWaiters = new Set();
@@ -409,10 +423,19 @@ async function deliver(session, { text, attachments = [] }, from, { signal = nul
   // The privacy lock cancels admitted-but-uncommitted work: every effect below
   // is preceded by this check, so a prompt that was still waiting for its agent
   // to become ready is dropped when the lock lands — not typed a moment later
-  // through a connection the lock already cut, and never replayed.
-  const cancelled = () => {
-    if (signal?.aborted) throw Object.assign(new Error('the manager locked itself before this could be delivered'), { statusCode: 403, code: 'locked' });
-  };
+  // through a connection the lock already cut, and never replayed. The scope is
+  // this call's own, so it holds for a delivery whose response already closed
+  // (a cron run's 202) exactly as for one still being awaited.
+  const scope = lockScope();
+  const cancelled = () => { if (scope.signal.aborted || signal?.aborted) throw lockedError(); };
+  try {
+    return await deliverInner(session, { text, attachments }, from, { cancelled, signal: scope.signal });
+  } finally {
+    scope.release();
+  }
+}
+
+async function deliverInner(session, { text, attachments }, from, { cancelled, signal }) {
   cancelled();
   if (isRemote(session.cli)) {
     if (attachments.length) throw Object.assign(new Error('files are not available for remote agents yet'), { statusCode: 400 });
@@ -444,7 +467,7 @@ async function deliver(session, { text, attachments = [] }, from, { signal = nul
     // Stop waiting the moment the lock lands rather than at readiness.
     const ready = await Promise.race([
       waitForInputReady(session.id),
-      new Promise((resolve) => { if (!signal) return; if (signal.aborted) resolve(false); else signal.addEventListener('abort', () => resolve(false), { once: true }); }),
+      new Promise((resolve) => { if (signal.aborted) resolve(false); else signal.addEventListener('abort', () => resolve(false), { once: true }); }),
     ]);
     cancelled();
     if (!ready) throw new Error('session did not become ready for input within 30 seconds — prompt was not sent');
@@ -542,16 +565,26 @@ app.post('/api/sessions/:id/attachments/insert', async (req, res) => {
     const nativeImages = s.cli === 'hermes'
       ? pending.filter((attachment) => attachment.kind === 'image') : [];
     const prelude = formatAttachmentPrelude(s.cli, nativeImages);
-    if (prelude.length) {
-      for (let index = 0; index < prelude.length; index += 1) {
-        await sendInput(s.id, prelude[index]);
-        inserted.add(nativeImages[index].id);
-        await sleep(500);
+    // Each command is a separate PTY effect with a wait in between: the lock
+    // may land part-way, and nothing after it may be typed.
+    const scope = lockScope();
+    const cancelled = () => { if (scope.signal.aborted) throw lockedError(); };
+    try {
+      if (prelude.length) {
+        for (let index = 0; index < prelude.length; index += 1) {
+          cancelled();
+          await sendInput(s.id, prelude[index]);
+          inserted.add(nativeImages[index].id);
+          await sleep(500);
+        }
       }
+      const inline = pending.filter((attachment) => !inserted.has(attachment.id));
+      cancelled();
+      if (inline.length) pasteInput(s.id, inline.map((attachment) => attachment.insertText).join(''));
+      for (const attachment of inline) inserted.add(attachment.id);
+    } finally {
+      scope.release();
     }
-    const inline = pending.filter((attachment) => !inserted.has(attachment.id));
-    if (inline.length) pasteInput(s.id, inline.map((attachment) => attachment.insertText).join(''));
-    for (const attachment of inline) inserted.add(attachment.id);
     return res.json({ ok: true, mode });
   } catch (e) {
     return res.status(e.statusCode || 409).json({ error: String(e.message || e) });
@@ -2391,11 +2424,16 @@ function createSession({ name, cli, groupId, path: reqPath, prompt }) {
       try { ensureRunning(store.get(s.id) || s); } catch (e) { console.error('[quickstart]', e && e.message); }
     } else {
       (async () => {
+        // Detached: the response is long gone when the typing happens, so the
+        // lock scope is this task's own.
+        const scope = lockScope();
         try {
           ensureRunning(s);
           await new Promise((r) => setTimeout(r, 4000));
+          if (scope.signal.aborted) return; // locked meanwhile: the agent runs, the prompt is dropped
           await sendInput(s.id, text);
         } catch (e) { console.error('[quickstart]', e && e.message); }
+        finally { scope.release(); }
       })();
     }
   }
@@ -2983,8 +3021,9 @@ function originAllowed(origin) {
 }
 
 // Close code for a terminal socket the privacy lock refused or revoked; the
-// reason is `locked:<reason>:<seq>` (seq = the lock's transition counter, so a
-// browser can order it against status responses). The frontend must not
+// reason is `locked:<reason>:<seq>:<boot>` (seq = the lock's transition
+// counter, boot = the server process it belongs to, so a browser can order it
+// against status responses and never across a restart). The frontend must not
 // auto-reconnect on it (the shared status poll reopens the app once the lock
 // clears); an older frontend that does is simply refused again, cheaply,
 // before any attach.
@@ -3007,7 +3046,7 @@ wss.on('connection', (ws, req) => {
   const refuse = (eff) => {
     revoked = true;
     detach();
-    try { ws.close(LOCKED_CLOSE_CODE, `locked:${eff.reason}${Number.isFinite(eff.seq) ? `:${eff.seq}` : ''}`); } catch { try { ws.terminate(); } catch {} }
+    try { ws.close(LOCKED_CLOSE_CODE, `locked:${eff.reason}${Number.isFinite(eff.seq) ? `:${eff.seq}${eff.boot ? `:${eff.boot}` : ''}` : ''}`); } catch { try { ws.terminate(); } catch {} }
     // A client that never answers the close handshake keeps the socket half
     // open for ws's own 30 s timeout; nothing flows meanwhile (detached, and
     // every handler checks `revoked`), but do not leave it hanging that long.

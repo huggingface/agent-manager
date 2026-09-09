@@ -10,6 +10,11 @@
  *   - a hidden Reader-only tab learns the lock when it comes back, and keeps its
  *     unsent draft and selected session across lock and reopen
  *   - a verification outage is explained as an outage, not as exposure
+ *   - the backend restarts under an open app: the new generation's first
+ *     refusal locks it (nothing cached stays mounted), its verification reopens
+ *     it, and a delayed refusal from the OLD generation cannot wedge it
+ *   - the unverified-bucket warning clears in a visible, unlocked tab once the
+ *     bucket verifies, without a reload or tab switch
  *
  * Set VISUI_PUBLIC_DIR to a prebuilt web/dist to skip the build.
  * am-test: manual — Chromium, a full web build and a fake Hub; run by hand.
@@ -61,7 +66,8 @@ if (!process.env.VISUI_PUBLIC_DIR) {
 }
 
 // ---------- fake Hub ----------
-const mode = { space: 'error', bucket: 'private' };
+// mode.auth: 'ok' | 'unauthorized' — whether the fixture token may read the Space.
+const mode = { space: 'error', bucket: 'private', auth: 'ok' };
 const hub = http.createServer((req, res) => {
   const json = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
   const repo = (id, m) => {
@@ -71,6 +77,7 @@ const hub = http.createServer((req, res) => {
   };
   if (req.url === `/api/spaces/${SPACE_ID}`) {
     if (req.headers.authorization) {
+      if (mode.auth === 'unauthorized') return json(401, { error: 'Invalid username or password.' });
       if (mode.space === 'error') return json(503, { error: 'unavailable' });
       return json(200, { id: SPACE_ID, private: mode.space !== 'public', runtime: { volumes: [{ type: 'bucket', source: BUCKET_ID, mountPath: '/data' }] } });
     }
@@ -102,20 +109,26 @@ fs.writeFileSync(path.join(HOME, '.profile'), `export PATH="${bin}:$PATH"\n`);
 const starts = () => (fs.existsSync(startLog) ? fs.readFileSync(startLog, 'utf8').trim().split('\n').filter(Boolean).length : 0);
 
 const { SPACE_ID: _s, AM_DISTRIBUTE_SKILLS, HF_TOKEN, HUGGING_FACE_HUB_TOKEN, HF_API_TOKEN, ...BASE_ENV } = process.env;
-const backend = spawn('node', ['src/index.js'], {
-  cwd: HERE,
-  env: {
-    ...BASE_ENV, PATH: `${bin}:${BASE_ENV.PATH || ''}`,
-    PORT: String(PORT), DATA_DIR, PUBLIC_DIR, HOME, CLAUDE_CONFIG_DIR: path.join(HOME, '.claude'),
-    AM_BASHRC: '/nonexistent', SPACE_HOST: '',
-    SPACE_ID, HF_ENDPOINT: `http://127.0.0.1:${hub.address().port}`, HF_TOKEN: 'hf_fixture_not_a_real_token',
-    AM_VISIBILITY_CHECK_MS: String(CHECK_MS), AM_VISIBILITY_GRACE_MS: String(GRACE_MS),
-  },
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
 let logs = '';
-backend.stdout.on('data', (d) => { logs += d; });
-backend.stderr.on('data', (d) => { logs += d; });
+let backend;
+const startBackend = () => {
+  backend = spawn('node', ['src/index.js'], {
+    cwd: HERE,
+    env: {
+      ...BASE_ENV, PATH: `${bin}:${BASE_ENV.PATH || ''}`,
+      PORT: String(PORT), DATA_DIR, PUBLIC_DIR, HOME, CLAUDE_CONFIG_DIR: path.join(HOME, '.claude'),
+      AM_BASHRC: '/nonexistent', SPACE_HOST: '',
+      SPACE_ID, HF_ENDPOINT: `http://127.0.0.1:${hub.address().port}`, HF_TOKEN: 'hf_fixture_not_a_real_token',
+      AM_VISIBILITY_CHECK_MS: String(CHECK_MS), AM_VISIBILITY_GRACE_MS: String(GRACE_MS),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  backend.stdout.on('data', (d) => { logs += d; });
+  backend.stderr.on('data', (d) => { logs += d; });
+  return backend;
+};
+const stopBackend = () => new Promise((resolve) => { const b = backend; b.once('exit', resolve); b.kill('SIGTERM'); setTimeout(() => { try { b.kill('SIGKILL'); } catch {} resolve(); }, 6000); });
+startBackend();
 
 const api = async (route, init = {}) => {
   const headers = new Headers(init.headers || {});
@@ -232,7 +245,7 @@ try {
   check('the setup guide is shown for a public Space', (await pageA.locator('.locked-app').innerText()).includes('Duplicate this Space'));
   check('protected view torn down: no terminal in the DOM', await pageA.locator('.xterm, .tile-terminal, .ov-composer').count() === 0);
   const sockA = await waitFor(() => pageA.evaluate(() => { const s = window.__sockets.at(-1); return s && s.close ? s : null; }), 5000);
-  check('the server closed the terminal socket with 4003 locked:public-space:<seq>', sockA?.close?.code === 4003 && /^locked:public-space:\d+$/.test(sockA?.close?.reason || ''), JSON.stringify(sockA?.close));
+  check('the server closed the terminal socket with 4003 locked:public-space:<seq>:<boot>', sockA?.close?.code === 4003 && /^locked:public-space:\d+:[\w-]+$/.test(sockA?.close?.reason || ''), JSON.stringify(sockA?.close));
   await sleep(1500);
   const sockA2 = await pageA.evaluate(() => window.__sockets.at(-1));
   check('no terminal frames after the close, and no reconnect attempt', sockA2.afterClose === 0 && (await pageA.evaluate(() => window.__sockets.length)) === 1, `afterClose=${sockA2.afterClose} sockets=${await pageA.evaluate(() => window.__sockets.length)}`);
@@ -296,6 +309,70 @@ try {
   mode.space = 'private';
   await lockedPage(pageA).waitFor({ state: 'detached', timeout: 20_000 });
   check('recovers when verification succeeds again', await pageA.locator('.sidebar:not(.mock-side)').count() === 1);
+
+  // ---- 7. the backend restarts under the open app ----
+  // (i) The new generation starts unverified. Its first refusal must lock the
+  // tab even though its counter (1) is far below the old generation's.
+  const oldBoot = (await info()).visibility.boot;
+  await pageA.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible', timeout: 15_000 });
+  mode.space = 'error'; // the new process cannot verify yet
+  await stopBackend();
+  startBackend();
+  const up2 = await waitFor(() => fetch(`${API}/api/health`).then((r) => r.ok).catch(() => false), 60_000);
+  check('backend restarted on the same port', !!up2);
+  const newBoot = (await info()).visibility.boot;
+  check('a new process has a new generation id', typeof newBoot === 'string' && newBoot !== oldBoot);
+  await lockedPage(pageA).waitFor({ timeout: 15_000 });
+  check('the open tab locks on the new generation\'s first refusal (checking)', (await lockReason(pageA)) === 'checking');
+  check('protected cached views are unmounted', await pageA.locator('.xterm, .tile-terminal, .ov-composer').count() === 0);
+  mode.space = 'private';
+  await lockedPage(pageA).waitFor({ state: 'detached', timeout: 25_000 });
+  check('the new generation\'s verification reopens the tab', await pageA.locator('.sidebar:not(.mock-side)').count() === 1);
+  // (ii) Reverse ordering: a delayed refusal from the OLD generation, with a
+  // high counter, arrives after the new generation's status was applied. It
+  // must neither lock the tab nor wedge it.
+  await pageA.evaluate(() => {
+    window.__oldGenRelock = 0;
+    new MutationObserver(() => { if (document.querySelector('.locked-app')) window.__oldGenRelock++; }).observe(document.body, { childList: true, subtree: true });
+  });
+  let oldGenArmed = true; let oldGenFired = false;
+  await pageA.route('**/api/tree*', async (route) => {
+    if (oldGenArmed) { oldGenArmed = false; oldGenFired = true; return route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: 'locked', reason: 'public-space', seq: 999, boot: oldBoot }) }); }
+    return route.continue();
+  });
+  await waitFor(() => oldGenFired, 8000);
+  await sleep(3000);
+  const oldGenRelock = await pageA.evaluate(() => window.__oldGenRelock);
+  check('a stale refusal from the previous generation does not lock the tab', oldGenFired && oldGenRelock === 0 && await lockedPage(pageA).count() === 0, `relock=${oldGenRelock}`);
+  await pageA.unroute('**/api/tree*');
+  check('...and the tab still tracks live state (a real lock still lands)', await (async () => {
+    mode.space = 'public';
+    const locked = await lockedPage(pageA).waitFor({ timeout: 10_000 }).then(() => true).catch(() => false);
+    mode.space = 'private';
+    await lockedPage(pageA).waitFor({ state: 'detached', timeout: 25_000 });
+    return locked;
+  })());
+
+  // ---- 8. the unverified-bucket warning clears in a visible, unlocked tab ----
+  // Restart with a refused credential: warning-only mode after three refusals.
+  mode.auth = 'unauthorized';
+  await stopBackend();
+  startBackend();
+  await waitFor(() => fetch(`${API}/api/health`).then((r) => r.ok).catch(() => false), 60_000);
+  const warned = await waitFor(async () => { const x = await info(); return x && !x.locked && x.bucketUnverified ? x : null; }, 20_000);
+  check('server in warning-only mode (Space private, bucket unverifiable)', !!warned);
+  await lockedPage(pageA).waitFor({ state: 'detached', timeout: 25_000 });
+  await pageA.locator('button[title="Settings"]').click();
+  const bucketWarn = pageA.locator('.s-warn', { hasText: 'storage bucket' });
+  await bucketWarn.waitFor({ timeout: 35_000 });
+  check('Settings shows the unverified-bucket warning', await bucketWarn.count() === 1);
+  const bootAtWarn = await pageA.evaluate(() => window.__boot);
+  // The token's access is fixed on the Hub; the server re-tries and verifies.
+  mode.auth = 'ok';
+  const verified = await waitFor(async () => { const x = await info(); return x && !x.locked && x.bucketUnverified === false ? x : null; }, 30_000);
+  check('server verified the bucket once the credential worked again', !!verified);
+  await bucketWarn.waitFor({ state: 'detached', timeout: 45_000 });
+  check('the warning cleared in the open, visible tab without reload or tab switch', await bucketWarn.count() === 0 && (await pageA.evaluate(() => window.__boot)) === bootAtWarn);
   check('no page errors during the run', errorsA.length === 0, errorsA.join(' | '));
   check('the fixture token never reached the browser or the log', !logs.includes('hf_fixture_not_a_real_token') && !(await pageA.content()).includes('hf_fixture'));
 } catch (e) {

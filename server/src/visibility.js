@@ -39,7 +39,10 @@
 //                                  answer in between restarts the count — this
 //                                  becomes the documented warning-only mode
 //                                  (bucketUnverified); no token at all is that
-//                                  mode immediately.
+//                                  mode immediately. A refused credential is
+//                                  re-tried every UNAUTHORIZED_RETRY_CYCLES, so
+//                                  a token whose access is fixed on the Hub
+//                                  gets the bucket verified without a restart.
 //     anything else              → no verdict; retried next cycle, never cached
 //                                  as an empty mount list.
 //   Each bucket, unauthenticated GET /api/buckets/{id}: same rules as the Space.
@@ -61,6 +64,7 @@ export const HF_TIMEOUT_MS = 8_000;      // per request
 export const CYCLE_BUDGET_MS = 25_000;   // whole cycle, all resources
 export const MAX_BUCKETS = 8;            // buckets verified per cycle; more than this is a misconfiguration
 export const UNAUTHORIZED_CONFIRMATIONS = 3;
+export const UNAUTHORIZED_RETRY_CYCLES = 10;  // a refused credential is re-tried every this many cycles (10 min)
 
 export const REASON = Object.freeze({
   PUBLIC_SPACE: 'public-space',
@@ -145,7 +149,7 @@ export function createVisibilityMonitor({
   // verdict: unknown | ok | unauthorized. `buckets` is the accepted mount list
   // (null until a discovery succeeded). tokenKey remembers which credential the
   // evidence belongs to, so a changed token invalidates it.
-  const discovery = { ...blankEvidence(), buckets: null, tokenKey: null, unauthorizedStreak: 0 };
+  const discovery = { ...blankEvidence(), buckets: null, tokenKey: null, unauthorizedStreak: 0, cyclesSinceRefusal: 0 };
   const buckets = new Map(); // id -> evidence
 
   let generation = 0;        // bumped per cycle and on stop(); results from older generations are dropped
@@ -221,7 +225,7 @@ export function createVisibilityMonitor({
     if (!changed) return eff;
     seq++;
     if (spaceId) log.warn(`[visibility] ${eff.locked ? `LOCKED (${eff.reason}${eff.bucket ? `: ${eff.bucket}` : ''})` : `unlocked${eff.bucketUnverified ? ' (bucket unverified)' : ''}`} seq=${seq}`);
-    const event = { ...eff, seq };
+    const event = { ...eff, seq, boot };
     for (const fn of [...listeners]) { try { fn(event); } catch (e) { log.error('[visibility] listener failed', e && e.message); } }
     return eff;
   }
@@ -274,9 +278,11 @@ export function createVisibilityMonitor({
     const c = classifyDiscoveryResponse(res, spaceId);
     discovery.error = c.error;
     if (c.verdict === 'ok') {
+      if (discovery.verdict === 'unauthorized') log.warn('[visibility] the HF token can read this Space again — verifying the bucket for real from now on');
       discovery.verdict = 'ok';
       discovery.verifiedAt = t;
       discovery.unauthorizedStreak = 0;
+      discovery.cyclesSinceRefusal = 0;
       // The mount list is deployment-scoped (mounting a bucket restarts the
       // Space). A resource that is no longer mounted drops out of the model —
       // loudly if it was known to be public.
@@ -289,6 +295,8 @@ export function createVisibilityMonitor({
       discovery.buckets = c.buckets;
       if (c.spacePublic) { space.verdict = 'public'; space.verifiedAt = t; space.attemptedAt = t; space.error = null; }
     } else if (c.verdict === 'unauthorized') {
+      discovery.cyclesSinceRefusal = 0;
+      if (discovery.verdict === 'unauthorized') return; // still refused: the cached exemption stands
       if (++discovery.unauthorizedStreak >= UNAUTHORIZED_CONFIRMATIONS) {
         if (discovery.verdict !== 'unauthorized') log.warn(`[visibility] the HF token cannot read this Space's metadata (${c.error}, ${discovery.unauthorizedStreak}x) — bucket visibility cannot be verified; unlocking with a warning once the Space itself verifies private`);
         discovery.verdict = 'unauthorized';
@@ -297,8 +305,10 @@ export function createVisibilityMonitor({
     }
     else {
       // No verdict: nothing cached, and a refusal streak has to be consecutive —
-      // an outage between two refusals is not a third refusal.
+      // an outage between two refusals is not a third refusal. A cached
+      // refusal is left alone (an outage is not evidence the token works).
       discovery.unauthorizedStreak = 0;
+      discovery.cyclesSinceRefusal = 0;
     }
     // Known buckets (public ones included) are kept in every branch.
   }
@@ -310,7 +320,7 @@ export function createVisibilityMonitor({
       // any half-counted unauthorized streak belong to another credential.
       // Public bucket verdicts are kept — they are facts about the buckets, not
       // about the token.
-      discovery.verdict = 'unknown'; discovery.verifiedAt = 0; discovery.buckets = null; discovery.unauthorizedStreak = 0; discovery.error = null;
+      discovery.verdict = 'unknown'; discovery.verifiedAt = 0; discovery.buckets = null; discovery.unauthorizedStreak = 0; discovery.cyclesSinceRefusal = 0; discovery.error = null;
       discovery.tokenKey = key;
     }
     if (!key && discovery.verdict !== 'unauthorized') {
@@ -338,9 +348,12 @@ export function createVisibilityMonitor({
     publishIfPublic();
     if (space.verdict === 'public') return; // public wins; no need to spend the budget on buckets
 
-    // 2. Bucket discovery — once per credential, retried only while it has no verdict.
+    // 2. Bucket discovery — once per credential, retried while it has no
+    //    verdict, and slowly (every UNAUTHORIZED_RETRY_CYCLES) while the
+    //    credential is refused, in case its access was fixed on the Hub.
     const key = syncCredential();
-    if (key && discovery.verdict === 'unknown') {
+    const retryRefused = key && discovery.verdict === 'unauthorized' && ++discovery.cyclesSinceRefusal >= UNAUTHORIZED_RETRY_CYCLES;
+    if (key && (discovery.verdict === 'unknown' || retryRefused)) {
       const d = await probe(`${endpoint}/api/spaces/${spaceId}`, { authorization: `Bearer ${token()}` }, signal);
       if (!live()) return;
       acceptDiscovery(d);
@@ -436,7 +449,7 @@ export function createVisibilityMonitor({
    */
   function snapshot() {
     const eff = publish();
-    return { ...eff, seq };
+    return { ...eff, seq, boot };
   }
 
   return {
@@ -473,4 +486,7 @@ export const onVisibilityChange = (fn) => monitor.onChange(fn);
 /** Returns the first cycle's promise so startup can wait (bounded) for a verdict. */
 export const startVisibilityWatch = () => monitor.start();
 /** The machine-readable body every locked refusal carries. */
-export const lockError = (eff = monitor.snapshot()) => ({ error: 'locked', reason: eff.reason, seq: eff.seq ?? monitor.snapshot().seq, ...(eff.bucket ? { bucket: eff.bucket } : {}) });
+export const lockError = (eff = monitor.snapshot()) => {
+  const snap = Number.isFinite(eff.seq) && eff.boot ? eff : monitor.snapshot();
+  return { error: 'locked', reason: eff.reason, seq: snap.seq, boot: snap.boot, ...(eff.bucket ? { bucket: eff.bucket } : {}) };
+};

@@ -32,36 +32,43 @@ export const LOCKED_EVENT = 'am-locked';
 /** Close code the server uses for a terminal socket the lock refused or revoked. */
 export const LOCKED_CLOSE_CODE = 4003;
 
-export interface LockAnnouncement { reason: LockReason | null; bucket: string | null; seq?: number | null }
+export interface LockAnnouncement { reason: LockReason | null; bucket: string | null; seq?: number | null; boot?: string | null }
 
 export const announceLock = (detail: LockAnnouncement) => {
   try { window.dispatchEvent(new CustomEvent(LOCKED_EVENT, { detail })); } catch { /* no window (tests) */ }
 };
 
-/** Parse a socket close reason such as "locked:public-space:7" (the seq is optional). */
-export const parseCloseReason = (reason: string | undefined | null): { reason: LockReason | null; seq: number | null } => {
-  const m = /^locked:([a-z-]+)(?::(\d+))?$/.exec(reason || '');
-  return m ? { reason: m[1] as LockReason, seq: m[2] !== undefined ? Number(m[2]) : null } : { reason: null, seq: null };
+/** Parse a socket close reason such as "locked:public-space:7:k3x9-ab12ef" (seq and boot are optional). */
+export const parseCloseReason = (reason: string | undefined | null): { reason: LockReason | null; seq: number | null; boot: string | null } => {
+  const m = /^locked:([a-z-]+)(?::(\d+)(?::([A-Za-z0-9_-]+))?)?$/.exec(reason || '');
+  if (!m) return { reason: null, seq: null, boot: null };
+  return { reason: m[1] as LockReason, seq: m[2] !== undefined ? Number(m[2]) : null, boot: m[3] ?? null };
 };
 export const reasonFromCloseReason = (reason: string | undefined | null): LockReason | null => parseCloseReason(reason).reason;
+
+export type LockObservation = 'apply' | 'stale' | 'refetch';
 
 /**
  * Orders lock observations in BOTH directions, so neither a stale "unlocked"
  * answer can undo a newer lock nor a stale "locked" answer can undo a newer
  * reopening. Two guards:
  *   - server order: every status, 403 body and socket close carries the
- *     server's transition counter (`seq`, per process `boot`). Anything older
- *     than the newest state already applied is ignored. After a lock, an
- *     unlocked status must be newer than that lock. A new `boot` (the server
- *     restarted) starts the counting over.
- *   - request order, for servers or channels without a seq: every lock
+ *     server's transition counter (`seq`) and its process identity (`boot`).
+ *     Counters are only ever compared within one generation: anything older
+ *     than the newest state of the current generation already applied is
+ *     ignored, and after a lock an unlocked status must be newer than that
+ *     lock. A status from a new `boot` (the server restarted) starts the
+ *     counting over. A refusal or socket close from an unknown generation is
+ *     neither applied nor allowed to seed the counters — it asks for the
+ *     current status instead, which then decides with its own boot.
+ *   - request order, for channels without a seq (an older server): every lock
  *     observation opens a new epoch, and an unlocked status is applied only if
  *     it was requested in the current epoch.
  */
 export function createLockTracker() {
   let epoch = 0;
   let boot: string | null = null;
-  let lastSeq = -1;          // newest server state applied
+  let lastSeq = -1;          // newest server state applied (this generation)
   let lastLocked: boolean | null = null;
   let minUnlockSeq = 0;      // an unlocked status must carry at least this
   const isStale = (seq: number | null) => seq !== null && seq < lastSeq;
@@ -69,16 +76,20 @@ export function createLockTracker() {
     /** Call when a status request starts; pass the value to accept(). */
     begin: () => epoch,
     /**
-     * A lock seen through a 403 body or a socket close. Returns false when the
-     * observation is older than a reopening already applied (a delayed refusal
-     * from before the unlock), in which case it must be ignored.
+     * A lock seen through a 403 body or a socket close.
+     *   'apply'   — news for the current generation: show the lock, then fetch status
+     *   'stale'   — older than a reopening already applied: ignore it
+     *   'refetch' — from another (or an unknown) generation: do not touch the
+     *               UI or the counters; fetch the status, which carries a boot
      */
-    observeLocked: (seq: number | null = null): boolean => {
-      if (seq !== null && seq <= lastSeq && lastLocked === false) return false;
+    observeLocked: ({ seq = null, boot: from = null }: { seq?: number | null; boot?: string | null } = {}): LockObservation => {
+      if (seq !== null && from === null) seq = null; // a counter without a generation is not comparable
+      if (seq !== null && from !== boot) return 'refetch';
+      if (seq !== null && seq <= lastSeq && lastLocked === false) return 'stale';
       epoch += 1;
       if (seq !== null) { lastSeq = Math.max(lastSeq, seq); lastLocked = true; }
       minUnlockSeq = lastSeq + 1;
-      return true;
+      return 'apply';
     },
     /** Whether a status fetched after begin() returned `began` may be applied. */
     accept: (began: number, status: { locked: boolean; seq?: number | null; boot?: string | null }) => {

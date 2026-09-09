@@ -74,10 +74,13 @@ exemption applies in exactly two cases:
 
 In both cases the Space itself still has to verify private. A network failure,
 a `5xx`, a rate limit or a malformed discovery body is **not** the exemption:
-those keep the app locked and are retried every cycle. Restoring a usable
-credential is picked up on the next cycle (the evidence is keyed to the
-credential's identity and invalidated when it changes); removing the token
-switches to warning-only mode on the next cycle.
+those keep the app locked and are retried every cycle. A changed credential is
+picked up on the next cycle (the evidence is keyed to the credential's identity
+and invalidated when it changes); removing the token switches to warning-only
+mode on the next cycle. A refused credential is re-tried every
+`UNAUTHORIZED_RETRY_CYCLES` (10 cycles, about 10 minutes), so a token whose
+access is fixed on the Hub side gets the bucket verified — and the warning
+cleared — without a restart. While still refused, the cached exemption stands.
 
 Fixing this properly means giving the Space a token with read access to it —
 then the bucket is verified for real, and the warning disappears.
@@ -111,8 +114,9 @@ tests. Leave them unset in a deployment.
 On every transition into a locked state, the server:
 
 1. **Refuses new privileged requests.** Every `/api/*` route answers
-   `403 {"error":"locked","reason":"<reason>","seq":<n>}` (plus `"bucket"` for
-   `public-bucket`; `seq` is the lock's transition counter, see below). The
+   `403 {"error":"locked","reason":"<reason>","seq":<n>,"boot":"<id>"}` (plus
+   `"bucket"` for `public-bucket`; `seq` is the lock's transition counter and
+   `boot` the server process it belongs to, see below). The
    guard is mounted on the `/api` router path, so it classifies requests with
    the router's own matching: a spelling Express would route to a privileged
    handler (`/API/sessions`, `/api/sessions/`) is a spelling the guard refuses.
@@ -121,8 +125,8 @@ On every transition into a locked state, the server:
    page can render and explain itself. `/api/info` withholds secret names and
    backup details while locked.
 2. **Refuses new terminal attachments.** A WebSocket is closed with code
-   `4003` and reason `locked:<reason>:<seq>` before anything is attached or
-   replayed.
+   `4003` and reason `locked:<reason>:<seq>:<boot>` before anything is attached
+   or replayed.
 3. **Revokes connections admitted before the lock**, on the server, whether or
    not any browser is awake:
    - open terminal sockets are detached from their session and closed with
@@ -142,14 +146,21 @@ On every transition into a locked state, the server:
 
 **Commit boundary.** Revocation detaches clients; it does not kill, restart or
 re-prompt agents, delete sessions or touch histories. Every admitted request
-carries a cancellation signal that the lock aborts:
+carries a cancellation signal that the lock aborts, and every piece of PTY
+work that outlives its request holds its own *lock scope* for exactly as long
+as it runs:
 
 - *Delivering a prompt* (`/api/sessions/:id/input`, `/api/agents/:id/prompt`,
-  a cron run) checks it before every effect. A prompt that was admitted but was
-  still waiting for its agent to become ready when the lock landed is dropped —
-  not typed a moment later through a connection the lock already cut, and
-  never replayed. If the agent had to be started for it, it stays started (the
-  lock never stops agents); it just receives nothing.
+  a cron run — which answers `202` and delivers in the background — and a
+  quickstart prompt typed after the CLI's boot delay) checks its scope before
+  every effect. A prompt that was admitted but was still waiting for its agent
+  to become ready when the lock landed is dropped — not typed a moment later,
+  whether or not the response that started it is still open, and never
+  replayed. If the agent had to be started for it, it stays started (the lock
+  never stops agents); it just receives nothing.
+- *Inserting attachments* (`/api/sessions/:id/attachments/insert`) types one
+  command per file with waits in between; the lock stops the sequence where it
+  stands, and the remaining commands are never typed.
 - *Workspace uploads* (`/api/files/:id/upload`) write to a staging file beside
   the target and rename it into place only when the whole body has arrived. A
   body cut short by the lock (or by a client going away) removes the staging
@@ -169,19 +180,28 @@ The app learns the state through one shared channel (`web/src/lib/lockStatus.ts`
 - every `/api` response of `403 {"error":"locked"}` and every terminal socket
   closed with `4003` announce the lock; the app applies it immediately and
   fetches `/api/info` for the full explanation;
-- `/api/info` is fetched on load, on return to the tab (and back online), and
+- `/api/info` is fetched on load, on return to the tab (and back online),
   every 15 s while locked — so an open app reopens by itself within a check
-  cycle of the lock clearing;
-- observations are ordered in both directions. By server state: every status,
-  every `403 {"error":"locked"}` body and every `4003` close reason carries the
-  server's transition counter (`seq`; statuses also carry a per-process `boot`
-  id). Anything older than the newest state already applied is ignored — a late
+  cycle of the lock clearing — and every 30 s while unlocked and visible, so
+  status that changes without a lock transition (the unverified-bucket warning
+  clearing once the bucket verifies, backup health) is accurate without a
+  reload. These are cached reads on the server; no tab causes Hub work;
+- observations are ordered in both directions, and only ever within one server
+  generation. Every status, every `403 {"error":"locked"}` body and every
+  `4003` close reason carries the server's transition counter (`seq`) and its
+  process identity (`boot`). Within the generation the tab is tracking,
+  anything older than the newest state already applied is ignored — a late
   "unlocked" answer cannot undo a newer lock, and a late "locked" answer or
-  refusal cannot undo a newer reopening. After a lock, an "unlocked" status must
-  be newer than that lock. A new `boot` (the server restarted) starts the
-  counting over. By request, for channels without a `seq` (an older server): a
-  lock seen through any channel opens a new epoch, and an "unlocked" status is
-  applied only if it was requested after it.
+  refusal cannot undo a newer reopening; after a lock, an "unlocked" status
+  must be newer than that lock. A status from a new `boot` (the server
+  restarted) starts the counting over. A refusal or socket close from an
+  unknown or different generation is neither applied nor allowed to seed the
+  counters: it triggers a status fetch, and the status — which carries its own
+  `boot` — decides. So a restarted server's first refusal (counter 1) locks an
+  open tab, and a delayed refusal from the previous generation (counter 999)
+  cannot wedge it. Channels without a `seq` (an older server) fall back to
+  request order: a lock opens a new epoch, and an "unlocked" status is applied
+  only if it was requested after it.
 
 While locked, protected polling stops, the protected view is unmounted (no
 terminal, Reader or composer stays in the DOM beneath the lock page), and the

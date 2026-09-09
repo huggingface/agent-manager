@@ -93,12 +93,49 @@ const L = (seq, boot = 'b1') => ({ locked: true, seq, boot });
   const t = createLockTracker();
   assert.equal(t.accept(t.begin(), L(3)), true);
   assert.equal(t.accept(t.begin(), U(4)), true);
-  assert.equal(t.observeLocked(3), false, 'a delayed 403/4003 stamped with the old lock seq is not news');
+  assert.equal(t.observeLocked({ seq: 3, boot: 'b1' }), 'stale', 'a delayed 403/4003 stamped with the old lock seq is not news');
   assert.equal(t.accept(t.begin(), U(4)), true, 'the app stays open');
-  assert.equal(t.observeLocked(5), true, 'a refusal stamped with a newer seq is a new lock');
+  assert.equal(t.observeLocked({ seq: 5, boot: 'b1' }), 'apply', 'a refusal stamped with a newer seq is a new lock');
   assert.equal(t.accept(t.begin(), U(4)), false);
   assert.equal(t.accept(t.begin(), U(6)), true);
-  assert.equal(t.observeLocked(null), true, 'a refusal without a seq (older server) is always taken as news');
+  assert.equal(t.observeLocked(), 'apply', 'a refusal without a seq (older server) is always taken as news');
+}
+
+// ---- generations: counters are never compared across a server restart ----
+{
+  // The app applied unlocked seq 8 of generation A. The server restarts: its
+  // first refusal is seq 1 of generation B — a genuine lock, not an old one.
+  const t = createLockTracker();
+  assert.equal(t.accept(t.begin(), U(8, 'A')), true);
+  assert.equal(t.observeLocked({ seq: 1, boot: 'B' }), 'refetch', 'a refusal from another generation is not judged by its counter — the status decides');
+  assert.equal(t.accept(t.begin(), L(1, 'B')), true, 'the fetched status (generation B, locked) applies and resets the counting');
+  assert.equal(t.accept(t.begin(), U(1, 'B')), false, 'generation B seq 1 is the lock itself — not a reopen');
+  assert.equal(t.accept(t.begin(), U(2, 'B')), true, 'generation B verifies: reopens');
+}
+{
+  // The reverse ordering: after the new generation's status was applied, a
+  // delayed refusal from the OLD generation (high seq) arrives. It must not
+  // seed the counters, or the new generation's healthy status could never
+  // clear the UI.
+  const t = createLockTracker();
+  assert.equal(t.accept(t.begin(), U(8, 'A')), true);
+  assert.equal(t.accept(t.begin(), U(2, 'B')), true, 'the app moved to generation B');
+  assert.equal(t.observeLocked({ seq: 40, boot: 'A' }), 'refetch', 'an old-generation refusal is neither applied nor allowed to seed the counters');
+  assert.equal(t.accept(t.begin(), U(2, 'B')), true, 'generation B status still applies — nothing was contaminated');
+  assert.equal(t.accept(t.begin(), U(1, 'B')), false, 'and generation B ordering still holds');
+  assert.equal(t.observeLocked({ seq: 3, boot: 'B' }), 'apply', 'a genuine new lock in generation B applies');
+}
+{
+  const t = createLockTracker();
+  assert.equal(t.accept(t.begin(), U(8, 'A')), true);
+  assert.equal(t.observeLocked({ seq: 2 }), 'apply', 'a counter without a generation is not comparable: treated as seq-less news');
+  assert.equal(t.accept(t.begin(), U(8, 'A')), false, 'the seq-less lock still blocks the stale unlock by request order');
+  assert.equal(t.accept(t.begin(), U(9, 'A')), true);
+}
+{
+  const t = createLockTracker();
+  assert.equal(t.observeLocked({ seq: 1, boot: 'B' }), 'refetch', 'first ever observation is a refusal: fetch the status rather than trusting a counter');
+  assert.equal(t.accept(t.begin(), L(1, 'B')), true);
 }
 
 // ---- close reasons ----
@@ -109,9 +146,11 @@ assert.equal(reasonFromCloseReason('exited'), null);
 assert.equal(reasonFromCloseReason(''), null);
 assert.equal(reasonFromCloseReason(undefined), null);
 assert.equal(reasonFromCloseReason('locked:<script>'), null, 'only reason slugs are accepted');
-assert.deepEqual(parseCloseReason('locked:public-space:7'), { reason: 'public-space', seq: 7 });
-assert.deepEqual(parseCloseReason('locked:checking:'), { reason: null, seq: null }, 'a dangling separator is not a valid reason string');
-assert.deepEqual(parseCloseReason('locked:verification-unavailable'), { reason: 'verification-unavailable', seq: null });
+assert.deepEqual(parseCloseReason('locked:public-space:7'), { reason: 'public-space', seq: 7, boot: null });
+assert.deepEqual(parseCloseReason('locked:public-space:7:mfx2k1-a1b2c3'), { reason: 'public-space', seq: 7, boot: 'mfx2k1-a1b2c3' });
+assert.deepEqual(parseCloseReason('locked:checking:'), { reason: null, seq: null, boot: null }, 'a dangling separator is not a valid reason string');
+assert.deepEqual(parseCloseReason('locked:checking:3:'), { reason: null, seq: null, boot: null });
+assert.deepEqual(parseCloseReason('locked:verification-unavailable'), { reason: 'verification-unavailable', seq: null, boot: null });
 assert.equal(reasonFromCloseReason('locked:public-bucket:12'), 'public-bucket');
 
 // ---- copy ----

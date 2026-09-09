@@ -378,10 +378,13 @@ export default function App() {
     // here: apply the lock at once, then fetch the full explanation.
     const onLock = (e: Event) => {
       const d = (e as CustomEvent<LockAnnouncement>).detail || { reason: null, bucket: null };
-      // A refusal older than a reopening already applied is a delayed answer
-      // from before the unlock, not news.
-      if (!lockTracker.current.observeLocked(d.seq ?? null)) return;
-      setInfo((i) => (i ? { ...i, locked: true, lockReason: d.reason ?? i.lockReason, lockBucket: d.bucket ?? i.lockBucket, secrets: [] } : i));
+      // Ordered against what this tab already applied: a refusal older than a
+      // reopening is a delayed answer, not news; one from another server
+      // generation (a restart) is decided by the status fetch, which carries
+      // the generation, rather than by its counter.
+      const verdict = lockTracker.current.observeLocked({ seq: d.seq ?? null, boot: d.boot ?? null });
+      if (verdict === 'stale') return;
+      if (verdict === 'apply') setInfo((i) => (i ? { ...i, locked: true, lockReason: d.reason ?? i.lockReason, lockBucket: d.bucket ?? i.lockBucket, secrets: [] } : i));
       loadInfo();
     };
     // Coming back to a tab (or back online) re-reads the state rather than
@@ -397,10 +400,13 @@ export default function App() {
     };
   }, [loadInfo]);
   // While locked, the safe status is the only thing polled — every 15 s, so the
-  // app reopens by itself within a check cycle of the lock clearing.
+  // app reopens by itself within a check cycle of the lock clearing. While
+  // unlocked it is re-read every 30 s in a visible tab, so status that changes
+  // without a lock transition (the unverified-bucket warning clearing once the
+  // bucket verifies, backup health) is accurate without a reload. Cached state
+  // on the server: no Hub work per tab.
   useEffect(() => {
-    if (!info?.locked) return;
-    const t = setInterval(loadInfo, 15_000);
+    const t = setInterval(() => { if (info?.locked || !document.hidden) loadInfo(); }, info?.locked ? 15_000 : 30_000);
     return () => clearInterval(t);
   }, [info?.locked, loadInfo]);
   useEffect(() => { writeStored('am-zoom', String(zoom)); }, [zoom]);

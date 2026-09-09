@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import {
   createVisibilityMonitor, classifyRepoResponse, classifyDiscoveryResponse, REASON,
-  GRACE_MS, CHECK_MS, CYCLE_BUDGET_MS, HF_TIMEOUT_MS, UNAUTHORIZED_CONFIRMATIONS,
+  GRACE_MS, CHECK_MS, CYCLE_BUDGET_MS, HF_TIMEOUT_MS, UNAUTHORIZED_CONFIRMATIONS, UNAUTHORIZED_RETRY_CYCLES,
 } from '../src/visibility.js';
 
 let pass = 0; let fail = 0;
@@ -278,6 +278,19 @@ const UNLOCKED_WARN = { locked: false, reason: null, bucket: null, bucketUnverif
   const authedSoFar = hub.calls.filter((c) => c.auth).length;
   await m.check();
   check('unauthorized verdict is cached per credential', hub.calls.filter((c) => c.auth).length === authedSoFar);
+  // ...but re-tried slowly, so access fixed on the Hub is noticed without a restart.
+  for (let i = 0; i < UNAUTHORIZED_RETRY_CYCLES - 2; i++) await m.check();
+  check(`no re-try before ${UNAUTHORIZED_RETRY_CYCLES} cycles`, hub.calls.filter((c) => c.auth).length === authedSoFar);
+  await m.check();
+  check('the refused credential is re-tried once per retry window', hub.calls.filter((c) => c.auth).length === authedSoFar + 1);
+  eq('still refused: the exemption stands (no re-count, no lock)', eff(m), UNLOCKED_WARN);
+  for (let i = 0; i < UNAUTHORIZED_RETRY_CYCLES - 1; i++) await m.check();
+  hub.on(SPACE_URL, spacePrivateAuthed([bucketVol(BUCKET_A)]), { auth: true });
+  hub.on(bucketUrl(BUCKET_A), PRIVATE_401);
+  await m.check();
+  eq('access fixed on the Hub: the next re-try discovers and verifies the bucket, warning cleared', eff(m), UNLOCKED);
+  check('bucket verified from then on', m.publicStatus().bucketDiscovery.verdict === 'ok' && m.publicStatus().buckets.length === 1);
+  hub.on(SPACE_URL, json(401, { error: 'Invalid username or password.' }), { auth: true });
   // Restoring a usable credential re-discovers and verifies for real.
   token = 'hf_fresh_token';
   hub.on(SPACE_URL, spacePrivateAuthed([bucketVol(BUCKET_A)]), { auth: true });
@@ -500,7 +513,8 @@ const UNLOCKED_WARN = { locked: false, reason: null, bucket: null, bucketUnverif
   const { m } = monitor(hub, clock);
   const seen = [];
   const seqs = [];
-  const off = m.onChange((e) => { seen.push(e.locked); seqs.push(e.seq); });
+  const boots = new Set();
+  const off = m.onChange((e) => { seen.push(e.locked); seqs.push(e.seq); boots.add(e.boot); });
   hub.on(SPACE_URL, PRIVATE_401);
   for (let i = 0; i < 20; i++) {
     hub.on(SPACE_URL, i % 2 ? PRIVATE_401 : spacePublic());
@@ -508,11 +522,16 @@ const UNLOCKED_WARN = { locked: false, reason: null, bucket: null, bucketUnverif
   }
   check('20 lock/unlock cycles: exactly 20 transitions, 20 requests, one expiry timer at most', seen.length === 20 && hub.calls.length === 20 && clock.pending() <= 1);
   check('every transition carries a strictly increasing seq, matching the status and the refusal body', seqs.every((v, i) => i === 0 || v === seqs[i - 1] + 1) && m.publicStatus().seq === seqs.at(-1) && m.snapshot().seq === seqs.at(-1));
+  check('events, status and snapshot all carry the same process identity', typeof m.snapshot().boot === 'string' && m.snapshot().boot === m.publicStatus().boot);
   const before = clock.pending();
   for (let i = 0; i < 50; i++) m.snapshot();
   check('snapshots (one per admitted request) do not re-arm timers or bump the seq', clock.pending() === before && m.snapshot().seq === seqs.at(-1));
   off();
   check('unsubscribe removes the listener', m.stats().listeners === 1);
+  check('one boot id for the whole process, carried on every event', boots.size === 1 && boots.has(m.snapshot().boot));
+  const other = createVisibilityMonitor({ spaceId: SPACE, endpoint: HUB, fetch: hub.fetch, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, log: quiet });
+  check('another process (monitor) has a different boot id', other.snapshot().boot !== m.snapshot().boot);
+  other.stop();
   m.stop();
 }
 
