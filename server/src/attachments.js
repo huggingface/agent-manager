@@ -6,9 +6,8 @@ import { pipeline } from 'node:stream/promises';
 import { STATE_DIR } from './config.js';
 
 export const ATTACHMENT_LIMIT = 100 * 1024 * 1024;
-// A single prompt is capped separately at five files. This lifetime cap keeps
-// a forgotten session from growing without bound while still leaving room for
-// many ordinary attachment turns.
+// Prompt batches have no separate count cap. These lifetime byte/file caps keep
+// a forgotten session bounded while allowing normal batches of dozens.
 export const SESSION_ATTACHMENT_LIMIT = 500 * 1024 * 1024;
 export const SESSION_ATTACHMENT_COUNT_LIMIT = 200;
 export const ATTACHMENT_ID = /^att_[a-f0-9]{24}$/;
@@ -60,7 +59,6 @@ const MIME_BY_EXTENSION = Object.freeze({
   epub: 'application/epub+zip',
 });
 const ATTACHMENT_FILE = /^att_[a-f0-9]{24}(?:[-.]|$)/;
-const uploadWindows = new Map();
 const uploadLocks = new Map();
 
 function httpError(statusCode, message) {
@@ -79,16 +77,12 @@ function sessionDir(sessionId) {
   return path.join(ATTACHMENTS_DIR, sessionId);
 }
 
-function checkUploadRate(sessionId) {
-  const now = Date.now();
-  const recent = (uploadWindows.get(sessionId) || []).filter((at) => now - at < 60_000);
-  if (recent.length >= 20) throw httpError(429, 'too many file uploads — try again in a minute');
-  recent.push(now);
-  uploadWindows.set(sessionId, recent);
-}
-
 // Serialize writes within one session so concurrent uploads cannot each pass a
-// stale quota check. Different sessions still stream in parallel.
+// stale quota check. This is also the server-side active-transfer bound: a
+// fifty-file batch streams one file at a time for its session, while different
+// sessions still make progress independently. The former 20/minute admission
+// counter rejected an ordinary batch at file 21 despite doing no useful load
+// control; the queue and byte/file quotas are the deliberate bounds instead.
 async function withUploadLock(sessionId, task) {
   const previous = uploadLocks.get(sessionId) || Promise.resolve();
   let release;
@@ -238,7 +232,6 @@ export async function receiveAttachment(readable, sessionId, { contentType = '',
   // Other formats are inert files: they are never executed, and the raw route
   // forces them to download rather than rendering browser-active content.
   const originalName = safeFileName(fileName);
-  checkUploadRate(sessionId);
   return withUploadLock(sessionId, async () => {
     const dir = sessionDir(sessionId);
     await fs.promises.mkdir(dir, { recursive: true });
@@ -297,12 +290,9 @@ export async function receiveAttachment(readable, sessionId, { contentType = '',
   });
 }
 
-/** Resolve an untrusted attachment id within exactly one session. */
-export function resolveAttachment(sessionId, attachmentId) {
+function resolveAttachmentFromNames(sessionId, attachmentId, names) {
   if (!ATTACHMENT_ID.test(String(attachmentId))) throw httpError(404, 'attachment not found');
   const dir = sessionDir(sessionId);
-  let names = [];
-  try { names = fs.readdirSync(dir); } catch {}
   for (const name of names) {
     const isCurrent = name.startsWith(`${attachmentId}-`);
     const legacyExtension = name.startsWith(`${attachmentId}.`) ? extensionOf(name) : '';
@@ -318,11 +308,24 @@ export function resolveAttachment(sessionId, attachmentId) {
   throw httpError(404, 'attachment not found');
 }
 
+/** Resolve an untrusted attachment id within exactly one session. */
+export function resolveAttachment(sessionId, attachmentId) {
+  const dir = sessionDir(sessionId);
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch {}
+  return resolveAttachmentFromNames(sessionId, attachmentId, names);
+}
+
 export function resolveAttachments(sessionId, attachmentIds) {
   if (!Array.isArray(attachmentIds)) throw httpError(400, 'attachmentIds must be an array');
-  if (attachmentIds.length > 5) throw httpError(400, 'at most five files may be attached');
   if (new Set(attachmentIds).size !== attachmentIds.length) throw httpError(400, 'duplicate attachment id');
-  return attachmentIds.map((id) => resolveAttachment(sessionId, id));
+  // One directory read for the whole prompt. Re-reading a FUSE-backed session
+  // directory once per id made a legitimate dozens-file Send need dozens of
+  // serial bucket round trips before the harness saw anything.
+  const dir = sessionDir(sessionId);
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch {}
+  return attachmentIds.map((id) => resolveAttachmentFromNames(sessionId, id, names));
 }
 
 /** Remove one unsent attachment without disturbing files the session still uses. */
@@ -335,7 +338,6 @@ export async function removeAttachment(sessionId, attachmentId) {
 }
 
 export async function removeSessionAttachments(sessionId) {
-  uploadWindows.delete(sessionId);
   await withUploadLock(sessionId, () => fs.promises.rm(sessionDir(sessionId), { recursive: true, force: true }));
 }
 

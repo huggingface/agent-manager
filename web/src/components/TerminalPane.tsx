@@ -17,7 +17,7 @@ import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph } from './icons';
 import * as api from '../api';
 import type { Attachment } from '../api';
 import {
-  MAX_ATTACHMENTS, attachmentFileError, filesFromClipboardItems, filesFromTransfer,
+  attachmentFileError, filesFromClipboardItems, filesFromTransfer,
   transferMayContainFile,
 } from '../lib/attachments';
 
@@ -377,12 +377,7 @@ export default function TerminalPane({
       return;
     }
     if (imageUploadBusyRef.current) return;
-    const candidates = files;
-    if (candidates.length > MAX_ATTACHMENTS) {
-      showImageStatus({ kind: 'error', text: `Attach at most ${MAX_ATTACHMENTS} files at a time` }, 4000);
-      return;
-    }
-    const images = candidates.slice(0, MAX_ATTACHMENTS);
+    const images = files;
     if (!images.length) return;
     const invalid = images.map((file) => attachmentFileError(file)).find(Boolean);
     if (invalid) { showImageStatus({ kind: 'error', text: invalid }, 4000); return; }

@@ -122,7 +122,8 @@ same paste/drop behavior:
 - A files-only submission uses `Please inspect the attached file.` (or `files`
   for several) as its text. Image-only server delivery retains the more specific
   `screenshot` wording.
-- At most five files may be attached to one prompt.
+- There is no per-prompt file-count limit. The separate server safeguards remain
+  100 MiB per file, 500 MiB and 200 stored attachment files per session.
 - Choosing, pasting, or dropping a file starts its upload immediately. Each
   chip shows transferred bytes, percentage, and server-confirmed success.
 - The send button is disabled until every upload has succeeded.
@@ -137,6 +138,19 @@ Pending files remain browser `File` objects for retry even after the server has
 stored them. `URL.createObjectURL()` supplies local previews and is revoked when
 a chip is removed or the component unmounts. Successful files are session-owned
 and follow that session's existing deletion/pruning lifecycle.
+
+The browser runs at most three attachment transfers for one session at once;
+overlapping picker, paste and drop additions join the same FIFO. Another session
+has its own queue. The server serializes publication/quota checks within a
+session, so concurrent requests cannot each pass a stale 500 MiB/200-file check.
+There is no automatic retry and no 20-per-minute rejection: transient failures
+stay beside their file with Retry, while size/storage/validation failures keep
+their reason and require removal rather than repeating the same invalid request.
+A lost response can leave one stored file whose id the browser never learned;
+the lifetime byte/file quotas
+bound those orphans, session removal clears them, and the seven-day orphan-store
+pruner handles sessions that disappeared after a crash. This is deliberately not
+an exactly-once transport claim.
 
 ### 5.2 Rendered terminal reader
 
@@ -338,12 +352,11 @@ Errors:
 | `404` | unknown session/attachment |
 | `413` | empty, larger than 100 MiB, or over the session quota |
 | `415` | a claimed PNG/JPEG/GIF/WebP is malformed |
-| `429` | per-session upload backstop exceeded |
 | `500` | durable write failed |
 
-Use a small backstop such as 20 uploads/minute/session. This is not the security
-boundary—the private Space is—but protects the terminal process from accidental
-paste/drop loops.
+The per-session stream lock, browser's three-transfer queue, and byte/file quotas
+are the load bounds. The old 20-uploads-per-minute counter rejected legitimate
+small-file batches at file 21 without limiting active work, so it was removed.
 
 ### 7.2 Preview
 
@@ -510,10 +523,11 @@ Add a small module, `web/src/lib/attachments.ts`, containing:
 - `transferMayContainFile(DataTransfer)`;
 - duplicate suppression across `items` and `files`;
 - local preview creation/revocation; and
-- sequential upload helpers that report progress and preserve per-file errors.
+- bounded per-session upload helpers that report progress and preserve per-file errors.
 
-Use sequential uploads initially. Five files is the maximum, bucket writes are
-the bottleneck, and simpler ordering makes chip status deterministic.
+The browser starts no more than three uploads for one session; the server streams
+and publishes them one at a time under its session quota lock. Selection order is
+kept independently of completion order.
 
 Add a reusable `Attachments` chip row used by Sidebar and Overview. The
 terminal imports only the transfer/upload helpers.

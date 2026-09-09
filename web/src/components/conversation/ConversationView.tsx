@@ -6,7 +6,8 @@ import type { Session } from '../../types';
 import { isRemote } from '../../types';
 import {
   buildPendingPrompt, discardPendingAttachment, discardPendingAttachments,
-  pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
+  filesFromTransfer, pendingAttachmentsFromFiles, revokePendingAttachments,
+  transferMayContainFile, uploadPendingAttachments,
 } from '../../lib/attachments';
 import type { PendingAttachment, PendingPrompt } from '../../lib/attachments';
 import { recallReading, rememberReading } from './readingPosition';
@@ -50,6 +51,7 @@ export default function ConversationView({
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const attachmentsRef = useRef<PendingAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [attachmentDrop, setAttachmentDrop] = useState(false);
   const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   const [sent, setSent] = useState<(PendingPrompt & { at: number }) | null>(null);
@@ -204,7 +206,25 @@ export default function ConversationView({
   useEffect(() => { reportHead.current?.(head); }, [head]);
   useEffect(() => () => reportHead.current?.(null), []);
 
-  return <div className="cxv">
+  return <div className={`cxv${attachmentDrop ? ' image-drop' : ''}`}
+    onDragEnter={(event) => {
+      if (allowAttachments && !sending && transferMayContainFile(event.dataTransfer)) {
+        event.preventDefault(); setAttachmentDrop(true);
+      }
+    }}
+    onDragOver={(event) => {
+      if (allowAttachments && !sending && transferMayContainFile(event.dataTransfer)) {
+        event.preventDefault(); event.dataTransfer.dropEffect = 'copy';
+      }
+    }}
+    onDragLeave={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setAttachmentDrop(false);
+    }}
+    onDrop={(event) => {
+      if (!allowAttachments || sending || !transferMayContainFile(event.dataTransfer)) return;
+      event.preventDefault(); event.stopPropagation(); setAttachmentDrop(false);
+      addAttachments(filesFromTransfer(event.dataTransfer));
+    }}>
     <div className="cxv-bar cxv-status mono">
       <span>{head ? `${exchanges.length.toLocaleString()} turns loaded` : phase === 'loading' ? 'Reading transcript…' : 'Conversation'}</span>
       <span className="spacer" />

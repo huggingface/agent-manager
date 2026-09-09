@@ -231,16 +231,23 @@ body {
 .quick-recovery { margin-top: -3px; color: var(--muted); font-size: 9.5px; line-height: 1.35; }
 .cart-row.off { opacity: 0.45; }
 
-/* file attachments: one compact operational row shared by composers */
-.image-attachments { min-width: 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* file attachments: a compact aggregate over a bounded, scrollable detail list.
+   Fifty files stay fifty rows without becoming fifty rows TALL in the reader. */
+.image-attachments { min-width: 0; display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+.image-attachments:not(.has-images) { width: max-content; }
+.image-attachments-head { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.image-attachments-summary { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 9.5px; }
+.image-details-toggle { flex: none; padding: 1px 4px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel-2); color: var(--muted); font: 9px var(--font-mono); cursor: pointer; }
+.image-details-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+.image-attachment-list { min-width: 0; max-height: 152px; overflow-y: auto; overscroll-behavior: contain; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(210px, 100%), 1fr)); gap: 4px; padding-right: 2px; scrollbar-gutter: stable; }
 .image-file-input { display: none; }
 .image-pick { flex: none; width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel-2); color: var(--muted); cursor: pointer; }
 .image-pick:hover:not(:disabled) { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .image-pick:disabled { opacity: 0.38; cursor: not-allowed; }
 .image-pick svg { width: 15px; height: 15px; }
 .image-attachments-note { min-width: 0; color: var(--muted); font-size: 10px; line-height: 1.3; }
-.image-chip { min-width: 0; max-width: 250px; height: 38px; display: flex; align-items: center; gap: 6px; padding: 3px 5px 3px 3px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); }
-.image-chip.error { max-width: min(100%, 360px); height: auto; min-height: 38px; border-color: color-mix(in srgb, var(--danger) 48%, var(--border)); }
+.image-chip { min-width: 0; width: 100%; height: 38px; display: flex; align-items: center; gap: 6px; padding: 3px 5px 3px 3px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); }
+.image-chip.error { height: auto; min-height: 38px; border-color: color-mix(in srgb, var(--danger) 48%, var(--border)); }
 .image-chip.uploading { border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); }
 .image-chip-preview { flex: none; width: 29px; height: 28px; border-radius: 3px; overflow: hidden; background: var(--panel-2); }
 .image-chip-preview:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -257,7 +264,7 @@ body {
 .image-chip > .image-chip-retry { color: var(--danger); font-size: 9px; font-weight: 650; }
 .image-chip > button:hover:not(:disabled) { color: var(--text); }
 .image-chip > button:disabled { opacity: 0.35; cursor: default; }
-.quick .image-attachments { align-items: flex-start; }
+.quick .image-attachments { align-items: stretch; }
 .widget.quick.image-drop { border-style: dashed; border-color: var(--accent); background: color-mix(in srgb, var(--drop) 55%, var(--panel-2)); }
 
 /* new-agent: logo buttons */
@@ -512,6 +519,7 @@ body {
    one-line composer looks exactly as it always has. */
 .ov-composer { --ov-first-line: calc(1.45 * 13px + 4px); display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 7px 8px; border-top: 1px solid var(--border); padding-top: 7px; }
 .ov-composer.image-drop { outline: 1px dashed var(--accent); outline-offset: 5px; background: var(--drop); }
+.cxv.image-drop .cxv-composer { outline: 1px dashed var(--accent); outline-offset: -1px; background: var(--drop); }
 .ov-composer .image-attachments.has-images { grid-column: 1 / -1; }
 .ov-composer .image-attachments.has-note { grid-column: 1 / -1; }
 .ov-composer .image-attachments.has-images + .ov-live,
@@ -1096,6 +1104,16 @@ body {
 .files-new-input:focus { outline: none; border-color: var(--accent); }
 .files-new.danger-row { background: color-mix(in srgb, var(--danger) 8%, var(--panel)); }
 .files-new.err { color: var(--danger); }
+.files-uploads { flex: none; min-height: 0; border-bottom: 1px solid var(--border); background: var(--panel); }
+.files-uploads-head { min-width: 0; display: flex; align-items: center; gap: 8px; padding: 4px 10px; color: var(--muted); font-size: 9.5px; }
+.files-uploads-head .bad { color: var(--danger); }
+.files-upload-list { max-height: 148px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.files-upload-row { min-width: 0; display: flex; align-items: center; gap: 6px; padding: 3px 10px; border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent); font-size: 10.5px; }
+.files-upload-row.collision, .files-upload-row.error { background: color-mix(in srgb, var(--danger) 6%, var(--panel)); }
+.files-upload-name { min-width: 6em; max-width: 18em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.files-upload-state { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.files-upload-row.collision .files-upload-state, .files-upload-row.error .files-upload-state { color: var(--danger); }
+.upload-btn.disabled { opacity: .45; cursor: default; }
 .tw-confirm { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
 .tw-warn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A destructive ICON in a row turns red under the pointer, the way the Files
