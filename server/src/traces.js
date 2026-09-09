@@ -10,6 +10,7 @@ import { mark, tracked, PHASE } from './watchdog.js';
 // resolver sharing uses. share.js does not import traces.js, so no cycle.
 import { findTrace, HARNESS_LABEL } from './share.js';
 import { cachedTrace, traceRevision } from './trace-revision.js';
+import { outputHash } from './output-id.js';
 
 // Workspace-wide trace analytics: parse every Claude transcript and Codex
 // rollout on the Space into per-conversation stats (turns, tool calls, web
@@ -51,8 +52,27 @@ function mergeInto(a, b) {
 // Built in the same parse pass: every real user prompt resets the segment, so
 // whatever accumulated by EOF is the activity since the last thing you said.
 function emptyDigest() {
-  return { lastPromptText: '', lastPromptRaw: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantMd: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [], sinceTokens: 0, running: false, turnsLog: [] };
+  return { lastPromptText: '', lastPromptRaw: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantMd: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [], sinceTokens: 0, running: false, turnsLog: [], outSeq: 0, outHash: '', outClipped: false, outFresh: false };
 }
+
+// ---------- which reply is this? (the Overview's unread cursor) ----------
+//
+// `outSeq`/`outHash` name the newest piece of human-facing assistant output, so
+// the Overview can ask "has the operator seen THIS?" instead of "is there
+// something newer than a timestamp?".
+//
+// Both halves are load-bearing:
+//
+//   seq  — how many distinct outputs this transcript has produced. Two replies
+//          with identical text, or the same timestamp, are still different
+//          replies, and only a counter separates them.
+//   hash — of the FULL text, not the 280-char card clip. A streaming answer
+//          that grows past the clip would otherwise look unchanged, and the
+//          operator has been shown something new.
+//
+// Deliberately NOT the file's revision: that moves for tool calls, token
+// counts and status records, none of which are anything to read.
+//
 const clip = (s, n = 280) => { const t = (s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 // Markdown-preserving variant (keeps newlines) for the expandable card view.
 const clipRaw = (s, n = 6000) => { const t = (s || '').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
@@ -66,6 +86,15 @@ function digestPrompt(d, text, ts) {
   d.turnsLog = []; // arrows only walk the current request's turns
   // The previous answer belongs to the previous prompt — never show it as "LAST".
   d.lastAssistantText = ''; d.lastAssistantMd = ''; d.lastAssistantTs = 0;
+  // outSeq/outHash are NOT cleared here. They name the newest reply this
+  // transcript has produced, and typing at an agent is not reading what it
+  // last said — clearing them would quietly mark an unseen answer as seen the
+  // moment the operator sent the next prompt.
+  //
+  // What a prompt DOES do is end the current reply. Whatever the agent says
+  // next is a new one even if it says exactly the same words, which is the only
+  // way to tell "ask again, get the same answer" apart from a record repeated.
+  d.outFresh = true;
 }
 function digestAssistant(d, text, ts) {
   const clipped = clip(text);
@@ -78,6 +107,26 @@ function digestAssistant(d, text, ts) {
     }
     d.lastAssistantText = clipped;
   }
+  // Off the FULL text, before any clipping, and before the mirror check above —
+  // which compares clipped text and so cannot tell a grown streaming answer
+  // from the same one twice.
+  const hash = outputHash(text);
+  // A prompt in between makes this a new reply whatever it says; otherwise only
+  // changed text does.
+  //
+  // The one thing this cannot separate is an agent repeating itself verbatim
+  // with no prompt in between — that is indistinguishable from the mirrored
+  // records every harness writes (codex emits agent_message and task_complete
+  // with the same words), and counting those would mark a session unread every
+  // time it finished a turn. Collapsing them is the safe direction: the
+  // operator has already been shown those words.
+  if (hash !== d.outHash || d.outFresh) { d.outSeq += 1; d.outHash = hash; }
+  d.outFresh = false;
+  // Whether the card's copy of this answer is the whole answer. A reply longer
+  // than clipRaw's cap is shown with its tail cut off, and the Overview must
+  // not record the omitted part as read — the reader, which serves the trace
+  // itself, is where that reply can actually be finished.
+  d.outClipped = clipRaw(text).length < String(text || '').trim().length;
   d.lastAssistantMd = clipRaw(text);
   d.lastAssistantTs = Date.parse(ts) || d.lastAssistantTs;
 }
@@ -772,6 +821,10 @@ function memoized() {
   }
   return resultMemo.val || building;
 }
+
+// Exposed for tests: the unread cursor's rules live in the parser, and a
+// hand-built digest object would exercise none of them.
+export const __parseClaudeForTest = parseClaude;
 
 export async function buildTraces() {
   const { perSession, totals, sessions } = await memoized();

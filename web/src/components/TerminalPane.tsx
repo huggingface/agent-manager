@@ -10,6 +10,7 @@ import { STATE_LABEL, isRemote } from '../types';
 import StateLogo from './StateLogo';
 import TraceInfo from './TraceInfo';
 import ConversationView from './conversation/ConversationView';
+import type { ConversationSeen } from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
@@ -191,10 +192,14 @@ if (typeof window !== 'undefined') {
 export default function TerminalPane({
   session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal',
   dragId, isMobile, groupName, onBack, onDragActive, onFocus, onRename, onClose,
-  onShare,
+  onShare, seen,
 }: {
   session: Session;
   cli?: Cli;
+  // The unread cursor, passed straight to the reader. Only supplied while this
+  // pane is the active one, so a pane sitting behind another in a deck cannot
+  // acknowledge a reply nobody is looking at.
+  seen?: ConversationSeen;
   theme: 'light' | 'dark';
   groupName?: string | null; // the group this pane belongs to, if any
   focused?: boolean;
@@ -1219,6 +1224,7 @@ export default function TerminalPane({
               onCloseSearch={() => setSearchOpen(false)}
               onAttachPicker={setReaderAttach}
               onHead={(head) => { setReaderFacts(head); setReaderLoaded(head?.loaded); }}
+              seen={seen}
             />
           </div>
         )}
