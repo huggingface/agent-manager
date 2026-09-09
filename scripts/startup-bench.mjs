@@ -155,11 +155,18 @@ async function panelOpens(page, mobile) {
 }
 
 const gz = (f) => zlib.gzipSync(fs.readFileSync(f), { level: 6 }).length;
-const results = { label: LABEL, dist: DIST, at: new Date().toISOString(), runs: RUNS, node: process.version, chromium: browser.version(), mobile: MOBILE, profiles: {} };
+// Resumable: a partial file from an interrupted run of the same build is
+// continued, cell by cell, rather than started over.
+const prior = fs.existsSync(OUT) ? JSON.parse(fs.readFileSync(OUT, 'utf8')) : null;
+const results = prior && prior.dist === DIST && prior.runs === RUNS
+  ? { ...prior, resumedAt: new Date().toISOString() }
+  : { label: LABEL, dist: DIST, at: new Date().toISOString(), runs: RUNS, node: process.version, chromium: browser.version(), mobile: MOBILE, profiles: {} };
+const save = () => fs.writeFileSync(OUT, JSON.stringify(results, null, 1));
 try {
   for (const profile of PROFILES) {
-    const P = (results.profiles[profile] = { scenarios: {}, panels: null });
+    const P = (results.profiles[profile] ||= { scenarios: {}, panels: null });
     for (const sc of SCENARIOS) {
+      if (P.scenarios[sc.id]) continue;
       const samples = [];
       for (let i = 0; i < RUNS; i++) {
         const v = await visit(profile, sc);
@@ -173,7 +180,9 @@ try {
         script: stat(samples.map((s) => s.script)), compile: stat(samples.map((s) => s.compile)), task: stat(samples.map((s) => s.task)),
         js: { count: samples[0].js.count, bytes: samples[0].js.bytes, gzip: files.reduce((n, f) => n + gz(path.join(DIST, 'assets', f)), 0), files },
       };
+      save();
     }
+    if (P.panels) continue;
     console.log();
     const opens = [];
     for (let i = 0; i < RUNS; i++) {
@@ -188,14 +197,14 @@ try {
       P.panels[pass] = {};
       for (const k of Object.keys(opens[0][pass])) P.panels[pass][k] = stat(opens.map((o) => o[pass][k]));
     }
-    fs.writeFileSync(OUT, JSON.stringify(results, null, 1)); // a later crash keeps this profile
+    save();
   }
   results.chunks = Object.fromEntries(fs.readdirSync(path.join(DIST, 'assets')).filter((f) => f.endsWith('.js')).map((f) => [f, { bytes: fs.statSync(path.join(DIST, 'assets', f)).size, gzip: gz(path.join(DIST, 'assets', f)) }]));
 } finally {
   await browser.close();
   await server.stop();
 }
-fs.writeFileSync(OUT, JSON.stringify(results, null, 1));
+save();
 
 const kb = (n) => `${(n / 1024).toFixed(0)}k`;
 const ms = (s) => `${s.median.toFixed(0)}ms`;
