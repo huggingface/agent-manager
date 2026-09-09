@@ -108,7 +108,8 @@ export function createValidator({ cliExists, sessionExists, groupExists }) {
     const mediaType = (req.headers['content-type'] || '').split(';', 1)[0].trim().toLowerCase();
     // req.is() returns null for zero-byte bodies, even with a JSON content
     // type. Bodyless commands remain valid with or without that header.
-    if (!prompt && mediaType && mediaType !== 'application/json') {
+    const hasBody = req.headers['transfer-encoding'] || Number(req.headers['content-length']) > 0;
+    if (!prompt && ((mediaType && mediaType !== 'application/json') || (!mediaType && hasBody))) {
       throw new ApiError(415, 'unsupported-media-type', 'Use application/json for this request.');
     }
     const b = prompt && typeof req.body === 'string' ? {} : object(req.body === undefined ? {} : req.body, 'body');

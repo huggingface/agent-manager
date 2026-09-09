@@ -154,6 +154,8 @@ try {
     const before = effects;
     const media = await fetch(base + '/api/sessions', { method: 'POST', headers: { 'x-am-origin': 'operator' }, body: 'not JSON' });
     assert.equal(media.status, 415); assert.equal(effects, before);
+    const untyped = await fetch(base + '/api/groups', { method: 'POST', headers: { 'x-am-origin': 'operator' }, body: new Uint8Array([1, 2]) });
+    assert.equal(untyped.status, 415); assert.equal(effects, before);
   });
   await test('file and remote callbacks terminate committed streams and release resources', async () => {
     const before = await fetch(base + '/api/file/before'); assert.equal(before.status, 500); assert.equal((await before.json()).code, 'internal-error');

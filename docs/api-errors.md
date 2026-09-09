@@ -95,8 +95,8 @@ and audit-filter work is not reimplemented here.
 
 - Validate at the route boundary before any domain action, not only in TS.
   Schema helpers distinguish missing values from null/empty/false; no generic
-  truthiness or numeric-string conversion for JSON. JSON-only routes require
-  `application/json` when a content type is supplied. Malformed JSON, unsupported
+  truthiness or numeric-string conversion for JSON. JSON-only payloads require
+  `application/json`; bodyless commands may omit it. Malformed JSON, unsupported
   encodings and parser limits get deliberate JSON errors. Express's strict
   parser rejects scalar JSON documents (including bare `null`).
 - Queries are scalar strings: duplicate/bracket-structured parameters are
