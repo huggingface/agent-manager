@@ -15,21 +15,25 @@ fs.writeFileSync(preload, `
   import fs from 'node:fs';
   import childProcess from 'node:child_process';
   import { syncBuiltinESMExports } from 'node:module';
+  import { isMainThread } from 'node:worker_threads';
   // Startup probes installed CLIs with execFile('--version'). Some write to
   // HOME long after HTTP is ready; keep their parent alive until they close.
-  const execFile = childProcess.execFile;
-  const commands = new Set();
-  childProcess.execFile = (...args) => {
-    const command = execFile(...args);
-    const closed = new Promise((resolve) => command.once('close', resolve));
-    commands.add(closed);
-    closed.then(() => commands.delete(closed));
-    return command;
-  };
-  syncBuiltinESMExports();
-  // Deterministic regression: this grandchild writes only AFTER stop is asked
-  // for, rather than relying on whichever CLI happens to be installed.
-  const lateWrite = childProcess.execFile(process.execPath, ['-e', ${JSON.stringify(`
+  // Workers inherit --import too; only the server's main thread owns probes
+  // and receives the fixture shutdown message.
+  if (isMainThread) {
+    const execFile = childProcess.execFile;
+    const commands = new Set();
+    childProcess.execFile = (...args) => {
+      const command = execFile(...args);
+      const closed = new Promise((resolve) => command.once('close', resolve));
+      commands.add(closed);
+      closed.then(() => commands.delete(closed));
+      return command;
+    };
+    syncBuiltinESMExports();
+    // Controlled regression: this grandchild writes only AFTER stop is asked
+    // for, rather than relying on whichever CLI happens to be installed.
+    const lateWrite = childProcess.execFile(process.execPath, ['-e', ${JSON.stringify(`
     const fs = require('node:fs');
     process.stdin.resume();
     process.stdin.once('end', () => setTimeout(() => {
@@ -37,12 +41,13 @@ fs.writeFileSync(preload, `
       fs.writeFileSync(process.env.HOME + '/fixture-command-closed', process.argv[1]);
     }, 100));
   `)}, String(process.pid)], () => {});
-  process.once('message', async (message) => {
-    if (message !== 'fixture-stop') return;
-    lateWrite.stdin.end();
-    while (commands.size) await Promise.all([...commands]);
-    process.kill(process.pid, 'SIGTERM');
-  });
+    process.once('message', async (message) => {
+      if (message !== 'fixture-stop') return;
+      lateWrite.stdin.end();
+      while (commands.size) await Promise.all([...commands]);
+      process.kill(process.pid, 'SIGTERM');
+    });
+  }
   globalThis.fetch = async () => new Response(JSON.stringify({private:process.env.FIXTURE_PUBLIC !== '1',runtime:{volumes:[]}}), {status:200,headers:{'content-type':'application/json'}});
   const write = fs.writeFileSync;
   fs.writeFileSync = (file, ...args) => {
