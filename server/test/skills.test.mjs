@@ -105,6 +105,26 @@ test('unowned installations block create and legacy adoption unless byte identic
   assert.equal(read(path.join(path.dirname(f.target()), 'helper.py')), 'user-owned');
 });
 
+test('deletion preserves a pre-existing directory even when removing the skill leaves it empty', async (t) => {
+  const f = fixture(t);
+  const preexisting = path.dirname(f.target());
+  fs.mkdirSync(preexisting, { recursive: true });
+  assert.equal((await f.service.create('demo.md', 'first')).ok, true);
+  const record = JSON.parse(read(f.manifest)).skills['demo.md'];
+  assert.deepEqual(record.targets.map((target) => target.dirOwned), [false, true, true, true, true]);
+
+  const restart = createSkillsService(f.options);
+  assert.equal((await restart.remove('demo.md', await revision(restart))).ok, true);
+  assert.equal(fs.existsSync(f.source()), false);
+  assert.ok(fs.statSync(preexisting).isDirectory());
+  assert.deepEqual(fs.readdirSync(preexisting), []);
+  for (let i = 0; i < 5; i++) {
+    assert.equal(fs.existsSync(f.target(i)), false);
+    assert.ok(fs.statSync(f.options.targetRoots[i]).isDirectory());
+    if (i > 0) assert.equal(fs.existsSync(path.dirname(f.target(i))), false);
+  }
+});
+
 test('ambiguous legacy identities adopt neither and unrelated source still distributes', async (t) => {
   const f = fixture(t);
   f.seed(f.source('Demo.md'), 'first'); f.seed(f.source(), 'first');
@@ -185,6 +205,29 @@ for (const state of ['corrupt', 'unreadable', 'unwritable', 'outside-path', 'out
     assert.equal(read(f.target()), generatedSkill('demo.md', 'first'));
   });
 }
+
+test('a manifest cannot redirect deletion to another skill inside an allowed target root', async (t) => {
+  const f = fixture(t);
+  await f.service.create('demo.md', 'first');
+  await f.service.create('other.md', 'independent');
+  const m = JSON.parse(read(f.manifest));
+  const sibling = m.skills['other.md'].targets[0];
+  // Keep the allowed root and copy the sibling's real hash: neither root
+  // containment nor external-edit checks should mask the wrong skill identity.
+  Object.assign(m.skills['demo.md'].targets[0], { path: sibling.path, hash: sibling.hash });
+  const tampered = JSON.stringify(m);
+  f.seed(f.manifest, tampered);
+
+  const restart = createSkillsService(f.options);
+  await rejects(async () => restart.remove('demo.md', await revision(restart)), 503);
+  assert.equal(read(f.manifest), tampered);
+  assert.equal(read(f.source()), 'first');
+  assert.equal(read(f.source('other.md')), 'independent');
+  for (let i = 0; i < 5; i++) {
+    assert.equal(read(f.target(i)), generatedSkill('demo.md', 'first'));
+    assert.equal(read(f.target(i, 'other')), generatedSkill('other.md', 'independent'));
+  }
+});
 
 test('loss of a manifest allows only verified legacy adoption, never removal', async (t) => {
   const f = fixture(t); await f.service.create('demo.md', 'first');

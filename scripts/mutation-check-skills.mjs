@@ -15,6 +15,8 @@ const mutations = [
   ['stale revision guard', 'if (snapshot(name, m).revision !== revision)', 'if (false)'],
   ['external installed-file guard', 'if (actual !== t.hash && actual !== r.pending?.targetHash && actual !== null)', 'if (false)'],
   ['unowned installation guard', 'if (actual !== null && (!adopt || actual !== expected))', 'if (false)'],
+  ['manifest destination identity', "t.path !== path.join(t.root, r.id, 'SKILL.md')", 'false'],
+  ['pre-existing directory ownership', 'if (t.dirOwned)', 'if (true)'],
   ['recursive directory deletion', 'io.unlinkSync(t.path);', 'io.rmSync(path.dirname(t.path), { recursive: true, force: true });'],
   ['pending deletion protection', /if \(m\.skills\[name\]\?\.pending\?\.kind === 'delete'\)|if \(r\?\.pending\?\.kind === 'delete'\)/g, 'if (false)'],
   ['temporary exclusive creation', 'fs.constants.O_EXCL | fs.constants.O_NOFOLLOW', 'fs.constants.O_TRUNC'],
