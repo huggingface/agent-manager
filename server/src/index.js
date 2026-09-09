@@ -52,6 +52,7 @@ import { operationMiddleware, readOperations } from './operations.js';
 import { ApiError, apiRoutes, apiNotFound, apiErrorHandler, errorEnvelope, pipeResponse } from './api-errors.js';
 import { createValidator } from './api-validation.js';
 import { remoteStream } from './api-streams.js';
+import { fileWriteError, receiveWorkspaceFile, replaceWorkspaceText } from './safe-write.js';
 
 // Before anything else touches the mount: a sync fs call to /data is ~85ms of
 // frozen event loop here, and nothing else in the stack can see it. See slowfs.js.
@@ -1842,7 +1843,7 @@ api.get('/api/files/:id/download', (req, res, next) => {
 // a stale buffer is worse than making someone reload. Second, only files we could
 // show WHOLE are writable: the preview serves the first 512 KB of a big file, and
 // saving that back would silently truncate the rest.
-api.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), (req, res) => {
+api.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const f = resolveSafe(folderPathOf(s), req.query.path);
@@ -1864,15 +1865,21 @@ api.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), (re
   const text = typeof req.body === 'string' ? req.body : '';
   if (text.length > TEXT_MAX) return res.status(413).json({ error: 'too big to save' });
 
-  // Write beside the target and rename: a crash or a full disk leaves the
-  // original intact rather than a half-written file.
-  const tmp = path.join(path.dirname(f), `.${path.basename(f)}.am-tmp`);
   try {
-    fs.writeFileSync(tmp, text, 'utf8');
-    fs.renameSync(tmp, f);
+    // Recheck under the same destination lock used by uploads. This keeps the
+    // editor's existing content-tag contract while giving both writers unique,
+    // exclusive temporary files and one publication order.
+    await replaceWorkspaceText(f, text, async () => {
+      const current = resolveSafe(folderPathOf(s), req.query.path);
+      if (current !== f || !fs.existsSync(f) || !fs.lstatSync(f).isFile() || fs.lstatSync(f).isSymbolicLink()) {
+        throw fileWriteError(409, 'changed-on-disk', 'changed on disk since you opened it');
+      }
+      if (base && base !== contentTag(f)) {
+        throw fileWriteError(409, 'changed-on-disk', 'changed on disk since you opened it');
+      }
+    });
   } catch (e) {
-    try { fs.unlinkSync(tmp); } catch {}
-    throw e;
+    return res.status(e.statusCode || 500).json({ error: String((e && e.message) || e), code: e.code });
   }
   const after = fs.statSync(f);
   res.json({ ok: true, size: after.size, mtime: after.mtimeMs, tag: contentTag(f) });
@@ -1898,9 +1905,14 @@ function contentTag(file) {
 function dependedOnDir(abs) {
   const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
   const target = real(abs);
-  if (target === real(SKILLS_DIR)) return 'the shared skills folder';
+  const contains = (parent, child) => child === parent || child.startsWith(parent + path.sep);
+  if (contains(target, real(SKILLS_DIR))) return 'the shared skills folder';
   for (const s of store.list()) {
-    if (s.path && real(workspacePath(s.path)) === target) return `${s.name}'s workspace`;
+    // `path` can be '' (the root) and old records can still omit it until the
+    // boot migration above. Both are real configured dependencies, including
+    // stopped sessions and sessions sharing or nesting a workspace.
+    const workspace = real(workspacePath(s.path ?? s.id));
+    if (contains(target, workspace)) return `${s.name}'s workspace`;
   }
   return null;
 }
@@ -1953,10 +1965,10 @@ api.post('/api/files/:id/rename', (req, res) => {
   if (!from || !name) return res.status(400).json({ error: 'bad name' });
   if (!fs.existsSync(from)) return res.status(404).json({ error: 'not found' });
   if (path.resolve(from) === path.resolve(root)) return res.status(400).json({ error: 'cannot rename the workspace root' });
-  const dep = dependedOnDir(from);
-  if (dep) return res.status(409).json({ error: `that folder is ${dep}` });
   const to = path.join(path.dirname(from), name);
   if (path.resolve(to) === path.resolve(from)) return res.json({ ok: true, name }); // no-op
+  const dep = dependedOnDir(from);
+  if (dep) return res.status(409).json({ error: `that folder contains ${dep}` });
   if (fs.existsSync(to)) return res.status(409).json({ error: `"${name}" already exists here` });
   try {
     fs.renameSync(from, to);
@@ -1977,9 +1989,6 @@ api.post('/api/files/:id/move', (req, res) => {
   const from = resolveSafe(root, b.path);
   if (!from || !fs.existsSync(from)) return res.status(404).json({ error: 'not found' });
   if (path.resolve(from) === path.resolve(root)) return res.status(400).json({ error: 'cannot move the workspace root' });
-  const dep = dependedOnDir(from);
-  if (dep) return res.status(409).json({ error: `that folder is ${dep}` });
-
   const destDir = resolveSafe(root, b.to || '');
   if (!destDir || !fs.existsSync(destDir)) return res.status(404).json({ error: 'no such folder' });
   if (!fs.statSync(destDir).isDirectory()) return res.status(400).json({ error: 'not a folder' });
@@ -1996,6 +2005,8 @@ api.post('/api/files/:id/move', (req, res) => {
 
   const to = path.join(destDir, path.basename(from));
   if (path.resolve(to) === path.resolve(from)) return res.json({ ok: true, path: path.relative(root, to) });
+  const dep = dependedOnDir(from);
+  if (dep) return res.status(409).json({ error: `that folder contains ${dep}` });
   if (fs.existsSync(to)) return res.status(409).json({ error: `"${path.basename(from)}" already exists there` });
   try {
     fs.renameSync(from, to);
@@ -2018,7 +2029,7 @@ api.delete('/api/files/:id/entry', (req, res) => {
   // A folder an agent is living in, or the shared skills dir, is not the
   // browser's to remove: the agent's cwd would vanish under a running process.
   const dep = dependedOnDir(target);
-  if (dep) return res.status(409).json({ error: `that folder is ${dep}` });
+  if (dep) return res.status(409).json({ error: `that folder contains ${dep}` });
   try {
     fs.rmSync(target, { recursive: true, force: true });
   } catch (e) {
@@ -2075,42 +2086,56 @@ api.get('/api/files/:id/trace', async (req, res) => {
 
 // Stream uploads straight to disk — a big drag-drop must not be buffered in the
 // RAM of the process that's also pumping every terminal's PTY data.
-api.post('/api/files/:id/upload', (req, res, next) => {
+api.post('/api/files/:id/upload', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  const dir = resolveSafe(folderPathOf(s), req.query.path);
-  const name = String(req.query.name || '');
-  if (!dir || !name || name.includes('/') || name.includes('..')) return res.status(400).json({ error: 'bad path' });
-  const dest = path.join(dir, name);
-  fs.mkdirSync(dir, { recursive: true });
-  const out = fs.createWriteStream(dest);
-  let done = false;
-  const cleanup = () => {
-    req.off('error', fail);
-    req.off('aborted', abort);
-    res.off('close', abort);
-  };
-  const fail = (e) => {
-    if (done) return;
-    done = true;
-    cleanup();
-    req.unpipe(out);
-    out.destroy();
-    out.once('close', () => fs.unlink(dest, () => {})); // wait for the descriptor before cleanup
-    next(e);
-  };
-  const abort = () => fail(new ApiError(400, 'request-aborted', 'Upload was interrupted.'));
-  out.on('error', fail);
-  req.on('error', fail);
-  req.once('aborted', abort);
-  res.once('close', abort);
-  out.once('finish', () => {
-    if (done) return;
-    done = true;
-    cleanup();
-    res.json({ ok: true });
-  });
-  req.pipe(out);
+  const root = folderPathOf(s);
+  const requestedDir = resolveSafe(root, req.query.path);
+  const name = cleanName(req.query.name);
+  if (!requestedDir || !name) return res.status(400).json({ error: 'bad path' });
+  let realRoot; let realDir;
+  try {
+    realRoot = await fs.promises.realpath(root);
+    realDir = await fs.promises.realpath(requestedDir);
+    const stat = await fs.promises.stat(realDir);
+    if (!stat.isDirectory() || (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep))) {
+      return res.status(400).json({ error: 'bad path' });
+    }
+  } catch {
+    return res.status(404).json({ error: 'destination folder no longer exists' });
+  }
+  const destination = path.join(realDir, name);
+  const displayPath = path.relative(root, path.join(requestedDir, name)).split(path.sep).join('/');
+  try {
+    const validate = async () => {
+      let rootNow; let dirNow;
+      try {
+        rootNow = await fs.promises.realpath(root);
+        dirNow = await fs.promises.realpath(requestedDir);
+      } catch {
+        throw fileWriteError(409, 'destination-changed', 'the destination folder changed during upload');
+      }
+      if (rootNow !== realRoot || dirNow !== realDir
+          || (dirNow !== rootNow && !dirNow.startsWith(rootNow + path.sep))) {
+        throw fileWriteError(409, 'destination-changed', 'the destination folder changed during upload');
+      }
+    };
+    const result = await receiveWorkspaceFile(req, destination, {
+      displayPath,
+      replaceToken: req.headers['x-am-replace-token'] || '',
+      validate,
+    });
+    if (!res.destroyed) res.json({ ok: true, path: displayPath, ...result });
+  } catch (e) {
+    if (!res.headersSent && !res.destroyed) res.status(e.statusCode || 500).json({
+      error: String((e && e.message) || e),
+      ...(e.code ? { code: e.code } : {}),
+      ...(e.path !== undefined ? { path: e.path } : {}),
+      ...(e.name !== undefined ? { name: e.name } : {}),
+      ...(e.revision !== undefined ? { revision: e.revision } : {}),
+      ...(e.replaceToken !== undefined ? { replaceToken: e.replaceToken } : {}),
+    });
+  }
 });
 
 // Sanitize a client-supplied workspace-relative path: no '..', no absolute

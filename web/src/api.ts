@@ -276,6 +276,26 @@ export interface AttachmentUploadOptions {
 }
 export const ATTACHMENT_UPLOAD_TIMEOUT_MS = 20 * 60 * 1000;
 
+/**
+ * Size, storage, validation and missing-session refusals cannot become valid by
+ * sending the same bytes again; network, timeout, throttling and 5xx failures
+ * can. The decoded ApiError (status, code, allowlisted data) is kept intact.
+ */
+export class AttachmentUploadError extends ApiError {
+  retryable: boolean;
+  constructor(failure: ApiError, retryable: boolean) {
+    super(failure.message, failure.status, failure.code, failure.data);
+    this.name = 'AttachmentUploadError';
+    this.legacy = failure.legacy;
+    this.retryable = retryable;
+  }
+}
+
+const attachmentUploadError = (error: unknown, status: number) => {
+  const failure = error instanceof ApiError ? error : new ApiError(`Upload failed (HTTP ${status}).`, status, 'upload-failed');
+  return new AttachmentUploadError(failure, ![400, 404, 413, 415].includes(status));
+};
+
 /** XMLHttpRequest is intentional: fetch has no browser upload-progress API. */
 export const uploadAttachment = (
   id: string,
@@ -317,7 +337,8 @@ export const uploadAttachment = (
       if (!attachment) throw new ApiError('The upload result was empty. Check the result before trying again.', request.status, 'unreadable-response');
       finish(() => resolve(attachment));
     } catch (error) {
-      finish(() => reject(error));
+      const failed = request.status < 200 || request.status >= 300;
+      finish(() => reject(failed ? attachmentUploadError(error, request.status) : error));
     }
   };
   request.onerror = () => finish(() => reject(connectionError(new Error('network'))));
@@ -401,10 +422,85 @@ export const getFileTracePage = async (id: string, p: string, offset = 0, limit 
 export const rawUrl = (id: string, p: string) =>
   `/api/files/${id}/raw?path=${encodeURIComponent(p)}`;
 
-export const uploadFile = (id: string, p: string, file: File) =>
-  fetch(`/api/files/${id}/upload?path=${encodeURIComponent(p)}&name=${encodeURIComponent(file.name)}`, {
-    method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: file,
-  }).then(json);
+export interface WorkspaceFileCollision {
+  code: 'file-exists' | 'replacement-stale';
+  name: string;
+  path: string;
+  revision: string | null;
+  replaceToken: string | null;
+}
+
+export class WorkspaceUploadError extends Error {
+  status: number;
+  collision?: WorkspaceFileCollision;
+  constructor(message: string, status: number, body?: Partial<WorkspaceFileCollision>) {
+    super(message);
+    this.name = 'WorkspaceUploadError';
+    this.status = status;
+    if (body?.code === 'file-exists' || body?.code === 'replacement-stale') {
+      this.collision = {
+        code: body.code,
+        name: String(body.name || ''),
+        path: String(body.path || ''),
+        revision: typeof body.revision === 'string' ? body.revision : null,
+        replaceToken: typeof body.replaceToken === 'string' ? body.replaceToken : null,
+      };
+    }
+  }
+}
+
+export interface WorkspaceUploadOptions extends AttachmentUploadOptions { replaceToken?: string }
+
+/** Workspace uploads use XHR for progress, but replacement remains a separate,
+ * token-bound request after the server reports the exact collision. */
+export const uploadFile = (
+  id: string, p: string, file: File,
+  { replaceToken, onProgress, signal, timeoutMs = ATTACHMENT_UPLOAD_TIMEOUT_MS }: WorkspaceUploadOptions = {},
+): Promise<{ ok: boolean; path: string; size: number; mtime: number }> => new Promise((resolve, reject) => {
+  const request = new XMLHttpRequest();
+  let settled = false;
+  const finish = (task: () => void) => {
+    if (settled) return;
+    settled = true;
+    signal?.removeEventListener('abort', abort);
+    task();
+  };
+  const abort = () => request.abort();
+  if (signal?.aborted) {
+    finish(() => reject(new WorkspaceUploadError('Upload was canceled before it completed.', 0)));
+    return;
+  }
+  request.open('POST', `/api/files/${encodeURIComponent(id)}/upload?path=${encodeURIComponent(p)}&name=${encodeURIComponent(file.name)}`);
+  request.timeout = timeoutMs;
+  request.setRequestHeader('content-type', 'application/octet-stream');
+  request.setRequestHeader('x-am-origin', 'operator');
+  if (replaceToken) request.setRequestHeader('x-am-replace-token', replaceToken);
+  request.upload.onprogress = (event) => onProgress?.({
+    loaded: event.loaded,
+    total: event.lengthComputable && event.total ? event.total : file.size,
+  });
+  request.upload.onload = () => onProgress?.({ loaded: file.size, total: file.size });
+  request.onload = () => {
+    let body: any = {};
+    try { body = JSON.parse(request.responseText || '{}'); } catch {}
+    if (request.status < 200 || request.status >= 300) {
+      finish(() => reject(new WorkspaceUploadError(body.error || `Upload failed (HTTP ${request.status}).`, request.status, body)));
+      return;
+    }
+    finish(() => resolve(body));
+  };
+  request.onerror = () => finish(() => reject(new WorkspaceUploadError(
+    typeof navigator !== 'undefined' && navigator.onLine === false
+      ? 'Upload stopped because this device is offline. Reconnect and retry.'
+      : 'Upload connection was interrupted before the file was published. Retry it.',
+    request.status,
+  )));
+  request.onabort = () => finish(() => reject(new WorkspaceUploadError('Upload was canceled before it completed.', 0)));
+  request.ontimeout = () => finish(() => reject(new WorkspaceUploadError('Upload timed out before the file was published. Retry it.', request.status)));
+  signal?.addEventListener('abort', abort, { once: true });
+  onProgress?.({ loaded: 0, total: file.size });
+  request.send(file);
+});
 
 // Create an empty folder / an empty file inside `parent`. The server refuses a
 // name that already exists rather than overwriting it.

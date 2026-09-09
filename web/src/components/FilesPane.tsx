@@ -4,7 +4,7 @@ import type { Session } from '../types';
 import * as api from '../api';
 import { Rails, railPad } from './Rails';
 import { keyIntent, keepInView, survivingFocus, type TreeRow } from '../lib/treeNav';
-import type { FileEntry, FileKind, FilePreview } from '../api';
+import type { FileEntry, FileKind, FilePreview, WorkspaceFileCollision } from '../api';
 import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
 import CodeView from './CodeView';
@@ -254,6 +254,41 @@ function UnsavedDialog({ name, conflict, busy, onSave, onDiscard, onCancel }: {
           <button className="mini-btn primary" autoFocus onClick={onSave} disabled={busy}>
             {busy ? 'Saving…' : conflict ? 'Overwrite and close' : 'Save and close'}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type WorkspaceUploadStatus = 'queued' | 'uploading' | 'uploaded' | 'collision' | 'error' | 'canceled';
+type WorkspaceUpload = {
+  key: string;
+  file: File;
+  folder: string;
+  destination: string;
+  status: WorkspaceUploadStatus;
+  loaded: number;
+  error?: string;
+  collision?: WorkspaceFileCollision;
+};
+
+function ReplaceUploadDialog({ upload, busy, onReplace, onCancel }: {
+  upload: WorkspaceUpload; busy: boolean; onReplace: () => void; onCancel: () => void;
+}) {
+  return (
+    <div className="fv-modal-back" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+      <div className="fv-modal" role="dialog" aria-modal="true" aria-label={`Replace ${upload.file.name}?`}
+        onKeyDown={(event) => {
+          event.stopPropagation();
+          if (event.key === 'Escape') { event.preventDefault(); onCancel(); }
+        }}>
+        <div className="fv-modal-title">Replace “{upload.file.name}”?</div>
+        <div className="fv-modal-body">
+          A file already exists at <span className="mono">{upload.destination}</span>. Replace it only if it is still the exact file you reviewed here.
+        </div>
+        <div className="fv-modal-acts">
+          <button className="mini-btn primary" autoFocus disabled={busy} onClick={onCancel}>Cancel</button>
+          <button className="mini-btn danger" disabled={busy} onClick={onReplace}>{busy ? 'Replacing…' : 'Replace'}</button>
         </div>
       </div>
     </div>
@@ -987,6 +1022,12 @@ export default function FilesPane({
   const [target, setTarget] = useState<string | null>(kept.target);
   const [acting, setActing] = useState(false);
   const [actErr, setActErr] = useState<string | null>(null);
+  const [workspaceUploads, setWorkspaceUploads] = useState<WorkspaceUpload[]>([]);
+  const workspaceUploadsRef = useRef<WorkspaceUpload[]>([]);
+  const workspaceUploadBusy = useRef(false);
+  const workspaceControllers = useRef(new Map<string, AbortController>());
+  const [pendingReplace, setPendingReplace] = useState<string | null>(null);
+  const [replaceBusy, setReplaceBusy] = useState(false);
   const paneRef = useRef<HTMLDivElement | null>(null);
   // Expanded folders live here rather than in each row, so the keyboard's
   // expand/collapse and the pointer's click-to-expand are the same fact, and
@@ -1098,14 +1139,99 @@ export default function FilesPane({
     keepInView(el, box);
   });
 
-  const upload = async (files: FileList | File[]) => {
-    setBusy(true);
-    for (const f of Array.from(files)) {
-      try { await api.uploadFile(session.id, dest, f); } catch { /* skip */ }
-    }
-    setBusy(false);
-    setReloadKey((k) => k + 1);
+  const updateWorkspaceUpload = (key: string, patch: Partial<WorkspaceUpload>) => {
+    const next = workspaceUploadsRef.current.map((item) => item.key === key ? { ...item, ...patch } : item);
+    workspaceUploadsRef.current = next;
+    setWorkspaceUploads(next);
   };
+  const runWorkspaceUpload = async (item: WorkspaceUpload, replaceToken?: string) => {
+    if (workspaceUploadsRef.current.find((current) => current.key === item.key)?.status === 'canceled') return;
+    const controller = new AbortController();
+    workspaceControllers.current.set(item.key, controller);
+    updateWorkspaceUpload(item.key, { status: 'uploading', loaded: 0, error: undefined, collision: undefined });
+    try {
+      await api.uploadFile(session.id, item.folder, item.file, {
+        replaceToken,
+        signal: controller.signal,
+        onProgress: ({ loaded }) => updateWorkspaceUpload(item.key, { loaded }),
+      });
+      if (controller.signal.aborted) return;
+      updateWorkspaceUpload(item.key, { status: 'uploaded', loaded: item.file.size });
+      setReloadKey((key) => key + 1);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      // A stale replacement can report that the destination disappeared. With
+      // no fresh token there is nothing left to replace: make the next action a
+      // normal create retry instead of offering a Replace button that cannot run.
+      if (error instanceof api.WorkspaceUploadError && error.collision?.replaceToken) {
+        updateWorkspaceUpload(item.key, {
+          status: 'collision',
+          loaded: 0,
+          error: error.message,
+          collision: error.collision,
+          destination: `${rootLabel}/${error.collision.path}`,
+        });
+      } else {
+        updateWorkspaceUpload(item.key, {
+          status: 'error', loaded: 0,
+          error: error instanceof Error ? error.message : 'Upload failed before the file was published.',
+        });
+      }
+    } finally {
+      if (workspaceControllers.current.get(item.key) === controller) workspaceControllers.current.delete(item.key);
+    }
+  };
+
+  const upload = async (files: FileList | File[]) => {
+    if (workspaceUploadBusy.current) {
+      setActErr('Wait for the current upload batch, or cancel a file in it.');
+      return;
+    }
+    const selected = Array.from(files);
+    if (!selected.length) return;
+    const folder = dest;
+    const items = selected.map((file): WorkspaceUpload => ({
+      key: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`,
+      file,
+      folder,
+      destination: `${rootLabel}/${join(folder, file.name)}`,
+      status: 'queued',
+      loaded: 0,
+    }));
+    workspaceUploadsRef.current = [...workspaceUploadsRef.current, ...items];
+    setWorkspaceUploads(workspaceUploadsRef.current);
+    workspaceUploadBusy.current = true;
+    setBusy(true); setActErr(null);
+    for (const item of items) await runWorkspaceUpload(item);
+    workspaceUploadBusy.current = false;
+    setBusy(false);
+  };
+
+  const cancelWorkspaceUpload = (key: string) => {
+    workspaceControllers.current.get(key)?.abort();
+    updateWorkspaceUpload(key, { status: 'canceled', loaded: 0, error: undefined, collision: undefined });
+    if (pendingReplace === key) setPendingReplace(null);
+  };
+  const retryWorkspaceUpload = (key: string) => {
+    if (workspaceUploadBusy.current || replaceBusy) return;
+    const item = workspaceUploadsRef.current.find((candidate) => candidate.key === key);
+    if (item) void runWorkspaceUpload(item);
+  };
+  const confirmWorkspaceReplace = async () => {
+    const item = workspaceUploadsRef.current.find((candidate) => candidate.key === pendingReplace);
+    const token = item?.collision?.replaceToken;
+    if (!item || !token || replaceBusy) return;
+    setReplaceBusy(true);
+    await runWorkspaceUpload(item, token);
+    setReplaceBusy(false); setPendingReplace(null);
+  };
+  const cancelWorkspaceReplace = () => {
+    if (pendingReplace) cancelWorkspaceUpload(pendingReplace);
+    setPendingReplace(null);
+  };
+  useEffect(() => () => {
+    for (const controller of workspaceControllers.current.values()) controller.abort();
+  }, []);
 
   // Nothing is written without being asked for, so leaving a file with an unsaved
   // buffer would drop it silently. Ask in a dialog — the answer is the work.
@@ -1280,6 +1406,15 @@ export default function FilesPane({
     };
   }, [dir.entries]);
 
+  const workspaceUploadCounts = useMemo(() => ({
+    queued: workspaceUploads.filter((item) => item.status === 'queued').length,
+    uploading: workspaceUploads.filter((item) => item.status === 'uploading').length,
+    uploaded: workspaceUploads.filter((item) => item.status === 'uploaded').length,
+    failed: workspaceUploads.filter((item) => item.status === 'error' || item.status === 'collision').length,
+    canceled: workspaceUploads.filter((item) => item.status === 'canceled').length,
+  }), [workspaceUploads]);
+  const replacement = workspaceUploads.find((item) => item.key === pendingReplace) || null;
+
   const meta = info.meta;
   const name = viewing ? viewing.split('/').pop()! : '';
 
@@ -1359,8 +1494,9 @@ export default function FilesPane({
                 label is not a control, so the picker had no keyboard at all.
                 Made a button in its own right, opening the same picker. */}
             <label
-              className="mini-btn upload-btn" title="Upload files"
-              role="button" tabIndex={0} aria-label="Upload files"
+              className={`mini-btn upload-btn${busy ? ' disabled' : ''}`}
+              title={busy ? 'Current upload batch is still running' : 'Upload files'}
+              role="button" tabIndex={0} aria-label="Upload files" aria-disabled={busy || undefined}
               onKeyDown={(e) => {
                 if (e.key !== 'Enter' && e.key !== ' ') return;
                 e.preventDefault();
@@ -1368,7 +1504,7 @@ export default function FilesPane({
               }}
             >
               <UploadGlyph /> Upload
-              <input type="file" multiple hidden onChange={(e) => { if (e.target.files) upload(e.target.files); e.target.value = ''; }} />
+              <input type="file" multiple hidden disabled={busy} onChange={(e) => { if (e.target.files) upload(e.target.files); e.target.value = ''; }} />
             </label>
           </>
         )}
@@ -1540,6 +1676,48 @@ export default function FilesPane({
           </div>
         )}
         {actErr && <div className="files-new err">{actErr}</div>}
+        {workspaceUploads.length > 0 && (
+          <div className="files-uploads" aria-label="Workspace upload results">
+            <div className="files-uploads-head mono" role="status">
+              <span>{workspaceUploads.length} file{workspaceUploads.length === 1 ? '' : 's'}</span>
+              {workspaceUploadCounts.queued > 0 && <span>{workspaceUploadCounts.queued} queued</span>}
+              {workspaceUploadCounts.uploading > 0 && <span>{workspaceUploadCounts.uploading} uploading</span>}
+              {workspaceUploadCounts.uploaded > 0 && <span>{workspaceUploadCounts.uploaded} uploaded</span>}
+              {workspaceUploadCounts.failed > 0 && <span className="bad">{workspaceUploadCounts.failed} need attention</span>}
+              {workspaceUploadCounts.canceled > 0 && <span>{workspaceUploadCounts.canceled} canceled</span>}
+              <span className="spacer" />
+              <button className="mini-btn" onClick={() => {
+                const next = workspaceUploadsRef.current.filter((item) => !['uploaded', 'canceled'].includes(item.status));
+                workspaceUploadsRef.current = next; setWorkspaceUploads(next);
+              }}>Clear finished</button>
+            </div>
+            <div className="files-upload-list">
+              {workspaceUploads.map((item) => {
+                const percent = item.file.size ? Math.min(100, Math.round((item.loaded / item.file.size) * 100)) : 0;
+                return <div key={item.key} className={`files-upload-row ${item.status}`}>
+                  <span className="files-upload-name" title={item.destination}>{item.file.name}</span>
+                  <span className="files-upload-state mono" title={item.error}>
+                    {item.status === 'uploading' ? `${percent}% · publishing after upload`
+                      : item.status === 'collision' ? item.error
+                        : item.status === 'error' ? item.error
+                          : item.status}
+                  </span>
+                  {item.status === 'collision' && <>
+                    <button className="mini-btn danger-hover" onClick={() => setPendingReplace(item.key)}>Replace…</button>
+                    <button className="mini-btn" onClick={() => cancelWorkspaceUpload(item.key)}>Cancel</button>
+                  </>}
+                  {item.status === 'error' && <>
+                    <button className="mini-btn" disabled={busy || replaceBusy} onClick={() => retryWorkspaceUpload(item.key)}>Retry</button>
+                    <button className="mini-btn" onClick={() => cancelWorkspaceUpload(item.key)}>Dismiss</button>
+                  </>}
+                  {(item.status === 'queued' || item.status === 'uploading') && (
+                    <button className="mini-btn" onClick={() => cancelWorkspaceUpload(item.key)}>Cancel</button>
+                  )}
+                </div>;
+              })}
+            </div>
+          </div>
+        )}
         <Cols
           sort={sort}
           onSort={(k) => setSort((s) => (s.key === k ? { key: k, desc: !s.desc } : { key: k, desc: k !== 'name' }))}
@@ -1555,7 +1733,7 @@ export default function FilesPane({
           tabIndex={dir.entries?.length ? -1 : 0}
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
-          onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files.length) upload(e.dataTransfer.files); }}
+          onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files.length) void upload(e.dataTransfer.files); }}
         >
           {dir.err && <div className="tree-msg" role="status">can't read folder</div>}
           {!dir.err && !dir.entries && <div className="tree-msg" role="status" aria-label="Loading files">…</div>}
@@ -1572,9 +1750,13 @@ export default function FilesPane({
               onRowFocus={setFocusPath} requestFocus={requestFocus}
             />
           )}
-          {busy && <div className="tree-msg">Uploading…</div>}
         </div>
       </div>
+
+      {replacement && (
+        <ReplaceUploadDialog upload={replacement} busy={replaceBusy}
+          onReplace={() => void confirmWorkspaceReplace()} onCancel={cancelWorkspaceReplace} />
+      )}
 
       {viewing && confirmClose && edit && (
         <UnsavedDialog
