@@ -1,6 +1,41 @@
 import type { TraceBlock, TraceTurn } from '../api';
 
 const queueKey = (text: string) => text.replace(/\s+/g, ' ').trim();
+
+// Mirrors the trace normalizer's named harness envelopes. A leading '<' alone
+// can be an operator's HTML/XML prompt and must not hide its prompt band.
+//
+// This lives with the model rather than with the grouping because the store has
+// to count exchanges to decide how much history it still owes the reader, and a
+// second copy of the rule would drift from the one the view groups by.
+export const isOperatorPrompt = (t: TraceTurn) => {
+  if (t.role !== 'user') return false;
+  const text = t.blocks.filter((b) => b.type === 'text').map((b) => ('text' in b ? b.text : '')).join('').trim();
+  if (!text) return t.blocks.some((b) => b.type === 'image');
+  return !/^<(?:task-notification|environment_context|system-reminder|app-context|recommended_plugins|fork-boilerplate)(?:\s|>)/.test(text)
+    && !text.startsWith('[Request interrupted')
+    && !text.startsWith('[SYSTEM NOTIFICATION');
+};
+
+/**
+ * How many exchanges a reconciled turn list holds — the unit the reader shows
+ * and the operator counts, as opposed to transport records, tool results or
+ * lifecycle events.
+ *
+ * Deliberately only the OPENING rule from `splitExchanges`: an operator prompt
+ * starts an exchange, and turns before the first prompt form one leading
+ * exchange. Nothing else in that function can change the count, and
+ * `exchanges.test.mjs` pins the two together against shared fixtures.
+ */
+export function countExchanges(turns: TraceTurn[]): number {
+  let count = 0;
+  let open = false;
+  for (const turn of turns) {
+    if (isOperatorPrompt(turn)) { count++; open = true; }
+    else if (!open) { count++; open = true; }
+  }
+  return count;
+}
 const sameBlocks = (a: TraceBlock[], b: TraceBlock[]) => a.length === b.length && a.every((v, i) => v === b[i]);
 
 /** Transport fragments → one immutable conversation. Never mutate cached pages.
