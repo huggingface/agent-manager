@@ -1,21 +1,17 @@
 import { useEffect, useState } from 'react';
 import { isPassive, isRemote, type Cli } from '../types';
 import * as api from '../api';
-import SkillsEditor from './SkillsEditor';
-import ApiLog from './ApiLog';
-import UsagePanel from './UsagePanel';
-import CronSettings from './CronSettings';
 import { SunGlyph, MoonGlyph, RefreshGlyph, InfoGlyph } from './icons';
 import Logo from './Logo';
+import LazyPanel from './LazyPanel';
+import type { SettingsPage as Page } from './SettingsShell';
 
-type Page = 'general' | 'usage' | 'skills' | 'cron' | 'apilog';
-const PAGES: { id: Page; label: string }[] = [
-  { id: 'general', label: 'General' },
-  { id: 'usage', label: 'Usage' },
-  { id: 'skills', label: 'Skills' },
-  { id: 'cron', label: 'Cron' },
-  { id: 'apilog', label: 'API log' },
-];
+// Each subpage is its own chunk, fetched the first time its tab is opened; the
+// General page is this module. Module-level so the loader cache keys on them.
+const loadUsage = () => import('./UsagePanel');
+const loadApiLog = () => import('./ApiLog');
+const loadSkills = () => import('./SkillsEditor');
+const loadCron = () => import('./CronSettings');
 
 interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; engine?: string; ghostty?: boolean; canRelaunch?: boolean; secrets?: string[]; bucketUnverified?: boolean; }
 
@@ -122,11 +118,11 @@ function PushRow() {
 }
 
 export default function SettingsView({
-  page, onPage, onClose, theme, onToggleTheme, clis, info, onShowWelcome, demoMode, onToggleDemo,
+  page, onClose, theme, onToggleTheme, clis, info, onShowWelcome, demoMode, onToggleDemo,
   onOpenSharedTrace,
 }: {
   page: Page;
-  onPage: (p: Page) => void;
+  /** Closing from inside a page (a shared trace opened). The shell owns the tabs. */
   onClose: () => void;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
@@ -270,23 +266,10 @@ export default function SettingsView({
       else setRelaunch({ msg: `Couldn't relaunch (${r.reason}).` });
     } catch { setRelaunch({ msg: 'Request failed.' }); }
   };
+  // The shell around these pages (Back, title, tabs) is SettingsShell, rendered
+  // by App so it is there before this module is.
   return (
-    <div className="app settings">
-      <aside className="sidebar">
-        <div className="brand">
-          <button className="icon-btn" onClick={onClose} title="Back">←</button>
-          <h1 style={{ flex: 1, marginLeft: 4 }}>Settings</h1>
-        </div>
-        <div className="settings-nav">
-          {PAGES.map((p) => (
-            <button key={p.id} className={`settings-navitem${page === p.id ? ' active' : ''}`} onClick={() => onPage(p.id)}>
-              {p.label}
-            </button>
-          ))}
-        </div>
-      </aside>
-
-      <div className="main settings-main">
+    <>
         {page === 'general' && (
           <div className="settings-page">
             <h2>General</h2>
@@ -775,7 +758,7 @@ export default function SettingsView({
         {page === 'usage' && (
           <div className="settings-page wide">
             <h2>Usage</h2>
-            <UsagePanel />
+            <LazyPanel load={loadUsage} what="the usage page" render={(m) => <m.default />} />
           </div>
         )}
 
@@ -787,7 +770,7 @@ export default function SettingsView({
               what, when, and in their own words: each entry keeps the call whole, body included.
               Credentials are the exception and are never written here.
             </p>
-            <ApiLog />
+            <LazyPanel load={loadApiLog} what="the API log" render={(m) => <m.default />} />
           </div>
         )}
 
@@ -795,7 +778,7 @@ export default function SettingsView({
           <div className="settings-page wide">
             <h2>Skills</h2>
             <p className="s-help">Reusable markdown/text skills. Saved skills are published as <span className="mono">SKILL.md</span> to every agent (Claude, Codex, Gemini, opencode, Hermes) and available in all new sessions. View renders markdown; Edit is plain text.</p>
-            <SkillsEditor />
+            <LazyPanel load={loadSkills} what="the skills editor" render={(m) => <m.default />} />
           </div>
         )}
 
@@ -803,10 +786,9 @@ export default function SettingsView({
           <div className="settings-page wide cron-page">
             <h2>Cron</h2>
             <p className="s-help cron-intro">Send a prompt to an agent on a schedule. Jobs persist across Space restarts; if the named agent does not exist when a job fires, it is created first.</p>
-            <CronSettings clis={clis} />
+            <LazyPanel load={loadCron} what="the cron page" render={(m) => <m.default clis={clis} />} />
           </div>
         )}
-      </div>
-    </div>
+    </>
   );
 }
