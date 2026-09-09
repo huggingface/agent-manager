@@ -16,6 +16,9 @@ import BackupBanner from './components/BackupBanner';
 import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
 import * as api from './api';
+import { applyAck, furtherMark, retireLocal, type ReadMark } from './lib/unread';
+// Matches the server's per-request cap; the client splits rather than being cut.
+const ACK_CHUNK = 100;
 import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { hiddenSessionIds } from './lib/overviewHidden';
@@ -487,6 +490,64 @@ export default function App() {
   // desktop, mobile and bfcache restoration. Refresh both independent resources
   // once; the reader owns its own equivalent lifecycle and is not touched here.
   useEffect(() => observeAppReturns(() => Promise.allSettled([refresh(), refreshMeta()])), [refresh, refreshMeta]);
+
+  // ---- what the operator has read ----
+  //
+  // The server owns this; these are the acknowledgements sent since the last
+  // poll answered, held so a card does not flash back to unread while the
+  // request is in flight. Merged with the server's copy by taking whichever has
+  // read further, so a poll that overtook an acknowledgement cannot regress it.
+  const [readLocal, setReadLocal] = useState<Record<string, ReadMark>>({});
+  // Marks already in flight or already landed, so a reader that keeps observing
+  // the same visible reply sends one request rather than one per frame. Keyed
+  // by the exact version, so genuinely new output is never coalesced away.
+  const ackSent = useRef<Set<string>>(new Set());
+  const markSeen = useCallback((marks: (api.OutputVersion & { id: string })[]) => {
+    const fresh = marks.filter((m) => !ackSent.current.has(`${m.id}:${m.src}:${m.seq}:${m.hash}`));
+    if (!fresh.length) return Promise.resolve(true);
+    for (const m of fresh) ackSent.current.add(`${m.id}:${m.src}:${m.seq}:${m.hash}`);
+    // Bounded: this only exists to stop repeat sends, so old entries are not
+    // worth keeping once it has grown past a fleet's worth of replies.
+    if (ackSent.current.size > 500) ackSent.current = new Set(fresh.map((m) => `${m.id}:${m.src}:${m.seq}:${m.hash}`));
+    // Sent in bounded chunks rather than one request the server would have to
+    // cap: a section larger than the cap must be acknowledged in full or report
+    // which targets were left, never silently truncated to the first N.
+    const chunks: (api.OutputVersion & { id: string })[][] = [];
+    for (let i = 0; i < fresh.length; i += ACK_CHUNK) chunks.push(fresh.slice(i, i + ACK_CHUNK));
+    return Promise.all(chunks.map((c) => api.markRead(c).then((r) => r.results)))
+      .then((all) => {
+        const results: Record<string, string> = Object.assign({}, ...all);
+        setReadLocal((prev) => applyAck(prev, fresh, results));
+        // A rejected mark can be retried later against whatever is newest then;
+        // forgetting it here is what makes that possible.
+        for (const m of fresh) if (results[m.id] !== 'ok') ackSent.current.delete(`${m.id}:${m.src}:${m.seq}:${m.hash}`);
+        // Every mark must come back named. A session missing from the answer is
+        // not a success, and reporting it as one is how a target gets dropped.
+        return fresh.every((m) => results[m.id] === 'ok');
+      })
+      .catch(() => {
+        // Nothing was written, so nothing is read. Drop the coalescing entries
+        // or a failed acknowledgement would never be attempted again.
+        for (const m of fresh) ackSent.current.delete(`${m.id}:${m.src}:${m.seq}:${m.hash}`);
+        return false;
+      });
+  }, []);
+  // What the Overview and the reader actually compare against.
+  const metaRead = useMemo(() => {
+    const out: Record<string, api.MetaSession> = {};
+    for (const [id, m] of Object.entries(meta)) {
+      const merged = furtherMark(m.read, readLocal[id], m.output);
+      out[id] = merged === m.read ? m : { ...m, read: merged };
+    }
+    return out;
+  }, [meta, readLocal]);
+  // Once the server's own copy has caught up, the local acknowledgement has
+  // nothing left to add — and a local mark for a generation that is gone would
+  // otherwise keep overriding the truth forever. Retiring them is what lets
+  // polling converge across devices.
+  useEffect(() => {
+    setReadLocal((prev) => retireLocal(prev, Object.values(meta)));
+  }, [meta]);
 
   // Archive threshold from the operator config; refresh when settings closes
   // (that's where it's edited).
@@ -961,6 +1022,14 @@ export default function App() {
                 focused={shown && sessions.length > 1 && s.id === focusedId}
                 visible={shown && deckVisible}
                 active={shown && deckVisible && s.id === focusedId}
+                // Only the active pane in a visible deck can acknowledge a
+                // reply: one sitting behind another is rendered but obscured,
+                // and rendering is not reading.
+                seen={shown && deckVisible && s.id === focusedId ? {
+                  version: metaRead[s.id]?.output ? { id: s.id, ...metaRead[s.id].output! } : null,
+                  
+                  onSeen: markSeen,
+                } : undefined}
                 dragId={shown && canDrag ? `p:${s.id}` : undefined}
                 isMobile={isMobile}
                 onBack={ownsBack ? () => setMobileStage(false) : undefined}
@@ -1171,8 +1240,9 @@ export default function App() {
               archived={archivedIds}
               showArchived={showArchived}
               showHidden={showHidden}
-              meta={meta}
+              meta={metaRead}
               metaReady={metaReady}
+              onSeen={markSeen}
               isMobile={isMobile}
               onOpen={(sid) => {
                 const g = tree.groups.find((x) => x.sessionIds.includes(sid));

@@ -215,14 +215,38 @@ export interface MetaDigest {
   sinceTurns: number; sinceToolCalls: number; sinceTools: Record<string, number>; sinceFiles: string[];
   sinceTokens: number;
   running?: boolean;        // task in flight (codex task_started/task_complete)
+  // The unread cursor: which reply this is, and whether the copy above is the
+  // whole of it. See server/src/output-id.js.
+  outSeq?: number; outHash?: string; outClipped?: boolean;
   turnsLog?: TurnEntry[];   // newest-first history of completed exchanges
 }
-export interface MetaSession extends Session { digest: MetaDigest | null }
+// Which reply is newest, and which one the operator has been shown. The pair is
+// the whole unread feature: see lib/unread.ts for the comparison, and
+// server/src/output-id.js for how a reply gets its identity.
+export interface OutputVersion { src: string; seq: number; hash: string }
+export interface MetaSession extends Session {
+  digest: MetaDigest | null;
+  output?: OutputVersion | null;
+  read?: (OutputVersion & { at?: string }) | null;
+}
 export const getMeta = (signal?: AbortSignal): Promise<{ sessions: MetaSession[]; generatedAt: string }> =>
   fetch('/api/meta', { signal }).then(json);
+
+/**
+ * "These replies were shown to the operator." Used by both read paths — a
+ * conversation scrolled to a visible latest answer, and the Unread section's
+ * Mark all read — because they make the same claim and must be judged by the
+ * same rules.
+ *
+ * Each mark is answered separately: 'ok' means recorded, anything else means
+ * the reply it described is no longer the newest, and the session stays unread.
+ */
+export const markRead = (marks: (OutputVersion & { id: string })[]): Promise<{
+  results: Record<string, string>;
+}> => fetch('/api/read', { method: 'POST', headers: HEADERS, body: JSON.stringify({ marks }) }).then(jsonOrError);
 // Targeted digest for one session (progressive tile fill); digest is null when
 // this CLI only resolves through the bulk pass.
-export const getMetaOne = (id: string): Promise<{ id: string; digest: MetaDigest | null }> =>
+export const getMetaOne = (id: string): Promise<{ id: string; digest: MetaDigest | null; output?: OutputVersion | null; read?: (OutputVersion & { at?: string }) | null }> =>
   fetch(`/api/meta/${id}`).then(json);
 // ---------- remote agents ----------
 // The pane polls this at the app's usual 2 s cadence. since=0 returns the tail;
