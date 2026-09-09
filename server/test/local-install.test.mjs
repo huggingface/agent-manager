@@ -25,8 +25,30 @@ assert.match(dockerfile, /\bBIND_HOST=0\.0\.0\.0\b/, 'the container remains reac
 
 assert.equal(runner.installClaudeRepinHook(), true);
 const settings = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json'), 'utf8'));
-assert.equal(settings.hooks.SessionStart[0].hooks[0].command, path.join(scripts, 'am-repin-hook.sh'));
-assert.equal(settings.hooks.Notification[0].hooks[0].command, path.join(scripts, 'am-input-required-hook.sh'));
+const quote = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
+assert.equal(settings.hooks.SessionStart[0].hooks[0].command, quote(path.join(scripts, 'am-repin-hook.sh')));
+assert.equal(settings.hooks.Notification[0].hooks[0].command, quote(path.join(scripts, 'am-input-required-hook.sh')));
+
+// Exercise the defaults from a real checkout path containing shell syntax.
+const spacedRoot = path.join(tmp, "checkout with spaces and 'quotes'");
+fs.cpSync(path.join(root, 'server', 'src'), path.join(spacedRoot, 'server', 'src'), { recursive: true });
+fs.copyFileSync(path.join(root, 'server', 'package.json'), path.join(spacedRoot, 'server', 'package.json'));
+fs.symlinkSync(path.join(root, 'server', 'node_modules'), path.join(spacedRoot, 'server', 'node_modules'));
+fs.mkdirSync(path.join(spacedRoot, 'scripts'), { recursive: true });
+for (const name of ['am-repin-hook.sh', 'am-input-required-hook.sh']) {
+  fs.writeFileSync(path.join(spacedRoot, 'scripts', name), '#!/bin/sh\nprintf hook-ok\n', { mode: 0o755 });
+}
+const { pathToFileURL } = await import('node:url');
+const spacedRunner = await import(pathToFileURL(path.join(spacedRoot, 'server', 'src', 'runner.js')));
+process.env.CLAUDE_CONFIG_DIR = path.join(tmp, 'spaced-claude');
+fs.mkdirSync(process.env.CLAUDE_CONFIG_DIR);
+assert.equal(spacedRunner.installClaudeRepinHook(), true);
+const spacedSettings = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json')));
+for (const event of Object.values(spacedSettings.hooks)) {
+  const result = spawnSync('sh', ['-c', event[0].hooks[0].command], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'hook-ok');
+}
 
 assert.equal(runner.installOpencodeRepinPlugin(), true);
 const installedPlugin = path.join(process.env.XDG_CONFIG_HOME, 'opencode', 'plugins', 'am-agent-manager.js');

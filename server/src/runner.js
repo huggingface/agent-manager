@@ -1324,8 +1324,8 @@ export async function codexRolloutForId(id) {
 // would be a terrible trade), and every failure is non-fatal: without the
 // hook the watcher simply keeps today's behaviour.
 export function installClaudeRepinHook(
-  hookCmd = appScript('am-repin-hook.sh'),
-  inputRequiredCmd = appScript('am-input-required-hook.sh'),
+  hookCmd = shq(appScript('am-repin-hook.sh')),
+  inputRequiredCmd = shq(appScript('am-input-required-hook.sh')),
 ) {
   const dir = process.env.CLAUDE_CONFIG_DIR;
   if (!dir) return false;
