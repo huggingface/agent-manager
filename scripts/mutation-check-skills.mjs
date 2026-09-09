@@ -9,10 +9,16 @@ const source = fs.readFileSync(path.join(repo, 'server/src/skills.js'), 'utf8');
 const suite = fs.readFileSync(path.join(repo, 'server/test/skills.test.mjs'), 'utf8');
 const mutations = [
   ['recreated skill identity', 'instance: nonce()', "instance: 'reused'"],
-  ['generated deletion flag', 'if (load().disabledGenerated.includes(name))', 'if (false)'],
+  ['generated deletion flag', 'if (m.disabledGenerated.includes(name))', 'if (false)'],
+  ['explicit save accepts confirmed source', 'const sourceConfirmed = confirmSource(r, observed);', 'const sourceConfirmed = false;'],
+  ['explicit deletion accepts confirmed source', 'const sourceConfirmed = confirmSource(r, confirmed);', 'const sourceConfirmed = false;'],
+  ['failed create cannot adopt a new source', 'if (r.sourceHash === null && accepted !== r.pending?.sourceHash)', 'if (false)'],
+  ['pending save keeps intended content', /if \(hash\(content\) !== (?:pending|r\.pending)\.sourceHash\)/g, 'if (false)'],
+  ['customized generated source is preserved', 'if (customized && !m.disabledGenerated.includes(name))', 'if (false)'],
+  ['user-created source resists generation', 'if (m.skills[name] && m.skills[name].generated !== true)', 'if (false)'],
   ['create overwrite guard', 'if (create && (r || existing !== null))', 'if (false)'],
   ['normalized collision guard', 'if (other.toLowerCase() === name.toLowerCase() || otherId === id)', 'if (false)'],
-  ['stale revision guard', 'if (snapshot(name, m).revision !== revision)', 'if (false)'],
+  ['stale revision guard', 'if (observed.revision !== revision)', 'if (false)'],
   ['external installed-file guard', 'if (actual !== t.hash && actual !== r.pending?.targetHash && actual !== null)', 'if (false)'],
   ['unowned installation guard', 'if (actual !== null && (!adopt || actual !== expected))', 'if (false)'],
   ['manifest destination identity', "t.path !== path.join(t.root, r.id, 'SKILL.md')", 'false'],

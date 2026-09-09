@@ -89,6 +89,56 @@ test('stale tabs, missing tags, source and installed edits preserve bytes', asyn
   assert.equal(read(f.target(2)), 'external installation');
 });
 
+for (const action of ['save', 'delete']) {
+  test(`a fresh revision permits ${action} of an externally edited source without claiming edited installations`, async (t) => {
+    const f = fixture(t); await f.service.create('demo.md', 'first');
+    const mutate = (s, rev) => action === 'save' ? s.update('demo.md', 'published', rev) : s.remove('demo.md', rev);
+    const stale = await revision(f.service);
+    f.seed(f.source(), 'edited outside Skills');
+    await rejects(mutate(f.service, stale));
+    const restart = createSkillsService(f.options);
+    assert.equal((await restart.redistribute()).ok, false);
+    assert.equal(read(f.source()), 'edited outside Skills');
+    for (let i = 0; i < 5; i++) assert.equal(read(f.target(i)), generatedSkill('demo.md', 'first'));
+
+    f.seed(f.target(2), 'independent installed edit');
+    await rejects(mutate(restart, await revision(restart)));
+    assert.equal(read(f.source()), 'edited outside Skills');
+    assert.equal(read(f.target(2)), 'independent installed edit');
+    f.seed(f.target(2), generatedSkill('demo.md', 'first'));
+    assert.equal((await mutate(restart, await revision(restart))).ok, true);
+    if (action === 'save') {
+      assert.equal(read(f.source()), 'published');
+      for (let i = 0; i < 5; i++) assert.equal(read(f.target(i)), generatedSkill('demo.md', 'published'));
+    } else {
+      assert.equal(fs.existsSync(f.source()), false);
+      for (let i = 0; i < 5; i++) assert.equal(fs.existsSync(f.target(i)), false);
+    }
+  });
+
+  test(`${action} persists the confirmed external source before a failure and keeps retries scoped`, async (t) => {
+    const f = fixture(t); await f.service.create('demo.md', 'first');
+    f.seed(f.source(), 'confirmed external edit');
+    const mutate = (s, rev) => action === 'save' ? s.update('demo.md', 'published', rev) : s.remove('demo.md', rev);
+    const s = createSkillsService({ ...f.options, io: { ...fs,
+      renameSync(a, b) { if (action === 'save' && b === f.source()) throw fail('source rename'); return fs.renameSync(a, b); },
+      unlinkSync(p) { if (action === 'delete' && p === f.target(2)) throw fail('target unlink'); return fs.unlinkSync(p); },
+    } });
+    assert.equal((await mutate(s, await revision(s))).ok, false);
+    assert.equal(read(f.source()), 'confirmed external edit');
+    const restart = createSkillsService(f.options);
+    assert.equal((await restart.redistribute()).ok, false);
+    const stale = await revision(restart);
+    f.seed(f.source(), 'another external edit');
+    await rejects(mutate(restart, stale));
+    assert.equal(read(f.source()), 'another external edit');
+    // Reviewing the new source can authorize it, but cannot change the pending
+    // save's intended content or add any installation to its original targets.
+    if (action === 'save') await rejects(restart.update('demo.md', 'different intent', await revision(restart)));
+    assert.equal((await mutate(restart, await revision(restart))).ok, true);
+  });
+}
+
 test('unowned installations block create and legacy adoption unless byte identical', async (t) => {
   const f = fixture(t);
   f.seed(f.target(), generatedSkill('demo.md', 'first'));
@@ -370,6 +420,22 @@ test('an incomplete create retries with the original content and cannot become a
   assert.equal(read(f.source('independent.md')), 'untouched');
 });
 
+test('a fresh revision cannot claim an unrelated source after its initial creation failed', async (t) => {
+  const f = fixture(t);
+  const s = createSkillsService({ ...f.options, io: { ...fs, writeFileSync(fd, content, ...args) {
+    if (content === 'intended') throw fail('initial source write');
+    return fs.writeFileSync(fd, content, ...args);
+  } } });
+  assert.equal((await s.create('demo.md', 'intended')).source, 'failed');
+  const manifest = read(f.manifest);
+  f.seed(f.source(), 'independent source');
+  const restart = createSkillsService(f.options);
+  await rejects(restart.update('demo.md', 'intended', await revision(restart)));
+  assert.equal(read(f.source()), 'independent source');
+  assert.equal(read(f.manifest), manifest);
+  for (let i = 0; i < 5; i++) assert.equal(fs.existsSync(f.target(i)), false);
+});
+
 test('a changed configured target set invalidates prepared deletion without broadening it', async (t) => {
   const f = fixture(t); await f.service.create('demo.md', 'first');
   const confirmed = await revision(f.service);
@@ -443,6 +509,24 @@ test('permanently deleted generated skills stay absent on restart until explicit
   await restart.remove('environment.md', await revision(restart, 'environment.md'));
   assert.equal((await restart.generate('environment.md', 'must stay deleted')).source, 'generation-disabled');
   await restart.create('environment.md', 'explicit recreation');
-  assert.equal((await restart.generate('environment.md', 'new generation')).ok, true);
-  assert.equal(read(f.source('environment.md')), 'new generation');
+  assert.equal((await restart.generate('environment.md', 'new generation')).source, 'generation-disabled');
+  assert.equal(read(f.source('environment.md')), 'explicit recreation');
+});
+
+test('an explicit edit to a generated skill pauses regeneration without preventing ordinary publication', async (t) => {
+  const f = fixture(t); await f.service.generate('environment.md', 'generated');
+  await f.service.update('environment.md', 'operator customization', await revision(f.service, 'environment.md'));
+  const restart = createSkillsService(f.options);
+  assert.equal((await restart.generate('environment.md', 'new generation')).source, 'generation-disabled');
+  assert.equal((await restart.redistribute()).ok, true);
+  assert.equal(read(f.source('environment.md')), 'operator customization');
+  for (let i = 0; i < 5; i++) assert.equal(read(f.target(i, 'environment')), generatedSkill('environment.md', 'operator customization'));
+  assert.match((await restart.get('environment.md')).problem, /regeneration is paused/);
+});
+
+test('automatic generation cannot take over a user-created managed skill', async (t) => {
+  const f = fixture(t); await f.service.create('environment.md', 'user-created');
+  await rejects(f.service.generate('environment.md', 'generated'));
+  assert.equal(read(f.source('environment.md')), 'user-created');
+  for (let i = 0; i < 5; i++) assert.equal(read(f.target(i, 'environment')), generatedSkill('environment.md', 'user-created'));
 });

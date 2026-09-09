@@ -7,6 +7,7 @@ import { build } from 'esbuild';
 import { chromium } from 'playwright';
 import { fileURLToPath } from 'node:url';
 import { skillsServer } from '../../server/test/fixtures/skills-server.mjs';
+import { generatedSkill } from '../../server/src/skills.js';
 import { chromiumLaunchOptions } from '../../scripts/test-chromium.mjs';
 const web = fileURLToPath(new URL('..', import.meta.url));
 const f = await skillsServer();
@@ -136,6 +137,25 @@ try {
   assert.equal(deletes, 3); assert.equal(fs.existsSync(f.source('demo.md')), false);
   assert.equal(fs.readFileSync(f.source('other.md'), 'utf8'), '# Other');
   console.log('PASS stale confirmation refresh, duplicate submission guard, persistent partial state and scoped retry');
+
+  // Files and agents can edit sources too. Reviewing the current source in the
+  // real editor must permit an explicit save and a newly confirmed deletion.
+  fs.writeFileSync(f.source('other.md'), '# Written outside Skills');
+  await page.getByRole('button', { name: 'other.md', exact: true }).click();
+  await page.getByRole('heading', { name: 'Written outside Skills' }).waitFor();
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Skill content' }).fill('# Reviewed external edit');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await page.getByRole('heading', { name: 'Reviewed external edit' }).waitFor();
+  for (let i = 0; i < 5; i++) assert.equal(fs.readFileSync(f.target(i, 'other'), 'utf8'), generatedSkill('other.md', '# Reviewed external edit'));
+  fs.writeFileSync(f.source('other.md'), '# Changed before confirmation');
+  await page.getByTitle('Delete skill', { exact: true }).click(); await dialog.waitFor();
+  assert.equal(deletes, 3); assert.ok(fs.existsSync(f.source('other.md')));
+  await dialog.getByRole('button', { name: 'Permanently delete', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' });
+  assert.equal(deletes, 4); assert.equal(fs.existsSync(f.source('other.md')), false);
+  for (let i = 0; i < 5; i++) assert.equal(fs.existsSync(f.target(i, 'other')), false);
+  console.log('PASS reviewed external source edits can be saved and explicitly confirmed for deletion');
 } finally {
   releaseDelete?.();
   await browser?.close(); await f.cleanup();

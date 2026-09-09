@@ -78,3 +78,47 @@ test('corrupt manifest degrades skills while the actual server stays available',
   assert.equal((await fetch(`${f.url}/api/health`)).status, 200);
   assert.match(f.log, /degraded distribution/);
 });
+
+test('real routes allow reviewed external source edits after restart while rejecting stale revisions', async (t) => {
+  const f = await skillsServer(); t.after(() => f.cleanup()); await f.start();
+  await f.api('demo.md', 'POST', '# Original');
+  const stale = (await f.api('demo.md')).body.revision;
+  fs.writeFileSync(f.source('demo.md'), '# Edited in Files or by an agent');
+  assert.equal((await f.api('demo.md', 'PUT', '# Stale save', stale)).status, 409);
+  assert.equal((await f.api('demo.md', 'DELETE', undefined, stale)).status, 409);
+  await f.stop(); await f.start();
+  const reviewed = (await f.api('demo.md')).body;
+  assert.equal(reviewed.content, '# Edited in Files or by an agent');
+  assert.match(reviewed.problem, /Source was modified/);
+  for (let i = 0; i < 5; i++) assert.equal(fs.readFileSync(f.target(i, 'demo'), 'utf8'), generatedSkill('demo.md', '# Original'));
+  const saved = await f.api('demo.md', 'PUT', '# Reviewed and published', reviewed.revision);
+  assert.equal(saved.status, 200); assert.equal(saved.body.ok, true);
+  await f.stop(); await f.start();
+  for (let i = 0; i < 5; i++) assert.equal(fs.readFileSync(f.target(i, 'demo'), 'utf8'), generatedSkill('demo.md', '# Reviewed and published'));
+  fs.writeFileSync(f.source('demo.md'), '# Another external edit');
+  const confirmed = (await f.api('demo.md')).body;
+  const deleted = await f.api('demo.md', 'DELETE', undefined, confirmed.revision);
+  assert.equal(deleted.status, 200); assert.equal(deleted.body.ok, true);
+  assert.equal(fs.existsSync(f.source('demo.md')), false);
+  for (let i = 0; i < 5; i++) assert.equal(fs.existsSync(f.target(i, 'demo')), false);
+});
+
+for (const action of ['recreate', 'save']) {
+  test(`Settings and startup preserve a generated skill's explicit ${action}`, async (t) => {
+    const f = await skillsServer(); t.after(() => f.cleanup()); await f.start();
+    const current = (await f.api('environment.md')).body;
+    if (action === 'recreate') {
+      assert.equal((await f.api('environment.md', 'DELETE', undefined, current.revision)).body.ok, true);
+      assert.equal((await f.api('environment.md', 'POST', '# My environment')).body.ok, true);
+    } else {
+      assert.equal((await f.api('environment.md', 'PUT', '# My environment', current.revision)).body.ok, true);
+    }
+    for (const route of ['/api/config', '/api/secrets']) {
+      const res = await fetch(f.url + route, { method: 'PUT', headers: { 'content-type': 'application/json', 'x-am-origin': 'operator' }, body: '{}' });
+      assert.equal((await res.json()).skillDistribution.source, 'generation-disabled');
+    }
+    await f.stop(); await f.start();
+    assert.equal((await f.api('environment.md')).body.content, '# My environment');
+    for (let i = 0; i < 5; i++) assert.equal(fs.readFileSync(f.target(i, 'environment'), 'utf8'), generatedSkill('environment.md', '# My environment'));
+  });
+}

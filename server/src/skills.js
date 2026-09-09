@@ -205,19 +205,36 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
       if (record) verified(record, name, { deleting: record.pending?.kind === 'delete' });
       else problem = 'Ownership is not established. Resolve the name or installation conflict and restart distribution; existing installations are untouched.';
     } catch (e) { problem = e.message; }
+    if (!problem && record?.generated) problem = m.disabledGenerated.includes(name)
+      ? 'Automatic regeneration is paused to preserve your edits. Explicit saves still publish this skill.'
+      : 'This skill is generated. Saving changes preserves your edits and pauses automatic regeneration.';
     return { name, content: content ?? '', sourceExists: content !== null, revision, ...(problem ? { problem } : {}),
       managed: !!record, pending: record?.pending?.kind || null,
       installations: installed.map(({ path, hash, error }) => ({ path, exists: hash !== null && hash !== undefined, ...(error ? { error } : {}) })) };
   }
   function match(name, m, revision) {
     if (!revision) throw new SkillError(428, 'A current skill revision is required');
-    if (snapshot(name, m).revision !== revision) conflict('Skill or installations changed; refresh before saving or confirming deletion');
+    const observed = snapshot(name, m);
+    if (observed.revision !== revision) conflict('Skill or installations changed; refresh before saving or confirming deletion');
+    return observed;
+  }
+  function confirmSource(r, observed) {
+    // Accept only source bytes covered by an explicit matching revision.
+    // Installed-file hashes, pending targets and intended save content stay fixed.
+    if (!r || !observed) return false;
+    const accepted = observed.sourceExists ? hash(observed.content) : null;
+    // A failed first create may never have owned a source at all. Only its
+    // already-published intended bytes establish ownership in that case.
+    if (r.sourceHash === null && accepted !== r.pending?.sourceHash) return false;
+    if (r.sourceHash === accepted) return false;
+    r.sourceHash = accepted;
+    return true;
   }
   function verified(r, name, { deleting = false } = {}) {
     const { source } = config();
     targetsValid(r);
     const src = current(source, path.join(source, name));
-    if (src !== r.sourceHash && src !== r.pending?.sourceHash && !(deleting && src === null)) conflict('Source was modified outside the manager');
+    if (src !== r.sourceHash && src !== r.pending?.sourceHash && !(deleting && src === null)) conflict('Source was modified outside the Skills editor; review the current source before saving or confirming deletion');
     for (const t of r.targets) {
       const actual = current(t.root, t.path);
       if (actual !== t.hash && actual !== r.pending?.targetHash && actual !== null) conflict(`Installed file was modified outside the manager: ${t.path}`);
@@ -275,9 +292,18 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
     const existing = read(source, path.join(source, name));
     let r = m.skills[name];
     if (create && (r || existing !== null)) conflict('Skill already exists; choose a different name or open the existing skill');
-    if (!create && !boot) match(name, m, revision);
+    const observed = !create && !boot ? match(name, m, revision) : null;
     if (r?.pending?.kind === 'delete') conflict('Deletion is pending; retry deletion before creating this skill again');
-    if (r?.pending?.kind === 'write') return finishWrite(name, content, m);
+    const customized = !!(observed && r?.generated && hash(content) !== r.sourceHash);
+    const sourceConfirmed = confirmSource(r, observed);
+    if (r?.pending?.kind === 'write') {
+      if (sourceConfirmed) {
+        if (hash(content) !== r.pending.sourceHash) conflict('An incomplete save must be retried with the same content');
+        verified(r, name);
+        persist(m); // persist the reviewed source before retrying the fixed intent
+      }
+      return finishWrite(name, content, m);
+    }
     if (r) verified(r, name);
     else {
       if (!create && !boot) conflict('Skill is not managed; refresh after startup adoption or resolve its installation conflict');
@@ -289,18 +315,19 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
     r.generated = r.generated || generated || m.disabledGenerated.includes(name);
     r.pending = { kind: 'write', id: nonce(), sourceHash: hash(content), targetHash: hash(generatedSkill(name, content)) };
     m.skills[name] = r;
-    if (create) m.disabledGenerated = m.disabledGenerated.filter((n) => n !== name);
+    if (customized && !m.disabledGenerated.includes(name)) m.disabledGenerated.push(name);
     persist(m); // intent first; a failure here must change no skill bytes
     return finishWrite(name, content, m);
   }
   function remove(name, revision) {
-    const m = load(); identity(name, m); match(name, m, revision);
+    const m = load(); identity(name, m); const confirmed = match(name, m, revision);
     const r = m.skills[name];
     if (!r) throw new SkillError(404, 'No ownership record; no installed files were removed');
     if (r.pending?.kind === 'write') conflict('A save is incomplete; retry it before deleting');
+    const sourceConfirmed = confirmSource(r, confirmed);
     verified(r, name, { deleting: true });
-    if (!r.pending) {
-      r.pending = { kind: 'delete', id: nonce() };
+    if (!r.pending || sourceConfirmed) {
+      if (!r.pending) r.pending = { kind: 'delete', id: nonce() };
       persist(m); // exact frozen target set; boot must never republish this source
     }
     const results = [];
@@ -361,7 +388,9 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
     redistribute: serial(redistribute),
     generate: serial((name, content) => {
       skillId(name);
-      if (load().disabledGenerated.includes(name)) return { ok: true, status: 'complete', source: 'generation-disabled', targets: [], manifest: 'persisted', skill: null };
+      const m = load();
+      if (m.disabledGenerated.includes(name)) return { ok: true, status: 'complete', source: 'generation-disabled', targets: [], manifest: 'persisted', skill: null };
+      if (m.skills[name] && m.skills[name].generated !== true) conflict('A user-managed skill already uses this name; automatic generation cannot replace it');
       return write(name, content, { boot: true, generated: true });
     }),
   };

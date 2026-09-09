@@ -1568,7 +1568,7 @@ What is different about them:
   which sleeps, drops off wifi, and closes lids. Ask once and move on.
 
 ## Shared skills
-- Reusable skills (like this one) live in \`/data/workspaces/skills/\` and are published into every agent's skills directory automatically. Read them for project conventions and recurring tasks.
+- Reusable skills live in \`/data/workspaces/skills/\`. Create and publish them through the Skills editor or \`/api/skills\`: POST creates only; GET returns the revision required by PUT/DELETE in \`If-Match\`. If you edit a source through Files or on disk, review its current contents in Skills and explicitly Save to publish it. Startup leaves unreviewed source edits and independently modified installations untouched. Read skills for project conventions and recurring tasks.
 
 ## Tooling
 - A full Linux shell with \`git\`, \`ripgrep\` (\`rg\`), \`node\`, and \`python3\`, plus build tools. Reach for \`rg\` for fast search.

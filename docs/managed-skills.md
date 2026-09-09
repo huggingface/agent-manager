@@ -48,23 +48,42 @@ to the rendering of that source. Only that file is adopted, never its directory
 or support files. Missing destinations can be installed. A modified destination
 or ambiguous source makes the whole skill conflict before writes. Other skills
 continue independently, and the server reports degraded distribution without
-stopping its other functions. Deleting a generated skill also disables automatic
-generation of that name; an explicit create re-enables it. This stores only a
-name flag, so a later startup cannot recreate a deliberately deleted environment
-skill. The editor explains when ownership is not
-established. Generated environment content follows the same checks, using the
-existing source to verify a legacy installation before publishing new content.
+stopping its other functions. Deleting a generated skill disables automatic
+generation of that name. Explicit recreation publishes the user's content but
+keeps automatic generation disabled. Saving changed generated content also
+pauses regeneration, so Settings changes and startup cannot erase those edits.
+These decisions store only a name flag, never a content copy. The editor explains
+this behavior before editing a generated skill and shows when regeneration is
+paused. Ordinary explicit saves and redistribution still publish the customized
+skill; there is no automatic resumption that can overwrite it. Generation cannot
+take over an existing user-created managed skill. Legacy environment content
+follows the same adoption checks, using the existing source to verify its
+installation before publishing new generated content.
 
 Name matching alone cannot authorize deletion, even when the source is absent.
 After losing a manifest, removal returns not-found until ownership has been
 narrowly verified again. Never delete the manifest to force an overwrite. To
 resolve a legacy conflict, choose a noncolliding source name or deliberately
 resolve the independent installation outside the manager, then restart
-redistribution. For a file modified after ownership was established, the manager
-refuses to overwrite/delete it; restore the recorded current content or resolve
-its ownership deliberately outside this API. There is no force-adopt endpoint.
+redistribution. An externally modified installed copy still blocks saves and
+deletion, even with a fresh revision; resolve that independent installation
+deliberately outside this API. There is no force-adopt endpoint.
 A removed/redirected configured destination must be restored before operations
 on records that still reference it can proceed.
+
+An external edit to a managed **source** (including edits through Files or by an
+agent) invalidates old revisions and stops automatic republication. Open or
+refresh it in Skills, review the current contents, then explicitly Save or
+confirm permanent deletion. A matching current revision authorizes exactly those
+source bytes. The service persists their accepted hash with the operation intent
+before any mutation; installed-file ownership checks remain unchanged. A source
+edit after that snapshot still conflicts. Retrying a pending operation can
+likewise accept a freshly reviewed source, while retaining the original target
+set and, for saves, the original intended content. No historical bytes need to
+be restored to unblock an explicit operation.
+This does not claim a new file that appears after an initial source creation
+failed: without a previously owned source hash, only byte-identical intended
+content can be recognized as an interrupted publication.
 
 ## HTTP mutation contract
 
