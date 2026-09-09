@@ -114,7 +114,7 @@ for (const action of ['recreate', 'save']) {
       assert.equal((await f.api('environment.md', 'PUT', '# My environment', current.revision)).body.ok, true);
     }
     for (const route of ['/api/config', '/api/secrets']) {
-      const res = await fetch(f.url + route, { method: 'PUT', headers: { 'content-type': 'application/json', 'x-am-origin': 'operator' }, body: '{}' });
+      const res = await fetch(f.url + route, { method: 'PUT', headers: { 'content-type': 'application/json', 'x-am-origin': 'operator' }, body: route === '/api/secrets' ? '{"notes":{}}' : '{}' });
       assert.equal((await res.json()).skillDistribution.source, 'generation-disabled');
     }
     await f.stop(); await f.start();
