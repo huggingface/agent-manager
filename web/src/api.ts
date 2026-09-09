@@ -24,7 +24,7 @@ const json = (r: Response) => {
 };
 
 export const getClis = (): Promise<Cli[]> => fetch('/api/clis').then(json);
-export const getTree = (): Promise<Tree> => fetch('/api/tree').then(json);
+export const getTree = (signal?: AbortSignal): Promise<Tree> => fetch('/api/tree', { signal }).then(json);
 
 // Hide a group (or one agent) from the Overview. `ref` is a tree ref — `g:<id>`
 // or `s:<id>`. Persisted server-side, so it holds on every device.
@@ -218,8 +218,8 @@ export interface MetaDigest {
   turnsLog?: TurnEntry[];   // newest-first history of completed exchanges
 }
 export interface MetaSession extends Session { digest: MetaDigest | null }
-export const getMeta = (): Promise<{ sessions: MetaSession[]; generatedAt: string }> =>
-  fetch('/api/meta').then(json);
+export const getMeta = (signal?: AbortSignal): Promise<{ sessions: MetaSession[]; generatedAt: string }> =>
+  fetch('/api/meta', { signal }).then(json);
 // Targeted digest for one session (progressive tile fill); digest is null when
 // this CLI only resolves through the bulk pass.
 export const getMetaOne = (id: string): Promise<{ id: string; digest: MetaDigest | null }> =>
