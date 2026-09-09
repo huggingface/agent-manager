@@ -726,7 +726,7 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
       // A refused save must NOT drop the text — put it back so the next attempt
       // (or an overwrite) still has it.
       pending.current = job;
-      setConflict(/changed on disk/.test(msg));
+      setConflict((e instanceof api.ApiError && e.code === 'file-changed') || /changed on disk/.test(msg));
       setSaveErr(msg);
       setStatus('error');
       return false;
