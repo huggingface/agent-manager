@@ -26,6 +26,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import os from 'node:os';
 import { chromium } from '../web/node_modules/playwright/index.mjs';
 import { chromiumLaunchOptions } from './test-chromium.mjs';
 import { startFixtureServer } from '../web/test/helpers/fixture-server.mjs';
@@ -160,7 +161,11 @@ const gz = (f) => zlib.gzipSync(fs.readFileSync(f), { level: 6 }).length;
 const prior = fs.existsSync(OUT) ? JSON.parse(fs.readFileSync(OUT, 'utf8')) : null;
 const results = prior && prior.dist === DIST && prior.runs === RUNS
   ? { ...prior, resumedAt: new Date().toISOString() }
-  : { label: LABEL, dist: DIST, at: new Date().toISOString(), runs: RUNS, node: process.version, chromium: browser.version(), mobile: MOBILE, profiles: {} };
+  : { label: LABEL, dist: DIST, at: new Date().toISOString(), runs: RUNS, node: process.version, chromium: browser.version(), mobile: MOBILE, cpus: os.cpus().length, load: [], profiles: {} };
+// The box is shared: a run taken under load is not a measurement. Record the
+// 1-minute load average at the start and after every profile.
+const noteLoad = (when) => { results.load.push({ when, at: new Date().toISOString(), load1: +os.loadavg()[0].toFixed(2) }); console.log(`load ${when}: ${os.loadavg().map((x) => x.toFixed(1)).join(' ')}`); };
+noteLoad('start');
 const save = () => fs.writeFileSync(OUT, JSON.stringify(results, null, 1));
 try {
   for (const profile of PROFILES) {
@@ -197,6 +202,7 @@ try {
       P.panels[pass] = {};
       for (const k of Object.keys(opens[0][pass])) P.panels[pass][k] = stat(opens.map((o) => o[pass][k]));
     }
+    noteLoad(`after ${profile}`);
     save();
   }
   results.chunks = Object.fromEntries(fs.readdirSync(path.join(DIST, 'assets')).filter((f) => f.endsWith('.js')).map((f) => [f, { bytes: fs.statSync(path.join(DIST, 'assets', f)).size, gzip: gz(path.join(DIST, 'assets', f)) }]));
