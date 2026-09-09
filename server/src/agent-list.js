@@ -21,11 +21,15 @@ export const sameName = (a, b) => {
   return left !== '' && left === normalizeName(b);
 };
 
-/** First item whose `.name` matches `name` ignoring case and outer whitespace. */
+/** Preserve exact targets; refuse ambiguous normalized names instead of guessing. */
 export function findByName(items, name) {
   const wanted = normalizeName(name);
   if (!wanted) return null;
-  return items.find((item) => normalizeName(item && item.name) === wanted) || null;
+  const exact = items.filter((item) => item?.name === name);
+  if (exact.length === 1) return exact[0];
+  const matches = items.filter((item) => normalizeName(item && item.name) === wanted);
+  if (matches.length > 1) throw new Error(`ambiguous name '${name}'; use an exact unique name`);
+  return matches[0] || null;
 }
 
 /** Sessions of the group called `group` (case-insensitive); no filter = all rows. */

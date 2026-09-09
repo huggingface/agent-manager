@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import assert from 'node:assert/strict';
 import { filterAgentsByGroup, findByName, normalizeName, sameName } from '../src/agent-list.js';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-list-'));
@@ -60,13 +61,15 @@ const sessions = [
   { id: 's3', name: 'reviewer' },
 ];
 check('exact match', findByName(sessions, 'Reviewer')?.id, 's1');
-check('case-insensitive match', findByName(sessions, 'REVIEWER')?.id, 's1');
-check('first match wins when two names collide by case', findByName(sessions, 'reviewer')?.id, 's1');
+check('case-insensitive unique match', findByName([sessions[0]], 'REVIEWER')?.id, 's1');
+check('exact match wins when two names collide by case', findByName(sessions, 'reviewer')?.id, 's3');
+assert.throws(() => findByName(sessions, 'REVIEWER'), /ambiguous name/);
+assert.throws(() => findByName([{ name: 'same' }, { name: 'same' }], 'same'), /ambiguous name/);
 check('trimmed and folded', findByName(sessions, '  Daily Digest ')?.id, 's2');
 check('unknown name is null', findByName(sessions, 'nobody'), null);
 check('empty name never matches', findByName([{ id: 'x', name: '' }, ...sessions], ''), null);
 check('undefined name is null, not a crash', findByName(sessions, undefined), null);
-check('sessions without a name are skipped', findByName([{ id: 'n' }, ...sessions], 'reviewer')?.id, 's1');
+check('sessions without a name are skipped', findByName([{ id: 'n' }, ...sessions], 'reviewer')?.id, 's3');
 
 console.log('\nspawn target group by name (POST /api/agents group=)');
 const hunter = groups.create('Hunter');
@@ -77,6 +80,9 @@ check('upper-case padded', groups.resolveSpawnGroup(' HUNTER ', 'x').groupId, hu
 check('decomposed accent', groups.resolveSpawnGroup('équipe', 'x').groupId, equipe.id);
 check('NONE still means ungrouped', groups.resolveSpawnGroup('NONE', 'x').groupId, null);
 check('unknown is still an error', typeof groups.resolveSpawnGroup('nope', 'x').error, 'string');
+const otherHunter = groups.create('hunter');
+check('exact group still wins', groups.resolveSpawnGroup('hunter', 'x').groupId, otherHunter.id);
+check('ambiguous group is an error', groups.resolveSpawnGroup('HUNTER', 'x').error.includes('ambiguous'), true);
 
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

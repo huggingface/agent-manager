@@ -114,7 +114,9 @@ export function resolveSpawnGroup(requested, callerId) {
   if (normalizeName(raw) === 'none') return { groupId: null };
   const byId = get(raw);
   if (byId) return { groupId: byId.id };
-  const byName = findByName(groups, raw);
+  let byName;
+  try { byName = findByName(groups, raw); }
+  catch (e) { return { error: e.message }; }
   if (byName) return { groupId: byName.id };
   const known = groups.map((g) => g.name).filter(Boolean).join(', ');
   return { error: `unknown group '${raw}'${known ? ` — groups here: ${known}` : ' — no groups exist yet'}; pass group=none to stay ungrouped` };
