@@ -41,6 +41,12 @@ allowlisted fields in `ApiError.data`, with bounded strings/collections. It
 retains `status` even for an unreadable proxy response. No automatic retry,
 new timeout policy, mutation replay or delivery guarantee is added.
 
+The audit recorder keeps one outcome. If the connection closes before the
+server finishes responding, `ok:false` and `incomplete:true` distinguish it from
+success; `status:499` is audit-only when no headers were committed. This is not
+evidence that the operation was rolled back or that a replay would be safe.
+Request-body capture and filtering are unchanged.
+
 ## Route / response / mutation inventory
 
 Paths below are relative to `/api`. The handler inventory was checked against

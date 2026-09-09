@@ -36,6 +36,7 @@ api.post('/api/failure/:mode', (req, res, next) => {
   if (req.params.mode === 'non-error') return Promise.reject(secret);
   if (req.params.mode === 'twice') { next(new Error(secret)); return Promise.reject(new Error(secret)); }
   if (req.params.mode === 'late') { res.json({ ok: true }); return delay(5).then(() => { throw new Error(secret); }); }
+  if (req.params.mode === 'disconnected') return delay(100).then(() => res.json({ ok: true }));
 });
 api.get('/api/expected/:status', (req, _res) => { throw new ApiError(Number(req.params.status), 'fixture-refused', 'Try a different value.', { reason: 'fixture', hits: { rule: 2 }, mtime: 123, tag: 'revision', details: [{ field: 'name', message: 'required' }] }); });
 api.get('/api/legacy', (_req, res) => res.status(409).json({ error: 'changed on disk', tag: 'latest' }));
@@ -120,6 +121,15 @@ try {
     for (const [url, body, method] of valid) assert.equal((await request(url, body, method)).status, 200, url);
     const text = await fetch(base + '/api/agents/one/prompt', { method: 'POST', headers: { 'x-am-origin': 'operator', 'content-type': 'application/x-www-form-urlencoded' }, body: 'curl text prompt' });
     assert.equal((await text.json()).body, 'curl text prompt');
+  });
+  await test('a disconnected mutation is recorded once without claiming success or replaying late work', async () => {
+    const controller = new AbortController();
+    const pending = fetch(base + '/api/failure/disconnected', { method: 'POST', headers: { 'x-am-origin': 'operator' }, signal: controller.signal });
+    setTimeout(() => controller.abort(), 20);
+    await assert.rejects(pending);
+    await delay(150);
+    const rows = readOperations(100).filter((entry) => entry.path === '/api/failure/disconnected');
+    assert.equal(rows.length, 1); assert.equal(rows[0].ok, false); assert.equal(rows[0].incomplete, true);
   });
   await test('additive codes, legacy fields, deliberate empty/partial responses, routing and parser failures', async () => {
     for (const status of [400, 403, 404, 409, 413, 429]) {

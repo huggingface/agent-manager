@@ -143,7 +143,7 @@ export function operationMiddleware({ resolveOrigin, resolveTarget, allowMissing
       responseBody = body;
       return originalJson(body);
     };
-    const record = () => {
+    const record = (completed) => {
       if (recorded) return;
       recorded = true;
       // A wait is a polling loop: only the call that RESOLVED is an event. The
@@ -165,14 +165,17 @@ export function operationMiddleware({ resolveOrigin, resolveTarget, allowMissing
         path: req.path,
         query: cleanQuery(req.query),
         request: summarizePayload(req.body, 'body'),
-        status: res.statusCode,
-        ok: res.statusCode < 400,
+        // 499 is audit-only when no HTTP response was committed. An aborted
+        // connection says nothing about whether the domain action completed.
+        status: completed || res.headersSent ? res.statusCode : 499,
+        ok: completed && res.statusCode < 400,
+        ...(!completed ? { incomplete: true } : {}),
         durationMs: Date.now() - started,
         result: summarizePayload(responseBody, 'result'),
       });
     };
-    res.once('finish', record);
-    res.once('close', record);
+    res.once('finish', () => record(true));
+    res.once('close', () => record(false));
     next();
   };
 }

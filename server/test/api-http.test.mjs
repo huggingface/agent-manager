@@ -110,6 +110,8 @@ try {
   assert.equal((await call('/api/not-real', undefined, 'GET')).body.code, 'api-not-found');
   assert.match(await (await fetch(base + '/nested/page')).text(), /fixture SPA/);
   const operations = (await call('/api/operations?limit=500', undefined, 'GET')).body.operations;
+  const interrupted = operations.filter((entry) => entry.query?.name === 'aborted-fixture.bin');
+  assert.equal(interrupted.length, 1); assert.equal(interrupted[0].ok, false);
   assert.ok(operations.some((entry) => entry.status === 500)); assert.ok(!JSON.stringify(operations).includes('synthetic-private')); assert.ok(!logs.includes('synthetic-private'));
   await stop(); await start(true);
   for (let i = 0; i < 50 && !(await call('/api/visibility', undefined, 'GET')).body.public; i++) await new Promise((r) => setTimeout(r, 20));
