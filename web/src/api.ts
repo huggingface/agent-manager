@@ -956,12 +956,14 @@ export const deleteSkill = (name: string, revision: string): Promise<SkillResult
 
 // ---- the API log (Settings → API log) ----
 // Written by operationMiddleware: every mutating call, plus the one read that is
-// an event between two agents — a `wait` that resolved. Payloads are summarised
-// at write time, never stored: a prompt is {present, chars, sha256} and nothing
-// else, so this view can say who asked whom and how long the ask was, never what
-// it said.
-export interface OperationSummary { present?: boolean; chars?: number; sha256?: string; bytes?: number; }
+// an event between two agents — a `wait` that resolved. Full non-secret content
+// is retained; v2 entries apply the documented best-effort credential filter
+// before persistence. Absence of audit metadata means a legacy, unrewritten row.
+export interface OperationSummary {
+  present?: boolean; chars?: number; sha256?: string; bytes?: number; text?: string; base64?: string;
+}
 export interface Operation {
+  version?: number;
   id: string;
   at: string;
   origin: { id: string; type: string; name?: string; cli?: string } | null;
@@ -974,6 +976,7 @@ export interface Operation {
   ok: boolean;
   durationMs: number;
   result?: unknown;
+  audit?: { credentialFilter?: { policy: string; status: 'applied' | 'failed'; reason?: string } };
 }
 export const getOperations = (limit = 500): Promise<{ operations: Operation[]; generatedAt: string }> =>
   fetch(`/api/operations?limit=${limit}`).then(json);
