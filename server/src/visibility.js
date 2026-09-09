@@ -13,8 +13,11 @@
 //
 // EVIDENCE (verified against the Hub on 2026-09-09, see docs/privacy-lock.md):
 //   Space, unauthenticated GET /api/spaces/{id}
-//     200 + JSON object with boolean `private` and the expected `id`
+//     200 + JSON object with boolean `private` AND a string `id` equal to the
+//     expected one (case-insensitive)
 //                                → verdict: `private` ? private : PUBLIC
+//                                  (a body without that identity is no verdict:
+//                                  it is not evidence about THIS resource)
 //     401/404 + JSON object      → private (the Hub answers "Invalid username or
 //                                  password." for a repo the caller may not see)
 //     anything else              → no verdict (3xx, 403, 429, 5xx, non-JSON,
@@ -32,9 +35,11 @@
 //                                  PUBLIC-space verdict (public wins).
 //     401/403/404 + JSON object  → unauthorized: the credential cannot read this
 //                                  Space. After UNAUTHORIZED_CONFIRMATIONS in a
-//                                  row this becomes the documented warning-only
-//                                  mode (bucketUnverified); no token at all is
-//                                  that mode immediately.
+//                                  row — consecutive cycles; any inconclusive
+//                                  answer in between restarts the count — this
+//                                  becomes the documented warning-only mode
+//                                  (bucketUnverified); no token at all is that
+//                                  mode immediately.
 //     anything else              → no verdict; retried next cycle, never cached
 //                                  as an empty mount list.
 //   Each bucket, unauthenticated GET /api/buckets/{id}: same rules as the Space.
@@ -79,7 +84,8 @@ export function classifyRepoResponse({ status, text }, expectedId) {
     const body = parseJson(text);
     if (!isObject(body)) return { verdict: null, error: 'malformed-body' };
     if (typeof body.private !== 'boolean') return { verdict: null, error: 'missing-private-field' };
-    if (body.id !== undefined && !sameId(body.id, expectedId)) return { verdict: null, error: 'id-mismatch' };
+    if (typeof body.id !== 'string') return { verdict: null, error: 'missing-id' };
+    if (!sameId(body.id, expectedId)) return { verdict: null, error: 'id-mismatch' };
     return { verdict: body.private ? 'private' : 'public', error: null };
   }
   if (status === 401 || status === 404) {
@@ -147,6 +153,7 @@ export function createVisibilityMonitor({
   let inflightAbort = null;
   let interval = null;
   let expiryTimer = null;
+  let expiryArmedFor = 0;    // the instant the armed expiry timer fires at
   let stopped = false;
   let checks = 0;            // completed cycles (bounded-work evidence for tests)
   let requests = 0;          // upstream requests issued
@@ -198,18 +205,24 @@ export function createVisibilityMonitor({
 
   function publish() {
     const eff = effective();
-    if (expiryTimer) { clearTimer(expiryTimer); expiryTimer = null; }
-    if (!eff.locked && spaceId && !stopped) {
-      const delay = Math.max(0, expiresAt() - now());
-      expiryTimer = setTimer(() => { expiryTimer = null; publish(); }, delay);
-      if (expiryTimer && expiryTimer.unref) expiryTimer.unref();
+    // Publishing is called on every admitted request (for the seq), so only
+    // touch the expiry timer when its target instant actually changed.
+    const wantExpiry = !eff.locked && spaceId && !stopped ? expiresAt() : 0;
+    if (wantExpiry !== expiryArmedFor || (wantExpiry && !expiryTimer)) {
+      if (expiryTimer) { clearTimer(expiryTimer); expiryTimer = null; }
+      expiryArmedFor = wantExpiry;
+      if (wantExpiry) {
+        expiryTimer = setTimer(() => { expiryTimer = null; expiryArmedFor = 0; publish(); }, Math.max(0, wantExpiry - now()));
+        if (expiryTimer && expiryTimer.unref) expiryTimer.unref();
+      }
     }
     const changed = !last || last.locked !== eff.locked || last.reason !== eff.reason || last.bucket !== eff.bucket;
     last = { locked: eff.locked, reason: eff.reason, bucket: eff.bucket };
     if (!changed) return eff;
     seq++;
-    if (spaceId) log.warn(`[visibility] ${eff.locked ? `LOCKED (${eff.reason}${eff.bucket ? `: ${eff.bucket}` : ''})` : `unlocked${eff.bucketUnverified ? ' (bucket unverified)' : ''}`}`);
-    for (const fn of [...listeners]) { try { fn(eff); } catch (e) { log.error('[visibility] listener failed', e && e.message); } }
+    if (spaceId) log.warn(`[visibility] ${eff.locked ? `LOCKED (${eff.reason}${eff.bucket ? `: ${eff.bucket}` : ''})` : `unlocked${eff.bucketUnverified ? ' (bucket unverified)' : ''}`} seq=${seq}`);
+    const event = { ...eff, seq };
+    for (const fn of [...listeners]) { try { fn(event); } catch (e) { log.error('[visibility] listener failed', e && e.message); } }
     return eff;
   }
 
@@ -257,7 +270,7 @@ export function createVisibilityMonitor({
   function acceptDiscovery(res) {
     const t = now();
     discovery.attemptedAt = t;
-    if (res.error) { discovery.error = res.error; return; }
+    if (res.error) { discovery.error = res.error; discovery.unauthorizedStreak = 0; return; }
     const c = classifyDiscoveryResponse(res, spaceId);
     discovery.error = c.error;
     if (c.verdict === 'ok') {
@@ -282,7 +295,12 @@ export function createVisibilityMonitor({
         discovery.verifiedAt = t;
       }
     }
-    // No verdict: nothing cached. Known buckets (public ones included) are kept.
+    else {
+      // No verdict: nothing cached, and a refusal streak has to be consecutive —
+      // an outage between two refusals is not a third refusal.
+      discovery.unauthorizedStreak = 0;
+    }
+    // Known buckets (public ones included) are kept in every branch.
   }
 
   function syncCredential() {
@@ -381,7 +399,7 @@ export function createVisibilityMonitor({
     if (inflightAbort) { try { inflightAbort.abort(); } catch {} }
     inflight = null; inflightAbort = null;
     if (interval) { clearInterval(interval); interval = null; }
-    if (expiryTimer) { clearTimer(expiryTimer); expiryTimer = null; }
+    if (expiryTimer) { clearTimer(expiryTimer); expiryTimer = null; expiryArmedFor = 0; }
     listeners.clear();
   }
 
@@ -411,8 +429,18 @@ export function createVisibilityMonitor({
     };
   }
 
+  /**
+   * The effective state with the transition counter that names it. Publishes
+   * first, so a refusal issued the moment a grace expired carries the seq of
+   * that lock rather than of the state before it.
+   */
+  function snapshot() {
+    const eff = publish();
+    return { ...eff, seq };
+  }
+
   return {
-    start, stop, check, effective, publicStatus,
+    start, stop, check, effective, publicStatus, snapshot,
     isLocked: () => effective().locked,
     /** Ids of the buckets a successful discovery listed (empty until then). */
     mountedBuckets: () => (discovery.verdict === 'ok' ? [...discovery.buckets] : []),
@@ -436,8 +464,8 @@ const monitor = createVisibilityMonitor({
 export const visibilityMonitor = monitor;
 /** True while the privileged API must not be served. Fails closed on a Space until verified. */
 export const isLocked = () => monitor.isLocked();
-/** { locked, reason, bucket, bucketUnverified } — the one effective state. */
-export const lockState = () => monitor.effective();
+/** { locked, reason, bucket, bucketUnverified, seq } — the one effective state, published. */
+export const lockState = () => monitor.snapshot();
 export const visibility = () => monitor.publicStatus();
 /** The mounted bucket ids, once discovery has succeeded (backup.js needs the source bucket). */
 export const mountedBuckets = () => monitor.mountedBuckets();
@@ -445,4 +473,4 @@ export const onVisibilityChange = (fn) => monitor.onChange(fn);
 /** Returns the first cycle's promise so startup can wait (bounded) for a verdict. */
 export const startVisibilityWatch = () => monitor.start();
 /** The machine-readable body every locked refusal carries. */
-export const lockError = (eff = monitor.effective()) => ({ error: 'locked', reason: eff.reason, ...(eff.bucket ? { bucket: eff.bucket } : {}) });
+export const lockError = (eff = monitor.snapshot()) => ({ error: 'locked', reason: eff.reason, seq: eff.seq ?? monitor.snapshot().seq, ...(eff.bucket ? { bucket: eff.bucket } : {}) });

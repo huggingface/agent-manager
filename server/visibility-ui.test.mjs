@@ -254,11 +254,31 @@ try {
   check('the agent process was left alone by the lock', starts() === startsAfterAttach);
 
   // ---- 5. private again: both tabs reopen where they were ----
+  const staleLocked = await info(); // captured while locked, replayed after the reopen below
   mode.space = 'private';
   const t3 = Date.now();
   await lockedPage(pageA).waitFor({ state: 'detached', timeout: 20_000 });
   await lockedPage(pageB).waitFor({ state: 'detached', timeout: 20_000 });
   check(`both tabs reopened automatically (${Date.now() - t3} ms)`, true);
+  // The reverse ordering: a delayed LOCKED status answer arriving after the
+  // reopen must not lock the app again (it would otherwise stay locked until
+  // the next server transition).
+  await pageA.evaluate(() => {
+    window.__relockFlicker = 0;
+    new MutationObserver(() => { if (document.querySelector('.locked-app')) window.__relockFlicker++; }).observe(document.body, { childList: true, subtree: true });
+  });
+  let staleArmed = true; let staleFired = false;
+  await pageA.route('**/api/info', async (route) => {
+    if (staleArmed) { staleArmed = false; staleFired = true; await sleep(300); return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(staleLocked) }); }
+    return route.continue();
+  });
+  await pageA.evaluate(() => document.dispatchEvent(new Event('visibilitychange'))); // a return-to-tab re-read
+  await waitFor(() => staleFired, 5000);
+  await sleep(2500);
+  const relock = await pageA.evaluate(() => window.__relockFlicker);
+  check('a stale "locked" status answer arriving after the reopen does not lock the app again', staleFired && relock === 0 && await lockedPage(pageA).count() === 0, `relock=${relock}`);
+  await pageA.unroute('**/api/info');
+  check('...and the app is still reading live state afterwards', !(await info()).locked);
   check('no forced reload across lock and reopen', (await pageA.evaluate(() => window.__boot)) === bootA);
   await pageA.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible', timeout: 15_000 });
   const reattached = await waitFor(() => pageA.evaluate(() => { const s = window.__sockets.at(-1); return s && !s.close && s.text.includes('FAKE-CLAUDE-READY'); }), 10_000);

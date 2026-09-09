@@ -13,7 +13,7 @@ import ConversationView from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
-import { LOCKED_CLOSE_CODE, announceLock, reasonFromCloseReason } from '../lib/lockStatus';
+import { LOCKED_CLOSE_CODE, announceLock, parseCloseReason } from '../lib/lockStatus';
 import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph } from './icons';
 import * as api from '../api';
 import type { Attachment } from '../api';
@@ -792,7 +792,8 @@ export default function TerminalPane({
         if (e.code === EXIT_CODE) { setConn('exited'); return; }
         if (e.code === LOCKED_CLOSE_CODE) {
           setConn('locked');
-          announceLock({ reason: reasonFromCloseReason(e.reason), bucket: null });
+          const parsed = parseCloseReason(e.reason);
+          announceLock({ reason: parsed.reason, bucket: null, seq: parsed.seq });
           return;
         }
         setConn('closed');

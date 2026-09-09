@@ -104,6 +104,9 @@ const UNLOCKED_WARN = { locked: false, reason: null, bucket: null, bucketUnverif
     ['404 JSON', json(404, { error: 'Repository not found' }), 'private'],
     ['200 private as string', json(200, { id: SPACE, private: 'false' }), null],
     ['200 missing private', json(200, { id: SPACE }), null],
+    ['200 missing id (private:false)', json(200, { private: false }), null],
+    ['200 missing id (private:true)', json(200, { private: true }), null],
+    ['200 id not a string', json(200, { id: 42, private: true }), null],
     ['200 for another repo', json(200, { id: 'someone/else', private: false }), null],
     ['200 array body', json(200, []), null],
     ['200 invalid JSON', { status: 200, text: '<html>ok</html>' }, null],
@@ -116,6 +119,28 @@ const UNLOCKED_WARN = { locked: false, reason: null, bucket: null, bucketUnverif
     ['503 HTML', { status: 503, text: 'maintenance' }, null],
   ];
   for (const [name, res, want] of rows) eq(`repo evidence: ${name} → ${want}`, classifyRepoResponse(res, SPACE).verdict, want);
+  eq('bucket evidence: 200 without id is no verdict either', classifyRepoResponse(json(200, { private: true }), BUCKET_A).verdict, null);
+  eq('bucket evidence: 200 with its id verifies', classifyRepoResponse(json(200, { id: BUCKET_A, private: true }), BUCKET_A).verdict, 'private');
+}
+// The identity requirement at the monitor level: a Space body without `id`
+// never refreshes evidence, so the app stays checking; a bucket body without
+// `id` leaves that bucket unverified.
+{
+  const hub = fakeHub(); const clock = fakeClock();
+  const { m } = monitor(hub, clock, { token: () => 'hf_x' });
+  hub.on(SPACE_URL, json(200, { private: true }));
+  await m.check();
+  eq('Space 200 without id: still checking', eff(m), LOCKED_CHECKING);
+  check('...and attempted, not verified', m.publicStatus().space.verifiedAt === null && m.publicStatus().space.error === 'missing-id');
+  hub.on(SPACE_URL, PRIVATE_401);
+  hub.on(SPACE_URL, spacePrivateAuthed([bucketVol(BUCKET_A)]), { auth: true });
+  hub.on(bucketUrl(BUCKET_A), json(200, { private: true }));
+  await m.check();
+  eq('bucket 200 without id: bucket unverified, still checking', eff(m), LOCKED_CHECKING);
+  hub.on(bucketUrl(BUCKET_A), json(200, { id: BUCKET_A, private: true }));
+  await m.check();
+  eq('bucket 200 with id verifies', eff(m), UNLOCKED);
+  m.stop();
 }
 {
   const rows = [
@@ -233,11 +258,26 @@ const UNLOCKED_WARN = { locked: false, reason: null, bucket: null, bucketUnverif
     await m.check();
     eq(`unauthorized discovery ${i}x: still locked/checking`, eff(m), LOCKED_CHECKING);
   }
+  // A refusal streak must be CONSECUTIVE: an outage between refusals restarts it.
+  hub.on(SPACE_URL, json(503, { error: 'busy' }), { auth: true });
   await m.check();
-  eq(`unauthorized discovery ${UNAUTHORIZED_CONFIRMATIONS}x: warning-only mode, unlocked`, eff(m), UNLOCKED_WARN);
+  eq('an inconclusive discovery between refusals: still checking', eff(m), LOCKED_CHECKING);
+  hub.on(SPACE_URL, json(401, { error: 'Invalid username or password.' }), { auth: true });
+  await m.check();
+  eq('a refusal after the outage does not complete the old streak', eff(m), LOCKED_CHECKING);
+  hub.on(SPACE_URL, () => Promise.reject(new TypeError('fetch failed')), { auth: true });
+  await m.check();
+  hub.on(SPACE_URL, json(401, { error: 'Invalid username or password.' }), { auth: true });
+  for (let i = 1; i < UNAUTHORIZED_CONFIRMATIONS; i++) {
+    await m.check();
+    eq(`consecutive refusal ${i}x after a network failure: still checking`, eff(m), LOCKED_CHECKING);
+  }
+  await m.check();
+  eq(`unauthorized discovery ${UNAUTHORIZED_CONFIRMATIONS}x in a row: warning-only mode, unlocked`, eff(m), UNLOCKED_WARN);
   check('warning mode does not call the bucket verified', m.publicStatus().bucketDiscovery.verdict === 'unauthorized' && m.publicStatus().buckets.length === 0);
+  const authedSoFar = hub.calls.filter((c) => c.auth).length;
   await m.check();
-  check('unauthorized verdict is cached per credential', hub.calls.filter((c) => c.auth).length === UNAUTHORIZED_CONFIRMATIONS);
+  check('unauthorized verdict is cached per credential', hub.calls.filter((c) => c.auth).length === authedSoFar);
   // Restoring a usable credential re-discovers and verifies for real.
   token = 'hf_fresh_token';
   hub.on(SPACE_URL, spacePrivateAuthed([bucketVol(BUCKET_A)]), { auth: true });
@@ -459,13 +499,18 @@ const UNLOCKED_WARN = { locked: false, reason: null, bucket: null, bucketUnverif
   const hub = fakeHub(); const clock = fakeClock();
   const { m } = monitor(hub, clock);
   const seen = [];
-  const off = m.onChange((e) => seen.push(e.locked));
+  const seqs = [];
+  const off = m.onChange((e) => { seen.push(e.locked); seqs.push(e.seq); });
   hub.on(SPACE_URL, PRIVATE_401);
   for (let i = 0; i < 20; i++) {
     hub.on(SPACE_URL, i % 2 ? PRIVATE_401 : spacePublic());
     await m.check();
   }
   check('20 lock/unlock cycles: exactly 20 transitions, 20 requests, one expiry timer at most', seen.length === 20 && hub.calls.length === 20 && clock.pending() <= 1);
+  check('every transition carries a strictly increasing seq, matching the status and the refusal body', seqs.every((v, i) => i === 0 || v === seqs[i - 1] + 1) && m.publicStatus().seq === seqs.at(-1) && m.snapshot().seq === seqs.at(-1));
+  const before = clock.pending();
+  for (let i = 0; i < 50; i++) m.snapshot();
+  check('snapshots (one per admitted request) do not re-arm timers or bump the seq', clock.pending() === before && m.snapshot().seq === seqs.at(-1));
   off();
   check('unsubscribe removes the listener', m.stats().listeners === 1);
   m.stop();

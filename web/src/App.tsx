@@ -378,7 +378,9 @@ export default function App() {
     // here: apply the lock at once, then fetch the full explanation.
     const onLock = (e: Event) => {
       const d = (e as CustomEvent<LockAnnouncement>).detail || { reason: null, bucket: null };
-      lockTracker.current.observeLocked();
+      // A refusal older than a reopening already applied is a delayed answer
+      // from before the unlock, not news.
+      if (!lockTracker.current.observeLocked(d.seq ?? null)) return;
       setInfo((i) => (i ? { ...i, locked: true, lockReason: d.reason ?? i.lockReason, lockBucket: d.bucket ?? i.lockBucket, secrets: [] } : i));
       loadInfo();
     };

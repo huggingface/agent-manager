@@ -15,7 +15,7 @@ await build({
   entryPoints: [path.join(HERE, '../src/lib/lockStatus.ts')],
   outfile: out, format: 'esm', bundle: false, logLevel: 'error',
 });
-const { createLockTracker, reasonFromCloseReason, describeVerification, LOCKED_CLOSE_CODE } = await import(pathToFileURL(out).href);
+const { createLockTracker, reasonFromCloseReason, parseCloseReason, describeVerification, LOCKED_CLOSE_CODE } = await import(pathToFileURL(out).href);
 
 // ---- ordering by request (no server counters) ----
 const U = (seq, boot = 'b1') => ({ locked: false, seq, boot });
@@ -77,6 +77,30 @@ const L = (seq, boot = 'b1') => ({ locked: true, seq, boot });
   assert.equal(t.accept(t.begin(), { locked: false }), true, '...falling back to request order alone');
 }
 
+// ---- the other direction: a stale LOCKED answer must not undo a newer reopening ----
+{
+  const t = createLockTracker();
+  assert.equal(t.accept(t.begin(), L(3)), true, 'locked seq 3');
+  assert.equal(t.accept(t.begin(), U(4)), true, 'reopened at seq 4');
+  const delayed = t.begin();
+  assert.equal(t.accept(delayed, L(3)), false, 'a delayed locked status from seq 3 is ignored after the reopen');
+  assert.equal(t.accept(t.begin(), U(4)), true, 'healthy polls keep the app open — nothing raised the bar');
+  assert.equal(t.accept(t.begin(), L(5)), true, 'a genuinely new lock (seq 5) still applies');
+  assert.equal(t.accept(t.begin(), U(4)), false, 'and the stale reopen from before it is refused');
+  assert.equal(t.accept(t.begin(), U(6)), true);
+}
+{
+  const t = createLockTracker();
+  assert.equal(t.accept(t.begin(), L(3)), true);
+  assert.equal(t.accept(t.begin(), U(4)), true);
+  assert.equal(t.observeLocked(3), false, 'a delayed 403/4003 stamped with the old lock seq is not news');
+  assert.equal(t.accept(t.begin(), U(4)), true, 'the app stays open');
+  assert.equal(t.observeLocked(5), true, 'a refusal stamped with a newer seq is a new lock');
+  assert.equal(t.accept(t.begin(), U(4)), false);
+  assert.equal(t.accept(t.begin(), U(6)), true);
+  assert.equal(t.observeLocked(null), true, 'a refusal without a seq (older server) is always taken as news');
+}
+
 // ---- close reasons ----
 assert.equal(LOCKED_CLOSE_CODE, 4003);
 assert.equal(reasonFromCloseReason('locked:public-space'), 'public-space');
@@ -85,6 +109,10 @@ assert.equal(reasonFromCloseReason('exited'), null);
 assert.equal(reasonFromCloseReason(''), null);
 assert.equal(reasonFromCloseReason(undefined), null);
 assert.equal(reasonFromCloseReason('locked:<script>'), null, 'only reason slugs are accepted');
+assert.deepEqual(parseCloseReason('locked:public-space:7'), { reason: 'public-space', seq: 7 });
+assert.deepEqual(parseCloseReason('locked:checking:'), { reason: null, seq: null }, 'a dangling separator is not a valid reason string');
+assert.deepEqual(parseCloseReason('locked:verification-unavailable'), { reason: 'verification-unavailable', seq: null });
+assert.equal(reasonFromCloseReason('locked:public-bucket:12'), 'public-bucket');
 
 // ---- copy ----
 {

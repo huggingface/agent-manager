@@ -8,7 +8,7 @@ const HEADERS = { 'content-type': 'application/json' };
 const noteLockedResponse = (r: Response) => {
   if (r.status !== 403) return;
   r.clone().json().then((b) => {
-    if (b && b.error === 'locked') announceLock({ reason: b.reason ?? null, bucket: b.bucket ?? null });
+    if (b && b.error === 'locked') announceLock({ reason: b.reason ?? null, bucket: b.bucket ?? null, seq: typeof b.seq === 'number' ? b.seq : null });
   }).catch(() => {});
 };
 // The browser is the single human operator. Stamp every state-changing request
