@@ -51,13 +51,18 @@ fs.writeFileSync(stub, `
     count(op) { return this.calls.filter((c) => c.op === op).length; },
   };
   window.__api = api;
+  // Fresh objects every time, exactly as parsing a JSON response gives you. The
+  // fixture used to hand back its own live array, so a rename that edited an
+  // entry in place also edited the listing the pane was already showing — which
+  // hid a real bug: in production that stale listing still holds the OLD name.
+  const snapshot = (entries) => (entries || []).map((entry) => ({ ...entry }));
   export const listFiles = (id, p = '') => {
     api.calls.push({ op: 'list', id, p });
     if (p === 'broken') return Promise.reject(new Error('EACCES'));
     if (p === 'slow' && api.holdSlow) {
-      return new Promise((resolve) => api.slowWaiters.push(() => resolve({ root: 'workspace', entries: api.tree.slow })));
+      return new Promise((resolve) => api.slowWaiters.push(() => resolve({ root: 'workspace', entries: snapshot(api.tree.slow) })));
     }
-    return Promise.resolve({ root: 'workspace', entries: api.tree[p] || [] });
+    return Promise.resolve({ root: 'workspace', entries: snapshot(api.tree[p]) });
   };
   export const previewFile = (id, p) => {
     api.calls.push({ op: 'preview', id, p });
@@ -529,6 +534,12 @@ await mount('kb-move');
   await settle(250);
   await check('Enter on the folder performs exactly one move, to that folder', async () =>
     assert.deepEqual(await calls('move'), [{ op: 'move', id: 'kb-move', p: 'alpha.txt', to: 'docs' }]));
+  // `docs` is closed, so the moved file has no row to stand on. The folder it
+  // went into is the nearest thing that is on screen, and it is where the file
+  // now is — better than the top of the listing, and better than expanding a
+  // folder the operator did not ask to open.
+  await check('…and the focus lands on the folder it went into', async () =>
+    assert.equal(await active(), 'row:docs'));
   await check('…and the move bar is gone', async () =>
     assert.equal(await page.evaluate(() => !!document.querySelector('.files-new .tw-warn')), false));
 }
@@ -561,6 +572,8 @@ await mount('kb-move-root');
   await settle(250);
   await check('“Move here” puts it in the folder the breadcrumb names', async () =>
     assert.deepEqual(await calls('move'), [{ op: 'move', id: 'kb-move-root', p: 'docs/guide.md', to: '' }]));
+  await check('…and the focus is on the file that moved, not on whatever row took its place', async () =>
+    assert.equal(await active(), 'row:guide.md'));
 }
 await mount('kb-move-cancel');
 {
@@ -576,6 +589,21 @@ await mount('kb-move-cancel');
     assert.equal(await active(), 'row:alpha.txt');
   });
 }
+await mount('kb-move-bar-cancel');
+{
+  await enterTree();
+  await tabTo('Move alpha.txt — then pick a destination folder');
+  await press('Enter');
+  await tabTo('Cancel');
+  await press('Enter');
+  await settle(150);
+  await check('the move bar’s own Cancel button cancels the move', async () => {
+    assert.deepEqual(await calls('move'), []);
+    assert.equal(await page.evaluate(() => !!document.querySelector('.files-new .tw-warn')), false);
+  });
+  await check('…and gives the keyboard back to the row instead of dropping it', async () =>
+    assert.equal(await active(), 'row:alpha.txt'));
+}
 await mount('kb-delete');
 {
   await toRow('beta.md');
@@ -589,6 +617,18 @@ await mount('kb-delete');
   });
   await check('…and the confirmation opens on Cancel, not on Delete', async () =>
     assert.equal(await active(), 'Cancel'));
+  // Escape is promised to cancel an open confirmation, and the focus is on the
+  // confirmation bar at that moment — which is not inside the tree.
+  await press('Escape');
+  await settle(150);
+  await check('Escape from the confirmation closes it and deletes nothing', async () => {
+    assert.deepEqual(await calls('delete'), []);
+    assert.equal(await page.evaluate(() => !!document.querySelector('.tw-confirm')), false);
+  });
+  await check('…and hands the row back', async () => assert.equal(await active(), 'row:beta.md'));
+  await tabTo('Delete beta.md');
+  await press('Enter');
+  await settle(150);
   await press('Enter');
   await settle(200);
   await check('Cancel deletes nothing and returns to the row', async () => {

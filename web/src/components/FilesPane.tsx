@@ -101,24 +101,33 @@ const padFor = railPad;
 // One directory listing, fetched once. Used by the pane for the current folder
 // and by every expanded FolderNode, so each level is loaded exactly once.
 function useDir(sessionId: string, path: string, reloadKey: number) {
+  const stamp = `${sessionId}\u0000${path}\u0000${reloadKey}`;
   const [state, setState] = useState<{ for: string | null; entries: FileEntry[] | null; err: boolean }>(
     { for: null, entries: null, err: false });
   useEffect(() => {
     let alive = true;
     setState({ for: null, entries: null, err: false });
     api.listFiles(sessionId, path)
-      .then((r) => { if (alive) setState({ for: path, entries: r.entries, err: false }); })
-      .catch(() => { if (alive) setState({ for: path, entries: null, err: true }); });
+      .then((r) => { if (alive) setState({ for: stamp, entries: r.entries, err: false }); })
+      .catch(() => { if (alive) setState({ for: stamp, entries: null, err: true }); });
     return () => { alive = false; };
   }, [sessionId, path, reloadKey]);
-  // WHICH FOLDER THESE ENTRIES ARE FROM. The state update above lands in an
-  // effect, one render after `path` changed, so for that one render the previous
-  // folder's entries would be drawn against the new folder's path — rows called
-  // `docs/alpha.txt` for a file that is `alpha.txt` at the root. Nobody saw it
-  // (it lasts a frame) but it is a real wrong path: a click landing in that frame
-  // would act on it, and anything keyed by path — the keyboard focus — follows it
-  // into a row that then disappears.
-  return state.for === path ? state : { entries: null, err: false };
+  // WHICH READ THESE ENTRIES CAME FROM — the folder AND the reload that asked
+  // for them. The state update above lands in an effect, one render after its
+  // inputs changed, so for that one render the previous answer would be drawn as
+  // if it were this one. Two ways that bites, both real:
+  //
+  //   · a new FOLDER draws the old folder's entries against the new path — rows
+  //     called `docs/alpha.txt` for a file that is `alpha.txt` at the root;
+  //   · a RELOAD after a rename or a move draws the listing from before it, so
+  //     the row the operation just created is briefly absent and the row it
+  //     replaced is briefly still there.
+  //
+  // The second one is what put the keyboard on the wrong file: the focus is
+  // asked to follow the renamed entry, that stale frame does not contain it, and
+  // the repair below reasonably concludes the row is gone. A listing that is not
+  // this read's is not a listing yet.
+  return state.for === stamp ? state : { entries: null, err: false };
 }
 
 type RowProps = {
@@ -1047,9 +1056,15 @@ export default function FilesPane({
   useLayoutEffect(() => {
     if (viewing || !bodyRef.current) return;
     const paths = rowEls().map((el) => el.dataset.path || '');
+    // NOTHING DRAWN YET. The folder is still being read, so this is not an answer
+    // about anything: a claim keeps waiting, a pending focus request keeps
+    // waiting, and — the part that bit — the last listing the operator actually
+    // saw stays recorded. Overwriting it with the empty one made the repair
+    // afterwards forget where the missing row had been, and send the focus to
+    // the top of the listing instead of to its neighbour.
+    if (!paths.length) return;
     const before = drawn.current;
     drawn.current = paths;
-    if (!paths.length) return;                 // still reading: a claim keeps waiting
     if (focusPath && paths.includes(focusPath)) return;   // the claim, if any, keeps until it lapses
     const mine = Date.now() < claim.current || bodyRef.current.contains(document.activeElement);
     claim.current = 0;
@@ -1461,7 +1476,15 @@ export default function FilesPane({
 
       {/* The tree stays mounted while a preview is open, so going back lands on
           the same expanded folders and the same scroll position. */}
-      <div className="files-stack" hidden={!!viewing} style={{ fontSize: `${(13 * zoom) / 100}px` }}>
+      {/* The key handler sits on the STACK, not on the listing: the create field,
+          the move bar and the delete confirmation are drawn above the rows, not
+          inside them, and Escape has to reach them from whichever of their
+          buttons has the focus. Everything it does is still about the listing —
+          see onTreeKey, which hands every key back that is not its business. */}
+      <div
+        className="files-stack" hidden={!!viewing} onKeyDown={onTreeKey}
+        style={{ fontSize: `${(13 * zoom) / 100}px` }}
+      >
         {creating && (
           <div className="files-new">
             {creating === 'folder' ? <FolderPlusGlyph className="tw-ico" /> : <FilePlusGlyph className="tw-ico" />}
@@ -1493,7 +1516,10 @@ export default function FilesPane({
                 Move here ({root ? root.split('/').pop() : rootLabel})
               </button>
             )}
-            <button className="mini-btn" onClick={() => setMoving(null)}>Cancel</button>
+            <button
+              className="mini-btn"
+              onClick={() => { const { path } = moving; setMoving(null); requestFocus(path); }}
+            >Cancel</button>
           </div>
         )}
         {pendingDel && (
@@ -1520,7 +1546,6 @@ export default function FilesPane({
           // empty, unreadable — it is the box itself, so Tab still finds the
           // listing and lands on something that says what it is.
           tabIndex={dir.entries?.length ? -1 : 0}
-          onKeyDown={onTreeKey}
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files.length) upload(e.dataTransfer.files); }}
