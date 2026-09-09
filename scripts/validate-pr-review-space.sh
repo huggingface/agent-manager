@@ -54,6 +54,7 @@ for pair in \
       run_suite pr113-process "$checkout/server" node test/fx-process.test.mjs
       run_suite pr113-digest "$checkout/server" node test/fx-digest.test.mjs
       run_suite pr113-resume "$checkout/server" node test/fx-resume.test.mjs
+      run_suite pr113-live "$checkout/server" node test/fx-live.test.mjs
       run_suite pr113-checkpoint "$checkout/server" node state-checkpoint.test.mjs
       ;;
   esac
