@@ -38,6 +38,12 @@ const normalizePath = (path?: string) => (path && path.trim() ? path : '.');
 export const quickStart = (cli: string, prompt: string, name = '', path = '.'): Promise<Session> =>
   fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ cli, name: name || undefined, path: path || '.', prompt: prompt || undefined }) }).then(json);
 
+// The name this cli would get if created now. Used to prefill the create
+// panel; the panel only SENDS a name when the operator edits it, so the server
+// still decides for an untouched field.
+export const nextName = (cli: string): Promise<{ cli: string; name: string }> =>
+  fetch(`/api/next-name?cli=${encodeURIComponent(cli)}`).then(json);
+
 export const createSession = (name: string, cli: string, groupId?: string, path?: string): Promise<Session> =>
   fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ name, cli, groupId, path: normalizePath(path) }) }).then(json);
 
@@ -520,6 +526,10 @@ export type TraceBlock =
   | { type: 'compaction'; text: string };
 
 export interface TraceTurn {
+  /** Stable record identity; messageId joins fragmented native messages. */
+  id?: string;
+  messageId?: string;
+  event?: { type: 'queue'; operation: string; text: string } | { type: 'task-complete'; text: string };
   role: 'user' | 'assistant' | 'system';
   kind?: 'final' | 'update';
   /**
@@ -537,6 +547,9 @@ export interface TraceTurn {
 }
 
 export interface TracePage {
+  generation?: string;
+  revision?: string;
+  activity?: 'working' | 'waiting' | null;
   harness: string;
   harnessLabel: string;
   sessionId: string | null;
@@ -589,9 +602,15 @@ export const getTracePage = async (id: string, offset = 0, limit = 200): Promise
 // been written since — each answered from a byte range of the transcript
 // instead of a parse of the whole thing. Cursors are opaque: hand back the
 // `start`/`end` the server gave you.
-export type TraceReq = { at: 'tail' } | { at: 'before' | 'after'; cursor: number };
+export type TraceReq = ({ at: 'tail' } | { at: 'before' | 'after'; cursor: number }) & { generation?: string };
 
 export interface TraceCursor {
+  generation?: string;
+  revision?: string;
+  /** Explicit source replacement; never an ordinary append. */
+  reset?: boolean;
+  /** Mutable index-backed tail replaces records starting at this index. */
+  replaceFrom?: number;
   /** byte offsets for a .jsonl, message indices for the SQLite harnesses */
   mode: 'bytes' | 'index';
   start: number;
@@ -614,7 +633,8 @@ export interface TraceWindow extends Omit<TracePage, 'total' | 'offset' | 'limit
 /** Whole-trace facts a single window cannot know. One full parse, off the paint path. */
 export type TraceSummary = Omit<TracePage, 'turns' | 'offset' | 'limit'>;
 
-const traceRange = (req: TraceReq) => (req.at === 'tail' ? 'tail=1' : `${req.at}=${req.cursor}`);
+const traceRange = (req: TraceReq) => (req.at === 'tail' ? 'tail=1' : `${req.at}=${req.cursor}`)
+  + `&v=2${req.generation ? `&generation=${encodeURIComponent(req.generation)}` : ''}`;
 
 const traceFetch = async <T>(url: string, signal?: AbortSignal): Promise<T> => {
   const r = await fetch(url, { signal });
@@ -637,6 +657,48 @@ export const getTraceSummary = (id: string, signal?: AbortSignal): Promise<Trace
 
 export const getFileTraceWindow = (id: string, p: string, req: TraceReq, bytes?: number, min?: number, signal?: AbortSignal): Promise<TraceWindow> =>
   traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&${traceRange(req)}${windowSize(bytes, min)}`, signal);
+
+// ---- sub-agents ----
+// The roster comes from the `subagents/` directory beside the transcript, not
+// from the transcript: a parent here reaches 292 MB while its whole roster is a
+// directory listing plus 187 bytes per agent. `spawnedAt` is the sidecar's
+// mtime and `lastWroteAt` the transcript's — the second one says when it last
+// wrote, and nothing about whether it is alive (measured silence inside a live
+// sub-agent: p99 112s, max 601s).
+export interface SubAgentEntry {
+  agentId: string;
+  agentType: string | null;
+  description: string | null;
+  toolUseId: string | null;
+  /** codex has no per-call id; its parent's records name the task instead */
+  taskName?: string | null;
+  parentAgentId: string | null;
+  depth: number | null;
+  spawnedAt: number | null;
+  lastWroteAt: number | null;
+  bytes: number;
+  hasTranscript: boolean;
+}
+
+export interface SubAgentRoster {
+  id: string;
+  supported: boolean;
+  reason?: string;
+  dir: string | null;
+  agents: SubAgentEntry[];
+}
+
+export const getSubAgents = (id: string, signal?: AbortSignal): Promise<SubAgentRoster> =>
+  traceFetch(`/api/agents/${id}/subagents`, signal);
+
+/** A sub-agent's own transcript, in the same shape as any other trace. */
+export const getSubAgentTrace = (id: string, agentId: string, bytes?: number, signal?: AbortSignal): Promise<TraceWindow> =>
+  traceFetch(`/api/agents/${id}/subagents/${encodeURIComponent(agentId)}?tail=1${windowSize(bytes)}`, signal);
+
+export const getSubAgentWindow = (id: string, agentId: string, req: TraceReq, bytes?: number, min?: number, signal?: AbortSignal): Promise<TraceWindow> =>
+  traceFetch(`/api/agents/${id}/subagents/${encodeURIComponent(agentId)}?${traceRange(req)}${windowSize(bytes, min)}`, signal);
+export const getSubAgentSummary = (id: string, agentId: string, signal?: AbortSignal): Promise<TraceSummary> =>
+  traceFetch(`/api/agents/${id}/subagents/${encodeURIComponent(agentId)}?summary=1`, signal);
 
 export const getFileTraceSummary = (id: string, p: string, signal?: AbortSignal): Promise<TraceSummary> =>
   traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&summary=1`, signal);

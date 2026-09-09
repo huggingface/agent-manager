@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import type { SessionState } from '../types';
 import { SlidersGlyph, SunGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
-import Logo from './Logo';
 import StateLogo from './StateLogo';
 
 // A frozen, slightly dimmed replica of the real sidebar so the install page
@@ -57,10 +56,6 @@ function MockSidebar() {
         ) : (
           <MockRow key={item.name} s={item} />
         ))}
-      </div>
-      <div className="quick-add">
-        <span className="btn-ghost"><Logo cli="shell" size={14} /> Shell</span>
-        <span className="btn-ghost"><Logo cli="files" size={14} /> Files</span>
       </div>
       <div className="legend">
         <span><StateLogo frameOnly state="working" size={12} /> working</span>
