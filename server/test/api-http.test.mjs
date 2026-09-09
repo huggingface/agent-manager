@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
+import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'am-api-http-'));
@@ -72,6 +73,19 @@ try {
   assert.equal(write.status, 409); assert.equal((await write.json()).code, 'file-changed'); assert.equal(fs.readFileSync(file, 'utf8'), 'changed');
   const upload = await fetch(`${base}/api/files/${id}/upload?name=fixture.json`, { method: 'POST', headers: { 'x-am-origin': 'operator', 'content-type': 'application/json' }, body: '{"raw":"file"}' });
   assert.equal(upload.status, 200); assert.equal(fs.readFileSync(path.join(root, 'data', 'workspaces', 'fixture.json'), 'utf8'), '{"raw":"file"}');
+  const abortedPath = path.join(root, 'data', 'workspaces', 'aborted-fixture.bin');
+  const uploading = http.request(`${base}/api/files/${id}/upload?name=aborted-fixture.bin`, {
+    method: 'POST', headers: { 'x-am-origin': 'operator', 'content-type': 'application/octet-stream', 'content-length': 1000000 },
+  });
+  uploading.on('error', () => {});
+  uploading.write(Buffer.alloc(1024));
+  for (let i = 0; i < 100 && !fs.existsSync(abortedPath); i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(fs.existsSync(abortedPath), 'fixture upload began');
+  uploading.destroy();
+  for (let i = 0; i < 100 && fs.existsSync(abortedPath); i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(!fs.existsSync(abortedPath), 'interrupted upload is cleaned up');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.ok(!logs.includes('[uncaughtException]'), 'disconnect must not escape the request boundary');
   const empty = await fetch(`${base}/api/files/${id}/write?path=fixture.txt`, { method: 'PUT', headers: { 'x-am-origin': 'operator', 'content-type': 'text/plain' }, body: '' });
   assert.equal(empty.status, 200); assert.equal(fs.readFileSync(file, 'utf8'), '');
   const remote = (await call('/api/sessions', { cli: 'remote', name: 'fixture-remote' })).body;
@@ -89,6 +103,7 @@ try {
   });
   assert.equal(emptyAttachment.status, 413); assert.equal((await emptyAttachment.json()).code, 'payload-too-large');
   const trace = await call(`/api/trace/${client.id}?tail=1&v=2`, undefined, 'GET'); assert.equal(trace.status, 404); assert.equal(trace.body.code, 'no-trace');
+  const noShare = await call(`/api/sessions/${client.id}/share`, { visibility: 'public' }); assert.equal(noShare.status, 403); assert.equal(noShare.body.code, 'no-hf-token');
   assert.equal((await call(`/api/sessions/${client.id}/input`, { text: null })).status, 400);
   assert.equal((await call('/api/relaunch')).body.reason, 'no-space');
   assert.equal((await call('/api/backup/run')).status, 403);
