@@ -2,10 +2,11 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import pty from 'node-pty';
+import { dismissCodexUpdatePrompt, trustCodexWorkspace } from './first-run.js';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { remoteState, setPaused } from './remote.js';
-import { cliById, isRemote, PORT, STATE_DIR, WORKSPACES_DIR } from './config.js';
+import { cliById, cliVersion, isRemote, PORT, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
 import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace } from './traces.js';
 import {
@@ -1842,6 +1843,35 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   const folder = session.path ?? session.id;
   const workdir = path.join(WORKSPACES_DIR, folder);
   fs.mkdirSync(workdir, { recursive: true });
+  // A session runs inside the workspaces root, and `path` is only checked
+  // lexically when it is recorded — so a symlink under a workspace can point
+  // out of the tree, and an agent can make one. Resolve it and refuse: Claude
+  // applies inherited trust to the RESOLVED directory, so an escaping link
+  // would land outside the one trusted root and stop the pane on the trust
+  // dialog with its task queued behind it. Refusing keeps the boundary the
+  // recorded path already implies, and needs no per-launch write to fix.
+  const realRoot = fs.realpathSync(WORKSPACES_DIR);
+  const realWork = fs.realpathSync(workdir);
+  if (realWork !== realRoot && !realWork.startsWith(`${realRoot}${path.sep}`)) {
+    throw new Error(`${folder} resolves to ${realWork}, outside the workspaces root — `
+      + 'a session has to run inside it. Point the session at a folder in the tree, '
+      + 'or copy what you need into one.');
+  }
+
+  // Folder trust is answered before we get here for Claude: one boot-time entry
+  // on the workspaces root, which it inherits down to every folder under it, so
+  // nothing is written on this path. Codex neither inherits nor honours a `-c`
+  // override for trust, so its answer is APPENDED to config.toml here — an
+  // append cannot discard another process's bytes, which a rewrite can.
+  //
+  // Its update screen is the other thing that can block, and only on a launch
+  // with no prompt. The cache behind it is refreshed in the background hours
+  // after boot, so it is checked per launch rather than once, as a
+  // compare-and-set. See first-run.js.
+  if (session.cli === 'codex') {
+    trustCodexWorkspace(realWork);
+    dismissCodexUpdatePrompt(cliVersion('codex'));
+  }
   // The login shell knows its own PTY-root pid before any `exec`. Adapters use
   // this marker to discard nested agent lifecycle events BEFORE they can
   // overwrite the top-level pane's breadcrumb; runner validation repeats the

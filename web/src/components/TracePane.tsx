@@ -312,7 +312,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', live, onHead, o
     setRange({ start: 0, end: 40 });
   }, []);
 
-  const { turns, head, error, version: tick, atStart, blocked, loadOlder } =
+  const { turns, head, error, phase, reload, version: tick, atStart, blocked, loadOlder } =
     useTraceWindows(src, srcKey, { onPrepend, onAppend, onReset, live });
 
   // Prefix sums over measured (or estimated) row heights. n is bounded by what
@@ -516,10 +516,10 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', live, onHead, o
         onTouchStart={() => { wanted.current = null; }}
         style={{ fontSize: `${(13 * zoom) / 100}px` }}
       >
-        {error && <div className="tv-msg">{error}</div>}
-        {!error && !head && <div className="tv-msg">reading…</div>}
+        {error && <div className="tv-msg" role="status">{error} <button onClick={() => void reload()}>Retry</button></div>}
+        {!error && !head && <div className="tv-msg">{phase === 'empty' ? 'No transcript yet.' : 'reading…'}</div>}
 
-        {!error && head && matches && (
+        {head && matches && (
           <div className="tv-matches">
             <div className="tv-msg">
               {matches.length} match{matches.length === 1 ? '' : 'es'} in the {fmtNum(n)} turns
@@ -529,7 +529,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', live, onHead, o
           </div>
         )}
 
-        {!error && head && !matches && (
+        {head && !matches && (
           <>
             {/* Fixed height whether it is loading, done, or at the beginning:
                 this line sits above every offset in the list, so changing its
@@ -646,7 +646,7 @@ export default function TracePane({
         <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
       </div>
 
-      <TraceView src={src} srcKey={session.id} zoom={zoom} query={query} live={sourceLive} onHead={setHead} onNav={onNav} />
+      <TraceView src={src} srcKey={`session:${session.id}`} zoom={zoom} query={query} live={sourceLive} onHead={setHead} onNav={onNav} />
     </div>
   );
 }

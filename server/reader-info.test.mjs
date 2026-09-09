@@ -202,7 +202,7 @@ try {
 
   // ---- and the reader, which hands its own head to the same panel ----------
   await page.locator('.modebar button', { hasText: 'reader' }).click();
-  // The reader has no toolbar until search is asked for, so wait for the body.
+  // Wait for the independent reader surface.
   await page.locator('.cxv-body').waitFor({ state: 'visible', timeout: 20_000 });
 
   // The rearrangement the operator asked for: the working directory beside the
@@ -232,15 +232,14 @@ try {
     JSON.stringify(layout.rightOrder) === JSON.stringify(['ph-image', 'ph-search', 'tinfo-btn', 'ph-close']),
     JSON.stringify(layout.rightOrder));
 
-  // 1. The reader opens with no bar at all: search is a tool the header's switch
-  //    reveals, and the facts left for the header's `i` (2026-08-18).
-  check('the reader opens with no toolbar of its own',
-    await page.locator('.cxv-bar').count() === 0);
+  // Recovery/navigation stay available; search remains a deliberate disclosure.
+  check('the reader opens with recovery controls and no search box',
+    await page.locator('.cxv-status').count() === 1 && await page.locator('.cxv-search').count() === 0);
   await page.locator('.pane-head .ph-search').tap();
   await page.locator('.cxv-bar .cxv-search').waitFor({ state: 'visible', timeout: 5_000 });
-  const barText = (await page.locator('.cxv-bar').innerText()).trim();
+  const barText = (await page.locator('.cxv-bar:not(.cxv-status)').innerText()).trim();
   check('the revealed bar carries search and the turn keys, and no facts',
-    await page.locator('.cxv-bar .cxv-nav').isVisible()
+    await page.getByRole('button', { name: 'Next matching turn', exact: true }).isVisible()
       && !barText.includes('claude-fixture-5') && !barText.includes('Jan'),
     JSON.stringify({ barText }));
   check('the search box takes focus when it appears',
@@ -252,7 +251,7 @@ try {
   await waitFor(async () => await page.locator('.cxv-body .cx').count() === 0, 4_000);
   const filteredAway = await page.locator('.cxv-body .cx').count();
   await page.locator('.pane-head .ph-search').tap();
-  await waitFor(async () => await page.locator('.cxv-bar').count() === 0, 4_000);
+  await waitFor(async () => await page.locator('.cxv-search').count() === 0, 4_000);
   await waitFor(async () => await page.locator('.cxv-body .cx').count() > 0, 4_000);
   const backAgain = await page.locator('.cxv-body .cx').count();
   check('closing search clears the filter as well as the box',
