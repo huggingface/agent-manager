@@ -162,6 +162,7 @@ COPY --chown=node:node entrypoint.sh /app/entrypoint.sh
 COPY --chown=node:node session.bashrc /app/
 
 ENV PORT=7860 \
+    BIND_HOST=0.0.0.0 \
     DATA_DIR=/data \
     PUBLIC_DIR=/app/public \
     DISABLE_AUTOUPDATER=1 \
