@@ -1,7 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { isPassive, isRemote, type Cli } from '../types';
 import * as api from '../api';
-import { useSaver, type Saver } from '../lib/saveQueue';
+import { useSaverState } from '../lib/saveQueue';
+import {
+  configSaver, secretsSaver, saverFor, settingsSlot, subscribeSettings, noteServerRead,
+  pendingSettings, overwriteSettings, adoptServerSettings, type Kind,
+} from '../lib/settingsSaves';
 import SkillsEditor from './SkillsEditor';
 import ApiLog from './ApiLog';
 import UsagePanel from './UsagePanel';
@@ -12,19 +16,65 @@ import Logo from './Logo';
 type Page = 'general' | 'usage' | 'skills' | 'cron' | 'apilog';
 
 // Saving is silent until it isn't. A failure stays on screen — it does not fade
-// like the tick does — because the change it describes is still only in this
-// browser, and Retry is the way to send it again.
-function SaveFlag({ state }: { state: Pick<Saver<never>, 'status' | 'error' | 'retry'> }) {
+// the way the tick does — because the change it describes is still only in this
+// browser, and the buttons are the ways back: Retry for a write that failed,
+// and, when someone else got there first, a choice between their version and
+// this one. Nothing here overwrites anything without being clicked.
+function SaveFlag({ kind, onAdopt }: { kind: Kind; onAdopt: (value: any) => void }) {
+  const state = useSaverState(saverFor(kind));
+  const slot = useSettingsSlot(kind);
   if (state.status === 'idle') return null;
   if (state.status === 'error') {
+    if (slot.conflict && !slot.readError) {
+      return (
+        <span className="save-flag save-flag-err">
+          changed elsewhere
+          <button className="save-retry" onClick={() => { void overwriteSettings(kind); }}
+            title="Save my version over the one that is stored">Keep mine</button>
+          <button
+            className="save-retry"
+            onClick={() => { const theirs = adoptServerSettings(kind); if (theirs) onAdopt(theirs); }}
+            title="Throw away my change and show what is stored"
+          >Use theirs</button>
+        </span>
+      );
+    }
     return (
       <span className="save-flag save-flag-err" title={state.error || undefined}>
-        not saved
-        <button className="save-retry" onClick={() => { void state.retry(); }}>Retry</button>
+        {state.unresolved ? 'not confirmed' : 'not saved'}
+        <button className="save-retry" onClick={() => { void saverFor(kind).retry(); }}>Retry</button>
       </span>
     );
   }
   return <span className="save-flag">{state.status === 'saving' ? 'saving…' : 'saved ✓'}</span>;
+}
+
+// The savers outlive this panel, so their bookkeeping is read through a
+// subscription rather than held in component state.
+function useSettingsSlot(kind: Kind) {
+  return useSyncExternalStore(subscribeSettings, () => settingsSlot(kind), () => settingsSlot(kind));
+}
+
+// Saving settings and telling the agents about them are two outcomes, and only
+// one of them is what "saved ✓" is about.
+function DerivedNote({ kind }: { kind: Kind }) {
+  const slot = useSettingsSlot(kind);
+  if (!slot.derived?.error) return null;
+  return (
+    <div className="s-help save-derived" title={slot.derived.error}>
+      Saved — but the <span className="mono">environment</span> skill agents read could not be
+      updated: {slot.derived.error}
+    </div>
+  );
+}
+
+// A settings file that cannot be read is not a settings file that is empty.
+// Nothing may be written over it, so the panel says so instead of showing
+// defaults that look like the current values.
+function ReadErrorNote({ kind }: { kind: Kind }) {
+  const slot = useSettingsSlot(kind);
+  if (!slot.readError) return null;
+  return <div className="s-help save-derived" title={slot.readError}>{slot.readError} — nothing was changed, and saving is refused until it is repaired.</div>;
 }
 
 const PAGES: { id: Page; label: string }[] = [
@@ -178,17 +228,19 @@ export default function SettingsView({
     }
   };
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
-  const [notes, setNotes] = useState<Record<string, string>>({});
+  // Reopening shows the value still owed to the server, not the older one a
+  // fresh read would put over it.
+  const [notes, setNotes] = useState<Record<string, string>>(() => pendingSettings('secrets') || {});
   // What the server has been asked for, so loading a value doesn't read as an
   // edit of it. Compared as JSON because these are rebuilt objects, not the ones
   // that came back.
-  const notesAsked = useRef('{}');
-  const notesSaver = useSaver<Record<string, string>, void>({
-    send: async (n) => { await api.saveSecrets(n); },
-  });
+  const notesAsked = useRef(JSON.stringify(pendingSettings('secrets') || {}));
   useEffect(() => {
     api.getSecrets().then((d) => {
       setSecretKeys(d.detected);
+      noteServerRead('secrets', d);
+      const owed = pendingSettings('secrets');
+      if (owed) return;                       // an edit of ours is still in flight or failed
       notesAsked.current = JSON.stringify(d.notes || {});
       setNotes(d.notes || {});
     }).catch(() => {});
@@ -202,32 +254,48 @@ export default function SettingsView({
   // Every change is sent the moment it is made: no debounce to sit out, no blur
   // to remember, nothing left unsaved by closing the panel. While a write is out
   // the newest value waits in one slot and follows it the instant it settles —
-  // see useSaver, which is also what keeps an older answer from speaking for a
+  // see saveQueue, which is also what keeps an older answer from speaking for a
   // newer edit.
   useEffect(() => {
     const json = JSON.stringify(notes);
     if (json === notesAsked.current) return;
     notesAsked.current = json;
-    void notesSaver.request(notes);
-  }, [notes, notesSaver.request]);
+    void secretsSaver.request(notes);
+  }, [notes]);
 
   // Operator config (artifacts hub, jobs policy): load once, save on every edit.
-  const [cfg, setCfg] = useState<api.AmConfig | null>(null);
-  const cfgAsked = useRef<string | null>(null);
-  const cfgSaver = useSaver<api.AmConfig, void>({
-    send: async (c) => { await api.saveConfig(c); },
-  });
+  const [cfg, setCfg] = useState<api.AmConfig | null>(() => (pendingSettings('config') as api.AmConfig) || null);
+  const cfgAsked = useRef<string | null>(cfg ? JSON.stringify(cfg) : null);
   useEffect(() => {
-    api.getConfig().then((c) => { cfgAsked.current = JSON.stringify(c); setCfg(c); }).catch(() => {});
+    api.getConfig().then((c) => {
+      noteServerRead('config', c);
+      const owed = pendingSettings('config') as api.AmConfig | null;
+      if (owed) { setCfg(owed); return; }
+      cfgAsked.current = JSON.stringify(c);
+      setCfg(c);
+    }).catch(() => {});
   }, []);
   useEffect(() => {
     if (!cfg) return;
     const json = JSON.stringify(cfg);
     if (json === cfgAsked.current) return;
     cfgAsked.current = json;
-    void cfgSaver.request(cfg);
-  }, [cfg, cfgSaver.request]);
-  const cfgSaved = cfgSaver.status;
+    void configSaver.request(cfg);
+  }, [cfg]);
+  const cfgState = useSaverState(configSaver);
+  const cfgSaved = cfgState.status;
+  // A number being typed is not a number yet. The box keeps what was typed —
+  // including the empty moment between "1" and "17" — while the setting keeps
+  // its last valid value, so an incomplete edit cannot be saved as a reset to 0.
+  const [usdDraft, setUsdDraft] = useState<string | null>(null);
+  const usdOf = (text: string) => {
+    const t = text.trim();
+    if (t === '') return null;
+    const n = Number(t);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  const usdValue = usdDraft === null ? (cfg?.jobs.askAboveUsd ?? 0) : usdOf(usdDraft);
+  const usdText = usdDraft === null ? String(cfg?.jobs.askAboveUsd ?? 0) : usdDraft;
 
   // Bucket backup: the copying happens in an HF Job, so the row reports what the
   // Hub says about the last one rather than anything we remember locally.
@@ -405,7 +473,13 @@ export default function SettingsView({
               })}
             </div>
 
-            <h3>Secrets &amp; variables<SaveFlag state={notesSaver} /></h3>
+            <h3>Secrets &amp; variables<SaveFlag kind="secrets" onAdopt={(theirs) => {
+              const taken = (theirs || {}) as Record<string, string>;
+              notesAsked.current = JSON.stringify(taken);
+              setNotes(taken);
+            }} /></h3>
+            <ReadErrorNote kind="secrets" />
+            <DerivedNote kind="secrets" />
             <div className="s-help">Detected by diffing the runtime environment against a build-time snapshot — names only, never values. Describe what each is for (saved automatically); this publishes an <span className="mono">environment</span> skill so every agent knows what's available.</div>
             {secretKeys.length === 0 ? (
               <div className="s-muted" style={{ marginTop: 8 }}>None detected.</div>
@@ -427,7 +501,14 @@ export default function SettingsView({
               </div>
             )}
 
-            <h3>Agent output &amp; compute<SaveFlag state={cfgSaver} /></h3>
+            <h3>Agent output &amp; compute<SaveFlag kind="config" onAdopt={(theirs) => {
+              const taken = theirs as api.AmConfig;
+              cfgAsked.current = JSON.stringify(taken);
+              setUsdDraft(null);
+              setCfg(taken);
+            }} /></h3>
+            <ReadErrorNote kind="config" />
+            <DerivedNote kind="config" />
             <div className="s-help">Both policies are published to agents through the <span className="mono">environment</span> skill.</div>
             {cfg && (
               <>
@@ -475,14 +556,26 @@ export default function SettingsView({
                   <div>
                     <div className="s-label">Ask before HF Jobs above</div>
                     <div className="s-help">Agents run expensive compute (GPU, long batch work) as HF Jobs. Above this estimated cost they must ask you first. 0 means always ask.</div>
+                    {usdDraft !== null && usdValue === null && (
+                      <div className="s-help cfg-bad-note">Not a number yet — the saved threshold is still ${cfg.jobs.askAboveUsd}.</div>
+                    )}
                   </div>
                   <span className="cfg-ctl">
                     <span className="mono cfg-usd">$</span>
                     <input
-                      className="cfg-input cfg-num mono"
+                      className={`cfg-input cfg-num mono${usdDraft !== null && usdValue === null ? ' cfg-bad' : ''}`}
                       type="number" min={0} step={1}
-                      value={cfg.jobs.askAboveUsd}
-                      onChange={(e) => setCfg({ ...cfg, jobs: { askAboveUsd: Math.max(0, Number(e.target.value) || 0) } })}
+                      value={usdText}
+                      onChange={(e) => {
+                        const typed = e.target.value;
+                        setUsdDraft(typed);
+                        // An empty box on the way to "17" is not a request to
+                        // ask about every job. Nothing is sent until the field
+                        // says a number again.
+                        const n = usdOf(typed);
+                        if (n !== null) setCfg({ ...cfg, jobs: { askAboveUsd: n } });
+                      }}
+                      onBlur={() => setUsdDraft(null)}
                     />
                   </span>
                 </div>

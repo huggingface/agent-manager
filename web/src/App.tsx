@@ -6,6 +6,7 @@ import FilesPane from './components/FilesPane';
 import TracePane from './components/TracePane';
 import RemotePane from './components/RemotePane';
 import SettingsView from './components/SettingsView';
+import SettingsSaveAlert from './components/SettingsSaveAlert';
 import NewSession from './components/NewSession';
 import LayoutPicker from './components/LayoutPicker';
 import ShareDialog from './components/ShareDialog';
@@ -1036,6 +1037,13 @@ export default function App() {
     <div className={`app${settingsOpen ? ' app-suspended' : ''}${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
       {showWelcome && <Welcome onClose={dismissWelcome} />}
       {toast && <div className="toast mono" role="alert">{toast}</div>}
+      {/* A settings save that failed after its panel was closed. The panel's own
+          flag says it while it is open, so this is the case the panel cannot
+          cover. */}
+      <SettingsSaveAlert
+        hidden={settingsOpen}
+        onOpen={() => { setSettingsPage('general'); setSettingsOpen(true); }}
+      />
       {shareId && sessById[shareId] && (
         <ShareDialog
           session={sessById[shareId]}

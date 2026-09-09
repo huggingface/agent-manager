@@ -1161,16 +1161,83 @@ app.post('/api/update', async (_req, res) => {
   }
 });
 
+// One reader for both settings files, with three outcomes rather than two: a file
+// that is not there yet (defaults, and a save may create it), a file we read (its
+// value and the revision of the exact bytes), and a file we could NOT read —
+// damaged JSON, wrong permissions, a directory in its place. That last case is
+// the dangerous one. Treating it as "no settings" is what hands the next
+// ordinary edit permission to replace whatever is actually in there, so a
+// hand-written config disappears behind a toggle click.
+function readSettingsFile(file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return { missing: true, value: {}, rev: null };
+    return { unreadable: `${path.basename(file)} could not be read — ${String((e && e.message) || e)}` };
+  }
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch (e) {
+    return { unreadable: `${path.basename(file)} is not valid JSON — ${String((e && e.message) || e)}` };
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { unreadable: `${path.basename(file)} does not contain a settings object` };
+  }
+  return { value, rev: revisionOf(raw) };
+}
+
+// The revision a client holds is the hash of the committed bytes — the same
+// trick the file editor's base tag uses, and for the same reason: mtime on this
+// bucket mount moves on its own.
+const revisionOf = (raw) => crypto.createHash('sha1').update(raw).digest('hex').slice(0, 16);
+
+// A settings write is read-check-write, and it has to be all three or nothing.
+// It runs synchronously from the read to the rename inside one request handler,
+// so no other request can land between the precondition and the commit.
+function commitSettings(file, value, base) {
+  const stored = readSettingsFile(file);
+  if (stored.unreadable) {
+    return { refused: { status: 409, body: { code: 'unreadable', error: `the saved file was left as it is — ${stored.unreadable}` } } };
+  }
+  // A file that exists can only be replaced by a writer that knows which version
+  // it is replacing. Two tabs, or a tab and a script, otherwise overwrite each
+  // other's unrelated fields with whatever each of them last read.
+  if (stored.rev && base !== stored.rev) {
+    return {
+      refused: {
+        status: 409,
+        body: {
+          code: base ? 'stale' : 'base-required',
+          error: base
+            ? 'these settings were changed somewhere else since this page read them'
+            : 'replacing existing settings needs the revision being replaced (?base=…)',
+          rev: stored.rev,
+          value: stored.value,
+        },
+      },
+    };
+  }
+  const raw = `${JSON.stringify(value, null, 2)}\n`;
+  writeJsonAtomic(file, raw);
+  return { rev: revisionOf(raw) };
+}
+
+// The revision a save is replacing, sent the way the file editor's save sends
+// its base tag.
+const baseOf = (req) => (typeof req.query.base === 'string' && req.query.base ? req.query.base : null);
+
 // Settings are saved on every change now, so these two files are written often
 // and while the app is being used. Write beside the target and rename: a crash
 // or a full disk leaves the previous settings intact rather than a truncated
 // file that reads back as "no settings at all". Throws on failure — a save that
 // did not happen must not be answered with ok.
-function writeJsonAtomic(file, value) {
+function writeJsonAtomic(file, raw) {
   const tmp = path.join(path.dirname(file), `.${path.basename(file)}.am-tmp`);
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`);
+    fs.writeFileSync(tmp, raw);
     fs.renameSync(tmp, file);
   } catch (e) {
     try { fs.unlinkSync(tmp); } catch {}
@@ -1180,16 +1247,21 @@ function writeJsonAtomic(file, value) {
 
 // ---------- secrets: describe each injected secret/variable, feed a skill ----------
 const SECRET_NOTES_FILE = path.join(DATA_DIR, 'secret-notes.json');
+// Internal consumers must never throw over settings; they take the defaults and
+// the routes are where a damaged file is reported and protected.
 function loadSecretNotes() {
-  try { return JSON.parse(fs.readFileSync(SECRET_NOTES_FILE, 'utf8')); } catch { return {}; }
+  const stored = readSettingsFile(SECRET_NOTES_FILE);
+  return stored.unreadable ? {} : (stored.value || {});
 }
 // ---------- operator config (artifacts hub, jobs policy) ----------
 const AM_CONFIG_FILE = path.join(DATA_DIR, 'am-config.json');
 const spaceNamespace = () => (process.env.SPACE_ID || '').split('/')[0] || '';
 const defaultArtifactsSpace = () => (spaceNamespace() ? `${spaceNamespace()}/agent-artifacts` : '');
 function loadAmConfig() {
-  let saved = {};
-  try { saved = JSON.parse(fs.readFileSync(AM_CONFIG_FILE, 'utf8')); } catch {}
+  const stored = readSettingsFile(AM_CONFIG_FILE);
+  return normalizeAmConfig(stored.unreadable ? {} : (stored.value || {}));
+}
+function normalizeAmConfig(saved) {
   return {
     artifacts: {
       enabled: saved.artifacts?.enabled !== false,
@@ -1226,7 +1298,20 @@ function loadAmConfig() {
     },
   };
 }
-app.get('/api/config', (_req, res) => res.json({ ...loadAmConfig(), defaultArtifactsSpace: defaultArtifactsSpace() }));
+// The read carries what a writer needs to replace it safely: the revision of the
+// bytes on disk, and — when they cannot be read at all — the reason, so the panel
+// can say why a save will be refused instead of quietly showing defaults over a
+// file it is about to lose.
+app.get('/api/config', (_req, res) => {
+  const stored = readSettingsFile(AM_CONFIG_FILE);
+  res.json({
+    ...normalizeAmConfig(stored.unreadable ? {} : (stored.value || {})),
+    defaultArtifactsSpace: defaultArtifactsSpace(),
+    rev: stored.rev || null,
+    readError: stored.unreadable || null,
+    derived: envSkillReport(),
+  });
+});
 app.put('/api/config', (req, res) => {
   const b = req.body || {};
   const cfg = {
@@ -1250,17 +1335,32 @@ app.put('/api/config', (req, res) => {
       exclude: backup.excludeFromConfig(b.backup?.exclude),
     },
   };
+  // Whole-resource replacement, guarded by the revision being replaced: that is
+  // what keeps a second writer from posting its own stale copy of every OTHER
+  // field. A caller that wants to change one field reads, edits, and sends the
+  // result — and is refused if the ground moved under it.
+  let commit;
   try {
-    writeJsonAtomic(AM_CONFIG_FILE, cfg);
+    commit = commitSettings(AM_CONFIG_FILE, cfg, baseOf(req));
   } catch (e) {
     // Saying ok here is how a setting silently goes back to what it was on the
     // next load. The client keeps the change and offers Retry instead.
     return res.status(500).json({ error: `could not save settings — ${String((e && e.message) || e)}` });
   }
+  if (commit.refused) {
+    const body = commit.refused.body;
+    // A refusal answers with what is actually stored, so the client can show the
+    // difference instead of guessing.
+    if (body.value) body.value = { ...normalizeAmConfig(body.value), defaultArtifactsSpace: defaultArtifactsSpace() };
+    return res.status(commit.refused.status).json(body);
+  }
   refreshEnvSkill();
-  // What was actually committed, normalization included, in the shape /api/config
-  // returns.
-  res.json({ ok: true, ...cfg, defaultArtifactsSpace: defaultArtifactsSpace() });
+  // What was actually committed, normalization included, in the shape
+  // /api/config returns — plus the revision to send with the next save.
+  res.json({
+    ok: true, ...cfg, defaultArtifactsSpace: defaultArtifactsSpace(),
+    rev: commit.rev, derived: envSkillReport(),
+  });
 });
 
 // ---------- bucket backup: status + run-now (docs/bucket-backup.md) ----------
@@ -1324,6 +1424,19 @@ function generateEnvSkill(notes) {
   return generateEnvSkillInner(notes, amCfg);
 }
 
+// What the agents are told is derived from what was committed, so a pass reads
+// the files rather than trusting whatever a request carried, and refuses to
+// publish over a settings file it could not read — describing an environment
+// from defaults that are not what the operator saved is worse than not
+// describing it at all.
+function generateEnvSkillFromDisk() {
+  for (const file of [SECRET_NOTES_FILE, AM_CONFIG_FILE]) {
+    const stored = readSettingsFile(file);
+    if (stored.unreadable) throw new Error(stored.unreadable);
+  }
+  generateEnvSkill(loadSecretNotes());
+}
+
 // The generated skill is derived from the settings, not part of saving them.
 // Regenerating it inline fanned a handful of file writes out on the response
 // path of every save — fine at one save per typing pause, wasteful now that a
@@ -1331,16 +1444,29 @@ function generateEnvSkill(notes) {
 // save finishing last left the skill describing settings that had been replaced.
 // One pass at a time, reading what is committed, and at most one more if a save
 // lands while a pass is running.
-let envSkillPass = false;
-let envSkillAgain = false;
+//
+// Its outcome is reported separately from the save. "Saved, and the agents have
+// been told" and "saved, but the agents have not been told yet" are different
+// states, and answering a save with the first when the second is true is the
+// same lie as acknowledging a write that did not happen.
+const envSkill = { running: false, again: false, pending: false, error: null, at: 0 };
+const envSkillReport = () => ({ pending: envSkill.pending, error: envSkill.error, at: envSkill.at || null });
 function refreshEnvSkill() {
-  if (envSkillPass) { envSkillAgain = true; return; }
-  envSkillPass = true;
+  envSkill.pending = true;
+  if (envSkill.running) { envSkill.again = true; return; }
+  envSkill.running = true;
   const pass = () => {
-    envSkillAgain = false;
-    try { generateEnvSkill(loadSecretNotes()); } catch {}
-    if (envSkillAgain) { setImmediate(pass); return; }
-    envSkillPass = false;
+    envSkill.again = false;
+    try {
+      generateEnvSkillFromDisk();
+      envSkill.error = null;
+    } catch (e) {
+      envSkill.error = String((e && e.message) || e);
+    }
+    envSkill.at = Date.now();
+    if (envSkill.again) { setImmediate(pass); return; }
+    envSkill.running = false;
+    envSkill.pending = false;
   };
   setImmediate(pass);
 }
@@ -1677,20 +1803,35 @@ from the environment when you need it (e.g. \`$NAME\`); never print secret value
 ${envLines}
 `;
   const p = skillPath('environment.md');
-  if (p) { try { fs.mkdirSync(SKILLS_DIR, { recursive: true }); fs.writeFileSync(p, content); } catch {} }
+  // Not swallowed: this is the write that decides whether the agents' copy of
+  // the environment matches the settings, and refreshEnvSkill reports it.
+  if (p) { fs.mkdirSync(SKILLS_DIR, { recursive: true }); fs.writeFileSync(p, content); }
   distributeSkill('environment.md', content);
 }
 
-app.get('/api/secrets', (_req, res) => res.json({ detected: injectedEnvKeys(), notes: loadSecretNotes() }));
+app.get('/api/secrets', (_req, res) => {
+  const stored = readSettingsFile(SECRET_NOTES_FILE);
+  res.json({
+    detected: injectedEnvKeys(),
+    notes: stored.unreadable ? {} : (stored.value || {}),
+    rev: stored.rev || null,
+    readError: stored.unreadable || null,
+    derived: envSkillReport(),
+  });
+});
 app.put('/api/secrets', (req, res) => {
   const notes = (req.body && req.body.notes && typeof req.body.notes === 'object') ? req.body.notes : {};
+  // Same contract as /api/config, for the same reason: two tabs describing the
+  // same keys must not overwrite each other's descriptions.
+  let commit;
   try {
-    writeJsonAtomic(SECRET_NOTES_FILE, notes);
+    commit = commitSettings(SECRET_NOTES_FILE, notes, baseOf(req));
   } catch (e) {
     return res.status(500).json({ error: `could not save descriptions — ${String((e && e.message) || e)}` });
   }
+  if (commit.refused) return res.status(commit.refused.status).json(commit.refused.body);
   refreshEnvSkill();
-  res.json({ ok: true, notes });
+  res.json({ ok: true, notes, rev: commit.rev, derived: envSkillReport() });
 });
 
 // ---------- skills (markdown/text files in the workspace) ----------
@@ -3032,7 +3173,9 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => handle.kill());
 });
 
-generateEnvSkill(loadSecretNotes()); // keep the environment skill current on boot
+// keep the environment skill current on boot — through the same reporting path,
+// so a damaged settings file is a reported derived failure rather than a crash
+refreshEnvSkill();
 
 // Warm ONLY the trace cache in the background (bounded: mtime-cached, tail-
 // capped, yields between files). The usage warmup is deliberately NOT run at
