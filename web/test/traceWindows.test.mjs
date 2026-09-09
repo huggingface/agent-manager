@@ -34,6 +34,7 @@ await build({
       let freeze = false;
       const indexCalls = [];
       let indexText = 'streaming first';
+      let indexRows = null;
       const page = (turns, end = 20, lastTs = Date.now()) => ({
         harness: 'claude', harnessLabel: 'Claude Code', sessionId: 's',
         title: '', model: null, cwd: null, firstTs: 0, lastTs,
@@ -69,13 +70,12 @@ await build({
       const indexSource = {
         window(req) {
           indexCalls.push(req);
-          const from = req.at === 'after' ? req.cursor : 0;
-          const turns = from < 1
-            ? [{ role: 'assistant', ts: 2, blocks: [{ type: 'text', text: indexText }] }]
-            : [];
+          const rows = indexRows || [indexText];
+          const from = req.at === 'after' ? Math.min(req.cursor, rows.length) : Math.max(0, rows.length - 2);
+          const turns = rows.slice(from).map(text => ({ role: 'assistant', ts: 2, blocks: [{ type: 'text', text }] }));
           return Promise.resolve({
             ...page([]), turns,
-            window: { mode: 'index', start: from, end: 1, atStart: from === 0, atEnd: true },
+            window: { mode: 'index', start: from, end: rows.length, atStart: from === 0, atEnd: true },
           });
         },
         summary() { return Promise.resolve({ ...page([]), total: 1, userTurns: [] }); },
@@ -96,8 +96,9 @@ await build({
       }
 
       function IndexProbe() {
-        const { turns, version } = useTraceWindows(indexSource, 'index-session', { live: true });
-        const text = turns.current[0]?.blocks[0]?.text || '';
+        const { turns, version, loadNewer } = useTraceWindows(indexSource, 'index-session', { live: true });
+        useEffect(() => { window.__pollIndex = loadNewer; }, [loadNewer]);
+        const text = turns.current.map(t => t.blocks[0]?.text || '').join('|');
         return <div id="index-reader" data-version={version}>{text}</div>;
       }
 
@@ -109,6 +110,7 @@ await build({
         calls,
         indexCalls,
         setIndexText(next) { indexText = next; },
+        setIndexRows(next) { indexRows = next; },
         pollIntervals: {
           staleWaiting: tracePollIntervalMs(1, false, 300_000),
           staleWorking: tracePollIntervalMs(1, true, 300_000),
@@ -178,6 +180,17 @@ try {
   await page.waitForFunction(() => document.getElementById('index-reader').textContent === 'streaming second', null, { timeout: 4500 });
   assert.ok(await page.evaluate(() => window.__traceHarness.indexCalls.some((c) => c.at === 'after' && c.cursor === 0)),
     'an index poll re-reads the mutable final message');
+
+  const indexStep = async (rows, expected) => {
+    await page.evaluate(async rows => { window.__traceHarness.setIndexRows(rows); await window.__pollIndex(); }, rows);
+    await page.waitForFunction(expected => document.getElementById('index-reader').textContent === expected, expected);
+  };
+  await indexStep(['m0', 'm1', 'm2'], 'm0|m1|m2');
+  await indexStep(['m0', 'm1', 'm2-edited', 'm3', 'm4'], 'm0|m1|m2-edited|m3|m4');
+  await indexStep(['m0', 'm1', 'm2-edited'], 'm1|m2-edited');
+  await indexStep(['m0', 'm1', 'm2-edited'], 'm1|m2-edited');
+  await indexStep([], '');
+  await indexStep(['after-clear'], 'after-clear');
 
   // This is the same activation hook App uses to gate follower panes. Merely
   // focusing within one surface keeps it ready; hiding and returning to the

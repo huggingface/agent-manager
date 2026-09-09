@@ -226,6 +226,20 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
         { at: 'after', cursor: after }, undefined, undefined, abort.signal,
       );
       if (mine !== gen.current) return 0;
+      if (cur.mode === 'index' && win.end < cur.end) {
+        // Deletes/reverts invalidate both the retained rows and their indices.
+        // The clamped after-window may be empty, so reload the actual tail.
+        const { turns: tail, window: tailWindow, ...tailMeta } = await src.window(
+          { at: 'tail' }, undefined, undefined, abort.signal,
+        );
+        if (mine !== gen.current) return 0;
+        turns.current = tail;
+        cursor.current = tailWindow;
+        cb.current.onReset?.();
+        setMeta((p) => mergeMeta(p, tailMeta));
+        bump();
+        return 0;
+      }
       if (win.gap) {
         // More was written than one window can carry. Splicing it in would leave
         // a hole in the middle of the conversation with nothing to say so —
@@ -314,8 +328,8 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
 
   // The transcript may still be being written — see LIVE_MS above. SQLite
   // harnesses use message indices rather than byte offsets, but the server memo
-  // makes an unchanged poll cheap and their WAL-aware key refreshes only the
-  // selected conversation when it actually moves.
+  // makes an unchanged poll cheap. The WAL-aware key is database-wide: writes
+  // to any conversation invalidate it, and alternating Readers share one memo.
   const lastTs = meta ? meta.lastTs : 0;
   const live = opts.live;
   const [hidden, setHidden] = useState(() => (typeof document === 'undefined' ? false : document.hidden));
