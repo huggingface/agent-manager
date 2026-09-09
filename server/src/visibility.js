@@ -152,6 +152,11 @@ export function createVisibilityMonitor({
   let requests = 0;          // upstream requests issued
   const listeners = new Set();
   let last = null;           // last published { locked, reason, bucket }
+  // Every published transition bumps `seq`; status responses carry it with a
+  // per-process `boot` id so a browser can tell a stale status from a newer one
+  // (and start over when the server was restarted).
+  let seq = 0;
+  const boot = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
   const tokenKey = () => {
     const t = token();
@@ -202,6 +207,7 @@ export function createVisibilityMonitor({
     const changed = !last || last.locked !== eff.locked || last.reason !== eff.reason || last.bucket !== eff.bucket;
     last = { locked: eff.locked, reason: eff.reason, bucket: eff.bucket };
     if (!changed) return eff;
+    seq++;
     if (spaceId) log.warn(`[visibility] ${eff.locked ? `LOCKED (${eff.reason}${eff.bucket ? `: ${eff.bucket}` : ''})` : `unlocked${eff.bucketUnverified ? ' (bucket unverified)' : ''}`}`);
     for (const fn of [...listeners]) { try { fn(eff); } catch (e) { log.error('[visibility] listener failed', e && e.message); } }
     return eff;
@@ -387,6 +393,8 @@ export function createVisibilityMonitor({
     const attempted = Math.max(space.attemptedAt, discovery.attemptedAt, ...[...buckets.values()].map((b) => b.attemptedAt));
     return {
       spaceId,
+      seq,
+      boot,
       locked: eff.locked,
       reason: eff.reason,
       bucket: eff.bucket,

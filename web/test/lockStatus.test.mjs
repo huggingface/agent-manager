@@ -17,31 +17,64 @@ await build({
 });
 const { createLockTracker, reasonFromCloseReason, describeVerification, LOCKED_CLOSE_CODE } = await import(pathToFileURL(out).href);
 
-// ---- ordering ----
+// ---- ordering by request (no server counters) ----
+const U = (seq, boot = 'b1') => ({ locked: false, seq, boot });
+const L = (seq, boot = 'b1') => ({ locked: true, seq, boot });
 {
   const t = createLockTracker();
   const a = t.begin();
-  assert.equal(t.accept(a, false), true, 'an unlocked status with nothing newer is applied');
+  assert.equal(t.accept(a, { locked: false }), true, 'an unlocked status with nothing newer is applied');
   const b = t.begin();
   const c = t.begin();
-  assert.equal(t.accept(c, true), true, 'a locked status is always applied');
-  assert.equal(t.accept(b, false), false, 'an older in-flight "unlocked" arriving after a lock is ignored');
+  assert.equal(t.accept(c, { locked: true }), true, 'a locked status is always applied');
+  assert.equal(t.accept(b, { locked: false }), false, 'an older in-flight "unlocked" arriving after a lock is ignored');
   const d = t.begin();
-  assert.equal(t.accept(d, false), true, 'an unlocked status requested after the lock reopens');
+  assert.equal(t.accept(d, { locked: false }), true, 'an unlocked status requested after the lock reopens');
 }
 {
   const t = createLockTracker();
   const a = t.begin();
   t.observeLocked(); // a 403 body or a 4003 socket close, seen while `a` was in flight
-  assert.equal(t.accept(a, false), false, 'a 403/4003 observation outranks an older status fetch');
-  assert.equal(t.accept(t.begin(), false), true, 'the next fetch decides');
+  assert.equal(t.accept(a, { locked: false }), false, 'a 403/4003 observation outranks an older status fetch');
+  assert.equal(t.accept(t.begin(), { locked: false }), true, 'the next fetch decides');
 }
 {
   const t = createLockTracker();
   const began = t.begin();
   for (let i = 0; i < 5; i++) t.observeLocked();
-  assert.equal(t.accept(began, true), true, 'repeated lock observations never block applying a lock');
-  assert.equal(t.accept(began, false), false, '...and still block the stale unlock');
+  assert.equal(t.accept(began, { locked: true }), true, 'repeated lock observations never block applying a lock');
+  assert.equal(t.accept(began, { locked: false }), false, '...and still block the stale unlock');
+}
+
+// ---- ordering by server state (seq/boot) ----
+{
+  const t = createLockTracker();
+  assert.equal(t.accept(t.begin(), U(4)), true, 'initial unlocked status seq 4 applied');
+  t.observeLocked(); // the socket closed with 4003: the server is past seq 4
+  const late = t.begin();
+  assert.equal(t.accept(late, U(4)), false, 'a post-lock request answered with the pre-lock status (seq 4) is refused');
+  assert.equal(t.accept(t.begin(), U(6)), true, 'a genuinely newer unlocked status reopens');
+}
+{
+  const t = createLockTracker();
+  assert.equal(t.accept(t.begin(), U(2)), true);
+  assert.equal(t.accept(t.begin(), L(3)), true, 'locked seq 3 applied');
+  assert.equal(t.accept(t.begin(), U(2)), false, 'an unlocked status older than the applied lock is refused even with a fresh request');
+  assert.equal(t.accept(t.begin(), U(4)), true, 'newer reopens');
+}
+{
+  const t = createLockTracker();
+  assert.equal(t.accept(t.begin(), L(40, 'old-boot')), true);
+  assert.equal(t.accept(t.begin(), U(1, 'new-boot')), true, 'a restarted server (new boot id) starts the counting over');
+  t.observeLocked();
+  assert.equal(t.accept(t.begin(), U(1, 'new-boot')), false, '...and its own stale statuses are then refused');
+  assert.equal(t.accept(t.begin(), U(3, 'new-boot')), true);
+}
+{
+  const t = createLockTracker();
+  assert.equal(t.accept(t.begin(), { locked: false }), true, 'an older server without counters still works');
+  t.observeLocked();
+  assert.equal(t.accept(t.begin(), { locked: false }), true, '...falling back to request order alone');
 }
 
 // ---- close reasons ----

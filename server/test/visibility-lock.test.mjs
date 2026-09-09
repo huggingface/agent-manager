@@ -306,9 +306,16 @@ try {
   mode.space = 'error';
   const v0 = (await info()).visibility.verifiedAt;
   const expectedExpiry = v0 + GRACE_MS;
-  await sleep(Math.max(0, expectedExpiry - 600 - Date.now()));
+  await sleep(Math.max(0, expectedExpiry - 900 - Date.now()));
+  const readAt = Date.now();
   const inside = await info();
-  check('inside grace the app stays open through failed checks, and failures do not renew verifiedAt', !inside.locked && inside.visibility.verifiedAt === v0 && inside.visibility.attemptedAt > v0);
+  // On a loaded box the read itself can land after the expiry; only a read that
+  // finished with margin says anything about grace.
+  if (Date.now() < expectedExpiry - 150) {
+    check('inside grace the app stays open through failed checks, and failures do not renew verifiedAt', !inside.locked && inside.visibility.verifiedAt === v0 && inside.visibility.attemptedAt > v0, `read at ${readAt - expectedExpiry} ms before expiry`);
+  } else {
+    check('inside-grace read was inconclusive (box too slow to read before expiry); failures still did not renew verifiedAt', inside.visibility.verifiedAt === v0);
+  }
   const unavailable = await waitFor(async () => { const x = await info(); return x?.locked ? x : null; }, GRACE_MS + 2 * CHECK_MS);
   const lateBy = Date.now() - expectedExpiry;
   check(`grace expires into verification-unavailable (${lateBy} ms after the computed expiry)`, unavailable?.lockReason === 'verification-unavailable' && lateBy >= -300 && lateBy < 1500);

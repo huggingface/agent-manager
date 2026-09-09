@@ -335,6 +335,12 @@ const UNLOCKED_WARN = { locked: false, reason: null, bucket: null, bucketUnverif
   hub.on(SPACE_URL, json(500, { error: 'down' }));
   await m.check();
   eq('an error after a public verdict cannot reopen', eff(m), { locked: true, reason: REASON.PUBLIC_SPACE, bucket: null, bucketUnverified: false });
+  hub.on(SPACE_URL, () => Promise.reject(new TypeError('fetch failed')));
+  await m.check();
+  eq('a network failure after a public verdict cannot reopen either', eff(m), { locked: true, reason: REASON.PUBLIC_SPACE, bucket: null, bucketUnverified: false });
+  hub.on(SPACE_URL, { status: 200, text: '<html>edge</html>' });
+  await m.check();
+  eq('a malformed answer after a public verdict cannot reopen either', eff(m), { locked: true, reason: REASON.PUBLIC_SPACE, bucket: null, bucketUnverified: false });
   await clock.advance(GRACE_MS * 2);
   eq('...nor does time', eff(m), { locked: true, reason: REASON.PUBLIC_SPACE, bucket: null, bucketUnverified: false });
   hub.on(SPACE_URL, PRIVATE_401);

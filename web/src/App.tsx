@@ -369,7 +369,7 @@ export default function App() {
     const began = lockTracker.current.begin();
     try {
       const next = await api.getInfo();
-      if (lockTracker.current.accept(began, !!next.locked)) setInfo(next);
+      if (lockTracker.current.accept(began, { locked: !!next.locked, seq: next.visibility?.seq, boot: next.visibility?.boot })) setInfo(next);
     } catch { /* offline, or the server is restarting */ }
   }, []);
   useEffect(() => {

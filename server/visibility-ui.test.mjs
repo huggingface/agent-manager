@@ -214,11 +214,21 @@ try {
     return route.continue();
   });
 
+  // Tab A's polls are cut off, so the ONLY way it can learn the lock is the
+  // server closing its terminal socket. (Restored once the lock page is up.)
+  const blocked = ['**/api/tree*', '**/api/meta*'];
+  for (const pattern of blocked) await pageA.route(pattern, (route) => route.abort());
+
   // ---- 4. the Space turns public while the terminal is open ----
   mode.space = 'public';
   const t2 = Date.now();
   await lockedPage(pageA).waitFor({ timeout: 10_000 });
-  check(`open terminal tab locked (${Date.now() - t2} ms after the flip)`, (await lockReason(pageA)) === null && (await pageA.locator('.locked-app').innerText()).includes('public'));
+  check(`open terminal tab locked (${Date.now() - t2} ms after the flip), learned from the socket close alone`, (await lockReason(pageA)) === null && (await pageA.locator('.locked-app').innerText()).includes('public'));
+  // From here on, the lock page must never disappear until the fixture is private again.
+  await pageA.evaluate(() => {
+    window.__unlockedFlicker = 0;
+    new MutationObserver(() => { if (!document.querySelector('.locked-app')) window.__unlockedFlicker++; }).observe(document.body, { childList: true, subtree: true });
+  });
   check('the setup guide is shown for a public Space', (await pageA.locator('.locked-app').innerText()).includes('Duplicate this Space'));
   check('protected view torn down: no terminal in the DOM', await pageA.locator('.xterm, .tile-terminal, .ov-composer').count() === 0);
   const sockA = await waitFor(() => pageA.evaluate(() => { const s = window.__sockets.at(-1); return s && s.close ? s : null; }), 5000);
@@ -228,8 +238,10 @@ try {
   check('no terminal frames after the close, and no reconnect attempt', sockA2.afterClose === 0 && (await pageA.evaluate(() => window.__sockets.length)) === 1, `afterClose=${sockA2.afterClose} sockets=${await pageA.evaluate(() => window.__sockets.length)}`);
   await waitFor(() => trapFired, 5000);
   await sleep(3200);
-  check('a stale "unlocked" status answer arriving after the lock does not reopen the app', trapFired && await lockedPage(pageA).count() === 1);
+  const flicker = await pageA.evaluate(() => window.__unlockedFlicker);
+  check('a stale "unlocked" status answer arriving after the lock does not reopen the app, not even briefly', trapFired && flicker === 0 && await lockedPage(pageA).count() === 1, `flicker=${flicker}`);
   await pageA.unroute('**/api/info');
+  for (const pattern of blocked) await pageA.unroute(pattern);
   check('hidden reader tab: nothing protected can be fetched (server refuses)', (await api('/api/tree')).status === 403);
   // The hidden tab comes back.
   await pageB.evaluate(() => {

@@ -153,9 +153,14 @@ The app learns the state through one shared channel (`web/src/lib/lockStatus.ts`
 - `/api/info` is fetched on load, on return to the tab (and back online), and
   every 15 s while locked — so an open app reopens by itself within a check
   cycle of the lock clearing;
-- observations are ordered: a lock seen through any channel opens a new epoch,
-  and an "unlocked" status is applied only if it was requested after the last
-  lock observation. A slow, stale status answer cannot undo a newer lock.
+- observations are ordered twice over. By request: a lock seen through any
+  channel opens a new epoch, and an "unlocked" status is applied only if it was
+  requested after the last lock observation. By server state: every status
+  carries the server's transition counter (`seq`) and a per-process `boot` id;
+  after a lock observation an "unlocked" status must carry a `seq` newer than
+  anything applied before the lock, so even a late answer to a post-lock request
+  cannot reopen the app with pre-lock state. A new `boot` (the server restarted)
+  starts the counting over.
 
 While locked, protected polling stops, the protected view is unmounted (no
 terminal, Reader or composer stays in the DOM beneath the lock page), and the

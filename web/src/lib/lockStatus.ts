@@ -14,6 +14,9 @@
 export type LockReason = 'public-space' | 'public-bucket' | 'checking' | 'verification-unavailable';
 
 export interface LockStatus {
+  /** Server transition counter and per-process id; see createLockTracker. */
+  seq?: number;
+  boot?: string;
   locked: boolean;
   reason: LockReason | null;
   bucket: string | null;
@@ -42,21 +45,40 @@ export const reasonFromCloseReason = (reason: string | undefined | null): LockRe
 };
 
 /**
- * Orders status observations so a slow, older "unlocked" response can never
- * undo a newer lock. Every lock observation opens a new epoch; an unlocked
- * status is applied only if it was requested in the current epoch.
+ * Orders status observations so a stale "unlocked" answer can never undo a
+ * newer lock. Two independent guards:
+ *   - request order: every lock observation opens a new epoch, and an unlocked
+ *     status is applied only if it was requested in the current epoch;
+ *   - server order: the server stamps each status with a transition counter
+ *     (`seq`, per process `boot`). After a lock observation, an unlocked status
+ *     must carry a seq newer than anything applied before the lock — so even a
+ *     late answer to a post-lock request cannot reopen with pre-lock state. A
+ *     new `boot` (the server restarted) starts the counting over.
  */
 export function createLockTracker() {
   let epoch = 0;
+  let boot: string | null = null;
+  let lastSeq = -1;
+  let minUnlockSeq = 0;
   return {
     /** Call when a status request starts; pass the value to accept(). */
     begin: () => epoch,
-    /** A lock seen through any channel. */
-    observeLocked: () => { epoch += 1; },
+    /** A lock seen through any channel (403 body, socket close). */
+    observeLocked: () => { epoch += 1; minUnlockSeq = lastSeq + 1; },
     /** Whether a status fetched after begin() returned `began` may be applied. */
-    accept: (began: number, locked: boolean) => {
-      if (locked) { epoch += 1; return true; }
-      return began === epoch;
+    accept: (began: number, status: { locked: boolean; seq?: number | null; boot?: string | null }) => {
+      const seq = typeof status.seq === 'number' ? status.seq : null;
+      if (status.boot && status.boot !== boot) { boot = status.boot; lastSeq = -1; minUnlockSeq = 0; }
+      if (status.locked) {
+        if (seq !== null) lastSeq = Math.max(lastSeq, seq);
+        epoch += 1;
+        minUnlockSeq = Math.max(minUnlockSeq, lastSeq + 1);
+        return true;
+      }
+      if (began !== epoch) return false;
+      if (seq !== null && seq < minUnlockSeq) return false;
+      if (seq !== null) lastSeq = Math.max(lastSeq, seq);
+      return true;
     },
   };
 }
