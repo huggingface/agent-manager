@@ -993,7 +993,10 @@ export default function FilesPane({
       setReloadKey((key) => key + 1);
     } catch (error) {
       if (controller.signal.aborted) return;
-      if (error instanceof api.WorkspaceUploadError && error.collision) {
+      // A stale replacement can report that the destination disappeared. With
+      // no fresh token there is nothing left to replace: make the next action a
+      // normal create retry instead of offering a Replace button that cannot run.
+      if (error instanceof api.WorkspaceUploadError && error.collision?.replaceToken) {
         updateWorkspaceUpload(item.key, {
           status: 'collision',
           loaded: 0,

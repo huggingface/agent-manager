@@ -19,10 +19,11 @@ await build({
     import { createRoot } from 'react-dom/client';
     import Attachments from './src/components/Attachments';
     import {
-      discardPendingAttachment, discardPendingAttachments, filesFromTransfer,
+      ACTIVE_UPLOADS_PER_SESSION, discardPendingAttachment, discardPendingAttachments, filesFromTransfer,
       pendingAttachmentsFromFiles, uploadPendingAttachments,
     } from './src/lib/attachments';
     window.transferFiles = filesFromTransfer;
+    window.activeUploadsPerSession = ACTIVE_UPLOADS_PER_SESSION;
     window.batchApps = {};
     function Batch({ sessionId }) {
       const [items, setItems] = useState([]); const ref = useRef([]);
@@ -69,17 +70,25 @@ await build({
         let done = false;
         const finish = (task) => { if(done)return; done=true; clearTimeout(timer);
           metrics.active[sessionId] -= 1; metrics.total -= 1; signal?.removeEventListener('abort', abort); task(); };
+        const stored = () => ({id:'att_'+String(metrics.starts.length).padStart(24,'0'),kind:'file',name:file.name,mime:file.type,
+          bytes:file.size,path:'/stored/'+sessionId+'/'+metrics.starts.length+'-'+file.name,previewUrl:'',insertText:''});
         const abort = () => {
-          if(file.name === 'late-success.txt') return;
+          // Simulate the server having published just as cancellation arrived:
+          // the id becomes known only after the signal is already aborted.
+          if(file.name === 'late-success.txt') {
+            setTimeout(() => finish(() => resolve(stored())), 0);
+            return;
+          }
           finish(() => reject(new Error('Upload was canceled before it completed.')));
         };
         const number = Number((file.name.match(/(\d+)/) || [0,0])[1]);
         const timer = setTimeout(() => finish(() => {
           if(file.name === 'fail-once.txt' && metrics.attempts[key] === 1) return reject(new Error('connection interrupted'));
           onProgress?.({loaded:file.size,total:file.size});
-          resolve({id:'att_'+String(metrics.starts.length).padStart(24,'0'),kind:'file',name:file.name,mime:file.type,
-            bytes:file.size,path:'/stored/'+sessionId+'/'+metrics.starts.length+'-'+file.name,previewUrl:'',insertText:''});
-        }), file.name.startsWith('cancel-') ? 180 : 8 + (number % 5) * 4);
+          resolve(stored());
+        }), file.name === 'late-success.txt' ? 60_000
+          : file.name.startsWith('cancel-') ? 180
+            : /^(one|two)-/.test(file.name) ? 100 : 8 + (number % 5) * 4);
         signal?.addEventListener('abort', abort, {once:true});
       });
       export const deleteAttachment = (sessionId, id) => { metrics.deletes.push({sessionId,id}); return Promise.resolve({ok:true}); };
@@ -157,7 +166,9 @@ try {
   await input('two').setInputFiles(files(8, 'two'));
   await Promise.all([waitUploaded('one', 8), waitUploaded('two', 8)]);
   metrics = await page.evaluate(() => window.uploadMetrics);
-  assert.ok(metrics.max.one <= 3 && metrics.max.two <= 3 && metrics.maxTotal >= 2, JSON.stringify(metrics));
+  const perSessionLimit = await page.evaluate(() => window.activeUploadsPerSession);
+  assert.ok(metrics.max.one <= perSessionLimit && metrics.max.two <= perSessionLimit
+    && metrics.maxTotal > perSessionLimit, JSON.stringify(metrics));
   const associations = await page.evaluate(() => ({
     one: window.batchApps.one.snapshot(), two: window.batchApps.two.snapshot(),
   }));
@@ -200,7 +211,7 @@ try {
   const late = batch('one').locator('.image-chip', { hasText: 'late-success.txt' });
   await late.getByRole('button', { name: 'Cancel upload late-success.txt' }).click();
   await late.waitFor({ state: 'detached' });
-  await page.waitForFunction((before) => window.uploadMetrics.deletes.length > before, deletesBeforeLate);
+  await page.waitForFunction((before) => window.uploadMetrics.deletes.length > before, deletesBeforeLate, { timeout: 2000 });
   metrics = await page.evaluate(() => window.uploadMetrics);
   assert.equal(metrics.deletes.length, deletesBeforeLate + 1,
     'a server success racing cancellation is explicitly removed');

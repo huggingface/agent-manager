@@ -19,7 +19,7 @@ fs.writeFileSync(stub, `
     constructor(message,status,body){super(message);this.status=status;
       if(body?.code==='file-exists'||body?.code==='replacement-stale')this.collision=body;}
   }
-  window.fileCalls=[]; window.revisions={existing:'token-existing',stale:'token-stale-1'};
+  window.fileCalls=[]; window.revisions={existing:'token-existing',stale:'token-stale-1'}; window.vanished=false;
   export const listFiles=()=>Promise.resolve({path:'',root:'workspace',entries:[
     {name:'target',dir:true,size:0,mtime:1},{name:'existing.txt',dir:false,size:8,mtime:1,kind:'text'}]});
   export const uploadFile=(_id,folder,file,{replaceToken,onProgress,signal}={})=>new Promise((resolve,reject)=>{
@@ -35,6 +35,12 @@ fs.writeFileSync(stub, `
         {code:'file-exists',name:'stale.txt',path:'target/stale.txt',revision:'sha256:5:a',replaceToken:window.revisions.stale}));
       if(file.name==='stale.txt'&&replaceToken==='token-stale-1')return reject(new WorkspaceUploadError('"stale.txt" changed after replacement was confirmed',409,
         {code:'replacement-stale',name:'stale.txt',path:'target/stale.txt',revision:'sha256:7:b',replaceToken:'token-stale-2'}));
+      if(file.name==='vanished.txt'&&!replaceToken&&!window.vanished)return reject(new WorkspaceUploadError('"vanished.txt" already exists',409,
+        {code:'file-exists',name:'vanished.txt',path:'target/vanished.txt',revision:'sha256:4:c',replaceToken:'token-vanished'}));
+      if(file.name==='vanished.txt'&&replaceToken==='token-vanished'){
+        window.vanished=true; return reject(new WorkspaceUploadError('"vanished.txt" no longer exists — upload it again',409,
+          {code:'replacement-stale',name:'vanished.txt',path:'target/vanished.txt',revision:null,replaceToken:null}));
+      }
       onProgress?.({loaded:file.size,total:file.size}); resolve({ok:true,path:folder+'/'+file.name,size:file.size,mtime:2});
     },file.name==='slow.txt'?500:15);
   });
@@ -113,6 +119,18 @@ try {
   await row('stale.txt').locator('.files-upload-state', { hasText: 'uploaded' }).waitFor();
   assert.equal((await page.evaluate(() => window.fileCalls)).filter((call) => call.name === 'stale.txt').at(-1).replaceToken,
     'token-stale-2', 'a stale choice requires the fresh server token');
+
+  await input.setInputFiles({ name: 'vanished.txt', mimeType: 'text/plain', buffer: Buffer.from('create-after-delete') });
+  await row('vanished.txt').getByRole('button', { name: 'Replace…' }).click();
+  await page.getByRole('dialog', { name: 'Replace vanished.txt?' }).getByRole('button', { name: 'Replace', exact: true }).click();
+  await row('vanished.txt').locator('.files-upload-state', { hasText: 'no longer exists' }).waitFor();
+  assert.equal(await row('vanished.txt').getByRole('button', { name: 'Replace…' }).count(), 0,
+    'a missing destination has no replacement token and must not offer an inert Replace action');
+  await row('vanished.txt').getByRole('button', { name: 'Retry' }).click();
+  await row('vanished.txt').locator('.files-upload-state', { hasText: 'uploaded' }).waitFor();
+  const vanishedCalls = (await page.evaluate(() => window.fileCalls)).filter((call) => call.name === 'vanished.txt');
+  assert.deepEqual(vanishedCalls.map((call) => call.replaceToken), [null, 'token-vanished', null],
+    'Retry after deletion is a plain create, not another replacement');
 
   await input.setInputFiles({ name: 'slow.txt', mimeType: 'text/plain', buffer: Buffer.alloc(2000) });
   await row('slow.txt').getByRole('button', { name: 'Cancel' }).click();
