@@ -788,6 +788,21 @@ body {
 /* transient error toast */
 .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 300; max-width: 90vw; padding: 9px 14px; background: color-mix(in srgb, var(--danger) 92%, #000); color: #fff; border-radius: var(--r-md); font-size: 12.5px; box-shadow: 0 8px 28px rgb(0 0 0 / 0.3); animation: rise-in 0.16s ease-out; }
 
+/* A settings change that did not save, reported where the operator is rather
+   than only in the panel they have already closed. It sits above the toast line
+   and stays until it is dealt with. */
+.save-alert {
+  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 301;
+  display: flex; align-items: center; gap: 8px; width: max-content; max-width: 92vw;
+  padding: 8px 10px 8px 14px;
+  background: var(--panel); color: var(--text); border: 1px solid var(--danger);
+  border-radius: var(--r-md); font-size: 12.5px; box-shadow: 0 8px 28px rgb(0 0 0 / 0.3);
+  animation: rise-in 0.16s ease-out;
+}
+/* The sentence gets the room; the two ways out keep their own line each. */
+.save-alert > span { flex: 1 1 auto; }
+.save-alert button { flex: 0 0 auto; white-space: nowrap; }
+
 /* ?vvdebug=1 — the mobile viewport readout. Above everything, transparent to
    touch so it never becomes the reason a gesture misbehaves. */
 .vvdebug {
@@ -1359,6 +1374,24 @@ body {
 .cfg-num { width: 90px; flex: none; text-align: right; }
 /* artifacts sub-settings stay visible when off, just clearly inert */
 .cfg-off { opacity: 0.45; pointer-events: none; }
+/* The save flag has never had a rule of its own, so it ran into the heading it
+   sits after ("Agent output & computesaved ✓"). It says more now — a failure and
+   its Retry — which is not something to leave touching the word before it. */
+.save-flag { margin-left: 8px; font-size: 12px; font-weight: 500; }
+/* A failed save is not decoration: it keeps its colour and its way out, while
+   the "saved ✓" beside it is a tick that fades. */
+.save-flag-err { color: var(--danger); }
+/* A derived-update failure is not a save failure: it sits under the heading in
+   the help column, where the sentence has room to say which one it is. */
+.s-help.save-derived { color: var(--danger); }
+/* A field mid-edit that is not a number yet: marked, not corrected. */
+.cfg-input.cfg-bad { border-color: var(--danger); }
+.s-help.cfg-bad-note { color: var(--danger); }
+.save-retry {
+  margin-left: 6px; padding: 0 6px; font: inherit; font-size: 11px;
+  border: 1px solid currentColor; border-radius: 5px; background: none;
+  color: inherit; cursor: pointer;
+}
 /* "Back up now" hangs off the interval control above it, so it sits on the page
    rail rather than in the row's right-hand slot. */
 .bk-now { margin-top: 10px; }

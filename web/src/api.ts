@@ -113,10 +113,57 @@ export interface AmConfig {
   revive: { enabled: boolean; days: 1 | 3 | 7 };
   backup: { every: BackupEvery; dataset: string; exclude: string[] };
   defaultArtifactsSpace?: string;
+  /** Revision of the committed bytes. Send it back to replace them. */
+  rev?: string | null;
+  /** Why the saved file could not be read. Nothing may be written over it. */
+  readError?: string | null;
+  /** The generated environment skill: saving settings and telling the agents
+   *  about them are different states, and this is the second one. */
+  derived?: DerivedStatus;
 }
+export interface DerivedStatus { pending: boolean; error: string | null; at: number | null }
+
+// A settings write that was refused because the ground moved: the server says
+// which revision is actually stored and what is in it, so the client can show
+// the difference instead of guessing — and never force its own copy over it
+// without being told to.
+export class SettingsConflict extends Error {
+  code: 'stale' | 'base-required' | 'unreadable';
+  rev: string | null;
+  value: unknown;
+  constructor(message: string, code: SettingsConflict['code'], rev: string | null, value: unknown) {
+    super(message);
+    this.name = 'SettingsConflict';
+    this.code = code;
+    this.rev = rev;
+    this.value = value;
+  }
+}
+
+// Settings writes share one shape: whole-resource replacement, guarded by the
+// revision being replaced (`base`), the way the file editor's save is guarded by
+// its content tag. A 409 is a conflict to show, not a failure to retry blindly.
+const settingsWrite = async (route: string, body: unknown, base: string | null) => {
+  const r = await fetch(`${route}${base ? `?base=${encodeURIComponent(base)}` : ''}`, {
+    method: 'PUT', headers: HEADERS, body: JSON.stringify(body),
+  });
+  const payload = await r.json().catch(() => ({} as any));
+  if (r.status === 409) {
+    throw new SettingsConflict(payload.error || 'these settings changed elsewhere',
+      payload.code || 'stale', payload.rev ?? null, payload.value ?? null);
+  }
+  // A refused save has something worth showing next to the setting that did not
+  // save ("could not save settings — ENOSPC"); a bare status would throw it away.
+  if (!r.ok) throw new Error(payload.error || `${r.status}`);
+  return payload;
+};
+
+// The outcome of the work a save sets off, asked for on its own. A save's
+// response can only say "started": the derived update runs after it.
+export const getDerivedStatus = (): Promise<DerivedStatus> => fetch('/api/settings/derived').then(json);
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
-export const saveConfig = (c: AmConfig) =>
-  fetch('/api/config', { method: 'PUT', headers: HEADERS, body: JSON.stringify(c) }).then(json);
+export const saveConfig = (c: AmConfig, base: string | null): Promise<AmConfig & { ok: true }> =>
+  settingsWrite('/api/config', c, base);
 
 // ---- durable scheduled prompts ----
 export type CronState = 'running' | 'stopped';
@@ -186,10 +233,16 @@ export const backupStatus = (): Promise<BackupStatus> => fetch('/api/backup/stat
 export const runBackup = (): Promise<{ job?: string }> =>
   fetch('/api/backup/run', { method: 'POST' }).then(jsonOrError);
 
-export interface SecretsData { detected: string[]; notes: Record<string, string>; }
+export interface SecretsData {
+  detected: string[];
+  notes: Record<string, string>;
+  rev?: string | null;
+  readError?: string | null;
+  derived?: DerivedStatus;
+}
 export const getSecrets = (): Promise<SecretsData> => fetch('/api/secrets').then(json);
-export const saveSecrets = (notes: Record<string, string>) =>
-  fetch('/api/secrets', { method: 'PUT', headers: HEADERS, body: JSON.stringify({ notes }) }).then(json);
+export const saveSecrets = (notes: Record<string, string>, base: string | null): Promise<SecretsData & { ok: true }> =>
+  settingsWrite('/api/secrets', { notes }, base);
 
 export interface QuotaWindow { usedPercent?: number; resetsAt?: number; windowMinutes?: number; }
 export interface ProviderUsage {

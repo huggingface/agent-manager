@@ -7,6 +7,7 @@ import { keyIntent, keepInView, survivingFocus, type TreeRow } from '../lib/tree
 import type { FileEntry, FileKind, FilePreview, WorkspaceFileCollision } from '../api';
 import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
+import { useSaver } from '../lib/saveQueue';
 import CodeView from './CodeView';
 import FileWrapToggle from './FileWrapToggle';
 import PdfView from './PdfView';
@@ -658,7 +659,14 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
   // The buffer waiting to be written, if any. There is no timer: these files
   // have no undo and no git behind them, so nothing reaches disk until it is
   // asked for.
-  const pending = useRef<{ text: string; base: string | null } | null>(null);
+  const pending = useRef<{ text: string } | null>(null);
+  // The version the buffer was typed against — the precondition the next write
+  // carries. It moves on when a write commits, so a save that follows an older
+  // one isn't refused for being based on the version that one replaced.
+  const baseRef = useRef<string | null>(null);
+  // The last text this viewer put on disk, for telling a real save from a repeat
+  // of one that already landed.
+  const committed = useRef<string | null>(null);
   // Adopt a kept buffer ONCE per file. Re-checking on every render resurrected
   // it mid-save — ⌘S fires two handlers (the editor's keymap and the pane's), the
   // first cleared `pending` and the render in between put it back with the tag it
@@ -668,7 +676,12 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
   if (restoredFor.current !== path) {
     restoredFor.current = path;
     const kept = recall(sessionId).draft;
-    pending.current = kept && kept.path === path ? { text: kept.text, base: kept.base } : null;
+    const mine = kept && kept.path === path ? kept : null;
+    pending.current = mine ? { text: mine.text } : null;
+    committed.current = null;
+    // A kept buffer keeps the version it was typed against: the file may have
+    // moved on while it sat there, and that is a conflict, not an overwrite.
+    baseRef.current = mine ? mine.base : null;
   }
 
   useEffect(() => {
@@ -682,7 +695,7 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
     else { setDraft(null); setStatus('clean'); }
     setTraceHead(null); setTraceQuery('');
     api.previewFile(sessionId, path)
-      .then((m) => { if (alive) setMeta(m); })
+      .then((m) => { if (alive) { setMeta(m); if (!pending.current) baseRef.current = m.tag ?? null; } })
       .catch((e) => { if (alive) setErr(String(e?.message || e)); });
     return () => { alive = false; };
   }, [sessionId, path]);
@@ -735,47 +748,127 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
   // Read at fire time by a callback that outlives the render that made it.
   const kindRef = useRef(meta?.kind);
   kindRef.current = meta?.kind;
+  // Which file this viewer is on *now*. A response describes the file it was
+  // sent for, which is not necessarily this one any more.
+  const hereRef = useRef({ sessionId, path });
+  hereRef.current = { sessionId, path };
+  // The text a write actually put on the wire, for working out afterwards
+  // whether a lost answer had landed.
+  const lastSent = useRef<{ sessionId: string; path: string; text: string } | null>(null);
 
-  // One writer for every save — the debounce, the flush on close, and ⌘S all
-  // come through here. `force` drops the mtime precondition, which is what
+  // One writer for every save — the Save button, ⌘S and "save and close" all
+  // come through here. `force` drops the content precondition, which is what
   // "overwrite" means after a conflict.
-  // Resolves true when the file on disk matches the buffer — which "save and
-  // close" needs, so a failed write keeps the dialog up instead of closing over
-  // the error.
-  const inflight = useRef<Promise<boolean> | null>(null);
-  const flush = useCallback((force = false): Promise<boolean> => {
-    // One write at a time. Two callers land on the same save rather than racing
-    // each other into a conflict of their own making.
-    if (inflight.current) return inflight.current;
-    const job = pending.current;
-    if (!job) return Promise.resolve(true);   // nothing outstanding
-    pending.current = null;
-    setStatus('saving'); setSaveErr(null);
-    const run = async (): Promise<boolean> => {
-    try {
-      const after = await api.writeFile(sessionId, path, job.text, force ? null : job.base);
-      setConflict(false);
-      setMeta((m) => (m ? { ...m, text: m.kind === 'html' ? m.text : job.text, size: after.size, mtime: after.mtime, tag: after.tag } : m));
-      remember(sessionId, { draft: null });
-      if (kindRef.current === 'html') setSource(job.text);
+  //
+  // A Save commits the version that was asked for. Reading the live buffer when
+  // the request finally goes out would quietly widen every Save into "and
+  // everything typed since", which is the one thing the file policy is not:
+  // §1 keeps normal Save explicit, and text typed after it stays dirty until it
+  // is saved in its own right.
+  //
+  // The base is the exception, and is read as the write goes out: an earlier
+  // save of this same file may have committed in the meantime, and this text is
+  // now based on what it left behind.
+  const write = useCallback(async (job: { force: boolean; sessionId: string; path: string; text: string; base: string | null }) => {
+    const { force, text } = job;
+    const here = job.sessionId === hereRef.current.sessionId && job.path === hereRef.current.path;
+    const base = here ? baseRef.current : job.base;
+    // ⌘S fires two handlers (the editor's keymap and the pane's), so the second
+    // one arrives behind the first with the same text. It is still a save — the
+    // buffer it asked for is on disk — but it does not need a second round trip
+    // to say what the first already did.
+    if (!force && here && text === committed.current) {
+      return { sessionId: job.sessionId, path: job.path, text, after: null };
+    }
+    lastSent.current = { sessionId: job.sessionId, path: job.path, text };
+    const after = await api.writeFile(job.sessionId, job.path, text, force ? null : base);
+    return { sessionId: job.sessionId, path: job.path, text, after };
+  }, []);
+
+  type Written = { sessionId: string; path: string; text: string; after: Awaited<ReturnType<typeof api.writeFile>> | null };
+
+  const saver = useSaver<{ force: boolean; sessionId: string; path: string; text: string; base: string | null }, Written | null>({
+    send: write,
+    onCommit: (_req, result, superseded) => {
+      if (!result) return;              // there was nothing left to write
+      const { sessionId: sid, path: fp, text, after } = result;
+      const here = sid === hereRef.current.sessionId && fp === hereRef.current.path;
+
+      // The remembered draft is shared by every viewer of this session, and it
+      // outlives them. Only the draft that IS this text may be released by this
+      // response — a newer draft, or one belonging to another file, is exactly
+      // the work an older success must not touch.
+      const kept = recall(sid).draft;
+      if (kept && kept.path === fp) {
+        if (kept.text === text) remember(sid, { draft: null });
+        else if (after) remember(sid, { draft: { ...kept, base: after.tag ?? null } });
+      }
+
+      if (!here) return;                // this viewer moved on; its state is not this file's
+      committed.current = text;
+      if (after) {
+        setConflict(false);
+        baseRef.current = after.tag ?? null;
+        setMeta((m) => (m ? { ...m, text: m.kind === 'html' ? m.text : text, size: after.size, mtime: after.mtime, tag: after.tag } : m));
+        if (kindRef.current === 'html') setSource(text);
+        onSaved?.();
+      }
+      // Does this response still describe the editor? Not if a newer save is
+      // already queued behind it, and not if the buffer has been typed into
+      // since. Either way the draft stays — releasing it here is the lost-work
+      // bug this guards.
+      const buffered = pending.current;
+      const stale = superseded || (!!buffered && buffered.text !== text);
+      if (stale) {
+        // A queued write is going out this instant; anything else is unsaved.
+        if (!superseded) setStatus((st) => (st === 'error' ? st : 'dirty'));
+        return;
+      }
+      pending.current = null;
       setStatus('saved');
-      onSaved?.();
-      return true;
-    } catch (e: any) {
-      const msg = String(e?.message || e);
-      // A refused save must NOT drop the text — put it back so the next attempt
-      // (or an overwrite) still has it.
-      pending.current = job;
+    },
+    onFail: (e, job) => {
+      if (job.sessionId !== hereRef.current.sessionId || job.path !== hereRef.current.path) return;
+      const msg = e.message;
+      // A refused save must NOT drop the text — the buffer is left where it is
+      // so the next attempt (or an overwrite) still has it.
       setConflict((e instanceof api.ApiError && e.code === 'file-changed') || /changed on disk/.test(msg));
       setSaveErr(msg);
       setStatus('error');
-      return false;
-    }
-    };
-    const p = run().finally(() => { inflight.current = null; });
-    inflight.current = p;
-    return p;
-  }, [sessionId, path, onSaved]);
+    },
+    // A write that never answers must not hold the file's slot forever. Files
+    // can be large, so this is generous — it is a request that is not coming
+    // back, not a slow one.
+    timeoutMs: 30_000,
+    // A lost answer may have committed. Read the file back and compare before
+    // anything is sent again: retrying blind would either repeat a write that
+    // landed or walk over what replaced it.
+    reconcile: async () => {
+      const sent = lastSent.current;
+      if (!sent) return { outcome: 'lost' };
+      const m = await api.previewFile(sent.sessionId, sent.path);
+      // html keeps its source outside the preview payload, so there is nothing
+      // to compare: the retry goes through the base precondition instead, which
+      // reports a conflict rather than overwriting.
+      if (m.kind === 'html' || m.text !== sent.text) return { outcome: 'lost' };
+      return {
+        outcome: 'committed',
+        result: { sessionId: sent.sessionId, path: sent.path, text: sent.text, after: { size: m.size, mtime: m.mtime, tag: m.tag ?? null } },
+      };
+    },
+  });
+
+  // Resolves true when the file on disk matches the buffer — which "save and
+  // close" needs, so a failed write keeps the dialog up instead of closing over
+  // the error, and a write still queued behind another one keeps it up too.
+  const saveRequest = saver.request;
+  const flush = useCallback((force = false): Promise<boolean> => {
+    const job = pending.current;
+    if (!job) return Promise.resolve(true);   // nothing outstanding
+    setStatus('saving'); setSaveErr(null);
+    // The version asked for is fixed here, at the moment the operator asked.
+    return saveRequest({ force, sessionId, path, text: job.text, base: baseRef.current });
+  }, [saveRequest, sessionId, path]);
 
   // Typing only fills the buffer. Writing it is a decision, taken with the Save
   // button or ⌘S — an autosave here would be one stray keystroke away from
@@ -783,11 +876,10 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
   const onEdit = useCallback((next: string) => {
     setDraft(next);
     if (!canEdit || !meta) return;
-    const base = meta.tag ?? null;
-    pending.current = { text: next, base };
+    pending.current = { text: next };
     // Held outside the component so switching this tile to another session — or
     // reloading the app — doesn't take the buffer with it.
-    remember(sessionId, { draft: { path, text: next, base } });
+    remember(sessionId, { draft: { path, text: next, base: baseRef.current } });
     setStatus((st) => (st === 'error' ? st : 'dirty'));   // keep a failure visible
   }, [canEdit, meta, sessionId, path]);
 
@@ -825,9 +917,15 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
   const edit = useMemo<SaveState>(() => ({
     can: canEdit,
     save: () => flush(),
-    saveNow: (force = false) => flush(force),
+    // "Save and close" asks a stricter question than Save: is the buffer as it
+    // stands now on disk? A write that succeeded for older text is not a yes.
+    saveNow: async (force = false) => {
+      const ok = await flush(force);
+      return ok && !pending.current;
+    },
     discard: () => {
       pending.current = null;
+      saver.reset();
       remember(sessionId, { draft: null });
       setDraft(null); setSaveErr(null); setStatus('clean');
     },
@@ -839,6 +937,7 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
     conflict,
     reload: () => {
       pending.current = null;
+      saver.reset();
       remember(sessionId, { draft: null });
       setDraft(null); setSaveErr(null); setConflict(false); setStatus('clean');
       setTraceHead(null); setTraceQuery('');
@@ -853,7 +952,7 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
     setWrap: (on: boolean) => { setWrapPref(on); writeWrap(on); },
     prettify: isJson && canEdit ? prettify : undefined,
     prettifyError: fmtErr,
-  }), [canEdit, editKind, meta?.truncated, status, saveErr, conflict, flush, sessionId, path,
+  }), [canEdit, editKind, meta?.truncated, status, saveErr, conflict, flush, saver.reset, sessionId, path,
        wrap, isJson, prettify, fmtErr]);
 
   const traceInfo = useMemo<TraceInfo | undefined>(() => (meta?.kind === 'trace' && !raw ? {
@@ -1236,7 +1335,10 @@ export default function FilesPane({
   // Nothing is written without being asked for, so leaving a file with an unsaved
   // buffer would drop it silently. Ask in a dialog — the answer is the work.
   const edit = info.edit;
-  const unsaved = edit?.status === 'dirty' || edit?.status === 'error' || !!edit?.conflict;
+  // A write still in flight counts: leaving while it is out is leaving with the
+  // answer unknown, and the dialog is where "save and close" lives.
+  const unsaved = edit?.status === 'dirty' || edit?.status === 'error'
+    || edit?.status === 'saving' || !!edit?.conflict;
   const leaveView = () => {
     if (unsaved) { setConfirmClose(true); return; }
     setConfirmClose(false);
@@ -1253,6 +1355,9 @@ export default function FilesPane({
   // Dismissing the dialog has to hand focus back, or the keyboard is left on
   // <body> and the next Esc goes nowhere — which reads as the guard being broken.
   const backToEditing = () => {
+    // The dialog's own answer. A save that was already out when it was clicked
+    // must not come back and close the view anyway.
+    closeIntent.current = false;
     setConfirmClose(false);
     requestAnimationFrame(() => {
       const cm = paneRef.current?.querySelector<HTMLElement>('.fv-cm .cm-content');
@@ -1260,10 +1365,21 @@ export default function FilesPane({
     });
   };
 
+  // Whether the operator still wants to leave, read after the write settles
+  // rather than assumed from when it started.
+  const closeIntent = useRef(false);
   const saveAndClose = async () => {
     if (!edit) return;
+    closeIntent.current = true;
+    // saveNow answers the strict question — is the buffer as it stands on disk —
+    // so text typed while the write was out comes back as false rather than as
+    // permission to close over it. Keep editing withdraws the intent outright.
     const ok = await edit.saveNow(!!edit.conflict);
-    if (ok) { setConfirmClose(false); if (viewing) requestFocus(viewing); setViewing(null); }
+    if (!ok || !closeIntent.current) return;
+    closeIntent.current = false;
+    setConfirmClose(false);
+    if (viewing) requestFocus(viewing);
+    setViewing(null);
   };
 
   // Create lands in the folder you are looking at, which is the one the
@@ -1532,7 +1648,16 @@ export default function FilesPane({
                 <button className="mini-btn" onClick={edit.overwrite} title="Save my version over theirs">Overwrite</button>
               </span>
             ) : edit?.error ? (
-              <span className="fi-err" title={edit.error}>{edit.error}</span>
+              // A failure that is not a conflict — the disk is full, the server
+              // said no — still has a way forward. Without one the buffer is
+              // stranded: kept, but with nothing on screen to send it again.
+              <span className="fv-edit">
+                <span className="fi-err" title={edit.error}>{edit.error}</span>
+                <button className="mini-btn" onClick={edit.discard}>Discard</button>
+                <button className="mini-btn primary" onClick={edit.save} disabled={edit.status === 'saving'}>
+                  {edit.status === 'saving' ? 'Saving…' : 'Retry'}
+                </button>
+              </span>
             ) : edit?.can && edit.status !== 'clean' ? (
               <span className="fv-edit">
                 {edit.status === 'saved' ? <span className="fv-save saved">saved</span> : (
