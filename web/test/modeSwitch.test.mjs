@@ -51,7 +51,7 @@ await build({
     import React from 'react'; import {createRoot} from 'react-dom/client'; import {flushSync} from 'react-dom';
     import TerminalPane from './src/components/TerminalPane';
     const CTRL = '\\x00\\x00AM:';
-    window.sockets = []; window.live = 0; window.sends = []; window.marks = [];
+    window.sockets = []; window.live = 0; window.sends = []; window.wsSends = []; window.marks = [];
     const mark = (name) => window.marks.push({ name, t: performance.now() });
     window.mark = mark;
     let config = {}, root;
@@ -68,17 +68,25 @@ await build({
           this.readyState = 1; mark('ws.open'); this.onopen?.({});
           setTimeout(() => {
             if (this.readyState === 3) return;
+            // attach() starts the session and THEN snapshots it, so a cold
+            // start is sent a restore frame too — with an empty snapshot.
+            // restoreAnsi is that snapshot; an empty one is the cold case.
             this.onmessage?.({ data: CTRL + JSON.stringify({ t: 'restore', controller: true,
               cols: 80, rows: 24, reset: false }) });
-            (config.payload || []).forEach((chunk, i) => setTimeout(() => {
-              if (this.readyState !== 3) this.onmessage?.({ data: chunk });
-            }, i * (config.chunkGap ?? 0)));
+            const snapshot = config.restoreAnsi ?? (config.payload || [])[0] ?? '';
+            this.onmessage?.({ data: snapshot });
+            // Frames the harness paints afterwards, at their own times.
+            for (const frame of config.frames || (config.payload || []).slice(1).map((data, i) => ({ at: (i + 1) * (config.chunkGap ?? 0), data }))) {
+              setTimeout(() => { if (this.readyState !== 3) this.onmessage?.({ data: frame.data }); }, frame.at);
+            }
           }, config.restoreDelay ?? 0);
         };
         config.openDelay ? setTimeout(open, config.openDelay) : Promise.resolve().then(open);
       }
-      send(d) { this.sent.push(d); }
-      close() { if (this.readyState !== 3) window.live--; this.readyState = 3; this.onclose?.({ code: 1000 }); }
+      send(d) { this.sent.push(d); window.wsSends.push(d); }
+      close(code) { if (this.readyState !== 3) window.live--; this.readyState = 3; this.onclose?.({ code: code ?? 1000 }); }
+      // A transient drop, the way a sleeping Space or a flaky proxy delivers one.
+      drop() { if (this.readyState !== 3) window.live--; this.readyState = 3; this.onclose?.({ code: 1006 }); }
     }
     window.WebSocket = FakeSocket;
     const empty = { harness:'claude',harnessLabel:'Fixture',sessionId:'s',title:'',model:null,cwd:null,
@@ -110,18 +118,21 @@ await build({
       roster: () => [],
     };
     function Pane({ id }) { return <div className="tile" style={{position:'relative',flex:1,minWidth:0}}><TerminalPane
-      session={{id,cli:'claude',name:'Switch fixture',state:'waiting',running:true,everStarted:true,path:null,createdAt:new Date().toISOString()}}
+      session={{id,cli:'claude',name:'Switch fixture',state:config.state||'waiting',
+        running:config.running!==false,everStarted:config.everStarted!==false,path:null,createdAt:new Date().toISOString()}}
       cli={{id:'claude',label:'Fixture',color:'#777'}} mode={config.mode||'reader'} theme="light" zoom={config.zoom||100}
       focused active visible onClose={()=>{}} /></div>; }
     function App(){ return <>
       <Pane id={config.id||'switch'} />
-      {config.second && <Pane id="second" />}
+      {config.second && <Pane id={config.second === 'same' ? (config.id||'switch') : 'second'} />}
     </>; }
     window.fixture = {
       mount(options){ if(root) flushSync(()=>root.unmount()); config={...options};
         root=createRoot(document.getElementById('fixture-root')); flushSync(()=>root.render(<App/>)); },
       change(options){ Object.assign(config, options); flushSync(()=>root.render(<App/>)); },
       reset(){ window.marks = []; },
+      drop(){ for (const sock of window.sockets) if (sock.readyState === 1) sock.drop(); },
+      live(){ return window.sockets.filter((s) => s.readyState === 1).length; },
     };
   ` }, bundle: true, outfile: bundle, format: 'iife', platform: 'browser',
   define: { 'process.env.NODE_ENV': '"production"' }, logLevel: 'silent',
@@ -343,6 +354,117 @@ try {
     assert.ok(slow < USABLE_BUDGET_MS, `${slow}ms`);
   });
 
+  console.log('\na cold start keeps its cover until the harness paints for real');
+  // The sequence the real server produces for a session it starts on this
+  // request: attach() runs ensureRunning() and then snapshots, so a restore
+  // frame arrives carrying an EMPTY screen, and the harness paints afterwards —
+  // its bottom input bar first, its banner and history a beat later. Uncovering
+  // on that first bottom-only frame would show a terminal that is not ready,
+  // which is a worse version of the delay this PR set out to remove.
+  // Clear + home first: a harness repaints its screen, it does not append to
+  // whatever was there. Appending would scroll the banner into the bottom third
+  // and the fixture would silently stop testing the upper-region rule.
+  const bannerScreen = '\x1b[2J\x1b[H' + ansi(['  Fixture harness 1.0', '  Loaded 12 files from the workspace', '', '> prompt']);
+  await open({ id: 'cold', running: false, everStarted: false, restoreAnsi: '',
+    frames: [{ at: 400, data: bottomOnlyScreen }, { at: 900, data: bannerScreen }] });
+  const cold = await p.evaluate(async () => {
+    const t0 = performance.now();
+    window.fixture.change({ mode: 'terminal' });
+    let bottomOnlyAt = 0;
+    while (performance.now() - t0 < 6000) {
+      const rows = document.querySelector('.xterm-rows');
+      const text = (rows?.textContent || '').trim();
+      const covered = !!document.querySelector('.term-preview, .term-boot');
+      if (!bottomOnlyAt && text.includes('ask me anything')) bottomOnlyAt = performance.now() - t0;
+      if (text.length > 1 && !covered) return { lift: Math.round(performance.now() - t0),
+        bottomOnlyAt: Math.round(bottomOnlyAt) };
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    return { lift: -1, bottomOnlyAt: Math.round(bottomOnlyAt) };
+  });
+  // The probe reads xterm's BUFFER; its DOM rows land a frame later. So the
+  // banner is asserted as arriving, not as already rendered at the exact
+  // millisecond the cover went away.
+  const bannerShown = await p.waitForFunction(
+    () => (document.querySelector('.xterm-rows')?.textContent || '').includes('Loaded 12 files'),
+    null, { timeout: 5000 }).then(() => true).catch(() => false);
+  check(`the bottom-only startup frame does not uncover it (lifted at ${cold.lift}ms)`, () => {
+    assert.ok(cold.bottomOnlyAt > 0, 'the bottom-only frame never arrived; the fixture is not exercising this');
+    assert.ok(cold.lift > cold.bottomOnlyAt + 100,
+      `uncovered ${cold.lift - cold.bottomOnlyAt}ms after the bottom-only frame`);
+  });
+  check('it uncovers once the harness paints its upper screen', () => {
+    // The banner frame is delivered at 900ms; uncovering before it would mean
+    // some earlier, bottom-only frame did it.
+    assert.ok(cold.lift >= 850, `lifted at ${cold.lift}ms, before the upper-screen frame`);
+    assert.ok(cold.lift < 3000, `lifted at ${cold.lift}ms`);
+    assert.equal(bannerShown, true, 'the banner never reached the screen');
+  });
+
+  console.log('\nreconnect after an interruption');
+  await open({ id: 'recon', payload: [shellScreen] });
+  await usable();
+  const dropped = await p.evaluate(async () => {
+    window.fixture.drop();
+    const t0 = performance.now();
+    while (performance.now() - t0 < 15_000) {
+      const rows = document.querySelector('.xterm-rows');
+      if (window.fixture.live() === 1 && (rows?.textContent || '').trim().length > 1
+        && !document.querySelector('.term-preview, .term-boot')) {
+        return { backAt: Math.round(performance.now() - t0), live: window.fixture.live() };
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return { backAt: -1, live: window.fixture.live() };
+  });
+  check(`a transient drop reconnects on its own (${dropped.backAt}ms)`, () => {
+    assert.ok(dropped.backAt >= 0 && dropped.backAt < 12_000, `never came back: ${JSON.stringify(dropped)}`);
+    assert.equal(dropped.live, 1, 'exactly one transport after recovery');
+  });
+
+  console.log('\ninput readiness, measured separately from paint');
+  await open({ id: 'input', payload: [shellScreen] });
+  const paintedAt = await usable();
+  await p.locator('.xterm-helper-textarea').focus();
+  await p.keyboard.type('ls');
+  const typed = await p.waitForFunction(() => {
+    const frames = window.wsSends.filter((d) => typeof d === 'string' && d.includes('"t":"i"'));
+    return frames.length ? frames.length : null;
+  }, null, { timeout: 10_000 }).then((h) => h.jsonValue()).catch(() => 0);
+  check(`keystrokes reach the transport after ${paintedAt}ms of paint (${typed} input frames)`, () => {
+    assert.ok(typed > 0, 'the terminal painted but never accepted input');
+  });
+
+  console.log('\nsmall viewport and zoom');
+  for (const [label, width, height, zoom] of [['phone', 390, 844, 100], ['desktop at 150%', 1000, 700, 150]]) {
+    await p.setViewportSize({ width, height });
+    await open({ id: `vp-${width}-${zoom}`, payload: [bottomOnlyScreen], zoom });
+    const first = await usable();
+    await toReader();
+    const again = await usable();
+    check(`${label}: ${first}ms then ${again}ms`, () => {
+      assert.ok(first >= 0 && first < USABLE_BUDGET_MS, `first ${first}ms`);
+      assert.ok(again >= 0 && again < USABLE_BUDGET_MS, `repeat ${again}ms`);
+    });
+  }
+  await p.setViewportSize({ width: 1000, height: 700 });
+
+  console.log('\na second viewer of the same session');
+  await p.evaluate((screen) => window.fixture.mount({ mode: 'terminal', id: 'shared',
+    second: 'same', payload: [screen] }), shellScreen);
+  await p.waitForSelector('.xterm');
+  await p.waitForTimeout(600);
+  const viewers = await p.evaluate(() => ({
+    live: window.fixture.live(),
+    sessions: window.sockets.filter((s) => s.readyState === 1).map((s) => new URL(s.url).searchParams.get('session')),
+    painted: [...document.querySelectorAll('.xterm-rows')].map((n) => n.textContent.includes('you/workspaces $')),
+  }));
+  check('both viewers attach as the same session and both paint', () => {
+    assert.equal(viewers.live, 2, JSON.stringify(viewers));
+    assert.deepEqual([...new Set(viewers.sessions)], ['shared']);
+    assert.deepEqual(viewers.painted, [true, true], 'a second viewer must not blank the first');
+  });
+
   console.log('\nlifecycle safety');
   await open({ id: 'lifecycle', payload: [shellScreen] });
   await p.evaluate(() => { window.sockets.length = 0; });
@@ -404,10 +526,13 @@ try {
     assert.doesNotMatch(source, /setTimeout\([^)]*screenHasContent/s);
     assert.doesNotMatch(source, /screenHasContent\(\)\) endBoot\(\);?\s*\}, *\d+\)/s);
   });
-  check('a session with no canonical snapshot keeps the cold boot rule', () => {
-    // `restored` is only set by the frame that follows t:'restore'; a new or
-    // starting session is sent none, so it keeps the upper-region rule and cap.
-    assert.match(source, /restored \? term\.rows : Math\.max\(2, Math\.floor\(term\.rows \* 2 \/ 3\)\)/);
+  check('the cold-boot rule is keyed on the snapshot content, not on the frame', () => {
+    // A restore FRAME is not evidence of a warm reattachment: attach() calls
+    // ensureRunning() before restore(), so a session started for this very
+    // request is sent one too, carrying an empty screen. Only a snapshot that
+    // actually has content may switch the probe to whole-screen.
+    assert.match(source, /if \(canonical && screenHasContent\(true\)\) restored = true;/);
+    assert.match(source, /const rows = whole \? term\.rows : Math\.max\(2, Math\.floor\(term\.rows \* 2 \/ 3\)\)/);
     assert.match(source, /if \(m\.t === 'restore'\) restoring = true;/);
   });
 

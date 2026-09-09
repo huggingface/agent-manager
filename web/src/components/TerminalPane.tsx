@@ -686,18 +686,24 @@ export default function TerminalPane({
     // (banner, resumed history) seconds later — only the upper region tells us
     // the pane is genuinely ready. Shell prompts paint at the top anyway.
     let restoring = false;  // a restore frame was seen: the next frame is its snapshot
-    let restored = false;   // that snapshot has been parsed onto the screen
-    const screenHasContent = () => {
+    let restored = false;   // and it carried a screen, so this is a reattachment
+    const screenHasContent = (whole = restored) => {
       try {
         const buf = term.buffer.active;
         // The upper-region rule is a rule about a harness BOOTING, and it only
         // applies while we are still waiting to find out what the screen looks
-        // like. Once the canonical snapshot has been written the screen IS the
-        // answer, wherever its content sits, so the whole screen counts. Read
-        // the upper region before that and a bottom-anchored TUI never
+        // like. Once an authoritative snapshot has been written the screen IS
+        // the answer, wherever its content sits, so the whole screen counts.
+        // Read the upper region after that and a bottom-anchored TUI never
         // qualifies: the cover sat until the 20-second cap on every switch
         // (#127, measured at 20.0s against 13ms of actual paint).
-        const rows = restored ? term.rows : Math.max(2, Math.floor(term.rows * 2 / 3));
+        //
+        // A restore FRAME is not that evidence on its own. attach() calls
+        // ensureRunning() before restore() (server/src/runner.js), so a session
+        // this request just started is sent a restore frame too — carrying an
+        // empty snapshot of a terminal that has painted nothing yet. Its
+        // content is what tells the two apart, and `restored` is set from that.
+        const rows = whole ? term.rows : Math.max(2, Math.floor(term.rows * 2 / 3));
         for (let y = 0; y < rows; y++) {
           const line = buf.getLine(buf.baseY + y);
           if (line && line.translateToString(true).trim().length >= 2) return true;
@@ -792,7 +798,10 @@ export default function TerminalPane({
         restoring = false;
         term.write(d, () => {
           schedulePreview();
-          if (canonical) restored = true;
+          // An empty canonical snapshot is a terminal that was just started for
+          // this request, not a screen to trust: stay in cold-boot mode and let
+          // the upper-region rule wait for the harness to paint something real.
+          if (canonical && screenHasContent(true)) restored = true;
           if (bootLive && screenHasContent()) endBoot();
         });
       };
