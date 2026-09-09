@@ -106,6 +106,8 @@ try {
   const noShare = await call(`/api/sessions/${client.id}/share`, { visibility: 'public' }); assert.equal(noShare.status, 403); assert.equal(noShare.body.code, 'no-hf-token');
   assert.equal((await call(`/api/sessions/${client.id}/input`, { text: null })).status, 400);
   assert.equal((await call('/api/relaunch')).body.reason, 'no-space');
+  const emptyCommand = await call('/api/relaunch', undefined, 'POST', { 'content-type': 'application/json' });
+  assert.equal(emptyCommand.status, 200); assert.equal(emptyCommand.body.reason, 'no-space');
   assert.equal((await call('/api/backup/run')).status, 403);
   assert.equal((await call('/api/not-real', undefined, 'GET')).body.code, 'api-not-found');
   assert.match(await (await fetch(base + '/nested/page')).text(), /fixture SPA/);

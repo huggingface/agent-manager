@@ -105,7 +105,10 @@ export function createValidator({ cliExists, sessionExists, groupExists }) {
       text(req.body, 'body', { empty: true }); return;
     }
     const prompt = route === '/api/agents' || route === '/api/agents/:id/prompt' || route === '/api/agents/:id/stop' || route === '/api/remote/:name/messages';
-    if (!prompt && req.headers['content-type'] && !req.is('application/json')) {
+    const mediaType = (req.headers['content-type'] || '').split(';', 1)[0].trim().toLowerCase();
+    // req.is() returns null for zero-byte bodies, even with a JSON content
+    // type. Bodyless commands remain valid with or without that header.
+    if (!prompt && mediaType && mediaType !== 'application/json') {
       throw new ApiError(415, 'unsupported-media-type', 'Use application/json for this request.');
     }
     const b = prompt && typeof req.body === 'string' ? {} : object(req.body === undefined ? {} : req.body, 'body');
