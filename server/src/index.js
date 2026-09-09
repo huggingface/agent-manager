@@ -18,6 +18,7 @@ import * as order from './order.js';
 import * as demo from './demo.js';
 import * as hidden from './hidden.js';
 import * as crons from './crons.js';
+import { ensureClaudeDialogDefaults, trustWorkspacesRoot } from './first-run.js';
 import {
   attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning,
   waitForInputReady, capturePane, ghosttyReady, ghosttyError,
@@ -29,7 +30,7 @@ import {
 // frontend's framing is unchanged.
 const TERM_CTRL = '\x00\x00AM:';
 import { buildUsage } from './usage.js';
-import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, traceHarnessOf } from './traces.js';
+import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, traceHarnessOf, subagentRoster, readSubagentTrace } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 import { kindOfName, kindOfFile, mimeOf, readTextHead, TEXT_MAX } from './preview.js';
@@ -65,6 +66,14 @@ hidden.init();
 // discovery must refuse to guess. Both installers are non-fatal; the existing
 // fallback remains available if either cannot be installed.
 installClaudeRepinHook();
+// The two first-run answers that belong to the whole Space rather than to one
+// session: Claude's folder trust, which it inherits from the workspaces root
+// down to every session under it, and the bypass-mode warning whose default
+// button is "No, exit" (so a blind Enter on it kills the session). Both run
+// before anything is spawned, and neither writes if the answer is already
+// there. See first-run.js.
+trustWorkspacesRoot();
+ensureClaudeDialogDefaults();
 // OpenCode's global plugin reports the root session chosen by /new (/clear),
 // and the next prompt after switching to an existing session.
 installOpencodeRepinPlugin();
@@ -646,6 +655,40 @@ app.get('/api/agents/:id/tail', (req, res) => {
   const text = capturePane(s.id, lines);
   if (text === null) return res.json({ id: s.id, state: 'stopped', text: '', note: 'not running' });
   res.json({ id: s.id, state: deriveState(s, agentInfo().get(s.id)), text });
+});
+
+// The sub-agents this session spawned, and one sub-agent's own transcript.
+//
+// Both read the `subagents/` directory next to the session's transcript and
+// never the transcript itself: the parent is up to 292 MB on this machine and
+// the roster is a directory listing. Whether a sub-agent has FINISHED is not
+// answered here — that fact lives in the parent's own records, which the reader
+// already has for the window it is showing, and inventing an answer from file
+// mtime would be wrong several times an hour (measured: p99 silence 112s inside
+// a live sub-agent, max 601s).
+app.get('/api/agents/:id/subagents', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json({ id: s.id, ...(await subagentRoster(s)) });
+  } catch (e) {
+    console.error('[subagents]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'roster failed' });
+  }
+});
+
+app.get('/api/agents/:id/subagents/:agentId', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json(await readSubagentTrace(s, req.params.agentId, traceOpts(req.query)));
+  } catch (e) {
+    if (['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(e && e.code)) {
+      return res.status(404).json({ error: e.message, code: e.code });
+    }
+    console.error('[subagent-trace]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'sub-agent trace read failed' });
+  }
 });
 
 // Block until the target reaches one of `state` — so a coordinating agent makes
@@ -2040,6 +2083,8 @@ function traceOpts(q) {
       cursor: Number(at === 'before' ? q.before : q.after) || 0,
       bytes: Number(q.bytes) || 0,
       min: Number(q.min) || 0,
+      version: q.v === '2' ? 2 : 1,
+      generation: typeof q.generation === 'string' ? q.generation.slice(0, 64) : undefined,
     },
   };
 }
@@ -2190,6 +2235,20 @@ function nextName(cli) {
   }
   return `${base}-${max + 1}`;
 }
+
+// The name a session WOULD get if it were created now, so the create panel can
+// prefill the field instead of showing an empty box. Deliberately a read from
+// the same nextName() the creation path uses: a second copy of the scheme in
+// the client drifts the first time either side changes.
+//
+// The panel treats this as a display value, not an answer — it only sends a
+// name when the operator edits it, so two creations racing on the same prefill
+// still get distinct names from the server (see Sidebar.tsx).
+app.get('/api/next-name', (req, res) => {
+  const cli = String(req.query.cli || '').trim();
+  if (!cliById(cli)) return res.status(400).json({ error: `unknown cli '${cli}'` });
+  res.json({ cli, name: nextName(cli) });
+});
 
 // Create a session and (optionally) start it on an initial prompt. Shared by
 // the UI's POST /api/sessions and the agent API's spawn — one creation path, so
