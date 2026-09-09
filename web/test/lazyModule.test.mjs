@@ -36,6 +36,8 @@ const settle = async () => { for (let i = 0; i < 20; i++) await tick(); };
 let html = `<!doctype html><html><body><script type="module" crossorigin src="${ENTRY}"></script></body></html>`;
 const imports = [];
 let importResult = () => Promise.resolve({ default: 'retried' });
+// The browser's error for a busted URL names THAT URL — the way Chromium does.
+const errorFor = (url) => new TypeError(`Failed to fetch dynamically imported module: ${url}`);
 Object.assign(lazyModuleInternals, {
   delay: () => Promise.resolve(),
   importUrl: (url) => { imports.push(url); return importResult(url); },
@@ -102,7 +104,7 @@ await check('a named chunk gets exactly one automatic retry, under a new URL', a
 await check('when the retry fails too it settles as failed, retryable, and not stale', async () => {
   fresh();
   const loader = () => Promise.reject(chromeError());
-  importResult = () => Promise.reject(chromeError());
+  importResult = (url) => Promise.reject(errorFor(url));
   readModule(loader);
   await settle();
   const st = readModule(loader);
@@ -116,7 +118,7 @@ await check('a manual retry is one more attempt, and success is kept', async () 
   fresh();
   const loader = () => Promise.reject(chromeError());
   let n = 0;
-  importResult = () => (++n < 2 ? Promise.reject(chromeError()) : Promise.resolve({ default: 'third' }));
+  importResult = (url) => (++n < 2 ? Promise.reject(errorFor(url)) : Promise.resolve({ default: 'third' }));
   readModule(loader);
   await settle();
   assert.equal(readModule(loader).kind, 'failed');

@@ -1030,7 +1030,6 @@ export default function App() {
         <LazyPanel load={loadSettingsView} what="settings" onClose={() => setSettingsOpen(false)} render={(m) => (
           <m.default
             page={settingsPage}
-            onPage={setSettingsPage}
             onClose={() => setSettingsOpen(false)}
             theme={theme}
             onToggleTheme={toggleTheme}

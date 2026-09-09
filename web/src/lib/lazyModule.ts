@@ -111,8 +111,9 @@ async function attempt<T>(loader: Loader<T>, e: Entry<T>): Promise<void> {
     const mod = e.url ? await lazyModuleInternals.importUrl(bustUrl(e.url, e.tries)) as T : await loader();
     setState(e, { kind: 'ready', module: mod });
   } catch (err) {
-    const url = failedModuleUrl(err);
-    if (url) e.url = url;
+    // Remember the chunk the FIRST failure named: a retry's error names the
+    // busted URL, and busting that again would only pile up query strings.
+    if (!e.url) e.url = failedModuleUrl(err);
     if (e.url && e.auto < MAX_AUTO_RETRIES) {
       e.auto++;
       await lazyModuleInternals.delay(RETRY_DELAY_MS);

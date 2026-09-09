@@ -118,11 +118,11 @@ function PushRow() {
 }
 
 export default function SettingsView({
-  page, onPage, onClose, theme, onToggleTheme, clis, info, onShowWelcome, demoMode, onToggleDemo,
+  page, onClose, theme, onToggleTheme, clis, info, onShowWelcome, demoMode, onToggleDemo,
   onOpenSharedTrace,
 }: {
   page: Page;
-  onPage: (p: Page) => void;
+  /** Closing from inside a page (a shared trace opened). The shell owns the tabs. */
   onClose: () => void;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;

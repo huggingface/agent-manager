@@ -89,7 +89,7 @@ await build({
       // app too: App mounts the shell at once and the page's code on demand.
       createRoot(document.getElementById('root')).render(
         <SettingsShell page="general" onPage={() => {}} onClose={() => {}}>
-          <SettingsView page="general" onPage={() => {}} onClose={() => {}}
+          <SettingsView page="general" onClose={() => {}}
             theme="light" onToggleTheme={() => {}} clis={clis} info={info}
             onShowWelcome={() => {}} demoMode={false} onToggleDemo={() => {}} />
         </SettingsShell>,
