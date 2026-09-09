@@ -22,7 +22,6 @@ await build({
       import React, { useEffect } from 'react';
       import { createRoot } from 'react-dom/client';
       import { useTraceWindows } from './src/lib/traceWindows.ts';
-      import { useReaderBatch } from './src/lib/readerBatch.ts';
 
       const calls = [];
       const tails = [];
@@ -71,21 +70,12 @@ await build({
         return <div id="head">{head ? String(head.loaded) : ''}</div>;
       }
 
-      function BatchProbe({ surfaceKey }) {
-        const batch = useReaderBatch(surfaceKey);
-        const [readyFor, setReadyFor] = React.useState('');
-        useEffect(() => { window.__readerBatch = batch; window.__markReaderReady = () => setReadyFor(batch); });
-        return <div id="follower">{readyFor === batch ? 'ready' : 'gated'}</div>;
-      }
-
       const root = createRoot(document.getElementById('root'));
       let paused = true;
-      let surfaceKey = '';
-      const render = () => root.render(<><Probe paused={paused} /><BatchProbe surfaceKey={surfaceKey} /></>);
+      const render = () => root.render(<Probe paused={paused} />);
       window.__traceHarness = {
         calls,
         setPaused(next) { paused = next; render(); },
-        setSurface(next) { surfaceKey = next; render(); },
         /** Turns the agent writes while the operator is looking at another app. */
         writeWhileAway(count) {
           pending = Array.from({ length: count }, (_, i) => (
@@ -135,23 +125,6 @@ try {
   await sleep(100);
   assert.deepEqual(await page.evaluate(() => window.__traceHarness.calls), [],
     'a paused reader performs no initial or summary request');
-
-  // This is the same activation hook App uses to gate follower panes. Merely
-  // focusing within one surface keeps it ready; hiding and returning to the
-  // same ids creates a fresh batch and gates followers again.
-  await page.evaluate(() => window.__traceHarness.setSurface('a,b'));
-  await page.waitForFunction(() => document.getElementById('follower').textContent === 'gated');
-  const firstBatch = await page.evaluate(() => window.__readerBatch);
-  await page.evaluate(() => window.__markReaderReady());
-  await page.waitForFunction(() => document.getElementById('follower').textContent === 'ready');
-  await page.evaluate(() => window.__traceHarness.setSurface('a,b'));
-  assert.equal(await page.evaluate(() => document.getElementById('follower').textContent), 'ready',
-    'rerendering or refocusing within one appearance preserves readiness');
-  await page.evaluate(() => window.__traceHarness.setSurface(''));
-  await page.evaluate(() => window.__traceHarness.setSurface('a,b'));
-  await page.waitForFunction(() => document.getElementById('follower').textContent === 'gated');
-  assert.notEqual(await page.evaluate(() => window.__readerBatch), firstBatch,
-    'returning to the same ids is a new focused-first activation');
 
   await page.evaluate(() => window.__traceHarness.setPaused(false));
   await page.waitForFunction(() => window.__traceHarness.calls.filter((c) => c.kind === 'window').length === 1);

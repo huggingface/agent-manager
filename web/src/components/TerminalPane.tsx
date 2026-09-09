@@ -189,8 +189,8 @@ if (typeof window !== 'undefined') {
 }
 
 export default function TerminalPane({
-  session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', readerEnabled,
-  readerReadyKey, onReaderReady, dragId, isMobile, groupName, onBack, onDragActive, onFocus, onRename, onClose,
+  session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal',
+  dragId, isMobile, groupName, onBack, onDragActive, onFocus, onRename, onClose,
   onShare,
 }: {
   session: Session;
@@ -202,9 +202,6 @@ export default function TerminalPane({
   active?: boolean;
   zoom?: number;
   mode?: PaneMode;          // app-wide reading mode, from the bottom bar
-  readerEnabled?: boolean;  // focused reader paints before visible followers
-  readerReadyKey?: string;  // visible batch whose first paint is being awaited
-  onReaderReady?: () => void;
   onShare?: () => void;      // reader info panel: publish this session
   dragId?: string;          // set when the pane can be rearranged (group view)
   isMobile?: boolean;       // show the on-screen control-key bar
@@ -468,6 +465,9 @@ export default function TerminalPane({
   };
 
   useEffect(() => {
+    // Reading must never attach, start or resize a PTY. The transcript and
+    // composer have their own APIs; reconnect only when showing the terminal.
+    if (reading) return;
     const term = new Terminal({
       fontFamily: "'Geist Mono', ui-monospace, 'SF Mono', Menlo, 'Cascadia Code', monospace",
       // Start at the requested zoom so attachment does not briefly create a
@@ -1007,7 +1007,7 @@ export default function TerminalPane({
       uploadImagesRef.current = () => {};
       if (imageStatusTimerRef.current) window.clearTimeout(imageStatusTimerRef.current);
     };
-  }, [session.id]);
+  }, [session.id, reading]);
 
   // Switch theme live without tearing down the terminal / connection.
   useEffect(() => {
@@ -1042,7 +1042,7 @@ export default function TerminalPane({
   // Move keyboard focus into the terminal whenever this pane becomes the active
   // one (e.g. selected from the sidebar, or newly created).
   useEffect(() => {
-    if (!active) return;
+    if (!active || reading) return;
     // A retained pane may have spent time under display:none. Reclaim and
     // remeasure only after its grid cell has layout again; hidden panes never
     // get to resize the canonical PTY.
@@ -1052,11 +1052,9 @@ export default function TerminalPane({
       focusTerm();
     }, 0);
     return () => clearTimeout(t);
-  }, [active]);
+  }, [active, reading]);
 
-  // In reader mode the terminal is covered but still mounted — and a mounted xterm
-  // with focus swallows every keystroke into the agent's TTY, invisibly. Hand
-  // focus back when the terminal is on top again.
+  // Cancel terminal-only interactions on a surface switch.
   useEffect(() => {
     // The glide too: a flick left coasting under the reader keeps moving a
     // viewport nobody can see, and no touch can catch it — the handler that
@@ -1203,10 +1201,7 @@ export default function TerminalPane({
           forbids the browser from panning anything nested inside — including
           the reader's own scroller. */}
       <div className={`term-host${reading ? ' reading' : ''}${imageDrop && !reading ? ' image-drop' : ''}`} ref={frameRef}>
-        <div className="term-fill" ref={hostRef} />
-        {/* Reader mode draws OVER the terminal rather than replacing it: xterm needs
-            layout to fit, and detaching tmux costs a repaint and can trip the
-            handoff path. The terminal stays mounted and connected underneath. */}
+        {!reading && <div className="term-fill" ref={hostRef} />}
         {reading && visible !== false && (
           // The zoom is one number for both modes: the terminal spends it on its
           // font size, the reader on --cx-base — the size every type size in the
@@ -1217,18 +1212,14 @@ export default function TerminalPane({
             style={{ '--cx-base': `${(13 * zoom) / 100}px` } as CSSProperties}
             onMouseDown={(e) => e.stopPropagation()}
           >
-            {readerEnabled === false
-              ? <div className="cxv-empty mono">reading the trace…</div>
-              : <ConversationView
-                  session={session}
-                  isMobile={isMobile}
-                  searchOpen={searchOpen}
-                  onCloseSearch={() => setSearchOpen(false)}
-                  onAttachPicker={setReaderAttach}
-                  onHead={(head) => { setReaderFacts(head); setReaderLoaded(head?.loaded); }}
-                  onReady={onReaderReady}
-                  readyKey={readerReadyKey}
-                />}
+            <ConversationView
+              session={session}
+              isMobile={isMobile}
+              searchOpen={searchOpen}
+              onCloseSearch={() => setSearchOpen(false)}
+              onAttachPicker={setReaderAttach}
+              onHead={(head) => { setReaderFacts(head); setReaderLoaded(head?.loaded); }}
+            />
           </div>
         )}
       </div>
@@ -1316,11 +1307,7 @@ export default function TerminalPane({
           <button className="tp-x" onClick={() => { setPasteOpen(false); focusTerm(); }}>cancel</button>
         </div>
       )}
-      {/* The terminal's own covers — restoring, booting, exited — belong to the
-          terminal. Reader mode is a complete surface over it, reading a file
-          that does not care whether the PTY is reconnecting, and these paint
-          ABOVE the overlay (z-index 4 vs 3): a reconnect turned the reader
-          into a terminal screen with a reader toolbar on top. */}
+      {/* Terminal connection states belong only to the terminal surface. */}
       {!reading && booting && preview && conn !== 'exited' && (
         <div className="term-preview mono" aria-label="Restoring terminal">
           <pre style={{ fontSize: `${Math.round((13 * zoom) / 100)}px` }}>{preview.rows.join('\n')}</pre>
