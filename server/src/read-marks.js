@@ -26,10 +26,15 @@ import { DATA_DIR } from './config.js';
 const FILE = path.join(DATA_DIR, 'read-marks.json');
 let state = { initialized: false, marks: {} };
 
-function persist() {
+// Write first, adopt second. The in-memory copy is what /api/meta answers from,
+// so promoting it before the file lands would publish a reply as read that a
+// restart brings back unread — and the caller would have been told it failed.
+// Nothing here mutates `state` unless the bytes are on disk.
+function commit(next) {
   const tmp = `${FILE}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
+  fs.writeFileSync(tmp, JSON.stringify(next, null, 2));
   fs.renameSync(tmp, FILE);
+  state = next;
 }
 
 export function init() {
@@ -81,16 +86,24 @@ export function acknowledge(id, mark, latest) {
   if (mark.src !== latest.src) return 'stale';
   if (mark.seq > latest.seq) return 'future';
   if (mark.seq === latest.seq && mark.hash !== latest.hash) return 'mismatch';
+  // Does this mark name exactly what is newest right now? That claim is always
+  // recordable, even when the stored cursor carries a HIGHER number: a rotated
+  // or replaced transcript restarts its sequence, and refusing the new, lower
+  // one as "stale" would leave real new output permanently unacknowledgeable.
+  const exact = mark.seq === latest.seq && mark.hash === latest.hash;
 
   const cur = state.marks[id];
-  if (cur && cur.src === mark.src) {
+  if (cur && cur.src === mark.src && !exact) {
     // Monotonic within a generation: a late or reordered request cannot undo
     // reading the operator has already done.
     if (cur.seq > mark.seq) return 'stale';
-    if (cur.seq === mark.seq && cur.hash === mark.hash) return 'ok'; // already there
   }
-  state.marks[id] = { src: mark.src, seq: mark.seq, hash: mark.hash, at: new Date().toISOString() };
-  persist();
+  if (cur && cur.src === mark.src && cur.seq === mark.seq && cur.hash === mark.hash) {
+    // Already recorded AND already on disk — `state` is only ever adopted from a
+    // completed write, so this shortcut cannot stand in for one that failed.
+    return 'ok';
+  }
+  commit({ ...state, marks: { ...state.marks, [id]: { src: mark.src, seq: mark.seq, hash: mark.hash, at: new Date().toISOString() } } });
   return 'ok';
 }
 
@@ -108,21 +121,26 @@ export function acknowledge(id, mark, latest) {
  */
 export function baseline(latestById) {
   if (state.initialized) return false;
+  const marks = { ...state.marks }, at = new Date().toISOString();
   for (const [id, latest] of latestById) {
     if (!latest || !latest.src || !latest.seq) continue;
-    state.marks[id] = { src: latest.src, seq: latest.seq, hash: latest.hash, at: new Date().toISOString() };
+    marks[id] = { src: latest.src, seq: latest.seq, hash: latest.hash, at };
   }
-  state.initialized = true;
-  persist();
+  // Same rule as acknowledge: the flag and the marks become true together, and
+  // only once the file holds them. A failed write leaves the baseline untaken,
+  // so the next poll retries it rather than starting to track from a moment
+  // nothing recorded.
+  commit({ ...state, initialized: true, marks });
   return true;
 }
 
 /** Drop marks for sessions that no longer exist. Renaming or moving a session
  *  keeps its id, and so keeps its mark. */
 export function retain(validIds) {
+  const marks = {};
   let changed = false;
-  for (const id of Object.keys(state.marks)) {
-    if (!validIds.has(id)) { delete state.marks[id]; changed = true; }
+  for (const [id, mark] of Object.entries(state.marks)) {
+    if (validIds.has(id)) marks[id] = mark; else changed = true;
   }
-  if (changed) persist();
+  if (changed) commit({ ...state, marks });
 }

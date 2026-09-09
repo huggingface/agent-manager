@@ -25,10 +25,14 @@ export function useSeenLatest({ version, eligible, onSeen }: {
   version: (OutputVersion & { id: string }) | null;
   /** Caller's guard: is this element really showing that version, in full? */
   eligible: boolean;
+  /** Resolves false when nothing was durably stored, which schedules a retry. */
   onSeen: (marks: (OutputVersion & { id: string })[]) => Promise<boolean> | void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const done = useRef<string>('');
+  // One attempt at a time for a given version, so a burst of intersection
+  // callbacks is one request rather than a queue of identical ones.
+  const inFlight = useRef<string>('');
   const cb = useRef(onSeen);
   cb.current = onSeen;
 
@@ -39,12 +43,21 @@ export function useSeenLatest({ version, eligible, onSeen }: {
 
     let cancelled = false;
     const fire = () => {
-      if (cancelled || done.current === key) return;
+      if (cancelled || done.current === key || inFlight.current === key) return;
       // A background tab renders and reports intersection perfectly well. The
       // operator is not looking at it.
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      done.current = key;
-      void cb.current([version]);
+      // Claimed, not finished. Marking it done here would retire the version on
+      // a request that never stored anything: the reply stays unread on the
+      // server and this observer refuses to try again for as long as it lives.
+      // It becomes done only when the write is confirmed.
+      inFlight.current = key;
+      Promise.resolve(cb.current([version])).then((ok) => {
+        inFlight.current = '';
+        // `undefined` means the caller does not report an outcome; treat that as
+        // done rather than retrying forever against a caller that cannot answer.
+        if (ok !== false) done.current = key;
+      }).catch(() => { inFlight.current = ''; });
     };
 
     // No IntersectionObserver (jsdom, very old browsers): do nothing rather
@@ -56,6 +69,9 @@ export function useSeenLatest({ version, eligible, onSeen }: {
     const io = new IntersectionObserver((entries) => {
       for (const e of entries) if (e.isIntersecting) fire();
     }, { threshold: 0.15 });
+    // Scrolling away and back is a fresh chance for a version whose write
+    // failed: the observer fires again on re-entry, and `done` was never set.
+
     io.observe(el);
     // Coming back to the tab with the reply already on screen counts; the
     // observer will not re-fire on its own for an element that never moved.

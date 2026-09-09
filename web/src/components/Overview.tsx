@@ -6,7 +6,7 @@ import type { Cli, OverviewChip, OverviewFilter, OverviewSort, Session, SessionS
 import { chipBuckets, isPassive, isRemote, STATE_LABEL, REMOTE_STATE_LABEL } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import { rankSessions, sortLabel } from '../lib/overviewSort';
-import { isUnread, markFor } from '../lib/unread';
+import { answerMatches, isUnread, markFor } from '../lib/unread';
 import { useSeenLatest } from './useSeenLatest';
 import { matchesOverviewSearch } from '../lib/overviewSearch';
 import { hiddenSessionIds } from '../lib/overviewHidden';
@@ -316,7 +316,24 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose, onSe
   // The version acknowledged is `s.output`, which came from the same digest as
   // the text above it — so the identity always describes the words on screen
   // rather than whatever the server happens to have parsed since.
-  const canSee = !!(windowed && onSeen && !entry && showAnswer && !d?.outClipped && s.output);
+  // Two branches can draw the reply, and each has its own way of not being the
+  // newest one in full:
+  //
+  //   transcript branch — the reader-grade view. It shows the whole answer, so
+  //     the card's clip limit does not apply; it must not be paged back
+  //     (`back > 0` prepends earlier exchanges but `latestX` stays newest, so
+  //     what matters is that the rendered answer IS the version we would claim).
+  //   digest branch     — a summary. It must be the live latest (`!entry`), it
+  //     must actually be rendered, and it must not be the truncated copy of a
+  //     reply longer than the card can hold.
+  const transcriptShown = !!latestX;
+  const answerTexts = transcriptShown
+    ? (latestX.answer || []).flatMap((t) => t.blocks || [])
+      .filter((b) => b.type === 'text').map((b) => (b as { text: string }).text || '')
+    : [];
+  const canSee = !!(windowed && onSeen && s.output && (transcriptShown
+    ? answerMatches(answerTexts, s.output.hash)
+    : (!entry && showAnswer && !d?.outClipped)));
   const seenRef = useSeenLatest({
     version: canSee && s.output ? { id: s.id, ...s.output } : null,
     eligible: canSee,
@@ -362,6 +379,11 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose, onSe
                 open={openWork}
                 onToggle={() => setOpenWork((o) => !o)}
                 running={running && !justSent}
+                // The expanded conversation acknowledges from whichever branch
+                // is actually drawing the reply. Once a real transcript loads,
+                // this is it — the digest fallback below is no longer on screen,
+                // and an observer left only there would stop clearing anything.
+                answerRef={windowed ? (node) => { seenRef.current = node; } : undefined}
               />
             </div>
             {/* Optimistic echo: the digest round-trip can take seconds, and a
@@ -702,8 +724,14 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
     // flight. Its unread state is untouched, so it arrives here the moment it
     // stops. Carving rather than copying is what keeps a session in exactly one
     // block — the sort's own order survives inside each.
-    const unread = [...ranked.dated, ...ranked.undated].filter((r) => isUnread(r.m));
-    const keep = (rows: typeof ranked.dated) => rows.filter((r) => !isUnread(r.m));
+    // `atWork`, not the ranking pin: when the chip has already narrowed the feed
+    // to working agents the pin is deliberately switched off (it would empty the
+    // sorted block), and reading that flag here would sweep every running agent
+    // into Unread — where Mark all read would then clear them, against both the
+    // section's rule and the button's own promise.
+    const stillWorking = (r: { m: MetaSession }) => atWork(r.m);
+    const unread = [...ranked.dated, ...ranked.undated].filter((r) => !stillWorking(r) && isUnread(r.m));
+    const keep = (rows: typeof ranked.dated) => rows.filter((r) => stillWorking(r) || !isUnread(r.m));
     return { running: ranked.running, dated: keep(ranked.dated), undated: keep(ranked.undated), unread };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sorted, sort, tree.order, sessById, groupById, meta, metaReady, chip, archived, showArchived, hiddenIds, showHidden, groupNameOf, query]);

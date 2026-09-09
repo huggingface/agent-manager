@@ -16,7 +16,9 @@ import BackupBanner from './components/BackupBanner';
 import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
 import * as api from './api';
-import { applyAck, furtherMark, type ReadMark } from './lib/unread';
+import { applyAck, furtherMark, retireLocal, type ReadMark } from './lib/unread';
+// Matches the server's per-request cap; the client splits rather than being cut.
+const ACK_CHUNK = 100;
 import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { hiddenSessionIds } from './lib/overviewHidden';
@@ -482,13 +484,21 @@ export default function App() {
     // Bounded: this only exists to stop repeat sends, so old entries are not
     // worth keeping once it has grown past a fleet's worth of replies.
     if (ackSent.current.size > 500) ackSent.current = new Set(fresh.map((m) => `${m.id}:${m.src}:${m.seq}:${m.hash}`));
-    return api.markRead(fresh)
-      .then((r) => {
-        setReadLocal((prev) => applyAck(prev, fresh, r.results));
+    // Sent in bounded chunks rather than one request the server would have to
+    // cap: a section larger than the cap must be acknowledged in full or report
+    // which targets were left, never silently truncated to the first N.
+    const chunks: (api.OutputVersion & { id: string })[][] = [];
+    for (let i = 0; i < fresh.length; i += ACK_CHUNK) chunks.push(fresh.slice(i, i + ACK_CHUNK));
+    return Promise.all(chunks.map((c) => api.markRead(c).then((r) => r.results)))
+      .then((all) => {
+        const results: Record<string, string> = Object.assign({}, ...all);
+        setReadLocal((prev) => applyAck(prev, fresh, results));
         // A rejected mark can be retried later against whatever is newest then;
         // forgetting it here is what makes that possible.
-        for (const m of fresh) if (r.results[m.id] !== 'ok') ackSent.current.delete(`${m.id}:${m.src}:${m.seq}:${m.hash}`);
-        return Object.values(r.results).every((v) => v === 'ok');
+        for (const m of fresh) if (results[m.id] !== 'ok') ackSent.current.delete(`${m.id}:${m.src}:${m.seq}:${m.hash}`);
+        // Every mark must come back named. A session missing from the answer is
+        // not a success, and reporting it as one is how a target gets dropped.
+        return fresh.every((m) => results[m.id] === 'ok');
       })
       .catch(() => {
         // Nothing was written, so nothing is read. Drop the coalescing entries
@@ -501,11 +511,18 @@ export default function App() {
   const metaRead = useMemo(() => {
     const out: Record<string, api.MetaSession> = {};
     for (const [id, m] of Object.entries(meta)) {
-      const merged = furtherMark(m.read, readLocal[id]);
+      const merged = furtherMark(m.read, readLocal[id], m.output);
       out[id] = merged === m.read ? m : { ...m, read: merged };
     }
     return out;
   }, [meta, readLocal]);
+  // Once the server's own copy has caught up, the local acknowledgement has
+  // nothing left to add — and a local mark for a generation that is gone would
+  // otherwise keep overriding the truth forever. Retiring them is what lets
+  // polling converge across devices.
+  useEffect(() => {
+    setReadLocal((prev) => retireLocal(prev, Object.values(meta)));
+  }, [meta]);
 
   // Archive threshold from the operator config; refresh when settings closes
   // (that's where it's edited).
@@ -983,7 +1000,7 @@ export default function App() {
                 // and rendering is not reading.
                 seen={shown && deckVisible && s.id === focusedId ? {
                   version: metaRead[s.id]?.output ? { id: s.id, ...metaRead[s.id].output! } : null,
-                  clip: metaRead[s.id]?.digest?.lastAssistantText || '',
+                  
                   onSeen: markSeen,
                 } : undefined}
                 dragId={shown && canDrag ? `p:${s.id}` : undefined}

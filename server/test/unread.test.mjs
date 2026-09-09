@@ -51,11 +51,36 @@ console.log('\nwhich reply is this?');
   check('a second reply advances the sequence', digestOf(two).outSeq === 2, `seq ${digestOf(two).outSeq}`);
   check('and is a different identity', idOf(one) !== idOf(two));
 
-  // The mirror case: codex writes agent_message and task_complete with the same
-  // words; Claude repeats a block. Same text must not invent a reply.
-  const mirrored = one + assistant('First answer.', '2026-01-01T00:00:05Z', 'm1b');
-  check('the same words again is NOT a new reply', digestOf(mirrored).outSeq === 1, `seq ${digestOf(mirrored).outSeq}`);
+  // A real Claude mirror repeats the SAME message id — a re-emitted record, or
+  // a second block of one message. That must not invent a reply.
+  const mirrored = one + assistant('First answer.', '2026-01-01T00:00:05Z', 'm1');
+  check('the same message id again is NOT a new reply', digestOf(mirrored).outSeq === 1, `seq ${digestOf(mirrored).outSeq}`);
   check('and not a new identity either', idOf(mirrored) === idOf(one));
+
+  // A DIFFERENT message that happens to say the same words is a different
+  // reply, and the operator who read the first has not read the second. Claude
+  // gives us the message id, so this is a fact rather than a guess.
+  const twice = assistant('Done.', '2026-01-01T00:00:00Z', 'msg-1')
+    + toolUse('2026-01-01T00:00:10Z', 'tu9')
+    + assistant('Done.', '2026-01-01T00:00:20Z', 'msg-3');
+  check('two distinct messages with identical text are two replies',
+    digestOf(twice).outSeq === 2, `seq ${digestOf(twice).outSeq}`);
+  check('so reading the first leaves the second unread',
+    idOf(twice) !== idOf(assistant('Done.', '2026-01-01T00:00:00Z', 'msg-1')));
+
+  // A second text block of ONE message is more of the same reply: same
+  // sequence, new content to be seen.
+  const twoBlocks = `${JSON.stringify({
+    type: 'assistant', timestamp: '2026-01-01T00:00:00Z', uuid: 'mb',
+    message: { id: 'mb', content: [{ type: 'text', text: 'part one' }, { type: 'text', text: 'part two' }] },
+  })}\n`;
+  const mb = digestOf(twoBlocks);
+  check('two blocks of one message are one reply', mb.outSeq === 1, `seq ${mb.outSeq}`);
+  check('but the later block changes the version to be seen',
+    mb.outHash !== digestOf(`${JSON.stringify({
+      type: 'assistant', timestamp: '2026-01-01T00:00:00Z', uuid: 'mb',
+      message: { id: 'mb', content: [{ type: 'text', text: 'part one' }] },
+    })}\n`).outHash);
 
   // Two genuinely separate replies that happen to say the same thing.
   const sameText = one + userMsg('again please', '2026-01-01T00:00:30Z') + assistant('First answer.', '2026-01-01T00:01:00Z', 'm3');
@@ -127,15 +152,21 @@ const say = (name, text) => fetch(`${API}/api/remote/${name}/messages?from=agent
   method: 'POST', headers: { 'content-type': 'text/plain' }, body: text,
 });
 const metaFor = async (id) => (await api('/api/meta')).body.sessions.find((s) => s.id === id);
+// The same rule the Overview applies, kept deliberately in one line so it
+// cannot drift into a friendlier version of itself: read means the mark names
+// EXACTLY the newest output. web/src/lib/unread.ts is the implementation the
+// app uses and web/test/unread.test.mjs pins its cases; this mirrors it so the
+// server suite is asserting what the operator would actually see.
 const unread = (s) => {
   const o = s?.output; const r = s?.read;
   if (!o || !o.seq) return false;
-  if (!r) return true;
-  return r.src !== o.src || r.seq < o.seq || (r.seq === o.seq && r.hash !== o.hash);
+  return !r || r.src !== o.src || r.seq !== o.seq || r.hash !== o.hash;
 };
 
 try {
   await waitUp();
+
+  const ack = (marks) => api('/api/read', { method: 'POST', body: JSON.stringify({ marks }) });
 
   console.log('\nthe rollout baseline: today is read, tomorrow is not');
   const a = await mkRemote('alpha');
@@ -151,9 +182,16 @@ try {
   await say('beta', 'Its very first answer.');
   check('so its FIRST reply is unread, not presumed seen', unread(await metaFor(b.id)));
 
+  console.log('\nan oversized batch is refused, not silently trimmed');
+  {
+    const big = Array.from({ length: 201 }, (_, i) => ({ id: `x${i}`, src: 's', seq: 1, hash: 'h' }));
+    const r = await ack(big);
+    check('over the cap is a 413, not a partial 200', r.status === 413, `status ${r.status}`);
+    check('and nothing is reported as done', !r.body?.results);
+  }
+
   console.log('\nacknowledging');
   const cur = await metaFor(a.id);
-  const ack = (marks) => api('/api/read', { method: 'POST', body: JSON.stringify({ marks }) });
   const okMark = { id: a.id, ...cur.output };
   check('acknowledging what is on screen is recorded', (await ack([okMark])).body.results[a.id] === 'ok');
   check('and the session is read', !unread(await metaFor(a.id)));
@@ -203,6 +241,57 @@ try {
   check('a reply that arrived mid-batch is NOT covered by it',
     (await ack(marks)).body.results[a.id] === 'ok' && unread(await metaFor(a.id)));
 
+  console.log('\na write that fails is not published as read');
+  {
+    // The reviewer's reproduction: make the marker file unwritable by putting a
+    // directory where its temp file goes. The acknowledgement must fail AND the
+    // reply must still read as unread — publishing it from memory while the
+    // bytes never landed is the failure this whole feature exists to avoid.
+    const c = await mkRemote('gamma');
+    await say('gamma', 'first');
+    await metaFor(c.id);                 // baseline covers it
+    await say('gamma', 'second, unread');
+    const before = await metaFor(c.id);
+    check('unread to begin with', unread(before));
+    const blocker = path.join(DATA_DIR, 'read-marks.json.tmp');
+    fs.mkdirSync(blocker, { recursive: true });
+    let failed = false;
+    try {
+      const r = await ack([{ id: c.id, ...before.output }]);
+      failed = r.status >= 400 || r.body?.results?.[c.id] !== 'ok';
+    } catch { failed = true; }
+    check('the acknowledgement does not report success', failed);
+    check('and the reply is STILL unread', unread(await metaFor(c.id)),
+      'a failed write must not be published from memory');
+    fs.rmSync(blocker, { recursive: true, force: true });
+    // The retry must actually write, not take an "already there" shortcut off
+    // the in-memory copy the failed attempt left behind.
+    const again = await metaFor(c.id);
+    check('the retry is accepted', (await ack([{ id: c.id, ...again.output }])).body.results[c.id] === 'ok');
+    check('and it is now read', !unread(await metaFor(c.id)));
+    const onDisk = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'read-marks.json'), 'utf8'));
+    check('the mark reached the file, not just memory', !!onDisk.marks[c.id],
+      JSON.stringify(onDisk.marks[c.id] || null));
+  }
+
+  console.log('\na replaced transcript does not inherit the old cursor');
+  {
+    // A rotated transcript restarts its sequence. The pane record cannot always
+    // tell one run from the next — OpenClaw merges several session files into
+    // one pane — so a mark numerically AHEAD of the current output must not be
+    // read as "already seen".
+    const d = await mkRemote('delta');
+    await say('delta', 'one'); await say('delta', 'two'); await say('delta', 'three');
+    const cur = await metaFor(d.id);
+    await ack([{ id: d.id, ...cur.output }]);
+    check('read after acknowledging', !unread(await metaFor(d.id)));
+    // Simulate the replacement: the same generation key, a LOWER sequence.
+    const lower = { ...cur.output, seq: 1, hash: 'freshstart' };
+    check('a lower sequence under the same generation reads as unread',
+      unread({ output: lower, read: (await metaFor(d.id)).read }),
+      'a cursor from a transcript that is gone must not cover new output');
+  }
+
   console.log('\nit survives a restart');
   const beforeRestart = (await metaFor(b.id)).read;
   srv.kill(); await sleep(700);
@@ -220,6 +309,45 @@ try {
   await api(`/api/sessions/${b.id}`, { method: 'PUT', body: JSON.stringify({ name: 'beta-renamed' }) });
   const renamed = await metaFor(b.id);
   check('a renamed session keeps its mark', !!renamed.read && !unread(renamed));
+  // ---- a fresh install whose fleet has not spoken yet ----
+  //
+  // Its own store, because the point is the FIRST pass ever taken. Waiting for
+  // some session to have output before baselining looked safer and was the
+  // opposite: on an empty fleet the baseline sat untaken until the first reply
+  // arrived, and then took that reply as history already read.
+  console.log('\na fresh install does not baseline away its first reply');
+  {
+    const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'unread-fresh-'));
+    const port = PORT + 1;
+    const child = spawn('node', ['src/index.js'], {
+      env: { ...BASE_ENV, PORT: String(port), DATA_DIR: fresh, AM_BASHRC: '/nonexistent', AM_ALLOW_MISSING_ORIGIN: '1', CLAUDE_CONFIG_DIR: CLAUDE_DIR },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const base = `http://localhost:${port}`;
+    const call = async (route, init = {}) => {
+      const sep = route.includes('?') ? '&' : '?';
+      const r = await fetch(`${base}${route}${sep}from=operator`, { headers: { 'content-type': 'application/json' }, ...init });
+      return { status: r.status, body: await r.json().catch(() => null) };
+    };
+    try {
+      for (let i = 0; i < 120; i++) {
+        if (await fetch(`${base}/api/health`).then((r) => r.ok).catch(() => false)) break;
+        await sleep(250);
+      }
+      const only = (await call('/api/sessions', { method: 'POST', body: JSON.stringify({ cli: 'remote', name: 'solo', path: 'solo' }) })).body;
+      const seen = (await call('/api/meta')).body.sessions.find((x) => x.id === only.id);
+      check('the first poll finds nothing to read, and records nothing', !seen.output && !seen.read);
+      await fetch(`${base}/api/remote/solo/messages?from=agent`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'THE VERY FIRST REPLY' });
+      const after = (await call('/api/meta')).body.sessions.find((x) => x.id === only.id);
+      check('so its very first reply is UNREAD, not baselined away', unread(after),
+        JSON.stringify({ output: after.output, read: after.read }));
+      check('and the baseline was taken on that first pass, once',
+        JSON.parse(fs.readFileSync(path.join(fresh, 'read-marks.json'), 'utf8')).initialized === true);
+    } finally {
+      child.kill();
+      try { fs.rmSync(fresh, { recursive: true, force: true }); } catch { /* tmp */ }
+    }
+  }
 } catch (e) {
   check(`suite threw: ${e && e.message}`, false, log.slice(-700));
 } finally {

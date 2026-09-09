@@ -18,7 +18,8 @@ await build({
   entryPoints: [path.join(HERE, '../src/lib/unread.ts')],
   outfile: out, format: 'esm', bundle: true, logLevel: 'error',
 });
-const { isUnread, sectionOf, markFor, furtherMark, applyAck } = await import(pathToFileURL(out).href);
+const { isUnread, sectionOf, markFor, furtherMark, retireLocal, applyAck, outputHash, answerMatches } = await import(pathToFileURL(out).href);
+const { outputHash: serverHash } = await import(pathToFileURL(path.join(HERE, '../../server/src/output-id.js')).href);
 
 let failed = 0;
 const check = (what, fn) => {
@@ -57,9 +58,13 @@ check('a mark from a replaced transcript does not cover the new one', () => {
   // swallow the new file's first nine replies.
   assert.equal(isUnread(S(v(1, 'h1', 'gen2'), v(9, 'h9', 'gen1'))), true);
 });
-check('a mark that has read further than the newest output is not unread', () => {
-  // Can only happen from a stale poll; it must not flicker the card.
-  assert.equal(isUnread(S(v(3), v(5))), false);
+check('a mark that has read FURTHER than the newest output is unread', () => {
+  // Not the impossibility it looks like: a rotated or replaced transcript
+  // restarts its sequence at 1, and a harness whose runs cannot be told apart
+  // from the pane record alone presents that new reply under the same key.
+  // Reading "seq 5 >= seq 1, so seen it" hides genuinely new output behind a
+  // cursor from a transcript that no longer exists.
+  assert.equal(isUnread(S(v(1, 'freshstart'), v(5))), true);
 });
 
 console.log('\nwhich block a session belongs in');
@@ -103,12 +108,76 @@ check('a poll that overtook an acknowledgement does not flash the card', () => {
   assert.deepEqual(furtherMark({ src: 'g', seq: 2, hash: 'b' }, { src: 'g', seq: 5, hash: 'e' }), { src: 'g', seq: 5, hash: 'e' });
   assert.deepEqual(furtherMark({ src: 'g', seq: 5, hash: 'e' }, { src: 'g', seq: 2, hash: 'b' }), { src: 'g', seq: 5, hash: 'e' });
 });
-check('a mark for a new generation replaces one for the old, whatever its number', () => {
-  assert.deepEqual(furtherMark({ src: 'old', seq: 99, hash: 'x' }, { src: 'new', seq: 1, hash: 'y' }), { src: 'new', seq: 1, hash: 'y' });
+check('the generation in front of us decides, not which argument came second', () => {
+  // This used to return whichever mark was passed second, on the assumption it
+  // was the newly learned one. App passes its RETAINED local mark there, so a
+  // stale local generation was overriding fresh server state forever.
+  const oldMark = { src: 'old', seq: 99, hash: 'x' };
+  const newMark = { src: 'new', seq: 1, hash: 'y' };
+  assert.deepEqual(furtherMark(oldMark, newMark, { src: 'new', seq: 1, hash: 'y' }), newMark);
+  assert.deepEqual(furtherMark(newMark, oldMark, { src: 'new', seq: 1, hash: 'y' }), newMark);
 });
 check('the same version twice is the same mark', () => {
   const a = { src: 'g', seq: 3, hash: 'h' };
   assert.equal(furtherMark(a, { src: 'g', seq: 3, hash: 'h' }), a);
+});
+
+console.log('\nthe two copies of the read state, and which one wins');
+check('a local mark from a dead generation cannot shout down the server\'s current one', () => {
+  // Tab A acknowledged g1; the transcript rolled to g2; tab B read g2. Every
+  // poll in A must converge on g2, not keep restoring its own stale g1.
+  const server = { src: 'g2', seq: 1, hash: 'b' };
+  const local = { src: 'g1', seq: 9, hash: 'a' };
+  assert.deepEqual(furtherMark(server, local, { src: 'g2', seq: 1, hash: 'b' }), server);
+});
+check('a local mark for the CURRENT generation still wins over an older server copy', () => {
+  const server = { src: 'g2', seq: 1, hash: 'a' };
+  const local = { src: 'g2', seq: 3, hash: 'c' };
+  assert.deepEqual(furtherMark(server, local, { src: 'g2', seq: 3, hash: 'c' }), local);
+});
+check('with no output to arbitrate, the server is the authority', () => {
+  assert.deepEqual(furtherMark({ src: 'g2', seq: 1, hash: 'b' }, { src: 'g1', seq: 9, hash: 'a' }, null),
+    { src: 'g2', seq: 1, hash: 'b' });
+});
+check('a local mark is retired once the server has caught up', () => {
+  const local = { s1: { src: 'g', seq: 3, hash: 'c' } };
+  const after = retireLocal(local, [{ id: 's1', output: v(3, 'c'), read: { src: 'g', seq: 3, hash: 'c' } }]);
+  assert.deepEqual(after, {});
+});
+check('…and when its generation is gone, so polling can converge', () => {
+  const local = { s1: { src: 'g1', seq: 9, hash: 'a' } };
+  assert.deepEqual(retireLocal(local, [{ id: 's1', output: v(1, 'b', 'g2'), read: null }]), {});
+});
+check('but one the server has not seen yet is kept', () => {
+  const local = { s1: { src: 'gen1', seq: 3, hash: 'h3' } };
+  assert.equal(retireLocal(local, [{ id: 's1', output: v(3), read: null }]), local,
+    'same object, so holding it costs no re-render');
+});
+
+console.log('\nnaming the reply that was actually rendered');
+check('the browser hash agrees with the server\'s, byte for byte', () => {
+  for (const t of ['', 'Done.', 'a'.repeat(500), 'unicode ✓ ⠋ é', '# Heading\n\nbody\n', JSON.stringify({ a: 1 })]) {
+    assert.equal(outputHash(t), serverHash(t), `diverged on ${JSON.stringify(t.slice(0, 20))}`);
+  }
+});
+check('a rendered answer matching the version is accepted', () => {
+  assert.equal(answerMatches(['the whole reply'], serverHash('the whole reply')), true);
+});
+check('two replies sharing a long prefix are NOT confused', () => {
+  // The bug this replaced: a 279-character prefix comparison called these the
+  // same reply, so the Reader displaying A acknowledged B.
+  const a = `${'x'.repeat(400)} TAIL A`;
+  const b = `${'x'.repeat(400)} TAIL B`;
+  assert.equal(answerMatches([a], serverHash(b)), false, 'displaying A must not acknowledge B');
+  assert.equal(answerMatches([b], serverHash(b)), true);
+});
+check('a multi-block answer matches on its last block or its join', () => {
+  assert.equal(answerMatches(['one', 'two'], serverHash('two')), true);
+  assert.equal(answerMatches(['one', 'two'], serverHash('one\ntwo')), true);
+});
+check('nothing rendered matches nothing', () => {
+  assert.equal(answerMatches([], serverHash('anything')), false);
+  assert.equal(answerMatches(['x'], ''), false);
 });
 
 console.log('\nthe race the whole design exists for');
@@ -119,7 +188,7 @@ check('B lands while the acknowledgement for A is in flight — B stays unread',
   const sent = [markFor(s)];
   s = S(v(2, 'B'), null);                       // B arrives
   const local = applyAck({}, sent, { s1: 'ok' }); // A's acknowledgement lands
-  s = { ...s, read: furtherMark(s.read, local.s1) };
+  s = { ...s, read: furtherMark(s.read, local.s1, s.output) };
   assert.equal(isUnread(s), true, 'B has not been shown to anyone');
   assert.equal(s.read.seq, 1, 'and A is correctly recorded as read');
 });

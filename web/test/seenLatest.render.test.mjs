@@ -29,12 +29,17 @@ import { useSeenLatest } from ${JSON.stringify(path.join(HERE, '../src/component
 
 const version = { id: 's1', src: 'gen1', seq: 3, hash: 'h3' };
 (window as any).acks = [];
+// Set by a test to make the acknowledgement report a failed write.
+(window as any).failNext = false;
 
 function Harness({ eligible }: { eligible: boolean }) {
   const ref = useSeenLatest({
     version,
     eligible,
-    onSeen: (marks) => { (window as any).acks.push(marks.map((m) => m.hash)); },
+    onSeen: (marks) => {
+      (window as any).acks.push(marks.map((m) => m.hash));
+      return Promise.resolve(!(window as any).failNext);
+    },
   });
   return h('div', null,
     h('div', { style: { height: '2000px' }, id: 'filler' }, 'earlier history'),
@@ -135,6 +140,37 @@ await page.waitForTimeout(200);
   check('returning to the tab with it on screen does acknowledge', () => assert.deepEqual(got, ['h3']));
 }
 
+console.log('\na write that failed is tried again');
+await load();
+await page.evaluate(() => { window.failNext = true; });
+await page.evaluate(() => document.getElementById('answer').scrollIntoView());
+await page.waitForTimeout(250);
+{
+  const got = await acks();
+  check('the first attempt happens', () => assert.deepEqual(got, ['h3']));
+}
+// Scroll away and back, the way an operator reading a long conversation does.
+await page.evaluate(() => window.scrollTo(0, 0));
+await page.waitForTimeout(150);
+await page.evaluate(() => { window.failNext = false; });
+await page.evaluate(() => document.getElementById('answer').scrollIntoView());
+await page.waitForTimeout(250);
+{
+  const got = await acks();
+  check('a version whose write failed is attempted again, not written off', () => {
+    assert.equal(got.length, 2, `attempts: ${JSON.stringify(got)}`);
+  });
+}
+// Now that one succeeded, it must stop.
+await page.evaluate(() => window.scrollTo(0, 0));
+await page.waitForTimeout(150);
+await page.evaluate(() => document.getElementById('answer').scrollIntoView());
+await page.waitForTimeout(250);
+{
+  const got = await acks();
+  check('and once it succeeds it stops being retried', () => assert.equal(got.length, 2));
+}
+
 console.log('\nthe caller can veto');
 await load(false); // eligible: false — e.g. paged back to an older turn
 await page.evaluate(() => document.getElementById('answer').scrollIntoView());
@@ -142,6 +178,43 @@ await page.waitForTimeout(200);
 {
   const got = await acks();
   check('a visible answer the caller says is not the latest is not acknowledged', () => assert.deepEqual(got, []));
+}
+
+// ---- the wiring, not just the hook ----
+//
+// The hook is only as good as what it is pointed at. This mounts the real
+// ExchangeView with a long prompt and its answer far below, wires the real hook
+// to the real `answerRef`, and checks that seeing the PROMPT is not seeing the
+// reply. Watching the exchange wrapper instead would pass every assertion above
+// and still clear the mark from a viewport showing none of the answer.
+{
+  const out2 = path.join(dir, 'wiring.js');
+  await build({
+    entryPoints: [path.join(HERE, 'fixtures/seenWiring.tsx')], outfile: out2, bundle: true, format: 'iife', logLevel: 'error', jsx: 'automatic',
+    nodePaths: [path.join(HERE, '../node_modules')],
+    loader: { '.css': 'empty' },
+  });
+  await page.setContent('<body style="margin:0"><div id="root"></div></body>');
+  await page.addScriptTag({ content: fs.readFileSync(out2, 'utf8') });
+  await page.evaluate(() => window.mountWired());
+  await page.waitForTimeout(250);
+  const geom = await page.evaluate(() => {
+    const a = document.querySelector('.cx-answer');
+    return a ? { top: Math.round(a.getBoundingClientRect().top), viewport: window.innerHeight, acks: window.acks.flat() } : null;
+  });
+  check('the observer is on the answer, and the answer really is below the fold', () => {
+    assert.ok(geom, 'ExchangeView rendered no .cx-answer');
+    assert.ok(geom.top > geom.viewport, `answer at y=${geom.top}, viewport ${geom.viewport}`);
+  });
+  check('a visible prompt does NOT acknowledge the answer below it', () => {
+    assert.deepEqual(geom.acks, []);
+  });
+  await page.evaluate(() => document.querySelector('.cx-answer').scrollIntoView());
+  await page.waitForTimeout(250);
+  {
+    const got = await page.evaluate(() => window.acks.flat());
+    check('scrolling to the answer itself does acknowledge it', () => assert.deepEqual(got, ['h1']));
+  }
 }
 
 await browser.close();

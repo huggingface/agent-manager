@@ -335,7 +335,7 @@ const outputOf = (session, digest) => {
 // between it and the last one. Not something a client should see or store.
 const stripInternal = (digest) => {
   if (!digest) return digest;
-  const { outFresh, ...rest } = digest;
+  const { outFresh, outKey, ...rest } = digest;
   return rest;
 };
 
@@ -371,16 +371,20 @@ app.get('/api/meta', async (_req, res) => {
     });
   // The one-time rollout baseline. Taken from the versions actually observed in
   // this pass, not a timestamp, so a reply landing while it is being written is
-  // newer than anything captured here and stays eligible for Unread. Skipped
-  // entirely until at least one session has readable output, so a first poll
-  // that arrives before any transcript is parsed cannot burn the baseline on an
-  // empty fleet and leave the real history unread.
+  // newer than anything captured here and stays eligible for Unread.
+  //
+  // It runs on the first pass that could observe anything at all, including one
+  // where nothing has spoken yet. Waiting for the first session WITH output
+  // looked safer and was the opposite: on a fresh install the baseline would sit
+  // untaken until some agent's first reply arrived, and then take that reply as
+  // history the operator had already read.
+  //
+  // `traceDigests()` has resolved by this point, so a session reporting no
+  // output here genuinely has none rather than not being parsed yet. It gets no
+  // mark, which is what leaves its first reply unread.
   if (!readMarks.initialized()) {
-    const observed = sessions.filter((s) => s.output).map((s) => [s.id, s.output]);
-    if (observed.length) {
-      readMarks.baseline(new Map(observed));
-      for (const s of sessions) if (s.output) s.read = readMarks.get(s.id);
-    }
+    readMarks.baseline(new Map(sessions.filter((s) => s.output).map((s) => [s.id, s.output])));
+    for (const s of sessions) s.read = readMarks.get(s.id);
   }
   readMarks.retain(new Set(store.list().map((s) => s.id)));
   res.json({ sessions, generatedAt: new Date().toISOString() });
@@ -397,8 +401,12 @@ app.get('/api/meta', async (_req, res) => {
  * described is no longer the newest and something unseen has taken its place.
  */
 app.post('/api/read', express.json({ limit: '64kb' }), async (req, res) => {
-  const marks = Array.isArray(req.body?.marks) ? req.body.marks.slice(0, 200) : null;
+  const marks = Array.isArray(req.body?.marks) ? req.body.marks : null;
   if (!marks) return res.status(400).json({ error: 'expected { marks: [{ id, src, seq, hash }] }' });
+  // Refused rather than truncated. Silently dropping the tail of a batch and
+  // answering 200 for the part that fit is how a session stays unread while the
+  // client reports success; the client sends bounded chunks instead.
+  if (marks.length > 200) return res.status(413).json({ error: 'too many marks in one request; send at most 200' });
   const digests = await traceDigests();
   const results = {};
   for (const m of marks) {

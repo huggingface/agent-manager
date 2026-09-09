@@ -2,19 +2,17 @@ import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, use
 import * as api from '../../api';
 import type { OutputVersion, SubAgentEntry } from '../../api';
 import { useSeenLatest } from '../useSeenLatest';
+import { answerMatches } from '../../lib/unread';
 
 /**
  * The unread cursor for one session, as the reader needs it.
  *
- * `clip` is the Overview digest's copy of the same reply, used only to check
- * that both surfaces are describing the same one — the identity itself is
- * `version`, which the server produced. Without that check a reader still
- * showing turn N could acknowledge an N+1 the poll had already learned about
- * and the operator had never seen.
+ * The reader proves it is showing this exact reply by hashing what it rendered
+ * and comparing against `version.hash`, so a reader still displaying turn N
+ * cannot acknowledge an N+1 the poll had already learned about.
  */
 export interface ConversationSeen {
   version: (OutputVersion & { id: string }) | null;
-  clip: string;
   onSeen: (marks: (OutputVersion & { id: string })[]) => Promise<boolean> | void;
 }
 import { useTraceWindows, type TraceHeadInfo, type TraceSource } from '../../lib/traceWindows';
@@ -239,24 +237,22 @@ export default function ConversationView({
   //     scrolled far out of view is not in the DOM and cannot be observed at all
   //   no search — a query shows matching older turns; the newest may not be
   //     among them, and a match is not the latest reply
-  //   the answer agrees with the Overview's copy of it — the two surfaces parse
-  //     the transcript separately, so this is what proves the reader has caught
-  //     up with the version being acknowledged rather than lagging a poll behind
-  // Only `text` blocks: thinking, tool calls and their results are not what the
-  // Overview's copy of the reply contains, and are not what the operator reads
-  // as the answer.
-  const lastAnswer = exchanges.length
+  //   the rendered answer hashes to the version being acknowledged — the two
+  //     surfaces parse the transcript separately, so this is what proves the
+  //     reader has caught up rather than lagging a poll behind. It is an exact
+  //     content identity, not a prefix: two replies routinely share their first
+  //     few hundred characters, and a growing streaming answer differs only in
+  //     the tail, which is precisely what a prefix cannot see.
+  //
+  // Only `text` blocks: thinking, tool calls and their results are not the
+  // reply, and are not what the server hashed.
+  const answerTexts = exchanges.length
     ? (exchanges[exchanges.length - 1].answer || [])
       .flatMap((t) => t.blocks || [])
       .filter((b) => b.type === 'text')
       .map((b) => (b as { text: string }).text || '')
-      .join(' ')
-    : '';
-  const norm = (t: string) => t.replace(/\s+/g, ' ').trim();
-  const clip = norm(seen?.clip || '');
-  // The digest's copy is clipped to 280 characters with an ellipsis, so the
-  // reader's full text starts with it rather than equalling it.
-  const agrees = !!clip && norm(lastAnswer).startsWith(clip.replace(/…$/, ''));
+    : [];
+  const agrees = !!seen?.version && answerMatches(answerTexts, seen.version.hash);
   const canSee = !!(seen?.version && !q && agrees && exchanges.length);
   const seenRef = useSeenLatest({
     version: canSee && seen?.version ? seen.version : null,
@@ -300,16 +296,14 @@ export default function ConversationView({
         {q && <div className="cxv-msg mono">{shown.length} of {exchanges.length} loaded turns match{atStart ? '' : ' · Earlier history has not been searched'}</div>}
         <div ref={virtual.container}>
           <div aria-hidden="true" style={{ height: virtual.before }} />
-          {shown.slice(virtual.start, virtual.end).map(({ x, n }) => <div key={x.key} data-x={x.key} data-row-key={x.key} ref={(node) => {
-            virtual.measure(x.key, node);
-            // Only the newest exchange carries the read observer. Being in this
-            // slice at all means it is rendered; the observer then decides
-            // whether it is actually on screen.
-            if (n === exchanges.length - 1) seenRef.current = node;
-          }}>
+          {shown.slice(virtual.start, virtual.end).map(({ x, n }) => <div key={x.key} data-x={x.key} data-row-key={x.key} ref={(node) => virtual.measure(x.key, node)}>
             <ExchangeView x={x} n={n + 1} total={exchanges.length} q={q || undefined} baseModel={head?.model || undefined}
               open={q ? undefined : openWork.get(x.key) || false} onToggle={() => setOpenWork((map) => new Map(map).set(x.key, !map.get(x.key)))}
-              running={live && n === exchanges.length - 1 && !sent} turns={turns} sessionId={session.id} live={!!session.running && !paused} roster={roster} />
+              running={live && n === exchanges.length - 1 && !sent} turns={turns} sessionId={session.id} live={!!session.running && !paused} roster={roster}
+              // The observer rides the newest exchange's ANSWER. Watching the
+              // whole exchange would let a visible prompt, with its answer
+              // thousands of pixels below the fold, clear the unread mark.
+              answerRef={n === exchanges.length - 1 ? (node) => { seenRef.current = node; } : undefined} />
           </div>)}
           <div aria-hidden="true" style={{ height: virtual.after }} />
         </div>

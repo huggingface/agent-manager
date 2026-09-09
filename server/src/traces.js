@@ -52,7 +52,7 @@ function mergeInto(a, b) {
 // Built in the same parse pass: every real user prompt resets the segment, so
 // whatever accumulated by EOF is the activity since the last thing you said.
 function emptyDigest() {
-  return { lastPromptText: '', lastPromptRaw: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantMd: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [], sinceTokens: 0, running: false, turnsLog: [], outSeq: 0, outHash: '', outClipped: false, outFresh: false };
+  return { lastPromptText: '', lastPromptRaw: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantMd: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [], sinceTokens: 0, running: false, turnsLog: [], outSeq: 0, outHash: '', outClipped: false, outFresh: false, outKey: null };
 }
 
 // ---------- which reply is this? (the Overview's unread cursor) ----------
@@ -96,7 +96,13 @@ function digestPrompt(d, text, ts) {
   // way to tell "ask again, get the same answer" apart from a record repeated.
   d.outFresh = true;
 }
-function digestAssistant(d, text, ts) {
+// `key` is the harness's own identity for this assistant message, where it has
+// one. Claude does (`message.id`), and it is the only thing that can tell two
+// replies apart when they say the same words — the case the text comparison
+// below gets wrong. Harnesses that mirror one message across several record
+// types with no shared id (codex writes agent_message and task_complete) pass
+// none, and fall back to that comparison.
+function digestAssistant(d, text, ts, key) {
   const clipped = clip(text);
   // Same text again (codex mirrors agent_message/response_item/task_complete):
   // refresh metadata only, don't log a phantom turn.
@@ -111,16 +117,26 @@ function digestAssistant(d, text, ts) {
   // which compares clipped text and so cannot tell a grown streaming answer
   // from the same one twice.
   const hash = outputHash(text);
-  // A prompt in between makes this a new reply whatever it says; otherwise only
-  // changed text does.
+  // A different message is a different reply, whatever it says. With an id from
+  // the harness that is a fact, not an inference — two `msg-1: "Done."` and
+  // `msg-3: "Done."` records are two replies, and the operator who read the
+  // first has not read the second.
   //
-  // The one thing this cannot separate is an agent repeating itself verbatim
-  // with no prompt in between — that is indistinguishable from the mirrored
-  // records every harness writes (codex emits agent_message and task_complete
-  // with the same words), and counting those would mark a session unread every
-  // time it finished a turn. Collapsing them is the safe direction: the
-  // operator has already been shown those words.
-  if (hash !== d.outHash || d.outFresh) { d.outSeq += 1; d.outHash = hash; }
+  // Without an id, the fallback: a prompt in between makes this new, and
+  // otherwise only changed text does. That still cannot separate an agent
+  // repeating itself verbatim mid-turn from the mirrored records such harnesses
+  // write, and collapsing those stays the safe direction — the alternative
+  // marks a session unread every time it finishes a turn. The limitation is now
+  // confined to harnesses that give us nothing to tell the two apart.
+  const fresh = key !== undefined && key !== null
+    ? key !== d.outKey
+    : (hash !== d.outHash || d.outFresh);
+  if (fresh) d.outSeq += 1;
+  // A revision of the SAME message (a second text block, a streaming answer
+  // that grew) keeps its sequence and changes its hash, which is a new version
+  // to be seen without being a new reply.
+  d.outHash = hash;
+  if (key !== undefined && key !== null) d.outKey = key;
   d.outFresh = false;
   // Whether the card's copy of this answer is the whole answer. A reply longer
   // than clipRaw's cap is shown with its tail cut off, and the Overview must
@@ -179,7 +195,7 @@ function parseClaude(txt) {
             const file = /^(Edit|Write|MultiEdit|NotebookEdit)$/.test(name) && c.input && c.input.file_path;
             digestTool(dg, name, file || null);
           } else if (c.type === 'text' && c.text && c.text.trim()) {
-            digestAssistant(dg, c.text, j.timestamp);
+            digestAssistant(dg, c.text, j.timestamp, id);
           }
         }
       }
