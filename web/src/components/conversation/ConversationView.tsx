@@ -38,6 +38,8 @@ export default function ConversationView({
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const following = useRef(true);
+  /** Where this scroller was at the previous scroll event — see onScroll. */
+  const lastTop = useRef(0);
   const [atLatest, setAtLatest] = useState(true);
   const touched = useRef(false);
   const [query, setQuery] = useState('');
@@ -225,8 +227,25 @@ export default function ConversationView({
       onWheel={interact} onTouchStart={interact} onPointerDown={interact} onKeyDown={interact}
       onScroll={(event) => {
         const el = event.currentTarget;
-        following.current = !q && el.scrollHeight - el.scrollTop - el.clientHeight < 48;
-        setAtLatest(following.current); virtual.onScroll(); capture();
+        // Following is an intent, so only a move AWAY from the end may end it,
+        // and "away" means this scroller moved UP — not that the distance to
+        // its bottom grew. Those are different events and telling them apart is
+        // the whole of #127: a reader following the end converges over several
+        // passes (pin to the end, render the rows that lands on, measure them,
+        // pin again), and in between the content below is still an estimate, so
+        // the distance is briefly large while scrollTop has not moved at all.
+        // Re-deriving the latch from that distance is what parked a following
+        // reader a few hundred pixels short of the end. Attributing the scroll
+        // event to the wheel that caused it is not an option: the scroll can be
+        // dispatched before the wheel handler runs.
+        const far = el.scrollHeight - el.scrollTop - el.clientHeight >= 48;
+        const movedUp = el.scrollTop < lastTop.current - 1;
+        if (following.current ? (movedUp && far) : (!q && !far)) {
+          following.current = !following.current;
+          setAtLatest(following.current);
+        }
+        lastTop.current = el.scrollTop;
+        virtual.onScroll(); capture();
         clearTimeout(settle.current); settle.current = setTimeout(() => { if (position.current) rememberReading(session.id, position.current); }, 150);
         if (touched.current && !q && el.scrollTop < 250 && !loadingEarlier) void loadOlder();
       }}>
