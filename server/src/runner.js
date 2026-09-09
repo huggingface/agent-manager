@@ -5,6 +5,7 @@ import pty from 'node-pty';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { remoteState, setPaused } from './remote.js';
+import { fxSessionForPid } from './fx-process.js';
 import { cliById, isRemote, PORT, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
 import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace,
@@ -1725,7 +1726,12 @@ function scheduleFxCapture(session, workdir) {
 
   const tick = () => {
     if (!isRunning(session.id)) { fxCapturing.delete(session.id); return; }
-    if (folderIsShared(session.id, workdir, 'fx')) {
+    const claimed = new Set(list().filter((s) => s.id !== session.id && s.fxSessionId).map((s) => s.fxSessionId));
+    const pinned = (list().find((s) => s.id === session.id) || session).fxSessionId;
+    const owned = fxSessionForPid(paneRootPid(session.id));
+    if (owned && !claimed.has(owned.id)) {
+      if (owned.id !== pinned) update(session.id, { fxSessionId: owned.id });
+    } else if (folderIsShared(session.id, workdir, 'fx')) {
       if (!warnedShared) {
         warnedShared = true;
         console.warn(`[fx] ${session.id}: folder shared with another live session — not following new conversations here`);
@@ -1736,8 +1742,6 @@ function scheduleFxCapture(session, workdir) {
       // so only conversations begun after the folder cleared are ever eligible.
       since = Date.now();
     } else {
-      const claimed = new Set(list().filter((s) => s.id !== session.id && s.fxSessionId).map((s) => s.fxSessionId));
-      const pinned = (list().find((s) => s.id === session.id) || session).fxSessionId;
       const hit = captureFxSession(workdir, since, claimed);
       if (hit && hit.id !== pinned) {
         if (pinned) console.warn(`[fx] re-pinning ${session.id}: ${pinned} -> ${hit.id} (conversation was replaced)`);
