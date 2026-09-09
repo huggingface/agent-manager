@@ -51,10 +51,8 @@ const AUTHORIZATION = new RegExp(
 // at every word boundary and allowed unlimited `word-` prefixes; on a long
 // dash-joined line it repeatedly re-walked the suffix (quadratic event-loop
 // work) even though the line contained no assignment operator at all.
-const ASSIGNMENT_VALUE = new RegExp(
-  String.raw`((?::|=)\s*)(${VALUE})`,
-  'g',
-);
+const ASSIGNMENT_OPERATOR = /[:=]/g;
+const VALUE_AT = new RegExp(VALUE, 'y');
 const COMPOUND_ASSIGNMENT_SUFFIXES = [
   'apikey', 'accesstoken', 'refreshtoken', 'authtoken', 'apitoken',
   'clientsecret', 'secretkey', 'privatekey',
@@ -178,6 +176,29 @@ function labelBeforeAssignment(input, operatorOffset) {
   return input.slice(start, end);
 }
 
+function redactAssignments(text) {
+  const pieces = [];
+  let copiedThrough = 0;
+  ASSIGNMENT_OPERATOR.lastIndex = 0;
+  for (let operator; (operator = ASSIGNMENT_OPERATOR.exec(text));) {
+    const label = labelBeforeAssignment(text, operator.index);
+    if (!label) continue;
+
+    let valueStart = operator.index + 1;
+    while (valueStart < text.length && /\s/.test(text[valueStart])) valueStart++;
+    VALUE_AT.lastIndex = valueStart;
+    const valueMatch = VALUE_AT.exec(text);
+    if (!valueMatch || !isExplicitCredentialAssignment(label, valueMatch[0])) continue;
+
+    pieces.push(text.slice(copiedThrough, valueStart), redactValue(valueMatch[0]));
+    copiedThrough = valueStart + valueMatch[0].length;
+    ASSIGNMENT_OPERATOR.lastIndex = copiedThrough;
+  }
+  if (!pieces.length) return text;
+  pieces.push(text.slice(copiedThrough));
+  return pieces.join('');
+}
+
 function exactValues(values) {
   const unique = new Set();
   for (const candidate of Array.isArray(values) ? values : []) {
@@ -203,11 +224,7 @@ export function createCredentialFilter(knownValues = []) {
     for (const value of exact) out = out.split(value).join(REDACTED_CREDENTIAL);
     for (const pattern of TOKEN_PATTERNS) out = out.replace(pattern, REDACTED_CREDENTIAL);
     out = out.replace(AUTHORIZATION, (_whole, prefix, value) => `${prefix}${redactValue(value, true)}`);
-    out = out.replace(ASSIGNMENT_VALUE, (whole, prefix, value, offset, inputText) => {
-      const label = labelBeforeAssignment(inputText, offset);
-      return isExplicitCredentialAssignment(label, value) ? `${prefix}${redactValue(value)}` : whole;
-    });
-    return out;
+    return redactAssignments(out);
   };
 }
 
