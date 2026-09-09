@@ -101,6 +101,14 @@ try {
     encoded: encodeURIComponent(KNOWN_LONG),
     tokenizer: 'ordinary tokenizer field',
     secretary: 'ordinary secretary field',
+    secret_key: 'structural snake secret',
+    SECRET_KEY: 'structural upper secret',
+    secretKey: 'structural camel secret',
+    subscriptionKey: 'structural subscription key',
+    'Ocp-Apim-Subscription-Key': 'structural compound subscription key',
+    passwordHash: 'structural password hash',
+    endpointUrl: 'structural endpoint url',
+    subscription_id: 'structural subscription id',
     embedded,
     [TOKENS.githubFine]: 'a credential can also be an object key',
   });
@@ -109,7 +117,7 @@ try {
     ok: false,
     error: `ordinary error before ${TOKENS.googleAuth} ordinary error after`,
     detail: 'Authorization: Bearer opaque-authorization-value. keep punctuation',
-    inline: 'password=opaque-password-value! keep punctuation',
+    inline: 'login_password=opaque-password-value! keep punctuation',
   });
   const resultBefore = structuredClone(resultBody);
   const { req, res } = invoke({
@@ -131,7 +139,10 @@ try {
   const first = JSON.parse(firstRaw);
   absentFrom(firstRaw, [...ALL_TOKENS, KNOWN_LONG, 'short field value', 'short-query-secret',
     'opaque quoted value', 'opaque shell value', 'opaque-authorization-value', 'opaque-password-value',
-    'alpha', 'beta', 'gamma', 'crossed-alpha', 'crossed-beta', 'crossed-gamma']);
+    'alpha', 'beta', 'gamma', 'crossed-alpha', 'crossed-beta', 'crossed-gamma',
+    'structural snake secret', 'structural upper secret', 'structural camel secret',
+    'structural subscription key', 'structural compound subscription key',
+    'structural password hash', 'structural endpoint url', 'structural subscription id']);
   assert.equal(first.version, 2);
   assert.deepEqual(first.audit, { credentialFilter: { policy: AUDIT_CREDENTIAL_POLICY, status: 'applied' } });
   assert.match(first.request.prompt.text, /^keep before /);
@@ -144,6 +155,10 @@ try {
   assert.equal(first.request.encoded, REDACTED_CREDENTIAL);
   assert.equal(first.request.tokenizer, 'ordinary tokenizer field');
   assert.equal(first.request.secretary, 'ordinary secretary field');
+  for (const field of ['secret_key', 'SECRET_KEY', 'secretKey', 'subscriptionKey',
+    'Ocp-Apim-Subscription-Key', 'passwordHash', 'endpointUrl', 'subscription_id']) {
+    assert.equal(first.request[field], REDACTED_CREDENTIAL, `${field} keeps structural protection`);
+  }
   assert.equal(first.request.nested[0].ordinary, 'left [redacted] right');
   assert.ok(Object.hasOwn(first.request, REDACTED_CREDENTIAL), 'credential material in a property name is filtered too');
   assert.equal(first.query.access_token, REDACTED_CREDENTIAL);
@@ -152,7 +167,7 @@ try {
   assert.equal(first.target.name, 'target [redacted]');
   assert.equal(first.result.error, 'ordinary error before [redacted] ordinary error after');
   assert.equal(first.result.detail, 'Authorization: Bearer [redacted]. keep punctuation');
-  assert.equal(first.result.inline, 'password=[redacted]! keep punctuation');
+  assert.equal(first.result.inline, 'login_password=[redacted]! keep punctuation');
 
   const fileInput = `file head\n${TOKENS.anthropic}\nfile tail`;
   const fileCall = invoke({ reqPath: '/api/files/files-1/write', body: fileInput }, (request, response) => {
@@ -235,6 +250,29 @@ try {
   const near = `https://example.test/sketch-${'x'.repeat(40)} hf_short eyJonly.two ${INCOMPLETE_KEY}`;
   invoke({ body: near }, (_req, response) => response.json({ ok: true }));
   assert.equal(newest().request.text, near);
+
+  // Ambiguous bare labels occur constantly in code, data and prose. Preserve
+  // them when an unquoted value has no high-confidence credential boundary;
+  // compound labels, quoted embedded fields and env-style labels stay covered.
+  const ordinaryAssignments = [
+    'sorted(items, key=lambda x: x[1])',
+    '<li key={item.id}>{item.name}</li>',
+    '{"key": "north", "secret": false, "token": 42}',
+    'key: value',
+    'The password: is required for this example.',
+  ].join('\n');
+  assert.equal(createCredentialFilter([])(ordinaryAssignments), ordinaryAssignments);
+  invoke({ reqPath: '/api/files/files-ordinary/write', body: ordinaryAssignments }, (_req, response) => response.json({ ok: true }));
+  assert.equal(newest().request.text, ordinaryAssignments, 'ordinary assignments survive in persisted file content');
+  const explicitAssignments = [
+    'OPENAI_API_KEY=synthetic-explicit-value',
+    'access_token=synthetic-access-value',
+    'DB_PASSWORD=synthetic-db-value',
+    String.raw`embedded {\"password\":\"synthetic quoted value\"}`,
+  ].join('\n');
+  const explicitFiltered = createCredentialFilter([])(explicitAssignments);
+  for (const value of ['synthetic-explicit-value', 'synthetic-access-value',
+    'synthetic-db-value', 'synthetic quoted value']) assert.ok(!explicitFiltered.includes(value));
 
   const idempotentFilter = createCredentialFilter([KNOWN_LONG]);
   const idempotentOnce = idempotentFilter(
@@ -365,7 +403,18 @@ try {
   const adversarialMs = performance.now() - adversarialAt;
   assert.equal(adversarialFiltered, adversarial, 'near-matches and incomplete markers are retained whole');
   assert.ok(adversarialMs < 2_500, `unexpected adversarial matcher cost: ${adversarialMs.toFixed(1)}ms`);
-  console.log(`operation-credentials performance: ${(large.length / 1024 / 1024).toFixed(2)} MiB representative; ${(adversarial.length / 1024 / 1024).toFixed(2)} MiB adversarial; baseline ${baselineMs.toFixed(1)}ms; filtered ${filteredMs.toFixed(1)}ms; adversarial ${adversarialMs.toFixed(1)}ms; event-loop delay ${timerDelayMs.toFixed(1)}ms; filter+append ${filterAndAppendMs.toFixed(1)}ms; heap delta ${heapDeltaMiB.toFixed(1)} MiB`);
+  const filterDashChain = (count) => {
+    const input = Array.from({ length: count }, (_, i) => `${String(i).padStart(8, '0')}-aaaa-bbbb-cccc-dddddddddddd`).join('-');
+    const startedAt = performance.now();
+    const output = createCredentialFilter([])(input);
+    return { input, output, ms: performance.now() - startedAt };
+  };
+  const dashChainSmall = filterDashChain(1_000);
+  const dashChain = filterDashChain(4_000);
+  assert.equal(dashChain.output, dashChain.input, 'a long dash-joined ordinary line is retained whole');
+  assert.ok(dashChain.ms < 2_500 && dashChain.ms < (dashChainSmall.ms * 8) + 250,
+    `unexpected dash-chain scaling: 1k ${dashChainSmall.ms.toFixed(1)}ms, 4k ${dashChain.ms.toFixed(1)}ms`);
+  console.log(`operation-credentials performance: ${(large.length / 1024 / 1024).toFixed(2)} MiB representative; ${(adversarial.length / 1024 / 1024).toFixed(2)} MiB adversarial; baseline ${baselineMs.toFixed(1)}ms; filtered ${filteredMs.toFixed(1)}ms; adversarial ${adversarialMs.toFixed(1)}ms; dash-chain 1k ${dashChainSmall.ms.toFixed(1)}ms / 4k ${dashChain.ms.toFixed(1)}ms; event-loop delay ${timerDelayMs.toFixed(1)}ms; filter+append ${filterAndAppendMs.toFixed(1)}ms; heap delta ${heapDeltaMiB.toFixed(1)} MiB`);
   console.log('operation-credentials: newly persisted bytes filtered; domain values and legacy bytes preserved');
 } finally {
   fs.rmSync(TMP, { recursive: true, force: true });

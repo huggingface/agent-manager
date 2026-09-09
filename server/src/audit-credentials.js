@@ -11,11 +11,15 @@ export const REDACTED_CREDENTIAL = '[redacted]';
 export const MIN_KNOWN_CREDENTIAL_LENGTH = 8;
 const SENSITIVE_EXACT = new Set([
   'authorization', 'credential', 'credentials', 'password', 'passwd', 'secret', 'secrets',
-  'token', 'tokens', 'key', 'subscription', 'endpoint', 'privatekey', 'apikey', 'accesskey',
+  'token', 'tokens', 'subscription', 'endpoint', 'privatekey', 'apikey', 'accesskey', 'secretkey',
 ]);
 const SENSITIVE_SUFFIXES = [
-  'credential', 'password', 'passwd', 'secret', 'token', 'privatekey', 'apikey', 'accesskey', 'endpoint',
+  'credential', 'password', 'passwd', 'secret', 'token', 'privatekey', 'apikey', 'accesskey', 'secretkey', 'endpoint',
 ];
+const SENSITIVE_KEY_WORDS = new Set([
+  'authorization', 'credential', 'credentials', 'password', 'passwd', 'secret', 'secrets',
+  'subscription', 'endpoint', 'token',
+]);
 
 // Fixed-count, bounded recognizers. Keep this list aligned with
 // docs/api-audit-log.md, including its source links and limitations.
@@ -38,15 +42,24 @@ const TOKEN_PATTERNS = [
 // field after the outer JSON body has already been parsed.
 const VALUE = String.raw`(?:\\"(?:\\\\.|[^"\\\r\n])*\\"|\\'(?:\\\\.|[^'\\\r\n])*\\'|"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|\x60(?:\\.|[^\x60\\\r\n])*\x60|[^\s,;&'"\x60]+)`;
 const AUTH_VALUE = String.raw`(?:\\"(?:\\\\.|[^"\\\r\n])*\\"|\\'(?:\\\\.|[^'\\\r\n])*\\'|"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|\x60(?:\\.|[^\x60\\\r\n])*\x60|(?:Bearer|Basic|Token)\s+[^\s,;&'"\x60]+|[^\s,;&'"\x60]+)`;
-const CREDENTIAL_LABEL = String.raw`(?:[a-z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret|secret[_-]?key|private[_-]?key|password|passwd|credential|token|secret|key)`;
 const AUTHORIZATION = new RegExp(
   String.raw`(\bauthorization\b(?:\\?["'])?\s*(?::|=)\s*)(${AUTH_VALUE})`,
   'gi',
 );
-const ASSIGNMENT = new RegExp(
-  String.raw`(\b${CREDENTIAL_LABEL}\b(?:\\?["'])?\s*(?::|=)\s*)(${VALUE})`,
-  'gi',
+// Find assignment operators once from left to right, then inspect at most 128
+// label characters immediately before each one. An earlier expression started
+// at every word boundary and allowed unlimited `word-` prefixes; on a long
+// dash-joined line it repeatedly re-walked the suffix (quadratic event-loop
+// work) even though the line contained no assignment operator at all.
+const ASSIGNMENT_VALUE = new RegExp(
+  String.raw`((?::|=)\s*)(${VALUE})`,
+  'g',
 );
+const COMPOUND_ASSIGNMENT_SUFFIXES = [
+  'apikey', 'accesstoken', 'refreshtoken', 'authtoken', 'apitoken',
+  'clientsecret', 'secretkey', 'privatekey',
+];
+const BARE_ASSIGNMENT_LABELS = new Set(['password', 'passwd', 'credential', 'token', 'secret']);
 
 const PRIVATE_KEY_MARKER = /-----(BEGIN|END) ((?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?)-----/g;
 
@@ -126,6 +139,45 @@ function redactValue(value, keepAuthorizationScheme = false) {
   return `${open}${scheme}${REDACTED_CREDENTIAL}${tail}${close}`;
 }
 
+function isQuotedValue(value) {
+  return ['\\"', "\\'", '"', "'", '`'].some((quote) => value.startsWith(quote));
+}
+
+function isExplicitCredentialAssignment(label, value) {
+  const normalized = label.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (COMPOUND_ASSIGNMENT_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) return true;
+
+  const lower = label.toLowerCase();
+  const parts = lower.split(/[_-]+/).filter(Boolean);
+  if (parts.length > 1 && ['password', 'passwd', 'credential'].includes(parts.at(-1))) return true;
+  if (!BARE_ASSIGNMENT_LABELS.has(lower)) return false;
+
+  // Quoting gives an embedded structured field a definite value boundary.
+  // An all-caps bare label is the conventional shell/env assignment form.
+  // Lowercase unquoted `key=`, `token:` and `password:` are too ambiguous with
+  // ordinary source code, YAML and prose to remove safely from a full log.
+  return isQuotedValue(value) || label === label.toUpperCase();
+}
+
+function labelBeforeAssignment(input, operatorOffset) {
+  let end = operatorOffset;
+  while (end > 0 && /\s/.test(input[end - 1])) end--;
+  if (input[end - 1] === '"' || input[end - 1] === "'") {
+    end--;
+    if (input[end - 1] === '\\') end--;
+  }
+
+  let start = end;
+  let remaining = 128;
+  while (start > 0 && remaining > 0 && /[A-Za-z0-9_-]/.test(input[start - 1])) {
+    start--;
+    remaining--;
+  }
+  if (start === end || (remaining === 0 && /[A-Za-z0-9_-]/.test(input[start - 1] || ''))) return '';
+  if (/[A-Za-z0-9_]/.test(input[start - 1] || '')) return '';
+  return input.slice(start, end);
+}
+
 function exactValues(values) {
   const unique = new Set();
   for (const candidate of Array.isArray(values) ? values : []) {
@@ -151,7 +203,10 @@ export function createCredentialFilter(knownValues = []) {
     for (const value of exact) out = out.split(value).join(REDACTED_CREDENTIAL);
     for (const pattern of TOKEN_PATTERNS) out = out.replace(pattern, REDACTED_CREDENTIAL);
     out = out.replace(AUTHORIZATION, (_whole, prefix, value) => `${prefix}${redactValue(value, true)}`);
-    out = out.replace(ASSIGNMENT, (_whole, prefix, value) => `${prefix}${redactValue(value)}`);
+    out = out.replace(ASSIGNMENT_VALUE, (whole, prefix, value, offset, inputText) => {
+      const label = labelBeforeAssignment(inputText, offset);
+      return isExplicitCredentialAssignment(label, value) ? `${prefix}${redactValue(value)}` : whole;
+    });
     return out;
   };
 }
@@ -162,7 +217,19 @@ export function createCredentialFilter(knownValues = []) {
  * fields, while `access_token` and `clientSecret` are not.
  */
 export function isSensitiveAuditKey(key) {
-  const normalized = String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const source = String(key);
+  const normalized = source.toLowerCase().replace(/[^a-z0-9]/g, '');
   if (SENSITIVE_EXACT.has(normalized)) return true;
-  return SENSITIVE_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
+  if (SENSITIVE_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) return true;
+
+  // Preserve main's protection for compound fields such as `passwordHash`,
+  // `endpointUrl`, `SECRET_KEY` and `Ocp-Apim-Subscription-Key` without its
+  // substring false positives for ordinary `tokenizer`/`secretary` fields.
+  const words = source
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  return words.some((word) => SENSITIVE_KEY_WORDS.has(word));
 }

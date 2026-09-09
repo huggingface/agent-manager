@@ -26,7 +26,7 @@ session objects keep the original values.
 |---|---|
 | Sensitive structured fields | Values under normalized credential names such as `authorization`, `password`, `token`, `api_key`, `clientSecret`, `private_key`, `subscription` and `endpoint`. A short value is still removed when its field is explicitly sensitive. Similar ordinary names such as `tokenizer` and `secretary` are retained. |
 | Provider/standard shapes | Hugging Face `hf_…`; Anthropic `sk-ant-…`; OpenAI `sk-…` including `sk-proj-…`/`sk-svcacct-…`; OpenRouter `sk-or-v1-…`; GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` and `github_pat_`; AWS `AKIA…` access-key ids; Google `AIza…`, `AQ.…` and `ya29.…`; three-part JWT-shaped strings. Boundaries and minimum lengths prevent short examples and ordinary identifiers from matching. |
-| Explicit text | Values in authorization text (`Authorization: Bearer …`, Basic or Token) and credential assignments such as `OPENAI_API_KEY="…"`, `password: …`, query-string `token=…`, and the same shapes in an escaped embedded JSON string. The label and surrounding ordinary text remain. |
+| Explicit text | Values in authorization text (`Authorization: Bearer …`, Basic or Token), bounded compound credential assignments such as `OPENAI_API_KEY="…"`/`access_token=…`, quoted bare sensitive fields in embedded JSON, uppercase environment-style bare assignments, and the same quoted shapes in an escaped embedded JSON string. Parsed query-string `token` fields are covered structurally. The label and surrounding ordinary text remain. |
 | Private keys | A complete matching `BEGIN … PRIVATE KEY` through `END … PRIVATE KEY` block, including PKCS, RSA, EC, OpenSSH and PGP-style labels. The whole block becomes one placeholder. An incomplete marker is retained because there is no safe block boundary to remove. |
 | Configured values | Exact values, at least eight non-whitespace characters long, from the Space's existing injected-secret catalog. Duplicates are removed, overlaps run longest-first, and one URL-encoded form is matched. The catalog is read for each new record, so rotation does not retain an obsolete matcher. Values are never sent to the browser. |
 | Buffers | UTF-8 Buffers use the text policy. Other Buffers use a one-byte mapping so recognizable ASCII credentials cannot evade filtering merely because the stored representation is base64. The retained byte length, checksum and base64 are all derived from the filtered bytes. |
@@ -52,9 +52,15 @@ Opaque binary receives only the direct ASCII checks described above. The filter
 does not scan workspaces, CLI credential files, the home directory, historical
 logs or backups, and it makes no network calls.
 
-These deliberate limits avoid erasing long IDs, URLs, code samples and ordinary
-words while keeping work bounded by the retained input, the fixed rule set and
-the small injected-value set. There is no scan cutoff or raw unscanned tail.
+Assignment labels are bounded to 128 characters, which keeps malformed
+dash-joined input linear rather than repeatedly scanning the same suffix.
+Ambiguous lowercase, unquoted bare assignments such as `key=value` are retained
+because they are common in source code, YAML and prose; use a compound
+credential label, structured sensitive field or configured-value match when
+that material must be recognized. These deliberate limits avoid erasing long
+IDs, URLs, code samples and ordinary words while keeping work bounded by the
+retained input, the fixed rule set and the small injected-value set. There is no
+payload scan cutoff or raw unscanned tail.
 The focused test prints baseline/filter/event-loop timings for a representative
 multi-megabyte value; filtering remains synchronous with the existing append,
 so that measured duration is also the event-loop delay for that write.
