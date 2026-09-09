@@ -176,7 +176,31 @@ fs.writeFileSync(path.join(clawState, 'openclaw.json'), JSON.stringify({
 }));
 const gitWorkspace = globalContextTargets(ENV);
 check('manager-home Git workspace is not modified', gitWorkspace.targets.some(({ cli }) => cli === 'openclaw'), false);
-check('Git workspace boundary is reported', gitWorkspace.skipped[0]?.reason, 'workspace is a Git repository');
+check('custom workspace boundary is reported', gitWorkspace.skipped[0]?.cli, 'openclaw');
+
+console.log('\nself-host home does not imply ownership of custom workspaces');
+const localEnv = { HOME: selfHostHome, AM_MANAGE_GLOBAL_CONTEXT: '1' };
+const localState = path.join(selfHostHome, '.openclaw');
+const localRepo = path.join(selfHostHome, 'project');
+fs.mkdirSync(path.join(localRepo, '.git'), { recursive: true });
+const nested = path.join(localRepo, 'subdir');
+fs.mkdirSync(nested);
+fs.writeFileSync(path.join(localState, 'openclaw.json'), JSON.stringify({ agents: { defaults: { workspace: nested } } }));
+check('repository subdirectory is not a target', globalContextTargets(localEnv).targets.some(t => t.cli === 'openclaw'), false);
+writeGlobalContextFiles(localEnv, 9300);
+check('repository subdirectory remains untouched', fs.existsSync(path.join(nested, 'AGENTS.md')), false);
+
+fs.writeFileSync(path.join(localState, 'openclaw.json'), '{}');
+fs.mkdirSync(path.join(localState, '.git'));
+check('default workspace inside a parent Git repo is skipped', globalContextTargets(localEnv).targets.some(t => t.cli === 'openclaw'), false);
+fs.rmdirSync(path.join(localState, '.git'));
+const defaultFile = path.join(localState, 'workspace', 'AGENTS.md');
+fs.unlinkSync(defaultFile);
+const operatorFile = path.join(localRepo, 'AGENTS.md');
+fs.writeFileSync(operatorFile, 'operator-owned');
+fs.symlinkSync(operatorFile, defaultFile);
+writeGlobalContextFiles(localEnv, 9400);
+check('instruction-file symlink cannot escape workspace', fs.readFileSync(operatorFile, 'utf8'), 'operator-owned');
 
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

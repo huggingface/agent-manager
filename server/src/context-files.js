@@ -134,20 +134,26 @@ function openClawTarget(env, home) {
     }
   }
 
-  if (![clawHome, state].some((root) => inside(workspace, root))) {
+  const managedWorkspace = path.join(state, 'workspace');
+  if (path.resolve(workspace) !== path.resolve(managedWorkspace)
+      || !inside(workspace, state)
+      || !inside(path.join(workspace, 'AGENTS.md'), workspace)) {
     return {
       target: null,
-      skipped: { cli: 'openclaw', reason: 'custom workspace is outside the manager-owned OpenClaw home' },
+      skipped: { cli: 'openclaw', reason: 'workspace or instruction file is outside the default manager-owned workspace' },
     };
   }
   // OpenClaw commonly encourages users to version its workspace. Once it is a
   // repository, leave it entirely operator-owned; an existing managed block
   // remains usable because AM_PORT overrides its baked-in fallback at runtime.
-  if (fs.existsSync(path.join(workspace, '.git'))) {
-    return {
-      target: null,
-      skipped: { cli: 'openclaw', reason: 'workspace is a Git repository' },
-    };
+  for (let dir = canonical(workspace); ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, '.git'))) {
+      return {
+        target: null,
+        skipped: { cli: 'openclaw', reason: 'workspace is inside a Git repository' },
+      };
+    }
+    if (path.dirname(dir) === dir) break;
   }
   return { target: { cli: 'openclaw', file: path.join(workspace, 'AGENTS.md') }, skipped: null };
 }
