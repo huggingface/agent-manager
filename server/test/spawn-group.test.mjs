@@ -66,10 +66,10 @@ check('object falls back to inherit', groups.resolveSpawnGroup({ x: 1 }, CALLER)
 
 // The skill tells agents to create a group and then spawn into the id it
 // returns, rather than the name. This is why: nothing dedupes group names.
-console.log('\nduplicate names resolve to the first match; ids stay exact');
+console.log('\nduplicate names are refused; ids stay exact');
 const dupe = groups.create('Co-write');
 check('two groups can share a name', groups.list().filter((x) => x.name === 'Co-write').length, 2);
-check('by name takes the first', groups.resolveSpawnGroup('Co-write', LONER).groupId, cowrite.id);
+check('by name reports ambiguity', groups.resolveSpawnGroup('Co-write', LONER).error.includes('ambiguous'), true);
 check('by id reaches the second', groups.resolveSpawnGroup(dupe.id, LONER).groupId, dupe.id);
 groups.remove(dupe.id);
 
