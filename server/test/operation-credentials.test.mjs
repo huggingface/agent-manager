@@ -247,6 +247,52 @@ try {
     assert.equal(cursor.next.text.text, `value-${i}`);
     cursor = cursor.next;
   }
+
+  // Valid JSON can be much deeper than the JavaScript call stack. The audit
+  // copy and its JSONL serialization must keep that full shape rather than let
+  // the caller turn an attributable operation into a generic filter failure.
+  const veryDeep = { level: 0 };
+  let veryDeepInputCursor = veryDeep;
+  for (let i = 1; i <= 5_000; i++) {
+    veryDeepInputCursor.next = { level: i };
+    veryDeepInputCursor = veryDeepInputCursor.next;
+  }
+  veryDeepInputCursor.prompt = `deep leaf ${TOKENS.huggingface}`;
+  const beforeVeryDeep = diskLines().length;
+  const veryDeepCall = invoke({ reqPath: '/api/agents/target-1/prompt', body: veryDeep }, (request, response) => {
+    assert.equal(request.body, veryDeep, 'the deeply nested body reaches the handler unchanged');
+    response.json({ ok: true });
+  });
+  assert.equal(veryDeepCall.res.jsonCalls, 1);
+  assert.equal(diskLines().length, beforeVeryDeep + 1, 'deep traversal and serialization append exactly one record');
+  const veryDeepRecord = newest();
+  assert.equal(veryDeepRecord.audit.credentialFilter.status, 'applied');
+  assert.equal(veryDeepRecord.origin.id, 'agent-1');
+  assert.equal(veryDeepRecord.target.id, 'target-1');
+  assert.equal(veryDeepRecord.method, 'POST');
+  assert.equal(veryDeepRecord.path, '/api/agents/target-1/prompt');
+  let veryDeepStoredCursor = veryDeepRecord.request;
+  for (let i = 0; i <= 5_000; i++) {
+    assert.equal(veryDeepStoredCursor.level, i, `deep level ${i} is retained`);
+    if (i < 5_000) veryDeepStoredCursor = veryDeepStoredCursor.next;
+  }
+  assert.equal(veryDeepStoredCursor.prompt.text, 'deep leaf [redacted]');
+  assert.equal(veryDeepInputCursor.prompt, `deep leaf ${TOKENS.huggingface}`,
+    'deep credential filtering does not mutate the delivered body');
+
+  const sharedBranch = { note: 'shared ordinary branch' };
+  const cyclic = { first: sharedBranch, second: sharedBranch };
+  cyclic.self = cyclic;
+  invoke({ body: cyclic }, (request, response) => {
+    assert.equal(request.body, cyclic);
+    response.json({ ok: true });
+  });
+  assert.deepEqual(newest().request, {
+    first: { note: 'shared ordinary branch' },
+    second: { note: 'shared ordinary branch' },
+    self: '[circular]',
+  }, 'iterative traversal preserves shared branches and marks only actual cycles');
+
   const near = `https://example.test/sketch-${'x'.repeat(40)} hf_short eyJonly.two ${INCOMPLETE_KEY}`;
   invoke({ body: near }, (_req, response) => response.json({ ok: true }));
   assert.equal(newest().request.text, near);

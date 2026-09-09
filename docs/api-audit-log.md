@@ -60,7 +60,9 @@ credential label, structured sensitive field or configured-value match when
 that material must be recognized. These deliberate limits avoid erasing long
 IDs, URLs, code samples and ordinary words while keeping work bounded by the
 retained input, the fixed rule set and the small injected-value set. There is no
-payload scan cutoff or raw unscanned tail.
+payload scan cutoff, traversal-depth limit or raw unscanned tail. Payload
+traversal and JSONL serialization use heap-backed work lists so deeply nested
+valid JSON does not fall through to a generic filter-failure entry.
 The focused test prints baseline/filter/event-loop timings for a representative
 multi-megabyte value; filtering remains synchronous with the existing append,
 so that measured duration is also the event-loop delay for that write.

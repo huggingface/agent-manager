@@ -29,9 +29,6 @@ const shouldLog = (req) => MUTATING.has(req.method)
 // the checksum travels beside the value, and `chars` is what the log's compact
 // list column reads.
 const MAX_TEXT = 500;
-// A backstop against a cyclic object, not a limit on how much is kept: a request
-// body is the output of a JSON or text parser and cannot contain a cycle, but
-// JSON.stringify throwing here would lose the whole entry.
 // How far back a read will go looking for complete records. One enormous entry
 // must not hide the log, and reading a whole year of it must not exhaust memory.
 const MAX_TAIL = 256 * 1024 * 1024;
@@ -49,45 +46,86 @@ function textSummary(value) {
 /**
  * The call as it was made, whole, with a checksum attached to anything long
  * enough to want one. Credentials are the single exception and are replaced by
- * `[redacted]` wherever the documented best-effort policy recognizes them.
+ * `[redacted]` wherever the documented best-effort policy recognizes them. The
+ * heap-backed traversal preserves valid JSON deeper than the JavaScript call
+ * stack; `active` is only a cycle guard, not a capture-depth limit.
  */
-export function summarizePayload(value, key = '', filterString = (text) => text, seen = new WeakSet()) {
-  if (key && isSensitiveAuditKey(key)) return REDACTED_CREDENTIAL;
-  if (value == null || typeof value === 'boolean' || typeof value === 'number') return value;
-  if (Buffer.isBuffer(value)) {
-    // UTF-8 text gets normal string semantics. For an opaque Buffer, latin1 is
-    // a one-byte mapping that still catches ASCII credential material without
-    // claiming to decode the binary format or inspect an archive.
-    const utf8 = value.toString('utf8');
-    const validUtf8 = Buffer.from(utf8, 'utf8').equals(value);
-    const filtered = validUtf8
-      ? Buffer.from(filterString(utf8), 'utf8')
-      : Buffer.from(filterString(value.toString('latin1')), 'latin1');
-    return { bytes: filtered.length, sha256: digest(filtered), base64: filtered.toString('base64') };
-  }
-  if (typeof value === 'string') {
-    const filtered = filterString(value);
-    if (CONTENT_KEY.test(key) || value.length > MAX_TEXT) return textSummary(filtered);
-    return filtered;
-  }
-  if (typeof value !== 'object') return filterString(String(value));
-  if (seen.has(value)) return '[circular]';
-  seen.add(value);
-  if (Array.isArray(value)) {
-    const out = value.map((v) => summarizePayload(v, key, filterString, seen));
-    seen.delete(value);
-    return out;
-  }
-  if (typeof value === 'object') {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) {
-      let storedKey = filterString(k);
-      for (let n = 2; Object.hasOwn(out, storedKey); n++) storedKey = `${filterString(k)}#${n}`;
-      out[storedKey] = summarizePayload(v, k, filterString, seen);
+export function summarizePayload(value, key = '', filterString = (text) => text) {
+  const root = { value: undefined };
+  const active = new WeakSet();
+  const stack = [{ type: 'visit', value, key, parent: root, slot: 'value' }];
+
+  while (stack.length) {
+    const frame = stack.pop();
+    if (frame.type === 'leave') {
+      active.delete(frame.value);
+      continue;
     }
-    seen.delete(value);
-    return out;
+
+    const { value: current, key: currentKey, parent, slot } = frame;
+    if (currentKey && isSensitiveAuditKey(currentKey)) {
+      parent[slot] = REDACTED_CREDENTIAL;
+      continue;
+    }
+    if (current == null || typeof current === 'boolean' || typeof current === 'number') {
+      parent[slot] = current;
+      continue;
+    }
+    if (Buffer.isBuffer(current)) {
+      // UTF-8 text gets normal string semantics. For an opaque Buffer, latin1
+      // is a one-byte mapping that still catches ASCII credential material
+      // without claiming to decode the binary format or inspect an archive.
+      const utf8 = current.toString('utf8');
+      const validUtf8 = Buffer.from(utf8, 'utf8').equals(current);
+      const filtered = validUtf8
+        ? Buffer.from(filterString(utf8), 'utf8')
+        : Buffer.from(filterString(current.toString('latin1')), 'latin1');
+      parent[slot] = { bytes: filtered.length, sha256: digest(filtered), base64: filtered.toString('base64') };
+      continue;
+    }
+    if (typeof current === 'string') {
+      const filtered = filterString(current);
+      parent[slot] = CONTENT_KEY.test(currentKey) || current.length > MAX_TEXT
+        ? textSummary(filtered)
+        : filtered;
+      continue;
+    }
+    if (typeof current !== 'object') {
+      parent[slot] = filterString(String(current));
+      continue;
+    }
+    if (active.has(current)) {
+      parent[slot] = '[circular]';
+      continue;
+    }
+
+    active.add(current);
+    stack.push({ type: 'leave', value: current });
+    if (Array.isArray(current)) {
+      const out = new Array(current.length);
+      parent[slot] = out;
+      for (let i = current.length - 1; i >= 0; i--) {
+        if (Object.hasOwn(current, i)) {
+          stack.push({ type: 'visit', value: current[i], key: currentKey, parent: out, slot: i });
+        }
+      }
+      continue;
+    }
+
+    const out = {};
+    parent[slot] = out;
+    const children = [];
+    for (const [childKey, child] of Object.entries(current)) {
+      let storedKey = filterString(childKey);
+      for (let n = 2; Object.hasOwn(out, storedKey); n++) storedKey = `${filterString(childKey)}#${n}`;
+      // Establish keys in source order before LIFO traversal processes values.
+      out[storedKey] = undefined;
+      children.push({ value: child, key: childKey, parent: out, slot: storedKey });
+    }
+    for (let i = children.length - 1; i >= 0; i--) stack.push({ type: 'visit', ...children[i] });
   }
+
+  return root.value;
 }
 
 function sanitizeMetadata(value, filterString, seen = new WeakSet()) {
@@ -111,9 +149,60 @@ function sanitizeMetadata(value, filterString, seen = new WeakSet()) {
   return out;
 }
 
+function stringifyAuditRecord(value) {
+  // JSON.stringify itself overflows on input depths JSON.parse and Express
+  // accept. Serialize the already-filtered representation with the same JSON
+  // scalar/container rules, but keep the traversal stack on the heap.
+  const chunks = [];
+  const seen = new WeakSet();
+  const stack = [{ type: 'value', value, arrayItem: false }];
+  while (stack.length) {
+    const frame = stack.pop();
+    if (frame.type === 'raw') {
+      chunks.push(frame.value);
+      continue;
+    }
+    if (frame.type === 'leave') {
+      seen.delete(frame.value);
+      continue;
+    }
+    const current = frame.value;
+    if (!current || typeof current !== 'object') {
+      const encoded = JSON.stringify(current);
+      chunks.push(encoded === undefined ? (frame.arrayItem ? 'null' : '') : encoded);
+      continue;
+    }
+    if (seen.has(current)) throw new TypeError('circular audit representation');
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      stack.push({ type: 'leave', value: current });
+      stack.push({ type: 'raw', value: ']' });
+      for (let i = current.length - 1; i >= 0; i--) {
+        if (i < current.length - 1) stack.push({ type: 'raw', value: ',' });
+        stack.push({ type: 'value', value: current[i], arrayItem: true });
+      }
+      stack.push({ type: 'raw', value: '[' });
+      continue;
+    }
+
+    const entries = Object.entries(current).filter(([, child]) => child !== undefined);
+    stack.push({ type: 'leave', value: current });
+    stack.push({ type: 'raw', value: '}' });
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const [childKey, child] = entries[i];
+      if (i < entries.length - 1) stack.push({ type: 'raw', value: ',' });
+      stack.push({ type: 'value', value: child, arrayItem: false });
+      stack.push({ type: 'raw', value: `${JSON.stringify(childKey)}:` });
+    }
+    stack.push({ type: 'raw', value: '{' });
+  }
+  return chunks.join('');
+}
+
 function append(record) {
   fs.mkdirSync(path.dirname(OPERATIONS_FILE), { recursive: true });
-  fs.appendFileSync(OPERATIONS_FILE, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  fs.appendFileSync(OPERATIONS_FILE, `${stringifyAuditRecord(record)}\n`, { mode: 0o600 });
 }
 
 const requestOrigin = (req) => String(
