@@ -49,7 +49,7 @@ fs.writeFileSync(preload, `
       process.kill(process.pid, 'SIGTERM');
     });
   }
-  globalThis.fetch = async () => new Response(JSON.stringify({private:process.env.FIXTURE_PUBLIC !== '1',runtime:{volumes:[]}}), {status:200,headers:{'content-type':'application/json'}});
+  globalThis.fetch = async () => new Response(JSON.stringify({id:process.env.SPACE_ID,private:process.env.FIXTURE_PUBLIC !== '1',runtime:{volumes:[]}}), {status:200,headers:{'content-type':'application/json'}});
   const write = fs.writeFileSync;
   fs.writeFileSync = (file, ...args) => {
     if (/am-config\.json/.test(String(file)) && fs.existsSync(process.env.DATA_DIR + '/reject-write')) throw new Error('synthetic-private-data /private/example token_fixture');
@@ -168,7 +168,8 @@ try {
   assert.equal(interrupted.length, 1); assert.equal(interrupted[0].ok, false);
   assert.ok(operations.some((entry) => entry.status === 500)); assert.ok(!JSON.stringify(operations).includes('synthetic-private')); assert.ok(!logs.includes('synthetic-private'));
   await stop(); await start(true);
-  for (let i = 0; i < 50 && !(await call('/api/visibility', undefined, 'GET')).body.public; i++) await new Promise((r) => setTimeout(r, 20));
+  // Locked from boot with reason 'checking' until the visibility monitor has a verdict (#131).
+  for (let i = 0; i < 400 && (await call('/api/visibility', undefined, 'GET')).body.reason === 'checking'; i++) await new Promise((r) => setTimeout(r, 25));
   const locked = await call('/api/sessions', { cli: 'files' }); assert.equal(locked.status, 403); assert.equal(locked.body.code, 'locked'); assert.equal(locked.body.reason, 'public-space');
   console.log('Production HTTP: validation, side effects, settings/group semantics, streams/uploads, conflicts, traces, origins, lock and safe errors passed');
 } finally { await stop(); fs.rmSync(root, { recursive: true, force: true }); }
