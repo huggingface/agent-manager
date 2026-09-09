@@ -64,10 +64,13 @@ const SCENARIOS = [
   { id: 'reader-empty', restore: `s:${ids.fresh}`, view: ['composer'] },
   { id: 'files', restore: `s:${ids.files}`, view: ['files'] },
   { id: 'trace', restore: `s:${ids.trace}`, view: ['trace'] },
-  { id: 'group', restore: `g:${ids.group}`, focused: ids.groupFiles, view: ['files', 'trace'] },
+  // A phone shows one pane of a group at a time, so only the focused one can land.
+  { id: 'group', restore: `g:${ids.group}`, focused: ids.groupFiles, view: ['files', 'trace'], mobileView: ['files'] },
 ];
 
-async function visit(profile, scenario) {
+// `stage`: on a phone, start on the selected view (true) or on the sidebar list
+// (false) — the Settings button lives in the sidebar.
+async function visit(profile, scenario, { stage = true, want: wantOnly = null } = {}) {
   const mobile = profile === 'mobile';
   const ctx = await browser.newContext({ viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 800 } });
   const page = await ctx.newPage();
@@ -94,16 +97,17 @@ async function visit(profile, scenario) {
     // `document` itself: init scripts run before <html> exists.
     new MutationObserver(look).observe(document, { childList: true, subtree: true, attributes: true });
     look();
-  }, { restore: scenario.restore, focused: scenario.focused || null, mobile, marks: MARK });
+  }, { restore: scenario.restore, focused: scenario.focused || null, mobile: mobile && stage, marks: MARK });
 
   await page.goto(server.origin + '/');
-  const want = ['nav', ...scenario.view];
+  const views = mobile && scenario.mobileView ? scenario.mobileView : scenario.view;
+  const want = wantOnly || ['nav', ...views];
   await page.waitForFunction((want) => want.every((k) => k in window.__marks), want, { timeout: 60_000 });
   const marks = await page.evaluate(() => window.__marks);
   const perf = Object.fromEntries((await cdp.send('Performance.getMetrics')).metrics.map((m) => [m.name, m.value]));
   const startup = {
     nav: marks.nav,
-    view: Math.max(...scenario.view.map((k) => marks[k])),
+    view: wantOnly ? NaN : Math.max(...views.map((k) => marks[k])),
     js: { count: js.size, bytes: [...js.values()].reduce((n, r) => n + r.bytes, 0), files: [...js.values()].map((r) => path.basename(new URL(r.url).pathname)) },
     script: perf.ScriptDuration * 1000, compile: perf.V8CompileDuration * 1000, task: perf.TaskDuration * 1000,
   };
@@ -112,11 +116,19 @@ async function visit(profile, scenario) {
 
 // From a warm Overview: open each deferred panel cold (chunk on the wire) and
 // again warm (module cached), timing click → first useful content.
-async function panelOpens(page) {
+// On a phone only the Settings pages are opened this way: Files and Trace are
+// reached through the stage, whose cold cost the scenarios above already hold.
+async function panelOpens(page, mobile) {
   const timeIt = async (act, marker) => {
     const t0 = Date.now();
     await act();
-    await page.locator(marker).first().waitFor({ timeout: 30_000 });
+    try {
+      await page.locator(marker).first().waitFor({ timeout: 30_000 });
+    } catch (e) {
+      // Say what the page showed instead — a bare timeout hides the cause.
+      const seen = await page.evaluate(() => [...document.querySelectorAll('.app')].map((el) => el.className).join(' | ') + ' ; main: ' + [...document.querySelectorAll('.main > *, .settings-main > *')].map((el) => el.className).join(' | ')).catch(() => '?');
+      throw new Error(`${e.message.split('\n')[0]} — page showed: ${seen}`);
+    }
     return Date.now() - t0;
   };
   const back = () => page.locator('.brand .icon-btn[title="Back"]').click();
@@ -128,8 +140,12 @@ async function panelOpens(page) {
     const r = (out[pass] = {});
     r.settings = await timeIt(() => settingsBtn.click(), MARK.settings);
     for (const [k, label] of [['usage', 'Usage'], ['apilog', 'API log'], ['skills', 'Skills'], ['cron', 'Cron']]) r[k] = await timeIt(() => tab(label), MARK[k]);
+    // Settings reopens on the page it was left on; leave it on General so the
+    // warm pass measures the same open as the cold one.
+    await timeIt(() => tab('General'), MARK.settings);
     await back();
     await page.locator('.app:not(.settings)').waitFor();
+    if (mobile) continue;
     r.files = await timeIt(() => rowOf('files').click(), MARK.files);
     r.trace = await timeIt(() => rowOf('trace').click(), MARK.trace);
     await page.locator('.sidebar .row.ov-row').first().click();
@@ -161,8 +177,8 @@ try {
     console.log();
     const opens = [];
     for (let i = 0; i < RUNS; i++) {
-      const v = await visit(profile, SCENARIOS[0]);
-      opens.push(await panelOpens(v.page));
+      const v = await visit(profile, SCENARIOS[0], { stage: false, want: ['nav'] });
+      opens.push(await panelOpens(v.page, profile === 'mobile'));
       await v.ctx.close();
       process.stdout.write(`\r${LABEL} ${profile} panel opens ${i + 1}/${RUNS}   `);
     }
@@ -172,6 +188,7 @@ try {
       P.panels[pass] = {};
       for (const k of Object.keys(opens[0][pass])) P.panels[pass][k] = stat(opens.map((o) => o[pass][k]));
     }
+    fs.writeFileSync(OUT, JSON.stringify(results, null, 1)); // a later crash keeps this profile
   }
   results.chunks = Object.fromEntries(fs.readdirSync(path.join(DIST, 'assets')).filter((f) => f.endsWith('.js')).map((f) => [f, { bytes: fs.statSync(path.join(DIST, 'assets', f)).size, gzip: gz(path.join(DIST, 'assets', f)) }]));
 } finally {
