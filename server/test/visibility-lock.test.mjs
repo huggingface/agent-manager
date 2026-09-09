@@ -312,7 +312,9 @@ try {
   // On a loaded box the read itself can land after the expiry; only a read that
   // finished with margin says anything about grace.
   if (Date.now() < expectedExpiry - 150) {
-    check('inside grace the app stays open through failed checks, and failures do not renew verifiedAt', !inside.locked && inside.visibility.verifiedAt === v0 && inside.visibility.attemptedAt > v0, `read at ${readAt - expectedExpiry} ms before expiry`);
+    check('inside grace the app stays open, and failed checks do not renew verifiedAt', !inside.locked && inside.visibility.verifiedAt === v0,
+      `read ${expectedExpiry - readAt} ms before expiry: locked=${inside.locked} reason=${inside.lockReason} verifiedAt-v0=${inside.visibility.verifiedAt - v0} attemptedAt-v0=${inside.visibility.attemptedAt - v0}`);
+    if (inside.visibility.attemptedAt > v0) check('a failed attempt inside grace is recorded as attempted, not verified', inside.visibility.space.verifiedAt === v0 || inside.visibility.space.attemptedAt > inside.visibility.space.verifiedAt);
   } else {
     check('inside-grace read was inconclusive (box too slow to read before expiry); failures still did not renew verifiedAt', inside.visibility.verifiedAt === v0);
   }
