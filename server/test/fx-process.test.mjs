@@ -14,7 +14,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'fx-process-'));
 const root = path.join(tmp, 'sessions');
 const children = [];
 try {
-  // Real concurrent processes in one cwd, each holding its own event log.
+  // Real concurrent processes in one cwd, each holding its own session lock.
   for (const id of ['session-a', 'session-b']) {
     const dir = path.join(root, id);
     fs.mkdirSync(dir, { recursive: true });
@@ -23,7 +23,7 @@ try {
       const fd = fs.openSync(process.argv[1], 'a');
       process.stdout.write('ready\\n');
       setInterval(() => fs.fsyncSync(fd), 1000);
-    `, path.join(dir, 'events.jsonl')], { cwd: tmp, stdio: ['ignore', 'pipe', 'inherit'] });
+    `, path.join(dir, 'session.lock')], { cwd: tmp, stdio: ['ignore', 'pipe', 'inherit'] });
     children.push(child);
     await once(child.stdout, 'data');
   }

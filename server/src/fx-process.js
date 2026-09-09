@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-// fx holds its event log open for the conversation's lifetime. On Linux that
+// fx holds session.lock open for the conversation's lifetime. On Linux that
 // gives us an exact owner even when several panes share the same workspace.
 export function fxSessionForPid(pid, root = path.join(process.env.HOME || '', '.fx', 'sessions')) {
   if (!Number.isInteger(pid) || pid <= 0) return null;
@@ -14,7 +14,7 @@ export function fxSessionForPid(pid, root = path.join(process.env.HOME || '', '.
       let target;
       try { target = fs.readlinkSync(`/proc/${owner}/fd/${fd}`); } catch { continue; }
       const rel = path.relative(root, target).split(path.sep);
-      if (rel.length === 2 && rel[1] === 'events.jsonl'
+      if (rel.length === 2 && rel[1] === 'session.lock'
           && /^[A-Za-z0-9._-]{1,255}$/.test(rel[0]) && !['.', '..'].includes(rel[0])) ids.add(rel[0]);
     }
     return ids.size === 1 ? { id: [...ids][0] } : null;
