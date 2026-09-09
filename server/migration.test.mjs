@@ -1,11 +1,11 @@
 // End-to-end check of the libghostty-backed session model.
 // Uses a `shell` session so it costs no agent tokens.
 //   node migration.test.mjs
+import { nativeFetch as fetch, NativeWebSocket as WebSocket } from './test/native-client.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { WebSocket } from 'ws';
 
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-migration-'));
 const BASHRC = path.join(DATA_DIR, 'test.bashrc');

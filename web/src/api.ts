@@ -1,13 +1,13 @@
 import type { Cli, Group, MoveTarget, RemoteInfo, RemoteMessage, Session, Tree } from './types';
+import { requestHeaders } from './requestIntent';
 
 const HEADERS = { 'content-type': 'application/json' };
 // The browser is the single human operator. Stamp every state-changing request
 // in one place so new API helpers cannot accidentally create unattributed work.
 const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  const method = String(init?.method || 'GET').toUpperCase();
-  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) return globalThis.fetch(input, init);
-  const headers = new Headers(init?.headers);
-  headers.set('x-am-origin', 'operator');
+  const request = input instanceof Request ? input : undefined;
+  const method = String(init?.method || request?.method || 'GET').toUpperCase();
+  const headers = requestHeaders(init?.headers || request?.headers, method);
   return globalThis.fetch(input, { ...init, headers });
 };
 // Like `json`, but keeps the server's own words — these routes fail for reasons
@@ -18,10 +18,7 @@ const jsonOrError = async (r: Response) => {
   return body;
 };
 
-const json = (r: Response) => {
-  if (!r.ok) throw new Error(`${r.status}`);
-  return r.json();
-};
+const json = (r: Response) => r.ok ? r.json() : jsonOrError(r);
 
 export const getClis = (): Promise<Cli[]> => fetch('/api/clis').then(json);
 export const getTree = (): Promise<Tree> => fetch('/api/tree').then(json);
@@ -298,7 +295,7 @@ export const uploadAttachment = (
   }
   request.open('POST', `/api/sessions/${encodeURIComponent(id)}/attachments`);
   request.timeout = timeoutMs;
-  request.setRequestHeader('x-am-origin', 'operator');
+  requestHeaders(undefined, 'POST').forEach((value, key) => request.setRequestHeader(key, value));
   request.setRequestHeader('x-file-name', encodeURIComponent(file.name || 'Attachment'));
   if (file.type) request.setRequestHeader('content-type', file.type);
   request.upload.onprogress = (event) => onProgress?.({

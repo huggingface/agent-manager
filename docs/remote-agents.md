@@ -459,11 +459,11 @@ token is not read-only access. Measured against this deployment:
 | `POST /api/relaunch`, `/api/update` | factory reboot; force-push over the Space repo |
 | `wss://…/ws?session=…` | **an interactive shell in the container** |
 
-The last row is the boundary. The handshake is accepted with a read-scoped token and **no `Origin`
-header** — `originAllowed()` returns true when `Origin` is absent (`index.js:1514`), deliberately,
-so curl and native clients work. A shell means `/data` entire (not just workspaces), every agent's
-stored credentials (`.claude/.credentials.json`, `.codex/auth.json`), and every secret **value** in
-the environment — including `HF_TOKEN`, which is write-scoped on the whole namespace.
+Native HTTP actions, contact/delivery reads and native terminal connections must now send
+`X-AM-Request: 1` within that private deployment boundary. Missing `Origin` alone is not
+admission; a presented browser origin must match the configured app origin exactly. The marker
+is non-secret request intent, not a credential or per-agent authorization. See
+[browser request protection](browser-request-protection.md) for policy and copied-client migration.
 
 **Therefore: Space membership is the security boundary, not the token.** Handing someone a token so
 their agent can connect hands them the container, the logged-in agents inside it, and a path to a
@@ -593,7 +593,7 @@ Space repo lvwerra/agent-manager. There is no separate key — you are identifie
 the name in the URL. Read access is all this needs; a write token buys nothing.
   export AM=https://lvwerra-agent-manager.hf.space/api/remote/laptop
   export HF_TOKEN=<a token with read access to lvwerra/agent-manager>
-  A() { curl -s -H "authorization: Bearer $HF_TOKEN" "$@"; }
+  A() { curl -s -H 'X-AM-Request: 1' -H "authorization: Bearer $HF_TOKEN" "$@"; }
 
 1. Check the connection before anything else:
      A "$AM/ping"

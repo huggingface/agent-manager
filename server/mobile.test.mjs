@@ -7,6 +7,7 @@
 //
 // am-test: manual — Chromium, a full web build and port 7896; `npm run test:mobile`.
 //   npm run test:mobile
+import { nativeFetch as fetch, NativeWebSocket as WebSocket } from './test/native-client.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,7 +15,6 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { chromiumLaunchOptions } from '../scripts/test-chromium.mjs';
-import { WebSocket } from 'ws';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);

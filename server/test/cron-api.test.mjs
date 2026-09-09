@@ -1,4 +1,5 @@
 // Cron API, durable boot behavior, scheduled identity, and same-name creation.
+import { nativeFetch as fetch } from './native-client.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
