@@ -1966,6 +1966,21 @@ async function readWindow(harness, file, sessionId, size, req, allowSubagent = f
 // a bundle small enough not to matter doesn't need them. They answer the same
 // shape with message INDICES as cursors: the reader treats a cursor as opaque.
 const INDEX_WINDOW_TURNS = 100; // no bytes to seek: page by turns, as index mode always did
+// A first-paint floor for the tail of an indexed source.
+//
+// `min` means two different things to the two window kinds. A byte window grows
+// its span until it holds that many messages, so a small `min` buys a cheap
+// first paint. An index window has no span to grow: the whole conversation is
+// already parsed by the time we get here, and `min` only decides how many of
+// those rows to hand back. Taking it literally is what made a cold reader on a
+// database source show two transport records — one exchange — no matter how
+// long the conversation was, and asking for fewer rows saved nothing, because
+// the parse had already happened.
+//
+// So on a TAIL request `min` is a floor rather than an exact count. Backward
+// paging still honours it exactly: that is a caller walking the conversation a
+// page at a time, and its page size is its own business.
+const INDEX_TAIL_MIN_TURNS = 40;
 
 function windowIndex(parsed, req) {
   const total = parsed.messages.length;
@@ -1977,7 +1992,7 @@ function windowIndex(parsed, req) {
     from = req.version === 2 ? Math.max(0, cursor - INDEX_WINDOW_TURNS) : cursor;
     to = req.version === 2 ? Math.min(total, cursor + min) : total;
   } else if (req.at === 'before' && !reset) { to = cursor; from = Math.max(0, to - min); }
-  else { to = total; from = Math.max(0, total - min); }
+  else { to = total; from = Math.max(0, total - Math.max(min, INDEX_TAIL_MIN_TURNS)); }
   return {
     ...headOf(parsed),
     total,

@@ -1,5 +1,5 @@
 import type { TraceCursor, TraceReq, TraceSummary, TraceTurn, TraceWindow } from '../api';
-import { reconcileTrace } from './readerModel';
+import { countExchanges, reconcileTrace } from './readerModel';
 
 export const INITIAL_WINDOW_BYTES = 128 * 1024;
 export const INITIAL_WINDOW_TURNS = 2;
@@ -7,6 +7,37 @@ export const WINDOW_BYTES = 384 * 1024;
 export const REQUEST_TIMEOUT_MS = 12_000;
 export const SUMMARY_DELAY_MS = 400;
 export const SUMMARY_REFRESH_MS = 5 * 60_000;
+
+/* ---- automatic recent-history fill (docs/reader-architecture.md §Initial history) ----
+ *
+ * The first window is deliberately small so the first paint is cheap. That is
+ * also why a cold reader used to show one or two exchanges: 128 KiB is one
+ * exchange of a tool-heavy trace, and an indexed source took `min` literally.
+ * So after the first window lands, the store keeps paging backward on its own
+ * until it holds a useful amount of recent conversation.
+ *
+ * A count is a target, never a promise: a trace whose records are huge will hit
+ * a budget first, and the reader still discloses the remaining history behind
+ * `Load earlier turns`. Every bound below exists so that a pathological trace
+ * costs a bounded amount of work rather than looping. */
+
+/** Exchanges a cold reader tries to have available. A starting point, tuned
+ * against the fixtures in `web/test/readerHistory.test.mjs`; the operator asked
+ * for "a bit more extensive" history, not for an exact number. */
+export const HISTORY_TARGET_EXCHANGES = 20;
+/** A viewport of very short exchanges can ask for more than the target. Past
+ * this the reader stops raising it, so tiny rows cannot page a whole trace. */
+export const HISTORY_MAX_EXCHANGES = 60;
+/** Backward pages one fill may spend. Six 384 KiB pages ≈ 2.3 MiB. */
+export const FILL_MAX_REQUESTS = 6;
+/** Bytes (or index rows) one fill may pull in beyond the first window. */
+export const FILL_MAX_BYTES = 3 * 1024 * 1024;
+/** Wall clock one continuous run may span, including waits between steps. */
+export const FILL_MAX_MS = 20_000;
+/** Between steps, so the paint, the live poll and user input all get a turn. */
+export const FILL_STEP_MS = 50;
+/** Assumed cost of one indexed row, so both source kinds share one byte budget. */
+const INDEX_ROW_COST = 4 * 1024;
 
 const sameFields = (a: object, b: object) => {
   const keys = Object.keys(a);
@@ -33,6 +64,10 @@ export interface ReaderSnapshot {
   lastSuccess: number;
   activityConfirmed: boolean;
   version: number;
+  /** Automatic recent-history fill: 'filling' while it pages backward, 'done'
+   * when the target is met, 'limited' when a budget or the source stopped it
+   * first (the reader keeps disclosing earlier history either way). */
+  fill: 'idle' | 'filling' | 'done' | 'limited';
 }
 
 export function mergeMeta(prev: Meta | null, next: Meta): Meta {
@@ -65,7 +100,7 @@ async function bounded<T>(run: (signal: AbortSignal) => Promise<T>, abort: Abort
 
 export class ReaderStore {
   private state: ReaderSnapshot = { turns: [], head: null, cursor: null, phase: 'loading', loading: null,
-    error: null, errorCode: null, notice: null, lastSuccess: 0, activityConfirmed: false, version: 0 };
+    error: null, errorCode: null, notice: null, lastSuccess: 0, activityConfirmed: false, version: 0, fill: 'idle' };
   private raw: TraceTurn[] = [];
   private meta: Meta | null = null;
   private summary: TraceSummary | null = null;
@@ -80,6 +115,11 @@ export class ReaderStore {
   private failures = 0;
   private summaryAt = 0;
   private summaryFailures = 0;
+  /** 0 = this consumer does not want automatic history (child readers, previews). */
+  private want = 0;
+  private fillTimer: ReturnType<typeof setTimeout> | null = null;
+  private spent = { requests: 0, bytes: 0, since: 0 };
+  private lastStart: number | null = null;
   constructor(private source: TraceSource) {}
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -112,11 +152,18 @@ export class ReaderStore {
 
   retain() {
     this.consumers++;
-    if (this.consumers === 1) { void this.read(this.state.cursor ? 'after' : 'tail'); this.scheduleSummary(); }
+    if (this.consumers === 1) {
+      void this.read(this.state.cursor ? 'after' : 'tail'); this.scheduleSummary();
+      // A warm store keeps its history and its spent budget: coming back to a
+      // pane must not re-run the preload, but it may still finish one that a
+      // budget or an unmount cut short.
+      this.planFill();
+    }
     return () => {
       this.consumers = Math.max(0, this.consumers - 1);
       if (!this.consumers) {
         this.cancel();
+        this.stopFill();
         clearTimeout(this.poll); this.poll = null;
         clearTimeout(this.summaryTimer); this.summaryTimer = null;
         this.summaryRequest?.abort(); this.summaryRequest = null;
@@ -134,7 +181,7 @@ export class ReaderStore {
   }
   /** Explicit refresh/foreground recovery replaces a possibly frozen request. */
   refresh = () => {
-    this.cancel(); this.failures = 0;
+    this.cancel(); this.resetFill(); this.failures = 0;
     this.summaryRequest?.abort(); this.summaryRequest = null;
     clearTimeout(this.summaryTimer); this.summaryTimer = null;
     this.summaryFailures = 0; this.summaryAt = 0; this.scheduleSummary();
@@ -149,6 +196,81 @@ export class ReaderStore {
   };
   loadNewer = () => this.read(this.state.cursor ? 'after' : 'tail');
   dismissNotice = () => this.publish({ notice: null });
+
+  /**
+   * How many recent exchanges this reader wants available without being asked.
+   * Consumers opt in: a child transcript opens at the top of its own context
+   * and a collapsed preview should not page anything, so both leave it at 0.
+   *
+   * Raising it (the view does, when a page of very short exchanges has not
+   * covered the scroller yet) resumes a fill that had reached the old target.
+   * It never resets a budget that a real limit already exhausted.
+   */
+  wantHistory = (exchanges: number) => {
+    const next = Math.min(Math.max(0, Math.trunc(exchanges)), HISTORY_MAX_EXCHANGES);
+    if (next <= this.want) return;
+    this.want = next;
+    if (this.state.fill === 'done') this.publish({ fill: 'idle' });
+    this.planFill();
+  };
+
+  private stopFill() {
+    clearTimeout(this.fillTimer); this.fillTimer = null;
+    // The wall clock measures one continuous run: it exists to stop a slow
+    // source filling forever, not to forbid a fill on a pane reopened later.
+    // Requests and bytes stay cumulative, so total work per transcript is still
+    // capped however many times it is reopened.
+    this.spent.since = 0;
+    if (this.state.fill === 'filling') this.publish({ fill: 'idle' });
+  }
+  /** A fresh transcript (or an explicit refresh) is allowed a fresh budget. */
+  private resetFill() {
+    this.stopFill();
+    this.spent = { requests: 0, bytes: 0, since: 0 };
+    this.lastStart = null;
+    if (this.state.fill !== 'idle') this.publish({ fill: 'idle' });
+  }
+  /**
+   * Decide whether to take another backward step, and why not if not. Called
+   * after every accepted read, so a fill that a user page or a live append
+   * interrupted simply continues from wherever the store now is.
+   */
+  private planFill() {
+    if (this.fillTimer || !this.want || !this.active) return;
+    const { cursor, turns } = this.state;
+    if (!cursor || this.state.loading) return;             // wait for the read in flight
+    const have = countExchanges(turns);
+    if (have >= this.want) { if (this.state.fill !== 'done') this.publish({ fill: 'done' }); return; }
+    // Nothing more to fetch, or nothing we can fetch: an honest partial view.
+    if (cursor.atStart || cursor.blocked || this.state.error) return this.limited();
+    // A backward page that did not move the cursor cannot be retried into
+    // progress — an oversized record is in the way.
+    if (this.lastStart !== null && cursor.start >= this.lastStart) return this.limited();
+    if (!this.spent.since) this.spent.since = Date.now();
+    if (this.spent.requests >= FILL_MAX_REQUESTS || this.spent.bytes >= FILL_MAX_BYTES
+      || Date.now() - this.spent.since >= FILL_MAX_MS) return this.limited();
+    if (this.state.fill !== 'filling') this.publish({ fill: 'filling' });
+    this.fillTimer = setTimeout(() => {
+      this.fillTimer = null;
+      if (!this.want || !this.active || this.state.loading) return this.planFill();
+      const from = this.state.cursor;
+      const held = this.state.turns.length;
+      this.lastStart = from ? from.start : null;
+      this.spent.requests++;
+      void this.read('before').then(() => {
+        const to = this.state.cursor;
+        // What this step actually cost. An index source has no byte offsets, so
+        // its rows are charged at an assumed size — the point is a single
+        // budget that both kinds of source can exhaust, not an exact byte count.
+        this.spent.bytes += from && to && to.mode !== 'index'
+          ? Math.max(0, from.start - to.start)
+          : Math.max(0, this.state.turns.length - held) * INDEX_ROW_COST;
+      });
+    }, FILL_STEP_MS);
+  }
+  private limited() {
+    if (this.state.fill !== 'limited') this.publish({ fill: 'limited' });
+  }
 
   private schedule(delay?: number) {
     clearTimeout(this.poll);
@@ -206,11 +328,15 @@ export class ReaderStore {
           errorCode: null, lastSuccess: Date.now(), version: this.state.version + (changed || reset ? 1 : 0),
           activityConfirmed: direction !== 'before' ? !!win.atEnd : this.state.activityConfirmed,
           notice: reset && cursor ? 'The transcript changed or was replaced. Showing its current content.' : this.state.notice }, change);
+        if (reset) this.resetFill();
         this.scheduleSummary();
         return Math.max(0, count);
       }).catch((error) => {
         if (token !== this.sequence) return 0;
         this.failures++;
+        // Failure ends the fill; the text and composer that are already here
+        // stay, and Earlier/Retry remain the way forward.
+        this.stopFill();
         const code = typeof error?.code === 'string' ? error.code : null;
         this.publish({ error: code === 'no-trace' && !this.state.head ? null : error?.message || 'Could not read the transcript',
           errorCode: code, activityConfirmed: false, phase: this.state.head ? this.state.phase : code === 'no-trace' ? 'empty' : 'error' });
@@ -220,6 +346,10 @@ export class ReaderStore {
         this.request = null; this.publish({ loading: null });
         const catchup = direction !== 'before' && this.state.cursor && !this.state.cursor.atEnd && !this.failures && !this.state.error;
         this.schedule(catchup ? 50 : undefined);
+        // After the slot is free, so a fill step never races the read that
+        // produced it. Every accepted read re-decides: a fill that a user page
+        // or a live append interrupted just continues from where the store is.
+        this.planFill();
       });
     this.request = { abort, token, promise };
     return promise;

@@ -1,7 +1,10 @@
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../../api';
 import type { SubAgentEntry } from '../../api';
-import { useTraceWindows, type TraceHeadInfo, type TraceSource } from '../../lib/traceWindows';
+import {
+  HISTORY_MAX_EXCHANGES, HISTORY_TARGET_EXCHANGES, useTraceWindows,
+  type TraceHeadInfo, type TraceSource,
+} from '../../lib/traceWindows';
 import type { Session } from '../../types';
 import { isRemote } from '../../types';
 import {
@@ -62,7 +65,9 @@ export default function ConversationView({
     summary: (signal) => api.getTraceSummary(session.id, signal),
   }), [session.id]);
   const onReset = useCallback(() => { following.current = true; setAtLatest(true); }, []);
-  const reader = useTraceWindows(src, `session:${session.id}`, { paused, onReset });
+  // The main reader asks for a useful amount of recent conversation up front.
+  // Child transcripts and previews deliberately do not (see the hook).
+  const reader = useTraceWindows(src, `session:${session.id}`, { paused, onReset, history: HISTORY_TARGET_EXCHANGES });
   const { head, error, phase, loading, notice, version, atStart, blocked, loadOlder, loadNewer, reload } = reader;
   const loadingEarlier = loading === 'tail' || loading === 'before';
   const turns = reader.turns.current;
@@ -188,6 +193,24 @@ export default function ConversationView({
     if (following.current) position.current = { ts: 0, off: 0, end: true };
     else if (exchange?.startTs) position.current = { ts: exchange.startTs, off: at!.offset, end: false };
   };
+  /**
+   * A page of conversation, not a page of estimates.
+   *
+   * The exchange target is about how much HISTORY is available; this is about
+   * whether the first thing shown fills the reader. They are different
+   * questions — twenty one-line exchanges do not cover a tall window, and one
+   * long answer covers it without giving any history — so both run, and each
+   * stops on its own terms. Bounded by HISTORY_MAX_EXCHANGES, so short rows
+   * cannot walk the whole transcript, and by `atStart`, so a genuinely short
+   * conversation settles immediately.
+   */
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (paused || !el || atStart || blocked || error || !exchanges.length) return;
+    if (el.clientHeight && virtual.measuredHeight() >= el.clientHeight) return;
+    reader.wantHistory(Math.min(HISTORY_MAX_EXCHANGES, exchanges.length + 8));
+  }, [virtual.offsets, virtual.measuredHeight, exchanges.length, atStart, blocked, error, paused, reader.wantHistory]);
+
   const settle = useRef<ReturnType<typeof setTimeout>>();
   const interact = () => { touched.current = true; virtual.cancelTarget(); };
   useEffect(() => () => { clearTimeout(settle.current); if (position.current) rememberReading(session.id, position.current); }, [session.id]);
@@ -238,7 +261,7 @@ export default function ConversationView({
         </button>}
         {head?.note && <div className="cxv-msg mono">{head.note}</div>}
         {q && <div className="cxv-msg mono">{shown.length} of {exchanges.length} loaded turns match{atStart ? '' : ' · Earlier history has not been searched'}</div>}
-        <div ref={virtual.container}>
+        <div className={exchanges.length ? 'cxv-rows' : undefined} ref={virtual.container}>
           <div aria-hidden="true" style={{ height: virtual.before }} />
           {shown.slice(virtual.start, virtual.end).map(({ x, n }) => <div key={x.key} data-x={x.key} data-row-key={x.key} ref={(node) => virtual.measure(x.key, node)}>
             <ExchangeView x={x} n={n + 1} total={exchanges.length} q={q || undefined} baseModel={head?.model || undefined}

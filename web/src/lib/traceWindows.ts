@@ -2,7 +2,10 @@
 // Parent readers, file previews and expanded children share the same lifecycle.
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { readerFor, type TraceSource } from './readerStore';
-export { INITIAL_WINDOW_BYTES, INITIAL_WINDOW_TURNS, WINDOW_BYTES, mergeMeta } from './readerStore';
+export {
+  FILL_MAX_BYTES, FILL_MAX_MS, FILL_MAX_REQUESTS, HISTORY_MAX_EXCHANGES, HISTORY_TARGET_EXCHANGES,
+  INITIAL_WINDOW_BYTES, INITIAL_WINDOW_TURNS, WINDOW_BYTES, mergeMeta,
+} from './readerStore';
 export type { TraceSource, Meta, TraceHeadInfo } from './readerStore';
 
 export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
@@ -12,6 +15,13 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
   paused?: boolean;
   /** Activity is a presentation hint; even an idle transcript can change. */
   live?: boolean;
+  /**
+   * Recent exchanges this reader wants loaded without the user asking. Opt-in:
+   * omitting it (children, previews, file consumers) keeps the old behaviour of
+   * one window until something asks for more. One store shared by several
+   * subscribers still fills once — the work belongs to the store, not the hook.
+   */
+  history?: number;
 } = {}) {
   const store = useMemo(() => readerFor(srcKey, src), [srcKey, src]);
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
@@ -24,8 +34,11 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
     else callbacks.current.onAppend?.(change.count);
   }), [store]);
   useEffect(() => {
-    if (!opts.paused && !hidden) return store.retain();
-  }, [store, opts.paused, hidden]);
+    if (opts.paused || hidden) return;
+    // Only a reader someone is actually looking at does speculative work.
+    if (opts.history) store.wantHistory(opts.history);
+    return store.retain();
+  }, [store, opts.paused, hidden, opts.history]);
   useEffect(() => {
     const visibility = () => setHidden(document.hidden);
     const recover = () => { if (!document.hidden && !callbacks.current.paused) void store.refresh(); };
@@ -41,5 +54,5 @@ export function useTraceWindows(src: TraceSource, srcKey: string, opts: {
   }, [store]);
   return { ...state, turns, meta: state.head, atStart: !!state.cursor?.atStart,
     blocked: !!state.cursor?.blocked, loadOlder: store.loadOlder, loadNewer: store.loadNewer,
-    reload: store.refresh, dismissNotice: store.dismissNotice };
+    reload: store.refresh, dismissNotice: store.dismissNotice, wantHistory: store.wantHistory };
 }

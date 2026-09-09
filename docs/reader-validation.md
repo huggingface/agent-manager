@@ -29,12 +29,56 @@ Validated on 2026-09-04, based on main `705e32dc`.
 | Operator HTML/XML disappears as harness text | Named harness envelopes in parser and exchange grouping instead of every leading `<` | `<div>Please review this markup</div>` remains a user prompt and opens a prompt band |
 | Existing UI contracts | Retained shared composer, attachment flow and info panel | Full-app reader-info, attachment-input and terminal UI integration suites pass |
 
+## Initial history (issue #129)
+
+Added 2026-09-09, on main `ef08e843`.
+
+| Problem / contract | Implementation | Evidence |
+| --- | --- | --- |
+| A cold reader shows one or two exchanges | Bounded backward fill to ~20 exchanges after the first paint, counted in exchanges; indexed sources get a first-window floor | Tool-heavy JSONL fixture goes from 2 exchanges to 22 with no scrolling, search or summary; a 40-exchange OpenCode database goes from 1 to 20 in its first window |
+| Counting records instead of conversation | `countExchanges` shares `isOperatorPrompt` with the grouping | Nine fixture shapes assert `countExchanges === splitExchanges().length`, including a transcript starting mid-exchange and harness envelopes that are not prompts |
+| A fill that cannot finish keeps trying | Request/byte/time budgets, plus start-of-source, blocked and no-progress stops | 900 KiB answers stop on the byte budget at ≤6 backward reads; a blocked cursor and a cursor that answers without advancing each stop after one retry, and neither claims the beginning of the conversation |
+| Preload competes with the reader | One request slot, 50 ms between steps, opt-in per consumer, cancelled on release | Composer and first text stay available under a 60 s hung summary; releasing a reader mid-fill stops it within one step; no child reader is created by a parent preload |
+| A warm return re-runs the preload | Budget and target are per transcript, not per mount | Remount after a completed fill issues zero further backward reads and keeps its history |
+| The first page does not fill the reader | The view raises the target while MEASURED rows have not covered the scroller's content box | 20 one-line exchanges leave a 2600 px reader uncovered; it continues to 94 and covers it, in one extra backward read |
+| Covering the page is mistaken for having history | Coverage and the exchange target are separate criteria | One 140-line answer covers the reader at 2 exchanges; the fill still reaches 22 |
+| Older history pushes visible text down | Position re-asserted in the same frame as the size change; transcript shorter than the window grows from the bottom | 0.69 px maximum anchor displacement over 110 frames while filling; 0.51 px across the underfilled→scrollable transition over 72 frames; a genuine live append still moves the view 77 px, which is Latest working |
+| Latest quietly stops following mid-preload | Corrections land before the scroll event that reports them | Latest is claimed on every one of 110 frames during the fill |
+
+Removing each mechanism fails a named assertion: no fill → “only 2 exchanges
+became available on their own”; no same-frame re-placement → “Latest is still
+the bottom”; no bottom-growth → 454 px of displacement; no coverage request →
+uncovered 2600 px reader; no indexed floor → “1 prompts in 2 messages”; a
+counter that ignores a leading exchange → the grouping comparison.
+
+### Measurements
+
+Same fixtures, before and after, Chromium at 1000×760. “Before” is main's source
+with the same tests.
+
+| Fixture | Exchanges after settling | First viewport filled | Max anchor drift | Backward reads | Bytes | Composer ready |
+| --- | --- | --- | --- | --- | --- | --- |
+| Tool-heavy, 90 KiB/exchange | 2 → **22** | 28% → **100%** | 0 → 0.69 px | 0 → 5 | 128 KiB → 2.0 MiB | 68 → 61 ms |
+| Large JSONL, 20 KiB answers | 50 → **200** | 100% → 100% | 0 → 0.13 px | 0 → 1 | 128 KiB → 509 KiB | 28 → 19 ms |
+| Ordinary small turns | 200 → 200 | 100% → 100% | 0 → 0.31 px | 0 → 0 | 117 KiB → 117 KiB | 26 → 20 ms |
+| OpenCode database, 40 exchanges | 1 → **20** (first window) | — | — | 0 → 0 | — | — |
+
+Time to a usable composer and to the first transcript paint are unchanged: the
+first window is the same request it always was. “Before” drift is zero because
+nothing arrives to displace anything, not because the old path was stable — the
+displacement this fixes is a property of prepending, which nothing did
+automatically before. Regression budgets for the tool-heavy fixture: ≥20
+exchanges, viewport covered, ≤2 px drift, ≤6 backward reads, ≤3 MiB.
+
 ## Runs
 
 - Web: `npm run build`, `npm test` (23 suites), `npm run test:render`.
+  For #129, re-run: `npm test` (25 suites), `npm run test:render`, `npm run build`.
 - Server: all 27 non-cron default suites passed. This includes trace windows,
   queued prompts, child traces, protocol regressions, attachments, permissions,
   migration, resize and state checkpoint tests.
+  For #129, re-run: every suite individually (the runner still stops at the cron
+  failure below); 30 passed, `test/crons.test.mjs` failed, unchanged from main.
 - Full-app browser integration: `reader-info.test.mjs`,
   `screenshot-input.test.mjs`, `terminal-ui.test.mjs`, using the production build.
 - Final targeted rerun: reader model/browser/protocol, legacy trace windows and

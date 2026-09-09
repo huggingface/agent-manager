@@ -398,7 +398,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    between the last line and the composer's border while the blocks above it are
    12px apart, which reads as one blank line too many at the end of every
    conversation. 12px makes the end of the flow spaced like the flow. */
-.cxv-body { --cx-gutter: 14px; --cx-tail: 12px; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px var(--cx-gutter) var(--cx-tail); }
+.cxv-body { --cx-gutter: 14px; --cx-tail: 12px; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px var(--cx-gutter) var(--cx-tail); display: flex; flex-direction: column; }
 
 /* The scrollbar is invisible until something scrolls, then fades back out.
    `.cxv-scrolling` is put on the node by the reader itself, on every scroll
@@ -440,7 +440,23 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
      delay too, so the bar simply goes rather than lingering. */
   .cxv-body, .cxv-body::-webkit-scrollbar-thumb { transition: none; }
 }
-.cxv-col { display: flex; flex-direction: column; min-width: 0; }
+/* `flex: 1 0 auto` rather than `min-height: 100%`: a percentage resolves
+   against the scroller's CONTENT box, so a full-height column plus the
+   scroller's own padding is taller than the scroller and every short
+   conversation gets 16px of scrollbar it has no content for. */
+.cxv-col { display: flex; flex-direction: column; min-width: 0; flex: 1 0 auto; }
+/* Conversation grows from the BOTTOM while it is shorter than the window.
+ *
+ * The reader opens following the latest message, so once the transcript is
+ * taller than the window a prepended older page moves nothing on screen: the
+ * bottom stays the bottom. Below that height there is no scroll offset to
+ * compensate with, and a top-aligned transcript would be pushed down the screen
+ * by every page of history that arrived after it. Anchoring the rows to the
+ * bottom removes that case instead of trying to correct it, and costs nothing
+ * once the content is tall enough — `auto` margins absorb only free space.
+ * Applied only when there ARE exchanges, so an empty reader keeps its welcome
+ * text where it has always been. */
+.cxv-rows { margin-top: auto; }
 .cxv-msg { font-size: 0.85em; color: var(--muted); padding: 6px 0; }
 /* The line above the oldest loaded exchange. Fixed height on purpose: it sits
    above everything in the column, so a line that grew or vanished when the
