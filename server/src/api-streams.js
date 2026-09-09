@@ -1,13 +1,17 @@
 // The remote protocol is unchanged: a connected line, heartbeats, then one
 // JSON line. Every event/timer enters the same request-scoped failure path.
-export function remoteStream(req, res, next, remote, name, since, wait) {
+// `admit`, when given, registers this poll with the privacy lock (index.js
+// admitClient): the lock ends it with the protocol's own stop line rather than
+// cutting the connection, so a queued prompt cannot ride out afterwards.
+export function remoteStream(req, res, next, remote, name, since, wait, admit) {
   let done = false;
   let heartbeat, timer;
   let release = () => {};
+  let releaseLock = () => {};
   const cleanup = () => {
     clearInterval(heartbeat); clearTimeout(timer);
     res.off('close', close); res.off('error', fail);
-    release();
+    release(); releaseLock();
   };
   const close = () => { if (!done) { done = true; cleanup(); } };
   const fail = (error) => {
@@ -29,6 +33,10 @@ export function remoteStream(req, res, next, remote, name, since, wait) {
     const pending = remote.pendingFor(name, since);
     res.set({ 'content-type': 'application/x-ndjson', 'cache-control': 'no-cache, no-transform', 'x-accel-buffering': 'no' });
     res.write(':connected\n');
+    if (admit) {
+      res.locals.handleLockItself?.();
+      releaseLock = admit((eff) => finish({ stop: true, reason: `the manager locked itself (${eff.reason})` }));
+    }
     release = remote.registerStream(name, {
       since,
       deliver: guard((messages) => finish({ messages, seq: messages[messages.length - 1].seq })),

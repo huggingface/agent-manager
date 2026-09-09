@@ -12,6 +12,7 @@ import ShareDialog from './components/ShareDialog';
 import StateLogo from './components/StateLogo';
 import Overview from './components/Overview';
 import Locked from './components/Locked';
+import { LOCKED_EVENT, createLockTracker, type LockAnnouncement } from './lib/lockStatus';
 import BackupBanner from './components/BackupBanner';
 import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
@@ -373,14 +374,56 @@ export default function App() {
     };
   }, []);
 
-  // Refresh info while locked so flipping the Space to Private unlocks the UI
-  // without a manual reload (the server re-checks visibility every minute).
+  // The privacy lock, as the app sees it (lib/lockStatus.ts). One tracker
+  // orders every observation so a slow "unlocked" answer cannot undo a lock
+  // that a later 403 or socket close already reported.
+  const lockTracker = useRef(createLockTracker());
+  const lockedRef = useRef(false);
+  lockedRef.current = !!info?.locked;
+  const loadInfo = useCallback(async () => {
+    const began = lockTracker.current.begin();
+    try {
+      const next = await api.getInfo();
+      if (lockTracker.current.accept(began, { locked: !!next.locked, seq: next.visibility?.seq, boot: next.visibility?.boot })) setInfo(next);
+    } catch { /* offline, or the server is restarting */ }
+  }, []);
   useEffect(() => {
-    api.getInfo().then(setInfo).catch(() => {});
-    if (!info?.locked) return;
-    const t = setInterval(() => api.getInfo().then(setInfo).catch(() => {}), 15_000);
+    loadInfo();
+    // Any 403 {error:'locked'} or a terminal socket closed by the lock lands
+    // here: apply the lock at once, then fetch the full explanation.
+    const onLock = (e: Event) => {
+      const d = (e as CustomEvent<LockAnnouncement>).detail || { reason: null, bucket: null };
+      // Ordered against what this tab already applied: a refusal older than a
+      // reopening is a delayed answer, not news; one from another server
+      // generation (a restart) is decided by the status fetch, which carries
+      // the generation, rather than by its counter.
+      const verdict = lockTracker.current.observeLocked({ seq: d.seq ?? null, boot: d.boot ?? null });
+      if (verdict === 'stale') return;
+      if (verdict === 'apply') setInfo((i) => (i ? { ...i, locked: true, lockReason: d.reason ?? i.lockReason, lockBucket: d.bucket ?? i.lockBucket, secrets: [] } : i));
+      loadInfo();
+    };
+    // Coming back to a tab (or back online) re-reads the state rather than
+    // trusting what was on screen when it was suspended.
+    const onReturn = () => { if (!document.hidden) loadInfo(); };
+    window.addEventListener(LOCKED_EVENT, onLock);
+    document.addEventListener('visibilitychange', onReturn);
+    window.addEventListener('online', onReturn);
+    return () => {
+      window.removeEventListener(LOCKED_EVENT, onLock);
+      document.removeEventListener('visibilitychange', onReturn);
+      window.removeEventListener('online', onReturn);
+    };
+  }, [loadInfo]);
+  // While locked, the safe status is the only thing polled — every 15 s, so the
+  // app reopens by itself within a check cycle of the lock clearing. While
+  // unlocked it is re-read every 30 s in a visible tab, so status that changes
+  // without a lock transition (the unverified-bucket warning clearing once the
+  // bucket verifies, backup health) is accurate without a reload. Cached state
+  // on the server: no Hub work per tab.
+  useEffect(() => {
+    const t = setInterval(() => { if (info?.locked || !document.hidden) loadInfo(); }, info?.locked ? 15_000 : 30_000);
     return () => clearInterval(t);
-  }, [info?.locked]);
+  }, [info?.locked, loadInfo]);
   useEffect(() => { writeStored('am-zoom', String(zoom)); }, [zoom]);
 
   // Show the welcome once, when /api/info first loads: on first run (never seen)
@@ -418,8 +461,15 @@ export default function App() {
   // Mutations and foreground recovery replace any possibly frozen request.
   // Ordinary polls use the manager directly below and coalesce instead.
   const refresh = useCallback((): Promise<Tree | null> => {
+    if (lockedRef.current) return Promise.resolve(null); // protected reads pause while locked
     return treeRefresh.current?.refresh('replace') ?? Promise.resolve(null);
   }, []);
+  // Reopening: the first tree after a lock clears should not wait for the poll.
+  const wasLocked = useRef(false);
+  useEffect(() => {
+    if (info?.locked) { wasLocked.current = true; return; }
+    if (wasLocked.current) { wasLocked.current = false; refresh(); }
+  }, [info?.locked, refresh]);
 
   // Hide/unhide a group (or one agent) in the Overview. Optimistic, because the
   // tree poll is up to 2.5s away and a control that does nothing for two seconds
@@ -440,10 +490,10 @@ export default function App() {
       (next) => { setTree(next); setTreeLoaded(true); },
     );
     treeRefresh.current = manager;
-    void manager.refresh('replace');
+    if (!lockedRef.current) void manager.refresh('replace');
     // Same cadence and hidden-tab rule as before. Foreground catch-up is shared
     // with metadata below so visibility/focus/pageshow/online cannot drift.
-    const t = setInterval(() => { if (!document.hidden) void manager.refresh('poll'); }, 2500);
+    const t = setInterval(() => { if (!document.hidden && !lockedRef.current) void manager.refresh('poll'); }, 2500);
     return () => {
       clearInterval(t);
       if (treeRefresh.current === manager) treeRefresh.current = null;
@@ -463,6 +513,7 @@ export default function App() {
   overviewActiveRef.current = activeRef === 'overview';
   const metaRefresh = useRef<ReturnType<typeof createLatestRefresh<Awaited<ReturnType<typeof api.getMeta>>>> | null>(null);
   const refreshMeta = useCallback(() => {
+    if (lockedRef.current) return Promise.resolve(null); // protected reads pause while locked
     return metaRefresh.current?.refresh('replace') ?? Promise.resolve(null);
   }, []);
   useEffect(() => {
@@ -481,12 +532,12 @@ export default function App() {
       },
     );
     metaRefresh.current = manager;
-    void manager.refresh('replace');
+    if (!lockedRef.current) void manager.refresh('replace');
     // One self-scheduling timer whose delay adapts to the active view, so we
     // never tear down / recreate the loop when navigating.
     let t: ReturnType<typeof setTimeout>;
     const tick = () => {
-      if (!document.hidden) void manager.refresh('poll');
+      if (!document.hidden && !lockedRef.current) void manager.refresh('poll');
       t = setTimeout(tick, overviewActiveRef.current ? 1500 : 8000);
     };
     t = setTimeout(tick, 1500);
@@ -1131,7 +1182,7 @@ export default function App() {
     );
   };
 
-  if (info?.locked) return <Locked spaceId={info.spaceId} reason={info.lockReason} bucket={info.lockBucket} />;
+  if (info?.locked) return <Locked spaceId={info.spaceId} reason={info.lockReason} bucket={info.lockBucket} status={info.visibility} />;
 
   return (
     <>
