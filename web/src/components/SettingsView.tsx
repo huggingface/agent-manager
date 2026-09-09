@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { isPassive, isRemote, type Cli } from '../types';
 import * as api from '../api';
+import { useSaver, type Saver } from '../lib/saveQueue';
 import SkillsEditor from './SkillsEditor';
 import ApiLog from './ApiLog';
 import UsagePanel from './UsagePanel';
@@ -9,6 +10,23 @@ import { SunGlyph, MoonGlyph, RefreshGlyph, InfoGlyph } from './icons';
 import Logo from './Logo';
 
 type Page = 'general' | 'usage' | 'skills' | 'cron' | 'apilog';
+
+// Saving is silent until it isn't. A failure stays on screen — it does not fade
+// like the tick does — because the change it describes is still only in this
+// browser, and Retry is the way to send it again.
+function SaveFlag({ state }: { state: Pick<Saver<never>, 'status' | 'error' | 'retry'> }) {
+  if (state.status === 'idle') return null;
+  if (state.status === 'error') {
+    return (
+      <span className="save-flag save-flag-err" title={state.error || undefined}>
+        not saved
+        <button className="save-retry" onClick={() => { void state.retry(); }}>Retry</button>
+      </span>
+    );
+  }
+  return <span className="save-flag">{state.status === 'saving' ? 'saving…' : 'saved ✓'}</span>;
+}
+
 const PAGES: { id: Page; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'usage', label: 'Usage' },
@@ -161,48 +179,55 @@ export default function SettingsView({
   };
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
   const [notes, setNotes] = useState<Record<string, string>>({});
-  const [savedNotes, setSavedNotes] = useState<Record<string, string>>({});
-  const [secretsSaved, setSecretsSaved] = useState<'idle' | 'saving' | 'saved'>('idle');
+  // What the server has been asked for, so loading a value doesn't read as an
+  // edit of it. Compared as JSON because these are rebuilt objects, not the ones
+  // that came back.
+  const notesAsked = useRef('{}');
+  const notesSaver = useSaver<Record<string, string>, void>({
+    send: async (n) => { await api.saveSecrets(n); },
+  });
   useEffect(() => {
-    api.getSecrets().then((d) => { setSecretKeys(d.detected); setNotes(d.notes || {}); setSavedNotes(d.notes || {}); }).catch(() => {});
+    api.getSecrets().then((d) => {
+      setSecretKeys(d.detected);
+      notesAsked.current = JSON.stringify(d.notes || {});
+      setNotes(d.notes || {});
+    }).catch(() => {});
   }, []);
-  const notesDirty = secretKeys.some((k) => (notes[k] || '') !== (savedNotes[k] || ''));
   // One-line textareas that grow with their content.
   const grow = (el: HTMLTextAreaElement) => { el.style.height = 'auto'; el.style.height = `${el.scrollHeight}px`; };
   const growRef = (el: HTMLTextAreaElement | null) => { if (el) grow(el); };
   useEffect(() => {
     document.querySelectorAll<HTMLTextAreaElement>('textarea.secret-desc').forEach(grow);
   }, [secretKeys]);
-  // Autosave: settle for a moment after the last keystroke, then persist.
+  // Every change is sent the moment it is made: no debounce to sit out, no blur
+  // to remember, nothing left unsaved by closing the panel. While a write is out
+  // the newest value waits in one slot and follows it the instant it settles —
+  // see useSaver, which is also what keeps an older answer from speaking for a
+  // newer edit.
   useEffect(() => {
-    if (!notesDirty) return;
-    const t = setTimeout(async () => {
-      setSecretsSaved('saving');
-      try { await api.saveSecrets(notes); setSavedNotes({ ...notes }); setSecretsSaved('saved'); setTimeout(() => setSecretsSaved('idle'), 1800); }
-      catch { setSecretsSaved('idle'); }
-    }, 900);
-    return () => clearTimeout(t);
-  }, [notes, notesDirty]);
-  // Operator config (artifacts hub, jobs policy): load once, autosave on edit.
+    const json = JSON.stringify(notes);
+    if (json === notesAsked.current) return;
+    notesAsked.current = json;
+    void notesSaver.request(notes);
+  }, [notes, notesSaver.request]);
+
+  // Operator config (artifacts hub, jobs policy): load once, save on every edit.
   const [cfg, setCfg] = useState<api.AmConfig | null>(null);
-  const [savedCfg, setSavedCfg] = useState('');
-  const [cfgSaved, setCfgSaved] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const cfgAsked = useRef<string | null>(null);
+  const cfgSaver = useSaver<api.AmConfig, void>({
+    send: async (c) => { await api.saveConfig(c); },
+  });
   useEffect(() => {
-    api.getConfig().then((c) => { setCfg(c); setSavedCfg(JSON.stringify(c)); }).catch(() => {});
+    api.getConfig().then((c) => { cfgAsked.current = JSON.stringify(c); setCfg(c); }).catch(() => {});
   }, []);
   useEffect(() => {
-    if (!cfg || JSON.stringify(cfg) === savedCfg) return;
-    const t = setTimeout(async () => {
-      setCfgSaved('saving');
-      try {
-        await api.saveConfig(cfg);
-        setSavedCfg(JSON.stringify(cfg));
-        setCfgSaved('saved');
-        setTimeout(() => setCfgSaved('idle'), 1800);
-      } catch { setCfgSaved('idle'); }
-    }, 900);
-    return () => clearTimeout(t);
-  }, [cfg, savedCfg]);
+    if (!cfg) return;
+    const json = JSON.stringify(cfg);
+    if (json === cfgAsked.current) return;
+    cfgAsked.current = json;
+    void cfgSaver.request(cfg);
+  }, [cfg, cfgSaver.request]);
+  const cfgSaved = cfgSaver.status;
 
   // Bucket backup: the copying happens in an HF Job, so the row reports what the
   // Hub says about the last one rather than anything we remember locally.
@@ -380,7 +405,7 @@ export default function SettingsView({
               })}
             </div>
 
-            <h3>Secrets &amp; variables{secretsSaved !== 'idle' && <span className="save-flag">{secretsSaved === 'saving' ? 'saving…' : 'saved ✓'}</span>}</h3>
+            <h3>Secrets &amp; variables<SaveFlag state={notesSaver} /></h3>
             <div className="s-help">Detected by diffing the runtime environment against a build-time snapshot — names only, never values. Describe what each is for (saved automatically); this publishes an <span className="mono">environment</span> skill so every agent knows what's available.</div>
             {secretKeys.length === 0 ? (
               <div className="s-muted" style={{ marginTop: 8 }}>None detected.</div>
@@ -402,7 +427,7 @@ export default function SettingsView({
               </div>
             )}
 
-            <h3>Agent output &amp; compute{cfgSaved !== 'idle' && <span className="save-flag">{cfgSaved === 'saving' ? 'saving…' : 'saved ✓'}</span>}</h3>
+            <h3>Agent output &amp; compute<SaveFlag state={cfgSaver} /></h3>
             <div className="s-help">Both policies are published to agents through the <span className="mono">environment</span> skill.</div>
             {cfg && (
               <>

@@ -1161,6 +1161,23 @@ app.post('/api/update', async (_req, res) => {
   }
 });
 
+// Settings are saved on every change now, so these two files are written often
+// and while the app is being used. Write beside the target and rename: a crash
+// or a full disk leaves the previous settings intact rather than a truncated
+// file that reads back as "no settings at all". Throws on failure — a save that
+// did not happen must not be answered with ok.
+function writeJsonAtomic(file, value) {
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.am-tmp`);
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`);
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    throw e;
+  }
+}
+
 // ---------- secrets: describe each injected secret/variable, feed a skill ----------
 const SECRET_NOTES_FILE = path.join(DATA_DIR, 'secret-notes.json');
 function loadSecretNotes() {
@@ -1233,9 +1250,17 @@ app.put('/api/config', (req, res) => {
       exclude: backup.excludeFromConfig(b.backup?.exclude),
     },
   };
-  try { fs.writeFileSync(AM_CONFIG_FILE, JSON.stringify(cfg, null, 2)); } catch {}
-  generateEnvSkill(loadSecretNotes());
-  res.json({ ok: true });
+  try {
+    writeJsonAtomic(AM_CONFIG_FILE, cfg);
+  } catch (e) {
+    // Saying ok here is how a setting silently goes back to what it was on the
+    // next load. The client keeps the change and offers Retry instead.
+    return res.status(500).json({ error: `could not save settings — ${String((e && e.message) || e)}` });
+  }
+  refreshEnvSkill();
+  // What was actually committed, normalization included, in the shape /api/config
+  // returns.
+  res.json({ ok: true, ...cfg, defaultArtifactsSpace: defaultArtifactsSpace() });
 });
 
 // ---------- bucket backup: status + run-now (docs/bucket-backup.md) ----------
@@ -1297,6 +1322,27 @@ estimate, then wait for approval.
 function generateEnvSkill(notes) {
   const amCfg = loadAmConfig();
   return generateEnvSkillInner(notes, amCfg);
+}
+
+// The generated skill is derived from the settings, not part of saving them.
+// Regenerating it inline fanned a handful of file writes out on the response
+// path of every save — fine at one save per typing pause, wasteful now that a
+// save is every change — and it wrote whatever the request carried, so an older
+// save finishing last left the skill describing settings that had been replaced.
+// One pass at a time, reading what is committed, and at most one more if a save
+// lands while a pass is running.
+let envSkillPass = false;
+let envSkillAgain = false;
+function refreshEnvSkill() {
+  if (envSkillPass) { envSkillAgain = true; return; }
+  envSkillPass = true;
+  const pass = () => {
+    envSkillAgain = false;
+    try { generateEnvSkill(loadSecretNotes()); } catch {}
+    if (envSkillAgain) { setImmediate(pass); return; }
+    envSkillPass = false;
+  };
+  setImmediate(pass);
 }
 function generateEnvSkillInner(notes, amCfg) {
   const keys = injectedEnvKeys();
@@ -1638,9 +1684,13 @@ ${envLines}
 app.get('/api/secrets', (_req, res) => res.json({ detected: injectedEnvKeys(), notes: loadSecretNotes() }));
 app.put('/api/secrets', (req, res) => {
   const notes = (req.body && req.body.notes && typeof req.body.notes === 'object') ? req.body.notes : {};
-  try { fs.writeFileSync(SECRET_NOTES_FILE, JSON.stringify(notes, null, 2)); } catch {}
-  generateEnvSkill(notes);
-  res.json({ ok: true });
+  try {
+    writeJsonAtomic(SECRET_NOTES_FILE, notes);
+  } catch (e) {
+    return res.status(500).json({ error: `could not save descriptions — ${String((e && e.message) || e)}` });
+  }
+  refreshEnvSkill();
+  res.json({ ok: true, notes });
 });
 
 // ---------- skills (markdown/text files in the workspace) ----------

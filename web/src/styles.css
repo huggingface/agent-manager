@@ -1306,6 +1306,18 @@ body {
 .cfg-num { width: 90px; flex: none; text-align: right; }
 /* artifacts sub-settings stay visible when off, just clearly inert */
 .cfg-off { opacity: 0.45; pointer-events: none; }
+/* The save flag has never had a rule of its own, so it ran into the heading it
+   sits after ("Agent output & computesaved ✓"). It says more now — a failure and
+   its Retry — which is not something to leave touching the word before it. */
+.save-flag { margin-left: 8px; font-size: 12px; font-weight: 500; }
+/* A failed save is not decoration: it keeps its colour and its way out, while
+   the "saved ✓" beside it is a tick that fades. */
+.save-flag-err { color: var(--danger); }
+.save-retry {
+  margin-left: 6px; padding: 0 6px; font: inherit; font-size: 11px;
+  border: 1px solid currentColor; border-radius: 5px; background: none;
+  color: inherit; cursor: pointer;
+}
 /* "Back up now" hangs off the interval control above it, so it sits on the page
    rail rather than in the row's right-hand slot. */
 .bk-now { margin-top: 10px; }

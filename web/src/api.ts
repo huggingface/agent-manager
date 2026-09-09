@@ -123,8 +123,11 @@ export interface AmConfig {
   defaultArtifactsSpace?: string;
 }
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
+// jsonOrError: a refused save has something worth showing next to the setting
+// that did not save ("could not save settings — ENOSPC"), and json() would throw
+// it away for a bare status.
 export const saveConfig = (c: AmConfig) =>
-  fetch('/api/config', { method: 'PUT', headers: HEADERS, body: JSON.stringify(c) }).then(json);
+  fetch('/api/config', { method: 'PUT', headers: HEADERS, body: JSON.stringify(c) }).then(jsonOrError);
 
 // ---- durable scheduled prompts ----
 export type CronState = 'running' | 'stopped';
@@ -197,7 +200,7 @@ export const runBackup = (): Promise<{ job?: string }> =>
 export interface SecretsData { detected: string[]; notes: Record<string, string>; }
 export const getSecrets = (): Promise<SecretsData> => fetch('/api/secrets').then(json);
 export const saveSecrets = (notes: Record<string, string>) =>
-  fetch('/api/secrets', { method: 'PUT', headers: HEADERS, body: JSON.stringify({ notes }) }).then(json);
+  fetch('/api/secrets', { method: 'PUT', headers: HEADERS, body: JSON.stringify({ notes }) }).then(jsonOrError);
 
 export interface QuotaWindow { usedPercent?: number; resetsAt?: number; windowMinutes?: number; }
 export interface ProviderUsage {
