@@ -116,10 +116,10 @@ Browser upgrade failures have limited details, so the terminal stops after five
 consecutive failed connections (immediately for 1008) and offers **retry connection**
 without clearing retained output. A successful terminal restore resets that count.
 
-This budget deliberately applies to outages as well as refusals: four automatic
-retries take about eleven seconds when failures are immediate, then each affected
-pane needs a manual retry. A restart or sleeping Space can therefore outlast the
-budget. We retain the bound rather than using HTTP health as a refusal classifier:
+This budget deliberately applies to outages as well as refusals: after four
+automatic retries, each affected pane needs a manual retry. A restart or sleeping
+Space can therefore outlast the budget. We retain the bound rather than using
+HTTP health as a refusal classifier:
 an HTTP response cannot establish why a separate WebSocket path failed, and lack of
 an HTTP response does not establish that retrying upgrades will help. Automatic
 outage recovery could be designed separately; it is not part of this policy.
