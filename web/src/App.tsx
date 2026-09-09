@@ -12,6 +12,7 @@ import ShareDialog from './components/ShareDialog';
 import StateLogo from './components/StateLogo';
 import Overview from './components/Overview';
 import Locked from './components/Locked';
+import { LOCKED_EVENT, createLockTracker, type LockAnnouncement } from './lib/lockStatus';
 import BackupBanner from './components/BackupBanner';
 import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
@@ -358,14 +359,48 @@ export default function App() {
     };
   }, []);
 
-  // Refresh info while locked so flipping the Space to Private unlocks the UI
-  // without a manual reload (the server re-checks visibility every minute).
+  // The privacy lock, as the app sees it (lib/lockStatus.ts). One tracker
+  // orders every observation so a slow "unlocked" answer cannot undo a lock
+  // that a later 403 or socket close already reported.
+  const lockTracker = useRef(createLockTracker());
+  const lockedRef = useRef(false);
+  lockedRef.current = !!info?.locked;
+  const loadInfo = useCallback(async () => {
+    const began = lockTracker.current.begin();
+    try {
+      const next = await api.getInfo();
+      if (lockTracker.current.accept(began, !!next.locked)) setInfo(next);
+    } catch { /* offline, or the server is restarting */ }
+  }, []);
   useEffect(() => {
-    api.getInfo().then(setInfo).catch(() => {});
+    loadInfo();
+    // Any 403 {error:'locked'} or a terminal socket closed by the lock lands
+    // here: apply the lock at once, then fetch the full explanation.
+    const onLock = (e: Event) => {
+      const d = (e as CustomEvent<LockAnnouncement>).detail || { reason: null, bucket: null };
+      lockTracker.current.observeLocked();
+      setInfo((i) => (i ? { ...i, locked: true, lockReason: d.reason ?? i.lockReason, lockBucket: d.bucket ?? i.lockBucket, secrets: [] } : i));
+      loadInfo();
+    };
+    // Coming back to a tab (or back online) re-reads the state rather than
+    // trusting what was on screen when it was suspended.
+    const onReturn = () => { if (!document.hidden) loadInfo(); };
+    window.addEventListener(LOCKED_EVENT, onLock);
+    document.addEventListener('visibilitychange', onReturn);
+    window.addEventListener('online', onReturn);
+    return () => {
+      window.removeEventListener(LOCKED_EVENT, onLock);
+      document.removeEventListener('visibilitychange', onReturn);
+      window.removeEventListener('online', onReturn);
+    };
+  }, [loadInfo]);
+  // While locked, the safe status is the only thing polled — every 15 s, so the
+  // app reopens by itself within a check cycle of the lock clearing.
+  useEffect(() => {
     if (!info?.locked) return;
-    const t = setInterval(() => api.getInfo().then(setInfo).catch(() => {}), 15_000);
+    const t = setInterval(loadInfo, 15_000);
     return () => clearInterval(t);
-  }, [info?.locked]);
+  }, [info?.locked, loadInfo]);
   useEffect(() => { writeStored('am-zoom', String(zoom)); }, [zoom]);
 
   // Show the welcome once, when /api/info first loads: on first run (never seen)
@@ -400,8 +435,15 @@ export default function App() {
   // arrives, "your agent isn't in this tree" only means the tree is still empty.
   const [treeLoaded, setTreeLoaded] = useState(false);
   const refresh = useCallback(async () => {
+    if (lockedRef.current) return; // protected reads pause while locked
     try { setTree(await api.getTree()); setTreeLoaded(true); } catch { /* offline */ }
   }, []);
+  // Reopening: the first tree after a lock clears should not wait for the poll.
+  const wasLocked = useRef(false);
+  useEffect(() => {
+    if (info?.locked) { wasLocked.current = true; return; }
+    if (wasLocked.current) { wasLocked.current = false; refresh(); }
+  }, [info?.locked, refresh]);
 
   // Hide/unhide a group (or one agent) in the Overview. Optimistic, because the
   // tree poll is up to 2.5s away and a control that does nothing for two seconds
@@ -438,7 +480,7 @@ export default function App() {
   useEffect(() => {
     let alive = true;
     let lastPayload = '';
-    const load = () => api.getMeta()
+    const load = () => (lockedRef.current ? Promise.resolve() : api.getMeta()
       .then((r) => {
         if (!alive) return;
         setMetaReady(true);
@@ -450,7 +492,7 @@ export default function App() {
           s.id, Math.max(s.digest?.lastAssistantTs || 0, s.digest?.lastPromptTs || 0),
         ])));
       })
-      .catch(() => {});
+      .catch(() => {}));
     load();
     // One self-scheduling timer whose delay adapts to the active view, so we
     // never tear down / recreate the loop when navigating.
@@ -1010,7 +1052,7 @@ export default function App() {
     );
   };
 
-  if (info?.locked) return <Locked spaceId={info.spaceId} reason={info.lockReason} bucket={info.lockBucket} />;
+  if (info?.locked) return <Locked spaceId={info.spaceId} reason={info.lockReason} bucket={info.lockBucket} status={info.visibility} />;
 
   return (
     <>

@@ -32,7 +32,7 @@ const TERM_CTRL = '\x00\x00AM:';
 import { buildUsage } from './usage.js';
 import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, traceHarnessOf, subagentRoster, readSubagentTrace } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
-import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
+import { startVisibilityWatch, isLocked, lockState, visibility, onVisibilityChange, lockError } from './visibility.js';
 import { kindOfName, kindOfFile, mimeOf, readTextHead, TEXT_MAX } from './preview.js';
 import { startWatchdog } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
@@ -161,13 +161,15 @@ function ensureAutonomyDefaults() {
 ensureAutonomyDefaults();
 initPush();
 
-// Wait for the visibility verdict before serving so isPublic() (which fails
-// closed until the first successful check) doesn't flash the locked UI on a
-// private Space's boot — but bound the wait: a hung HF API must NEVER stop the
-// server from listening. If the check is slow, we serve anyway (briefly locked)
-// and the 60s interval check unlocks once it lands.
+// Wait for the first privacy verdict before serving so a private Space's boot
+// doesn't flash the locked UI — but bound the wait: a hung HF API must NEVER
+// stop the server from listening. If the check is slow, we serve anyway (locked,
+// reason `checking`) and unlock the moment valid evidence lands. The cycle
+// itself is bounded (visibility.js CYCLE_BUDGET_MS), so `firstVerdict` always
+// settles.
+const firstVerdict = startVisibilityWatch();
 await Promise.race([
-  startVisibilityWatch(),
+  firstVerdict,
   new Promise((r) => setTimeout(r, 9000)),
 ]);
 
@@ -200,15 +202,52 @@ app.use((req, res, next) => {
   return jsonBody(req, res, next);
 });
 
-// Safety lock: with no authentication, only serve the terminal backend when the
-// Space is private. If it's public, block every working API (and /ws below) and
-// let the UI render its setup widget instead. Health/info/visibility stay open
-// so the page can explain itself; static assets load so the widget can render.
-const OPEN_WHEN_PUBLIC = new Set(['/api/health', '/api/info', '/api/visibility']);
+// Safety lock: with no authentication, only serve the privileged API while the
+// deployment is verified private (visibility.js owns that decision). Locked,
+// every /api route is refused with the same machine-readable body, except the
+// deliberately safe health/info/visibility trio the setup page needs; static
+// assets still load so that page can render.
+//
+// The same state has to reach connections admitted BEFORE the lock: a terminal
+// WebSocket, a long poll, a download still streaming. Every admitted privileged
+// connection registers a revoke() here and the lock transition calls them all,
+// on the server, whether or not any browser is awake to notice.
+const OPEN_WHEN_LOCKED = new Set(['/api/health', '/api/info', '/api/visibility']);
+const admitted = new Set(); // revoke(eff) callbacks for live privileged connections
+const admitClient = (revoke) => { admitted.add(revoke); return () => admitted.delete(revoke); };
+// Long polls sleep between looks; a lock must wake them instead of waiting the
+// sleep out. Resolves when `ms` elapse OR the lock lands, whichever is first.
+const lockWaiters = new Set();
+const sleepUnlessLocked = (ms) => new Promise((resolve) => {
+  const done = () => { clearTimeout(t); lockWaiters.delete(done); resolve(); };
+  const t = setTimeout(done, ms);
+  lockWaiters.add(done);
+});
+onVisibilityChange((eff) => {
+  if (!eff.locked) return;
+  const revokes = [...admitted];
+  admitted.clear();
+  for (const revoke of revokes) { try { revoke(eff); } catch (e) { console.error('[visibility] revoke failed', e && e.message); } }
+  for (const wake of [...lockWaiters]) wake();
+  console.warn(`[visibility] revoked ${revokes.length} live client connection(s)`);
+});
 app.use((req, res, next) => {
-  if (!isPublic()) return next();
-  if (!req.path.startsWith('/api/') || OPEN_WHEN_PUBLIC.has(req.path)) return next();
-  return res.status(403).json({ error: 'locked', reason: 'public-space' });
+  if (!req.path.startsWith('/api/') || OPEN_WHEN_LOCKED.has(req.path)) return next();
+  const eff = lockState();
+  if (eff.locked) return res.status(403).json(lockError(eff));
+  // Admitted. If the lock lands while this response is still open — a download
+  // mid-stream, an upload still arriving, a handler still working — cut the
+  // connection: nothing further is delivered and nothing further is read.
+  // Work the handler already committed stays committed (writes are atomic);
+  // nothing is replayed. A late write into the destroyed response is a no-op.
+  const release = admitClient(() => { if (!res.writableEnded) { try { res.destroy(); } catch {} } });
+  // A route that ends its own response on the lock (a long poll with a proper
+  // refusal, a stream with its protocol's stop line) calls this to opt out of
+  // the cut and take responsibility itself.
+  res.locals.handleLockItself = release;
+  res.on('error', () => {});
+  res.on('close', release);
+  next();
 });
 
 // Every state-changing call has an attributable origin and a durable outcome.
@@ -706,7 +745,10 @@ app.get('/api/agents/:id/wait', async (req, res) => {
   let matchedAt = 0;
   let open = true;
   res.on('close', () => { open = false; }); // client gave up: stop polling
+  res.locals.handleLockItself?.();
   while (open) {
+    // The lock ends the wait at once with the same refusal a new call would get.
+    if (isLocked()) return res.status(403).json(lockError());
     const cur = store.get(s0.id);
     if (!cur) return res.json({ id: s0.id, state: 'gone', matched: false });
     const state = deriveState(cur, agentInfo().get(cur.id));
@@ -722,7 +764,7 @@ app.get('/api/agents/:id/wait', async (req, res) => {
       matchedAt = 0;
     }
     if (Date.now() - startedAt >= timeout) return res.json({ id: cur.id, state, matched: false, timedOut: true, waited });
-    await sleep(1500); // aligned with the agentInfo() memo
+    await sleepUnlessLocked(1500); // aligned with the agentInfo() memo
   }
 });
 
@@ -892,11 +934,17 @@ app.get('/api/remote/:name/stream', (req, res) => {
     try { res.write(':hb\n'); } catch { /* handled by the close listener */ }
   }, remote.HEARTBEAT_MS);
   const timer = setTimeout(() => finish({ messages: [], seq: remote.lastSeq(name) }), wait * 1000);
-  const release = remote.registerStream(name, {
+  const releaseStream = remote.registerStream(name, {
     since,
     deliver: (msgs) => finish({ messages: msgs, seq: msgs[msgs.length - 1].seq }),
     stop: (reason) => finish({ stop: true, reason: reason || 'disconnected from the manager' }),
   });
+  // The privacy lock ends an open poll with the protocol's own stop line — the
+  // agent's next call would be refused anyway, and a queued prompt must not
+  // ride out through a connection admitted before the lock.
+  res.locals.handleLockItself?.();
+  const releaseLock = admitClient((eff) => finish({ stop: true, reason: `the manager locked itself (${eff.reason})` }));
+  const release = () => { releaseStream(); releaseLock(); };
   res.on('close', () => {
     if (done) return;
     done = true;
@@ -1015,20 +1063,23 @@ app.get('/api/info', (_req, res) => res.json({
   spaceHost: process.env.SPACE_HOST || null,
   engine: 'libghostty',
   ghostty: ghosttyReady(),
-  locked: isPublic(),
-  lockReason: visibility().reason,
-  lockBucket: visibility().bucket,
+  locked: isLocked(),
+  lockReason: lockState().reason,
+  lockBucket: lockState().bucket,
+  // The full public-safe lock status (reason, timestamps, cadence) so an open
+  // app can explain a lock and notice when it clears. Cached state: no Hub call.
+  visibility: visibility(),
   canRelaunch: !!(process.env.SPACE_ID && hfToken()),
-  // While public, /api/info stays reachable (the Locked page needs it) — don't
+  // While locked, /api/info stays reachable (the Locked page needs it) — don't
   // advertise which credentials exist to the whole internet.
-  secrets: isPublic() ? [] : injectedEnvKeys(),
+  secrets: isLocked() ? [] : injectedEnvKeys(),
   // True when the Space is private but we couldn't verify its bucket is private
-  // (no HF_TOKEN to discover the bucket). Non-blocking; the UI shows a warning.
-  bucketUnverified: !isPublic() && !!visibility().bucketUnverified,
+  // (no usable HF_TOKEN to discover the bucket). Non-blocking; the UI shows a warning.
+  bucketUnverified: !isLocked() && !!lockState().bucketUnverified,
   // Backup health, or null when there is nothing wrong. Read from state, never
-  // the Hub: every open tab polls this route every 15s. Withheld while public
+  // the Hub: every open tab polls this route every 15s. Withheld while locked
   // for the same reason as `secrets` — it names the operator's repos.
-  backup: isPublic() ? null : backup.backupHealth(loadAmConfig()),
+  backup: isLocked() ? null : backup.backupHealth(loadAmConfig()),
   // First-run welcome: shown once per Space (flag persists on the bucket).
   welcomeSeen: welcomeSeen(),
   // Demo mode: current sessions hidden from view; forces the welcome to show.
@@ -2886,16 +2937,41 @@ function originAllowed(origin) {
   return host === 'localhost' || host === '127.0.0.1'; // local dev
 }
 
+// Close code for a terminal socket the privacy lock refused or revoked. The
+// frontend must not auto-reconnect on it (the shared status poll reopens the
+// app once the lock clears); an older frontend that does is simply refused
+// again, cheaply, before any attach.
+const LOCKED_CLOSE_CODE = 4003;
+
 wss.on('connection', (ws, req) => {
   ws.on('error', (e) => console.error('[ws error]', e && e.message)); // a client reset must not crash us
   if (!originAllowed(req.headers.origin)) {
     ws.close(1008, 'bad origin');
     return;
   }
-  if (isPublic()) {
-    try { ws.send('\r\n[locked: this Space is public — make it private to use the terminals]\r\n'); } catch {}
-    ws.close();
-    return;
+  // Privacy lock. Register for revocation BEFORE the admission check so a lock
+  // landing between the two cannot slip past: the transition either finds this
+  // socket in the registry or the check below sees the lock — there is no gap.
+  // Revocation detaches this viewer (the agent keeps running), stops every
+  // later frame in either direction, and closes with LOCKED_CLOSE_CODE.
+  let handle = null;
+  let revoked = false;
+  const detach = () => { const h = handle; handle = null; if (h) h.kill(); };
+  const refuse = (eff) => {
+    revoked = true;
+    detach();
+    try { ws.close(LOCKED_CLOSE_CODE, `locked:${eff.reason}`); } catch { try { ws.terminate(); } catch {} }
+    // A client that never answers the close handshake keeps the socket half
+    // open for ws's own 30 s timeout; nothing flows meanwhile (detached, and
+    // every handler checks `revoked`), but do not leave it hanging that long.
+    const hard = setTimeout(() => { try { ws.terminate(); } catch {} }, 2000);
+    if (hard.unref) hard.unref();
+  };
+  const release = admitClient(refuse);
+  ws.on('close', () => { release(); detach(); });
+  {
+    const eff = lockState();
+    if (eff.locked) { release(); refuse(eff); return; }
   }
   const url = new URL(req.url, 'http://localhost');
   const id = url.searchParams.get('session');
@@ -2917,7 +2993,6 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  let handle;
   try {
     handle = attach(session, cols, rows);
   } catch (e) {
@@ -2925,9 +3000,10 @@ wss.on('connection', (ws, req) => {
     ws.close();
     return;
   }
+  if (revoked) { detach(); return; } // the lock landed while attach() ran
 
   handle.onData((d) => {
-    if (ws.readyState !== ws.OPEN) return;
+    if (revoked || ws.readyState !== ws.OPEN) return;
     if (d.length) ws.send(d);
   });
   handle.onExit(() => {
@@ -2942,7 +3018,7 @@ wss.on('connection', (ws, req) => {
   // Watchers still report their preferred size so taking control is immediate.
   // `reset` means an authoritative Ghostty snapshot follows this frame.
   handle.onGrid((cols_, rows_, controller, viewers, reset) => {
-    if (ws.readyState !== ws.OPEN) return;
+    if (revoked || ws.readyState !== ws.OPEN) return;
     try { ws.send(TERM_CTRL + JSON.stringify({ t: 'grid', cols: cols_, rows: rows_, controller, viewers, reset })); } catch {}
   });
 
@@ -2951,6 +3027,7 @@ wss.on('connection', (ws, req) => {
   // restore. Installing the listener afterwards left a small window where the
   // first mobile geometry request was silently lost.
   ws.on('message', (raw) => {
+    if (revoked || !handle) return; // a frame already in flight when the lock landed
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.t === 'i') {
@@ -2978,8 +3055,7 @@ wss.on('connection', (ws, req) => {
     } catch {}
   }
 
-  // Detaching a viewer, NOT stopping the session.
-  ws.on('close', () => handle.kill());
+  // Detaching a viewer, NOT stopping the session: see the 'close' listener above.
 });
 
 generateEnvSkill(loadSecretNotes()); // keep the environment skill current on boot
@@ -3007,12 +3083,16 @@ startWatchdog();
 // it judges "recent" with.
 runstate.init();
 setTimeout(() => {
-  // A locked (public) Space serves no terminals, so it starts nothing — but it
-  // still records what's running, so the snapshot stays true for the next boot.
-  const done = isPublic()
-    ? Promise.resolve([])
-    : runstate.reviveOnBoot(loadAmConfig().revive).catch((e) => console.error('[revive]', e && e.message));
-  done.then(() => runstate.startRunstateWatch());
+  // A locked Space serves no terminals, so it starts nothing — but it still
+  // records what's running, so the snapshot stays true for the next boot. The
+  // decision waits for the first (bounded) privacy verdict rather than reading
+  // the fail-closed `checking` state as a reason not to revive.
+  firstVerdict.then(() => {
+    const done = isLocked()
+      ? Promise.resolve([])
+      : runstate.reviveOnBoot(loadAmConfig().revive).catch((e) => console.error('[revive]', e && e.message));
+    done.then(() => runstate.startRunstateWatch());
+  });
 }, 8000);
 
 server.listen(PORT, () => {

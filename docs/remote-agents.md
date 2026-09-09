@@ -240,6 +240,9 @@ and closes:
 - An empty `messages` array means the wait expired. That is the normal idle state; the agent calls
   again at once.
 - `{"stop": true, "reason": "disconnected from the manager"}` when the pane is paused or deleted.
+- `{"stop": true, "reason": "the manager locked itself (…)"}` when the privacy lock lands while the
+  poll is open (docs/privacy-lock.md). Every later call is refused with `403 {"error":"locked"}`
+  until the lock clears; the agent has to be reconnected by hand afterwards.
 - `wait` clamped to `[5, 1800]` s. Needs `server.requestTimeout = 0` (§2).
 - Max **2** concurrent streams per name and **32** across the Space; the oldest closes when a third
   arrives, so a runaway agent can't hoard sockets.

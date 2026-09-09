@@ -13,6 +13,7 @@ import ConversationView from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
+import { LOCKED_CLOSE_CODE, announceLock, reasonFromCloseReason } from '../lib/lockStatus';
 import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph } from './icons';
 import * as api from '../api';
 import type { Attachment } from '../api';
@@ -44,12 +45,14 @@ const THEMES: Record<'light' | 'dark', ITheme> = {
   },
 };
 
-type ConnState = 'connecting' | 'connected' | 'closed' | 'exited';
+type ConnState = 'connecting' | 'connected' | 'closed' | 'exited' | 'locked';
 
 // Close code the server uses when the session's process exited for real (vs a
 // transient drop). The client must NOT auto-reconnect on this, or it would
 // respawn the agent in a loop and trample an in-progress login flow.
 const EXIT_CODE = 4000;
+// The privacy lock refused or revoked this socket. Do not reconnect: the app's
+// shared status poll shows the lock page and reopens the pane once it clears.
 
 function workspaceLabel(p: string | null) {
   const rel = (p || '').replace(/^\.\/?/, '').replace(/^\/+|\/+$/g, '');
@@ -787,6 +790,11 @@ export default function TerminalPane({
         // reattach to the still-running backend session.
         endBoot();
         if (e.code === EXIT_CODE) { setConn('exited'); return; }
+        if (e.code === LOCKED_CLOSE_CODE) {
+          setConn('locked');
+          announceLock({ reason: reasonFromCloseReason(e.reason), bucket: null });
+          return;
+        }
         setConn('closed');
         if (!closedByUs) {
           retry = setTimeout(connect, retryDelay);

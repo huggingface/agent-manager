@@ -1,14 +1,29 @@
 import type { Cli, Group, MoveTarget, RemoteInfo, RemoteMessage, Session, Tree } from './types';
+import { announceLock, type LockStatus } from './lib/lockStatus';
 
 const HEADERS = { 'content-type': 'application/json' };
+// A refused-because-locked answer is the same on every route: 403 with
+// {error:'locked', reason}. Any helper that sees one tells the app, so the lock
+// screen appears on the next poll that hits it rather than on a dedicated timer.
+const noteLockedResponse = (r: Response) => {
+  if (r.status !== 403) return;
+  r.clone().json().then((b) => {
+    if (b && b.error === 'locked') announceLock({ reason: b.reason ?? null, bucket: b.bucket ?? null });
+  }).catch(() => {});
+};
 // The browser is the single human operator. Stamp every state-changing request
 // in one place so new API helpers cannot accidentally create unattributed work.
-const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   const method = String(init?.method || 'GET').toUpperCase();
-  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) return globalThis.fetch(input, init);
-  const headers = new Headers(init?.headers);
-  headers.set('x-am-origin', 'operator');
-  return globalThis.fetch(input, { ...init, headers });
+  let request = init;
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    const headers = new Headers(init?.headers);
+    headers.set('x-am-origin', 'operator');
+    request = { ...init, headers };
+  }
+  const r = await globalThis.fetch(input, request);
+  noteLockedResponse(r);
+  return r;
 };
 // Like `json`, but keeps the server's own words — these routes fail for reasons
 // worth reading ("already exists here").
@@ -93,7 +108,27 @@ export interface BackupHealth {
   message: string | null; reason: string | null;
   lastSuccessAt: number | null; jobsUrl: string;
 }
-export const getInfo = () => fetch('/api/info').then(json);
+export interface Info {
+  dataDir?: string;
+  home?: string;
+  spaceId: string | null;
+  spaceHost: string | null;
+  engine?: string;
+  ghostty?: boolean;
+  locked: boolean;
+  lockReason: string | null;
+  lockBucket: string | null;
+  visibility?: LockStatus;
+  canRelaunch?: boolean;
+  secrets?: string[];
+  bucketUnverified?: boolean;
+  backup?: BackupHealth | null;
+  welcomeSeen?: boolean;
+  demoMode?: boolean;
+}
+export const getInfo = (): Promise<Info> => fetch('/api/info').then(json);
+// Public-safe lock status alone; what the locked page polls.
+export const getVisibility = (): Promise<LockStatus> => fetch('/api/visibility').then(json);
 
 export const dismissWelcome = () => fetch('/api/welcome/seen', { method: 'POST' }).then(json);
 
