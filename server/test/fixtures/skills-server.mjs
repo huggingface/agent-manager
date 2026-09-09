@@ -7,6 +7,7 @@ import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { skillTargetDirs } from '../../src/skills.js';
+import { nativeFetch as fetch } from '../native-client.mjs';
 const serverDir = fileURLToPath(new URL('../..', import.meta.url));
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 export async function skillsServer() {

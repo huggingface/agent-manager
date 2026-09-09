@@ -9,6 +9,7 @@
  * Set TERMUI_PUBLIC_DIR to a prebuilt web/dist to skip the build.
  * am-test: manual — Chromium, a full web build and port 7897; `npm run test:ui`.
  */
+import { nativeFetch as fetch, NativeWebSocket as WebSocket } from './test/native-client.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,7 +17,6 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { chromiumLaunchOptions } from '../scripts/test-chromium.mjs';
-import { WebSocket } from 'ws';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);

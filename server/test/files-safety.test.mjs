@@ -7,6 +7,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { nativeFetch as fetch } from './native-client.mjs';
 
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-files-safety-'));
 const WORK = path.join(DATA_DIR, 'workspaces');

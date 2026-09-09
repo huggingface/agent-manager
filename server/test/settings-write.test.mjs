@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { nativeFetch as fetch } from './native-client.mjs';
 
 const PORT = 7906;
 const API = `http://127.0.0.1:${PORT}`;

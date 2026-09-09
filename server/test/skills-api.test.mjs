@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { skillsServer } from './fixtures/skills-server.mjs';
 import { generatedSkill } from '../src/skills.js';
+import { nativeFetch as fetch } from './native-client.mjs';
 
 test('real routes, startup and generated caller share ownership and revisions', async (t) => {
   const f = await skillsServer(); t.after(() => f.cleanup()); await f.start();

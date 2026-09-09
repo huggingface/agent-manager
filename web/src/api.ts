@@ -1,15 +1,15 @@
 import type { Cli, Group, MoveTarget, RemoteInfo, RemoteMessage, Session, Tree } from './types';
 import { ApiError, connectionError, decodeJsonText, decodeResponse } from './apiResponse';
 export { ApiError } from './apiResponse';
+import { requestHeaders } from './requestIntent';
 
 const HEADERS = { 'content-type': 'application/json' };
 // The browser is the single human operator. Stamp every state-changing request
 // in one place so new API helpers cannot accidentally create unattributed work.
 const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  const method = String(init?.method || 'GET').toUpperCase();
-  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) return globalThis.fetch(input, init).catch((error) => { throw connectionError(error); });
-  const headers = new Headers(init?.headers);
-  headers.set('x-am-origin', 'operator');
+  const request = input instanceof Request ? input : undefined;
+  const method = String(init?.method || request?.method || 'GET').toUpperCase();
+  const headers = requestHeaders(init?.headers || request?.headers, method);
   return globalThis.fetch(input, { ...init, headers }).catch((error) => { throw connectionError(error); });
 };
 const json = (r: Response) => decodeResponse(r);
@@ -373,7 +373,7 @@ export const uploadAttachment = (
   }
   request.open('POST', `/api/sessions/${encodeURIComponent(id)}/attachments`);
   request.timeout = timeoutMs;
-  request.setRequestHeader('x-am-origin', 'operator');
+  requestHeaders(undefined, 'POST').forEach((value, key) => request.setRequestHeader(key, value));
   request.setRequestHeader('x-file-name', encodeURIComponent(file.name || 'Attachment'));
   if (file.type) request.setRequestHeader('content-type', file.type);
   request.upload.onprogress = (event) => onProgress?.({
@@ -526,7 +526,7 @@ export const uploadFile = (
   request.open('POST', `/api/files/${encodeURIComponent(id)}/upload?path=${encodeURIComponent(p)}&name=${encodeURIComponent(file.name)}`);
   request.timeout = timeoutMs;
   request.setRequestHeader('content-type', 'application/octet-stream');
-  request.setRequestHeader('x-am-origin', 'operator');
+  requestHeaders(undefined, 'POST').forEach((value, key) => request.setRequestHeader(key, value));
   if (replaceToken) request.setRequestHeader('x-am-replace-token', replaceToken);
   request.upload.onprogress = (event) => onProgress?.({
     loaded: event.loaded,

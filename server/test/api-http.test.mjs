@@ -7,6 +7,7 @@ import net from 'node:net';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { nativeFetch as fetch } from './native-client.mjs';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'am-api-http-'));
 const home = path.join(root, 'home'); fs.mkdirSync(home);
 const publicDir = path.join(root, 'public'); fs.mkdirSync(publicDir); fs.writeFileSync(path.join(publicDir, 'index.html'), '<html>fixture SPA</html>');
