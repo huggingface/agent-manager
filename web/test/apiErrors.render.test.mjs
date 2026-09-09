@@ -83,6 +83,14 @@ try {
   await page.getByRole('button', { name: 'Create group', exact: true }).click();
   await page.getByRole('alert').filter({ hasText: 'choose a different group name' }).waitFor();
   assert.equal(await page.getByPlaceholder('Group name').inputValue(), 'group draft');
+  await page.locator('.quick-clis .quick-cli').first().click();
+  const quickPrompt = page.locator('.quick textarea').first();
+  await quickPrompt.fill('session prompt draft');
+  await page.locator('input.quick-name').fill('session name draft');
+  await page.getByRole('button', { name: 'Create & send', exact: true }).click();
+  await page.getByRole('alert').filter({ hasText: 'choose a different session name' }).waitFor();
+  assert.equal(await quickPrompt.inputValue(), 'session prompt draft');
+  assert.equal(await page.locator('input.quick-name').inputValue(), 'session name draft');
   await page.evaluate(() => window.mount('share'));
   await page.getByPlaceholder('alice, bob').fill('fixture-recipient');
   await page.getByRole('button', { name: 'Public', exact: true }).click();
