@@ -307,8 +307,8 @@ for (let i = 2; i <= 5; i++) {
   oc.prepare('insert into message values (?, ?, ?, ?)').run(`msg_${i}`, 'ses_reader', i, JSON.stringify({ role: 'user' }));
   oc.prepare('insert into part values (?, ?, ?, ?)').run(`part_${i}`, `msg_${i}`, i, JSON.stringify({ type: 'text', text: `message ${i}` }));
 }
-const grown = await readTrace(ocSession, { window: { at: 'tail', version: 2, min: 2 } });
-assert.equal(grown.window.end, 5);
+const ocGrown = await readTrace(ocSession, { window: { at: 'tail', version: 2, min: 2 } });
+assert.equal(ocGrown.window.end, 5);
 oc.exec("delete from part where message_id in ('msg_4', 'msg_5'); delete from message where id in ('msg_4', 'msg_5')");
 const shrunk = await readTrace(ocSession, { window: { at: 'after', version: 2, cursor: 5, min: 2 } });
 assert.equal(shrunk.window.reset, true, 'a deletion resets a cursor beyond the new end');
