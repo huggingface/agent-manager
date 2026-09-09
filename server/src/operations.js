@@ -2,6 +2,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './config.js';
+import {
+  AUDIT_CREDENTIAL_POLICY, REDACTED_CREDENTIAL, createCredentialFilter, isSensitiveAuditKey,
+} from './audit-credentials.js';
 
 export const OPERATIONS_FILE = path.join(DATA_DIR, 'operations.jsonl');
 
@@ -29,11 +32,9 @@ const MAX_TEXT = 500;
 // A backstop against a cyclic object, not a limit on how much is kept: a request
 // body is the output of a JSON or text parser and cannot contain a cycle, but
 // JSON.stringify throwing here would lose the whole entry.
-const MAX_DEPTH = 20;
 // How far back a read will go looking for complete records. One enormous entry
 // must not hide the log, and reading a whole year of it must not exhaust memory.
 const MAX_TAIL = 256 * 1024 * 1024;
-const SENSITIVE_KEY = /(authorization|credential|password|secret|subscription|token|endpoint|private.?key)/i;
 const CONTENT_KEY = /(body|content|data|prompt|text)/i;
 
 const digest = (value) => crypto.createHash('sha256').update(value).digest('hex');
@@ -48,41 +49,71 @@ function textSummary(value) {
 /**
  * The call as it was made, whole, with a checksum attached to anything long
  * enough to want one. Credentials are the single exception and are replaced by
- * `[redacted]` wherever they appear.
+ * `[redacted]` wherever the documented best-effort policy recognizes them.
  */
-export function summarizePayload(value, key = '', depth = 0) {
+export function summarizePayload(value, key = '', filterString = (text) => text, seen = new WeakSet()) {
+  if (key && isSensitiveAuditKey(key)) return REDACTED_CREDENTIAL;
   if (value == null || typeof value === 'boolean' || typeof value === 'number') return value;
-  // No route here parses a raw body today, but if one ever does, keep the bytes
-  // rather than a description of them.
   if (Buffer.isBuffer(value)) {
-    return { bytes: value.length, sha256: digest(value), base64: value.toString('base64') };
+    // UTF-8 text gets normal string semantics. For an opaque Buffer, latin1 is
+    // a one-byte mapping that still catches ASCII credential material without
+    // claiming to decode the binary format or inspect an archive.
+    const utf8 = value.toString('utf8');
+    const validUtf8 = Buffer.from(utf8, 'utf8').equals(value);
+    const filtered = validUtf8
+      ? Buffer.from(filterString(utf8), 'utf8')
+      : Buffer.from(filterString(value.toString('latin1')), 'latin1');
+    return { bytes: filtered.length, sha256: digest(filtered), base64: filtered.toString('base64') };
   }
   if (typeof value === 'string') {
-    if (SENSITIVE_KEY.test(key)) return '[redacted]';
-    if (CONTENT_KEY.test(key) || value.length > MAX_TEXT) return textSummary(value);
-    return value;
+    const filtered = filterString(value);
+    if (CONTENT_KEY.test(key) || value.length > MAX_TEXT) return textSummary(filtered);
+    return filtered;
   }
-  if (depth >= MAX_DEPTH) return '[max-depth]';
-  if (Array.isArray(value)) return value.map((v) => summarizePayload(v, key, depth + 1));
+  if (typeof value !== 'object') return filterString(String(value));
+  if (seen.has(value)) return '[circular]';
+  seen.add(value);
+  if (Array.isArray(value)) {
+    const out = value.map((v) => summarizePayload(v, key, filterString, seen));
+    seen.delete(value);
+    return out;
+  }
   if (typeof value === 'object') {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
-      out[k] = SENSITIVE_KEY.test(k) ? '[redacted]' : summarizePayload(v, k, depth + 1);
+      let storedKey = filterString(k);
+      for (let n = 2; Object.hasOwn(out, storedKey); n++) storedKey = `${filterString(k)}#${n}`;
+      out[storedKey] = summarizePayload(v, k, filterString, seen);
     }
+    seen.delete(value);
     return out;
   }
-  return String(value);
+}
+
+function sanitizeMetadata(value, filterString, seen = new WeakSet()) {
+  if (typeof value === 'string') return filterString(value);
+  if (value == null || typeof value === 'boolean' || typeof value === 'number') return value;
+  if (typeof value !== 'object') return filterString(String(value));
+  if (seen.has(value)) return '[circular]';
+  seen.add(value);
+  if (Array.isArray(value)) {
+    const out = value.map((v) => sanitizeMetadata(v, filterString, seen));
+    seen.delete(value);
+    return out;
+  }
+  const out = {};
+  for (const [key, child] of Object.entries(value)) {
+    let storedKey = filterString(key);
+    for (let n = 2; Object.hasOwn(out, storedKey); n++) storedKey = `${filterString(key)}#${n}`;
+    out[storedKey] = isSensitiveAuditKey(key) ? REDACTED_CREDENTIAL : sanitizeMetadata(child, filterString, seen);
+  }
+  seen.delete(value);
+  return out;
 }
 
 function append(record) {
-  try {
-    fs.mkdirSync(path.dirname(OPERATIONS_FILE), { recursive: true });
-    fs.appendFileSync(OPERATIONS_FILE, `${JSON.stringify(record)}\n`, { mode: 0o600 });
-  } catch (e) {
-    // Auditing must never turn a successfully completed user operation into an
-    // HTTP failure. Make storage trouble loud in the server log instead.
-    console.error('[operations.append]', e && e.message);
-  }
+  fs.mkdirSync(path.dirname(OPERATIONS_FILE), { recursive: true });
+  fs.appendFileSync(OPERATIONS_FILE, `${JSON.stringify(record)}\n`, { mode: 0o600 });
 }
 
 const requestOrigin = (req) => String(
@@ -92,10 +123,10 @@ const requestOrigin = (req) => String(
   || '',
 ).trim();
 
-const cleanQuery = (query) => {
+const cleanQuery = (query, filterString) => {
   const out = { ...(query || {}) };
   delete out.from;
-  return summarizePayload(out, 'query');
+  return summarizePayload(out, 'query', filterString);
 };
 
 /**
@@ -106,7 +137,14 @@ const cleanQuery = (query) => {
  * unknown. It may derive an identity from a protocol route (remote agents do
  * this for backwards compatibility with already-running polling loops).
  */
-export function operationMiddleware({ resolveOrigin, resolveTarget, allowMissing = false } = {}) {
+export function operationMiddleware({
+  resolveOrigin,
+  resolveTarget,
+  allowMissing = false,
+  getKnownCredentialValues = () => [],
+  filterFactory = createCredentialFilter,
+  appendRecord = append,
+} = {}) {
   return (req, res, next) => {
     if (!req.path.startsWith('/api/') || !shouldLog(req)) return next();
 
@@ -151,24 +189,59 @@ export function operationMiddleware({ resolveOrigin, resolveTarget, allowMissing
       // Same for a wait the caller abandoned (no body) or one whose target had
       // already gone: nothing came back, so there is nothing to draw.
       if (!MUTATING.has(req.method) && !(responseBody && responseBody.matched === true)) return;
-      append({
-        version: 1,
-        id: operationId,
-        at: new Date(started).toISOString(),
-        origin,
-        // Who it was done TO, snapshotted above. The id is in the path already,
-        // but a name read back later is the name the session has NOW — renamed
-        // or deleted, and the audit trail stops making sense.
-        ...(target ? { target } : {}),
-        method: req.method,
-        path: req.path,
-        query: cleanQuery(req.query),
-        request: summarizePayload(req.body, 'body'),
-        status: res.statusCode,
-        ok: res.statusCode < 400,
-        durationMs: Date.now() - started,
-        result: summarizePayload(responseBody, 'result'),
-      });
+      let entry;
+      try {
+        const filterString = filterFactory(getKnownCredentialValues());
+        entry = {
+          version: 2,
+          id: operationId,
+          at: new Date(started).toISOString(),
+          audit: { credentialFilter: { policy: AUDIT_CREDENTIAL_POLICY, status: 'applied' } },
+          origin: sanitizeMetadata(origin, filterString),
+          // Who it was done TO, snapshotted above. The id is in the path already,
+          // but a name read back later is the name the session has NOW — renamed
+          // or deleted, and the audit trail stops making sense.
+          ...(target ? { target: sanitizeMetadata(target, filterString) } : {}),
+          method: req.method,
+          path: filterString(req.path),
+          query: cleanQuery(req.query, filterString),
+          request: summarizePayload(req.body, 'body', filterString),
+          status: res.statusCode,
+          ok: res.statusCode < 400,
+          durationMs: Date.now() - started,
+          result: summarizePayload(responseBody, 'result', filterString),
+        };
+      } catch {
+        // No raw fallback. Even labels, paths and exception messages may be
+        // attacker-controlled, so a filter failure records only fixed text and
+        // identifiers generated inside this middleware.
+        entry = {
+          version: 2,
+          id: operationId,
+          at: new Date(started).toISOString(),
+          audit: {
+            credentialFilter: {
+              policy: AUDIT_CREDENTIAL_POLICY,
+              status: 'failed',
+              reason: 'credential-filter-failed',
+            },
+          },
+          origin: null,
+          method: 'AUDIT',
+          path: '/audit/credential-filter',
+          query: {},
+          status: 0,
+          ok: false,
+          durationMs: Date.now() - started,
+        };
+      }
+      try {
+        appendRecord(entry);
+      } catch {
+        // Auditing must never change a completed operation or attempt a second
+        // response. Keep this diagnostic fixed: append errors can quote data.
+        console.error('[operations.append] audit append failed');
+      }
     };
     res.once('finish', record);
     res.once('close', record);

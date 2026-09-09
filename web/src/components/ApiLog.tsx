@@ -14,9 +14,9 @@
 //          going out and nothing ever coming back.
 //
 // The log stores each call WHOLE — body included, on the operator's instruction —
-// with credentials the one thing withheld. So this can answer who asked whom to
-// do what, when, and in their own words. Equal checksums still mean identical
-// prompts, which is what a repeating job produces, so repeats are marked; and
+// after best-effort credential filtering for new records. So this can answer who
+// asked whom to do what, when, and in their own words. Equal checksums mean equal
+// RETAINED payloads (filtered originals may differ), so repeats are marked; and
 // because an entry is now as big as the call it records, the card decides how
 // much of a body to paint rather than trying to paint all of it.
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -155,9 +155,9 @@ export default function ApiLog() {
   const hidden = (ops || []).length - rows.length;
   const failures = rows.filter((op) => !op.ok).length;
 
-  // Identical prompts have identical checksums. Counting them is the only thing
-  // the log can honestly say about repetition, and it is enough to spot a job
-  // that fires the same text on a schedule.
+  // Identical retained payloads have identical checksums. Credentials collapse
+  // to one placeholder, so this deliberately makes no claim that filtered
+  // originals were identical.
   const repeats = useMemo(() => {
     const n = new Map<string, number>();
     for (const op of rows) {
@@ -226,7 +226,7 @@ function LogTable({ rows, repeats, names }: {
                 <td className="num">{took(op.durationMs)}</td>
                 <td className="al-pay">
                   {pay.text}
-                  {n > 1 && <span className="al-rep" title={`${n} calls with this exact payload — ${pay.sha}`}> ×{n}</span>}
+                  {n > 1 && <span className="al-rep" title={`${n} calls with the same retained payload — filtered originals may differ — ${pay.sha}`}> ×{n}</span>}
                 </td>
               </tr>
             );
@@ -618,9 +618,9 @@ function LogMap({ rows, names }: { rows: api.Operation[]; names: Map<string, str
 }
 
 /** The whole call, pretty-printed, plus the metadata that is not in the body:
- *  who, what it hit, the status and how long it took. The log's request/result
- *  are already summaries — this shows them as they are stored rather than
- *  paraphrasing them into a sentence. */
+ *  who, what it hit, the status, filtering version and how long it took. The
+ *  log's request/result are stored audit copies — this shows them as retained
+ *  rather than paraphrasing them into a sentence. */
 function HoverCard({ op, pinned, names, onEnter, onLeave, onClose }: {
   op: api.Operation | null;
   pinned: boolean;
@@ -643,6 +643,7 @@ function HoverCard({ op, pinned, names, onEnter, onLeave, onClose }: {
   }
   const text = promptText(op);
   const body = {
+    log: { version: op.version || 1, ...(op.audit || {}) },
     at: op.at,
     call: `${op.method} ${op.path}`,
     from: op.origin ? `${op.origin.name || op.origin.id}${op.origin.type ? ` (${op.origin.type})` : ''}` : null,
@@ -667,7 +668,7 @@ function HoverCard({ op, pinned, names, onEnter, onLeave, onClose }: {
         <div className="al-prompt">
           <div className="al-prompt-lbl">
             <span>
-              body as sent
+              retained body
               {text.length > SHOW_CHARS && (
                 <span className="al-clipped">
                   {' '}· showing the first {SHOW_CHARS.toLocaleString()} of {text.length.toLocaleString()} characters
@@ -693,8 +694,8 @@ function HoverCard({ op, pinned, names, onEnter, onLeave, onClose }: {
       <pre className="al-json">{json(body)}</pre>
       <div className="al-card-foot">
         {text === null
-          ? 'no prompt on this call — bodies that are not prompts stay summarised'
-          : 'stored with the entry; the checksum beside it is what makes a repeated prompt visible'}
+          ? 'no text body on this call — structured request and result content remains in the entry'
+          : 'stored after best-effort filtering; the checksum compares retained text, not necessarily the original'}
         {!pinned && <span className="al-card-hint"> · click the call to keep this open</span>}
       </div>
     </div>
