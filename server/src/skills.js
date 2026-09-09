@@ -138,13 +138,14 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
   function load() {
     const { state } = config();
     const bytes = read(state, manifestPath());
-    if (bytes === null) return { version: 1, sourceRoot: config().source, skills: Object.create(null) };
+    if (bytes === null) return { version: 1, sourceRoot: config().source, disabledGenerated: [], skills: Object.create(null) };
     try {
       const m = JSON.parse(bytes);
       if (m.version !== 1 || m.sourceRoot !== config().source || !m.skills || Array.isArray(m.skills) || typeof m.skills !== 'object') throw new Error();
+      if (!Array.isArray(m.disabledGenerated) || m.disabledGenerated.some((name) => { try { skillId(name); return false; } catch { return true; } })) throw new Error();
       const ids = new Set();
       for (const [name, r] of Object.entries(m.skills)) {
-        if (r.id !== skillId(name) || ids.has(r.id) || !digest(r.sourceHash) || !Array.isArray(r.targets)) throw new Error();
+        if (typeof r.instance !== 'string' || !r.instance || r.id !== skillId(name) || ids.has(r.id) || !digest(r.sourceHash) || !Array.isArray(r.targets)) throw new Error();
         ids.add(r.id);
         const seen = new Set();
         for (const t of r.targets) {
@@ -280,7 +281,7 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
     if (r) verified(r, name);
     else {
       if (!create && !boot) conflict('Skill is not managed; refresh after startup adoption or resolve its installation conflict');
-      r = { id, sourceHash: existing === null ? null : hash(existing), targets: [] };
+      r = { id, instance: nonce(), sourceHash: existing === null ? null : hash(existing), targets: [] };
     }
     // Legacy adoption is checked against the CURRENT source, including for the
     // generated environment skill, before any newly generated text is written.
@@ -288,6 +289,7 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
     r.generated = r.generated || generated;
     r.pending = { kind: 'write', id: nonce(), sourceHash: hash(content), targetHash: hash(generatedSkill(name, content)) };
     m.skills[name] = r;
+    if (create) m.disabledGenerated = m.disabledGenerated.filter((n) => n !== name);
     persist(m); // intent first; a failure here must change no skill bytes
     return finishWrite(name, content, m);
   }
@@ -327,6 +329,7 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
       }
     } catch (e) { return outcome(name, 'failed', results, 'persisted', e.message); }
     delete m.skills[name];
+    if (r.generated && !m.disabledGenerated.includes(name)) m.disabledGenerated.push(name);
     try { persist(m); } catch (e) { return outcome(name, 'removed', results, 'failed', e.message); }
     return outcome(name, 'removed', results, 'persisted');
   }
@@ -356,6 +359,10 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
     update: serial((name, content, revision) => write(name, content, { revision })),
     remove: serial(remove),
     redistribute: serial(redistribute),
-    generate: serial((name, content) => write(name, content, { boot: true, generated: true })),
+    generate: serial((name, content) => {
+      skillId(name);
+      if (load().disabledGenerated.includes(name)) return { ok: true, status: 'complete', source: 'generation-disabled', targets: [], manifest: 'persisted', skill: null };
+      return write(name, content, { boot: true, generated: true });
+    }),
   };
 }

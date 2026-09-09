@@ -35,7 +35,7 @@ they do not isolate files against arbitrary hostile same-user filesystem races.
 
 The version 1 manifest is stored at `DATA_DIR/state/skills/skills-v1.json`.
 It binds the canonical source root and each source filename to its installation
-ID, current source digest, exact target roots/files, and generated-file digests.
+ID, a unique creation identity, current source digest, exact target roots/files, and generated-file digests.
 It records which skill directories the operation creates; adopted directories
 are never owned. Recorded paths are checked against current configured roots
 and reconstructed expected filenames before use. A changed source root, unknown
@@ -48,7 +48,10 @@ to the rendering of that source. Only that file is adopted, never its directory
 or support files. Missing destinations can be installed. A modified destination
 or ambiguous source makes the whole skill conflict before writes. Other skills
 continue independently, and the server reports degraded distribution without
-stopping its other functions. The editor explains when ownership is not
+stopping its other functions. Deleting a generated skill also disables automatic
+generation of that name; an explicit create re-enables it. This stores only a
+name flag, so a later startup cannot recreate a deliberately deleted environment
+skill. The editor explains when ownership is not
 established. Generated environment content follows the same checks, using the
 existing source to verify a legacy installation before publishing new content.
 
@@ -78,7 +81,8 @@ operator header used by the web client). Origin attribution is not authenticatio
 
 Revisions include current source content, ownership/operation metadata, observed
 installation contents and the configured target set. A stale tab or changed
-confirmation cannot overwrite/delete the new state. Current revision tags do
+confirmation cannot overwrite/delete the new state. A newly created skill has
+a new identity even when it reuses a deleted filename and identical content. Current revision tags do
 not override detected external changes to an owned installation. Repeated
 already-completed deletions return the same documented 404/no-mutation outcome.
 

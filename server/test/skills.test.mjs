@@ -63,7 +63,7 @@ test('owned lifecycle, restart, all targets, support files and permanent deletio
     assert.equal(read(path.join(f.options.targetRoots[i], 'independent', 'SKILL.md')), `unrelated ${i}`);
     assert.ok(fs.statSync(f.options.targetRoots[i]).isDirectory());
   }
-  assert.deepEqual(JSON.parse(read(f.manifest)), { version: 1, sourceRoot: f.options.sourceRoot, skills: {} });
+  assert.deepEqual(JSON.parse(read(f.manifest)), { version: 1, sourceRoot: f.options.sourceRoot, disabledGenerated: [], skills: {} });
   assert.deepEqual(fs.readdirSync(f.options.stateRoot), ['skills-v1.json']);
   assert.deepEqual(fs.readdirSync(f.options.sourceRoot), []);
 });
@@ -375,4 +375,28 @@ test('atomic publication works on roots without hard-link support', async (t) =>
   assert.equal((await s.update('demo.md', 'second', await revision(s))).ok, true);
   assert.equal(read(f.source()), 'second');
   assert.equal(read(f.target()), generatedSkill('demo.md', 'second'));
+});
+
+test('deleting and recreating identical bytes cannot revive an old confirmation', async (t) => {
+  const f = fixture(t); await f.service.create('demo.md', 'first');
+  const oldConfirmation = await revision(f.service);
+  await f.service.remove('demo.md', oldConfirmation);
+  await f.service.create('demo.md', 'first');
+  await rejects(f.service.remove('demo.md', oldConfirmation));
+  await rejects(f.service.update('demo.md', 'stale edit', oldConfirmation));
+  assert.equal(read(f.source()), 'first');
+});
+
+test('permanently deleted generated skills stay absent on restart until explicitly recreated', async (t) => {
+  const f = fixture(t); await f.service.generate('environment.md', 'generated');
+  await f.service.remove('environment.md', await revision(f.service, 'environment.md'));
+  const restart = createSkillsService(f.options);
+  assert.equal((await restart.redistribute()).ok, true);
+  const r = await restart.generate('environment.md', 'new generation');
+  assert.equal(r.source, 'generation-disabled');
+  assert.equal(fs.existsSync(f.source('environment.md')), false);
+  for (let i = 0; i < 5; i++) assert.equal(fs.existsSync(f.target(i, 'environment')), false);
+  await restart.create('environment.md', 'explicit recreation');
+  assert.equal((await restart.generate('environment.md', 'new generation')).ok, true);
+  assert.equal(read(f.source('environment.md')), 'new generation');
 });

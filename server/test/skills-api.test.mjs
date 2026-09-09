@@ -51,6 +51,12 @@ test('real routes, startup and generated caller share ownership and revisions', 
   const res = await fetch(`${f.url}/api/secrets`, { method: 'PUT', headers: { 'content-type': 'application/json', 'x-am-origin': 'operator' }, body: JSON.stringify({ notes: {} }) });
   assert.equal((await res.json()).skillDistribution.ok, false);
   assert.equal(fs.readFileSync(f.target(0, 'environment'), 'utf8'), 'user environment');
+  const envSource = (await get('environment.md')).content;
+  fs.writeFileSync(f.target(0, 'environment'), generatedSkill('environment.md', envSource));
+  assert.equal((await f.api('environment.md', 'DELETE', undefined, (await get('environment.md')).revision)).body.ok, true);
+  await f.stop(); await f.start();
+  assert.equal((await f.api('environment.md')).status, 404);
+  for (let i = 0; i < 5; i++) assert.equal(fs.existsSync(f.target(i, 'environment')), false);
   assert.equal((await fetch(`${f.url}/api/health`)).status, 200);
 });
 

@@ -8,6 +8,8 @@ const repo = fileURLToPath(new URL('..', import.meta.url));
 const source = fs.readFileSync(path.join(repo, 'server/src/skills.js'), 'utf8');
 const suite = fs.readFileSync(path.join(repo, 'server/test/skills.test.mjs'), 'utf8');
 const mutations = [
+  ['recreated skill identity', 'instance: nonce()', "instance: 'reused'"],
+  ['generated deletion flag', 'if (load().disabledGenerated.includes(name))', 'if (false)'],
   ['create overwrite guard', 'if (create && (r || existing !== null))', 'if (false)'],
   ['normalized collision guard', 'if (other.toLowerCase() === name.toLowerCase() || otherId === id)', 'if (false)'],
   ['stale revision guard', 'if (snapshot(name, m).revision !== revision)', 'if (false)'],
