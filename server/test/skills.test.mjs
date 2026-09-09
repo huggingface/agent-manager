@@ -397,6 +397,9 @@ test('permanently deleted generated skills stay absent on restart until explicit
   assert.equal(fs.existsSync(f.source('environment.md')), false);
   for (let i = 0; i < 5; i++) assert.equal(fs.existsSync(f.target(i, 'environment')), false);
   await restart.create('environment.md', 'explicit recreation');
+  await restart.remove('environment.md', await revision(restart, 'environment.md'));
+  assert.equal((await restart.generate('environment.md', 'must stay deleted')).source, 'generation-disabled');
+  await restart.create('environment.md', 'explicit recreation');
   assert.equal((await restart.generate('environment.md', 'new generation')).ok, true);
   assert.equal(read(f.source('environment.md')), 'new generation');
 });

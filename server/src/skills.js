@@ -286,7 +286,7 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
     // Legacy adoption is checked against the CURRENT source, including for the
     // generated environment skill, before any newly generated text is written.
     r.targets = targetPlan(r, id, hash(generatedSkill(name, existing ?? content)), boot && existing !== null);
-    r.generated = r.generated || generated;
+    r.generated = r.generated || generated || m.disabledGenerated.includes(name);
     r.pending = { kind: 'write', id: nonce(), sourceHash: hash(content), targetHash: hash(generatedSkill(name, content)) };
     m.skills[name] = r;
     if (create) m.disabledGenerated = m.disabledGenerated.filter((n) => n !== name);
