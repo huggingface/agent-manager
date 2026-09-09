@@ -783,9 +783,9 @@ export default function TerminalPane({
         }
       };
       ws.onclose = (e) => {
-        // A real process exit: stop here and let the user relaunch. Anything
-        // else is a transient drop (sleep/wake, network) → auto-reconnect and
-        // reattach to the still-running backend session.
+        // A real process exit requires relaunch. Other closes get a bounded
+        // reconnect budget: browsers cannot distinguish admission refusal
+        // from a transient drop, so prolonged outages also need manual retry.
         endBoot();
         if (e.code === EXIT_CODE) { setConn('exited'); return; }
         setConn('closed');

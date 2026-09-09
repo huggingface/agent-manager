@@ -91,7 +91,7 @@ export function admissionFailure(req, policy, { websocket = false } = {}) {
   const dest = headers['sec-fetch-dest'];
   if (site !== undefined && !['same-origin', 'same-site', 'cross-site', 'none'].includes(site)) return 'fetch-metadata';
   if (mode !== undefined && !(websocket ? ['websocket'] : ['cors', 'same-origin']).includes(mode)) return 'fetch-metadata';
-  if (dest !== undefined && dest !== 'empty') return 'fetch-metadata';
+  if (dest !== undefined && !(websocket ? ['empty', 'websocket'] : ['empty']).includes(dest)) return 'fetch-metadata';
   if (headers['sec-fetch-user'] !== undefined) return 'fetch-metadata';
   // Exact app Origin wins over cross-site ancestor metadata. Without Origin,
   // native clients have no metadata; same-origin browser GET fetches may omit

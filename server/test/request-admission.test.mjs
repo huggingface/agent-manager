@@ -69,6 +69,23 @@ test('terminal browser and native handshakes use the same origin policy', () => 
   assert.equal(check({ 'sec-fetch-site': 'cross-site' }, ws), 'origin-required');
 });
 
+test('WebSocket destinations are upgrade-only and preserve the other admission checks', () => {
+  const ws = { websocket: true };
+  const headers = { origin: 'https://app.example', 'x-am-request': undefined,
+    'sec-fetch-mode': 'websocket', 'sec-fetch-site': 'cross-site' };
+  for (const dest of [undefined, 'empty', 'websocket']) {
+    assert.equal(check({ ...headers, 'sec-fetch-dest': dest }, ws), null);
+  }
+  for (const dest of ['document', 'iframe', 'image', 'future', '']) {
+    assert.equal(check({ ...headers, 'sec-fetch-dest': dest }, ws), 'fetch-metadata');
+  }
+  const handshake = { ...headers, 'sec-fetch-dest': 'websocket' };
+  assert.equal(check({ ...handshake, 'x-am-request': '1', 'sec-fetch-mode': 'cors' }), 'fetch-metadata');
+  assert.equal(check({ ...handshake, 'sec-fetch-mode': 'cors' }, ws), 'fetch-metadata');
+  assert.equal(check({ ...handshake, origin: 'https://other.example' }, ws), 'untrusted-origin');
+  assert.equal(check({ ...handshake, origin: undefined, 'sec-fetch-site': undefined }, ws), 'request-marker-required');
+});
+
 test('contact/delivery and external-operation reads include route aliases', () => {
   for (const route of ['/api/remote/fixture/stream', '/api/remote/fixture/messages', '/API/REMOTE/fixture/MESSAGES/',
     '/api/update/check', '/api/backup/status', '/api/share/access', '/api/sessions/fixture/share/']) assert.ok(protectedRead(route), route);

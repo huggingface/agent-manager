@@ -62,7 +62,8 @@ test('upgrade refusals never attach/replay/control; a valid viewer remains usabl
     const url = f.origin.replace('http:', 'ws:') + '/ws?session=fixture';
     const valid = new WebSocket(url, { origin: f.origin });
     assert.equal(String((await once(valid, 'message'))[0]), 'fixture replay');
-    for (const headers of [{}, { origin: 'null', ...REQUEST_HEADERS }, { origin: 'https://unrelated.example', ...REQUEST_HEADERS }]) {
+    for (const headers of [{}, { origin: 'null', ...REQUEST_HEADERS }, { origin: 'https://unrelated.example', ...REQUEST_HEADERS },
+      { origin: f.origin, 'sec-fetch-mode': 'websocket', 'sec-fetch-dest': 'document' }]) {
       const bad = new WebSocket(url, { headers });
       const response = await new Promise((resolve, reject) => {
         bad.on('unexpected-response', (_req, res) => { res.resume(); resolve(res.statusCode); bad.terminate(); });
@@ -79,5 +80,28 @@ test('upgrade refusals never attach/replay/control; a valid viewer remains usabl
     const native = new WebSocket(url, { headers: REQUEST_HEADERS });
     assert.equal(String((await once(native, 'message'))[0]), 'fixture replay');
     assert.equal(f.state.upgrades, 2);
+  } finally { await f.close(); }
+});
+
+test('upgrade adapter accepts WebSocket metadata without allowing it on HTTP actions', async () => {
+  const f = await requestFixture();
+  try {
+    const denied = await fetch(`${f.origin}/api/fixture`, { method: 'POST', headers: {
+      ...REQUEST_HEADERS, origin: f.origin, 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'websocket',
+    } });
+    assert.equal(denied.status, 403);
+    assert.equal((await denied.json()).reason, 'fetch-metadata');
+    assert.equal(f.state.parsed, 0);
+    assert.equal(f.state.writes, 0);
+
+    const url = f.origin.replace('http:', 'ws:') + '/ws?session=fixture';
+    for (const dest of [undefined, 'empty', 'websocket']) {
+      const headers = { 'sec-fetch-mode': 'websocket', 'sec-fetch-site': 'cross-site' };
+      if (dest !== undefined) headers['sec-fetch-dest'] = dest;
+      const ws = new WebSocket(url, { origin: f.origin, headers });
+      assert.equal(String((await once(ws, 'message'))[0]), 'fixture replay');
+    }
+    assert.equal(f.state.upgrades, 3);
+    assert.equal(f.state.controls, 0);
   } finally { await f.close(); }
 });

@@ -34,7 +34,8 @@ session IDs and Authorization-looking strings cannot satisfy admission.
 
 Fetch Metadata is defense in depth. Absent metadata is supported for native clients
 and browsers that omit it. Known API modes are `cors`/`same-origin`, or `websocket`
-for upgrades; destination, if present, must be `empty`. Navigation/no-cors modes,
+for upgrades; destination, if present, must be `empty` for HTTP, or `empty`/`websocket`
+for upgrades. Navigation/no-cors modes,
 user-navigation metadata and unfamiliar values are refused. Same-site is not
 same-origin. With no Origin, a present site value must be `same-origin`; with an
 exact app Origin, cross-site metadata is allowed for embedding. There is no Referer,
@@ -115,11 +116,43 @@ Browser upgrade failures have limited details, so the terminal stops after five
 consecutive failed connections (immediately for 1008) and offers **retry connection**
 without clearing retained output. A successful terminal restore resets that count.
 
+This budget deliberately applies to outages as well as refusals: four automatic
+retries take about eleven seconds when failures are immediate, then each affected
+pane needs a manual retry. A restart or sleeping Space can therefore outlast the
+budget. We retain the bound rather than using HTTP health as a refusal classifier:
+an HTTP response cannot establish why a separate WebSocket path failed, and lack of
+an HTTP response does not establish that retrying upgrades will help. Automatic
+outage recovery could be designed separately; it is not part of this policy.
+
 There is no production legacy bypass. `AM_ALLOW_MISSING_ORIGIN` relaxes **audit
 attribution only**, not request admission. Implementation/testing does not update
 installed live scripts, restart agents or deploy; rollout coordination is separate.
 The guard itself logs no request contents or caller-supplied values. Rejections are
 not passed to the operations body capture. The broader audit policy is unchanged.
+
+## Authorized rollout checks
+
+Production edge behavior remains unverified by the local fixtures. The release
+owner must confirm these assumptions before or during an authorized rollout;
+implementation and review do not authorize a deployment or live probing.
+
+- Confirm privately that the actual app page origin matches the configured exact
+  origin and that the upstream HTTP **and** upgrade target Host is an accepted
+  public or backend authority. Do not derive new trust from forwarded headers.
+- Check ordinary UI actions and terminal attachment both standalone and inside the
+  real hosting frame, using the deployment's existing private access boundary.
+  Both must succeed; a mismatch can refuse every write and terminal together.
+- Inspect a refused HTTP response's JSON in the browser Network panel:
+  `code: request-not-allowed` with `reason: untrusted-target` identifies target Host
+  configuration; `reason: untrusted-origin` identifies the page Origin check.
+  Upgrade refusals carry the same JSON on the failed handshake, but the browser
+  WebSocket API exposes only a generic failure. Use authorized private network
+  diagnostics if the browser does not show that handshake response. Do not infer
+  the reason from a paused pane or publish headers, credentials or deployment IDs.
+- Stop rollout if either context fails, resolve the deployment mismatch through
+  trusted configuration, and repeat both checks before proceeding. Do not add a
+  permissive bypass, replay uncertain writes, or treat local fixture success as
+  confirmation of the production edge. Record the outcome privately.
 
 ## Verification
 
