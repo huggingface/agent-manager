@@ -52,7 +52,7 @@ fs.writeFileSync(preload, `
   globalThis.fetch = async () => new Response(JSON.stringify({private:process.env.FIXTURE_PUBLIC !== '1',runtime:{volumes:[]}}), {status:200,headers:{'content-type':'application/json'}});
   const write = fs.writeFileSync;
   fs.writeFileSync = (file, ...args) => {
-    if (String(file).endsWith('/am-config.json') && fs.existsSync(process.env.DATA_DIR + '/reject-write')) throw new Error('synthetic-private-data /private/example token_fixture');
+    if (/am-config\.json/.test(String(file)) && fs.existsSync(process.env.DATA_DIR + '/reject-write')) throw new Error('synthetic-private-data /private/example token_fixture');
     return write(file, ...args);
   };
 `);
@@ -66,7 +66,7 @@ const start = async (locked = false) => {
       CODEX_HOME: path.join(home, 'codex'), CLAUDE_CONFIG_DIR: path.join(home, 'claude'),
       XDG_CONFIG_HOME: path.join(home, 'config'), XDG_DATA_HOME: path.join(home, 'share'),
       AM_REPIN_DIR: path.join(root, 'repin'), AM_INPUT_REQUIRED_DIR: path.join(root, 'input-required'), AM_BASHRC: '/nonexistent',
-      ...(locked ? { SPACE_ID: 'fixture/test', FIXTURE_PUBLIC: '1' } : {}),
+      ...(locked ? { SPACE_ID: 'fixture/test', SPACE_HOST: 'fixture-test.hf.space', FIXTURE_PUBLIC: '1' } : {}),
     }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   child.stdout.on('data', (c) => { logs += c; }); child.stderr.on('data', (c) => { logs += c; });
@@ -90,6 +90,11 @@ const call = async (url, body, method = 'POST', headers = {}) => {
   const r = await fetch(base + url, { method, headers: { 'x-am-origin': 'operator', ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000) });
   return { status: r.status, body: await r.json() };
 };
+// Replacing stored settings needs the revision being replaced (#123): read it first.
+const putConfig = async (body) => {
+  const rev = (await call('/api/config', undefined, 'GET')).body.rev;
+  return call(`/api/config${rev ? `?base=${encodeURIComponent(rev)}` : ''}`, body, 'PUT');
+};
 try {
   await start();
   const initial = await call('/api/tree', undefined, 'GET');
@@ -100,13 +105,13 @@ try {
   const group = (await call('/api/groups', { name: 'fixture group' })).body;
   assert.equal((await call(`/api/groups/${group.id}`, { sessionIds: [id], layout: { cols: 1, rows: 1 } }, 'PUT')).status, 200);
   const patch = await call(`/api/groups/${group.id}`, { layout: null }, 'PUT'); assert.deepEqual(patch.body.sessionIds, [id]); assert.equal(patch.body.layout, undefined);
-  assert.equal((await call('/api/config', { artifacts: { enabled: false }, jobs: { askAboveUsd: 0 }, backup: { exclude: [] } }, 'PUT')).status, 200);
+  assert.equal((await putConfig({ artifacts: { enabled: false }, jobs: { askAboveUsd: 0 }, backup: { exclude: [] } })).status, 200);
   const config = (await call('/api/config', undefined, 'GET')).body; assert.equal(config.artifacts.enabled, false); assert.deepEqual(config.backup.exclude, []);
-  assert.equal((await call('/api/config', {}, 'PUT')).status, 200);
+  assert.equal((await putConfig({})).status, 200);
   assert.equal((await call('/api/config', undefined, 'GET')).body.artifacts.enabled, true, 'PUT still replaces with defaults');
-  assert.equal((await call('/api/config', { artifacts: { enabled: null } }, 'PUT')).status, 400);
+  assert.equal((await putConfig({ artifacts: { enabled: null } })).status, 400);
   fs.writeFileSync(path.join(root, 'data', 'reject-write'), 'fixture');
-  const failedSave = await call('/api/config', {}, 'PUT');
+  const failedSave = await putConfig({});
   assert.equal(failedSave.status, 500); assert.equal(failedSave.body.code, 'internal-error'); assert.ok(!JSON.stringify(failedSave).includes('synthetic-private'));
   fs.unlinkSync(path.join(root, 'data', 'reject-write'));
   const file = path.join(root, 'data', 'workspaces', 'fixture.txt'); fs.writeFileSync(file, 'original');
@@ -119,15 +124,18 @@ try {
   assert.equal(upload.status, 200); assert.equal(fs.readFileSync(path.join(root, 'data', 'workspaces', 'fixture.json'), 'utf8'), '{"raw":"file"}');
   const abortedPath = path.join(root, 'data', 'workspaces', 'aborted-fixture.bin');
   const uploading = http.request(`${base}/api/files/${id}/upload?name=aborted-fixture.bin`, {
-    method: 'POST', headers: { 'x-am-origin': 'operator', 'content-type': 'application/octet-stream', 'content-length': 1000000 },
+    method: 'POST', headers: { 'x-am-origin': 'operator', 'x-am-request': '1', 'content-type': 'application/octet-stream', 'content-length': 1000000 },
   });
   uploading.on('error', () => {});
   uploading.write(Buffer.alloc(1024));
-  for (let i = 0; i < 100 && !fs.existsSync(abortedPath); i++) await new Promise((r) => setTimeout(r, 10));
-  assert.ok(fs.existsSync(abortedPath), 'fixture upload began');
+  // Uploads are staged beside the destination and published whole (#122), so
+  // the destination never exists mid-stream; the staged part file is the trace.
+  const staged = () => fs.readdirSync(path.dirname(abortedPath)).filter((name) => /^\.aborted-fixture\.bin\.am-upload-.*\.part$/.test(name));
+  for (let i = 0; i < 100 && !staged().length; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(staged().length, 'fixture upload began');
   uploading.destroy();
-  for (let i = 0; i < 100 && fs.existsSync(abortedPath); i++) await new Promise((r) => setTimeout(r, 10));
-  assert.ok(!fs.existsSync(abortedPath), 'interrupted upload is cleaned up');
+  for (let i = 0; i < 100 && (staged().length || fs.existsSync(abortedPath)); i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(!staged().length && !fs.existsSync(abortedPath), 'interrupted upload is cleaned up');
   await new Promise((r) => setTimeout(r, 30));
   assert.ok(!logs.includes('[uncaughtException]'), 'disconnect must not escape the request boundary');
   const empty = await fetch(`${base}/api/files/${id}/write?path=fixture.txt`, { method: 'PUT', headers: { 'x-am-origin': 'operator', 'content-type': 'text/plain' }, body: '' });
@@ -143,7 +151,7 @@ try {
   const paused = await call(`/api/remote/${name}/messages`, { text: 'fixture' }); assert.equal(paused.status, 409); assert.equal(paused.body.stop, true); assert.ok(paused.body.reason); assert.ok(paused.body.code);
   const client = (await call('/api/sessions', { cli: 'claude', name: 'not-started' })).body;
   const emptyAttachment = await fetch(`${base}/api/sessions/${client.id}/attachments`, {
-    method: 'POST', headers: { 'x-am-origin': 'operator', 'content-type': 'application/octet-stream', 'x-file-name': 'empty.txt' }, body: '', signal: AbortSignal.timeout(2000),
+    method: 'POST', headers: { 'x-am-origin': 'operator', 'x-am-request': '1', 'content-type': 'application/octet-stream', 'x-file-name': 'empty.txt' }, body: '', signal: AbortSignal.timeout(2000),
   });
   assert.equal(emptyAttachment.status, 413); assert.equal((await emptyAttachment.json()).code, 'payload-too-large');
   const trace = await call(`/api/trace/${client.id}?tail=1&v=2`, undefined, 'GET'); assert.equal(trace.status, 404); assert.equal(trace.body.code, 'no-trace');
