@@ -53,6 +53,15 @@ try {
   }
   globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.error(new Error('private stream data')); } }), { status: 503 });
   await assert.rejects(api.getTree(), (e) => e.code === 'network-error' && e.status === 503 && !e.message.includes('private'));
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { onLine: false } });
+  try {
+    globalThis.fetch = async () => { throw new Error('private network detail'); };
+    await assert.rejects(api.getTree(), (e) => e.code === 'offline' && e.status === null);
+  } finally {
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
+    else delete globalThis.navigator;
+  }
   let canceled = false;
   globalThis.fetch = async () => new Response(new ReadableStream({ start(c) { c.enqueue(new Uint8Array(70_000)); }, cancel() { canceled = true; } }), { status: 502 });
   await assert.rejects(api.getTree(), (e) => e.status === 502);

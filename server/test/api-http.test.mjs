@@ -84,6 +84,10 @@ try {
   assert.equal((await call(`/api/sessions/${remote.id}/remote/paused`, { paused: true })).status, 200);
   const paused = await call(`/api/remote/${name}/messages`, { text: 'fixture' }); assert.equal(paused.status, 409); assert.equal(paused.body.stop, true); assert.ok(paused.body.reason); assert.ok(paused.body.code);
   const client = (await call('/api/sessions', { cli: 'claude', name: 'not-started' })).body;
+  const emptyAttachment = await fetch(`${base}/api/sessions/${client.id}/attachments`, {
+    method: 'POST', headers: { 'x-am-origin': 'operator', 'content-type': 'application/octet-stream', 'x-file-name': 'empty.txt' }, body: '', signal: AbortSignal.timeout(2000),
+  });
+  assert.equal(emptyAttachment.status, 413); assert.equal((await emptyAttachment.json()).code, 'payload-too-large');
   const trace = await call(`/api/trace/${client.id}?tail=1&v=2`, undefined, 'GET'); assert.equal(trace.status, 404); assert.equal(trace.body.code, 'no-trace');
   assert.equal((await call(`/api/sessions/${client.id}/input`, { text: null })).status, 400);
   assert.equal((await call('/api/relaunch')).body.reason, 'no-space');
