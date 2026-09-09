@@ -30,6 +30,7 @@ import os from 'node:os';
 import { chromium } from '../web/node_modules/playwright/index.mjs';
 import { chromiumLaunchOptions } from './test-chromium.mjs';
 import { startFixtureServer } from '../web/test/helpers/fixture-server.mjs';
+import { MARK } from '../web/test/helpers/markers.mjs';
 
 const arg = (k, d) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ? process.argv[i + 1] : d; };
 const DIST = path.resolve(arg('dist'));
@@ -48,17 +49,7 @@ const server = await startFixtureServer({ port: PORT, publicDir: DIST, tag: 'am-
 const { ids } = server;
 const browser = await chromium.launch(chromiumLaunchOptions());
 
-// The markers: a view is "usable" when its first interactive content is in the DOM.
-const MARK = {
-  nav: '.sidebar .row.session',
-  overview: '.ov-tile, .ov-card',
-  reader: '.pane-reader .cx-prompt',
-  composer: '.pane-reader .ov-composer textarea:not([disabled])',
-  files: '.files-body.tree .tree-row',
-  trace: '.trace-body .cx-prompt, .trace-body .tv-md',
-  settings: '.settings-page .setting-row',
-  usage: '.usage', apilog: '.al-tbl, .al-head', skills: '.skills', cron: '.cron-form',
-};
+// A view is usable at its first USEFUL content — see web/test/helpers/markers.mjs.
 const SCENARIOS = [
   { id: 'overview', restore: 'overview', view: ['overview'] },
   { id: 'reader', restore: `s:${ids.cadence}`, view: ['reader', 'composer'] },

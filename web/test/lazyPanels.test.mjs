@@ -17,6 +17,7 @@ import { spawnSync } from 'node:child_process';
 import { chromium } from 'playwright';
 import { chromiumLaunchOptions } from '../../scripts/test-chromium.mjs';
 import { startFixtureServer, buildWeb } from './helpers/fixture-server.mjs';
+import { MARK, FRAME } from './helpers/markers.mjs';
 
 const PORT = 7904;
 const PANEL_CHUNK = /\/assets\/(FilesPane|TracePane|SettingsView|ApiLog|CronSettings|UsagePanel|SkillsEditor)-[^/]+\.js/;
@@ -76,6 +77,10 @@ try {
     await sleep(1500); // the polls settle; nothing further may arrive
     assert.deepEqual(requests(PANEL_CHUNK), [], 'panel chunks requested at startup');
     const entry = await fetch(server.origin + entrySrc).then((r) => r.text());
+    // The budget from the #133 measurements (697 kB measured, headroom to 720).
+    // Reaching it again means a panel grew back into the entry or a new eager
+    // import landed there; read the chunk stats before raising it.
+    assert.ok(entry.length <= 720 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 720 kB budget`);
     // One literal only that panel's module contains — a dynamic import that
     // merely wraps an unchanged graph would leave these in the entry.
     for (const [panel, marker] of [
@@ -97,7 +102,7 @@ try {
     await page.locator('.settings-page .setting-row').first().waitFor({ timeout: 10_000 });
     assert.equal(requests(chunkOf('SettingsView')).length, 1);
     assert.equal(requests(/UsagePanel|ApiLog|CronSettings|SkillsEditor/).length, 0, 'subpages came with the General page');
-    for (const [label, marker, chunk] of [['Usage', '.usage', 'UsagePanel'], ['API log', '.al-tbl, .al-head', 'ApiLog'], ['Skills', '.skills', 'SkillsEditor'], ['Cron', '.cron-form', 'CronSettings']]) {
+    for (const [label, marker, chunk] of [['Usage', FRAME.usage, 'UsagePanel'], ['API log', FRAME.apilog, 'ApiLog'], ['Skills', MARK.skills, 'SkillsEditor'], ['Cron', MARK.cron, 'CronSettings']]) {
       await tab(page, label);
       await page.locator(marker).first().waitFor({ timeout: 10_000 });
       assert.equal(requests(chunkOf(chunk)).length, 1, `${chunk} fetched once`);
@@ -264,6 +269,24 @@ try {
     await page.locator('.al-tbl, .al-head').first().waitFor({ timeout: 10_000 });
     assert.equal(await page.locator('.usage').count(), 0, 'the earlier page showed up late');
     assert.equal(await page.locator('.lazy-panel').count(), 0);
+    await ctx.close();
+  });
+
+  await check('the Usage readiness marker cannot fire on skeletons: with its data held back, the frame is there and the marker is not', async () => {
+    const { ctx, page } = await open();
+    let release;
+    const held = new Promise((r) => { release = r; });
+    await page.route(/\/api\/(usage|traces)(\?|$)/, async (r) => { await held; await r.continue(); });
+    await page.locator(CARD).first().waitFor({ timeout: 15_000 });
+    await openSettings(page);
+    await page.locator(MARK.settings).first().waitFor({ timeout: 10_000 });
+    await tab(page, 'Usage');
+    await page.locator(FRAME.usage).waitFor({ timeout: 10_000 });
+    await sleep(1000);
+    assert.ok((await page.locator('.usage .skel').count()) > 0, 'the page shows skeletons while its data is on the way');
+    assert.equal(await page.locator(MARK.usage).count(), 0, 'the usable-content marker fired on skeletons');
+    release();
+    await page.locator(MARK.usage).first().waitFor({ timeout: 10_000 });
     await ctx.close();
   });
 

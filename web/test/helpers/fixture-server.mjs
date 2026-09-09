@@ -6,6 +6,7 @@
 // never attached (reader mode reads transcripts), and `claude` on PATH is a stub
 // that would only sleep if something did spawn it.
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -16,7 +17,19 @@ export const ROOT = path.resolve(HERE, '..', '..', '..');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Resolves when nothing listens on the port; rejects otherwise. */
+const assertPortFree = (port) => new Promise((resolve, reject) => {
+  const probe = net.createServer();
+  probe.once('error', (e) => reject(new Error(`port ${port} is not free (${e.code}): another server is there, and seeding it would write fixtures into someone else's instance`)));
+  probe.listen(port, '127.0.0.1', () => probe.close(() => resolve()));
+});
+
 export async function startFixtureServer({ port, publicDir, tag = 'am-fixture-' }) {
+  // Never seed a listener this helper did not start: with the port taken, the
+  // child dies of EADDRINUSE while /api/health from the OTHER server answers
+  // 200, and every fixture write below would land in that instance — and the
+  // measurement would be of whatever build it serves.
+  await assertPortFree(port);
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), tag));
   const cfgDir = path.join(dataDir, 'claude-config');
   const binDir = path.join(dataDir, 'bin');
@@ -49,13 +62,21 @@ export async function startFixtureServer({ port, publicDir, tag = 'am-fixture-' 
     if (!r.ok) throw new Error(`${method} ${p} → ${r.status} ${await r.text()}`);
     return r.status === 204 ? null : r.json();
   };
+  // Ready means THIS child answers: /api/info names the DATA_DIR it was given,
+  // which no other instance shares. A child that exited is a failure at once.
+  let exited = null;
+  child.once('exit', (code, signal) => { exited = { code, signal }; });
   const until = Date.now() + 60_000;
   let up = false;
-  while (Date.now() < until && !up) {
-    up = await fetch(`${origin}/api/health`).then((r) => r.ok).catch(() => false);
+  while (Date.now() < until && !up && !exited) {
+    up = await fetch(`${origin}/api/info`).then((r) => (r.ok ? r.json() : null)).then((i) => i?.dataDir === dataDir).catch(() => false);
     if (!up) await sleep(100);
   }
-  if (!up) { child.kill('SIGKILL'); throw new Error(`fixture server did not come up on ${port}\n${logs}`); }
+  if (!up) {
+    child.kill('SIGKILL');
+    fs.rmSync(dataDir, { recursive: true, force: true });
+    throw new Error(`fixture server did not come up on ${port}${exited ? ` (child exited: ${JSON.stringify(exited)})` : ''}\n${logs}`);
+  }
 
   await api('/api/welcome/seen', 'POST');
   const cadence = await api('/api/sessions', 'POST', { name: 'cadence', cli: 'claude', path: 'cadence' });
