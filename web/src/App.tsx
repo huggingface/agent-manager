@@ -117,7 +117,10 @@ export default function App() {
   // Imported traces already live on the Hub; sharing them means handing on
   // their original dataset link, not publishing a duplicate dataset.
   const [traceShare, setTraceShare] = useState<{ title: string; url: string } | null>(null);
-  const showErr = (msg: string) => (e: unknown) => { console.error(msg, e); setToast(msg); window.setTimeout(() => setToast(null), 4000); };
+  const showErr = (msg: string) => (e: unknown) => {
+    setToast(e instanceof api.ApiError ? `${msg}: ${e.message}` : msg);
+    window.setTimeout(() => setToast(null), 4000);
+  };
   // Overview presentation: tiles (default) or the classic list.
   const [ovView, setOvViewRaw] = useState<'tiles' | 'list'>(() =>
     (readStored('am-ov-view') === 'list' ? 'list' : 'tiles'));
@@ -706,8 +709,10 @@ export default function App() {
   const newSession = (name: string, cli: string, path: string, groupId?: string) =>
     createSession(name, cli, path, groupId ?? activeGroup?.id);
   const newGroup = async (name: string, cart?: { cli: string; count: number }[], path = ROOT_PATH) => {
+    let created: string | null = null;
     try {
       const g = await api.createGroup(name);
+      created = g.id;
       for (const { cli, count } of cart || []) {
         const base = cliMap[cli]?.label || cli;
         for (let i = 0; i < count; i++) {
@@ -717,7 +722,15 @@ export default function App() {
       }
       await refresh();
       setActiveRef(`g:${g.id}`);
-    } catch (e) { showErr('Couldn’t create the group')(e); }
+    } catch (e) {
+      if (created) {
+        void refresh();
+        setActiveRef(`g:${created}`);
+        throw new api.ApiError('The group was created, but not all agents could be added. Check the group before trying again.',
+          e instanceof api.ApiError ? e.status : null, 'group-partially-created');
+      }
+      throw e;
+    }
   };
   // Merging two agents, or dropping one into a group, changes what the pane you
   // are looking at IS — it is now part of a grid. Follow it there rather than

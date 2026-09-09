@@ -1,27 +1,19 @@
 import type { Cli, Group, MoveTarget, RemoteInfo, RemoteMessage, Session, Tree } from './types';
+import { ApiError, connectionError, decodeJsonText, decodeResponse } from './apiResponse';
+export { ApiError } from './apiResponse';
 
 const HEADERS = { 'content-type': 'application/json' };
 // The browser is the single human operator. Stamp every state-changing request
 // in one place so new API helpers cannot accidentally create unattributed work.
 const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
   const method = String(init?.method || 'GET').toUpperCase();
-  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) return globalThis.fetch(input, init);
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) return globalThis.fetch(input, init).catch((error) => { throw connectionError(error); });
   const headers = new Headers(init?.headers);
   headers.set('x-am-origin', 'operator');
-  return globalThis.fetch(input, { ...init, headers });
+  return globalThis.fetch(input, { ...init, headers }).catch((error) => { throw connectionError(error); });
 };
-// Like `json`, but keeps the server's own words — these routes fail for reasons
-// worth reading ("already exists here").
-const jsonOrError = async (r: Response) => {
-  const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.error || `${r.status}`);
-  return body;
-};
-
-const json = (r: Response) => {
-  if (!r.ok) throw new Error(`${r.status}`);
-  return r.json();
-};
+const json = (r: Response) => decodeResponse(r);
+const jsonOrError = json;
 
 export const getClis = (): Promise<Cli[]> => fetch('/api/clis').then(json);
 export const getTree = (): Promise<Tree> => fetch('/api/tree').then(json);
@@ -236,10 +228,7 @@ export const sayToRemote = (id: string, text: string) => sendInput(id, text);
 
 // text/plain, and free of secrets by design — safe to put on a clipboard.
 export const getRemotePrompt = (name: string): Promise<string> =>
-  fetch(`/api/remote/${encodeURIComponent(name)}/prompt`).then((r) => {
-    if (!r.ok) throw new Error(`${r.status}`);
-    return r.text();
-  });
+  fetch(`/api/remote/${encodeURIComponent(name)}/prompt`).then((r) => decodeResponse<string>(r, 'text'));
 
 export const setRemotePaused = (id: string, paused: boolean): Promise<RemoteInfo> =>
   fetch(`/api/sessions/${id}/remote/paused`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ paused }) }).then(json);
@@ -263,20 +252,6 @@ export interface AttachmentUploadOptions {
 }
 export const ATTACHMENT_UPLOAD_TIMEOUT_MS = 20 * 60 * 1000;
 
-const attachmentUploadError = (request: XMLHttpRequest) => {
-  let detail = '';
-  try {
-    const body = JSON.parse(request.responseText || '{}');
-    if (typeof body?.error === 'string') detail = body.error;
-  } catch { /* An ingress/proxy error can be HTML. Classify it by status below. */ }
-  if (detail) return detail;
-  if (request.status === 413) return 'The server or its proxy rejected this file as too large (HTTP 413). Try a smaller file.';
-  if (request.status === 408 || request.status === 504) return `The upload timed out (HTTP ${request.status}). Check the connection and retry.`;
-  if (request.status === 429) return 'Too many uploads at once (HTTP 429). Wait a minute, then retry.';
-  if (request.status >= 500) return `The upload server failed (HTTP ${request.status}). Retry in a moment.`;
-  return `Upload failed (HTTP ${request.status}${request.statusText ? ` ${request.statusText}` : ''}).`;
-};
-
 /** XMLHttpRequest is intentional: fetch has no browser upload-progress API. */
 export const uploadAttachment = (
   id: string,
@@ -291,9 +266,12 @@ export const uploadAttachment = (
     signal?.removeEventListener('abort', abort);
     task();
   };
-  const abort = () => request.abort();
+  const abort = () => {
+    request.abort();
+    finish(() => reject(new ApiError('Upload was canceled before it completed.', null, 'canceled')));
+  };
   if (signal?.aborted) {
-    finish(() => reject(new Error('Upload was canceled before it completed.')));
+    finish(() => reject(new ApiError('Upload was canceled before it completed.', null, 'canceled')));
     return;
   }
   request.open('POST', `/api/sessions/${encodeURIComponent(id)}/attachments`);
@@ -310,29 +288,20 @@ export const uploadAttachment = (
   // "bytes sent, awaiting server confirmation", not prematurely "stored".
   request.upload.onload = () => onProgress?.({ loaded: file.size, total: file.size });
   request.onload = () => {
-    if (request.status < 200 || request.status >= 300) {
-      finish(() => reject(new Error(attachmentUploadError(request))));
-      return;
-    }
     try {
-      const attachment = JSON.parse(request.responseText) as Attachment;
+      const attachment = decodeJsonText<Attachment>(request.responseText, request.status);
+      if (!attachment) throw new ApiError('The upload result was empty. Check the result before trying again.', request.status, 'unreadable-response');
       finish(() => resolve(attachment));
-    } catch {
-      finish(() => reject(new Error('The upload completed, but the server returned an unreadable response. Retry the file.')));
+    } catch (error) {
+      finish(() => reject(error));
     }
   };
-  request.onerror = () => finish(() => reject(new Error(
-    typeof navigator !== 'undefined' && navigator.onLine === false
-      ? 'Upload stopped because this device is offline. Reconnect and retry.'
-      : 'Upload connection was interrupted before the server confirmed the file. Check the connection and retry.',
-  )));
-  request.onabort = () => finish(() => reject(new Error('Upload was canceled before it completed.')));
-  request.ontimeout = () => finish(() => reject(new Error(
-    `Upload timed out after ${Math.round(timeoutMs / 60_000)} minutes. Check the connection and retry.`,
-  )));
+  request.onerror = () => finish(() => reject(connectionError(new Error('network'))));
+  request.onabort = () => finish(() => reject(new ApiError('Upload was canceled before it completed.', null, 'canceled')));
+  request.ontimeout = () => finish(() => reject(new ApiError('Upload timed out before the result was confirmed.', null, 'timeout')));
   signal?.addEventListener('abort', abort, { once: true });
   onProgress?.({ loaded: 0, total: file.size });
-  request.send(file);
+  if (!settled) request.send(file);
 });
 
 export const deleteAttachment = (sessionId: string, attachmentId: string): Promise<{ ok: boolean }> =>
@@ -402,12 +371,7 @@ export const previewFile = (id: string, p: string): Promise<FilePreview> =>
 // One page of a transcript sitting in the workspace, shaped exactly like the
 // Trace pane's own pages so the same viewer renders it.
 export const getFileTracePage = async (id: string, p: string, offset = 0, limit = 200): Promise<TracePage> => {
-  const r = await fetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&offset=${offset}&limit=${limit}`);
-  if (!r.ok) {
-    const d = await r.json().catch(() => ({}));
-    throw new TraceUnavailable(d.error || 'could not read this trace', d.code || 'no-trace');
-  }
-  return r.json();
+  return traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&offset=${offset}&limit=${limit}`);
 };
 
 export const rawUrl = (id: string, p: string) =>
@@ -455,11 +419,7 @@ export const writeFile = async (id: string, p: string, text: string, base: strin
   const r = await fetch(`/api/files/${id}/write?path=${encodeURIComponent(p)}${q}`, {
     method: 'PUT', headers: { 'content-type': 'text/plain; charset=utf-8' }, body: text,
   });
-  // Unlike the rest of the API, a failed save has something worth reading in it
-  // ("changed on disk since you opened it") — surface it instead of a number.
-  const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.error || `${r.status}`);
-  return body;
+  return json(r);
 };
 
 // ---- session sharing (docs/session-sharing.md) ----
@@ -483,10 +443,10 @@ export interface ShareResult {
 }
 // Thrown when the redaction gate refuses a public share (HTTP 409). Carries the
 // rule names so the dialog can say exactly what tripped instead of "failed".
-export class RedactionBlocked extends Error {
+export class RedactionBlocked extends ApiError {
   hits: Record<string, number>;
   constructor(message: string, hits: Record<string, number>) {
-    super(message);
+    super(message, 409, 'redaction-blocked', { hits });
     this.name = 'RedactionBlocked';
     this.hits = hits;
   }
@@ -499,12 +459,13 @@ export const shareSession = async (
   body: { visibility: 'public' | 'gated'; name?: string; grantTo?: string[] },
 ): Promise<ShareResult> => {
   const r = await fetch(`/api/sessions/${id}/share`, { method: 'POST', headers: HEADERS, body: JSON.stringify(body) });
-  if (r.status === 409) {
-    const d = await r.json().catch(() => ({}));
-    throw new RedactionBlocked(d.error || 'blocked by the redaction gate', d.hits || {});
+  try { return await json(r); }
+  catch (error) {
+    if (error instanceof ApiError && error.status === 409 && (error.code === 'redaction-blocked' || error.legacy)) {
+      throw new RedactionBlocked(error.message, error.data.hits || {});
+    }
+    throw error;
   }
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
-  return r.json();
 };
 
 export interface ShareAccess { accepted: string[]; pending: string[] }
@@ -577,23 +538,15 @@ export interface TracePage {
 
 // A 404 here is an expected state (no transcript yet, unsupported CLI, a codex
 // guardian rollout), so the reason travels with it for the pane to render.
-export class TraceUnavailable extends Error {
-  code: string;
+export class TraceUnavailable extends ApiError {
   constructor(message: string, code: string) {
-    super(message);
+    super(message, 404, code);
     this.name = 'TraceUnavailable';
-    this.code = code;
   }
 }
 
 export const getTracePage = async (id: string, offset = 0, limit = 200): Promise<TracePage> => {
-  const r = await fetch(`/api/trace/${id}?offset=${offset}&limit=${limit}`);
-  if (r.status === 404) {
-    const d = await r.json().catch(() => ({}));
-    throw new TraceUnavailable(d.error || 'no trace for this session yet', d.code || 'no-trace');
-  }
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
-  return r.json();
+  return traceFetch(`/api/trace/${id}?offset=${offset}&limit=${limit}`);
 };
 
 // ---- windows: how the reader actually reads ----
@@ -638,12 +591,15 @@ const traceRange = (req: TraceReq) => (req.at === 'tail' ? 'tail=1' : `${req.at}
 
 const traceFetch = async <T>(url: string, signal?: AbortSignal): Promise<T> => {
   const r = await fetch(url, { signal });
-  if (r.status === 404) {
-    const d = await r.json().catch(() => ({}));
-    throw new TraceUnavailable(d.error || 'no trace for this session yet', d.code || 'no-trace');
+  try { return await json(r); }
+  catch (error) {
+    if (error instanceof ApiError && error.status === 404 && (error.legacy || ['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(error.code))) {
+      const unavailable = new TraceUnavailable(error.message, error.code === 'not-found' ? 'no-trace' : error.code);
+      unavailable.data = error.data;
+      throw unavailable;
+    }
+    throw error;
   }
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
-  return r.json();
 };
 
 const windowSize = (bytes?: number, min?: number) =>
@@ -710,8 +666,7 @@ export interface TraceLocation {
 }
 export const getTraceLocation = async (id: string): Promise<TraceLocation> => {
   const r = await fetch(`/api/trace/${id}/location`);
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
-  return r.json();
+  return json(r);
 };
 
 // Receiving: pull a shared trace off the Hub so a pane can render it. Accepts a
@@ -722,8 +677,7 @@ export interface ImportedBundle {
 }
 export const importTraceBundle = async (repo: string): Promise<ImportedBundle> => {
   const r = await fetch('/api/trace/import', { method: 'POST', headers: HEADERS, body: JSON.stringify({ repo }) });
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
-  return r.json();
+  return json(r);
 };
 
 export interface BundleEntry {

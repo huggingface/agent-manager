@@ -119,6 +119,7 @@ export function operationMiddleware({ resolveOrigin, resolveTarget, allowMissing
     // unattributed wait still records that someone finished waiting on B.
     if (!origin && MUTATING.has(req.method)) {
       return res.status(400).json({
+        code: raw ? 'unknown-origin' : 'origin-required',
         error: raw
           ? `unknown origin '${raw}'`
           : 'from required — mutating calls must pass ?from=<origin id> (agents use $AM_ID)',

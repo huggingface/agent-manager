@@ -548,7 +548,7 @@ export async function shareSession(session, { visibility = 'public', name, grant
         } catch (e) {
           // 400 already-has-access is a success from the caller's point of view.
           if (e.status === 400 && /already/i.test(e.message)) granted.push(user);
-          else grantErrors.push({ user, error: e.message });
+          else grantErrors.push({ user, error: 'Access could not be granted. Check the username and dataset permissions.', code: 'grant-failed' });
         }
       }
     }
