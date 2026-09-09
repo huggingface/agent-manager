@@ -93,7 +93,7 @@ await build({
       </div></div>; }
 
     window.fixture = {
-      mount(options){
+      mount(options){ window.t0 = performance.now();
         // A distinct id per case: reader stores are cached by session, so
         // reusing one would hand the next case the previous case's warm
         // history and spent budget.
@@ -141,6 +141,24 @@ await build({
           covered: rowsTop <= top + 1 && rowsBottom >= bottom - 1};
       },
       atBottom(){ const el = scroller(); return !!el && el.scrollHeight - el.scrollTop - el.clientHeight < 2; },
+      // Is the transcript actually being SHOWN? Rows are laid out and measured
+      // while the first page is prepared, so their existence is not the answer.
+      shown(){ const r = document.querySelector('.cxv-rows, [data-x]');
+        return !!r && getComputedStyle(r.closest('.cxv-rows') || r).visibility !== 'hidden'
+          && document.querySelectorAll('[data-x]').length > 0; },
+      // Sample the very first frame on which the transcript becomes visible.
+      watchReveal(){
+        window.reveal = null;
+        const step = () => {
+          if (!window.reveal && window.probe.shown()) {
+            window.reveal = { ...window.probe.coverage(), ex: window.probe.exchanges(),
+              atMs: Math.round(performance.now() - window.t0) };
+          }
+          window._rv = requestAnimationFrame(step);
+        };
+        step();
+      },
+      stopReveal(){ cancelAnimationFrame(window._rv); return window.reveal; },
       // What the reader TELLS the user about following, which drives the saved
       // reading position and whether a new reply scrolls into view.
       latestLabel(){ return [...document.querySelectorAll('.cxv-status button')]
@@ -211,6 +229,31 @@ try {
     await p.evaluate(() => { delete window.__last; });
   };
 
+  // ---------- 0. the FIRST transcript the user sees is a page of conversation ----------
+  // Not "eventually covered": covered on the frame it first becomes visible.
+  // The first window is two exchanges on this fixture, and older pages are slow,
+  // so a reader that painted its first response would be caught here.
+  await p.evaluate(() => window.fixture.mount({
+    count: 200, toolBytes: 90 * 1024, answerLines: 6, beforeDelay: 250 }));
+  await p.evaluate(() => window.probe.watchReveal());
+  await p.waitForFunction(() => window.probe.shown(), null, { timeout: 20_000 });
+  const reveal = await p.evaluate(() => window.probe.stopReveal());
+  assert.ok(reveal, 'the transcript became visible');
+  assert.ok(reveal.covered,
+    `the first transcript the reader shows covers it (${JSON.stringify(reveal)})`);
+  assert.ok(reveal.ex > 2,
+    `and is more than the first window's two exchanges (${reveal.ex})`);
+  assert.equal(await p.locator('.cxv-composer textarea').count(), 1,
+    'the composer was never part of the wait');
+  results.push({ case: 'first visible transcript', exchanges: reveal.ex,
+    covered: reveal.covered, revealedAtMs: reveal.atMs });
+
+  // A conversation with nothing more to load must not wait for anything.
+  await p.evaluate(() => window.fixture.mount({ count: 3, answerLines: 2, beforeDelay: 5_000 }));
+  await p.getByText('Question 2', { exact: true }).waitFor({ timeout: 3_000 });
+  assert.ok(await p.evaluate(() => window.probe.shown()),
+    'a short conversation is shown at once rather than held back');
+
   // ---------- 1. a tool-heavy cold open reaches the target on its own ----------
   await p.evaluate(() => window.fixture.mount({ count: 200, toolBytes: 90 * 1024, answerLines: 6 }));
   await p.getByText('Question 199', { exact: true }).waitFor();
@@ -248,22 +291,28 @@ try {
   assert.equal(lost, 0, `Latest is never given up while history loads (${lost} of ${labels.length} frames said otherwise)`);
   results.push({ case: 'anchor drift while filling', samples: samples.length, driftPx: drift, framesNotAtLatest: lost });
 
-  // ---------- 3. underfilled → scrollable is the same story ----------
-  // Two exchanges do not fill the reader. The pages that follow must grow the
-  // transcript upward, not push the two that were already readable downward.
-  await p.evaluate(() => window.fixture.mount({ count: 40, toolBytes: 200 * 1024, answerLines: 2, beforeDelay: 200 }));
-  await p.getByText('Question 39', { exact: true }).waitFor();
-  const before = await p.evaluate(() => window.probe.coverage());
-  assert.ok(!before.scrollable, 'the first window really is shorter than the reader');
-  await p.evaluate(() => window.probe.track('Question 39'));
-  await settled(Math.min(TARGET, 20));
-  const under = await p.evaluate(() => window.probe.stop());
-  const underDrift = Math.max(...under) - Math.min(...under);
-  assert.ok(underDrift <= 2,
-    `underfilled → scrollable does not displace visible text (max ${underDrift}px over ${under.length} frames)`);
-  const grown = await p.evaluate(() => window.probe.coverage());
-  assert.ok(grown.scrollable && grown.covered, 'and it ends up covering the reader');
-  results.push({ case: 'underfilled → scrollable', samples: under.length, driftPx: underDrift });
+  // ---------- 3. a transcript shorter than the reader sits at the bottom ----------
+  // Preparation means a cold reader rarely reveals an underfilled transcript,
+  // but a conversation that IS shorter than the window is revealed at once, and
+  // it must sit against the composer rather than floating at the top. That is
+  // also what makes any later page grow the transcript upward instead of
+  // pushing the readable text down.
+  await p.evaluate(() => window.fixture.mount({ count: 3, answerLines: 2 }));
+  await p.getByText('Question 2', { exact: true }).waitFor();
+  const short = await p.evaluate(() => {
+    const el = document.querySelector('.cxv-body');
+    const box = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    const rows = [...document.querySelectorAll('[data-x]')].map((r) => r.getBoundingClientRect());
+    return { scrollable: el.scrollHeight - el.clientHeight > 1,
+      gapBelow: Math.round(box.bottom - parseFloat(style.paddingBottom) - Math.max(...rows.map((r) => r.bottom))),
+      gapAbove: Math.round(Math.min(...rows.map((r) => r.top)) - (box.top + parseFloat(style.paddingTop))) };
+  });
+  assert.ok(!short.scrollable, 'three short exchanges really are shorter than the reader');
+  assert.ok(short.gapBelow <= 2,
+    `and sit against the bottom of it (${short.gapBelow}px below, ${short.gapAbove}px above)`);
+  assert.ok(short.gapAbove > 20, 'with the empty space above them, not below');
+  results.push({ case: 'short transcript anchoring', gapBelow: short.gapBelow, gapAbove: short.gapAbove });
 
   // ---------- 4. a tall answer covers the page but history still loads ----------
   // Slow older pages, so the state where ONE answer covers the reader and the
@@ -289,10 +338,8 @@ try {
   await p.setViewportSize({ width: 820, height: 2600 });
   await p.evaluate(() => window.fixture.mount({ count: 400, promptBytes: 5200, answerLines: 1 }));
   await p.getByText('Question 399', { exact: true }).waitFor();
-  await p.waitForFunction((n) => window.probe.exchanges() >= n, TARGET, { timeout: 20_000 });
-  const atTarget = await p.evaluate(() => window.probe.coverage());
-  assert.ok(!atTarget.covered,
-    `${TARGET} one-line exchanges do not fill a 2600px reader — this is the case coverage is for`);
+  // Non-vacuity is the OUTCOME here: the fill stops at the exchange target on
+  // its own, so going past it can only be the coverage rule asking for more.
   await settled(TARGET + 1);
   const tinyCov = await p.evaluate(() => window.probe.coverage());
   const tiny = await p.evaluate(() => window.probe.exchanges());

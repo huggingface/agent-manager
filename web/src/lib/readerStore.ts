@@ -30,12 +30,36 @@ export const HISTORY_TARGET_EXCHANGES = 20;
 export const HISTORY_MAX_EXCHANGES = 60;
 /** Backward pages one fill may spend. Six 384 KiB pages ≈ 2.3 MiB. */
 export const FILL_MAX_REQUESTS = 6;
-/** Bytes (or index rows) one fill may pull in beyond the first window. */
-export const FILL_MAX_BYTES = 3 * 1024 * 1024;
+/**
+ * Transcript one fill may ADD to what the reader retains, in bytes (indexed
+ * rows charged at an assumed size).
+ *
+ * Retained, not read: a page's size is not knowable before fetching it, so the
+ * request that crosses this is the last one — the ceiling is this plus one
+ * page. And a server page reads a little more than it returns, because it
+ * discards the partial record at its leading edge. What bounds the READ is
+ * `FILL_MIN_TURNS` below, which stops the server growing one response beyond a
+ * single oversized record; the request count bounds how many such pages there
+ * can be. On 900 KiB answers that is four pages reading 1.5 MiB each and
+ * retaining 4.4 MiB, where an unbounded floor grew single pages to six.
+ */
+export const FILL_MAX_RETAINED_BYTES = 3 * 1024 * 1024;
 /** Wall clock one continuous run may span, including waits between steps. */
 export const FILL_MAX_MS = 20_000;
 /** Between steps, so the paint, the live poll and user input all get a turn. */
 export const FILL_STEP_MS = 50;
+/**
+ * Message floor a speculative backward page asks for.
+ *
+ * Not a page size: the server grows one response until it holds this many whole
+ * records, so the floor is what bounds a single request on a trace of huge
+ * records. Omitting it left the server's own default of twelve in charge, which
+ * on 900 KiB answers grew one page to six megabytes — a budget the client then
+ * charged for only after the next page had already been scheduled. One is the
+ * tightest floor that still guarantees a page makes progress; on ordinary
+ * traces the first 384 KiB span satisfies it immediately and nothing changes.
+ */
+export const FILL_MIN_TURNS = 1;
 /** Assumed cost of one indexed row, so both source kinds share one byte budget. */
 const INDEX_ROW_COST = 4 * 1024;
 
@@ -108,7 +132,7 @@ export class ReaderStore {
   private observers = new Set<(change: ReaderChange) => void>();
   private consumers = 0;
   private sequence = 0;
-  private request: { abort: AbortController; token: number; promise: Promise<number> } | null = null;
+  private request: { abort: AbortController; token: number; promise: Promise<number>; speculative: boolean } | null = null;
   private summaryRequest: AbortController | null = null;
   private poll: ReturnType<typeof setTimeout> | null = null;
   private summaryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -119,7 +143,9 @@ export class ReaderStore {
   private want = 0;
   private fillTimer: ReturnType<typeof setTimeout> | null = null;
   private spent = { requests: 0, bytes: 0, since: 0 };
-  private lastStart: number | null = null;
+  /** A speculative page in flight, and where the cursor was before it. */
+  private step: { from: number; held: number } | null = null;
+  private stalled = false;
   constructor(private source: TraceSource) {}
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -221,13 +247,15 @@ export class ReaderStore {
     // Requests and bytes stay cumulative, so total work per transcript is still
     // capped however many times it is reopened.
     this.spent.since = 0;
+    this.step = null;
     if (this.state.fill === 'filling') this.publish({ fill: 'idle' });
   }
   /** A fresh transcript (or an explicit refresh) is allowed a fresh budget. */
   private resetFill() {
     this.stopFill();
     this.spent = { requests: 0, bytes: 0, since: 0 };
-    this.lastStart = null;
+    this.step = null;
+    this.stalled = false;
     if (this.state.fill !== 'idle') this.publish({ fill: 'idle' });
   }
   /**
@@ -235,37 +263,49 @@ export class ReaderStore {
    * after every accepted read, so a fill that a user page or a live append
    * interrupted simply continues from wherever the store now is.
    */
+  /**
+   * Charge the step that just finished, before anything decides on the next
+   * one. Deliberately not in a `.then()` chained onto the read: `read()`'s
+   * `finally` calls this, and a promise callback attached downstream of it runs
+   * afterwards — so the budget was still reading zero when the following page
+   * was scheduled, and one more request always went out over the limit.
+   */
+  private settleStep() {
+    const step = this.step;
+    if (!step) return;
+    this.step = null;
+    const cursor = this.state.cursor;
+    if (!cursor) return;
+    // An index source has no byte offsets, so its rows are charged at an assumed
+    // size: one budget both kinds of source can exhaust, not an exact count.
+    const advance = cursor.mode === 'index'
+      ? Math.max(0, this.state.turns.length - step.held) * INDEX_ROW_COST
+      : Math.max(0, step.from - cursor.start);
+    this.spent.bytes += advance;
+    // A page that moved nothing cannot be retried into progress: an oversized
+    // record is in the way, or the source has nothing more to give.
+    if (!advance) this.stalled = true;
+  }
   private planFill() {
+    this.settleStep();
     if (this.fillTimer || !this.want || !this.active) return;
     const { cursor, turns } = this.state;
     if (!cursor || this.state.loading) return;             // wait for the read in flight
     const have = countExchanges(turns);
     if (have >= this.want) { if (this.state.fill !== 'done') this.publish({ fill: 'done' }); return; }
     // Nothing more to fetch, or nothing we can fetch: an honest partial view.
-    if (cursor.atStart || cursor.blocked || this.state.error) return this.limited();
-    // A backward page that did not move the cursor cannot be retried into
-    // progress — an oversized record is in the way.
-    if (this.lastStart !== null && cursor.start >= this.lastStart) return this.limited();
+    if (cursor.atStart || cursor.blocked || this.state.error || this.stalled) return this.limited();
     if (!this.spent.since) this.spent.since = Date.now();
-    if (this.spent.requests >= FILL_MAX_REQUESTS || this.spent.bytes >= FILL_MAX_BYTES
+    if (this.spent.requests >= FILL_MAX_REQUESTS || this.spent.bytes >= FILL_MAX_RETAINED_BYTES
       || Date.now() - this.spent.since >= FILL_MAX_MS) return this.limited();
     if (this.state.fill !== 'filling') this.publish({ fill: 'filling' });
     this.fillTimer = setTimeout(() => {
       this.fillTimer = null;
-      if (!this.want || !this.active || this.state.loading) return this.planFill();
       const from = this.state.cursor;
-      const held = this.state.turns.length;
-      this.lastStart = from ? from.start : null;
+      if (!this.want || !this.active || this.state.loading || !from) return this.planFill();
+      this.step = { from: from.start, held: this.state.turns.length };
       this.spent.requests++;
-      void this.read('before').then(() => {
-        const to = this.state.cursor;
-        // What this step actually cost. An index source has no byte offsets, so
-        // its rows are charged at an assumed size — the point is a single
-        // budget that both kinds of source can exhaust, not an exact byte count.
-        this.spent.bytes += from && to && to.mode !== 'index'
-          ? Math.max(0, from.start - to.start)
-          : Math.max(0, this.state.turns.length - held) * INDEX_ROW_COST;
-      });
+      void this.read('before', true);
     }, FILL_STEP_MS);
   }
   private limited() {
@@ -279,19 +319,34 @@ export class ReaderStore {
     const cadence = this.state.cursor?.mode === 'index' ? 10_000 : recent ? 3_000 : 10_000;
     this.poll = setTimeout(() => { this.poll = null; void this.loadNewer(); }, delay ?? (this.failures ? Math.min(30_000, 1500 * 2 ** Math.min(this.failures, 5)) : cadence));
   }
-  private read(direction: 'tail' | 'before' | 'after'): Promise<number> {
+  private read(direction: 'tail' | 'before' | 'after', speculative = false): Promise<number> {
     const cursor = this.state.cursor;
     if (direction === 'before' && (!cursor || cursor.atStart || cursor.blocked)) return Promise.resolve(0);
-    if (this.request) return this.request.promise;
+    if (this.request) {
+      // Going forward is live output and explicit user intent; going backward
+      // speculatively is neither. Handing a forward caller the fill's promise
+      // means Latest, refresh and the poll all quietly wait for a backward page
+      // and never ask for the newest messages at all. The abandoned step is
+      // uncharged and un-stalled — it simply did not happen — and `planFill`
+      // starts it again once this read settles.
+      if (direction === 'before' || !this.request.speculative) return this.request.promise;
+      this.step = null;
+      this.cancel();
+    }
     if (direction === 'after' && !cursor) direction = 'tail';
     const token = ++this.sequence;
     const abort = new AbortController();
     const req: TraceReq = direction === 'tail' ? { at: 'tail' } : { at: direction,
       cursor: direction === 'before' ? cursor.start : cursor.end, generation: cursor.generation };
     this.publish({ loading: direction });
+    // A speculative page asks for the smallest floor that still makes progress,
+    // so the server cannot grow one response past a single oversized record.
+    // An indexed source reads `min` as an exact page size instead of a floor to
+    // grow to, so it keeps the ordinary page.
+    const floor = direction === 'tail' ? INITIAL_WINDOW_TURNS
+      : speculative && cursor?.mode !== 'index' ? FILL_MIN_TURNS : undefined;
     const promise = bounded((signal) => this.source.window(req,
-      direction === 'tail' ? INITIAL_WINDOW_BYTES : WINDOW_BYTES,
-      direction === 'tail' ? INITIAL_WINDOW_TURNS : undefined, signal), abort)
+      direction === 'tail' ? INITIAL_WINDOW_BYTES : WINDOW_BYTES, floor, signal), abort)
       .then((response) => {
         if (token !== this.sequence) return 0;
         const { turns: got, window: win, ...metadata } = response;
@@ -351,7 +406,7 @@ export class ReaderStore {
         // or a live append interrupted just continues from where the store is.
         this.planFill();
       });
-    this.request = { abort, token, promise };
+    this.request = { abort, token, promise, speculative };
     return promise;
   }
 

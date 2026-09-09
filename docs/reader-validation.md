@@ -45,11 +45,33 @@ Added 2026-09-09, on main `ef08e843`.
 | Older history pushes visible text down | Position re-asserted in the same frame as the size change; transcript shorter than the window grows from the bottom | 0.69 px maximum anchor displacement over 110 frames while filling; 0.51 px across the underfilled→scrollable transition over 72 frames; a genuine live append still moves the view 77 px, which is Latest working |
 | Latest quietly stops following mid-preload | Corrections land before the scroll event that reports them | Latest is claimed on every one of 110 frames during the fill |
 
+### Review round (2026-09-09)
+
+| Finding | Fix | Evidence |
+| --- | --- | --- |
+| The whole-conversation half of #129 was absent | Server scan endpoint, an explicit Reader action, and an old-hit window separate from the live store | A term in exchange 0 of a 120-exchange transcript, with 10 exchanges loaded: one click finds it, one read opens it, and the reader's place is restored on the way back |
+| The first PRESENTED viewport was still the first response | Rows are laid out and measured but not painted until they cover the reader, bounded four ways | The frame the transcript first becomes visible on is asserted covered, on a fixture whose first window is two exchanges and whose older pages are slow |
+| A forward read waited behind speculative history | A forward read cancels an in-flight speculative page instead of inheriting its promise; the abandoned step is uncharged and restartable | With a 300 ms backward page in flight, `loadNewer()` issues an `after` request rather than resolving with the backward one |
+| The documented byte limit was not a limit | A speculative page asks for a floor of one message, so the server cannot grow it past one record; the step is charged before the next is scheduled | On 900 KiB answers: largest page 1.5 MiB (was 6), retained 4.4 MiB against a 3 MiB budget plus the page that crossed it, in four requests |
+
+Two further defects surfaced while testing the fix, both fixed here: the virtual
+list kept correcting the scroller while its own rows were hidden behind an old
+window (every box measures zero, so it scrolled the borrower to the top), and
+scrolling inside a borrowed window could make the live transcript page backward.
+
 Removing each mechanism fails a named assertion: no fill → “only 2 exchanges
 became available on their own”; no same-frame re-placement → “Latest is still
 the bottom”; no bottom-growth → 454 px of displacement; no coverage request →
 uncovered 2600 px reader; no indexed floor → “1 prompts in 2 messages”; a
-counter that ignores a leading exchange → the grouping comparison.
+counter that ignores a leading exchange → the grouping comparison; no
+whole-history scan → the results never appear; a hit opened as a tail → “opened
+with the locator the search handed back”; no run token → “the newest query owns
+the results”; always claiming a complete scan → the partial-coverage line never
+appears; no clipped disclosure → its line never appears; a server scan limited
+to one page → “found the needle far outside the tail (0 hits)”; a database scan
+that ignores the conversation id → the neighbouring conversation leaks in; the
+virtual list not standing down while hidden → “the old window opens on its
+match”; no remembered position → the row returns 704px away instead of 0.
 
 ### Measurements
 
@@ -73,7 +95,7 @@ exchanges, viewport covered, ≤2 px drift, ≤6 backward reads, ≤3 MiB.
 ## Runs
 
 - Web: `npm run build`, `npm test` (23 suites), `npm run test:render`.
-  For #129, re-run: `npm test` (25 suites), `npm run test:render`, `npm run build`.
+  For #129, re-run: `npm test` (26 suites), `npm run test:render`, `npm run build`.
 - Server: all 27 non-cron default suites passed. This includes trace windows,
   queued prompts, child traces, protocol regressions, attachments, permissions,
   migration, resize and state checkpoint tests.

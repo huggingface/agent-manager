@@ -1,10 +1,17 @@
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../../api';
-import type { SubAgentEntry } from '../../api';
+import type { SubAgentEntry, TraceHit, TraceSearch, TraceTurn } from '../../api';
+import { reconcileTrace } from '../../lib/readerModel';
 import {
   HISTORY_MAX_EXCHANGES, HISTORY_TARGET_EXCHANGES, useTraceWindows,
   type TraceHeadInfo, type TraceSource,
 } from '../../lib/traceWindows';
+
+/** Longest a cold reader will hold its first transcript back (see `preparing`). */
+const PREPARE_MAX_MS = 2_000;
+/** Exchanges rendered around an old hit. The window the server points at is
+ * bounded already; this bounds the DOM as well, and the hit is its last turn. */
+const HIT_CONTEXT_EXCHANGES = 30;
 import type { Session } from '../../types';
 import { isRemote } from '../../types';
 import {
@@ -59,6 +66,22 @@ export default function ConversationView({
   const allowAttachments = !isRemote(session.cli);
   const [openWork, setOpenWork] = useState(new Map<string, boolean>());
   const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
+  /**
+   * Whole-conversation search, and the old part of the conversation a result
+   * opens. Both are deliberately separate from the reader's live history: the
+   * scan is an explicit action that reads the transcript, and a result opens an
+   * explicit historical window rather than paging the live store back to it.
+   */
+  const [scan, setScan] = useState<{
+    q: string; state: 'searching' | 'done' | 'failed'; hits: TraceHit[];
+    next: string | null; complete: boolean; clipped: boolean; error?: string;
+  } | null>(null);
+  const [historic, setHistoric] = useState<{
+    hit: TraceHit; turns: TraceTurn[]; loading: boolean; error?: string } | null>(null);
+  const beforeHit = useRef<{ end: boolean; key?: string; offset?: number } | null>(null);
+  const scanRun = useRef(0);
+  const scanAbort = useRef<AbortController | null>(null);
+  const hitAbort = useRef<AbortController | null>(null);
 
   const src = useMemo<TraceSource>(() => ({
     window: (req, bytes, min, signal) => api.getTraceWindow(session.id, req, bytes, min, signal),
@@ -76,6 +99,21 @@ export default function ConversationView({
   const shown = useMemo(() => exchanges.map((x, n) => ({ x, n })).filter(({ n }) => !q || index[n].includes(q)), [exchanges, index, q]);
   const keys = useMemo(() => shown.map(({ x }) => x.key), [shown]);
   const virtual = useVirtualRows(keys, scroller, following);
+  const keysRef = useRef(keys); keysRef.current = keys;
+  /**
+   * A cold reader holds the first transcript back until it is worth showing.
+   *
+   * The first window is 128 KiB, which on a tool-heavy trace is two exchanges.
+   * Bottom-anchoring stops the pages that follow from pushing that text down,
+   * but it does not make two messages and a screen of empty space an acceptable
+   * first page — the reader is supposed to open on a page of conversation.
+   * Rows are laid out and measured throughout, so this is a paint delay and not
+   * a fetch delay, and it is bounded four ways: coverage, the start of the
+   * conversation, an unusable source, and a deadline. The composer is never
+   * part of it, and a warm store starts revealed because its text is already
+   * readable.
+   */
+  const [preparing, setPreparing] = useState(() => !reader.turns.current.length);
   // A terminal redraw is not evidence of work. Only transcript lifecycle
   // events light the working line; connection/recovery is separate chrome.
   const live = !!session.running && reader.activityConfirmed && head?.activity === 'working' && !session.inputRequired;
@@ -154,9 +192,6 @@ export default function ConversationView({
     setQuery(value);
   };
   useEffect(() => {
-    if (searchOpen) searchBox.current?.focus(); else setQuery('');
-  }, [searchOpen]);
-  useEffect(() => {
     if (q) {
       following.current = false; setAtLatest(false); setHit(0); virtual.scrollTo(0);
     } else if (beforeSearch.current) {
@@ -169,6 +204,103 @@ export default function ConversationView({
     const next = (hit + direction + shown.length) % shown.length;
     setHit(next); virtual.scrollTo(next);
   };
+
+  // ---- whole-conversation search -------------------------------------------
+  // The instant filter above stays exactly as it was. This is the separate,
+  // explicit action for everything older than the loaded stretch: it is started
+  // by a button or ⌘/Ctrl+Enter, never by typing, and each request is bounded
+  // and continued with a cursor. Results are bound to the query and the run
+  // that asked for them, so a late answer to an abandoned query is dropped.
+  const stopScan = useCallback(() => {
+    scanRun.current++;
+    scanAbort.current?.abort(); scanAbort.current = null;
+  }, []);
+  const runScan = async (more = false) => {
+    const text = query.trim();
+    if (!text) return;
+    stopScan();
+    const run = scanRun.current;
+    const cursor = more ? scan?.next ?? null : null;
+    const controller = new AbortController();
+    scanAbort.current = controller;
+    setScan((prev) => ({
+      q: text, state: 'searching', clipped: prev && more ? prev.clipped : false,
+      hits: more && prev && prev.q === text ? prev.hits : [], next: null, complete: false,
+    }));
+    try {
+      const page: TraceSearch = await api.searchTraceHistory(
+        session.id, text, cursor, head?.generation, controller.signal);
+      if (run !== scanRun.current) return;                  // a newer query won
+      setScan((prev) => ({
+        q: text, state: 'done',
+        hits: [...(more && prev && prev.q === text ? prev.hits : []), ...page.hits],
+        next: page.next, complete: page.complete && !page.next,
+        clipped: (more && prev ? prev.clipped : false) || page.clipped,
+      }));
+    } catch (error) {
+      if (run !== scanRun.current) return;
+      setScan((prev) => ({
+        q: text, state: 'failed', hits: prev?.q === text ? prev.hits : [], next: prev?.next ?? null,
+        complete: false, clipped: !!prev?.clipped,
+        error: error instanceof Error ? error.message : 'The search could not finish.',
+      }));
+    } finally { if (scanAbort.current === controller) scanAbort.current = null; }
+  };
+  const openHit = async (target: TraceHit) => {
+    // Remember the live reading position explicitly before borrowing the
+    // scroller. The virtual list cannot hold it for us: history keeps arriving
+    // while the old window is up, and by the time we come back the row may be
+    // outside the rendered window, where a measured correction has nothing to
+    // measure. `scrollTo` is the same path a remembered position from a
+    // previous session is restored through, and it survives re-measurement.
+    if (!historic) beforeHit.current = following.current
+      ? { end: true }
+      : { end: false, key: virtual.anchor.current?.key || '', offset: virtual.anchor.current?.offset || 0 };
+    hitAbort.current?.abort();
+    const controller = new AbortController();
+    hitAbort.current = controller;
+    setHistoric({ hit: target, turns: [], loading: true });
+    try {
+      const page = await api.getTraceWindow(session.id,
+        { at: 'before', cursor: target.window.cursor, generation: head?.generation },
+        target.window.bytes, target.window.min, controller.signal);
+      if (hitAbort.current !== controller) return;
+      setHistoric({ hit: target, turns: reconcileTrace(page.turns), loading: false });
+    } catch (error) {
+      if (hitAbort.current !== controller) return;
+      setHistoric({ hit: target, turns: [], loading: false,
+        error: error instanceof Error ? error.message : 'That part of the conversation could not be read.' });
+    }
+  };
+  const closeHistoric = () => {
+    hitAbort.current?.abort(); hitAbort.current = null;
+    setHistoric(null);
+    const saved = beforeHit.current; beforeHit.current = null;
+    if (!saved) return;
+    // After the live rows are mounted again, not during this event.
+    queueMicrotask(() => {
+      if (saved.end) { latest(); return; }
+      const index = keysRef.current.indexOf(saved.key);
+      if (index >= 0) { virtual.scrollTo(index, saved.offset); setAtLatest(false); }
+      else latest();
+    });
+  };
+  // A historical window is read-only and detached: it never advances the live
+  // cursor, and leaving it puts the reader back where it was.
+  const historicExchanges = useMemo(
+    () => (historic ? splitExchanges(historic.turns).slice(-HIT_CONTEXT_EXCHANGES) : []),
+    [historic],
+  );
+  useEffect(() => {
+    if (searchOpen) searchBox.current?.focus();
+    else { setQuery(''); stopScan(); setScan(null); setHistoric(null); }
+  }, [searchOpen, stopScan]);
+  useEffect(() => () => { stopScan(); hitAbort.current?.abort(); }, [stopScan]);
+  useEffect(() => { stopScan(); setScan(null); setHistoric(null); }, [session.id, stopScan]);
+  useLayoutEffect(() => {
+    // The hit is the last turn of its window, so the bottom of the list is it.
+    if (historic && !historic.loading && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
+  }, [historic]);
 
   const position = useRef<ReturnType<typeof recallReading>>(null);
   const restore = useRef({ done: false, hops: 0 });
@@ -187,7 +319,7 @@ export default function ConversationView({
     restore.current.hops++; void loadOlder();
   }, [head, version, loading, paused, q, atStart, blocked, error, shown, session.id, loadOlder, virtual.scrollTo]);
   const capture = () => {
-    if (!touched.current || q) return;
+    if (!touched.current || q || historic) return;
     const at = virtual.anchor.current;
     const exchange = at && shown.find(({ x }) => x.key === at.key)?.x;
     if (following.current) position.current = { ts: 0, off: 0, end: true };
@@ -204,12 +336,26 @@ export default function ConversationView({
    * cannot walk the whole transcript, and by `atStart`, so a genuinely short
    * conversation settles immediately.
    */
-  useLayoutEffect(() => {
+  const covered = () => {
     const el = scroller.current;
-    if (paused || !el || atStart || blocked || error || !exchanges.length) return;
-    if (el.clientHeight && virtual.measuredHeight() >= el.clientHeight) return;
+    return !!el && el.clientHeight > 0 && virtual.measuredHeight() >= el.clientHeight;
+  };
+  useLayoutEffect(() => {
+    if (paused || atStart || blocked || error || !exchanges.length || covered()) return;
     reader.wantHistory(Math.min(HISTORY_MAX_EXCHANGES, exchanges.length + 8));
   }, [virtual.offsets, virtual.measuredHeight, exchanges.length, atStart, blocked, error, paused, reader.wantHistory]);
+  useLayoutEffect(() => {
+    if (!preparing) return;
+    // Anything that means more history is not coming, or is not needed.
+    if (atStart || blocked || error || phase === 'empty' || reader.fill === 'limited' || covered()) setPreparing(false);
+  }, [preparing, atStart, blocked, error, phase, reader.fill, virtual.offsets, exchanges.length]);
+  useEffect(() => {
+    if (!preparing) return;
+    // The safety bound. Preparation is meant to be brief; if the source is slow
+    // enough that it is not, an honestly partial page beats a spinner.
+    const timer = setTimeout(() => setPreparing(false), PREPARE_MAX_MS);
+    return () => clearTimeout(timer);
+  }, [preparing]);
 
   const settle = useRef<ReturnType<typeof setTimeout>>();
   const interact = () => { touched.current = true; virtual.cancelTarget(); };
@@ -236,11 +382,23 @@ export default function ConversationView({
       <button className="cxv-mini" onClick={() => void reload()} aria-label="Refresh transcript" title="Refresh transcript">↻</button>
     </div>
     {searchOpen && <div className="cxv-bar mono">
-      <input ref={searchBox} className="cxv-search" aria-label="Search loaded conversation" placeholder="Search loaded conversation…" value={query}
-        onChange={(event) => changeQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') onCloseSearch?.(); if (event.key === 'Enter') nextHit(event.shiftKey ? -1 : 1); }} />
+      <input ref={searchBox} className="cxv-search" aria-label="Search the conversation" placeholder="Search loaded conversation…" value={query}
+        onChange={(event) => changeQuery(event.target.value)} onKeyDown={(event) => {
+          if (event.key === 'Escape') { if (historic) closeHistoric(); else onCloseSearch?.(); return; }
+          if (event.key !== 'Enter') return;
+          // Enter walks the loaded matches, as it always has. Starting a scan of
+          // the whole transcript is a different, deliberate keystroke, so an
+          // edited query cannot start one by accident or start two at once.
+          if (event.metaKey || event.ctrlKey) void runScan();
+          else nextHit(event.shiftKey ? -1 : 1);
+        }} />
       {q && <span className="cxv-hits">{shown.length ? `${Math.min(hit + 1, shown.length)}/${shown.length} turns` : 'No matches'}</span>}
       <button className="cxv-mini" disabled={!q || !shown.length} onClick={() => nextHit(-1)} aria-label="Previous matching turn">↑</button>
       <button className="cxv-mini" disabled={!q || !shown.length} onClick={() => nextHit(1)} aria-label="Next matching turn">↓</button>
+      <button className="cxv-mini" disabled={!q || scan?.state === 'searching'} onClick={() => void runScan()}
+        title="Search every message in this conversation, including history that is not loaded (⌘/Ctrl+Enter)">
+        {scan?.state === 'searching' ? 'Searching all…' : 'Search all history'}</button>
+      {scan?.state === 'searching' && <button className="cxv-mini" onClick={stopScan} aria-label="Cancel the whole-history search">Cancel</button>}
     </div>}
     <input ref={filePicker} className="image-file-input" type="file" multiple disabled={sending || !allowAttachments}
       onChange={(event) => { addAttachments(Array.from(event.currentTarget.files || [])); event.currentTarget.value = ''; }} />
@@ -248,6 +406,11 @@ export default function ConversationView({
       onWheel={interact} onTouchStart={interact} onPointerDown={interact} onKeyDown={interact}
       onScroll={(event) => {
         const el = event.currentTarget;
+        // A historical window borrows the scroller but is not the live
+        // conversation: reading follow intent, an anchor or a saved position
+        // out of its geometry would answer questions about the wrong content,
+        // and leaving it would then land somewhere nobody asked for.
+        if (historic) return;
         following.current = !q && el.scrollHeight - el.scrollTop - el.clientHeight < 48;
         setAtLatest(following.current); virtual.onScroll(); capture();
         clearTimeout(settle.current); settle.current = setTimeout(() => { if (position.current) rememberReading(session.id, position.current); }, 150);
@@ -261,7 +424,52 @@ export default function ConversationView({
         </button>}
         {head?.note && <div className="cxv-msg mono">{head.note}</div>}
         {q && <div className="cxv-msg mono">{shown.length} of {exchanges.length} loaded turns match{atStart ? '' : ' · Earlier history has not been searched'}</div>}
-        <div className={exchanges.length ? 'cxv-rows' : undefined} ref={virtual.container}>
+        {preparing && <div className="cxv-msg mono" role="status">Opening the conversation…</div>}
+        {scan && <div className="cxv-scan mono">
+          <div className="cxv-msg" role="status">
+            {scan.state === 'searching' ? `Searching the whole conversation for “${scan.q}”…`
+              : scan.state === 'failed' ? scan.error
+              : scan.hits.length ? `${scan.hits.length}${scan.next ? '+' : ''} message${scan.hits.length === 1 ? '' : 's'} match “${scan.q}”`
+              : scan.complete ? `No message in this conversation contains “${scan.q}”`
+              : `No matches yet in the part searched so far`}
+            {scan.clipped && ' · some very long messages were searched only as far as the reader displays them'}
+            {!scan.complete && scan.state === 'done' && ' · not the whole conversation yet'}
+            {' '}
+            {scan.next && scan.state !== 'searching'
+              && <button className="cxv-mini" onClick={() => void runScan(true)}>Keep searching earlier</button>}
+            {scan.state === 'failed' && <button className="cxv-mini" onClick={() => void runScan()}>Try again</button>}
+            <button className="cxv-mini" onClick={() => { stopScan(); setScan(null); closeHistoric(); }}>Clear</button>
+          </div>
+          {scan.hits.map((h, i) => <button key={`${h.window.cursor}:${h.id ?? i}:${h.ts ?? i}`}
+            className={`cxv-hitrow${historic?.hit === h ? ' on' : ''}`} onClick={() => void openHit(h)}>
+            <span className="cxv-hitwho">{h.role === 'user' ? 'you' : h.role === 'assistant' ? 'agent' : h.role}</span>
+            <span className="cxv-hittext">
+              {h.snippet.text.slice(0, h.snippet.at)}
+              <mark>{h.snippet.text.slice(h.snippet.at, h.snippet.at + h.snippet.length)}</mark>
+              {h.snippet.text.slice(h.snippet.at + h.snippet.length)}
+            </span>
+            {h.occurrences > 1 && <span className="cxv-hitwho">×{h.occurrences}</span>}
+          </button>)}
+        </div>}
+        {historic && <div className="cxv-msg mono" role="status">
+          Showing an older part of the conversation. The latest messages are not below this.
+          {' '}<button className="cxv-mini" onClick={closeHistoric}>Back to the current view</button>
+        </div>}
+        {historic && <div className="cxv-rows">
+          {historic.loading && <div className="cxv-msg mono" role="status">Reading that part of the conversation…</div>}
+          {historic.error && <div className="cxv-msg bad mono" role="status">{historic.error}</div>}
+          {historic.hit.clipped && !historic.loading && !historic.error && <div className="cxv-msg mono">
+            This message is longer than the reader displays; the match may be in the part not shown.
+          </div>}
+          {historicExchanges.map((x, n) => <div key={`h:${x.key}`} data-x={x.key} data-historic="1">
+            <ExchangeView x={x} n={n + 1} total={historicExchanges.length} q={scan?.q.toLowerCase() || undefined}
+              baseModel={head?.model || undefined} open={false} onToggle={() => {}}
+              turns={historic.turns} sessionId={session.id} live={false} roster={roster} />
+          </div>)}
+        </div>}
+        <div hidden={!!historic}
+          className={`${exchanges.length ? 'cxv-rows' : ''}${preparing ? ' cxv-preparing' : ''}`.trim() || undefined}
+          ref={virtual.container}>
           <div aria-hidden="true" style={{ height: virtual.before }} />
           {shown.slice(virtual.start, virtual.end).map(({ x, n }) => <div key={x.key} data-x={x.key} data-row-key={x.key} ref={(node) => virtual.measure(x.key, node)}>
             <ExchangeView x={x} n={n + 1} total={exchanges.length} q={q || undefined} baseModel={head?.model || undefined}

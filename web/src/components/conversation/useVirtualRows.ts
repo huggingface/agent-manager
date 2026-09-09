@@ -39,13 +39,31 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
     return out;
   }, [keys, measurement]);
   const current = useRef({ keys, offsets }); current.current = { keys, offsets };
+  const keysRef = useRef(keys); keysRef.current = keys;
+  /**
+   * Is the list this hook owns the thing on screen?
+   *
+   * The reader can borrow its scroller for something else — an old part of the
+   * conversation opened from a search result — and hide this list while it
+   * does. Every position below is computed from these rows' boxes, and a
+   * `display: none` subtree reports every box as zero, so continuing to read or
+   * write the scroll offset against it scrolls the borrower to the top and
+   * loses the place the reader was going to come back to.
+   */
+  const mounted = () => {
+    const list = container.current;
+    return !!list && (!keysRef.current.length || list.getClientRects().length > 0);
+  };
   const origin = useCallback(() => {
     const el = scroller.current, list = container.current;
     return el && list ? list.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop : 0;
   }, [scroller]);
   const update = useCallback(() => {
     const el = scroller.current;
-    if (!el) return;
+    // Same reason as `mounted()` below: while the scroller is showing something
+    // else, its offset says nothing about where this list is being read, and
+    // adopting it as the anchor throws away the place to come back to.
+    if (!el || !mounted()) return;
     const top = el.scrollTop - origin();
     const { keys: list, offsets: positions } = current.current;
     const index = lower(positions, top);
@@ -63,7 +81,7 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
    */
   const place = useCallback(() => {
     const el = scroller.current;
-    if (!el) return;
+    if (!el || !mounted()) return;
     const put = (top: number) => { el.scrollTop = top; placedAt.current = el.scrollHeight; };
     if (following.current) { put(el.scrollHeight); return; }
     const wanted = target.current || anchor.current;
@@ -88,7 +106,7 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
    */
   const hold = useCallback(() => {
     const el = scroller.current;
-    if (!el) return;
+    if (!el || !mounted()) return;
     placedAt.current = el.scrollHeight;
     if (following.current) { el.scrollTop = el.scrollHeight; return; }
     const wanted = target.current || anchor.current;

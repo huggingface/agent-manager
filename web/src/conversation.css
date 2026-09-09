@@ -457,6 +457,24 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
  * Applied only when there ARE exchanges, so an empty reader keeps its welcome
  * text where it has always been. */
 .cxv-rows { margin-top: auto; }
+/* Laid out and measured, not painted. `visibility` rather than `display` or
+   `content-visibility` precisely because the rows must still have real boxes:
+   the question being answered while this is on is whether a page of measured
+   conversation exists yet, which an unlaid-out subtree cannot answer. */
+.cxv-preparing { visibility: hidden; }
+/* Whole-conversation results: a list of places, not a second transcript. It
+   sits above the reader's own content and scrolls with it, so there is still
+   exactly one scroll owner. */
+.cxv-scan { display: flex; flex-direction: column; gap: 1px; padding-bottom: 6px; }
+.cxv-hitrow { display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left;
+  padding: 4px 6px; border: 1px solid transparent; border-radius: 3px; background: transparent;
+  color: var(--text); font: inherit; cursor: pointer; }
+.cxv-hitrow:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.cxv-hitrow:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.cxv-hitrow.on { border-color: var(--accent); }
+.cxv-hitwho { flex: none; color: var(--muted); font-size: 0.85em; min-width: 3.2em; }
+.cxv-hittext { flex: 1; min-width: 0; font-size: 0.85em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cxv-hittext mark { background: var(--accent); color: var(--panel); }
 .cxv-msg { font-size: 0.85em; color: var(--muted); padding: 6px 0; }
 /* The line above the oldest loaded exchange. Fixed height on purpose: it sits
    above everything in the column, so a line that grew or vanished when the

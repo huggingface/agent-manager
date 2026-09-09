@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { readerFor, type TraceSource } from './readerStore';
 export {
-  FILL_MAX_BYTES, FILL_MAX_MS, FILL_MAX_REQUESTS, HISTORY_MAX_EXCHANGES, HISTORY_TARGET_EXCHANGES,
+  FILL_MAX_MS, FILL_MAX_REQUESTS, FILL_MAX_RETAINED_BYTES, FILL_MIN_TURNS, HISTORY_MAX_EXCHANGES, HISTORY_TARGET_EXCHANGES,
   INITIAL_WINDOW_BYTES, INITIAL_WINDOW_TURNS, WINDOW_BYTES, mergeMeta,
 } from './readerStore';
 export type { TraceSource, Meta, TraceHeadInfo } from './readerStore';

@@ -22,7 +22,7 @@ await build({
 });
 const {
   ReaderStore, countExchanges: storeCount, HISTORY_TARGET_EXCHANGES, HISTORY_MAX_EXCHANGES,
-  FILL_MAX_REQUESTS, FILL_MAX_BYTES, FILL_MAX_MS, FILL_STEP_MS,
+  FILL_MAX_REQUESTS, FILL_MAX_RETAINED_BYTES, FILL_MAX_MS, FILL_STEP_MS,
 } = await import(pathToFileURL(out).href);
 const model = await build({
   entryPoints: [path.join(HERE, '../src/lib/readerModel.ts')],
@@ -60,13 +60,14 @@ function source(n, opts = {}) {
     put({ id: `a${i}`, role: 'assistant', ts: 1002 + i * 10, kind: 'final', blocks: [{ type: 'text', text: `answer ${i}` }] }, answerBytes);
   }
   const size = at;
-  const state = { calls: [], bytes: 0 };
+  const state = { calls: [], bytes: 0, spans: [] };
   const inside = (from, to) => records.filter((r) => r.at >= from && r.at + r.size <= to);
   const page = (from, to) => {
     const got = inside(from, to);
     const start = got.length ? got[0].at : to;
     const end = got.length ? got[got.length - 1].at + got[got.length - 1].size : to;
     state.bytes += Math.max(0, to - from);
+    state.spans.push(Math.max(0, to - from));
     return {
       harness: 'claude', harnessLabel: 'Fixture', sessionId: 's', title: '', model: null, cwd: null,
       firstTs: 0, lastTs: 0, usage: null, source: null, sharedBy: null, note: null, truncated: false,
@@ -80,6 +81,7 @@ function source(n, opts = {}) {
     size,
     async window(req, bytes, min) {
       state.calls.push({ at: req.at, bytes, min });
+      if (opts.hold && req.at === 'before') await tick(opts.hold);
       if (fail && state.calls.length >= fail) throw new Error('read failed');
       await tick(0);
       // A source that answers without moving the cursor and WITHOUT saying it
@@ -184,6 +186,57 @@ for (const n of [0, 1, 2, 5]) {
   release();
 }
 
+// ---- a forward read is never swallowed by speculative history ----
+// Latest, an explicit refresh and the live poll all go forward. The single
+// request slot is shared with the fill, and returning the fill's promise to a
+// forward caller means new output simply does not arrive until some later poll.
+{
+  const src = source(200, { toolBytes: 120 * 1024, hold: 300 });
+  const store = new ReaderStore(src);
+  const release = store.retain();
+  store.wantHistory(HISTORY_TARGET_EXCHANGES);
+  // wait until a speculative backward read is actually in flight
+  for (let i = 0; i < 60 && store.getSnapshot().loading !== 'before'; i++) await tick(10);
+  assert.equal(store.getSnapshot().loading, 'before', 'a speculative page is in flight');
+  const before = src.state.calls.filter((c) => c.at === 'after' || c.at === 'tail').length;
+  await store.loadNewer();
+  const after = src.state.calls.filter((c) => c.at === 'after' || c.at === 'tail').length;
+  assert.ok(after > before,
+    'asking for the latest while history is loading actually asks the source for it');
+  await settle(store);
+  assert.ok(countExchanges(store.getSnapshot().turns) >= 2, 'and the transcript survives');
+  release();
+}
+
+// ---- the byte budget is a budget ----
+// A backward page with no floor of its own lets the server grow one response
+// until it holds a dozen messages, which on a trace of huge records is
+// megabytes per request — and charging for it only after the next step has
+// been scheduled lets one more go out on top.
+{
+  const src = source(200, { answerBytes: 900 * 1024 });
+  const store = new ReaderStore(src);
+  const release = store.retain();
+  store.wantHistory(HISTORY_TARGET_EXCHANGES);
+  const state = await settle(store);
+  assert.equal(state.fill, 'limited', 'the fill stops');
+  const backward = src.state.spans.slice(1);              // spans[0] is the tail
+  const total = backward.reduce((n, v) => n + v, 0);
+  const biggest = Math.max(0, ...backward);
+  const retained = state.cursor ? src.size - state.cursor.start : 0;
+  const MiB = (n) => `${(n / 1048576).toFixed(1)} MiB`;
+  // Three separate bounds, because they are three separate quantities.
+  assert.ok(biggest <= 2 * 1024 * 1024,
+    `the server cannot grow one speculative page to megabytes (largest ${MiB(biggest)})`);
+  assert.ok(retained <= FILL_MAX_RETAINED_BYTES + biggest,
+    `retained history stays inside the budget plus the page that crossed it `
+    + `(${MiB(retained)} for a ${MiB(FILL_MAX_RETAINED_BYTES)} budget, largest page ${MiB(biggest)})`);
+  assert.ok(total <= backward.length * 2 * 1024 * 1024,
+    `and the whole run's reads stay inside requests x page ceiling (${MiB(total)})`);
+  assert.ok(backward.length <= FILL_MAX_REQUESTS, `in ${backward.length} requests`);
+  release();
+}
+
 // ---- an oversized record blocks progress: stop, do not loop ----
 {
   const src = source(200, { toolBytes: 120 * 1024, blockAt: Number.MAX_SAFE_INTEGER });
@@ -275,6 +328,6 @@ for (const n of [0, 1, 2, 5]) {
   release();
 }
 
-assert.ok(FILL_MAX_MS > 0 && FILL_MAX_BYTES > 0, 'the documented budgets exist');
+assert.ok(FILL_MAX_MS > 0 && FILL_MAX_RETAINED_BYTES > 0, 'the documented budgets exist');
 assert.equal(storeCount, undefined, 'the store does not re-export a second counter');
 console.log('reader-history: ok');
