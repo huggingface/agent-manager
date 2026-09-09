@@ -13,6 +13,36 @@ const publicDir = path.join(root, 'public'); fs.mkdirSync(publicDir); fs.writeFi
 const preload = path.join(root, 'preload.mjs');
 fs.writeFileSync(preload, `
   import fs from 'node:fs';
+  import childProcess from 'node:child_process';
+  import { syncBuiltinESMExports } from 'node:module';
+  // Startup probes installed CLIs with execFile('--version'). Some write to
+  // HOME long after HTTP is ready; keep their parent alive until they close.
+  const execFile = childProcess.execFile;
+  const commands = new Set();
+  childProcess.execFile = (...args) => {
+    const command = execFile(...args);
+    const closed = new Promise((resolve) => command.once('close', resolve));
+    commands.add(closed);
+    closed.then(() => commands.delete(closed));
+    return command;
+  };
+  syncBuiltinESMExports();
+  // Deterministic regression: this grandchild writes only AFTER stop is asked
+  // for, rather than relying on whichever CLI happens to be installed.
+  const lateWrite = childProcess.execFile(process.execPath, ['-e', ${JSON.stringify(`
+    const fs = require('node:fs');
+    process.stdin.resume();
+    process.stdin.once('end', () => setTimeout(() => {
+      fs.mkdirSync(process.env.HOME, { recursive: true });
+      fs.writeFileSync(process.env.HOME + '/fixture-command-closed', process.argv[1]);
+    }, 100));
+  `)}, String(process.pid)], () => {});
+  process.once('message', async (message) => {
+    if (message !== 'fixture-stop') return;
+    lateWrite.stdin.end();
+    while (commands.size) await Promise.all([...commands]);
+    process.kill(process.pid, 'SIGTERM');
+  });
   globalThis.fetch = async () => new Response(JSON.stringify({private:process.env.FIXTURE_PUBLIC !== '1',runtime:{volumes:[]}}), {status:200,headers:{'content-type':'application/json'}});
   const write = fs.writeFileSync;
   fs.writeFileSync = (file, ...args) => {
@@ -31,7 +61,7 @@ const start = async (locked = false) => {
       XDG_CONFIG_HOME: path.join(home, 'config'), XDG_DATA_HOME: path.join(home, 'share'),
       AM_REPIN_DIR: path.join(root, 'repin'), AM_INPUT_REQUIRED_DIR: path.join(root, 'input-required'), AM_BASHRC: '/nonexistent',
       ...(locked ? { SPACE_ID: 'fixture/test', FIXTURE_PUBLIC: '1' } : {}),
-    }, stdio: ['ignore', 'pipe', 'pipe'],
+    }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   child.stdout.on('data', (c) => { logs += c; }); child.stderr.on('data', (c) => { logs += c; });
   for (let i = 0; i < 150; i++) {
@@ -41,7 +71,15 @@ const start = async (locked = false) => {
   }
   throw new Error('fixture server did not start');
 };
-const stop = async () => { if (child && child.exitCode === null) { child.kill('SIGTERM'); await once(child, 'exit'); } };
+const stop = async () => {
+  if (child && child.exitCode === null && child.signalCode === null) {
+    const closed = once(child, 'close');
+    child.send('fixture-stop');
+    await closed;
+    assert.equal(fs.readFileSync(path.join(home, 'fixture-command-closed'), 'utf8'), String(child.pid),
+      'the shutdown-time writer must finish before the server exits and HOME is removed');
+  }
+};
 const call = async (url, body, method = 'POST', headers = {}) => {
   const r = await fetch(base + url, { method, headers: { 'x-am-origin': 'operator', ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000) });
   return { status: r.status, body: await r.json() };
