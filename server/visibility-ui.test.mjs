@@ -232,7 +232,7 @@ try {
   check('the setup guide is shown for a public Space', (await pageA.locator('.locked-app').innerText()).includes('Duplicate this Space'));
   check('protected view torn down: no terminal in the DOM', await pageA.locator('.xterm, .tile-terminal, .ov-composer').count() === 0);
   const sockA = await waitFor(() => pageA.evaluate(() => { const s = window.__sockets.at(-1); return s && s.close ? s : null; }), 5000);
-  check('the server closed the terminal socket with 4003 locked:public-space', sockA?.close?.code === 4003 && sockA?.close?.reason === 'locked:public-space', JSON.stringify(sockA?.close));
+  check('the server closed the terminal socket with 4003 locked:public-space:<seq>', sockA?.close?.code === 4003 && /^locked:public-space:\d+$/.test(sockA?.close?.reason || ''), JSON.stringify(sockA?.close));
   await sleep(1500);
   const sockA2 = await pageA.evaluate(() => window.__sockets.at(-1));
   check('no terminal frames after the close, and no reconnect attempt', sockA2.afterClose === 0 && (await pageA.evaluate(() => window.__sockets.length)) === 1, `afterClose=${sockA2.afterClose} sockets=${await pageA.evaluate(() => window.__sockets.length)}`);
