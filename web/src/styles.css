@@ -2102,3 +2102,14 @@ a.btn-ghost { text-decoration: none; }
 .skiphead { display: flex; align-items: flex-start; gap: 12px; }
 .skiphead > span { flex: 1; min-width: 0; }
 .skiprestore { flex: none; font-size: 11.5px; padding: 3px 8px; white-space: nowrap; }
+
+/* Skills mutation feedback stays beside the buffer until explicitly dismissed. */
+.skill-outcome { padding: 12px; margin: 8px; border: 1px solid var(--border); border-left: 3px solid var(--danger, #b64b47); border-radius: 5px; font-size: 12px; }
+.skill-outcome p { margin: 0 0 8px; }
+.skill-outcome code, .skill-delete-dialog code { overflow-wrap: anywhere; }
+.skill-outcome ul, .skill-delete-dialog ul { padding-left: 20px; }
+.skill-delete-dialog { width: min(580px, calc(100% - 40px)); max-height: 80vh; overflow: auto; padding: 24px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text); font: inherit; }
+.skill-delete-dialog::backdrop { background: rgb(0 0 0 / 55%); }
+.skill-delete-dialog h2 { font-size: 17px; margin: 0 0 12px; }
+.skill-delete-dialog p, .skill-delete-dialog li { font-size: 13px; line-height: 1.6; }
+.skill-delete-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }

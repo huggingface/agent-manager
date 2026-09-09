@@ -736,14 +736,26 @@ export const setTraceSource = (id: string, kind: 'session' | 'bundle', ref: stri
   fetch(`/api/trace/${id}/source`, { method: 'PUT', headers: HEADERS, body: JSON.stringify({ kind, ref }) }).then(json);
 
 // ---- skills ----
-export interface SkillFile { name: string; size: number; }
-export const listSkills = (): Promise<SkillFile[]> => fetch('/api/skills').then(json);
-export const getSkill = (name: string): Promise<{ name: string; content: string }> =>
-  fetch(`/api/skills/${encodeURIComponent(name)}`).then(json);
-export const saveSkill = (name: string, content: string) =>
-  fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'PUT', headers: { 'content-type': 'text/plain' }, body: content }).then(json);
-export const deleteSkill = (name: string) =>
-  fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(json);
+export interface SkillFile { name: string; size: number; pending?: 'write' | 'delete' | null; error?: string; }
+export interface SkillSnapshot {
+  name: string; content: string; revision: string; managed: boolean; sourceExists: boolean; problem?: string;
+  pending: 'write' | 'delete' | null;
+  installations: { path: string; exists: boolean; error?: string }[];
+}
+export interface SkillResult {
+  ok: boolean; status: 'complete' | 'partial'; source: string; manifest: string; error?: string;
+  targets: { path: string; status: string; error?: string; directoryError?: string }[];
+  skill: SkillSnapshot | null;
+}
+export const listSkills = (): Promise<SkillFile[]> => fetch('/api/skills').then(jsonOrError);
+export const getSkill = (name: string): Promise<SkillSnapshot> =>
+  fetch(`/api/skills/${encodeURIComponent(name)}`).then(jsonOrError);
+export const createSkill = (name: string, content: string): Promise<SkillResult> =>
+  fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: content }).then(jsonOrError);
+export const saveSkill = (name: string, content: string, revision: string): Promise<SkillResult> =>
+  fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'PUT', headers: { 'content-type': 'text/plain', 'If-Match': revision }, body: content }).then(jsonOrError);
+export const deleteSkill = (name: string, revision: string): Promise<SkillResult> =>
+  fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE', headers: { 'If-Match': revision } }).then(jsonOrError);
 
 // ---- the API log (Settings → API log) ----
 // Written by operationMiddleware: every mutating call, plus the one read that is

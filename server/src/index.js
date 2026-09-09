@@ -8,9 +8,10 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import {
-  PORT, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR,
+  PORT, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR, STATE_DIR,
   ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions, PASSIVE_CLIS, isRemote,
 } from './config.js';
+import { createSkillsService, skillTargetDirs } from './skills.js';
 import * as remote from './remote.js';
 import * as store from './sessions.js';
 import * as groups from './groups.js';
@@ -99,7 +100,16 @@ function ensureWorkspaceFolders() {
   }
 }
 ensureWorkspaceFolders();
-distributeAllSkills(); // re-publish skills to each agent's dir on boot
+const skills = createSkillsService({ sourceRoot: SKILLS_DIR, stateRoot: path.join(STATE_DIR, 'skills'), targetRoots: skillTargetDirs() });
+const reportSkills = (result) => {
+  if (!result.ok) {
+    const failures = (result.results || [result]).filter((r) => !r.ok)
+      .map(({ name, error, source, manifest, targets }) => ({ name, error, source, manifest, targets }));
+    console.error('[skills] degraded distribution', JSON.stringify({ error: result.error, failures }));
+  }
+  return result;
+};
+skills.redistribute().then(reportSkills).catch((e) => console.error('[skills]', e.message));
 
 // Configure a Claude Code statusline hook that captures the official rate_limits
 // payload to disk (for the Usage page), preserving any existing settings.
@@ -1210,7 +1220,7 @@ function loadAmConfig() {
   };
 }
 app.get('/api/config', (_req, res) => res.json({ ...loadAmConfig(), defaultArtifactsSpace: defaultArtifactsSpace() }));
-app.put('/api/config', (req, res) => {
+app.put('/api/config', async (req, res) => {
   const b = req.body || {};
   const cfg = {
     artifacts: {
@@ -1234,8 +1244,8 @@ app.put('/api/config', (req, res) => {
     },
   };
   try { fs.writeFileSync(AM_CONFIG_FILE, JSON.stringify(cfg, null, 2)); } catch {}
-  generateEnvSkill(loadSecretNotes());
-  res.json({ ok: true });
+  const skillDistribution = await generateEnvSkill(loadSecretNotes());
+  res.json({ ok: true, skillDistribution });
 });
 
 // ---------- bucket backup: status + run-now (docs/bucket-backup.md) ----------
@@ -1630,119 +1640,35 @@ from the environment when you need it (e.g. \`$NAME\`); never print secret value
 
 ${envLines}
 `;
-  const p = skillPath('environment.md');
-  if (p) { try { fs.mkdirSync(SKILLS_DIR, { recursive: true }); fs.writeFileSync(p, content); } catch {} }
-  distributeSkill('environment.md', content);
+  return skills.generate('environment.md', content).then(reportSkills)
+    .catch((e) => reportSkills({ ok: false, error: e.message }));
 }
 
 app.get('/api/secrets', (_req, res) => res.json({ detected: injectedEnvKeys(), notes: loadSecretNotes() }));
-app.put('/api/secrets', (req, res) => {
+app.put('/api/secrets', async (req, res) => {
   const notes = (req.body && req.body.notes && typeof req.body.notes === 'object') ? req.body.notes : {};
   try { fs.writeFileSync(SECRET_NOTES_FILE, JSON.stringify(notes, null, 2)); } catch {}
-  generateEnvSkill(notes);
-  res.json({ ok: true });
+  const skillDistribution = await generateEnvSkill(notes);
+  res.json({ ok: true, skillDistribution });
 });
 
 // ---------- skills (markdown/text files in the workspace) ----------
-const SKILL_RE = /^[\w.\- ]{1,80}$/;
-function skillPath(name) {
-  if (!SKILL_RE.test(name) || name.includes('/') || name.includes('..')) return null;
-  return path.join(SKILLS_DIR, name);
-}
-
-// Fan skills out as SKILL.md into the dirs every agent auto-reads, so a saved
-// skill is available to all of them in every new session. Gated to real Space
-// deployments (or explicit opt-in): on a dev laptop these paths are the
-// developer's OWN ~/.claude etc. — local test runs must not write there.
-function skillTargetDirs() {
-  if (!process.env.SPACE_ID && process.env.AM_DISTRIBUTE_SKILLS !== '1') return [];
-  const home = process.env.HOME || os.homedir();
-  const claudeCfg = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
-  const dirs = [
-    path.join(home, '.agents', 'skills'),   // Codex and opencode
-    path.join(claudeCfg, 'skills'),          // Claude Code
-    path.join(home, '.hermes', 'skills'),    // Hermes
-  ];
-  // GEMINI_CLI_HOME deliberately changes the home Gemini resolves its global
-  // .agents directory against; fan skills into that local/checkpointed home as
-  // well as the ordinary durable HOME.
-  if (process.env.GEMINI_CLI_HOME) dirs.push(path.join(process.env.GEMINI_CLI_HOME, '.agents', 'skills'));
-  // OpenClaw runs with its own HOME (see entrypoint.sh) and reads managed
-  // skills from ~/.agents/skills resolved against THAT home. Recreated on
-  // every boot, so it needs no backup coverage.
-  if (process.env.OPENCLAW_HOME) dirs.push(path.join(process.env.OPENCLAW_HOME, '.agents', 'skills'));
-  return dirs;
-}
-function parseSkillFile(filename, content) {
-  const name = slugify(path.basename(filename).replace(/\.[^.]+$/, '')) || 'skill';
-  let body = content;
-  let desc = '';
-  const fm = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-  if (fm) {
-    const d = fm[1].match(/^description:\s*(.+)$/m);
-    if (d) desc = d[1].trim().replace(/^["']|["']$/g, '');
-    body = fm[2];
-  }
-  if (!desc) {
-    const h = body.match(/^#+\s*(.+)$/m);
-    desc = (h ? h[1] : (body.split('\n').find((l) => l.trim()) || name)).trim();
-  }
-  desc = desc.replace(/\s+/g, ' ').slice(0, 300).replace(/"/g, '\\"');
-  return { name, description: desc, body: body.trim() };
-}
-function distributeSkill(filename, content) {
-  const { name, description, body } = parseSkillFile(filename, content);
-  const md = `---\nname: ${name}\ndescription: "${description}"\n---\n\n${body}\n`;
-  for (const base of skillTargetDirs()) {
-    try { fs.mkdirSync(path.join(base, name), { recursive: true }); fs.writeFileSync(path.join(base, name, 'SKILL.md'), md); } catch {}
-  }
-}
-function undistributeSkill(filename) {
-  const name = slugify(path.basename(filename).replace(/\.[^.]+$/, ''));
-  for (const base of skillTargetDirs()) {
-    try { fs.rmSync(path.join(base, name), { recursive: true, force: true }); } catch {}
-  }
-}
-function distributeAllSkills() {
-  let files = [];
-  try { files = fs.readdirSync(SKILLS_DIR).filter((f) => { try { return fs.statSync(path.join(SKILLS_DIR, f)).isFile(); } catch { return false; } }); } catch {}
-  for (const f of files) {
-    try { distributeSkill(f, fs.readFileSync(path.join(SKILLS_DIR, f), 'utf8')); } catch {}
-  }
-}
-
-app.get('/api/skills', (_req, res) => {
-  fs.mkdirSync(SKILLS_DIR, { recursive: true });
-  const files = fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
-    .filter((e) => e.isFile())
-    .map((e) => ({ name: e.name, size: fs.statSync(path.join(SKILLS_DIR, e.name)).size }));
-  files.sort((a, b) => a.name.localeCompare(b.name));
-  res.json(files);
-});
-
-app.get('/api/skills/:name', (req, res) => {
-  const p = skillPath(req.params.name);
-  if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'not found' });
-  res.json({ name: req.params.name, content: fs.readFileSync(p, 'utf8') });
-});
-
-app.put('/api/skills/:name', express.text({ type: '*/*', limit: '5mb' }), (req, res) => {
-  const p = skillPath(req.params.name);
-  if (!p) return res.status(400).json({ error: 'bad name' });
-  fs.mkdirSync(SKILLS_DIR, { recursive: true });
-  const content = typeof req.body === 'string' ? req.body : '';
-  fs.writeFileSync(p, content);
-  distributeSkill(req.params.name, content); // push to every agent
-  res.json({ ok: true });
-});
-
-app.delete('/api/skills/:name', (req, res) => {
-  const p = skillPath(req.params.name);
-  if (!p) return res.status(400).json({ error: 'bad name' });
-  try { fs.unlinkSync(p); } catch {}
-  undistributeSkill(req.params.name);
-  res.json({ ok: true });
-});
+// POST is create-only; PUT and DELETE require the revision returned by GET.
+// A partial result is a successful HTTP exchange, not a claim of full mutation.
+const skillRoute = (run) => async (req, res) => {
+  try {
+    const result = await run(req);
+    res.status(result?.ok === false ? 207 : 200).json(result);
+  } catch (e) { res.status(e.status || 503).json({ error: e.message }); }
+};
+app.get('/api/skills', skillRoute(() => skills.list()));
+app.get('/api/skills/:name', skillRoute((req) => skills.get(req.params.name)));
+const skillText = (req) => req.get('content-length') === '0' ? '' : req.body;
+app.post('/api/skills/:name', express.text({ type: '*/*', limit: '5mb' }),
+  skillRoute((req) => skills.create(req.params.name, skillText(req))));
+app.put('/api/skills/:name', express.text({ type: '*/*', limit: '5mb' }),
+  skillRoute((req) => skills.update(req.params.name, skillText(req), req.get('If-Match'))));
+app.delete('/api/skills/:name', skillRoute((req) => skills.remove(req.params.name, req.get('If-Match'))));
 
 // ---------- file browser (for the Files agent) ----------
 function folderPathOf(session) {
