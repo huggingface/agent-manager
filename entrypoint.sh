@@ -62,9 +62,8 @@ export HERMES_LIVE="$AM_LOCAL/hermes"
 export HERMES_DURABLE="$DATA_DIR/state/hermes"
 # fx has no config-dir override at all — auth, settings and sessions are
 # hardcoded to ~/.fx — so the symlink is the only way to keep it off the
-# bucket. It must be: fx appends to a session's events.jsonl through one handle
-# held open for the whole conversation, exactly the shape that loses its open
-# epoch on the mount (see Codex above).
+# bucket. Session locks and in-flight event writes need local POSIX semantics;
+# closed checkpoints carry their durable state to the bucket.
 export FX_LIVE="$AM_LOCAL/fx-home"
 export FX_DURABLE="$DATA_DIR/state/fx"
 
