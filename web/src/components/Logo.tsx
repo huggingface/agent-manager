@@ -4,12 +4,18 @@ import { FolderGlyph, ListGlyph, RemoteGlyph } from './icons';
 const INVERT_DARK = new Set(['shell', 'opencode']);
 const INVERT_LIGHT = new Set(['hermes']);
 
+// A state frame must follow the tile exactly, so expose the two pieces of tile
+// geometry rather than making that component repeat Logo's sizing arithmetic.
+export const logoTilePadding = (size: number, tint?: string) =>
+  tint ? Math.max(3, Math.round(size * 0.18)) : 0;
+export const logoTileRadius = (size: number) => Math.max(4, Math.round(size * 0.28));
+
 export default function Logo({ cli, size = 18, tint }: { cli: string; size?: number; tint?: string }) {
   // `tint` (the CLI's brand color) wraps the glyph in a softly tinted tile so
   // rows/panes read as "Claude / Codex / Gemini" at a glance. `size` stays the
   // glyph size; the tile adds its own padding around it.
   const tile = tint
-    ? { padding: Math.max(3, Math.round(size * 0.18)), background: `color-mix(in srgb, ${tint} 13%, transparent)`, borderRadius: Math.max(4, Math.round(size * 0.28)) }
+    ? { padding: logoTilePadding(size, tint), background: `color-mix(in srgb, ${tint} 13%, transparent)`, borderRadius: logoTileRadius(size) }
     : undefined;
 
   // Files uses the same minimal folder glyph as the file tree.

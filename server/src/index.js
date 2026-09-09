@@ -17,6 +17,8 @@ import * as groups from './groups.js';
 import * as order from './order.js';
 import * as demo from './demo.js';
 import * as hidden from './hidden.js';
+import * as crons from './crons.js';
+import { ensureClaudeDialogDefaults, trustWorkspacesRoot } from './first-run.js';
 import {
   attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning,
   waitForInputReady, capturePane, ghosttyReady, ghosttyError,
@@ -28,7 +30,7 @@ import {
 // frontend's framing is unchanged.
 const TERM_CTRL = '\x00\x00AM:';
 import { buildUsage } from './usage.js';
-import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, traceHarnessOf } from './traces.js';
+import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, traceHarnessOf, subagentRoster, readSubagentTrace } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 import { kindOfName, kindOfFile, mimeOf, readTextHead, TEXT_MAX } from './preview.js';
@@ -37,7 +39,8 @@ import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revo
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
 import {
-  formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeSessionAttachments,
+  formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeAttachment,
+  removeSessionAttachments,
   resolveAttachment, resolveAttachments,
 } from './attachments.js';
 import * as runstate from './runstate.js';
@@ -51,6 +54,7 @@ installSlowFsProbe();
 ensureDirs();
 refreshVersions();
 store.init();
+crons.init();
 pruneAttachmentDirs(store.list().map((session) => session.id))
   .catch((e) => console.error('[attachments.prune]', e && e.message));
 groups.init();
@@ -62,6 +66,14 @@ hidden.init();
 // discovery must refuse to guess. Both installers are non-fatal; the existing
 // fallback remains available if either cannot be installed.
 installClaudeRepinHook();
+// The two first-run answers that belong to the whole Space rather than to one
+// session: Claude's folder trust, which it inherits from the workspaces root
+// down to every session under it, and the bypass-mode warning whose default
+// button is "No, exit" (so a blind Enter on it kills the session). Both run
+// before anything is spawned, and neither writes if the answer is already
+// there. See first-run.js.
+trustWorkspacesRoot();
+ensureClaudeDialogDefaults();
 // OpenCode's global plugin reports the root session chosen by /new (/clear),
 // and the next prompt after switching to an existing session.
 installOpencodeRepinPlugin();
@@ -209,6 +221,10 @@ const resolveOperationOrigin = (raw, req) => {
     return { id: 'operator', type: 'operator', name: process.env.SPACE_AUTHOR_NAME || process.env.AM_USER || 'operator' };
   }
   if (raw) {
+    if (raw.startsWith('cron:')) {
+      const job = crons.get(raw.slice('cron:'.length));
+      if (job) return { id: raw, type: 'cron', name: job.name };
+    }
     const session = store.get(raw);
     if (session) return { id: session.id, type: 'agent', name: session.name, cli: session.cli };
     if (raw.startsWith('remote:')) {
@@ -225,8 +241,20 @@ const resolveOperationOrigin = (raw, req) => {
   const remoteSession = store.list().find((s) => s.remote?.name === name);
   return remoteSession ? { id: `remote:${name}`, type: 'remote', name, cli: remoteSession.remote?.peer?.harness || 'remote' } : null;
 };
+// Who the call was aimed at. Every route that acts on one session names it in
+// the path; resolving the NAME here, at write time, is the difference between an
+// audit trail that still reads in a month and one full of ids whose sessions
+// have since been renamed or deleted.
+const TARGET_ROUTES = /^\/api\/(?:agents|sessions|trace|files)\/([^/]+)/;
+const resolveOperationTarget = (req) => {
+  const id = (req.path.match(TARGET_ROUTES) || [])[1];
+  if (!id) return null;
+  const s = store.get(id);
+  return s ? { id: s.id, name: s.name, cli: s.cli } : { id };
+};
 app.use(operationMiddleware({
   resolveOrigin: resolveOperationOrigin,
+  resolveTarget: resolveOperationTarget,
   // Test servers explicitly opt out so old endpoint-focused fixtures do not
   // have to pretend to be the operator. Production never sets this switch.
   allowMissing: process.env.AM_ALLOW_MISSING_ORIGIN === '1',
@@ -460,6 +488,17 @@ app.post('/api/sessions/:id/attachments/insert', async (req, res) => {
   }
 });
 
+app.delete('/api/sessions/:id/attachments/:attachmentId', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  try {
+    await removeAttachment(s.id, req.params.attachmentId);
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(e.statusCode || 500).json({ error: String(e.message || e) });
+  }
+});
+
 app.get('/api/sessions/:id/attachments/:attachmentId/raw', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
@@ -548,6 +587,7 @@ function agentRow(s, act, d, selfId, mates) {
     state: deriveState(s, act),
     // Seconds since its screen last changed. Small = actively working.
     idleFor: act ? act.age : null,
+    inputRequired: act?.inputRequired || null,
     workdir: workspacePath(folder),
     path: folder,
     // Who else writes to this same folder — the actual collision hazard.
@@ -615,6 +655,40 @@ app.get('/api/agents/:id/tail', (req, res) => {
   const text = capturePane(s.id, lines);
   if (text === null) return res.json({ id: s.id, state: 'stopped', text: '', note: 'not running' });
   res.json({ id: s.id, state: deriveState(s, agentInfo().get(s.id)), text });
+});
+
+// The sub-agents this session spawned, and one sub-agent's own transcript.
+//
+// Both read the `subagents/` directory next to the session's transcript and
+// never the transcript itself: the parent is up to 292 MB on this machine and
+// the roster is a directory listing. Whether a sub-agent has FINISHED is not
+// answered here — that fact lives in the parent's own records, which the reader
+// already has for the window it is showing, and inventing an answer from file
+// mtime would be wrong several times an hour (measured: p99 silence 112s inside
+// a live sub-agent, max 601s).
+app.get('/api/agents/:id/subagents', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json({ id: s.id, ...(await subagentRoster(s)) });
+  } catch (e) {
+    console.error('[subagents]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'roster failed' });
+  }
+});
+
+app.get('/api/agents/:id/subagents/:agentId', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json(await readSubagentTrace(s, req.params.agentId, traceOpts(req.query)));
+  } catch (e) {
+    if (['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(e && e.code)) {
+      return res.status(404).json({ error: e.message, code: e.code });
+    }
+    console.error('[subagent-trace]', e && e.message);
+    res.status(500).json({ error: (e && e.message) || 'sub-agent trace read failed' });
+  }
 });
 
 // Block until the target reaches one of `state` — so a coordinating agent makes
@@ -1271,6 +1345,33 @@ To reconstruct recent manager operations (newest first):
 curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/operations?limit=100" | jq .operations
 \`\`\`
 
+### Schedule recurring prompts
+A cron job sends a normal prompt on a five-field cron schedule. It survives
+Space restarts in durable storage; if the named agent does not exist when it
+fires, the manager creates it in \`workspaces/<agent-name>\` first. The timezone
+is required because the Space clock is UTC. Create one with your own id so the
+operation log records who asked:
+
+\`\`\`sh
+curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/crons?from=$AM_ID" \\
+  -H 'content-type: application/json' -d '{
+    "name":"weekday issue triage",
+    "agent":{"name":"triage","cli":"claude"},
+    "prompt":"Triage newly opened issues and report anything urgent.",
+    "schedule":{"cron":"0 9 * * 1-5","tz":"Europe/Zurich"},
+    "runOnRestart":true
+  }'
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/crons" | jq .crons
+\`\`\`
+
+Use \`POST /api/crons/$ID/run?from=$AM_ID\` to run now,
+\`PUT /api/crons/$ID?from=$AM_ID\` with \`{"state":"stopped"}\` (or
+\`"running"\`) to stop/start it, and \`DELETE /api/crons/$ID?from=$AM_ID\` to
+remove it. Run-on-restart is one fresh fire, never a replay of missed times.
+There is deliberately no overlap or spend guard: stop or delete jobs you no
+longer want. See \`docs/cron-jobs.md\` in the Agent Manager source for the full
+request and response shapes.
+
 Your session exports the port as \`$AM_PORT\` — read it rather than trusting a
 number you remember, and check it before you believe an empty answer: \`curl -s\`
 to a port nothing is listening on prints **nothing at all**, and in some agent
@@ -1314,17 +1415,46 @@ digest for one agent. Read \`state\` before you do anything:
 ### Watch instead of asking
 \`\`\`sh
 curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/tail?lines=120" | jq -r .text
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=120"   # blocks
+curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15&from=$AM_ID"
 \`\`\`
 \`tail\` returns that agent's screen and scrollback — exactly what a human would
-see in its pane. \`wait\` blocks until it stops working (default: any of
-\`waiting,idle,stopped\`, \`timeout\` up to 300s) and answers
-\`{state, matched, timedOut}\`. Use \`wait\` instead of a \`sleep\` loop: long
-foreground sleeps can destabilize a session.
+see in its pane. \`wait\` BLOCKS until the agent has held one of \`state\`
+(default \`waiting,idle,stopped\`) for \`settle\` seconds, then answers
+\`{state, matched, waited}\`. Both knobs decide whether it works for you:
+
+- \`settle\` — seconds the state must HOLD (default 4, max 60). An agent goes
+  quiet between tool calls, so a bare match can fire in a gap in the middle of
+  the work and hand you half a result. Use 10–15 for a peer doing a real task.
+- \`timeout\` — seconds to block (default 60, **max 300**). One call rarely
+  covers a whole job; on expiry it answers \`{matched:false,timedOut:true}\` and
+  you reissue. That is the shape of the API, not a failure.
+
+\`wait\` is read-only, so \`from=$AM_ID\` is optional on it — pass it anyway. It
+is what lets Settings → API log draw the arrow back from the agent you waited on
+to you; without it the log knows the wait finished but not who was watching.
+
+Because of both, the correct form is a background loop rather than a call:
+reissue until it matches, started the way your harness runs a command in the
+background (Claude Code: \`run_in_background\`), so you stay free meanwhile and
+are woken once, when the peer is genuinely finished.
+
+\`\`\`sh
+( until curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15&from=$AM_ID" \\
+        > /tmp/wait-$ID.json \\
+     && jq -e '.matched or .state == "gone" or has("error")' /tmp/wait-$ID.json >/dev/null
+  do sleep 2; done ) >/dev/null 2>&1 &
+\`\`\`
+When that exits, \`/tmp/wait-$ID.json\` holds the last answer: \`matched: true\`
+is finished, \`"state":"gone"\` means the session was deleted, \`error\` means the
+id is wrong. Read the file — do not start polling \`/api/agents\` instead. (The
+\`sleep 2\` costs nothing when \`wait\` is doing its job, and keeps the loop from
+spinning if the manager is briefly unreachable; it is inside the background
+subshell, so nothing of yours is blocked by it.)
 
 **This is the main pattern.** If you hand work to another agent, YOU watch it
-with \`tail\`/\`wait\`. It does not have to report back, and you must not sit in a
-loop asking it whether it's done.
+with \`tail\`/\`wait\` — start that loop as soon as you have its id. It does not
+have to report back, you must not sit in a loop asking it whether it's done, and
+never wait with \`sleep\`: long foreground sleeps can destabilize a session.
 
 ### Send an agent a prompt
 Send the text as the request **body** so quoting and newlines never bite you:
@@ -1366,6 +1496,11 @@ different one (the names are the \`group\` field in the roster), or \`group=none
 to leave it ungrouped. The prompt is required — it starts working on it
 immediately. Spawn one agent for one clearly separable job; several agents in
 one folder is fine, but this Space is a small CPU box, so don't build a fleet.
+
+The response carries the new agent's \`id\`. Capture it and start the background
+\`wait\` loop from **Watch instead of asking** right then: launching is the
+moment you choose how you will find out it finished, and nothing else will tell
+you.
 
 **Into a NEW group** — e.g. "start four agents in a group called taskforce".
 \`group=\` only ever selects a group that already exists; an unknown name is
@@ -1947,6 +2082,8 @@ function traceOpts(q) {
       cursor: Number(at === 'before' ? q.before : q.after) || 0,
       bytes: Number(q.bytes) || 0,
       min: Number(q.min) || 0,
+      version: q.v === '2' ? 2 : 1,
+      generation: typeof q.generation === 'string' ? q.generation.slice(0, 64) : undefined,
     },
   };
 }
@@ -2026,7 +2163,7 @@ function sessionsWithState() {
   const info = agentInfo();
   return store.list().map((s) => {
     const state = deriveState(s, info.get(s.id));
-    return { ...s, state, running: state !== 'stopped' };
+    return { ...s, state, running: state !== 'stopped', inputRequired: info.get(s.id)?.inputRequired || null };
   });
 }
 
@@ -2098,6 +2235,20 @@ function nextName(cli) {
   return `${base}-${max + 1}`;
 }
 
+// The name a session WOULD get if it were created now, so the create panel can
+// prefill the field instead of showing an empty box. Deliberately a read from
+// the same nextName() the creation path uses: a second copy of the scheme in
+// the client drifts the first time either side changes.
+//
+// The panel treats this as a display value, not an answer — it only sends a
+// name when the operator edits it, so two creations racing on the same prefill
+// still get distinct names from the server (see Sidebar.tsx).
+app.get('/api/next-name', (req, res) => {
+  const cli = String(req.query.cli || '').trim();
+  if (!cliById(cli)) return res.status(400).json({ error: `unknown cli '${cli}'` });
+  res.json({ cli, name: nextName(cli) });
+});
+
 // Create a session and (optionally) start it on an initial prompt. Shared by
 // the UI's POST /api/sessions and the agent API's spawn — one creation path, so
 // quickstart behaves identically whoever asked. Returns null for a bad path.
@@ -2164,6 +2315,128 @@ app.post('/api/sessions', (req, res) => {
   res.status(201).json({ ...s, running: false, state: 'stopped' });
 });
 
+// ---------- scheduled prompts (/api/crons) ----------
+//
+// A cron's agent type is only used when its named agent does not exist yet.
+// Existing names are deliberately reused (even if the session was created with
+// another CLI): the name is the idempotency key promised by the Settings form.
+const cronCliError = (cli) => {
+  const def = cliById(cli);
+  if (!def || !isAgentCli(cli) || isRemote(cli)) {
+    return `unknown agent type '${cli}' — use an agent from GET /api/clis (not shell, files, trace, or remote)`;
+  }
+  return null;
+};
+const cronAgentFolder = (name) => {
+  const readable = slugify(name);
+  if (readable) return readable;
+  // A perfectly valid display name can contain no ASCII characters. Do not
+  // collapse those agents into the workspaces root (or one shared `agent/`
+  // folder); a tiny deterministic suffix keeps the promised private folder.
+  let hash = 2_166_136_261;
+  for (const character of name) hash = Math.imul(hash ^ character.codePointAt(0), 16_777_619);
+  return `agent-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+};
+
+function beginCronFire(job, trigger) {
+  const at = new Date();
+  const started = Date.now();
+  const fail = (error) => {
+    const message = String(error && error.message || error).slice(0, 500);
+    crons.recordLast(job.id, {
+      at: at.toISOString(), status: 'failed', durationMs: Date.now() - started, trigger, error: message,
+    });
+    return message;
+  };
+
+  try {
+    let session = store.list().find((candidate) => candidate.name === job.agent.name) || null;
+    let agentCreated = false;
+    if (!session) {
+      const invalid = cronCliError(job.agent.cli);
+      if (invalid) throw new Error(invalid);
+      const catalog = cliCatalog().find((candidate) => candidate.id === job.agent.cli);
+      if (!catalog?.available) throw new Error(`${cliById(job.agent.cli).label} is not installed on this Space`);
+      session = createSession({
+        name: job.agent.name,
+        cli: job.agent.cli,
+        // Cron-created agents own a predictable workspace. A second job with
+        // the same name sees the session synchronously and cannot create it
+        // again, even while the first prompt is still being delivered.
+        path: cronAgentFolder(job.agent.name),
+      });
+      if (!session) throw new Error('could not create the agent workspace');
+      if (session.error) throw new Error(session.error);
+      agentCreated = true;
+    }
+    if (!promptable(session) || isRemote(session.cli)) {
+      throw new Error(`the existing '${session.name}' session (${session.cli}) cannot receive scheduled prompts`);
+    }
+    const text = `[message from cron "${job.name}":] ${job.prompt}`;
+    const completion = deliver(session, { text }, `cron: ${job.name}`)
+      .then(() => {
+        crons.recordLast(job.id, {
+          at: at.toISOString(), status: 'ok', durationMs: Date.now() - started, trigger,
+        });
+      })
+      .catch((error) => { fail(error); });
+    return { agentCreated, completion };
+  } catch (error) {
+    const message = fail(error);
+    throw Object.assign(new Error(message), { statusCode: 409 });
+  }
+}
+
+const validateCronCli = (body) => {
+  const cli = body?.agent?.cli;
+  return typeof cli === 'string' ? cronCliError(cli.trim()) : null;
+};
+
+app.get('/api/crons', (_req, res) => res.json({ crons: crons.list() }));
+
+app.post('/api/crons', (req, res) => {
+  const cliError = validateCronCli(req.body);
+  if (cliError) return res.status(400).json({ error: cliError });
+  try {
+    const job = crons.create(req.body || {});
+    return res.status(201).json(job);
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+app.put('/api/crons/:id', (req, res) => {
+  if (!crons.get(req.params.id)) return res.status(404).json({ error: 'not found' });
+  const cliError = validateCronCli(req.body);
+  if (cliError) return res.status(400).json({ error: cliError });
+  try {
+    return res.json(crons.update(req.params.id, req.body || {}));
+  } catch (e) {
+    return res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+app.delete('/api/crons/:id', (req, res) => {
+  if (!crons.remove(req.params.id)) return res.status(404).json({ error: 'not found' });
+  return res.json({ ok: true });
+});
+
+app.post('/api/crons/:id/run', (req, res) => {
+  const job = crons.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'not found' });
+  const requested = String(req.query.trigger || '');
+  const trigger = req.operationOrigin?.type === 'cron' && (requested === 'schedule' || requested === 'restart')
+    ? requested : 'manual';
+  try {
+    const run = beginCronFire(job, trigger);
+    // 202 means the prompt was accepted for delivery, not that the agent's work
+    // has finished. `last` is updated when delivery itself succeeds or fails.
+    return res.status(202).json({ ok: true, agentCreated: run.agentCreated });
+  } catch (e) {
+    return res.status(e.statusCode || 409).json({ error: String(e.message || e) });
+  }
+});
+
 // Rename = display label only. Folders are never renamed or moved.
 app.put('/api/sessions/:id', (req, res) => {
   const name = (req.body || {}).name;
@@ -2171,6 +2444,35 @@ app.put('/api/sessions/:id', (req, res) => {
   const existing = store.get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'not found' });
   res.json(store.update(existing.id, { name: name.trim() }));
+});
+
+// ---------- archiving ----------
+//
+// Archiving is how a session leaves the working list, and it is STORED rather
+// than derived. The idle window (`archive.after`) measures an absence of
+// activity; "I am finished with this one" cannot be expressed that way — an
+// agent you retire the moment it answers is as active as it will ever be.
+//
+// The two roads meet in the sidebar's archived view, but they are not the same
+// road: the window's verdict changes when the setting changes, and this one
+// does not. Only this one unlocks delete — see the DELETE route below.
+app.post('/api/sessions/:id/archive', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  // Archiving stops the agent. Putting a session away while its CLI keeps
+  // running is how you end up paying for work behind a row you can no longer
+  // see. A remote agent has no process here — its connection is a separate
+  // control that stays where it is, so archiving one only files it away.
+  if (!isRemote(s.cli) && !PASSIVE_CLIS.includes(s.cli)) stop(s.id);
+  res.json(store.update(s.id, { archivedAt: new Date().toISOString() }));
+});
+
+// Restore. Deliberately does NOT start the agent again: unarchiving says "I
+// want to see this again", and starting is what opening the pane does.
+app.post('/api/sessions/:id/unarchive', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  return res.json(store.update(s.id, { archivedAt: undefined }));
 });
 
 app.post('/api/sessions/:id/stop', (req, res) => {
@@ -2292,25 +2594,76 @@ app.get('/api/trace/bundles', async (_req, res) => {
 // Resolve the concrete local source behind a trace pane. Handover uses this to
 // seed the next agent with a path it can inspect directly, whether the pane
 // points at one of this Manager's sessions or at an imported Hub bundle.
+// Which directory a bundle ref names — the ONE place that decides. The shape
+// check alone admits `..`, and `path.join(DATA_DIR, 'traces', '..')` is
+// DATA_DIR: a pane whose ref is `..` served the first *.jsonl in the data
+// directory, as a file from /download and as a rendered conversation from
+// /api/trace/:id. These refs arrive from the browser, so resolve and require
+// the result to be a direct child of the bundle root.
+const TRACES_DIR = path.join(DATA_DIR, 'traces');
+function bundleDir(ref) {
+  const name = String(ref ?? '');
+  if (!/^[\w.-]+$/.test(name)) return null;
+  const dir = path.resolve(TRACES_DIR, name);
+  const rel = path.relative(TRACES_DIR, dir);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || rel.includes(path.sep)) return null;
+  return dir;
+}
+
+// Where the transcript behind a pane actually lives. A trace pane reads someone
+// else's file (an imported bundle) or another session's; any other session reads
+// its own. Reports "no trace" as a value rather than throwing, because an agent
+// that has not spoken yet is an ordinary state, not a failure.
+async function traceFileOf(s) {
+  const source = s.cli === 'trace'
+    ? (s.traceSource || { kind: 'session', ref: s.id })
+    : { kind: 'session', ref: s.id };
+  if (source.kind === 'bundle') {
+    const dir = bundleDir(source.ref);
+    if (!dir) return { status: 400, error: 'bad bundle ref' };
+    const names = (await fs.promises.readdir(dir)).filter((n) => n.endsWith('.jsonl'));
+    if (!names.length) return { status: 404, error: 'bundle has no trace file', code: 'no-trace' };
+    return { path: path.join(dir, names[0]), sessionId: null, source };
+  }
+  const target = store.get(source.ref);
+  if (!target) return { status: 404, error: 'source session is gone', code: 'no-trace' };
+  const hit = await findTrace(target, store.list());
+  if (!hit) return { status: 404, error: 'no trace found for this session', code: 'no-trace' };
+  return { path: hit.src, sessionId: hit.sessionId || null, source };
+}
+
 app.get('/api/trace/:id/location', async (req, res) => {
   const pane = store.get(req.params.id);
   if (!pane || pane.cli !== 'trace') return res.status(404).json({ error: 'not a trace pane' });
-  const source = pane.traceSource || { kind: 'session', ref: pane.id };
   try {
-    if (source.kind === 'bundle') {
-      if (!/^[\w.-]+$/.test(String(source.ref))) return res.status(400).json({ error: 'bad bundle ref' });
-      const dir = path.join(DATA_DIR, 'traces', source.ref);
-      const names = (await fs.promises.readdir(dir)).filter((n) => n.endsWith('.jsonl'));
-      if (!names.length) return res.status(404).json({ error: 'bundle has no trace file', code: 'no-trace' });
-      return res.json({ path: path.join(dir, names[0]), source });
-    }
-    const target = store.get(source.ref);
-    if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
-    const hit = await findTrace(target, store.list());
-    if (!hit) return res.status(404).json({ error: 'no trace found for this session', code: 'no-trace' });
-    return res.json({ path: hit.src, sessionId: hit.sessionId || null, source });
+    const found = await traceFileOf(pane);
+    if (found.error) return res.status(found.status).json({ error: found.error, code: found.code });
+    return res.json({ path: found.path, sessionId: found.sessionId, source: found.source });
   } catch (e) {
     res.status(500).json({ error: (e && e.message) || 'could not resolve trace path' });
+  }
+});
+
+// The transcript itself, as a file. The reader and the Files pane RENDER a
+// trace; this hands over the bytes — for an archive, an issue report, another
+// tool. Any session, not only a trace pane: a session's own transcript lives in
+// its harness's directory, OUTSIDE the workspace, so the Files pane cannot
+// reach it and a download is the only way to hold the file.
+//
+// No redaction gate, and that is deliberate: this returns the operator's own
+// file to the operator, over the session they are already authenticated on.
+// Publishing is /api/share, which does gate, because that is what puts a
+// transcript somewhere other people can read it.
+app.get('/api/trace/:id/download', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  try {
+    const found = await traceFileOf(s);
+    if (found.error) return res.status(found.status).json({ error: found.error, code: found.code });
+    const stem = slugify(s.name || '') || 'trace';
+    res.download(found.path, `${stem}${path.extname(found.path) || '.jsonl'}`);
+  } catch (e) {
+    res.status(500).json({ error: (e && e.message) || 'could not read that trace' });
   }
 });
 
@@ -2325,8 +2678,9 @@ app.get('/api/trace/:id', async (req, res) => {
 
   try {
     if (source.kind === 'bundle') {
-      if (!/^[\w.-]+$/.test(String(source.ref))) return res.status(400).json({ error: 'bad bundle ref' });
-      return res.json(await readTraceBundle(path.join(DATA_DIR, 'traces', source.ref), opts));
+      const dir = bundleDir(source.ref);
+      if (!dir) return res.status(400).json({ error: 'bad bundle ref' });
+      return res.json(await readTraceBundle(dir, opts));
     }
     const target = store.get(source.ref);
     if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
@@ -2354,7 +2708,7 @@ app.put('/api/trace/:id/source', (req, res) => {
   if (!ref) return res.status(400).json({ error: 'ref required' });
   // A bundle ref becomes a path segment under DATA_DIR/traces — validate it here
   // too, so a traversal attempt never gets persisted in the session record.
-  if (kind === 'bundle' && !/^[\w.-]+$/.test(ref)) return res.status(400).json({ error: 'bad bundle ref' });
+  if (kind === 'bundle' && !bundleDir(ref)) return res.status(400).json({ error: 'bad bundle ref' });
   if (kind === 'session' && !store.get(ref)) return res.status(404).json({ error: 'no such session' });
   store.update(pane.id, { traceSource: { kind, ref } });
   res.json({ ok: true, traceSource: { kind, ref } });
@@ -2363,6 +2717,34 @@ app.put('/api/trace/:id/source', (req, res) => {
 app.delete('/api/sessions/:id', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
+  // Two guards, answering two different questions, and a session has to satisfy
+  // whichever one it is being asked.
+  //
+  // `?ifNeverStarted=1` is the caller saying "only if this never ran" — the
+  // wrong-CLI mistake, where an agent created by accident is abandoned before it
+  // has done anything. That is a precondition the CALLER set, so a session that
+  // has started is refused even though it might have been deletable without the
+  // flag, and refused in its own words.
+  //
+  // Otherwise delete is an archived-only action: retire a session, then remove
+  // it. That is what keeps the one destructive control out of the working list,
+  // and it is enforced here rather than only in the sidebar so the rule holds
+  // for any caller. Being quiet for a month is NOT this flag — see the archive
+  // route.
+  //
+  // The two compose into the exemption this guard was written expecting: a
+  // session that never ran has nothing worth archiving, so `ifNeverStarted=1`
+  // gets it in one step instead of two.
+  const claimedNeverStarted = req.query.ifNeverStarted === '1';
+  if (claimedNeverStarted && s.everStarted) {
+    return res.status(409).json({ error: 'session has already started' });
+  }
+  if (!claimedNeverStarted && !s.archivedAt) {
+    return res.status(409).json({
+      error: 'archive this session before deleting it',
+      code: 'not-archived',
+    });
+  }
   stop(s.id);
   // Close the agent's poll and drop the in-memory log, so a pane later created
   // with the same name reads the folder fresh instead of inheriting a ghost.
@@ -2572,11 +2954,12 @@ wss.on('connection', (ws, req) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.t === 'i') {
-      handle.write(msg.d);
+      const terminalReply = runstate.isTerminalReply(msg.d);
+      handle.write(msg.d, { terminalReply });
       // Not every frame on this channel is you: the emulator answers the TUI's
       // device-attribute and cursor queries down the same path, instantly on
       // attach. Opening a pane is not sending it something.
-      if (!runstate.isTerminalReply(msg.d)) touchInput(session.id);
+      if (!terminalReply) touchInput(session.id);
     }
     else if (msg.t === 'r') handle.resize(msg.cols, msg.rows);
     else if (msg.t === 'claim') handle.claim();
@@ -2636,4 +3019,16 @@ server.listen(PORT, () => {
   console.log(`Agent Manager :${PORT}  engine=libghostty${ghosttyReady() ? '' : ' (UNAVAILABLE)'}  data=${DATA_DIR}`);
   console.log('⚠  No authentication: this app trusts whoever can reach it.');
   console.log('   Keep this Space PRIVATE — a public instance gives anyone a shell + your logged-in agents.');
+  // Scheduled fires use the public cron-run route too. That keeps one execution
+  // path and gives the operations log a first-class `cron:<id>` origin instead
+  // of inventing a session that does not exist.
+  crons.startScheduler(async (id, trigger) => {
+    const response = await fetch(`http://127.0.0.1:${PORT}/api/crons/${encodeURIComponent(id)}/run?trigger=${trigger}`, {
+      method: 'POST', headers: { 'x-am-origin': `cron:${id}` },
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `cron run returned HTTP ${response.status}`);
+    }
+  });
 });

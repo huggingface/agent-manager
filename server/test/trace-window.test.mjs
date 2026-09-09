@@ -303,6 +303,22 @@ assert.equal(mainAfter.mtimeMs, mainBefore.mtimeMs, 'the main db does not move w
 assert.equal(mainAfter.size, mainBefore.size, 'nor does its size');
 const ocSecond = await readTrace(ocSession, { window: { at: 'tail', min: 2 } });
 assert.equal(textOf(ocSecond.turns.at(-1)), 'streaming second', 'the Reader memo follows the WAL');
+for (let i = 2; i <= 5; i++) {
+  oc.prepare('insert into message values (?, ?, ?, ?)').run(`msg_${i}`, 'ses_reader', i, JSON.stringify({ role: 'user' }));
+  oc.prepare('insert into part values (?, ?, ?, ?)').run(`part_${i}`, `msg_${i}`, i, JSON.stringify({ type: 'text', text: `message ${i}` }));
+}
+const grown = await readTrace(ocSession, { window: { at: 'tail', version: 2, min: 2 } });
+assert.equal(grown.window.end, 5);
+oc.exec("delete from part where message_id in ('msg_4', 'msg_5'); delete from message where id in ('msg_4', 'msg_5')");
+const shrunk = await readTrace(ocSession, { window: { at: 'after', version: 2, cursor: 5, min: 2 } });
+assert.equal(shrunk.window.reset, true, 'a deletion resets a cursor beyond the new end');
+assert.deepEqual(shrunk.turns.map(textOf), ['message 2', 'message 3']);
+assert.equal(shrunk.window.end, 3);
+oc.exec('delete from part; delete from message');
+const cleared = await readTrace(ocSession, { window: { at: 'after', version: 2, cursor: 3 } });
+assert.equal(cleared.window.reset, true);
+assert.deepEqual(cleared.turns, []);
+assert.equal(cleared.window.end, 0);
 oc.close();
 
 fs.rmSync(TMP, { recursive: true, force: true });

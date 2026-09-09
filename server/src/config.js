@@ -46,6 +46,11 @@ export function refreshVersions() {
   }
 }
 
+/** The installed version of one CLI, once the boot-time pass has answered. */
+export function cliVersion(id) {
+  return versionCache.get(id) || null;
+}
+
 // tmux is no longer part of the terminal path: sessions are PTYs held by this
 // process with a libghostty-vt grid as the authoritative screen (see runner.js).
 
@@ -70,6 +75,18 @@ export const PASSIVE_CLIS = ['files', 'trace'];
 // it" path has to route around it — see isRemote() callers.
 export const isRemote = (cli) => cli === 'remote';
 
+// Codex's TUI emits OSC 9 only after it has installed one of these native
+// interactive views. Pin the notification backend per invocation so Agent
+// Manager can consume that control signal without changing the operator's
+// durable Codex preferences or enabling ordinary turn-complete notifications.
+const CODEX_INPUT_SIGNALS = '-c \'tui.notifications=["approval-requested","plan-mode-prompt"]\''
+  + ' -c \'tui.notification_method="osc9"\''
+  + ' -c \'tui.notification_condition="always"\'';
+// A `-c 'projects."<dir>".trust_level="trusted"'` override was tried first and
+// does NOT reach Codex's trust check — it reads the config file itself, so the
+// answer has to be in the file (see trustCodexWorkspace in first-run.js).
+const codexCommand = (tail = '') => `codex ${CODEX_INPUT_SIGNALS}${tail ? ` ${tail}` : ''}`;
+
 export const CLIS = [
   { id: 'shell',    label: 'Shell',       bin: 'bash',     color: '#8aa0ad', run: 'exec bash -il',  cont: null },
   { id: 'files',    label: 'Files',       bin: null,       color: '#d99a2b', run: null,             cont: null },
@@ -83,10 +100,11 @@ export const CLIS = [
   { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue', resizeMode: 'repaint',
     withPrompt: (q) => `claude ${q}`,
     setup: setupHint('ANTHROPIC_API_KEY') },
-  { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: 'codex',          cont: 'codex resume --last', resizeMode: 'repaint',
+  { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: codexCommand(),   cont: codexCommand('resume --last'), resizeMode: 'repaint',
+    resume: (id) => codexCommand(`resume ${id}`),
     // `q` and image paths arrive shell-quoted from runner.commandFor(). Repeat
     // -i because Codex's variadic flag would otherwise consume the prompt.
-    withPrompt: (q, images = []) => `codex${images.length ? ` ${images.map((image) => `-i ${image}`).join(' ')}` : ''} ${q}`,
+    withPrompt: (q, images = []) => `${codexCommand()}${images.length ? ` ${images.map((image) => `-i ${image}`).join(' ')}` : ''} ${q}`,
     setup: setupHint('OPENAI_API_KEY') },
   { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', run: 'gemini',         cont: null, resizeMode: 'repaint',
     withPrompt: (q) => `gemini -i ${q}`, // -i = interactive session seeded with the prompt

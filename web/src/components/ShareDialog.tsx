@@ -133,6 +133,19 @@ export default function ShareDialog({ session, onClose }: { session: Session; on
 
             <div className="share-actions">
               <button className="btn-ghost" onClick={onClose}>Cancel</button>
+              {/* Publishing is not the only reason to want the transcript. This
+                  saves the file to the operator's own device and puts it
+                  nowhere else, so it is offered even when sharing is refused —
+                  a session with a credential in it is exactly one you may want
+                  to read locally. */}
+              {info?.reason !== 'no-transcript' && (
+                <a
+                  className="btn-ghost"
+                  href={api.traceDownloadUrl(session.id)}
+                  download
+                  title="Save the transcript file to this device. Nothing is published."
+                >Download transcript</a>
+              )}
               <button
                 className="btn-primary"
                 disabled={busy || !info?.canShare}
@@ -167,8 +180,8 @@ export default function ShareDialog({ session, onClose }: { session: Session; on
             {/* The link IS the handoff — nothing notifies them, so say what to do
                 with it and what they do at the other end. */}
             <p className="share-note">
-              Send this link to whoever should read it. They paste it into <em>Trace</em> in their own
-              Agent Manager to open the session{result.visibility === 'public' ? '' : ' — a granted user can read it even though the dataset is gated'}.
+              Send this link to whoever should read it. They paste it into <em>Settings → Open a shared
+              trace</em> in their own Agent Manager to open the session{result.visibility === 'public' ? '' : ' — a granted user can read it even though the dataset is gated'}.
             </p>
             <ul className="share-facts">
               <li>{result.stats.prompts} prompts · {result.stats.turns} turns · {result.stats.toolCalls} tool calls</li>

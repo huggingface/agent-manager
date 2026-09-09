@@ -9,20 +9,19 @@ import SettingsView from './components/SettingsView';
 import NewSession from './components/NewSession';
 import LayoutPicker from './components/LayoutPicker';
 import ShareDialog from './components/ShareDialog';
-import Logo from './components/Logo';
+import StateLogo from './components/StateLogo';
 import Overview from './components/Overview';
 import Locked from './components/Locked';
 import BackupBanner from './components/BackupBanner';
+import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
 import * as api from './api';
 import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { hiddenSessionIds } from './lib/overviewHidden';
-import { useReaderBatch } from './lib/readerBatch';
 import { paneOwnsBack } from './lib/mobileBack';
-import { isPassive, isRemote } from './types';
+import { isPassive, isRemote, isShareable } from './types';
 import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
-import { uploadPendingAttachments } from './lib/attachments';
 
 // `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
 // when the app is embedded cross-origin. Read once: it never changes mid-run,
@@ -51,7 +50,7 @@ function autoGrid(n: number): GridSpec {
   return { cols: 3, rows: 3 };
 }
 
-type SettingsPage = 'general' | 'usage' | 'skills';
+type SettingsPage = 'general' | 'usage' | 'skills' | 'cron' | 'apilog';
 const ROOT_PATH = '.';
 const WARM_TERMINAL_LIMIT = 12;
 const normalizePath = (p?: string | null) => (p && p.trim() ? p : ROOT_PATH);
@@ -132,10 +131,18 @@ export default function App() {
     return s === 'prompt' || s === 'answer' ? s : 'manual';
   });
   const setOvSort = (v: OverviewSort) => { setOvSortRaw(v); writeStored('am-ov-sort', v); };
-  // Archiving: sessions quiet for longer than the configured window are hidden
-  // from the sidebar and overview unless "archived" is checked. Derived, never
-  // stored — flipping the setting instantly (un)archives.
+  // Archiving takes two roads into the same view, and they are not the same
+  // thing. The operator archives a session deliberately (`archivedAt` on the
+  // record, server-side, and the agent is stopped); separately, a session quiet
+  // for longer than the configured window is hidden the way it always was —
+  // derived, so flipping the setting instantly (un)archives it again.
+  // Both are hidden unless "archived" is checked. Only the stored one can be
+  // deleted, which is why the two sets stay distinguishable below.
   const [showArchived, setShowArchived] = useState(false);
+  // A trace pane asking to be continued in a new agent. The prefilled create
+  // panel belongs to the sidebar, so the request is passed there and cleared
+  // once it has been picked up.
+  const [handoverFor, setHandoverFor] = useState<string | null>(null);
   const [archiveAfter, setArchiveAfter] = useState<'week' | 'month' | 'never'>('month');
   // Hiding a group from the Overview is a standing choice and lives on the server
   // (tree.hidden). REVEALING it is a glance, so that half stays here and resets on
@@ -145,9 +152,6 @@ export default function App() {
   // How every pane is read — the terminal itself, or reader mode over the same
   // session. App-wide, like zoom, and remembered the same way.
   const [paneMode, setPaneMode] = useState(readPaneMode);
-  // Which continuous appearance of a visible batch has let its focused reader
-  // paint. The activation key below changes across page/group/hide transitions.
-  const [readerReadyFor, setReaderReadyFor] = useState('');
   useEffect(() => onPaneMode(setPaneMode), []);
   const showPaneMode = (m: 'terminal' | 'reader') => { setPaneMode(m); writePaneMode(m); };
   const [zoom, setZoom] = useState<number>(() => {
@@ -167,6 +171,9 @@ export default function App() {
   // unlike the sort beside it: "show me only the stopped ones" is a thing you do
   // for a moment, not a standing preference.
   const [ovChip, setOvChip] = useState<OverviewChip>('all');
+  // A glance, like the state chip: keep it while switching Overview layouts,
+  // but start clean on reload. Filtering reads only the digests already polled.
+  const [ovQuery, setOvQuery] = useState('');
   const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
   const rememberPath = (p?: string | null) => {
     const next = normalizePath(p);
@@ -462,18 +469,33 @@ export default function App() {
     if (settingsOpen) return;
     api.getConfig().then((c) => setArchiveAfter(c.archive?.after ?? 'month')).catch(() => {});
   }, [settingsOpen]);
-  const archivedIds = useMemo(() => {
+  // Road one: the operator said so. The server holds it, so it survives a
+  // reload and means the same thing on every device.
+  const retiredIds = useMemo(
+    () => new Set(tree.sessions.filter((s) => s.archivedAt).map((s) => s.id)),
+    [tree.sessions],
+  );
+  // Road two: quiet for longer than the window. Unchanged, and still derived —
+  // it is a statement about the clock, so it has to be recomputed against the
+  // clock rather than written down once.
+  const quietIds = useMemo(() => {
     const out = new Set<string>();
     if (archiveAfter === 'never') return out;
     const cut = Date.now() - (archiveAfter === 'week' ? 7 : 30) * 864e5;
     for (const s of tree.sessions) {
       // Shells and passive panels have no trace clock — never archive them.
       if (s.cli === 'shell' || isPassive(s.cli) || s.state === 'working') continue;
+      if (s.archivedAt) continue;                       // already on road one
       const last = ages[s.id] || Date.parse(s.createdAt) || 0;
       if (last && last < cut) out.add(s.id);
     }
     return out;
   }, [tree.sessions, ages, archiveAfter]);
+  // What the sidebar and overview leave out of the working list.
+  const archivedIds = useMemo(
+    () => new Set([...retiredIds, ...quietIds]),
+    [retiredIds, quietIds],
+  );
 
   // What the operator hid from the Overview, as refs (`g:<id>` / `s:<id>`). The
   // server owns the list; this is just the shape the sidebar wants for a lookup.
@@ -503,7 +525,7 @@ export default function App() {
     const ok = activeRef && (activeRef === 'overview'
       || (activeRef.startsWith('g:') ? groupById[activeRef.slice(2)] : sessById[activeRef.slice(2)]));
     if (!ok) {
-      setActiveRef(tree.order[0] ?? null);
+      setActiveRef('overview');
       // The remembered agent is gone (deleted, or a different Space). Land on
       // the list rather than full-screening whichever agent happens to be first.
       setMobileStage(false);
@@ -573,13 +595,6 @@ export default function App() {
     .filter((s) => !isPassive(s.cli) && !isRemote(s.cli))
     .map((s) => s.id);
   const visibleTerminalKey = visibleTerminalIds.join(',');
-  const readerLeadId = focusedId && visibleTerminalIds.includes(focusedId)
-    ? focusedId : visibleTerminalIds[0] || null;
-  // A batch is one continuous on-screen appearance, not merely a set of ids:
-  // opening Settings/mobile home unmounts readers, so returning to the same ids
-  // must gate them again. Focus only chooses the leader and does not change it.
-  const readerBatch = useReaderBatch(paneMode === 'reader' ? visibleTerminalKey : '');
-  const readerFollowersReady = readerReadyFor === readerBatch;
   const sessionIdsKey = tree.sessions.map((s) => s.id).join(',');
   const [warmTerminalIds, setWarmTerminalIds] = useState<string[]>([]);
   useEffect(() => {
@@ -628,28 +643,48 @@ export default function App() {
   };
   // Quickstart: server boots the agent and types the prompt; we jump straight
   // to the new pane so you watch it happen.
+  const prepareQuickStart = async (cli: string, name = '', path = '.') => {
+    const created = await api.createSession(name, cli, undefined, path);
+    rememberPath(created.path);
+    await refresh();
+    return created;
+  };
+  const abandonQuickStart = async (id: string) => {
+    try {
+      await api.discardUnstartedSession(id);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      // A target the operator deliberately opened is no longer placeholder
+      // state. The conditional DELETE makes that decision atomically server-side.
+      if (detail.includes('session has already started') || detail === 'not found') return;
+      console.error('Couldn’t discard the unstarted agent', error);
+      setToast(`Couldn’t discard the unstarted agent: ${detail}`);
+      window.setTimeout(() => setToast(null), 5000);
+      throw error;
+    } finally {
+      await refresh();
+    }
+  };
   const quickStart = async (cli: string, prompt: string, name = '', path = '.', attachmentOptions?: QuickStartAttachmentOptions) => {
     try {
       let sessionId: string;
       let sessionPath: string | null = path;
-      if (attachmentOptions?.attachments.length) {
+      if (attachmentOptions && (attachmentOptions.sessionId || attachmentOptions.attachments.length)) {
         if (attachmentOptions.sessionId) {
           sessionId = attachmentOptions.sessionId;
         } else {
-          // Attachments are session-scoped, so create the stopped session first,
-          // then upload. If an upload fails the session remains visible and the
-          // sidebar retains its id for a retry.
-          const created = await api.createSession(name, cli, undefined, path);
+          // Defensive fallback for a submit racing the target-creation render.
+          // Normal attachment uploads create this stopped target immediately.
+          const created = await prepareQuickStart(cli, name, path);
           sessionId = created.id;
           sessionPath = created.path;
           attachmentOptions.onSessionCreated(created.id);
-          rememberPath(created.path);
-          await refresh();
         }
-        const attachments = await uploadPendingAttachments(
-          sessionId, attachmentOptions.attachments, attachmentOptions.onAttachmentUpdate,
-        );
-        await api.sendInput(sessionId, prompt, attachments.map((image) => image.id));
+        if (attachmentOptions.attachments.some((attachment) => !attachment.attachment)) {
+          throw new Error('Wait for every file to finish uploading, or retry/remove the failed file.');
+        }
+        await api.sendInput(sessionId, prompt,
+          attachmentOptions.attachments.map((attachment) => attachment.attachment!.id));
       } else {
         const created = await api.quickStart(cli, prompt, name, path);
         sessionId = created.id;
@@ -702,12 +737,24 @@ export default function App() {
   const renameGroup = (id: string, name: string) => api.renameGroup(id, name).then(refresh).catch(showErr('Couldn’t rename'));
   const renameSession = (id: string, name: string) => { if (name.trim()) api.renameSession(id, name.trim()).then(refresh).catch(showErr('Couldn’t rename')); };
   const deleteGroup = (id: string) => api.deleteGroup(id).then(() => { if (activeRef === `g:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the group'));
-  const stopSession = (id: string) => api.stopSession(id).then(refresh).catch(showErr('Couldn’t stop the agent'));
+  // Archiving stops the agent server-side, so there is no separate stop call
+  // left in the UI — `api.stopSession` stays for the archive route's own use
+  // and for anything that needs to end a process without filing it away.
+  const archiveSession = (id: string) => api.archiveSession(id)
+    .then(() => { if (activeRef === `s:${id}`) setActiveRef(null); closePane(id); refresh(); })
+    .catch(showErr('Couldn’t archive that agent'));
+  const unarchiveSession = (id: string) => api.unarchiveSession(id).then(refresh)
+    .catch(showErr('Couldn’t restore that agent'));
   // A remote agent has no process: "stopped" is a closed connection, so the
   // sidebar's stop/play pair disconnects and reconnects instead.
   const setRemotePaused = (id: string, paused: boolean) =>
     api.setRemotePaused(id, paused).then(refresh).catch(showErr(paused ? 'Couldn’t disconnect' : 'Couldn’t reconnect'));
-  const deleteSession = (id: string) => api.deleteSession(id).then(() => { if (activeRef === `s:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the agent'));
+  // The server refuses to delete anything that has not been archived, and says
+  // so in words worth passing on — a generic toast here would leave the reader
+  // guessing at a rule the UI is meant to be teaching.
+  const deleteSession = (id: string) => api.deleteSession(id)
+    .then(() => { if (activeRef === `s:${id}`) setActiveRef(null); refresh(); })
+    .catch((e: unknown) => showErr(e instanceof Error && e.message ? e.message : 'Couldn’t delete the agent')(e));
   const shareTrace = async (id: string) => {
     const pane = sessById[id];
     if (!pane || pane.cli !== 'trace') return;
@@ -749,26 +796,6 @@ export default function App() {
     setActiveRef(ref);
     setPage(0);
     if (isMobile) setMobileStage(true);
-  };
-  // Read an agent's own transcript in a read-only trace pane. The pane is a
-  // session record like any other (so it survives reload, tiles, and drag), and
-  // it's REUSED per source — clicking Trace twice reopens the same pane instead
-  // of littering the sidebar with duplicates.
-  const openTrace = async (sid: string) => {
-    const src = sessById[sid];
-    if (!src) return;
-    const existing = tree.sessions.find((p) => p.cli === 'trace' && p.traceSource?.kind === 'session' && p.traceSource.ref === sid);
-    if (existing) { openSession(existing.id, tree.groups.find((g) => g.sessionIds.includes(existing.id))?.id); return; }
-    try {
-      // '.' = the workspaces root: a trace pane reads a transcript, so it owns no
-      // folder and must not create one.
-      const pane = await api.createSession(`Trace: ${src.name}`, 'trace', undefined, '.');
-      await api.setTraceSource(pane.id, 'session', sid);
-      await refresh();
-      setActiveRef(`s:${pane.id}`);
-      setPage(0);
-      if (isMobile) setMobileStage(true);
-    } catch (e) { showErr('Couldn’t open the trace')(e); }
   };
   // Someone shared a session as a Hub dataset: pull it down, then open a pane on
   // it. Errors propagate so the sidebar can show the server's own reason inline
@@ -898,13 +925,11 @@ export default function App() {
             >
               <TerminalPane
                 session={s}
+                onShare={isShareable(s.cli) ? () => setShareId(s.id) : undefined}
                 cli={cliMap[s.cli]}
                 theme={theme}
                 zoom={zoom}
                 mode={paneMode}
-                readerEnabled={shown && deckVisible && (id === readerLeadId || readerFollowersReady)}
-                onReaderReady={id === readerLeadId ? () => setReaderReadyFor(readerBatch) : undefined}
-                readerReadyKey={readerBatch}
                 groupName={groupNameOf[s.id]}
                 focused={shown && sessions.length > 1 && s.id === focusedId}
                 visible={shown && deckVisible}
@@ -964,6 +989,10 @@ export default function App() {
                 dragId={canDrag ? `p:${s.id}` : undefined}
                 onDragActive={setPaneDrag}
                 onFocus={() => setFocusedId(s.id)}
+                onShare={() => shareTrace(s.id)}
+                // The prefilled create panel lives in the sidebar, so the
+                // request travels there rather than the panel moving here.
+                onHandover={() => setHandoverFor(s.id)}
                 onClose={() => closePane(s.id)}
               />
             ))}
@@ -995,6 +1024,7 @@ export default function App() {
         clis={clis}
         info={info}
         onShowWelcome={openWelcome}
+        onOpenSharedTrace={openSharedTrace}
         demoMode={!!info?.demoMode}
         onToggleDemo={toggleDemo}
       />
@@ -1047,17 +1077,16 @@ export default function App() {
         onActivate={activate}
         onOpenSession={openSession}
         onNewSession={newSession}
-        onShareSession={setShareId}
-        onShareTrace={shareTrace}
         onTraceHandover={api.getTraceLocation}
-        onOpenTrace={openTrace}
-        onOpenSharedTrace={openSharedTrace}
+        handoverFor={handoverFor}
+        onHandoverHandled={() => setHandoverFor(null)}
         onNewGroup={newGroup}
         onRenameGroup={renameGroup}
         onRenameSession={renameSession}
         onDeleteGroup={deleteGroup}
         onSetRemotePaused={setRemotePaused}
-        onStopSession={stopSession}
+        onArchiveSession={archiveSession}
+        onUnarchiveSession={unarchiveSession}
         onDeleteSession={deleteSession}
         onMove={doMove}
         onDragState={setSessionDrag}
@@ -1065,7 +1094,10 @@ export default function App() {
         theme={theme}
         onToggleTheme={toggleTheme}
         onQuickStart={quickStart}
+        onPrepareQuickStart={prepareQuickStart}
+        onAbandonQuickStart={abandonQuickStart}
         archived={archivedIds}
+        retired={retiredIds}
         showArchived={showArchived}
         onToggleArchived={() => setShowArchived((v) => !v)}
         overviewHidden={hiddenRefs}
@@ -1080,8 +1112,7 @@ export default function App() {
               <div className="mchips">
                 {groupSessions.map((s, i) => (
                   <button key={s.id} className={`mchip${i === page ? ' on' : ''}`} title={s.name} onClick={() => setPage(i)}>
-                    <Logo cli={s.cli} size={13} tint={cliMap[s.cli]?.color} />
-                    <span className={`status ${s.state}`} />
+                    <StateLogo cli={s.cli} state={s.state} size={13} tint={cliMap[s.cli]?.color} />
                   </button>
                 ))}
               </div>
@@ -1108,6 +1139,7 @@ export default function App() {
               tree={tree}
               chip={ovChip}
               sort={ovSort}
+              query={ovQuery}
               view={ovView}
               archived={archivedIds}
               showArchived={showArchived}
@@ -1144,6 +1176,7 @@ export default function App() {
         </div>
         {activeRef === 'overview' && (
           <div className="zoombar ov-bar">
+            <OverviewSearchBox value={ovQuery} onChange={setOvQuery} />
             <div className="seg ov-seg">
               {OV_CHIPS.map(({ chip, title }) => (
                 <button key={chip} className={ovChip === chip ? 'on' : ''} title={title}

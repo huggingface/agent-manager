@@ -6,13 +6,14 @@ import { ClipboardAddon, Base64 } from '@xterm/addon-clipboard';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { Cli, Session } from '../types';
-import { STATE_LABEL } from '../types';
-import Logo from './Logo';
+import { STATE_LABEL, isRemote } from '../types';
+import StateLogo from './StateLogo';
+import TraceInfo from './TraceInfo';
 import ConversationView from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
-import { BackGlyph, CloseGlyph, RefreshGlyph } from './icons';
+import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph } from './icons';
 import * as api from '../api';
 import type { Attachment } from '../api';
 import {
@@ -188,8 +189,9 @@ if (typeof window !== 'undefined') {
 }
 
 export default function TerminalPane({
-  session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal', readerEnabled,
-  readerReadyKey, onReaderReady, dragId, isMobile, groupName, onBack, onDragActive, onFocus, onRename, onClose,
+  session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal',
+  dragId, isMobile, groupName, onBack, onDragActive, onFocus, onRename, onClose,
+  onShare,
 }: {
   session: Session;
   cli?: Cli;
@@ -200,9 +202,7 @@ export default function TerminalPane({
   active?: boolean;
   zoom?: number;
   mode?: PaneMode;          // app-wide reading mode, from the bottom bar
-  readerEnabled?: boolean;  // focused reader paints before visible followers
-  readerReadyKey?: string;  // visible batch whose first paint is being awaited
-  onReaderReady?: () => void;
+  onShare?: () => void;      // reader info panel: publish this session
   dragId?: string;          // set when the pane can be rearranged (group view)
   isMobile?: boolean;       // show the on-screen control-key bar
   onBack?: () => void;      // mobile: leave the pane for the list (see .ph-back)
@@ -225,6 +225,7 @@ export default function TerminalPane({
   const uploadImagesRef = useRef<(files: File[]) => void>(() => {});
   const imagePickerRef = useRef<HTMLInputElement>(null);
   const imageUploadBusyRef = useRef(false);
+  const imageUploadAbortRef = useRef<AbortController | null>(null);
   const imageStatusTimerRef = useRef<number | null>(null);
   // Reachable from the mode switch: a flick can still be coasting through the
   // terminal's scrollback when the reader covers it.
@@ -258,10 +259,37 @@ export default function TerminalPane({
   const [imageDrop, setImageDrop] = useState(false);
   const [imageStatus, setImageStatus] = useState<{ kind: 'uploading' | 'success' | 'error'; text: string } | null>(null);
   const [imageUploadBusy, setImageUploadBusy] = useState(false);
+  const [imageUploadCancelable, setImageUploadCancelable] = useState(false);
+  // The reader's search bar is hidden until asked for; the header owns the
+  // switch because the icon that reveals it lives there.
+  const [searchOpen, setSearchOpen] = useState(false);
+  // Who the header's paperclip talks to. The reader registers its own opener
+  // (its files go into the composer's draft); otherwise it is the terminal's.
+  const [readerAttach, setReaderAttach] = useState<{ open: () => void; disabled: boolean; reason?: string } | null>(null);
+
+  // What the reader already knows about this conversation. The header's `i`
+  // takes it as a gift when the reader is mounted, and reads the file itself
+  // only when it is not (a terminal pane has parsed nothing).
+  const [readerFacts, setReaderFacts] = useState<api.TraceSummary | null>(null);
+  const [readerLoaded, setReaderLoaded] = useState<number | undefined>(undefined);
   const [pendingInsert, setPendingInsert] = useState<Attachment[]>([]);
   const supportsAttachments = session.cli !== 'shell';
   const canAttachFiles = supportsAttachments && conn === 'connected' && hasInputControl
     && !imageUploadBusy && pendingInsert.length === 0;
+  // One paperclip, whichever view is showing. The reader's registration wins
+  // while it is mounted: its files land in the composer's draft, which is the
+  // thing the button is for.
+  const attach = reading
+    ? readerAttach
+    : (supportsAttachments ? {
+      open: () => imagePickerRef.current?.click(),
+      disabled: !canAttachFiles,
+      reason: conn === 'connected'
+        ? (!hasInputControl
+          ? 'Interact with the terminal to take control before attaching files'
+          : (pendingInsert.length ? 'Retry the saved file first' : 'Attach files'))
+        : 'Restart or reconnect the agent to attach files',
+    } : null);
   const commitName = () => {
     const v = draft.trim();
     if (v && v !== session.name) onRename?.(v);
@@ -326,6 +354,14 @@ export default function TerminalPane({
     }
   };
 
+  const discardTerminalInsert = () => {
+    const discarded = pendingInsert;
+    setPendingInsert([]);
+    void Promise.all(discarded.map((attachment) =>
+      api.deleteAttachment(session.id, attachment.id).catch(() => undefined)));
+    showImageStatus({ kind: 'success', text: `${discarded.length === 1 ? 'File' : 'Files'} removed` }, 2500);
+  };
+
   uploadImagesRef.current = (files: File[]) => {
     if (!supportsAttachments) return;
     if (conn !== 'connected') {
@@ -352,32 +388,58 @@ export default function TerminalPane({
     if (invalid) { showImageStatus({ kind: 'error', text: invalid }, 4000); return; }
     imageUploadBusyRef.current = true;
     setImageUploadBusy(true);
+    const uploadController = new AbortController();
+    imageUploadAbortRef.current = uploadController;
+    setImageUploadCancelable(true);
     void (async () => {
       const attachments: Attachment[] = [];
       try {
         for (let index = 0; index < images.length; index += 1) {
-          showImageStatus({ kind: 'uploading', text: `uploading file${images.length > 1 ? ` ${index + 1}/${images.length}` : ''}…` });
-          const attachment = await api.uploadAttachment(session.id, images[index]);
+          const fileLabel = `file${images.length > 1 ? ` ${index + 1}/${images.length}` : ''}`;
+          showImageStatus({ kind: 'uploading', text: `uploading ${fileLabel} · 0%` });
+          const attachment = await api.uploadAttachment(session.id, images[index], {
+            signal: uploadController.signal,
+            onProgress: ({ loaded, total }) => {
+              const progress = total ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+              showImageStatus({ kind: 'uploading', text: `uploading ${fileLabel} · ${progress}%` });
+            },
+          });
+          if (uploadController.signal.aborted) {
+            await api.deleteAttachment(session.id, attachment.id).catch(() => undefined);
+            throw new Error('Upload was canceled before it completed.');
+          }
           attachments.push(attachment);
         }
+        imageUploadAbortRef.current = null;
+        setImageUploadCancelable(false);
         showImageStatus({ kind: 'uploading', text: `inserting file${images.length === 1 ? '' : 's'}…` });
         await insertTerminalAttachments(attachments);
       } catch (error) {
-        if (attachments.length) {
+        if (uploadController.signal.aborted) {
+          await Promise.all(attachments.map((attachment) =>
+            api.deleteAttachment(session.id, attachment.id).catch(() => undefined)));
+          setPendingInsert([]);
+          showImageStatus({ kind: 'success', text: 'Upload canceled' }, 2500);
+        } else if (attachments.length) {
+          const reason = error instanceof Error ? error.message : 'upload failed';
           setPendingInsert(attachments);
           showImageStatus({
             kind: 'error',
-            text: `${attachments.length} file${attachments.length === 1 ? '' : 's'} saved; another failed to upload`,
+            text: `${attachments.length} file${attachments.length === 1 ? '' : 's'} saved; another failed: ${reason}`,
           });
         } else {
           showImageStatus({ kind: 'error', text: error instanceof Error ? error.message : 'file upload failed' }, 5000);
         }
       } finally {
+        if (imageUploadAbortRef.current === uploadController) imageUploadAbortRef.current = null;
         imageUploadBusyRef.current = false;
         setImageUploadBusy(false);
+        setImageUploadCancelable(false);
       }
     })();
   };
+
+  useEffect(() => () => imageUploadAbortRef.current?.abort(), []);
 
   // Phones have no Ctrl+V, so the key-bar needs an explicit paste. Two paths,
   // because the direct read is unavailable exactly where this app usually runs:
@@ -403,6 +465,9 @@ export default function TerminalPane({
   };
 
   useEffect(() => {
+    // Reading must never attach, start or resize a PTY. The transcript and
+    // composer have their own APIs; reconnect only when showing the terminal.
+    if (reading) return;
     const term = new Terminal({
       fontFamily: "'Geist Mono', ui-monospace, 'SF Mono', Menlo, 'Cascadia Code', monospace",
       // Start at the requested zoom so attachment does not briefly create a
@@ -942,7 +1007,7 @@ export default function TerminalPane({
       uploadImagesRef.current = () => {};
       if (imageStatusTimerRef.current) window.clearTimeout(imageStatusTimerRef.current);
     };
-  }, [session.id]);
+  }, [session.id, reading]);
 
   // Switch theme live without tearing down the terminal / connection.
   useEffect(() => {
@@ -977,7 +1042,7 @@ export default function TerminalPane({
   // Move keyboard focus into the terminal whenever this pane becomes the active
   // one (e.g. selected from the sidebar, or newly created).
   useEffect(() => {
-    if (!active) return;
+    if (!active || reading) return;
     // A retained pane may have spent time under display:none. Reclaim and
     // remeasure only after its grid cell has layout again; hidden panes never
     // get to resize the canonical PTY.
@@ -987,16 +1052,18 @@ export default function TerminalPane({
       focusTerm();
     }, 0);
     return () => clearTimeout(t);
-  }, [active]);
+  }, [active, reading]);
 
-  // In reader mode the terminal is covered but still mounted — and a mounted xterm
-  // with focus swallows every keystroke into the agent's TTY, invisibly. Hand
-  // focus back when the terminal is on top again.
+  // Cancel terminal-only interactions on a surface switch.
   useEffect(() => {
     // The glide too: a flick left coasting under the reader keeps moving a
     // viewport nobody can see, and no touch can catch it — the handler that
     // would stop it now stands down in this mode.
-    if (reading) { termRef.current?.blur(); stopGlideRef.current(); }
+    if (reading) {
+      termRef.current?.blur();
+      stopGlideRef.current();
+      imageUploadAbortRef.current?.abort();
+    }
     else if (focused) termRef.current?.focus();
   }, [reading, focused]);
 
@@ -1036,8 +1103,15 @@ export default function TerminalPane({
               <BackGlyph />
             </button>
           )}
-          <Logo cli={session.cli} size={16} tint={tint} />
-          <span className={`status ${session.state}`} title={`${STATE_LABEL[session.state]} · ${conn}`} />
+          <StateLogo
+            cli={session.cli} state={session.state} size={16} tint={tint}
+            title={`${STATE_LABEL[session.state]} · ${conn}`}
+          />
+          {/* Where the agent runs, beside what it is. It was on the right, in
+              among the controls; it is not a control. Still hidden on a phone —
+              moving it did not create room — where the `i` panel carries it
+              instead (see TraceInfo's Folder line). */}
+          <span className="ph-path" title={pathLabel}>{pathLabel}</span>
         </div>
         {editing ? (
           <input
@@ -1061,40 +1135,65 @@ export default function TerminalPane({
           </span>
         )}
         <div className="ph-right">
-          <span className="ph-path" title={pathLabel}>{pathLabel}</span>
-          {supportsAttachments && !reading && (
-            <>
-              <button
-                className="mini-btn ph-image"
-                title={conn === 'connected'
-                  ? (!hasInputControl
-                    ? 'Interact with the terminal to take control before attaching files'
-                    : (pendingInsert.length ? 'Retry the saved file first' : 'Attach files'))
-                  : 'Restart or reconnect the agent to attach files'}
-                aria-label="Attach files"
-                disabled={!canAttachFiles}
-                draggable={false}
-                onMouseDown={(event) => event.stopPropagation()}
-                onClick={(event) => { event.stopPropagation(); imagePickerRef.current?.click(); }}
-              >
-                <svg viewBox="0 0 18 18" aria-hidden="true">
-                  <path d="M6.2 9.7 10.8 5a2.5 2.5 0 0 1 3.6 3.5l-6.2 6.3a4 4 0 0 1-5.7-5.7l6-6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                </svg>
-              </button>
-              <input
-                ref={imagePickerRef}
-                className="image-file-input"
-                type="file"
-                multiple
-                disabled={!canAttachFiles}
-                onChange={(event) => {
-                  uploadImagesRef.current(Array.from(event.currentTarget.files || []));
-                  event.currentTarget.value = '';
-                }}
-              />
-            </>
+          {/* One style for all four: no boxes, one size, even spacing (.ph-btn).
+              The attachment picker belongs to whichever view is showing — the
+              terminal's insert flow, or the reader's composer, which registers
+              its own opener below. */}
+          {attach && (
+            <button
+              className="ph-btn ph-image"
+              title={attach.reason || 'Attach files'}
+              aria-label="Attach files"
+              disabled={attach.disabled}
+              draggable={false}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => { event.stopPropagation(); attach.open(); }}
+            >
+              <svg viewBox="0 0 18 18" aria-hidden="true">
+                <path d="M6.2 9.7 10.8 5a2.5 2.5 0 0 1 3.6 3.5l-6.2 6.3a4 4 0 0 1-5.7-5.7l6-6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            </button>
           )}
-          <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
+          {supportsAttachments && !reading && (
+            <input
+              ref={imagePickerRef}
+              className="image-file-input"
+              type="file"
+              multiple
+              disabled={!canAttachFiles}
+              onChange={(event) => {
+                uploadImagesRef.current(Array.from(event.currentTarget.files || []));
+                event.currentTarget.value = '';
+              }}
+            />
+          )}
+          {/* Search searches the TRANSCRIPT, so it is offered where there is one
+              to search. Closing it clears the query — a search filters the
+              reader to matching turns, and leaving that filter in place with no
+              visible search box is a reader that looks broken. */}
+          {reading && (
+            <button
+              className={`ph-btn ph-search${searchOpen ? ' on' : ''}`}
+              title={searchOpen ? 'Hide search' : 'Search this conversation'}
+              aria-label={searchOpen ? 'Hide search' : 'Search this conversation'}
+              aria-expanded={searchOpen}
+              draggable={false}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => { event.stopPropagation(); setSearchOpen((open) => !open); }}
+            >
+              <SearchGlyph />
+            </button>
+          )}
+          {!isRemote(session.cli) && (
+            <TraceInfo
+              session={session}
+              facts={reading ? readerFacts : undefined}
+              turnsLoaded={reading ? readerLoaded : undefined}
+              folder={pathLabel}
+              onShare={onShare}
+            />
+          )}
+          <button className="ph-btn ph-close" title="Close" aria-label="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
       {/* `reading` releases the frame's touch-action: the phone rule pins it to
@@ -1102,10 +1201,7 @@ export default function TerminalPane({
           forbids the browser from panning anything nested inside — including
           the reader's own scroller. */}
       <div className={`term-host${reading ? ' reading' : ''}${imageDrop && !reading ? ' image-drop' : ''}`} ref={frameRef}>
-        <div className="term-fill" ref={hostRef} />
-        {/* Reader mode draws OVER the terminal rather than replacing it: xterm needs
-            layout to fit, and detaching tmux costs a repaint and can trip the
-            handoff path. The terminal stays mounted and connected underneath. */}
+        {!reading && <div className="term-fill" ref={hostRef} />}
         {reading && visible !== false && (
           // The zoom is one number for both modes: the terminal spends it on its
           // font size, the reader on --cx-base — the size every type size in the
@@ -1116,21 +1212,35 @@ export default function TerminalPane({
             style={{ '--cx-base': `${(13 * zoom) / 100}px` } as CSSProperties}
             onMouseDown={(e) => e.stopPropagation()}
           >
-            {readerEnabled === false
-              ? <div className="cxv-empty mono">reading the trace…</div>
-              : <ConversationView session={session} isMobile={isMobile} onReady={onReaderReady} readyKey={readerReadyKey} />}
+            <ConversationView
+              session={session}
+              isMobile={isMobile}
+              searchOpen={searchOpen}
+              onCloseSearch={() => setSearchOpen(false)}
+              onAttachPicker={setReaderAttach}
+              onHead={(head) => { setReaderFacts(head); setReaderLoaded(head?.loaded); }}
+            />
           </div>
         )}
       </div>
+      {/* The header starts this flow, but xterm has no Agent Manager draft row
+          for operational chips. Keep progress and recovery over the terminal
+          itself, below the compact attach/search/info/close cluster. */}
       {imageStatus && !reading && (
         <div
-          className={`term-image-status ${imageStatus.kind}${pendingInsert.length ? ' has-action' : ''} mono`}
+          className={`term-image-status ${imageStatus.kind}${pendingInsert.length || imageUploadCancelable ? ' has-action' : ''} mono`}
           role={imageStatus.kind === 'error' ? 'alert' : 'status'}
           aria-live={imageStatus.kind === 'error' ? 'assertive' : 'polite'}
         >
           <span>{imageStatus.text}</span>
+          {imageUploadCancelable && (
+            <button type="button" onClick={() => imageUploadAbortRef.current?.abort()}>cancel</button>
+          )}
           {pendingInsert.length > 0 && (
-            <button type="button" onClick={retryTerminalInsert} disabled={imageUploadBusy || conn !== 'connected' || !hasInputControl}>retry</button>
+            <>
+              <button type="button" onClick={retryTerminalInsert} disabled={imageUploadBusy || conn !== 'connected' || !hasInputControl}>retry</button>
+              <button type="button" onClick={discardTerminalInsert} disabled={imageUploadBusy}>remove</button>
+            </>
           )}
         </div>
       )}
@@ -1197,11 +1307,7 @@ export default function TerminalPane({
           <button className="tp-x" onClick={() => { setPasteOpen(false); focusTerm(); }}>cancel</button>
         </div>
       )}
-      {/* The terminal's own covers — restoring, booting, exited — belong to the
-          terminal. Reader mode is a complete surface over it, reading a file
-          that does not care whether the PTY is reconnecting, and these paint
-          ABOVE the overlay (z-index 4 vs 3): a reconnect turned the reader
-          into a terminal screen with a reader toolbar on top. */}
+      {/* Terminal connection states belong only to the terminal surface. */}
       {!reading && booting && preview && conn !== 'exited' && (
         <div className="term-preview mono" aria-label="Restoring terminal">
           <pre style={{ fontSize: `${Math.round((13 * zoom) / 100)}px` }}>{preview.rows.join('\n')}</pre>

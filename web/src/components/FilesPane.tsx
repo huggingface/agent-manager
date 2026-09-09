@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { recall, remember, readWrap, writeWrap } from './filesMemory';
 import type { Session } from '../types';
 import * as api from '../api';
+import { Rails, railPad } from './Rails';
 import type { FileEntry, FileKind, FilePreview } from '../api';
 import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
 import CodeView from './CodeView';
+import FileWrapToggle from './FileWrapToggle';
 import PdfView from './PdfView';
 import { TraceView, type TraceHeadInfo, type TraceSource } from './TracePane';
 import {
@@ -91,18 +93,9 @@ const KIND_LABEL: Record<FileKind, string> = {
   trace: 'trace',
 };
 
-// ASCII-tree rails: one cell per ancestor (vertical line if that ancestor has
-// more siblings below) plus the elbow cell for this row (├ normally, └ if last).
-// `prefix[i]` = "draw a continuation line at ancestor column i".
-function Rails({ prefix, isLast }: { prefix: boolean[]; isLast: boolean }) {
-  return (
-    <span className="rails" aria-hidden>
-      {prefix.map((cont, i) => <span key={i} className={`rail${cont ? ' v' : ''}`} />)}
-      <span className={`rail elbow${isLast ? ' last' : ''}`} />
-    </span>
-  );
-}
-const padFor = (prefix: boolean[]) => ({ paddingLeft: `${(prefix.length + 1) * 1.1}em` });
+// The rails live in components/Rails.tsx: the reader's sub-agent strip draws the
+// same tree, and one copy of six lines is better than two that drift.
+const padFor = railPad;
 
 // One directory listing, fetched once. Used by the pane for the current folder
 // and by every expanded FolderNode, so each level is loaded exactly once.
@@ -522,7 +515,7 @@ export type SaveState = {
 // The viewer for one file. Kinds it can't render fall back to an honest
 // "download it instead" card rather than an empty box. The view mode (`raw`,
 // `scripts`) belongs to the pane, which draws the toggles in its info strip.
-function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
+export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
   sessionId: string; path: string; zoom: number; raw: boolean; scripts: boolean;
   onInfo: (info: ViewInfo) => void;
   onSaved?: () => void;
@@ -803,7 +796,7 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
       // underneath it.
       return raw ? code(shown) : (
         <TraceView
-          src={traceSrc} srcKey={`${sessionId}:${path}`} zoom={zoom} query={traceQuery}
+          src={traceSrc} srcKey={`file:${sessionId}:${path}`} zoom={zoom} query={traceQuery}
           onHead={setTraceHead} onNav={(go) => { traceNav.current = go; }}
         />
       );
@@ -852,15 +845,22 @@ function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved }: {
     );
   };
 
-  // Only the code viewer follows the shared zoom; rendered markdown, images and
-  // framed pages carry their own typography.
+  // Text previews follow the shared zoom. Code/source keeps its compact 12.5px
+  // base; rendered markdown keeps its 14px reading base, with its nested type
+  // expressed in em below so headings, code and tables move with it. A rendered
+  // trace already spends the same zoom inside TraceView (13px, like the session
+  // reader). Images and PDF pages keep their intrinsic scale: a text-size control
+  // should not enlarge pixels. Rendered HTML lives in an opaque sandboxed frame,
+  // so the parent cannot safely reach in and restyle its document; its Source
+  // view still zooms as code.
   const isCode = meta.kind === 'text'
     || (raw && (meta.kind === 'markdown' || meta.kind === 'html' || meta.kind === 'trace'));
+  const textBase = isCode ? 12.5 : (meta.kind === 'markdown' ? 14 : null);
   // A capped read is a partial answer, so say so where the text ends rather than
   // only as a chip in the strip — and offer the whole file in the same breath.
   const headOnly = !!meta.truncated && (isCode || meta.kind === 'markdown');
   return (
-    <div className="fv-body" style={isCode ? { fontSize: `${(12.5 * zoom) / 100}px` } : undefined}>
+    <div className="fv-body" style={textBase ? { fontSize: `${(textBase * zoom) / 100}px` } : undefined}>
       {body()}
       {headOnly && (
         <div className="fv-foot">
@@ -1164,14 +1164,7 @@ export default function FilesPane({
               </button>
             )}
             {info.showWrap && edit && (
-              <button
-                className={`mini-btn${edit.wrap ? ' on' : ''}`}
-                onClick={() => edit.setWrap(!edit.wrap)}
-                title={edit.wrap ? 'Long lines are wrapped — click to let them run' : 'Wrap long lines'}
-                aria-pressed={edit.wrap}
-              >
-                Wrap
-              </button>
+              <FileWrapToggle wrap={edit.wrap} onChange={edit.setWrap} />
             )}
             {edit && !edit.can && edit.why && (
               <span className="fi-stat fi-extra" title={edit.why}>read-only</span>

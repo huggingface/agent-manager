@@ -5,6 +5,7 @@
 // visual viewport is replaced with a controllable EventTarget so the keyboard
 // test covers both viewport height and iOS's non-zero offsetTop.
 //
+// am-test: manual — Chromium, a full web build and port 7896; `npm run test:mobile`.
 //   npm run test:mobile
 import fs from 'node:fs';
 import os from 'node:os';

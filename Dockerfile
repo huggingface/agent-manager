@@ -55,6 +55,10 @@ RUN chmod 755 /etc/codex/hooks/am-codex-repin-hook.sh
 # Newer agents, best-effort so a publish hiccup can't break the image build;
 # the app marks any missing binary "unavailable" gracefully.
 RUN npm install -g @google/gemini-cli@latest || echo "gemini-cli install failed"
+# Gemini merges hook arrays across settings layers. The lowest-priority system
+# defaults layer adds an observation-only ToolPermission hook without replacing
+# any user or project hooks.
+COPY gemini-system-defaults.json /etc/gemini-cli/system-defaults.json
 RUN npm install -g opencode-ai@latest || echo "opencode install failed"
 RUN npm install -g openclaw@latest || echo "openclaw install failed"
 # ccusage powers the Usage page (token/cost aggregation across agents). Its

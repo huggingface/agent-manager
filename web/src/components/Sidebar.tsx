@@ -1,30 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Cli, MoveTarget, Group, Session, Tree } from '../types';
 import { STATE_LABEL, REMOTE_STATE_LABEL, isPassive, isRemote } from '../types';
-import { hiddenSessionIds } from '../lib/overviewHidden';
+import * as api from '../api';
 import Logo from './Logo';
+import StateLogo from './StateLogo';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
 import Attachments from './Attachments';
 import {
-  filesFromTransfer, pendingAttachmentsFromFiles, revokePendingAttachments, transferMayContainFile,
+  attachmentFileError, discardPendingAttachment, discardPendingAttachments, filesFromTransfer,
+  pendingAttachmentsFromFiles, revokePendingAttachments, transferMayContainFile, uploadPendingAttachments,
 } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
-import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, GridGlyph, PlusGlyph, AmMark, ShareGlyph, HandoverGlyph, ListGlyph, EyeGlyph, EyeOffGlyph } from './icons';
+import { SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, UpGlyph, TrashGlyph, GridGlyph, PlusGlyph, AmMark, EyeGlyph, EyeOffGlyph } from './icons';
 
 import { dropZone, backgroundAnchor, isBackgroundTarget } from './sidebar-dnd';
 import type { Zone, Kind } from './sidebar-dnd';
-
-// Harnesses whose traces the Hub renders natively, so a share ships the file
-// verbatim (mirrors SHAREABLE_CLIS in server/src/share.js). The others need
-// converters first, and a button that always fails is worse than no button.
-const SHAREABLE_CLIS = ['claude', 'codex', 'hermes', 'opencode', 'openclaw'];
 
 export interface QuickStartAttachmentOptions {
   sessionId: string | null;
   attachments: PendingAttachment[];
   onSessionCreated: (id: string) => void;
-  onAttachmentUpdate: (key: string, patch: Partial<PendingAttachment>) => void;
 }
 
 // Folded groups, remembered across reloads.
@@ -42,8 +38,10 @@ const fmtAgo = (ts?: number) => {
 export default function Sidebar({
   clis, tree, activeRef, focusedId, defaultPath, ages,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
-  onStopSession, onSetRemotePaused, onDeleteSession, onShareSession, onShareTrace, onTraceHandover, onOpenTrace, onOpenSharedTrace, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
-  archived, showArchived, onToggleArchived,
+  onArchiveSession, onUnarchiveSession, onSetRemotePaused, onDeleteSession, onTraceHandover, handoverFor, onHandoverHandled, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
+  onPrepareQuickStart,
+  onAbandonQuickStart,
+  archived, retired, showArchived, onToggleArchived,
   overviewHidden, onToggleOverviewHidden,
 }: {
   clis: Cli[];
@@ -60,25 +58,38 @@ export default function Sidebar({
   onRenameGroup: (id: string, name: string) => void;
   onRenameSession: (id: string, name: string) => void;
   onDeleteGroup: (id: string) => void;
-  onStopSession: (id: string) => void;
+  // Archiving stops the agent and takes it out of the working list; it is
+  // also the only route to deleting one (the server enforces that).
+  onArchiveSession: (id: string) => void;
+  onUnarchiveSession: (id: string) => void;
   onSetRemotePaused: (id: string, paused: boolean) => void;
   onDeleteSession: (id: string) => void;
-  onShareSession: (id: string) => void;
-  onShareTrace: (id: string) => void;
+  // Continuing from a trace is triggered on the trace's own pane now, but the
+  // prefilled create panel it opens lives here — so the request arrives as an
+  // id, and is handed back once this has acted on it.
   onTraceHandover: (id: string) => Promise<{ path: string; sessionId?: string | null }>;
-  onOpenTrace: (id: string) => void;
-  onOpenSharedTrace: (repo: string) => Promise<void>;
+  handoverFor: string | null;
+  onHandoverHandled: () => void;
   onMove: (ref: string, to: MoveTarget) => void;
   onDragState?: (ref: string | null) => void; // lets the stage offer per-tile drop targets
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
   onQuickStart: (cli: string, prompt: string, name?: string, path?: string, attachmentOptions?: QuickStartAttachmentOptions) => Promise<void>;
+  // Creating a session up front so an attachment has somewhere to go (#76).
+  // Nothing to do with the row's controls, which is why both survive the same
+  // resolution.
+  onPrepareQuickStart: (cli: string, name?: string, path?: string) => Promise<Session>;
+  onAbandonQuickStart: (id: string) => Promise<void>;
+  // Everything kept out of the working list, by either road…
   archived: Set<string>;
+  // …and the subset the operator archived on purpose. Only these can be
+  // deleted; the rest are merely quiet and are offered the archive instead.
+  retired: Set<string>;
   showArchived: boolean;
   onToggleArchived: () => void;
   // Refs hidden from the OVERVIEW. The sidebar keeps showing them — it is where
   // you hide a group and the only way back to one — so this only drives the
-  // per-group button and the overview row's count.
+  // per-group button.
   overviewHidden: Set<string>;
   onToggleOverviewHidden: (ref: string, hidden: boolean) => void;
 }) {
@@ -86,13 +97,15 @@ export default function Sidebar({
   const [quickMode, setQuickMode] = useState<'agent' | 'group'>('agent');
   const [quickCli, setQuickCli] = useState<string | null>(null);
   const [quickPrompt, setQuickPrompt] = useState('');
-  const [quickMore, setQuickMore] = useState(false); // reveals name + folder
   const [quickName, setQuickName] = useState('');
   const [quickLoc, setQuickLoc] = useState('.');
   const [quickError, setQuickError] = useState<string | null>(null);
   const [quickImages, setQuickImages] = useState<PendingAttachment[]>([]);
   const quickImagesRef = useRef<PendingAttachment[]>([]);
   const [quickSessionId, setQuickSessionId] = useState<string | null>(null);
+  const quickSessionIdRef = useRef<string | null>(null);
+  const quickPrepareRef = useRef<Promise<Session> | null>(null);
+  const quickGenerationRef = useRef(0);
   const [quickSending, setQuickSending] = useState(false);
   const [quickDrop, setQuickDrop] = useState(false);
   // When creation was launched from a group's + the new agent lands there.
@@ -116,24 +129,18 @@ export default function Sidebar({
   }, [collapsed]);
   const [dragRef, setDragRef] = useState<string | null>(null);
   const [drop, setDrop] = useState<{ ref: string; zone: Zone } | null>(null);
-  // "Open a shared trace": paste a dataset id/URL, we pull it and show it.
-  const [openTraceRepo, setOpenTraceRepo] = useState<string | null>(null);
-  const [openTraceBusy, setOpenTraceBusy] = useState(false);
-  const [openTraceErr, setOpenTraceErr] = useState<string | null>(null);
 
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
   const colorOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c.color])), [clis]);
-  // This badge sits ON the overview row, so it has to count what the overview
-  // would actually show: not a hidden group's agents (being told about the group
-  // you hid is exactly what you hid it to stop), and not archived ones either,
-  // which the feed has always dropped while this number quietly included them.
-  const hiddenIds = useMemo(() => hiddenSessionIds(tree), [tree]);
-  const waiting = tree.sessions.filter((s) =>
-    s.state === 'waiting' && !hiddenIds.has(s.id) && !archived.has(s.id)).length;
+  const quickFilesBlocked = quickImages.some((image) => !image.attachment);
 
   useEffect(() => { quickImagesRef.current = quickImages; }, [quickImages]);
-  useEffect(() => () => revokePendingAttachments(quickImagesRef.current), []);
+
+  const rememberQuickSession = (id: string | null) => {
+    quickSessionIdRef.current = id;
+    setQuickSessionId(id);
+  };
 
   const updateQuickImage = (key: string, patch: Partial<PendingAttachment>) => {
     setQuickImages((current) => {
@@ -142,6 +149,67 @@ export default function Sidebar({
       return next;
     });
   };
+  const abandonQuickTarget = (
+    sessionId: string | null,
+    preparing: Promise<Session> | null,
+    attachments: PendingAttachment[],
+  ) => {
+    discardPendingAttachments(sessionId || '', attachments);
+    const discard = sessionId
+      ? onAbandonQuickStart(sessionId)
+      : preparing?.then((created) => onAbandonQuickStart(created.id));
+    // App owns the visible cleanup error because this panel is intentionally
+    // already gone. The server-side condition makes this safe if the operator
+    // opened the target while its upload was still pending.
+    void discard?.catch(() => {});
+  };
+  useEffect(() => () => {
+    abandonQuickTarget(
+      quickSessionIdRef.current,
+      quickPrepareRef.current,
+      quickImagesRef.current,
+    );
+  }, []);
+  const prepareQuickTarget = async (generation: number) => {
+    if (quickSessionIdRef.current) return quickSessionIdRef.current;
+    if (!quickCli || isRemote(quickCli)) throw new Error('Choose a local agent before attaching files.');
+    if (!quickPrepareRef.current) {
+      quickPrepareRef.current = onPrepareQuickStart(
+        quickCli, quickName.trim(), quickLoc,
+      );
+    }
+    const preparing = quickPrepareRef.current;
+    try {
+      const created = await preparing;
+      if (generation === quickGenerationRef.current) rememberQuickSession(created.id);
+      return created.id;
+    } catch (error) {
+      if (quickPrepareRef.current === preparing) quickPrepareRef.current = null;
+      throw error;
+    }
+  };
+  const startQuickUploads = (attachments: PendingAttachment[]) => {
+    const uploadable = attachments.filter((attachment) => !attachmentFileError(attachment.file));
+    if (!uploadable.length) return;
+    const generation = quickGenerationRef.current;
+    void (async () => {
+      let sessionId: string;
+      try {
+        sessionId = await prepareQuickTarget(generation);
+      } catch (error) {
+        if (generation !== quickGenerationRef.current) return;
+        const message = error instanceof Error ? error.message : 'Could not prepare an agent for this upload.';
+        for (const attachment of uploadable) updateQuickImage(attachment.key, { status: 'error', error: message });
+        setQuickError(message);
+        return;
+      }
+      if (generation !== quickGenerationRef.current) return;
+      setQuickError(null);
+      await uploadPendingAttachments(sessionId, uploadable, updateQuickImage).catch(() => {
+        // Each failed chip keeps the exact server or connection error and retry action.
+      });
+    })();
+  };
   const addQuickImages = (files: File[]) => {
     if (quickSending) return;
     const next = pendingAttachmentsFromFiles(files, quickImagesRef.current.length);
@@ -149,22 +217,34 @@ export default function Sidebar({
     quickImagesRef.current = merged;
     setQuickImages(merged);
     setQuickError(next.error);
+    startQuickUploads(next.attachments);
   };
   const removeQuickImage = (key: string) => {
     if (quickSending) return;
     setQuickImages((current) => {
       const removed = current.find((image) => image.key === key);
-      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      if (removed) discardPendingAttachment(quickSessionIdRef.current || '', removed);
       const next = current.filter((image) => image.key !== key);
       quickImagesRef.current = next;
       return next;
     });
     setQuickError(null);
   };
+  const retryQuickImage = (key: string) => {
+    const image = quickImagesRef.current.find((item) => item.key === key);
+    if (!image || quickSending) return;
+    startQuickUploads([image]);
+  };
   // A retry may reuse uploaded ids only while it still targets the same
   // server-created session. Changing its identity starts a fresh target.
   const resetQuickTarget = () => {
-    setQuickSessionId(null);
+    const sessionId = quickSessionIdRef.current;
+    const preparing = quickPrepareRef.current;
+    const attachments = quickImagesRef.current;
+    quickGenerationRef.current += 1;
+    quickPrepareRef.current = null;
+    rememberQuickSession(null);
+    abandonQuickTarget(sessionId, preparing, attachments);
     setQuickImages((current) => {
       const next = current.map((image) => image.attachment
         ? { ...image, attachment: undefined, status: 'pending' as const, error: undefined }
@@ -174,51 +254,120 @@ export default function Sidebar({
     });
   };
 
+  // A trace pane asked to be continued in a new agent: open the create panel
+  // prefilled, exactly as the old per-row button did, then release the request
+  // so re-opening it later fires again.
+  useEffect(() => {
+    if (!handoverFor) return;
+    const s = sessById[handoverFor];
+    onHandoverHandled();
+    if (s) openHandover(s);
+  }, [handoverFor]);
+
   const clearDrag = () => { setDragRef(null); setDrop(null); onDragState?.(null); };
-  // Failures here are ordinary and specific (no access, not a share, no token) —
-  // show what the server said rather than a generic toast, since the fix is
-  // usually to paste a different id.
-  const submitSharedTrace = async () => {
-    const repo = (openTraceRepo || '').trim();
-    if (!repo) return;
-    setOpenTraceBusy(true);
-    setOpenTraceErr(null);
-    try {
-      await onOpenSharedTrace(repo);
-      setOpenTraceRepo(null);
-    } catch (e) {
-      setOpenTraceErr(e instanceof Error ? e.message : 'could not open that trace');
-    } finally {
-      setOpenTraceBusy(false);
-    }
-  };
   // Archived sessions vanish from the tree unless the legend checkbox is on.
   const isHidden = (id: string) => !showArchived && archived.has(id);
   const bump = (id: string, d: number) => setCart((c) => ({ ...c, [id]: Math.max(0, (c[id] || 0) + d) }));
-  const closePanel = () => {
+  const finishPanel = (keepQuickTarget: boolean) => {
     if (panel === 'quick') {
-      revokePendingAttachments(quickImagesRef.current);
+      const sessionId = quickSessionIdRef.current;
+      const preparing = quickPrepareRef.current;
+      const attachments = quickImagesRef.current;
+      quickGenerationRef.current += 1;
+      if (keepQuickTarget) revokePendingAttachments(attachments);
+      else abandonQuickTarget(sessionId, preparing, attachments);
       quickImagesRef.current = [];
       setQuickImages([]);
-      setQuickSessionId(null);
+      quickPrepareRef.current = null;
+      rememberQuickSession(null);
       setQuickSending(false);
       setQuickDrop(false);
     }
     setPanel('none'); setCreateTarget(null);
   };
+  const closePanel = () => finishPanel(false);
+  const completePanel = () => finishPanel(true);
   const openCreate = (target: string | null = null) => {
     setCreateTarget(target);
     setPanel('create');
   };
   // Quickstart: one harness pick + one prompt, agent launches in workspace/.
   // Every agent harness is shown; ones not installed here are greyed out.
-  // "More options" adds a name + folder; the group tile flips to group creation.
+  // Row one is the agents you reach for; row two is everything else you can
+  // make from here. Shell and Files used to be buttons of their own below the
+  // tree — they are session types like any other, so they belong in the picker
+  // rather than in a second place that does the same job.
   const quickable = clis.filter((c) => c.id !== 'shell' && !isPassive(c.id) && !isRemote(c.id));
   const remoteCli = clis.find((c) => isRemote(c.id)) || null;
+  const shellCli = clis.find((c) => c.id === 'shell') || null;
+  const filesCli = clis.find((c) => c.id === 'files') || null;
+
+  // The picker is a row of logos, and a logo does not say what it is. Each button
+  // carries a sentence on hover: who makes it, or what the type does. Keyed by id
+  // with a fallback, so a harness added to the server without a line here still
+  // gets a usable tooltip rather than an empty one.
+  const blurbs: Record<string, string> = {
+    claude: "Anthropic's coding agent",
+    codex: "OpenAI's coding agent",
+    gemini: "Google's coding agent",
+    opencode: 'open-source agent, your choice of model',
+    hermes: "Nous Research's agent",
+    openclaw: 'open-source Claude Code fork',
+    qwen: "Alibaba's coding agent",
+    remote: 'an agent running on another machine',
+    // no em-dash in a blurb: the tooltip already joins label and blurb with one
+    shell: 'a plain terminal, no agent',
+    files: 'browse the workspace files',
+  };
+  const cliTitle = (c: { id: string; label: string; available?: boolean; version?: string | null }) => {
+    const what = blurbs[c.id] ? ` — ${blurbs[c.id]}` : '';
+    if (c.available === false) return `${c.label}${what} (not installed)`;
+    return `${c.label}${what}`;
+  };
+
+  // What each type can actually use. A field that makes no sense for the type
+  // is disabled with the reason in its own placeholder rather than hidden, so
+  // the panel keeps its shape as you click along the row.
+  const rules = (cli: string | null, mode: 'agent' | 'group') => {
+    if (mode === 'group') return { prompt: null, folder: 'ok', attach: null, promptLabel: '' };
+    if (cli === 'files') {
+      return {
+        prompt: 'a file browser takes no prompt',
+        folder: 'browses the whole workspace',
+        attach: 'attachments go to agents',
+        promptLabel: '',
+      };
+    }
+    if (cli === 'shell') {
+      return { prompt: null, folder: 'ok', attach: 'attachments go to agents', promptLabel: 'first command…' };
+    }
+    if (cli && isRemote(cli)) {
+      return { prompt: null, folder: 'the remote agent brings its own', attach: 'attachments go to local agents', promptLabel: 'first message…' };
+    }
+    return { prompt: null, folder: 'ok', attach: null, promptLabel: '' };
+  };
+  const rule = rules(quickCli, quickMode);
+
+  // The name the server WOULD choose, shown in the field so the panel says what
+  // is about to happen instead of showing an empty box. It is a display value:
+  // `quickName` stays empty until the operator types, and an untouched (or
+  // cleared) field still sends nothing, so the server names the session at
+  // creation time and two quick creations cannot collide on one prefill.
+  const [nameHint, setNameHint] = useState('');
+  useEffect(() => {
+    const target = quickMode === 'group' ? null : quickCli;
+    if (!target) { setNameHint(''); return undefined; }
+    let alive = true;
+    api.nextName(target).then((r) => { if (alive) setNameHint(r.name); }).catch(() => { if (alive) setNameHint(''); });
+    return () => { alive = false; };
+    // tree.sessions: after a create the next name moves on, so re-ask.
+  }, [quickCli, quickMode, tree.sessions.length]);
   const openQuick = () => {
+    quickGenerationRef.current += 1;
     setQuickError(null);
     setQuickName('');
-    setQuickSessionId(null);
+    quickPrepareRef.current = null;
+    rememberQuickSession(null);
     setQuickCli((q) => q ?? (quickable.find((c) => c.available && c.ready)?.id || quickable.find((c) => c.available)?.id || null));
     setQuickMode('agent');
     setQuickLoc(defaultPath || '.');
@@ -233,7 +382,6 @@ export default function Sidebar({
         || quickable.find((c) => c.available);
       setQuickCli(selected?.id || null);
       setQuickMode('agent');
-      setQuickMore(false);
       setQuickName('');
       setQuickLoc(defaultPath || '.');
       setQuickPrompt(`In this session we will continue from the session traces at ${loc.path}${loc.sessionId ? ` (session ${loc.sessionId})` : ''}`);
@@ -247,6 +395,7 @@ export default function Sidebar({
   const submitQuick = async () => {
     const p = quickPrompt.trim();
     if (!quickCli || quickSending) return;
+    if (quickImagesRef.current.some((image) => !image.attachment)) return;
     // A remote agent names itself like any other agent when unnamed
     // (remote-agent-1, -2, …); its "location" is always its own message folder,
     // never the picker's.
@@ -254,28 +403,26 @@ export default function Sidebar({
       setQuickSending(true);
       try {
         await onQuickStart(quickCli, p, quickName.trim(), '.');
-        setQuickPrompt(''); setQuickName(''); closePanel();
+        setQuickPrompt(''); setQuickName(''); completePanel();
       } catch (error) {
         setQuickError(error instanceof Error ? error.message : 'could not create the remote agent');
       } finally { setQuickSending(false); }
       return;
     }
-    if (!p && !quickImages.length && !quickMore) return; // the bare quick path needs a prompt or file
     setQuickSending(true);
     setQuickError(null);
     try {
       await onQuickStart(
-        quickCli, p, quickMore ? quickName.trim() : '', quickMore ? quickLoc : '.',
-        quickImages.length ? {
+        quickCli, p, quickName.trim(), quickLoc,
+        quickSessionId || quickImages.length ? {
           sessionId: quickSessionId,
           attachments: quickImages,
-          onSessionCreated: setQuickSessionId,
-          onAttachmentUpdate: updateQuickImage,
+          onSessionCreated: rememberQuickSession,
         } : undefined,
       );
       setQuickPrompt('');
       setQuickName('');
-      closePanel();
+      completePanel();
     } catch (error) {
       setQuickError(error instanceof Error ? error.message : 'could not quickstart the agent');
     } finally { setQuickSending(false); }
@@ -379,10 +526,12 @@ export default function Sidebar({
         onDoubleClick={(e) => { e.stopPropagation(); startEdit(ref, s.name); }}
         title={s.path ? `${s.name} · ${s.path}` : s.name}
       >
-        {/* The same three lights, but for a remote agent they mean connection,
-            not process: working / listening / not connected. */}
-        <span className={`status ${s.state}`} title={(isRemote(s.cli) ? REMOTE_STATE_LABEL : STATE_LABEL)[s.state]} />
-        <Logo cli={s.cli} size={12} tint={colorOf[s.cli]} />
+        {/* State rides the CLI tile itself. For a remote agent it means
+            connection, not process: working / listening / not connected. */}
+        <StateLogo
+          cli={s.cli} state={s.state} size={12} tint={colorOf[s.cli]}
+          title={(isRemote(s.cli) ? REMOTE_STATE_LABEL : STATE_LABEL)[s.state]}
+        />
         {editing ? (
           <input
             autoFocus className="rename" value={editName}
@@ -395,28 +544,46 @@ export default function Sidebar({
           <span className="name">{s.name}</span>
         )}
         <span className="age">{fmtAgo(ages?.[s.id])}</span>
+        {/* One button on a live row, and it files the agent away. Start was the
+            row's own onClick spelled twice; stop went because an idle CLI costs
+            nothing and a runaway one is interrupted in its pane, where Ctrl-C
+            has the CLI's own semantics. A remote agent keeps its connection
+            pair: that is a line to another machine, not a local process. */}
         <span className="row-actions">
-          {s.cli === 'trace' ? (
-            <>
-              <button className="mini-btn" title="Share this trace" onClick={(e) => { e.stopPropagation(); onShareTrace(s.id); }}><ShareGlyph /></button>
-              <button className="mini-btn" title="Continue from this trace in a new agent" onClick={(e) => { e.stopPropagation(); openHandover(s); }}><HandoverGlyph /></button>
-            </>
-          ) : isRemote(s.cli) ? (
-            // No process to kill: stop/play are disconnect/reconnect, and
-            // "reconnect" must not try to open a terminal for this pane.
+          {isRemote(s.cli) && (
             s.remote?.paused
               ? <button className="mini-btn" title="Reconnect" onClick={(e) => { e.stopPropagation(); onSetRemotePaused(s.id, false); }}><PlayGlyph /></button>
               : <button className="mini-btn" title="Disconnect" onClick={(e) => { e.stopPropagation(); onSetRemotePaused(s.id, true); }}><StopGlyph /></button>
-          ) : s.running
-            ? <button className="mini-btn" title="Stop" onClick={(e) => { e.stopPropagation(); onStopSession(s.id); }}><StopGlyph /></button>
-            : <button className="mini-btn" title="Start" onClick={(e) => { e.stopPropagation(); onOpenSession(s.id, groupId); }}><PlayGlyph /></button>}
-          {SHAREABLE_CLIS.includes(s.cli) && (
-            <>
-              <button className="mini-btn" title="Read this session's trace" onClick={(e) => { e.stopPropagation(); onOpenTrace(s.id); }}><ListGlyph /></button>
-              <button className="mini-btn" title="Share this session" onClick={(e) => { e.stopPropagation(); onShareSession(s.id); }}><ShareGlyph /></button>
-            </>
           )}
-          <button className="mini-btn" title="Delete" onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><CloseGlyph /></button>
+          {showArchived && archived.has(s.id) ? (
+            // The archived view, where the two roads show themselves. A session
+            // the operator retired can come back or be removed; one that is
+            // merely quiet has not been decided about, so it is offered the
+            // decision rather than the delete.
+            //
+            // Deleting is the one irreversible thing here, so it does NOT reuse
+            // the `×` that means archive on the row above — a reversible action
+            // and a permanent one must not share a mark. It is the same trash
+            // the Files pane and the skills editor use, so destructive looks the
+            // same wherever it appears. Restore is an arrow back up into the
+            // list rather than a ▷, which on this very row already means
+            // "reconnect" for a remote agent — and which would in any case
+            // promise a start that unarchiving deliberately does not do.
+            retired.has(s.id) ? (
+              <>
+                <button className="mini-btn" title="Restore to the working list" aria-label="Restore"
+                  onClick={(e) => { e.stopPropagation(); onUnarchiveSession(s.id); }}><UpGlyph /></button>
+                <button className="mini-btn danger-hover" title="Delete — the folder on disk is kept" aria-label="Delete"
+                  onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><TrashGlyph /></button>
+              </>
+            ) : (
+              <button className="mini-btn" title="Quiet for a while. Archive it to stop it and be able to delete it." aria-label="Archive"
+                onClick={(e) => { e.stopPropagation(); onArchiveSession(s.id); }}><CloseGlyph /></button>
+            )
+          ) : (
+            <button className="mini-btn" title="Archive — stops the agent and files it away" aria-label="Archive"
+              onClick={(e) => { e.stopPropagation(); onArchiveSession(s.id); }}><CloseGlyph /></button>
+          )}
         </span>
       </div>
     );
@@ -534,18 +701,19 @@ export default function Sidebar({
                 <button
                   key={c.id}
                   className={`quick-cli${quickMode === 'agent' && quickCli === c.id ? ' on' : ''}${c.available ? '' : ' off'}`}
-                  title={c.available ? c.label : `${c.label} (not installed)`}
-                  disabled={!c.available || quickSending}
+                  title={cliTitle(c)}
+                  disabled={!c.available || quickSending || quickImages.length > 0}
                   style={quickMode === 'agent' && quickCli === c.id ? { borderColor: c.color } : undefined}
                   onClick={() => { setQuickMode('agent'); if (quickCli !== c.id) resetQuickTarget(); setQuickCli(c.id); }}
                 ><Logo cli={c.id} size={14} /></button>
               ))}
-              <span className="quick-sep" />
+            </div>
+            <div className="quick-clis quick-clis-2">
               <button
                 className={`quick-cli quick-grp${quickMode === 'group' ? ' on' : ''}`}
-                title="New group"
-                disabled={quickSending}
-                onClick={() => setQuickMode('group')}
+                title="Group — several agents created together, sharing a folder"
+                disabled={quickSending || quickImages.length > 0}
+                onClick={() => { resetQuickTarget(); setQuickMode('group'); }}
               >
                 <span className="grp-mini">
                   <Logo cli="claude" size={8} />
@@ -557,15 +725,24 @@ export default function Sidebar({
               {remoteCli && (
                 <button
                   className={`quick-cli${quickMode === 'agent' && quickCli === 'remote' ? ' on' : ''}`}
-                  title="Remote agent — an agent on another machine"
-                  disabled={quickSending}
+                  title={cliTitle(remoteCli)}
+                  disabled={quickSending || quickImages.length > 0}
                   style={quickMode === 'agent' && quickCli === 'remote' ? { borderColor: remoteCli.color } : undefined}
                   onClick={() => {
-                    setQuickMode('agent'); setQuickCli('remote'); setQuickSessionId(null);
-                    revokePendingAttachments(quickImagesRef.current); quickImagesRef.current = []; setQuickImages([]); setQuickError(null);
+                    resetQuickTarget(); setQuickMode('agent'); setQuickCli('remote'); setQuickError(null);
                   }}
                 ><Logo cli="remote" size={14} /></button>
               )}
+              {[shellCli, filesCli].filter(Boolean).map((c) => (
+                <button
+                  key={c!.id}
+                  className={`quick-cli${quickMode === 'agent' && quickCli === c!.id ? ' on' : ''}${c!.available ? '' : ' off'}`}
+                  title={cliTitle(c!)}
+                  disabled={!c!.available || quickSending || quickImages.length > 0}
+                  style={quickMode === 'agent' && quickCli === c!.id ? { borderColor: c!.color } : undefined}
+                  onClick={() => { setQuickMode('agent'); if (quickCli !== c!.id) resetQuickTarget(); setQuickCli(c!.id); }}
+                ><Logo cli={c!.id} size={14} /></button>
+              ))}
             </div>
 
             {quickMode === 'agent' ? (
@@ -576,15 +753,42 @@ export default function Sidebar({
                     The agent was created. Retry will reuse it; delete it from the agent row if you want to start over.
                   </div>
                 )}
+                {!quickError && quickSessionId && quickImages.length > 0 && (
+                  <div className="quick-recovery mono">
+                    {quickImages.every((image) => !!image.attachment)
+                      ? 'Files are uploaded to this stopped agent; launch will reuse them.'
+                      : quickImages.some((image) => image.status === 'error')
+                        ? 'A file needs attention before this stopped agent can launch.'
+                        : 'Files are uploading to this stopped agent now; launch waits until they are ready.'}
+                  </div>
+                )}
+                <input
+                  className="quick-name"
+                  placeholder={nameHint || 'Name'}
+                  title={nameHint ? `Leave it as it is and the agent is named ${nameHint}` : undefined}
+                  value={quickName}
+                  disabled={quickSending || quickImages.length > 0}
+                  onChange={(e) => { resetQuickTarget(); setQuickName(e.target.value); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') submitQuick(); if (e.key === 'Escape') closePanel(); }}
+                />
+                <FolderPicker
+                  disabled={quickSending || quickImages.length > 0 || rule.folder !== 'ok'}
+                  placeholder={rule.folder !== 'ok' ? rule.folder : undefined}
+                  value={quickLoc}
+                  onChange={(value) => { resetQuickTarget(); setQuickLoc(value); }}
+                />
                 <textarea
                   autoFocus
                   rows={1}
                   className="quick-prompt"
-                  placeholder={quickCli ? `prompt for ${clis.find((c) => c.id === quickCli)?.label ?? quickCli}…` : 'prompt…'}
-                  value={quickPrompt}
-                  disabled={quickSending}
+                  placeholder={rule.prompt
+                    || rule.promptLabel
+                    || (quickCli ? `prompt for ${clis.find((c) => c.id === quickCli)?.label ?? quickCli}…` : 'prompt…')}
+                  title={rule.prompt || undefined}
+                  value={rule.prompt ? '' : quickPrompt}
+                  disabled={quickSending || !!rule.prompt}
                   onPaste={(event) => {
-                    if (quickSending || !quickCli || isRemote(quickCli)) return;
+                    if (quickSending || !quickCli || rule.attach) return;
                     const files = filesFromTransfer(event.clipboardData);
                     if (!files.length) return;
                     event.preventDefault(); addQuickImages(files);
@@ -597,35 +801,20 @@ export default function Sidebar({
                 />
                 <Attachments
                   attachments={quickImages}
-                  disabled={quickSending || !quickCli || isRemote(quickCli)}
+                  disabled={quickSending || !quickCli || !!rule.attach}
                   showPicker={false}
                   onFiles={addQuickImages}
                   onRemove={removeQuickImage}
+                  onRetry={retryQuickImage}
                 />
-                {quickMore && (
-                  <>
-                    <input
-                      placeholder="Name (optional)"
-                      value={quickName}
-                      disabled={quickSending}
-                      onChange={(e) => { resetQuickTarget(); setQuickName(e.target.value); }}
-                      onKeyDown={(e) => { if (e.key === 'Enter') submitQuick(); if (e.key === 'Escape') closePanel(); }}
-                    />
-                    <FolderPicker value={quickLoc} onChange={(value) => { resetQuickTarget(); setQuickLoc(value); }} />
-                    <div className="widget-actions">
-                      <button className="btn-primary" onClick={submitQuick} disabled={quickSending}>{quickSending ? 'Uploading…' : `Create${quickPrompt.trim() || quickImages.length ? ' & send' : ''}`}</button>
-                      <button className="btn-ghost" onClick={closePanel} disabled={quickSending}>Cancel</button>
-                    </div>
-                  </>
-                )}
-                <div className="quick-foot">
-                  <button className="quick-more" onClick={() => setQuickMore((v) => !v)} disabled={quickSending}>{quickMore ? '▴ less' : '▾ more options'}</button>
-                  <span className="quick-hint mono">↵ launch · ⇧↵ newline</span>
+                <div className="widget-actions">
+                  <button className="btn-primary" onClick={submitQuick} disabled={quickSending || quickFilesBlocked}>{quickSending ? 'Starting…' : `Create${quickPrompt.trim() || quickImages.length ? ' & send' : ''}`}</button>
+                  <button className="btn-ghost" onClick={closePanel} disabled={quickSending}>Cancel</button>
                 </div>
               </>
             ) : (
               <>
-                <input autoFocus placeholder="Group name" value={groupName}
+                <input autoFocus className="quick-name" placeholder="Group name" value={groupName}
                   onChange={(e) => setGroupName(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') submitGroup(); if (e.key === 'Escape') closePanel(); }} />
                 <FolderPicker value={groupLoc} onChange={setGroupLoc} />
@@ -675,19 +864,19 @@ export default function Sidebar({
         </div>
       )}
 
-      {/* Overview: pinned above the tree with the row anatomy (tile · name ·
-          right slot) so it reads as clickable; the right slot counts agents
-          waiting on you. */}
+      {/* Overview: pinned above the tree with the row anatomy (tile · name) so
+          it reads as clickable. It used to carry an "N waiting" count in a
+          right slot; the rows directly below already show each of those agents
+          with state on its tile, so the number was a second, vaguer telling of
+          what the list says exactly. */}
       <div className="ov-fixed">
         <div
           className={`row session ov-row${activeRef === 'overview' ? ' active' : ''}`}
           onClick={() => onActivate('overview')}
           title="All agents: digests, states, replies"
         >
-          <span className="status ov-spacer" />
           <span className="ov-tile"><GridGlyph /></span>
           <span className="name">overview</span>
-          {waiting > 0 && <span className="ov-wait">{waiting} waiting</span>}
         </div>
       </div>
 
@@ -710,66 +899,24 @@ export default function Sidebar({
           const anyVisible = agents.length === 0 || agents.some((s) => !isHidden(s.id));
           return anyVisible ? GroupBlock(g) : null;
         })}
-        {!showArchived && archived.size > 0 && (
-          <div className="arch-note">not showing {archived.size} archived session{archived.size === 1 ? '' : 's'}</div>
+        {archived.size > 0 && (
+          // Renders in BOTH states on purpose: this line is the switch now, so
+          // one that only appeared while archived were hidden would be a door
+          // that locks behind you.
+          <button className="arch-note arch-toggle" onClick={onToggleArchived}>
+            {showArchived ? 'hide' : 'show'} {archived.size} archived session{archived.size === 1 ? '' : 's'}
+          </button>
         )}
       </div>
 
       {/* Quick-add utilities: created instantly with a default name (double-
           click to rename afterwards). Both open at the workspaces root. */}
-      <div className="quick-add">
-        <button className="btn-ghost" title="New shell at the workspaces root" onClick={() => onNewSession('', 'shell', '.')}>
-          <Logo cli="shell" size={14} /> Shell
-        </button>
-        <button className="btn-ghost" title="New file browser (whole workspace)" onClick={() => onNewSession('', 'files', '.')}>
-          <Logo cli="files" size={14} /> Files
-        </button>
-        {/* A trace pane can't be created blank, so it isn't a quick-add: this
-            asks WHICH shared trace, then opens the pane on it. */}
-        <button className="btn-ghost" title="Open a session someone shared with you"
-          onClick={() => { setOpenTraceRepo(openTraceRepo === null ? '' : null); setOpenTraceErr(null); }}>
-          <Logo cli="trace" size={14} /> Trace
-        </button>
-      </div>
-
-      {openTraceRepo !== null && (
-        <div className="widget open-trace">
-          <div className="w-field">
-            <span className="w-label">Dataset</span>
-            <input
-              autoFocus
-              placeholder="user/session-name — or paste the dataset URL"
-              value={openTraceRepo}
-              disabled={openTraceBusy}
-              onChange={(e) => setOpenTraceRepo(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') submitSharedTrace(); if (e.key === 'Escape') setOpenTraceRepo(null); }}
-            />
-          </div>
-          {openTraceErr && <div className="open-trace-err">{openTraceErr}</div>}
-          <div className="quick-hint">
-            Private and gated shares work too — this Space downloads with its own token.
-          </div>
-          <div className="widget-actions">
-            <button className="btn-ghost" onClick={() => setOpenTraceRepo(null)} disabled={openTraceBusy}>Cancel</button>
-            <button className="btn-primary" onClick={submitSharedTrace} disabled={openTraceBusy || !openTraceRepo.trim()}>
-              {openTraceBusy ? 'Fetching…' : 'Open'}
-            </button>
-          </div>
-        </div>
-      )}
-
       <div className="legend">
-        <span><span className="status working" /> working</span>
-        <span><span className="status waiting" /> idle</span>
-        <span><span className="status stopped" /> stopped</span>
-        {archived.size > 0 && (
-          <label className="legend-arch" title="Sessions with no activity beyond the archive window (Settings)">
-            <input type="checkbox" checked={showArchived} onChange={onToggleArchived} />
-            <span className="lbox" />
-            archived
-          </label>
-        )}
-      </div>
+        <span><StateLogo frameOnly state="working" size={12} /> working</span>
+        <span><StateLogo frameOnly state="waiting" size={12} /> your turn</span>
+        <span><StateLogo frameOnly state="idle" size={12} /> idle</span>
+        <span><StateLogo frameOnly state="stopped" size={12} /> stopped</span>
+              </div>
     </aside>
   );
 }

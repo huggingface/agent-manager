@@ -38,6 +38,12 @@ const normalizePath = (path?: string) => (path && path.trim() ? path : '.');
 export const quickStart = (cli: string, prompt: string, name = '', path = '.'): Promise<Session> =>
   fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ cli, name: name || undefined, path: path || '.', prompt: prompt || undefined }) }).then(json);
 
+// The name this cli would get if created now. Used to prefill the create
+// panel; the panel only SENDS a name when the operator edits it, so the server
+// still decides for an untouched field.
+export const nextName = (cli: string): Promise<{ cli: string; name: string }> =>
+  fetch(`/api/next-name?cli=${encodeURIComponent(cli)}`).then(json);
+
 export const createSession = (name: string, cli: string, groupId?: string, path?: string): Promise<Session> =>
   fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ name, cli, groupId, path: normalizePath(path) }) }).then(json);
 
@@ -47,8 +53,18 @@ export const listFolders = (p = ''): Promise<{ path: string; folders: string[] }
 export const stopSession = (id: string) =>
   fetch(`/api/sessions/${id}/stop`, { method: 'POST' }).then(json);
 
+// Put a session away: it stops, and it leaves the working list. The server
+// refuses to delete anything that has not been through here first.
+export const archiveSession = (id: string) =>
+  fetch(`/api/sessions/${id}/archive`, { method: 'POST' }).then(json);
+
+export const unarchiveSession = (id: string) =>
+  fetch(`/api/sessions/${id}/unarchive`, { method: 'POST' }).then(json);
+
+// Keeps the server's own words: refusing to delete a session that is not
+// archived is an ordinary, explainable answer, not a failure.
 export const deleteSession = (id: string) =>
-  fetch(`/api/sessions/${id}`, { method: 'DELETE' }).then(json);
+  fetch(`/api/sessions/${id}`, { method: 'DELETE' }).then(jsonOrError);
 
 export const renameSession = (id: string, name: string) =>
   fetch(`/api/sessions/${id}`, { method: 'PUT', headers: HEADERS, body: JSON.stringify({ name }) }).then(json);
@@ -109,6 +125,38 @@ export interface AmConfig {
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
 export const saveConfig = (c: AmConfig) =>
   fetch('/api/config', { method: 'PUT', headers: HEADERS, body: JSON.stringify(c) }).then(json);
+
+// ---- durable scheduled prompts ----
+export type CronState = 'running' | 'stopped';
+export interface CronJob {
+  id: string;
+  name: string;
+  agent: { name: string; cli: string };
+  prompt: string;
+  schedule: { cron: string; tz: string };
+  runOnRestart: boolean;
+  state: CronState;
+  createdAt: string;
+  updatedAt: string;
+  next: string | null;
+  last?: {
+    at: string;
+    status: 'ok' | 'failed';
+    durationMs: number;
+    trigger?: 'schedule' | 'restart' | 'manual';
+    error?: string;
+  };
+}
+export type CronDraft = Pick<CronJob, 'name' | 'agent' | 'prompt' | 'schedule' | 'runOnRestart'>;
+export const getCrons = (): Promise<{ crons: CronJob[] }> => fetch('/api/crons').then(jsonOrError);
+export const createCron = (job: CronDraft): Promise<CronJob> =>
+  fetch('/api/crons', { method: 'POST', headers: HEADERS, body: JSON.stringify(job) }).then(jsonOrError);
+export const updateCron = (id: string, patch: Partial<CronDraft & { state: CronState }>): Promise<CronJob> =>
+  fetch(`/api/crons/${encodeURIComponent(id)}`, { method: 'PUT', headers: HEADERS, body: JSON.stringify(patch) }).then(jsonOrError);
+export const runCron = (id: string): Promise<{ ok: boolean; agentCreated: boolean }> =>
+  fetch(`/api/crons/${encodeURIComponent(id)}/run`, { method: 'POST' }).then(jsonOrError);
+export const deleteCron = (id: string): Promise<{ ok: boolean }> =>
+  fetch(`/api/crons/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(jsonOrError);
 
 // ---- bucket backup: a Job on the Hub does the copying (docs/bucket-backup.md) ----
 export type BackupEvery = 'never' | '1h' | '3h' | '24h';
@@ -207,18 +255,93 @@ export interface Attachment {
   insertText: string;
 }
 
-export const uploadAttachment = async (id: string, file: File): Promise<Attachment> => {
-  const headers: Record<string, string> = {
-    'x-file-name': encodeURIComponent(file.name || 'Attachment'),
-  };
-  if (file.type) headers['content-type'] = file.type;
-  const response = await fetch(`/api/sessions/${id}/attachments`, {
-    method: 'POST',
-    headers,
-    body: file,
-  });
-  return jsonOrError(response);
+export interface AttachmentUploadProgress { loaded: number; total: number }
+export interface AttachmentUploadOptions {
+  onProgress?: (progress: AttachmentUploadProgress) => void;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+export const ATTACHMENT_UPLOAD_TIMEOUT_MS = 20 * 60 * 1000;
+
+const attachmentUploadError = (request: XMLHttpRequest) => {
+  let detail = '';
+  try {
+    const body = JSON.parse(request.responseText || '{}');
+    if (typeof body?.error === 'string') detail = body.error;
+  } catch { /* An ingress/proxy error can be HTML. Classify it by status below. */ }
+  if (detail) return detail;
+  if (request.status === 413) return 'The server or its proxy rejected this file as too large (HTTP 413). Try a smaller file.';
+  if (request.status === 408 || request.status === 504) return `The upload timed out (HTTP ${request.status}). Check the connection and retry.`;
+  if (request.status === 429) return 'Too many uploads at once (HTTP 429). Wait a minute, then retry.';
+  if (request.status >= 500) return `The upload server failed (HTTP ${request.status}). Retry in a moment.`;
+  return `Upload failed (HTTP ${request.status}${request.statusText ? ` ${request.statusText}` : ''}).`;
 };
+
+/** XMLHttpRequest is intentional: fetch has no browser upload-progress API. */
+export const uploadAttachment = (
+  id: string,
+  file: File,
+  { onProgress, signal, timeoutMs = ATTACHMENT_UPLOAD_TIMEOUT_MS }: AttachmentUploadOptions = {},
+): Promise<Attachment> => new Promise((resolve, reject) => {
+  const request = new XMLHttpRequest();
+  let settled = false;
+  const finish = (task: () => void) => {
+    if (settled) return;
+    settled = true;
+    signal?.removeEventListener('abort', abort);
+    task();
+  };
+  const abort = () => request.abort();
+  if (signal?.aborted) {
+    finish(() => reject(new Error('Upload was canceled before it completed.')));
+    return;
+  }
+  request.open('POST', `/api/sessions/${encodeURIComponent(id)}/attachments`);
+  request.timeout = timeoutMs;
+  request.setRequestHeader('x-am-origin', 'operator');
+  request.setRequestHeader('x-file-name', encodeURIComponent(file.name || 'Attachment'));
+  if (file.type) request.setRequestHeader('content-type', file.type);
+  request.upload.onprogress = (event) => onProgress?.({
+    loaded: event.loaded,
+    total: event.lengthComputable && event.total ? event.total : file.size,
+  });
+  // Some browsers coalesce every progress event for a fast/small body. The
+  // upload-side load event still fires before the response, so 100% means
+  // "bytes sent, awaiting server confirmation", not prematurely "stored".
+  request.upload.onload = () => onProgress?.({ loaded: file.size, total: file.size });
+  request.onload = () => {
+    if (request.status < 200 || request.status >= 300) {
+      finish(() => reject(new Error(attachmentUploadError(request))));
+      return;
+    }
+    try {
+      const attachment = JSON.parse(request.responseText) as Attachment;
+      finish(() => resolve(attachment));
+    } catch {
+      finish(() => reject(new Error('The upload completed, but the server returned an unreadable response. Retry the file.')));
+    }
+  };
+  request.onerror = () => finish(() => reject(new Error(
+    typeof navigator !== 'undefined' && navigator.onLine === false
+      ? 'Upload stopped because this device is offline. Reconnect and retry.'
+      : 'Upload connection was interrupted before the server confirmed the file. Check the connection and retry.',
+  )));
+  request.onabort = () => finish(() => reject(new Error('Upload was canceled before it completed.')));
+  request.ontimeout = () => finish(() => reject(new Error(
+    `Upload timed out after ${Math.round(timeoutMs / 60_000)} minutes. Check the connection and retry.`,
+  )));
+  signal?.addEventListener('abort', abort, { once: true });
+  onProgress?.({ loaded: 0, total: file.size });
+  request.send(file);
+});
+
+export const deleteAttachment = (sessionId: string, attachmentId: string): Promise<{ ok: boolean }> =>
+  fetch(`/api/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`, {
+    method: 'DELETE',
+  }).then(jsonOrError);
+
+export const discardUnstartedSession = (id: string): Promise<{ ok: boolean }> =>
+  fetch(`/api/sessions/${encodeURIComponent(id)}?ifNeverStarted=1`, { method: 'DELETE' }).then(jsonOrError);
 
 export const insertAttachments = (
   id: string,
@@ -250,6 +373,10 @@ export interface TraceStats {
 export interface SessionTraces extends TraceStats { id: string; name: string; cli: string; path: string | null; }
 export interface Traces { sessions: SessionTraces[]; totals: TraceStats; generatedAt: string; }
 export const getTraces = (): Promise<Traces> => fetch('/api/traces').then(json);
+
+/** The transcript file behind a session or trace pane. A URL, not a fetch: the
+ *  browser saves it, so a 6 MB transcript never lands in a JS string first. */
+export const traceDownloadUrl = (id: string) => `/api/trace/${encodeURIComponent(id)}/download`;
 
 // ---- files ----
 // 'trace' is content-detected, not name-detected: a transcript is a .jsonl like
@@ -399,8 +526,20 @@ export type TraceBlock =
   | { type: 'compaction'; text: string };
 
 export interface TraceTurn {
+  /** Stable record identity; messageId joins fragmented native messages. */
+  id?: string;
+  messageId?: string;
+  event?: { type: 'queue'; operation: string; text: string } | { type: 'task-complete'; text: string };
   role: 'user' | 'assistant' | 'system';
   kind?: 'final' | 'update';
+  /**
+   * A prompt typed while the agent was mid-turn, read from Claude Code's queue
+   * records because it is written nowhere else (server/src/traces.js). The
+   * reader says so on the band: the records cannot tell a prompt that was
+   * consumed from one that was cancelled, so it reports what it knows — that
+   * this was typed and queued — rather than claiming it was answered.
+   */
+  queued?: boolean;
   ts?: number;
   model?: string;
   usage?: { in: number; out: number; cacheRead?: number };
@@ -408,6 +547,9 @@ export interface TraceTurn {
 }
 
 export interface TracePage {
+  generation?: string;
+  revision?: string;
+  activity?: 'working' | 'waiting' | null;
   harness: string;
   harnessLabel: string;
   sessionId: string | null;
@@ -460,9 +602,15 @@ export const getTracePage = async (id: string, offset = 0, limit = 200): Promise
 // been written since — each answered from a byte range of the transcript
 // instead of a parse of the whole thing. Cursors are opaque: hand back the
 // `start`/`end` the server gave you.
-export type TraceReq = { at: 'tail' } | { at: 'before' | 'after'; cursor: number };
+export type TraceReq = ({ at: 'tail' } | { at: 'before' | 'after'; cursor: number }) & { generation?: string };
 
 export interface TraceCursor {
+  generation?: string;
+  revision?: string;
+  /** Explicit source replacement; never an ordinary append. */
+  reset?: boolean;
+  /** Mutable index-backed tail replaces records starting at this index. */
+  replaceFrom?: number;
   /** byte offsets for a .jsonl, message indices for the SQLite harnesses */
   mode: 'bytes' | 'index';
   start: number;
@@ -485,7 +633,8 @@ export interface TraceWindow extends Omit<TracePage, 'total' | 'offset' | 'limit
 /** Whole-trace facts a single window cannot know. One full parse, off the paint path. */
 export type TraceSummary = Omit<TracePage, 'turns' | 'offset' | 'limit'>;
 
-const traceRange = (req: TraceReq) => (req.at === 'tail' ? 'tail=1' : `${req.at}=${req.cursor}`);
+const traceRange = (req: TraceReq) => (req.at === 'tail' ? 'tail=1' : `${req.at}=${req.cursor}`)
+  + `&v=2${req.generation ? `&generation=${encodeURIComponent(req.generation)}` : ''}`;
 
 const traceFetch = async <T>(url: string, signal?: AbortSignal): Promise<T> => {
   const r = await fetch(url, { signal });
@@ -508,6 +657,48 @@ export const getTraceSummary = (id: string, signal?: AbortSignal): Promise<Trace
 
 export const getFileTraceWindow = (id: string, p: string, req: TraceReq, bytes?: number, min?: number, signal?: AbortSignal): Promise<TraceWindow> =>
   traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&${traceRange(req)}${windowSize(bytes, min)}`, signal);
+
+// ---- sub-agents ----
+// The roster comes from the `subagents/` directory beside the transcript, not
+// from the transcript: a parent here reaches 292 MB while its whole roster is a
+// directory listing plus 187 bytes per agent. `spawnedAt` is the sidecar's
+// mtime and `lastWroteAt` the transcript's — the second one says when it last
+// wrote, and nothing about whether it is alive (measured silence inside a live
+// sub-agent: p99 112s, max 601s).
+export interface SubAgentEntry {
+  agentId: string;
+  agentType: string | null;
+  description: string | null;
+  toolUseId: string | null;
+  /** codex has no per-call id; its parent's records name the task instead */
+  taskName?: string | null;
+  parentAgentId: string | null;
+  depth: number | null;
+  spawnedAt: number | null;
+  lastWroteAt: number | null;
+  bytes: number;
+  hasTranscript: boolean;
+}
+
+export interface SubAgentRoster {
+  id: string;
+  supported: boolean;
+  reason?: string;
+  dir: string | null;
+  agents: SubAgentEntry[];
+}
+
+export const getSubAgents = (id: string, signal?: AbortSignal): Promise<SubAgentRoster> =>
+  traceFetch(`/api/agents/${id}/subagents`, signal);
+
+/** A sub-agent's own transcript, in the same shape as any other trace. */
+export const getSubAgentTrace = (id: string, agentId: string, bytes?: number, signal?: AbortSignal): Promise<TraceWindow> =>
+  traceFetch(`/api/agents/${id}/subagents/${encodeURIComponent(agentId)}?tail=1${windowSize(bytes)}`, signal);
+
+export const getSubAgentWindow = (id: string, agentId: string, req: TraceReq, bytes?: number, min?: number, signal?: AbortSignal): Promise<TraceWindow> =>
+  traceFetch(`/api/agents/${id}/subagents/${encodeURIComponent(agentId)}?${traceRange(req)}${windowSize(bytes, min)}`, signal);
+export const getSubAgentSummary = (id: string, agentId: string, signal?: AbortSignal): Promise<TraceSummary> =>
+  traceFetch(`/api/agents/${id}/subagents/${encodeURIComponent(agentId)}?summary=1`, signal);
 
 export const getFileTraceSummary = (id: string, p: string, signal?: AbortSignal): Promise<TraceSummary> =>
   traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&summary=1`, signal);
@@ -553,3 +744,27 @@ export const saveSkill = (name: string, content: string) =>
   fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'PUT', headers: { 'content-type': 'text/plain' }, body: content }).then(json);
 export const deleteSkill = (name: string) =>
   fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(json);
+
+// ---- the API log (Settings → API log) ----
+// Written by operationMiddleware: every mutating call, plus the one read that is
+// an event between two agents — a `wait` that resolved. Payloads are summarised
+// at write time, never stored: a prompt is {present, chars, sha256} and nothing
+// else, so this view can say who asked whom and how long the ask was, never what
+// it said.
+export interface OperationSummary { present?: boolean; chars?: number; sha256?: string; bytes?: number; }
+export interface Operation {
+  id: string;
+  at: string;
+  origin: { id: string; type: string; name?: string; cli?: string } | null;
+  target?: { id: string; name?: string; cli?: string };
+  method: string;
+  path: string;
+  query?: Record<string, unknown>;
+  request?: unknown;
+  status: number;
+  ok: boolean;
+  durationMs: number;
+  result?: unknown;
+}
+export const getOperations = (limit = 500): Promise<{ operations: Operation[]; generatedAt: string }> =>
+  fetch(`/api/operations?limit=${limit}`).then(json);

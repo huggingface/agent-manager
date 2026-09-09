@@ -312,9 +312,14 @@ check('installs into existing file', runner.installClaudeRepinHook('/app/scripts
 let s = JSON.parse(fs.readFileSync(settings, 'utf8'));
 check('other keys kept', s.model, 'opus');
 check('hook entry present', s.hooks.SessionStart.length, 1);
+check('attention notification hook present', s.hooks.Notification.length, 1);
+check('attention hook uses post-dialog events', s.hooks.Notification[0].matcher,
+  'permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|agent_completed');
+check('attention marker gets a native clear path', s.hooks.PostToolBatch.length, 1);
 check('second run is a no-op', runner.installClaudeRepinHook('/app/scripts/am-repin-hook.sh'), true);
 s = JSON.parse(fs.readFileSync(settings, 'utf8'));
 check('no duplicate entry', s.hooks.SessionStart.length, 1);
+check('no duplicate attention entry', s.hooks.Notification.length, 1);
 
 console.log('\ninstaller refuses to clobber a corrupt settings file');
 fs.writeFileSync(settings, '{ not json');

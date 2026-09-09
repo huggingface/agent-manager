@@ -1,10 +1,11 @@
 import { useState } from 'react';
+import type { SessionState } from '../types';
 import { SlidersGlyph, SunGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
-import Logo from './Logo';
+import StateLogo from './StateLogo';
 
 // A frozen, slightly dimmed replica of the real sidebar so the install page
 // looks like the product it unlocks. Pure decoration: no handlers, no state.
-type MockSession = { name: string; cli: string; tint: string; state: string };
+type MockSession = { name: string; cli: string; tint: string; state: SessionState };
 type MockItem = MockSession | { group: string; members: MockSession[] };
 const MOCK: MockItem[] = [
   { group: 'research', members: [
@@ -19,8 +20,7 @@ const MOCK: MockItem[] = [
 function MockRow({ s, nested }: { s: MockSession; nested?: boolean }) {
   return (
     <div className={`row session${nested ? ' nested' : ''}`}>
-      <span className={`status ${s.state}`} />
-      <Logo cli={s.cli} size={12} tint={s.tint} />
+      <StateLogo cli={s.cli} state={s.state} size={12} tint={s.tint} />
       <span className="name">{s.name}</span>
     </div>
   );
@@ -39,7 +39,6 @@ function MockSidebar() {
       </div>
       <div className="ov-fixed">
         <div className="row ov-row">
-          <span className="status ov-spacer" />
           <span className="ov-tile"><GridGlyph /></span>
           <span className="name">overview</span>
         </div>
@@ -58,15 +57,11 @@ function MockSidebar() {
           <MockRow key={item.name} s={item} />
         ))}
       </div>
-      <div className="quick-add">
-        <span className="btn-ghost"><Logo cli="shell" size={14} /> Shell</span>
-        <span className="btn-ghost"><Logo cli="files" size={14} /> Files</span>
-      </div>
       <div className="legend">
-        <span><span className="status working" /> working</span>
-        <span><span className="status waiting" /> your turn</span>
-        <span><span className="status idle" /> idle</span>
-        <span><span className="status stopped" /> stopped</span>
+        <span><StateLogo frameOnly state="working" size={12} /> working</span>
+        <span><StateLogo frameOnly state="waiting" size={12} /> your turn</span>
+        <span><StateLogo frameOnly state="idle" size={12} /> idle</span>
+        <span><StateLogo frameOnly state="stopped" size={12} /> stopped</span>
       </div>
     </aside>
   );

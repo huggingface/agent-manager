@@ -2,15 +2,19 @@ import { useEffect, useState } from 'react';
 import { isPassive, isRemote, type Cli } from '../types';
 import * as api from '../api';
 import SkillsEditor from './SkillsEditor';
+import ApiLog from './ApiLog';
 import UsagePanel from './UsagePanel';
+import CronSettings from './CronSettings';
 import { SunGlyph, MoonGlyph, RefreshGlyph, InfoGlyph } from './icons';
 import Logo from './Logo';
 
-type Page = 'general' | 'usage' | 'skills';
+type Page = 'general' | 'usage' | 'skills' | 'cron' | 'apilog';
 const PAGES: { id: Page; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'usage', label: 'Usage' },
   { id: 'skills', label: 'Skills' },
+  { id: 'cron', label: 'Cron' },
+  { id: 'apilog', label: 'API log' },
 ];
 
 interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; engine?: string; ghostty?: boolean; canRelaunch?: boolean; secrets?: string[]; bucketUnverified?: boolean; }
@@ -119,6 +123,7 @@ function PushRow() {
 
 export default function SettingsView({
   page, onPage, onClose, theme, onToggleTheme, clis, info, onShowWelcome, demoMode, onToggleDemo,
+  onOpenSharedTrace,
 }: {
   page: Page;
   onPage: (p: Page) => void;
@@ -128,10 +133,32 @@ export default function SettingsView({
   clis: Cli[];
   info: Info | null;
   onShowWelcome?: () => void;
+  /** Pull a session someone shared as a Hub dataset and open it as a trace. */
+  onOpenSharedTrace?: (repo: string) => Promise<void>;
   demoMode?: boolean;
   onToggleDemo?: () => void;
 }) {
   const [relaunch, setRelaunch] = useState<{ busy?: boolean; msg?: string; confirm?: boolean }>({});
+  const [sharedTrace, setSharedTrace] = useState('');
+  const [sharedTraceBusy, setSharedTraceBusy] = useState(false);
+  const [sharedTraceErr, setSharedTraceErr] = useState<string | null>(null);
+  // Failures here are ordinary and specific (no access, not a share, no token),
+  // so show what the server said: the fix is usually a different id.
+  const openSharedTrace = async () => {
+    const repo = sharedTrace.trim();
+    if (!repo || !onOpenSharedTrace) return;
+    setSharedTraceBusy(true);
+    setSharedTraceErr(null);
+    try {
+      await onOpenSharedTrace(repo);
+      setSharedTrace('');
+      onClose();
+    } catch (e) {
+      setSharedTraceErr(e instanceof Error ? e.message : 'could not open that trace');
+    } finally {
+      setSharedTraceBusy(false);
+    }
+  };
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [savedNotes, setSavedNotes] = useState<Record<string, string>>({});
@@ -268,6 +295,38 @@ export default function SettingsView({
               <div><div className="s-label">Theme</div><div className="s-help">Defaults to your system setting.</div></div>
               <button className="btn-ghost" onClick={onToggleTheme}>{theme === 'dark' ? <><MoonGlyph /> Dark</> : <><SunGlyph /> Light</>}</button>
             </div>
+
+            {/* Opening someone else's shared session. This used to be a widget
+                in the sidebar, which is a lot of standing furniture for
+                something you do when a link arrives — and the sidebar is for
+                agents that exist. It is the one thing the Files pane's trace
+                viewer cannot do (that reads files in the workspace; this pulls a
+                dataset off the Hub), so it moved rather than went away. */}
+            {onOpenSharedTrace && (
+              <div className="setting-row row-top">
+                <div>
+                  <div className="s-label">Open a shared trace</div>
+                  <div className="s-help">
+                    Paste the dataset id or URL someone sent you. Private and gated shares work
+                    too — this Space downloads with its own token.
+                  </div>
+                  <input
+                    className="cfg-input trace-open"
+                    placeholder="user/session-name — or the dataset URL"
+                    value={sharedTrace}
+                    disabled={sharedTraceBusy}
+                    onChange={(e) => { setSharedTrace(e.target.value); setSharedTraceErr(null); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') openSharedTrace(); }}
+                  />
+                  {sharedTraceErr && <div className="s-help s-err" role="alert">{sharedTraceErr}</div>}
+                </div>
+                <button
+                  className="btn-ghost"
+                  disabled={sharedTraceBusy || !sharedTrace.trim()}
+                  onClick={openSharedTrace}
+                >{sharedTraceBusy ? 'Fetching…' : 'Open'}</button>
+              </div>
+            )}
 
             {onShowWelcome && (
               <div className="setting-row">
@@ -511,6 +570,25 @@ export default function SettingsView({
                   </div>
                 )}
 
+                {/* On demand regardless of the interval: taking one backup
+                    before a risky change should not mean switching on a
+                    schedule. It belongs directly under the intervals it stands
+                    beside — it used to sit past the skip-folders field, a screen
+                    away from the control it relates to. The cost note stays
+                    above it: that is what you want to have read before pressing
+                    a button that starts a billed Job. Disabled while a run is in
+                    flight — two Jobs uploading to one dataset would race. */}
+                {bk?.canRunNow && (
+                  <button
+                    className="btn-ghost bk-now"
+                    disabled={bkBusy || bk.running}
+                    onClick={doBackup}
+                  >
+                    {bkBusy ? 'Launching…' : bk.running ? 'Backing up…' : 'Back up now'}
+                  </button>
+                )}
+                {bkMsg && <div className="s-help" style={{ marginTop: 6 }}>{bkMsg}</div>}
+
                 {/* Folders to keep out of the history. An env directory is
                     thousands of files the backup has to hash and none of them
                     worth keeping — measured, that is 7s of work versus 1s.
@@ -573,22 +651,6 @@ export default function SettingsView({
                     </div>
                   </>
                 )}
-                {/* On demand regardless of the interval: taking one backup
-                    before a risky change should not mean switching on a
-                    schedule. Disabled while a run is in flight — two Jobs
-                    uploading to one dataset would race. */}
-                {bk?.canRunNow && (
-                  <button
-                    className="btn-ghost"
-                    style={{ marginTop: 8 }}
-                    disabled={bkBusy || bk.running}
-                    onClick={doBackup}
-                  >
-                    {bkBusy ? 'Launching…' : bk.running ? 'Backing up…' : 'Back up now'}
-                  </button>
-                )}
-                {bkMsg && <div className="s-help" style={{ marginTop: 6 }}>{bkMsg}</div>}
-
                 <div className="setting-row">
                   <div>
                     <div className="s-label">Restart sessions after a reboot</div>
@@ -717,11 +779,31 @@ export default function SettingsView({
           </div>
         )}
 
+        {page === 'apilog' && (
+          <div className="settings-page wide">
+            <h2>API log</h2>
+            <p className="s-help">
+              Every call that changed something, plus the waits that resolved — who asked whom to do
+              what, when, and in their own words: each entry keeps the call whole, body included.
+              Credentials are the exception and are never written here.
+            </p>
+            <ApiLog />
+          </div>
+        )}
+
         {page === 'skills' && (
           <div className="settings-page wide">
             <h2>Skills</h2>
             <p className="s-help">Reusable markdown/text skills. Saved skills are published as <span className="mono">SKILL.md</span> to every agent (Claude, Codex, Gemini, opencode, Hermes) and available in all new sessions. View renders markdown; Edit is plain text.</p>
             <SkillsEditor />
+          </div>
+        )}
+
+        {page === 'cron' && (
+          <div className="settings-page wide cron-page">
+            <h2>Cron</h2>
+            <p className="s-help cron-intro">Send a prompt to an agent on a schedule. Jobs persist across Space restarts; if the named agent does not exist when a job fires, it is created first.</p>
+            <CronSettings clis={clis} />
           </div>
         )}
       </div>

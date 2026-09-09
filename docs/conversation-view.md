@@ -128,9 +128,33 @@ Rules that keep this from becoming the ugly viewer in a small box:
 - **One left column, two meanings.** A tool reports its outcome there (`✓` / `✗`); everything
   else offers a disclosure triangle, greyed when there is nothing more to see. The fold control
   above uses the same column and the same triangle, so it reads as the head of the list.
-- **Expanding never repeats itself.** Text steps (thinking, an aside, a compaction) simply stop
-  being truncated — same font, same colour, more of it. Only a tool has genuinely *different*
-  material below: its input and what came back.
+- **Expanding never repeats itself.** A text step's one-line preview is the head row's whole
+  content while it is shut; opened, that row hands the text over and the step's body carries it
+  **rendered as markdown**. An agent writes an aside the way it writes an answer — headings, lists,
+  code spans, links — and for a long time only the answer was rendered, so the middle of a turn
+  showed its syntax raw (`## Plan`, `[the docs](https://…)`). The prose kinds — `note`, `think`,
+  `compact`, named by `proseOf()` — take the same path the answer does,
+  `highlightHtml(renderMarkdown(text), q)`, so a search term is still marked inside the rendered
+  blocks. Three consequences worth stating:
+    - **It renders in the body, not in the head row.** That row is a `<button>`; markdown carries
+      links and block elements, and neither is valid — or clickable — inside one.
+    - **An open `note` is two columns**, the disclosure gutter and the prose beside it. A note has
+      no label, so once its text moved to the body its head row held nothing but a triangle — and a
+      row whose only content is a triangle still takes a line, which read as *"it adds an empty line
+      at the beginning when expanded"*. Nothing was wrong with the rendering: no empty node, no
+      uncollapsed margin, and a leading newline in the source is dropped by markdown anyway (all
+      three are pinned in `stepMarkdown.test.mjs`). The blank line **was** the row. `think` and
+      `compact` keep the stacked layout, because their row says `thinking` or `context compacted`
+      and is therefore not an empty line.
+    - **The collapsed preview keeps its syntax.** `## Plan` says the message opens with a heading
+      and ` ``` ` says a code block is coming, which is more than `Plan` tells you, and stripping
+      it would mean a second markdown pass over a string that may be cut mid-token.
+    - **A cut message cannot take the panel with it.** These steps carry a `more` tail, so the text
+      can end mid-fence or mid-table; `marked` closes both itself and DOMPurify reparses what it
+      emits, so no unclosed block escapes to swallow what follows. Pinned in
+      `web/test/stepMarkdown.test.mjs`.
+  What must stay literal, stays literal: a tool's input is JSON, a shell's output and a tool result
+  are terminal bytes where two spaces mean two spaces, and an image is an image.
 - Consecutive calls to the same tool collapse (`✓ Read ×4  App.tsx, api.ts, +2`). The grouping
   logic exists — `ToolGroup` in `TracePane.tsx:86` — and gets reused, not rewritten.
 - **Thinking is one line** with a preview; system/harness turns are not shown at all in the card
@@ -215,34 +239,82 @@ pane with nothing to render (a shell) simply stays a terminal.
   `.markdown` rules are absolute px and would otherwise stay put while the prose grew.
   Spacing does not scale, but anything that lines a column up with a glyph — the prompt's `❯`
   gutter, the step rail, the tool-field labels — is in `em`, or it stops lining up when zoomed.
-- **Nothing of the terminal's may paint over the reader.** Its covers — `restoring last view…`,
-  `starting claude…`, `stopped · output preserved` — sit at `z-index: 4` and were drawn straight
-  over the conversation, so a reconnect turned the reader into a terminal screen with a reader
-  toolbar on top. They are gated off while reading (they belong to the terminal, and the reader
-  is reading a file that does not care whether the PTY is up), and the overlay now outranks
-  anything the terminal can raise.
-- The terminal element stays mounted and connected underneath; the reader draws over it. Toggling
-  must not detach tmux — a reattach costs a repaint and can trip the handoff path
-  (`HANDOFF_CODE`, `TerminalPane.tsx`). **Verify** this before shipping: xterm needs layout to
-  fit, so "cover, don't unmount" is the low-risk option, and a refit on return is required.
+- **Reader and terminal are independent surfaces.** The terminal element and
+  WebSocket are absent in reader mode. Reading cannot start, claim or resize a
+  PTY, and terminal connection covers cannot paint over a transcript. Returning
+  to terminal reconnects to the server's canonical history; local terminal
+  selection/scroll position can reset. See [Reader architecture](reader-architecture.md)
+  for the current lifecycle, transport, rendering and recovery contracts.
 - The reader's toolbar is a second header row, not a squeeze into the first — on a phone the
-  first row has no spare width. It carries only what is true of the whole session and said
-  nowhere else: the model, `13 turns`, the token totals abbreviated (`2.2M↓ 654k↑`), `▲▼`, and
-  the search box. The harness is the logo in the row above; the raw message count and the cached
-  tokens are details, so they live in `title` attributes. There is no "expand everything" — each
-  turn folds itself, and search opens what it needs to.
-- **Search has to be followable.** Filtering to matching turns is not finding: the term is
-  highlighted wherever it lands, a turn whose only match is inside its folded work *unfolds it*
-  (and opens the step holding it, body included), the box reports `3/17`, and `▲▼` switch from
-  walking turns to walking hits. With no query, `▲▼` put the next turn's prompt at the top of
-  the reading area — measured against the scroller's rect, not `offsetTop`, which is relative to
-  the nearest positioned ancestor and lands a few rows off.
+  first row has no spare width. It carries the reader's **controls**: `▲▼` and the search box.
+  There is no "expand everything" — each turn folds itself, and search opens what it needs to.
+- **The facts live behind one `i` in the PANE HEADER** (2026-08-16, moved out of the reader's bar 2026-08-18). They were spread
+  across the bar — model chip, `13 turns`, `2.2M↓ 654k↑`, the day it started — which is a lot of
+  standing furniture for things you read once, and on a narrow pane they pushed search to the
+  edge. Tapping the `i` opens a small panel over the conversation (it overlays, so opening it
+  does not move the text under your thumb), and it closes on Escape or a press anywhere else.
+  Nothing was dropped, and two things got **better**: the raw message count and the cached
+  tokens used to be `title` attributes, and so did the full timestamp behind the short date —
+  a phone cannot open any of those. They are plain text in the panel. The panel is also where
+  the session's transcript is offered as a **file** (`/api/trace/:id/download`) and where
+  **Share…** opens the same dialog the sidebar row opens.
+
+  | Was on the bar | Now |
+  |---|---|
+  | model chip | panel — `Model` |
+  | `13 turns` + `of N messages` | panel — `Turns`, with the message total once the summary lands |
+  | token totals `2.2M↓ 654k↑` | panel — `Tokens` |
+  | cached tokens (`title` only) | panel — text beside the totals |
+  | day started, e.g. `14 Aug` | panel — `Started` |
+  | full timestamp (`title` only) | panel — text beside the day |
+  | `▲▼`, search box, hit counter | **unchanged, still on the bar** |
+
+  **The header's own layout (2026-08-18).** Left: the agent's logo, then the
+  working directory (`.ph-path`, which used to sit among the controls on the
+  right — it is not a control). Centre: the state mark immediately left of the
+  name, both centred as one title. Right: attach, search, `i`, close, in one
+  `.ph-btn` contract — 22px of ink, no boxes, 8px apart, and a `::before`
+  overlay that makes each a 28×28 target. The 8px is measured, not chosen: at
+  4px each overlay reached over its neighbour's ink and the middle two measured
+  20px across, under the 24px floor and invisibly so.
+
+  **The reader has no toolbar until search is asked for.** The header's search
+  switch reveals the bar (search box + `▲▼`) and closing it CLEARS the query —
+  a search filters the reader to matching turns, so hiding the box while the
+  filter stands leaves a reader showing three of forty turns with nothing to say
+  why. A phone gets a row of reading height back when it is closed.
+
+  **The paperclip is the header's, in both views.** While the reader is mounted
+  it registers its own picker upward (`onAttachPicker`), so the files still land
+  in the composer's draft; the composer no longer draws a picker of its own. The
+  search switch is reader-only: it searches a transcript, and the terminal view
+  has none.
+
+  It sits in the header rather than the reader's toolbar because the operator
+  asked for it from the terminal view too, and these are facts about the
+  SESSION: a pane showing a terminal has the same model, the same token total
+  and the same start date. One instance, in the pane's identity cluster beside
+  the close button, in the right-hand cluster. The panel is anchored to
+  `.pane-head`, not to the button, and hangs from its right edge, so it opens
+  inside the pane at any width. It carries a `Folder` line: the working
+  directory is hidden on a phone, and this is where the fact stays reachable.
+
+  **The whole-file read is lazy.** A terminal pane has parsed nothing, so the
+  summary is fetched when the panel is first opened and once per session; while
+  it is in flight the panel says `reading the transcript…`, and a session that
+  has not spoken says so instead of showing zeros — with no Download, since the
+  route would answer `no-trace`. When the reader IS mounted it hands its head
+  down (`onHead`), so opening the panel there costs no request at all.
+- **Search has to be followable.** Search indexes loaded transcript text and
+  explicitly states that scope. Matching work unfolds and visible matches are
+  highlighted; next/previous and Enter/Shift+Enter navigate matching *turns*.
+  Only a measured window of results renders. Navigation changes the reader's
+  own scroll offset, never an ancestor through `scrollIntoView`.
 - Vocabulary: a **turn** is one exchange, a **message** is a raw transcript row. Each turn's meta
   line says `turn 6/13`, so the bar counts the same things the reader does.
-- **The terminal must not keep the keyboard** while reader mode covers it. A mounted xterm with focus
-  swallows keystrokes into the agent's TTY, invisibly — and several paths grab focus back (the
-  pane becoming active, the header, the key bar), some of them *after* the mode changes, so the
-  guard belongs at each call rather than at the switch.
+- **The composer is independent of transcript readiness.** Loading, empty,
+  failed and ready readers all accept a draft and first prompt. No hidden xterm
+  is mounted to intercept its keyboard input.
 - **A failed refresh must not blank the conversation.** The poll's error is a strip above the
   turns, not a replacement for them: this mount answers `EIO` now and then, and going stale for
   three seconds beats losing your place mid-read.
@@ -253,6 +325,41 @@ pane with nothing to render (a shell) simply stays a terminal.
   tool call is unusable while a task runs; one that never moves makes you chase it.
 - **The prompt band sticks to the top** while you read a long turn. What you want overhead deep
   in someone's 67-step answer is the question it is answering — not a row of numbers.
+- **An exchange reads in the order it happened.** Usually the answer is the last thing the agent
+  said, so it goes under the work. But an agent that answers and then keeps going — a resumed
+  task, a reply followed by more tool calls — leaves its answer in the *middle* of the turn, and
+  the reader used to lift it out and print it under work it predates. With the steps expanded that
+  reads as nonsense: "I will add the index and re-run" sitting below the edit and the re-run.
+  `answerAt` (exchanges.ts) remembers the index the answer was lifted from, and the work renders as
+  two runs of steps with the answer between them. Grouping runs over each side separately, so two
+  `Read`s either side of the reply stay two rows rather than collapsing into `Read ×2` and erasing
+  the sequence.
+- **One column, and only marks outside it.** The prompt's `❯`, a fold's `▸` and the working line's
+  spinner all hang in the gutter; the summary, the answer, the step rows and the word `working` all
+  start on the same text column. A mark that sits *inside* the column pushes its own row's text
+  sideways, which is what made a turn with no tool calls indent its `13s · 188 tok` by 19px — the
+  row reserved the gutter for a triangle that cannot exist in that state (`.cx-fold.flat` used to
+  pay `padding-left: 1.75em`). The cell is one number, `--cx-mark` on `.cx-meta`, read by both the
+  hang and the glyph's width so they cannot drift apart.
+- **A turn with nothing yet has no meta row.** No steps, no duration, no tokens means no left half,
+  and rendering the row anyway left an empty line above the working line — which read as the widget
+  sitting low, dropped rather than placed. In that state the turn's facts ride on the working line
+  itself, so there is one row instead of one and a half. The working line does not move for this:
+  it is the last row at the text column either way, before and after the first step arrives
+  (checked live, not inferred — the facts move up into the new meta row, the line stays put).
+- **One working line, and it is the last thing in the reader.** It carries what the agent is doing
+  *now* (`working · Bash …`), so it belongs at the end of the rail it continues — putting it above
+  the steps would report the present before the past, which is the same disorder as the bullet
+  above. Only the last exchange shows it, and while an optimistic echo is pending the echo owns
+  the spot: the agent is one process working on one thing, and two `working` lines stacked (the
+  live turn's and the echo's) is what read as the indicator being "sometimes below and above".
+  The card has had this guard since it grew an echo; the reader had not. The cost of choosing the
+  echo's line is that it is the bare one — the live turn's carries `· what it is doing now`, and
+  that detail is gone for the second or two until the transcript catches up and the echo clears.
+- **The turn column holds still.** `turn 9/10` and `turn 10/10` are different widths, so the whole
+  right-hand cluster stepped sideways the moment a session passed nine turns. The number is padded
+  to the width of the total with figure spaces (U+2007) — the row is mono and tabular, so a figure
+  space is exactly a digit — and the clock beside it was already stable.
 - **The prompt band spans the pane.** Reaching into the left gutter but stopping at the text
   column on the right made it read as a card floating over the answer rather than as the head of
   it. Full bleed both sides; the meta row sits tight under the band it belongs to, and one
@@ -267,6 +374,15 @@ pane with nothing to render (a shell) simply stays a terminal.
   `.markdown` turns that into a sideways drag because a scroller in one axis makes the other axis
   a scroller too. `overflow-x: hidden` on a parent is not the fix: it hides the symptom and clips
   content people need to read.
+- **The conversation ends the way it flows.** The scroller's bottom padding is `--cx-tail`, and it
+  is the same 12px that separates two paragraphs — so the last line clears the composer's border by
+  a paragraph's worth of space and no more. It used to be 30px, a number from when the reader's
+  bottom edge was the pane's rather than a border 30px away, which put 32px under the last line of
+  every conversation and read as one blank line too many. Nothing else contributes: the last
+  rendered block already gives up its margin (`.cx-md > :last-child`), and the tail holds no
+  elements — the empty-element shape of this bug (a spacer, a blank meta half, a working line with
+  nothing to say) was checked for and is not what this was. The phone narrows `--cx-gutter` and
+  restates no padding, so the two cannot drift apart.
 - **The reader fills the pane.** A fixed reading column left a gutter of nothing on each
   side while the prompt band still spanned the full width, so the two disagreed about where the
   conversation began. The pane is the measure: narrow the pane and the conversation narrows.
@@ -313,6 +429,28 @@ pane with nothing to render (a shell) simply stays a terminal.
   history recall, a slash-command menu — and duplicated markup is how one surface quietly gets
   them and the other does not. `onPasteFiles` and `above` are the seam an attachment strip plugs
   into, so it arrives in both places at once or in neither.
+- **A prompt typed mid-turn is still a prompt.** Claude Code does not write one as a `user`
+  message: while the agent is working it records `{"type":"queue-operation","operation":"enqueue",
+  "content":"…"}`, and the text exists nowhere else until the queue is consumed. `queue-operation`
+  appeared nowhere in this repo, so every such prompt was invisible in the reader — permanently,
+  not late. Two of the operator's own prompts were lost that way.
+
+  The two consumption paths need opposite treatment, and they are distinguishable from the records
+  alone (which matters, because a window can hold the enqueue and not what follows it): `dequeue`
+  carries no text and pops the oldest queued prompt — the prompt arrives as an ordinary message
+  right after, so the queued copy stands down; `remove` names the text it takes out, and nothing
+  else will ever carry it, so that copy is what the reader shows. In the reference transcript that
+  split is 86 dequeues to 5 removes, and the 5 are exactly the prompts with no message anywhere.
+  A prompt still in the queue when the window ends is left to its message for the same reason.
+
+  It is shown where it was typed — inside the turn it interrupted, which means it opens a new
+  exchange there and the interrupted turn keeps only the work it had done so far. That is the
+  honest order: the operator typed it then, and the answer that follows usually addresses it. And
+  the band says **queued**, because the records cannot tell a prompt that was consumed from one
+  that was cancelled — so the reader states what it knows rather than implying the agent replied.
+  Harness noise is filtered exactly as it is for ordinary user text: one of those five removes is
+  an enqueued `<task-notification>`, and showing that as something the operator typed would be a
+  new bug in place of the old one.
 - **A half-typed reply is kept** (`drafts.ts`, `useDraft.ts`). Reported from a phone: start typing
   an answer, switch apps, come back, and the text is gone. The pane is not what loses it — App.tsx
   keeps a dozen panes warm, so an in-app trip to the session list already survived — the
@@ -361,22 +499,32 @@ pane with nothing to render (a shell) simply stays a terminal.
 
 ### 3.4 What leaves the sidebar
 
-| Today | Tomorrow |
+| Was on the row | Where it is now |
 |---|---|
-| `Read this session's trace` on every agent row (`Sidebar.tsx:245`) | bottom bar → **reader** |
-| `Share this session` on every agent row (`Sidebar.tsx:246`) | pane header → **share** |
-| A `trace` **session row per read** (`App.tsx:openTrace`) | **gone** — no duplicate rows |
-| Trace row's `Share` (`Sidebar.tsx:237`) | trace pane header (imported traces keep a pane) |
-| Trace row's `Handover` (`Sidebar.tsx:238`) | reader / trace-pane footer |
-| Quick-add **Trace** = open a shared dataset (`Sidebar.tsx:482`) | **stays** |
+| `Read this session's trace` on every agent row | **reader mode** — a session's own history is a mode of its pane (done, #86) |
+| `Share this session` on every agent row | **pane header → `i` → Share** (done, #86) |
+| A `trace` **session row per read** (`App.tsx:openTrace`) | **gone**, with `openTrace` itself — no duplicate rows (done, #86) |
+| Trace row's `Share` | **trace pane header** — imported traces keep a pane (done, #86) |
+| Trace row's `Handover` | **trace pane header**, beside Share. Not the reader's `i`: that panel is `TraceInfo`, which a trace pane does not use (done, #86) |
+| Quick-add **Trace** = open a shared dataset | **Settings → Open a shared trace** (2026-08-16) |
+| `Start` | the row's own click already opened the pane (done, #86) |
+| `Stop` | **nowhere, deliberately.** An idle CLI costs nothing; a runaway one is interrupted in its pane, where Ctrl-C carries the CLI's own semantics (done, #86) |
+| `Delete` | **the archived view only** — archive a session, then remove it; the server enforces it (done, #86) |
 
-The last row is deliberate: an **imported** trace has no session behind it, so it is a genuine
-object that needs a row of its own. Same for a transcript opened from the Files pane
-(`getFileTracePage`). What disappears is the *local* trace pane — a session's own history is
-now a mode of its own pane, not a second entity.
+The last row was `stays` until the operator asked for the sidebar's trace widget to go
+(improv.md, iteration two). It moved rather than went away, because it is the one trace
+affordance nothing else replaces: the Files pane's trace viewer reads files **in the
+workspace**, and this pulls a dataset **off the Hub**. An imported trace still gets a pane and
+a row of its own once it is here — what left the sidebar is the standing *form* for typing a
+dataset id, which is furniture for something you do when a link arrives.
 
-Agent rows keep stop/play and delete. Three glyphs less per row, which is most visible exactly
-where the sidebar is worst: on a phone.
+What disappears is the *local* trace pane — a session's own history is now a mode of its own
+pane, not a second entity.
+
+An agent row is now **one** control: `×`, which archives — it stops the agent and files it
+away, and it is the only route to deleting one. A remote agent keeps its reconnect/disconnect
+pair beside it, because that is a line to another machine rather than a local process. Up to
+four glyphs less per row, which is most visible exactly where the sidebar is worst: on a phone.
 
 ---
 
@@ -467,7 +615,7 @@ the block model already supports.
 - One component to style, so "the overview is more pleasant" becomes true everywhere at once.
 - The card answers "what did it actually do?" without leaving the Overview.
 - A session's history is reachable from the session, not from a second sidebar row.
-- Three glyphs less per sidebar row, and a full-screen card on a phone.
+- A sidebar row down to one control, and a full-screen card on a phone.
 - Removed code: the `turnsLog` stepper in the card, `openTrace`'s pane-creation path, two
   sidebar buttons, `.tv-badge` and the terminal-styled viewer chrome.
 
@@ -550,11 +698,13 @@ Built (this branch):
 5. Tests for the one piece of judgement in the renderer — what counts as the answer, and what
    stays in the work (`web/test/exchanges.test.mjs`, `npm test` in `web/`).
 
+7. The sidebar lost its trace buttons and `openTrace`, and the row came down to one control
+   (#86, §3.4). Share moved into the pane header's `i` with #84.
+
 Not yet, in the order I would do it:
 
 6. `head.prompts[]` (§5) — index, first line and timestamp per prompt, so a surface can draw the
    skeleton and label "show previous turn" before fetching the page that holds it.
-7. The sidebar loses its trace buttons and `openTrace`; share moves into the pane header (§3.4).
 8. Windowing by exchange in reader mode: a collapsed turn is 2–3 rows, so the DOM stays small,
    `head.prompts[]` gives the skeleton up front, and only an opened turn needs its page. The
    measured-height machinery in `TraceView` is reused as-is — what changes is what a "row" means.

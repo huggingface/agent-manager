@@ -8,7 +8,8 @@ own Agent Manager and keep working.
 > **Scope decision, 2026-07-29 — no in-app notification.** The banner, accept/decline, and
 > the sender allowlist described in §5 and §9 are **not built and not planned for now**. The
 > flow is simpler: share the session, send the person the dataset URL, and they open it with
-> the **Trace** button in their own Space. That path is built and tested end to end, works
+> **Settings → Open a shared trace** in their own Space (the sidebar's Trace widget until
+> 2026-08-16). That path is built and tested end to end, works
 > for private and gated repos (the viewer is blocked there, an authenticated download is
 > not), and needs no polling, no consent UI and no second repo.
 >
@@ -37,6 +38,7 @@ own Agent Manager and keep working.
 | Viewer | **Our own trace panel** (`cli: 'trace'`), visually inspired by the Hub viewer, built on `traces.js`. *Reverses an earlier decision — see §5.* |
 | Cross-harness | **Briefing handoff**, not transcript translation, wrapped in a data envelope that is never auto-fed to an agent. |
 | Recipient | **A teammate with their own Agent Manager Space.** |
+| **Getting the file itself** | `GET /api/trace/:id/download` (2026-08-16) — the transcript, as a file, for an archive or an issue report. Offered in the reader's `i` panel and in the share dialog. **No redaction gate**: it returns the operator's own file to the operator over their own session, and publishes nothing. Sharing is what needs the gate. |
 
 The access-control decision collapses what used to be two flows into one: a share **always**
 produces a payload dataset and the only difference between public and private is that

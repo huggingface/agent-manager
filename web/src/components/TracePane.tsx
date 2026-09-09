@@ -21,7 +21,7 @@ import type { TraceBlock, TraceTurn } from '../api';
 import { useTraceWindows, type TraceHeadInfo, type TraceSource } from '../lib/traceWindows';
 import { renderMarkdown } from '../lib/markdown';
 import Logo from './Logo';
-import { CloseGlyph } from './icons';
+import { CloseGlyph, ShareGlyph, HandoverGlyph } from './icons';
 
 const ROW_EST = 44;        // unmeasured row height, collapsed
 const OVERSCAN_PX = 600;
@@ -312,7 +312,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', live, onHead, o
     setRange({ start: 0, end: 40 });
   }, []);
 
-  const { turns, head, error, version: tick, atStart, blocked, loadOlder } =
+  const { turns, head, error, phase, reload, version: tick, atStart, blocked, loadOlder } =
     useTraceWindows(src, srcKey, { onPrepend, onAppend, onReset, live });
 
   // Prefix sums over measured (or estimated) row heights. n is bounded by what
@@ -516,10 +516,10 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', live, onHead, o
         onTouchStart={() => { wanted.current = null; }}
         style={{ fontSize: `${(13 * zoom) / 100}px` }}
       >
-        {error && <div className="tv-msg">{error}</div>}
-        {!error && !head && <div className="tv-msg">reading…</div>}
+        {error && <div className="tv-msg" role="status">{error} <button onClick={() => void reload()}>Retry</button></div>}
+        {!error && !head && <div className="tv-msg">{phase === 'empty' ? 'No transcript yet.' : 'reading…'}</div>}
 
-        {!error && head && matches && (
+        {head && matches && (
           <div className="tv-matches">
             <div className="tv-msg">
               {matches.length} match{matches.length === 1 ? '' : 'es'} in the {fmtNum(n)} turns
@@ -529,7 +529,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', live, onHead, o
           </div>
         )}
 
-        {!error && head && !matches && (
+        {head && !matches && (
           <>
             {/* Fixed height whether it is loading, done, or at the beginning:
                 this line sits above every offset in the list, so changing its
@@ -569,7 +569,7 @@ export function TraceView({ src, srcKey, zoom = 100, query = '', live, onHead, o
 }
 
 export default function TracePane({
-  session, focused, zoom = 100, dragId, sourceLive, onDragActive, onFocus, onClose,
+  session, focused, zoom = 100, dragId, sourceLive, onDragActive, onFocus, onShare, onHandover, onClose,
 }: {
   session: Session;
   focused?: boolean;
@@ -579,6 +579,12 @@ export default function TracePane({
   dragId?: string;
   onDragActive?: (dragging: boolean) => void;
   onFocus?: () => void;
+  /** Publish this trace, and continue from it in a new agent. Both used to be
+   *  buttons on the sidebar row; they belong to the trace, so they live on the
+   *  pane that shows it. (The reader's `i` panel is ConversationView's, and a
+   *  trace pane does not use ConversationView.) */
+  onShare?: () => void;
+  onHandover?: () => void;
   onClose: () => void;
 }) {
   const [head, setHead] = useState<TraceHeadInfo | null>(null);
@@ -629,10 +635,18 @@ export default function TracePane({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
+        {onShare && (
+          <button className="mini-btn" title="Share this trace"
+            onClick={(e) => { e.stopPropagation(); onShare(); }}><ShareGlyph /></button>
+        )}
+        {onHandover && (
+          <button className="mini-btn" title="Continue from this trace in a new agent"
+            onClick={(e) => { e.stopPropagation(); onHandover(); }}><HandoverGlyph /></button>
+        )}
         <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
       </div>
 
-      <TraceView src={src} srcKey={session.id} zoom={zoom} query={query} live={sourceLive} onHead={setHead} onNav={onNav} />
+      <TraceView src={src} srcKey={`session:${session.id}`} zoom={zoom} query={query} live={sourceLive} onHead={setHead} onNav={onNav} />
     </div>
   );
 }

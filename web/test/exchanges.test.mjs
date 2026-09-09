@@ -161,6 +161,59 @@ const kinds = (steps) => steps.map((s) => (s.kind === 'tools' ? `${s.name}×${s.
   assert.equal(stepsOf(x.steps)[0].details[0], 'server/src/runner.js');
 }
 
+// ------------------------------------------------- answered, then kept going
+// The agent replies and goes back to work. The reply is still the answer — but
+// it is NOT the last thing that happened, and printing it under the tools that
+// ran afterwards tells the story in the wrong order. `answerAt` is where it
+// belongs; the steps either side of it are the work before and after.
+{
+  const [x] = splitExchanges([
+    user('why is the nightly job slow, and can you fix it?'),
+    agent([call('Bash', { command: 'explain analyze …' }), result('Seq Scan on usage')]),
+    agent([text('Found it — no index behind the group-by. I will add one and re-run.')], 'final'),
+    agent([call('Edit', { file_path: 'migrations/014_usage_index.sql' }), result('created')]),
+    agent([call('Bash', { command: 'node scripts/nightly.mjs' }), result('ok · 12.4s')]),
+  ]);
+  assert.match(said(x.answer), /^Found it/, 'the reply is still the answer');
+  assert.equal(x.answerAt, 1, 'and it is remembered where it was said');
+  assert.deepEqual(kinds(stepsOf(x.steps.slice(0, x.answerAt))), ['Bash×1'],
+    'the work it followed stays above it');
+  assert.deepEqual(kinds(stepsOf(x.steps.slice(x.answerAt))), ['Edit×1', 'Bash×1'],
+    'and the work it promised stays below it');
+}
+
+// The other end of the same rule: an agent that answers FIRST and then does the
+// work — "I will add one now", then the edit and the run, and it never speaks
+// again. markFinalTurns marks that text at index 0, so answerAt is 0 and every
+// step belongs below it. Zero is the value a falsy check silently loses: swap
+// `at == null` for `!at` in Exchange.tsx and this turn renders its answer under
+// both tool rows again, which is the bug this whole change exists to remove.
+{
+  const [x] = splitExchanges([
+    user('add an index for the nightly job'),
+    agent([text('I will add one now.')], 'final'),
+    agent([call('Edit', { file_path: 'migrations/014_usage_index.sql' }), result('created')]),
+    agent([call('Bash', { command: 'node scripts/nightly.mjs' }), result('ok · 12.4s')]),
+  ]);
+  assert.match(said(x.answer), /^I will add one now/);
+  assert.equal(x.answerAt, 0, 'answered before doing anything: index zero, not undefined');
+  assert.deepEqual(kinds(stepsOf(x.steps.slice(0, x.answerAt))), [], 'nothing above it');
+  assert.deepEqual(kinds(stepsOf(x.steps.slice(x.answerAt))), ['Edit×1', 'Bash×1'],
+    'and all of the work below it');
+}
+
+// An answer that really is last says so by leaving answerAt unset, which is
+// what keeps the ordinary turn one plain block of steps.
+{
+  const [x] = splitExchanges([
+    user('what changed in the deploy config?'),
+    agent([call('Read', { file_path: 'deploy.yaml' }), result('healthz: /api/health')]),
+    agent([text('Only the health-check path.')], 'final'),
+  ]);
+  assert.match(said(x.answer), /^Only the health-check/);
+  assert.equal(x.answerAt, undefined, 'nothing to remember: it is simply last');
+}
+
 // ------------------------------------------------------------- formatting
 assert.equal(fmtTok(954), '954');
 assert.equal(fmtTok(21_000), '21.0k');

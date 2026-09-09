@@ -325,6 +325,15 @@ export function resolveAttachments(sessionId, attachmentIds) {
   return attachmentIds.map((id) => resolveAttachment(sessionId, id));
 }
 
+/** Remove one unsent attachment without disturbing files the session still uses. */
+export async function removeAttachment(sessionId, attachmentId) {
+  return withUploadLock(sessionId, async () => {
+    const attachment = resolveAttachment(sessionId, attachmentId);
+    await fs.promises.unlink(attachment.path);
+    return attachment;
+  });
+}
+
 export async function removeSessionAttachments(sessionId) {
   uploadWindows.delete(sessionId);
   await withUploadLock(sessionId, () => fs.promises.rm(sessionDir(sessionId), { recursive: true, force: true }));

@@ -20,7 +20,23 @@ const middleware = operationMiddleware({
   resolveOrigin: (raw) => raw === 'operator'
     ? { id: 'operator', type: 'operator', name: 'test operator' }
     : raw === 'agent-1' ? { id: raw, type: 'agent', name: 'agent one', cli: 'codex' } : null,
+  // Stands in for the manager's store: a session exists until something deletes
+  // it. A resolver that always answers would hide the case this has to cover.
+  resolveTarget: (req) => {
+    const id = (req.path.match(/^\/api\/(?:agents|sessions)\/([^/]+)/) || [])[1];
+    if (!id) return null;
+    const known = sessions.get(id);
+    return known ? { id, ...known } : { id };
+  },
 });
+
+// The fake store the resolver reads. Handlers below delete from it mid-request,
+// which is what the real delete route does before it answers.
+const sessions = new Map([
+  ['s-target', { name: 'name of s-target', cli: 'claude' }],
+  ['s-42', { name: 'name of s-42', cli: 'claude' }],
+  ['s-doomed', { name: 'deleted-agent', cli: 'codex' }],
+]);
 
 class Response extends EventEmitter {
   statusCode = 200;
@@ -65,10 +81,148 @@ try {
   check('credentials are redacted', rows[1]?.request?.token === '[redacted]');
   check('session creation with a prompt records presence and size',
     rows[2]?.request?.prompt?.present === true && rows[2]?.request?.prompt?.chars === 27);
-  check('prompt content is not copied into the audit log', rows[2]?.request?.prompt?.sha256 && !JSON.stringify(rows[2]).includes('flaky test'));
+  // This assertion used to read "prompt content is not copied into the audit
+  // log". The operator asked for the opposite — a log that can say who asked
+  // whom but never what they asked answers half the question — so the rule is
+  // now: the prompt is kept, and everything that was never a prompt is not.
+  check('a prompt is kept as text, on the operator\'s instruction',
+    rows[2]?.request?.prompt?.text === 'Investigate the flaky test.');
+  check('with its checksum beside it, so a repeated prompt is still spottable',
+    rows[2]?.request?.prompt?.sha256?.length === 64);
   check('plain-text agent prompts are summarized too', rows[3]?.request?.present === true && rows[3]?.request?.chars === 26);
   check('origin is separate from the recorded query', rows[3]?.origin?.id === 'agent-1' && !('from' in (rows[3]?.query || {})));
   check('query parameters needed to replay the operation remain', rows[3]?.query?.cli === 'codex');
+
+  // The one read this log cares about. A `wait` is how one agent watches
+  // another, so it is the only GET recorded — and only when it RESOLVED, since
+  // a wait that timed out is a polling artefact, not an event.
+  console.log('\nthe wait that came back');
+  const before = readOperations(50).length;
+  invoke({ method: 'GET', path: '/api/agents/s-target/wait', query: { from: 'agent-1' } },
+    (_req, res) => res.json({ id: 's-target', state: 'waiting', matched: true, waited: 143 }));
+  invoke({ method: 'GET', path: '/api/agents/s-target/wait', query: { from: 'agent-1' } },
+    (_req, res) => res.json({ id: 's-target', state: 'working', matched: false, timedOut: true }));
+  invoke({ method: 'GET', path: '/api/agents/s-target/wait' },
+    (_req, res) => res.json({ id: 's-target', state: 'idle', matched: true, waited: 4 }));
+  let tailed = false;
+  invoke({ method: 'GET', path: '/api/agents/s-target/tail' }, (_req, res) => { tailed = true; res.json({ text: '' }); });
+  let rostered = false;
+  invoke({ method: 'GET', path: '/api/agents' }, (_req, res) => { rostered = true; res.json({ agents: [] }); });
+
+  const waits = readOperations(50).filter((r) => r.method === 'GET');
+  check('a resolved wait is recorded', waits.length === 2, `${waits.length} GET rows`);
+  check('a wait that only timed out is not', !waits.some((r) => r.result?.matched === false));
+  check('tail is never logged — every open pane polls it', tailed && !waits.some((r) => r.path.endsWith('/tail')));
+  check('nor is the roster, or any other read', rostered && readOperations(50).length === before + 2);
+
+  // `wait` is documented read-only and every watch loop running today calls it
+  // without ?from=. Refusing those would break them the moment this ships.
+  const anonymous = waits.find((r) => !r.origin);
+  check('an unattributed wait is accepted, not 400ed', !!anonymous);
+  check('and still records who it was waiting ON', anonymous?.target?.id === 's-target');
+  const attributed = waits.find((r) => r.origin?.id === 'agent-1');
+  check('an attributed wait keeps both ends', attributed?.origin?.id === 'agent-1' && attributed?.target?.name === 'name of s-target');
+  check('a wait is worth its duration, not just its timestamp', typeof attributed?.durationMs === 'number');
+
+  console.log('\nwho it was done to');
+  invoke({ path: '/api/sessions/s-42/input', query: { from: 'agent-1' }, body: { text: 'go' } },
+    (_req, res) => res.json({ ok: true }));
+  invoke({ path: '/api/sessions/ghost-9/input', query: { from: 'agent-1' }, body: { text: 'go' } },
+    (_req, res) => res.status(404).json({ error: 'not found' }));
+  const [ghost, named] = readOperations(2);
+  check('the target name is resolved at write time, not read time', named?.target?.name === 'name of s-42');
+  check('a target that no longer exists still records its id', ghost?.target?.id === 'ghost-9' && !ghost?.target?.name);
+
+  console.log('\nthe body is kept whole, whatever route it came in on');
+  invoke({ path: '/api/agents/s-target/prompt', query: { from: 'agent-1' }, body: 'Investigate the flaky test in web/.' },
+    (_req, res) => res.json({ ok: true }));
+  const [prompted] = readOperations(1);
+  check('a prompt is stored as text', prompted?.request?.text === 'Investigate the flaky test in web/.');
+  check('and still carries its checksum, which is how a repeat is spotted',
+    prompted?.request?.sha256?.length === 64 && prompted?.request?.chars === 35,
+    `chars ${prompted?.request?.chars}`);
+  invoke({ path: '/api/sessions/s-42/input', query: { from: 'agent-1' }, body: { text: 'run the tests' } },
+    (_req, res) => res.json({ ok: true }));
+  check('a prompt nested in a field is kept too', readOperations(1)[0]?.request?.text?.text === 'run the tests');
+  // This used to assert the opposite — that only prompt-carrying routes kept
+  // their text. The operator asked for the allowlist gone: "just store all the
+  // full api calls. why this arbitrary compression."
+  invoke({ method: 'PUT', path: '/api/files/f-1/write', query: { from: 'agent-1' }, body: 'x'.repeat(4000) },
+    (_req, res) => res.json({ ok: true }));
+  const [written] = readOperations(1);
+  check('a file write body is kept too — no route allowlist any more',
+    written?.request?.text === 'x'.repeat(4000) && written?.request?.chars === 4000);
+  // …and this asserted a 64 KB cut. There is no cap now.
+  invoke({ path: '/api/agents/s-target/prompt', query: { from: 'agent-1' }, body: 'y'.repeat(70 * 1024) },
+    (_req, res) => res.json({ ok: true }));
+  const [huge] = readOperations(1);
+  check('nothing is truncated, however big',
+    huge?.request?.text?.length === 70 * 1024 && huge?.request?.truncated === undefined,
+    `kept ${huge?.request?.text?.length} of ${70 * 1024}`);
+  check('with the checksum of the whole thing beside it',
+    huge?.request?.sha256?.length === 64 && huge?.request?.chars === 70 * 1024);
+  invoke({ path: '/api/sessions', query: { from: 'agent-1' }, body: { cli: 'claude', prompt: 'seed', token: 'hunter2' } },
+    (_req, res) => res.status(201).json({ id: 's-new' }));
+  const [seeded] = readOperations(1);
+  check('a seed prompt is kept', seeded?.request?.prompt?.text === 'seed');
+  check('and a credential beside it is still redacted', seeded?.request?.token === '[redacted]');
+
+  // One eight-megabyte line must not hide everything behind it: the tail window
+  // grows until it holds whole records rather than half of one.
+  console.log('\nreading past an enormous entry');
+  invoke({ method: 'PUT', path: '/api/files/f-2/write', query: { from: 'agent-1' }, body: 'z'.repeat(6 * 1024 * 1024) },
+    (_req, res) => res.json({ ok: true }));
+  invoke({ path: '/api/agents/s-target/prompt', query: { from: 'agent-1' }, body: 'after the big one' },
+    (_req, res) => res.json({ ok: true }));
+  const past = readOperations(20);
+  check('the entries behind it are still readable', past.length >= 5, `${past.length} rows`);
+  check('including the giant one itself',
+    past.some((r) => r.request?.chars === 6 * 1024 * 1024));
+  check('and the one after it', past[0]?.request?.text === 'after the big one');
+
+  console.log('\ndeleting the thing being audited');
+  // The real route removes the session from the store and only then answers, so
+  // a target resolved from the response handler finds nothing left. This is the
+  // one operation where the roster can never fill the name back in afterwards.
+  invoke({ method: 'DELETE', path: '/api/sessions/s-doomed', query: { from: 'operator' } },
+    (_req, res) => { sessions.delete('s-doomed'); res.json({ ok: true }); });
+  const [deleted] = readOperations(1);
+  check('a delete keeps the name of what it deleted',
+    deleted?.target?.name === 'deleted-agent' && deleted?.target?.cli === 'codex',
+    JSON.stringify(deleted?.target));
+  check('and the session really was gone before the response', !sessions.has('s-doomed'));
+  invoke({ path: '/api/sessions/never-existed/input', query: { from: 'operator' }, body: { text: 'x' } },
+    (_req, res) => res.json({ ok: true }));
+  const [noSuchTarget] = readOperations(1);
+  check('a genuinely unknown target is still recorded as a bare id',
+    noSuchTarget?.target?.id === 'never-existed' && !noSuchTarget?.target?.name);
+
+  console.log('\nchronology, when a wait outlives the calls it overlaps');
+  // A record carries the time the request STARTED but is written when it
+  // finishes. A wait blocks for up to 300s, so it is appended after calls that
+  // began later — and `readOperations` used to just reverse the file.
+  const slowWait = { method: 'GET', path: '/api/agents/s-target/wait', query: { from: 'agent-1' }, headers: {}, body: undefined };
+  const waitRes = new Response();
+  middleware(slowWait, waitRes, () => {});                   // starts first…
+  await new Promise((r) => setTimeout(r, 25));
+  invoke({ path: '/api/sessions/s-42/input', query: { from: 'agent-1' }, body: { text: 'meanwhile' } },
+    (_req, res) => res.json({ ok: true }));                  // …a later call finishes first…
+  await new Promise((r) => setTimeout(r, 25));
+  waitRes.json({ id: 's-target', state: 'waiting', matched: true, waited: 0 });  // …and the wait resolves last
+
+  const feed = readOperations(50);
+  const iWait = feed.findIndex((r) => r.method === 'GET' && r.result?.waited === 0);
+  const iMeanwhile = feed.findIndex((r) => r.request?.text?.chars === 9);
+  check('the wait was appended last but is listed after the call it overlapped',
+    iWait > iMeanwhile && iMeanwhile >= 0, `wait at ${iWait}, overlapping call at ${iMeanwhile}`);
+  check('so every row is in order, newest first',
+    feed.every((r, i) => i === 0 || feed[i - 1].at >= r.at));
+  check('and the wait still carries how long it blocked',
+    feed[iWait]?.durationMs >= 40, `${feed[iWait]?.durationMs}ms`);
+
+  console.log('\nand the guard that has to keep holding');
+  const stillRefused = invoke({ path: '/api/groups', body: { name: 'nope' } }, () => {});
+  check('a mutating call with no origin is still refused', stillRefused.statusCode === 400);
 } finally {
   fs.rmSync(TMP, { recursive: true, force: true });
 }

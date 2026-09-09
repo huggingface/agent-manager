@@ -1,5 +1,12 @@
 export type SessionState = 'working' | 'waiting' | 'idle' | 'stopped';
 
+export interface InputRequired {
+  kind: 'permission' | 'question' | 'confirmation';
+  cli: string;
+  confidence: 'high';
+  detectedAt: string;
+}
+
 export interface Session {
   id: string;
   name: string;
@@ -11,6 +18,12 @@ export interface Session {
   everStarted: boolean;
   running: boolean;
   state: SessionState;
+  // Set when the operator archived this session — a stored decision, not the
+  // idle window's verdict, which is computed in App.tsx and expires when the
+  // setting changes. Only a session with this can be deleted (server-enforced).
+  archivedAt?: string;
+  /** Native CLI event says an interactive TUI dialog is currently pending. */
+  inputRequired?: InputRequired | null;
   // Only on `cli: 'trace'` panes: what the read-only trace view is pointed at.
   // A regular agent session needs no such record — it reads its own transcript.
   traceSource?: { kind: 'session' | 'bundle'; ref: string } | null;
@@ -68,6 +81,12 @@ export const isPassive = (cli: string) => PASSIVE_CLIS.includes(cli);
 // an agent (card, digest, light) but has no process here, so it is NOT passive
 // and NOT a terminal — see docs/remote-agents.md.
 export const isRemote = (cli: string) => cli === 'remote';
+
+// Harnesses whose traces the Hub renders natively, so a share ships the file
+// verbatim (mirrors SHAREABLE_CLIS in server/src/share.js). The others need
+// converters first, and a button that always fails is worse than no button.
+export const SHAREABLE_CLIS = ['claude', 'codex', 'hermes', 'opencode', 'openclaw'];
+export const isShareable = (cli: string) => SHAREABLE_CLIS.includes(cli);
 
 // The three states mean something different when the agent is elsewhere: there
 // is no process to be "stopped", only a connection that is or isn't there.

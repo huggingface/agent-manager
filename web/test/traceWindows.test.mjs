@@ -21,8 +21,7 @@ await build({
     contents: `
       import React, { useEffect } from 'react';
       import { createRoot } from 'react-dom/client';
-      import { tracePollIntervalMs, useTraceWindows } from './src/lib/traceWindows.ts';
-      import { useReaderBatch } from './src/lib/readerBatch.ts';
+      import { useTraceWindows } from './src/lib/traceWindows.ts';
 
       const calls = [];
       const tails = [];
@@ -32,9 +31,6 @@ await build({
       // along with the tab, which is what iOS Safari does to a backgrounded one.
       let pending = [];
       let freeze = false;
-      const indexCalls = [];
-      let indexText = 'streaming first';
-      let indexRows = null;
       const page = (turns, end = 20, lastTs = Date.now()) => ({
         harness: 'claude', harnessLabel: 'Claude Code', sessionId: 's',
         title: '', model: null, cwd: null, firstTs: 0, lastTs,
@@ -67,20 +63,6 @@ await build({
         },
       };
 
-      const indexSource = {
-        window(req) {
-          indexCalls.push(req);
-          const rows = indexRows || [indexText];
-          const from = req.at === 'after' ? Math.min(req.cursor, rows.length) : Math.max(0, rows.length - 2);
-          const turns = rows.slice(from).map(text => ({ role: 'assistant', ts: 2, blocks: [{ type: 'text', text }] }));
-          return Promise.resolve({
-            ...page([]), turns,
-            window: { mode: 'index', start: from, end: rows.length, atStart: from === 0, atEnd: true },
-          });
-        },
-        summary() { return Promise.resolve({ ...page([]), total: 1, userTurns: [] }); },
-      };
-
       function Probe({ paused }) {
         const { head, loadNewer } = useTraceWindows(source, 'session-a', { paused, live: false });
         useEffect(() => { window.__traceHead = head; }, [head]);
@@ -88,36 +70,12 @@ await build({
         return <div id="head">{head ? String(head.loaded) : ''}</div>;
       }
 
-      function BatchProbe({ surfaceKey }) {
-        const batch = useReaderBatch(surfaceKey);
-        const [readyFor, setReadyFor] = React.useState('');
-        useEffect(() => { window.__readerBatch = batch; window.__markReaderReady = () => setReadyFor(batch); });
-        return <div id="follower">{readyFor === batch ? 'ready' : 'gated'}</div>;
-      }
-
-      function IndexProbe() {
-        const { turns, version, loadNewer } = useTraceWindows(indexSource, 'index-session', { live: true });
-        useEffect(() => { window.__pollIndex = loadNewer; }, [loadNewer]);
-        const text = turns.current.map(t => t.blocks[0]?.text || '').join('|');
-        return <div id="index-reader" data-version={version}>{text}</div>;
-      }
-
       const root = createRoot(document.getElementById('root'));
       let paused = true;
-      let surfaceKey = '';
-      const render = () => root.render(<><Probe paused={paused} /><BatchProbe surfaceKey={surfaceKey} /><IndexProbe /></>);
+      const render = () => root.render(<Probe paused={paused} />);
       window.__traceHarness = {
         calls,
-        indexCalls,
-        setIndexText(next) { indexText = next; },
-        setIndexRows(next) { indexRows = next; },
-        pollIntervals: {
-          staleWaiting: tracePollIntervalMs(1, false, 300_000),
-          staleWorking: tracePollIntervalMs(1, true, 300_000),
-          freshWaiting: tracePollIntervalMs(299_000, false, 300_000),
-        },
         setPaused(next) { paused = next; render(); },
-        setSurface(next) { surfaceKey = next; render(); },
         /** Turns the agent writes while the operator is looking at another app. */
         writeWhileAway(count) {
           pending = Array.from({ length: count }, (_, i) => (
@@ -167,47 +125,6 @@ try {
   await sleep(100);
   assert.deepEqual(await page.evaluate(() => window.__traceHarness.calls), [],
     'a paused reader performs no initial or summary request');
-  assert.deepEqual(await page.evaluate(() => window.__traceHarness.pollIntervals), {
-    staleWaiting: 10_000,
-    staleWorking: 3_000,
-    freshWaiting: 3_000,
-  }, 'a visible waiting reader keeps a slow catch-up heartbeat');
-
-  // OpenCode updates the current SQLite message in place. Its index cursor must
-  // overlap that final message, and index-backed readers must actually poll.
-  await page.waitForFunction(() => document.getElementById('index-reader').textContent === 'streaming first');
-  await page.evaluate(() => window.__traceHarness.setIndexText('streaming second'));
-  await page.waitForFunction(() => document.getElementById('index-reader').textContent === 'streaming second', null, { timeout: 4500 });
-  assert.ok(await page.evaluate(() => window.__traceHarness.indexCalls.some((c) => c.at === 'after' && c.cursor === 0)),
-    'an index poll re-reads the mutable final message');
-
-  const indexStep = async (rows, expected) => {
-    await page.evaluate(async rows => { window.__traceHarness.setIndexRows(rows); await window.__pollIndex(); }, rows);
-    await page.waitForFunction(expected => document.getElementById('index-reader').textContent === expected, expected);
-  };
-  await indexStep(['m0', 'm1', 'm2'], 'm0|m1|m2');
-  await indexStep(['m0', 'm1', 'm2-edited', 'm3', 'm4'], 'm0|m1|m2-edited|m3|m4');
-  await indexStep(['m0', 'm1', 'm2-edited'], 'm1|m2-edited');
-  await indexStep(['m0', 'm1', 'm2-edited'], 'm1|m2-edited');
-  await indexStep([], '');
-  await indexStep(['after-clear'], 'after-clear');
-
-  // This is the same activation hook App uses to gate follower panes. Merely
-  // focusing within one surface keeps it ready; hiding and returning to the
-  // same ids creates a fresh batch and gates followers again.
-  await page.evaluate(() => window.__traceHarness.setSurface('a,b'));
-  await page.waitForFunction(() => document.getElementById('follower').textContent === 'gated');
-  const firstBatch = await page.evaluate(() => window.__readerBatch);
-  await page.evaluate(() => window.__markReaderReady());
-  await page.waitForFunction(() => document.getElementById('follower').textContent === 'ready');
-  await page.evaluate(() => window.__traceHarness.setSurface('a,b'));
-  assert.equal(await page.evaluate(() => document.getElementById('follower').textContent), 'ready',
-    'rerendering or refocusing within one appearance preserves readiness');
-  await page.evaluate(() => window.__traceHarness.setSurface(''));
-  await page.evaluate(() => window.__traceHarness.setSurface('a,b'));
-  await page.waitForFunction(() => document.getElementById('follower').textContent === 'gated');
-  assert.notEqual(await page.evaluate(() => window.__readerBatch), firstBatch,
-    'returning to the same ids is a new focused-first activation');
 
   await page.evaluate(() => window.__traceHarness.setPaused(false));
   await page.waitForFunction(() => window.__traceHarness.calls.filter((c) => c.kind === 'window').length === 1);

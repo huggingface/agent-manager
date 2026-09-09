@@ -84,6 +84,15 @@ body {
 /* overview bottom bar: filter · sort · view segments, centered — three of them
    don't fit a phone on one line, so it wraps rather than overflowing */
 .zoombar.ov-bar { justify-content: center; gap: 8px; flex-wrap: wrap; row-gap: 5px; }
+.ov-search { box-sizing: border-box; flex: 0 1 220px; min-width: 150px; height: 24px; display: flex; align-items: center; gap: 5px; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel-2); color: var(--muted); }
+.ov-search.has-query { border-color: var(--border-strong); }
+.ov-search:focus-within { border-color: var(--accent); color: var(--text); }
+.ov-search > svg { width: 13px; height: 13px; flex: none; }
+.ov-search > input { min-width: 0; flex: 1; border: 0; outline: 0; padding: 0; background: transparent; color: var(--text); font: inherit; font-size: 11.5px; }
+.ov-search > input::placeholder { color: var(--muted); }
+/* The mark stays small; its box is a real touch target. */
+.ov-search > button { width: 24px; height: 24px; flex: none; margin-right: -6px; border: 0; padding: 0; border-radius: 50%; background: transparent; color: var(--muted); font: 15px/15px system-ui, sans-serif; cursor: pointer; }
+.ov-search > button:hover { background: var(--hover); color: var(--text); }
 /* the sort segment needs to say what it is — "prompt"/"answer" next to a row of
    filter words would otherwise read as two more filters — so a glyph sits beside
    it, outside the segment (inside, it read as a fourth disabled button) */
@@ -113,6 +122,23 @@ body {
 .cli-logo.files-glyph { color: color-mix(in srgb, var(--accent) 65%, var(--muted)); }
 [data-theme='dark'] .cli-logo.inv-dark img { filter: invert(1); }
 [data-theme='light'] .cli-logo.inv-light img { filter: invert(1); }
+
+/* Agent state follows the CLI tile instead of occupying a second mark slot.
+   The 0.5px inset centres a 1px SVG stroke on the pixel boundary, so its top
+   and bottom edges paint at the same weight. Working uses four exact 20 + 4
+   cells on a normalised 96-unit perimeter: the final gap ends exactly where
+   the first dash starts, with no remainder to jump at the path origin. The
+   other three states are solid frames: accent when waiting on the operator,
+   muted while idle, and the same muted hue dimmed further when stopped. */
+.state-logo { position: relative; flex: none; display: inline-flex; color: var(--accent); }
+.state-logo-frame { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.state-logo-frame rect { fill: none; stroke: currentColor; stroke-width: 1; vector-effect: non-scaling-stroke; stroke-linecap: butt; stroke-linejoin: round; }
+.state-logo-track { opacity: 0.22; }
+.state-logo-run { stroke-dasharray: 20 4; animation: state-logo-trace 0.92s linear infinite; }
+.state-logo.waiting { color: var(--accent); }
+.state-logo.idle { color: var(--muted); }
+.state-logo.stopped { color: color-mix(in srgb, var(--muted) 50%, transparent); }
+@keyframes state-logo-trace { to { stroke-dashoffset: -24; } }
 
 /* header */
 .brand { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 13px 14px; border-bottom: 1px solid var(--border); }
@@ -165,8 +191,12 @@ body {
 /* quickstart: one row of harnesses (+ the group tile), one prompt, go */
 /* Sized so every tile fits on ONE row at the sidebar's width; wrap stays as a
    fallback for a narrower viewport rather than overflowing. */
-.quick-clis { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
-.quick-cli { width: 25px; height: 25px; flex: none; display: inline-flex; align-items: center; justify-content: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; padding: 0; opacity: 0.65; }
+/* Six to a row, both rows on the same track size, so the picker fills the panel
+   instead of trailing off mid-width. A grid rather than flex: row two has fewer
+   buttons, and they must land on the same widths as row one rather than sizing
+   themselves. A seventh harness wraps onto a new line of the same grid. */
+.quick-clis { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; align-items: center; }
+.quick-cli { width: 100%; height: 30px; flex: none; display: inline-flex; align-items: center; justify-content: center; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); cursor: pointer; padding: 0; opacity: 0.65; }
 .quick-cli:hover:not(:disabled) { opacity: 1; border-color: var(--border-strong); }
 .quick-cli.on { opacity: 1; border-width: 1.5px; box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
 .quick-cli.off { opacity: 0.25; cursor: default; }
@@ -175,15 +205,29 @@ body {
 .grp-mini .cli-logo { width: 8px; height: 8px; }
 .quick-prompt { width: 100%; resize: none; overflow: hidden; min-height: 34px; max-height: 160px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--text); font: inherit; font-size: 13px; line-height: 1.45; }
 .quick-prompt:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
-.quick-hint { font-size: 10.5px; color: var(--muted); }
-/* the group tile sits apart from the harnesses behind a hairline */
-.quick-sep { width: 1px; align-self: stretch; background: var(--border); margin: 3px 2px; }
+/* Name, folder and prompt are one column of equal rows. The folder button was
+   the shortest of the three, so the other two come down to it rather than it
+   stretching up — one number, so they cannot drift apart again. */
+.controls .widget { --field-h: 28px; }
+.controls .widget .quick-name,
+.controls .widget .fp .fp-current {
+  height: var(--field-h); min-height: var(--field-h);
+  padding-top: 0; padding-bottom: 0;
+}
+.controls .widget .quick-prompt {
+  min-height: var(--field-h); height: var(--field-h);
+  padding-top: 5px; padding-bottom: 5px; line-height: 1.35;
+}
+/* Second picker row: everything you can make that is not one of the agents. */
+.quick-clis-2 { margin-top: 4px; }
+/* A field switched off because it means nothing for this type says so in its
+   own box, rather than going grey and leaving you to guess. */
+.fp-current .fp-why { color: var(--muted); font-style: italic; }
+.controls .quick-prompt:disabled, .controls .quick-name:disabled { background: var(--panel-2); }
+.controls .quick-prompt:disabled::placeholder { font-style: italic; }
+/* the group tile leads the second picker row — the things that are not agents */
 .quick-grp { color: var(--muted); }
 .quick-grp.on { color: var(--accent); border-color: var(--accent) !important; }
-.quick-foot { display: flex; align-items: center; gap: 8px; }
-.quick-foot .quick-hint { margin-left: auto; white-space: nowrap; }
-.quick-more { background: none; border: none; padding: 0; font: inherit; font-size: 10.5px; font-weight: 600; color: var(--accent); cursor: pointer; white-space: nowrap; }
-.quick-more:hover { text-decoration: underline; }
 .quick-recovery { margin-top: -3px; color: var(--muted); font-size: 9.5px; line-height: 1.35; }
 .cart-row.off { opacity: 0.45; }
 
@@ -195,19 +239,22 @@ body {
 .image-pick:disabled { opacity: 0.38; cursor: not-allowed; }
 .image-pick svg { width: 15px; height: 15px; }
 .image-attachments-note { min-width: 0; color: var(--muted); font-size: 10px; line-height: 1.3; }
-.image-chip { min-width: 0; max-width: 205px; height: 36px; display: flex; align-items: center; gap: 6px; padding: 3px 5px 3px 3px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); }
-.image-chip.error { border-color: color-mix(in srgb, var(--danger) 48%, var(--border)); }
+.image-chip { min-width: 0; max-width: 250px; height: 38px; display: flex; align-items: center; gap: 6px; padding: 3px 5px 3px 3px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); }
+.image-chip.error { max-width: min(100%, 360px); height: auto; min-height: 38px; border-color: color-mix(in srgb, var(--danger) 48%, var(--border)); }
 .image-chip.uploading { border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); }
 .image-chip-preview { flex: none; width: 29px; height: 28px; border-radius: 3px; overflow: hidden; background: var(--panel-2); }
 .image-chip-preview:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .image-chip img { display: block; width: 29px; height: 28px; object-fit: cover; }
 .image-chip-placeholder { flex: none; width: 29px; height: 28px; display: inline-flex; align-items: center; justify-content: center; border-radius: 3px; background: var(--panel-2); color: var(--muted); font-size: 8px; }
-.image-chip-copy { min-width: 0; display: flex; flex-direction: column; line-height: 1.15; }
+.image-chip-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.15; }
 .image-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; font-weight: 600; }
 .image-chip-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; color: var(--muted); font: 9.5px var(--font-mono); }
-.image-chip.error .image-chip-meta { color: var(--danger); }
-.image-chip.uploading .image-chip-meta { color: var(--accent); animation: breathe 1.2s ease-in-out infinite; }
+.image-chip.error .image-chip-meta { overflow: visible; text-overflow: clip; white-space: normal; color: var(--danger); line-height: 1.25; }
+.image-chip.uploading .image-chip-meta { color: var(--accent); }
+.image-chip-progress { display: block; width: 100%; height: 2px; margin-top: 3px; overflow: hidden; border-radius: 1px; background: color-mix(in srgb, var(--accent) 16%, var(--panel-2)); }
+.image-chip-progress > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width 120ms linear; }
 .image-chip > button { flex: none; padding: 1px; border: none; background: transparent; color: var(--muted); font: 13px/1 var(--font-sans); cursor: pointer; }
+.image-chip > .image-chip-retry { color: var(--danger); font-size: 9px; font-weight: 650; }
 .image-chip > button:hover:not(:disabled) { color: var(--text); }
 .image-chip > button:disabled { opacity: 0.35; cursor: default; }
 .quick .image-attachments { align-items: flex-start; }
@@ -240,6 +287,7 @@ body {
 .fp { display: flex; flex-direction: column; gap: 4px; }
 .fp-current { display: flex; align-items: center; gap: 7px; width: 100%; padding: 7px 10px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; text-align: left; }
 .fp-current:hover { border-color: var(--border-strong); }
+.fp-current:disabled { opacity: 0.5; cursor: not-allowed; }
 .fp-ico { flex: none; width: 14px; height: 14px; color: var(--muted); }
 .fp-row .fp-ico { width: 13px; height: 13px; margin-right: 4px; }
 .fp-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
@@ -257,7 +305,11 @@ body {
 .fp-msg { color: var(--muted); cursor: default; }
 .fp-input { flex: 1; padding: 3px 8px !important; font-size: 12px !important; }
 
-.cart { display: flex; flex-direction: column; gap: 4px; }
+/* The panel no longer opens on demand — it is always there — so its height is
+   now permanent furniture above the fleet list. The cart is the one part that
+   grows without limit (one row per installed harness), so it scrolls inside a
+   cap instead of pushing the list off the bottom of a short window. */
+.cart { display: flex; flex-direction: column; gap: 4px; max-height: 168px; overflow-y: auto; }
 .cart-row { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: var(--r-md); font-size: 13px; }
 .cart-row.has { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .cart-name { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -270,11 +322,9 @@ body {
 /* overview: pinned sidebar row (session-row anatomy) + cards view */
 .ov-fixed { padding: 5px 8px 6px; border-bottom: 1px solid var(--border); }
 .ov-row { cursor: pointer; padding-top: 6px; padding-bottom: 6px; }
-.ov-row .status.ov-spacer { visibility: hidden; }
 .ov-tile { flex: none; box-sizing: content-box; width: 12px; height: 12px; padding: 3px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; }
 .ov-tile svg { width: 100%; height: 100%; display: block; }
 .ov-row .name { color: var(--text); }
-.ov-wait { flex: none; font-family: var(--font-mono); font-size: 10px; color: var(--accent); }
 /* ---- Overview: one reading column of capsules (design mock v4.12) ---- */
 .ov-wrap { height: 100%; overflow-y: auto; }
 .ov-feed { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; padding: 2px 2px 40px; }
@@ -297,13 +347,18 @@ body {
 /* --border-strong is a BORDER token: as text on the page background it lands at
    ~1.4:1 in either theme, i.e. a count nobody can read. */
 .ov-sortn { color: var(--muted); }
-/* The group an agent is in, when the feed is flat and no capsule says it.
-   In a list card it rides the name row and gives up its pixels first (shrink
-   5×, never more than half the row): the prefix is context, the name is the
-   thing you are looking for. In a tile there is no room to share, so it takes
-   its own line above the name — see the comment in Overview.tsx. */
+/* The group an agent is in, when the feed is flat and no capsule says it. Both
+   surfaces put it on the name's row, and on both the prefix is context while the
+   name is the thing you are looking for — so the group is what gives way.
+   A LIST CARD is wide enough to always show something, so it yields pixels
+   (shrink 5x, never more than half the row) and ellipsises if it must. */
 .ov-gtag { flex: 0 5 auto; min-width: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-weight: 500; font-size: 11.5px; }
-.ovt-gline { font-size: 10px; letter-spacing: 0.04em; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: -3px; }
+/* A TILE is ~225px, where half a row is not enough to read either string, so it
+   is all or nothing instead: Overview.tsx's useHeadFits measures this row and
+   drops the group when anything in it would truncate. No cap and no shrink here
+   — a capped, shrinkable group is what produced a stub beside a clipped name.
+   The ellipsis is a backstop for the frame before a measurement lands. */
+.ovt-gtag { flex: 0 0 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-weight: 500; font-size: 11.5px; }
 
 /* group capsule: header bar / spaced flat slabs / footer strip that merges away */
 .ov-sec { display: flex; flex-direction: column; }
@@ -358,9 +413,44 @@ body {
 .markdown.ov-md { border: none; background: none; padding: 0; font-size: 12.5px; }
 .ov-md pre { font-size: 11px; }
 
-/* braille spinner: unmistakably a process, never an input line */
+/* braille spinner: unmistakably a process, never an input line.
+
+   Its type and cell are declared here, with the animation, because everything
+   that draws this spinner — and everything that stands in for it while an
+   agent is NOT working (see `.status.waiting` and friends) — reads the same
+   values. Change the glyph, font size or cell and every renderer follows,
+   instead of leaving a static approximation behind. The cell remains em-based
+   on the shared mark size.
+
+   The path values are measured from the bundled Geist Mono at --mark-size in
+   Chromium, rasterised 16x (alpha >= 16): ⠿ ink is 5.5 x 8.8125px, one dot is
+   1.875px, and the ink begins 1.8125px from the cell's left edge. A DOM raster
+   puts its natural top at 1.25px. That natural ink sits 0.90625px high inside
+   the cell; the adjacent 600-weight 12px title's x-height centre sits another
+   0.5px below the cell centre. --mark-optical-y applies the full 1.40625px
+   correction, and the static path starts at the same corrected 2.65625px.
+
+   Chromium quantises CSS border widths to whole CSS
+   pixels (1.875px paints as 1px), so --mark-stroke uses the nearest paintable
+   diameter, 2px. Ratios keep those measurements tied to --mark-size.
+   If the font fails and the mono fallback has different braille metrics, the
+   spinner may briefly drift; the rectangle deliberately stays on the bundled
+   font's measured path rather than guessing from an unknown fallback. */
+:root {
+  --mark-size: 12.5px; --mark-weight: 400;
+  --mark-w: 1.2em; --mark-h: 1.05em; --mark-optical-y: 0.1125em;
+  --mark-ink-x: 0.145em; --mark-ink-y: 0.2125em;
+  --mark-ink-w: 0.44em; --mark-ink-h: 0.705em; --mark-stroke: 0.16em;
+}
 .ov-busy { font-size: 12.5px; color: var(--muted); }
-.ov-busy::before { content: '⠋'; display: inline-block; width: 1.2em; color: var(--accent); animation: ov-spin 0.9s steps(1) infinite; }
+.ov-busy::before {
+  content: '⠋'; display: inline-flex; align-items: center;
+  width: var(--mark-w); height: var(--mark-h);
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
+  color: var(--accent); transform: translateY(var(--mark-optical-y));
+  animation: ov-spin 0.9s steps(1) infinite;
+}
 @keyframes ov-spin {
   0% { content: '⠋'; } 12.5% { content: '⠙'; } 25% { content: '⠹'; } 37.5% { content: '⠸'; }
   50% { content: '⠼'; } 62.5% { content: '⠴'; } 75% { content: '⠦'; } 87.5% { content: '⠧'; }
@@ -388,7 +478,12 @@ body {
 .ovt-prompt.none::before { color: var(--border-strong); }
 .ovt-state { font-size: 10.5px; color: var(--muted); }
 .ovt-state.running { color: var(--accent); }
-.ovt-state.running::before { content: '⠋ '; display: inline-block; animation: ov-spin 0.9s steps(1) infinite; }
+.ovt-state.input { color: var(--accent); font-weight: 650; }
+/* No spinner glyph here any more. The tile's frame is the animated thing now,
+   and a second ⠋ in the line below it meant one small tile carrying two motions
+   that say the same word. The line keeps the WORD, because it says things the
+   four-state frame cannot: `needs input`, `✓ done`, and `running` in the wider
+   digest sense (atWork) that a frame reading `waiting` does not cover. */
 .ovt-state.stopped { opacity: 0.7; }
 .ovt-group { position: relative; border: 1px solid var(--border); border-radius: 13px; padding: 12px 10px 10px; margin-top: 6px; }
 /* loose tiles align with tiles INSIDE group boxes (1px border + 10px padding),
@@ -421,6 +516,16 @@ body {
 .ov-composer .image-attachments.has-note { grid-column: 1 / -1; }
 .ov-composer .image-attachments.has-images + .ov-live,
 .ov-composer .image-attachments.has-note + .ov-live { grid-column: 1 / -1; }
+/* The reply row takes the LAST column, always — it is never the thing column 1
+   is for. Column 1 holds the paperclip, and only the Overview card still draws
+   one: the reader's moved to the pane header (2026-08-18), so `Attachments`
+   renders nothing there until a file is attached and the composer had a single
+   child. Auto-placed, that child landed in the `auto` track and sized itself to
+   its own content — a 210px reply line in an 872px composer, with the send key
+   marooned 650px from the right edge. Naming the column fixes both shapes at
+   once: in the card it sits beside the paperclip as before, and in the reader
+   the empty `auto` track measures 0 and this fills the row. */
+.ov-composer > .ov-live { grid-column: 2 / -1; }
 .ov-composer .ov-live { border-top: none; padding-top: 0; }
 .ov-live { display: flex; gap: 8px; align-items: flex-start; border-top: 1px solid var(--border); padding-top: 7px; font-size: 13px; }
 /* Each control is centred on the first line rather than on the whole box. The
@@ -447,7 +552,10 @@ body {
 .ov-note { font-size: 11px; color: var(--danger); }
 
 /* tree */
-.tree { flex: 1; overflow-y: auto; padding: 6px 8px 10px; display: flex; flex-direction: column; }
+/* min-height beats flex's default min-content floor AND guarantees the list
+   keeps room for a few rows: with an always-open create panel, a short window
+   would otherwise hand every pixel to the panel and leave the fleet invisible. */
+.tree { flex: 1; min-height: 108px; overflow-y: auto; padding: 6px 8px 10px; display: flex; flex-direction: column; }
 .tree > * { flex: none; } /* rows keep their natural height; the arch-note's margin-top:auto sinks it */
 .empty-hint { color: var(--muted); font-size: 12px; padding: 12px 10px; line-height: 1.5; }
 .empty-hint.nested { padding: 6px 10px 8px 38px; font-size: 11.5px; }
@@ -465,10 +573,8 @@ body {
 .row.drop-before::after { top: -1px; }
 .row.drop-after::after { bottom: -1px; }
 .row.drop-on { background: var(--drop); outline: 1px solid var(--accent); outline-offset: -1px; }
-/* the dot column is a size down from the app-wide 8px dots */
-.row .status { width: 6px; height: 6px; }
 /* mono for THINGS (session names, counts), sans for commentary. Member names
-   speak in the muted voice — state (dot) and place (frame) carry the color. */
+   speak in the muted voice — the CLI tile's state frame carries the color. */
 .row .name { flex: 1; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row.active .name, .row:hover .name { color: var(--text); }
 .row .rename { flex: 1; font: inherit; font-family: var(--font-mono); font-size: 11.5px; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
@@ -512,17 +618,54 @@ body {
 .g-add svg { width: 11px; height: 11px; display: block; }
 .row.nested { margin-left: 0; padding-left: 8px; }
 
-/* status dots */
+/* A bare `.status` is a plain colour dot and has to stay one: UsagePanel and
+   SettingsView use it with an inline `background` to carry a provider's or a
+   CLI's own colour, and no state class at all. The state vocabulary below is a
+   specialisation of this, never a replacement — anything drawn on bare
+   `.status` paints over those colours and they lose their identity. */
 .status { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; transition: background 0.2s, box-shadow 0.2s, opacity 0.2s; }
-.status.working { background: var(--accent); animation: breathe 2.2s ease-in-out infinite; }
-/* your turn: hollow ring in the primary color — "paused, waiting on you" */
-.status.waiting { background: transparent; border: 1.5px solid var(--accent); }
-.status.idle { background: var(--muted); opacity: 0.5; }
-.status.stopped { background: transparent; border: 1.5px solid var(--muted); opacity: 0.5; }
 
-/* quick-add utilities (shell / files) pinned above the legend */
-.quick-add { display: flex; gap: 6px; padding: 10px 10px; border-top: 1px solid var(--border); }
-.quick-add .btn-ghost { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 5.5px 8px; font-family: var(--font-mono); font-size: 12px; font-weight: 500; border-radius: var(--r-sm); }
+/* ---- agent state: one path, moving or still ----
+   A working agent shows the braille spinner the reader and the cards already
+   run (`ov-spin`) — the same animation, not a second thing that also means
+   "busy". Every other state shows that motion's completed path: the same
+   square-cornered hollow rectangle, measured from the six-dot ink rather than
+   from the much larger layout cell. State comes only from colour/intensity.
+
+   The type/cell/path values are declared once beside `ov-spin` and consumed by
+   every renderer. The static path cannot drift away from the animation it
+   stands in for because there is one measured contract and everyone reads it.
+   Same principle as --cx-gutter (#71) and --ph-pad-y (#75). */
+.status.working, .status.waiting, .status.idle, .status.stopped {
+  width: var(--mark-w); height: var(--mark-h);
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
+  border-radius: 0; background: none;
+  display: inline-flex; align-items: center; position: relative;
+  transition: color 0.2s, opacity 0.2s;
+}
+.status.working::before {
+  display: inline-flex; align-items: center; box-sizing: border-box;
+  width: 100%; height: 100%; background: none; border: none; box-shadow: none;
+}
+/* The same spinner, in the same cell. */
+.status.working { overflow: hidden; }
+.status.working::before {
+  content: '⠋'; transform: translateY(var(--mark-optical-y));
+  animation: ov-spin 0.9s steps(1) infinite;
+}
+.status.waiting::before, .status.idle::before, .status.stopped::before {
+  content: ''; position: absolute;
+  left: var(--mark-ink-x); top: var(--mark-ink-y);
+  width: var(--mark-ink-w); height: var(--mark-ink-h);
+  box-sizing: border-box; background: none;
+  border: var(--mark-stroke) solid currentColor; border-radius: 0; box-shadow: none;
+}
+/* working and your-turn are both the accent: one moves, one is asking. */
+.status.working, .status.waiting { color: var(--accent); }
+.status.idle, .status.stopped { color: var(--muted); }
+.status.stopped { opacity: 0.5; }
+
 /* the create panel speaks the same dense mono voice as the rows */
 .controls .widget { gap: 6px; padding: 8px; border-radius: var(--r-md); }
 .controls .w-field { gap: 3px; }
@@ -539,18 +682,15 @@ body {
 .controls .seg button { font-family: var(--font-mono); font-size: 11.5px; padding: 4px 8px; }
 
 .legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 10px 16px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--muted); }
-.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend > span { display: inline-flex; align-items: center; gap: 5px; }
 /* archived toggle: a quiet custom checkbox speaking the app's language */
-.legend-arch { position: relative; display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
-.legend-arch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
-.legend-arch .lbox { width: 11px; height: 11px; flex: none; border: 1px solid var(--border-strong); border-radius: 3.5px; background: var(--panel-2); display: inline-flex; align-items: center; justify-content: center; transition: background 0.12s, border-color 0.12s; }
-.legend-arch:hover .lbox { border-color: var(--muted); }
-.legend-arch input:checked ~ .lbox { background: var(--accent); border-color: var(--accent); }
-.legend-arch input:checked ~ .lbox::after { content: ''; width: 5px; height: 2.5px; border-left: 1.5px solid var(--accent-fg); border-bottom: 1.5px solid var(--accent-fg); transform: rotate(-45deg) translateY(-1px); }
 /* archived rows/tiles: present but visibly parked */
-.row.archived .name, .row.archived .cli-logo { opacity: 0.45; }
+.row.archived .name, .row.archived .state-logo, .row.archived > .cli-logo { opacity: 0.45; }
 .ovt-tile.archived .ovt-head { opacity: 0.55; }
 .arch-note { font-size: 10.5px; color: var(--muted); font-style: italic; text-align: center; padding: 14px 12px 4px; margin-top: auto; }
+/* It reads as a sentence until you point at it, then as the link it is. */
+.arch-toggle { display: block; width: 100%; background: none; border: none; font: inherit; font-size: 10.5px; font-style: italic; color: var(--muted); cursor: pointer; }
+.arch-toggle:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 
 /* main: tiles */
 .tiles { height: 100%; display: grid; gap: 12px; }
@@ -677,11 +817,7 @@ body {
    already reachable with a long enough agent name; putting the group in front
    of the name made it reachable at ordinary ones. With the floor the title is
    capped at what is actually free and ellipsises instead. */
-/* The vertical padding is a variable because .ph-back cancels it to reach the
-   header's full height without adding any (below). A bleed that restated the
-   number would drift the first time this padding changed — the same way a
-   hardcoded 14px against an 8px gutter gave the phone a sideways scroll. */
-.pane-head { --ph-pad-y: 7px; container-type: inline-size; display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr); align-items: center; gap: 9px; padding: var(--ph-pad-y) 11px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
+.pane-head { --ph-pad-y: 7px; --ph-pad-x: 11px; position: relative; container-type: inline-size; display: grid; grid-template-columns: minmax(min-content, 1fr) minmax(0, auto) minmax(min-content, 1fr); align-items: center; gap: 9px; padding: var(--ph-pad-y) var(--ph-pad-x); background: var(--panel); border-bottom: 1px solid var(--border); font-size: 12px; flex: none; }
 .pane-head .ph-left { grid-column: 1; justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
 .pane-head .ph-title { grid-column: 2; min-width: 0; max-width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 5px; font-family: var(--font-mono); font-weight: 600; white-space: nowrap; overflow: hidden; cursor: text; }
 /* `[Group] name` is one title in two parts, and the group is the only part that
@@ -696,15 +832,93 @@ body {
    bounds it: it can fill the whole title but no more, which is what puts the
    ellipsis on the name itself when the name alone is too long for the header. */
 .pane-head .ph-name { flex: 0 0 auto; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; }
+.pane-head .ph-right { grid-column: 3; min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 8px; }
+/* Attach, search, info, close: ONE contract, so they cannot drift apart the way
+   the `i` and the reader's nav keys did. No box — the operator asked for the
+   bounding box off the `i`, and a row where one of four is boxed is worse than
+   either — so the hit area is an overlay instead (below), which is why these are
+   22px of ink in a 28px target. The 8px gap is what makes that target real: at
+   4px the overlays of neighbouring buttons met over each other's ink and each
+   one measured 20px across, under the floor. Measured, not guessed. */
+.pane-head .ph-btn {
+  position: relative; flex: none; width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: var(--r-sm); background: none; color: var(--muted);
+  font: 700 12px/1 var(--font-mono); cursor: pointer;
+}
+.pane-head .ph-btn > svg { width: 14px; height: 14px; }
+.pane-head .ph-btn:hover:not(:disabled) { color: var(--text); background: var(--border); }
+.pane-head .ph-btn:disabled { opacity: 0.38; cursor: not-allowed; }
+.pane-head .ph-btn.on { color: var(--accent); }
+/* The tap target, which is not the ink. WCAG 2.2 SC 2.5.8 floors a target at
+   24x24 and iOS asks for 44; these are the only route to attach, search, the
+   conversation's facts and close, on a phone. Pinned by hit-testing in
+   server/reader-info.test.mjs — all four, in both views. */
+.pane-head .ph-btn::before { content: ''; position: absolute; inset: -4px -4px; }
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }
+/* The conversation's facts, behind one `i` in the pane header — the same place
+   in the terminal view and the reader (docs/conversation-view.md §3.3). A square
+   mini-control in the app's --r-sm register, sized like the header's other mini
+   buttons rather than falling out of its own padding. */
+/* NOT the positioning context for the panel — the header is. The `i` sits a
+   back-button, a logo and a state dot into the row, so a panel anchored to the
+   button itself starts ~100px in and runs off the right edge of a phone. */
+/* NOT the positioning context for the panel — the header is. The `i` sits in the
+   right-hand cluster, so a panel anchored to the button itself would hang off
+   the far edge of the pane. */
+.tinfo-wrap { flex: none; display: inline-flex; }
+.tinfo {
+  /* Anchored to the pane header — not to the button — so it opens inside the
+     pane at any width. It hangs from the RIGHT edge now, under the cluster the
+     `i` belongs to, which is also the side with room on a phone: the left of
+     that row is a back arrow and a path. */
+  position: absolute; z-index: 12; top: calc(100% + 4px); right: 8px; left: auto;
+  /* Wide enough that the two actions sit side by side on one line each — at a
+     phone width that is what 78vw buys, and below it they stack rather than
+     wrap a label in half. */
+  min-width: min(19rem, calc(100% - 16px)); max-width: min(23rem, calc(100% - 16px));
+  display: flex; flex-direction: column; gap: 8px; padding: 9px 10px;
+  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.18);
+}
+/* Reading the transcript, or nothing to read: the panel says which. A terminal
+   pane has parsed nothing, so opening this is the first read — and a whole-file
+   one — which is exactly why it must not pretend to have the answer already. */
+.tinfo-state { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.tinfo-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; margin: 0; }
+.tinfo-facts dt { color: var(--muted); }
+.tinfo-facts dd { margin: 0; color: var(--text); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.tinfo-actions { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 7px; border-top: 1px solid var(--border); }
+/* Download is an <a download> and Share is a <button> — two elements that match
+   only if they are told to. Same padding, same weight, and an equal share of
+   the row, so the panel reads as one pair of actions rather than a long control
+   and a short one. */
+.tinfo-actions .btn-ghost {
+  flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  padding: 5px 8px; font: inherit; font-size: 1em; font-weight: 600; line-height: 1.35; text-decoration: none;
+  white-space: nowrap;
+}
+.tinfo-actions svg { width: 13px; height: 13px; }
+
 /* The way back on a phone, left of the agent's logo. It stretches to the
    header's own height — cancelling that height's padding rather than adding any
    — because a taller header would hand straight back the row that dropping the
-   bar above it won (see .mbar). */
-.pane-head .ph-back { align-self: stretch; margin: calc(-1 * var(--ph-pad-y)) 1px calc(-1 * var(--ph-pad-y)) -5px; padding: 0 8px; }
+   bar above it won (see .mbar).
+   Horizontally it is all left: the padding it needs to stay a thumb-sized
+   target is spent on the side away from the logo, and cancelled by an equal
+   negative margin on the side facing it. So the hit area REACHES INTO the space
+   between arrow and logo instead of MAKING that space, and what you see is the
+   7px .ph-left already puts between every other pair in the row — not 16px.
+   The left margin gives the same treatment to the header's own gutter: the
+   target starts at the very edge of the pane, which is where a thumb reaching
+   across a phone arrives first. */
+.pane-head .ph-back {
+  align-self: stretch;
+  margin: calc(-1 * var(--ph-pad-y)) -8px calc(-1 * var(--ph-pad-y)) calc(-1 * var(--ph-pad-x));
+  padding: 0 8px 0 var(--ph-pad-x);
+}
 .pane-head .ph-back svg { width: 15px; height: 15px; }
 @container (max-width: 520px) {
   .pane-head .ph-path { display: none; }
@@ -724,7 +938,7 @@ body {
 .term-image-status { position: absolute; z-index: 8; left: 50%; bottom: 10px; transform: translateX(-50%); max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: color-mix(in srgb, var(--term-bg) 92%, transparent); color: var(--muted); box-shadow: 0 4px 14px rgb(0 0 0 / 0.12); font-size: 10.5px; pointer-events: none; }
 .term-image-status.uploading { color: var(--accent); animation: breathe 1.2s ease-in-out infinite; }
 .term-image-status.success { color: var(--go); }
-.term-image-status.error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
+.term-image-status.error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); white-space: normal; text-overflow: clip; }
 .term-image-status.has-action { display: flex; align-items: center; gap: 8px; pointer-events: auto; }
 .term-image-status button { padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 700; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .term-image-status button:disabled { opacity: 0.45; cursor: default; }
@@ -800,6 +1014,8 @@ body {
    the right — the corner that used to be blank. */
 .files-info { flex: none; container-type: inline-size; display: flex; align-items: center; gap: 10px; padding: 4px 11px; background: var(--panel-2); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; }
 .files-info .spacer { flex: 1; }
+.file-wrap-toggle { flex: none; }
+.files-info .file-wrap-toggle button { height: 20px; padding: 0 8px; font-size: 10.5px; line-height: 1; }
 .fi-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); font-size: 10.5px; color: var(--text); }
 .fi-stat { flex: none; font-variant-numeric: tabular-nums; }
 .fi-stat + .fi-stat::before { content: '·'; margin-right: 7px; color: var(--border-strong); }
@@ -882,6 +1098,11 @@ body {
 .files-new.err { color: var(--danger); }
 .tw-confirm { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
 .tw-warn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A destructive ICON in a row turns red under the pointer, the way the Files
+   pane's trash does (.tw-act.danger). Distinct from .mini-btn.danger below,
+   which is the filled red button for a surface whose whole point is the
+   action — too loud for one glyph among others in a list row. */
+.mini-btn.danger-hover:hover { color: var(--danger); }
 .mini-btn.danger { background: var(--danger); color: #fff; border-color: transparent; }
 .mini-btn.danger:disabled { opacity: .5; }
 /* the one obvious action in a group — Create, Save and close */
@@ -989,7 +1210,15 @@ body {
 .fv-pdf .pdf-page { border-radius: var(--r-sm); box-shadow: 0 1px 4px #0003; background: #fff; max-width: 100%; }
 
 /* the shared .markdown card is defined later in this file — win on specificity */
-.markdown.fv-md { flex: 1; min-height: 0; border: none; border-radius: 0; background: none; padding: 14px 18px 26px; }
+.markdown.fv-md { flex: 1; min-height: 0; border: none; border-radius: 0; background: none; padding: 14px 18px 26px; font-size: inherit; }
+/* The shared markdown rules use absolute sizes. In the file reader those would
+   leave headings fixed while the zoom changed only the body. Preserve the
+   existing 22/18/15px hierarchy at the 14px base, but make it one em cascade so
+   headings, inline/pre code and table text all follow the same reading size. */
+.markdown.fv-md h1 { font-size: 1.5714285714em; }
+.markdown.fv-md h2 { font-size: 1.2857142857em; }
+.markdown.fv-md h3 { font-size: 1.0714285714em; }
+.markdown.fv-md table { font-size: 1em; }
 .markdown.fv-md img { border-radius: var(--r-md); }
 
 /* A light checkerboard in BOTH themes: it says "transparent" without hiding the
@@ -1021,8 +1250,28 @@ body {
 .settings-navitem { text-align: left; background: none; border: 1px solid transparent; border-radius: var(--r-md); padding: 9px 12px; font: inherit; font-size: 13px; color: var(--text); cursor: pointer; }
 .settings-navitem:hover { background: var(--panel-2); }
 .settings-navitem.active { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--accent); font-weight: 600; }
-.settings-main { overflow-y: auto; }
-.settings-page { max-width: 640px; margin: 0 auto; padding: 6px 4px 30px; }
+/* The settings page reacts to the width of its own pane, not the window: with
+   the nav rail beside it a 768px tablet leaves the page 486px — as tight as a
+   phone — while a phone in the stacked layout gets the whole viewport. One
+   container query covers both, and the split-pane case nobody has asked for yet.
+   (Container queries are older than the color-mix() this sheet already relies
+   on, so this is not a new baseline.) */
+/* scrollbar-gutter, because the card growing the page must not move the graph.
+   The loop the operator found: hovering a mark shows the card → the page grows →
+   a scrollbar appears → the layout narrows → the plot shifts left → the cursor
+   is no longer on the mark → the card goes → the scrollbar goes → it shifts
+   back. Reserving the gutter always means step three changes nothing. Where this
+   property is unsupported (Safari before 18.2) the platform is using overlay
+   scrollbars anyway, which take no layout space and cannot start the loop; and
+   the card no longer empties on mouseleave, so it cannot oscillate either way. */
+.settings-main { overflow-y: auto; scrollbar-gutter: stable; container-type: inline-size; }
+/* width:100% is load-bearing. `.settings-main` is a column flex container, and
+   `margin: 0 auto` on a flex item switches off the cross-axis stretch: the page
+   box then sized itself from its widest content (524px) rather than from the
+   pane, so on anything narrower than that it hung over the right edge of the
+   scroller — controls off screen, descriptions cut mid-sentence — while the
+   centring still looked correct on a desktop wider than 524. */
+.settings-page { width: 100%; max-width: 640px; margin: 0 auto; padding: 6px 4px 30px; }
 .settings-page h2 { margin: 6px 0 18px; font-size: 22px; }
 .settings-page h3 { margin: 24px 0 8px; font-size: 14px; }
 /* plain rows, not cards: the bold label is the section header */
@@ -1032,9 +1281,14 @@ body {
 .setting-row.row-top { align-items: flex-start; }
 /* right-side controls share one width so the column reads as one rail */
 .setting-row > .btn-ghost, .setting-row .confirm-del { flex: none; }
+/* The text column may shrink. Without this a long mono value inside it (a
+   dataset id, a path) sets a min-content floor, the row cannot render under
+   ~524px, and anything narrower than that — a tablet, a phone, a split window —
+   pushes the control rail off the edge of the scroller instead of wrapping. */
+.setting-row > div { min-width: 0; }
 /* operator config (artifacts, jobs): every control sits in the same-width
    right-hand slot so the column lines up */
-.cfg-ctl { flex: none; width: 232px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.cfg-ctl { flex: 0 1 232px; width: 232px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .cfg-seg { display: flex; width: 100%; }
 .cfg-seg button { flex: 1; padding: 6px 0; }
 .cfg-input { width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--text); font-size: 12.5px; }
@@ -1052,18 +1306,40 @@ body {
 .cfg-num { width: 90px; flex: none; text-align: right; }
 /* artifacts sub-settings stay visible when off, just clearly inert */
 .cfg-off { opacity: 0.45; pointer-events: none; }
+/* "Back up now" hangs off the interval control above it, so it sits on the page
+   rail rather than in the row's right-hand slot. */
+.bk-now { margin-top: 10px; }
 .setting-row > .btn-ghost, .setting-row > a.btn-ghost { min-width: 180px; white-space: nowrap; }
 a.btn-ghost { text-decoration: none; }
 .s-label { font-weight: 600; font-size: 14px; }
+/* the shared-trace id: wide enough for a dataset URL, capped so it does not
+   run the width of a desktop settings page */
+.trace-open { margin-top: 8px; max-width: 420px; }
+.s-err { color: var(--danger); }
 .s-help { color: var(--muted); font-size: 12.5px; line-height: 1.5; margin: 2px 0 0; }
 .s-muted { color: var(--muted); }
+/* One voice for this page. Everywhere else in the app prose is sans and machine
+   values are mono at ~11.5px — the sidebar's session name and age (.row .name,
+   .row .age), the overview's state word (.ov-wait), the toolbar's segmented
+   options (.controls .seg button). Settings had drifted: option tokens and an
+   agent's state were sans while the version beside them was mono, and prose sat
+   at 12, 12.5 and 13 in adjacent blocks. Same split, one size for each role. */
+.settings-page .seg button { font-family: var(--font-mono); font-size: 11.5px; }
+.ar-state { font-family: var(--font-mono); }
+.kv b { font-family: var(--font-mono); }
+.kv > div { font-size: 12.5px; }
+.s-warn { font-size: 12.5px; }
+.tagf-chip { font-size: 11.5px; }
 /* agents: one hairline row per CLI — dot · logo · name · version · state */
 /* plain hairline rows — no box (sidebar voice: boundaries only where they mean something) */
 .agent-rows { display: flex; flex-direction: column; margin-top: 4px; }
 .agent-row { display: flex; align-items: center; gap: 10px; padding: 9px 2px; font-size: 13px; }
 .agent-row + .agent-row { border-top: 1px solid var(--border); }
 .agent-row .spacer { flex: 1; }
-.ar-name { white-space: nowrap; font-weight: 500; }
+/* The name is the only elastic thing in the row: it ellipsizes so the
+   version/state rail keeps its alignment in a narrow pane instead of pushing
+   the row past the edge. */
+.ar-name { white-space: nowrap; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ar-ver { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .ar-state { flex: none; width: 88px; text-align: right; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 .ar-state.ok { color: var(--go); }
@@ -1130,8 +1406,232 @@ a.btn-ghost { text-decoration: none; }
 .zlvl { min-width: 44px; background: none; border: none; color: var(--muted); font-size: 11px; cursor: pointer; font-variant-numeric: tabular-nums; }
 .zlvl:hover { color: var(--text); }
 
+/* ---- settings, narrow pane (phone, or a tablet beside the nav rail) ---- */
+@container (max-width: 560px) {
+  .settings-page { padding: 6px 14px 30px; }
+  /* A setting row is a text column plus a 232px control rail: it cannot render
+     much under ~450px, so in a 292px pane every control sat off the right edge
+     and the descriptions were cut mid-sentence. Stack instead — the control
+     lands under the text it belongs to, on the same rail as everything else. */
+  .settings-page .setting-row { flex-direction: column; align-items: stretch; gap: 9px; padding: 12px 0; }
+  /* flex:none, or the 232px basis inherited from the two-column layout becomes
+     a 232px-TALL control block once the row stacks and the main axis is vertical. */
+  .settings-page .cfg-ctl { flex: none; width: 100%; justify-content: flex-start; }
+  /* Options size to themselves. Stretching a two-word on/off across the pane
+     makes a toggle look like a banner; the intervals still line up because
+     every button in a group shares its width. */
+  .settings-page .cfg-seg { width: auto; }
+  .settings-page .cfg-seg button { white-space: nowrap; }
+  /* Buttons keep their own width and start at the rail rather than stretching:
+     a full-bleed "Show guide" reads as a banner, not as this row's control. */
+  .settings-page .setting-row > .btn-ghost,
+  .settings-page .setting-row > a.btn-ghost,
+  .settings-page .setting-row > .btn-primary { align-self: flex-start; }
+  .settings-page .setting-row .confirm-del { flex-wrap: wrap; }
+  /* Rows drop the 2px inset that put every label out of line with its heading. */
+  .settings-page .agent-row, .settings-page .kv > div { padding-left: 0; padding-right: 0; }
+  /* The 88px state rail plus a version string leaves ~45px for the name in a
+     320px pane, which ellipsises "Claude Code" to two letters. Drop the fixed
+     rail here: the states still end flush right, and the name is the part you
+     actually read. */
+  .settings-page .agent-row { gap: 8px; }
+  .settings-page .ar-state { width: auto; }
+  /* 22px against a 12.5px description is a magazine headline on a phone. */
+  .settings-page h2 { font-size: 18px; margin: 4px 0 14px; }
+  .settings-page h3 { margin: 22px 0 8px; }
+  /* Restore-defaults sits under its paragraph instead of squeezing it. */
+  .skiphead { flex-direction: column; gap: 8px; }
+  .skiprestore { align-self: flex-start; }
+}
+
+/* ---- settings: API log (docs: the approved cron-and-api-log mock) ---- */
+.al { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
+.al-head { display: flex; align-items: center; gap: 10px; }
+.al-count { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
+.al-fails { color: var(--danger); }
+.al-view { margin-left: auto; }
+.al-refresh { padding: 4px 9px; font-size: 11.5px; }
+/* one plain control, on the same line as the buttons */
+.al-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); cursor: pointer; margin-left: 10px; }
+.al-check input { margin: 0; accent-color: var(--accent); }
+.al-check-n { color: var(--muted); font-family: var(--font-mono); font-size: 11px; }
+/* A filter is a chip: bordered, quiet until it is on, and never a coloured pill
+   sitting in a data row — the rows themselves carry no badges at all. */
+.al-empty { padding: 14px 2px; }
+
+/* ONE CALL PER LINE. Every cell is nowrap and clips; the path is the only
+   column that may take the slack (max-width:0 + width:100% is what makes a
+   table cell shrink-to-fit-the-rest rather than push the row wide). Wrapping
+   would halve how many calls a screen holds, which is the whole point of it. */
+.al-tblwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-md); }
+.al-tbl { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+/* A floor, so a narrow pane scrolls the table sideways instead of crushing the
+   Call column — which is the one column worth reading — down to two letters.
+   The row stays one line either way; that is the rule this is protecting. */
+.al-tbl { min-width: 640px; }
+.al-tbl th { text-align: left; padding: 7px 10px; background: var(--panel-2); border-bottom: 1px solid var(--border); font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.al-tbl td { padding: 5px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.al-tbl tr:last-child td { border-bottom: none; }
+.al-tbl td.grow, .al-tbl th.grow { max-width: 0; width: 100%; }
+.al-tbl td.num, .al-tbl th.num { text-align: right; }
+.al-tbl tbody tr:hover { background: var(--panel-2); }
+.al-time { color: var(--muted); }
+.al-who { max-width: 130px; overflow: hidden; text-overflow: ellipsis; }
+.al-meth { font-weight: 700; color: var(--accent); }
+/* the one logged read: attention coming back, not work going out */
+.al-meth.back { color: var(--muted); }
+.al-path { color: var(--text); }
+/* colour the text in the column, never a badge around it */
+.al-st { font-weight: 600; }
+.al-st.ok { color: var(--go); }
+.al-st.warn { color: #9a6212; }
+.al-st.bad { color: var(--danger); }
+.al-pay { color: var(--muted); max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+.al-rep { color: var(--accent); font-weight: 600; }
+
+/* the map */
+.al-map { display: flex; flex-direction: column; gap: 8px; }
+.al-mapbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.al-scale button, .al-zoom button { padding: 3px 9px; font-size: 11px; }
+.al-reset { padding: 3px 9px; font-size: 11px; }
+.al-window { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.al-scale-note { font-size: 11px; color: var(--muted); }
+.al-mapwrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); padding: 6px; }
+/* Drag horizontally to zoom into a slice of the axis. `col-resize` is the
+   cursor every charting brush uses; on a touch device none of this applies —
+   see the pointerType check in ApiLog.tsx — so the frame keeps its own
+   sideways scroll and the page keeps scrolling down. */
+.al-map svg { display: block; width: 100%; min-width: 620px; height: auto; cursor: col-resize; }
+.al-svg.brushing { user-select: none; }
+.al-brush { fill: color-mix(in srgb, var(--accent) 14%, transparent); stroke: var(--accent); stroke-width: 1; }
+.al-brush-lbl { font-family: var(--font-mono); font-size: 8px; fill: var(--accent); }
+.al-lane { stroke: var(--border); stroke-width: 1; }
+/* before the agent existed: barely there, so the line cannot claim it did */
+.al-lane.unborn { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 4; opacity: 0.45; }
+.al-lane-lbl { font-family: var(--font-mono); font-size: 9px; fill: var(--muted); }
+.al-lane-lbl.new { fill: var(--accent); }
+.al-axis { font-family: var(--font-mono); font-size: 8px; fill: var(--muted); }
+/* slim: at 1px an arrow marks a moment instead of shouting about it */
+.al-arrow { stroke: var(--accent); stroke-width: 1; }
+.al-arrow.back { stroke: var(--muted); stroke-dasharray: 3 3; }
+.al-arrow.bad { stroke: var(--danger); }
+.al-arrow.new { stroke-width: 1.5; }
+/* the stretch a caller spent blocked, on the caller's own lane */
+.al-held { stroke: var(--muted); stroke-width: 3; opacity: 0.28; stroke-linecap: round; }
+.al-dot { fill: var(--accent); }
+.al-dot.back { fill: var(--muted); }
+.al-dot.bad { fill: var(--danger); }
+.al-hit { stroke: transparent; stroke-width: 10; }
+/* a slight lift on hover, not a thickening — the card carries the detail */
+.al-arrowg.on .al-arrow { stroke-width: 1.6; }
+/* the selected call, kept: a ring around its mark, so the card and the picture
+   agree about which entry you are reading */
+.al-held-ring { fill: none; stroke: var(--accent); stroke-width: 1.2; opacity: 0.75; }
+.al-arrowg.held .al-arrow, .al-dotg.held .al-dot { stroke: var(--accent); }
+.al-dotg { cursor: pointer; }
+.al-arrowg.on .al-held { opacity: 0.45; }
+.al-key text { font-family: var(--font-mono); font-size: 8px; fill: var(--muted); }
+/* the moment a lane begins */
+.al-birth { fill: var(--panel); stroke: var(--accent); stroke-width: 1.4; }
+
+/* the hover card: the call as it is stored, plus what the body does not say */
+.al-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; min-height: 74px; }
+.al-card-idle { color: var(--muted); font-size: 11.5px; justify-content: center; }
+.al-card-head { display: flex; align-items: baseline; gap: 7px; font-family: var(--font-mono); font-size: 11px; }
+.al-card-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.al-card-took { color: var(--muted); margin-left: auto; white-space: nowrap; }
+.al-card.pinned { border-color: var(--accent); }
+.al-card-x { border: none; background: none; color: var(--muted); cursor: pointer; font-size: 11px; padding: 0 2px; line-height: 1; }
+.al-card-x:hover { color: var(--text); }
+.al-card-hint { color: var(--muted); opacity: 0.8; }
+/* the marks are clickable, and the whole point of the card is that you can
+   reach into it — so nothing here opts out of pointer events */
+.al-arrowg, .al-dot { cursor: pointer; }
+/* NOT scrollable, and not capped: a 210px window over 411px of JSON was a card
+   whose second half could not be read at all. The page scrolls instead. */
+.al-json { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 10.5px; line-height: 1.45; color: var(--text); }
+.al-json .al-k { color: var(--accent); }
+.al-card-foot { font-size: 9.5px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 5px; }
+/* the prompt as sent: its own block, because JSON-escaping a paragraph onto one
+   line makes it unreadable. Selectable, wrapped, and never truncated here. */
+.al-prompt { display: flex; flex-direction: column; gap: 3px; }
+.al-prompt-lbl { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-family: var(--font-mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); }
+.al-md-toggle button { padding: 1px 7px; font-size: 10px; }
+/* Rendered like the file viewer's markdown — same renderer, same 14px reading
+   base — but inside a card rather than a pane, so it does not scroll itself and
+   has no zoom to follow: Settings has no text-size control (see #102, which gave
+   the FILE pane's markdown the pane zoom). */
+.markdown.al-md { flex: none; overflow: visible; max-height: none; border: none; border-radius: var(--r-sm); background: var(--panel-2); padding: 8px 11px; font-size: 14px; }
+.markdown.al-md > :first-child { margin-top: 0; }
+.markdown.al-md > :last-child { margin-bottom: 0; }
+.al-clipped { color: var(--muted); text-transform: none; letter-spacing: 0; }
+.al-prompt-body { margin: 0; padding: 7px 9px; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-sm); font-family: var(--font-mono); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+
 /* settings: skills editor */
 .settings-page.wide { max-width: 980px; }
+
+/* settings: cron jobs — a labelled form followed by the operational table from
+   the approved mock. State is plain coloured text; controls are controls, never
+   status pills, so "running" cannot be mistaken for something clickable. */
+.cron-intro { max-width: 680px; margin: -8px 0 18px; }
+.cron-form { display: grid; grid-template-columns: 128px minmax(0, 1fr); column-gap: 20px; row-gap: 16px; padding: 16px 2px 20px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.cron-form > label, .cron-label { padding-top: 8px; font-size: 13px; font-weight: 600; }
+.cron-form > div { min-width: 0; }
+.cron-form input, .cron-form textarea, .cron-form select { padding: 7px 9px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--text); font: inherit; font-size: 12.5px; }
+.cron-form input:focus, .cron-form textarea:focus, .cron-form select:focus { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); border-color: var(--accent); }
+.cron-form > div > input, .cron-form textarea { display: block; width: 100%; }
+.cron-form textarea { resize: vertical; min-height: 82px; line-height: 1.45; }
+.cron-form p { margin: 5px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.45; }
+.cron-clis { display: flex; flex-wrap: wrap; gap: 5px; }
+.cron-clis button { min-height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel); color: var(--muted); font: 11.5px var(--font-mono); cursor: pointer; }
+.cron-clis button:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); }
+.cron-clis button.on { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+.cron-clis button:disabled { opacity: 0.34; cursor: not-allowed; }
+.cron-presets { display: flex; flex-wrap: wrap; border: 0; border-radius: 0; overflow: visible; gap: 4px; }
+.cron-presets button { border: 1px solid var(--border); border-radius: var(--r-sm); padding: 5px 9px; }
+.cron-schedule-fields { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: 9px; }
+.cron-schedule-fields label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
+.cron-schedule-fields input[type='time'] { width: 132px; font-family: var(--font-mono); }
+.cron-schedule-fields select { min-width: 112px; }
+.cron-schedule-fields .cron-expression { flex: 1 1 210px; }
+.cron-expression input { flex: 1; min-width: 140px; }
+.cron-schedule-fields .cron-zone { flex: 1 1 230px; }
+.cron-zone input { flex: 1; min-width: 160px; }
+.cron-form-actions { grid-column: 2; display: flex; gap: 8px; }
+.cron-message { margin-top: 14px; }
+.cron-page h3 { margin-top: 24px; }
+.cron-table-wrap { margin-top: 8px; border-top: 1px solid var(--border); }
+.cron-table { width: 100%; border-collapse: collapse; table-layout: auto; font-size: 11.5px; }
+/* Every data column takes its intrinsic one-line width. The final empty column
+   owns all surplus, keeping the useful columns grouped instead of stretching
+   Job and Agent across the table. */
+.cron-col-job, .cron-col-agent, .cron-col-type, .cron-col-interval,
+.cron-col-state, .cron-col-next, .cron-col-last, .cron-col-actions { width: 1%; }
+.cron-col-fill { width: auto; }
+.cron-table th { padding: 7px 5px; border-bottom: 1px solid var(--border); color: var(--muted); font: 500 10px var(--font-mono); letter-spacing: 0.045em; text-align: left; text-transform: uppercase; white-space: nowrap; }
+.cron-table td { padding: 7px 5px; border-bottom: 1px solid var(--border); color: var(--text); font-family: var(--font-mono); vertical-align: middle; white-space: nowrap; }
+.cron-table .cron-fill { padding: 0; }
+.cron-table tbody tr { cursor: pointer; }
+.cron-table tbody tr:hover, .cron-table tbody tr.editing { background: var(--panel-2); }
+.cron-table tbody tr:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.cron-table tbody tr.editing { box-shadow: inset 2px 0 var(--accent); }
+.cron-type .cli-logo { display: flex; }
+.cron-dim { color: var(--muted); }
+.cron-state.running, .cron-last.ok { color: var(--go); }
+.cron-state.stopped { color: var(--muted); }
+.cron-last.failed { color: var(--danger); }
+.cron-actions { display: inline-flex; gap: 4px; white-space: nowrap; }
+.cron-actions .btn-ghost { padding: 4px 5px; border-radius: var(--r-sm); background: var(--panel); font: 500 10.5px var(--font-mono); }
+.cron-actions .btn-ghost:disabled { cursor: wait; }
+
+@container (max-width: 560px) {
+  .cron-form { grid-template-columns: minmax(0, 1fr); row-gap: 5px; padding-left: 0; padding-right: 0; }
+  .cron-form > label, .cron-label { padding-top: 10px; }
+  .cron-form-actions { grid-column: 1; margin-top: 10px; }
+  .cron-schedule-fields { align-items: flex-start; flex-direction: column; }
+  .cron-schedule-fields .cron-expression, .cron-schedule-fields .cron-zone { flex: none; width: 100%; }
+}
 /* natural height — the settings page scrolls, not the preview */
 .skills { display: flex; gap: 14px; margin-top: 12px; align-items: flex-start; }
 .skills-list { width: 220px; flex: none; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; border-right: 1px solid var(--border); padding-right: 10px; }
@@ -1307,7 +1807,7 @@ a.btn-ghost { text-decoration: none; }
   /* 16px inputs stop iOS zoom-on-focus — touch devices only, so a narrow
      DESKTOP window keeps the reply line at card size */
   @media (pointer: coarse) {
-    .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input, .ov-live textarea { font-size: 16px; }
+    .widget input, .widget select, .row .rename, .secret-desc, .fp-input, .pane-head .ph-title-input, .ov-live textarea, .ov-search > input { font-size: 16px; }
     .ov-composer { --ov-first-line: calc(1.45 * 16px + 4px); }
   }
   .ov-headrow { flex-wrap: wrap; }
@@ -1316,9 +1816,15 @@ a.btn-ghost { text-decoration: none; }
   /* settings stacks vertically */
   .app.settings { flex-direction: column; }
   .app.settings .sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
-  .app.settings .settings-nav { flex-direction: row; gap: 6px; padding: 8px 10px; }
-  .app.settings .settings-main { flex: 1; }
-  .settings-page { padding: 6px 12px 30px; }
+  /* 14px, so the header (.brand), these tabs and the page below share one rail. */
+  .app.settings .settings-nav { flex-direction: row; gap: 6px; padding: 8px 14px; }
+  /* ONE owner for that gutter, and it is `.settings-page`. `.main` gives every
+     pane 12px (line 72) and the page then adds its own 14px on top, which put
+     the body on a 26px rail while the header and tabs sat at 14 — two
+     contributors, so tuning either drifts them apart again. The main gives up
+     its horizontal padding here; the vertical padding stays, since only the
+     side rail had a second claimant. Pinned by test/settingsMobile.test.mjs. */
+  .app.settings .settings-main { flex: 1; padding-left: 0; padding-right: 0; }
   /* wide pages (usage / skills) must never scroll the whole page sideways */
   .settings-page.wide { max-width: 100%; }
   .skills { flex-direction: column; }
@@ -1425,7 +1931,6 @@ a.btn-ghost { text-decoration: none; }
 .tv-matches .tv-row:first-of-type { border-top: 1px solid var(--border); }
 
 /* "Open a shared trace" — the sidebar widget that pulls a bundle off the Hub. */
-.widget.open-trace { margin: 0 8px 8px; }
 .open-trace-err { color: var(--danger); font-size: 11.5px; line-height: 1.4; }
 .trace-hint a { color: inherit; text-decoration: underline; text-decoration-style: dotted; }
 .trace-hint a:hover { color: var(--accent); }
@@ -1476,18 +1981,22 @@ a.btn-ghost { text-decoration: none; }
   padding: 3px 8px 3px 6px; margin: 1px 0;
 }
 .rp-caret { color: var(--accent); font-weight: 700; flex: none; }
-/* Not flex:1 — the tick sits immediately after the words, not pushed to the
-   far edge where it reads as unrelated furniture. */
+/* The message and its receipt stack, so the receipt lands at the foot of the
+   block on the text column rather than trailing off the end of whatever line
+   the text happened to stop on. */
+.rp-user-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .rp-user-text { white-space: pre-wrap; word-break: break-word; min-width: 0; }
-.rp-ack {
-  flex: none; width: 1.15em; height: 1.15em; color: var(--accent);
-  align-self: center; margin-left: 1px;
-}
+/* One fixed height for both receipts. `pending` is small italic text and the
+   tick is a glyph box, so without this the block would change height the moment
+   a receipt lands — and a log pinned to the newest message would jump under the
+   operator while they were reading. */
+.rp-receipt { display: flex; align-items: center; height: 1.25em; margin-top: 1px; }
+.rp-ack { flex: none; width: 1.05em; height: 1.05em; color: var(--accent); }
 /* The other half of the tick: quiet, italic, and out of the way — it marks a
    normal waiting state, not a problem. */
 .rp-pending {
   flex: none; font-style: italic; font-size: 0.8em; color: var(--muted);
-  opacity: 0.85; margin-left: 2px; white-space: nowrap;
+  opacity: 0.85; white-space: nowrap;
 }
 
 .rp-agent { padding-left: 15px; word-break: break-word; }
@@ -1503,6 +2012,29 @@ a.btn-ghost { text-decoration: none; }
 .rp-agent ul, .rp-agent ol { margin: 0.3em 0; padding-left: 1.4em; }
 .rp-agent table { border-collapse: collapse; margin: 0.4em 0; }
 .rp-agent th, .rp-agent td { border: 1px solid var(--border); padding: 2px 7px; text-align: left; }
+
+/* The reader's running line, drawn in this log. Not a copy of it — literally
+   `.cx-running` (conversation.css), so the line is one thing with one place to
+   change it. The reader pulls it left by a cell so `working` lands on its text
+   column; this log has no mark gutter to pull into, so the pull would hang the
+   mark outside the log's padding. Neutralising that one declaration is the
+   whole difference between the two homes.
+
+   Two things differ from the reader beyond that, both because a remote agent
+   always has a state worth reading while a reader turn is either running or
+   over: the line is always present, and its mark is a real element carrying the
+   state rather than the reader's always-spinning ::before. `.status` is that
+   mark — the app's settled one, spinner while working and the completed path
+   otherwise — so the three states are one drawing and only `working` moves. */
+.rp-body .cx-running { margin-left: 0; }
+/* The line's own mark is turned off, because here the mark is a real element
+   that carries the state. Two classes deep because `.cx-running::before` lives
+   in the other stylesheet and a single-class override would tie on specificity
+   and lose to whichever file loads last; and `animation: none` because
+   `ov-spin` sets `content` in its keyframes, and an animated declaration wins
+   over a plain one no matter how specific — without it the reader's spinner
+   kept drawing behind this line's mark. */
+.rp-body .rp-run::before { content: none; animation: none; }
 
 /* Composer: inherits the log's font size (set inline from zoom) so the two
    surfaces match at every zoom level. */
@@ -1520,7 +2052,9 @@ a.btn-ghost { text-decoration: none; }
 }
 .rp-input::placeholder { color: var(--muted); opacity: 0.7; }
 
-/* Bottom context row: state, where the agent is, when it last spoke. */
+/* Bottom context row: where the agent is, when it last spoke, how to send. The
+   state is not here — the log's running line carries it, and saying the same
+   word twice forty pixels apart just teaches the eye to skip one of them. */
 .rp-status {
   display: flex; align-items: center; gap: 5px;
   padding: 4px 12px 5px; border-top: 1px solid var(--border);
@@ -1530,6 +2064,7 @@ a.btn-ghost { text-decoration: none; }
 .rp-status .spacer { flex: 1; }
 .rp-status > span { font-size: 0.82em; }
 .rp-state.working, .rp-state.waiting { color: var(--accent); }
+.rp-state.idle { color: var(--muted); }
 .rp-state.stopped { color: var(--muted); }
 .rp-dot { opacity: 0.5; }
 .rp-cwd { overflow: hidden; text-overflow: ellipsis; min-width: 0; }

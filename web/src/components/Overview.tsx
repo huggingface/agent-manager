@@ -3,18 +3,22 @@ import type { CSSProperties, ReactNode } from 'react';
 import * as api from '../api';
 import type { MetaSession, TraceTurn } from '../api';
 import type { Cli, OverviewChip, OverviewFilter, OverviewSort, Session, SessionState, Tree } from '../types';
-import { chipBuckets, isPassive, isRemote } from '../types';
+import { chipBuckets, isPassive, isRemote, STATE_LABEL, REMOTE_STATE_LABEL } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import { rankSessions, sortLabel } from '../lib/overviewSort';
+import { matchesOverviewSearch } from '../lib/overviewSearch';
 import { hiddenSessionIds } from '../lib/overviewHidden';
 import type { Rankable } from '../lib/overviewSort';
 import {
-  defaultAttachmentPrompt, pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
+  buildPendingPrompt, discardPendingAttachment, discardPendingAttachments,
+  pendingAttachmentsFromFiles, revokePendingAttachments, uploadPendingAttachments,
 } from '../lib/attachments';
-import type { PendingAttachment } from '../lib/attachments';
+import type { PendingAttachment, PendingPrompt } from '../lib/attachments';
 import Attachments from './Attachments';
 import Logo from './Logo';
+import StateLogo from './StateLogo';
 import Composer from './conversation/Composer';
+import InputRequiredNotice from './conversation/InputRequiredNotice';
 import ExchangeView, { PendingExchange } from './conversation/Exchange';
 import { useDraft } from './conversation/useDraft';
 import { writePaneMode } from '../lib/paneMode';
@@ -60,6 +64,11 @@ const bucket = (state: SessionState): OverviewFilter =>
 const atWork = (m: MetaSession) =>
   m.state === 'working'
   || (!isRemote(m.cli) && m.state !== 'stopped' && !!m.digest?.running);
+
+// The same label rule the sidebar row uses: for a remote agent the frame means
+// connection, not process, so it must not borrow the local words.
+const stateTitle = (s: { cli: string; state: SessionState }) =>
+  (isRemote(s.cli) ? REMOTE_STATE_LABEL : STATE_LABEL)[s.state];
 
 /** How much of the conversation the card reads. Cheap: one page, from the end. */
 const CARD_TAIL = 120;
@@ -150,7 +159,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   // Optimistic echo: the sent text becomes the prompt line the moment the
   // send succeeds — the digest round-trip (CLI writes transcript → rebuild →
   // poll) can take seconds, and a frozen card reads as "did that get lost?".
-  const [sent, setSent] = useState<{ text: string; at: number } | null>(null);
+  const [sent, setSent] = useState<(PendingPrompt & { at: number }) | null>(null);
   const [histIdx, setHistIdx] = useState(0); // digest fallback only: n-th answer back
   const [back, setBack] = useState(0);       // how many earlier turns are shown
   const [openWork, setOpenWork] = useState(false);
@@ -162,7 +171,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   const allowAttachments = !isRemote(s.cli);
 
   useEffect(() => { imagesRef.current = images; }, [images]);
-  useEffect(() => () => revokePendingAttachments(imagesRef.current), []);
+  useEffect(() => () => discardPendingAttachments(s.id, imagesRef.current), [s.id]);
 
   const addImages = (files: File[]) => {
     if (!allowAttachments || sending || !files.length) return;
@@ -171,12 +180,15 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
     imagesRef.current = merged;
     setImages(merged);
     setImageError(next.error);
+    void uploadPendingAttachments(s.id, next.attachments, updateImage).catch(() => {
+      // The affected chip owns the persistent, actionable error and retry.
+    });
   };
   const removeImage = (key: string) => {
     if (sending) return;
     setImages((current) => {
       const removed = current.find((image) => image.key === key);
-      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      if (removed) discardPendingAttachment(s.id, removed);
       const next = current.filter((image) => image.key !== key);
       imagesRef.current = next;
       return next;
@@ -189,6 +201,11 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
       imagesRef.current = next;
       return next;
     });
+  };
+  const retryImage = (key: string) => {
+    const image = imagesRef.current.find((item) => item.key === key);
+    if (!image || sending) return;
+    void uploadPendingAttachments(s.id, [image], updateImage).catch(() => {});
   };
 
   // After you send (or when the transcript shows a prompt newer than the last
@@ -219,16 +236,17 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
     const text = draft.trim();
     const batch = imagesRef.current;
     if ((!text && !batch.length) || sending) return;
-    const optimisticText = text || defaultAttachmentPrompt(batch.length);
+    if (batch.some((image) => !image.attachment)) return;
+    const uploaded = batch.map((image) => image.attachment!);
+    const optimistic = buildPendingPrompt(s.cli, text, uploaded);
     setSending(true);
     setFailed(null);
     setDraft('');
-    setSent({ text: optimisticText, at: Date.now() });
+    setSent({ ...optimistic, at: Date.now() });
     setHistIdx(0);
     if (inputRef.current) { inputRef.current.style.height = 'auto'; inputRef.current.blur(); }
     try {
-      const attachments = await uploadPendingAttachments(s.id, batch, updateImage);
-      await api.sendInput(s.id, text, attachments.map((image) => image.id));
+      await api.sendInput(s.id, text, batch.map((image) => image.attachment!.id));
       revokePendingAttachments(batch);
       imagesRef.current = [];
       setImages([]);
@@ -259,7 +277,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   }, [back, sent, running, latestX]);
 
   const ago = fmtAgo(Math.max(d?.lastAssistantTs || 0, d?.lastPromptTs || 0) || Date.parse(s.createdAt) || 0);
-  const promptText = sent ? sent.text : d?.lastPromptText || '';
+  const promptText = sent ? sent.displayText : d?.lastPromptText || '';
   const answerText = entry ? entry.answer : d?.lastAssistantText || '';
   const answerMd = entry ? entry.answerMd : d?.lastAssistantMd || '';
   // Chronological position: hist is newest-first, live text is the newest turn.
@@ -283,8 +301,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   return (
     <div className={`ov-card${windowed ? '' : ' ov-compact'}`}>
       <div className="ov-id" onClick={() => onOpen(s.id)} title="Open pane">
-        <span className={`status ${s.state}`} />
-        <Logo cli={s.cli} size={12} tint={color} />
+        <StateLogo cli={s.cli} state={s.state} size={12} tint={color} title={stateTitle(s)} />
         {group && <span className="ov-gtag mono">[{group}]</span>}
         <span className="ov-name mono">{s.name}</span>
         {ago && <span className="ov-ago">· {ago}</span>}
@@ -324,14 +341,14 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
             </div>
             {/* Optimistic echo: the digest round-trip can take seconds, and a
                 frozen card reads as "did that get lost?". */}
-            {justSent && sent && <PendingExchange text={sent.text} />}
+            {justSent && sent && <PendingExchange text={sent.displayText} />}
           </>
         ) : (
           /* No transcript to read yet (never started, or a harness with no
              trace): the digest still knows the last prompt and answer. */
           <>
             {promptText ? (
-              <div className="ov-prompt">{sent ? sent.text : (d?.lastPromptRaw || promptText)}</div>
+              <div className="ov-prompt">{sent ? sent.displayText : (d?.lastPromptRaw || promptText)}</div>
             ) : pending ? (
               <div className="ov-prompt-skel"><span className="skel" style={{ width: '70%' }} /></div>
             ) : (
@@ -366,18 +383,26 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
         )}
       </div>
 
+      {s.inputRequired && (
+        <InputRequiredNotice
+          input={s.inputRequired}
+          onOpenTerminal={() => { writePaneMode('terminal'); onOpen(s.id); }}
+        />
+      )}
       <Composer
         draft={draft}
         sending={sending}
         isMobile={isMobile}
         inputRef={inputRef}
-        canSend={!!draft.trim() || images.length > 0}
+        canSend={(!!draft.trim() || images.length > 0)
+          && images.every((image) => !!image.attachment)}
         above={<Attachments
           attachments={images}
           disabled={sending || !allowAttachments}
           disabledReason={!allowAttachments ? 'Files are not available for remote agents yet — that agent cannot read files stored on this Space.' : undefined}
           onFiles={addImages}
           onRemove={removeImage}
+          onRetry={retryImage}
         />}
         onChange={setDraft}
         onSend={send}
@@ -388,24 +413,100 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   );
 }
 
+/**
+ * Does everything on a tile's head row fit, with the group in it?
+ *
+ * The group is rendered first and the browser is asked: did any child have to
+ * truncate? If yes the group is dropped and the name gets the whole row; if no
+ * it stays. That is a question about SPACE, which is the thing that decides
+ * whether two strings can share 225px — a character count is not a proxy for it
+ * (`AM cowrite-add-agent` is 19 characters and clips both halves at 225px;
+ * `rl-llm-agents release` is 20 and fits at 276px).
+ *
+ * Measuring happens in a layout effect, before paint, so the group never
+ * flashes in and out. A ResizeObserver re-asks when the tile's width changes —
+ * the grid reflows on window resize and when the sidebar opens — and the group
+ * is put back for that one pass so the measurement is of the real row again.
+ * Web fonts land after first paint and change every width, so the first
+ * `document.fonts.ready` also re-asks.
+ */
+function useHeadFits(hasGroup: boolean) {
+  const head = useRef<HTMLDivElement | null>(null);
+  const probe = useRef<HTMLSpanElement | null>(null);
+  // `true` while measuring: the group has to be in the row to be measured.
+  const [show, setShow] = useState(true);
+  // The width the live decision belongs to. It is recorded on EVERY pass, not
+  // only the ones that could measure — `observe()` fires the callback once
+  // immediately, and a callback that cannot tell "same width" from "not decided
+  // yet" flips the group back on, which re-runs this effect, which re-observes,
+  // which fires again. That spins: 54k DOM writes in 1.5s when I got it wrong.
+  const decidedAt = useRef<number | null>(null);
+  // Once per mount, not once per pass, for the same reason.
+  const awaitedFonts = useRef(false);
+
+  useLayoutEffect(() => {
+    if (!hasGroup) return undefined;
+    const row = head.current;
+    if (!row) return undefined;
+    const width = row.clientWidth;
+    if (probe.current) {
+      const clipped = (el: Element | null) => !!el && el.scrollWidth > el.clientWidth + 0.5;
+      setShow(!clipped(probe.current) && !clipped(row.querySelector('.ovt-name')));
+    }
+    decidedAt.current = width;
+
+    const ro = new ResizeObserver(() => {
+      const now = head.current?.clientWidth ?? 0;
+      if (decidedAt.current !== null && Math.abs(now - decidedAt.current) < 0.5) return;
+      // The tile actually changed width: put the group back for one pass so the
+      // next measurement is of the real row again.
+      decidedAt.current = null;
+      setShow(true);
+    });
+    ro.observe(row);
+
+    let cancelled = false;
+    if (!awaitedFonts.current) {
+      awaitedFonts.current = true;
+      // Web fonts land after first paint and change every width, so the first
+      // decision was made on fallback metrics. Ask again, once.
+      document.fonts?.ready.then(() => {
+        if (cancelled) return;
+        decidedAt.current = null;
+        setShow(true);
+      });
+    }
+    return () => { cancelled = true; ro.disconnect(); };
+  }, [hasGroup, show]);
+
+  return { head, probe, show };
+}
+
 /** Compact tile: status + prompt + state; click opens the conversation window. */
-function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color?: string; group?: string | null; dim?: boolean; pending?: boolean; onOpen: () => void }) {
+export function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color?: string; group?: string | null; dim?: boolean; pending?: boolean; onOpen: () => void }) {
   const d = s.digest;
   const running = atWork(s);   // same definition as the card and the pinned block
   const last = Math.max(d?.lastAssistantTs || 0, d?.lastPromptTs || 0) || Date.parse(s.createdAt) || 0;
   // ring = waiting on you AND recent — a fleet where everything is "waiting
   // since last week" shouldn't glow everywhere
   const fresh = s.state === 'waiting' && Date.now() - last < 24 * 3600e3;
+  const groupFits = useHeadFits(!!group);
   return (
     <div className={`ovt-tile${fresh ? ' attn' : ''}${dim ? ' archived' : ''}`} onClick={onOpen}>
-      {/* A tile is ~225px: a group prefix INSIDE the name row would ellipsise,
-          and so would the name, leaving "[Age… trace reader pa…" — two clipped
-          strings and no legible fact. It gets its own line, where the full
-          width is available (the list card is wide enough to keep it inline). */}
-      {group && <div className="ovt-gline mono">[{group}]</div>}
-      <div className="ovt-head">
-        <span className={`status ${s.state}`} />
-        <Logo cli={s.cli} size={12} tint={color} />
+      {/* The group rides the name's row, as it does on the list card. A tile is
+          only ~225px, so the two cannot always share it, and the rule is that
+          the NAME is the identity while the group is context: when the row is
+          short of space the group goes, whole, and the name keeps the width.
+          Which happens is decided by MEASURING this row, not by counting
+          characters — a character budget was tried first and failed in both
+          directions: at 225px it let a 19-character pair through that clipped
+          BOTH strings, and it dropped `rl-llm-agents release` at 276px where
+          there was room to spare. useHeadFits renders the group, asks the
+          browser whether anything in the row had to truncate, and drops it if
+          so. Either the group is fully legible or it is not there. */}
+      <div className="ovt-head" ref={groupFits.head}>
+        <StateLogo cli={s.cli} state={s.state} size={12} tint={color} title={stateTitle(s)} />
+        {group && groupFits.show && <span className="ovt-gtag mono" ref={groupFits.probe}>{group}</span>}
         <span className="ovt-name mono">{s.name}</span>
         <span className="ovt-ago">{pending ? '' : fmtAgo(last)}</span>
       </div>
@@ -419,7 +520,9 @@ function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color
           {d?.lastPromptText
             ? <div className="ovt-prompt" title={d.lastPromptText}>{d.lastPromptText}</div>
             : <div className="ovt-prompt none">no prompt yet</div>}
-          {running
+          {s.inputRequired
+            ? <div className="ovt-state input mono">! needs input</div>
+            : running
             ? <div className="ovt-state running mono">running</div>
             : s.state === 'stopped'
               ? <div className="ovt-state stopped mono">stopped</div>
@@ -435,11 +538,12 @@ function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession; color
 /** Mission control: one reading column — group capsules with their agents as
  *  slabs, loose agents as standalone panels. Unless a sort is on, in which case
  *  it is one flat ranked column instead (see §"sorted feed" below). */
-export default function Overview({ clis, tree, chip, sort, view, archived, showArchived, showHidden, meta, metaReady, isMobile, onOpen }: {
+export default function Overview({ clis, tree, chip, sort, query, view, archived, showArchived, showHidden, meta, metaReady, isMobile, onOpen }: {
   clis: Cli[];
   tree: Tree;
   chip: OverviewChip;     // controlled by the bottom bar in App
   sort: OverviewSort;     // ditto, and independent of the filter
+  query: string;          // transient recent-activity filter in the bottom bar
   view: 'tiles' | 'list'; // controlled by the bottom bar in App
   archived: Set<string>;
   showArchived: boolean;
@@ -477,14 +581,6 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
   // hide a group and its working agent must not float back to the top.
   const hiddenIds = useMemo(() => hiddenSessionIds(tree), [tree]);
 
-  // One chip can stand for several buckets ('started' is waiting AND working), so
-  // this is set membership, not equality.
-  const buckets = chipBuckets(chip);
-  const visible = (s: MetaSession) =>
-    buckets.includes(bucket(s.state))
-    && (showArchived || !archived.has(s.id))
-    && (showHidden || !hiddenIds.has(s.id));
-
   // Which group each agent is in, by name. Only the sorted feed needs it: the
   // manual feed draws the group as a frame around its members and would be
   // saying it twice (the same rule the sidebar and pane headers follow —
@@ -494,6 +590,16 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
     for (const g of tree.groups) for (const id of g.sessionIds) m[id] = g.name;
     return m;
   }, [tree.groups]);
+
+  // One chip can stand for several buckets ('started' is waiting AND working), so
+  // this is set membership, not equality. Search is the final AND: it filters
+  // the same cards without changing their grouping or order.
+  const buckets = chipBuckets(chip);
+  const visible = (s: MetaSession) =>
+    buckets.includes(bucket(s.state))
+    && (showArchived || !archived.has(s.id))
+    && (showHidden || !hiddenIds.has(s.id))
+    && matchesOverviewSearch(s, groupNameOf[s.id] ?? '', query);
 
   // ---- sorted feed: flat, ranked, groups become a prefix ----
   //
@@ -539,7 +645,7 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
     if (!metaReady) return { running: [], dated: items, undated: [] };
     return rankSessions(items, sort);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sorted, sort, tree.order, sessById, groupById, meta, metaReady, chip, archived, showArchived, hiddenIds, showHidden]);
+  }, [sorted, sort, tree.order, sessById, groupById, meta, metaReady, chip, archived, showArchived, hiddenIds, showHidden, groupNameOf, query]);
 
   // Collapse at constant velocity: duration follows the group's height.
   const toggleGroup = (gid: string, el: HTMLElement) => {
@@ -667,7 +773,9 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
   const hiddenCount = hiddenIds.size;
   const empty = (
     <div className="usage-msg mono">
-      {!showHidden && hiddenCount > 0
+      {query.trim()
+        ? `no recent activity matches “${query.trim()}” with the current filters.`
+        : !showHidden && hiddenCount > 0
         ? `nothing to show — ${hiddenCount} hidden. reveal them from the bar below.`
         : chip === 'all' ? 'no agents yet — shells and file panes don’t appear here.'
         : chip === 'started' ? 'nothing started — no agent is running or waiting on you.'
@@ -710,7 +818,10 @@ export default function Overview({ clis, tree, chip, sort, view, archived, showA
             <span className="ov-sectitle">{g.name}</span>
             <span className="ov-secn mono">{shown.length}</span>
             <span className="ov-peek">
-              {shown.map(({ s }) => <span key={s.id} className={`status ${dataFor(s).state}`} />)}
+              {shown.map(({ s }) => (
+                <StateLogo key={s.id} frameOnly state={dataFor(s).state} size={12}
+                  title={`${s.name} · ${stateTitle({ cli: s.cli, state: dataFor(s).state })}`} />
+              ))}
             </span>
           </button>
           <div className="ov-drawer"><div className="ov-drawer-in">
