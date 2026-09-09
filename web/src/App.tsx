@@ -2,10 +2,9 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import Sidebar from './components/Sidebar';
 import type { QuickStartAttachmentOptions } from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
-import FilesPane from './components/FilesPane';
-import TracePane from './components/TracePane';
 import RemotePane from './components/RemotePane';
-import SettingsView from './components/SettingsView';
+import SettingsShell, { type SettingsPage } from './components/SettingsShell';
+import LazyPanel from './components/LazyPanel';
 import NewSession from './components/NewSession';
 import LayoutPicker from './components/LayoutPicker';
 import ShareDialog from './components/ShareDialog';
@@ -29,6 +28,15 @@ import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './compon
 const VV_DEBUG = new URLSearchParams(location.search).has('vvdebug');
 const ViewportDebug = lazy(() => import('./components/ViewportDebug'));
 
+// Panels a visit may never open ship as their own chunks and are fetched when
+// first shown (LazyPanel). The terminal/reader pane is the app's reason to
+// exist and stays in the entry. These loaders are module-level on purpose: the
+// module cache is keyed by the function, and a stable component type is what
+// keeps a mounted panel's state through re-renders.
+const loadFilesPane = () => import('./components/FilesPane');
+const loadTracePane = () => import('./components/TracePane');
+const loadSettingsView = () => import('./components/SettingsView');
+
 // Phone-sized viewport: the app becomes two full-screen views (list ⇄ pane).
 function useIsMobile() {
   const [m, setM] = useState(() => window.matchMedia('(max-width: 720px)').matches);
@@ -50,7 +58,6 @@ function autoGrid(n: number): GridSpec {
   return { cols: 3, rows: 3 };
 }
 
-type SettingsPage = 'general' | 'usage' | 'skills' | 'cron' | 'apilog';
 const ROOT_PATH = '.';
 const WARM_TERMINAL_LIMIT = 12;
 const normalizePath = (p?: string | null) => (p && p.trim() ? p : ROOT_PATH);
@@ -953,15 +960,17 @@ export default function App() {
             {...(activeGroup ? tileDnd(i, !!s) : {})}
           >
             {s && (s.cli === 'files' ? (
-              <FilesPane
-                session={s}
-                zoom={zoom}
-                focused={visibleSessions.length > 1 && s.id === focusedId}
-                dragId={canDrag ? `p:${s.id}` : undefined}
-                onDragActive={setPaneDrag}
-                onFocus={() => setFocusedId(s.id)}
-                onClose={() => closePane(s.id)}
-              />
+              <LazyPanel load={loadFilesPane} what="the file browser" onClose={() => closePane(s.id)} render={(m) => (
+                <m.default
+                  session={s}
+                  zoom={zoom}
+                  focused={visibleSessions.length > 1 && s.id === focusedId}
+                  dragId={canDrag ? `p:${s.id}` : undefined}
+                  onDragActive={setPaneDrag}
+                  onFocus={() => setFocusedId(s.id)}
+                  onClose={() => closePane(s.id)}
+                />
+              )} />
             ) : s.cli === 'remote' ? (
               <RemotePane
                 session={s}
@@ -976,25 +985,27 @@ export default function App() {
                 onClose={() => closePane(s.id)}
               />
             ) : (
-              <TracePane
-                session={s}
-                // A trace pane follows its SOURCE session: whether that agent is
-                // still writing decides how hard this pane looks for new turns.
-                sourceLive={(() => {
-                  const ref = s.traceSource?.kind === 'session' ? s.traceSource.ref : null;
-                  return ref ? sessById[ref]?.state === 'working' : false;
-                })()}
-                zoom={zoom}
-                focused={visibleSessions.length > 1 && s.id === focusedId}
-                dragId={canDrag ? `p:${s.id}` : undefined}
-                onDragActive={setPaneDrag}
-                onFocus={() => setFocusedId(s.id)}
-                onShare={() => shareTrace(s.id)}
-                // The prefilled create panel lives in the sidebar, so the
-                // request travels there rather than the panel moving here.
-                onHandover={() => setHandoverFor(s.id)}
-                onClose={() => closePane(s.id)}
-              />
+              <LazyPanel load={loadTracePane} what="the trace viewer" onClose={() => closePane(s.id)} render={(m) => (
+                <m.default
+                  session={s}
+                  // A trace pane follows its SOURCE session: whether that agent is
+                  // still writing decides how hard this pane looks for new turns.
+                  sourceLive={(() => {
+                    const ref = s.traceSource?.kind === 'session' ? s.traceSource.ref : null;
+                    return ref ? sessById[ref]?.state === 'working' : false;
+                  })()}
+                  zoom={zoom}
+                  focused={visibleSessions.length > 1 && s.id === focusedId}
+                  dragId={canDrag ? `p:${s.id}` : undefined}
+                  onDragActive={setPaneDrag}
+                  onFocus={() => setFocusedId(s.id)}
+                  onShare={() => shareTrace(s.id)}
+                  // The prefilled create panel lives in the sidebar, so the
+                  // request travels there rather than the panel moving here.
+                  onHandover={() => setHandoverFor(s.id)}
+                  onClose={() => closePane(s.id)}
+                />
+              )} />
             ))}
           </div>
         )))}
@@ -1015,19 +1026,23 @@ export default function App() {
   return (
     <>
       {settingsOpen && (
-      <SettingsView
-        page={settingsPage}
-        onPage={setSettingsPage}
-        onClose={() => setSettingsOpen(false)}
-        theme={theme}
-        onToggleTheme={toggleTheme}
-        clis={clis}
-        info={info}
-        onShowWelcome={openWelcome}
-        onOpenSharedTrace={openSharedTrace}
-        demoMode={!!info?.demoMode}
-        onToggleDemo={toggleDemo}
-      />
+      <SettingsShell page={settingsPage} onPage={setSettingsPage} onClose={() => setSettingsOpen(false)}>
+        <LazyPanel load={loadSettingsView} what="settings" onClose={() => setSettingsOpen(false)} render={(m) => (
+          <m.default
+            page={settingsPage}
+            onPage={setSettingsPage}
+            onClose={() => setSettingsOpen(false)}
+            theme={theme}
+            onToggleTheme={toggleTheme}
+            clis={clis}
+            info={info}
+            onShowWelcome={openWelcome}
+            onOpenSharedTrace={openSharedTrace}
+            demoMode={!!info?.demoMode}
+            onToggleDemo={toggleDemo}
+          />
+        )} />
+      </SettingsShell>
       )}
     {/* Outside .app: it reports where .app was put. That does not make it
         immune — it is fixed too, so a displaced fixed subtree would carry it

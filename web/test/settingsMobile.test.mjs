@@ -78,16 +78,21 @@ await build({
       import React from 'react';
       import { createRoot } from 'react-dom/client';
       import SettingsView from './src/components/SettingsView.tsx';
+      import SettingsShell from './src/components/SettingsShell.tsx';
 
       const clis = [
         { id: 'claude', label: 'Claude Code', color: '#d97757', available: true, ready: true, version: '2.1.232' },
         { id: 'gemini', label: 'Gemini CLI', color: '#4796e3', available: true, ready: false, version: '0.55.1', setup: 'Sign in once.' },
       ];
       const info = { dataDir: '/data', home: '/data/home', spaceId: 'me/space', ghostty: true, canRelaunch: true };
+      // The shell (Back, title, tabs) and the page are two components in the
+      // app too: App mounts the shell at once and the page's code on demand.
       createRoot(document.getElementById('root')).render(
-        <SettingsView page="general" onPage={() => {}} onClose={() => {}}
-          theme="light" onToggleTheme={() => {}} clis={clis} info={info}
-          onShowWelcome={() => {}} demoMode={false} onToggleDemo={() => {}} />,
+        <SettingsShell page="general" onPage={() => {}} onClose={() => {}}>
+          <SettingsView page="general" onPage={() => {}} onClose={() => {}}
+            theme="light" onToggleTheme={() => {}} clis={clis} info={info}
+            onShowWelcome={() => {}} demoMode={false} onToggleDemo={() => {}} />
+        </SettingsShell>,
       );
     `,
   },
