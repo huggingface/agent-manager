@@ -25,7 +25,7 @@ import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { hiddenSessionIds } from './lib/overviewHidden';
 import { paneOwnsBack } from './lib/mobileBack';
 import { isPassive, isRemote, isShareable } from './types';
-import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
+import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph } from './components/icons';
 import { createLatestRefresh, observeAppReturns } from './lib/appRefresh';
 
 // `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
@@ -144,7 +144,8 @@ export default function App() {
   // thing that makes a sort control feel like a toy.
   const [ovSort, setOvSortRaw] = useState<OverviewSort>(() => {
     const s = readStored('am-ov-sort');
-    return s === 'prompt' || s === 'answer' ? s : 'manual';
+    // `manual` is the stored name for the "grouped" button, and the default.
+    return s === 'prompt' || s === 'answer' || s === 'unread' ? s : 'manual';
   });
   const setOvSort = (v: OverviewSort) => { setOvSortRaw(v); writeStored('am-ov-sort', v); };
   // Archiving takes two roads into the same view, and they are not the same
@@ -1360,25 +1361,36 @@ export default function App() {
         {activeRef === 'overview' && (
           <div className="zoombar ov-bar">
             <OverviewSearchBox value={ovQuery} onChange={setOvQuery} />
-            <div className="seg ov-seg">
-              {OV_CHIPS.map(({ chip, title }) => (
-                <button key={chip} className={ovChip === chip ? 'on' : ''} title={title}
-                  onClick={() => setOvChip(chip)}>{chip}</button>
-              ))}
-            </div>
-            {/* Sort, independent of the filter beside it: one says WHICH agents
-                you are looking at, the other WHERE each one is in the feed.
-                The glyph sits OUTSIDE the segment: inside it read as a fourth,
-                permanently-disabled option. */}
-            <span className="ov-sortmark" aria-hidden="true" title="Order"><SortGlyph /></span>
-            <div className="seg ov-seg ov-sortseg">
-              <button className={ovSort === 'manual' ? 'on' : ''} title="Your own order — the sidebar's groups and arrangement"
-                onClick={() => setOvSort('manual')}>manual</button>
-              <button className={ovSort === 'prompt' ? 'on' : ''} title="Newest message from you first"
-                onClick={() => setOvSort('prompt')}>prompt</button>
-              <button className={ovSort === 'answer' ? 'on' : ''} title="Newest reply from an agent first"
-                onClick={() => setOvSort('answer')}>answer</button>
-            </div>
+            {/* Both controls are named now. Unlabelled, `all/started/…` beside
+                `manual/prompt/answer` read as one long row of six choices with
+                no clue that the first three narrow the feed and the last three
+                arrange it — and `unread`, which does both, made that worse. */}
+            <label className="ov-ctl">
+              <span className="ov-ctl-label mono">state</span>
+              <span className="seg ov-seg">
+                {OV_CHIPS.map(({ chip, title }) => (
+                  <button key={chip} className={ovChip === chip ? 'on' : ''} title={title}
+                    onClick={() => setOvChip(chip)}>{chip}</button>
+                ))}
+              </span>
+            </label>
+            {/* Independent of the state control beside it: one says WHICH agents
+                you are looking at, the other how the feed is arranged. `unread`
+                is the exception that does both, and its own button says so. */}
+            <label className="ov-ctl">
+              <span className="ov-ctl-label mono">sort by</span>
+              <span className="seg ov-seg ov-sortseg">
+                <button className={ovSort === 'manual' ? 'on' : ''} title="Your own order — the sidebar's groups and arrangement"
+                  onClick={() => setOvSort('manual')}>grouped</button>
+                <button className={ovSort === 'prompt' ? 'on' : ''} title="Newest message from you first"
+                  onClick={() => setOvSort('prompt')}>prompt</button>
+                <button className={ovSort === 'answer' ? 'on' : ''} title="Newest reply from an agent first"
+                  onClick={() => setOvSort('answer')}>answer</button>
+                <button className={ovSort === 'unread' ? 'on' : ''}
+                  title="Only agents whose latest reply you have not read, newest first. The state control still applies."
+                  onClick={() => setOvSort('unread')}>unread</button>
+              </span>
+            </label>
             <div className="seg ov-seg ov-viewseg">
               <button className={ovView === 'tiles' ? 'on' : ''} title="Tiles" onClick={() => setOvView('tiles')}><GridGlyph /></button>
               <button className={ovView === 'list' ? 'on' : ''} title="List" onClick={() => setOvView('list')}><ListGlyph /></button>

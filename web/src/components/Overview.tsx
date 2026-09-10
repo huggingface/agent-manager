@@ -7,6 +7,7 @@ import { chipBuckets, isPassive, isRemote, STATE_LABEL, REMOTE_STATE_LABEL } fro
 import { renderMarkdown } from '../lib/markdown';
 import { rankSessions, sortLabel } from '../lib/overviewSort';
 import { answerMatches, isUnread, markFor } from '../lib/unread';
+import { emptyMessage } from '../lib/overviewEmpty';
 import { useSeenLatest } from './useSeenLatest';
 import { matchesOverviewSearch } from '../lib/overviewSearch';
 import { hiddenSessionIds } from '../lib/overviewHidden';
@@ -346,6 +347,12 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose, onSe
         <StateLogo cli={s.cli} state={s.state} size={12} tint={color} title={stateTitle(s)} />
         {group && <span className="ov-gtag mono">[{group}]</span>}
         <span className="ov-name mono">{s.name}</span>
+        {/* Unread is a section in exactly one of the four orders now, so in the
+            other three the card is the only place it can show. A dot rather
+            than a word: it sits beside the name at a glance in every order,
+            including the unread feed itself, where it is what the rows have in
+            common rather than a distinction between them. */}
+        {isUnread(s) && <span className="ov-unread" title="Unread reply" aria-label="Unread reply" />}
         {ago && <span className="ov-ago">· {ago}</span>}
         <span className="spacer" />
         <span className="ov-go">open ↗</span>
@@ -555,6 +562,7 @@ export function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession
         <StateLogo cli={s.cli} state={s.state} size={12} tint={color} title={stateTitle(s)} />
         {group && groupFits.show && <span className="ovt-gtag mono" ref={groupFits.probe}>{group}</span>}
         <span className="ovt-name mono">{s.name}</span>
+        {isUnread(s) && <span className="ov-unread" title="Unread reply" aria-label="Unread reply" />}
         <span className="ovt-ago">{pending ? '' : fmtAgo(last)}</span>
       </div>
       {pending ? (
@@ -670,8 +678,14 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
   // this is set membership, not equality. Search is the final AND: it filters
   // the same cards without changing their grouping or order.
   const buckets = chipBuckets(chip);
+  // `unread` is the one option that both narrows and orders. It composes with
+  // the state control rather than replacing it: two named controls are on
+  // screen, and one of them silently doing nothing is worse than an empty feed
+  // that says why. The empty message below names whichever ones are narrowing.
+  const onlyUnread = sort === 'unread';
   const visible = (s: MetaSession) =>
-    buckets.includes(bucket(s.state))
+    (!onlyUnread || isUnread(s))
+    && buckets.includes(bucket(s.state))
     && (showArchived || !archived.has(s.id))
     && (showHidden || !hiddenIds.has(s.id))
     && matchesOverviewSearch(s, groupNameOf[s.id] ?? '', query);
@@ -685,6 +699,7 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
   // would only be the newest agent *of whichever group happens to be first in
   // the sidebar*. Which group an agent is in is not lost, it moves onto the
   // card as `[Group] name`, exactly as a pane header spells it.
+  // Everything but the grouped order is one flat ranked column.
   const sorted = sort !== 'manual';
   const sections = useMemo(() => {
     if (!sorted) return null;
@@ -717,22 +732,13 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
     // Until the first /api/meta lands every digest is null, which would file the
     // whole fleet under "nothing sent yet" — a labelled claim about agents we
     // know nothing about yet. One unlabelled block until we do.
-    if (!metaReady) return { running: [], dated: items, undated: [], unread: [] };
-    const ranked = rankSessions(items, sort);
-    // Unread is carved out of the ranked tail, never out of `running`: an agent
-    // still working stays in the block the operator watches while work is in
-    // flight. Its unread state is untouched, so it arrives here the moment it
-    // stops. Carving rather than copying is what keeps a session in exactly one
-    // block — the sort's own order survives inside each.
-    // `atWork`, not the ranking pin: when the chip has already narrowed the feed
-    // to working agents the pin is deliberately switched off (it would empty the
-    // sorted block), and reading that flag here would sweep every running agent
-    // into Unread — where Mark all read would then clear them, against both the
-    // section's rule and the button's own promise.
-    const stillWorking = (r: { m: MetaSession }) => atWork(r.m);
-    const unread = [...ranked.dated, ...ranked.undated].filter((r) => !stillWorking(r) && isUnread(r.m));
-    const keep = (rows: typeof ranked.dated) => rows.filter((r) => stillWorking(r) || !isUnread(r.m));
-    return { running: ranked.running, dated: keep(ranked.dated), undated: keep(ranked.undated), unread };
+    if (!metaReady) return { running: [], dated: items, undated: [] };
+    // Unread is no longer carved out of the other orders. It is its own option,
+    // and in the three that are not it, an unread agent stays exactly where its
+    // order puts it and says so on its own card — which is how the tracking
+    // stays visible under all four without a session appearing twice, and
+    // without a card changing parent when a background poll makes it unread.
+    return rankSessions(items, sort);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sorted, sort, tree.order, sessById, groupById, meta, metaReady, chip, archived, showArchived, hiddenIds, showHidden, groupNameOf, query]);
 
@@ -808,13 +814,27 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
   const rankedBlocks = (): ReactNode[] => {
     if (!sections) return [];
     type Row = { id: string; m: MetaSession };
-    const blocks = [
-      { key: 'running', label: 'running now', rows: sections.running },
-      { key: 'unread', label: 'unread', rows: sections.unread },
-      // No label before the first poll answers: `sections` is unranked then.
-      { key: 'dated', label: metaReady ? sortLabel(sort) : '', rows: sections.dated },
-      { key: 'undated', label: sort === 'prompt' ? 'nothing sent yet' : 'no reply yet', rows: sections.undated },
-    ].filter((b) => b.rows.length > 0);
+    const blocks = (onlyUnread
+      ? [
+        // A running agent stays pinned here even in the unread feed: hiding one
+        // whose reply you have not read, from the view whose whole job is to
+        // show exactly that, would be a lie. It is still working, so it keeps
+        // the block the operator watches while work is in flight, and Mark all
+        // read still leaves it alone (see the button's own scope below).
+        { key: 'running', label: 'running now', rows: sections.running },
+        // One block, not the usual dated/undated pair. Every row here is unread
+        // by definition, and an unread agent CAN have no reply timestamp — the
+        // digest clears it when the operator sends the next prompt — so the
+        // ordinary split would file a real unread reply under "no reply yet"
+        // and, worse, leave it outside the bulk action's scope.
+        { key: 'unread', label: 'unread', rows: [...sections.dated, ...sections.undated] },
+      ]
+      : [
+        { key: 'running', label: 'running now', rows: sections.running },
+        // No label before the first poll answers: `sections` is unranked then.
+        { key: 'dated', label: metaReady ? sortLabel(sort) : '', rows: sections.dated },
+        { key: 'undated', label: sort === 'prompt' ? 'nothing sent yet' : 'no reply yet', rows: sections.undated },
+      ]).filter((b) => b.rows.length > 0);
     if (!blocks.length) return [];
 
     // ONE parent for every card, with the labels as siblings between them —
@@ -878,17 +898,15 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
   // be a lie the operator cannot see through. So hiding is named first, and
   // counted, whenever it is what emptied the feed.
   const hiddenCount = hiddenIds.size;
+  // An empty feed has to say which control emptied it — there are three that
+  // can, and two are named on screen. The wording lives in lib/overviewEmpty.ts
+  // so the "never looks broken" claim can be tested.
   const empty = (
     <div className="usage-msg mono">
-      {query.trim()
-        ? `no recent activity matches “${query.trim()}” with the current filters.`
-        : !showHidden && hiddenCount > 0
-        ? `nothing to show — ${hiddenCount} hidden. reveal them from the bar below.`
-        : chip === 'all' ? 'no agents yet — shells and file panes don’t appear here.'
-        : chip === 'started' ? 'nothing started — no agent is running or waiting on you.'
-        : 'nothing in this state.'}
+      {emptyMessage({ onlyUnread, chip, query, hiddenCount, showHidden })}
     </div>
   );
+
 
   if (view === 'tiles') {
     const content = sorted ? rankedBlocks() : tileBlocks;
