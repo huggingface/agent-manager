@@ -24,11 +24,12 @@
   --term-bg: #ffffff;
   --drop: #0e7c8618;
   --tile: #ffffff;
-  /* Where the keyboard is, in the Files listing. Neutral on purpose — every
-     other row state is accent-tinted — and mixed from the tokens either theme
-     already defines, so it tracks the palette instead of being two hard-coded
-     greys. */
-  --row-focus: color-mix(in srgb, var(--text) 20%, var(--term-bg));
+  /* Where the keyboard is, in the Files listing: a band behind the NAME. The
+     accent, like the states around it, but denser than any of them — it has to
+     stay legible when it lands on a selected row (accent 14%) or on a drop
+     target (accent 20%), which it composites over. Kept as a mix with
+     `transparent` for exactly that reason. */
+  --row-focus: color-mix(in srgb, var(--accent) 34%, transparent);
 }
 
 [data-theme='dark'] {
@@ -1146,8 +1147,22 @@ body {
    first one rather than dropping the whole list and showing no focus at all. */
 .tree-row.selected { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .tree-row.selected .tw-name { color: var(--accent); font-weight: 600; }
-.tree-row:focus-visible { outline: none; background: var(--row-focus); }
-.tree-row:has(:focus-visible) { background: var(--row-focus); }
+.tree-row:focus-visible { outline: none; }
+/* The band is on the name, not the row: `.tw-name` is the flexible column that
+   pushes Size and Modified right, so the paint sits on an inner span that is as
+   wide as the text and no wider. Square — the rounding belongs to the row. The
+   side padding is cancelled by an equal negative margin, so arrowing down a
+   listing does not nudge each name sideways as the focus arrives.
+   The `:has()` half keeps the band while Tab walks that row's own actions, and
+   is a SEPARATE rule so a browser without :has() still gets the first one
+   rather than dropping both and showing no focus at all. */
+.tree-row:focus-visible .tw-ink { background: var(--row-focus); padding: 0 0.25em; margin: 0 -0.25em; }
+.tree-row:has(:focus-visible) .tw-ink { background: var(--row-focus); padding: 0 0.25em; margin: 0 -0.25em; }
+/* On a selected row the name is already accent-coloured, which on an accent
+   band is teal on teal. The band wins the background, so the text goes back to
+   the ordinary ink and `.selected` keeps its weight and its row tint. */
+.tree-row.selected:focus-visible .tw-ink,
+.tree-row.selected:has(:focus-visible) .tw-ink { color: var(--text); }
 .tw-act:hover { color: var(--accent); }
 .tw-act.danger:hover { color: var(--danger); }
 .tw-act.ghost { pointer-events: none; }

@@ -366,7 +366,7 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
                 onCommit={(name) => onRename(p, name)}
                 onCancel={() => { setRenaming(null); requestFocus(p); }}
               />
-            ) : <span className="tw-name">{e.name}</span>}
+            ) : <span className="tw-name"><span className="tw-ink">{e.name}</span></span>}
             <span className="tw-size">{fmtSize(e.size)}</span>
             <span className="tw-time">{fmtWhen(e.mtime)}</span>
             <span className="tw-acts">
@@ -483,7 +483,7 @@ function FolderNode({ path, name, mtime, isLast, pos, setSize, ...rest }: RowPro
             onCommit={(next) => onRename(path, next)}
             onCancel={() => { setRenaming(null); requestFocus(path); }}
           />
-        ) : <span className="tw-name">{name}</span>}
+        ) : <span className="tw-name"><span className="tw-ink">{name}</span></span>}
         <span className="tw-size" />
         <span className="tw-time">{fmtWhen(mtime)}</span>
         <span className="tw-acts">
