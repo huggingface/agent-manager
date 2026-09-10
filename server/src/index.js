@@ -2483,6 +2483,15 @@ app.post('/api/sessions/:id/archive', (req, res) => {
 app.post('/api/sessions/:id/pin', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
+  // The other half of the same invariant groups.js keeps: a member cannot hold
+  // a pin. Membership clears one that already exists; this refuses to write a
+  // new one. Without it the API can still park a value on a member that only
+  // becomes visible once the session leaves the group. The sidebar never asks
+  // — it leaves the control off a grouped row — so this answers agents and
+  // direct callers.
+  if (groups.groupOf(s.id)) {
+    return res.status(409).json({ error: 'a session in a group cannot be pinned — pin the group instead' });
+  }
   res.json(store.update(s.id, { pinnedAt: new Date().toISOString() }));
 });
 

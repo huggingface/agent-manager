@@ -117,6 +117,90 @@ try {
   check('a pinned session is still pinned after a restart', !!(await sessionOf(c.id)).pinnedAt);
   check('and so is a pinned group', !!(await groupOf(g2.id)).pinnedAt);
 
+  // ---- the invariant: a session in a group never HOLDS a pin ----
+  //
+  // Not "reads as unpinned" — holds none. A stray `pinnedAt` on a member is
+  // suppressed by every read while the session is grouped, and every one of
+  // those reads stops applying the moment it leaves. The pin then springs back
+  // on a row the operator has had no way to see or change since it joined. So
+  // the ways IN are covered here next to the ways OUT: guarding one exit is not
+  // the same as the value never existing, and there is more than one exit.
+
+  // The asymmetric pairing the review found. The sidebar's carry-pin looks at
+  // the DRAGGED row; here the pinned one is the target, which becomes a member
+  // without ever being examined.
+  const pa = await mkSession('anchor');
+  const pb = await mkSession('dragged');
+  await api(`/api/sessions/${pa.id}/pin`, { method: 'POST' });
+  const paired = await api('/api/move', {
+    method: 'POST',
+    body: JSON.stringify({ ref: `s:${pb.id}`, to: { kind: 'pair', sessionId: pa.id } }),
+  });
+  check('pairing an unpinned session onto a pinned one answers 200', paired.status === 200, `status ${paired.status}`);
+  check('and the pinned TARGET loses its pin on the way in', !(await sessionOf(pa.id)).pinnedAt);
+
+  // Exit one: the group is deleted and its members go loose.
+  const pairGroup = (await tree()).groups.find((g) => g.sessionIds.includes(pa.id));
+  check('the pair really did make a group', !!pairGroup);
+  await api(`/api/groups/${pairGroup.id}`, { method: 'DELETE' });
+  check('released by deleting its group, it does not come back pinned', !(await sessionOf(pa.id)).pinnedAt);
+
+  // The other way a member can acquire one: the API, directly. The sidebar
+  // never asks — it leaves the control off a grouped row — but an agent can.
+  const held = (await api('/api/groups', { method: 'POST', body: JSON.stringify({ name: 'held' }) })).body;
+  const pc = await mkSession('member');
+  await api(`/api/groups/${held.id}`, { method: 'PUT', body: JSON.stringify({ sessionIds: [pc.id] }) });
+  const refused = await api(`/api/sessions/${pc.id}/pin`, { method: 'POST' });
+  check('pinning a session inside a group is refused', refused.status === 409, `status ${refused.status}`);
+  check('and nothing was written to the record', !(await sessionOf(pc.id)).pinnedAt);
+
+  // The tree editor sends whole membership lists rather than one attach.
+  const pd = await mkSession('joiner');
+  await api(`/api/sessions/${pd.id}/pin`, { method: 'POST' });
+  await api(`/api/groups/${held.id}`, { method: 'PUT', body: JSON.stringify({ sessionIds: [pc.id, pd.id] }) });
+  check('a tree edit that adds a pinned session clears its pin', !(await sessionOf(pd.id)).pinnedAt);
+
+  // Exit two: pulled back out beside a top-level row.
+  await api('/api/move', {
+    method: 'POST',
+    body: JSON.stringify({ ref: `s:${pd.id}`, to: { kind: 'before', ref: `g:${held.id}` } }),
+  });
+  check('pulled back out to the top level, it is still unpinned', !(await sessionOf(pd.id)).pinnedAt);
+
+  // Straight in through a move, and straight back out.
+  const pe = await mkSession('mover');
+  await api(`/api/sessions/${pe.id}/pin`, { method: 'POST' });
+  await api('/api/move', {
+    method: 'POST',
+    body: JSON.stringify({ ref: `s:${pe.id}`, to: { kind: 'into', groupId: held.id } }),
+  });
+  check('moving a pinned session INTO a group clears its pin', !(await sessionOf(pe.id)).pinnedAt);
+
+  // And the anchor form, which attaches beside a row that is itself nested.
+  const pf = await mkSession('nested');
+  await api(`/api/sessions/${pf.id}/pin`, { method: 'POST' });
+  await api('/api/move', {
+    method: 'POST',
+    body: JSON.stringify({ ref: `s:${pf.id}`, to: { kind: 'after', ref: `s:${pc.id}` } }),
+  });
+  check('placed beside a nested row, a pinned session loses its pin', !(await sessionOf(pf.id)).pinnedAt);
+
+  // Exit three: records written BEFORE the invariant was enforced. Those exist
+  // in the wild, so write the state the old code could produce and boot on it.
+  srv.kill();
+  await sleep(600);
+  const sessionsFile = path.join(DATA_DIR, 'sessions.json');
+  const onDisk = JSON.parse(fs.readFileSync(sessionsFile, 'utf8'));
+  onDisk.find((x) => x.id === pc.id).pinnedAt = new Date().toISOString();
+  fs.writeFileSync(sessionsFile, JSON.stringify(onDisk, null, 2));
+  srv = boot();
+  srv.stdout.on('data', (d) => { log += d; });
+  srv.stderr.on('data', (d) => { log += d; });
+  await waitUp();
+  check('a stray pin left by an older record is cleared on load', !(await sessionOf(pc.id)).pinnedAt);
+  const stillGrouped = (await tree()).groups.find((g) => g.id === held.id);
+  check('and clearing it did not disturb the membership', stillGrouped.sessionIds.includes(pc.id));
+
   // ---- unknown ids ----
   const missing = await api('/api/sessions/nope-nope/pin', { method: 'POST' });
   check('pinning something that does not exist is a 404', missing.status === 404, `status ${missing.status}`);

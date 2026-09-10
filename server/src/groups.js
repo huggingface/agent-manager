@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { DATA_DIR } from './config.js';
+import * as sessions from './sessions.js';
 
 const GROUPS_FILE = path.join(DATA_DIR, 'groups.json');
 let groups = [];
@@ -16,6 +17,27 @@ function persist() {
 // each session records its own `path`. (Old groups.json entries may still carry
 // a `folder` key; it's kept for the one-time path migration in index.js and
 // otherwise ignored.)
+// Membership revokes an individual pin, and it has to do so by CLEARING it.
+//
+// The rule is that a session inside a group cannot be pinned — the group is the
+// thing that gets pinned, and its members inherit what that buys. A `pinnedAt`
+// left behind on a member is not inert: every read that suppresses it is
+// conditioned on the session being grouped, so the value comes back to life the
+// moment the session leaves the group, by any of the ways it can (dragged out,
+// the group deleted, an anchor move, a tree edit that drops it). The operator
+// then sees a row lift above the rule because of a pin they set before it was
+// grouped and have had no way to see or change since.
+//
+// So it is cleared here, where membership is written, rather than guarded at
+// each of the places membership can end. This is the only choke point: every
+// route that groups a session goes through attach() or update().
+function clearMemberPins(ids) {
+  for (const id of ids) {
+    const s = sessions.get(id);
+    if (s && s.pinnedAt) sessions.update(id, { pinnedAt: undefined });
+  }
+}
+
 export function init() {
   try {
     groups = JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8'));
@@ -23,6 +45,9 @@ export function init() {
   } catch {
     groups = [];
   }
+  // Records written before membership cleared pins can still carry one. Fix
+  // them on load rather than leaving a pin that springs back on the way out.
+  for (const g of groups) clearMemberPins(g.sessionIds || []);
 }
 
 export function list() {
@@ -64,6 +89,7 @@ export function update(id, { name, sessionIds, layout }) {
       if (other.id !== id) other.sessionIds = other.sessionIds.filter((s) => !set.has(s));
     }
     g.sessionIds = [...new Set(sessionIds)];
+    clearMemberPins(g.sessionIds);
   }
   persist();
   return g;
@@ -94,6 +120,7 @@ export function attach(groupId, sessionId, index) {
   for (const other of groups) other.sessionIds = other.sessionIds.filter((s) => s !== sessionId);
   const at = Number.isInteger(index) && index >= 0 && index <= g.sessionIds.length ? index : g.sessionIds.length;
   g.sessionIds.splice(at, 0, sessionId);
+  clearMemberPins([sessionId]);
   persist();
   return g;
 }
