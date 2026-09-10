@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import {
-  PORT, BIND_HOST, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR,
+  PORT, BIND_HOST, INTERNAL_HOST, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR,
   ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions, PASSIVE_CLIS, isRemote,
 } from './config.js';
 import * as remote from './remote.js';
@@ -112,7 +112,10 @@ function ensureClaudeStatusline() {
     let s = {};
     try { s = JSON.parse(fs.readFileSync(p, 'utf8')); } catch {}
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'claude-statusline.mjs');
-    s.statusLine = { type: 'command', command: `node ${script}`, padding: 0 };
+    // Quoted: a checkout whose path contains a space would otherwise split into
+    // extra arguments and the statusline command would never run.
+    const quoted = `'${script.replace(/'/g, `'\\''`)}'`;
+    s.statusLine = { type: 'command', command: `node ${quoted}`, padding: 0 };
     fs.writeFileSync(p, JSON.stringify(s, null, 2));
   } catch {}
 }
@@ -1333,7 +1336,7 @@ Hermes — alongside plain shells and a file browser.
 - You can see them, watch them, and talk to them — see the next section.
 
 ## Working with the other agents
-The manager exposes a small HTTP API on \`localhost:\${AM_PORT:-${PORT}}\`. You are \`$AM_ID\`
+The manager exposes a small HTTP API on \`\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}\`. You are \`$AM_ID\`
 (\`$AM_NAME\` is your display name). Every call that changes something takes
 \`?from=$AM_ID\` so the other agent, and the operator reading the log later, can
 tell who asked. The manager durably records these operations and their outcomes;
@@ -1342,7 +1345,7 @@ prompt and file contents are hashed rather than copied into the audit log.
 To reconstruct recent manager operations (newest first):
 
 \`\`\`sh
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/operations?limit=100" | jq .operations
+curl -s "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/operations?limit=100" | jq .operations
 \`\`\`
 
 ### Schedule recurring prompts
@@ -1353,7 +1356,7 @@ is required because the Space clock is UTC. Create one with your own id so the
 operation log records who asked:
 
 \`\`\`sh
-curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/crons?from=$AM_ID" \\
+curl -sS --fail -X POST "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/crons?from=$AM_ID" \\
   -H 'content-type: application/json' -d '{
     "name":"weekday issue triage",
     "agent":{"name":"triage","cli":"claude"},
@@ -1361,7 +1364,7 @@ curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/crons?from=$A
     "schedule":{"cron":"0 9 * * 1-5","tz":"Europe/Zurich"},
     "runOnRestart":true
   }'
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/crons" | jq .crons
+curl -s "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/crons" | jq .crons
 \`\`\`
 
 Use \`POST /api/crons/$ID/run?from=$AM_ID\` to run now,
@@ -1386,11 +1389,11 @@ OpenClaw expose tokens and estimated model cost; they have no single quota
 because sessions may use different providers:
 
 \`\`\`sh
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=claude" | jq .providers.claude
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=codex" | jq .providers.codex
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=opencode" | jq .providers.opencode
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=hermes" | jq .providers.hermes
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=openclaw" | jq .providers.openclaw
+curl -s "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/usage?provider=claude" | jq .providers.claude
+curl -s "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/usage?provider=codex" | jq .providers.codex
+curl -s "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/usage?provider=opencode" | jq .providers.opencode
+curl -s "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/usage?provider=hermes" | jq .providers.hermes
+curl -s "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/usage?provider=openclaw" | jq .providers.openclaw
 \`\`\`
 
 These values reflect local calls made from this Space, as of each harness's
@@ -1399,7 +1402,7 @@ read-only call, so it does not take \`?from=\`.
 
 ### See who is here
 \`\`\`sh
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents?from=$AM_ID" | jq .
+curl -s "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/agents?from=$AM_ID" | jq .
 \`\`\`
 Each entry carries \`id\`, \`name\`, \`cli\`, \`state\`, \`workdir\`, \`sharesFolderWith\`,
 a one-line \`lastPrompt\`/\`lastAnswer\`, \`recentFiles\`, and \`trace\` — the path to
@@ -1414,8 +1417,8 @@ digest for one agent. Read \`state\` before you do anything:
 
 ### Watch instead of asking
 \`\`\`sh
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/tail?lines=120" | jq -r .text
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15&from=$AM_ID"
+curl -s "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/agents/$ID/tail?lines=120" | jq -r .text
+curl -s "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15&from=$AM_ID"
 \`\`\`
 \`tail\` returns that agent's screen and scrollback — exactly what a human would
 see in its pane. \`wait\` BLOCKS until the agent has held one of \`state\`
@@ -1439,7 +1442,7 @@ background (Claude Code: \`run_in_background\`), so you stay free meanwhile and
 are woken once, when the peer is genuinely finished.
 
 \`\`\`sh
-( until curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15&from=$AM_ID" \\
+( until curl -s "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15&from=$AM_ID" \\
         > /tmp/wait-$ID.json \\
      && jq -e '.matched or .state == "gone" or has("error")' /tmp/wait-$ID.json >/dev/null
   do sleep 2; done ) >/dev/null 2>&1 &
@@ -1459,7 +1462,7 @@ never wait with \`sleep\`: long foreground sleeps can destabilize a session.
 ### Send an agent a prompt
 Send the text as the request **body** so quoting and newlines never bite you:
 \`\`\`sh
-curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/prompt?from=$AM_ID" \\
+curl -s -X POST "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/agents/$ID/prompt?from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary @- <<'EOF'
 Please run the test suite in your folder and fix whatever fails.
 EOF
@@ -1483,7 +1486,7 @@ Rules that matter, because nothing enforces them for you:
 
 ### Launch a new agent
 \`\`\`sh
-curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents?cli=claude&name=reviewer&from=$AM_ID" \\
+curl -s -X POST "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/agents?cli=claude&name=reviewer&from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary @- <<'EOF'
 Review the diff in /data/workspaces/api and report anything that would break in production.
 EOF
@@ -1508,10 +1511,10 @@ refused rather than created, so a typo can't quietly fragment the sidebar. Make
 the group first, then spawn into it:
 
 \`\`\`sh
-GID=$(curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/groups?from=$AM_ID" \\
+GID=$(curl -sS --fail -X POST "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/groups?from=$AM_ID" \\
   -H 'content-type: application/json' -d '{"name":"taskforce"}' | jq -r .id)
 
-curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents?cli=claude&group=$GID&from=$AM_ID" \\
+curl -sS --fail -X POST "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/agents?cli=claude&group=$GID&from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary 'Draft the migration plan.'
 \`\`\`
 
@@ -1523,7 +1526,7 @@ the origin for the operation log.
 
 ### Stop an agent
 \`\`\`sh
-curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/stop?from=$AM_ID"
+curl -s -X POST "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/agents/$ID/stop?from=$AM_ID"
 \`\`\`
 **Only when the operator asked you to.** It kills that agent's CLI mid-thought.
 Files and conversation survive, and a later prompt resumes it, but work in
@@ -1535,7 +1538,7 @@ a GPU box — not in this container. They appear in the roster like anyone else 
 you message them the same way:
 
 \`\`\`sh
-curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/prompt?from=$AM_ID" \\
+curl -s -X POST "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/agents/$ID/prompt?from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary 'can you check the tokenizer?'
 \`\`\`
 
@@ -1600,7 +1603,7 @@ operator explicitly asked for it in their prompt (e.g. "notify me when the
 tests pass") — send exactly ONE message when that condition is met:
 
 \`\`\`sh
-curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/notify?from=$AM_ID" \\
+curl -s -X POST "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/notify?from=$AM_ID" \\
   -H 'content-type: application/json' \\
   -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"<one-line outcome>\\"}"
 \`\`\`
@@ -1613,7 +1616,7 @@ For DELAYED notifications ("notify me in 10 minutes"), do not block on a long
 immediately (long-running foreground execs can destabilize some sessions):
 
 \`\`\`sh
-(sleep 600 && curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/notify?from=$AM_ID" \\
+(sleep 600 && curl -s -X POST "http://\${AM_HOST:-${INTERNAL_HOST}}:\${AM_PORT:-${PORT}}/api/notify?from=$AM_ID" \\
   -H 'content-type: application/json' \\
   -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"reminder\\"}") >/dev/null 2>&1 &
 \`\`\`
@@ -3023,7 +3026,10 @@ server.listen(PORT, BIND_HOST, () => {
   // path and gives the operations log a first-class `cron:<id>` origin instead
   // of inventing a session that does not exist.
   crons.startScheduler(async (id, trigger) => {
-    const response = await fetch(`http://127.0.0.1:${PORT}/api/crons/${encodeURIComponent(id)}/run?trigger=${trigger}`, {
+    // INTERNAL_HOST, not a hardcoded loopback: with BIND_HOST set to a specific
+    // interface the server never binds 127.0.0.1, and every scheduled fire
+    // would be refused before it reached the route.
+    const response = await fetch(`http://${INTERNAL_HOST}:${PORT}/api/crons/${encodeURIComponent(id)}/run?trigger=${trigger}`, {
       method: 'POST', headers: { 'x-am-origin': `cron:${id}` },
     });
     if (!response.ok) {

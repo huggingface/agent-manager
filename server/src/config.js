@@ -8,6 +8,24 @@ export function resolveBindHost(env = process.env) {
   return env.BIND_HOST || '127.0.0.1';
 }
 export const BIND_HOST = resolveBindHost();
+
+// Where the server can be reached from inside this machine.
+//
+// `server.listen(PORT, BIND_HOST)` binds ONE address unless that address is a
+// wildcard, so once an operator sets BIND_HOST to a specific interface —
+// exactly the reverse-proxy setup this supports — 127.0.0.1 stops answering.
+// Anything that calls the manager's own HTTP API from inside the process or
+// from an agent has to use this instead of a hardcoded loopback.
+export function resolveInternalHost(env = process.env) {
+  const bind = resolveBindHost(env);
+  return bind === '0.0.0.0' || bind === '::' ? '127.0.0.1' : bind;
+}
+/** The same host, safe to drop into a URL: a bare IPv6 literal needs brackets. */
+export function internalHostForUrl(env = process.env) {
+  const host = resolveInternalHost(env);
+  return host.includes(':') ? `[${host}]` : host;
+}
+export const INTERNAL_HOST = internalHostForUrl();
 export const DATA_DIR = process.env.DATA_DIR || path.resolve(process.cwd(), 'data');
 export const WORKSPACES_DIR = path.join(DATA_DIR, 'workspaces');
 export const STATE_DIR = path.join(DATA_DIR, 'state');

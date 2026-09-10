@@ -195,8 +195,10 @@ run when the backend is launched directly by Node or systemd:
 ./scripts/install-local-clis.sh opencode codex
 ```
 
-The script installs into `${NPM_CONFIG_PREFIX:-$HOME/.local}` and fails if a
-requested binary is not available on `PATH`. Include that prefix's `bin`
+The script installs into `${NPM_CONFIG_PREFIX:-$HOME/.local}`. Claude and Codex
+are required and a failure stops the run; Gemini, opencode and OpenClaw are
+best-effort, exactly as in the container image, and a CLI that does not install
+is listed at the end and shown as unavailable in the app. Include that prefix's `bin`
 directory in the service's `PATH`, then restart Agent Manager: CLI availability
 is cached for the lifetime of the backend process. The backend listens only on
 `127.0.0.1` by default because Agent Manager has no built-in authentication. If

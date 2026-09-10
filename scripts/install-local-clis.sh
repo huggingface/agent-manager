@@ -11,13 +11,21 @@ export PATH="$prefix/bin:$PATH"
 
 selected="${*:-claude codex gemini opencode openclaw}"
 
+# Required versus optional, matching the Dockerfile exactly: it installs Claude
+# and Codex unconditionally and lets Gemini, opencode and OpenClaw fail with a
+# note (`|| echo "... install failed"`). Those three routinely refuse to install
+# on a Node version the others accept, so making them fatal here meant the
+# recommended no-argument run could not finish on a supported runtime — and the
+# manager already reports a missing CLI as unavailable rather than breaking.
+skipped=''
+
 for cli in $selected; do
   case "$cli" in
-    claude)   package='@anthropic-ai/claude-code@latest'; binary='claude' ;;
-    codex)    package='@openai/codex@latest';             binary='codex' ;;
-    gemini)   package='@google/gemini-cli@latest';        binary='gemini' ;;
-    opencode) package='opencode-ai@latest';               binary='opencode' ;;
-    openclaw) package='openclaw@latest';                  binary='openclaw' ;;
+    claude)   package='@anthropic-ai/claude-code@latest'; binary='claude';   optional=0 ;;
+    codex)    package='@openai/codex@latest';             binary='codex';    optional=0 ;;
+    gemini)   package='@google/gemini-cli@latest';        binary='gemini';   optional=1 ;;
+    opencode) package='opencode-ai@latest';               binary='opencode'; optional=1 ;;
+    openclaw) package='openclaw@latest';                  binary='openclaw'; optional=1 ;;
     *)
       echo "unknown CLI '$cli' (expected: claude codex gemini opencode openclaw)" >&2
       exit 2
@@ -25,12 +33,19 @@ for cli in $selected; do
   esac
 
   echo "Installing $cli ($package) into $prefix ..."
-  npm install -g --no-audit --no-fund "$package"
-  if ! command -v "$binary" >/dev/null 2>&1; then
-    echo "$cli installation completed but '$binary' is not on PATH" >&2
+  if npm install -g --no-audit --no-fund "$package" && command -v "$binary" >/dev/null 2>&1; then
+    echo "Installed $binary: $($binary --version 2>/dev/null | head -n 1)"
+    continue
+  fi
+  if [ "$optional" -eq 0 ]; then
+    echo "$cli did not install, and Agent Manager needs it" >&2
     exit 1
   fi
-  echo "Installed $binary: $($binary --version 2>/dev/null | head -n 1)"
+  echo "$cli did not install — Agent Manager will show it as unavailable" >&2
+  skipped="$skipped $cli"
 done
 
 echo "Agent CLIs are installed in $prefix/bin."
+if [ -n "$skipped" ]; then
+  echo "Not installed:$skipped. Re-run with that name to see the failure in full."
+fi

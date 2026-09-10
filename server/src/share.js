@@ -22,6 +22,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { WORKSPACES_DIR, DATA_DIR } from './config.js';
@@ -31,8 +32,15 @@ const hfToken = () =>
   process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN || process.env.HF_API_TOKEN || null;
 
 // Repo root, so we can find scripts/share-session.mjs from server/src/.
-const REPO_ROOT = path.resolve(new URL('../..', import.meta.url).pathname);
+// fileURLToPath, not URL.pathname: a checkout whose path contains a space
+// arrives percent-encoded from pathname, and the exporter is then looked for at
+// a path that does not exist.
+const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const EXPORTER = path.join(REPO_ROOT, 'scripts', 'share-session.mjs');
+// Exposed for the local-install regression: buildBundle only reaches this path
+// after it has found a transcript, so a checkout-name bug here is otherwise
+// invisible until a real share fails.
+export const __exporterPathForTest = EXPORTER;
 
 // Rules whose hits must block a PUBLIC share. `email` is deliberately NOT here:
 // it is redacted like everything else, but a redacted address is not a reason to
