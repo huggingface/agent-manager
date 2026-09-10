@@ -1722,16 +1722,19 @@ const fxCapturing = new Map();
 function scheduleFxCapture(session, workdir) {
   const prev = fxCapturing.get(session.id);
   if (prev) clearTimeout(prev);
-  let since = Date.now() - 2000;
+  let since = session.fxCaptureSince || Date.now() - 2000;
   let warnedShared = false;
 
   const tick = () => {
     if (!isRunning(session.id)) { fxCapturing.delete(session.id); return; }
+    const current = list().find((s) => s.id === session.id) || session;
     const claimed = new Set(list().filter((s) => s.id !== session.id && s.fxSessionId).map((s) => s.fxSessionId));
-    const pinned = (list().find((s) => s.id === session.id) || session).fxSessionId;
+    const pinned = current.fxSessionId;
     const owned = fxSessionForPid(paneRootPid(session.id));
     if (owned && !claimed.has(owned.id)) {
-      if (owned.id !== pinned) update(session.id, { fxSessionId: owned.id });
+      if (owned.id !== pinned || current.fxCaptureSince) {
+        update(session.id, { fxSessionId: owned.id, fxCaptureSince: undefined });
+      }
     } else if (folderIsShared(session.id, workdir, 'fx')) {
       if (!warnedShared) {
         warnedShared = true;
@@ -1742,11 +1745,12 @@ function scheduleFxCapture(session, workdir) {
       // "alone" and adopt the newest one — which is theirs. Advance the floor
       // so only conversations begun after the folder cleared are ever eligible.
       since = Date.now();
+      if (!current.fxCaptureSince) update(session.id, { fxCaptureSince: since });
     } else {
       const hit = captureFxSession(workdir, since, claimed);
       if (hit && hit.id !== pinned) {
         if (pinned) console.warn(`[fx] re-pinning ${session.id}: ${pinned} -> ${hit.id} (conversation was replaced)`);
-        update(session.id, { fxSessionId: hit.id });
+        update(session.id, { fxSessionId: hit.id, fxCaptureSince: undefined });
       }
     }
     const t = setTimeout(tick, REPIN_MS);
@@ -1865,13 +1869,17 @@ export function commandFor(session) {
     const events = `"$HOME/.fx/sessions/${session.fxSessionId}/events.jsonl"`;
     return `if [ -f ${events} ]; then exec ${cli.resume(session.fxSessionId)}; else exec ${cli.run}; fi`;
   }
-  // Unpinned fx (first launch, or the pin is gone): only `--continue` when this
-  // session holds its folder alone — otherwise it would resume a sibling's
-  // conversation. Same hazard as codex `resume --last`.
-  if (cli.id === 'fx' && session.everStarted) {
+  // Unpinned fx (first launch, or the pin is gone): remember that this pane has
+  // shared its folder. If the sibling is later deleted, its conversation is
+  // still on disk and `--continue` would adopt it. Keep starting fresh until
+  // this pane acquires an exact pin; the watcher clears the floor then.
+  if (cli.id === 'fx' && !session.fxSessionId) {
     const folder = session.path ?? session.id;
     const shared = list().some((o) => o.id !== session.id && o.cli === 'fx' && (o.path ?? o.id) === folder);
-    if (shared) return `exec ${cli.run}`;
+    if (shared || session.fxCaptureSince) {
+      update(session.id, { fxCaptureSince: Date.now() });
+      if (session.everStarted) return `exec ${cli.run}`;
+    }
   }
 
   // codex without a pinned conversation: `resume --last` scopes to the cwd,

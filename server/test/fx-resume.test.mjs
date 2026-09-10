@@ -80,6 +80,13 @@ const shared = runner.commandFor(sessions.get(s.id));
 check('no --continue in a shared folder', shared.includes('--continue'), false);
 check('a fresh launch instead', shared, 'exec fx');
 
+console.log('\na deleted sibling cannot leave its newest conversation behind for us');
+check('sharing records a launch floor', Number.isFinite(sessions.get(s.id).fxCaptureSince), true);
+sessions.remove(other.id);
+const afterDelete = runner.commandFor(sessions.get(s.id));
+check('still does not --continue after the sibling is deleted', afterDelete.includes('--continue'), false);
+check('still starts fresh', afterDelete, 'exec fx');
+
 console.log('\nalone in its folder, an unpinned pane may continue');
 const solo = sessions.create({ name: 'fx-3', cli: 'fx', path: 'proj-b' });
 sessions.update(solo.id, { everStarted: true });
