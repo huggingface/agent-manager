@@ -188,8 +188,10 @@ files for Claude, Codex, Gemini, OpenCode, Hermes, and OpenClaw. Existing text
 outside that block is preserved, refreshes are idempotent, and project checkout
 files are never created or modified. OpenClaw is the one workspace-based CLI:
 Agent Manager writes only to its default private, non-Git state workspace and
-skips a custom, external, or Git-backed workspace. Set the variable to `0` to
-disable this behavior in the Docker/Space runtime.
+skips a custom, external, or Git-backed workspace. Symlinked instruction entries
+and instruction files inside Git repositories are also skipped. Set the variable
+to `0` to stop maintaining these files in the Docker/Space runtime; any managed
+blocks already written remain in place until they are removed manually.
 
 ## Local development
 

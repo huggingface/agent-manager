@@ -51,6 +51,9 @@ check('Docker/Space entrypoint opts its isolated homes in',
 const backend = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
 check('entrypoint context flag is explicitly classified as non-secret',
   backend.includes("'AM_MANAGE_GLOBAL_CONTEXT'"), true);
+const readme = fs.readFileSync(new URL('../../README.md', import.meta.url), 'utf8');
+check('disablement docs say existing managed blocks remain',
+  readme.includes('any managed\nblocks already written remain in place until they are removed manually'), true);
 
 console.log('\nexplicit self-host mode uses each CLI supported user-level fallback');
 const selfHostHome = path.join(TMP, 'self-host-home');
@@ -136,6 +139,65 @@ console.warn = originalWarn;
 check('one malformed file is skipped', partial.skipped.length, 1);
 check('the other five files still refresh', partial.written.length, 5);
 check('malformed operator file is untouched', fs.readFileSync(byCli.codex, 'utf8'), malformed);
+
+console.log('\nnon-OpenClaw instruction targets never follow managed-entry symlinks');
+const redirectHome = path.join(TMP, 'redirect-home');
+const redirectRepo = path.join(TMP, 'redirect-repo');
+fs.mkdirSync(path.join(redirectRepo, '.git'), { recursive: true });
+const redirectEnv = {
+  HOME: redirectHome,
+  AM_MANAGE_GLOBAL_CONTEXT: '1',
+  CLAUDE_CONFIG_DIR: path.join(redirectHome, 'claude'),
+  CODEX_HOME: path.join(redirectHome, 'codex'),
+  GEMINI_CLI_HOME: path.join(redirectHome, 'gemini-home'),
+  OPENCODE_CONFIG_DIR: path.join(redirectHome, 'opencode'),
+  HERMES_LIVE: path.join(redirectHome, 'hermes'),
+  OPENCLAW_HOME: path.join(redirectHome, 'openclaw-home'),
+};
+const redirectedFiles = {
+  claude: path.join(redirectEnv.CLAUDE_CONFIG_DIR, 'CLAUDE.md'),
+  codex: path.join(redirectEnv.CODEX_HOME, 'AGENTS.md'),
+  gemini: path.join(redirectEnv.GEMINI_CLI_HOME, '.gemini', 'GEMINI.md'),
+  opencode: path.join(redirectEnv.OPENCODE_CONFIG_DIR, 'AGENTS.md'),
+  hermes: path.join(redirectEnv.HERMES_LIVE, 'memories', 'USER.md'),
+};
+const repoFiles = {};
+for (const [cli, file] of Object.entries(redirectedFiles)) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  repoFiles[cli] = path.join(redirectRepo, `${cli}.md`);
+  fs.writeFileSync(repoFiles[cli], `${cli} operator-owned`);
+  fs.symlinkSync(repoFiles[cli], file);
+}
+const redirected = globalContextTargets(redirectEnv);
+check('all five redirected targets are omitted',
+  Object.keys(redirectedFiles).every(cli => !redirected.targets.some(target => target.cli === cli)), true);
+check('all five redirected targets are reported',
+  Object.keys(redirectedFiles).every(cli => redirected.skipped.some(item => item.cli === cli)), true);
+console.warn = () => {};
+writeGlobalContextFiles(redirectEnv, 9150);
+console.warn = originalWarn;
+check('redirected repository files remain untouched',
+  Object.entries(repoFiles).every(([cli, file]) => fs.readFileSync(file, 'utf8') === `${cli} operator-owned`), true);
+
+console.log('\nnon-OpenClaw instruction files inside Git repositories are skipped');
+const gitBackedHome = path.join(TMP, 'git-backed-home');
+fs.mkdirSync(path.join(gitBackedHome, '.git'), { recursive: true });
+const gitBackedCodex = path.join(gitBackedHome, 'codex');
+fs.mkdirSync(gitBackedCodex);
+const gitBackedFile = path.join(gitBackedCodex, 'AGENTS.md');
+fs.writeFileSync(gitBackedFile, 'operator-owned');
+const gitBackedEnv = {
+  HOME: path.join(TMP, 'otherwise-safe-home'),
+  AM_MANAGE_GLOBAL_CONTEXT: '1',
+  CODEX_HOME: gitBackedCodex,
+};
+const gitBacked = globalContextTargets(gitBackedEnv);
+check('regular Git-backed target is omitted', gitBacked.targets.some(target => target.cli === 'codex'), false);
+check('regular Git-backed target is reported', gitBacked.skipped.some(item => item.cli === 'codex'), true);
+console.warn = () => {};
+writeGlobalContextFiles(gitBackedEnv, 9175);
+console.warn = originalWarn;
+check('regular Git-backed file remains untouched', fs.readFileSync(gitBackedFile, 'utf8'), 'operator-owned');
 
 console.log('\nOpenClaw never writes into an external custom workspace');
 fs.writeFileSync(byCli.codex, mergeManagedContext(prefix, 9100));

@@ -95,6 +95,53 @@ const expandHome = (value, home) => {
   return path.isAbsolute(value) ? path.normalize(value) : path.resolve(home, value);
 };
 
+function globalInstructionTarget(cli, root, file) {
+  const absoluteRoot = path.resolve(root);
+  const absoluteFile = path.resolve(file);
+  const rel = path.relative(absoluteRoot, absoluteFile);
+  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)
+      || !inside(absoluteFile, absoluteRoot)) {
+    return {
+      target: null,
+      skipped: { cli, reason: 'instruction file is outside the configured CLI home' },
+    };
+  }
+
+  // The configured root itself may be an intentional alias. Entries below it
+  // may not redirect writes into another operator-owned location.
+  let entry = absoluteRoot;
+  for (const part of rel.split(path.sep)) {
+    if (!part) continue;
+    entry = path.join(entry, part);
+    try {
+      if (fs.lstatSync(entry).isSymbolicLink()) {
+        return {
+          target: null,
+          skipped: { cli, reason: 'symlink at managed instruction entry' },
+        };
+      }
+    } catch (e) {
+      if (e?.code !== 'ENOENT') {
+        return {
+          target: null,
+          skipped: { cli, reason: 'cannot safely inspect managed instruction entry' },
+        };
+      }
+    }
+  }
+
+  for (let dir = path.dirname(canonical(absoluteFile)); ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, '.git'))) {
+      return {
+        target: null,
+        skipped: { cli, reason: 'instruction file is inside a Git repository' },
+      };
+    }
+    if (path.dirname(dir) === dir) break;
+  }
+  return { target: { cli, file: absoluteFile }, skipped: null };
+}
+
 /**
  * OpenClaw has no global instruction file outside its workspace. Its standard
  * Agent Manager workspace is private app state, so it is safe to manage there.
@@ -169,27 +216,27 @@ export function globalContextTargets(env = process.env) {
   const home = env.HOME || os.homedir();
   const targets = [];
   const skipped = [];
-  targets.push({
-    cli: 'claude',
-    file: path.join(env.CLAUDE_CONFIG_DIR || path.join(home, '.claude'), 'CLAUDE.md'),
-  });
-  targets.push({
-    cli: 'codex',
-    file: path.join(env.CODEX_HOME || path.join(home, '.codex'), 'AGENTS.md'),
-  });
-  targets.push({
-    cli: 'gemini',
-    file: path.join(env.GEMINI_CLI_HOME || home, '.gemini', 'GEMINI.md'),
-  });
-  const openCode = env.OPENCODE_CONFIG_DIR
-    || path.join(env.XDG_CONFIG_HOME || path.join(home, '.config'), 'opencode');
-  targets.push({ cli: 'opencode', file: path.join(openCode, 'AGENTS.md') });
+  const add = (cli, root, ...parts) => {
+    const result = globalInstructionTarget(cli, root, path.join(root, ...parts));
+    if (result.target) targets.push(result.target);
+    if (result.skipped) skipped.push(result.skipped);
+  };
+  const claude = env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
+  add('claude', claude, 'CLAUDE.md');
+  const codex = env.CODEX_HOME || path.join(home, '.codex');
+  add('codex', codex, 'AGENTS.md');
+  const gemini = env.GEMINI_CLI_HOME || home;
+  add('gemini', gemini, '.gemini', 'GEMINI.md');
+  if (env.OPENCODE_CONFIG_DIR) {
+    add('opencode', env.OPENCODE_CONFIG_DIR, 'AGENTS.md');
+  } else {
+    const configHome = env.XDG_CONFIG_HOME || path.join(home, '.config');
+    add('opencode', configHome, 'opencode', 'AGENTS.md');
+  }
   // USER.md is a global frozen prompt snapshot. Unlike SOUL.md, creating it
   // does not replace Hermes's built-in identity on a first-ever launch.
-  targets.push({
-    cli: 'hermes',
-    file: path.join(env.HERMES_LIVE || path.join(home, '.hermes'), 'memories', 'USER.md'),
-  });
+  const hermes = env.HERMES_LIVE || path.join(home, '.hermes');
+  add('hermes', hermes, 'memories', 'USER.md');
   const claw = openClawTarget(env, home);
   if (claw.target) targets.push(claw.target);
   if (claw.skipped) skipped.push(claw.skipped);
