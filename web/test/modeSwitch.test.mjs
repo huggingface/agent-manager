@@ -249,6 +249,43 @@ try {
     });
   }
 
+  console.log('\nand a transcript shorter than the window sits at the TOP');
+  // "Scrolled to the end" and "aligned to the bottom" look identical while the
+  // content overflows and nothing alike when it does not. A `margin-top: auto`
+  // on the rows produced the second: a two-exchange conversation sat on the
+  // floor of the pane with the free space above it, which reads as a layout
+  // fault. Bottom scroll POSITION is what opening at the latest means.
+  const geometry2 = () => p.evaluate(() => {
+    const el = document.querySelector('.cxv-body');
+    const rows = [...document.querySelectorAll('[data-x]')];
+    const box = el.getBoundingClientRect();
+    return {
+      scrollable: el.scrollHeight > el.clientHeight,
+      fromBottom: Math.round(el.scrollHeight - el.scrollTop - el.clientHeight),
+      above: rows[0] ? Math.round(rows[0].getBoundingClientRect().top - box.top) : null,
+      below: rows.length ? Math.round(box.bottom - rows.at(-1).getBoundingClientRect().bottom) : null,
+    };
+  });
+  for (const count of [1, 2]) {
+    await open({ id: `short-${count}`, payload: [shellScreen], count });
+    await settleReader();
+    const g = await geometry2();
+    check(`${count} exchange(s): the slack is below the text, not above it`, () => {
+      assert.equal(g.scrollable, false, `the fixture must not overflow here: ${JSON.stringify(g)}`);
+      // What is left above is the pane's own padding and chrome. Free space
+      // would grow as the content shrinks; this does not.
+      assert.ok(g.above < 60, `${g.above}px above the first exchange`);
+      assert.ok(g.below > g.above, `${g.below}px below vs ${g.above}px above`);
+    });
+  }
+  await open({ id: 'short-tall', payload: [shellScreen], count: 120 });
+  await settleReader();
+  const tall = await geometry2();
+  check('and once it does overflow, it still opens at the end', () => {
+    assert.equal(tall.scrollable, true);
+    assert.equal(tall.fromBottom, 0, JSON.stringify(tall));
+  });
+
   console.log('\nand to the NEW end when output arrived while the terminal was up');
   await open({ id: 'append', payload: [shellScreen] });
   await settleReader();
@@ -399,6 +436,52 @@ try {
     assert.ok(cold.lift >= 850, `lifted at ${cold.lift}ms, before the upper-screen frame`);
     assert.ok(cold.lift < 3000, `lifted at ${cold.lift}ms`);
     assert.equal(bannerShown, true, 'the banner never reached the screen');
+  });
+
+  console.log('\nthe cover shows the screen that was just torn down');
+  // Leaving the terminal flushes its final screen to storage, but the cover
+  // used to render a value read once when the pane mounted — so it showed a
+  // screen from an earlier page load, or the bare `connecting` line, while the
+  // screen the operator had just been looking at sat unused. The wait itself is
+  // real (a fresh socket and the canonical restore, measured above); what it
+  // shows during that wait should be the last view it claims to be.
+  const coverContent = () => p.evaluate(async () => {
+    const t0 = performance.now();
+    window.fixture.change({ mode: 'terminal' });
+    while (performance.now() - t0 < 5000) {
+      const shown = document.querySelector('.term-preview');
+      const boot = document.querySelector('.term-boot');
+      if (shown) return { kind: 'preview', text: (shown.querySelector('pre')?.textContent || '').split('\n')[0] };
+      if (boot) return { kind: 'boot', text: boot.textContent };
+      const rows = document.querySelector('.xterm-rows');
+      if (rows && (rows.textContent || '').trim().length > 1) return { kind: 'none', text: '' };
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    return { kind: 'timeout', text: '' };
+  });
+  const firstScreen = ansi(['FIRST-SCREEN in the terminal', 'you/workspaces $ ']);
+  const secondScreen = ansi(['SECOND-SCREEN after working', 'you/workspaces $ ']);
+  await p.evaluate(() => { try { localStorage.clear(); } catch { /* storage may be denied */ } });
+  // Enough latency that the cover is reached before the restore lands.
+  await open({ id: 'lastview', payload: [firstScreen], openDelay: 150, restoreDelay: 150 });
+  const noStoredView = await coverContent();
+  check('with nothing stored yet it still says connecting', () => assert.equal(noStoredView.kind, 'boot'));
+  await p.waitForFunction(() => (document.querySelector('.xterm-rows')?.textContent || '').includes('FIRST-SCREEN'), null, { timeout: 10_000 });
+  await toReader();
+  await p.waitForTimeout(250);
+  await p.evaluate((data) => window.fixture.change({ payload: [data] }), secondScreen);
+  const second = await coverContent();
+  check('the next visit shows the screen the last one ended on', () => {
+    assert.equal(second.kind, 'preview', JSON.stringify(second));
+    assert.match(second.text, /FIRST-SCREEN/);
+  });
+  await p.waitForFunction(() => (document.querySelector('.xterm-rows')?.textContent || '').includes('SECOND-SCREEN'), null, { timeout: 10_000 });
+  await toReader();
+  await p.waitForTimeout(250);
+  const third = await coverContent();
+  check('and it moves on, rather than pinning the first screen forever', () => {
+    assert.equal(third.kind, 'preview', JSON.stringify(third));
+    assert.match(third.text, /SECOND-SCREEN/);
   });
 
   console.log('\nreconnect after an interruption');

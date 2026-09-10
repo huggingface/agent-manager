@@ -291,12 +291,21 @@ try {
   assert.equal(lost, 0, `Latest is never given up while history loads (${lost} of ${labels.length} frames said otherwise)`);
   results.push({ case: 'anchor drift while filling', samples: samples.length, driftPx: drift, framesNotAtLatest: lost });
 
-  // ---------- 3. a transcript shorter than the reader sits at the bottom ----------
-  // Preparation means a cold reader rarely reveals an underfilled transcript,
-  // but a conversation that IS shorter than the window is revealed at once, and
-  // it must sit against the composer rather than floating at the top. That is
-  // also what makes any later page grow the transcript upward instead of
-  // pushing the readable text down.
+  // ---------- 3. a transcript shorter than the reader sits at the TOP ----------
+  // This case used to assert the opposite, held there by a `margin-top: auto`
+  // on the rows. The operator overruled it: a conversation shorter than the
+  // window sitting on the floor of the pane, with the empty space above it,
+  // reads as a layout fault rather than as a reader scrolled to the end.
+  // Opening "at the latest" is a scroll POSITION; while nothing overflows there
+  // is nothing to scroll and the ordinary thing is to sit at the top.
+  //
+  // The auto margin's other job was to make a later page grow the transcript
+  // upward rather than push the readable text down. That needs a view both
+  // shorter than the window AND with unread history above it — which is the
+  // case this file's own preparation (case 1) exists to prevent, and which the
+  // anchor measurement in case 2 covers once the reader does overflow. A view
+  // that is short because the CONVERSATION is short has no older page to
+  // prepend, so the margin was a second, cruder guard for a case already held.
   await p.evaluate(() => window.fixture.mount({ count: 3, answerLines: 2 }));
   await p.getByText('Question 2', { exact: true }).waitFor();
   const short = await p.evaluate(() => {
@@ -309,9 +318,14 @@ try {
       gapAbove: Math.round(Math.min(...rows.map((r) => r.top)) - (box.top + parseFloat(style.paddingTop))) };
   });
   assert.ok(!short.scrollable, 'three short exchanges really are shorter than the reader');
-  assert.ok(short.gapBelow <= 2,
-    `and sit against the bottom of it (${short.gapBelow}px below, ${short.gapAbove}px above)`);
-  assert.ok(short.gapAbove > 20, 'with the empty space above them, not below');
+  // What is left above the first row is the reader's own chrome — the
+  // beginning-of-conversation line — not free space: it does not grow as the
+  // transcript gets shorter, which is exactly how it differs from the gap the
+  // auto margin used to leave there.
+  assert.ok(short.gapAbove < 40,
+    `and start at the top of it (${short.gapAbove}px above, ${short.gapBelow}px below)`);
+  assert.ok(short.gapBelow > short.gapAbove,
+    `with the empty space below them, not above (${short.gapBelow} vs ${short.gapAbove})`);
   results.push({ case: 'short transcript anchoring', gapBelow: short.gapBelow, gapAbove: short.gapAbove });
 
   // ---------- 4. a tall answer covers the page but history still loads ----------

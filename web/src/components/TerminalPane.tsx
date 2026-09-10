@@ -242,7 +242,13 @@ export default function TerminalPane({
   const reconnectRef = useRef<(restart?: boolean) => void>(() => {});
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
-  const [preview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
+  // Re-read on every terminal visit, not once per pane. The cleanup below
+  // flushes the live screen to storage when the terminal is torn down for
+  // reader mode, so by the time this runs again the freshest screen is there —
+  // but holding the mount-time value meant the cover showed a screen from an
+  // earlier page load, or (with nothing stored yet) the bare `connecting`
+  // line, while the screen the operator was just looking at sat unused.
+  const [preview, setPreview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
   // The mode is app-wide (the bottom bar owns it, like zoom), but only an agent
   // has a conversation to read: a shell is a shell, and files/trace panels are
   // not this component's business at all.
@@ -472,6 +478,9 @@ export default function TerminalPane({
     // Reading must never attach, start or resize a PTY. The transcript and
     // composer have their own APIs; reconnect only when showing the terminal.
     if (reading) return;
+    // The previous run's cleanup has already flushed its final screen, so this
+    // is the last view — which is what the cover claims to be showing.
+    setPreview(loadTerminalPreview(session.id));
     const term = new Terminal({
       fontFamily: "'Geist Mono', ui-monospace, 'SF Mono', Menlo, 'Cascadia Code', monospace",
       // Start at the requested zoom so attachment does not briefly create a

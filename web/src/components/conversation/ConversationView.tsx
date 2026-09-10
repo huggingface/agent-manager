@@ -563,7 +563,7 @@ export default function ConversationView({
           </div>)}
         </div>}
         <div hidden={!!historic}
-          className={`${exchanges.length ? 'cxv-rows' : ''}${preparing ? ' cxv-preparing' : ''}`.trim() || undefined}
+          className={`cxv-rows${preparing ? ' cxv-preparing' : ''}`}
           ref={virtual.container}>
           <div aria-hidden="true" style={{ height: virtual.before }} />
           {shown.slice(virtual.start, virtual.end).map(({ x, n }) => <div key={x.key} data-x={x.key} data-row-key={x.key} ref={(node) => virtual.measure(x.key, node)}>
