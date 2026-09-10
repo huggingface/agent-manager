@@ -24,6 +24,11 @@
   --term-bg: #ffffff;
   --drop: #0e7c8618;
   --tile: #ffffff;
+  /* Where the keyboard is, in the Files listing. Neutral on purpose — every
+     other row state is accent-tinted — and mixed from the tokens either theme
+     already defines, so it tracks the palette instead of being two hard-coded
+     greys. */
+  --row-focus: color-mix(in srgb, var(--text) 20%, var(--term-bg));
 }
 
 [data-theme='dark'] {
@@ -1105,9 +1110,25 @@ body {
    buttons with the focus, shows its actions. Same rule the sidebar rows use.
    Without it the buttons were tab stops at opacity 0 — focus you cannot see. */
 .tree-row:focus-within .tw-act { opacity: 1; }
-/* The row's own focus ring is the app-wide one ([tabindex]:focus-visible), drawn
-   inside the scroller so it is not clipped at the first and last row. */
-.tree-row:focus-visible { outline-offset: -1px; }
+/* ROW STATES, in the order they override one another — later rule wins, and
+   that order is the whole point:
+     :hover      the pointer is over it              (--panel-2, a whisper)
+     .selected   it is the file open in the preview  (accent 14%)
+     :focus-visible / :has(:focus-visible)
+                 the keyboard is on it, or on one of its actions
+     .drop       a drag would land here              (accent 20% + its outline)
+   Focus is a BACKGROUND, not a ring: a 2px outline drawn across every row of a
+   dense listing was the loudest thing on the screen. It is the one NEUTRAL
+   state, so "where the keyboard is" can never be read as "what is chosen" or
+   "what a drop would hit", and it is a step of ~20% ink rather than a shade of
+   hover — visible in both themes with the pointer resting on another row.
+   The :has() half keeps the band while Tab walks that row's own action buttons;
+   it is a SEPARATE rule because a browser without :has() must still get the
+   first one rather than dropping the whole list and showing no focus at all. */
+.tree-row.selected { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.tree-row.selected .tw-name { color: var(--accent); font-weight: 600; }
+.tree-row:focus-visible { outline: none; background: var(--row-focus); }
+.tree-row:has(:focus-visible) { background: var(--row-focus); }
 .tw-act:hover { color: var(--accent); }
 .tw-act.danger:hover { color: var(--danger); }
 .tw-act.ghost { pointer-events: none; }
@@ -1164,8 +1185,6 @@ body {
 .mini-btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .mini-btn.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
 .mini-btn.primary:disabled { opacity: .45; }
-.tree-row.selected { background: color-mix(in srgb, var(--accent) 14%, transparent); }
-.tree-row.selected .tw-name { color: var(--accent); font-weight: 600; }
 .tree-msg { color: var(--muted); font-size: 0.85em; padding: 0.15em 0; }
 /* a quarter-screen tile has no room for three columns — names come first */
 @container (max-width: 330px) {

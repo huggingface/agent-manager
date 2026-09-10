@@ -963,21 +963,124 @@ await mount('kb-layout');
     });
   }
   await page.setViewportSize({ width: 900, height: 620 });
+  // WHERE THE KEYBOARD IS, WITHOUT A RING. The operator rejected the outline, so
+  // what has to hold now is that the band is unmistakable anyway: a real step
+  // away from a plain row AND from a hovered one, in both themes, since the
+  // pointer commonly rests on a different row than the keyboard.
+  // Chromium reports a color-mix() result as `color(srgb 0.81 0.82 0.82)` and a
+  // plain colour as `rgb(245, 248, 249)`; only one of the two is 0-255.
+  const channels = (value) => {
+    const nums = (value.match(/[\d.]+/g) || []).map(Number).slice(0, 3);
+    return value.startsWith('color(') ? nums.map((v) => v * 255) : nums;
+  };
+  const luminance = (value) => {
+    const [r, g, b] = channels(value).map((v) => {
+      const c = v / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  /** What `var(--row-focus)` actually paints, asked of the browser. */
+  const bandColour = () => page.evaluate(() => {
+    const probe = document.createElement('div');
+    probe.style.background = 'var(--row-focus)';
+    document.body.appendChild(probe);
+    const value = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return value;
+  });
+  const contrast = (a, b) => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  };
   for (const theme of ['light', 'dark']) {
     await page.evaluate((t) => document.documentElement.setAttribute('data-theme', t), theme);
     await settle(80);
-    await check(`the focus ring is drawn in the ${theme} theme`, async () => {
-      const ring = await page.evaluate(() => {
-        const row = document.querySelector('[role="treeitem"][tabindex="0"]');
-        row.focus();
-        const cs = getComputedStyle(row);
-        return { width: cs.outlineWidth, style: cs.outlineStyle, colour: cs.outlineColor };
+    const shades = await page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll('[role="treeitem"]'));
+      const focused = rows.find((r) => r.tabIndex === 0);
+      const plain = rows.find((r) => r !== focused);
+      const read = (el) => getComputedStyle(el).backgroundColor;
+      plain.classList.add('hover-probe');
+      const hover = read(plain);
+      plain.classList.remove('hover-probe');
+      return {
+        focus: read(focused), plain: hover, outline: getComputedStyle(focused).outlineStyle,
+        panel2: getComputedStyle(document.documentElement).getPropertyValue('--panel-2').trim(),
+      };
+    });
+    await check(`the focused row carries a background, not a ring, in the ${theme} theme`, () => {
+      assert.equal(shades.outline, 'none', `outline is ${shades.outline}`);
+      assert.notEqual(shades.focus, 'rgba(0, 0, 0, 0)');
+      assert.notEqual(shades.focus, shades.plain);
+    });
+    await check(`…a clear step from both a quiet row and a hovered one, in ${theme}`, async () => {
+      const around = await page.evaluate(() => {
+        const row = Array.from(document.querySelectorAll('[role="treeitem"]')).find((r) => r.tabIndex !== 0);
+        const quiet = getComputedStyle(document.querySelector('.files-body')).backgroundColor;
+        row.style.background = getComputedStyle(document.documentElement).getPropertyValue('--panel-2');
+        const hover = getComputedStyle(row).backgroundColor;
+        row.style.background = '';
+        return { quiet, hover };
       });
-      assert.equal(ring.style, 'solid');
-      assert.ok(parseFloat(ring.width) >= 2, `ring is ${ring.width}`);
-      assert.notEqual(ring.colour, 'rgba(0, 0, 0, 0)');
+      // A ratio, not a difference: at the dark end two colours a person reads as
+      // clearly different are a hair apart in absolute luminance.
+      const vsHover = contrast(shades.focus, around.hover);
+      const vsQuiet = contrast(shades.focus, around.quiet);
+      console.log(`       ${theme}: focus ${shades.focus} — ${vsHover.toFixed(2)}:1 against hover, ${vsQuiet.toFixed(2)}:1 against a quiet row`);
+      assert.ok(vsHover >= 1.3, `focus vs hover is only ${vsHover.toFixed(2)}:1`);
+      assert.ok(vsQuiet >= 1.3, `focus vs a quiet row is only ${vsQuiet.toFixed(2)}:1`);
     });
   }
+  // Tabbing into the row's own actions keeps the band, so the row you are
+  // working in does not go quiet the moment you reach for one of its buttons.
+  await page.evaluate((t) => document.documentElement.setAttribute('data-theme', t), 'light');
+  // The pointer has to be off the listing first: hover paints a background too,
+  // and a check that only asks "is this row different from that one" would pass
+  // on the hover of a mouse that happens to be resting there.
+  await page.mouse.move(2, 2);
+  await tabTo(/^Rename/);
+  await check('the band stays while Tab walks that row’s actions', async () => {
+    const band = await bandColour();
+    const row = await page.evaluate(() =>
+      getComputedStyle(document.activeElement.closest('[role="treeitem"]')).backgroundColor);
+    assert.equal(row, band, `the row is painted ${row}, not the focus band ${band}`);
+  });
+
+  // Mid-drag the drop affordance has to win: a row that is BOTH focused and the
+  // folder a drag would land in must read as the drop target, not as the focus.
+  await check('a drop target does not read as the focused row', async () => {
+    const shades = await page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll('[role="treeitem"]'));
+      const file = rows.find((r) => r.dataset.dir !== '1');
+      const folder = rows.find((r) => r.dataset.dir === '1');
+      folder.focus();
+      window.__dt2 = new DataTransfer();
+      file.dispatchEvent(new DragEvent('dragstart', { dataTransfer: window.__dt2, bubbles: true }));
+      return { folder: folder.dataset.path };
+    });
+    await settle(80);
+    await page.evaluate(() => {
+      const folder = Array.from(document.querySelectorAll('[role="treeitem"]')).find((r) => r.dataset.dir === '1');
+      folder.dispatchEvent(new DragEvent('dragover', { dataTransfer: window.__dt2, bubbles: true, cancelable: true }));
+    });
+    await settle(120);
+    const painted = await page.evaluate(() => {
+      const folder = Array.from(document.querySelectorAll('[role="treeitem"]')).find((r) => r.dataset.dir === '1');
+      const cs = getComputedStyle(folder);
+      return { drop: folder.classList.contains('drop'), bg: cs.backgroundColor, outline: cs.outlineStyle };
+    });
+    const band = await bandColour();
+    assert.equal(painted.drop, true, 'the folder never became a drop target');
+    assert.notEqual(painted.bg, band, `a drop target is painted with the focus band (${band})`);
+    assert.equal(painted.outline, 'solid', 'a drop target has no outline of its own');
+    console.log(`       drop ${painted.bg} vs focus ${band} — ${contrast(painted.bg, band).toFixed(2)}:1 apart`);
+  });
+  await page.evaluate(() => {
+    const folder = Array.from(document.querySelectorAll('[role="treeitem"]')).find((r) => r.dataset.dir === '1');
+    folder.dispatchEvent(new DragEvent('dragend', { dataTransfer: window.__dt2, bubbles: true }));
+  });
+  await settle(80);
   await page.evaluate(() => document.documentElement.removeAttribute('data-theme'));
   // Zoom: the pane's own font-size knob, which the rows are sized from.
   await page.evaluate(() => { document.querySelector('.files-stack').style.fontSize = '20px'; });
