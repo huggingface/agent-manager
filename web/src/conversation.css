@@ -445,18 +445,26 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    scroller's own padding is taller than the scroller and every short
    conversation gets 16px of scrollbar it has no content for. */
 .cxv-col { display: flex; flex-direction: column; min-width: 0; flex: 1 0 auto; }
-/* Conversation grows from the BOTTOM while it is shorter than the window.
+/* The conversation lays out from the TOP and the scroller starts at its end.
  *
- * The reader opens following the latest message, so once the transcript is
- * taller than the window a prepended older page moves nothing on screen: the
- * bottom stays the bottom. Below that height there is no scroll offset to
- * compensate with, and a top-aligned transcript would be pushed down the screen
- * by every page of history that arrived after it. Anchoring the rows to the
- * bottom removes that case instead of trying to correct it, and costs nothing
- * once the content is tall enough — `auto` margins absorb only free space.
- * Applied only when there ARE exchanges, so an empty reader keeps its welcome
- * text where it has always been. */
-.cxv-rows { margin-top: auto; }
+ * There used to be a `margin-top: auto` here, to stop a prepended older page
+ * pushing a short transcript down the screen when there is no scroll offset to
+ * compensate with. It bought that at the price the operator actually sees: a
+ * transcript shorter than the window sat on the floor of the pane with the
+ * empty space ABOVE it, which reads as a layout fault rather than as a reader
+ * scrolled to the end. Bottom scroll POSITION is what "opens at the latest"
+ * means; bottom alignment is a different thing that only looks the same once
+ * the content is tall enough to scroll.
+ *
+ * So: ordinary flow, and `following` puts the scroll at the end (a no-op while
+ * nothing overflows, which is correct — there is nowhere to scroll). The case
+ * the auto margin protected needs a transcript both shorter than the window and
+ * with unread history above it; #129's cold open now loads a useful amount of
+ * recent history, so a short view is usually a short CONVERSATION, which has no
+ * older page to prepend.
+ *
+ * `.cxv-rows` itself stays: it is how the rows container is identified, and the
+ * reader's own suites select on it. It simply carries no alignment any more. */
 /* Laid out and measured, not painted. `visibility` rather than `display` or
    `content-visibility` precisely because the rows must still have real boxes:
    the question being answered while this is on is whether a page of measured
