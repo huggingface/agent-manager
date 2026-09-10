@@ -36,7 +36,10 @@ export interface Rankable {
 /** The timestamp a given sort reads. 0 for the manual order, which reads none. */
 export function sortTs(s: Rankable, sort: OverviewSort): number {
   if (sort === 'prompt') return s.lastPromptTs || 0;
-  if (sort === 'answer') return s.lastAssistantTs || 0;
+  // `unread` is a filter first, but the rows it keeps still need an order, and
+  // the useful one is the same question `answer` asks: the newest thing you
+  // have not read is the most likely thing you want next.
+  if (sort === 'answer' || sort === 'unread') return s.lastAssistantTs || 0;
   return 0;
 }
 
@@ -73,5 +76,10 @@ export function rankSessions<T extends Rankable>(items: T[], sort: OverviewSort)
 
 /** What the sorted block is sorted BY, spelled out above it in the feed. */
 export function sortLabel(sort: OverviewSort): string {
-  return sort === 'prompt' ? 'by your last message' : sort === 'answer' ? 'by the last reply' : '';
+  if (sort === 'prompt') return 'by your last message';
+  if (sort === 'answer') return 'by the last reply';
+  // The unread feed's own heading carries the count and the bulk action, so it
+  // is named where it is built rather than here.
+  if (sort === 'unread') return 'unread';
+  return '';
 }

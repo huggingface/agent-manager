@@ -106,11 +106,27 @@ check('an empty fleet gives three empty blocks', () => {
   assert.deepEqual([r.running, r.dated, r.undated], [[], [], []]);
 });
 
+console.log('the unread option orders like `answer`');
+check('it ranks by the last reply, because that is the unread thing', () => {
+  // `unread` filters in the component; here it only has to put the rows it
+  // kept in a useful order, and the newest unread reply is what you want next.
+  const rows = [a('old', 0, 100, false), a('new', 0, 900, false), a('mid', 0, 500, false)];
+  assert.deepEqual(ids(rankSessions(rows, 'unread').dated), ['new', 'mid', 'old']);
+});
+check('and pins a running agent the same way the other orders do', () => {
+  const r = rankSessions([a('busy', 0, 50, true), a('idle', 0, 900, false)], 'unread');
+  assert.deepEqual(ids(r.running), ['busy']);
+  assert.deepEqual(ids(r.dated), ['idle']);
+});
+
 console.log('sortLabel');
 check('names what the block is sorted by', () => {
   assert.equal(sortLabel('prompt'), 'by your last message');
   assert.equal(sortLabel('answer'), 'by the last reply');
+  // `manual` is the stored name for the button the UI calls "grouped"; it has
+  // no block heading because it is the sidebar's own arrangement.
   assert.equal(sortLabel('manual'), '');
+  assert.equal(sortLabel('unread'), 'unread');
 });
 
 console.log(failed ? `\n${failed} failed` : '\nall passed');

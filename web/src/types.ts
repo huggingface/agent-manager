@@ -157,7 +157,10 @@ export const chipBuckets = (chip: OverviewChip): OverviewFilter[] =>
 // How the Overview is ordered. `manual` is the tree's own arrangement — groups
 // as capsules, agents where you put them; the other two flatten that and rank
 // every agent by a timestamp from its digest. See web/src/lib/overviewSort.ts.
-export type OverviewSort = 'manual' | 'prompt' | 'answer';
+// `manual` is the stored identifier for what the UI calls "grouped". Renaming
+// it would reset every operator's saved preference for a label change, so the
+// wire value stays and only the button text moved.
+export type OverviewSort = 'manual' | 'prompt' | 'answer' | 'unread';
 
 export type MoveTarget =
   | { kind: 'into'; groupId: string }

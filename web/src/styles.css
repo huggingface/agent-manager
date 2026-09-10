@@ -89,7 +89,11 @@ body {
 /* overview bottom bar: filter · sort · view segments, centered — three of them
    don't fit a phone on one line, so it wraps rather than overflowing */
 .zoombar.ov-bar { justify-content: center; gap: 8px; flex-wrap: wrap; row-gap: 5px; }
-.ov-search { box-sizing: border-box; flex: 0 1 220px; min-width: 150px; height: 24px; display: flex; align-items: center; gap: 5px; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel-2); color: var(--muted); }
+/* 190 rather than 220: the bar wraps before it shrinks, so the search box's
+   resting width is what decides whether an ordinary laptop fits the row on one
+   line now that both controls are named. It still holds a filter phrase, and
+   still grows on a wide screen. */
+.ov-search { box-sizing: border-box; flex: 0 1 190px; min-width: 150px; height: 24px; display: flex; align-items: center; gap: 5px; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel-2); color: var(--muted); }
 .ov-search.has-query { border-color: var(--border-strong); }
 .ov-search:focus-within { border-color: var(--accent); color: var(--text); }
 .ov-search > svg { width: 13px; height: 13px; flex: none; }
@@ -101,8 +105,12 @@ body {
 /* the sort segment needs to say what it is — "prompt"/"answer" next to a row of
    filter words would otherwise read as two more filters — so a glyph sits beside
    it, outside the segment (inside, it read as a fourth disabled button) */
-.ov-sortmark { display: inline-flex; align-items: center; color: var(--muted); margin-right: -3px; }
-.ov-sortmark svg { width: 12px; height: 12px; display: block; }
+/* A named control: its label and its segment travel together, so the bar wraps
+   between controls rather than orphaning a label from the buttons it names.
+   This replaced a bare sort glyph — a word says which control it is, and the
+   glyph could not say the other one was a filter. */
+.ov-ctl { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.ov-ctl-label { font-size: 10px; letter-spacing: 0.06em; color: var(--muted); white-space: nowrap; }
 .ov-viewseg button { display: inline-flex; align-items: center; padding: 4.5px 9px; }
 .ov-viewseg svg { width: 13px; height: 13px; }
 /* "n hidden": present only when something is, and deliberately quiet — it is the
@@ -340,7 +348,10 @@ body {
 /* ---- Overview: one reading column of capsules (design mock v4.12) ---- */
 .ov-wrap { height: 100%; overflow-y: auto; }
 .ov-feed { max-width: 680px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; padding: 2px 2px 40px; }
-.ov-seg button { padding: 3px 11px; }
+/* Slightly tighter than before: naming the two controls cost the bar about a
+   hundred pixels, and this buys most of it back so an ordinary laptop width
+   still fits the row on one line. */
+.ov-seg button { padding: 3px 8px; }
 
 .ov-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-xl); }
 
@@ -359,6 +370,14 @@ body {
 /* --border-strong is a BORDER token: as text on the page background it lands at
    ~1.4:1 in either theme, i.e. a count nobody can read. */
 .ov-sortn { color: var(--muted); }
+/* Unread, on the card itself. The Overview shows it as a section in one of the
+   four orders; in the other three this dot is the only place it appears, so it
+   has to read at a glance without taking a word's worth of room beside a name
+   that may already be truncating. */
+.ov-unread {
+  flex: none; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent); margin-left: 1px;
+}
 /* Mark all read: a text button on the Unread heading, in the heading's own
    voice rather than a control bolted beside it. Compact by treatment, not by
    shrinking the hit area — the padding keeps a comfortable target on touch
