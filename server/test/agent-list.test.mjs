@@ -30,7 +30,8 @@ console.log('\nnormalizeName folds the things people type differently');
 check('case', normalizeName('Hunter'), 'hunter');
 check('outer whitespace', normalizeName('  Hunter '), 'hunter');
 check('unicode case', normalizeName('ÉQUIPE'), 'équipe');
-check('NFC vs NFD', normalizeName('Équipe'), normalizeName('Équipe'));
+// A genuinely decomposed literal (E + combining acute), not two composed copies.
+check('NFC vs NFD', normalizeName('E\u0301quipe'), normalizeName('\u00c9quipe'));
 check('null is empty', normalizeName(null), '');
 check('sameName never matches two blanks', sameName('  ', ''), false);
 check('sameName ignores case', sameName('Hunter', 'HUNTER'), true);
@@ -48,7 +49,7 @@ check('exact name still works', ids(filterAgentsByGroup(rows, 'Hunter')), 'a,b')
 check('lower-case query finds the mixed-case group', ids(filterAgentsByGroup(rows, 'hunter')), 'a,b');
 check('upper-case query too', ids(filterAgentsByGroup(rows, 'HUNTER')), 'a,b');
 check('padded query is trimmed', ids(filterAgentsByGroup(rows, ' co-WRITE ')), 'c');
-check('accented group, decomposed query', ids(filterAgentsByGroup(rows, 'équipe')), 'e');
+check('accented group, decomposed query', ids(filterAgentsByGroup(rows, 'e\u0301quipe')), 'e');
 check('unknown group is empty, not everything', ids(filterAgentsByGroup(rows, 'nope')), '');
 check('no filter returns all', filterAgentsByGroup(rows, null).length, rows.length);
 check('blank filter returns all', filterAgentsByGroup(rows, '  ').length, rows.length);

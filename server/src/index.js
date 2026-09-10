@@ -46,7 +46,7 @@ import {
 import * as runstate from './runstate.js';
 import { installSlowFsProbe } from './slowfs.js';
 import { operationMiddleware, readOperations } from './operations.js';
-import { findByName, filterAgentsByGroup } from './agent-list.js';
+import { findByName, filterAgentsByGroup, normalizeName } from './agent-list.js';
 
 // Before anything else touches the mount: a sync fs call to /data is ~85ms of
 // frozen event loop here, and nothing else in the stack can see it. See slowfs.js.
@@ -2234,7 +2234,10 @@ function nextName(cli) {
   const re = new RegExp(`^${base}-(\\d+)$`);
   let max = 0;
   for (const s of store.list()) {
-    const m = s.name.match(re);
+    // Counted under the same equivalence rule the lookups use (agent-list.js):
+    // an automatically allocated name must never fold-equal an existing one,
+    // or a plain nameless creation could take over a cron's exact-name target.
+    const m = normalizeName(s.name).match(re);
     if (m) max = Math.max(max, parseInt(m[1], 10));
   }
   return `${base}-${max + 1}`;
