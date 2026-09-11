@@ -10,6 +10,7 @@ import { mark, tracked, PHASE } from './watchdog.js';
 // resolver sharing uses. share.js does not import traces.js, so no cycle.
 import { findTrace, HARNESS_LABEL } from './share.js';
 import { cachedTrace, traceRevision } from './trace-revision.js';
+import { outputHash } from './output-id.js';
 
 // Workspace-wide trace analytics: parse every Claude transcript and Codex
 // rollout on the Space into per-conversation stats (turns, tool calls, web
@@ -51,8 +52,27 @@ function mergeInto(a, b) {
 // Built in the same parse pass: every real user prompt resets the segment, so
 // whatever accumulated by EOF is the activity since the last thing you said.
 function emptyDigest() {
-  return { lastPromptText: '', lastPromptRaw: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantMd: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [], sinceTokens: 0, running: false, turnsLog: [] };
+  return { lastPromptText: '', lastPromptRaw: '', lastPromptTs: 0, lastAssistantText: '', lastAssistantMd: '', lastAssistantTs: 0, sinceTurns: 0, sinceToolCalls: 0, sinceTools: {}, sinceFiles: [], sinceTokens: 0, running: false, turnsLog: [], outSeq: 0, outHash: '', outClipped: false, outFresh: false, outKey: null };
 }
+
+// ---------- which reply is this? (the Overview's unread cursor) ----------
+//
+// `outSeq`/`outHash` name the newest piece of human-facing assistant output, so
+// the Overview can ask "has the operator seen THIS?" instead of "is there
+// something newer than a timestamp?".
+//
+// Both halves are load-bearing:
+//
+//   seq  — how many distinct outputs this transcript has produced. Two replies
+//          with identical text, or the same timestamp, are still different
+//          replies, and only a counter separates them.
+//   hash — of the FULL text, not the 280-char card clip. A streaming answer
+//          that grows past the clip would otherwise look unchanged, and the
+//          operator has been shown something new.
+//
+// Deliberately NOT the file's revision: that moves for tool calls, token
+// counts and status records, none of which are anything to read.
+//
 const clip = (s, n = 280) => { const t = (s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 // Markdown-preserving variant (keeps newlines) for the expandable card view.
 const clipRaw = (s, n = 6000) => { const t = (s || '').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
@@ -66,8 +86,23 @@ function digestPrompt(d, text, ts) {
   d.turnsLog = []; // arrows only walk the current request's turns
   // The previous answer belongs to the previous prompt — never show it as "LAST".
   d.lastAssistantText = ''; d.lastAssistantMd = ''; d.lastAssistantTs = 0;
+  // outSeq/outHash are NOT cleared here. They name the newest reply this
+  // transcript has produced, and typing at an agent is not reading what it
+  // last said — clearing them would quietly mark an unseen answer as seen the
+  // moment the operator sent the next prompt.
+  //
+  // What a prompt DOES do is end the current reply. Whatever the agent says
+  // next is a new one even if it says exactly the same words, which is the only
+  // way to tell "ask again, get the same answer" apart from a record repeated.
+  d.outFresh = true;
 }
-function digestAssistant(d, text, ts) {
+// `key` is the harness's own identity for this assistant message, where it has
+// one. Claude does (`message.id`), and it is the only thing that can tell two
+// replies apart when they say the same words — the case the text comparison
+// below gets wrong. Harnesses that mirror one message across several record
+// types with no shared id (codex writes agent_message and task_complete) pass
+// none, and fall back to that comparison.
+function digestAssistant(d, text, ts, key) {
   const clipped = clip(text);
   // Same text again (codex mirrors agent_message/response_item/task_complete):
   // refresh metadata only, don't log a phantom turn.
@@ -78,6 +113,36 @@ function digestAssistant(d, text, ts) {
     }
     d.lastAssistantText = clipped;
   }
+  // Off the FULL text, before any clipping, and before the mirror check above —
+  // which compares clipped text and so cannot tell a grown streaming answer
+  // from the same one twice.
+  const hash = outputHash(text);
+  // A different message is a different reply, whatever it says. With an id from
+  // the harness that is a fact, not an inference — two `msg-1: "Done."` and
+  // `msg-3: "Done."` records are two replies, and the operator who read the
+  // first has not read the second.
+  //
+  // Without an id, the fallback: a prompt in between makes this new, and
+  // otherwise only changed text does. That still cannot separate an agent
+  // repeating itself verbatim mid-turn from the mirrored records such harnesses
+  // write, and collapsing those stays the safe direction — the alternative
+  // marks a session unread every time it finishes a turn. The limitation is now
+  // confined to harnesses that give us nothing to tell the two apart.
+  const fresh = key !== undefined && key !== null
+    ? key !== d.outKey
+    : (hash !== d.outHash || d.outFresh);
+  if (fresh) d.outSeq += 1;
+  // A revision of the SAME message (a second text block, a streaming answer
+  // that grew) keeps its sequence and changes its hash, which is a new version
+  // to be seen without being a new reply.
+  d.outHash = hash;
+  if (key !== undefined && key !== null) d.outKey = key;
+  d.outFresh = false;
+  // Whether the card's copy of this answer is the whole answer. A reply longer
+  // than clipRaw's cap is shown with its tail cut off, and the Overview must
+  // not record the omitted part as read — the reader, which serves the trace
+  // itself, is where that reply can actually be finished.
+  d.outClipped = clipRaw(text).length < String(text || '').trim().length;
   d.lastAssistantMd = clipRaw(text);
   d.lastAssistantTs = Date.parse(ts) || d.lastAssistantTs;
 }
@@ -130,7 +195,7 @@ function parseClaude(txt) {
             const file = /^(Edit|Write|MultiEdit|NotebookEdit)$/.test(name) && c.input && c.input.file_path;
             digestTool(dg, name, file || null);
           } else if (c.type === 'text' && c.text && c.text.trim()) {
-            digestAssistant(dg, c.text, j.timestamp);
+            digestAssistant(dg, c.text, j.timestamp, id);
           }
         }
       }
@@ -772,6 +837,10 @@ function memoized() {
   }
   return resultMemo.val || building;
 }
+
+// Exposed for tests: the unread cursor's rules live in the parser, and a
+// hand-built digest object would exercise none of them.
+export const __parseClaudeForTest = parseClaude;
 
 export async function buildTraces() {
   const { perSession, totals, sessions } = await memoized();
@@ -1966,6 +2035,21 @@ async function readWindow(harness, file, sessionId, size, req, allowSubagent = f
 // a bundle small enough not to matter doesn't need them. They answer the same
 // shape with message INDICES as cursors: the reader treats a cursor as opaque.
 const INDEX_WINDOW_TURNS = 100; // no bytes to seek: page by turns, as index mode always did
+// A first-paint floor for the tail of an indexed source.
+//
+// `min` means two different things to the two window kinds. A byte window grows
+// its span until it holds that many messages, so a small `min` buys a cheap
+// first paint. An index window has no span to grow: the whole conversation is
+// already parsed by the time we get here, and `min` only decides how many of
+// those rows to hand back. Taking it literally is what made a cold reader on a
+// database source show two transport records — one exchange — no matter how
+// long the conversation was, and asking for fewer rows saved nothing, because
+// the parse had already happened.
+//
+// So on a TAIL request `min` is a floor rather than an exact count. Backward
+// paging still honours it exactly: that is a caller walking the conversation a
+// page at a time, and its page size is its own business.
+const INDEX_TAIL_MIN_TURNS = 40;
 
 function windowIndex(parsed, req) {
   const total = parsed.messages.length;
@@ -1977,7 +2061,7 @@ function windowIndex(parsed, req) {
     from = req.version === 2 ? Math.max(0, cursor - INDEX_WINDOW_TURNS) : cursor;
     to = req.version === 2 ? Math.min(total, cursor + min) : total;
   } else if (req.at === 'before' && !reset) { to = cursor; from = Math.max(0, to - min); }
-  else { to = total; from = Math.max(0, total - min); }
+  else { to = total; from = Math.max(0, total - Math.max(min, INDEX_TAIL_MIN_TURNS)); }
   return {
     ...headOf(parsed),
     total,
@@ -2358,5 +2442,201 @@ export async function readTraceBundle(dir, opts = {}) {
     sessionId: null,
     size: st.size,
     decorate,
+  }, opts);
+}
+
+/* ------------------------------------------------------------------ search --
+ *
+ * Searching the WHOLE conversation, as opposed to the stretch the reader has
+ * loaded. The reader keeps its instant filter over loaded exchanges; this is
+ * the explicit action for everything older, and it is explicit precisely
+ * because it reads the transcript.
+ *
+ * Scanning runs backward from the tail, newest first, because that is the order
+ * a reader looks for something in. Each request is bounded in pages, bytes and
+ * wall clock, and hands back a cursor to continue from — a long transcript is
+ * several bounded requests rather than one unbounded one.
+ *
+ * The scan boundary for a live conversation is the size (or message count) read
+ * at the start of the request. Output appended while it runs is outside this
+ * request's stated scope rather than something it chases forever, and the
+ * response says so.
+ */
+const SEARCH_MAX_QUERY = 200;
+const SEARCH_MAX_HITS = 50;
+const SEARCH_PAGE_BYTES = 256 * 1024;
+/** Messages of context an indexed hit opens with, the hit itself last. */
+const SEARCH_INDEX_CONTEXT = 40;
+const SEARCH_MAX_BYTES = 12 * 1024 * 1024;   // scanned per request
+const SEARCH_MAX_MS = 4_000;                 // per request
+const SEARCH_MAX_PAGES = 40;                 // per request
+const SNIPPET_BEFORE = 60;
+const SNIPPET_AFTER = 120;
+
+/**
+ * The text of one turn as the reader would show it, and whether any of it was
+ * clipped on the way here.
+ *
+ * Deliberately the same fields the reader's own loaded-history search uses
+ * (`web/src/components/conversation/readerSearch.ts`), so the two scopes cannot
+ * disagree about what counts as conversation: prompts, assistant text, thinking,
+ * tool names, tool input and output, shell commands and their streams. Image
+ * data and transport metadata are not conversation text.
+ *
+ * `clipped` matters because the parsers cap long blocks: a match in the part
+ * that was cut is a match this scan cannot see, so a scan that passed over a
+ * clipped block must not claim to have searched all of it.
+ */
+function searchableTurn(turn) {
+  const parts = [];
+  let clipped = false;
+  if (turn.event && typeof turn.event.text === 'string') parts.push(turn.event.text);
+  for (const block of turn.blocks || []) {
+    if (block.type === 'image') continue;
+    if (typeof block.name === 'string') parts.push(block.name);
+    for (const key of ['text', 'command', 'stdout', 'stderr']) {
+      if (typeof block[key] === 'string') parts.push(block[key]);
+    }
+    if (block.more) clipped = true;
+  }
+  return { text: parts.join('\n'), clipped };
+}
+
+/** A short, whitespace-collapsed excerpt around the first match, with the
+ * match's position in it — the client highlights, the server does not emit
+ * markup. */
+function snippetOf(text, at, length) {
+  const from = Math.max(0, at - SNIPPET_BEFORE);
+  const to = Math.min(text.length, at + length + SNIPPET_AFTER);
+  const head = (from ? '…' : '') + text.slice(from, at).replace(/\s+/g, ' ');
+  const match = text.slice(at, at + length).replace(/\s+/g, ' ');
+  const tail = text.slice(at + length, to).replace(/\s+/g, ' ') + (to < text.length ? '…' : '');
+  return { text: head + match + tail, at: head.length, length: match.length };
+}
+
+function hitsIn(turns, needle, locator) {
+  const out = [];
+  let clipped = false;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const turn = turns[i];
+    const { text, clipped: cut } = searchableTurn(turn);
+    if (cut) clipped = true;
+    if (!text) continue;
+    const at = text.toLowerCase().indexOf(needle);
+    if (at < 0) continue;
+    const occurrences = text.toLowerCase().split(needle).length - 1;
+    out.push({
+      id: turn.id || null,
+      role: turn.role,
+      ts: turn.ts || null,
+      occurrences,
+      clipped: cut,
+      snippet: snippetOf(text, at, needle.length),
+      ...locator(i, turn),
+    });
+  }
+  return { hits: out, clipped };
+}
+
+/**
+ * One bounded search request against one located trace.
+ *
+ * Returns hits newest-first with a `window` locator each: the cursor the reader
+ * asks the ordinary window endpoint for to see that message with its
+ * surrounding conversation. Nothing here mutates or advances the reader's live
+ * cursor — a search is a read of the source, not a move through it.
+ */
+async function serveSearch({ key, harness, file, sessionId, size, stat, allowSubagent }, opts) {
+  const q = typeof opts.q === 'string' ? opts.q.trim() : '';
+  if (!q) { const e = new Error('empty search'); e.code = 'bad-query'; throw e; }
+  if (q.length > SEARCH_MAX_QUERY) { const e = new Error('search text is too long'); e.code = 'bad-query'; throw e; }
+  const limit = clampN(Math.trunc(opts.limit) || SEARCH_MAX_HITS, 1, SEARCH_MAX_HITS);
+  const needle = q.toLowerCase();
+  const identity = await traceRevision(file, stat || await fsp.stat(file), !WINDOWABLE.has(harness));
+  // A cursor belongs to the source it was issued for. A replaced transcript
+  // restarts the scan rather than continuing into unrelated bytes.
+  const stale = opts.generation && opts.generation !== identity.generation;
+  const base = { generation: identity.generation, revision: identity.revision, query: q };
+  const started = Date.now();
+
+  if (!WINDOWABLE.has(harness)) {
+    // An indexed source is parsed whole either way, so one request covers the
+    // whole conversation; only the RESULTS are paged, on exact message indices.
+    const parsed = await cachedTrace(`${key}:${identity.revision}`, size, async () =>
+      tracked(PHASE.readTrace, () => parseTraceFile(harness, file, sessionId, null, allowSubagent)));
+    const total = parsed.messages.length;
+    const from = stale ? total : clampN(Math.trunc(opts.cursor ?? total), 0, total);
+    const { hits, clipped } = hitsIn(parsed.messages.slice(0, from), needle,
+      (i) => ({ window: { at: 'before', cursor: i + 1, min: SEARCH_INDEX_CONTEXT } }));
+    const page = hits.slice(0, limit);
+    const more = hits.length > limit;
+    return { ...base, mode: 'index', reset: !!stale, hits: page,
+      next: more ? String(page[page.length - 1].window.cursor - 1) : null,
+      complete: !more, clipped, scanned: from, boundary: total };
+  }
+
+  let at = stale ? size : clampN(Math.trunc(opts.cursor ?? size), 0, size);
+  const hits = [];
+  let clipped = false;
+  let pages = 0;
+  let bytes = 0;
+  let atStart = at <= 0;
+  let blocked = false;
+  // Whole pages only. A cursor points at a page boundary, so continuing from it
+  // can neither repeat a hit already returned nor step over one: `hits` may
+  // overrun `limit` by the tail of the last page rather than be cut mid-page.
+  while (!atStart && hits.length < limit && pages < SEARCH_MAX_PAGES
+    && bytes < SEARCH_MAX_BYTES && Date.now() - started < SEARCH_MAX_MS) {
+    const page = await tracked(PHASE.readTrace, () => readWindow(harness, file, sessionId, size,
+      { at: 'before', cursor: at, bytes: SEARCH_PAGE_BYTES, min: 1, version: 2 }, allowSubagent));
+    pages++;
+    const end = page.cur.end ?? at;
+    // The locator names the WHOLE window, size included, not just its end: the
+    // same request reproduces exactly the page the hit was found in. An end
+    // offset alone would be read back with some other span, and a hit near the
+    // page's leading edge would then sit outside the window it pointed at.
+    const found = hitsIn(page.parsed.messages, needle,
+      () => ({ window: { at: 'before', cursor: end, bytes: SEARCH_PAGE_BYTES } }));
+    if (found.clipped) clipped = true;
+    hits.push(...found.hits);
+    bytes += Math.max(0, at - page.cur.start);
+    if (page.cur.blocked || page.cur.start >= at) { blocked = true; break; }
+    at = page.cur.start;
+    atStart = !!page.cur.atStart || at <= 0;
+  }
+  return {
+    ...base, mode: 'bytes', reset: !!stale, hits,
+    // Where a continuation resumes. `null` means this scan reached the start of
+    // the conversation, or stopped on a record it cannot get past.
+    next: atStart || blocked ? null : String(at),
+    complete: atStart, blocked, clipped, scanned: bytes, boundary: size,
+  };
+}
+
+/** Search a trace by path — the search-side counterpart of readTraceByPath(),
+ * used by tests and by any caller that already located the file. */
+export async function searchTraceByPath(file, opts = {}, allowSubagent = false) {
+  const st = await statRetry(file);
+  if (!st) { const e = new Error('trace file unreadable'); e.code = 'no-trace'; throw e; }
+  const harness = await sniffHarness(file);
+  if (!harness) { const e = new Error('unrecognized trace format'); e.code = 'unsupported-harness'; throw e; }
+  return serveSearch({ key: `f:${file}:${st.mtimeMs}:${st.size}${allowSubagent ? ':sub' : ''}`,
+    stat: st, harness, file, sessionId: null, size: st.size, allowSubagent }, opts);
+}
+
+/** Search one session's transcript. `session` is an Agent Manager session
+ * record; locating the file is delegated to findTrace() exactly as reads are. */
+export async function searchTrace(session, opts = {}) {
+  const hit = await findTrace(session, store.list());
+  if (!hit) { const e = new Error('no trace found for this session'); e.code = 'no-trace'; throw e; }
+  const st = await statRetry(hit.src);
+  if (!st) { const e = new Error(`trace file unreadable: ${hit.src}`); e.code = 'no-trace'; throw e; }
+  return serveSearch({
+    key: `s:${session.id}:${hit.src}:${hit.sessionId || ''}:${st.mtimeMs}:${st.size}`,
+    stat: st,
+    harness: session.cli,
+    file: hit.src,
+    sessionId: hit.sessionId || session.sessionUuid || null,
+    size: st.size,
   }, opts);
 }

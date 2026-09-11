@@ -2,10 +2,9 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import Sidebar from './components/Sidebar';
 import type { QuickStartAttachmentOptions } from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
-import FilesPane from './components/FilesPane';
-import TracePane from './components/TracePane';
 import RemotePane from './components/RemotePane';
-import SettingsView from './components/SettingsView';
+import SettingsShell, { type SettingsPage } from './components/SettingsShell';
+import LazyPanel from './components/LazyPanel';
 import SettingsSaveAlert from './components/SettingsSaveAlert';
 import NewSession from './components/NewSession';
 import LayoutPicker from './components/LayoutPicker';
@@ -17,18 +16,31 @@ import BackupBanner from './components/BackupBanner';
 import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
 import * as api from './api';
+import { applyAck, furtherMark, retireLocal, type ReadMark } from './lib/unread';
+// Matches the server's per-request cap; the client splits rather than being cut.
+const ACK_CHUNK = 100;
 import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { hiddenSessionIds } from './lib/overviewHidden';
 import { paneOwnsBack } from './lib/mobileBack';
 import { isPassive, isRemote, isShareable } from './types';
 import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
+import { createLatestRefresh, observeAppReturns } from './lib/appRefresh';
 
 // `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
 // when the app is embedded cross-origin. Read once: it never changes mid-run,
 // and lazily imported so a debug surface is not part of the shipped bundle.
 const VV_DEBUG = new URLSearchParams(location.search).has('vvdebug');
 const ViewportDebug = lazy(() => import('./components/ViewportDebug'));
+
+// Panels a visit may never open ship as their own chunks and are fetched when
+// first shown (LazyPanel). The terminal/reader pane is the app's reason to
+// exist and stays in the entry. These loaders are module-level on purpose: the
+// module cache is keyed by the function, and a stable component type is what
+// keeps a mounted panel's state through re-renders.
+const loadFilesPane = () => import('./components/FilesPane');
+const loadTracePane = () => import('./components/TracePane');
+const loadSettingsView = () => import('./components/SettingsView');
 
 // Phone-sized viewport: the app becomes two full-screen views (list ⇄ pane).
 function useIsMobile() {
@@ -51,7 +63,6 @@ function autoGrid(n: number): GridSpec {
   return { cols: 3, rows: 3 };
 }
 
-type SettingsPage = 'general' | 'usage' | 'skills' | 'cron' | 'apilog';
 const ROOT_PATH = '.';
 const WARM_TERMINAL_LIMIT = 12;
 const normalizePath = (p?: string | null) => (p && p.trim() ? p : ROOT_PATH);
@@ -118,7 +129,10 @@ export default function App() {
   // Imported traces already live on the Hub; sharing them means handing on
   // their original dataset link, not publishing a duplicate dataset.
   const [traceShare, setTraceShare] = useState<{ title: string; url: string } | null>(null);
-  const showErr = (msg: string) => (e: unknown) => { console.error(msg, e); setToast(msg); window.setTimeout(() => setToast(null), 4000); };
+  const showErr = (msg: string) => (e: unknown) => {
+    setToast(e instanceof api.ApiError ? `${msg}: ${e.message}` : msg);
+    window.setTimeout(() => setToast(null), 4000);
+  };
   // Overview presentation: tiles (default) or the classic list.
   const [ovView, setOvViewRaw] = useState<'tiles' | 'list'>(() =>
     (readStored('am-ov-view') === 'list' ? 'list' : 'tiles'));
@@ -400,8 +414,11 @@ export default function App() {
   // treeLoaded gates the selection check below: until the first tree actually
   // arrives, "your agent isn't in this tree" only means the tree is still empty.
   const [treeLoaded, setTreeLoaded] = useState(false);
-  const refresh = useCallback(async () => {
-    try { setTree(await api.getTree()); setTreeLoaded(true); } catch { /* offline */ }
+  const treeRefresh = useRef<ReturnType<typeof createLatestRefresh<Tree>> | null>(null);
+  // Mutations and foreground recovery replace any possibly frozen request.
+  // Ordinary polls use the manager directly below and coalesce instead.
+  const refresh = useCallback((): Promise<Tree | null> => {
+    return treeRefresh.current?.refresh('replace') ?? Promise.resolve(null);
   }, []);
 
   // Hide/unhide a group (or one agent) in the Overview. Optimistic, because the
@@ -418,13 +435,21 @@ export default function App() {
 
   useEffect(() => {
     api.getClis().then(setClis).catch(() => {});
-    refresh();
-    // Skip polling while the tab is hidden; catch up immediately on return.
-    const t = setInterval(() => { if (!document.hidden) refresh(); }, 2500);
-    const onVisible = () => { if (!document.hidden) refresh(); };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVisible); };
-  }, [refresh]);
+    const manager = createLatestRefresh(
+      (signal) => api.getTree(signal),
+      (next) => { setTree(next); setTreeLoaded(true); },
+    );
+    treeRefresh.current = manager;
+    void manager.refresh('replace');
+    // Same cadence and hidden-tab rule as before. Foreground catch-up is shared
+    // with metadata below so visibility/focus/pageshow/online cannot drift.
+    const t = setInterval(() => { if (!document.hidden) void manager.refresh('poll'); }, 2500);
+    return () => {
+      clearInterval(t);
+      if (treeRefresh.current === manager) treeRefresh.current = null;
+      manager.dispose();
+    };
+  }, []);
 
   // Live per-session digests, polled CONTINUOUSLY in the background (not only
   // while the Overview is open) so opening it is instant. Faster cadence when
@@ -436,12 +461,15 @@ export default function App() {
   const [ages, setAges] = useState<Record<string, number>>({});
   const overviewActiveRef = useRef(false);
   overviewActiveRef.current = activeRef === 'overview';
+  const metaRefresh = useRef<ReturnType<typeof createLatestRefresh<Awaited<ReturnType<typeof api.getMeta>>>> | null>(null);
+  const refreshMeta = useCallback(() => {
+    return metaRefresh.current?.refresh('replace') ?? Promise.resolve(null);
+  }, []);
   useEffect(() => {
-    let alive = true;
     let lastPayload = '';
-    const load = () => api.getMeta()
-      .then((r) => {
-        if (!alive) return;
+    const manager = createLatestRefresh(
+      (signal) => api.getMeta(signal),
+      (r) => {
         setMetaReady(true);
         const payload = JSON.stringify(r.sessions);
         if (payload === lastPayload) return;
@@ -450,19 +478,87 @@ export default function App() {
         setAges(Object.fromEntries(r.sessions.map((s) => [
           s.id, Math.max(s.digest?.lastAssistantTs || 0, s.digest?.lastPromptTs || 0),
         ])));
-      })
-      .catch(() => {});
-    load();
+      },
+    );
+    metaRefresh.current = manager;
+    void manager.refresh('replace');
     // One self-scheduling timer whose delay adapts to the active view, so we
     // never tear down / recreate the loop when navigating.
     let t: ReturnType<typeof setTimeout>;
     const tick = () => {
-      if (!document.hidden) load();
+      if (!document.hidden) void manager.refresh('poll');
       t = setTimeout(tick, overviewActiveRef.current ? 1500 : 8000);
     };
     t = setTimeout(tick, 1500);
-    return () => { alive = false; clearTimeout(t); };
+    return () => {
+      clearTimeout(t);
+      if (metaRefresh.current === manager) metaRefresh.current = null;
+      manager.dispose();
+    };
   }, []);
+
+  // Browser returns arrive as different (often clustered) event shapes across
+  // desktop, mobile and bfcache restoration. Refresh both independent resources
+  // once; the reader owns its own equivalent lifecycle and is not touched here.
+  useEffect(() => observeAppReturns(() => Promise.allSettled([refresh(), refreshMeta()])), [refresh, refreshMeta]);
+
+  // ---- what the operator has read ----
+  //
+  // The server owns this; these are the acknowledgements sent since the last
+  // poll answered, held so a card does not flash back to unread while the
+  // request is in flight. Merged with the server's copy by taking whichever has
+  // read further, so a poll that overtook an acknowledgement cannot regress it.
+  const [readLocal, setReadLocal] = useState<Record<string, ReadMark>>({});
+  // Marks already in flight or already landed, so a reader that keeps observing
+  // the same visible reply sends one request rather than one per frame. Keyed
+  // by the exact version, so genuinely new output is never coalesced away.
+  const ackSent = useRef<Set<string>>(new Set());
+  const markSeen = useCallback((marks: (api.OutputVersion & { id: string })[]) => {
+    const fresh = marks.filter((m) => !ackSent.current.has(`${m.id}:${m.src}:${m.seq}:${m.hash}`));
+    if (!fresh.length) return Promise.resolve(true);
+    for (const m of fresh) ackSent.current.add(`${m.id}:${m.src}:${m.seq}:${m.hash}`);
+    // Bounded: this only exists to stop repeat sends, so old entries are not
+    // worth keeping once it has grown past a fleet's worth of replies.
+    if (ackSent.current.size > 500) ackSent.current = new Set(fresh.map((m) => `${m.id}:${m.src}:${m.seq}:${m.hash}`));
+    // Sent in bounded chunks rather than one request the server would have to
+    // cap: a section larger than the cap must be acknowledged in full or report
+    // which targets were left, never silently truncated to the first N.
+    const chunks: (api.OutputVersion & { id: string })[][] = [];
+    for (let i = 0; i < fresh.length; i += ACK_CHUNK) chunks.push(fresh.slice(i, i + ACK_CHUNK));
+    return Promise.all(chunks.map((c) => api.markRead(c).then((r) => r.results)))
+      .then((all) => {
+        const results: Record<string, string> = Object.assign({}, ...all);
+        setReadLocal((prev) => applyAck(prev, fresh, results));
+        // A rejected mark can be retried later against whatever is newest then;
+        // forgetting it here is what makes that possible.
+        for (const m of fresh) if (results[m.id] !== 'ok') ackSent.current.delete(`${m.id}:${m.src}:${m.seq}:${m.hash}`);
+        // Every mark must come back named. A session missing from the answer is
+        // not a success, and reporting it as one is how a target gets dropped.
+        return fresh.every((m) => results[m.id] === 'ok');
+      })
+      .catch(() => {
+        // Nothing was written, so nothing is read. Drop the coalescing entries
+        // or a failed acknowledgement would never be attempted again.
+        for (const m of fresh) ackSent.current.delete(`${m.id}:${m.src}:${m.seq}:${m.hash}`);
+        return false;
+      });
+  }, []);
+  // What the Overview and the reader actually compare against.
+  const metaRead = useMemo(() => {
+    const out: Record<string, api.MetaSession> = {};
+    for (const [id, m] of Object.entries(meta)) {
+      const merged = furtherMark(m.read, readLocal[id], m.output);
+      out[id] = merged === m.read ? m : { ...m, read: merged };
+    }
+    return out;
+  }, [meta, readLocal]);
+  // Once the server's own copy has caught up, the local acknowledgement has
+  // nothing left to add — and a local mark for a generation that is gone would
+  // otherwise keep overriding the truth forever. Retiring them is what lets
+  // polling converge across devices.
+  useEffect(() => {
+    setReadLocal((prev) => retireLocal(prev, Object.values(meta)));
+  }, [meta]);
 
   // Archive threshold from the operator config; refresh when settings closes
   // (that's where it's edited).
@@ -707,8 +803,10 @@ export default function App() {
   const newSession = (name: string, cli: string, path: string, groupId?: string) =>
     createSession(name, cli, path, groupId ?? activeGroup?.id);
   const newGroup = async (name: string, cart?: { cli: string; count: number }[], path = ROOT_PATH) => {
+    let created: string | null = null;
     try {
       const g = await api.createGroup(name);
+      created = g.id;
       for (const { cli, count } of cart || []) {
         const base = cliMap[cli]?.label || cli;
         for (let i = 0; i < count; i++) {
@@ -718,16 +816,26 @@ export default function App() {
       }
       await refresh();
       setActiveRef(`g:${g.id}`);
-    } catch (e) { showErr('Couldn’t create the group')(e); }
+    } catch (e) {
+      if (created) {
+        void refresh();
+        setActiveRef(`g:${created}`);
+        throw new api.ApiError('The group was created, but not all agents could be added. Check the group before trying again.',
+          e instanceof api.ApiError ? e.status : null, 'group-partially-created');
+      }
+      throw e;
+    }
   };
   // Merging two agents, or dropping one into a group, changes what the pane you
   // are looking at IS — it is now part of a grid. Follow it there rather than
   // leaving you on a single view of a session that has moved.
   const doMove = (ref: string, to: MoveTarget) => api.move(ref, to)
     .then(async () => {
-      const next = await api.getTree().catch(() => null);
-      if (!next) return refresh();
-      setTree(next);
+      const next = await refresh();
+      // Preserve the old post-move fallback: if its first read fails, make one
+      // more ordinary replacement attempt even though there is nothing safe to
+      // navigate against yet.
+      if (!next) return refresh().then(() => undefined);
       const watching = activeRef?.startsWith('s:') ? activeRef.slice(2) : null;
       if (!watching) return undefined;
       const home = next.groups.find((g) => g.sessionIds.includes(watching));
@@ -935,6 +1043,14 @@ export default function App() {
                 focused={shown && sessions.length > 1 && s.id === focusedId}
                 visible={shown && deckVisible}
                 active={shown && deckVisible && s.id === focusedId}
+                // Only the active pane in a visible deck can acknowledge a
+                // reply: one sitting behind another is rendered but obscured,
+                // and rendering is not reading.
+                seen={shown && deckVisible && s.id === focusedId ? {
+                  version: metaRead[s.id]?.output ? { id: s.id, ...metaRead[s.id].output! } : null,
+                  
+                  onSeen: markSeen,
+                } : undefined}
                 dragId={shown && canDrag ? `p:${s.id}` : undefined}
                 isMobile={isMobile}
                 onBack={ownsBack ? () => setMobileStage(false) : undefined}
@@ -954,15 +1070,17 @@ export default function App() {
             {...(activeGroup ? tileDnd(i, !!s) : {})}
           >
             {s && (s.cli === 'files' ? (
-              <FilesPane
-                session={s}
-                zoom={zoom}
-                focused={visibleSessions.length > 1 && s.id === focusedId}
-                dragId={canDrag ? `p:${s.id}` : undefined}
-                onDragActive={setPaneDrag}
-                onFocus={() => setFocusedId(s.id)}
-                onClose={() => closePane(s.id)}
-              />
+              <LazyPanel load={loadFilesPane} what="the file browser" onClose={() => closePane(s.id)} render={(m) => (
+                <m.default
+                  session={s}
+                  zoom={zoom}
+                  focused={visibleSessions.length > 1 && s.id === focusedId}
+                  dragId={canDrag ? `p:${s.id}` : undefined}
+                  onDragActive={setPaneDrag}
+                  onFocus={() => setFocusedId(s.id)}
+                  onClose={() => closePane(s.id)}
+                />
+              )} />
             ) : s.cli === 'remote' ? (
               <RemotePane
                 session={s}
@@ -977,25 +1095,27 @@ export default function App() {
                 onClose={() => closePane(s.id)}
               />
             ) : (
-              <TracePane
-                session={s}
-                // A trace pane follows its SOURCE session: whether that agent is
-                // still writing decides how hard this pane looks for new turns.
-                sourceLive={(() => {
-                  const ref = s.traceSource?.kind === 'session' ? s.traceSource.ref : null;
-                  return ref ? sessById[ref]?.state === 'working' : false;
-                })()}
-                zoom={zoom}
-                focused={visibleSessions.length > 1 && s.id === focusedId}
-                dragId={canDrag ? `p:${s.id}` : undefined}
-                onDragActive={setPaneDrag}
-                onFocus={() => setFocusedId(s.id)}
-                onShare={() => shareTrace(s.id)}
-                // The prefilled create panel lives in the sidebar, so the
-                // request travels there rather than the panel moving here.
-                onHandover={() => setHandoverFor(s.id)}
-                onClose={() => closePane(s.id)}
-              />
+              <LazyPanel load={loadTracePane} what="the trace viewer" onClose={() => closePane(s.id)} render={(m) => (
+                <m.default
+                  session={s}
+                  // A trace pane follows its SOURCE session: whether that agent is
+                  // still writing decides how hard this pane looks for new turns.
+                  sourceLive={(() => {
+                    const ref = s.traceSource?.kind === 'session' ? s.traceSource.ref : null;
+                    return ref ? sessById[ref]?.state === 'working' : false;
+                  })()}
+                  zoom={zoom}
+                  focused={visibleSessions.length > 1 && s.id === focusedId}
+                  dragId={canDrag ? `p:${s.id}` : undefined}
+                  onDragActive={setPaneDrag}
+                  onFocus={() => setFocusedId(s.id)}
+                  onShare={() => shareTrace(s.id)}
+                  // The prefilled create panel lives in the sidebar, so the
+                  // request travels there rather than the panel moving here.
+                  onHandover={() => setHandoverFor(s.id)}
+                  onClose={() => closePane(s.id)}
+                />
+              )} />
             ))}
           </div>
         )))}
@@ -1016,19 +1136,22 @@ export default function App() {
   return (
     <>
       {settingsOpen && (
-      <SettingsView
-        page={settingsPage}
-        onPage={setSettingsPage}
-        onClose={() => setSettingsOpen(false)}
-        theme={theme}
-        onToggleTheme={toggleTheme}
-        clis={clis}
-        info={info}
-        onShowWelcome={openWelcome}
-        onOpenSharedTrace={openSharedTrace}
-        demoMode={!!info?.demoMode}
-        onToggleDemo={toggleDemo}
-      />
+      <SettingsShell page={settingsPage} onPage={setSettingsPage} onClose={() => setSettingsOpen(false)}>
+        <LazyPanel load={loadSettingsView} what="settings" onClose={() => setSettingsOpen(false)} render={(m) => (
+          <m.default
+            page={settingsPage}
+            onClose={() => setSettingsOpen(false)}
+            theme={theme}
+            onToggleTheme={toggleTheme}
+            clis={clis}
+            info={info}
+            onShowWelcome={openWelcome}
+            onOpenSharedTrace={openSharedTrace}
+            demoMode={!!info?.demoMode}
+            onToggleDemo={toggleDemo}
+          />
+        )} />
+      </SettingsShell>
       )}
     {/* Outside .app: it reports where .app was put. That does not make it
         immune — it is fixed too, so a displaced fixed subtree would carry it
@@ -1152,8 +1275,9 @@ export default function App() {
               archived={archivedIds}
               showArchived={showArchived}
               showHidden={showHidden}
-              meta={meta}
+              meta={metaRead}
               metaReady={metaReady}
+              onSeen={markSeen}
               isMobile={isMobile}
               onOpen={(sid) => {
                 const g = tree.groups.find((x) => x.sessionIds.includes(sid));
