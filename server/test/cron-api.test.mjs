@@ -36,6 +36,12 @@ const check = (name, ok, detail = '') => {
   ok ? pass++ : fail++;
 };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Sessions run in a LOGIN shell, and /etc/profile rebuilds PATH, so the fake
+// binary has to be put back by the fixture HOME's own profile — otherwise the
+// real CLI starts in its place.
+fs.mkdirSync(path.join(DATA_DIR, 'home'), { recursive: true });
+fs.writeFileSync(path.join(DATA_DIR, 'home', '.profile'), `export PATH="${bin}:$PATH"\n`);
+
 const { SPACE_ID, AM_DISTRIBUTE_SKILLS, ...BASE_ENV } = process.env;
 const server = spawn('node', ['src/index.js'], {
   env: {
@@ -123,6 +129,44 @@ try {
   const deleted = await api('/api/crons/cron_boot_two', { method: 'DELETE' });
   check('delete is distinct from stop and removes the job', deleted.status === 200
     && !(await api('/api/crons')).body.crons.some((job) => job.id === 'cron_boot_two'));
+
+  // A cron keeps its target when a nameless session is created later. Names
+  // are compared ignoring case everywhere, so automatic name allocation must
+  // use the same rule: with `Claude-Code-1` present, the next free name is
+  // `claude-code-2`, never a `claude-code-1` that an exact-name preference
+  // would then pick over the cron's real target.
+  const mixed = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ name: 'Claude-Code-1', cli: 'claude', path: 'first-project' }) });
+  check('a mixed-case session is created', mixed.status === 201, JSON.stringify(mixed.body));
+  const target = await api('/api/crons', {
+    method: 'POST', body: JSON.stringify({
+      name: 'lower-case target', agent: { name: 'claude-code-1', cli: 'claude' }, prompt: 'Report.',
+      schedule: { cron: '0 9 * * *', tz: 'UTC' }, runOnRestart: false,
+    }),
+  });
+  const before = ((await api('/api/sessions')).body || []).length;
+  const firstRun = await api(`/api/crons/${target.body.id}/run`, { method: 'POST' });
+  check('a cron naming the session in another case reuses it instead of spawning a twin',
+    firstRun.status === 202 && firstRun.body?.agentCreated === false && ((await api('/api/sessions')).body || []).length === before,
+    JSON.stringify(firstRun.body));
+  const hintAfter = await api('/api/next-name?cli=claude');
+  check('the next automatic name skips the case-variant that exists', hintAfter.body?.name === 'claude-code-2', JSON.stringify(hintAfter.body));
+  const nameless = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ cli: 'claude', path: 'second-project' }) });
+  check('a nameless creation gets that name', nameless.status === 201 && nameless.body?.name === 'claude-code-2', JSON.stringify(nameless.body));
+  const secondRun = await api(`/api/crons/${target.body.id}/run`, { method: 'POST' });
+  const after = (await api('/api/sessions')).body || [];
+  const original = after.find((s) => s.id === mixed.body.id);
+  const newcomer = after.find((s) => s.id === nameless.body.id);
+  check('the cron still fires into its original session, not the newcomer',
+    secondRun.status === 202 && secondRun.body?.agentCreated === false && original?.everStarted === true && newcomer?.everStarted === false,
+    `original=${JSON.stringify({ everStarted: original?.everStarted })} newcomer=${JSON.stringify({ name: newcomer?.name, everStarted: newcomer?.everStarted })}`);
+
+  // The roster filter, through the real route: a group named one way, asked for another.
+  const hunter = await api('/api/groups', { method: 'POST', body: JSON.stringify({ name: 'Hunter' }) });
+  const member = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ name: 'in-hunter', cli: 'claude', path: 'hunter-project', groupId: hunter.body?.id }) });
+  const roster = await api('/api/agents?group=HUNTER');
+  check('GET /api/agents?group= matches the group name ignoring case',
+    hunter.status === 201 && member.status === 201 && roster.status === 200 && roster.body?.agents?.length === 1 && roster.body.agents[0].id === member.body.id,
+    JSON.stringify({ group: hunter.body, agents: roster.body?.agents?.map((a) => a.name) }));
 
   const disk = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'crons.json'), 'utf8'));
   check('the final state is on DATA_DIR, not local process memory',

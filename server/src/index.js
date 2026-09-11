@@ -50,6 +50,7 @@ import {
 import * as runstate from './runstate.js';
 import { installSlowFsProbe } from './slowfs.js';
 import { operationMiddleware, readOperations } from './operations.js';
+import { findByName, filterAgentsByGroup, normalizeName } from './agent-list.js';
 import { fileLinkRoots, fileLinksRouter } from './file-links.js';
 import { ApiError, apiRoutes, apiNotFound, apiErrorHandler, errorEnvelope, pipeResponse } from './api-errors.js';
 import { createValidator } from './api-validation.js';
@@ -812,6 +813,9 @@ function agentRow(s, act, d, selfId, mates) {
 }
 
 api.get('/api/agents', async (req, res) => {
+  // `?group=` narrows the roster to one sidebar group, by name, ignoring case.
+  const group = req.query.group === undefined ? null : String(req.query.group).trim();
+  if (group !== null && (!group || group.length > 120)) return res.status(400).json({ error: 'group filter is invalid' });
   const info = agentInfo();
   const digests = await traceDigests();
   const selfId = String(req.query.from || req.query.self || '').trim() || null;
@@ -829,7 +833,7 @@ api.get('/api/agents', async (req, res) => {
     agents.push(row);
   }
   res.json({
-    agents,
+    agents: filterAgentsByGroup(agents, group),
     // Which CLIs a spawn can ask for. `ready` = a credential was found.
     // Remote agents are absent from the spawn list on purpose: creating one
     // produces a pane waiting for a human to paste its prompt onto another
@@ -1804,7 +1808,8 @@ curl -s -H 'X-AM-Request: 1' "http://localhost:\${AM_PORT:-${PORT}}/api/agents?f
 Each entry carries \`id\`, \`name\`, \`cli\`, \`state\`, \`workdir\`, \`sharesFolderWith\`,
 a one-line \`lastPrompt\`/\`lastAnswer\`, \`recentFiles\`, and \`trace\` — the path to
 its raw conversation log, which you can read directly with \`jq\` when you need
-the full history rather than a summary. \`GET /api/agents/$ID\` adds the full
+the full history rather than a summary. \`?group=<name>\` keeps only one sidebar
+group (name matched ignoring case). \`GET /api/agents/$ID\` adds the full
 digest for one agent. Read \`state\` before you do anything:
 
 - \`working\` — thinking or running a tool right now. **Leave it alone.**
@@ -2625,7 +2630,10 @@ function nextName(cli) {
   const re = new RegExp(`^${base}-(\\d+)$`);
   let max = 0;
   for (const s of store.list()) {
-    const m = s.name.match(re);
+    // Counted under the same equivalence rule the lookups use (agent-list.js):
+    // an automatically allocated name must never fold-equal an existing one,
+    // or a plain nameless creation could take over a cron's exact-name target.
+    const m = normalizeName(s.name).match(re);
     if (m) max = Math.max(max, parseInt(m[1], 10));
   }
   return `${base}-${max + 1}`;
@@ -2751,7 +2759,9 @@ function beginCronFire(job, trigger, { signal = null } = {}) {
   };
 
   try {
-    let session = store.list().find((candidate) => candidate.name === job.agent.name) || null;
+    let session;
+    try { session = findByName(store.list(), job.agent.name); }
+    catch (error) { throw new ApiError(409, 'cron-unavailable', error.message); }
     let agentCreated = false;
     if (!session) {
       const invalid = cronCliError(job.agent.cli);
