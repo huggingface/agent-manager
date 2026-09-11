@@ -22,6 +22,11 @@ export interface Session {
   // idle window's verdict, which is computed in App.tsx and expires when the
   // setting changes. Only a session with this can be deleted (server-enforced).
   archivedAt?: string;
+  // Set when the operator pinned this session. Stored, like archivedAt: it says
+  // something the clock cannot. It lifts the session above the sidebar's rule
+  // and exempts it from the idle window — never from a deliberate archive,
+  // which clears it.
+  pinnedAt?: string;
   /** Native CLI event says an interactive TUI dialog is currently pending. */
   inputRequired?: InputRequired | null;
   // Only on `cli: 'trace'` panes: what the read-only trace view is pointed at.
@@ -51,6 +56,9 @@ export interface Group {
   sessionIds: string[];
   layout?: GridSpec | null;
   createdAt?: string;
+  // Pinned as a whole: holds the group's place above the rule and exempts
+  // every member from the idle window. See Session.pinnedAt.
+  pinnedAt?: string;
 }
 
 export interface Tree {
