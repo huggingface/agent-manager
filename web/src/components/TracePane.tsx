@@ -20,6 +20,7 @@ import * as api from '../api';
 import type { TraceBlock, TraceTurn } from '../api';
 import { useTraceWindows, type TraceHeadInfo, type TraceSource } from '../lib/traceWindows';
 import { renderMarkdown } from '../lib/markdown';
+import FileLinkContent, { FileLinkScope } from './FileLinkContent';
 import Logo from './Logo';
 import { CloseGlyph, ShareGlyph, HandoverGlyph } from './icons';
 
@@ -77,7 +78,7 @@ function TextBlock({ text, more, markdown }: { text: string; more?: number; mark
   // truncated answer reads as a complete one.
   return (
     <>
-      <div className="tv-md" dangerouslySetInnerHTML={{ __html: html }} />
+      <FileLinkContent className="tv-md" html={html} />
       {!!more && <div className="tv-msg">…{moreLabel(more)}</div>}
     </>
   );
@@ -604,6 +605,7 @@ export default function TracePane({
     : `${fmtNum(head.loaded)} turn${head.loaded === 1 ? '' : 's'} loaded`);
 
   return (
+    <FileLinkScope session={session.id}>
     <div className={`slot${focused ? ' focused' : ''}`} onMouseDown={onFocus}>
       <div
         className={`pane-head trace-head${dragId ? ' draggable' : ''}`}
@@ -648,5 +650,6 @@ export default function TracePane({
 
       <TraceView src={src} srcKey={`session:${session.id}`} zoom={zoom} query={query} live={sourceLive} onHead={setHead} onNav={onNav} />
     </div>
+    </FileLinkScope>
   );
 }

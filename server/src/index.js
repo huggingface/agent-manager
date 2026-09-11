@@ -50,6 +50,7 @@ import {
 import * as runstate from './runstate.js';
 import { installSlowFsProbe } from './slowfs.js';
 import { operationMiddleware, readOperations } from './operations.js';
+import { fileLinkRoots, fileLinksRouter } from './file-links.js';
 import { ApiError, apiRoutes, apiNotFound, apiErrorHandler, errorEnvelope, pipeResponse } from './api-errors.js';
 import { createValidator } from './api-validation.js';
 import { remoteStream } from './api-streams.js';
@@ -2098,6 +2099,8 @@ api.put('/api/skills/:name', express.text({ type: '*/*', limit: '5mb' }),
 api.delete('/api/skills/:name', skillRoute((req) => skills.remove(req.params.name, req.get('If-Match'))));
 
 // ---------- file browser (for the Files agent) ----------
+app.use('/api/file-links', fileLinksRouter({ roots: fileLinkRoots(WORKSPACES_DIR), getSession: store.get }));
+
 function folderPathOf(session) {
   // A Files agent without a chosen location browses the whole workspace root.
   if (session.cli === 'files' && !session.path) return WORKSPACES_DIR;
