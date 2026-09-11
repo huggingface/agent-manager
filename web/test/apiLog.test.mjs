@@ -31,7 +31,9 @@ const bundle = path.join(tmp, 'app.js');
 
 const at = (s) => new Date(Date.UTC(2026, 7, 19, 21, 0, s)).toISOString();
 const PROMPT = '## Review\n\nRead the diff in `web/` and report:\n\n- anything that would **break**\n- anything undocumented\n';
+const AUDITED = { version: 2, audit: { credentialFilter: { policy: 'credentials-v1', status: 'applied' } } };
 const prompt = (i, from, to, chars, ok = true) => ({
+  ...AUDITED,
   id: `p${i}`, at: at(i), method: 'POST', path: `/api/agents/${to}/prompt`,
   origin: { id: from, type: 'agent', name: from },
   target: { id: to, name: to, cli: 'claude' },
@@ -40,6 +42,7 @@ const prompt = (i, from, to, chars, ok = true) => ({
   status: ok ? 200 : 404, ok, durationMs: 303, result: { ok },
 });
 const wait = (i, watcher, watched, ms) => ({
+  ...AUDITED,
   id: `w${i}`, at: at(i), method: 'GET', path: `/api/agents/${watched}/wait`,
   origin: { id: watcher, type: 'agent', name: watcher },
   target: { id: watched, name: watched, cli: 'claude' },
@@ -52,6 +55,7 @@ const wait = (i, watcher, watched, ms) => ({
 // Its target is an agent nothing else in the fixture touches, so the mark it
 // leaves can only have come from this entry.
 const anonymousWait = {
+  ...AUDITED,
   id: 'w0', at: at(2), method: 'GET', path: '/api/agents/lonely/wait',
   origin: null, target: { id: 'lonely', name: 'lonely', cli: 'claude' },
   status: 200, ok: true, durationMs: 12000,
@@ -60,6 +64,7 @@ const anonymousWait = {
 // The operator's own calls: most of a real log, and hidden by default because
 // this view is for what the AGENTS did to each other.
 const mine = (i) => ({
+  ...AUDITED,
   id: `m${i}`, at: at(20 + i), method: 'POST', path: '/api/sessions/shell-1/input',
   origin: { id: 'lvwerra', type: 'operator', name: 'lvwerra' },
   target: { id: 'shell-1', name: 'shell-1', cli: 'shell' },
@@ -69,6 +74,7 @@ const mine = (i) => ({
 // A create names nothing in its path: the session it made is in the result, and
 // the lane it brings into being must not look as though it was always there.
 const create = {
+  ...AUDITED,
   id: 'c1', at: at(1), method: 'POST', path: '/api/agents',
   origin: { id: 'manager', type: 'agent', name: 'manager' },
   query: { cli: 'claude', name: 'poet' },
@@ -87,13 +93,15 @@ const operations = [
   prompt(5, 'operator', 'manager', 4096),
   prompt(4, 'manager', 'builder', 1204),
   { id: 'f1', at: at(3), method: 'PUT', path: '/api/files/files-5/write',
-    origin: { id: 'operator', type: 'operator', name: 'operator' },
+    // Deliberately v1: a visible legacy row exercises mixed-history rendering.
+    origin: { id: 'manager', type: 'agent', name: 'manager' },
     target: { id: 'files-5', name: 'files-5' },
     request: { present: true, chars: 8400, sha256: 'sha-file' },
     status: 200, ok: true, durationMs: 41, result: { ok: true } },
   anonymousWait,
   // manager waits on the agent it just created; 258s of being blocked
   { id: 'w-poet', at: at(2), method: 'GET', path: '/api/agents/poet-1/wait',
+    ...AUDITED,
     origin: { id: 'manager', type: 'agent', name: 'manager' },
     target: { id: 'poet-1', name: 'poet', cli: 'claude' },
     status: 200, ok: true, durationMs: 258000,
@@ -105,6 +113,7 @@ const operations = [
 // to the nearest neighbouring call gave this no span at all — which is the
 // normal shape of waiting, not an edge case.
 const quietWait = {
+  ...AUDITED,
   id: 'wq', at: at(600), method: 'GET', path: '/api/agents/quiet-1/wait',
   origin: { id: 'watcher', type: 'agent', name: 'watcher' },
   target: { id: 'quiet-1', name: 'quiet', cli: 'claude' },
@@ -117,6 +126,7 @@ operations.push(quietWait);
 // Nothing is cut on disk; the card decides how much of it to paint.
 const HUGE = 'q'.repeat(400_000);
 operations.push({
+  ...AUDITED,
   id: 'big', at: at(601), method: 'PUT', path: '/api/files/files-9/write',
   origin: { id: 'manager', type: 'agent', name: 'manager' },
   target: { id: 'files-9', name: 'files-9' },
@@ -274,6 +284,7 @@ try {
     return {
       first: cells.find((c) => c[2].includes('/api/agents/builder/wait')) || cells[0],
       repeats: [...document.querySelectorAll('.al-rep')].map((e) => e.textContent.trim()),
+      repeatTitles: [...document.querySelectorAll('.al-rep')].map((e) => e.getAttribute('title')),
       whos: [...document.querySelectorAll('.al-who')].map((e) => e.textContent.trim()),
       newest: document.querySelector('.al-tbl tbody tr')?.getAttribute('title')?.split(' ')[0],
       big: (() => {
@@ -289,6 +300,8 @@ try {
   check('and the newest row really is the newest', () => assert.equal(list.newest, operations[0].at));
   check('identical prompts are marked as repeats — the checksum still earns its place',
     () => assert.deepEqual(list.repeats, ['×2', '×2']));
+  check('repeat wording compares retained payloads without claiming filtered originals matched',
+    () => list.repeatTitles.forEach((title) => assert.match(title, /same retained payload — filtered originals may differ/)));
   check('an unattributed call still reads as a row, with an em dash for who',
     () => assert.ok(list.whos.includes('—'), list.whos.join(', ')));
   // "just store all the full api calls" — so the VIEWER is what has to stay
@@ -407,8 +420,9 @@ try {
       assert.match(card.status, /^\d{3}$/, `status: ${card.status}`);
       assert.match(card.tookText, /^\d/, `took: ${card.tookText}`);
     });
-  check('and the whole entry as JSON, with the metadata named',
-    () => ['at', 'call', 'from', 'to', 'status', 'took'].forEach((k) => assert.ok(card.keys.includes(k), `${k} missing from ${card.keys.join(', ')}`)));
+  check('and the whole entry as JSON, with the metadata and filter version named',
+    () => ['log', 'version', 'credentialFilter', 'at', 'call', 'from', 'to', 'status', 'took']
+      .forEach((k) => assert.ok(card.keys.includes(k), `${k} missing from ${card.keys.join(', ')}`)));
   check('still never the prompt text', () => assert.ok(!/"text":\s*"/.test(card.json)));
   check('and it sits below the plot rather than covering it',
     () => assert.equal(card.floating, 'static'));
@@ -589,6 +603,19 @@ try {
       assert.match(painted.path || '', /files-9/, `card shows ${painted.path}`);
       assert.ok(painted.drawn <= 20_000, `painted ${painted.drawn} characters`);
       assert.match(painted.note || '', /400,000 characters/, `note: ${painted.note}`);
+    });
+
+  await pressMark(page, 'files-5');
+  const legacyCard = await page.evaluate(() => ({
+    path: document.querySelector('.al-card-path')?.textContent,
+    json: document.querySelector('.al-json')?.textContent,
+  }));
+  check('a legacy entry remains readable and identifies itself without claiming filtering',
+    () => {
+      assert.match(legacyCard.path || '', /files-5/, `card shows ${legacyCard.path}`);
+      assert.ok(legacyCard.json, `legacy card JSON missing: ${JSON.stringify(legacyCard)}`);
+      assert.match(legacyCard.json, /version: 1/);
+      assert.ok(!legacyCard.json.includes('credentialFilter'), legacyCard.json);
     });
 
   // "i want an option to show things in real time, now it seems all actions are

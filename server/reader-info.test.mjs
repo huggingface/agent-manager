@@ -13,6 +13,7 @@
  * READER_INFO_PORT to move off the default when suites run in parallel.
  * am-test: manual — Chromium, a full web build and READER_INFO_PORT; `npm run test:ui`.
  */
+import { nativeFetch as fetch } from './test/native-client.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
