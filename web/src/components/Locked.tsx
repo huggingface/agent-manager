@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { SessionState } from '../types';
+import { describeVerification, type LockStatus } from '../lib/lockStatus';
 import { SlidersGlyph, SunGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
 import StateLogo from './StateLogo';
 
@@ -67,14 +68,27 @@ function MockSidebar() {
   );
 }
 
-// Shown when the server locks itself: either the Space is public (visitors get
-// the install guide) or the owner's bucket is public (they get a warning — a
-// public bucket exposes everything the agents saved, credentials included).
-export default function Locked({ spaceId, reason, bucket }: {
+// Shown when the server locks itself (server/src/visibility.js), one page per
+// reason so nobody is told to fix the wrong thing:
+//   public-space              visitors get the install guide; the owner, a fix
+//   public-bucket             the owner's bucket is public — everything the
+//                             agents saved is readable, credentials included
+//   checking                  a fresh start, not yet verified private
+//   verification-unavailable  verified before, but not recently enough — an
+//                             outage of the check, never proof of exposure
+export default function Locked({ spaceId, reason, bucket, status }: {
   spaceId?: string | null;
   reason?: string | null;
   bucket?: string | null;
+  status?: LockStatus | null;
 }) {
+  // The "N s ago" copy has to move without a status refresh.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (reason !== 'checking' && reason !== 'verification-unavailable') return;
+    const t = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(t);
+  }, [reason]);
   const id = spaceId || 'owner/space-name';
   const cmd = `from huggingface_hub import HfApi, Volume, create_bucket
 
@@ -114,6 +128,40 @@ api.duplicate_repo(
     if (legacyCopy()) { flash(); return; }
     navigator.clipboard?.writeText(cmd).then(flash).catch(() => {});
   };
+
+  if (reason === 'checking' || reason === 'verification-unavailable') {
+    const v = describeVerification(status, now);
+    const checking = reason === 'checking';
+    return (
+      <div className="app locked-app">
+        <MockSidebar />
+        <div className="main locked-main">
+          <div className="install" data-lock-reason={reason}>
+            <h1>{checking ? 'Checking that this Space is private…' : 'Couldn’t re-verify that this Space is private'}</h1>
+            <p className="locked-lead">
+              {checking ? (
+                <>Agent Manager only serves terminals once it has confirmed that this Space and the
+                bucket mounted at <span className="mono">/data</span> are <b>private</b>. That check is
+                running now; the app opens by itself as soon as it succeeds.</>
+              ) : (
+                <>The privacy check has not succeeded for more than {v.grace}, so the terminals are
+                locked as a precaution. This is a <b>verification outage</b>, not a sign that anything
+                is public — nothing was observed to be exposed.</>
+              )}
+            </p>
+            <div className="step">
+              <div className="step-head"><span className="step-n mono">…</span><h3>{checking ? 'What happens next' : 'Nothing to duplicate or reconfigure'}</h3></div>
+              <p className="locked-sub">
+                {v.lastVerified} {v.lastAttempt} It retries {v.cadence} and this page reopens automatically
+                once a check succeeds.{checking ? null : <> If it keeps failing, check that the Space can
+                reach <span className="mono">huggingface.co</span>.</>}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (reason === 'public-bucket') {
     return (

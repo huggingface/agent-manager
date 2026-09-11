@@ -203,6 +203,13 @@ export function setDoc(view: EditorView, text: string) {
   }
 }
 
+export function revealLine(view: EditorView, number: number, column = 1) {
+  const line = view.state.doc.line(Math.min(Math.max(1, number), view.state.doc.lines));
+  const from = Math.min(line.to, line.from + Math.max(0, column - 1));
+  view.dispatch({ selection: { anchor: from, head: column === 1 ? line.to : from },
+    effects: EditorView.scrollIntoView(from, { y: 'center' }) });
+}
+
 export function setWrap(view: EditorView, wrap: boolean) {
   view.dispatch({ effects: wrapComp.reconfigure(wrap ? EditorView.lineWrapping : []) });
 }

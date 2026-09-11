@@ -3,6 +3,7 @@
 // a session's own transcript: it lives in the harness's directory, outside the
 // workspace, so the Files pane cannot reach it. Run with:
 //   node test/trace-download.test.mjs
+import { nativeFetch as fetch } from './native-client.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

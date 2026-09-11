@@ -4,6 +4,7 @@ import { REMOTE_STATE_LABEL } from '../types';
 import * as api from '../api';
 import StateLogo from './StateLogo';
 import { renderMarkdown } from '../lib/markdown';
+import FileLinkContent, { FileLinkScope } from './FileLinkContent';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
 import { BackGlyph, CloseGlyph, StopGlyph, PlayGlyph, ShareGlyph, AckGlyph } from './icons';
 
@@ -206,6 +207,7 @@ export default function RemotePane({
   );
 
   return (
+    <FileLinkScope session={session.id}>
     <div className={`slot${focused ? ' focused' : ''}`} onMouseDown={onFocus}>
       {/* The standard three-column pane header: identity left, name centred,
           actions right — same as every other agent's pane. Everything else the
@@ -315,7 +317,7 @@ export default function RemotePane({
               </div>
             </div>
           ) : (
-            <div key={m.seq} className="rp-agent" dangerouslySetInnerHTML={{ __html: m.html }} />
+            <FileLinkContent key={m.seq} className="rp-agent" html={m.html} />
           )
         ))}
         {/* The reader's running line, in this log, as its last child — directly
@@ -377,5 +379,6 @@ export default function RemotePane({
         <span className="rp-hint">↵ send · ⇧↵ newline</span>
       </div>
     </div>
+    </FileLinkScope>
   );
 }

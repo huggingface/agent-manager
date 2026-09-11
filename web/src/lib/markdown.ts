@@ -1,5 +1,6 @@
-import { marked } from 'marked';
+import { marked, Renderer } from 'marked';
 import DOMPurify from 'dompurify';
+import { fileLinkHash, parseFileReference } from './fileLinks';
 
 // Render markdown to SANITIZED HTML. Agent output and skill files can contain
 // untrusted content (an agent may echo something it read from the web or a
@@ -15,6 +16,14 @@ import DOMPurify from 'dompurify';
 // every multi-line prompt in the reader into one paragraph, which is a silent
 // loss of what was typed rather than a rendering choice.
 export function renderMarkdown(md: string, opts?: { breaks?: boolean }): string {
-  const html = marked.parse(md ?? '', { async: false, breaks: !!opts?.breaks }) as string;
+  const renderer = new Renderer();
+  const link = renderer.link;
+  renderer.link = function (token) {
+    // file:// and a bare `app.ts:42` look like protocols to the sanitizer.
+    // Convert recognized file references to safe app fragments first.
+    const ref = /^[^/]*:/.test(token.href) ? parseFileReference(token.href) : null;
+    return link.call(this, ref ? { ...token, href: fileLinkHash(ref) } : token);
+  };
+  const html = marked.parse(md ?? '', { async: false, breaks: !!opts?.breaks, renderer }) as string;
   return DOMPurify.sanitize(html);
 }

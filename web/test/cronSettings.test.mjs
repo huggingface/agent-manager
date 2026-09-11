@@ -41,6 +41,7 @@ await build({
       import React from 'react';
       import { createRoot } from 'react-dom/client';
       import SettingsView from './src/components/SettingsView.tsx';
+      import SettingsShell from './src/components/SettingsShell.tsx';
       const clis = [
         { id: 'shell', label: 'Shell', color: '#888', available: true },
         { id: 'files', label: 'Files', color: '#888', available: true },
@@ -49,9 +50,13 @@ await build({
         { id: 'claude', label: 'Claude Code', color: '#d97757', available: true },
         { id: 'codex', label: 'Codex', color: '#5eb6a6', available: false },
       ];
+      // Shell (Back, tabs, the .settings-main scroller) and page are two
+      // components, as in App; the Cron page's code arrives on demand.
       createRoot(document.getElementById('root')).render(
-        <SettingsView page="cron" onPage={() => {}} onClose={() => {}} theme="light"
-          onToggleTheme={() => {}} clis={clis} info={{ dataDir: '/data' }} />,
+        <SettingsShell page="cron" onPage={() => {}} onClose={() => {}}>
+          <SettingsView page="cron" onClose={() => {}} theme="light"
+            onToggleTheme={() => {}} clis={clis} info={{ dataDir: '/data' }} />
+        </SettingsShell>,
       );
     `,
   },

@@ -7,16 +7,20 @@ import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import express from 'express';
 import { WebSocketServer } from 'ws';
+import { createRequestPolicy, requestAdmission, terminalUpgrade, REQUEST_HEADERS } from './request-admission.js';
 import {
-  PORT, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR,
+  PORT, PUBLIC_DIR, DATA_DIR, WORKSPACES_DIR, SKILLS_DIR, STATE_DIR,
   ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions, PASSIVE_CLIS, isRemote,
 } from './config.js';
+import { createSkillsService, skillTargetDirs } from './skills.js';
 import * as remote from './remote.js';
 import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
 import * as demo from './demo.js';
 import * as hidden from './hidden.js';
+import * as readMarks from './read-marks.js';
+import { sourceKey } from './output-id.js';
 import * as crons from './crons.js';
 import { ensureClaudeDialogDefaults, trustWorkspacesRoot } from './first-run.js';
 import {
@@ -30,9 +34,9 @@ import {
 // frontend's framing is unchanged.
 const TERM_CTRL = '\x00\x00AM:';
 import { buildUsage } from './usage.js';
-import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, traceHarnessOf, subagentRoster, readSubagentTrace } from './traces.js';
+import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, searchTrace, traceHarnessOf, subagentRoster, readSubagentTrace } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
-import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
+import { startVisibilityWatch, isLocked, lockState, visibility, onVisibilityChange, lockError } from './visibility.js';
 import { kindOfName, kindOfFile, mimeOf, readTextHead, TEXT_MAX } from './preview.js';
 import { startWatchdog } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
@@ -46,11 +50,17 @@ import {
 import * as runstate from './runstate.js';
 import { installSlowFsProbe } from './slowfs.js';
 import { operationMiddleware, readOperations } from './operations.js';
+import { fileLinkRoots, fileLinksRouter } from './file-links.js';
+import { ApiError, apiRoutes, apiNotFound, apiErrorHandler, errorEnvelope, pipeResponse } from './api-errors.js';
+import { createValidator } from './api-validation.js';
+import { remoteStream } from './api-streams.js';
+import { fileWriteError, receiveWorkspaceFile, replaceWorkspaceText } from './safe-write.js';
 
 // Before anything else touches the mount: a sync fs call to /data is ~85ms of
 // frozen event loop here, and nothing else in the stack can see it. See slowfs.js.
 installSlowFsProbe();
 
+const requestPolicy = createRequestPolicy();
 ensureDirs();
 refreshVersions();
 store.init();
@@ -61,6 +71,7 @@ groups.init();
 order.init();
 demo.init();
 hidden.init();
+readMarks.init();
 // Lifecycle adapters report conversation resets (e.g. /clear) with the exact
 // id, so re-pin watchers can follow them even in shared folders where storage
 // discovery must refuse to guess. Both installers are non-fatal; the existing
@@ -99,7 +110,18 @@ function ensureWorkspaceFolders() {
   }
 }
 ensureWorkspaceFolders();
-distributeAllSkills(); // re-publish skills to each agent's dir on boot
+// environment.md is derived from the Space configuration (generateEnvSkill), so it
+// is read-only in the editor and API and the newest generation always wins.
+const skills = createSkillsService({ sourceRoot: SKILLS_DIR, stateRoot: path.join(STATE_DIR, 'skills'), targetRoots: skillTargetDirs(), generated: ['environment.md'] });
+const reportSkills = (result) => {
+  if (!result.ok) {
+    const failures = (result.results || [result]).filter((r) => !r.ok)
+      .map(({ name, error, source, manifest, targets }) => ({ name, error, source, manifest, targets }));
+    console.error('[skills] degraded distribution', JSON.stringify({ error: result.error, failures }));
+  }
+  return result;
+};
+skills.redistribute().then(reportSkills).catch((e) => console.error('[skills]', e.message));
 
 // Configure a Claude Code statusline hook that captures the official rate_limits
 // payload to disk (for the Usage page), preserving any existing settings.
@@ -161,13 +183,15 @@ function ensureAutonomyDefaults() {
 ensureAutonomyDefaults();
 initPush();
 
-// Wait for the visibility verdict before serving so isPublic() (which fails
-// closed until the first successful check) doesn't flash the locked UI on a
-// private Space's boot — but bound the wait: a hung HF API must NEVER stop the
-// server from listening. If the check is slow, we serve anyway (briefly locked)
-// and the 60s interval check unlocks once it lands.
+// Wait for the first privacy verdict before serving so a private Space's boot
+// doesn't flash the locked UI — but bound the wait: a hung HF API must NEVER
+// stop the server from listening. If the check is slow, we serve anyway (locked,
+// reason `checking`) and unlock the moment valid evidence lands. The cycle
+// itself is bounded (visibility.js CYCLE_BUDGET_MS), so `firstVerdict` always
+// settles.
+const firstVerdict = startVisibilityWatch();
 await Promise.race([
-  startVisibilityWatch(),
+  firstVerdict,
   new Promise((r) => setTimeout(r, 9000)),
 ]);
 
@@ -191,24 +215,94 @@ process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e)
 process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
 
 const app = express();
+// Admission precedes body parsing, upload streaming and operations capture.
+app.use(requestAdmission(requestPolicy));
+const api = apiRoutes(app, createValidator({ cliExists: cliById, sessionExists: store.get, groupExists: groups.get }));
 const jsonBody = express.json();
 app.use((req, res, next) => {
   // Attachments are raw streaming bodies. Skip JSON parsing even when browser
   // metadata claims application/json, or the global parser would consume a
   // JSON file (and reject mislabeled image bytes) before the upload route.
-  if (req.method === 'POST' && /^\/api\/sessions\/[^/]+\/attachments$/.test(req.path)) return next();
+  if (req.method === 'POST' && /^\/api\/(?:sessions\/[^/]+\/attachments|files\/[^/]+\/upload)$/.test(req.path)) return next();
   return jsonBody(req, res, next);
 });
 
-// Safety lock: with no authentication, only serve the terminal backend when the
-// Space is private. If it's public, block every working API (and /ws below) and
-// let the UI render its setup widget instead. Health/info/visibility stay open
-// so the page can explain itself; static assets load so the widget can render.
-const OPEN_WHEN_PUBLIC = new Set(['/api/health', '/api/info', '/api/visibility']);
-app.use((req, res, next) => {
-  if (!isPublic()) return next();
-  if (!req.path.startsWith('/api/') || OPEN_WHEN_PUBLIC.has(req.path)) return next();
-  return res.status(403).json({ error: 'locked', reason: 'public-space' });
+// Safety lock: with no authentication, only serve the privileged API while the
+// deployment is verified private (visibility.js owns that decision). Locked,
+// every /api route is refused with the same machine-readable body, except the
+// deliberately safe health/info/visibility trio the setup page needs; static
+// assets still load so that page can render.
+//
+// The same state has to reach connections admitted BEFORE the lock: a terminal
+// WebSocket, a long poll, a download still streaming. Every admitted privileged
+// connection registers a revoke() here and the lock transition calls them all,
+// on the server, whether or not any browser is awake to notice.
+const OPEN_WHEN_LOCKED = new Set(['/health', '/info', '/visibility']); // relative to the /api mount
+const admitted = new Set(); // revoke(eff) callbacks for live privileged connections
+const admitClient = (revoke) => { admitted.add(revoke); return () => admitted.delete(revoke); };
+// Work that performs PTY effects after a wait — typing a prompt once the agent
+// is ready, inserting attachments one by one — holds a scope for exactly as
+// long as it runs, whether or not the HTTP response that started it is still
+// open (a cron run answers 202 and delivers in the background). The lock
+// aborts every open scope; the work checks the signal before each effect.
+function lockScope() {
+  const cancel = new AbortController();
+  const revoke = (locked) => { try { cancel.abort(new Error(`locked:${locked.reason}`)); } catch {} };
+  const release = admitClient(revoke);
+  const eff = lockState();
+  if (eff.locked) revoke(eff); // opened while locked: nothing may happen
+  return { signal: cancel.signal, release };
+}
+const lockedError = () => Object.assign(new Error('the manager locked itself before this could be delivered'), { statusCode: 403, code: 'locked' });
+// Long polls sleep between looks; a lock must wake them instead of waiting the
+// sleep out. Resolves when `ms` elapse OR the lock lands, whichever is first.
+const lockWaiters = new Set();
+const sleepUnlessLocked = (ms) => new Promise((resolve) => {
+  const done = () => { clearTimeout(t); lockWaiters.delete(done); resolve(); };
+  const t = setTimeout(done, ms);
+  lockWaiters.add(done);
+});
+onVisibilityChange((eff) => {
+  if (!eff.locked) return;
+  const revokes = [...admitted];
+  admitted.clear();
+  for (const revoke of revokes) { try { revoke(eff); } catch (e) { console.error('[visibility] revoke failed', e && e.message); } }
+  for (const wake of [...lockWaiters]) wake();
+  console.warn(`[visibility] revoked ${revokes.length} live client connection(s)`);
+});
+// Mounted at /api so that "is this a privileged route?" is answered by the
+// router's own matching — case-insensitive, trailing slash tolerated. A
+// spelling Express would route to a privileged handler is, by construction, a
+// spelling this guard sees; a home-grown prefix test would not agree with it.
+app.use('/api', (req, res, next) => {
+  const rel = req.path.toLowerCase().replace(/\/+$/, '') || '/';
+  if (OPEN_WHEN_LOCKED.has(rel)) return next();
+  const eff = lockState();
+  // `code` is the machine-readable refusal every route shares (#134); the lock body itself is visibility.js's.
+  if (eff.locked) return res.status(403).json({ ...lockError(eff), code: 'locked' });
+  // Admitted. If the lock lands while this request is still being served:
+  //   1. `lockSignal` aborts, so a handler still waiting to perform an effect
+  //      (typing a prompt once an agent is ready) checks it and stops before
+  //      the effect — the work is cancelled, not replayed;
+  //   2. the connection is destroyed, so nothing further is delivered (a
+  //      download mid-stream) or read (an upload still arriving). Routes that
+  //      write files stage and rename, so a cut body leaves the old file whole.
+  // Work a handler had already committed stays committed. A late write into
+  // the destroyed response is a no-op.
+  const cancel = new AbortController();
+  res.locals.lockSignal = cancel.signal;
+  let cutOnLock = true;
+  const release = admitClient((locked) => {
+    try { cancel.abort(new Error(`locked:${locked.reason}`)); } catch {}
+    if (cutOnLock && !res.writableEnded) { try { res.destroy(); } catch {} }
+  });
+  // A route that ends its own response on the lock (a long poll with a proper
+  // refusal, a stream with its protocol's stop line) calls this to opt out of
+  // the cut and take responsibility itself. The signal still aborts.
+  res.locals.handleLockItself = () => { cutOnLock = false; };
+  res.on('error', () => {});
+  res.on('close', release);
+  next();
 });
 
 // Every state-changing call has an attributable origin and a durable outcome.
@@ -255,39 +349,44 @@ const resolveOperationTarget = (req) => {
 app.use(operationMiddleware({
   resolveOrigin: resolveOperationOrigin,
   resolveTarget: resolveOperationTarget,
+  // The same injected-secret catalog shown in Settings, but values stay here.
+  // It is evaluated per record so rotation drops obsolete values immediately;
+  // no workspace, harness credential file, home directory or history is read.
+  getKnownCredentialValues: () => injectedEnvKeys().map((key) => process.env[key]),
   // Test servers explicitly opt out so old endpoint-focused fixtures do not
   // have to pretend to be the operator. Production never sets this switch.
   allowMissing: process.env.AM_ALLOW_MISSING_ORIGIN === '1',
 }));
+app.use(errorEnvelope);
 
-app.get('/api/visibility', (_req, res) => res.json(visibility()));
+api.get('/api/visibility', (_req, res) => res.json(visibility()));
 
-app.get('/api/health', (_req, res) =>
+api.get('/api/health', (_req, res) =>
   res.json({ ok: true, engine: 'libghostty', ghostty: ghosttyReady(), ghosttyError }));
 
-app.get('/api/clis', (_req, res) => res.json(cliCatalog()));
+api.get('/api/clis', (_req, res) => res.json(cliCatalog()));
 
-app.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.debug === '1', req.query.provider || null)));
+api.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.debug === '1', req.query.provider || null)));
 
 // Newest first. The JSONL source lives under DATA_DIR; this bounded API is the
 // stable way for the operator or an agent to reconstruct manager operations.
-app.get('/api/operations', (req, res) => {
+api.get('/api/operations', (req, res) => {
   const before = typeof req.query.before === 'string' && req.query.before ? req.query.before : null;
   res.json({ operations: readOperations(req.query.limit, before), generatedAt: new Date().toISOString() });
 });
 
-app.get('/api/traces', async (_req, res) => res.json(await buildTraces()));
+api.get('/api/traces', async (_req, res) => res.json(await buildTraces()));
 
 // ---------- push notifications (agent-initiated, on explicit request) ----------
-app.get('/api/push/key', (_req, res) => res.json({ publicKey: publicKey(), devices: deviceCount() }));
+api.get('/api/push/key', (_req, res) => res.json({ publicKey: publicKey(), devices: deviceCount() }));
 
-app.post('/api/push/subscribe', (req, res) => {
+api.post('/api/push/subscribe', (req, res) => {
   const ok = addSubscription((req.body || {}).subscription, req.headers['user-agent']);
   if (!ok) return res.status(400).json({ error: 'bad subscription' });
   res.json({ ok: true, devices: deviceCount() });
 });
 
-app.post('/api/push/unsubscribe', (req, res) => {
+api.post('/api/push/unsubscribe', (req, res) => {
   removeSubscription((req.body || {}).endpoint);
   res.json({ ok: true, devices: deviceCount() });
 });
@@ -295,7 +394,7 @@ app.post('/api/push/unsubscribe', (req, res) => {
 // Agents (and the Settings test button) call this from inside the container.
 // Rate-limited as a backstop: a confused agent must not buzz a phone in a loop.
 const notifyLog = [];
-app.post('/api/notify', async (req, res) => {
+api.post('/api/notify', async (req, res) => {
   const { title, body, url } = req.body || {};
   const text = typeof body === 'string' ? body.trim().slice(0, 500) : '';
   if (!text) return res.status(400).json({ error: 'body required' });
@@ -317,14 +416,36 @@ app.post('/api/notify', async (req, res) => {
 // Overview cards: every agent's state + what it did since your last prompt.
 // Targeted digest for one session — lets the Overview fill tiles one by one
 // while the bulk build (below) is still chewing through the bucket.
-app.get('/api/meta/:id', async (req, res) => {
+/**
+ * The newest human-facing reply this session has produced, as an identity the
+ * Overview can compare against what the operator has read. `null` when there is
+ * nothing readable yet, or when the digest could not be built — which is not
+ * the same as "all read", and the client is careful to treat it that way.
+ */
+const outputOf = (session, digest) => {
+  const src = sourceKey(session);
+  if (!src || !digest || !digest.outSeq) return null;
+  return { src, seq: digest.outSeq, hash: digest.outHash || '' };
+};
+// `outFresh` is parser bookkeeping — how the next reply knows a prompt came
+// between it and the last one. Not something a client should see or store.
+const stripInternal = (digest) => {
+  if (!digest) return digest;
+  const { outFresh, outKey, ...rest } = digest;
+  return rest;
+};
+
+api.get('/api/meta/:id', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const digest = await digestFor(s);
-  res.json({ id: s.id, digest });
+  // The same output/read pair the bulk pass publishes: a tile filled by this
+  // targeted route has to be able to say whether it is unread too, or it would
+  // read as "all caught up" purely because it loaded down a different path.
+  res.json({ id: s.id, digest: stripInternal(digest), output: outputOf(s, digest), read: readMarks.get(s.id) });
 });
 
-app.get('/api/meta', async (_req, res) => {
+api.get('/api/meta', async (_req, res) => {
   const digests = await traceDigests();
   const hs = demo.active() ? demo.hiddenSessions() : null;
   const sessions = sessionsWithState()
@@ -333,12 +454,68 @@ app.get('/api/meta', async (_req, res) => {
     .map((s) => {
       // A remote agent's digest comes from its message folder, not the bulk
       // transcript pass — which never sees it.
-      if (isRemote(s.cli)) return { ...s, digest: remote.remoteDigest(s), remote: remote.remoteInfo(s) };
-      const d = digests.get(s.id);
-      if (d) { const { _ts, ...digest } = d; return { ...s, digest }; }
-      return { ...s, digest: null };
+      const digest = isRemote(s.cli) ? remote.remoteDigest(s) : (() => {
+        const d = digests.get(s.id);
+        if (!d) return null;
+        const { _ts, ...rest } = d;
+        return rest;
+      })();
+      const base = isRemote(s.cli)
+        ? { ...s, digest: stripInternal(digest), remote: remote.remoteInfo(s) }
+        : { ...s, digest: stripInternal(digest) };
+      return { ...base, output: outputOf(s, digest), read: readMarks.get(s.id) };
     });
+  // The one-time rollout baseline. Taken from the versions actually observed in
+  // this pass, not a timestamp, so a reply landing while it is being written is
+  // newer than anything captured here and stays eligible for Unread.
+  //
+  // It runs on the first pass that could observe anything at all, including one
+  // where nothing has spoken yet. Waiting for the first session WITH output
+  // looked safer and was the opposite: on a fresh install the baseline would sit
+  // untaken until some agent's first reply arrived, and then take that reply as
+  // history the operator had already read.
+  //
+  // `traceDigests()` has resolved by this point, so a session reporting no
+  // output here genuinely has none rather than not being parsed yet. It gets no
+  // mark, which is what leaves its first reply unread.
+  if (!readMarks.initialized()) {
+    readMarks.baseline(new Map(sessions.filter((s) => s.output).map((s) => [s.id, s.output])));
+    for (const s of sessions) s.read = readMarks.get(s.id);
+  }
+  readMarks.retain(new Set(store.list().map((s) => s.id)));
   res.json({ sessions, generatedAt: new Date().toISOString() });
+});
+
+/**
+ * "I was shown this reply." One route for both paths — a conversation scrolled
+ * to a visible latest answer, and the Unread section's Mark all read — because
+ * they make exactly the same claim and must be applied by exactly the same
+ * rules. A batch so the bulk action is one request rather than one per card.
+ *
+ * Every entry is answered individually. The client needs to know which of its
+ * marks landed: a rejected one is not a failure to retry, it means the reply it
+ * described is no longer the newest and something unseen has taken its place.
+ */
+api.post('/api/read', express.json({ limit: '64kb' }), async (req, res) => {
+  const marks = Array.isArray(req.body?.marks) ? req.body.marks : null;
+  if (!marks) return res.status(400).json({ error: 'expected { marks: [{ id, src, seq, hash }] }' });
+  // Refused rather than truncated. Silently dropping the tail of a batch and
+  // answering 200 for the part that fit is how a session stays unread while the
+  // client reports success; the client sends bounded chunks instead.
+  if (marks.length > 200) return res.status(413).json({ error: 'too many marks in one request; send at most 200' });
+  const digests = await traceDigests();
+  const results = {};
+  for (const m of marks) {
+    const s = store.get(String(m?.id || ''));
+    if (!s) { results[String(m?.id)] = 'unknown'; continue; }
+    const digest = isRemote(s.cli) ? remote.remoteDigest(s) : (digests.get(s.id) || null);
+    results[s.id] = readMarks.acknowledge(
+      s.id,
+      { src: String(m.src || ''), seq: Number(m.seq), hash: String(m.hash || '') },
+      outputOf(s, digest),
+    );
+  }
+  res.json({ results, marks: readMarks.all() });
 });
 
 // Whose turn a `user` message is attributed to in a remote log. The Space owner
@@ -351,9 +528,26 @@ const operatorName = () => process.env.SPACE_AUTHOR_NAME || process.env.AM_USER 
  * agent-to-agent API) go through here, which is what makes remote agents
  * reachable from everywhere the local ones are without duplicating either path.
  */
-async function deliver(session, { text, attachments = [] }, from) {
+async function deliver(session, { text, attachments = [] }, from, { signal = null } = {}) {
+  // The privacy lock cancels admitted-but-uncommitted work: every effect below
+  // is preceded by this check, so a prompt that was still waiting for its agent
+  // to become ready is dropped when the lock lands — not typed a moment later
+  // through a connection the lock already cut, and never replayed. The scope is
+  // this call's own, so it holds for a delivery whose response already closed
+  // (a cron run's 202) exactly as for one still being awaited.
+  const scope = lockScope();
+  const cancelled = () => { if (scope.signal.aborted || signal?.aborted) throw lockedError(); };
+  try {
+    return await deliverInner(session, { text, attachments }, from, { cancelled, signal: scope.signal });
+  } finally {
+    scope.release();
+  }
+}
+
+async function deliverInner(session, { text, attachments }, from, { cancelled, signal }) {
+  cancelled();
   if (isRemote(session.cli)) {
-    if (attachments.length) throw Object.assign(new Error('files are not available for remote agents yet'), { statusCode: 400 });
+    if (attachments.length) throw new ApiError(400, 'invalid-input', 'files are not available for remote agents yet');
     const name = session.remote?.name;
     if (!name) throw new Error('this remote pane has no name recorded');
     // Delivery does NOT un-pause: a disconnected agent isn't listening, so the
@@ -378,13 +572,21 @@ async function deliver(session, { text, attachments = [] }, from) {
     return ensureRunning(store.get(session.id) || session);
   }
   const started = ensureRunning(session);
-  if (started && !await waitForInputReady(session.id)) {
-    throw new Error('session did not become ready for input within 30 seconds — prompt was not sent');
+  if (started) {
+    // Stop waiting the moment the lock lands rather than at readiness.
+    const ready = await Promise.race([
+      waitForInputReady(session.id),
+      new Promise((resolve) => { if (signal.aborted) resolve(false); else signal.addEventListener('abort', () => resolve(false), { once: true }); }),
+    ]);
+    cancelled();
+    if (!ready) throw new ApiError(409, 'input-not-ready', 'session did not become ready for input within 30 seconds — prompt was not sent');
   }
   for (const command of prelude) {
+    cancelled();
     await sendInput(session.id, command);
     await sleep(500);
   }
+  cancelled();
   await sendInput(session.id, prompt, { confirmEcho: started && session.cli === 'opencode' });
   return started;
 }
@@ -405,7 +607,7 @@ function touchInput(id) {
 // Type a prompt into a session's terminal from the Overview — no pane needed.
 // If the agent is stopped, start its backend PTY and give the resumed CLI a
 // moment to boot before the keystrokes land.
-app.post('/api/sessions/:id/input', async (req, res) => {
+api.post('/api/sessions/:id/input', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   if (PASSIVE_CLIS.includes(s.cli)) return res.status(400).json({ error: `${s.cli} pane takes no input` });
@@ -414,11 +616,11 @@ app.post('/api/sessions/:id/input', async (req, res) => {
   if (!text && (!Array.isArray(attachmentIds) || attachmentIds.length === 0)) return res.status(400).json({ error: 'empty' });
   try {
     const attachments = resolveAttachments(s.id, attachmentIds);
-    const started = await deliver(s, { text, attachments });
+    const started = await deliver(s, { text, attachments }, undefined, { signal: res.locals.lockSignal });
     touchInput(s.id);
     res.json({ ok: true, started });
   } catch (e) {
-    res.status(e.statusCode || 409).json({ error: String(e.message || e) });
+    throw e;
   }
 });
 
@@ -432,7 +634,7 @@ const terminalAttachmentInsertions = new Map();
 // Managed attachments live under STATE_DIR, never in the user's repository.
 // The raw body is streamed and capped in attachments.js; express.json ignores
 // this exact route, so no middleware buffers uploads first.
-app.post('/api/sessions/:id/attachments', async (req, res) => {
+api.post('/api/sessions/:id/attachments', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   if (!canAttachFiles(s)) {
@@ -448,7 +650,7 @@ app.post('/api/sessions/:id/attachments', async (req, res) => {
     });
     if (!res.destroyed) res.status(201).json(attachment);
   } catch (e) {
-    if (!res.headersSent && !res.destroyed) res.status(e.statusCode || 500).json({ error: String(e.message || e) });
+    throw e;
   }
 });
 
@@ -456,7 +658,7 @@ app.post('/api/sessions/:id/attachments', async (req, res) => {
 // prompt. This server acknowledgement is the source of truth for the terminal
 // overlay; a browser-local xterm paste can be dropped after a disconnect or
 // when another viewer owns the input lease.
-app.post('/api/sessions/:id/attachments/insert', async (req, res) => {
+api.post('/api/sessions/:id/attachments/insert', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   if (!canAttachFiles(s)) return res.status(400).json({ error: `${s.cli} pane cannot accept files` });
@@ -472,34 +674,44 @@ app.post('/api/sessions/:id/attachments/insert', async (req, res) => {
     const nativeImages = s.cli === 'hermes'
       ? pending.filter((attachment) => attachment.kind === 'image') : [];
     const prelude = formatAttachmentPrelude(s.cli, nativeImages);
-    if (prelude.length) {
-      for (let index = 0; index < prelude.length; index += 1) {
-        await sendInput(s.id, prelude[index]);
-        inserted.add(nativeImages[index].id);
-        await sleep(500);
+    // Each command is a separate PTY effect with a wait in between: the lock
+    // may land part-way, and nothing after it may be typed.
+    const scope = lockScope();
+    const cancelled = () => { if (scope.signal.aborted) throw lockedError(); };
+    try {
+      if (prelude.length) {
+        for (let index = 0; index < prelude.length; index += 1) {
+          cancelled();
+          await sendInput(s.id, prelude[index]);
+          inserted.add(nativeImages[index].id);
+          await sleep(500);
+        }
       }
+      const inline = pending.filter((attachment) => !inserted.has(attachment.id));
+      cancelled();
+      if (inline.length) pasteInput(s.id, inline.map((attachment) => attachment.insertText).join(''));
+      for (const attachment of inline) inserted.add(attachment.id);
+    } finally {
+      scope.release();
     }
-    const inline = pending.filter((attachment) => !inserted.has(attachment.id));
-    if (inline.length) pasteInput(s.id, inline.map((attachment) => attachment.insertText).join(''));
-    for (const attachment of inline) inserted.add(attachment.id);
     return res.json({ ok: true, mode });
   } catch (e) {
-    return res.status(e.statusCode || 409).json({ error: String(e.message || e) });
+    throw e;
   }
 });
 
-app.delete('/api/sessions/:id/attachments/:attachmentId', async (req, res) => {
+api.delete('/api/sessions/:id/attachments/:attachmentId', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   try {
     await removeAttachment(s.id, req.params.attachmentId);
     return res.json({ ok: true });
   } catch (e) {
-    return res.status(e.statusCode || 500).json({ error: String(e.message || e) });
+    throw e;
   }
 });
 
-app.get('/api/sessions/:id/attachments/:attachmentId/raw', (req, res) => {
+api.get('/api/sessions/:id/attachments/:attachmentId/raw', (req, res, next) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   try {
@@ -515,11 +727,9 @@ app.get('/api/sessions/:id/attachments/:attachmentId/raw', (req, res) => {
       'Content-Security-Policy': 'sandbox',
       'Cache-Control': 'no-store',
     });
-    const stream = fs.createReadStream(attachment.path);
-    stream.on('error', () => { if (!res.headersSent) res.status(404).end(); else res.destroy(); });
-    stream.pipe(res);
+    pipeResponse(fs.createReadStream(attachment.path), req, res, next);
   } catch (e) {
-    res.status(e.statusCode || 404).json({ error: String(e.message || e) });
+    throw e;
   }
 });
 
@@ -601,7 +811,7 @@ function agentRow(s, act, d, selfId, mates) {
   };
 }
 
-app.get('/api/agents', async (req, res) => {
+api.get('/api/agents', async (req, res) => {
   const info = agentInfo();
   const digests = await traceDigests();
   const selfId = String(req.query.from || req.query.self || '').trim() || null;
@@ -630,7 +840,7 @@ app.get('/api/agents', async (req, res) => {
   });
 });
 
-app.get('/api/agents/:id', async (req, res) => {
+api.get('/api/agents/:id', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const selfId = String(req.query.from || req.query.self || '').trim() || null;
@@ -648,7 +858,7 @@ app.get('/api/agents/:id', async (req, res) => {
 
 // A peer's screen (plus scrollback) — watch progress without spending a turn on
 // either side. This is the cheap way to answer "how far has it got?".
-app.get('/api/agents/:id/tail', (req, res) => {
+api.get('/api/agents/:id/tail', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const lines = clamp(parseInt(req.query.lines || '80', 10), 1, 2000, 80);
@@ -666,18 +876,17 @@ app.get('/api/agents/:id/tail', (req, res) => {
 // already has for the window it is showing, and inventing an answer from file
 // mtime would be wrong several times an hour (measured: p99 silence 112s inside
 // a live sub-agent, max 601s).
-app.get('/api/agents/:id/subagents', async (req, res) => {
+api.get('/api/agents/:id/subagents', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   try {
     res.json({ id: s.id, ...(await subagentRoster(s)) });
   } catch (e) {
-    console.error('[subagents]', e && e.message);
-    res.status(500).json({ error: (e && e.message) || 'roster failed' });
+    throw e;
   }
 });
 
-app.get('/api/agents/:id/subagents/:agentId', async (req, res) => {
+api.get('/api/agents/:id/subagents/:agentId', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   try {
@@ -686,8 +895,7 @@ app.get('/api/agents/:id/subagents/:agentId', async (req, res) => {
     if (['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(e && e.code)) {
       return res.status(404).json({ error: e.message, code: e.code });
     }
-    console.error('[subagent-trace]', e && e.message);
-    res.status(500).json({ error: (e && e.message) || 'sub-agent trace read failed' });
+    throw e;
   }
 });
 
@@ -696,7 +904,7 @@ app.get('/api/agents/:id/subagents/:agentId', async (req, res) => {
 // some CLIs). The state must HOLD for `settle` seconds before it counts: pane
 // diffing sees brief pauses between tool calls, and a just-prompted agent needs
 // a moment before its screen starts moving.
-app.get('/api/agents/:id/wait', async (req, res) => {
+api.get('/api/agents/:id/wait', async (req, res) => {
   const s0 = store.get(req.params.id);
   if (!s0) return res.status(404).json({ error: 'not found' });
   const want = new Set(String(req.query.state || 'waiting,idle,stopped').split(',').map((x) => x.trim()).filter(Boolean));
@@ -706,7 +914,10 @@ app.get('/api/agents/:id/wait', async (req, res) => {
   let matchedAt = 0;
   let open = true;
   res.on('close', () => { open = false; }); // client gave up: stop polling
+  res.locals.handleLockItself?.();
   while (open) {
+    // The lock ends the wait at once with the same refusal a new call would get.
+    if (isLocked()) return res.status(403).json(lockError());
     const cur = store.get(s0.id);
     if (!cur) return res.json({ id: s0.id, state: 'gone', matched: false });
     const state = deriveState(cur, agentInfo().get(cur.id));
@@ -722,7 +933,7 @@ app.get('/api/agents/:id/wait', async (req, res) => {
       matchedAt = 0;
     }
     if (Date.now() - startedAt >= timeout) return res.json({ id: cur.id, state, matched: false, timedOut: true, waited });
-    await sleep(1500); // aligned with the agentInfo() memo
+    await sleepUnlessLocked(1500); // aligned with the agentInfo() memo
   }
 });
 
@@ -730,7 +941,7 @@ app.get('/api/agents/:id/wait', async (req, res) => {
 // stopped, then type. The [message from x:] prefix goes into the target's own
 // transcript, so both the target and the operator reading it later can see the
 // request came from a peer.
-app.post('/api/agents/:id/prompt', promptBody, async (req, res) => {
+api.post('/api/agents/:id/prompt', promptBody, async (req, res) => {
   const from = sender(req);
   if (from.error) return res.status(400).json({ error: from.error });
   const s = store.get(req.params.id);
@@ -744,15 +955,15 @@ app.post('/api/agents/:id/prompt', promptBody, async (req, res) => {
     // the operator's laptop, and the [message from x:] prefix plus `from:` in
     // the message's frontmatter is how it can tell a peer's request from the
     // operator's.
-    const started = await deliver(s, { text: `[message from ${from.session.name}:] ${text}` }, from.session.name);
+    const started = await deliver(s, { text: `[message from ${from.session.name}:] ${text}` }, from.session.name, { signal: res.locals.lockSignal });
     res.json({ ok: true, id: s.id, name: s.name, started });
   } catch (e) {
-    res.status(409).json({ error: String(e.message || e) });
+    throw e;
   }
 });
 
 // Launch a peer, already working on the prompt you give it.
-app.post('/api/agents', promptBody, (req, res) => {
+api.post('/api/agents', promptBody, (req, res) => {
   const from = sender(req);
   if (from.error) return res.status(400).json({ error: from.error });
   const q = req.query;
@@ -790,7 +1001,7 @@ app.post('/api/agents', promptBody, (req, res) => {
 
 // Stop a peer. Kills its CLI; the conversation and files are untouched, and a
 // later prompt wakes it and resumes. Only for when the operator asked.
-app.post('/api/agents/:id/stop', promptBody, (req, res) => {
+api.post('/api/agents/:id/stop', promptBody, (req, res) => {
   const from = sender(req);
   if (from.error) return res.status(400).json({ error: from.error });
   const s = store.get(req.params.id);
@@ -817,7 +1028,7 @@ const paneFor = (name) => store.list().find((s) => s.remote?.name === name) || n
 // this, so a disconnected loop ends instead of spinning.
 const STOP_PAUSED = { stop: true, reason: 'disconnected from the manager' };
 
-app.get('/api/remote/:name/ping', (req, res) => {
+api.get('/api/remote/:name/ping', (req, res) => {
   const name = req.params.name;
   const s = paneFor(name);
   // JSON, so the copied prompt can tell "wrong name" (this) from "your token
@@ -837,7 +1048,7 @@ app.get('/api/remote/:name/ping', (req, res) => {
   });
 });
 
-app.post('/api/remote/:name/hello', express.json({ limit: '8kb' }), (req, res) => {
+api.post('/api/remote/:name/hello', express.json({ limit: '8kb' }), (req, res) => {
   const name = req.params.name;
   const s = paneFor(name);
   if (!s) return res.status(404).json({ error: `no remote agent named '${name}' in this Space` });
@@ -856,7 +1067,7 @@ app.post('/api/remote/:name/hello', express.json({ limit: '8kb' }), (req, res) =
 
 // The one blocking call. Writes ':connected' immediately (which also flushes
 // headers through the edge), ':hb' every 25 s, then exactly one JSON line.
-app.get('/api/remote/:name/stream', (req, res) => {
+api.get('/api/remote/:name/stream', (req, res, next) => {
   const name = req.params.name;
   const s = paneFor(name);
   if (!s) return res.status(404).json({ error: `no remote agent named '${name}' in this Space` });
@@ -868,52 +1079,12 @@ app.get('/api/remote/:name/stream', (req, res) => {
   const since = clamp(parseInt(req.query.since || '0', 10), 0, Number.MAX_SAFE_INTEGER, 0);
   const wait = clamp(parseInt(req.query.wait || String(remote.WAIT_DEFAULT), 10), remote.WAIT_MIN, remote.WAIT_MAX, remote.WAIT_DEFAULT);
 
-  res.setHeader('content-type', 'application/x-ndjson');
-  res.setHeader('cache-control', 'no-cache, no-transform');
-  res.setHeader('x-accel-buffering', 'no'); // don't let a proxy buffer the heartbeats
-  res.write(':connected\n');
-
-  let done = false;
-  const finish = (payload) => {
-    if (done) return;
-    done = true;
-    clearInterval(hb);
-    clearTimeout(timer);
-    release();
-    try { res.write(`${JSON.stringify(payload)}\n`); res.end(); } catch { /* client vanished */ }
-  };
-
-  // Anything already waiting is returned at once — that is what makes a
-  // reconnect after a dropped socket lossless.
-  const pending = remote.pendingFor(name, since);
-
-  const hb = setInterval(() => {
-    if (done) return;
-    try { res.write(':hb\n'); } catch { /* handled by the close listener */ }
-  }, remote.HEARTBEAT_MS);
-  const timer = setTimeout(() => finish({ messages: [], seq: remote.lastSeq(name) }), wait * 1000);
-  const release = remote.registerStream(name, {
-    since,
-    deliver: (msgs) => finish({ messages: msgs, seq: msgs[msgs.length - 1].seq }),
-    stop: (reason) => finish({ stop: true, reason: reason || 'disconnected from the manager' }),
-  });
-  res.on('close', () => {
-    if (done) return;
-    done = true;
-    clearInterval(hb);
-    clearTimeout(timer);
-    release();
-  });
-
-  if (pending.length) {
-    remote.markDelivered(name, pending[pending.length - 1].seq);
-    finish({ messages: pending, seq: pending[pending.length - 1].seq });
-  }
+  remoteStream(req, res, next, remote, name, since, wait, admitClient);
 });
 
 // The same thing without blocking: the short-polling fallback for a proxy that
 // kills long connections, and what the browser pane polls.
-app.get('/api/remote/:name/messages', (req, res) => {
+api.get('/api/remote/:name/messages', (req, res) => {
   const name = req.params.name;
   const s = paneFor(name);
   if (!s) return res.status(404).json({ error: `no remote agent named '${name}' in this Space` });
@@ -931,7 +1102,7 @@ app.get('/api/remote/:name/messages', (req, res) => {
 // The agent speaks. text/plain markdown is the primary shape (a heredoc into
 // curl never trips over quoting), JSON {text} also accepted — same convention as
 // the agent-to-agent API.
-app.post('/api/remote/:name/messages', promptBody, (req, res) => {
+api.post('/api/remote/:name/messages', promptBody, (req, res) => {
   const name = req.params.name;
   const s = paneFor(name);
   if (!s) return res.status(404).json({ error: `no remote agent named '${name}' in this Space` });
@@ -945,7 +1116,7 @@ app.post('/api/remote/:name/messages', promptBody, (req, res) => {
 });
 
 // The thing the operator copies. Contains no secret — just a URL and a name.
-app.get('/api/remote/:name/prompt', (req, res) => {
+api.get('/api/remote/:name/prompt', (req, res) => {
   const name = req.params.name;
   if (!paneFor(name)) return res.status(404).json({ error: `no remote agent named '${name}' in this Space` });
   const host = process.env.SPACE_HOST || req.headers.host || 'localhost:7860';
@@ -954,7 +1125,7 @@ app.get('/api/remote/:name/prompt', (req, res) => {
 
 // ---------- remote panes, addressed by session id (what the browser uses) ----------
 
-app.get('/api/sessions/:id/remote', (req, res) => {
+api.get('/api/sessions/:id/remote', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   if (!isRemote(s.cli)) return res.status(400).json({ error: 'not a remote agent' });
@@ -967,7 +1138,7 @@ app.get('/api/sessions/:id/remote', (req, res) => {
 });
 
 // Disconnect / reconnect — what the sidebar's stop and play buttons mean here.
-app.post('/api/sessions/:id/remote/paused', express.json({ limit: '4kb' }), (req, res) => {
+api.post('/api/sessions/:id/remote/paused', express.json({ limit: '4kb' }), (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   if (!isRemote(s.cli)) return res.status(400).json({ error: 'not a remote agent' });
@@ -980,7 +1151,8 @@ const hfToken = () => process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN
 
 // Env var names that existed at build time (baked in by the Dockerfile). Names
 // present at runtime but NOT here were injected by HF → the Space's secrets and
-// variables. We never read their values, only report the names.
+// variables. Settings reports only their names; operationMiddleware also reads
+// values from this same bounded catalog server-side to filter new audit records.
 const BUILD_ENV_KEYS = (() => {
   try {
     return new Set(fs.readFileSync('/app/build-env-keys.txt', 'utf8').split('\n').map((s) => s.trim()).filter(Boolean));
@@ -1009,27 +1181,30 @@ function injectedEnvKeys() {
     .sort();
 }
 
-app.get('/api/info', (_req, res) => res.json({
+api.get('/api/info', (_req, res) => res.json({
   dataDir: DATA_DIR,
   home: process.env.HOME || null,
   spaceId: process.env.SPACE_ID || null,
   spaceHost: process.env.SPACE_HOST || null,
   engine: 'libghostty',
   ghostty: ghosttyReady(),
-  locked: isPublic(),
-  lockReason: visibility().reason,
-  lockBucket: visibility().bucket,
+  locked: isLocked(),
+  lockReason: lockState().reason,
+  lockBucket: lockState().bucket,
+  // The full public-safe lock status (reason, timestamps, cadence) so an open
+  // app can explain a lock and notice when it clears. Cached state: no Hub call.
+  visibility: visibility(),
   canRelaunch: !!(process.env.SPACE_ID && hfToken()),
-  // While public, /api/info stays reachable (the Locked page needs it) — don't
+  // While locked, /api/info stays reachable (the Locked page needs it) — don't
   // advertise which credentials exist to the whole internet.
-  secrets: isPublic() ? [] : injectedEnvKeys(),
+  secrets: isLocked() ? [] : injectedEnvKeys(),
   // True when the Space is private but we couldn't verify its bucket is private
-  // (no HF_TOKEN to discover the bucket). Non-blocking; the UI shows a warning.
-  bucketUnverified: !isPublic() && !!visibility().bucketUnverified,
+  // (no usable HF_TOKEN to discover the bucket). Non-blocking; the UI shows a warning.
+  bucketUnverified: !isLocked() && !!lockState().bucketUnverified,
   // Backup health, or null when there is nothing wrong. Read from state, never
-  // the Hub: every open tab polls this route every 15s. Withheld while public
+  // the Hub: every open tab polls this route every 15s. Withheld while locked
   // for the same reason as `secrets` — it names the operator's repos.
-  backup: isPublic() ? null : backup.backupHealth(loadAmConfig()),
+  backup: isLocked() ? null : backup.backupHealth(loadAmConfig()),
   // First-run welcome: shown once per Space (flag persists on the bucket).
   welcomeSeen: welcomeSeen(),
   // Demo mode: current sessions hidden from view; forces the welcome to show.
@@ -1038,7 +1213,7 @@ app.get('/api/info', (_req, res) => res.json({
 
 // Demo mode toggle. Activating snapshots the current sessions/groups as the
 // hidden set; deactivating clears it. Nothing is deleted either way.
-app.post('/api/demo', (req, res) => {
+api.post('/api/demo', (req, res) => {
   const on = !!(req.body || {}).active;
   if (on) demo.activate(store.list().map((s) => s.id), groups.list().map((g) => g.id));
   else demo.deactivate();
@@ -1051,8 +1226,8 @@ const WELCOME_FILE = path.join(DATA_DIR, 'welcome-seen.json');
 function welcomeSeen() {
   try { return !!JSON.parse(fs.readFileSync(WELCOME_FILE, 'utf8')).seen; } catch { return false; }
 }
-app.post('/api/welcome/seen', (_req, res) => {
-  try { fs.writeFileSync(WELCOME_FILE, JSON.stringify({ seen: true, at: new Date().toISOString() })); } catch {}
+api.post('/api/welcome/seen', (_req, res) => {
+  fs.writeFileSync(WELCOME_FILE, JSON.stringify({ seen: true, at: new Date().toISOString() }));
   res.json({ ok: true });
 });
 
@@ -1060,7 +1235,7 @@ app.post('/api/welcome/seen', (_req, res) => {
 // latest published versions, per the Dockerfile) and relaunches everything.
 // Needs an HF token with write access set as a Space secret (HF_TOKEN).
 let lastRelaunchAt = 0;
-app.post('/api/relaunch', async (_req, res) => {
+api.post('/api/relaunch', async (_req, res) => {
   const id = process.env.SPACE_ID;
   const token = hfToken();
   if (!id) return res.json({ ok: false, reason: 'no-space' });
@@ -1074,7 +1249,7 @@ app.post('/api/relaunch', async (_req, res) => {
     });
     if (!r.ok) return res.json({ ok: false, reason: `http-${r.status}` });
     return res.json({ ok: true });
-  } catch (e) { return res.json({ ok: false, reason: String(e.message || e) }); }
+  } catch (e) { throw e; }
 });
 
 // ---------- self-update: pull the latest app from the upstream repo ----------
@@ -1114,7 +1289,7 @@ async function updateSource() {
   return { own, ownSha: info.sha || null, source: SOURCE_SLUG, sourceUrl: SOURCE_URL, latestSha: latest };
 }
 
-app.get('/api/update/check', async (_req, res) => {
+api.get('/api/update/check', async (_req, res) => {
   if (!process.env.SPACE_ID) return res.json({ ok: false, reason: 'no-space' });
   try {
     const src = await updateSource();
@@ -1127,11 +1302,11 @@ app.get('/api/update/check', async (_req, res) => {
       behind: !!(src.ownSha && src.latestSha && src.ownSha !== src.latestSha),
       canUpdate: !!hfToken(),
     });
-  } catch (e) { res.json({ ok: false, reason: String(e.message || e) }); }
+  } catch (e) { throw e; }
 });
 
 let updateBusy = false;
-app.post('/api/update', async (_req, res) => {
+api.post('/api/update', async (_req, res) => {
   const token = hfToken();
   if (!process.env.SPACE_ID) return res.json({ ok: false, reason: 'no-space' });
   if (!token) return res.json({ ok: false, reason: 'no-token' });
@@ -1155,25 +1330,128 @@ app.post('/api/update', async (_req, res) => {
     await git(['push', '--force', 'own', 'HEAD:main'], dir);
     res.json({ ok: true, from: src.ownSha, to: src.latestSha });
   } catch (e) {
-    res.json({ ok: false, reason: String(e.message || e).slice(0, 300) });
+    throw e;
   } finally {
     updateBusy = false;
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
   }
 });
 
+// One reader for both settings files, with three outcomes rather than two: a file
+// that is not there yet (defaults, and a save may create it), a file we read (its
+// value and the revision of the exact bytes), and a file we could NOT read —
+// damaged JSON, wrong permissions, a directory in its place. That last case is
+// the dangerous one. Treating it as "no settings" is what hands the next
+// ordinary edit permission to replace whatever is actually in there, so a
+// hand-written config disappears behind a toggle click.
+function readSettingsFile(file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return { missing: true, value: {}, rev: null };
+    return { unreadable: `${path.basename(file)} could not be read — ${String((e && e.message) || e)}` };
+  }
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch (e) {
+    return { unreadable: `${path.basename(file)} is not valid JSON — ${String((e && e.message) || e)}` };
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { unreadable: `${path.basename(file)} does not contain a settings object` };
+  }
+  return { value, rev: revisionOf(raw) };
+}
+
+// The revision a client holds is the hash of the committed bytes — the same
+// trick the file editor's base tag uses, and for the same reason: mtime on this
+// bucket mount moves on its own.
+const revisionOf = (raw) => crypto.createHash('sha1').update(raw).digest('hex').slice(0, 16);
+
+// A settings write is read-check-write, and it has to be all three or nothing.
+// It runs synchronously from the read to the rename inside one request handler,
+// so no other request can land between the precondition and the commit.
+function commitSettings(file, value, base) {
+  const stored = readSettingsFile(file);
+  if (stored.unreadable) {
+    return { refused: { status: 409, body: { code: 'unreadable', error: `the saved file was left as it is — ${stored.unreadable}` } } };
+  }
+  // A file that exists can only be replaced by a writer that knows which version
+  // it is replacing. Two tabs, or a tab and a script, otherwise overwrite each
+  // other's unrelated fields with whatever each of them last read.
+  if (stored.rev && base !== stored.rev) {
+    return {
+      refused: {
+        status: 409,
+        body: {
+          code: base ? 'stale' : 'base-required',
+          error: base
+            ? 'these settings were changed somewhere else since this page read them'
+            : 'replacing existing settings needs the revision being replaced (?base=…)',
+          rev: stored.rev,
+          value: stored.value,
+        },
+      },
+    };
+  }
+  const raw = `${JSON.stringify(value, null, 2)}\n`;
+  writeJsonAtomic(file, raw);
+  return { rev: revisionOf(raw) };
+}
+
+// Name the settings resource without returning filesystem exception text or an
+// absolute container path. The API error boundary may replace the prose, but it
+// deliberately retains this structured, durable-data-relative diagnostic.
+function settingsWriteFailure(file) {
+  const relative = path.relative(DATA_DIR, file).split(path.sep).join('/');
+  return {
+    // The API error boundary (#134) owns 5xx prose and renders this sentence; the
+    // structured relative path below is the diagnostic it deliberately keeps.
+    error: 'The request could not be completed. Please try again.',
+    code: 'internal-error',
+    details: [{ field: 'path', message: relative }],
+  };
+}
+
+// The revision a save is replacing, sent the way the file editor's save sends
+// its base tag.
+const baseOf = (req) => (typeof req.query.base === 'string' && req.query.base ? req.query.base : null);
+
+// Settings are saved on every change now, so these two files are written often
+// and while the app is being used. Write beside the target and rename: a crash
+// or a full disk leaves the previous settings intact rather than a truncated
+// file that reads back as "no settings at all". Throws on failure — a save that
+// did not happen must not be answered with ok.
+function writeJsonAtomic(file, raw) {
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.am-tmp`);
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, raw);
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    throw e;
+  }
+}
+
 // ---------- secrets: describe each injected secret/variable, feed a skill ----------
 const SECRET_NOTES_FILE = path.join(DATA_DIR, 'secret-notes.json');
+// Internal consumers must never throw over settings; they take the defaults and
+// the routes are where a damaged file is reported and protected.
 function loadSecretNotes() {
-  try { return JSON.parse(fs.readFileSync(SECRET_NOTES_FILE, 'utf8')); } catch { return {}; }
+  const stored = readSettingsFile(SECRET_NOTES_FILE);
+  return stored.unreadable ? {} : (stored.value || {});
 }
 // ---------- operator config (artifacts hub, jobs policy) ----------
 const AM_CONFIG_FILE = path.join(DATA_DIR, 'am-config.json');
 const spaceNamespace = () => (process.env.SPACE_ID || '').split('/')[0] || '';
 const defaultArtifactsSpace = () => (spaceNamespace() ? `${spaceNamespace()}/agent-artifacts` : '');
 function loadAmConfig() {
-  let saved = {};
-  try { saved = JSON.parse(fs.readFileSync(AM_CONFIG_FILE, 'utf8')); } catch {}
+  const stored = readSettingsFile(AM_CONFIG_FILE);
+  return normalizeAmConfig(stored.unreadable ? {} : (stored.value || {}));
+}
+function normalizeAmConfig(saved) {
   return {
     artifacts: {
       enabled: saved.artifacts?.enabled !== false,
@@ -1210,9 +1488,28 @@ function loadAmConfig() {
     },
   };
 }
-app.get('/api/config', (_req, res) => res.json({ ...loadAmConfig(), defaultArtifactsSpace: defaultArtifactsSpace() }));
-app.put('/api/config', (req, res) => {
+// The read carries what a writer needs to replace it safely: the revision of the
+// bytes on disk, and — when they cannot be read at all — the reason, so the panel
+// can say why a save will be refused instead of quietly showing defaults over a
+// file it is about to lose.
+api.get('/api/config', (_req, res) => {
+  const stored = readSettingsFile(AM_CONFIG_FILE);
+  res.json({
+    ...normalizeAmConfig(stored.unreadable ? {} : (stored.value || {})),
+    defaultArtifactsSpace: defaultArtifactsSpace(),
+    rev: stored.rev || null,
+    readError: stored.unreadable || null,
+    derived: envSkillReport(),
+  });
+});
+api.put('/api/config', async (req, res) => {
   const b = req.body || {};
+  // Every field below is normalized, so a wrong shape cannot write nonsense —
+  // but it can write a whole file of defaults, and answering that with 200 would
+  // make a malformed request look like a deliberate reset.
+  if (typeof b !== 'object' || Array.isArray(b)) {
+    return res.status(400).json({ code: 'invalid-input', error: 'settings must be an object' });
+  }
   const cfg = {
     artifacts: {
       enabled: !!(b.artifacts?.enabled ?? true),
@@ -1234,19 +1531,49 @@ app.put('/api/config', (req, res) => {
       exclude: backup.excludeFromConfig(b.backup?.exclude),
     },
   };
-  try { fs.writeFileSync(AM_CONFIG_FILE, JSON.stringify(cfg, null, 2)); } catch {}
-  generateEnvSkill(loadSecretNotes());
-  res.json({ ok: true });
+  // Whole-resource replacement, guarded by the revision being replaced: that is
+  // what keeps a second writer from posting its own stale copy of every OTHER
+  // field. A caller that wants to change one field reads, edits, and sends the
+  // result — and is refused if the ground moved under it.
+  let commit;
+  try {
+    commit = commitSettings(AM_CONFIG_FILE, cfg, baseOf(req));
+  } catch (e) {
+    // Saying ok here is how a setting silently goes back to what it was on the
+    // next load. The client keeps the change and offers Retry instead.
+    return res.status(500).json(settingsWriteFailure(AM_CONFIG_FILE));
+  }
+  if (commit.refused) {
+    const body = commit.refused.body;
+    // A refusal answers with what is actually stored, so the client can show the
+    // difference instead of guessing.
+    if (body.value) body.value = { ...normalizeAmConfig(body.value), defaultArtifactsSpace: defaultArtifactsSpace() };
+    return res.status(commit.refused.status).json(body);
+  }
+  // The regeneration is coalesced and reported through `derived` (#123); the
+  // distribution outcome itself is answered too (#121), so a refused or partial
+  // fan-out to an agent's owned copy is never swallowed by a 200.
+  const skillDistribution = await refreshEnvSkill();
+  // What was actually committed, normalization included, in the shape
+  // /api/config returns — plus the revision to send with the next save.
+  res.json({
+    ok: true, ...cfg, defaultArtifactsSpace: defaultArtifactsSpace(),
+    rev: commit.rev, derived: envSkillReport(), skillDistribution,
+  });
 });
 
+// The derived update finishes after the save it follows, so its outcome is not
+// in that save's response. This is how a client finds out what happened without
+// sending the settings again — resubmitting a committed write to learn the fate
+// of the work it triggered is not a status check.
+api.get('/api/settings/derived', (_req, res) => res.json(envSkillReport()));
+
 // ---------- bucket backup: status + run-now (docs/bucket-backup.md) ----------
-app.get('/api/backup/status', async (_req, res) => {
-  try { res.json(await backup.backupStatus(loadAmConfig())); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+api.get('/api/backup/status', async (_req, res) => {
+  res.json(await backup.backupStatus(loadAmConfig()));
 });
-app.post('/api/backup/run', async (_req, res) => {
-  try { res.json(await backup.runBackupNow(loadAmConfig())); }
-  catch (e) { res.status(500).json({ error: e.stderr || e.message }); }
+api.post('/api/backup/run', async (_req, res) => {
+  res.json(await backup.runBackupNow(loadAmConfig()));
 });
 
 // The artifacts section teaches agents to publish rich HTML results to a
@@ -1299,6 +1626,71 @@ function generateEnvSkill(notes) {
   const amCfg = loadAmConfig();
   return generateEnvSkillInner(notes, amCfg);
 }
+
+// What the agents are told is derived from what was committed, so a pass reads
+// the files rather than trusting whatever a request carried, and refuses to
+// publish over a settings file it could not read — describing an environment
+// from defaults that are not what the operator saved is worse than not
+// describing it at all.
+function generateEnvSkillFromDisk() {
+  for (const file of [SECRET_NOTES_FILE, AM_CONFIG_FILE]) {
+    const stored = readSettingsFile(file);
+    if (stored.unreadable) throw new Error(stored.unreadable);
+  }
+  return generateEnvSkill(loadSecretNotes());
+}
+
+// The generated skill is derived from the settings, not part of saving them.
+// Regenerating it inline fanned a handful of file writes out on the response
+// path of every save — fine at one save per typing pause, wasteful now that a
+// save is every change — and it wrote whatever the request carried, so an older
+// save finishing last left the skill describing settings that had been replaced.
+// One pass at a time, reading what is committed, and at most one more if a save
+// lands while a pass is running.
+//
+// Its outcome is reported separately from the save. "Saved, and the agents have
+// been told" and "saved, but the agents have not been told yet" are different
+// states, and answering a save with the first when the second is true is the
+// same lie as acknowledging a write that did not happen.
+const envSkill = { running: false, again: false, pending: false, error: null, at: 0, done: null };
+const envSkillReport = () => ({ pending: envSkill.pending, error: envSkill.error, at: envSkill.at || null });
+// What a distribution result means for the settings panel: a refused or partial
+// fan-out is a failure to report, with the first concrete reason it carries.
+const distributionError = (result) => {
+  if (!result || result.ok !== false) return null;
+  const targets = (result.targets || []).filter((t) => t.error).map((t) => `${t.path}: ${t.error}`);
+  return result.error || targets.join('; ') || 'the environment skill could not be distributed to every agent';
+};
+// Coalesced: a burst of saves runs one regeneration, then one more if anything
+// arrived meanwhile. Resolves, for every caller, with the outcome of the pass
+// that covered its save — the distribution is async since the owned-skills
+// service took it over, so both the `derived` report and the returned outcome
+// are settled together rather than before the write happened.
+function refreshEnvSkill() {
+  envSkill.pending = true;
+  if (envSkill.running) { envSkill.again = true; return envSkill.done; }
+  envSkill.running = true;
+  let settle;
+  envSkill.done = new Promise((resolve) => { settle = resolve; });
+  const pass = async () => {
+    envSkill.again = false;
+    let result = null;
+    try {
+      result = await generateEnvSkillFromDisk();
+      envSkill.error = distributionError(result);
+    } catch (e) {
+      envSkill.error = String((e && e.message) || e);
+      result = { ok: false, error: envSkill.error };
+    }
+    envSkill.at = Date.now();
+    if (envSkill.again) { setImmediate(pass); return; }
+    envSkill.running = false;
+    envSkill.pending = false;
+    settle(result);
+  };
+  setImmediate(pass);
+  return envSkill.done;
+}
 function generateEnvSkillInner(notes, amCfg) {
   const keys = injectedEnvKeys();
   const envLines = keys.length
@@ -1329,6 +1721,11 @@ Hermes — alongside plain shells and a file browser.
 - Exception: OpenClaw runs with its own \`$HOME\` on local disk for filesystem compatibility; that state is backed up to the bucket every minute.
 
 ## You may not be alone
+Manager API writes and remote contact/delivery reads require the non-secret
+header \`X-AM-Request: 1\`. Keep \`from=$AM_ID\` for attribution as well; it is
+not authorization. If an older helper returns \`request-not-allowed\`, update
+its headers before resuming, without automatically replaying an uncertain write.
+
 - Other agents run in **sibling folders** under \`/data/workspaces/\`, and you may be **grouped** to share a single folder with other agents.
 - Be a good neighbor: stay within your task, and never delete or \`rm -rf\` a folder that isn't yours.
 - You can see them, watch them, and talk to them — see the next section.
@@ -1337,13 +1734,16 @@ Hermes — alongside plain shells and a file browser.
 The manager exposes a small HTTP API on \`localhost:\${AM_PORT:-${PORT}}\`. You are \`$AM_ID\`
 (\`$AM_NAME\` is your display name). Every call that changes something takes
 \`?from=$AM_ID\` so the other agent, and the operator reading the log later, can
-tell who asked. The manager durably records these operations and their outcomes;
-prompt and file contents are hashed rather than copied into the audit log.
+tell who asked. The manager durably records these operations and their outcomes,
+including full non-secret prompt, file and response content. New records apply
+best-effort filtering for recognizable credentials before persistence. The log
+remains sensitive and private: filtering cannot identify every unlabeled secret,
+deleting a source does not delete its audit copy, and older records were not rewritten.
 
 To reconstruct recent manager operations (newest first):
 
 \`\`\`sh
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/operations?limit=100" | jq .operations
+curl -s -H 'X-AM-Request: 1' "http://localhost:\${AM_PORT:-${PORT}}/api/operations?limit=100" | jq .operations
 \`\`\`
 
 ### Schedule recurring prompts
@@ -1354,7 +1754,7 @@ is required because the Space clock is UTC. Create one with your own id so the
 operation log records who asked:
 
 \`\`\`sh
-curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/crons?from=$AM_ID" \\
+curl -sS -H 'X-AM-Request: 1' --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/crons?from=$AM_ID" \\
   -H 'content-type: application/json' -d '{
     "name":"weekday issue triage",
     "agent":{"name":"triage","cli":"claude"},
@@ -1362,7 +1762,7 @@ curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/crons?from=$A
     "schedule":{"cron":"0 9 * * 1-5","tz":"Europe/Zurich"},
     "runOnRestart":true
   }'
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/crons" | jq .crons
+curl -s -H 'X-AM-Request: 1' "http://localhost:\${AM_PORT:-${PORT}}/api/crons" | jq .crons
 \`\`\`
 
 Use \`POST /api/crons/$ID/run?from=$AM_ID\` to run now,
@@ -1387,11 +1787,11 @@ OpenClaw expose tokens and estimated model cost; they have no single quota
 because sessions may use different providers:
 
 \`\`\`sh
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=claude" | jq .providers.claude
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=codex" | jq .providers.codex
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=opencode" | jq .providers.opencode
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=hermes" | jq .providers.hermes
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=openclaw" | jq .providers.openclaw
+curl -s -H 'X-AM-Request: 1' "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=claude" | jq .providers.claude
+curl -s -H 'X-AM-Request: 1' "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=codex" | jq .providers.codex
+curl -s -H 'X-AM-Request: 1' "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=opencode" | jq .providers.opencode
+curl -s -H 'X-AM-Request: 1' "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=hermes" | jq .providers.hermes
+curl -s -H 'X-AM-Request: 1' "http://localhost:\${AM_PORT:-${PORT}}/api/usage?provider=openclaw" | jq .providers.openclaw
 \`\`\`
 
 These values reflect local calls made from this Space, as of each harness's
@@ -1400,7 +1800,7 @@ read-only call, so it does not take \`?from=\`.
 
 ### See who is here
 \`\`\`sh
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents?from=$AM_ID" | jq .
+curl -s -H 'X-AM-Request: 1' "http://localhost:\${AM_PORT:-${PORT}}/api/agents?from=$AM_ID" | jq .
 \`\`\`
 Each entry carries \`id\`, \`name\`, \`cli\`, \`state\`, \`workdir\`, \`sharesFolderWith\`,
 a one-line \`lastPrompt\`/\`lastAnswer\`, \`recentFiles\`, and \`trace\` — the path to
@@ -1415,8 +1815,8 @@ digest for one agent. Read \`state\` before you do anything:
 
 ### Watch instead of asking
 \`\`\`sh
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/tail?lines=120" | jq -r .text
-curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15&from=$AM_ID"
+curl -s -H 'X-AM-Request: 1' "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/tail?lines=120" | jq -r .text
+curl -s -H 'X-AM-Request: 1' "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15&from=$AM_ID"
 \`\`\`
 \`tail\` returns that agent's screen and scrollback — exactly what a human would
 see in its pane. \`wait\` BLOCKS until the agent has held one of \`state\`
@@ -1440,7 +1840,7 @@ background (Claude Code: \`run_in_background\`), so you stay free meanwhile and
 are woken once, when the peer is genuinely finished.
 
 \`\`\`sh
-( until curl -s "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15&from=$AM_ID" \\
+( until curl -s -H 'X-AM-Request: 1' "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/wait?timeout=300&settle=15&from=$AM_ID" \\
         > /tmp/wait-$ID.json \\
      && jq -e '.matched or .state == "gone" or has("error")' /tmp/wait-$ID.json >/dev/null
   do sleep 2; done ) >/dev/null 2>&1 &
@@ -1460,7 +1860,7 @@ never wait with \`sleep\`: long foreground sleeps can destabilize a session.
 ### Send an agent a prompt
 Send the text as the request **body** so quoting and newlines never bite you:
 \`\`\`sh
-curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/prompt?from=$AM_ID" \\
+curl -s -H 'X-AM-Request: 1' -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/prompt?from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary @- <<'EOF'
 Please run the test suite in your folder and fix whatever fails.
 EOF
@@ -1484,7 +1884,7 @@ Rules that matter, because nothing enforces them for you:
 
 ### Launch a new agent
 \`\`\`sh
-curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents?cli=claude&name=reviewer&from=$AM_ID" \\
+curl -s -H 'X-AM-Request: 1' -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents?cli=claude&name=reviewer&from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary @- <<'EOF'
 Review the diff in /data/workspaces/api and report anything that would break in production.
 EOF
@@ -1509,10 +1909,10 @@ refused rather than created, so a typo can't quietly fragment the sidebar. Make
 the group first, then spawn into it:
 
 \`\`\`sh
-GID=$(curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/groups?from=$AM_ID" \\
+GID=$(curl -sS -H 'X-AM-Request: 1' --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/groups?from=$AM_ID" \\
   -H 'content-type: application/json' -d '{"name":"taskforce"}' | jq -r .id)
 
-curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents?cli=claude&group=$GID&from=$AM_ID" \\
+curl -sS -H 'X-AM-Request: 1' --fail -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents?cli=claude&group=$GID&from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary 'Draft the migration plan.'
 \`\`\`
 
@@ -1524,7 +1924,7 @@ the origin for the operation log.
 
 ### Stop an agent
 \`\`\`sh
-curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/stop?from=$AM_ID"
+curl -s -H 'X-AM-Request: 1' -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/stop?from=$AM_ID"
 \`\`\`
 **Only when the operator asked you to.** It kills that agent's CLI mid-thought.
 Files and conversation survive, and a later prompt resumes it, but work in
@@ -1536,7 +1936,7 @@ a GPU box — not in this container. They appear in the roster like anyone else 
 you message them the same way:
 
 \`\`\`sh
-curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/prompt?from=$AM_ID" \\
+curl -s -H 'X-AM-Request: 1' -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/agents/$ID/prompt?from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary 'can you check the tokenizer?'
 \`\`\`
 
@@ -1559,7 +1959,7 @@ What is different about them:
   which sleeps, drops off wifi, and closes lids. Ask once and move on.
 
 ## Shared skills
-- Reusable skills (like this one) live in \`/data/workspaces/skills/\` and are published into every agent's skills directory automatically. Read them for project conventions and recurring tasks.
+- Reusable skills live in \`/data/workspaces/skills/\`. Create and publish them through the Skills editor or \`/api/skills\`: POST creates only; GET returns the revision required by PUT/DELETE in \`If-Match\`. If you edit a source through Files or on disk, review its current contents in Skills and explicitly Save to publish it. Startup leaves unreviewed source edits and independently modified installations untouched. This \`environment.md\` is generated from the Space configuration and read-only; put your own instructions in a separate skill. Read skills for project conventions and recurring tasks.
 
 ## Tooling
 - A full Linux shell with \`git\`, \`ripgrep\` (\`rg\`), \`node\`, and \`python3\`, plus build tools. Reach for \`rg\` for fast search.
@@ -1601,7 +2001,7 @@ operator explicitly asked for it in their prompt (e.g. "notify me when the
 tests pass") — send exactly ONE message when that condition is met:
 
 \`\`\`sh
-curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/notify?from=$AM_ID" \\
+curl -s -H 'X-AM-Request: 1' -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/notify?from=$AM_ID" \\
   -H 'content-type: application/json' \\
   -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"<one-line outcome>\\"}"
 \`\`\`
@@ -1614,7 +2014,7 @@ For DELAYED notifications ("notify me in 10 minutes"), do not block on a long
 immediately (long-running foreground execs can destabilize some sessions):
 
 \`\`\`sh
-(sleep 600 && curl -s -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/notify?from=$AM_ID" \\
+(sleep 600 && curl -s -H 'X-AM-Request: 1' -X POST "http://localhost:\${AM_PORT:-${PORT}}/api/notify?from=$AM_ID" \\
   -H 'content-type: application/json' \\
   -d "{\\"title\\":\\"$AM_NAME\\",\\"body\\":\\"reminder\\"}") >/dev/null 2>&1 &
 \`\`\`
@@ -1631,121 +2031,77 @@ from the environment when you need it (e.g. \`$NAME\`); never print secret value
 
 ${envLines}
 `;
-  const p = skillPath('environment.md');
-  if (p) { try { fs.mkdirSync(SKILLS_DIR, { recursive: true }); fs.writeFileSync(p, content); } catch {} }
-  distributeSkill('environment.md', content);
+  return skills.generate('environment.md', content).then(reportSkills)
+    .catch((e) => reportSkills({ ok: false, error: e.message }));
 }
 
-app.get('/api/secrets', (_req, res) => res.json({ detected: injectedEnvKeys(), notes: loadSecretNotes() }));
-app.put('/api/secrets', (req, res) => {
-  const notes = (req.body && req.body.notes && typeof req.body.notes === 'object') ? req.body.notes : {};
-  try { fs.writeFileSync(SECRET_NOTES_FILE, JSON.stringify(notes, null, 2)); } catch {}
-  generateEnvSkill(notes);
-  res.json({ ok: true });
+api.get('/api/secrets', (_req, res) => {
+  const stored = readSettingsFile(SECRET_NOTES_FILE);
+  res.json({
+    detected: injectedEnvKeys(),
+    notes: stored.unreadable ? {} : (stored.value || {}),
+    rev: stored.rev || null,
+    readError: stored.unreadable || null,
+    derived: envSkillReport(),
+  });
+});
+// `typeof [] === 'object'` is how an array became a settings object. Writing one
+// replaced every description with `[]`, which the reader then refuses to load —
+// so a permissive write turned into a file nobody could save to again. The shape
+// is checked before anything is replaced, not after.
+const NOTE_MAX = 2000;
+function readNotesPayload(body) {
+  const notes = body && body.notes;
+  if (notes === undefined || notes === null) return { error: 'notes is required' };
+  if (typeof notes !== 'object' || Array.isArray(notes)) return { error: 'notes must be an object of name → description' };
+  const out = {};
+  for (const [key, value] of Object.entries(notes)) {
+    if (typeof value !== 'string') return { error: `the description for ${key} must be text` };
+    if (key.length > 128) return { error: 'a name is too long to be an environment variable' };
+    if (value.length > NOTE_MAX) return { error: `the description for ${key} is longer than ${NOTE_MAX} characters` };
+    out[key] = value;
+  }
+  return { notes: out };
+}
+
+api.put('/api/secrets', async (req, res) => {
+  const payload = readNotesPayload(req.body);
+  if (payload.error) return res.status(400).json({ code: 'invalid-input', error: payload.error });
+  const notes = payload.notes;
+  // Same contract as /api/config, for the same reason: two tabs describing the
+  // same keys must not overwrite each other's descriptions.
+  let commit;
+  try {
+    commit = commitSettings(SECRET_NOTES_FILE, notes, baseOf(req));
+  } catch (e) {
+    return res.status(500).json(settingsWriteFailure(SECRET_NOTES_FILE));
+  }
+  if (commit.refused) return res.status(commit.refused.status).json(commit.refused.body);
+  const skillDistribution = await refreshEnvSkill();
+  res.json({ ok: true, notes, rev: commit.rev, derived: envSkillReport(), skillDistribution });
 });
 
 // ---------- skills (markdown/text files in the workspace) ----------
-const SKILL_RE = /^[\w.\- ]{1,80}$/;
-function skillPath(name) {
-  if (!SKILL_RE.test(name) || name.includes('/') || name.includes('..')) return null;
-  return path.join(SKILLS_DIR, name);
-}
-
-// Fan skills out as SKILL.md into the dirs every agent auto-reads, so a saved
-// skill is available to all of them in every new session. Gated to real Space
-// deployments (or explicit opt-in): on a dev laptop these paths are the
-// developer's OWN ~/.claude etc. — local test runs must not write there.
-function skillTargetDirs() {
-  if (!process.env.SPACE_ID && process.env.AM_DISTRIBUTE_SKILLS !== '1') return [];
-  const home = process.env.HOME || os.homedir();
-  const claudeCfg = process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
-  const dirs = [
-    path.join(home, '.agents', 'skills'),   // Codex and opencode
-    path.join(claudeCfg, 'skills'),          // Claude Code
-    path.join(home, '.hermes', 'skills'),    // Hermes
-  ];
-  // GEMINI_CLI_HOME deliberately changes the home Gemini resolves its global
-  // .agents directory against; fan skills into that local/checkpointed home as
-  // well as the ordinary durable HOME.
-  if (process.env.GEMINI_CLI_HOME) dirs.push(path.join(process.env.GEMINI_CLI_HOME, '.agents', 'skills'));
-  // OpenClaw runs with its own HOME (see entrypoint.sh) and reads managed
-  // skills from ~/.agents/skills resolved against THAT home. Recreated on
-  // every boot, so it needs no backup coverage.
-  if (process.env.OPENCLAW_HOME) dirs.push(path.join(process.env.OPENCLAW_HOME, '.agents', 'skills'));
-  return dirs;
-}
-function parseSkillFile(filename, content) {
-  const name = slugify(path.basename(filename).replace(/\.[^.]+$/, '')) || 'skill';
-  let body = content;
-  let desc = '';
-  const fm = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-  if (fm) {
-    const d = fm[1].match(/^description:\s*(.+)$/m);
-    if (d) desc = d[1].trim().replace(/^["']|["']$/g, '');
-    body = fm[2];
-  }
-  if (!desc) {
-    const h = body.match(/^#+\s*(.+)$/m);
-    desc = (h ? h[1] : (body.split('\n').find((l) => l.trim()) || name)).trim();
-  }
-  desc = desc.replace(/\s+/g, ' ').slice(0, 300).replace(/"/g, '\\"');
-  return { name, description: desc, body: body.trim() };
-}
-function distributeSkill(filename, content) {
-  const { name, description, body } = parseSkillFile(filename, content);
-  const md = `---\nname: ${name}\ndescription: "${description}"\n---\n\n${body}\n`;
-  for (const base of skillTargetDirs()) {
-    try { fs.mkdirSync(path.join(base, name), { recursive: true }); fs.writeFileSync(path.join(base, name, 'SKILL.md'), md); } catch {}
-  }
-}
-function undistributeSkill(filename) {
-  const name = slugify(path.basename(filename).replace(/\.[^.]+$/, ''));
-  for (const base of skillTargetDirs()) {
-    try { fs.rmSync(path.join(base, name), { recursive: true, force: true }); } catch {}
-  }
-}
-function distributeAllSkills() {
-  let files = [];
-  try { files = fs.readdirSync(SKILLS_DIR).filter((f) => { try { return fs.statSync(path.join(SKILLS_DIR, f)).isFile(); } catch { return false; } }); } catch {}
-  for (const f of files) {
-    try { distributeSkill(f, fs.readFileSync(path.join(SKILLS_DIR, f), 'utf8')); } catch {}
-  }
-}
-
-app.get('/api/skills', (_req, res) => {
-  fs.mkdirSync(SKILLS_DIR, { recursive: true });
-  const files = fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
-    .filter((e) => e.isFile())
-    .map((e) => ({ name: e.name, size: fs.statSync(path.join(SKILLS_DIR, e.name)).size }));
-  files.sort((a, b) => a.name.localeCompare(b.name));
-  res.json(files);
-});
-
-app.get('/api/skills/:name', (req, res) => {
-  const p = skillPath(req.params.name);
-  if (!p || !fs.existsSync(p)) return res.status(404).json({ error: 'not found' });
-  res.json({ name: req.params.name, content: fs.readFileSync(p, 'utf8') });
-});
-
-app.put('/api/skills/:name', express.text({ type: '*/*', limit: '5mb' }), (req, res) => {
-  const p = skillPath(req.params.name);
-  if (!p) return res.status(400).json({ error: 'bad name' });
-  fs.mkdirSync(SKILLS_DIR, { recursive: true });
-  const content = typeof req.body === 'string' ? req.body : '';
-  fs.writeFileSync(p, content);
-  distributeSkill(req.params.name, content); // push to every agent
-  res.json({ ok: true });
-});
-
-app.delete('/api/skills/:name', (req, res) => {
-  const p = skillPath(req.params.name);
-  if (!p) return res.status(400).json({ error: 'bad name' });
-  try { fs.unlinkSync(p); } catch {}
-  undistributeSkill(req.params.name);
-  res.json({ ok: true });
-});
+// POST is create-only; PUT and DELETE require the revision returned by GET.
+// A partial result is a successful HTTP exchange, not a claim of full mutation.
+const skillRoute = (run) => async (req, res) => {
+  try {
+    const result = await run(req);
+    res.status(result?.ok === false ? 207 : 200).json(result);
+  } catch (e) { res.status(e.status || 503).json({ error: e.message }); }
+};
+api.get('/api/skills', skillRoute(() => skills.list()));
+api.get('/api/skills/:name', skillRoute((req) => skills.get(req.params.name)));
+const skillText = (req) => req.get('content-length') === '0' ? '' : req.body;
+api.post('/api/skills/:name', express.text({ type: '*/*', limit: '5mb' }),
+  skillRoute((req) => skills.create(req.params.name, skillText(req))));
+api.put('/api/skills/:name', express.text({ type: '*/*', limit: '5mb' }),
+  skillRoute((req) => skills.update(req.params.name, skillText(req), req.get('If-Match'))));
+api.delete('/api/skills/:name', skillRoute((req) => skills.remove(req.params.name, req.get('If-Match'))));
 
 // ---------- file browser (for the Files agent) ----------
+app.use('/api/file-links', fileLinksRouter({ roots: fileLinkRoots(WORKSPACES_DIR), getSession: store.get }));
+
 function folderPathOf(session) {
   // A Files agent without a chosen location browses the whole workspace root.
   if (session.cli === 'files' && !session.path) return WORKSPACES_DIR;
@@ -1768,7 +2124,7 @@ function resolveSafe(root, rel) {
   } catch { return null; }
 }
 
-app.get('/api/files/:id', (req, res) => {
+api.get('/api/files/:id', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   if (s.cli === 'files' && !req.query.path) ensureWorkspaceFolders(); // refresh the root view
@@ -1800,7 +2156,7 @@ app.get('/api/files/:id', (req, res) => {
 // What the viewer needs to show one file: its kind, its stats, and — for the
 // text-ish kinds — the content itself, capped. Image/html/pdf are fetched by the
 // browser from /raw instead.
-app.get('/api/files/:id/preview', async (req, res) => {
+api.get('/api/files/:id/preview', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const root = folderPathOf(s);
@@ -1836,7 +2192,7 @@ app.get('/api/files/:id/preview', async (req, res) => {
       const { text, truncated } = readTextHead(f);
       return res.json({ ...meta, text, truncated });
     } catch (e) {
-      return res.status(500).json({ error: String(e && e.message || e) });
+      throw e;
     }
   }
   res.json(meta);
@@ -1849,24 +2205,24 @@ app.get('/api/files/:id/preview', async (req, res) => {
 // origin, so even opened directly in a tab it can't read this app's storage or
 // call its API with the operator's cookies. The iframe's own sandbox attribute
 // decides whether scripts run at all.
-app.get('/api/files/:id/raw', (req, res) => {
+api.get('/api/files/:id/raw', (req, res, next) => {
   const s = store.get(req.params.id);
-  if (!s) return res.status(404).end();
+  if (!s) return res.status(404).json({ error: 'not found', code: 'not-found' });
   const f = resolveSafe(folderPathOf(s), req.query.path);
-  if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) return res.status(404).end();
+  if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) return res.status(404).json({ error: 'not found', code: 'not-found' });
   res.setHeader('content-type', mimeOf(f, kindOfFile(f)));
   res.setHeader('x-content-type-options', 'nosniff');
   res.setHeader('content-security-policy', 'sandbox allow-scripts allow-popups allow-forms allow-modals');
   res.setHeader('content-disposition', `inline; filename="${path.basename(f).replace(/[^\w.\- ]/g, '_')}"`);
-  res.sendFile(f);
+  res.sendFile(f, (error) => { if (error) next(error); });
 });
 
-app.get('/api/files/:id/download', (req, res) => {
+api.get('/api/files/:id/download', (req, res, next) => {
   const s = store.get(req.params.id);
-  if (!s) return res.status(404).end();
+  if (!s) return res.status(404).json({ error: 'not found', code: 'not-found' });
   const f = resolveSafe(folderPathOf(s), req.query.path);
-  if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) return res.status(404).end();
-  res.download(f);
+  if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) return res.status(404).json({ error: 'not found', code: 'not-found' });
+  res.download(f, (error) => { if (error) next(error); });
 });
 
 // Save an edited text file.
@@ -1877,7 +2233,7 @@ app.get('/api/files/:id/download', (req, res) => {
 // a stale buffer is worse than making someone reload. Second, only files we could
 // show WHOLE are writable: the preview serves the first 512 KB of a big file, and
 // saving that back would silently truncate the rest.
-app.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), (req, res) => {
+api.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const f = resolveSafe(folderPathOf(s), req.query.path);
@@ -1894,20 +2250,26 @@ app.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), (re
   }
   const base = String(req.query.base || '');
   if (base && base !== contentTag(f)) {
-    return res.status(409).json({ error: 'changed on disk since you opened it', mtime: st.mtimeMs });
+    return res.status(409).json({ error: 'changed on disk since you opened it', code: 'file-changed', mtime: st.mtimeMs });
   }
   const text = typeof req.body === 'string' ? req.body : '';
   if (text.length > TEXT_MAX) return res.status(413).json({ error: 'too big to save' });
 
-  // Write beside the target and rename: a crash or a full disk leaves the
-  // original intact rather than a half-written file.
-  const tmp = path.join(path.dirname(f), `.${path.basename(f)}.am-tmp`);
   try {
-    fs.writeFileSync(tmp, text, 'utf8');
-    fs.renameSync(tmp, f);
+    // Recheck under the same destination lock used by uploads. This keeps the
+    // editor's existing content-tag contract while giving both writers unique,
+    // exclusive temporary files and one publication order.
+    await replaceWorkspaceText(f, text, async () => {
+      const current = resolveSafe(folderPathOf(s), req.query.path);
+      if (current !== f || !fs.existsSync(f) || !fs.lstatSync(f).isFile() || fs.lstatSync(f).isSymbolicLink()) {
+        throw fileWriteError(409, 'changed-on-disk', 'changed on disk since you opened it');
+      }
+      if (base && base !== contentTag(f)) {
+        throw fileWriteError(409, 'changed-on-disk', 'changed on disk since you opened it');
+      }
+    });
   } catch (e) {
-    try { fs.unlinkSync(tmp); } catch {}
-    return res.status(500).json({ error: String((e && e.message) || e) });
+    return res.status(e.statusCode || 500).json({ error: String((e && e.message) || e), code: e.code });
   }
   const after = fs.statSync(f);
   res.json({ ok: true, size: after.size, mtime: after.mtimeMs, tag: contentTag(f) });
@@ -1933,9 +2295,14 @@ function contentTag(file) {
 function dependedOnDir(abs) {
   const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
   const target = real(abs);
-  if (target === real(SKILLS_DIR)) return 'the shared skills folder';
+  const contains = (parent, child) => child === parent || child.startsWith(parent + path.sep);
+  if (contains(target, real(SKILLS_DIR))) return 'the shared skills folder';
   for (const s of store.list()) {
-    if (s.path && real(workspacePath(s.path)) === target) return `${s.name}'s workspace`;
+    // `path` can be '' (the root) and old records can still omit it until the
+    // boot migration above. Both are real configured dependencies, including
+    // stopped sessions and sessions sharing or nesting a workspace.
+    const workspace = real(workspacePath(s.path ?? s.id));
+    if (contains(target, workspace)) return `${s.name}'s workspace`;
   }
   return null;
 }
@@ -1959,7 +2326,7 @@ for (const [verb, make] of [
   // already there, so "new file" can never quietly empty an existing one.
   ['touch', (dest) => fs.closeSync(fs.openSync(dest, 'wx'))],
 ]) {
-  app.post(`/api/files/:id/${verb}`, (req, res) => {
+  api.post(`/api/files/:id/${verb}`, (req, res) => {
     const s = store.get(req.params.id);
     if (!s) return res.status(404).json({ error: 'not found' });
     const dir = resolveSafe(folderPathOf(s), (req.body || {}).path || '');
@@ -1971,7 +2338,7 @@ for (const [verb, make] of [
       fs.mkdirSync(dir, { recursive: true });
       make(dest);
     } catch (e) {
-      return res.status(500).json({ error: String((e && e.message) || e) });
+      throw e;
     }
     res.status(201).json({ ok: true, name });
   });
@@ -1979,7 +2346,7 @@ for (const [verb, make] of [
 
 // Rename one entry in place. The new name is a NAME, so a rename can never also
 // move something — that is the /move route's job (still to come from #9).
-app.post('/api/files/:id/rename', (req, res) => {
+api.post('/api/files/:id/rename', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const root = folderPathOf(s);
@@ -1988,15 +2355,15 @@ app.post('/api/files/:id/rename', (req, res) => {
   if (!from || !name) return res.status(400).json({ error: 'bad name' });
   if (!fs.existsSync(from)) return res.status(404).json({ error: 'not found' });
   if (path.resolve(from) === path.resolve(root)) return res.status(400).json({ error: 'cannot rename the workspace root' });
-  const dep = dependedOnDir(from);
-  if (dep) return res.status(409).json({ error: `that folder is ${dep}` });
   const to = path.join(path.dirname(from), name);
   if (path.resolve(to) === path.resolve(from)) return res.json({ ok: true, name }); // no-op
+  const dep = dependedOnDir(from);
+  if (dep) return res.status(409).json({ error: `that folder contains ${dep}` });
   if (fs.existsSync(to)) return res.status(409).json({ error: `"${name}" already exists here` });
   try {
     fs.renameSync(from, to);
   } catch (e) {
-    return res.status(500).json({ error: String((e && e.message) || e) });
+    throw e;
   }
   res.json({ ok: true, name, path: path.relative(root, to) });
 });
@@ -2004,7 +2371,7 @@ app.post('/api/files/:id/rename', (req, res) => {
 // Move an entry into another folder under the same root, keeping its name — the
 // drag-and-drop half of rename. `to` is the destination FOLDER ('' = the root).
 // Adapted from PR #9, including the realpath check below.
-app.post('/api/files/:id/move', (req, res) => {
+api.post('/api/files/:id/move', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const root = folderPathOf(s);
@@ -2012,9 +2379,6 @@ app.post('/api/files/:id/move', (req, res) => {
   const from = resolveSafe(root, b.path);
   if (!from || !fs.existsSync(from)) return res.status(404).json({ error: 'not found' });
   if (path.resolve(from) === path.resolve(root)) return res.status(400).json({ error: 'cannot move the workspace root' });
-  const dep = dependedOnDir(from);
-  if (dep) return res.status(409).json({ error: `that folder is ${dep}` });
-
   const destDir = resolveSafe(root, b.to || '');
   if (!destDir || !fs.existsSync(destDir)) return res.status(404).json({ error: 'no such folder' });
   if (!fs.statSync(destDir).isDirectory()) return res.status(400).json({ error: 'not a folder' });
@@ -2031,17 +2395,19 @@ app.post('/api/files/:id/move', (req, res) => {
 
   const to = path.join(destDir, path.basename(from));
   if (path.resolve(to) === path.resolve(from)) return res.json({ ok: true, path: path.relative(root, to) });
+  const dep = dependedOnDir(from);
+  if (dep) return res.status(409).json({ error: `that folder contains ${dep}` });
   if (fs.existsSync(to)) return res.status(409).json({ error: `"${path.basename(from)}" already exists there` });
   try {
     fs.renameSync(from, to);
   } catch (e) {
-    return res.status(500).json({ error: String((e && e.message) || e) });
+    throw e;
   }
   res.json({ ok: true, path: path.relative(root, to) });
 });
 
 // Delete one entry. Folders go recursively — the pane says so before asking.
-app.delete('/api/files/:id/entry', (req, res) => {
+api.delete('/api/files/:id/entry', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const root = folderPathOf(s);
@@ -2053,11 +2419,11 @@ app.delete('/api/files/:id/entry', (req, res) => {
   // A folder an agent is living in, or the shared skills dir, is not the
   // browser's to remove: the agent's cwd would vanish under a running process.
   const dep = dependedOnDir(target);
-  if (dep) return res.status(409).json({ error: `that folder is ${dep}` });
+  if (dep) return res.status(409).json({ error: `that folder contains ${dep}` });
   try {
     fs.rmSync(target, { recursive: true, force: true });
   } catch (e) {
-    return res.status(500).json({ error: String((e && e.message) || e) });
+    throw e;
   }
   res.json({ ok: true });
 });
@@ -2089,7 +2455,7 @@ function traceOpts(q) {
   };
 }
 
-app.get('/api/files/:id/trace', async (req, res) => {
+api.get('/api/files/:id/trace', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const f = resolveSafe(folderPathOf(s), req.query.path);
@@ -2104,32 +2470,62 @@ app.get('/api/files/:id/trace', async (req, res) => {
     if (['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(e && e.code)) {
       return res.status(404).json({ error: e.message, code: e.code });
     }
-    console.error('[trace file]', e && e.message);
-    res.status(500).json({ error: (e && e.message) || 'trace read failed' });
+    throw e;
   }
 });
 
 // Stream uploads straight to disk — a big drag-drop must not be buffered in the
 // RAM of the process that's also pumping every terminal's PTY data.
-app.post('/api/files/:id/upload', (req, res) => {
+api.post('/api/files/:id/upload', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  const dir = resolveSafe(folderPathOf(s), req.query.path);
-  const name = String(req.query.name || '');
-  if (!dir || !name || name.includes('/') || name.includes('..')) return res.status(400).json({ error: 'bad path' });
-  const dest = path.join(dir, name);
-  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { return res.status(500).json({ error: e.message }); }
-  const out = fs.createWriteStream(dest);
-  const fail = (e) => {
-    out.destroy();
-    fs.unlink(dest, () => {}); // don't leave a truncated file behind
-    if (!res.headersSent) res.status(500).json({ error: String(e && e.message || e) });
-  };
-  out.on('error', fail);
-  req.on('error', fail);
-  req.on('aborted', () => fail(new Error('upload aborted')));
-  out.on('finish', () => res.json({ ok: true }));
-  req.pipe(out);
+  const root = folderPathOf(s);
+  const requestedDir = resolveSafe(root, req.query.path);
+  const name = cleanName(req.query.name);
+  if (!requestedDir || !name) return res.status(400).json({ error: 'bad path' });
+  let realRoot; let realDir;
+  try {
+    realRoot = await fs.promises.realpath(root);
+    realDir = await fs.promises.realpath(requestedDir);
+    const stat = await fs.promises.stat(realDir);
+    if (!stat.isDirectory() || (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep))) {
+      return res.status(400).json({ error: 'bad path' });
+    }
+  } catch {
+    return res.status(404).json({ error: 'destination folder no longer exists' });
+  }
+  const destination = path.join(realDir, name);
+  const displayPath = path.relative(root, path.join(requestedDir, name)).split(path.sep).join('/');
+  try {
+    const validate = async () => {
+      let rootNow; let dirNow;
+      try {
+        rootNow = await fs.promises.realpath(root);
+        dirNow = await fs.promises.realpath(requestedDir);
+      } catch {
+        throw fileWriteError(409, 'destination-changed', 'the destination folder changed during upload');
+      }
+      if (rootNow !== realRoot || dirNow !== realDir
+          || (dirNow !== rootNow && !dirNow.startsWith(rootNow + path.sep))) {
+        throw fileWriteError(409, 'destination-changed', 'the destination folder changed during upload');
+      }
+    };
+    const result = await receiveWorkspaceFile(req, destination, {
+      displayPath,
+      replaceToken: req.headers['x-am-replace-token'] || '',
+      validate,
+    });
+    if (!res.destroyed) res.json({ ok: true, path: displayPath, ...result });
+  } catch (e) {
+    if (!res.headersSent && !res.destroyed) res.status(e.statusCode || 500).json({
+      error: String((e && e.message) || e),
+      ...(e.code ? { code: e.code } : {}),
+      ...(e.path !== undefined ? { path: e.path } : {}),
+      ...(e.name !== undefined ? { name: e.name } : {}),
+      ...(e.revision !== undefined ? { revision: e.revision } : {}),
+      ...(e.replaceToken !== undefined ? { replaceToken: e.replaceToken } : {}),
+    });
+  }
 });
 
 // Sanitize a client-supplied workspace-relative path: no '..', no absolute
@@ -2146,7 +2542,7 @@ function cleanRelPath(p) {
 }
 
 // Folder listing for the location picker (subfolders of one level).
-app.get('/api/folders', (req, res) => {
+api.get('/api/folders', (req, res) => {
   const rel = cleanRelPath(req.query.path || '');
   if (rel === null) return res.status(400).json({ error: 'bad path' });
   const dir = workspacePath(rel);
@@ -2169,7 +2565,7 @@ function sessionsWithState() {
 }
 
 // The whole sidebar tree in one call: ordered refs + groups + sessions(+state).
-app.get('/api/tree', (_req, res) => {
+api.get('/api/tree', (_req, res) => {
   let sessions = sessionsWithState();
   let groupList = groups.list();
   const groupedIds = new Set(groupList.flatMap((g) => g.sessionIds));
@@ -2208,7 +2604,7 @@ app.get('/api/tree', (_req, res) => {
  * it takes `from` like every other mutating call so the operation log can say who
  * asked. It deliberately does NOT touch the sidebar: that is the way back.
  */
-app.post('/api/overview/hidden', (req, res) => {
+api.post('/api/overview/hidden', (req, res) => {
   const { ref, hidden: want } = req.body || {};
   if (typeof ref !== 'string') return res.status(400).json({ error: 'bad ref' });
   // Only HIDING has to name something real. Unhiding a ref whose group is already
@@ -2222,7 +2618,7 @@ app.post('/api/overview/hidden', (req, res) => {
 });
 
 // Backwards-compatible flat list (used by probes/tests).
-app.get('/api/sessions', (_req, res) => res.json(sessionsWithState()));
+api.get('/api/sessions', (_req, res) => res.json(sessionsWithState()));
 
 // Default name for a new agent: "<cli-label-slug>-<n>", e.g. claude-code-1.
 function nextName(cli) {
@@ -2244,7 +2640,7 @@ function nextName(cli) {
 // The panel treats this as a display value, not an answer — it only sends a
 // name when the operator edits it, so two creations racing on the same prefill
 // still get distinct names from the server (see Sidebar.tsx).
-app.get('/api/next-name', (req, res) => {
+api.get('/api/next-name', (req, res) => {
   const cli = String(req.query.cli || '').trim();
   if (!cliById(cli)) return res.status(400).json({ error: `unknown cli '${cli}'` });
   res.json({ cli, name: nextName(cli) });
@@ -2296,18 +2692,23 @@ function createSession({ name, cli, groupId, path: reqPath, prompt }) {
       try { ensureRunning(store.get(s.id) || s); } catch (e) { console.error('[quickstart]', e && e.message); }
     } else {
       (async () => {
+        // Detached: the response is long gone when the typing happens, so the
+        // lock scope is this task's own.
+        const scope = lockScope();
         try {
           ensureRunning(s);
           await new Promise((r) => setTimeout(r, 4000));
+          if (scope.signal.aborted) return; // locked meanwhile: the agent runs, the prompt is dropped
           await sendInput(s.id, text);
         } catch (e) { console.error('[quickstart]', e && e.message); }
+        finally { scope.release(); }
       })();
     }
   }
   return s;
 }
 
-app.post('/api/sessions', (req, res) => {
+api.post('/api/sessions', (req, res) => {
   const { name, cli, groupId, path: reqPath, prompt } = req.body || {};
   if (!cli || !cliById(cli)) return res.status(400).json({ error: 'unknown cli' });
   const s = createSession({ name, cli, groupId, path: reqPath, prompt });
@@ -2339,11 +2740,11 @@ const cronAgentFolder = (name) => {
   return `agent-${(hash >>> 0).toString(16).padStart(8, '0')}`;
 };
 
-function beginCronFire(job, trigger) {
+function beginCronFire(job, trigger, { signal = null } = {}) {
   const at = new Date();
   const started = Date.now();
   const fail = (error) => {
-    const message = String(error && error.message || error).slice(0, 500);
+    const message = error instanceof ApiError ? error.message : 'Scheduled prompt could not be delivered.';
     crons.recordLast(job.id, {
       at: at.toISOString(), status: 'failed', durationMs: Date.now() - started, trigger, error: message,
     });
@@ -2355,9 +2756,9 @@ function beginCronFire(job, trigger) {
     let agentCreated = false;
     if (!session) {
       const invalid = cronCliError(job.agent.cli);
-      if (invalid) throw new Error(invalid);
+      if (invalid) throw new ApiError(409, 'cron-unavailable', invalid);
       const catalog = cliCatalog().find((candidate) => candidate.id === job.agent.cli);
-      if (!catalog?.available) throw new Error(`${cliById(job.agent.cli).label} is not installed on this Space`);
+      if (!catalog?.available) throw new ApiError(409, 'cron-unavailable', `${cliById(job.agent.cli).label} is not installed on this Space`);
       session = createSession({
         name: job.agent.name,
         cli: job.agent.cli,
@@ -2367,14 +2768,14 @@ function beginCronFire(job, trigger) {
         path: cronAgentFolder(job.agent.name),
       });
       if (!session) throw new Error('could not create the agent workspace');
-      if (session.error) throw new Error(session.error);
+      if (session.error) throw new ApiError(409, 'cron-unavailable', session.error);
       agentCreated = true;
     }
     if (!promptable(session) || isRemote(session.cli)) {
-      throw new Error(`the existing '${session.name}' session (${session.cli}) cannot receive scheduled prompts`);
+      throw new ApiError(409, 'cron-unavailable', 'The existing target session cannot receive scheduled prompts.');
     }
     const text = `[message from cron "${job.name}":] ${job.prompt}`;
-    const completion = deliver(session, { text }, `cron: ${job.name}`)
+    const completion = deliver(session, { text }, `cron: ${job.name}`, { signal })
       .then(() => {
         crons.recordLast(job.id, {
           at: at.toISOString(), status: 'ok', durationMs: Date.now() - started, trigger,
@@ -2383,8 +2784,8 @@ function beginCronFire(job, trigger) {
       .catch((error) => { fail(error); });
     return { agentCreated, completion };
   } catch (error) {
-    const message = fail(error);
-    throw Object.assign(new Error(message), { statusCode: 409 });
+    fail(error);
+    throw error;
   }
 }
 
@@ -2393,53 +2794,53 @@ const validateCronCli = (body) => {
   return typeof cli === 'string' ? cronCliError(cli.trim()) : null;
 };
 
-app.get('/api/crons', (_req, res) => res.json({ crons: crons.list() }));
+api.get('/api/crons', (_req, res) => res.json({ crons: crons.list() }));
 
-app.post('/api/crons', (req, res) => {
+api.post('/api/crons', (req, res) => {
   const cliError = validateCronCli(req.body);
   if (cliError) return res.status(400).json({ error: cliError });
   try {
     const job = crons.create(req.body || {});
     return res.status(201).json(job);
   } catch (e) {
-    return res.status(400).json({ error: String(e.message || e) });
+    throw e;
   }
 });
 
-app.put('/api/crons/:id', (req, res) => {
+api.put('/api/crons/:id', (req, res) => {
   if (!crons.get(req.params.id)) return res.status(404).json({ error: 'not found' });
   const cliError = validateCronCli(req.body);
   if (cliError) return res.status(400).json({ error: cliError });
   try {
     return res.json(crons.update(req.params.id, req.body || {}));
   } catch (e) {
-    return res.status(400).json({ error: String(e.message || e) });
+    throw e;
   }
 });
 
-app.delete('/api/crons/:id', (req, res) => {
+api.delete('/api/crons/:id', (req, res) => {
   if (!crons.remove(req.params.id)) return res.status(404).json({ error: 'not found' });
   return res.json({ ok: true });
 });
 
-app.post('/api/crons/:id/run', (req, res) => {
+api.post('/api/crons/:id/run', (req, res) => {
   const job = crons.get(req.params.id);
   if (!job) return res.status(404).json({ error: 'not found' });
   const requested = String(req.query.trigger || '');
   const trigger = req.operationOrigin?.type === 'cron' && (requested === 'schedule' || requested === 'restart')
     ? requested : 'manual';
   try {
-    const run = beginCronFire(job, trigger);
+    const run = beginCronFire(job, trigger, { signal: res.locals.lockSignal });
     // 202 means the prompt was accepted for delivery, not that the agent's work
     // has finished. `last` is updated when delivery itself succeeds or fails.
     return res.status(202).json({ ok: true, agentCreated: run.agentCreated });
   } catch (e) {
-    return res.status(e.statusCode || 409).json({ error: String(e.message || e) });
+    throw e;
   }
 });
 
 // Rename = display label only. Folders are never renamed or moved.
-app.put('/api/sessions/:id', (req, res) => {
+api.put('/api/sessions/:id', (req, res) => {
   const name = (req.body || {}).name;
   if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'bad name' });
   const existing = store.get(req.params.id);
@@ -2457,7 +2858,7 @@ app.put('/api/sessions/:id', (req, res) => {
 // The two roads meet in the sidebar's archived view, but they are not the same
 // road: the window's verdict changes when the setting changes, and this one
 // does not. Only this one unlocks delete — see the DELETE route below.
-app.post('/api/sessions/:id/archive', (req, res) => {
+api.post('/api/sessions/:id/archive', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   // Archiving stops the agent. Putting a session away while its CLI keeps
@@ -2465,18 +2866,72 @@ app.post('/api/sessions/:id/archive', (req, res) => {
   // see. A remote agent has no process here — its connection is a separate
   // control that stays where it is, so archiving one only files it away.
   if (!isRemote(s.cli) && !PASSIVE_CLIS.includes(s.cli)) stop(s.id);
-  res.json(store.update(s.id, { archivedAt: new Date().toISOString() }));
+  // Archiving a pinned session is allowed and clears the pin: see the pin
+  // routes below for why the two cannot both be true.
+  res.json(store.update(s.id, { archivedAt: new Date().toISOString(), pinnedAt: undefined }));
+});
+
+// ---------- pinning ----------
+//
+// Pinning is stored, like archiving and for the same reason: it is the operator
+// saying something, not the clock reporting something. It does two jobs, and
+// only two — the sidebar keeps pinned things above a rule, and the idle window
+// stops applying to them.
+//
+// What it deliberately does NOT do is stop the operator archiving a pinned
+// session on purpose. Those are the two roads again: the window's verdict is
+// what pinning suppresses; "I am finished with this one" is still theirs to say,
+// and saying it clears the pin — keeping both would leave the record asserting
+// "keep this in front of me" and "I am done with this" at once, and the later
+// statement is the true one.
+api.post('/api/sessions/:id/pin', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  // The other half of the same invariant groups.js keeps: a member cannot hold
+  // a pin. Membership clears one that already exists; this refuses to write a
+  // new one. Without it the API can still park a value on a member that only
+  // becomes visible once the session leaves the group. The sidebar never asks
+  // — it leaves the control off a grouped row — so this answers agents and
+  // direct callers.
+  if (groups.groupOf(s.id)) {
+    return res.status(409).json({ error: 'a session in a group cannot be pinned — pin the group instead' });
+  }
+  res.json(store.update(s.id, { pinnedAt: new Date().toISOString() }));
+});
+
+api.post('/api/sessions/:id/unpin', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  res.json(store.update(s.id, { pinnedAt: undefined }));
+});
+
+// A group is pinned as a whole. Its members inherit the exemption from the idle
+// window — see docs and the sidebar — because a pinned group whose agents aged
+// out would empty itself and disappear, which is the opposite of what pinning
+// it asked for. Their own `pinnedAt` is untouched: membership is what carries
+// them, so unpinning the group returns every member to the ordinary rules
+// without having to remember which of them was individually pinned.
+api.post('/api/groups/:id/pin', (req, res) => {
+  const g = groups.get(req.params.id);
+  if (!g) return res.status(404).json({ error: 'not found' });
+  res.json(groups.setPinned(g.id, true));
+});
+
+api.post('/api/groups/:id/unpin', (req, res) => {
+  const g = groups.get(req.params.id);
+  if (!g) return res.status(404).json({ error: 'not found' });
+  res.json(groups.setPinned(g.id, false));
 });
 
 // Restore. Deliberately does NOT start the agent again: unarchiving says "I
 // want to see this again", and starting is what opening the pane does.
-app.post('/api/sessions/:id/unarchive', (req, res) => {
+api.post('/api/sessions/:id/unarchive', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   return res.json(store.update(s.id, { archivedAt: undefined }));
 });
 
-app.post('/api/sessions/:id/stop', (req, res) => {
+api.post('/api/sessions/:id/stop', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   stop(s.id);
@@ -2491,7 +2946,7 @@ app.post('/api/sessions/:id/stop', (req, res) => {
 // Claude and Codex: both write JSONL the Hub renders natively, so the trace
 // ships verbatim. The remaining harnesses need converters (§13 phase 5) — say so
 // plainly rather than producing a broken bundle.
-app.post('/api/sessions/:id/share', async (req, res) => {
+api.post('/api/sessions/:id/share', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   if (!SHAREABLE_CLIS.includes(s.cli)) {
@@ -2513,14 +2968,13 @@ app.post('/api/sessions/:id/share', async (req, res) => {
     if (e.code === 'redaction-blocked') {
       return res.status(409).json({ error: e.message, code: e.code, hits: e.hits });
     }
-    console.error('[share]', e && e.message);
-    res.status(500).json({ error: (e && e.message) || 'share failed' });
+    throw e;
   }
 });
 
 // Can this session be shared at all, and where would it go? Lets the dialog
 // open in a truthful state instead of failing on submit.
-app.get('/api/sessions/:id/share', async (req, res) => {
+api.get('/api/sessions/:id/share', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const [namespace, hit] = await Promise.all([shareNamespace(), findTrace(s, store.list())]);
@@ -2533,14 +2987,13 @@ app.get('/api/sessions/:id/share', async (req, res) => {
 });
 
 // Who can see an existing gated share.
-app.get('/api/share/access', async (req, res) => {
+api.get('/api/share/access', async (req, res) => {
   const repo = String(req.query.repo || '');
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return res.status(400).json({ error: 'bad repo' });
-  try { res.json(await shareAccess(repo)); }
-  catch (e) { res.status(500).json({ error: (e && e.message) || 'failed' }); }
+  res.json(await shareAccess(repo));
 });
 
-app.post('/api/share/access', async (req, res) => {
+api.post('/api/share/access', async (req, res) => {
   const b = req.body || {};
   const repo = String(b.repo || '');
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return res.status(400).json({ error: 'bad repo' });
@@ -2550,7 +3003,7 @@ app.post('/api/share/access', async (req, res) => {
     const revoked = await revokeAccess(repo, list(b.revoke));
     res.json({ granted, revoked, ...(await shareAccess(repo)) });
   } catch (e) {
-    res.status(500).json({ error: (e && e.message) || 'failed' });
+    throw e;
   }
 });
 
@@ -2568,7 +3021,7 @@ app.post('/api/share/access', async (req, res) => {
 // render it. This is the manual half of receiving — the same materialisation step
 // accepting an inbox delivery will perform. Works for a private/gated repo: the
 // viewer is blocked there, authenticated download is not.
-app.post('/api/trace/import', async (req, res) => {
+api.post('/api/trace/import', async (req, res) => {
   const repo = String((req.body || {}).repo || '')
     .trim()
     // Accept a pasted dataset URL as readily as a bare id — that is what people
@@ -2582,14 +3035,12 @@ app.post('/api/trace/import', async (req, res) => {
   } catch (e) {
     if (['bad-repo', 'not-a-bundle'].includes(e && e.code)) return res.status(400).json({ error: e.message, code: e.code });
     if (['no-access', 'no-hf-token'].includes(e && e.code)) return res.status(403).json({ error: e.message, code: e.code });
-    console.error('[trace-import]', e && e.message);
-    res.status(500).json({ error: (e && e.message) || 'import failed' });
+    throw e;
   }
 });
 
-app.get('/api/trace/bundles', async (_req, res) => {
-  try { res.json({ bundles: await listBundles() }); }
-  catch (e) { res.status(500).json({ error: (e && e.message) || 'failed' }); }
+api.get('/api/trace/bundles', async (_req, res) => {
+  res.json({ bundles: await listBundles() });
 });
 
 // Resolve the concrete local source behind a trace pane. Handover uses this to
@@ -2633,7 +3084,7 @@ async function traceFileOf(s) {
   return { path: hit.src, sessionId: hit.sessionId || null, source };
 }
 
-app.get('/api/trace/:id/location', async (req, res) => {
+api.get('/api/trace/:id/location', async (req, res) => {
   const pane = store.get(req.params.id);
   if (!pane || pane.cli !== 'trace') return res.status(404).json({ error: 'not a trace pane' });
   try {
@@ -2641,7 +3092,7 @@ app.get('/api/trace/:id/location', async (req, res) => {
     if (found.error) return res.status(found.status).json({ error: found.error, code: found.code });
     return res.json({ path: found.path, sessionId: found.sessionId, source: found.source });
   } catch (e) {
-    res.status(500).json({ error: (e && e.message) || 'could not resolve trace path' });
+    throw e;
   }
 });
 
@@ -2655,22 +3106,22 @@ app.get('/api/trace/:id/location', async (req, res) => {
 // file to the operator, over the session they are already authenticated on.
 // Publishing is /api/share, which does gate, because that is what puts a
 // transcript somewhere other people can read it.
-app.get('/api/trace/:id/download', async (req, res) => {
+api.get('/api/trace/:id/download', async (req, res, next) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   try {
     const found = await traceFileOf(s);
     if (found.error) return res.status(found.status).json({ error: found.error, code: found.code });
     const stem = slugify(s.name || '') || 'trace';
-    res.download(found.path, `${stem}${path.extname(found.path) || '.jsonl'}`);
+    res.download(found.path, `${stem}${path.extname(found.path) || '.jsonl'}`, (error) => { if (error) next(error); });
   } catch (e) {
-    res.status(500).json({ error: (e && e.message) || 'could not read that trace' });
+    throw e;
   }
 });
 
 // Paginated on purpose: a single session here is 6.15 MB and the panel only ever
 // shows a window of it. `limit` is clamped in readTrace().
-app.get('/api/trace/:id', async (req, res) => {
+api.get('/api/trace/:id', async (req, res) => {
   const pane = store.get(req.params.id);
   if (!pane) return res.status(404).json({ error: 'not found' });
 
@@ -2692,15 +3143,49 @@ app.get('/api/trace/:id', async (req, res) => {
     if (['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(e && e.code)) {
       return res.status(404).json({ error: e.message, code: e.code });
     }
-    console.error('[trace]', e && e.message);
-    res.status(500).json({ error: (e && e.message) || 'trace read failed' });
+    throw e;
+  }
+});
+
+// Search one conversation's whole transcript, as opposed to the stretch the
+// reader has loaded. Registered before /api/trace/:id/source for the same
+// ordering reason as the routes above.
+//
+// Bounded per request and continued with `cursor`; the reader asks for this
+// explicitly, so nothing here runs on a keystroke or on mount.
+api.get('/api/trace/:id/search', async (req, res) => {
+  const pane = store.get(req.params.id);
+  if (!pane) return res.status(404).json({ error: 'not found' });
+  const source = pane.traceSource || { kind: 'session', ref: pane.id };
+  if (source.kind === 'bundle') {
+    return res.status(400).json({ error: 'searching a shared bundle is not supported yet', code: 'unsupported-harness' });
+  }
+  const target = store.get(source.ref);
+  if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
+  const q = typeof req.query.q === 'string' ? req.query.q : '';
+  const cursor = req.query.cursor === undefined ? undefined : Number(req.query.cursor);
+  if (cursor !== undefined && !Number.isFinite(cursor)) {
+    return res.status(400).json({ error: 'bad cursor', code: 'bad-query' });
+  }
+  try {
+    res.json(await searchTrace(target, { q, cursor,
+      limit: Number(req.query.limit) || undefined,
+      generation: typeof req.query.generation === 'string' ? req.query.generation : undefined }));
+  } catch (e) {
+    if (e && e.code === 'bad-query') return res.status(400).json({ error: e.message, code: e.code });
+    if (['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(e && e.code)) {
+      return res.status(404).json({ error: e.message, code: e.code });
+    }
+    // The query itself is never logged: it is conversation content.
+    console.error('[trace search]', e && e.message);
+    res.status(500).json({ error: 'trace search failed' });
   }
 });
 
 // Point a trace pane at a source (used by the "Trace" button on a session row).
 // Creating the pane goes through the normal POST /api/sessions with cli:'trace';
 // this only records what it should show.
-app.put('/api/trace/:id/source', (req, res) => {
+api.put('/api/trace/:id/source', (req, res) => {
   const pane = store.get(req.params.id);
   if (!pane || pane.cli !== 'trace') return res.status(404).json({ error: 'not a trace pane' });
   const b = req.body || {};
@@ -2715,7 +3200,7 @@ app.put('/api/trace/:id/source', (req, res) => {
   res.json({ ok: true, traceSource: { kind, ref } });
 });
 
-app.delete('/api/sessions/:id', async (req, res) => {
+api.delete('/api/sessions/:id', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   // Two guards, answering two different questions, and a session has to satisfy
@@ -2759,19 +3244,19 @@ app.delete('/api/sessions/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/groups', (req, res) => {
+api.post('/api/groups', (req, res) => {
   const g = groups.create((req.body || {}).name);
   order.prepend(`g:${g.id}`);
   res.status(201).json(g);
 });
 
-app.put('/api/groups/:id', (req, res) => {
+api.put('/api/groups/:id', (req, res) => {
   const existing = groups.get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'not found' });
   res.json(groups.update(existing.id, { ...(req.body || {}) }));
 });
 
-app.delete('/api/groups/:id', (req, res) => {
+api.delete('/api/groups/:id', (req, res) => {
   const g = groups.get(req.params.id);
   if (!g) return res.status(404).json({ error: 'not found' });
   const idx = order.indexOf(`g:${g.id}`);
@@ -2790,7 +3275,7 @@ app.delete('/api/groups/:id', (req, res) => {
 const splitRef = (r) => [r.slice(0, 1), r.slice(2)];
 const removeSessionEverywhere = (sid) => { groups.detachSession(sid); order.drop(`s:${sid}`); };
 
-app.post('/api/move', (req, res) => {
+api.post('/api/move', (req, res) => {
   const { ref, to } = req.body || {};
   if (typeof ref !== 'string' || !to) return res.status(400).json({ error: 'bad request' });
   const [t, id] = splitRef(ref);
@@ -2840,6 +3325,7 @@ app.post('/api/move', (req, res) => {
   res.json({ ok: true });
 });
 
+app.use(apiNotFound);
 // Serve the built frontend with SPA fallback.
 if (fs.existsSync(PUBLIC_DIR)) {
   app.use(express.static(PUBLIC_DIR));
@@ -2849,13 +3335,15 @@ if (fs.existsSync(PUBLIC_DIR)) {
   });
 }
 
+app.use(apiErrorHandler);
 const server = http.createServer(app);
 // Node kills any request still open at requestTimeout (default 300 s), which
 // would cut a remote agent's long poll off mid-wait and look exactly like a
 // flaky proxy. The poll's own `wait` clamp bounds it instead (remote.WAIT_MAX),
 // and every other route here answers in milliseconds.
 server.requestTimeout = 0;
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({ noServer: true });
+server.on('upgrade', terminalUpgrade(wss, requestPolicy));
 // Without these listeners a transport error (client reset, listen failure)
 // throws out of the EventEmitter and crashes the process.
 // A bind failure surfaces on both emitters; the server handler below owns it, so
@@ -2874,29 +3362,40 @@ server.on('error', (e) => {
   }
 });
 
-// Only accept WebSockets from our own page. WS handshakes skip CORS entirely
-// and the browser attaches cookies, so without this check any website could try
-// a cross-site `new WebSocket('wss://<space>/ws')` and reach a shell with the
-// visitor's HF credentials. No Origin header (curl, native clients) is allowed —
-// those carry no ambient browser credentials.
-function originAllowed(origin) {
-  if (!origin) return true;
-  let host;
-  try { host = new URL(origin).hostname; } catch { return false; }
-  if (process.env.SPACE_HOST) return host === process.env.SPACE_HOST;
-  return host === 'localhost' || host === '127.0.0.1'; // local dev
-}
+// Close code for a terminal socket the privacy lock refused or revoked; the
+// reason is `locked:<reason>:<seq>:<boot>` (seq = the lock's transition
+// counter, boot = the server process it belongs to, so a browser can order it
+// against status responses and never across a restart). The frontend must not
+// auto-reconnect on it (the shared status poll reopens the app once the lock
+// clears); an older frontend that does is simply refused again, cheaply,
+// before any attach.
+const LOCKED_CLOSE_CODE = 4003;
 
 wss.on('connection', (ws, req) => {
   ws.on('error', (e) => console.error('[ws error]', e && e.message)); // a client reset must not crash us
-  if (!originAllowed(req.headers.origin)) {
-    ws.close(1008, 'bad origin');
-    return;
-  }
-  if (isPublic()) {
-    try { ws.send('\r\n[locked: this Space is public — make it private to use the terminals]\r\n'); } catch {}
-    ws.close();
-    return;
+  // Privacy lock. Register for revocation BEFORE the admission check so a lock
+  // landing between the two cannot slip past: the transition either finds this
+  // socket in the registry or the check below sees the lock — there is no gap.
+  // Revocation detaches this viewer (the agent keeps running), stops every
+  // later frame in either direction, and closes with LOCKED_CLOSE_CODE.
+  let handle = null;
+  let revoked = false;
+  const detach = () => { const h = handle; handle = null; if (h) h.kill(); };
+  const refuse = (eff) => {
+    revoked = true;
+    detach();
+    try { ws.close(LOCKED_CLOSE_CODE, `locked:${eff.reason}${Number.isFinite(eff.seq) ? `:${eff.seq}${eff.boot ? `:${eff.boot}` : ''}` : ''}`); } catch { try { ws.terminate(); } catch {} }
+    // A client that never answers the close handshake keeps the socket half
+    // open for ws's own 30 s timeout; nothing flows meanwhile (detached, and
+    // every handler checks `revoked`), but do not leave it hanging that long.
+    const hard = setTimeout(() => { try { ws.terminate(); } catch {} }, 2000);
+    if (hard.unref) hard.unref();
+  };
+  const release = admitClient(refuse);
+  ws.on('close', () => { release(); detach(); });
+  {
+    const eff = lockState();
+    if (eff.locked) { release(); refuse(eff); return; }
   }
   const url = new URL(req.url, 'http://localhost');
   const id = url.searchParams.get('session');
@@ -2918,7 +3417,6 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  let handle;
   try {
     handle = attach(session, cols, rows);
   } catch (e) {
@@ -2926,9 +3424,10 @@ wss.on('connection', (ws, req) => {
     ws.close();
     return;
   }
+  if (revoked) { detach(); return; } // the lock landed while attach() ran
 
   handle.onData((d) => {
-    if (ws.readyState !== ws.OPEN) return;
+    if (revoked || ws.readyState !== ws.OPEN) return;
     if (d.length) ws.send(d);
   });
   handle.onExit(() => {
@@ -2943,7 +3442,7 @@ wss.on('connection', (ws, req) => {
   // Watchers still report their preferred size so taking control is immediate.
   // `reset` means an authoritative Ghostty snapshot follows this frame.
   handle.onGrid((cols_, rows_, controller, viewers, reset) => {
-    if (ws.readyState !== ws.OPEN) return;
+    if (revoked || ws.readyState !== ws.OPEN) return;
     try { ws.send(TERM_CTRL + JSON.stringify({ t: 'grid', cols: cols_, rows: rows_, controller, viewers, reset })); } catch {}
   });
 
@@ -2952,6 +3451,7 @@ wss.on('connection', (ws, req) => {
   // restore. Installing the listener afterwards left a small window where the
   // first mobile geometry request was silently lost.
   ws.on('message', (raw) => {
+    if (revoked || !handle) return; // a frame already in flight when the lock landed
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.t === 'i') {
@@ -2979,11 +3479,12 @@ wss.on('connection', (ws, req) => {
     } catch {}
   }
 
-  // Detaching a viewer, NOT stopping the session.
-  ws.on('close', () => handle.kill());
+  // Detaching a viewer, NOT stopping the session: see the 'close' listener above.
 });
 
-generateEnvSkill(loadSecretNotes()); // keep the environment skill current on boot
+// keep the environment skill current on boot — through the same reporting path,
+// so a damaged settings file is a reported derived failure rather than a crash
+refreshEnvSkill();
 
 // Warm ONLY the trace cache in the background (bounded: mtime-cached, tail-
 // capped, yields between files). The usage warmup is deliberately NOT run at
@@ -3008,12 +3509,16 @@ startWatchdog();
 // it judges "recent" with.
 runstate.init();
 setTimeout(() => {
-  // A locked (public) Space serves no terminals, so it starts nothing — but it
-  // still records what's running, so the snapshot stays true for the next boot.
-  const done = isPublic()
-    ? Promise.resolve([])
-    : runstate.reviveOnBoot(loadAmConfig().revive).catch((e) => console.error('[revive]', e && e.message));
-  done.then(() => runstate.startRunstateWatch());
+  // A locked Space serves no terminals, so it starts nothing — but it still
+  // records what's running, so the snapshot stays true for the next boot. The
+  // decision waits for the first (bounded) privacy verdict rather than reading
+  // the fail-closed `checking` state as a reason not to revive.
+  firstVerdict.then(() => {
+    const done = isLocked()
+      ? Promise.resolve([])
+      : runstate.reviveOnBoot(loadAmConfig().revive).catch((e) => console.error('[revive]', e && e.message));
+    done.then(() => runstate.startRunstateWatch());
+  });
 }, 8000);
 
 server.listen(PORT, () => {
@@ -3025,7 +3530,7 @@ server.listen(PORT, () => {
   // of inventing a session that does not exist.
   crons.startScheduler(async (id, trigger) => {
     const response = await fetch(`http://127.0.0.1:${PORT}/api/crons/${encodeURIComponent(id)}/run?trigger=${trigger}`, {
-      method: 'POST', headers: { 'x-am-origin': `cron:${id}` },
+      method: 'POST', headers: { ...REQUEST_HEADERS, 'x-am-origin': `cron:${id}` },
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));

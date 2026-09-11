@@ -15,6 +15,7 @@ import { useTraceWindows, type TraceSource } from '../../lib/traceWindows';
 import { useVirtualRows } from './useVirtualRows';
 import { Rails } from '../Rails';
 import { renderMarkdown } from '../../lib/markdown';
+import FileLinkContent from '../FileLinkContent';
 import type { Exchange, Step } from './exchanges';
 import { agentSpawnsOf, agentStatus, anyLive, canOpenAgent, capRows, railIsLast, fmtClock, fmtDur, fmtTok, oneLine, proseOf, splitExchanges, stepSummary, stepText, stepsOf } from './exchanges';
 import type { AgentSpawn, AgentStatus } from './exchanges';
@@ -152,7 +153,7 @@ function StepRow({ s, q }: { s: Step; q?: string }) {
               emits, so a cut tail cannot leave an open block that swallows the
               rest of the panel — pinned in test/stepMarkdown.test.mjs. */}
           {proseHtml ? (
-            <div className="markdown cs-md" dangerouslySetInnerHTML={{ __html: proseHtml }} />
+            <FileLinkContent className="markdown cs-md" html={proseHtml} />
           ) : null}
           {!!full && !!more && <div className="cs-more mono">…{moreLabel(more)}</div>}
           {s.kind === 'tools' && s.blocks.map((b, i) => (
@@ -210,7 +211,7 @@ function PromptBand({ text, q, queued }: { text: string; q?: string; queued?: bo
   const html = useMemo(() => highlightHtml(renderMarkdown(text, { breaks: true }), q), [text, q]);
   return (
     <div className="cx-prompt">
-      <div className="markdown cx-pmd" dangerouslySetInnerHTML={{ __html: html }} />
+      <FileLinkContent className="markdown cx-pmd" html={html} />
       {/* Read from a queue record rather than a message: it was typed while the
           agent was working. Labelled because those records cannot say whether it
           was then consumed or cancelled — see TraceTurn.queued. It stays a
@@ -425,9 +426,13 @@ function LiveAgents({ rows, sessionId, live, rosterKnown, roster, ancestors }: {
 }
 
 export function ExchangeView({
-  x, n, total, open, onToggle, running, dim, q, baseModel, turns, sessionId, live, roster, ancestors,
+  x, n, total, open, onToggle, running, dim, q, baseModel, turns, sessionId, live, roster, ancestors, answerRef,
 }: {
   x: Exchange;
+  /** Attached to the ANSWER, not the exchange: the unread cursor is cleared by
+   *  seeing the reply, and a visible prompt above a long run of work is not
+   *  that. See useSeenLatest. */
+  answerRef?: (node: HTMLDivElement | null) => void;
   n?: number;            // 1-based position — the viewer numbers turns, a card does not
   total?: number;
   open?: boolean;        // controlled fold of the work
@@ -599,8 +604,8 @@ export function ExchangeView({
           when the agent answered and then kept going, `answerAt` puts it back
           between the two runs of steps instead of under work it predates. */}
       {answerHtml ? (
-        <div className="cx-answer">
-          <div className="markdown cx-md" dangerouslySetInnerHTML={{ __html: answerHtml }} />
+        <div className="cx-answer" ref={answerRef}>
+          <FileLinkContent className="markdown cx-md" html={answerHtml} />
           {!!answerMore && <div className="cx-note mono">…{moreLabel(answerMore)}</div>}
         </div>
       ) : null}

@@ -8,7 +8,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'am-attachments-'));
 process.env.DATA_DIR = root;
 
 const {
-  ATTACHMENT_LIMIT, SESSION_ATTACHMENT_LIMIT, detectImageMime, formatAttachmentDelivery,
+  ATTACHMENT_LIMIT, SESSION_ATTACHMENT_LIMIT, SESSION_ATTACHMENT_COUNT_LIMIT, detectImageMime, formatAttachmentDelivery,
   formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeAttachment, removeSessionAttachments,
   resolveAttachment, resolveAttachments,
 } = await import('../src/attachments.js');
@@ -56,7 +56,7 @@ try {
 
   assert.throws(() => resolveAttachment('other-123abc', stored.id), /not found/);
   assert.throws(() => resolveAttachment('codex-123abc', '../sessions.json'), /not found/);
-  assert.throws(() => resolveAttachments('codex-123abc', Array(6).fill(stored.id)), /at most five/);
+  assert.throws(() => resolveAttachments('codex-123abc', Array(6).fill(stored.id)), /duplicate attachment id/);
 
   const mislabeled = await receive(png, 'codex-123abc', 'image/jpeg', 'wrong.jpg');
   assert.equal(mislabeled.mime, 'image/png');
@@ -134,6 +134,16 @@ try {
     (error) => error.statusCode === 413 && /500 MB/.test(error.message),
   );
 
+  const countDir = path.join(root, 'state', 'attachments', 'count-quota-123abc');
+  fs.mkdirSync(countDir, { recursive: true });
+  for (let index = 0; index < SESSION_ATTACHMENT_COUNT_LIMIT; index += 1) {
+    fs.writeFileSync(path.join(countDir, `att_${index.toString(16).padStart(24, '0')}-tiny.txt`), 'x');
+  }
+  await assert.rejects(
+    receive(Buffer.from('one more'), 'count-quota-123abc', 'text/plain', 'over.txt'),
+    (error) => error.statusCode === 413 && /200 files/.test(error.message),
+  );
+
   const raceQuotaDir = path.join(root, 'state', 'attachments', 'race-quota-123abc');
   fs.mkdirSync(raceQuotaDir, { recursive: true });
   const raceQuotaFile = path.join(raceQuotaDir, 'existing.bin');
@@ -150,6 +160,51 @@ try {
   const concurrent = await Promise.all(Array.from({ length: 4 }, () =>
     receive(png, 'parallel-123abc', 'application/octet-stream', 'parallel.png')));
   assert.equal(new Set(concurrent.map((image) => image.id)).size, concurrent.length);
+
+  // Fifty is an acceptance case, not a new ceiling. Upload more than that
+  // through the real store and resolver, then prove every requested batch keeps
+  // its order all the way into normal harness delivery.
+  const many = await Promise.all(Array.from({ length: 75 }, (_, index) =>
+    receive(Buffer.from(`batch-${String(index).padStart(2, '0')}`), 'batch-123abc',
+      'text/plain', index % 2 ? 'same-name.txt' : `file-${index}.txt`)));
+  assert.equal(new Set(many.map((file) => file.id)).size, 75, 'same display names remain separate stored files');
+  for (const count of [6, 30, 50, 75]) {
+    const requested = many.slice(0, count);
+    const resolved = resolveAttachments('batch-123abc', requested.map((file) => file.id));
+    assert.deepEqual(resolved.map((file) => file.id), requested.map((file) => file.id));
+    const delivered = formatAttachmentDelivery('codex', `Read ${count}`, resolved);
+    let previous = -1;
+    for (const file of resolved) {
+      const at = delivered.indexOf(JSON.stringify(file.path));
+      assert.ok(at > previous, `${count}-file harness delivery lost or reordered ${file.name}`);
+      previous = at;
+    }
+  }
+
+  let activeTotal = 0; let maxTotal = 0;
+  const activeBySession = new Map(); const maxBySession = new Map();
+  const metered = (sessionId, text) => new Readable({
+    read() {
+      if (this.started) return;
+      this.started = true;
+      const active = (activeBySession.get(sessionId) || 0) + 1;
+      activeBySession.set(sessionId, active);
+      maxBySession.set(sessionId, Math.max(maxBySession.get(sessionId) || 0, active));
+      activeTotal += 1; maxTotal = Math.max(maxTotal, activeTotal);
+      setTimeout(() => {
+        this.push(text); this.push(null);
+        activeBySession.set(sessionId, activeBySession.get(sessionId) - 1);
+        activeTotal -= 1;
+      }, 30);
+    },
+  });
+  await Promise.all([
+    receiveAttachment(metered('meter-a', 'a1'), 'meter-a', { fileName: 'a1.txt' }),
+    receiveAttachment(metered('meter-a', 'a2'), 'meter-a', { fileName: 'a2.txt' }),
+    receiveAttachment(metered('meter-b', 'b1'), 'meter-b', { fileName: 'b1.txt' }),
+  ]);
+  assert.equal(maxBySession.get('meter-a'), 1, 'one session streams one quota-checked file at a time');
+  assert.ok(maxTotal >= 2, 'independent sessions stream without sharing one global lock');
 
   const formatted = formatAttachmentDelivery('codex', 'Compare this', [stored]);
   assert.match(formatted, /Compare this/);

@@ -1,3 +1,4 @@
+import { ApiError } from './api-errors.js';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -1910,7 +1911,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   // Nothing to start: a remote agent starts itself, on its own machine. Both
   // callers guard this too; keep the refusal here so no future one can spawn
   // a PTY for a pane that can never use it.
-  if (isRemote(session.cli)) throw new Error('a remote agent runs on its own machine — nothing to start here');
+  if (isRemote(session.cli)) throw new ApiError(409, 'remote-agent', 'a remote agent runs on its own machine — nothing to start here');
   const existing = hosts.get(session.id);
   if (existing) return false;
   if (!ghostty) throw new Error(`libghostty-vt unavailable: ${ghosttyError}`);
@@ -1931,7 +1932,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   const realRoot = fs.realpathSync(WORKSPACES_DIR);
   const realWork = fs.realpathSync(workdir);
   if (realWork !== realRoot && !realWork.startsWith(`${realRoot}${path.sep}`)) {
-    throw new Error(`${folder} resolves to ${realWork}, outside the workspaces root — `
+    throw new ApiError(409, 'invalid-workspace', 'The folder resolves outside the workspaces root — '
       + 'a session has to run inside it. Point the session at a folder in the tree, '
       + 'or copy what you need into one.');
   }
@@ -2137,7 +2138,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
 export function attach(session, cols, rows) {
   ensureRunning(session, cols, rows);
   const host = hosts.get(session.id);
-  if (!host) throw new Error('session failed to start');
+  if (!host) throw new ApiError(409, 'input-not-ready', 'session failed to start');
 
   const sub = {
     onData: () => {},
@@ -2203,7 +2204,7 @@ export function attach(session, cols, rows) {
 /** Type a line into the session's terminal (works with no browser attached). */
 export async function sendInput(id, text, { confirmEcho = false } = {}) {
   const host = hosts.get(id);
-  if (!host || stopping.has(id)) throw new Error('session is not running');
+  if (!host || stopping.has(id)) throw new ApiError(409, 'input-not-ready', 'session is not running');
   host.inputRequired.observeInput();
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
   // the inner newlines as soft line breaks instead of submitting early.
@@ -2222,7 +2223,7 @@ export async function sendInput(id, text, { confirmEcho = false } = {}) {
     let attempt = 0;
     let echoed = false;
     while (Date.now() < deadline && !echoed) {
-      if (hosts.get(id) !== host) throw new Error('session stopped while waiting for input acknowledgement');
+      if (hosts.get(id) !== host) throw new ApiError(409, 'input-not-ready', 'session stopped while waiting for input acknowledgement');
       if (attempt++) {
         host.pty.write('\x15'); // clear any attempt accepted too late to paint
         await new Promise((r) => setTimeout(r, 100));
@@ -2233,7 +2234,7 @@ export async function sendInput(id, text, { confirmEcho = false } = {}) {
       host.pty.write(payload);
       const attemptDeadline = Math.min(deadline, Date.now() + 1200);
       while (Date.now() < attemptDeadline) {
-        if (hosts.get(id) !== host) throw new Error('session stopped while waiting for input acknowledgement');
+        if (hosts.get(id) !== host) throw new ApiError(409, 'input-not-ready', 'session stopped while waiting for input acknowledgement');
         let screen = '';
         try { screen = host.vt.getVisibleText(); } catch {}
         echoed = host.outputSeq > beforeOutput && screen !== beforeScreen
@@ -2242,7 +2243,7 @@ export async function sendInput(id, text, { confirmEcho = false } = {}) {
         await new Promise((r) => setTimeout(r, 50));
       }
     }
-    if (!echoed) throw new Error('session did not acknowledge the input before the timeout — prompt was not submitted');
+    if (!echoed) throw new ApiError(409, 'input-not-ready', 'session did not acknowledge the input before the timeout — prompt was not submitted');
   } else {
     host.pty.write(payload);
   }
@@ -2253,7 +2254,7 @@ export async function sendInput(id, text, { confirmEcho = false } = {}) {
 /** Insert text into a running terminal's composer without submitting it. */
 export function pasteInput(id, text) {
   const host = hosts.get(id);
-  if (!host || stopping.has(id)) throw new Error('session is not running');
+  if (!host || stopping.has(id)) throw new ApiError(409, 'input-not-ready', 'session is not running');
   const value = String(text || '');
   if (!value) return;
   host.inputRequired.observeInput();
@@ -2274,7 +2275,7 @@ export async function waitForInputReady(id, timeoutMs = INPUT_READY_TIMEOUT_MS) 
   const deadline = Date.now() + Math.max(0, timeoutMs);
   while (Date.now() < deadline) {
     const host = hosts.get(id);
-    if (!host) throw new Error('session stopped while waiting for input readiness');
+    if (!host) throw new ApiError(409, 'input-not-ready', 'session stopped while waiting for input readiness');
     const lastActivity = Math.max(host.startedAt || 0, host.lastOutputAt || 0, host.screenChangedAt || 0);
     if (!host.startupHistory && !host.resizeCapture
       && Date.now() - lastActivity >= INPUT_READY_QUIET_MS) return true;

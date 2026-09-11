@@ -1,7 +1,8 @@
-import { Component } from 'react';
+import { Component, lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
+import { requestFromHash } from './lib/fileLinks';
 import './styles.css';
 import './conversation.css';
 
@@ -31,7 +32,21 @@ class Boundary extends Component<{ children: ReactNode }, { err: unknown }> {
 }
 
 // No StrictMode: it double-mounts in dev, which would open duplicate WebSockets.
-createRoot(document.getElementById('root')!).render(<Boundary><App /></Boundary>);
+const FileLinkPage = lazy(() => import('./components/FileLinkPage'));
+function Entry() {
+  const [hash, setHash] = useState(location.hash);
+  useEffect(() => {
+    const changed = () => setHash(location.hash);
+    window.addEventListener('hashchange', changed);
+    return () => window.removeEventListener('hashchange', changed);
+  }, []);
+  // Keep request identity stable while the page renders metadata or copies a URL.
+  const request = useMemo(() => requestFromHash(hash), [hash]);
+  return request
+    ? <Suspense fallback={<div className="fv-empty">Loading file preview…</div>}><FileLinkPage key={hash} request={request} /></Suspense>
+    : <App />;
+}
+createRoot(document.getElementById('root')!).render(<Boundary><Entry /></Boundary>);
 
 // Push notifications ride on this worker (agents message the operator on request).
 if ('serviceWorker' in navigator) {
