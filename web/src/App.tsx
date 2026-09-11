@@ -22,6 +22,7 @@ import { hiddenSessionIds } from './lib/overviewHidden';
 import { paneOwnsBack } from './lib/mobileBack';
 import { isPassive, isRemote, isShareable } from './types';
 import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
+import { createLatestRefresh, observeAppReturns } from './lib/appRefresh';
 
 // `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
 // when the app is embedded cross-origin. Read once: it never changes mid-run,
@@ -399,8 +400,11 @@ export default function App() {
   // treeLoaded gates the selection check below: until the first tree actually
   // arrives, "your agent isn't in this tree" only means the tree is still empty.
   const [treeLoaded, setTreeLoaded] = useState(false);
-  const refresh = useCallback(async () => {
-    try { setTree(await api.getTree()); setTreeLoaded(true); } catch { /* offline */ }
+  const treeRefresh = useRef<ReturnType<typeof createLatestRefresh<Tree>> | null>(null);
+  // Mutations and foreground recovery replace any possibly frozen request.
+  // Ordinary polls use the manager directly below and coalesce instead.
+  const refresh = useCallback((): Promise<Tree | null> => {
+    return treeRefresh.current?.refresh('replace') ?? Promise.resolve(null);
   }, []);
 
   // Hide/unhide a group (or one agent) in the Overview. Optimistic, because the
@@ -417,13 +421,21 @@ export default function App() {
 
   useEffect(() => {
     api.getClis().then(setClis).catch(() => {});
-    refresh();
-    // Skip polling while the tab is hidden; catch up immediately on return.
-    const t = setInterval(() => { if (!document.hidden) refresh(); }, 2500);
-    const onVisible = () => { if (!document.hidden) refresh(); };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVisible); };
-  }, [refresh]);
+    const manager = createLatestRefresh(
+      (signal) => api.getTree(signal),
+      (next) => { setTree(next); setTreeLoaded(true); },
+    );
+    treeRefresh.current = manager;
+    void manager.refresh('replace');
+    // Same cadence and hidden-tab rule as before. Foreground catch-up is shared
+    // with metadata below so visibility/focus/pageshow/online cannot drift.
+    const t = setInterval(() => { if (!document.hidden) void manager.refresh('poll'); }, 2500);
+    return () => {
+      clearInterval(t);
+      if (treeRefresh.current === manager) treeRefresh.current = null;
+      manager.dispose();
+    };
+  }, []);
 
   // Live per-session digests, polled CONTINUOUSLY in the background (not only
   // while the Overview is open) so opening it is instant. Faster cadence when
@@ -435,12 +447,15 @@ export default function App() {
   const [ages, setAges] = useState<Record<string, number>>({});
   const overviewActiveRef = useRef(false);
   overviewActiveRef.current = activeRef === 'overview';
+  const metaRefresh = useRef<ReturnType<typeof createLatestRefresh<Awaited<ReturnType<typeof api.getMeta>>>> | null>(null);
+  const refreshMeta = useCallback(() => {
+    return metaRefresh.current?.refresh('replace') ?? Promise.resolve(null);
+  }, []);
   useEffect(() => {
-    let alive = true;
     let lastPayload = '';
-    const load = () => api.getMeta()
-      .then((r) => {
-        if (!alive) return;
+    const manager = createLatestRefresh(
+      (signal) => api.getMeta(signal),
+      (r) => {
         setMetaReady(true);
         const payload = JSON.stringify(r.sessions);
         if (payload === lastPayload) return;
@@ -449,19 +464,29 @@ export default function App() {
         setAges(Object.fromEntries(r.sessions.map((s) => [
           s.id, Math.max(s.digest?.lastAssistantTs || 0, s.digest?.lastPromptTs || 0),
         ])));
-      })
-      .catch(() => {});
-    load();
+      },
+    );
+    metaRefresh.current = manager;
+    void manager.refresh('replace');
     // One self-scheduling timer whose delay adapts to the active view, so we
     // never tear down / recreate the loop when navigating.
     let t: ReturnType<typeof setTimeout>;
     const tick = () => {
-      if (!document.hidden) load();
+      if (!document.hidden) void manager.refresh('poll');
       t = setTimeout(tick, overviewActiveRef.current ? 1500 : 8000);
     };
     t = setTimeout(tick, 1500);
-    return () => { alive = false; clearTimeout(t); };
+    return () => {
+      clearTimeout(t);
+      if (metaRefresh.current === manager) metaRefresh.current = null;
+      manager.dispose();
+    };
   }, []);
+
+  // Browser returns arrive as different (often clustered) event shapes across
+  // desktop, mobile and bfcache restoration. Refresh both independent resources
+  // once; the reader owns its own equivalent lifecycle and is not touched here.
+  useEffect(() => observeAppReturns(() => Promise.allSettled([refresh(), refreshMeta()])), [refresh, refreshMeta]);
 
   // Archive threshold from the operator config; refresh when settings closes
   // (that's where it's edited).
@@ -724,9 +749,11 @@ export default function App() {
   // leaving you on a single view of a session that has moved.
   const doMove = (ref: string, to: MoveTarget) => api.move(ref, to)
     .then(async () => {
-      const next = await api.getTree().catch(() => null);
-      if (!next) return refresh();
-      setTree(next);
+      const next = await refresh();
+      // Preserve the old post-move fallback: if its first read fails, make one
+      // more ordinary replacement attempt even though there is nothing safe to
+      // navigate against yet.
+      if (!next) return refresh().then(() => undefined);
       const watching = activeRef?.startsWith('s:') ? activeRef.slice(2) : null;
       if (!watching) return undefined;
       const home = next.groups.find((g) => g.sessionIds.includes(watching));
