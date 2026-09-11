@@ -347,6 +347,21 @@ body {
 /* --border-strong is a BORDER token: as text on the page background it lands at
    ~1.4:1 in either theme, i.e. a count nobody can read. */
 .ov-sortn { color: var(--muted); }
+/* Mark all read: a text button on the Unread heading, in the heading's own
+   voice rather than a control bolted beside it. Compact by treatment, not by
+   shrinking the hit area — the padding keeps a comfortable target on touch
+   while the type stays the same size as the label it sits on. */
+.ov-markread {
+  flex: none; background: none; border: none; padding: 4px 6px; margin: -4px -2px -4px 0;
+  font: inherit; font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em;
+  color: var(--accent); cursor: pointer; border-radius: var(--r-sm);
+}
+.ov-markread:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.ov-markread:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ov-markread:disabled { color: var(--muted); cursor: default; }
+/* A batch that did not save says so where it was triggered, and stays until it
+   is retried — there is no toast, because a read receipt is not news. */
+.ov-markerr { color: var(--danger); }
 /* The group an agent is in, when the feed is flat and no capsule says it. Both
    surfaces put it on the name's row, and on both the prefix is context while the
    name is the thing you are looking for — so the group is what gives way.
@@ -1063,6 +1078,13 @@ body {
 .tw-act { flex: none; width: 1.6em; height: 1.3em; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: none; border: none; color: var(--muted); cursor: pointer; opacity: 0; transition: opacity 0.1s ease-out; }
 .tw-act svg { width: 1em; height: 1em; }
 .tree-row:hover .tw-act { opacity: 1; }
+/* …and for the keyboard, which has no hover: a row with the focus, or one of its
+   buttons with the focus, shows its actions. Same rule the sidebar rows use.
+   Without it the buttons were tab stops at opacity 0 — focus you cannot see. */
+.tree-row:focus-within .tw-act { opacity: 1; }
+/* The row's own focus ring is the app-wide one ([tabindex]:focus-visible), drawn
+   inside the scroller so it is not clipped at the first and last row. */
+.tree-row:focus-visible { outline-offset: -1px; }
 .tw-act:hover { color: var(--accent); }
 .tw-act.danger:hover { color: var(--danger); }
 .tw-act.ghost { pointer-events: none; }
@@ -1239,6 +1261,19 @@ body {
 .fv-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 24px; color: var(--muted); font-size: 13px; text-align: center; }
 .fv-sub { color: var(--muted); font-size: 11.5px; font-family: var(--font-mono); opacity: 0.85; }
 .fv-empty .mini-btn { border: 1px solid var(--border); }
+
+/* A deferred panel's place while its code loads, and where it says so when it
+   cannot. Fills the slot it stands in (tile, settings page, file viewer) so the
+   layout does not jump when the real panel lands. */
+.lazy-panel { flex: 1; min-width: 0; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 24px; color: var(--muted); font-size: 13px; text-align: center; }
+.tile > .lazy-panel { background: var(--panel); border-radius: var(--r-xl); border: 1px solid var(--border); }
+.settings-page > .lazy-panel { min-height: 120px; }
+.lazy-panel.lazy-failed { color: var(--text); }
+.lazy-card { max-width: 380px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.lazy-title { font-weight: 600; font-size: 14px; }
+.lazy-msg { line-height: 1.45; }
+.lazy-failed .lazy-msg { color: var(--muted); }
+.lazy-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 4px; }
 
 .fv-toggles { flex: none; display: inline-flex; align-items: center; gap: 8px; }
 .fv-toggles .seg button { padding: 1px 8px; font-size: 10.5px; }
@@ -1704,13 +1739,19 @@ a.btn-ghost { text-decoration: none; }
 /* wide tables scroll inside their own container, never the page */
 .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .traces-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.traces-table th { text-align: right; font-weight: 500; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.traces-table th { text-align: right; font-weight: 500; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 0; border-bottom: 1px solid var(--border); }
 .traces-table th:first-child { text-align: left; }
+.traces-table .tr-sort { width: 100%; display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; padding: 6px 10px; border: 0; color: inherit; background: transparent; font: inherit; letter-spacing: inherit; text-transform: inherit; white-space: nowrap; cursor: pointer; }
+.traces-table th:first-child .tr-sort { justify-content: flex-start; }
+.traces-table .tr-sort:hover, .traces-table .tr-sort.active { color: var(--text); }
+.traces-table .tr-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.traces-table .tr-sort-arrow { width: 9px; color: var(--accent); font-size: 11px; line-height: 1; }
 .traces-table td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .traces-table tbody tr:hover { background: var(--panel-2); }
 .traces-table .tr-agent { text-align: left; display: flex; align-items: center; gap: 7px; overflow: hidden; }
 .traces-table .tr-agent span { overflow: hidden; text-overflow: ellipsis; }
 .traces-table .tr-when { color: var(--muted); font-size: 11px; }
+.traces-table .tr-empty td { text-align: left; color: var(--muted); font-family: var(--font); }
 .traces-table .tr-total td { font-weight: 600; border-top: 1px solid var(--border-strong); border-bottom: none; }
 .usage-top { display: flex; align-items: center; gap: 8px; }
 .usage-top .spacer { flex: 1; }
