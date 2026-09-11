@@ -1078,6 +1078,13 @@ body {
 .tw-act { flex: none; width: 1.6em; height: 1.3em; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: none; border: none; color: var(--muted); cursor: pointer; opacity: 0; transition: opacity 0.1s ease-out; }
 .tw-act svg { width: 1em; height: 1em; }
 .tree-row:hover .tw-act { opacity: 1; }
+/* …and for the keyboard, which has no hover: a row with the focus, or one of its
+   buttons with the focus, shows its actions. Same rule the sidebar rows use.
+   Without it the buttons were tab stops at opacity 0 — focus you cannot see. */
+.tree-row:focus-within .tw-act { opacity: 1; }
+/* The row's own focus ring is the app-wide one ([tabindex]:focus-visible), drawn
+   inside the scroller so it is not clipped at the first and last row. */
+.tree-row:focus-visible { outline-offset: -1px; }
 .tw-act:hover { color: var(--accent); }
 .tw-act.danger:hover { color: var(--danger); }
 .tw-act.ghost { pointer-events: none; }
