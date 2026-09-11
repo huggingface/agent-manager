@@ -685,11 +685,26 @@ export default function TerminalPane({
     // TUIs paint their bottom input bar first and load the actual content
     // (banner, resumed history) seconds later — only the upper region tells us
     // the pane is genuinely ready. Shell prompts paint at the top anyway.
-    const screenHasContent = () => {
+    let restoring = false;  // a restore frame was seen: the next frame is its snapshot
+    let restored = false;   // and it carried a screen, so this is a reattachment
+    const screenHasContent = (whole = restored) => {
       try {
         const buf = term.buffer.active;
-        const upper = Math.max(2, Math.floor(term.rows * 2 / 3));
-        for (let y = 0; y < upper; y++) {
+        // The upper-region rule is a rule about a harness BOOTING, and it only
+        // applies while we are still waiting to find out what the screen looks
+        // like. Once an authoritative snapshot has been written the screen IS
+        // the answer, wherever its content sits, so the whole screen counts.
+        // Read the upper region after that and a bottom-anchored TUI never
+        // qualifies: the cover sat until the 20-second cap on every switch
+        // (#127, measured at 20.0s against 13ms of actual paint).
+        //
+        // A restore FRAME is not that evidence on its own. attach() calls
+        // ensureRunning() before restore() (server/src/runner.js), so a session
+        // this request just started is sent a restore frame too — carrying an
+        // empty snapshot of a terminal that has painted nothing yet. Its
+        // content is what tells the two apart, and `restored` is set from that.
+        const rows = whole ? term.rows : Math.max(2, Math.floor(term.rows * 2 / 3));
+        for (let y = 0; y < rows; y++) {
           const line = buf.getLine(buf.baseY + y);
           if (line && line.translateToString(true).trim().length >= 2) return true;
         }
@@ -698,11 +713,9 @@ export default function TerminalPane({
     };
     let bootLive = false;
     let bootTimer: ReturnType<typeof setTimeout> | null = null;   // safety cap
-    let bootCheck: ReturnType<typeof setTimeout> | null = null;   // throttled content probe
     const endBoot = () => {
       bootLive = false;
       if (bootTimer) { clearTimeout(bootTimer); bootTimer = null; }
-      if (bootCheck) { clearTimeout(bootCheck); bootCheck = null; }
       setBooting(false);
     };
     const connect = () => {
@@ -712,6 +725,7 @@ export default function TerminalPane({
       // A reconnect keeps the already-rendered xterm visible. On a fresh page,
       // `booting` instead exposes the saved preview until canonical restore has
       // painted real content.
+      restoring = false; restored = false;
       const needsCover = !screenHasContent();
       setBooting(needsCover);
       bootLive = needsCover;
@@ -738,6 +752,7 @@ export default function TerminalPane({
           try {
             const m = JSON.parse(d.slice(MODE_CTRL.length));
             if (m.t === 'grid' || m.t === 'restore') {
+              if (m.t === 'restore') restoring = true;
               controllerRef.current = !!m.controller;
               setHasInputControl(!!m.controller);
               const applyGrid = () => {
@@ -760,6 +775,7 @@ export default function TerminalPane({
                     followingBottom = true;
                   }
                   schedulePreview();
+                  if (bootLive && screenHasContent()) endBoot();
                 } catch { /* ignore */ }
               };
               // Writes are asynchronous. A queued empty write is a barrier so
@@ -772,14 +788,22 @@ export default function TerminalPane({
           } catch { /* ignore */ }
           return;
         }
-        term.write(d, schedulePreview);
-        // Probe shortly after each burst (throttled; write() is async).
-        if (bootLive && !bootCheck) {
-          bootCheck = setTimeout(() => {
-            bootCheck = null;
-            if (bootLive && screenHasContent()) endBoot();
-          }, 150);
-        }
+        // The write callback fires when this data has been parsed onto the
+        // screen, which is exactly the question the cover is waiting on. The
+        // old 150ms probe timer asked it late and kept painted content hidden
+        // for that long on every switch.
+        // One canonical snapshot follows a restore frame. Everything after it is
+        // live output.
+        const canonical = restoring;
+        restoring = false;
+        term.write(d, () => {
+          schedulePreview();
+          // An empty canonical snapshot is a terminal that was just started for
+          // this request, not a screen to trust: stay in cold-boot mode and let
+          // the upper-region rule wait for the harness to paint something real.
+          if (canonical && screenHasContent(true)) restored = true;
+          if (bootLive && screenHasContent()) endBoot();
+        });
       };
       ws.onclose = (e) => {
         // A real process exit: stop here and let the user relaunch. Anything
@@ -976,7 +1000,6 @@ export default function TerminalPane({
       closedByUs = true;
       if (retry) clearTimeout(retry);
       if (bootTimer) clearTimeout(bootTimer);
-      if (bootCheck) clearTimeout(bootCheck);
       if (resyncTimer) clearTimeout(resyncTimer);
       persistPreview();
       ro.disconnect();
