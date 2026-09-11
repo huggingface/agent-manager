@@ -49,6 +49,9 @@ test('jobs persist, stop without deletion, resume from now, and never replay sta
 });
 
 test('run on restart fires once for enabled running jobs, not stopped ones', async () => {
+  // The previous case used a historical clock. Reload at the real startup
+  // time before arming real timers, otherwise its overdue job also fires.
+  crons.init();
   const running = crons.get(crons.list()[0].id);
   assert.equal(running.runOnRestart, true);
   const stopped = crons.create({
