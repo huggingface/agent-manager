@@ -1719,13 +1719,19 @@ a.btn-ghost { text-decoration: none; }
 /* wide tables scroll inside their own container, never the page */
 .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .traces-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.traces-table th { text-align: right; font-weight: 500; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.traces-table th { text-align: right; font-weight: 500; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 0; border-bottom: 1px solid var(--border); }
 .traces-table th:first-child { text-align: left; }
+.traces-table .tr-sort { width: 100%; display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; padding: 6px 10px; border: 0; color: inherit; background: transparent; font: inherit; letter-spacing: inherit; text-transform: inherit; white-space: nowrap; cursor: pointer; }
+.traces-table th:first-child .tr-sort { justify-content: flex-start; }
+.traces-table .tr-sort:hover, .traces-table .tr-sort.active { color: var(--text); }
+.traces-table .tr-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.traces-table .tr-sort-arrow { width: 9px; color: var(--accent); font-size: 11px; line-height: 1; }
 .traces-table td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .traces-table tbody tr:hover { background: var(--panel-2); }
 .traces-table .tr-agent { text-align: left; display: flex; align-items: center; gap: 7px; overflow: hidden; }
 .traces-table .tr-agent span { overflow: hidden; text-overflow: ellipsis; }
 .traces-table .tr-when { color: var(--muted); font-size: 11px; }
+.traces-table .tr-empty td { text-align: left; color: var(--muted); font-family: var(--font); }
 .traces-table .tr-total td { font-weight: 600; border-top: 1px solid var(--border-strong); border-bottom: none; }
 .usage-top { display: flex; align-items: center; gap: 8px; }
 .usage-top .spacer { flex: 1; }
