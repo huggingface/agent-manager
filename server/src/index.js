@@ -348,6 +348,10 @@ const resolveOperationTarget = (req) => {
 app.use(operationMiddleware({
   resolveOrigin: resolveOperationOrigin,
   resolveTarget: resolveOperationTarget,
+  // The same injected-secret catalog shown in Settings, but values stay here.
+  // It is evaluated per record so rotation drops obsolete values immediately;
+  // no workspace, harness credential file, home directory or history is read.
+  getKnownCredentialValues: () => injectedEnvKeys().map((key) => process.env[key]),
   // Test servers explicitly opt out so old endpoint-focused fixtures do not
   // have to pretend to be the operator. Production never sets this switch.
   allowMissing: process.env.AM_ALLOW_MISSING_ORIGIN === '1',
@@ -1146,7 +1150,8 @@ const hfToken = () => process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN
 
 // Env var names that existed at build time (baked in by the Dockerfile). Names
 // present at runtime but NOT here were injected by HF → the Space's secrets and
-// variables. We never read their values, only report the names.
+// variables. Settings reports only their names; operationMiddleware also reads
+// values from this same bounded catalog server-side to filter new audit records.
 const BUILD_ENV_KEYS = (() => {
   try {
     return new Set(fs.readFileSync('/app/build-env-keys.txt', 'utf8').split('\n').map((s) => s.trim()).filter(Boolean));
@@ -1727,8 +1732,11 @@ its headers before resuming, without automatically replaying an uncertain write.
 The manager exposes a small HTTP API on \`localhost:\${AM_PORT:-${PORT}}\`. You are \`$AM_ID\`
 (\`$AM_NAME\` is your display name). Every call that changes something takes
 \`?from=$AM_ID\` so the other agent, and the operator reading the log later, can
-tell who asked. The manager durably records these operations and their outcomes;
-prompt and file contents are hashed rather than copied into the audit log.
+tell who asked. The manager durably records these operations and their outcomes,
+including full non-secret prompt, file and response content. New records apply
+best-effort filtering for recognizable credentials before persistence. The log
+remains sensitive and private: filtering cannot identify every unlabeled secret,
+deleting a source does not delete its audit copy, and older records were not rewritten.
 
 To reconstruct recent manager operations (newest first):
 
