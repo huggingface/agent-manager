@@ -1404,7 +1404,9 @@ function commitSettings(file, value, base) {
 function settingsWriteFailure(file) {
   const relative = path.relative(DATA_DIR, file).split(path.sep).join('/');
   return {
-    error: 'The settings file could not be saved.',
+    // The API error boundary (#134) owns 5xx prose and renders this sentence; the
+    // structured relative path below is the diagnostic it deliberately keeps.
+    error: 'The request could not be completed. Please try again.',
     code: 'internal-error',
     details: [{ field: 'path', message: relative }],
   };
@@ -1505,7 +1507,7 @@ api.put('/api/config', async (req, res) => {
   // but it can write a whole file of defaults, and answering that with 200 would
   // make a malformed request look like a deliberate reset.
   if (typeof b !== 'object' || Array.isArray(b)) {
-    return res.status(400).json({ code: 'invalid', error: 'settings must be an object' });
+    return res.status(400).json({ code: 'invalid-input', error: 'settings must be an object' });
   }
   const cfg = {
     artifacts: {
@@ -2063,7 +2065,7 @@ function readNotesPayload(body) {
 
 api.put('/api/secrets', async (req, res) => {
   const payload = readNotesPayload(req.body);
-  if (payload.error) return res.status(400).json({ code: 'invalid', error: payload.error });
+  if (payload.error) return res.status(400).json({ code: 'invalid-input', error: payload.error });
   const notes = payload.notes;
   // Same contract as /api/config, for the same reason: two tabs describing the
   // same keys must not overwrite each other's descriptions.

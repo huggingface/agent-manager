@@ -144,7 +144,7 @@ try {
       refused.status === 500 && !refused.body?.ok && typeof refused.body?.error === 'string',
       `status ${refused.status} ${JSON.stringify(refused.body).slice(0, 100)}`);
     check('with generic prose and the failed file in the structured diagnostic',
-      refused.body?.error === 'The settings file could not be saved.'
+      refused.body?.error === 'The request could not be completed. Please try again.'
         && refused.body?.code === 'internal-error'
         && refused.body?.details?.some((detail) => detail.field === 'path' && detail.message === 'am-config.json'),
       JSON.stringify(refused.body));
@@ -231,7 +231,7 @@ try {
   const asArray = await api(`/api/secrets?base=${encodeURIComponent(notesRev)}`,
     { method: 'PUT', body: JSON.stringify({ notes: [] }) });
   check('an array is not an object of descriptions, and is refused',
-    asArray.status === 400 && asArray.body?.code === 'invalid',
+    asArray.status === 400 && asArray.body?.code === 'invalid-input',
     `status ${asArray.status} ${JSON.stringify(asArray.body?.error)}`);
   const asNumbers = await api(`/api/secrets?base=${encodeURIComponent(notesRev)}`,
     { method: 'PUT', body: JSON.stringify({ notes: { [PROBE_KEY]: 42 } }) });
