@@ -1131,6 +1131,17 @@ function loadSecretNotes() {
 const AM_CONFIG_FILE = path.join(DATA_DIR, 'am-config.json');
 const spaceNamespace = () => (process.env.SPACE_ID || '').split('/')[0] || '';
 const defaultArtifactsSpace = () => (spaceNamespace() ? `${spaceNamespace()}/agent-artifacts` : '');
+
+// Filesystem exception text and the absolute mount path stay private. The
+// settings client only needs the durable-data-relative filename to say which
+// resource failed.
+function settingsWriteError(file) {
+  const relative = path.relative(DATA_DIR, file).split(path.sep).join('/');
+  return new ApiError(500, 'internal-error', 'The settings file could not be saved.', {
+    details: [{ field: 'path', message: relative }],
+  });
+}
+
 function loadAmConfig() {
   let saved = {};
   try { saved = JSON.parse(fs.readFileSync(AM_CONFIG_FILE, 'utf8')); } catch {}
@@ -1194,7 +1205,11 @@ api.put('/api/config', (req, res) => {
       exclude: backup.excludeFromConfig(b.backup?.exclude),
     },
   };
-  fs.writeFileSync(AM_CONFIG_FILE, JSON.stringify(cfg, null, 2));
+  try {
+    fs.writeFileSync(AM_CONFIG_FILE, JSON.stringify(cfg, null, 2));
+  } catch {
+    throw settingsWriteError(AM_CONFIG_FILE);
+  }
   generateEnvSkill(loadSecretNotes());
   res.json({ ok: true });
 });
@@ -1597,7 +1612,11 @@ ${envLines}
 api.get('/api/secrets', (_req, res) => res.json({ detected: injectedEnvKeys(), notes: loadSecretNotes() }));
 api.put('/api/secrets', (req, res) => {
   const notes = (req.body && req.body.notes && typeof req.body.notes === 'object') ? req.body.notes : {};
-  fs.writeFileSync(SECRET_NOTES_FILE, JSON.stringify(notes, null, 2));
+  try {
+    fs.writeFileSync(SECRET_NOTES_FILE, JSON.stringify(notes, null, 2));
+  } catch {
+    throw settingsWriteError(SECRET_NOTES_FILE);
+  }
   generateEnvSkill(notes);
   res.json({ ok: true });
 });
