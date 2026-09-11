@@ -114,7 +114,11 @@ test('the environment skill regenerates after an interrupted generation, through
   const f = await skillsServer(); t.after(() => f.cleanup()); await f.start();
   // The generated text embeds the jobs cost limit, so a Settings save with a
   // new limit is a generation with genuinely different content.
-  const settings = (askAboveUsd) => fetch(`${f.url}/api/config`, { method: 'PUT', headers: { 'content-type': 'application/json', 'x-am-origin': 'operator' }, body: JSON.stringify({ jobs: { askAboveUsd } }) }).then((r) => r.json());
+  // Replacing stored settings needs the revision being replaced (#123): read it first.
+  const settings = async (askAboveUsd) => {
+    const rev = (await fetch(`${f.url}/api/config`).then((r) => r.json())).rev;
+    return fetch(`${f.url}/api/config${rev ? `?base=${encodeURIComponent(rev)}` : ''}`, { method: 'PUT', headers: { 'content-type': 'application/json', 'x-am-origin': 'operator' }, body: JSON.stringify({ jobs: { askAboveUsd } }) }).then((r) => r.json());
+  };
   const before = (await f.api('environment.md')).body;
   // Boot N: the regeneration triggered by a Settings save fails on one target.
   f.fault({ method: 'renameSync', path: f.target(2, 'environment') });

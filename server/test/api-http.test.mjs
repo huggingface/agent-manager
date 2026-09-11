@@ -51,7 +51,7 @@ fs.writeFileSync(preload, `
   globalThis.fetch = async () => new Response(JSON.stringify({private:process.env.FIXTURE_PUBLIC !== '1',runtime:{volumes:[]}}), {status:200,headers:{'content-type':'application/json'}});
   const write = fs.writeFileSync;
   fs.writeFileSync = (file, ...args) => {
-    if (String(file).endsWith('/am-config.json') && fs.existsSync(process.env.DATA_DIR + '/reject-write')) throw new Error('synthetic-private-data /private/example token_fixture');
+    if (/am-config\.json/.test(String(file)) && fs.existsSync(process.env.DATA_DIR + '/reject-write')) throw new Error('synthetic-private-data /private/example token_fixture');
     return write(file, ...args);
   };
 `);
@@ -89,6 +89,11 @@ const call = async (url, body, method = 'POST', headers = {}) => {
   const r = await fetch(base + url, { method, headers: { 'x-am-origin': 'operator', ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000) });
   return { status: r.status, body: await r.json() };
 };
+// Replacing stored settings needs the revision being replaced (#123): read it first.
+const putConfig = async (body) => {
+  const rev = (await call('/api/config', undefined, 'GET')).body.rev;
+  return call(`/api/config${rev ? `?base=${encodeURIComponent(rev)}` : ''}`, body, 'PUT');
+};
 try {
   await start();
   const initial = await call('/api/tree', undefined, 'GET');
@@ -99,13 +104,13 @@ try {
   const group = (await call('/api/groups', { name: 'fixture group' })).body;
   assert.equal((await call(`/api/groups/${group.id}`, { sessionIds: [id], layout: { cols: 1, rows: 1 } }, 'PUT')).status, 200);
   const patch = await call(`/api/groups/${group.id}`, { layout: null }, 'PUT'); assert.deepEqual(patch.body.sessionIds, [id]); assert.equal(patch.body.layout, undefined);
-  assert.equal((await call('/api/config', { artifacts: { enabled: false }, jobs: { askAboveUsd: 0 }, backup: { exclude: [] } }, 'PUT')).status, 200);
+  assert.equal((await putConfig({ artifacts: { enabled: false }, jobs: { askAboveUsd: 0 }, backup: { exclude: [] } })).status, 200);
   const config = (await call('/api/config', undefined, 'GET')).body; assert.equal(config.artifacts.enabled, false); assert.deepEqual(config.backup.exclude, []);
-  assert.equal((await call('/api/config', {}, 'PUT')).status, 200);
+  assert.equal((await putConfig({})).status, 200);
   assert.equal((await call('/api/config', undefined, 'GET')).body.artifacts.enabled, true, 'PUT still replaces with defaults');
-  assert.equal((await call('/api/config', { artifacts: { enabled: null } }, 'PUT')).status, 400);
+  assert.equal((await putConfig({ artifacts: { enabled: null } })).status, 400);
   fs.writeFileSync(path.join(root, 'data', 'reject-write'), 'fixture');
-  const failedSave = await call('/api/config', {}, 'PUT');
+  const failedSave = await putConfig({});
   assert.equal(failedSave.status, 500); assert.equal(failedSave.body.code, 'internal-error');
   assert.equal(failedSave.body.error, 'The request could not be completed. Please try again.');
   assert.ok(!failedSave.body.error.includes('am-config.json'), 'the filename is not free-text 5xx prose');
