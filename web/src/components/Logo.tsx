@@ -1,7 +1,7 @@
 import { FolderGlyph, ListGlyph, RemoteGlyph } from './icons';
 
 // Black logos invert on the dark theme; white logos invert on the light theme.
-const INVERT_DARK = new Set(['shell', 'opencode']);
+const INVERT_DARK = new Set(['shell', 'opencode', 'fx']);
 const INVERT_LIGHT = new Set(['hermes']);
 
 // A state frame must follow the tile exactly, so expose the two pieces of tile

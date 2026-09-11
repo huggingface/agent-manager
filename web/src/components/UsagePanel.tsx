@@ -182,7 +182,7 @@ export default function UsagePanel() {
 
       <h3>Traces</h3>
       <div className="s-help">
-        Parsed from every agent transcript stored on this Space (Claude, Codex, opencode, Hermes, OpenClaw) —
+        Parsed from every agent transcript stored on this Space (Claude, Codex, opencode, Hermes, OpenClaw, fx) —
         hover the tools count for the breakdown, tokens-in for the cache share. Zero-token session rows are hidden;
         the total still counts traces of deleted agents and all other parsed activity.
       </div>
