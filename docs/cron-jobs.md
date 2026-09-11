@@ -12,7 +12,7 @@ operator origin automatically.
 ## Create and list
 
 ```sh
-curl -sS --fail -X POST \
+curl -sS -H 'X-AM-Request: 1' --fail -X POST \
   "http://localhost:${AM_PORT:-7860}/api/crons?from=$AM_ID" \
   -H 'content-type: application/json' -d '{
     "name": "nightly deploy check",
@@ -30,7 +30,7 @@ daylight-saving transitions. Expressions use exactly the conventional five
 fields: minute, hour, day of month, month, day of week.
 
 ```sh
-curl -s "http://localhost:${AM_PORT:-7860}/api/crons" | jq .crons
+curl -s -H 'X-AM-Request: 1' "http://localhost:${AM_PORT:-7860}/api/crons" | jq .crons
 ```
 
 Each listed job includes:
@@ -64,20 +64,20 @@ overlapping prompts, so claiming task success here would be false.
 
 ```sh
 # Fire outside the schedule. 202 means accepted for delivery.
-curl -sS --fail -X POST \
+curl -sS -H 'X-AM-Request: 1' --fail -X POST \
   "http://localhost:${AM_PORT:-7860}/api/crons/$ID/run?from=$AM_ID"
 
 # Stop keeps the definition and last result, but removes its next occurrence.
-curl -sS --fail -X PUT \
+curl -sS -H 'X-AM-Request: 1' --fail -X PUT \
   "http://localhost:${AM_PORT:-7860}/api/crons/$ID?from=$AM_ID" \
   -H 'content-type: application/json' -d '{"state":"stopped"}'
 
 # Start again. PUT also accepts any of the create fields for editing.
-curl -sS --fail -X PUT \
+curl -sS -H 'X-AM-Request: 1' --fail -X PUT \
   "http://localhost:${AM_PORT:-7860}/api/crons/$ID?from=$AM_ID" \
   -H 'content-type: application/json' -d '{"state":"running"}'
 
-curl -sS --fail -X DELETE \
+curl -sS -H 'X-AM-Request: 1' --fail -X DELETE \
   "http://localhost:${AM_PORT:-7860}/api/crons/$ID?from=$AM_ID"
 ```
 

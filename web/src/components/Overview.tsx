@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import * as api from '../api';
-import type { MetaSession, TraceTurn } from '../api';
+import type { MetaSession, OutputVersion, TraceTurn } from '../api';
 import type { Cli, OverviewChip, OverviewFilter, OverviewSort, Session, SessionState, Tree } from '../types';
 import { chipBuckets, isPassive, isRemote, STATE_LABEL, REMOTE_STATE_LABEL } from '../types';
 import { renderMarkdown } from '../lib/markdown';
 import { rankSessions, sortLabel } from '../lib/overviewSort';
+import { answerMatches, isUnread, markFor } from '../lib/unread';
+import { useSeenLatest } from './useSeenLatest';
 import { matchesOverviewSearch } from '../lib/overviewSearch';
 import { hiddenSessionIds } from '../lib/overviewHidden';
 import type { Rankable } from '../lib/overviewSort';
@@ -134,7 +136,7 @@ const Caret = () => (
  * two, and history grows one turn at a time instead of a stepper that replaced
  * the answer with an older one.
  */
-export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
+export function Card({ s, color, group, pending, isMobile, onOpen, onClose, onSeen }: {
   s: MetaSession;
   color?: string;
   // The group this agent belongs to, when the feed is not already drawing one
@@ -144,6 +146,8 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   isMobile?: boolean;
   onOpen: (sid: string) => void;
   onClose?: () => void; // present when the card lives in the conversation window
+  // Present only where the whole reply is on screen: the expanded window.
+  onSeen?: (marks: (OutputVersion & { id: string })[]) => Promise<boolean> | void;
 }) {
   const d = s.digest;
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -298,6 +302,44 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
   const showAnswer = entry ? !!answerText : (!!answerText && (answerFresh || !running));
   const answerHtml = showAnswer ? renderMarkdown(answerMd || answerText) : '';
 
+  // Reading the expanded conversation is one of the two surfaces that can
+  // acknowledge a reply. Every condition below is a way this card could be
+  // showing something that is NOT the newest reply in full:
+  //
+  //   windowed    — a compact tile or card preview is a summary, not the reply.
+  //   onSeen      — only the expanded window is given the callback at all.
+  //   !entry      — the operator has paged back to an earlier turn.
+  //   showAnswer  — nothing is rendered yet (running, or a just-sent prompt).
+  //   !outClipped — the answer is longer than the card's copy of it, so the
+  //                 tail was never shown. That one is finished in the reader.
+  //
+  // The version acknowledged is `s.output`, which came from the same digest as
+  // the text above it — so the identity always describes the words on screen
+  // rather than whatever the server happens to have parsed since.
+  // Two branches can draw the reply, and each has its own way of not being the
+  // newest one in full:
+  //
+  //   transcript branch — the reader-grade view. It shows the whole answer, so
+  //     the card's clip limit does not apply; it must not be paged back
+  //     (`back > 0` prepends earlier exchanges but `latestX` stays newest, so
+  //     what matters is that the rendered answer IS the version we would claim).
+  //   digest branch     — a summary. It must be the live latest (`!entry`), it
+  //     must actually be rendered, and it must not be the truncated copy of a
+  //     reply longer than the card can hold.
+  const transcriptShown = !!latestX;
+  const answerTexts = transcriptShown
+    ? (latestX.answer || []).flatMap((t) => t.blocks || [])
+      .filter((b) => b.type === 'text').map((b) => (b as { text: string }).text || '')
+    : [];
+  const canSee = !!(windowed && onSeen && s.output && (transcriptShown
+    ? answerMatches(answerTexts, s.output.hash)
+    : (!entry && showAnswer && !d?.outClipped)));
+  const seenRef = useSeenLatest({
+    version: canSee && s.output ? { id: s.id, ...s.output } : null,
+    eligible: canSee,
+    onSeen: onSeen || (() => {}),
+  });
+
   return (
     <div className={`ov-card${windowed ? '' : ' ov-compact'}`}>
       <div className="ov-id" onClick={() => onOpen(s.id)} title="Open pane">
@@ -337,6 +379,11 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
                 open={openWork}
                 onToggle={() => setOpenWork((o) => !o)}
                 running={running && !justSent}
+                // The expanded conversation acknowledges from whichever branch
+                // is actually drawing the reply. Once a real transcript loads,
+                // this is it — the digest fallback below is no longer on screen,
+                // and an observer left only there would stop clearing anything.
+                answerRef={windowed ? (node) => { seenRef.current = node; } : undefined}
               />
             </div>
             {/* Optimistic echo: the digest round-trip can take seconds, and a
@@ -374,7 +421,7 @@ export function Card({ s, color, group, pending, isMobile, onOpen, onClose }: {
               </div>
             )}
             {answerHtml && (
-              <div className="ov-answer-wrap">
+              <div className="ov-answer-wrap" ref={seenRef}>
                 <div className="markdown ov-md" dangerouslySetInnerHTML={{ __html: answerHtml }} />
               </div>
             )}
@@ -538,7 +585,7 @@ export function Tile({ s, color, group, dim, pending, onOpen }: { s: MetaSession
 /** Mission control: one reading column — group capsules with their agents as
  *  slabs, loose agents as standalone panels. Unless a sort is on, in which case
  *  it is one flat ranked column instead (see §"sorted feed" below). */
-export default function Overview({ clis, tree, chip, sort, query, view, archived, showArchived, showHidden, meta, metaReady, isMobile, onOpen }: {
+export default function Overview({ clis, tree, chip, sort, query, view, archived, showArchived, showHidden, meta, metaReady, onSeen, isMobile, onOpen }: {
   clis: Cli[];
   tree: Tree;
   chip: OverviewChip;     // controlled by the bottom bar in App
@@ -553,12 +600,40 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
   showHidden: boolean;
   meta: Record<string, MetaSession>; // continuously polled in App; instant on open
   metaReady: boolean;                // false until the first poll lands
+  // "These replies were shown." Resolves false when nothing was durably
+  // recorded, which is what Mark all read reports as a retryable failure.
+  onSeen: (marks: (OutputVersion & { id: string })[]) => Promise<boolean>;
   isMobile: boolean;
   onOpen: (sid: string) => void;
 }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [durs, setDurs] = useState<Record<string, number>>({});
   const [openId, setOpenId] = useState<string | null>(null); // conversation window
+  // Mark all read: one batch at a time, with the versions captured when it was
+  // clicked. A reply arriving mid-request is not in that batch, so the server
+  // rejects the mark that would have covered it and the card stays unread —
+  // which is the point. Retry deliberately reuses the ORIGINAL capture rather
+  // than rescanning, so a slow request cannot quietly widen what it clears.
+  const [marking, setMarking] = useState(false);
+  const [markFailed, setMarkFailed] = useState<(OutputVersion & { id: string })[] | null>(null);
+  const markAllRead = async (rows: MetaSession[]) => {
+    if (marking) return;
+    const batch = rows.map(markFor).filter(Boolean) as (OutputVersion & { id: string })[];
+    if (!batch.length) return;
+    setMarking(true); setMarkFailed(null);
+    const ok = await onSeen(batch);
+    setMarking(false);
+    // Truthful: nothing is claimed read unless the server said so. On failure
+    // the section stays exactly as it was, with one compact way to try again.
+    if (!ok) setMarkFailed(batch);
+  };
+  const retryMarkRead = async () => {
+    if (marking || !markFailed) return;
+    setMarking(true);
+    const ok = await onSeen(markFailed);
+    setMarking(false);
+    if (ok) setMarkFailed(null);
+  };
   useEffect(() => {
     if (!openId) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpenId(null); };
@@ -642,8 +717,22 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
     // Until the first /api/meta lands every digest is null, which would file the
     // whole fleet under "nothing sent yet" — a labelled claim about agents we
     // know nothing about yet. One unlabelled block until we do.
-    if (!metaReady) return { running: [], dated: items, undated: [] };
-    return rankSessions(items, sort);
+    if (!metaReady) return { running: [], dated: items, undated: [], unread: [] };
+    const ranked = rankSessions(items, sort);
+    // Unread is carved out of the ranked tail, never out of `running`: an agent
+    // still working stays in the block the operator watches while work is in
+    // flight. Its unread state is untouched, so it arrives here the moment it
+    // stops. Carving rather than copying is what keeps a session in exactly one
+    // block — the sort's own order survives inside each.
+    // `atWork`, not the ranking pin: when the chip has already narrowed the feed
+    // to working agents the pin is deliberately switched off (it would empty the
+    // sorted block), and reading that flag here would sweep every running agent
+    // into Unread — where Mark all read would then clear them, against both the
+    // section's rule and the button's own promise.
+    const stillWorking = (r: { m: MetaSession }) => atWork(r.m);
+    const unread = [...ranked.dated, ...ranked.undated].filter((r) => !stillWorking(r) && isUnread(r.m));
+    const keep = (rows: typeof ranked.dated) => rows.filter((r) => stillWorking(r) || !isUnread(r.m));
+    return { running: ranked.running, dated: keep(ranked.dated), undated: keep(ranked.undated), unread };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sorted, sort, tree.order, sessById, groupById, meta, metaReady, chip, archived, showArchived, hiddenIds, showHidden, groupNameOf, query]);
 
@@ -721,6 +810,7 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
     type Row = { id: string; m: MetaSession };
     const blocks = [
       { key: 'running', label: 'running now', rows: sections.running },
+      { key: 'unread', label: 'unread', rows: sections.unread },
       // No label before the first poll answers: `sections` is unranked then.
       { key: 'dated', label: metaReady ? sortLabel(sort) : '', rows: sections.dated },
       { key: 'undated', label: sort === 'prompt' ? 'nothing sent yet' : 'no reply yet', rows: sections.undated },
@@ -739,6 +829,22 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
       if (b.label) out.push(
         <div className="ov-sortlbl mono" key={`lbl:${b.key}`}>
           <span>{b.label}</span><span className="ov-sortrule" /><span className="ov-sortn">{b.rows.length}</span>
+          {b.key === 'unread' && markFailed && (
+            <button className="ov-markread ov-markerr" onClick={() => void retryMarkRead()} disabled={marking}>
+              couldn’t save · retry
+            </button>
+          )}
+          {b.key === 'unread' && !markFailed && (
+            <button
+              className="ov-markread"
+              disabled={marking}
+              // Says what it will and will not touch: this section as it stands,
+              // which is the filtered set on screen — not the running agents
+              // above it, and not anything a filter is currently hiding.
+              title={`Mark the ${b.rows.length} unread ${b.rows.length === 1 ? 'reply' : 'replies'} in this section as read. Running agents and anything the current filters hide are left alone.`}
+              onClick={() => void markAllRead(b.rows.map((r) => r.m))}
+            >{marking ? 'marking…' : 'Mark all read'}</button>
+          )}
         </div>,
       );
       for (const { m } of b.rows as Row[]) {
@@ -761,7 +867,8 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
         {/* The window shows ONE agent on its own — no capsule around it, sorted
             or not — so it names its group the way a pane header does. */}
         <Card s={dataFor(openSess)} color={colorOf[openSess.cli]} group={groupNameOf[openSess.id]}
-          pending={pending(openSess.id)} isMobile={isMobile} onOpen={onOpen} onClose={() => setOpenId(null)} />
+          pending={pending(openSess.id)} isMobile={isMobile} onOpen={onOpen} onClose={() => setOpenId(null)}
+          onSeen={onSeen} />
       </div>
     </div>
   );

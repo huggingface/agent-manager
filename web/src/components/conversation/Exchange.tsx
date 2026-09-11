@@ -426,9 +426,13 @@ function LiveAgents({ rows, sessionId, live, rosterKnown, roster, ancestors }: {
 }
 
 export function ExchangeView({
-  x, n, total, open, onToggle, running, dim, q, baseModel, turns, sessionId, live, roster, ancestors,
+  x, n, total, open, onToggle, running, dim, q, baseModel, turns, sessionId, live, roster, ancestors, answerRef,
 }: {
   x: Exchange;
+  /** Attached to the ANSWER, not the exchange: the unread cursor is cleared by
+   *  seeing the reply, and a visible prompt above a long run of work is not
+   *  that. See useSeenLatest. */
+  answerRef?: (node: HTMLDivElement | null) => void;
   n?: number;            // 1-based position — the viewer numbers turns, a card does not
   total?: number;
   open?: boolean;        // controlled fold of the work
@@ -600,7 +604,7 @@ export function ExchangeView({
           when the agent answered and then kept going, `answerAt` puts it back
           between the two runs of steps instead of under work it predates. */}
       {answerHtml ? (
-        <div className="cx-answer">
+        <div className="cx-answer" ref={answerRef}>
           <FileLinkContent className="markdown cx-md" html={answerHtml} />
           {!!answerMore && <div className="cx-note mono">…{moreLabel(answerMore)}</div>}
         </div>

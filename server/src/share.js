@@ -19,6 +19,7 @@
 //     asking the operator to notice a warning.
 
 import fs from 'node:fs';
+import { ApiError } from './api-errors.js';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -53,7 +54,7 @@ const run = (cmd, args, opts = {}) =>
 
 async function hfApi(pathname, { method = 'GET', body } = {}) {
   const token = hfToken();
-  if (!token) throw new Error('no HF_TOKEN — add it as a Space secret to share sessions');
+  if (!token) throw new ApiError(403, 'no-hf-token', 'no HF_TOKEN — add it as a Space secret to share sessions');
   const r = await fetch(`${HF}${pathname}`, {
     method,
     headers: {
@@ -451,7 +452,7 @@ Traces can still contain local paths and command output. Review before relying o
  */
 export async function buildBundle(session, { title, visibility, allSessions = [] }) {
   const hit = await findTrace(session, allSessions);
-  if (!hit) throw new Error('no transcript on disk for this session yet — run it first');
+  if (!hit) throw new ApiError(409, 'no-transcript', 'no transcript on disk for this session yet — run it first');
 
   // The exporter must be present in the image (Dockerfile copies scripts/).
   // Fail with the actual cause rather than an unparseable-output error.
@@ -496,6 +497,7 @@ export async function buildBundle(session, { title, visibility, allSessions = []
  * @param grantTo          usernames to pre-authorize (gated only)
  */
 export async function shareSession(session, { visibility = 'public', name, grantTo = [], allSessions = [] } = {}) {
+  if (!hfToken()) throw new ApiError(403, 'no-hf-token', 'no HF_TOKEN — add it as a Space secret to share sessions');
   if (!['public', 'gated'].includes(visibility)) throw new Error(`bad visibility: ${visibility}`);
   const ns = await shareNamespace();
   if (!ns) throw new Error('cannot resolve the Hub namespace — check HF_TOKEN');
@@ -548,7 +550,7 @@ export async function shareSession(session, { visibility = 'public', name, grant
         } catch (e) {
           // 400 already-has-access is a success from the caller's point of view.
           if (e.status === 400 && /already/i.test(e.message)) granted.push(user);
-          else grantErrors.push({ user, error: e.message });
+          else grantErrors.push({ user, error: 'Access could not be granted. Check the username and dataset permissions.', code: 'grant-failed' });
         }
       }
     }

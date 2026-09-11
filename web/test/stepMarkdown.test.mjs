@@ -59,7 +59,9 @@ fs.mkdirSync(outDir, { recursive: true });
 const exOut = path.join(outDir, 'exchanges-md.mjs');
 await build({
   entryPoints: [path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/components/conversation/exchanges.ts')],
-  outfile: exOut, format: 'esm', bundle: false, logLevel: 'error',
+// Bundled, not just transpiled: the grouping shares `isOperatorPrompt` with
+// lib/readerModel, which the store counts exchanges with.
+  outfile: exOut, format: 'esm', bundle: true, logLevel: 'error',
 });
 const { proseOf, stepsOf, oneLine } = await import(pathToFileURL(exOut).href);
 

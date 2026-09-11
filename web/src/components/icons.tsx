@@ -150,6 +150,18 @@ export const UpGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+// A drawing pin seen from the side: head, shaft, point. `off` strikes it
+// through, the way every other "undo this" glyph in the set reads — the same
+// mark plus a line, so pinned and unpinned are visibly one control in two
+// states rather than two unrelated icons.
+export const PinGlyph = ({ className, off = false }: { className?: string; off?: boolean }) => (
+  <G className={className}>
+    <path d="M6.1 2.2h3.8M6.9 2.2v3.6L5 8.1v1.1h6V8.1L9.1 5.8V2.2" />
+    <path d="M8 9.2v4.6" />
+    {off && <path d="M2.6 2.6l10.8 10.8" />}
+  </G>
+);
+
 export const BackGlyph = ({ className }: { className?: string }) => (
   <G className={className}>
     <path d="M12.8 8H3.4M7 4.4 3.4 8 7 11.6" />

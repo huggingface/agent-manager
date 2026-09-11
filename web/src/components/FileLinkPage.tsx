@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { FileView, type LinkedFileSource, type ViewInfo } from './FilesPane';
-import FileWrapToggle from './FileWrapToggle';
+import { FileView, FileWrapToggle, type LinkedFileSource, type ViewInfo } from './FilesPane';
 import { fileLinkUrl, fileResourceUrl, resolveFileLink, type FileLinkRequest, type FileLinkTarget } from '../lib/fileLinks';
 import { BackGlyph, CloseGlyph, DownloadGlyph, FileGlyph, RefreshGlyph } from './icons';
 import '../file-links.css';
