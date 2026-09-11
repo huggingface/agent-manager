@@ -127,11 +127,14 @@ try {
   });
   uploading.on('error', () => {});
   uploading.write(Buffer.alloc(1024));
-  for (let i = 0; i < 100 && !fs.existsSync(abortedPath); i++) await new Promise((r) => setTimeout(r, 10));
-  assert.ok(fs.existsSync(abortedPath), 'fixture upload began');
+  // Uploads are staged beside the destination and published whole (#122), so
+  // the destination never exists mid-stream; the staged part file is the trace.
+  const staged = () => fs.readdirSync(path.dirname(abortedPath)).filter((name) => /^\.aborted-fixture\.bin\.am-upload-.*\.part$/.test(name));
+  for (let i = 0; i < 100 && !staged().length; i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(staged().length, 'fixture upload began');
   uploading.destroy();
-  for (let i = 0; i < 100 && fs.existsSync(abortedPath); i++) await new Promise((r) => setTimeout(r, 10));
-  assert.ok(!fs.existsSync(abortedPath), 'interrupted upload is cleaned up');
+  for (let i = 0; i < 100 && (staged().length || fs.existsSync(abortedPath)); i++) await new Promise((r) => setTimeout(r, 10));
+  assert.ok(!staged().length && !fs.existsSync(abortedPath), 'interrupted upload is cleaned up');
   await new Promise((r) => setTimeout(r, 30));
   assert.ok(!logs.includes('[uncaughtException]'), 'disconnect must not escape the request boundary');
   const empty = await fetch(`${base}/api/files/${id}/write?path=fixture.txt`, { method: 'PUT', headers: { 'x-am-origin': 'operator', 'content-type': 'text/plain' }, body: '' });
