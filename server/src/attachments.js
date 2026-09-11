@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { ApiError, statusCode } from './api-errors.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Transform } from 'node:stream';
@@ -61,11 +62,7 @@ const MIME_BY_EXTENSION = Object.freeze({
 const ATTACHMENT_FILE = /^att_[a-f0-9]{24}(?:[-.]|$)/;
 const uploadLocks = new Map();
 
-function httpError(statusCode, message) {
-  const error = new Error(message);
-  error.statusCode = statusCode;
-  return error;
-}
+function httpError(status, message) { return new ApiError(status, statusCode(status), message); }
 
 function sessionDir(sessionId) {
   // Session ids are server-generated slugs. Keep this check here as a second

@@ -1,20 +1,26 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { recall, remember, readWrap, writeWrap } from './filesMemory';
 import type { Session } from '../types';
 import * as api from '../api';
 import { Rails, railPad } from './Rails';
+import { keyIntent, keepInView, survivingFocus, type TreeRow } from '../lib/treeNav';
 import type { FileEntry, FileKind, FilePreview, WorkspaceFileCollision } from '../api';
 import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
 import CodeView from './CodeView';
 import FileWrapToggle from './FileWrapToggle';
 import PdfView from './PdfView';
-import { TraceView, type TraceHeadInfo, type TraceSource } from './TracePane';
+import type { TraceHeadInfo, TraceSource } from '../lib/traceWindows';
+import LazyPanel from './LazyPanel';
 import {
   FolderGlyph, FileGlyph, CloseGlyph, UpGlyph, UploadGlyph, BackGlyph, DownloadGlyph,
   RefreshGlyph, ImageGlyph, CodeGlyph, DocGlyph, GlobeGlyph,
   FolderPlusGlyph, FilePlusGlyph, TrashGlyph, PencilGlyph, MoveGlyph,
 } from './icons';
+
+// The rendered-conversation view of a .jsonl file is the trace pane's code,
+// fetched only when such a file is opened (most Files sessions never do).
+const loadTraceView = () => import('./TracePane');
 
 const fmtSize = (n: number) => {
   if (n < 1024) return `${n} B`;
@@ -100,16 +106,33 @@ const padFor = railPad;
 // One directory listing, fetched once. Used by the pane for the current folder
 // and by every expanded FolderNode, so each level is loaded exactly once.
 function useDir(sessionId: string, path: string, reloadKey: number) {
-  const [state, setState] = useState<{ entries: FileEntry[] | null; err: boolean }>({ entries: null, err: false });
+  const stamp = `${sessionId}\u0000${path}\u0000${reloadKey}`;
+  const [state, setState] = useState<{ for: string | null; entries: FileEntry[] | null; err: boolean }>(
+    { for: null, entries: null, err: false });
   useEffect(() => {
     let alive = true;
-    setState({ entries: null, err: false });
+    setState({ for: null, entries: null, err: false });
     api.listFiles(sessionId, path)
-      .then((r) => { if (alive) setState({ entries: r.entries, err: false }); })
-      .catch(() => { if (alive) setState({ entries: null, err: true }); });
+      .then((r) => { if (alive) setState({ for: stamp, entries: r.entries, err: false }); })
+      .catch(() => { if (alive) setState({ for: stamp, entries: null, err: true }); });
     return () => { alive = false; };
   }, [sessionId, path, reloadKey]);
-  return state;
+  // WHICH READ THESE ENTRIES CAME FROM — the folder AND the reload that asked
+  // for them. The state update above lands in an effect, one render after its
+  // inputs changed, so for that one render the previous answer would be drawn as
+  // if it were this one. Two ways that bites, both real:
+  //
+  //   · a new FOLDER draws the old folder's entries against the new path — rows
+  //     called `docs/alpha.txt` for a file that is `alpha.txt` at the root;
+  //   · a RELOAD after a rename or a move draws the listing from before it, so
+  //     the row the operation just created is briefly absent and the row it
+  //     replaced is briefly still there.
+  //
+  // The second one is what put the keyboard on the wrong file: the focus is
+  // asked to follow the renamed entry, that stale frame does not contain it, and
+  // the repair below reasonably concludes the row is gone. A listing that is not
+  // this read's is not a listing yet.
+  return state.for === stamp ? state : { entries: null, err: false };
 }
 
 type RowProps = {
@@ -126,7 +149,33 @@ type RowProps = {
   /** The folder new entries and uploads land in. */
   target: string;
   setTarget: (dir: string) => void;
+  /** Expanded folders, by path — held by the pane so a key and a click agree. */
+  open: ReadonlySet<string>;
+  setOpen: (path: string, on?: boolean) => void;
+  /** The one row that is in the tab order. Focus, not selection: see treeNav. */
+  focusPath: string | null;
+  /** A row took the focus (Tab, a click, a key) — remember which. */
+  onRowFocus: (path: string) => void;
+  /** Ask for the focus to be MOVED to a row, once it is drawn. */
+  requestFocus: (path: string) => void;
 };
+
+// Everything a row needs to be one item of the tree widget: which of the
+// listing's rows carries the tab stop, where it sits in the hierarchy, and a
+// path the pane can find it by again after a re-render reorders everything.
+const rowProps = (
+  path: string, dir: boolean, level: number, pos: number, size: number,
+  focusPath: string | null, onRowFocus: (p: string) => void,
+) => ({
+  role: 'treeitem' as const,
+  'aria-level': level,
+  'aria-posinset': pos,
+  'aria-setsize': size,
+  'data-path': path,
+  'data-dir': dir ? '1' : undefined,
+  tabIndex: focusPath === path ? 0 : -1,
+  onFocus: (e: React.FocusEvent) => { if (e.target === e.currentTarget) onRowFocus(path); },
+});
 
 export interface Moving { path: string; name: string; dir: boolean }
 
@@ -161,6 +210,9 @@ function RenameInput({ init, onCommit, onCancel }: {
       onChange={(e) => setV(e.target.value)}
       onKeyDown={(e) => {
         e.stopPropagation();
+        // An IME sends Enter to accept the candidate it is showing. Committing
+        // the rename on that key would rename the file to half a word.
+        if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
         if (e.key === 'Enter') { e.preventDefault(); finish(true); }
         if (e.key === 'Escape') { e.preventDefault(); done.current = true; onCancel(); }
       }}
@@ -255,13 +307,13 @@ function ConfirmDelete({ name, dir, busy, onYes, onNo }: {
         {dir ? `Delete "${name}" and everything in it?` : `Delete "${name}"?`}
       </span>
       <button className="mini-btn danger" disabled={busy} onClick={onYes}>{busy ? 'Deleting…' : 'Delete'}</button>
-      <button className="mini-btn" disabled={busy} onClick={onNo}>Cancel</button>
+      <button className="mini-btn" data-confirm="cancel" disabled={busy} onClick={onNo}>Cancel</button>
     </span>
   );
 }
 
 // Rows for one already-loaded listing; folders recurse through FolderNode.
-function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, onPreview, selected, onDelete, onRename, renaming, setRenaming, onMove, moving, setMoving, target, setTarget }: RowProps & {
+function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, onPreview, selected, onDelete, onRename, renaming, setRenaming, onMove, moving, setMoving, target, setTarget, open, setOpen, focusPath, onRowFocus, requestFocus }: RowProps & {
   entries: FileEntry[]; path: string;
 }) {
   const arr = sortEntries(entries, sort);
@@ -278,13 +330,21 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
               onOpen={onOpen} onPreview={onPreview} selected={selected} onDelete={onDelete}
               onRename={onRename} renaming={renaming} setRenaming={setRenaming}
               onMove={onMove} moving={moving} setMoving={setMoving} target={target} setTarget={setTarget}
+              open={open} setOpen={setOpen} focusPath={focusPath} onRowFocus={onRowFocus}
+              requestFocus={requestFocus} pos={i + 1} setSize={arr.length}
             />
           );
         }
         const kindNote = e.kind && e.kind !== 'binary' ? `${KIND_LABEL[e.kind]} · ` : '';
+        // Only the focused row's actions are Tab stops. Every row's would mean
+        // four stops per row between the listing and whatever follows it, all of
+        // them invisible until their row is hovered.
+        const act = focusPath === p ? 0 : -1;
         return (
           <div
             key={e.name}
+            {...rowProps(p, false, prefix.length + 1, i + 1, arr.length, focusPath, onRowFocus)}
+            aria-selected={selected === p ? true : undefined}
             className={`tree-row file${selected === p ? ' selected' : ''}${moving?.path === p ? ' moving' : ''}`}
             style={padFor(prefix)}
             draggable={renaming !== p}
@@ -303,32 +363,33 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
               <RenameInput
                 init={e.name}
                 onCommit={(name) => onRename(p, name)}
-                onCancel={() => setRenaming(null)}
+                onCancel={() => { setRenaming(null); requestFocus(p); }}
               />
             ) : <span className="tw-name">{e.name}</span>}
             <span className="tw-size">{fmtSize(e.size)}</span>
             <span className="tw-time">{fmtWhen(e.mtime)}</span>
             <span className="tw-acts">
               <button
-                className="tw-act" title="Download"
+                className="tw-act" tabIndex={act} title="Download" aria-label={`Download ${e.name}`}
                 onClick={(ev) => { ev.stopPropagation(); triggerDownload(api.downloadUrl(sessionId, p), e.name); }}
               >
                 <DownloadGlyph />
               </button>
               <button
-                className="tw-act" title={`Rename ${e.name}`}
+                className="tw-act" tabIndex={act} title={`Rename ${e.name}`} aria-label={`Rename ${e.name}`}
                 onClick={(ev) => { ev.stopPropagation(); setRenaming(p); }}
               >
                 <PencilGlyph />
               </button>
               <button
-                className="tw-act" title={`Move ${e.name} — then pick a folder`}
-                onClick={(ev) => { ev.stopPropagation(); setMoving({ path: p, name: e.name, dir: false }); }}
+                className="tw-act" tabIndex={act} title={`Move ${e.name} — then pick a folder`}
+                aria-label={`Move ${e.name} — then pick a destination folder`}
+                onClick={(ev) => { ev.stopPropagation(); setMoving({ path: p, name: e.name, dir: false }); requestFocus(p); }}
               >
                 <MoveGlyph />
               </button>
               <button
-                className="tw-act danger" title={`Delete ${e.name}`}
+                className="tw-act danger" tabIndex={act} title={`Delete ${e.name}`} aria-label={`Delete ${e.name}`}
                 onClick={(ev) => { ev.stopPropagation(); onDelete(p, e.name, false); }}
               >
                 <TrashGlyph />
@@ -344,21 +405,33 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
 // Lazily-loaded contents of one expanded directory.
 function DirContents({ path, sessionId, prefix, ...rest }: RowProps & { path: string }) {
   const { entries, err } = useDir(sessionId, path, rest.reloadKey);
-  if (err) return <div className="tree-msg" style={padFor(prefix)}>can't read folder</div>;
-  if (!entries) return <div className="tree-msg" style={padFor(prefix)}>…</div>;
-  if (entries.length === 0) return <div className="tree-msg" style={padFor(prefix)}>empty</div>;
+  // Not rows: a folder that is loading, empty or unreadable has nothing to focus,
+  // and offering an empty destination would be a keyboard dead end. They are
+  // announced instead, so the state is readable rather than silent.
+  const here = path.split('/').pop() || path;
+  const msg = (text: string, label?: string) => (
+    <div className="tree-msg" style={padFor(prefix)} role="status" aria-label={label}>{text}</div>
+  );
+  if (err) return msg("can't read folder", `${here} could not be read`);
+  // The visible ellipsis is the listing's own idiom; a reader gets a sentence.
+  if (!entries) return msg('…', `Loading ${here}`);
+  if (entries.length === 0) return msg('empty', `${here} is empty`);
   return <DirRows entries={entries} path={path} sessionId={sessionId} prefix={prefix} {...rest} />;
 }
 
 // A folder row: single click toggles inline expand, double click opens it as the
 // new tree root. A short timer disambiguates the two.
-function FolderNode({ path, name, mtime, isLast, ...rest }: RowProps & {
-  path: string; name: string; mtime: number; isLast: boolean;
+function FolderNode({ path, name, mtime, isLast, pos, setSize, ...rest }: RowProps & {
+  path: string; name: string; mtime: number; isLast: boolean; pos: number; setSize: number;
 }) {
-  const { prefix, onOpen, onDelete, onRename, renaming, setRenaming, onMove, moving, setMoving, target, setTarget } = rest;
-  const [open, setOpen] = useState(false);
+  const {
+    prefix, onOpen, onDelete, onRename, renaming, setRenaming, onMove, moving, setMoving,
+    target, setTarget, open: openSet, setOpen: setOpenPath, focusPath, onRowFocus, requestFocus,
+  } = rest;
+  const open = openSet.has(path);
   const [over, setOver] = useState(false);
   const takes = !!moving && canMoveTo(moving, path);   // would a drop here do anything?
+  const act = focusPath === path ? 0 : -1;            // see the file row
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   const onClick = () => {
@@ -370,7 +443,7 @@ function FolderNode({ path, name, mtime, isLast, ...rest }: RowProps & {
     }
     setTarget(path);                 // new folders, new files and uploads land here
     if (timer.current) return;
-    timer.current = setTimeout(() => { timer.current = null; setOpen((o) => !o); }, 200);
+    timer.current = setTimeout(() => { timer.current = null; setOpenPath(path); }, 200);
   };
   const onDoubleClick = () => {
     if (timer.current) { clearTimeout(timer.current); timer.current = null; }
@@ -379,6 +452,8 @@ function FolderNode({ path, name, mtime, isLast, ...rest }: RowProps & {
   return (
     <>
       <div
+        {...rowProps(path, true, prefix.length + 1, pos, setSize, focusPath, onRowFocus)}
+        aria-expanded={open}
         className={`tree-row folder${target === path ? ' target' : ''}${over && takes ? ' drop' : ''}${moving?.path === path ? ' moving' : ''}`}
         style={padFor(prefix)}
         draggable={renaming !== path}
@@ -405,7 +480,7 @@ function FolderNode({ path, name, mtime, isLast, ...rest }: RowProps & {
           <RenameInput
             init={name}
             onCommit={(next) => onRename(path, next)}
-            onCancel={() => setRenaming(null)}
+            onCancel={() => { setRenaming(null); requestFocus(path); }}
           />
         ) : <span className="tw-name">{name}</span>}
         <span className="tw-size" />
@@ -415,19 +490,21 @@ function FolderNode({ path, name, mtime, isLast, ...rest }: RowProps & {
               sit in the same place on every row */}
           <span className="tw-act ghost" aria-hidden />
           <button
-            className="tw-act" title={`Rename ${name}`}
+            className="tw-act" tabIndex={act} title={`Rename ${name}`} aria-label={`Rename folder ${name}`}
             onClick={(ev) => { ev.stopPropagation(); setRenaming(path); }}
           >
             <PencilGlyph />
           </button>
           <button
-            className="tw-act" title={`Move ${name} — then pick a folder`}
-            onClick={(ev) => { ev.stopPropagation(); setMoving({ path, name, dir: true }); }}
+            className="tw-act" tabIndex={act} title={`Move ${name} — then pick a folder`}
+            aria-label={`Move folder ${name} — then pick a destination folder`}
+            onClick={(ev) => { ev.stopPropagation(); setMoving({ path, name, dir: true }); requestFocus(path); }}
           >
             <MoveGlyph />
           </button>
           <button
-            className="tw-act danger" title={`Delete ${name}`}
+            className="tw-act danger" tabIndex={act} title={`Delete ${name}`}
+            aria-label={`Delete folder ${name} and everything in it`}
             onClick={(ev) => { ev.stopPropagation(); onDelete(path, name, true); }}
           >
             <TrashGlyph />
@@ -689,7 +766,7 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
       // A refused save must NOT drop the text — put it back so the next attempt
       // (or an overwrite) still has it.
       pending.current = job;
-      setConflict(/changed on disk/.test(msg));
+      setConflict((e instanceof api.ApiError && e.code === 'file-changed') || /changed on disk/.test(msg));
       setSaveErr(msg);
       setStatus('error');
       return false;
@@ -830,10 +907,12 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
       // Same two faces as markdown: the rendered conversation, or the JSONL
       // underneath it.
       return raw ? code(shown) : (
-        <TraceView
-          src={traceSrc} srcKey={`file:${sessionId}:${path}`} zoom={zoom} query={traceQuery}
-          onHead={setTraceHead} onNav={(go) => { traceNav.current = go; }}
-        />
+        <LazyPanel load={loadTraceView} what="the trace viewer" render={(m) => (
+          <m.TraceView
+            src={traceSrc} srcKey={`file:${sessionId}:${path}`} zoom={zoom} query={traceQuery}
+            onHead={setTraceHead} onNav={(go) => { traceNav.current = go; }}
+          />
+        )} />
       );
     }
     if (meta.kind === 'text') return code(shown);
@@ -950,8 +1029,53 @@ export default function FilesPane({
   const [pendingReplace, setPendingReplace] = useState<string | null>(null);
   const [replaceBusy, setReplaceBusy] = useState(false);
   const paneRef = useRef<HTMLDivElement | null>(null);
+  // Expanded folders live here rather than in each row, so the keyboard's
+  // expand/collapse and the pointer's click-to-expand are the same fact, and
+  // `aria-expanded` can be read off it.
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  // WHICH ROW OWNS THE KEYBOARD — by path, never by index: a sort or a refresh
+  // reorders the listing under you, and an index would silently mean a different
+  // file. It is the tree's single tab stop and nothing more; opening, moving and
+  // deleting are separate acts, so arrowing over a row changes nothing on disk.
+  const [focusPath, setFocusPath] = useState<string | null>(null);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  // A pending request to MOVE the browser's focus, which is a different question
+  // from which row is the tab stop: only a user action sets one, it expires, and
+  // it is dropped if the operator has since gone to another pane. That is what
+  // keeps a slow directory response from stealing the keyboard.
+  const wantFocus = useRef<{ path: string; until: number } | null>(null);
+  // Set by an operation that is about to remove the focused row, so the repair
+  // below knows the focus was ours to place and not someone else's to keep. A
+  // deadline rather than a flag: opening a folder empties the listing until the
+  // read comes back, so the claim has to outlive a render or two — and then
+  // lapse, rather than waiting to pounce on whatever is drawn next.
+  const claim = useRef(0);
+  const drawn = useRef<string[]>([]);
 
   const dir = useDir(session.id, root, reloadKey);
+
+  const rowEls = () => Array.from(bodyRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') || []);
+  const rowEl = (path: string) => rowEls().find((el) => el.dataset.path === path) || null;
+  const rows = (): TreeRow[] => rowEls().map((el) => ({
+    path: el.dataset.path || '', dir: el.dataset.dir === '1', open: el.getAttribute('aria-expanded') === 'true',
+  }));
+  const requestFocus = useCallback((path: string) => {
+    setFocusPath(path);
+    wantFocus.current = { path, until: Date.now() + 2000 };
+  }, []);
+  const setOpenPath = useCallback((path: string, on?: boolean) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (on ?? !next.has(path)) next.add(path); else next.delete(path);
+      return next;
+    });
+  }, []);
+  // True when the focus is somewhere in this pane right now — asked BEFORE an
+  // operation removes the row that had it, since by the time React has taken the
+  // row away the browser has already parked the focus on <body>.
+  const claimFocus = () => {
+    if (paneRef.current?.contains(document.activeElement)) claim.current = Date.now() + 2000;
+  };
 
   // Coming back to a pane should put you where you left it, not at the top of
   // the workspace — the folder you were in, the file you were reading, and the
@@ -971,6 +1095,49 @@ export default function FilesPane({
     setConfirmClose(false);
     if (viewing) paneRef.current?.focus({ preventScroll: true });
   }, [viewing]);
+
+  // KEEP THE TAB STOP ON A ROW THAT EXISTS. Runs after every render because
+  // every render is a chance the listing changed underneath the focus: renamed,
+  // deleted, moved away, re-sorted, or replaced when the root changed. Only the
+  // tab stop is repaired here; the browser's focus moves only when this pane was
+  // the one holding it.
+  useLayoutEffect(() => {
+    if (viewing || !bodyRef.current) return;
+    const paths = rowEls().map((el) => el.dataset.path || '');
+    // NOTHING DRAWN YET. The folder is still being read, so this is not an answer
+    // about anything: a claim keeps waiting, a pending focus request keeps
+    // waiting, and — the part that bit — the last listing the operator actually
+    // saw stays recorded. Overwriting it with the empty one made the repair
+    // afterwards forget where the missing row had been, and send the focus to
+    // the top of the listing instead of to its neighbour.
+    if (!paths.length) return;
+    const before = drawn.current;
+    drawn.current = paths;
+    if (focusPath && paths.includes(focusPath)) return;   // the claim, if any, keeps until it lapses
+    const mine = Date.now() < claim.current || bodyRef.current.contains(document.activeElement);
+    claim.current = 0;
+    const next = focusPath ? survivingFocus(before, paths, focusPath) : paths[0];
+    if (!next) return;
+    if (mine) requestFocus(next); else setFocusPath(next);
+  });
+
+  // Move the focus to a row that was asked for. Split from the repair above
+  // because the row is often not drawn yet — a rename or a move only lands after
+  // the listing has been read again — so this waits for the render that draws it,
+  // and gives up rather than pouncing on a row that arrives much later.
+  useLayoutEffect(() => {
+    const req = wantFocus.current;
+    const box = bodyRef.current;
+    if (!req || !box || viewing) return;
+    const active = document.activeElement as HTMLElement | null;
+    const elsewhere = active && active !== document.body && !paneRef.current?.contains(active);
+    if (elsewhere || Date.now() > req.until) { wantFocus.current = null; return; }
+    const el = rowEl(req.path);
+    if (!el) return;
+    wantFocus.current = null;
+    el.focus({ preventScroll: true });
+    keepInView(el, box);
+  });
 
   const updateWorkspaceUpload = (key: string, patch: Partial<WorkspaceUpload>) => {
     const next = workspaceUploadsRef.current.map((item) => item.key === key ? { ...item, ...patch } : item);
@@ -1073,6 +1240,10 @@ export default function FilesPane({
   const leaveView = () => {
     if (unsaved) { setConfirmClose(true); return; }
     setConfirmClose(false);
+    // Back to the row the file was opened from — the listing was only hidden, so
+    // its expansion and scroll are still there and this is the last piece of
+    // where you were.
+    if (viewing) requestFocus(viewing);
     setViewing(null);
   };
   useEffect(() => { if (!unsaved) setConfirmClose(false); }, [unsaved]);
@@ -1092,7 +1263,7 @@ export default function FilesPane({
   const saveAndClose = async () => {
     if (!edit) return;
     const ok = await edit.saveNow(!!edit.conflict);
-    if (ok) { setConfirmClose(false); setViewing(null); }
+    if (ok) { setConfirmClose(false); if (viewing) requestFocus(viewing); setViewing(null); }
   };
 
   // Create lands in the folder you are looking at, which is the one the
@@ -1116,9 +1287,10 @@ export default function FilesPane({
   useEffect(() => { setTarget(null); setMoving(null); }, [root]);
 
   const doMove = async (from: string, toDir: string) => {
-    setMoving(null); setActErr(null);
+    setMoving(null); setActErr(null); claimFocus();
     try {
       const { path: next } = await api.moveEntry(session.id, from, toDir);
+      requestFocus(next);          // follow the entry to where it went
       if (viewing === from) setViewing(next);
       else if (viewing && viewing.startsWith(`${from}/`)) setViewing(`${next}${viewing.slice(from.length)}`);
       setReloadKey((k) => k + 1);
@@ -1128,9 +1300,10 @@ export default function FilesPane({
   };
 
   const doRename = async (p: string, name: string) => {
-    setRenaming(null); setActErr(null);
+    setRenaming(null); setActErr(null); claimFocus();
     try {
       const { path: next } = await api.renameEntry(session.id, p, name);
+      requestFocus(next);          // same row, new name
       // Keep the viewer pointed at the same bytes: renaming the open file, or a
       // folder above it, should not close what you were reading.
       if (viewing === p) setViewing(next);
@@ -1143,7 +1316,7 @@ export default function FilesPane({
 
   const doDelete = async () => {
     if (!pendingDel) return;
-    setActing(true); setActErr(null);
+    setActing(true); setActErr(null); claimFocus();
     try {
       await api.deleteEntry(session.id, pendingDel.path);
       // If the open file was the one deleted, leave the viewer rather than
@@ -1158,9 +1331,68 @@ export default function FilesPane({
     }
   };
 
+  // THE LISTING'S KEYS. One handler for every row, on the box they sit in: rows
+  // come and go, and a listener per row would be a listener per row to get wrong.
+  // What each key means is in lib/treeNav.ts; what is here is everything that
+  // depends on what the pane is doing — an armed move, an open confirmation — and
+  // the rule that a key belongs to whatever is focused before it belongs to us.
+  const onTreeKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const el = e.target as HTMLElement;
+    // Composition first: an IME sends Enter to finish a word, and that Enter is
+    // the input's, not ours. Then anything being typed into.
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+    if (el.closest('input, textarea, select, [contenteditable="true"]')) return;
+    if (e.altKey || e.metaKey || e.ctrlKey) return;   // ⌘S and friends belong to the pane
+
+    if (e.key === 'Escape') {
+      // One Escape undoes one pending thing, and closes nothing else. The row it
+      // was about gets the focus back, because that is where the eye is.
+      if (moving) { e.preventDefault(); e.stopPropagation(); const { path } = moving; setMoving(null); requestFocus(path); return; }
+      if (pendingDel && !acting) { e.preventDefault(); e.stopPropagation(); const { path } = pendingDel; setPendingDel(null); requestFocus(path); return; }
+      return;
+    }
+    // A focused action button owns its own Enter and Space; the row must not act
+    // on the same press as well.
+    if (el.closest('button')) return;
+
+    const here = el.closest<HTMLElement>('[role="treeitem"]')?.dataset.path ?? focusPath;
+    const intent = keyIntent(rows(), here ?? null, e.key);
+    if (!intent) return;                     // Tab, typing, anything else: not ours
+    e.preventDefault();
+    e.stopPropagation();                     // and not the other panes' either
+    if (intent.kind === 'focus') { requestFocus(intent.path); return; }
+    if (intent.kind === 'expand' || intent.kind === 'collapse') {
+      setOpenPath(intent.path, intent.kind === 'expand');
+      requestFocus(intent.path);             // expanding does not leave the folder
+      return;
+    }
+    // Enter. While a move is armed the tree is a destination picker, exactly as
+    // it is for the pointer: a folder that can take the entry takes it, a folder
+    // that cannot cancels, and a file is not a destination at all.
+    if (moving) {
+      if (!intent.dir) return;
+      if (canMoveTo(moving, intent.path)) doMove(moving.path, intent.path);
+      else { const { path } = moving; setMoving(null); requestFocus(path); }
+      return;
+    }
+    // Opening a folder replaces every row, so say the focus is ours to place —
+    // asked here, while the row that has it is still on screen.
+    if (intent.dir) { claimFocus(); openDir(intent.path); } else setViewing(intent.path);
+  };
+
   const up = () => setRoot(root.includes('/') ? root.slice(0, root.lastIndexOf('/')) : '');
   const openDir = (p: string) => { setViewing(null); setRoot(p); };
   const crumbs = ['', ...root.split('/').filter(Boolean).map((_, i, arr) => arr.slice(0, i + 1).join('/'))];
+
+  // A confirmation that nobody's keyboard can reach is not a confirmation. It
+  // opens on Cancel, never on Delete: the key that opened it is still going up,
+  // and a Space release landing on a freshly focused Delete would delete the file
+  // with one press. One Tab away is close enough for the answer that is meant to
+  // cost something.
+  useEffect(() => {
+    if (!pendingDel || !paneRef.current?.contains(document.activeElement)) return;
+    paneRef.current.querySelector<HTMLElement>('[data-confirm="cancel"]')?.focus({ preventScroll: true });
+  }, [pendingDel]);
 
   // Folder summary: the numbers that used to be nowhere on screen.
   const stats = useMemo(() => {
@@ -1190,6 +1422,11 @@ export default function FilesPane({
     <div
       className={`slot${focused ? ' focused' : ''}`} ref={paneRef} tabIndex={-1}
       onMouseDown={onFocus}
+      // …and the same for the keyboard: tabbing into the listing has to make
+      // this the pane the app considers current, or the row you are standing on
+      // is in one pane while the app's shortcuts are pointed at another. React's
+      // onFocus is focusin, so it fires for anything inside the pane.
+      onFocus={onFocus}
       // Esc anywhere in the pane leaves the preview — the handler sits on the
       // pane, not on the viewer, so it still fires after a click on a toggle in
       // the info strip moved focus out of the body.
@@ -1212,7 +1449,7 @@ export default function FilesPane({
         <Logo cli="files" size={16} tint="#d99a2b" />
         {viewing ? (
           <>
-            <button className="mini-btn" title="Back to files (Esc)" onClick={leaveView}><BackGlyph /></button>
+            <button className="mini-btn" title="Back to files (Esc)" aria-label="Back to files" onClick={leaveView}><BackGlyph /></button>
             <span className="fv-title" title={viewing}>
               <KindGlyph name={name} kind={meta?.kind} className="tw-ico" />
               <span className="fv-name">{name}</span>
@@ -1221,13 +1458,16 @@ export default function FilesPane({
               )}
             </span>
             <span className="spacer" />
-            <button className="mini-btn" title="Download" onClick={() => triggerDownload(api.downloadUrl(session.id, viewing), name)}>
+            <button
+              className="mini-btn" title="Download" aria-label={`Download ${name}`}
+              onClick={() => triggerDownload(api.downloadUrl(session.id, viewing), name)}
+            >
               <DownloadGlyph />
             </button>
           </>
         ) : (
           <>
-            <button className="mini-btn" title="Up" disabled={!root} onClick={up}><UpGlyph /></button>
+            <button className="mini-btn" title="Up" aria-label="Up one folder" disabled={!root} onClick={up}><UpGlyph /></button>
             <div className="crumbs">
               {crumbs.map((c, i) => (
                 <span key={c || 'root'}>
@@ -1238,21 +1478,40 @@ export default function FilesPane({
             </div>
             <span className="spacer" />
             <button
-              className="mini-btn" title="New folder here"
+              className="mini-btn" title="New folder here" aria-label={`New folder in ${dest || rootLabel}`}
               onClick={() => { setCreating('folder'); setNewName(''); setActErr(null); }}
             ><FolderPlusGlyph /></button>
             <button
-              className="mini-btn" title="New empty file here"
+              className="mini-btn" title="New empty file here" aria-label={`New file in ${dest || rootLabel}`}
               onClick={() => { setCreating('file'); setNewName(''); setActErr(null); }}
             ><FilePlusGlyph /></button>
-            <button className="mini-btn" title="Refresh" onClick={() => setReloadKey((k) => k + 1)}><RefreshGlyph /></button>
-            <label className={`mini-btn upload-btn${busy ? ' disabled' : ''}`} title={busy ? 'Current upload batch is still running' : 'Upload files'}>
+            <button
+              className="mini-btn" title="Refresh" aria-label="Refresh the listing"
+              onClick={() => setReloadKey((k) => k + 1)}
+            ><RefreshGlyph /></button>
+            {/* A <label> around a hidden <input type=file> is clickable and
+                nothing else: the input cannot be tabbed to (it is hidden) and a
+                label is not a control, so the picker had no keyboard at all.
+                Made a button in its own right, opening the same picker. */}
+            <label
+              className={`mini-btn upload-btn${busy ? ' disabled' : ''}`}
+              title={busy ? 'Current upload batch is still running' : 'Upload files'}
+              role="button" tabIndex={0} aria-label="Upload files" aria-disabled={busy || undefined}
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                e.currentTarget.querySelector<HTMLInputElement>('input[type=file]')?.click();
+              }}
+            >
               <UploadGlyph /> Upload
               <input type="file" multiple hidden disabled={busy} onChange={(e) => { if (e.target.files) upload(e.target.files); e.target.value = ''; }} />
             </label>
           </>
         )}
-        <button className="mini-btn ph-close" title="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
+        <button
+          className="mini-btn ph-close" title="Close" aria-label="Close the files pane"
+          onClick={(e) => { e.stopPropagation(); onClose(); }}
+        ><CloseGlyph /></button>
       </div>
 
       {/* Info strip: where you are, or what you're looking at. */}
@@ -1360,7 +1619,15 @@ export default function FilesPane({
 
       {/* The tree stays mounted while a preview is open, so going back lands on
           the same expanded folders and the same scroll position. */}
-      <div className="files-stack" hidden={!!viewing} style={{ fontSize: `${(13 * zoom) / 100}px` }}>
+      {/* The key handler sits on the STACK, not on the listing: the create field,
+          the move bar and the delete confirmation are drawn above the rows, not
+          inside them, and Escape has to reach them from whichever of their
+          buttons has the focus. Everything it does is still about the listing —
+          see onTreeKey, which hands every key back that is not its business. */}
+      <div
+        className="files-stack" hidden={!!viewing} onKeyDown={onTreeKey}
+        style={{ fontSize: `${(13 * zoom) / 100}px` }}
+      >
         {creating && (
           <div className="files-new">
             {creating === 'folder' ? <FolderPlusGlyph className="tw-ico" /> : <FilePlusGlyph className="tw-ico" />}
@@ -1371,6 +1638,7 @@ export default function FilesPane({
               value={newName}
               onChange={(e) => { setNewName(e.target.value); setActErr(null); }}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;   // see RenameInput
                 if (e.key === 'Enter') { e.preventDefault(); create(); }
                 if (e.key === 'Escape') { e.preventDefault(); setCreating(null); setActErr(null); }
               }}
@@ -1391,7 +1659,10 @@ export default function FilesPane({
                 Move here ({root ? root.split('/').pop() : rootLabel})
               </button>
             )}
-            <button className="mini-btn" onClick={() => setMoving(null)}>Cancel</button>
+            <button
+              className="mini-btn"
+              onClick={() => { const { path } = moving; setMoving(null); requestFocus(path); }}
+            >Cancel</button>
           </div>
         )}
         {pendingDel && (
@@ -1399,7 +1670,8 @@ export default function FilesPane({
             <TrashGlyph className="tw-ico" />
             <ConfirmDelete
               name={pendingDel.name} dir={pendingDel.dir} busy={acting}
-              onYes={doDelete} onNo={() => { setPendingDel(null); setActErr(null); }}
+              onYes={doDelete}
+              onNo={() => { setPendingDel(null); setActErr(null); requestFocus(pendingDel.path); }}
             />
           </div>
         )}
@@ -1451,14 +1723,21 @@ export default function FilesPane({
           onSort={(k) => setSort((s) => (s.key === k ? { key: k, desc: !s.desc } : { key: k, desc: k !== 'name' }))}
         />
         <div
+          ref={bodyRef}
           className={`files-body tree${dragOver ? ' drag' : ''}`}
+          role="tree"
+          aria-label={`Files in ${root ? `${rootLabel}/${root}` : rootLabel}`}
+          // With rows on screen the tab stop is one of them; with none — loading,
+          // empty, unreadable — it is the box itself, so Tab still finds the
+          // listing and lands on something that says what it is.
+          tabIndex={dir.entries?.length ? -1 : 0}
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files.length) void upload(e.dataTransfer.files); }}
         >
-          {dir.err && <div className="tree-msg">can't read folder</div>}
-          {!dir.err && !dir.entries && <div className="tree-msg">…</div>}
-          {dir.entries?.length === 0 && <div className="tree-msg">empty</div>}
+          {dir.err && <div className="tree-msg" role="status">can't read folder</div>}
+          {!dir.err && !dir.entries && <div className="tree-msg" role="status" aria-label="Loading files">…</div>}
+          {dir.entries?.length === 0 && <div className="tree-msg" role="status">empty folder</div>}
           {dir.entries && dir.entries.length > 0 && (
             <DirRows
               entries={dir.entries} path={root} sessionId={session.id} prefix={[]} sort={sort}
@@ -1467,6 +1746,8 @@ export default function FilesPane({
               onRename={doRename} renaming={renaming} setRenaming={(p) => { setActErr(null); setRenaming(p); }}
               onMove={doMove} moving={moving} setMoving={(m) => { setActErr(null); setMoving(m); }}
               target={dest} setTarget={setTarget}
+              open={expanded} setOpen={setOpenPath} focusPath={focusPath}
+              onRowFocus={setFocusPath} requestFocus={requestFocus}
             />
           )}
         </div>
@@ -1483,7 +1764,7 @@ export default function FilesPane({
           conflict={!!edit.conflict}
           busy={edit.status === 'saving'}
           onSave={saveAndClose}
-          onDiscard={() => { edit.discard(); setConfirmClose(false); setViewing(null); }}
+          onDiscard={() => { edit.discard(); setConfirmClose(false); requestFocus(viewing); setViewing(null); }}
           onCancel={backToEditing}
         />
       )}
@@ -1499,7 +1780,7 @@ export default function FilesPane({
 
       <div className="files-hint">
         {!viewing
-          ? 'Click a file to preview · click a folder to expand · double-click a folder to open it'
+          ? 'Click a file to preview · double-click a folder to open it · ↑↓ move, → expand, ← collapse, Enter opens, Tab reaches the row\u2019s actions'
           : edit?.status === 'dirty'
               ? 'Unsaved changes — ⌘S or Save'
               : edit?.can

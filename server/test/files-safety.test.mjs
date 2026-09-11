@@ -181,7 +181,7 @@ try {
   fs.symlinkSync(path.join(WORK, 'actual-a'), switcher);
   const switched = await new Promise((resolve, reject) => {
     const request = http.request(`${API}/api/files/${files.id}/upload?path=switcher&name=switched.txt`, {
-      method: 'POST', headers: { 'x-am-origin': 'operator', 'content-type': 'application/octet-stream', 'content-length': 16 },
+      method: 'POST', headers: { 'x-am-origin': 'operator', 'x-am-request': '1', 'content-type': 'application/octet-stream', 'content-length': 16 },
     }, (response) => {
       let text = ''; response.on('data', (chunk) => { text += chunk; });
       response.on('end', () => resolve({ status: response.statusCode, body: JSON.parse(text) }));
