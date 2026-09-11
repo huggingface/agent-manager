@@ -55,7 +55,7 @@ export default function Sidebar({
   onOpenSession: (sessionId: string, groupId?: string) => void;
   onOpenSettings: () => void;
   onNewSession: (name: string, cli: string, path: string, groupId?: string) => void;
-  onNewGroup: (name: string, cart?: { cli: string; count: number }[], path?: string) => void;
+  onNewGroup: (name: string, cart?: { cli: string; count: number }[], path?: string) => void | Promise<void>;
   onRenameGroup: (id: string, name: string) => void;
   onRenameSession: (id: string, name: string) => void;
   onDeleteGroup: (id: string) => void;
@@ -439,10 +439,16 @@ export default function Sidebar({
       setQuickError(error instanceof Error ? error.message : 'could not quickstart the agent');
     } finally { setQuickSending(false); }
   };
-  const submitGroup = () => {
+  const submitGroup = async () => {
+    if (quickSending) return;
     const items = Object.entries(cart).filter(([, n]) => n > 0).map(([cli, count]) => ({ cli, count }));
-    onNewGroup(groupName.trim() || 'Group', items, groupLoc);
-    setGroupName(''); setCart({}); closePanel();
+    setQuickSending(true); setQuickError(null);
+    try {
+      await onNewGroup(groupName.trim() || 'Group', items, groupLoc);
+      setGroupName(''); setCart({}); closePanel();
+    } catch (error) {
+      setQuickError(error instanceof Error ? error.message : 'Could not create the group.');
+    } finally { setQuickSending(false); }
   };
   const startEdit = (ref: string, name: string) => { setEditRef(ref); setEditName(name); };
   const commitEdit = () => {
@@ -922,9 +928,10 @@ export default function Sidebar({
                   })}
                 </div>
                 <div className="widget-actions">
-                  <button className="btn-primary" onClick={submitGroup}>Create group</button>
-                  <button className="btn-ghost" onClick={() => { setCart({}); closePanel(); }}>Cancel</button>
+                  <button className="btn-primary" onClick={submitGroup} disabled={quickSending}>{quickSending ? 'Creating…' : 'Create group'}</button>
+                  <button className="btn-ghost" onClick={() => { setCart({}); closePanel(); }} disabled={quickSending}>Cancel</button>
                 </div>
+                {quickError && <div className="open-trace-err" role="alert">{quickError}</div>}
               </>
             )}
           </div>

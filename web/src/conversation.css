@@ -345,6 +345,12 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    thing. A toolbar left at 10.5px while the conversation grew would be the part
    you zoomed in because you could not read. */
 .cxv { display: flex; flex-direction: column; min-height: 0; font-size: var(--cx-base, 13px); }
+.cxv-windowed { overflow-anchor: none; }
+.cxv-status { min-height: 29px; }
+.cxv-welcome { padding: 28px 8px; color: var(--text); }
+.cxv-welcome p { margin: 8px 0 0; color: var(--muted); font-size: 0.9em; line-height: 1.6; }
+.ca-reader { max-height: min(65vh, 600px); overflow: auto; overflow-anchor: none; overscroll-behavior: contain; }
+.cxv-windowed:focus-visible, .ca-reader:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 
 .cxv-bar {
   /* wraps at ANY width, not behind a media query: a pane is a container, and
@@ -360,7 +366,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    OVERLAYS the conversation instead of pushing it down: opening it must not
    move the text under the reader's thumb. */
 .cxv-bar .cxv-mini {
-  flex: none; min-width: 1.75em; height: 1.75em;
+  flex: none; min-width: max(24px, 1.75em); min-height: 24px; height: 1.75em;
   display: inline-flex; align-items: center; justify-content: center;
   padding: 0 4px; border-radius: var(--r-sm);
 }
@@ -392,7 +398,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    between the last line and the composer's border while the blocks above it are
    12px apart, which reads as one blank line too many at the end of every
    conversation. 12px makes the end of the flow spaced like the flow. */
-.cxv-body { --cx-gutter: 14px; --cx-tail: 12px; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px var(--cx-gutter) var(--cx-tail); }
+.cxv-body { --cx-gutter: 14px; --cx-tail: 12px; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px var(--cx-gutter) var(--cx-tail); display: flex; flex-direction: column; }
 
 /* The scrollbar is invisible until something scrolls, then fades back out.
    `.cxv-scrolling` is put on the node by the reader itself, on every scroll
@@ -434,7 +440,41 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
      delay too, so the bar simply goes rather than lingering. */
   .cxv-body, .cxv-body::-webkit-scrollbar-thumb { transition: none; }
 }
-.cxv-col { display: flex; flex-direction: column; min-width: 0; }
+/* `flex: 1 0 auto` rather than `min-height: 100%`: a percentage resolves
+   against the scroller's CONTENT box, so a full-height column plus the
+   scroller's own padding is taller than the scroller and every short
+   conversation gets 16px of scrollbar it has no content for. */
+.cxv-col { display: flex; flex-direction: column; min-width: 0; flex: 1 0 auto; }
+/* Conversation grows from the BOTTOM while it is shorter than the window.
+ *
+ * The reader opens following the latest message, so once the transcript is
+ * taller than the window a prepended older page moves nothing on screen: the
+ * bottom stays the bottom. Below that height there is no scroll offset to
+ * compensate with, and a top-aligned transcript would be pushed down the screen
+ * by every page of history that arrived after it. Anchoring the rows to the
+ * bottom removes that case instead of trying to correct it, and costs nothing
+ * once the content is tall enough — `auto` margins absorb only free space.
+ * Applied only when there ARE exchanges, so an empty reader keeps its welcome
+ * text where it has always been. */
+.cxv-rows { margin-top: auto; }
+/* Laid out and measured, not painted. `visibility` rather than `display` or
+   `content-visibility` precisely because the rows must still have real boxes:
+   the question being answered while this is on is whether a page of measured
+   conversation exists yet, which an unlaid-out subtree cannot answer. */
+.cxv-preparing { visibility: hidden; }
+/* Whole-conversation results: a list of places, not a second transcript. It
+   sits above the reader's own content and scrolls with it, so there is still
+   exactly one scroll owner. */
+.cxv-scan { display: flex; flex-direction: column; gap: 1px; padding-bottom: 6px; }
+.cxv-hitrow { display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left;
+  padding: 4px 6px; border: 1px solid transparent; border-radius: 3px; background: transparent;
+  color: var(--text); font: inherit; cursor: pointer; }
+.cxv-hitrow:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.cxv-hitrow:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.cxv-hitrow.on { border-color: var(--accent); }
+.cxv-hitwho { flex: none; color: var(--muted); font-size: 0.85em; min-width: 3.2em; }
+.cxv-hittext { flex: 1; min-width: 0; font-size: 0.85em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cxv-hittext mark { background: var(--accent); color: var(--panel); }
 .cxv-msg { font-size: 0.85em; color: var(--muted); padding: 6px 0; }
 /* The line above the oldest loaded exchange. Fixed height on purpose: it sits
    above everything in the column, so a line that grew or vanished when the
@@ -501,7 +541,8 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
    overlay outranking anything the terminal can raise is the belt to that
    brace: a cover winning here does not look like a bug, it looks like the
    reader turning into a terminal. */
-.pane-reader { position: absolute; inset: 0; z-index: 6; display: flex; background: var(--panel); }
+.term-host.reading { display: flex; overflow: clip; min-width: 0; }
+.pane-reader { flex: 1; min-width: 0; min-height: 0; display: flex; overflow: clip; background: var(--panel); }
 .pane-reader > .cxv { flex: 1; min-width: 0; }
 /* The one thing the reader can render that is not inside .cxv — so it reads the
    base itself rather than inheriting a size from it. */

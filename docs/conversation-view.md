@@ -239,16 +239,12 @@ pane with nothing to render (a shell) simply stays a terminal.
   `.markdown` rules are absolute px and would otherwise stay put while the prose grew.
   Spacing does not scale, but anything that lines a column up with a glyph — the prompt's `❯`
   gutter, the step rail, the tool-field labels — is in `em`, or it stops lining up when zoomed.
-- **Nothing of the terminal's may paint over the reader.** Its covers — `restoring last view…`,
-  `starting claude…`, `stopped · output preserved` — sit at `z-index: 4` and were drawn straight
-  over the conversation, so a reconnect turned the reader into a terminal screen with a reader
-  toolbar on top. They are gated off while reading (they belong to the terminal, and the reader
-  is reading a file that does not care whether the PTY is up), and the overlay now outranks
-  anything the terminal can raise.
-- The terminal element stays mounted and connected underneath; the reader draws over it. Toggling
-  must not detach tmux — a reattach costs a repaint and can trip the handoff path
-  (`HANDOFF_CODE`, `TerminalPane.tsx`). **Verify** this before shipping: xterm needs layout to
-  fit, so "cover, don't unmount" is the low-risk option, and a refit on return is required.
+- **Reader and terminal are independent surfaces.** The terminal element and
+  WebSocket are absent in reader mode. Reading cannot start, claim or resize a
+  PTY, and terminal connection covers cannot paint over a transcript. Returning
+  to terminal reconnects to the server's canonical history; local terminal
+  selection/scroll position can reset. See [Reader architecture](reader-architecture.md)
+  for the current lifecycle, transport, rendering and recovery contracts.
 - The reader's toolbar is a second header row, not a squeeze into the first — on a phone the
   first row has no spare width. It carries the reader's **controls**: `▲▼` and the search box.
   There is no "expand everything" — each turn folds itself, and search opens what it needs to.
@@ -309,18 +305,16 @@ pane with nothing to render (a shell) simply stays a terminal.
   has not spoken says so instead of showing zeros — with no Download, since the
   route would answer `no-trace`. When the reader IS mounted it hands its head
   down (`onHead`), so opening the panel there costs no request at all.
-- **Search has to be followable.** Filtering to matching turns is not finding: the term is
-  highlighted wherever it lands, a turn whose only match is inside its folded work *unfolds it*
-  (and opens the step holding it, body included), the box reports `3/17`, and `▲▼` switch from
-  walking turns to walking hits. With no query, `▲▼` put the next turn's prompt at the top of
-  the reading area — measured against the scroller's rect, not `offsetTop`, which is relative to
-  the nearest positioned ancestor and lands a few rows off.
+- **Search has to be followable.** Search indexes loaded transcript text and
+  explicitly states that scope. Matching work unfolds and visible matches are
+  highlighted; next/previous and Enter/Shift+Enter navigate matching *turns*.
+  Only a measured window of results renders. Navigation changes the reader's
+  own scroll offset, never an ancestor through `scrollIntoView`.
 - Vocabulary: a **turn** is one exchange, a **message** is a raw transcript row. Each turn's meta
   line says `turn 6/13`, so the bar counts the same things the reader does.
-- **The terminal must not keep the keyboard** while reader mode covers it. A mounted xterm with focus
-  swallows keystrokes into the agent's TTY, invisibly — and several paths grab focus back (the
-  pane becoming active, the header, the key bar), some of them *after* the mode changes, so the
-  guard belongs at each call rather than at the switch.
+- **The composer is independent of transcript readiness.** Loading, empty,
+  failed and ready readers all accept a draft and first prompt. No hidden xterm
+  is mounted to intercept its keyboard input.
 - **A failed refresh must not blank the conversation.** The poll's error is a strip above the
   turns, not a replacement for them: this mount answers `EIO` now and then, and going stale for
   three seconds beats losing your place mid-read.

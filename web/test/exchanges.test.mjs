@@ -6,8 +6,11 @@
 // that came after it), and mid-task the last message was promoted to the answer
 // slot (so an agent's aside read as its reply, in the wrong place).
 //
-// No test runner: esbuild is already here for vite, so the module is transpiled
-// and imported directly. Run with:  node test/exchanges.test.mjs
+// No test runner: esbuild is already here for vite, so the module is bundled
+// and imported directly. Bundled rather than transpiled because the grouping
+// shares `isOperatorPrompt` with lib/readerModel, which the store counts
+// exchanges with — one definition, so the two cannot disagree.
+// Run with:  node test/exchanges.test.mjs
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -19,9 +22,19 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'exch-')), 'exchanges.mjs');
 await build({
   entryPoints: [path.join(HERE, '../src/components/conversation/exchanges.ts')],
-  outfile: out, format: 'esm', bundle: false, logLevel: 'error',
+  outfile: out, format: 'esm', bundle: true, logLevel: 'error',
 });
 const { splitExchanges, stepsOf, stepSummary, fmtTok } = await import(pathToFileURL(out).href);
+// The store decides how much history it still owes the reader by counting
+// exchanges, and it cannot import the grouping to do it. `countExchanges` is
+// therefore a second implementation of the same question, and the two agreeing
+// is pinned below rather than assumed.
+const modelOut = path.join(path.dirname(out), 'readerModel.mjs');
+await build({
+  entryPoints: [path.join(HERE, '../src/lib/readerModel.ts')],
+  outfile: modelOut, format: 'esm', bundle: true, logLevel: 'error',
+});
+const { countExchanges } = await import(pathToFileURL(modelOut).href);
 
 let ts = 1_700_000_000_000;
 const at = () => (ts += 30_000);
@@ -212,6 +225,36 @@ const kinds = (steps) => steps.map((s) => (s.kind === 'tools' ? `${s.name}×${s.
   ]);
   assert.match(said(x.answer), /^Only the health-check/);
   assert.equal(x.answerAt, undefined, 'nothing to remember: it is simply last');
+}
+
+// ---------------------------------------------- counting without grouping
+// Every shape in this file, plus the ones that decide the count on their own:
+// a transcript that starts mid-exchange, envelopes that are not prompts, and
+// records that carry no prose at all.
+{
+  const cases = {
+    empty: [],
+    'one prompt': [user('hello')],
+    'answer first': [agent([text('picking up where we left off')], 'final'), user('thanks'), agent([text('ok')], 'final')],
+    'three exchanges': [user('a'), agent([text('1')], 'final'), user('b'), agent([text('2')], 'final'), user('c'), agent([text('3')], 'final')],
+    'tool-heavy single exchange': [user('check it'),
+      agent([call('Read', { file_path: 'a' }), result('a')]),
+      agent([call('Bash', { command: 'ls' }), result('a b')]),
+      agent([text('checked')], 'final')],
+    'envelopes are not prompts': [user('real prompt'),
+      { role: 'user', ts: at(), blocks: [text('<system-reminder>be careful</system-reminder>')] },
+      { role: 'user', ts: at(), blocks: [text('<task-notification> done')] },
+      agent([text('done')], 'final')],
+    'interrupted': [user('go'), { role: 'user', ts: at(), blocks: [text('[Request interrupted by user]')] },
+      user('again'), agent([text('ok')], 'final')],
+    'system only': [{ role: 'system', ts: at(), blocks: [text('compacted')] }],
+    'image prompt': [{ role: 'user', ts: at(), blocks: [{ type: 'image', src: 'data:image/png;base64,AAA' }] },
+      agent([text('a screenshot')], 'final')],
+  };
+  for (const [label, turns] of Object.entries(cases)) {
+    assert.equal(countExchanges(turns), splitExchanges(turns).length,
+      `${label}: counted without grouping matches grouping`);
+  }
 }
 
 // ------------------------------------------------------------- formatting
