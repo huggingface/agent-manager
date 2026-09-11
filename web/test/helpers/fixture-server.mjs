@@ -56,7 +56,7 @@ export async function startFixtureServer({ port, publicDir, tag = 'am-fixture-' 
   const origin = `http://127.0.0.1:${port}`;
   const api = async (p, method = 'GET', body) => {
     const r = await fetch(origin + p, {
-      method, headers: body ? { 'content-type': 'application/json' } : undefined,
+      method, headers: { 'x-am-request': '1', ...(body ? { 'content-type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined,
     });
     if (!r.ok) throw new Error(`${method} ${p} → ${r.status} ${await r.text()}`);

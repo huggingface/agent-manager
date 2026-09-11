@@ -80,7 +80,11 @@ try {
     // The budget from the #133 measurements (697 kB measured, headroom to 720).
     // Reaching it again means a panel grew back into the entry or a new eager
     // import landed there; read the chunk stats before raising it.
-    assert.ok(entry.length <= 720 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 720 kB budget`);
+    // Integration of the fourteen issue PRs (2026-09-09): 730 kB measured with
+    // every panel still in its own chunk and no marker in the entry — the growth
+    // is the unread, reader-history, refresh, admission and lock code that
+    // belongs in the entry. Raised with the same headroom.
+    assert.ok(entry.length <= 760 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 760 kB budget`);
     // One literal only that panel's module contains — a dynamic import that
     // merely wraps an unchanged graph would leave these in the entry.
     for (const [panel, marker] of [
