@@ -635,6 +635,44 @@ export const getTraceWindow = (id: string, req: TraceReq, bytes?: number, min?: 
 export const getTraceSummary = (id: string, signal?: AbortSignal): Promise<TraceSummary> =>
   traceFetch(`/api/trace/${id}?summary=1`, signal);
 
+/** One match, and the window that shows it with its surrounding conversation. */
+export interface TraceHit {
+  id: string | null;
+  role: 'user' | 'assistant' | 'system';
+  ts: number | null;
+  /** Occurrences of the term in this message, which is not the same as hits. */
+  occurrences: number;
+  /** This message's text was clipped by the display cap before being searched. */
+  clipped: boolean;
+  snippet: { text: string; at: number; length: number };
+  window: { at: 'before'; cursor: number; bytes?: number; min?: number };
+}
+export interface TraceSearch {
+  query: string;
+  mode: 'bytes' | 'index';
+  hits: TraceHit[];
+  /** Continue from here, or null when the scan reached the conversation's start. */
+  next: string | null;
+  /** The stated scope was searched to its beginning. Only then is "no matches" true. */
+  complete: boolean;
+  blocked?: boolean;
+  /** Some searched messages were clipped by the display cap, so their tails were not seen. */
+  clipped: boolean;
+  scanned: number;
+  boundary: number;
+  reset?: boolean;
+  generation?: string;
+  revision?: string;
+}
+
+/** Search the whole conversation, not the loaded stretch. Explicit by design:
+ * it reads the transcript, so nothing calls it on a keystroke or on mount. */
+export const searchTraceHistory = (id: string, q: string, cursor?: string | null,
+  generation?: string, signal?: AbortSignal): Promise<TraceSearch> =>
+  traceFetch(`/api/trace/${id}/search?q=${encodeURIComponent(q)}`
+    + `${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+    + `${generation ? `&generation=${encodeURIComponent(generation)}` : ''}`, signal);
+
 export const getFileTraceWindow = (id: string, p: string, req: TraceReq, bytes?: number, min?: number, signal?: AbortSignal): Promise<TraceWindow> =>
   traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&${traceRange(req)}${windowSize(bytes, min)}`, signal);
 

@@ -195,7 +195,12 @@ try {
   const afterSwitch = await anchor();
   assert.equal(afterSwitch.key, beforeSwitch.key, 'returning to a retained reader restores the manually read row');
   assert.ok(Math.abs(afterSwitch.offset-beforeSwitch.offset)<2, 'returning restores the manual pixel offset after measuring rows again');
-  await p.evaluate(() => window.fixture.mount({ id: 'paging-priority', count: 500, from: 490, hangAfter: true }));
+  // `from` has to leave more history loaded than the reader now fetches by
+  // itself: this case is about an explicit Earlier competing with a hung
+  // refresh, and a first window smaller than the automatic recent-history
+  // target would be filled to the beginning before the click, leaving nothing
+  // earlier to page to and no Earlier button to click.
+  await p.evaluate(() => window.fixture.mount({ id: 'paging-priority', count: 500, from: 400, hangAfter: true }));
   await p.getByText('Question 499', { exact: true }).waitFor();
   await p.getByRole('button', { name: 'Refresh transcript', exact: true }).click();
   await p.waitForFunction(() => window.reads.some((r) => r.id === 'paging-priority' && r.req.at === 'after'));

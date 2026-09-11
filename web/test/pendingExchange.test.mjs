@@ -61,7 +61,9 @@ const { formatAttachmentDelivery } = await import(
 const exOut = path.join(outDir, 'exchanges-meta.mjs');
 await build({
   entryPoints: [path.join(HERE, '../src/components/conversation/exchanges.ts')],
-  outfile: exOut, format: 'esm', bundle: false, logLevel: 'error',
+// Bundled, not just transpiled: the grouping shares `isOperatorPrompt` with
+// lib/readerModel, which the store counts exchanges with.
+  outfile: exOut, format: 'esm', bundle: true, logLevel: 'error',
 });
 const { stepSummary, stepsOf: stepsOfEx } = await import(pathToFileURL(exOut).href);
 const stepSummaryOf = (x) => stepSummary(x, stepsOfEx(x.steps));

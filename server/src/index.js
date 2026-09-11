@@ -32,7 +32,7 @@ import {
 // frontend's framing is unchanged.
 const TERM_CTRL = '\x00\x00AM:';
 import { buildUsage } from './usage.js';
-import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, traceHarnessOf, subagentRoster, readSubagentTrace } from './traces.js';
+import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, searchTrace, traceHarnessOf, subagentRoster, readSubagentTrace } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
 import { kindOfName, kindOfFile, mimeOf, readTextHead, TEXT_MAX } from './preview.js';
@@ -2763,6 +2763,41 @@ api.get('/api/trace/:id', async (req, res) => {
       return res.status(404).json({ error: e.message, code: e.code });
     }
     throw e;
+  }
+});
+
+// Search one conversation's whole transcript, as opposed to the stretch the
+// reader has loaded. Registered before /api/trace/:id/source for the same
+// ordering reason as the routes above.
+//
+// Bounded per request and continued with `cursor`; the reader asks for this
+// explicitly, so nothing here runs on a keystroke or on mount.
+api.get('/api/trace/:id/search', async (req, res) => {
+  const pane = store.get(req.params.id);
+  if (!pane) return res.status(404).json({ error: 'not found' });
+  const source = pane.traceSource || { kind: 'session', ref: pane.id };
+  if (source.kind === 'bundle') {
+    return res.status(400).json({ error: 'searching a shared bundle is not supported yet', code: 'unsupported-harness' });
+  }
+  const target = store.get(source.ref);
+  if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
+  const q = typeof req.query.q === 'string' ? req.query.q : '';
+  const cursor = req.query.cursor === undefined ? undefined : Number(req.query.cursor);
+  if (cursor !== undefined && !Number.isFinite(cursor)) {
+    return res.status(400).json({ error: 'bad cursor', code: 'bad-query' });
+  }
+  try {
+    res.json(await searchTrace(target, { q, cursor,
+      limit: Number(req.query.limit) || undefined,
+      generation: typeof req.query.generation === 'string' ? req.query.generation : undefined }));
+  } catch (e) {
+    if (e && e.code === 'bad-query') return res.status(400).json({ error: e.message, code: e.code });
+    if (['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(e && e.code)) {
+      return res.status(404).json({ error: e.message, code: e.code });
+    }
+    // The query itself is never logged: it is conversation content.
+    console.error('[trace search]', e && e.message);
+    res.status(500).json({ error: 'trace search failed' });
   }
 });
 
