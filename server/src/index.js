@@ -2881,7 +2881,7 @@ api.post('/api/sessions/:id/archive', (req, res) => {
 // and saying it clears the pin — keeping both would leave the record asserting
 // "keep this in front of me" and "I am done with this" at once, and the later
 // statement is the true one.
-app.post('/api/sessions/:id/pin', (req, res) => {
+api.post('/api/sessions/:id/pin', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   // The other half of the same invariant groups.js keeps: a member cannot hold
@@ -2896,7 +2896,7 @@ app.post('/api/sessions/:id/pin', (req, res) => {
   res.json(store.update(s.id, { pinnedAt: new Date().toISOString() }));
 });
 
-app.post('/api/sessions/:id/unpin', (req, res) => {
+api.post('/api/sessions/:id/unpin', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   res.json(store.update(s.id, { pinnedAt: undefined }));
@@ -2908,13 +2908,13 @@ app.post('/api/sessions/:id/unpin', (req, res) => {
 // it asked for. Their own `pinnedAt` is untouched: membership is what carries
 // them, so unpinning the group returns every member to the ordinary rules
 // without having to remember which of them was individually pinned.
-app.post('/api/groups/:id/pin', (req, res) => {
+api.post('/api/groups/:id/pin', (req, res) => {
   const g = groups.get(req.params.id);
   if (!g) return res.status(404).json({ error: 'not found' });
   res.json(groups.setPinned(g.id, true));
 });
 
-app.post('/api/groups/:id/unpin', (req, res) => {
+api.post('/api/groups/:id/unpin', (req, res) => {
   const g = groups.get(req.params.id);
   if (!g) return res.status(404).json({ error: 'not found' });
   res.json(groups.setPinned(g.id, false));
