@@ -184,9 +184,15 @@ const settingsWrite = async (route: string, body: unknown, base: string | null) 
     throw new SettingsConflict(payload.error || 'these settings changed elsewhere',
       payload.code || 'stale', payload.rev ?? null, payload.value ?? null);
   }
-  // A refused save has something worth showing next to the setting that did not
-  // save ("could not save settings — ENOSPC"); a bare status would throw it away.
-  if (!r.ok) throw new Error(payload.error || `${r.status}`);
+  if (!r.ok) {
+    const failedPath = Array.isArray(payload.details)
+      ? payload.details.find((detail: any) => detail?.field === 'path' && typeof detail.message === 'string')?.message
+      : null;
+    // 5xx prose is intentionally generic. The relative filename is its safe,
+    // structured diagnostic and tells the operator which settings resource to
+    // inspect without exposing an absolute container path.
+    throw new Error(failedPath ? `${failedPath} could not be saved.` : (payload.error || `${r.status}`));
+  }
   return payload;
 };
 

@@ -30,7 +30,11 @@ export default function SettingsSaveAlert({ onOpen, hidden }: { onOpen: () => vo
       <span>
         {conflicted
           ? `Somebody else changed ${LABEL[kind].toLowerCase()} you were editing.`
-          : `${LABEL[kind]} you changed was not saved${state.unresolved ? ' — the server did not answer' : ''}.`}
+          : state.unresolved
+            ? `${LABEL[kind]} you changed was not saved — the server did not answer.`
+            : state.error
+              ? `${LABEL[kind]} you changed was not saved — ${state.error}`
+              : `${LABEL[kind]} you changed was not saved.`}
       </span>
       <button className="mini-btn" onClick={onOpen}>Open settings</button>
       <button

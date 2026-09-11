@@ -143,8 +143,14 @@ try {
     check('a failed write is answered as a failure, not as ok',
       refused.status === 500 && !refused.body?.ok && typeof refused.body?.error === 'string',
       `status ${refused.status} ${JSON.stringify(refused.body).slice(0, 100)}`);
-    check('with something the operator can read',
-      /could not save settings/.test(refused.body?.error || ''), refused.body?.error);
+    check('with generic prose and the failed file in the structured diagnostic',
+      refused.body?.error === 'The settings file could not be saved.'
+        && refused.body?.code === 'internal-error'
+        && refused.body?.details?.some((detail) => detail.field === 'path' && detail.message === 'am-config.json'),
+      JSON.stringify(refused.body));
+    check('without exposing the absolute data path or filesystem exception',
+      !JSON.stringify(refused.body).includes(DATA_DIR) && !JSON.stringify(refused.body).includes('EACCES'),
+      JSON.stringify(refused.body));
     check('the settings that were there are whole and untouched',
       fs.readFileSync(CONFIG, 'utf8') === before);
     check('and no half-written file is left beside them',
@@ -179,6 +185,20 @@ try {
   check('descriptions save the same way', notesOne.status === 200 && notesOne.body?.notes?.[PROBE_KEY] === 'mark-a'
     && typeof notesOne.body?.rev === 'string');
   check('and land as whole JSON', JSON.parse(fs.readFileSync(NOTES, 'utf8'))[PROBE_KEY] === 'mark-a');
+  if (!isRoot) {
+    const notesBefore = fs.readFileSync(NOTES, 'utf8');
+    fs.chmodSync(NOTES, 0o444);
+    fs.chmodSync(DATA_DIR, 0o555);
+    const refusedNotes = await putNotes({ [PROBE_KEY]: 'must-not-land' }, notesOne.body.rev);
+    fs.chmodSync(DATA_DIR, 0o755);
+    fs.chmodSync(NOTES, 0o644);
+    check('a failed descriptions write names its own relative file',
+      refusedNotes.status === 500
+        && refusedNotes.body?.details?.some((detail) => detail.field === 'path' && detail.message === 'secret-notes.json')
+        && !JSON.stringify(refusedNotes.body).includes(DATA_DIR),
+      JSON.stringify(refusedNotes.body));
+    check('and leaves the descriptions that were there untouched', fs.readFileSync(NOTES, 'utf8') === notesBefore);
+  }
   const staleNotes = await putNotes({ [PROBE_KEY]: 'mark-x' }, 'not-the-revision');
   check('a description written against a revision that has moved on is refused',
     staleNotes.status === 409 && staleNotes.body?.code === 'stale');

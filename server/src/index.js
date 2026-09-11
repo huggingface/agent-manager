@@ -1396,6 +1396,18 @@ function commitSettings(file, value, base) {
   return { rev: revisionOf(raw) };
 }
 
+// Name the settings resource without returning filesystem exception text or an
+// absolute container path. The API error boundary may replace the prose, but it
+// deliberately retains this structured, durable-data-relative diagnostic.
+function settingsWriteFailure(file) {
+  const relative = path.relative(DATA_DIR, file).split(path.sep).join('/');
+  return {
+    error: 'The settings file could not be saved.',
+    code: 'internal-error',
+    details: [{ field: 'path', message: relative }],
+  };
+}
+
 // The revision a save is replacing, sent the way the file editor's save sends
 // its base tag.
 const baseOf = (req) => (typeof req.query.base === 'string' && req.query.base ? req.query.base : null);
@@ -1520,10 +1532,10 @@ api.put('/api/config', async (req, res) => {
   let commit;
   try {
     commit = commitSettings(AM_CONFIG_FILE, cfg, baseOf(req));
-  } catch (e) {
+  } catch {
     // Saying ok here is how a setting silently goes back to what it was on the
     // next load. The client keeps the change and offers Retry instead.
-    return res.status(500).json({ error: `could not save settings — ${String((e && e.message) || e)}` });
+    return res.status(500).json(settingsWriteFailure(AM_CONFIG_FILE));
   }
   if (commit.refused) {
     const body = commit.refused.body;
@@ -2055,8 +2067,8 @@ api.put('/api/secrets', async (req, res) => {
   let commit;
   try {
     commit = commitSettings(SECRET_NOTES_FILE, notes, baseOf(req));
-  } catch (e) {
-    return res.status(500).json({ error: `could not save descriptions — ${String((e && e.message) || e)}` });
+  } catch {
+    return res.status(500).json(settingsWriteFailure(SECRET_NOTES_FILE));
   }
   if (commit.refused) return res.status(commit.refused.status).json(commit.refused.body);
   const skillDistribution = await refreshEnvSkill();
