@@ -35,6 +35,11 @@ window.__net = net;
 const park = (list, payload) => new Promise((resolve, reject) => {
   list.push({ ...payload, at: Date.now(), resolve, reject, settled: false });
 });
+window.__rejectSettingsFile = (kind, index, file) => {
+  const req = net[kind][index];
+  req.settled = true;
+  req.reject(new Error(file + ' could not be saved.'));
+};
 export const previewFile = (_id, p) => Promise.resolve({
   kind: 'text', name: p.replace(/^.*\\//, ''), mime: 'text/plain',
   size: 5, mtime: 1, tag: 'tag-0', text: 'start',
@@ -374,9 +379,13 @@ try {
   await page.getByRole('button', { name: '1 month', exact: true }).click();
   const failing = await waitFor((n) => window.__net.configs.length === n + 1, before, 400);
   check('the change is sent', () => assert.ok(failing, 'nothing was sent'));
-  await settle('configs', before, 'disk is full', 'reject');
+  await page.evaluate(([kind, index, file]) => window.__rejectSettingsFile(kind, index, file),
+    ['configs', before, 'am-config.json']);
+  await page.waitForTimeout(60);
   const flag = await waitFor(() => /not saved/i.test(document.querySelector('.save-flag-err')?.textContent || ''), null, 600);
   check('the failure is on screen', () => assert.ok(flag, 'no failure shown'));
+  const failedFile = await page.evaluate(() => document.querySelector('.save-flag-err')?.textContent || '');
+  check('and names the settings file whose write failed', () => assert.match(failedFile, /am-config\.json could not be saved/));
   const saidSaved = await flagOf('Agent output');
   check('and that setting does not claim to be saved', () => assert.ok(!/saved ✓/.test(saidSaved), saidSaved));
   const neighbour = await flagOf('Secrets');
@@ -676,7 +685,8 @@ try {
   await waitFor((n) => window.__net.configs.length === n + 1, c5, 600);
   await page.evaluate(() => window.__h.setShowSettings(false));
   await page.waitForTimeout(100);
-  await settle('configs', c5, 'disk is full', 'reject');
+  await page.evaluate(([kind, index, file]) => window.__rejectSettingsFile(kind, index, file),
+    ['configs', c5, 'am-config.json']);
   await page.waitForTimeout(150);
   const alert = await page.evaluate(() => {
     const el = document.querySelector('.save-alert');
@@ -684,6 +694,8 @@ try {
   });
   check('a failure that arrives after the panel is closed is reported in the app',
     () => assert.match(alert.text, /was not saved/));
+  check('and still names the settings file outside the panel',
+    () => assert.match(alert.text, /am-config\.json could not be saved/));
   check('with a way back to the setting and a way to send it again',
     () => assert.ok(alert.buttons.includes('Open settings') && alert.buttons.includes('Retry'), alert.buttons.join(',')));
   await page.locator('.save-alert').getByRole('button', { name: 'Retry', exact: true }).click();

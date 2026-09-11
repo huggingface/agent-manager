@@ -41,7 +41,7 @@ function SaveFlag({ kind, onAdopt }: { kind: Kind; onAdopt: (value: any) => void
     }
     return (
       <span className="save-flag save-flag-err" title={state.error || undefined}>
-        {state.unresolved ? 'not confirmed' : 'not saved'}
+        {state.unresolved ? 'not confirmed' : `not saved${state.error ? ` — ${state.error}` : ''}`}
         <button className="save-retry" onClick={() => { void saverFor(kind).retry(); }}>Retry</button>
       </span>
     );

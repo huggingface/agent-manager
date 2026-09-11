@@ -98,6 +98,12 @@ A write that failed is answered as a failure. `{ok:true}` for a write that did
 not happen is how a setting reverts on the next load with nothing on screen to
 say so.
 
+The response keeps its human-facing 5xx text generic and carries the failed
+settings filename in `details: [{field:"path",message}]`. That filename is
+relative to the durable data root (`am-config.json` or `secret-notes.json`), not
+an absolute container path. The browser uses it to name the resource beside
+Retry while retaining the unsaved value.
+
 Every settings save has a finite window for an answer (15s; file writes get
 30s). When it passes, the slot is released — otherwise one request that never
 settles traps every later edit behind it — and the state becomes *not
