@@ -2862,7 +2862,61 @@ api.post('/api/sessions/:id/archive', (req, res) => {
   // see. A remote agent has no process here — its connection is a separate
   // control that stays where it is, so archiving one only files it away.
   if (!isRemote(s.cli) && !PASSIVE_CLIS.includes(s.cli)) stop(s.id);
-  res.json(store.update(s.id, { archivedAt: new Date().toISOString() }));
+  // Archiving a pinned session is allowed and clears the pin: see the pin
+  // routes below for why the two cannot both be true.
+  res.json(store.update(s.id, { archivedAt: new Date().toISOString(), pinnedAt: undefined }));
+});
+
+// ---------- pinning ----------
+//
+// Pinning is stored, like archiving and for the same reason: it is the operator
+// saying something, not the clock reporting something. It does two jobs, and
+// only two — the sidebar keeps pinned things above a rule, and the idle window
+// stops applying to them.
+//
+// What it deliberately does NOT do is stop the operator archiving a pinned
+// session on purpose. Those are the two roads again: the window's verdict is
+// what pinning suppresses; "I am finished with this one" is still theirs to say,
+// and saying it clears the pin — keeping both would leave the record asserting
+// "keep this in front of me" and "I am done with this" at once, and the later
+// statement is the true one.
+api.post('/api/sessions/:id/pin', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  // The other half of the same invariant groups.js keeps: a member cannot hold
+  // a pin. Membership clears one that already exists; this refuses to write a
+  // new one. Without it the API can still park a value on a member that only
+  // becomes visible once the session leaves the group. The sidebar never asks
+  // — it leaves the control off a grouped row — so this answers agents and
+  // direct callers.
+  if (groups.groupOf(s.id)) {
+    return res.status(409).json({ error: 'a session in a group cannot be pinned — pin the group instead' });
+  }
+  res.json(store.update(s.id, { pinnedAt: new Date().toISOString() }));
+});
+
+api.post('/api/sessions/:id/unpin', (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  res.json(store.update(s.id, { pinnedAt: undefined }));
+});
+
+// A group is pinned as a whole. Its members inherit the exemption from the idle
+// window — see docs and the sidebar — because a pinned group whose agents aged
+// out would empty itself and disappear, which is the opposite of what pinning
+// it asked for. Their own `pinnedAt` is untouched: membership is what carries
+// them, so unpinning the group returns every member to the ordinary rules
+// without having to remember which of them was individually pinned.
+api.post('/api/groups/:id/pin', (req, res) => {
+  const g = groups.get(req.params.id);
+  if (!g) return res.status(404).json({ error: 'not found' });
+  res.json(groups.setPinned(g.id, true));
+});
+
+api.post('/api/groups/:id/unpin', (req, res) => {
+  const g = groups.get(req.params.id);
+  if (!g) return res.status(404).json({ error: 'not found' });
+  res.json(groups.setPinned(g.id, false));
 });
 
 // Restore. Deliberately does NOT start the agent again: unarchiving says "I
