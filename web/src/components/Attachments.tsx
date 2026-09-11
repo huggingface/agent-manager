@@ -1,4 +1,4 @@
-import { useId, useRef } from 'react';
+import { useId, useMemo, useRef, useState } from 'react';
 import { attachmentFileError } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
 
@@ -21,44 +21,73 @@ export default function Attachments({ attachments, disabled, disabledReason, sho
   onRetry?: (key: string) => void;
 }) {
   const picker = useRef<HTMLInputElement>(null);
+  const [expanded, setExpanded] = useState(true);
   const reasonId = useId();
   const showReason = showPicker && !!disabled && !!disabledReason;
+  const counts = useMemo(() => ({
+    queued: attachments.filter((item) => item.status === 'pending').length,
+    uploading: attachments.filter((item) => item.status === 'uploading').length,
+    uploaded: attachments.filter((item) => item.status === 'uploaded').length,
+    failed: attachments.filter((item) => item.status === 'error').length,
+  }), [attachments]);
+  // A collapsed batch still exposes failures: otherwise the one file preventing
+  // Send would disappear behind an innocent-looking aggregate.
+  const shown = expanded ? attachments : attachments.filter((item) => item.status === 'error');
   if (!showPicker && attachments.length === 0) return null;
   return (
     <div className={`image-attachments${attachments.length ? ' has-images' : ''}${showReason ? ' has-note' : ''}`}>
-      {showPicker && (
-        <>
-          <button
-            type="button"
-            className="image-pick"
-            disabled={disabled}
-            title={disabledReason || 'Attach files'}
-            aria-label="Attach files"
-            aria-describedby={showReason ? reasonId : undefined}
-            onClick={() => picker.current?.click()}
-          >
-            <svg viewBox="0 0 18 18" aria-hidden="true">
-              <path d="M6.2 9.7 10.8 5a2.5 2.5 0 0 1 3.6 3.5l-6.2 6.3a4 4 0 0 1-5.7-5.7l6-6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
-          </button>
-          <input
-            ref={picker}
-            className="image-file-input"
-            type="file"
-            multiple
-            disabled={disabled}
-            onChange={(event) => {
-              onFiles(Array.from(event.currentTarget.files || []));
-              event.currentTarget.value = '';
-            }}
-          />
-        </>
-      )}
-      {showReason && <span id={reasonId} className="image-attachments-note">{disabledReason}</span>}
-      {attachments.map((attachment) => {
+      <div className="image-attachments-head">
+        {showPicker && (
+          <>
+            <button
+              type="button"
+              className="image-pick"
+              disabled={disabled}
+              title={disabledReason || 'Attach files'}
+              aria-label="Attach files"
+              aria-describedby={showReason ? reasonId : undefined}
+              onClick={() => picker.current?.click()}
+            >
+              <svg viewBox="0 0 18 18" aria-hidden="true">
+                <path d="M6.2 9.7 10.8 5a2.5 2.5 0 0 1 3.6 3.5l-6.2 6.3a4 4 0 0 1-5.7-5.7l6-6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            </button>
+            <input
+              ref={picker}
+              className="image-file-input"
+              type="file"
+              multiple
+              disabled={disabled}
+              onChange={(event) => {
+                onFiles(Array.from(event.currentTarget.files || []));
+                event.currentTarget.value = '';
+              }}
+            />
+          </>
+        )}
+        {attachments.length > 0 && (
+          <>
+            <span className="image-attachments-summary mono" role="status">
+              {attachments.length} file{attachments.length === 1 ? '' : 's'}
+              {counts.queued ? ` · ${counts.queued} queued` : ''}
+              {counts.uploading ? ` · ${counts.uploading} uploading` : ''}
+              {counts.uploaded ? ` · ${counts.uploaded} uploaded` : ''}
+              {counts.failed ? ` · ${counts.failed} failed` : ''}
+            </span>
+            <button type="button" className="image-details-toggle" aria-expanded={expanded}
+              onClick={() => setExpanded((open) => !open)}>
+              {expanded ? 'hide' : 'details'}
+            </button>
+          </>
+        )}
+        {showReason && <span id={reasonId} className="image-attachments-note">{disabledReason}</span>}
+      </div>
+      {shown.length > 0 && <div className="image-attachment-list">
+      {shown.map((attachment) => {
         const loaded = Math.min(attachment.file.size, attachment.uploadedBytes || 0);
         const progress = attachment.file.size ? Math.round((loaded / attachment.file.size) * 100) : 0;
-        const retryable = attachment.status === 'error' && !attachmentFileError(attachment.file) && !!onRetry;
+        const retryable = attachment.status === 'error' && attachment.retryable !== false
+          && !attachmentFileError(attachment.file) && !!onRetry;
         return (
           <div key={attachment.key} className={`image-chip ${attachment.status}`}>
             {attachment.previewUrl ? (
@@ -72,7 +101,7 @@ export default function Attachments({ attachments, disabled, disabledReason, sho
               <span className="image-chip-name">{attachment.file.name || 'Attachment'}</span>
               <span className="image-chip-meta" aria-live="polite" title={attachment.error}>
                 {attachment.status === 'uploading' ? `${progress}% · ${fmtBytes(loaded)} / ${fmtBytes(attachment.file.size)}`
-                  : attachment.error || (attachment.status === 'uploaded' ? 'uploaded' : fmtBytes(attachment.file.size))}
+                  : attachment.error || (attachment.status === 'uploaded' ? 'uploaded' : `queued · ${fmtBytes(attachment.file.size)}`)}
               </span>
               {attachment.status === 'uploading' && (
                 <span
@@ -94,11 +123,12 @@ export default function Attachments({ attachments, disabled, disabledReason, sho
               type="button"
               onClick={() => onRemove(attachment.key)}
               disabled={disabled}
-              aria-label={`${attachment.status === 'uploading' ? 'Cancel upload' : 'Remove'} ${attachment.file.name || 'file'}`}
+              aria-label={`${attachment.status === 'uploading' || attachment.status === 'pending' ? 'Cancel upload' : 'Remove'} ${attachment.file.name || 'file'}`}
             >×</button>
           </div>
         );
       })}
+      </div>}
     </div>
   );
 }

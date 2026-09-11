@@ -209,8 +209,8 @@ Four things it handles that catch people out by hand:
   a test run write to them. A dev instance gets a fresh bucket, so it starts
   empty and its own logins stay its own.
 - **Private, always.** The app authenticates nobody past HF's edge, so a public
-  instance is a shell for whoever finds it. It does lock itself when public, but
-  the right answer is not to publish it at all.
+  instance is a shell for whoever finds it. It does lock itself when public
+  (see `docs/privacy-lock.md`), but the right answer is not to publish it at all.
 - **LFS objects go up first.** Git hooks cannot run from a workspace on the
   bucket (object storage holds no exec bit), so the `git lfs` pre-push hook never
   fires and a plain `git push` sends an LFS *pointer* with no object behind it —

@@ -5,12 +5,12 @@
 // a scratch terminal so presentation bytes never become history. Exactly one
 // viewer controls input and PTY geometry; Ghostty remains the durable authority.
 //   node resize.test.mjs
+import { nativeFetch as fetch, NativeWebSocket as WebSocket } from './test/native-client.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { WebSocket } from 'ws';
 import {
   TERMINAL_HISTORY_VERSION, createTerminalHistoryCheckpoint, loadTerminalHistory,
   traceHistoryLines,

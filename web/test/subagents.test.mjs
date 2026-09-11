@@ -26,7 +26,9 @@ fs.mkdirSync(outDir, { recursive: true });
 const out = path.join(outDir, 'exchanges-subagents.mjs');
 await build({
   entryPoints: [path.join(HERE, '../src/components/conversation/exchanges.ts')],
-  outfile: out, format: 'esm', bundle: false, logLevel: 'error',
+// Bundled, not just transpiled: the grouping shares `isOperatorPrompt` with
+// lib/readerModel, which the store counts exchanges with.
+  outfile: out, format: 'esm', bundle: true, logLevel: 'error',
 });
 const { splitExchanges, agentSpawnsOf, agentCounts, agentStatus, isLive, anyLive, canOpenAgent, capRows, railIsLast, stepsOf, stepSummary, MAX_NEST, STALE_MS } = await import(pathToFileURL(out).href);
 

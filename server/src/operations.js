@@ -246,6 +246,7 @@ export function operationMiddleware({
     // unattributed wait still records that someone finished waiting on B.
     if (!origin && MUTATING.has(req.method)) {
       return res.status(400).json({
+        code: raw ? 'unknown-origin' : 'origin-required',
         error: raw
           ? `unknown origin '${raw}'`
           : 'from required — mutating calls must pass ?from=<origin id> (agents use $AM_ID)',
@@ -269,7 +270,7 @@ export function operationMiddleware({
       responseBody = body;
       return originalJson(body);
     };
-    const record = () => {
+    const record = (completed) => {
       if (recorded) return;
       recorded = true;
       // A wait is a polling loop: only the call that RESOLVED is an event. The
@@ -295,8 +296,11 @@ export function operationMiddleware({
           path: filterString(req.path),
           query: cleanQuery(req.query, filterString),
           request: summarizePayload(req.body, 'body', filterString),
-          status: res.statusCode,
-          ok: res.statusCode < 400,
+          // 499 is audit-only when no HTTP response was committed. An aborted
+          // connection says nothing about whether the domain action completed.
+          status: completed || res.headersSent ? res.statusCode : 499,
+          ok: completed && res.statusCode < 400,
+          ...(!completed ? { incomplete: true } : {}),
           durationMs: Date.now() - started,
           result: summarizePayload(responseBody, 'result', filterString),
         };
@@ -332,8 +336,8 @@ export function operationMiddleware({
         console.error('[operations.append] audit append failed');
       }
     };
-    res.once('finish', record);
-    res.once('close', record);
+    res.once('finish', () => record(true));
+    res.once('close', () => record(false));
     next();
   };
 }

@@ -1,21 +1,94 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { isPassive, isRemote, type Cli } from '../types';
 import * as api from '../api';
-import SkillsEditor from './SkillsEditor';
-import ApiLog from './ApiLog';
-import UsagePanel from './UsagePanel';
-import CronSettings from './CronSettings';
+import { useSaverState } from '../lib/saveQueue';
+import {
+  configSaver, secretsSaver, saverFor, settingsSlot, subscribeSettings, noteServerRead,
+  pendingSettings, overwriteSettings, adoptServerSettings, type Kind,
+} from '../lib/settingsSaves';
 import { SunGlyph, MoonGlyph, RefreshGlyph, InfoGlyph } from './icons';
 import Logo from './Logo';
+import LazyPanel from './LazyPanel';
+import type { SettingsPage as Page } from './SettingsShell';
 
-type Page = 'general' | 'usage' | 'skills' | 'cron' | 'apilog';
-const PAGES: { id: Page; label: string }[] = [
-  { id: 'general', label: 'General' },
-  { id: 'usage', label: 'Usage' },
-  { id: 'skills', label: 'Skills' },
-  { id: 'cron', label: 'Cron' },
-  { id: 'apilog', label: 'API log' },
-];
+// Each subpage is its own chunk, fetched the first time its tab is opened; the
+// General page is this module. Module-level so the loader cache keys on them.
+const loadUsage = () => import('./UsagePanel');
+const loadApiLog = () => import('./ApiLog');
+const loadSkills = () => import('./SkillsEditor');
+const loadCron = () => import('./CronSettings');
+
+// Saving is silent until it isn't. A failure stays on screen — it does not fade
+// the way the tick does — because the change it describes is still only in this
+// browser, and the buttons are the ways back: Retry for a write that failed,
+// and, when someone else got there first, a choice between their version and
+// this one. Nothing here overwrites anything without being clicked.
+function SaveFlag({ kind, onAdopt }: { kind: Kind; onAdopt: (value: any) => void }) {
+  const state = useSaverState(saverFor(kind));
+  const slot = useSettingsSlot(kind);
+  if (state.status === 'idle') return null;
+  if (state.status === 'error') {
+    if (slot.conflict && !slot.readError) {
+      return (
+        <span className="save-flag save-flag-err">
+          changed elsewhere
+          <button className="save-retry" onClick={() => { void overwriteSettings(kind); }}
+            title="Save my version over the one that is stored">Keep mine</button>
+          <button
+            className="save-retry"
+            onClick={() => { const theirs = adoptServerSettings(kind); if (theirs) onAdopt(theirs); }}
+            title="Throw away my change and show what is stored"
+          >Use theirs</button>
+        </span>
+      );
+    }
+    return (
+      <span className="save-flag save-flag-err" title={state.error || undefined}>
+        {state.unresolved ? 'not confirmed' : `not saved${state.error ? ` — ${state.error}` : ''}`}
+        <button className="save-retry" onClick={() => { void saverFor(kind).retry(); }}>Retry</button>
+      </span>
+    );
+  }
+  return <span className="save-flag">{state.status === 'saving' ? 'saving…' : 'saved ✓'}</span>;
+}
+
+// The savers outlive this panel, so their bookkeeping is read through a
+// subscription rather than held in component state.
+function useSettingsSlot(kind: Kind) {
+  return useSyncExternalStore(subscribeSettings, () => settingsSlot(kind), () => settingsSlot(kind));
+}
+
+// Saving settings and telling the agents about them are two outcomes, and only
+// one of them is what "saved ✓" is about.
+function DerivedNote({ kind }: { kind: Kind }) {
+  const slot = useSettingsSlot(kind);
+  const derived = slot.derived;
+  if (!derived) return null;
+  if (derived.error) {
+    return (
+      <div className="s-help save-derived" title={derived.error}>
+        Saved — but the <span className="mono">environment</span> skill agents read could not be
+        updated: {derived.error}
+      </div>
+    );
+  }
+  // Rebuilding it takes a moment and normally says nothing. It says something
+  // when the moment has passed and it is still going.
+  if (derived.pending && slot.derivedSlow) {
+    return <div className="s-help">Saved. Still updating the <span className="mono">environment</span> skill agents read…</div>;
+  }
+  return null;
+}
+
+// A settings file that cannot be read is not a settings file that is empty.
+// Nothing may be written over it, so the panel says so instead of showing
+// defaults that look like the current values.
+function ReadErrorNote({ kind }: { kind: Kind }) {
+  const slot = useSettingsSlot(kind);
+  if (!slot.readError) return null;
+  return <div className="s-help save-derived" title={slot.readError}>{slot.readError} — nothing was changed, and saving is refused until it is repaired.</div>;
+}
+
 
 interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; engine?: string; ghostty?: boolean; canRelaunch?: boolean; secrets?: string[]; bucketUnverified?: boolean; }
 
@@ -122,11 +195,11 @@ function PushRow() {
 }
 
 export default function SettingsView({
-  page, onPage, onClose, theme, onToggleTheme, clis, info, onShowWelcome, demoMode, onToggleDemo,
+  page, onClose, theme, onToggleTheme, clis, info, onShowWelcome, demoMode, onToggleDemo,
   onOpenSharedTrace,
 }: {
   page: Page;
-  onPage: (p: Page) => void;
+  /** Closing from inside a page (a shared trace opened). The shell owns the tabs. */
   onClose: () => void;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
@@ -160,49 +233,74 @@ export default function SettingsView({
     }
   };
   const [secretKeys, setSecretKeys] = useState<string[]>([]);
-  const [notes, setNotes] = useState<Record<string, string>>({});
-  const [savedNotes, setSavedNotes] = useState<Record<string, string>>({});
-  const [secretsSaved, setSecretsSaved] = useState<'idle' | 'saving' | 'saved'>('idle');
+  // Reopening shows the value still owed to the server, not the older one a
+  // fresh read would put over it.
+  const [notes, setNotes] = useState<Record<string, string>>(() => pendingSettings('secrets') || {});
+  // What the server has been asked for, so loading a value doesn't read as an
+  // edit of it. Compared as JSON because these are rebuilt objects, not the ones
+  // that came back.
+  const notesAsked = useRef(JSON.stringify(pendingSettings('secrets') || {}));
   useEffect(() => {
-    api.getSecrets().then((d) => { setSecretKeys(d.detected); setNotes(d.notes || {}); setSavedNotes(d.notes || {}); }).catch(() => {});
+    api.getSecrets().then((d) => {
+      setSecretKeys(d.detected);
+      noteServerRead('secrets', d);
+      const owed = pendingSettings('secrets');
+      if (owed) return;                       // an edit of ours is still in flight or failed
+      notesAsked.current = JSON.stringify(d.notes || {});
+      setNotes(d.notes || {});
+    }).catch(() => {});
   }, []);
-  const notesDirty = secretKeys.some((k) => (notes[k] || '') !== (savedNotes[k] || ''));
   // One-line textareas that grow with their content.
   const grow = (el: HTMLTextAreaElement) => { el.style.height = 'auto'; el.style.height = `${el.scrollHeight}px`; };
   const growRef = (el: HTMLTextAreaElement | null) => { if (el) grow(el); };
   useEffect(() => {
     document.querySelectorAll<HTMLTextAreaElement>('textarea.secret-desc').forEach(grow);
   }, [secretKeys]);
-  // Autosave: settle for a moment after the last keystroke, then persist.
+  // Every change is sent the moment it is made: no debounce to sit out, no blur
+  // to remember, nothing left unsaved by closing the panel. While a write is out
+  // the newest value waits in one slot and follows it the instant it settles —
+  // see saveQueue, which is also what keeps an older answer from speaking for a
+  // newer edit.
   useEffect(() => {
-    if (!notesDirty) return;
-    const t = setTimeout(async () => {
-      setSecretsSaved('saving');
-      try { await api.saveSecrets(notes); setSavedNotes({ ...notes }); setSecretsSaved('saved'); setTimeout(() => setSecretsSaved('idle'), 1800); }
-      catch { setSecretsSaved('idle'); }
-    }, 900);
-    return () => clearTimeout(t);
-  }, [notes, notesDirty]);
-  // Operator config (artifacts hub, jobs policy): load once, autosave on edit.
-  const [cfg, setCfg] = useState<api.AmConfig | null>(null);
-  const [savedCfg, setSavedCfg] = useState('');
-  const [cfgSaved, setCfgSaved] = useState<'idle' | 'saving' | 'saved'>('idle');
+    const json = JSON.stringify(notes);
+    if (json === notesAsked.current) return;
+    notesAsked.current = json;
+    void secretsSaver.request(notes);
+  }, [notes]);
+
+  // Operator config (artifacts hub, jobs policy): load once, save on every edit.
+  const [cfg, setCfg] = useState<api.AmConfig | null>(() => (pendingSettings('config') as api.AmConfig) || null);
+  const cfgAsked = useRef<string | null>(cfg ? JSON.stringify(cfg) : null);
   useEffect(() => {
-    api.getConfig().then((c) => { setCfg(c); setSavedCfg(JSON.stringify(c)); }).catch(() => {});
+    api.getConfig().then((c) => {
+      noteServerRead('config', c);
+      const owed = pendingSettings('config') as api.AmConfig | null;
+      if (owed) { setCfg(owed); return; }
+      cfgAsked.current = JSON.stringify(c);
+      setCfg(c);
+    }).catch(() => {});
   }, []);
   useEffect(() => {
-    if (!cfg || JSON.stringify(cfg) === savedCfg) return;
-    const t = setTimeout(async () => {
-      setCfgSaved('saving');
-      try {
-        await api.saveConfig(cfg);
-        setSavedCfg(JSON.stringify(cfg));
-        setCfgSaved('saved');
-        setTimeout(() => setCfgSaved('idle'), 1800);
-      } catch { setCfgSaved('idle'); }
-    }, 900);
-    return () => clearTimeout(t);
-  }, [cfg, savedCfg]);
+    if (!cfg) return;
+    const json = JSON.stringify(cfg);
+    if (json === cfgAsked.current) return;
+    cfgAsked.current = json;
+    void configSaver.request(cfg);
+  }, [cfg]);
+  const cfgState = useSaverState(configSaver);
+  const cfgSaved = cfgState.status;
+  // A number being typed is not a number yet. The box keeps what was typed —
+  // including the empty moment between "1" and "17" — while the setting keeps
+  // its last valid value, so an incomplete edit cannot be saved as a reset to 0.
+  const [usdDraft, setUsdDraft] = useState<string | null>(null);
+  const usdOf = (text: string) => {
+    const t = text.trim();
+    if (t === '') return null;
+    const n = Number(t);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  const usdValue = usdDraft === null ? (cfg?.jobs.askAboveUsd ?? 0) : usdOf(usdDraft);
+  const usdText = usdDraft === null ? String(cfg?.jobs.askAboveUsd ?? 0) : usdDraft;
 
   // Bucket backup: the copying happens in an HF Job, so the row reports what the
   // Hub says about the last one rather than anything we remember locally.
@@ -270,23 +368,10 @@ export default function SettingsView({
       else setRelaunch({ msg: `Couldn't relaunch (${r.reason}).` });
     } catch { setRelaunch({ msg: 'Request failed.' }); }
   };
+  // The shell around these pages (Back, title, tabs) is SettingsShell, rendered
+  // by App so it is there before this module is.
   return (
-    <div className="app settings">
-      <aside className="sidebar">
-        <div className="brand">
-          <button className="icon-btn" onClick={onClose} title="Back">←</button>
-          <h1 style={{ flex: 1, marginLeft: 4 }}>Settings</h1>
-        </div>
-        <div className="settings-nav">
-          {PAGES.map((p) => (
-            <button key={p.id} className={`settings-navitem${page === p.id ? ' active' : ''}`} onClick={() => onPage(p.id)}>
-              {p.label}
-            </button>
-          ))}
-        </div>
-      </aside>
-
-      <div className="main settings-main">
+    <>
         {page === 'general' && (
           <div className="settings-page">
             <h2>General</h2>
@@ -380,7 +465,13 @@ export default function SettingsView({
               })}
             </div>
 
-            <h3>Secrets &amp; variables{secretsSaved !== 'idle' && <span className="save-flag">{secretsSaved === 'saving' ? 'saving…' : 'saved ✓'}</span>}</h3>
+            <h3>Secrets &amp; variables<SaveFlag kind="secrets" onAdopt={(theirs) => {
+              const taken = (theirs || {}) as Record<string, string>;
+              notesAsked.current = JSON.stringify(taken);
+              setNotes(taken);
+            }} /></h3>
+            <ReadErrorNote kind="secrets" />
+            <DerivedNote kind="secrets" />
             <div className="s-help">Detected by diffing the runtime environment against a build-time snapshot — names only, never values. Describe what each is for (saved automatically); this publishes an <span className="mono">environment</span> skill so every agent knows what's available.</div>
             {secretKeys.length === 0 ? (
               <div className="s-muted" style={{ marginTop: 8 }}>None detected.</div>
@@ -402,7 +493,14 @@ export default function SettingsView({
               </div>
             )}
 
-            <h3>Agent output &amp; compute{cfgSaved !== 'idle' && <span className="save-flag">{cfgSaved === 'saving' ? 'saving…' : 'saved ✓'}</span>}</h3>
+            <h3>Agent output &amp; compute<SaveFlag kind="config" onAdopt={(theirs) => {
+              const taken = theirs as api.AmConfig;
+              cfgAsked.current = JSON.stringify(taken);
+              setUsdDraft(null);
+              setCfg(taken);
+            }} /></h3>
+            <ReadErrorNote kind="config" />
+            <DerivedNote kind="config" />
             <div className="s-help">Both policies are published to agents through the <span className="mono">environment</span> skill.</div>
             {cfg && (
               <>
@@ -450,14 +548,26 @@ export default function SettingsView({
                   <div>
                     <div className="s-label">Ask before HF Jobs above</div>
                     <div className="s-help">Agents run expensive compute (GPU, long batch work) as HF Jobs. Above this estimated cost they must ask you first. 0 means always ask.</div>
+                    {usdDraft !== null && usdValue === null && (
+                      <div className="s-help cfg-bad-note">Not a number yet — the saved threshold is still ${cfg.jobs.askAboveUsd}.</div>
+                    )}
                   </div>
                   <span className="cfg-ctl">
                     <span className="mono cfg-usd">$</span>
                     <input
-                      className="cfg-input cfg-num mono"
+                      className={`cfg-input cfg-num mono${usdDraft !== null && usdValue === null ? ' cfg-bad' : ''}`}
                       type="number" min={0} step={1}
-                      value={cfg.jobs.askAboveUsd}
-                      onChange={(e) => setCfg({ ...cfg, jobs: { askAboveUsd: Math.max(0, Number(e.target.value) || 0) } })}
+                      value={usdText}
+                      onChange={(e) => {
+                        const typed = e.target.value;
+                        setUsdDraft(typed);
+                        // An empty box on the way to "17" is not a request to
+                        // ask about every job. Nothing is sent until the field
+                        // says a number again.
+                        const n = usdOf(typed);
+                        if (n !== null) setCfg({ ...cfg, jobs: { askAboveUsd: n } });
+                      }}
+                      onBlur={() => setUsdDraft(null)}
                     />
                   </span>
                 </div>
@@ -775,7 +885,7 @@ export default function SettingsView({
         {page === 'usage' && (
           <div className="settings-page wide">
             <h2>Usage</h2>
-            <UsagePanel />
+            <LazyPanel load={loadUsage} what="the usage page" render={(m) => <m.default />} />
           </div>
         )}
 
@@ -788,7 +898,7 @@ export default function SettingsView({
               best-effort filtering for recognizable credentials. This remains sensitive private data:
               deleting the source does not delete its audit copy, and older entries were not rewritten.
             </p>
-            <ApiLog />
+            <LazyPanel load={loadApiLog} what="the API log" render={(m) => <m.default />} />
           </div>
         )}
 
@@ -796,7 +906,7 @@ export default function SettingsView({
           <div className="settings-page wide">
             <h2>Skills</h2>
             <p className="s-help">Reusable markdown/text skills. Saved skills are published as <span className="mono">SKILL.md</span> to every agent (Claude, Codex, Gemini, opencode, Hermes) and available in all new sessions. View renders markdown; Edit is plain text.</p>
-            <SkillsEditor />
+            <LazyPanel load={loadSkills} what="the skills editor" render={(m) => <m.default />} />
           </div>
         )}
 
@@ -804,10 +914,9 @@ export default function SettingsView({
           <div className="settings-page wide cron-page">
             <h2>Cron</h2>
             <p className="s-help cron-intro">Send a prompt to an agent on a schedule. Jobs persist across Space restarts; if the named agent does not exist when a job fires, it is created first.</p>
-            <CronSettings clis={clis} />
+            <LazyPanel load={loadCron} what="the cron page" render={(m) => <m.default clis={clis} />} />
           </div>
         )}
-      </div>
-    </div>
+    </>
   );
 }

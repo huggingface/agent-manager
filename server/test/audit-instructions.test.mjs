@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'am-audit-instructions-'));
 const dataDir = path.join(TMP, 'data');
@@ -16,7 +17,9 @@ const generated = path.join(dataDir, 'workspaces', 'skills', 'environment.md');
 fs.mkdirSync(homeDir, { recursive: true });
 
 // Do not let a local test child inherit actual configured credential values.
-const env = { ...process.env, DATA_DIR: dataDir, HOME: homeDir, PORT: '0', AM_BASHRC: '/nonexistent' };
+// The request policy validates PORT at startup (#130), so an ephemeral 0 is refused.
+const port = await new Promise((resolve) => { const probe = net.createServer(); probe.listen(0, '127.0.0.1', () => { const { port } = probe.address(); probe.close(() => resolve(port)); }); });
+const env = { ...process.env, DATA_DIR: dataDir, HOME: homeDir, PORT: String(port), AM_BASHRC: '/nonexistent' };
 for (const key of Object.keys(env)) {
   if (/(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)/i.test(key)) delete env[key];
 }
