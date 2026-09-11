@@ -21,6 +21,7 @@ import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
 import * as api from './api';
 import { pinnedSessionIds } from './lib/pinned';
+import { quietSessionIds } from './lib/idleWindow';
 import { applyAck, furtherMark, retireLocal, type ReadMark } from './lib/unread';
 // Matches the server's per-request cap; the client splits rather than being cut.
 const ACK_CHUNK = 100;
@@ -627,33 +628,18 @@ export default function App() {
     () => new Set(tree.sessions.filter((s) => s.archivedAt).map((s) => s.id)),
     [tree.sessions],
   );
-  // Road two: quiet for longer than the window. Unchanged, and still derived —
-  // it is a statement about the clock, so it has to be recomputed against the
-  // clock rather than written down once.
   // Pinned, counting membership — see lib/pinned.ts for why a group's members
   // inherit the exemption.
   const pinnedIds = useMemo(
     () => pinnedSessionIds(tree.sessions, tree.groups),
     [tree.sessions, tree.groups],
   );
-  const quietIds = useMemo(() => {
-    const out = new Set<string>();
-    if (archiveAfter === 'never') return out;
-    const cut = Date.now() - (archiveAfter === 'week' ? 7 : 30) * 864e5;
-    for (const s of tree.sessions) {
-      // Shells and passive panels have no trace clock — never archive them.
-      if (s.cli === 'shell' || isPassive(s.cli) || s.state === 'working') continue;
-      if (s.archivedAt) continue;                       // already on road one
-      // Pinning suppresses THIS road and only this one. It is a statement about
-      // the clock, and pinning says the clock is not the point for this session;
-      // road one is the operator saying they are finished, which pinning has no
-      // business overriding (and which clears the pin server-side).
-      if (pinnedIds.has(s.id)) continue;
-      const last = ages[s.id] || Date.parse(s.createdAt) || 0;
-      if (last && last < cut) out.add(s.id);
-    }
-    return out;
-  }, [tree.sessions, ages, archiveAfter, pinnedIds]);
+  // Road two: quiet for longer than the window — see lib/idleWindow.ts, where
+  // the rule and pinning's exemption from it live together.
+  const quietIds = useMemo(
+    () => quietSessionIds(tree.sessions, ages, archiveAfter, pinnedIds),
+    [tree.sessions, ages, archiveAfter, pinnedIds],
+  );
   // What the sidebar and overview leave out of the working list.
   const archivedIds = useMemo(
     () => new Set([...retiredIds, ...quietIds]),
