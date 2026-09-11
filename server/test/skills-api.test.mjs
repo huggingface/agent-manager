@@ -54,10 +54,17 @@ test('real routes, startup and generated caller share ownership and revisions', 
   assert.equal(fs.readFileSync(f.target(0, 'environment'), 'utf8'), 'user environment');
   const envSource = (await get('environment.md')).content;
   fs.writeFileSync(f.target(0, 'environment'), generatedSkill('environment.md', envSource));
-  assert.equal((await f.api('environment.md', 'DELETE', undefined, (await get('environment.md')).revision)).body.ok, true);
-  await f.stop(); await f.start();
-  assert.equal((await f.api('environment.md')).status, 404);
-  for (let i = 0; i < 5; i++) assert.equal(fs.existsSync(f.target(i, 'environment')), false);
+  // The generated skill is read-only through the API, whatever revision is presented.
+  const env = await get('environment.md');
+  assert.equal(env.readOnly, true); assert.match(env.problem, /read-only/);
+  assert.equal((await f.api('environment.md', 'PUT', '# My environment', env.revision)).status, 403);
+  assert.equal((await f.api('environment.md', 'DELETE', undefined, env.revision)).status, 403);
+  assert.equal((await f.api('environment.md', 'POST', '# My environment')).status, 403);
+  assert.equal((await get('environment.md')).content, envSource);
+  await f.stop(); await f.start(); // a new port: the generated text legitimately changes
+  const regenerated = await get('environment.md');
+  assert.equal(regenerated.readOnly, true); assert.equal(regenerated.pending, null);
+  for (let i = 0; i < 5; i++) assert.equal(fs.readFileSync(f.target(i, 'environment'), 'utf8'), generatedSkill('environment.md', regenerated.content));
   assert.equal((await fetch(`${f.url}/api/health`)).status, 200);
 });
 
@@ -104,22 +111,38 @@ test('real routes allow reviewed external source edits after restart while rejec
   for (let i = 0; i < 5; i++) assert.equal(fs.existsSync(f.target(i, 'demo')), false);
 });
 
-for (const action of ['recreate', 'save']) {
-  test(`Settings and startup preserve a generated skill's explicit ${action}`, async (t) => {
-    const f = await skillsServer(); t.after(() => f.cleanup()); await f.start();
-    const current = (await f.api('environment.md')).body;
-    if (action === 'recreate') {
-      assert.equal((await f.api('environment.md', 'DELETE', undefined, current.revision)).body.ok, true);
-      assert.equal((await f.api('environment.md', 'POST', '# My environment')).body.ok, true);
-    } else {
-      assert.equal((await f.api('environment.md', 'PUT', '# My environment', current.revision)).body.ok, true);
-    }
-    for (const route of ['/api/config', '/api/secrets']) {
-      const res = await fetch(f.url + route, { method: 'PUT', headers: { 'content-type': 'application/json', 'x-am-origin': 'operator' }, body: route === '/api/secrets' ? '{"notes":{}}' : '{}' });
-      assert.equal((await res.json()).skillDistribution.source, 'generation-disabled');
-    }
-    await f.stop(); await f.start();
-    assert.equal((await f.api('environment.md')).body.content, '# My environment');
-    for (let i = 0; i < 5; i++) assert.equal(fs.readFileSync(f.target(i, 'environment'), 'utf8'), generatedSkill('environment.md', '# My environment'));
-  });
-}
+test('the environment skill regenerates after an interrupted generation, through Settings and on startup', async (t) => {
+  const f = await skillsServer(); t.after(() => f.cleanup()); await f.start();
+  // The generated text embeds the jobs cost limit, so a Settings save with a
+  // new limit is a generation with genuinely different content.
+  // Replacing stored settings needs the revision being replaced (#123): read it first.
+  const settings = async (askAboveUsd) => {
+    const rev = (await fetch(`${f.url}/api/config`).then((r) => r.json())).rev;
+    return fetch(`${f.url}/api/config${rev ? `?base=${encodeURIComponent(rev)}` : ''}`, { method: 'PUT', headers: { 'content-type': 'application/json', 'x-am-origin': 'operator' }, body: JSON.stringify({ jobs: { askAboveUsd } }) }).then((r) => r.json());
+  };
+  const before = (await f.api('environment.md')).body;
+  // Boot N: the regeneration triggered by a Settings save fails on one target.
+  f.fault({ method: 'renameSync', path: f.target(2, 'environment') });
+  const broken = await settings(11);
+  assert.equal(broken.skillDistribution.ok, false);
+  assert.equal((await f.api('environment.md')).body.pending, 'write');
+  // The inputs change again; the old intended bytes can no longer be produced.
+  f.fault({});
+  const recovered = await settings(22);
+  assert.equal(recovered.skillDistribution.ok, true, JSON.stringify(recovered.skillDistribution));
+  const after = (await f.api('environment.md')).body;
+  assert.equal(after.pending, null);
+  assert.notEqual(after.content, before.content);
+  assert.match(after.content, /\$22\b/);
+  for (let i = 0; i < 5; i++) assert.equal(fs.readFileSync(f.target(i, 'environment'), 'utf8'), generatedSkill('environment.md', after.content));
+  // Boot N+1 with an interrupted generation left over from boot N.
+  f.fault({ method: 'renameSync', path: f.target(0, 'environment') });
+  assert.equal((await settings(33)).skillDistribution.ok, false);
+  f.fault({});
+  await f.stop(); await f.start();
+  const booted = (await f.api('environment.md')).body;
+  assert.equal(booted.pending, null); assert.equal(booted.readOnly, true);
+  assert.match(booted.content, /\$33\b/);
+  for (let i = 0; i < 5; i++) assert.equal(fs.readFileSync(f.target(i, 'environment'), 'utf8'), generatedSkill('environment.md', booted.content));
+  assert.doesNotMatch(f.log, /An incomplete save must be retried/);
+});

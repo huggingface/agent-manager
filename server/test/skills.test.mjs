@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import { createSkillsService, generatedSkill, skillId, skillTargetDirs } from '../src/skills.js';
+const sha = (text) => createHash('sha256').update(text).digest('hex');
 
 function fixture(t, count = 5) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'am-skills-'));
@@ -496,32 +498,121 @@ test('deleting and recreating identical bytes cannot revive an old confirmation'
   assert.equal(read(f.source()), 'first');
 });
 
-test('permanently deleted generated skills stay absent on restart until explicitly recreated', async (t) => {
-  const f = fixture(t); await f.service.generate('environment.md', 'generated');
-  await f.service.remove('environment.md', await revision(f.service, 'environment.md'));
-  const restart = createSkillsService(f.options);
-  assert.equal((await restart.redistribute()).ok, true);
-  const r = await restart.generate('environment.md', 'new generation');
-  assert.equal(r.source, 'generation-disabled');
+test('generated skills are read-only: create, update and remove are refused and regeneration continues', async (t) => {
+  const f = fixture(t);
+  const s = createSkillsService({ ...f.options, generated: ['environment.md'] });
+  // Before the first generation the name is already reserved.
+  await rejects(s.create('environment.md', 'user-created'), 403);
   assert.equal(fs.existsSync(f.source('environment.md')), false);
-  for (let i = 0; i < 5; i++) assert.equal(fs.existsSync(f.target(i, 'environment')), false);
-  await restart.create('environment.md', 'explicit recreation');
-  await restart.remove('environment.md', await revision(restart, 'environment.md'));
-  assert.equal((await restart.generate('environment.md', 'must stay deleted')).source, 'generation-disabled');
-  await restart.create('environment.md', 'explicit recreation');
-  assert.equal((await restart.generate('environment.md', 'new generation')).source, 'generation-disabled');
-  assert.equal(read(f.source('environment.md')), 'explicit recreation');
+  assert.equal((await s.generate('environment.md', 'generated')).ok, true);
+  const snap = await s.get('environment.md');
+  assert.equal(snap.readOnly, true); assert.match(snap.problem, /read-only/);
+  await rejects(s.update('environment.md', 'operator customization', snap.revision), 403);
+  await rejects(s.remove('environment.md', snap.revision), 403);
+  await rejects(s.create('environment.md', 'again'), 403);
+  assert.equal(read(f.source('environment.md')), 'generated');
+  for (let i = 0; i < 5; i++) assert.equal(read(f.target(i, 'environment')), generatedSkill('environment.md', 'generated'));
+  // The list without a configured name still refuses a record that was generated.
+  const restart = createSkillsService(f.options);
+  await rejects(restart.update('environment.md', 'edit', await revision(restart, 'environment.md')), 403);
+  await rejects(restart.remove('environment.md', await revision(restart, 'environment.md')), 403);
+  assert.equal((await restart.generate('environment.md', 'new generation')).ok, true);
+  assert.equal(read(f.source('environment.md')), 'new generation');
+  // Ordinary skills are untouched by the rule.
+  assert.equal((await s.create('demo.md', 'first')).ok, true);
+  assert.equal((await s.update('demo.md', 'second', await revision(s))).ok, true);
+  assert.equal((await s.get('demo.md')).readOnly, false);
 });
 
-test('an explicit edit to a generated skill pauses regeneration without preventing ordinary publication', async (t) => {
-  const f = fixture(t); await f.service.generate('environment.md', 'generated');
-  await f.service.update('environment.md', 'operator customization', await revision(f.service, 'environment.md'));
-  const restart = createSkillsService(f.options);
-  assert.equal((await restart.generate('environment.md', 'new generation')).source, 'generation-disabled');
+test('the newest generation wins over an interrupted earlier one, whatever its content', async (t) => {
+  const f = fixture(t);
+  // Boot N: generating "second" fails part-way (one target write). The intent
+  // for "second" is recorded. Boot N+1 generates "third" — the inputs changed
+  // and nobody can reproduce "second" any more.
+  let fired = false;
+  const flaky = createSkillsService({ ...f.options, generated: ['environment.md'], io: { ...fs, writeFileSync(fd, content, ...args) {
+    if (!fired && content === generatedSkill('environment.md', 'second') && args[0] === 'utf8' && typeof fd === 'number') { fired = true; throw fail('target write'); }
+    return fs.writeFileSync(fd, content, ...args);
+  } } });
+  assert.equal((await flaky.generate('environment.md', 'first')).ok, true);
+  const interrupted = await flaky.generate('environment.md', 'second');
+  assert.equal(interrupted.ok, false); assert.equal(interrupted.skill.pending, 'write');
+  assert.equal(read(f.source('environment.md')), 'second');
+  const restart = createSkillsService({ ...f.options, generated: ['environment.md'] });
+  // Startup redistribution cannot finish that intent with other content — and does not need to.
+  const third = await restart.generate('environment.md', 'third');
+  assert.equal(third.ok, true, JSON.stringify(third));
+  assert.equal(read(f.source('environment.md')), 'third');
+  for (let i = 0; i < 5; i++) assert.equal(read(f.target(i, 'environment')), generatedSkill('environment.md', 'third'));
+  const m = JSON.parse(read(f.manifest));
+  assert.equal(m.skills['environment.md'].pending, undefined);
   assert.equal((await restart.redistribute()).ok, true);
-  assert.equal(read(f.source('environment.md')), 'operator customization');
-  for (let i = 0; i < 5; i++) assert.equal(read(f.target(i, 'environment')), generatedSkill('environment.md', 'operator customization'));
-  assert.match((await restart.get('environment.md')).problem, /regeneration is paused/);
+  // An externally modified installation is still a conflict, not something regeneration overwrites.
+  f.seed(f.target(1, 'environment'), 'user copy');
+  await rejects(restart.generate('environment.md', 'fourth'));
+  assert.equal(read(f.target(1, 'environment')), 'user copy');
+  assert.equal(read(f.source('environment.md')), 'third');
+});
+
+test('an interrupted generation whose source write failed is also superseded', async (t) => {
+  const f = fixture(t);
+  const flaky = createSkillsService({ ...f.options, generated: ['environment.md'], io: { ...fs, writeFileSync(fd, content, ...args) {
+    if (content === 'second') throw fail('source write');
+    return fs.writeFileSync(fd, content, ...args);
+  } } });
+  assert.equal((await flaky.generate('environment.md', 'first')).ok, true);
+  assert.equal((await flaky.generate('environment.md', 'second')).source, 'failed');
+  assert.equal(read(f.source('environment.md')), 'first');
+  const restart = createSkillsService({ ...f.options, generated: ['environment.md'] });
+  assert.equal((await restart.generate('environment.md', 'third')).ok, true);
+  assert.equal(read(f.source('environment.md')), 'third');
+  for (let i = 0; i < 5; i++) assert.equal(read(f.target(i, 'environment')), generatedSkill('environment.md', 'third'));
+});
+
+test('a legacy customization is honoured for one cycle, then replaced, and the editor is told both times', async (t) => {
+  const f = fixture(t);
+  const s = createSkillsService({ ...f.options, generated: ['environment.md'] });
+  assert.equal((await s.generate('environment.md', 'generated')).ok, true);
+  // What the previous contract left behind: a customized source, its installed
+  // rendering, and a paused-regeneration flag in the manifest.
+  const custom = 'operator customization';
+  f.seed(f.source('environment.md'), custom);
+  for (let i = 0; i < 5; i++) f.seed(f.target(i, 'environment'), generatedSkill('environment.md', custom));
+  const m = JSON.parse(read(f.manifest));
+  m.disabledGenerated = ['environment.md'];
+  m.skills['environment.md'].sourceHash = sha(custom);
+  for (const target of m.skills['environment.md'].targets) target.hash = sha(generatedSkill('environment.md', custom));
+  fs.writeFileSync(f.manifest, JSON.stringify(m, null, 2) + '\n');
+  const upgraded = createSkillsService({ ...f.options, generated: ['environment.md'] });
+  // Cycle 1: kept, with a warning that names what will happen.
+  const kept = await upgraded.generate('environment.md', 'new generation');
+  assert.equal(kept.ok, true); assert.equal(kept.source, 'legacy-edit-kept');
+  assert.equal(read(f.source('environment.md')), custom);
+  for (let i = 0; i < 5; i++) assert.equal(read(f.target(i, 'environment')), generatedSkill('environment.md', custom));
+  const warned = await upgraded.get('environment.md');
+  assert.equal(warned.readOnly, true); assert.match(warned.problem, /still in place.*will be replaced/);
+  await rejects(upgraded.update('environment.md', 'more edits', warned.revision), 403);
+  assert.deepEqual(JSON.parse(read(f.manifest)).disabledGenerated, []);
+  // Cycle 2: replaced, and the editor says so.
+  assert.equal((await upgraded.generate('environment.md', 'newer generation')).ok, true);
+  assert.equal(read(f.source('environment.md')), 'newer generation');
+  for (let i = 0; i < 5; i++) assert.equal(read(f.target(i, 'environment')), generatedSkill('environment.md', 'newer generation'));
+  assert.match((await upgraded.get('environment.md')).problem, /were replaced/);
+  // Cycle 3: back to the plain read-only explanation.
+  assert.equal((await upgraded.generate('environment.md', 'newest')).ok, true);
+  assert.match((await upgraded.get('environment.md')).problem, /read-only/);
+  assert.doesNotMatch((await upgraded.get('environment.md')).problem, /replaced/);
+  assert.equal(JSON.parse(read(f.manifest)).skills['environment.md'].legacyEdit, undefined);
+});
+
+test('a legacy deletion of a generated skill no longer keeps it deleted', async (t) => {
+  const f = fixture(t);
+  fs.mkdirSync(f.options.stateRoot, { recursive: true });
+  fs.writeFileSync(f.manifest, JSON.stringify({ version: 1, sourceRoot: f.options.sourceRoot, disabledGenerated: ['environment.md'], skills: {} }, null, 2) + '\n');
+  const s = createSkillsService({ ...f.options, generated: ['environment.md'] });
+  assert.equal((await s.generate('environment.md', 'generated again')).ok, true);
+  assert.equal(read(f.source('environment.md')), 'generated again');
+  assert.deepEqual(JSON.parse(read(f.manifest)).disabledGenerated, []);
 });
 
 test('automatic generation cannot take over a user-created managed skill', async (t) => {

@@ -941,7 +941,7 @@ export const setTraceSource = (id: string, kind: 'session' | 'bundle', ref: stri
 // ---- skills ----
 export interface SkillFile { name: string; size: number; pending?: 'write' | 'delete' | null; error?: string; }
 export interface SkillSnapshot {
-  name: string; content: string; revision: string; managed: boolean; sourceExists: boolean; problem?: string;
+  name: string; content: string; revision: string; managed: boolean; sourceExists: boolean; problem?: string; readOnly?: boolean;
   pending: 'write' | 'delete' | null;
   installations: { path: string; exists: boolean; error?: string }[];
 }

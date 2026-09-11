@@ -7,6 +7,11 @@ export class SkillError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 const conflict = (message) => { throw new SkillError(409, message); };
+const readOnlyMessage = (name) => `${name} is generated from this Space's configuration and is read-only: it is rebuilt on every start and whenever secret descriptions change. Keep your own instructions in a separate skill.`;
+const LEGACY_NOTICE = {
+  kept: 'Your earlier edits to this generated skill are still in place, but it is now read-only and will be replaced by the generated content the next time the environment is rebuilt (a restart, or a change to secret descriptions). Copy anything you want to keep into another skill now.',
+  replaced: 'Your earlier edits to this generated skill were replaced by the generated content; it is read-only. Keep your own instructions in a separate skill.',
+};
 const hash = (content) => createHash('sha256').update(content).digest('hex');
 const digest = (value) => value === null || (typeof value === 'string' && /^[a-f0-9]{64}$/.test(value));
 const below = (root, file) => file.startsWith(root + path.sep);
@@ -46,7 +51,13 @@ export function skillTargetDirs(env = process.env) {
 // One instance per manager. Every caller (including reads and boot) goes through
 // its queue. Injectable sync IO keeps fault tests deterministic; no awaited gap
 // exists between preflight and publication within a process.
-export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], io = fs, nonce = randomUUID }) {
+//
+// `generated` names the skills the manager rebuilds from its own inputs (the
+// environment skill). Their content is derived, not authored, so they are
+// read-only through create/update/remove, and the newest generated content is
+// always authoritative: an interrupted earlier generation can never hold the
+// next one hostage, because nobody can reproduce the old bytes on purpose.
+export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], generated = [], io = fs, nonce = randomUUID }) {
   let queue = Promise.resolve();
   const serial = (fn) => (...args) => {
     const result = queue.then(() => fn(...args));
@@ -155,6 +166,7 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
         }
         if (r.pending && (!['write', 'delete'].includes(r.pending.kind) || typeof r.pending.id !== 'string'
             || (r.pending.kind === 'write' && (!r.pending.sourceHash || !digest(r.pending.sourceHash) || !r.pending.targetHash || !digest(r.pending.targetHash))))) throw new Error();
+        if (r.legacyEdit !== undefined && !Object.hasOwn(LEGACY_NOTICE, r.legacyEdit)) throw new Error();
       }
       Object.setPrototypeOf(m.skills, null);
       return m;
@@ -163,6 +175,12 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
   function persist(m) {
     const { state } = config();
     atomic(state, manifestPath(), JSON.stringify(m, null, 2) + '\n', current(state, manifestPath()));
+  }
+  // Generated names are read-only whether or not a record exists yet: a user
+  // must not be able to create the file the manager is about to regenerate.
+  const readOnly = (name, r) => generated.includes(name) || r?.generated === true;
+  function refuseIfReadOnly(name, m) {
+    if (readOnly(name, m.skills[name])) throw new SkillError(403, readOnlyMessage(name));
   }
   function names(m) {
     const { source } = config(); checkRoot(source);
@@ -205,11 +223,10 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
       if (record) verified(record, name, { deleting: record.pending?.kind === 'delete' });
       else problem = 'Ownership is not established. Resolve the name or installation conflict and restart distribution; existing installations are untouched.';
     } catch (e) { problem = e.message; }
-    if (!problem && record?.generated) problem = m.disabledGenerated.includes(name)
-      ? 'Automatic regeneration is paused to preserve your edits. Explicit saves still publish this skill.'
-      : 'This skill is generated. Saving changes preserves your edits and pauses automatic regeneration.';
+    const locked = readOnly(name, record);
+    if (!problem && locked) problem = record?.legacyEdit ? LEGACY_NOTICE[record.legacyEdit] : readOnlyMessage(name);
     return { name, content: content ?? '', sourceExists: content !== null, revision, ...(problem ? { problem } : {}),
-      managed: !!record, pending: record?.pending?.kind || null,
+      managed: !!record, readOnly: locked, pending: record?.pending?.kind || null,
       installations: installed.map(({ path, hash, error }) => ({ path, exists: hash !== null && hash !== undefined, ...(error ? { error } : {}) })) };
   }
   function match(name, m, revision) {
@@ -294,7 +311,6 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
     if (create && (r || existing !== null)) conflict('Skill already exists; choose a different name or open the existing skill');
     const observed = !create && !boot ? match(name, m, revision) : null;
     if (r?.pending?.kind === 'delete') conflict('Deletion is pending; retry deletion before creating this skill again');
-    const customized = !!(observed && r?.generated && hash(content) !== r.sourceHash);
     const sourceConfirmed = confirmSource(r, observed);
     if (r?.pending?.kind === 'write') {
       if (sourceConfirmed) {
@@ -312,10 +328,9 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
     // Legacy adoption is checked against the CURRENT source, including for the
     // generated environment skill, before any newly generated text is written.
     r.targets = targetPlan(r, id, hash(generatedSkill(name, existing ?? content)), boot && existing !== null);
-    r.generated = r.generated || generated || m.disabledGenerated.includes(name);
+    r.generated = r.generated || generated;
     r.pending = { kind: 'write', id: nonce(), sourceHash: hash(content), targetHash: hash(generatedSkill(name, content)) };
     m.skills[name] = r;
-    if (customized && !m.disabledGenerated.includes(name)) m.disabledGenerated.push(name);
     persist(m); // intent first; a failure here must change no skill bytes
     return finishWrite(name, content, m);
   }
@@ -356,7 +371,6 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
       }
     } catch (e) { return outcome(name, 'failed', results, 'persisted', e.message); }
     delete m.skills[name];
-    if (r.generated && !m.disabledGenerated.includes(name)) m.disabledGenerated.push(name);
     try { persist(m); } catch (e) { return outcome(name, 'removed', results, 'failed', e.message); }
     return outcome(name, 'removed', results, 'persisted');
   }
@@ -382,15 +396,45 @@ export function createSkillsService({ sourceRoot, stateRoot, targetRoots = [], i
       catch (e) { return { name, size: 0, error: e.message }; }
     }).sort((a, b) => a.name.localeCompare(b.name)); }),
     get: serial((name) => snapshot(name, load())),
-    create: serial((name, content) => write(name, content, { create: true })),
-    update: serial((name, content, revision) => write(name, content, { revision })),
-    remove: serial(remove),
+    create: serial((name, content) => { skillId(name); refuseIfReadOnly(name, load()); return write(name, content, { create: true }); }),
+    update: serial((name, content, revision) => { skillId(name); refuseIfReadOnly(name, load()); return write(name, content, { revision }); }),
+    remove: serial((name, revision) => { skillId(name); refuseIfReadOnly(name, load()); return remove(name, revision); }),
     redistribute: serial(redistribute),
     generate: serial((name, content) => {
       skillId(name);
       const m = load();
-      if (m.disabledGenerated.includes(name)) return { ok: true, status: 'complete', source: 'generation-disabled', targets: [], manifest: 'persisted', skill: null };
-      if (m.skills[name] && m.skills[name].generated !== true) conflict('A user-managed skill already uses this name; automatic generation cannot replace it');
+      const r = m.skills[name];
+      if (r && r.generated !== true) conflict('A user-managed skill already uses this name; automatic generation cannot replace it');
+      let changed = false;
+      // Legacy: an edit or deletion made while generated skills were still
+      // editable left a `disabledGenerated` flag. An edit is honoured for one
+      // more cycle — the editor says so — and replaced on the next; a deletion
+      // has nothing to keep, so regeneration simply resumes.
+      if (m.disabledGenerated.includes(name)) {
+        m.disabledGenerated = m.disabledGenerated.filter((other) => other !== name);
+        if (r) {
+          r.legacyEdit = 'kept';
+          persist(m);
+          return { ok: true, status: 'complete', source: 'legacy-edit-kept', targets: [], manifest: 'persisted', skill: snapshot(name, m) };
+        }
+        changed = true;
+      } else if (r?.legacyEdit === 'kept') { r.legacyEdit = 'replaced'; changed = true; }
+      else if (r?.legacyEdit === 'replaced') { delete r.legacyEdit; changed = true; }
+      // An interrupted earlier generation left an intent whose bytes only the
+      // old inputs could reproduce. The files that carry those intended bytes
+      // were written by this manager — adopt them as owned, drop the intent,
+      // and let the newest content through. Externally modified files are
+      // still refused by the ordinary ownership checks in write().
+      if (r?.pending) {
+        const { source } = config();
+        if (r.pending.kind === 'write') {
+          if (current(source, path.join(source, name)) === r.pending.sourceHash) r.sourceHash = r.pending.sourceHash;
+          for (const t of r.targets) if (current(t.root, t.path) === r.pending.targetHash) t.hash = r.pending.targetHash;
+        }
+        delete r.pending;
+        changed = true;
+      }
+      if (changed) persist(m);
       return write(name, content, { boot: true, generated: true });
     }),
   };

@@ -10,6 +10,7 @@ const mutants = [
   ['deletion on opening', 'setConfirmDel(await api.getSkill(loaded.name));', 'await api.deleteSkill(loaded.name, loaded.revision);'],
   ['duplicate submission guard', 'if (working.current) return;', ''],
   ['failed save discards buffer', 'await api.saveSkill(loaded.name, content, loaded.revision)', "await api.saveSkill(loaded.name, content, loaded.revision).catch((e) => { setContent(''); throw e; })"],
+  ['generated skill editable in the UI', "disabled={busy || loaded?.pending === 'delete' || loaded?.readOnly}", "disabled={busy || loaded?.pending === 'delete'}"],
 ];
 let failed = 0;
 for (const [name, from, to] of mutants) {
