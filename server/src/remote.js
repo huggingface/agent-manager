@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { outputHash } from './output-id.js';
 import path from 'node:path';
 import { WORKSPACES_DIR } from './config.js';
 import { update } from './sessions.js';
@@ -410,6 +411,13 @@ export function remoteDigest(session) {
     running: isListening(name) && !session.remote.paused,
     turnsLog: sinceTurns.slice(0, -1).reverse()
       .map((m) => ({ answer: clip(m.text), answerMd: clipRaw(m.text), ts: Date.parse(m.at || '') || 0 })),
+    // A remote log already numbers its messages, so the unread cursor uses that
+    // rather than deriving one: it is authoritative, monotonic, and survives a
+    // reconnect. The hash still comes from the full text, so an agent that
+    // edits and resends the same message is a new thing to read.
+    outSeq: answer ? answer.seq : 0,
+    outHash: answer ? outputHash(answer.text) : '',
+    outClipped: answer ? clipRaw(answer.text).length < String(answer.text || '').trim().length : false,
   };
 }
 

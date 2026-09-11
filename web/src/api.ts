@@ -1,4 +1,6 @@
 import type { Cli, Group, MoveTarget, RemoteInfo, RemoteMessage, Session, Tree } from './types';
+import { ApiError, connectionError, decodeJsonText, decodeResponse } from './apiResponse';
+export { ApiError } from './apiResponse';
 import { requestHeaders } from './requestIntent';
 
 const HEADERS = { 'content-type': 'application/json' };
@@ -8,20 +10,13 @@ const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
   const request = input instanceof Request ? input : undefined;
   const method = String(init?.method || request?.method || 'GET').toUpperCase();
   const headers = requestHeaders(init?.headers || request?.headers, method);
-  return globalThis.fetch(input, { ...init, headers });
+  return globalThis.fetch(input, { ...init, headers }).catch((error) => { throw connectionError(error); });
 };
-// Like `json`, but keeps the server's own words — these routes fail for reasons
-// worth reading ("already exists here").
-const jsonOrError = async (r: Response) => {
-  const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.error || `${r.status}`);
-  return body;
-};
-
-const json = (r: Response) => r.ok ? r.json() : jsonOrError(r);
+const json = (r: Response) => decodeResponse(r);
+const jsonOrError = json;
 
 export const getClis = (): Promise<Cli[]> => fetch('/api/clis').then(json);
-export const getTree = (): Promise<Tree> => fetch('/api/tree').then(json);
+export const getTree = (signal?: AbortSignal): Promise<Tree> => fetch('/api/tree', { signal }).then(json);
 
 // Hide a group (or one agent) from the Overview. `ref` is a tree ref — `g:<id>`
 // or `s:<id>`. Persisted server-side, so it holds on every device.
@@ -118,10 +113,63 @@ export interface AmConfig {
   revive: { enabled: boolean; days: 1 | 3 | 7 };
   backup: { every: BackupEvery; dataset: string; exclude: string[] };
   defaultArtifactsSpace?: string;
+  /** Revision of the committed bytes. Send it back to replace them. */
+  rev?: string | null;
+  /** Why the saved file could not be read. Nothing may be written over it. */
+  readError?: string | null;
+  /** The generated environment skill: saving settings and telling the agents
+   *  about them are different states, and this is the second one. */
+  derived?: DerivedStatus;
 }
+export interface DerivedStatus { pending: boolean; error: string | null; at: number | null }
+
+// A settings write that was refused because the ground moved: the server says
+// which revision is actually stored and what is in it, so the client can show
+// the difference instead of guessing — and never force its own copy over it
+// without being told to.
+export class SettingsConflict extends Error {
+  code: 'stale' | 'base-required' | 'unreadable';
+  rev: string | null;
+  value: unknown;
+  constructor(message: string, code: SettingsConflict['code'], rev: string | null, value: unknown) {
+    super(message);
+    this.name = 'SettingsConflict';
+    this.code = code;
+    this.rev = rev;
+    this.value = value;
+  }
+}
+
+// Settings writes share one shape: whole-resource replacement, guarded by the
+// revision being replaced (`base`), the way the file editor's save is guarded by
+// its content tag. A 409 is a conflict to show, not a failure to retry blindly.
+const settingsWrite = async (route: string, body: unknown, base: string | null) => {
+  const r = await fetch(`${route}${base ? `?base=${encodeURIComponent(base)}` : ''}`, {
+    method: 'PUT', headers: HEADERS, body: JSON.stringify(body),
+  });
+  const payload = await r.json().catch(() => ({} as any));
+  if (r.status === 409) {
+    throw new SettingsConflict(payload.error || 'these settings changed elsewhere',
+      payload.code || 'stale', payload.rev ?? null, payload.value ?? null);
+  }
+  if (!r.ok) {
+    const failedPath = Array.isArray(payload.details)
+      ? payload.details.find((detail: any) => detail?.field === 'path' && typeof detail.message === 'string')?.message
+      : null;
+    // 5xx prose is intentionally generic. The relative filename is its safe,
+    // structured diagnostic and tells the operator which settings resource to
+    // inspect without exposing an absolute container path.
+    throw new Error(failedPath ? `${failedPath} could not be saved.` : (payload.error || `${r.status}`));
+  }
+  return payload;
+};
+
+// The outcome of the work a save sets off, asked for on its own. A save's
+// response can only say "started": the derived update runs after it.
+export const getDerivedStatus = (): Promise<DerivedStatus> => fetch('/api/settings/derived').then(json);
 export const getConfig = (): Promise<AmConfig> => fetch('/api/config').then(json);
-export const saveConfig = (c: AmConfig) =>
-  fetch('/api/config', { method: 'PUT', headers: HEADERS, body: JSON.stringify(c) }).then(json);
+export const saveConfig = (c: AmConfig, base: string | null): Promise<AmConfig & { ok: true }> =>
+  settingsWrite('/api/config', c, base);
 
 // ---- durable scheduled prompts ----
 export type CronState = 'running' | 'stopped';
@@ -191,10 +239,16 @@ export const backupStatus = (): Promise<BackupStatus> => fetch('/api/backup/stat
 export const runBackup = (): Promise<{ job?: string }> =>
   fetch('/api/backup/run', { method: 'POST' }).then(jsonOrError);
 
-export interface SecretsData { detected: string[]; notes: Record<string, string>; }
+export interface SecretsData {
+  detected: string[];
+  notes: Record<string, string>;
+  rev?: string | null;
+  readError?: string | null;
+  derived?: DerivedStatus;
+}
 export const getSecrets = (): Promise<SecretsData> => fetch('/api/secrets').then(json);
-export const saveSecrets = (notes: Record<string, string>) =>
-  fetch('/api/secrets', { method: 'PUT', headers: HEADERS, body: JSON.stringify({ notes }) }).then(json);
+export const saveSecrets = (notes: Record<string, string>, base: string | null): Promise<SecretsData & { ok: true }> =>
+  settingsWrite('/api/secrets', { notes }, base);
 
 export interface QuotaWindow { usedPercent?: number; resetsAt?: number; windowMinutes?: number; }
 export interface ProviderUsage {
@@ -212,14 +266,38 @@ export interface MetaDigest {
   sinceTurns: number; sinceToolCalls: number; sinceTools: Record<string, number>; sinceFiles: string[];
   sinceTokens: number;
   running?: boolean;        // task in flight (codex task_started/task_complete)
+  // The unread cursor: which reply this is, and whether the copy above is the
+  // whole of it. See server/src/output-id.js.
+  outSeq?: number; outHash?: string; outClipped?: boolean;
   turnsLog?: TurnEntry[];   // newest-first history of completed exchanges
 }
-export interface MetaSession extends Session { digest: MetaDigest | null }
-export const getMeta = (): Promise<{ sessions: MetaSession[]; generatedAt: string }> =>
-  fetch('/api/meta').then(json);
+// Which reply is newest, and which one the operator has been shown. The pair is
+// the whole unread feature: see lib/unread.ts for the comparison, and
+// server/src/output-id.js for how a reply gets its identity.
+export interface OutputVersion { src: string; seq: number; hash: string }
+export interface MetaSession extends Session {
+  digest: MetaDigest | null;
+  output?: OutputVersion | null;
+  read?: (OutputVersion & { at?: string }) | null;
+}
+export const getMeta = (signal?: AbortSignal): Promise<{ sessions: MetaSession[]; generatedAt: string }> =>
+  fetch('/api/meta', { signal }).then(json);
+
+/**
+ * "These replies were shown to the operator." Used by both read paths — a
+ * conversation scrolled to a visible latest answer, and the Unread section's
+ * Mark all read — because they make the same claim and must be judged by the
+ * same rules.
+ *
+ * Each mark is answered separately: 'ok' means recorded, anything else means
+ * the reply it described is no longer the newest, and the session stays unread.
+ */
+export const markRead = (marks: (OutputVersion & { id: string })[]): Promise<{
+  results: Record<string, string>;
+}> => fetch('/api/read', { method: 'POST', headers: HEADERS, body: JSON.stringify({ marks }) }).then(jsonOrError);
 // Targeted digest for one session (progressive tile fill); digest is null when
 // this CLI only resolves through the bulk pass.
-export const getMetaOne = (id: string): Promise<{ id: string; digest: MetaDigest | null }> =>
+export const getMetaOne = (id: string): Promise<{ id: string; digest: MetaDigest | null; output?: OutputVersion | null; read?: (OutputVersion & { at?: string }) | null }> =>
   fetch(`/api/meta/${id}`).then(json);
 // ---------- remote agents ----------
 // The pane polls this at the app's usual 2 s cadence. since=0 returns the tail;
@@ -233,10 +311,7 @@ export const sayToRemote = (id: string, text: string) => sendInput(id, text);
 
 // text/plain, and free of secrets by design — safe to put on a clipboard.
 export const getRemotePrompt = (name: string): Promise<string> =>
-  fetch(`/api/remote/${encodeURIComponent(name)}/prompt`).then((r) => {
-    if (!r.ok) throw new Error(`${r.status}`);
-    return r.text();
-  });
+  fetch(`/api/remote/${encodeURIComponent(name)}/prompt`).then((r) => decodeResponse<string>(r, 'text'));
 
 export const setRemotePaused = (id: string, paused: boolean): Promise<RemoteInfo> =>
   fetch(`/api/sessions/${id}/remote/paused`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ paused }) }).then(json);
@@ -260,18 +335,24 @@ export interface AttachmentUploadOptions {
 }
 export const ATTACHMENT_UPLOAD_TIMEOUT_MS = 20 * 60 * 1000;
 
-const attachmentUploadError = (request: XMLHttpRequest) => {
-  let detail = '';
-  try {
-    const body = JSON.parse(request.responseText || '{}');
-    if (typeof body?.error === 'string') detail = body.error;
-  } catch { /* An ingress/proxy error can be HTML. Classify it by status below. */ }
-  if (detail) return detail;
-  if (request.status === 413) return 'The server or its proxy rejected this file as too large (HTTP 413). Try a smaller file.';
-  if (request.status === 408 || request.status === 504) return `The upload timed out (HTTP ${request.status}). Check the connection and retry.`;
-  if (request.status === 429) return 'Too many uploads at once (HTTP 429). Wait a minute, then retry.';
-  if (request.status >= 500) return `The upload server failed (HTTP ${request.status}). Retry in a moment.`;
-  return `Upload failed (HTTP ${request.status}${request.statusText ? ` ${request.statusText}` : ''}).`;
+/**
+ * Size, storage, validation and missing-session refusals cannot become valid by
+ * sending the same bytes again; network, timeout, throttling and 5xx failures
+ * can. The decoded ApiError (status, code, allowlisted data) is kept intact.
+ */
+export class AttachmentUploadError extends ApiError {
+  retryable: boolean;
+  constructor(failure: ApiError, retryable: boolean) {
+    super(failure.message, failure.status, failure.code, failure.data);
+    this.name = 'AttachmentUploadError';
+    this.legacy = failure.legacy;
+    this.retryable = retryable;
+  }
+}
+
+const attachmentUploadError = (error: unknown, status: number) => {
+  const failure = error instanceof ApiError ? error : new ApiError(`Upload failed (HTTP ${status}).`, status, 'upload-failed');
+  return new AttachmentUploadError(failure, ![400, 404, 413, 415].includes(status));
 };
 
 /** XMLHttpRequest is intentional: fetch has no browser upload-progress API. */
@@ -288,9 +369,12 @@ export const uploadAttachment = (
     signal?.removeEventListener('abort', abort);
     task();
   };
-  const abort = () => request.abort();
+  const abort = () => {
+    request.abort();
+    finish(() => reject(new ApiError('Upload was canceled before it completed.', null, 'canceled')));
+  };
   if (signal?.aborted) {
-    finish(() => reject(new Error('Upload was canceled before it completed.')));
+    finish(() => reject(new ApiError('Upload was canceled before it completed.', null, 'canceled')));
     return;
   }
   request.open('POST', `/api/sessions/${encodeURIComponent(id)}/attachments`);
@@ -307,29 +391,21 @@ export const uploadAttachment = (
   // "bytes sent, awaiting server confirmation", not prematurely "stored".
   request.upload.onload = () => onProgress?.({ loaded: file.size, total: file.size });
   request.onload = () => {
-    if (request.status < 200 || request.status >= 300) {
-      finish(() => reject(new Error(attachmentUploadError(request))));
-      return;
-    }
     try {
-      const attachment = JSON.parse(request.responseText) as Attachment;
+      const attachment = decodeJsonText<Attachment>(request.responseText, request.status);
+      if (!attachment) throw new ApiError('The upload result was empty. Check the result before trying again.', request.status, 'unreadable-response');
       finish(() => resolve(attachment));
-    } catch {
-      finish(() => reject(new Error('The upload completed, but the server returned an unreadable response. Retry the file.')));
+    } catch (error) {
+      const failed = request.status < 200 || request.status >= 300;
+      finish(() => reject(failed ? attachmentUploadError(error, request.status) : error));
     }
   };
-  request.onerror = () => finish(() => reject(new Error(
-    typeof navigator !== 'undefined' && navigator.onLine === false
-      ? 'Upload stopped because this device is offline. Reconnect and retry.'
-      : 'Upload connection was interrupted before the server confirmed the file. Check the connection and retry.',
-  )));
-  request.onabort = () => finish(() => reject(new Error('Upload was canceled before it completed.')));
-  request.ontimeout = () => finish(() => reject(new Error(
-    `Upload timed out after ${Math.round(timeoutMs / 60_000)} minutes. Check the connection and retry.`,
-  )));
+  request.onerror = () => finish(() => reject(connectionError(new Error('network'))));
+  request.onabort = () => finish(() => reject(new ApiError('Upload was canceled before it completed.', null, 'canceled')));
+  request.ontimeout = () => finish(() => reject(new ApiError('Upload timed out before the result was confirmed.', null, 'timeout')));
   signal?.addEventListener('abort', abort, { once: true });
   onProgress?.({ loaded: 0, total: file.size });
-  request.send(file);
+  if (!settled) request.send(file);
 });
 
 export const deleteAttachment = (sessionId: string, attachmentId: string): Promise<{ ok: boolean }> =>
@@ -399,21 +475,91 @@ export const previewFile = (id: string, p: string): Promise<FilePreview> =>
 // One page of a transcript sitting in the workspace, shaped exactly like the
 // Trace pane's own pages so the same viewer renders it.
 export const getFileTracePage = async (id: string, p: string, offset = 0, limit = 200): Promise<TracePage> => {
-  const r = await fetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&offset=${offset}&limit=${limit}`);
-  if (!r.ok) {
-    const d = await r.json().catch(() => ({}));
-    throw new TraceUnavailable(d.error || 'could not read this trace', d.code || 'no-trace');
-  }
-  return r.json();
+  return traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&offset=${offset}&limit=${limit}`);
 };
 
 export const rawUrl = (id: string, p: string) =>
   `/api/files/${id}/raw?path=${encodeURIComponent(p)}`;
 
-export const uploadFile = (id: string, p: string, file: File) =>
-  fetch(`/api/files/${id}/upload?path=${encodeURIComponent(p)}&name=${encodeURIComponent(file.name)}`, {
-    method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: file,
-  }).then(json);
+export interface WorkspaceFileCollision {
+  code: 'file-exists' | 'replacement-stale';
+  name: string;
+  path: string;
+  revision: string | null;
+  replaceToken: string | null;
+}
+
+export class WorkspaceUploadError extends Error {
+  status: number;
+  collision?: WorkspaceFileCollision;
+  constructor(message: string, status: number, body?: Partial<WorkspaceFileCollision>) {
+    super(message);
+    this.name = 'WorkspaceUploadError';
+    this.status = status;
+    if (body?.code === 'file-exists' || body?.code === 'replacement-stale') {
+      this.collision = {
+        code: body.code,
+        name: String(body.name || ''),
+        path: String(body.path || ''),
+        revision: typeof body.revision === 'string' ? body.revision : null,
+        replaceToken: typeof body.replaceToken === 'string' ? body.replaceToken : null,
+      };
+    }
+  }
+}
+
+export interface WorkspaceUploadOptions extends AttachmentUploadOptions { replaceToken?: string }
+
+/** Workspace uploads use XHR for progress, but replacement remains a separate,
+ * token-bound request after the server reports the exact collision. */
+export const uploadFile = (
+  id: string, p: string, file: File,
+  { replaceToken, onProgress, signal, timeoutMs = ATTACHMENT_UPLOAD_TIMEOUT_MS }: WorkspaceUploadOptions = {},
+): Promise<{ ok: boolean; path: string; size: number; mtime: number }> => new Promise((resolve, reject) => {
+  const request = new XMLHttpRequest();
+  let settled = false;
+  const finish = (task: () => void) => {
+    if (settled) return;
+    settled = true;
+    signal?.removeEventListener('abort', abort);
+    task();
+  };
+  const abort = () => request.abort();
+  if (signal?.aborted) {
+    finish(() => reject(new WorkspaceUploadError('Upload was canceled before it completed.', 0)));
+    return;
+  }
+  request.open('POST', `/api/files/${encodeURIComponent(id)}/upload?path=${encodeURIComponent(p)}&name=${encodeURIComponent(file.name)}`);
+  request.timeout = timeoutMs;
+  request.setRequestHeader('content-type', 'application/octet-stream');
+  requestHeaders(undefined, 'POST').forEach((value, key) => request.setRequestHeader(key, value));
+  if (replaceToken) request.setRequestHeader('x-am-replace-token', replaceToken);
+  request.upload.onprogress = (event) => onProgress?.({
+    loaded: event.loaded,
+    total: event.lengthComputable && event.total ? event.total : file.size,
+  });
+  request.upload.onload = () => onProgress?.({ loaded: file.size, total: file.size });
+  request.onload = () => {
+    let body: any = {};
+    try { body = JSON.parse(request.responseText || '{}'); } catch {}
+    if (request.status < 200 || request.status >= 300) {
+      finish(() => reject(new WorkspaceUploadError(body.error || `Upload failed (HTTP ${request.status}).`, request.status, body)));
+      return;
+    }
+    finish(() => resolve(body));
+  };
+  request.onerror = () => finish(() => reject(new WorkspaceUploadError(
+    typeof navigator !== 'undefined' && navigator.onLine === false
+      ? 'Upload stopped because this device is offline. Reconnect and retry.'
+      : 'Upload connection was interrupted before the file was published. Retry it.',
+    request.status,
+  )));
+  request.onabort = () => finish(() => reject(new WorkspaceUploadError('Upload was canceled before it completed.', 0)));
+  request.ontimeout = () => finish(() => reject(new WorkspaceUploadError('Upload timed out before the file was published. Retry it.', request.status)));
+  signal?.addEventListener('abort', abort, { once: true });
+  onProgress?.({ loaded: 0, total: file.size });
+  request.send(file);
+});
 
 // Create an empty folder / an empty file inside `parent`. The server refuses a
 // name that already exists rather than overwriting it.
@@ -452,11 +598,7 @@ export const writeFile = async (id: string, p: string, text: string, base: strin
   const r = await fetch(`/api/files/${id}/write?path=${encodeURIComponent(p)}${q}`, {
     method: 'PUT', headers: { 'content-type': 'text/plain; charset=utf-8' }, body: text,
   });
-  // Unlike the rest of the API, a failed save has something worth reading in it
-  // ("changed on disk since you opened it") — surface it instead of a number.
-  const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.error || `${r.status}`);
-  return body;
+  return json(r);
 };
 
 // ---- session sharing (docs/session-sharing.md) ----
@@ -480,10 +622,10 @@ export interface ShareResult {
 }
 // Thrown when the redaction gate refuses a public share (HTTP 409). Carries the
 // rule names so the dialog can say exactly what tripped instead of "failed".
-export class RedactionBlocked extends Error {
+export class RedactionBlocked extends ApiError {
   hits: Record<string, number>;
   constructor(message: string, hits: Record<string, number>) {
-    super(message);
+    super(message, 409, 'redaction-blocked', { hits });
     this.name = 'RedactionBlocked';
     this.hits = hits;
   }
@@ -496,12 +638,13 @@ export const shareSession = async (
   body: { visibility: 'public' | 'gated'; name?: string; grantTo?: string[] },
 ): Promise<ShareResult> => {
   const r = await fetch(`/api/sessions/${id}/share`, { method: 'POST', headers: HEADERS, body: JSON.stringify(body) });
-  if (r.status === 409) {
-    const d = await r.json().catch(() => ({}));
-    throw new RedactionBlocked(d.error || 'blocked by the redaction gate', d.hits || {});
+  try { return await json(r); }
+  catch (error) {
+    if (error instanceof ApiError && error.status === 409 && (error.code === 'redaction-blocked' || error.legacy)) {
+      throw new RedactionBlocked(error.message, error.data.hits || {});
+    }
+    throw error;
   }
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
-  return r.json();
 };
 
 export interface ShareAccess { accepted: string[]; pending: string[] }
@@ -574,23 +717,15 @@ export interface TracePage {
 
 // A 404 here is an expected state (no transcript yet, unsupported CLI, a codex
 // guardian rollout), so the reason travels with it for the pane to render.
-export class TraceUnavailable extends Error {
-  code: string;
+export class TraceUnavailable extends ApiError {
   constructor(message: string, code: string) {
-    super(message);
+    super(message, 404, code);
     this.name = 'TraceUnavailable';
-    this.code = code;
   }
 }
 
 export const getTracePage = async (id: string, offset = 0, limit = 200): Promise<TracePage> => {
-  const r = await fetch(`/api/trace/${id}?offset=${offset}&limit=${limit}`);
-  if (r.status === 404) {
-    const d = await r.json().catch(() => ({}));
-    throw new TraceUnavailable(d.error || 'no trace for this session yet', d.code || 'no-trace');
-  }
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
-  return r.json();
+  return traceFetch(`/api/trace/${id}?offset=${offset}&limit=${limit}`);
 };
 
 // ---- windows: how the reader actually reads ----
@@ -635,12 +770,15 @@ const traceRange = (req: TraceReq) => (req.at === 'tail' ? 'tail=1' : `${req.at}
 
 const traceFetch = async <T>(url: string, signal?: AbortSignal): Promise<T> => {
   const r = await fetch(url, { signal });
-  if (r.status === 404) {
-    const d = await r.json().catch(() => ({}));
-    throw new TraceUnavailable(d.error || 'no trace for this session yet', d.code || 'no-trace');
+  try { return await json(r); }
+  catch (error) {
+    if (error instanceof ApiError && error.status === 404 && (error.legacy || ['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(error.code))) {
+      const unavailable = new TraceUnavailable(error.message, error.code === 'not-found' ? 'no-trace' : error.code);
+      unavailable.data = error.data;
+      throw unavailable;
+    }
+    throw error;
   }
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
-  return r.json();
 };
 
 const windowSize = (bytes?: number, min?: number) =>
@@ -651,6 +789,44 @@ export const getTraceWindow = (id: string, req: TraceReq, bytes?: number, min?: 
 
 export const getTraceSummary = (id: string, signal?: AbortSignal): Promise<TraceSummary> =>
   traceFetch(`/api/trace/${id}?summary=1`, signal);
+
+/** One match, and the window that shows it with its surrounding conversation. */
+export interface TraceHit {
+  id: string | null;
+  role: 'user' | 'assistant' | 'system';
+  ts: number | null;
+  /** Occurrences of the term in this message, which is not the same as hits. */
+  occurrences: number;
+  /** This message's text was clipped by the display cap before being searched. */
+  clipped: boolean;
+  snippet: { text: string; at: number; length: number };
+  window: { at: 'before'; cursor: number; bytes?: number; min?: number };
+}
+export interface TraceSearch {
+  query: string;
+  mode: 'bytes' | 'index';
+  hits: TraceHit[];
+  /** Continue from here, or null when the scan reached the conversation's start. */
+  next: string | null;
+  /** The stated scope was searched to its beginning. Only then is "no matches" true. */
+  complete: boolean;
+  blocked?: boolean;
+  /** Some searched messages were clipped by the display cap, so their tails were not seen. */
+  clipped: boolean;
+  scanned: number;
+  boundary: number;
+  reset?: boolean;
+  generation?: string;
+  revision?: string;
+}
+
+/** Search the whole conversation, not the loaded stretch. Explicit by design:
+ * it reads the transcript, so nothing calls it on a keystroke or on mount. */
+export const searchTraceHistory = (id: string, q: string, cursor?: string | null,
+  generation?: string, signal?: AbortSignal): Promise<TraceSearch> =>
+  traceFetch(`/api/trace/${id}/search?q=${encodeURIComponent(q)}`
+    + `${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`
+    + `${generation ? `&generation=${encodeURIComponent(generation)}` : ''}`, signal);
 
 export const getFileTraceWindow = (id: string, p: string, req: TraceReq, bytes?: number, min?: number, signal?: AbortSignal): Promise<TraceWindow> =>
   traceFetch(`/api/files/${id}/trace?path=${encodeURIComponent(p)}&${traceRange(req)}${windowSize(bytes, min)}`, signal);
@@ -707,8 +883,7 @@ export interface TraceLocation {
 }
 export const getTraceLocation = async (id: string): Promise<TraceLocation> => {
   const r = await fetch(`/api/trace/${id}/location`);
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
-  return r.json();
+  return json(r);
 };
 
 // Receiving: pull a shared trace off the Hub so a pane can render it. Accepts a
@@ -719,8 +894,7 @@ export interface ImportedBundle {
 }
 export const importTraceBundle = async (repo: string): Promise<ImportedBundle> => {
   const r = await fetch('/api/trace/import', { method: 'POST', headers: HEADERS, body: JSON.stringify({ repo }) });
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `${r.status}`);
-  return r.json();
+  return json(r);
 };
 
 export interface BundleEntry {
@@ -733,14 +907,26 @@ export const setTraceSource = (id: string, kind: 'session' | 'bundle', ref: stri
   fetch(`/api/trace/${id}/source`, { method: 'PUT', headers: HEADERS, body: JSON.stringify({ kind, ref }) }).then(json);
 
 // ---- skills ----
-export interface SkillFile { name: string; size: number; }
-export const listSkills = (): Promise<SkillFile[]> => fetch('/api/skills').then(json);
-export const getSkill = (name: string): Promise<{ name: string; content: string }> =>
-  fetch(`/api/skills/${encodeURIComponent(name)}`).then(json);
-export const saveSkill = (name: string, content: string) =>
-  fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'PUT', headers: { 'content-type': 'text/plain' }, body: content }).then(json);
-export const deleteSkill = (name: string) =>
-  fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' }).then(json);
+export interface SkillFile { name: string; size: number; pending?: 'write' | 'delete' | null; error?: string; }
+export interface SkillSnapshot {
+  name: string; content: string; revision: string; managed: boolean; sourceExists: boolean; problem?: string; readOnly?: boolean;
+  pending: 'write' | 'delete' | null;
+  installations: { path: string; exists: boolean; error?: string }[];
+}
+export interface SkillResult {
+  ok: boolean; status: 'complete' | 'partial'; source: string; manifest: string; error?: string;
+  targets: { path: string; status: string; error?: string; directoryError?: string }[];
+  skill: SkillSnapshot | null;
+}
+export const listSkills = (): Promise<SkillFile[]> => fetch('/api/skills').then(jsonOrError);
+export const getSkill = (name: string): Promise<SkillSnapshot> =>
+  fetch(`/api/skills/${encodeURIComponent(name)}`).then(jsonOrError);
+export const createSkill = (name: string, content: string): Promise<SkillResult> =>
+  fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'POST', headers: { 'content-type': 'text/plain' }, body: content }).then(jsonOrError);
+export const saveSkill = (name: string, content: string, revision: string): Promise<SkillResult> =>
+  fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'PUT', headers: { 'content-type': 'text/plain', 'If-Match': revision }, body: content }).then(jsonOrError);
+export const deleteSkill = (name: string, revision: string): Promise<SkillResult> =>
+  fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE', headers: { 'If-Match': revision } }).then(jsonOrError);
 
 // ---- the API log (Settings → API log) ----
 // Written by operationMiddleware: every mutating call, plus the one read that is

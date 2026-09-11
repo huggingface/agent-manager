@@ -3,6 +3,11 @@
 // One prompt, the work, the answer. Every surface in the app is some depth of
 // this, so the grouping lives here and not in a component.
 import type { TraceBlock, TraceTurn } from '../../api';
+import { isOperatorPrompt } from '../../lib/readerModel';
+
+// Re-exported: the rule moved next to the reconciliation the store also counts
+// with, so there is one definition rather than two that can disagree.
+export { isOperatorPrompt };
 
 export interface Exchange {
   key: string;
@@ -26,17 +31,6 @@ export interface Exchange {
   toolCalls: number;
   model?: string;
 }
-
-// Mirrors the trace normalizer's named harness envelopes. A leading '<' alone
-// can be an operator's HTML/XML prompt and must not hide its prompt band.
-export const isOperatorPrompt = (t: TraceTurn) => {
-  if (t.role !== 'user') return false;
-  const text = t.blocks.filter((b) => b.type === 'text').map((b) => ('text' in b ? b.text : '')).join('').trim();
-  if (!text) return t.blocks.some((b) => b.type === 'image');
-  return !/^<(?:task-notification|environment_context|system-reminder|app-context|recommended_plugins|fork-boilerplate)(?:\s|>)/.test(text)
-    && !text.startsWith('[Request interrupted')
-    && !text.startsWith('[SYSTEM NOTIFICATION');
-};
 
 const usageOf = (t: TraceTurn) => (t.usage ? (t.usage.in || 0) + (t.usage.out || 0) : 0);
 
