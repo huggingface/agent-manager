@@ -10,12 +10,17 @@ import { renderMarkdown } from '../lib/markdown';
 import CodeView from './CodeView';
 import FileWrapToggle from './FileWrapToggle';
 import PdfView from './PdfView';
-import { TraceView, type TraceHeadInfo, type TraceSource } from './TracePane';
+import type { TraceHeadInfo, TraceSource } from '../lib/traceWindows';
+import LazyPanel from './LazyPanel';
 import {
   FolderGlyph, FileGlyph, CloseGlyph, UpGlyph, UploadGlyph, BackGlyph, DownloadGlyph,
   RefreshGlyph, ImageGlyph, CodeGlyph, DocGlyph, GlobeGlyph,
   FolderPlusGlyph, FilePlusGlyph, TrashGlyph, PencilGlyph, MoveGlyph,
 } from './icons';
+
+// The rendered-conversation view of a .jsonl file is the trace pane's code,
+// fetched only when such a file is opened (most Files sessions never do).
+const loadTraceView = () => import('./TracePane');
 
 const fmtSize = (n: number) => {
   if (n < 1024) return `${n} B`;
@@ -867,10 +872,12 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved 
       // Same two faces as markdown: the rendered conversation, or the JSONL
       // underneath it.
       return raw ? code(shown) : (
-        <TraceView
-          src={traceSrc} srcKey={`file:${sessionId}:${path}`} zoom={zoom} query={traceQuery}
-          onHead={setTraceHead} onNav={(go) => { traceNav.current = go; }}
-        />
+        <LazyPanel load={loadTraceView} what="the trace viewer" render={(m) => (
+          <m.TraceView
+            src={traceSrc} srcKey={`file:${sessionId}:${path}`} zoom={zoom} query={traceQuery}
+            onHead={setTraceHead} onNav={(go) => { traceNav.current = go; }}
+          />
+        )} />
       );
     }
     if (meta.kind === 'text') return code(shown);
