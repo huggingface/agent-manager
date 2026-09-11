@@ -36,7 +36,7 @@ const TERM_CTRL = '\x00\x00AM:';
 import { buildUsage } from './usage.js';
 import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, searchTrace, traceHarnessOf, subagentRoster, readSubagentTrace } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
-import { startVisibilityWatch, isPublic, visibility } from './visibility.js';
+import { startVisibilityWatch, isLocked, lockState, visibility, onVisibilityChange, lockError } from './visibility.js';
 import { kindOfName, kindOfFile, mimeOf, readTextHead, TEXT_MAX } from './preview.js';
 import { startWatchdog } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
@@ -182,13 +182,15 @@ function ensureAutonomyDefaults() {
 ensureAutonomyDefaults();
 initPush();
 
-// Wait for the visibility verdict before serving so isPublic() (which fails
-// closed until the first successful check) doesn't flash the locked UI on a
-// private Space's boot — but bound the wait: a hung HF API must NEVER stop the
-// server from listening. If the check is slow, we serve anyway (briefly locked)
-// and the 60s interval check unlocks once it lands.
+// Wait for the first privacy verdict before serving so a private Space's boot
+// doesn't flash the locked UI — but bound the wait: a hung HF API must NEVER
+// stop the server from listening. If the check is slow, we serve anyway (locked,
+// reason `checking`) and unlock the moment valid evidence lands. The cycle
+// itself is bounded (visibility.js CYCLE_BUDGET_MS), so `firstVerdict` always
+// settles.
+const firstVerdict = startVisibilityWatch();
 await Promise.race([
-  startVisibilityWatch(),
+  firstVerdict,
   new Promise((r) => setTimeout(r, 9000)),
 ]);
 
@@ -224,15 +226,82 @@ app.use((req, res, next) => {
   return jsonBody(req, res, next);
 });
 
-// Safety lock: with no authentication, only serve the terminal backend when the
-// Space is private. If it's public, block every working API (and /ws below) and
-// let the UI render its setup widget instead. Health/info/visibility stay open
-// so the page can explain itself; static assets load so the widget can render.
-const OPEN_WHEN_PUBLIC = new Set(['/api/health', '/api/info', '/api/visibility']);
-app.use((req, res, next) => {
-  if (!isPublic()) return next();
-  if (!req.path.startsWith('/api/') || OPEN_WHEN_PUBLIC.has(req.path)) return next();
-  return res.status(403).json({ error: 'locked', code: 'locked', reason: 'public-space' });
+// Safety lock: with no authentication, only serve the privileged API while the
+// deployment is verified private (visibility.js owns that decision). Locked,
+// every /api route is refused with the same machine-readable body, except the
+// deliberately safe health/info/visibility trio the setup page needs; static
+// assets still load so that page can render.
+//
+// The same state has to reach connections admitted BEFORE the lock: a terminal
+// WebSocket, a long poll, a download still streaming. Every admitted privileged
+// connection registers a revoke() here and the lock transition calls them all,
+// on the server, whether or not any browser is awake to notice.
+const OPEN_WHEN_LOCKED = new Set(['/health', '/info', '/visibility']); // relative to the /api mount
+const admitted = new Set(); // revoke(eff) callbacks for live privileged connections
+const admitClient = (revoke) => { admitted.add(revoke); return () => admitted.delete(revoke); };
+// Work that performs PTY effects after a wait — typing a prompt once the agent
+// is ready, inserting attachments one by one — holds a scope for exactly as
+// long as it runs, whether or not the HTTP response that started it is still
+// open (a cron run answers 202 and delivers in the background). The lock
+// aborts every open scope; the work checks the signal before each effect.
+function lockScope() {
+  const cancel = new AbortController();
+  const revoke = (locked) => { try { cancel.abort(new Error(`locked:${locked.reason}`)); } catch {} };
+  const release = admitClient(revoke);
+  const eff = lockState();
+  if (eff.locked) revoke(eff); // opened while locked: nothing may happen
+  return { signal: cancel.signal, release };
+}
+const lockedError = () => Object.assign(new Error('the manager locked itself before this could be delivered'), { statusCode: 403, code: 'locked' });
+// Long polls sleep between looks; a lock must wake them instead of waiting the
+// sleep out. Resolves when `ms` elapse OR the lock lands, whichever is first.
+const lockWaiters = new Set();
+const sleepUnlessLocked = (ms) => new Promise((resolve) => {
+  const done = () => { clearTimeout(t); lockWaiters.delete(done); resolve(); };
+  const t = setTimeout(done, ms);
+  lockWaiters.add(done);
+});
+onVisibilityChange((eff) => {
+  if (!eff.locked) return;
+  const revokes = [...admitted];
+  admitted.clear();
+  for (const revoke of revokes) { try { revoke(eff); } catch (e) { console.error('[visibility] revoke failed', e && e.message); } }
+  for (const wake of [...lockWaiters]) wake();
+  console.warn(`[visibility] revoked ${revokes.length} live client connection(s)`);
+});
+// Mounted at /api so that "is this a privileged route?" is answered by the
+// router's own matching — case-insensitive, trailing slash tolerated. A
+// spelling Express would route to a privileged handler is, by construction, a
+// spelling this guard sees; a home-grown prefix test would not agree with it.
+app.use('/api', (req, res, next) => {
+  const rel = req.path.toLowerCase().replace(/\/+$/, '') || '/';
+  if (OPEN_WHEN_LOCKED.has(rel)) return next();
+  const eff = lockState();
+  // `code` is the machine-readable refusal every route shares (#134); the lock body itself is visibility.js's.
+  if (eff.locked) return res.status(403).json({ ...lockError(eff), code: 'locked' });
+  // Admitted. If the lock lands while this request is still being served:
+  //   1. `lockSignal` aborts, so a handler still waiting to perform an effect
+  //      (typing a prompt once an agent is ready) checks it and stops before
+  //      the effect — the work is cancelled, not replayed;
+  //   2. the connection is destroyed, so nothing further is delivered (a
+  //      download mid-stream) or read (an upload still arriving). Routes that
+  //      write files stage and rename, so a cut body leaves the old file whole.
+  // Work a handler had already committed stays committed. A late write into
+  // the destroyed response is a no-op.
+  const cancel = new AbortController();
+  res.locals.lockSignal = cancel.signal;
+  let cutOnLock = true;
+  const release = admitClient((locked) => {
+    try { cancel.abort(new Error(`locked:${locked.reason}`)); } catch {}
+    if (cutOnLock && !res.writableEnded) { try { res.destroy(); } catch {} }
+  });
+  // A route that ends its own response on the lock (a long poll with a proper
+  // refusal, a stream with its protocol's stop line) calls this to opt out of
+  // the cut and take responsibility itself. The signal still aborts.
+  res.locals.handleLockItself = () => { cutOnLock = false; };
+  res.on('error', () => {});
+  res.on('close', release);
+  next();
 });
 
 // Every state-changing call has an attributable origin and a durable outcome.
@@ -454,7 +523,24 @@ const operatorName = () => process.env.SPACE_AUTHOR_NAME || process.env.AM_USER 
  * agent-to-agent API) go through here, which is what makes remote agents
  * reachable from everywhere the local ones are without duplicating either path.
  */
-async function deliver(session, { text, attachments = [] }, from) {
+async function deliver(session, { text, attachments = [] }, from, { signal = null } = {}) {
+  // The privacy lock cancels admitted-but-uncommitted work: every effect below
+  // is preceded by this check, so a prompt that was still waiting for its agent
+  // to become ready is dropped when the lock lands — not typed a moment later
+  // through a connection the lock already cut, and never replayed. The scope is
+  // this call's own, so it holds for a delivery whose response already closed
+  // (a cron run's 202) exactly as for one still being awaited.
+  const scope = lockScope();
+  const cancelled = () => { if (scope.signal.aborted || signal?.aborted) throw lockedError(); };
+  try {
+    return await deliverInner(session, { text, attachments }, from, { cancelled, signal: scope.signal });
+  } finally {
+    scope.release();
+  }
+}
+
+async function deliverInner(session, { text, attachments }, from, { cancelled, signal }) {
+  cancelled();
   if (isRemote(session.cli)) {
     if (attachments.length) throw new ApiError(400, 'invalid-input', 'files are not available for remote agents yet');
     const name = session.remote?.name;
@@ -481,13 +567,21 @@ async function deliver(session, { text, attachments = [] }, from) {
     return ensureRunning(store.get(session.id) || session);
   }
   const started = ensureRunning(session);
-  if (started && !await waitForInputReady(session.id)) {
-    throw new ApiError(409, 'input-not-ready', 'session did not become ready for input within 30 seconds — prompt was not sent');
+  if (started) {
+    // Stop waiting the moment the lock lands rather than at readiness.
+    const ready = await Promise.race([
+      waitForInputReady(session.id),
+      new Promise((resolve) => { if (signal.aborted) resolve(false); else signal.addEventListener('abort', () => resolve(false), { once: true }); }),
+    ]);
+    cancelled();
+    if (!ready) throw new ApiError(409, 'input-not-ready', 'session did not become ready for input within 30 seconds — prompt was not sent');
   }
   for (const command of prelude) {
+    cancelled();
     await sendInput(session.id, command);
     await sleep(500);
   }
+  cancelled();
   await sendInput(session.id, prompt, { confirmEcho: started && session.cli === 'opencode' });
   return started;
 }
@@ -517,7 +611,7 @@ api.post('/api/sessions/:id/input', async (req, res) => {
   if (!text && (!Array.isArray(attachmentIds) || attachmentIds.length === 0)) return res.status(400).json({ error: 'empty' });
   try {
     const attachments = resolveAttachments(s.id, attachmentIds);
-    const started = await deliver(s, { text, attachments });
+    const started = await deliver(s, { text, attachments }, undefined, { signal: res.locals.lockSignal });
     touchInput(s.id);
     res.json({ ok: true, started });
   } catch (e) {
@@ -575,16 +669,26 @@ api.post('/api/sessions/:id/attachments/insert', async (req, res) => {
     const nativeImages = s.cli === 'hermes'
       ? pending.filter((attachment) => attachment.kind === 'image') : [];
     const prelude = formatAttachmentPrelude(s.cli, nativeImages);
-    if (prelude.length) {
-      for (let index = 0; index < prelude.length; index += 1) {
-        await sendInput(s.id, prelude[index]);
-        inserted.add(nativeImages[index].id);
-        await sleep(500);
+    // Each command is a separate PTY effect with a wait in between: the lock
+    // may land part-way, and nothing after it may be typed.
+    const scope = lockScope();
+    const cancelled = () => { if (scope.signal.aborted) throw lockedError(); };
+    try {
+      if (prelude.length) {
+        for (let index = 0; index < prelude.length; index += 1) {
+          cancelled();
+          await sendInput(s.id, prelude[index]);
+          inserted.add(nativeImages[index].id);
+          await sleep(500);
+        }
       }
+      const inline = pending.filter((attachment) => !inserted.has(attachment.id));
+      cancelled();
+      if (inline.length) pasteInput(s.id, inline.map((attachment) => attachment.insertText).join(''));
+      for (const attachment of inline) inserted.add(attachment.id);
+    } finally {
+      scope.release();
     }
-    const inline = pending.filter((attachment) => !inserted.has(attachment.id));
-    if (inline.length) pasteInput(s.id, inline.map((attachment) => attachment.insertText).join(''));
-    for (const attachment of inline) inserted.add(attachment.id);
     return res.json({ ok: true, mode });
   } catch (e) {
     throw e;
@@ -805,7 +909,10 @@ api.get('/api/agents/:id/wait', async (req, res) => {
   let matchedAt = 0;
   let open = true;
   res.on('close', () => { open = false; }); // client gave up: stop polling
+  res.locals.handleLockItself?.();
   while (open) {
+    // The lock ends the wait at once with the same refusal a new call would get.
+    if (isLocked()) return res.status(403).json(lockError());
     const cur = store.get(s0.id);
     if (!cur) return res.json({ id: s0.id, state: 'gone', matched: false });
     const state = deriveState(cur, agentInfo().get(cur.id));
@@ -821,7 +928,7 @@ api.get('/api/agents/:id/wait', async (req, res) => {
       matchedAt = 0;
     }
     if (Date.now() - startedAt >= timeout) return res.json({ id: cur.id, state, matched: false, timedOut: true, waited });
-    await sleep(1500); // aligned with the agentInfo() memo
+    await sleepUnlessLocked(1500); // aligned with the agentInfo() memo
   }
 });
 
@@ -843,7 +950,7 @@ api.post('/api/agents/:id/prompt', promptBody, async (req, res) => {
     // the operator's laptop, and the [message from x:] prefix plus `from:` in
     // the message's frontmatter is how it can tell a peer's request from the
     // operator's.
-    const started = await deliver(s, { text: `[message from ${from.session.name}:] ${text}` }, from.session.name);
+    const started = await deliver(s, { text: `[message from ${from.session.name}:] ${text}` }, from.session.name, { signal: res.locals.lockSignal });
     res.json({ ok: true, id: s.id, name: s.name, started });
   } catch (e) {
     throw e;
@@ -967,7 +1074,7 @@ api.get('/api/remote/:name/stream', (req, res, next) => {
   const since = clamp(parseInt(req.query.since || '0', 10), 0, Number.MAX_SAFE_INTEGER, 0);
   const wait = clamp(parseInt(req.query.wait || String(remote.WAIT_DEFAULT), 10), remote.WAIT_MIN, remote.WAIT_MAX, remote.WAIT_DEFAULT);
 
-  remoteStream(req, res, next, remote, name, since, wait);
+  remoteStream(req, res, next, remote, name, since, wait, admitClient);
 });
 
 // The same thing without blocking: the short-polling fallback for a proxy that
@@ -1074,20 +1181,23 @@ api.get('/api/info', (_req, res) => res.json({
   spaceHost: process.env.SPACE_HOST || null,
   engine: 'libghostty',
   ghostty: ghosttyReady(),
-  locked: isPublic(),
-  lockReason: visibility().reason,
-  lockBucket: visibility().bucket,
+  locked: isLocked(),
+  lockReason: lockState().reason,
+  lockBucket: lockState().bucket,
+  // The full public-safe lock status (reason, timestamps, cadence) so an open
+  // app can explain a lock and notice when it clears. Cached state: no Hub call.
+  visibility: visibility(),
   canRelaunch: !!(process.env.SPACE_ID && hfToken()),
-  // While public, /api/info stays reachable (the Locked page needs it) — don't
+  // While locked, /api/info stays reachable (the Locked page needs it) — don't
   // advertise which credentials exist to the whole internet.
-  secrets: isPublic() ? [] : injectedEnvKeys(),
+  secrets: isLocked() ? [] : injectedEnvKeys(),
   // True when the Space is private but we couldn't verify its bucket is private
-  // (no HF_TOKEN to discover the bucket). Non-blocking; the UI shows a warning.
-  bucketUnverified: !isPublic() && !!visibility().bucketUnverified,
+  // (no usable HF_TOKEN to discover the bucket). Non-blocking; the UI shows a warning.
+  bucketUnverified: !isLocked() && !!lockState().bucketUnverified,
   // Backup health, or null when there is nothing wrong. Read from state, never
-  // the Hub: every open tab polls this route every 15s. Withheld while public
+  // the Hub: every open tab polls this route every 15s. Withheld while locked
   // for the same reason as `secrets` — it names the operator's repos.
-  backup: isPublic() ? null : backup.backupHealth(loadAmConfig()),
+  backup: isLocked() ? null : backup.backupHealth(loadAmConfig()),
   // First-run welcome: shown once per Space (flag persists on the bucket).
   welcomeSeen: welcomeSeen(),
   // Demo mode: current sessions hidden from view; forces the welcome to show.
@@ -2570,11 +2680,16 @@ function createSession({ name, cli, groupId, path: reqPath, prompt }) {
       try { ensureRunning(store.get(s.id) || s); } catch (e) { console.error('[quickstart]', e && e.message); }
     } else {
       (async () => {
+        // Detached: the response is long gone when the typing happens, so the
+        // lock scope is this task's own.
+        const scope = lockScope();
         try {
           ensureRunning(s);
           await new Promise((r) => setTimeout(r, 4000));
+          if (scope.signal.aborted) return; // locked meanwhile: the agent runs, the prompt is dropped
           await sendInput(s.id, text);
         } catch (e) { console.error('[quickstart]', e && e.message); }
+        finally { scope.release(); }
       })();
     }
   }
@@ -2613,7 +2728,7 @@ const cronAgentFolder = (name) => {
   return `agent-${(hash >>> 0).toString(16).padStart(8, '0')}`;
 };
 
-function beginCronFire(job, trigger) {
+function beginCronFire(job, trigger, { signal = null } = {}) {
   const at = new Date();
   const started = Date.now();
   const fail = (error) => {
@@ -2648,7 +2763,7 @@ function beginCronFire(job, trigger) {
       throw new ApiError(409, 'cron-unavailable', 'The existing target session cannot receive scheduled prompts.');
     }
     const text = `[message from cron "${job.name}":] ${job.prompt}`;
-    const completion = deliver(session, { text }, `cron: ${job.name}`)
+    const completion = deliver(session, { text }, `cron: ${job.name}`, { signal })
       .then(() => {
         crons.recordLast(job.id, {
           at: at.toISOString(), status: 'ok', durationMs: Date.now() - started, trigger,
@@ -2703,7 +2818,7 @@ api.post('/api/crons/:id/run', (req, res) => {
   const trigger = req.operationOrigin?.type === 'cron' && (requested === 'schedule' || requested === 'restart')
     ? requested : 'manual';
   try {
-    const run = beginCronFire(job, trigger);
+    const run = beginCronFire(job, trigger, { signal: res.locals.lockSignal });
     // 202 means the prompt was accepted for delivery, not that the agent's work
     // has finished. `last` is updated when delivery itself succeeds or fails.
     return res.status(202).json({ ok: true, agentCreated: run.agentCreated });
@@ -3181,12 +3296,40 @@ server.on('error', (e) => {
   }
 });
 
+// Close code for a terminal socket the privacy lock refused or revoked; the
+// reason is `locked:<reason>:<seq>:<boot>` (seq = the lock's transition
+// counter, boot = the server process it belongs to, so a browser can order it
+// against status responses and never across a restart). The frontend must not
+// auto-reconnect on it (the shared status poll reopens the app once the lock
+// clears); an older frontend that does is simply refused again, cheaply,
+// before any attach.
+const LOCKED_CLOSE_CODE = 4003;
+
 wss.on('connection', (ws, req) => {
   ws.on('error', (e) => console.error('[ws error]', e && e.message)); // a client reset must not crash us
-  if (isPublic()) {
-    try { ws.send('\r\n[locked: this Space is public — make it private to use the terminals]\r\n'); } catch {}
-    ws.close();
-    return;
+  // Privacy lock. Register for revocation BEFORE the admission check so a lock
+  // landing between the two cannot slip past: the transition either finds this
+  // socket in the registry or the check below sees the lock — there is no gap.
+  // Revocation detaches this viewer (the agent keeps running), stops every
+  // later frame in either direction, and closes with LOCKED_CLOSE_CODE.
+  let handle = null;
+  let revoked = false;
+  const detach = () => { const h = handle; handle = null; if (h) h.kill(); };
+  const refuse = (eff) => {
+    revoked = true;
+    detach();
+    try { ws.close(LOCKED_CLOSE_CODE, `locked:${eff.reason}${Number.isFinite(eff.seq) ? `:${eff.seq}${eff.boot ? `:${eff.boot}` : ''}` : ''}`); } catch { try { ws.terminate(); } catch {} }
+    // A client that never answers the close handshake keeps the socket half
+    // open for ws's own 30 s timeout; nothing flows meanwhile (detached, and
+    // every handler checks `revoked`), but do not leave it hanging that long.
+    const hard = setTimeout(() => { try { ws.terminate(); } catch {} }, 2000);
+    if (hard.unref) hard.unref();
+  };
+  const release = admitClient(refuse);
+  ws.on('close', () => { release(); detach(); });
+  {
+    const eff = lockState();
+    if (eff.locked) { release(); refuse(eff); return; }
   }
   const url = new URL(req.url, 'http://localhost');
   const id = url.searchParams.get('session');
@@ -3208,7 +3351,6 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  let handle;
   try {
     handle = attach(session, cols, rows);
   } catch (e) {
@@ -3216,9 +3358,10 @@ wss.on('connection', (ws, req) => {
     ws.close();
     return;
   }
+  if (revoked) { detach(); return; } // the lock landed while attach() ran
 
   handle.onData((d) => {
-    if (ws.readyState !== ws.OPEN) return;
+    if (revoked || ws.readyState !== ws.OPEN) return;
     if (d.length) ws.send(d);
   });
   handle.onExit(() => {
@@ -3233,7 +3376,7 @@ wss.on('connection', (ws, req) => {
   // Watchers still report their preferred size so taking control is immediate.
   // `reset` means an authoritative Ghostty snapshot follows this frame.
   handle.onGrid((cols_, rows_, controller, viewers, reset) => {
-    if (ws.readyState !== ws.OPEN) return;
+    if (revoked || ws.readyState !== ws.OPEN) return;
     try { ws.send(TERM_CTRL + JSON.stringify({ t: 'grid', cols: cols_, rows: rows_, controller, viewers, reset })); } catch {}
   });
 
@@ -3242,6 +3385,7 @@ wss.on('connection', (ws, req) => {
   // restore. Installing the listener afterwards left a small window where the
   // first mobile geometry request was silently lost.
   ws.on('message', (raw) => {
+    if (revoked || !handle) return; // a frame already in flight when the lock landed
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.t === 'i') {
@@ -3269,8 +3413,7 @@ wss.on('connection', (ws, req) => {
     } catch {}
   }
 
-  // Detaching a viewer, NOT stopping the session.
-  ws.on('close', () => handle.kill());
+  // Detaching a viewer, NOT stopping the session: see the 'close' listener above.
 });
 
 // keep the environment skill current on boot — through the same reporting path,
@@ -3300,12 +3443,16 @@ startWatchdog();
 // it judges "recent" with.
 runstate.init();
 setTimeout(() => {
-  // A locked (public) Space serves no terminals, so it starts nothing — but it
-  // still records what's running, so the snapshot stays true for the next boot.
-  const done = isPublic()
-    ? Promise.resolve([])
-    : runstate.reviveOnBoot(loadAmConfig().revive).catch((e) => console.error('[revive]', e && e.message));
-  done.then(() => runstate.startRunstateWatch());
+  // A locked Space serves no terminals, so it starts nothing — but it still
+  // records what's running, so the snapshot stays true for the next boot. The
+  // decision waits for the first (bounded) privacy verdict rather than reading
+  // the fail-closed `checking` state as a reason not to revive.
+  firstVerdict.then(() => {
+    const done = isLocked()
+      ? Promise.resolve([])
+      : runstate.reviveOnBoot(loadAmConfig().revive).catch((e) => console.error('[revive]', e && e.message));
+    done.then(() => runstate.startRunstateWatch());
+  });
 }, 8000);
 
 server.listen(PORT, () => {

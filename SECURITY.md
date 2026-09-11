@@ -10,13 +10,21 @@ the privacy of the Hugging Face Space it runs on.
 hands anyone a terminal; a public bucket exposes everything the agents saved,
 including credentials.
 
-The app defends this itself: it checks its own visibility on a timer and, if it
-finds the Space (or a mounted bucket it can verify) is public, it locks down,
-refuses WebSocket connections, hides secret names, and shows a setup page
-instead of terminals. If you have not set an `HF_TOKEN`, the app cannot discover
-which bucket is mounted and so cannot verify the bucket's visibility on its own
-in that case it warns rather than locking, so double-check your bucket is
-private.
+The app defends this itself with a privacy lock (details in
+[docs/privacy-lock.md](docs/privacy-lock.md)): it verifies the Space and every
+mounted bucket against the Hub once a minute and serves its privileged API only
+while that evidence is fresh. A Space or bucket seen to be public locks it at
+once; a check that has not succeeded for 2.5 minutes locks it too, as an outage
+rather than as proof of exposure. Locking refuses new requests and terminal
+attachments **and** revokes connections that were already open — terminals,
+long polls, remote agents' streams — on the server, whether or not a browser
+is watching; agents keep running, and the app reopens by itself once a check
+succeeds. While locked it serves only health, a public-safe status and the
+setup page, and hides secret names. If you have not set an `HF_TOKEN`, the app
+cannot discover which bucket is mounted and so cannot verify the bucket's
+visibility on its own; in that case it warns rather than locking, so
+double-check your bucket is private. Locking does not make a public bucket
+private and cannot take back anything delivered before the lock.
 
 ## Good practice for self-hosters
 
