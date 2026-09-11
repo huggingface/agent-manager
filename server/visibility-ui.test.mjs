@@ -27,6 +27,7 @@ import net from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { nativeFetch as fetch } from './test/native-client.mjs';
 import { chromiumLaunchOptions } from '../scripts/test-chromium.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -117,7 +118,9 @@ const startBackend = () => {
     env: {
       ...BASE_ENV, PATH: `${bin}:${BASE_ENV.PATH || ''}`,
       PORT: String(PORT), DATA_DIR, PUBLIC_DIR, HOME, CLAUDE_CONFIG_DIR: path.join(HOME, '.claude'),
-      AM_BASHRC: '/nonexistent', SPACE_HOST: '',
+      AM_BASHRC: '/nonexistent', SPACE_HOST: 'fixture-owner-fixture-space.hf.space',
+      // The browser fixture is served on this exact local origin (#130).
+      AM_ALLOWED_ORIGINS: API,
       SPACE_ID, HF_ENDPOINT: `http://127.0.0.1:${hub.address().port}`, HF_TOKEN: 'hf_fixture_not_a_real_token',
       AM_VISIBILITY_CHECK_MS: String(CHECK_MS), AM_VISIBILITY_GRACE_MS: String(GRACE_MS),
     },

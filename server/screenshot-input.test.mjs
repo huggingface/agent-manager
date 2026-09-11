@@ -14,6 +14,7 @@
  * Set SCREENSHOT_PUBLIC_DIR to a prebuilt web/dist to skip the build.
  * am-test: manual — Chromium, a full web build and SCREENSHOT_PORT; `npm run test:ui`.
  */
+import { nativeFetch as fetch } from './test/native-client.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -324,6 +325,7 @@ try {
   await readerPicker.setInputFiles({
     name: 'interrupted.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(256 * 1024),
   });
+  await readerReply.fill('keep this draft while the file fails');
   const interruptedChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'interrupted.bin' });
   await interruptedChip.filter({ has: page.locator('.image-chip-retry') }).waitFor({ state: 'visible' });
   const interruptedText = await interruptedChip.locator('.image-chip-meta').textContent();
@@ -331,6 +333,9 @@ try {
     !!interruptedText?.includes('connection was interrupted')
       && await interruptedChip.locator('.image-chip-retry').isVisible(),
     JSON.stringify({ interruptedText }));
+  check('an unresolved file blocks partial Send without losing the draft',
+    await readerReply.inputValue() === 'keep this draft while the file fails'
+      && await page.locator('.pane-reader .ov-send').count() === 0);
   await interruptedChip.locator('.image-chip-retry').click();
   await interruptedChip.filter({ has: page.locator('.image-chip-meta', { hasText: 'uploaded' }) }).waitFor();
   const attachmentDir = path.join(DATA_DIR, 'state', 'attachments', id);
@@ -340,6 +345,32 @@ try {
   const interruptedRemoved = await waitFor(() => !fs.existsSync(attachmentDir)
     || !fs.readdirSync(attachmentDir).some((name) => name.endsWith('-interrupted.bin')));
   check('removing a successful unsent chip deletes its stored file', interruptedStored && interruptedRemoved);
+  await readerReply.fill('');
+
+  await page.evaluate(() => Object.defineProperty(navigator, 'onLine', { configurable: true, value: false }));
+  await page.route(`**/api/sessions/${id}/attachments`, (route) => route.abort('internetdisconnected'), { times: 1 });
+  await readerPicker.setInputFiles({
+    name: 'offline.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(1024),
+  });
+  const offlineChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'offline.bin' });
+  await offlineChip.filter({ has: page.locator('.image-chip-retry') }).waitFor();
+  check('offline failure is distinguished and remains retryable',
+    (await offlineChip.locator('.image-chip-meta').textContent())?.includes('device is offline'));
+  await offlineChip.getByRole('button', { name: 'Remove offline.bin' }).click();
+  await page.evaluate(() => { delete navigator.onLine; });
+
+  await page.route(`**/api/sessions/${id}/attachments`, (route) => route.fulfill({
+    status: 413, contentType: 'application/json',
+    body: JSON.stringify({ error: 'session attachment storage is full (500 MB max)' }),
+  }), { times: 1 });
+  await readerPicker.setInputFiles({
+    name: 'quota.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(1024),
+  });
+  const quotaChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'quota.bin' });
+  await quotaChip.filter({ has: page.locator('.image-chip-meta', { hasText: '500 MB max' }) }).waitFor();
+  check('storage quota failure stays visible and does not offer a futile retry',
+    await quotaChip.locator('.image-chip-retry').count() === 0);
+  await quotaChip.getByRole('button', { name: 'Remove quota.bin' }).click();
 
   // Hugging Face's ingress may answer before Express with an HTML error page.
   // Preserve the status as a useful diagnosis instead of reducing it to "413".
@@ -350,10 +381,11 @@ try {
     name: 'proxy-limit.bin', mimeType: 'application/octet-stream', buffer: Buffer.alloc(1024),
   });
   const proxyChip = page.locator('.pane-reader .cxv-composer .image-chip', { hasText: 'proxy-limit.bin' });
-  await proxyChip.filter({ has: page.locator('.image-chip-retry') }).waitFor();
+  await proxyChip.filter({ has: page.locator('.image-chip-meta', { hasText: 'HTTP 413' }) }).waitFor();
   const proxyText = await proxyChip.locator('.image-chip-meta').textContent();
   check('a non-JSON proxy rejection keeps an actionable HTTP reason',
-    !!proxyText?.includes('proxy rejected this file as too large') && proxyText.includes('HTTP 413'),
+    !!proxyText?.includes('proxy rejected this file as too large') && proxyText.includes('HTTP 413')
+      && await proxyChip.locator('.image-chip-retry').count() === 0,
     JSON.stringify({ proxyText }));
   await proxyChip.getByRole('button', { name: 'Remove proxy-limit.bin' }).click();
 
@@ -412,6 +444,91 @@ try {
   check('reader sends an image-only structured turn',
     readerInput?.text === '' && readerInput?.attachmentIds?.length === 1,
     JSON.stringify(readerInput));
+
+  // Reader input supports all three browser entry points. Exercise paste and
+  // drop on the real reader before the large picker batch; remove each stored
+  // file again so the following count proves only its own fifty selections.
+  await readerReply.evaluate((element) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(['pasted'], 'reader-paste.txt', { type: 'text/plain' }));
+    element.dispatchEvent(new ClipboardEvent('paste', {
+      bubbles: true, cancelable: true, clipboardData: transfer,
+    }));
+  });
+  const pasted = page.locator('.pane-reader .image-chip', { hasText: 'reader-paste.txt' });
+  await pasted.filter({ has: page.locator('.image-chip-meta', { hasText: 'uploaded' }) }).waitFor();
+  check('reader paste keeps an eligible file', await pasted.count() === 1);
+  await pasted.getByRole('button', { name: 'Remove reader-paste.txt' }).click();
+
+  await page.locator('.pane-reader .cxv').evaluate((element) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(['dropped'], 'reader-drop.txt', { type: 'text/plain' }));
+    for (const type of ['dragenter', 'dragover', 'drop']) {
+      element.dispatchEvent(new DragEvent(type, {
+        bubbles: true, cancelable: true, dataTransfer: transfer,
+      }));
+    }
+  });
+  const dropped = page.locator('.pane-reader .image-chip', { hasText: 'reader-drop.txt' });
+  await dropped.filter({ has: page.locator('.image-chip-meta', { hasText: 'uploaded' }) }).waitFor();
+  check('reader drop keeps an eligible file', await dropped.count() === 1);
+  await dropped.getByRole('button', { name: 'Remove reader-drop.txt' }).click();
+
+  // The requested acceptance case: fifty is ordinary, not a new ceiling. Use
+  // the real picker, real XHR uploads and real server store; only intercept the
+  // final input so this test never submits work to the fixture CLI.
+  const batchNames = Array.from({ length: 50 }, (_, index) => index % 10 === 0 ? 'same-name.txt' : `reader-${index}.txt`);
+  await readerPicker.setInputFiles(batchNames.map((name, index) => ({
+    name, mimeType: index % 3 === 0 ? 'text/markdown' : 'text/plain', buffer: Buffer.from(`reader batch ${index}`),
+  })));
+  const fiftyStored = await waitFor(async () =>
+    await page.locator('.pane-reader .image-chip.uploaded').count() === 50, 30_000);
+  const batchGeometry = await page.locator('.pane-reader').evaluate((pane) => {
+    const list = pane.querySelector('.image-attachment-list');
+    const composer = pane.querySelector('.cxv-composer');
+    const p = pane.getBoundingClientRect(); const l = list.getBoundingClientRect(); const c = composer.getBoundingClientRect();
+    return { count: pane.querySelector('.image-attachments-summary')?.textContent, listHeight: l.height,
+      listScrollable: list.scrollHeight > list.clientHeight, composerBottom: c.bottom, paneBottom: p.bottom };
+  });
+  check('reader accepts all 50 files and keeps the detail list bounded',
+    fiftyStored
+      && batchGeometry.count?.includes('50 files')
+      && batchGeometry.listHeight <= 153
+      && batchGeometry.listScrollable
+      && batchGeometry.composerBottom <= batchGeometry.paneBottom + 1,
+    JSON.stringify(batchGeometry));
+  await page.locator('.pane-deck').evaluate((deck) => {
+    deck.style.width = '390px'; deck.style.gridTemplateColumns = '390px';
+  });
+  const narrowBatch = await page.locator('.pane-reader').evaluate((pane) => ({
+    overflow: pane.scrollWidth > pane.clientWidth,
+    listHeight: pane.querySelector('.image-attachment-list').getBoundingClientRect().height,
+    summary: pane.querySelector('.image-attachments-summary')?.textContent,
+  }));
+  check('the 50-file reader batch stays usable at phone width',
+    !narrowBatch.overflow && narrowBatch.listHeight <= 153 && narrowBatch.summary?.includes('50 files'),
+    JSON.stringify(narrowBatch));
+  if (process.env.ISSUE122_SCREENSHOT) await page.locator('.pane-reader').screenshot({ path: process.env.ISSUE122_SCREENSHOT });
+
+  let batchInput;
+  let sawBatchInput;
+  const batchInputReached = new Promise((resolve) => { sawBatchInput = resolve; });
+  await page.route(`**/api/sessions/${id}/input`, async (route) => {
+    batchInput = route.request().postDataJSON();
+    await route.fulfill({ json: { ok: true } });
+    sawBatchInput();
+  }, { times: 1 });
+  await page.locator('.pane-reader .ov-send').click();
+  await Promise.race([batchInputReached, sleep(10_000).then(() => { throw new Error('50-file reader input did not send'); })]);
+  const storedNames = batchInput.attachmentIds.map((attachmentId) => {
+    const storedName = fs.readdirSync(attachmentDir).find((name) => name.startsWith(`${attachmentId}-`));
+    return storedName?.slice(attachmentId.length + 1);
+  });
+  check('all 50 distinct ids reach Send in selection order, including repeated names',
+    new Set(batchInput.attachmentIds).size === 50
+      && JSON.stringify(storedNames) === JSON.stringify(batchNames),
+    JSON.stringify({ ids: batchInput.attachmentIds.length, names: storedNames }));
+  await page.locator('.pane-deck').evaluate((deck) => { deck.style.width = ''; deck.style.gridTemplateColumns = ''; });
 
   // Overview tiles open a conversation window. It uses the same structured
   // delivery contract even though no terminal pane is mounted in that view.

@@ -3,7 +3,11 @@ import type { Attachment } from '../api';
 
 export const IMAGE_MIMES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const;
 export const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
-export const MAX_ATTACHMENTS = 5;
+// More files do not mean more simultaneous requests. Three transfers per
+// session keeps a large batch moving without letting repeated picker/drop
+// additions turn into an unbounded fan-out. Other sessions have their own
+// queue, so one large prompt does not hold up another agent.
+export const ACTIVE_UPLOADS_PER_SESSION = 3;
 
 export type PendingAttachmentStatus = 'pending' | 'uploading' | 'uploaded' | 'error';
 
@@ -15,10 +19,10 @@ export interface PendingAttachment {
   uploadedBytes?: number;
   uploadController?: AbortController;
   error?: string;
+  retryable?: boolean;
   attachment?: Attachment;
 }
 
-const identity = (file: File) => `${file.name}\u0000${file.type}\u0000${file.size}`;
 const IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp)$/i;
 
 function normalizedMime(type: string) {
@@ -57,12 +61,8 @@ export function filesFromTransfer(transfer: DataTransfer) {
   if (listed.length) return listed;
 
   const files: File[] = [];
-  const seen = new Set<string>();
   const add = (file: File | null) => {
     if (!file) return;
-    const id = identity(file);
-    if (seen.has(id)) return;
-    seen.add(id);
     files.push(file);
   };
   for (const item of Array.from(transfer.items || [])) {
@@ -104,9 +104,8 @@ export async function filesFromClipboardItems(items: ClipboardItem[]) {
   return files;
 }
 
-export function pendingAttachmentsFromFiles(files: File[], currentCount = 0) {
-  const remaining = Math.max(0, MAX_ATTACHMENTS - currentCount);
-  const accepted = files.slice(0, remaining).map((file): PendingAttachment => {
+export function pendingAttachmentsFromFiles(files: File[], _currentCount = 0) {
+  const accepted = files.map((file): PendingAttachment => {
     const error = attachmentFileError(file);
     return {
       key: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`,
@@ -114,11 +113,12 @@ export function pendingAttachmentsFromFiles(files: File[], currentCount = 0) {
       previewUrl: isPreviewableImageFile(file) ? URL.createObjectURL(file) : undefined,
       status: error ? 'error' : 'pending',
       error,
+      retryable: error ? false : undefined,
     };
   });
   return {
     attachments: accepted,
-    error: files.length > remaining ? `At most ${MAX_ATTACHMENTS} files can be attached.` : null,
+    error: null,
   };
 }
 
@@ -172,14 +172,60 @@ export function buildPendingPrompt(
   return { text: prompt, displayText: `${prompt}\n\n${attachmentText}` };
 }
 
-/** Upload in display order. Already-successful items are reused on retry. */
+type UploadJob<T> = {
+  signal: AbortSignal;
+  run: () => Promise<T>;
+  resolve: (value: T | undefined) => void;
+  reject: (reason: unknown) => void;
+  started: boolean;
+};
+type SessionUploadQueue = { active: number; jobs: UploadJob<unknown>[] };
+const sessionUploadQueues = new Map<string, SessionUploadQueue>();
+
+function drainSessionUploads(sessionId: string) {
+  const queue = sessionUploadQueues.get(sessionId);
+  if (!queue) return;
+  while (queue.active < ACTIVE_UPLOADS_PER_SESSION && queue.jobs.length) {
+    const job = queue.jobs.shift()!;
+    if (job.signal.aborted) { job.resolve(undefined); continue; }
+    job.started = true;
+    queue.active += 1;
+    job.run().then(job.resolve, job.reject).finally(() => {
+      queue.active -= 1;
+      drainSessionUploads(sessionId);
+    });
+  }
+  if (queue.active === 0 && queue.jobs.length === 0) sessionUploadQueues.delete(sessionId);
+}
+
+/** Queue one transfer behind only the other transfers for this same session. */
+function scheduleSessionUpload<T>(sessionId: string, signal: AbortSignal, run: () => Promise<T>) {
+  return new Promise<T | undefined>((resolve, reject) => {
+    const queue = sessionUploadQueues.get(sessionId) || { active: 0, jobs: [] };
+    sessionUploadQueues.set(sessionId, queue);
+    const job: UploadJob<T> = { signal, run, resolve, reject, started: false };
+    const cancelQueued = () => {
+      if (job.started) return; // the XHR owns active cancellation
+      const at = queue.jobs.indexOf(job as UploadJob<unknown>);
+      if (at < 0) return;
+      queue.jobs.splice(at, 1);
+      resolve(undefined);
+      if (queue.active === 0 && queue.jobs.length === 0) sessionUploadQueues.delete(sessionId);
+    };
+    signal.addEventListener('abort', cancelQueued, { once: true });
+    queue.jobs.push(job as UploadJob<unknown>);
+    drainSessionUploads(sessionId);
+  });
+}
+
+/** Upload with bounded per-session concurrency. Already-successful items are reused on retry. */
 export async function uploadPendingAttachments(
   sessionId: string,
   attachments: PendingAttachment[],
   update: (key: string, patch: Partial<PendingAttachment>) => void,
 ) {
-  const uploaded: Attachment[] = [];
-  let firstFailure: Error | null = null;
+  const uploaded: Array<Attachment | undefined> = new Array(attachments.length);
+  const failures: Array<Error | undefined> = new Array(attachments.length);
   const controllers = new Map<string, AbortController>();
   for (const attachment of attachments) {
     if (attachment.attachment || attachmentFileError(attachment.file)) continue;
@@ -187,47 +233,56 @@ export async function uploadPendingAttachments(
     controllers.set(attachment.key, controller);
     update(attachment.key, { uploadController: controller });
   }
-  for (const attachment of attachments) {
+  await Promise.all(attachments.map(async (attachment, index) => {
     if (attachment.attachment) {
-      uploaded.push(attachment.attachment);
-      continue;
+      uploaded[index] = attachment.attachment;
+      return;
     }
     const invalid = attachmentFileError(attachment.file);
     if (invalid) {
       update(attachment.key, { status: 'error', error: invalid });
-      firstFailure ??= new Error(invalid);
-      continue;
+      failures[index] = new Error(invalid);
+      return;
     }
     const controller = controllers.get(attachment.key)!;
-    if (controller.signal.aborted) continue;
-    update(attachment.key, { status: 'uploading', uploadedBytes: 0, error: undefined });
+    if (controller.signal.aborted) return;
     try {
-      const stored = await api.uploadAttachment(sessionId, attachment.file, {
-        signal: controller.signal,
-        onProgress: ({ loaded }) => update(attachment.key, { uploadedBytes: loaded }),
+      const stored = await scheduleSessionUpload(sessionId, controller.signal, () => {
+        update(attachment.key, { status: 'uploading', uploadedBytes: 0, error: undefined, retryable: undefined });
+        return api.uploadAttachment(sessionId, attachment.file, {
+          signal: controller.signal,
+          onProgress: ({ loaded }) => update(attachment.key, { uploadedBytes: loaded }),
+        });
       });
+      if (!stored) return; // cancelled while queued
       // An abort can race the final response: XHR may have settled while the
       // click that removed the chip already marked the controller aborted.
       // In that narrow window we learned the id, so remove the now-unsent file.
       if (controller.signal.aborted) {
         await api.deleteAttachment(sessionId, stored.id).catch(() => undefined);
-        continue;
+        return;
       }
       update(attachment.key, {
         status: 'uploaded', uploadedBytes: attachment.file.size,
         uploadController: undefined, attachment: stored,
       });
-      uploaded.push(stored);
+      uploaded[index] = stored;
     } catch (error) {
       if (controller.signal.aborted) {
         update(attachment.key, { uploadController: undefined });
-        continue;
+        return;
       }
       const message = error instanceof Error ? error.message : 'upload failed';
-      update(attachment.key, { status: 'error', uploadController: undefined, error: message });
-      firstFailure ??= error instanceof Error ? error : new Error(message);
+      const retryable = !(typeof error === 'object' && error !== null
+        && 'retryable' in error && (error as { retryable?: unknown }).retryable === false);
+      update(attachment.key, {
+        status: 'error', uploadController: undefined, error: message,
+        retryable,
+      });
+      failures[index] = error instanceof Error ? error : new Error(message);
     }
-  }
+  }));
+  const firstFailure = failures.find(Boolean);
   if (firstFailure) throw firstFailure;
-  return uploaded;
+  return uploaded.filter((attachment): attachment is Attachment => !!attachment);
 }

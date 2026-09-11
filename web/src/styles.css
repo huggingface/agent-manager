@@ -231,16 +231,23 @@ body {
 .quick-recovery { margin-top: -3px; color: var(--muted); font-size: 9.5px; line-height: 1.35; }
 .cart-row.off { opacity: 0.45; }
 
-/* file attachments: one compact operational row shared by composers */
-.image-attachments { min-width: 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* file attachments: a compact aggregate over a bounded, scrollable detail list.
+   Fifty files stay fifty rows without becoming fifty rows TALL in the reader. */
+.image-attachments { min-width: 0; display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+.image-attachments:not(.has-images) { width: max-content; }
+.image-attachments-head { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.image-attachments-summary { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 9.5px; }
+.image-details-toggle { flex: none; padding: 1px 4px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--panel-2); color: var(--muted); font: 9px var(--font-mono); cursor: pointer; }
+.image-details-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+.image-attachment-list { min-width: 0; max-height: 152px; overflow-y: auto; overscroll-behavior: contain; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(210px, 100%), 1fr)); gap: 4px; padding-right: 2px; scrollbar-gutter: stable; }
 .image-file-input { display: none; }
 .image-pick { flex: none; width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel-2); color: var(--muted); cursor: pointer; }
 .image-pick:hover:not(:disabled) { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .image-pick:disabled { opacity: 0.38; cursor: not-allowed; }
 .image-pick svg { width: 15px; height: 15px; }
 .image-attachments-note { min-width: 0; color: var(--muted); font-size: 10px; line-height: 1.3; }
-.image-chip { min-width: 0; max-width: 250px; height: 38px; display: flex; align-items: center; gap: 6px; padding: 3px 5px 3px 3px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); }
-.image-chip.error { max-width: min(100%, 360px); height: auto; min-height: 38px; border-color: color-mix(in srgb, var(--danger) 48%, var(--border)); }
+.image-chip { min-width: 0; width: 100%; height: 38px; display: flex; align-items: center; gap: 6px; padding: 3px 5px 3px 3px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); }
+.image-chip.error { height: auto; min-height: 38px; border-color: color-mix(in srgb, var(--danger) 48%, var(--border)); }
 .image-chip.uploading { border-color: color-mix(in srgb, var(--accent) 42%, var(--border)); }
 .image-chip-preview { flex: none; width: 29px; height: 28px; border-radius: 3px; overflow: hidden; background: var(--panel-2); }
 .image-chip-preview:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -257,7 +264,7 @@ body {
 .image-chip > .image-chip-retry { color: var(--danger); font-size: 9px; font-weight: 650; }
 .image-chip > button:hover:not(:disabled) { color: var(--text); }
 .image-chip > button:disabled { opacity: 0.35; cursor: default; }
-.quick .image-attachments { align-items: flex-start; }
+.quick .image-attachments { align-items: stretch; }
 .widget.quick.image-drop { border-style: dashed; border-color: var(--accent); background: color-mix(in srgb, var(--drop) 55%, var(--panel-2)); }
 
 /* new-agent: logo buttons */
@@ -347,6 +354,21 @@ body {
 /* --border-strong is a BORDER token: as text on the page background it lands at
    ~1.4:1 in either theme, i.e. a count nobody can read. */
 .ov-sortn { color: var(--muted); }
+/* Mark all read: a text button on the Unread heading, in the heading's own
+   voice rather than a control bolted beside it. Compact by treatment, not by
+   shrinking the hit area — the padding keeps a comfortable target on touch
+   while the type stays the same size as the label it sits on. */
+.ov-markread {
+  flex: none; background: none; border: none; padding: 4px 6px; margin: -4px -2px -4px 0;
+  font: inherit; font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em;
+  color: var(--accent); cursor: pointer; border-radius: var(--r-sm);
+}
+.ov-markread:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.ov-markread:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ov-markread:disabled { color: var(--muted); cursor: default; }
+/* A batch that did not save says so where it was triggered, and stays until it
+   is retried — there is no toast, because a read receipt is not news. */
+.ov-markerr { color: var(--danger); }
 /* The group an agent is in, when the feed is flat and no capsule says it. Both
    surfaces put it on the name's row, and on both the prefix is context while the
    name is the thing you are looking for — so the group is what gives way.
@@ -512,6 +534,7 @@ body {
    one-line composer looks exactly as it always has. */
 .ov-composer { --ov-first-line: calc(1.45 * 13px + 4px); display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 7px 8px; border-top: 1px solid var(--border); padding-top: 7px; }
 .ov-composer.image-drop { outline: 1px dashed var(--accent); outline-offset: 5px; background: var(--drop); }
+.cxv.image-drop .cxv-composer { outline: 1px dashed var(--accent); outline-offset: -1px; background: var(--drop); }
 .ov-composer .image-attachments.has-images { grid-column: 1 / -1; }
 .ov-composer .image-attachments.has-note { grid-column: 1 / -1; }
 .ov-composer .image-attachments.has-images + .ov-live,
@@ -764,6 +787,21 @@ body {
 
 /* transient error toast */
 .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 300; max-width: 90vw; padding: 9px 14px; background: color-mix(in srgb, var(--danger) 92%, #000); color: #fff; border-radius: var(--r-md); font-size: 12.5px; box-shadow: 0 8px 28px rgb(0 0 0 / 0.3); animation: rise-in 0.16s ease-out; }
+
+/* A settings change that did not save, reported where the operator is rather
+   than only in the panel they have already closed. It sits above the toast line
+   and stays until it is dealt with. */
+.save-alert {
+  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 301;
+  display: flex; align-items: center; gap: 8px; width: max-content; max-width: 92vw;
+  padding: 8px 10px 8px 14px;
+  background: var(--panel); color: var(--text); border: 1px solid var(--danger);
+  border-radius: var(--r-md); font-size: 12.5px; box-shadow: 0 8px 28px rgb(0 0 0 / 0.3);
+  animation: rise-in 0.16s ease-out;
+}
+/* The sentence gets the room; the two ways out keep their own line each. */
+.save-alert > span { flex: 1 1 auto; }
+.save-alert button { flex: 0 0 auto; white-space: nowrap; }
 
 /* ?vvdebug=1 — the mobile viewport readout. Above everything, transparent to
    touch so it never becomes the reason a gesture misbehaves. */
@@ -1063,6 +1101,13 @@ body {
 .tw-act { flex: none; width: 1.6em; height: 1.3em; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: none; border: none; color: var(--muted); cursor: pointer; opacity: 0; transition: opacity 0.1s ease-out; }
 .tw-act svg { width: 1em; height: 1em; }
 .tree-row:hover .tw-act { opacity: 1; }
+/* …and for the keyboard, which has no hover: a row with the focus, or one of its
+   buttons with the focus, shows its actions. Same rule the sidebar rows use.
+   Without it the buttons were tab stops at opacity 0 — focus you cannot see. */
+.tree-row:focus-within .tw-act { opacity: 1; }
+/* The row's own focus ring is the app-wide one ([tabindex]:focus-visible), drawn
+   inside the scroller so it is not clipped at the first and last row. */
+.tree-row:focus-visible { outline-offset: -1px; }
 .tw-act:hover { color: var(--accent); }
 .tw-act.danger:hover { color: var(--danger); }
 .tw-act.ghost { pointer-events: none; }
@@ -1096,6 +1141,16 @@ body {
 .files-new-input:focus { outline: none; border-color: var(--accent); }
 .files-new.danger-row { background: color-mix(in srgb, var(--danger) 8%, var(--panel)); }
 .files-new.err { color: var(--danger); }
+.files-uploads { flex: none; min-height: 0; border-bottom: 1px solid var(--border); background: var(--panel); }
+.files-uploads-head { min-width: 0; display: flex; align-items: center; gap: 8px; padding: 4px 10px; color: var(--muted); font-size: 9.5px; }
+.files-uploads-head .bad { color: var(--danger); }
+.files-upload-list { max-height: 148px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.files-upload-row { min-width: 0; display: flex; align-items: center; gap: 6px; padding: 3px 10px; border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent); font-size: 10.5px; }
+.files-upload-row.collision, .files-upload-row.error { background: color-mix(in srgb, var(--danger) 6%, var(--panel)); }
+.files-upload-name { min-width: 6em; max-width: 18em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.files-upload-state { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.files-upload-row.collision .files-upload-state, .files-upload-row.error .files-upload-state { color: var(--danger); }
+.upload-btn.disabled { opacity: .45; cursor: default; }
 .tw-confirm { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
 .tw-warn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A destructive ICON in a row turns red under the pointer, the way the Files
@@ -1240,6 +1295,19 @@ body {
 .fv-sub { color: var(--muted); font-size: 11.5px; font-family: var(--font-mono); opacity: 0.85; }
 .fv-empty .mini-btn { border: 1px solid var(--border); }
 
+/* A deferred panel's place while its code loads, and where it says so when it
+   cannot. Fills the slot it stands in (tile, settings page, file viewer) so the
+   layout does not jump when the real panel lands. */
+.lazy-panel { flex: 1; min-width: 0; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 24px; color: var(--muted); font-size: 13px; text-align: center; }
+.tile > .lazy-panel { background: var(--panel); border-radius: var(--r-xl); border: 1px solid var(--border); }
+.settings-page > .lazy-panel { min-height: 120px; }
+.lazy-panel.lazy-failed { color: var(--text); }
+.lazy-card { max-width: 380px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.lazy-title { font-weight: 600; font-size: 14px; }
+.lazy-msg { line-height: 1.45; }
+.lazy-failed .lazy-msg { color: var(--muted); }
+.lazy-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 4px; }
+
 .fv-toggles { flex: none; display: inline-flex; align-items: center; gap: 8px; }
 .fv-toggles .seg button { padding: 1px 8px; font-size: 10.5px; }
 .fv-check { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; font-size: 10.5px; }
@@ -1306,6 +1374,24 @@ body {
 .cfg-num { width: 90px; flex: none; text-align: right; }
 /* artifacts sub-settings stay visible when off, just clearly inert */
 .cfg-off { opacity: 0.45; pointer-events: none; }
+/* The save flag has never had a rule of its own, so it ran into the heading it
+   sits after ("Agent output & computesaved ✓"). It says more now — a failure and
+   its Retry — which is not something to leave touching the word before it. */
+.save-flag { margin-left: 8px; font-size: 12px; font-weight: 500; }
+/* A failed save is not decoration: it keeps its colour and its way out, while
+   the "saved ✓" beside it is a tick that fades. */
+.save-flag-err { color: var(--danger); }
+/* A derived-update failure is not a save failure: it sits under the heading in
+   the help column, where the sentence has room to say which one it is. */
+.s-help.save-derived { color: var(--danger); }
+/* A field mid-edit that is not a number yet: marked, not corrected. */
+.cfg-input.cfg-bad { border-color: var(--danger); }
+.s-help.cfg-bad-note { color: var(--danger); }
+.save-retry {
+  margin-left: 6px; padding: 0 6px; font: inherit; font-size: 11px;
+  border: 1px solid currentColor; border-radius: 5px; background: none;
+  color: inherit; cursor: pointer;
+}
 /* "Back up now" hangs off the interval control above it, so it sits on the page
    rail rather than in the row's right-hand slot. */
 .bk-now { margin-top: 10px; }
@@ -1704,13 +1790,19 @@ a.btn-ghost { text-decoration: none; }
 /* wide tables scroll inside their own container, never the page */
 .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .traces-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.traces-table th { text-align: right; font-weight: 500; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.traces-table th { text-align: right; font-weight: 500; color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 0; border-bottom: 1px solid var(--border); }
 .traces-table th:first-child { text-align: left; }
+.traces-table .tr-sort { width: 100%; display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; padding: 6px 10px; border: 0; color: inherit; background: transparent; font: inherit; letter-spacing: inherit; text-transform: inherit; white-space: nowrap; cursor: pointer; }
+.traces-table th:first-child .tr-sort { justify-content: flex-start; }
+.traces-table .tr-sort:hover, .traces-table .tr-sort.active { color: var(--text); }
+.traces-table .tr-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.traces-table .tr-sort-arrow { width: 9px; color: var(--accent); font-size: 11px; line-height: 1; }
 .traces-table td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--border); font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .traces-table tbody tr:hover { background: var(--panel-2); }
 .traces-table .tr-agent { text-align: left; display: flex; align-items: center; gap: 7px; overflow: hidden; }
 .traces-table .tr-agent span { overflow: hidden; text-overflow: ellipsis; }
 .traces-table .tr-when { color: var(--muted); font-size: 11px; }
+.traces-table .tr-empty td { text-align: left; color: var(--muted); font-family: var(--font); }
 .traces-table .tr-total td { font-weight: 600; border-top: 1px solid var(--border-strong); border-bottom: none; }
 .usage-top { display: flex; align-items: center; gap: 8px; }
 .usage-top .spacer { flex: 1; }
@@ -2102,3 +2194,14 @@ a.btn-ghost { text-decoration: none; }
 .skiphead { display: flex; align-items: flex-start; gap: 12px; }
 .skiphead > span { flex: 1; min-width: 0; }
 .skiprestore { flex: none; font-size: 11.5px; padding: 3px 8px; white-space: nowrap; }
+
+/* Skills mutation feedback stays beside the buffer until explicitly dismissed. */
+.skill-outcome { padding: 12px; margin: 8px; border: 1px solid var(--border); border-left: 3px solid var(--danger, #b64b47); border-radius: 5px; font-size: 12px; }
+.skill-outcome p { margin: 0 0 8px; }
+.skill-outcome code, .skill-delete-dialog code { overflow-wrap: anywhere; }
+.skill-outcome ul, .skill-delete-dialog ul { padding-left: 20px; }
+.skill-delete-dialog { width: min(580px, calc(100% - 40px)); max-height: 80vh; overflow: auto; padding: 24px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text); font: inherit; }
+.skill-delete-dialog::backdrop { background: rgb(0 0 0 / 55%); }
+.skill-delete-dialog h2 { font-size: 17px; margin: 0 0 12px; }
+.skill-delete-dialog p, .skill-delete-dialog li { font-size: 13px; line-height: 1.6; }
+.skill-delete-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }

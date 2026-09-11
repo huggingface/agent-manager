@@ -19,6 +19,7 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { WebSocket } from 'ws';
+import { nativeFetch as fetch, NativeWebSocket } from './native-client.mjs';
 
 const freePort = () => new Promise((resolve, reject) => {
   const s = net.createServer();
@@ -119,7 +120,7 @@ const server = spawn('node', ['src/index.js'], {
     PATH: `${bin}:${BASE_ENV.PATH || ''}`,
     PORT: String(PORT), DATA_DIR, HOME,
     CLAUDE_CONFIG_DIR: path.join(HOME, '.claude'),
-    AM_BASHRC: '/nonexistent', SPACE_HOST: '',
+    AM_BASHRC: '/nonexistent', SPACE_HOST: 'fixture-owner-fixture-space.hf.space',
     SPACE_ID, HF_ENDPOINT: `http://127.0.0.1:${HUB_PORT}`, HF_TOKEN: 'hf_fixture_not_a_real_token',
     AM_VISIBILITY_CHECK_MS: String(CHECK_MS), AM_VISIBILITY_GRACE_MS: String(GRACE_MS),
     AM_INPUT_READY_QUIET_MS: '500',
@@ -144,7 +145,7 @@ const info = () => api('/api/info').then((r) => r.body);
 
 // A well-behaved terminal client (the `ws` package): collects frames and the close code.
 const attach = (id) => new Promise((resolve) => {
-  const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws?session=${encodeURIComponent(id)}&cols=80&rows=24`);
+  const ws = new NativeWebSocket(`ws://127.0.0.1:${PORT}/ws?session=${encodeURIComponent(id)}&cols=80&rows=24`);
   const c = { ws, text: '', frames: 0, framesAfterClose: 0, closed: null, opened: false };
   ws.on('open', () => { c.opened = true; });
   ws.on('message', (d) => { c.frames++; if (c.closed) c.framesAfterClose++; c.text += d.toString(); });
@@ -160,7 +161,7 @@ async function rawAttach(id) {
   const sock = net.connect(PORT, '127.0.0.1');
   await new Promise((r) => sock.once('connect', r));
   const key = crypto.randomBytes(16).toString('base64');
-  sock.write(`GET /ws?session=${encodeURIComponent(id)}&cols=80&rows=24 HTTP/1.1\r\nHost: 127.0.0.1:${PORT}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+  sock.write(`GET /ws?session=${encodeURIComponent(id)}&cols=80&rows=24 HTTP/1.1\r\nHost: 127.0.0.1:${PORT}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nX-AM-Request: 1\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`);
   const c = { sock, text: '', frames: 0, framesAfterClose: 0, close: null, ended: false };
   let buf = Buffer.alloc(0);
   let handshaken = false;
@@ -281,7 +282,7 @@ try {
   const filesDir = path.join(DATA_DIR, 'workspaces', 'files-ws');
   fs.mkdirSync(filesDir, { recursive: true });
   fs.writeFileSync(path.join(filesDir, 'keep.txt'), 'OLD-CONTENT-MUST-SURVIVE');
-  const upload = http.request({ host: '127.0.0.1', port: PORT, method: 'POST', path: `/api/files/${filesId}/upload?name=keep.txt`, headers: { 'content-type': 'application/octet-stream', 'content-length': '100000', 'x-am-origin': 'operator' } });
+  const upload = http.request({ host: '127.0.0.1', port: PORT, method: 'POST', path: `/api/files/${filesId}/upload?name=keep.txt`, headers: { 'content-type': 'application/octet-stream', 'content-length': '100000', 'x-am-origin': 'operator', 'x-am-request': '1' } });
   const uploadOutcome = new Promise((resolve) => { upload.on('response', (x) => resolve({ status: x.statusCode })); upload.on('error', (e) => resolve({ error: e.code || e.message })); });
   upload.write('NEW-PARTIAL-');
   await sleep(300);
@@ -416,11 +417,17 @@ try {
   check('the cancelled prompt is not replayed on reopening', !stdinOf('slow').includes('late-input'));
   await sleep(1500);
   check('neither are the cancelled cron, quickstart or insertion effects', !stdinOf('slow-cron').includes('cron-late') && !stdinOf('quick').includes('quick-late') && imagesTyped() === typedAtLock, `images now=${imagesTyped()} at lock=${typedAtLock}`);
-  const uploadFull = await new Promise((resolve) => {
-    const q = http.request({ host: '127.0.0.1', port: PORT, method: 'POST', path: `/api/files/${filesId}/upload?name=keep.txt`, headers: { 'content-type': 'application/octet-stream', 'x-am-origin': 'operator' } }, (x) => resolve({ status: x.statusCode }));
+  const uploadOnce = (extra) => new Promise((resolve) => {
+    const q = http.request({ host: '127.0.0.1', port: PORT, method: 'POST', path: `/api/files/${filesId}/upload?name=keep.txt`, headers: { 'content-type': 'application/octet-stream', 'x-am-origin': 'operator', 'x-am-request': '1', ...extra } }, (x) => {
+      let text = ''; x.on('data', (c) => { text += c; }); x.on('end', () => { let body = null; try { body = JSON.parse(text); } catch {} resolve({ status: x.statusCode, body }); });
+    });
     q.on('error', (e) => resolve({ error: e.message }));
     q.end('NEW-CONTENT');
   });
+  let uploadFull = await uploadOnce({});
+  // An existing file is never overwritten silently (#122): the collision answers
+  // with a replace token, and the replacement is an explicit second request.
+  if (uploadFull.status === 409 && uploadFull.body?.replaceToken) uploadFull = await uploadOnce({ 'x-am-replace-token': uploadFull.body.replaceToken });
   check('a complete upload after reopening replaces the file atomically', uploadFull.status === 200 && fs.readFileSync(path.join(filesDir, 'keep.txt'), 'utf8') === 'NEW-CONTENT' && fs.readdirSync(filesDir).filter((f) => f.includes('am-upload')).length === 0, JSON.stringify(uploadFull));
   const s3 = openStream('laptop');
   await sleep(400);
