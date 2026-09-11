@@ -33,10 +33,12 @@ stack, upstream response or new secret-bearing diagnostic is logged here.
 | 409 | `redaction-blocked` | Existing `hits` rule/count map preserved |
 | 409 | `conflict` on paused remote messages | Existing `stop` and `reason` retained, plus additive `error`/`code` |
 | 413 / 415 / 429 | `payload-too-large` / `unsupported-media-type` / `rate-limited` | Body limits, media/encoding policy, existing rate limits |
-| 5xx | `internal-error` | Generic safe message; optional bounded `requestId` |
+| 5xx | `internal-error` | Generic safe message; optional bounded `requestId`; a settings write may name its validated data-root-relative file in `details: [{field:"path",message}]` |
 
 `reason`, `hint`, `hits`, `mtime`, `tag`, `currentTag`, `retryAfter`, and
-`details` are optional, not universally present. The browser retains these
+`details` are optional, not universally present. A 5xx never carries an absolute
+path or exception text; the settings filename is relative to the durable data
+root (for example, `am-config.json`). The browser retains these
 allowlisted fields in `ApiError.data`, with bounded strings/collections. It
 retains `status` even for an unreadable proxy response. No automatic retry,
 new timeout policy, mutation replay or delivery guarantee is added.

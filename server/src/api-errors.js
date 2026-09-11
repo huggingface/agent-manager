@@ -20,6 +20,25 @@ export const invalid = (field, message) => new ApiError(400, 'invalid-input', `$
   details: [{ field, message }],
 });
 
+// A 5xx message is always replaced below, but a route may deliberately name the
+// relative file whose operation failed. Keep that diagnostic narrow: an
+// absolute/container path, traversal, markup or control text is not public
+// merely because an old local catch put it in a JSON field.
+const publicFailurePath = (value) => typeof value === 'string'
+  && value.length > 0 && value.length <= 256
+  && !/^(?:[/\\]|[a-z]:)/i.test(value)
+  && !/[\\<>\u0000-\u001f]/.test(value)
+  && value.split('/').every((part) => part && part !== '.' && part !== '..');
+
+const public5xxDetails = (body) => {
+  if (!Array.isArray(body?.details)) return undefined;
+  const details = body.details.slice(0, 4)
+    .filter((item) => item && typeof item === 'object'
+      && item.field === 'path' && publicFailurePath(item.message))
+    .map(({ field, message }) => ({ field, message }));
+  return details.length ? details : undefined;
+};
+
 // Express 4 catches synchronous throws, but not returned promises. `next` is
 // once-only even for a handler that forwards an error and subsequently rejects.
 export function asyncHandler(handler) {
@@ -55,10 +74,14 @@ export function errorEnvelope(_req, res, next) {
   res.json = function (body) {
     if (res.writableEnded || res.destroyed) return this;
     if (res.statusCode >= 400) {
-      body = res.statusCode >= 500
-        ? { error: 'The request could not be completed. Please try again.', code: 'internal-error', requestId: randomUUID() }
-        : { ...body, error: typeof body?.error === 'string' ? body.error : 'The request was refused.',
+      if (res.statusCode >= 500) {
+        const details = public5xxDetails(body);
+        body = { error: 'The request could not be completed. Please try again.', code: 'internal-error', requestId: randomUUID(),
+          ...(details ? { details } : {}) };
+      } else {
+        body = { ...body, error: typeof body?.error === 'string' ? body.error : 'The request was refused.',
           code: typeof body?.code === 'string' ? body.code : statusCode(res.statusCode) };
+      }
     }
     return json.call(this, body);
   };

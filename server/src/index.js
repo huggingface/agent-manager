@@ -1443,6 +1443,7 @@ function loadSecretNotes() {
 const AM_CONFIG_FILE = path.join(DATA_DIR, 'am-config.json');
 const spaceNamespace = () => (process.env.SPACE_ID || '').split('/')[0] || '';
 const defaultArtifactsSpace = () => (spaceNamespace() ? `${spaceNamespace()}/agent-artifacts` : '');
+
 function loadAmConfig() {
   const stored = readSettingsFile(AM_CONFIG_FILE);
   return normalizeAmConfig(stored.unreadable ? {} : (stored.value || {}));

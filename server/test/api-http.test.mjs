@@ -112,7 +112,12 @@ try {
   assert.equal((await putConfig({ artifacts: { enabled: null } })).status, 400);
   fs.writeFileSync(path.join(root, 'data', 'reject-write'), 'fixture');
   const failedSave = await putConfig({});
-  assert.equal(failedSave.status, 500); assert.equal(failedSave.body.code, 'internal-error'); assert.ok(!JSON.stringify(failedSave).includes('synthetic-private'));
+  assert.equal(failedSave.status, 500); assert.equal(failedSave.body.code, 'internal-error');
+  assert.equal(failedSave.body.error, 'The request could not be completed. Please try again.');
+  assert.ok(!failedSave.body.error.includes('am-config.json'), 'the filename is not free-text 5xx prose');
+  assert.deepEqual(failedSave.body.details, [{ field: 'path', message: 'am-config.json' }]);
+  assert.ok(!JSON.stringify(failedSave).includes('synthetic-private'));
+  assert.ok(!JSON.stringify(failedSave).includes(path.join(root, 'data')));
   fs.unlinkSync(path.join(root, 'data', 'reject-write'));
   const file = path.join(root, 'data', 'workspaces', 'fixture.txt'); fs.writeFileSync(file, 'original');
   const preview = (await call(`/api/files/${id}/preview?path=fixture.txt`, undefined, 'GET')).body;

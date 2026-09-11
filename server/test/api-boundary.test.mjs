@@ -40,7 +40,10 @@ api.post('/api/failure/:mode', (req, res, next) => {
 });
 api.get('/api/expected/:status', (req, _res) => { throw new ApiError(Number(req.params.status), 'fixture-refused', 'Try a different value.', { reason: 'fixture', hits: { rule: 2 }, mtime: 123, tag: 'revision', details: [{ field: 'name', message: 'required' }] }); });
 api.get('/api/legacy', (_req, res) => res.status(409).json({ error: 'changed on disk', tag: 'latest' }));
-api.get('/api/old-internal', (_req, res) => res.status(500).json({ error: secret, raw: secret }));
+api.get('/api/old-internal', (_req, res) => res.status(500).json({ error: secret, raw: secret,
+  details: [{ field: 'path', message: secret }] }));
+api.get('/api/file-diagnostic', (_req, res) => res.status(500).json({ error: secret,
+  details: [{ field: 'path', message: 'am-config.json' }] }));
 api.get('/api/empty', (_req, res) => res.status(204).end());
 api.get('/api/partial', (_req, res) => res.json({ ok: false, reason: 'no-devices', failed: 1 }));
 api.get('/api/healthy', (_req, res) => res.json({ ok: true }));
@@ -139,7 +142,12 @@ try {
       assert.equal(b.code, 'fixture-refused'); assert.equal(b.error, 'Try a different value.'); assert.equal(b.tag, 'revision'); assert.equal(b.hits.rule, 2);
     }
     assert.equal((await (await fetch(base + '/api/legacy')).json()).code, 'conflict');
-    assert.ok(!(await (await fetch(base + '/api/old-internal')).text()).includes(secret));
+    const internal = await (await fetch(base + '/api/old-internal')).json();
+    assert.ok(!JSON.stringify(internal).includes(secret)); assert.equal(internal.details, undefined);
+    const diagnostic = await (await fetch(base + '/api/file-diagnostic')).json();
+    assert.equal(diagnostic.error, 'The request could not be completed. Please try again.');
+    assert.equal(diagnostic.code, 'internal-error');
+    assert.deepEqual(diagnostic.details, [{ field: 'path', message: 'am-config.json' }]);
     assert.equal(await (await fetch(base + '/api/empty')).text(), '');
     assert.deepEqual(await (await fetch(base + '/api/partial')).json(), { ok: false, reason: 'no-devices', failed: 1 });
     assert.equal((await (await fetch(base + '/api/no-such-route')).json()).code, 'api-not-found');
