@@ -1,6 +1,20 @@
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../../api';
-import type { SubAgentEntry } from '../../api';
+import type { OutputVersion, SubAgentEntry } from '../../api';
+import { useSeenLatest } from '../useSeenLatest';
+import { answerMatches } from '../../lib/unread';
+
+/**
+ * The unread cursor for one session, as the reader needs it.
+ *
+ * The reader proves it is showing this exact reply by hashing what it rendered
+ * and comparing against `version.hash`, so a reader still displaying turn N
+ * cannot acknowledge an N+1 the poll had already learned about.
+ */
+export interface ConversationSeen {
+  version: (OutputVersion & { id: string }) | null;
+  onSeen: (marks: (OutputVersion & { id: string })[]) => Promise<boolean> | void;
+}
 import { useTraceWindows, type TraceHeadInfo, type TraceSource } from '../../lib/traceWindows';
 import type { Session } from '../../types';
 import { isRemote } from '../../types';
@@ -24,7 +38,7 @@ import { writePaneMode } from '../../lib/paneMode';
 /** The reader owns presentation and draft state. The store owns the transcript;
  * the virtual list owns measurement. Neither requires a terminal attachment. */
 export default function ConversationView({
-  session, paused, isMobile, readOnly, onHandover, searchOpen, onCloseSearch, onAttachPicker, onHead,
+  session, paused, isMobile, readOnly, onHandover, searchOpen, onCloseSearch, onAttachPicker, onHead, seen,
 }: {
   session: Session;
   paused?: boolean;
@@ -35,6 +49,18 @@ export default function ConversationView({
   onCloseSearch?: () => void;
   onAttachPicker?: (picker: { open: () => void; disabled: boolean; reason?: string } | null) => void;
   onHead?: (head: TraceHeadInfo | null) => void;
+  /**
+   * The unread cursor for this session, when the app is tracking one. The
+   * reader is the surface that shows a reply in full, so it is where a long
+   * answer the Overview had to clip can actually be acknowledged.
+   *
+   * `clip` is the Overview digest's copy of the same reply, used only to check
+   * the two surfaces are talking about the same one — the identity itself is
+   * `version`, which the server produced. Without that check a reader still
+   * showing turn N could acknowledge an N+1 the poll had already learned about
+   * and the operator had never seen.
+   */
+  seen?: ConversationSeen;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const following = useRef(true);
@@ -206,6 +232,36 @@ export default function ConversationView({
   useEffect(() => { reportHead.current?.(head); }, [head]);
   useEffect(() => () => reportHead.current?.(null), []);
 
+  // Acknowledging a reply from the reader needs the reader to be showing that
+  // exact reply, not merely to be open on this session.
+  //
+  //   the last exchange is rendered — the list is virtual, so an exchange
+  //     scrolled far out of view is not in the DOM and cannot be observed at all
+  //   no search — a query shows matching older turns; the newest may not be
+  //     among them, and a match is not the latest reply
+  //   the rendered answer hashes to the version being acknowledged — the two
+  //     surfaces parse the transcript separately, so this is what proves the
+  //     reader has caught up rather than lagging a poll behind. It is an exact
+  //     content identity, not a prefix: two replies routinely share their first
+  //     few hundred characters, and a growing streaming answer differs only in
+  //     the tail, which is precisely what a prefix cannot see.
+  //
+  // Only `text` blocks: thinking, tool calls and their results are not the
+  // reply, and are not what the server hashed.
+  const answerTexts = exchanges.length
+    ? (exchanges[exchanges.length - 1].answer || [])
+      .flatMap((t) => t.blocks || [])
+      .filter((b) => b.type === 'text')
+      .map((b) => (b as { text: string }).text || '')
+    : [];
+  const agrees = !!seen?.version && answerMatches(answerTexts, seen.version.hash);
+  const canSee = !!(seen?.version && !q && agrees && exchanges.length);
+  const seenRef = useSeenLatest({
+    version: canSee && seen?.version ? seen.version : null,
+    eligible: canSee,
+    onSeen: seen?.onSeen || (() => {}),
+  });
+
   return <div className="cxv">
     <div className="cxv-bar cxv-status mono">
       <span>{head ? `${exchanges.length.toLocaleString()} turns loaded` : phase === 'loading' ? 'Reading transcript…' : 'Conversation'}</span>
@@ -262,7 +318,11 @@ export default function ConversationView({
           {shown.slice(virtual.start, virtual.end).map(({ x, n }) => <div key={x.key} data-x={x.key} data-row-key={x.key} ref={(node) => virtual.measure(x.key, node)}>
             <ExchangeView x={x} n={n + 1} total={exchanges.length} q={q || undefined} baseModel={head?.model || undefined}
               open={q ? undefined : openWork.get(x.key) || false} onToggle={() => setOpenWork((map) => new Map(map).set(x.key, !map.get(x.key)))}
-              running={live && n === exchanges.length - 1 && !sent} turns={turns} sessionId={session.id} live={!!session.running && !paused} roster={roster} />
+              running={live && n === exchanges.length - 1 && !sent} turns={turns} sessionId={session.id} live={!!session.running && !paused} roster={roster}
+              // The observer rides the newest exchange's ANSWER. Watching the
+              // whole exchange would let a visible prompt, with its answer
+              // thousands of pixels below the fold, clear the unread mark.
+              answerRef={n === exchanges.length - 1 ? (node) => { seenRef.current = node; } : undefined} />
           </div>)}
           <div aria-hidden="true" style={{ height: virtual.after }} />
         </div>

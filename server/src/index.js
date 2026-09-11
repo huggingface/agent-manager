@@ -17,6 +17,8 @@ import * as groups from './groups.js';
 import * as order from './order.js';
 import * as demo from './demo.js';
 import * as hidden from './hidden.js';
+import * as readMarks from './read-marks.js';
+import { sourceKey } from './output-id.js';
 import * as crons from './crons.js';
 import { ensureClaudeDialogDefaults, trustWorkspacesRoot } from './first-run.js';
 import {
@@ -64,6 +66,7 @@ groups.init();
 order.init();
 demo.init();
 hidden.init();
+readMarks.init();
 // Lifecycle adapters report conversation resets (e.g. /clear) with the exact
 // id, so re-pin watchers can follow them even in shared folders where storage
 // discovery must refuse to guess. Both installers are non-fatal; the existing
@@ -322,11 +325,33 @@ api.post('/api/notify', async (req, res) => {
 // Overview cards: every agent's state + what it did since your last prompt.
 // Targeted digest for one session — lets the Overview fill tiles one by one
 // while the bulk build (below) is still chewing through the bucket.
+/**
+ * The newest human-facing reply this session has produced, as an identity the
+ * Overview can compare against what the operator has read. `null` when there is
+ * nothing readable yet, or when the digest could not be built — which is not
+ * the same as "all read", and the client is careful to treat it that way.
+ */
+const outputOf = (session, digest) => {
+  const src = sourceKey(session);
+  if (!src || !digest || !digest.outSeq) return null;
+  return { src, seq: digest.outSeq, hash: digest.outHash || '' };
+};
+// `outFresh` is parser bookkeeping — how the next reply knows a prompt came
+// between it and the last one. Not something a client should see or store.
+const stripInternal = (digest) => {
+  if (!digest) return digest;
+  const { outFresh, outKey, ...rest } = digest;
+  return rest;
+};
+
 api.get('/api/meta/:id', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const digest = await digestFor(s);
-  res.json({ id: s.id, digest });
+  // The same output/read pair the bulk pass publishes: a tile filled by this
+  // targeted route has to be able to say whether it is unread too, or it would
+  // read as "all caught up" purely because it loaded down a different path.
+  res.json({ id: s.id, digest: stripInternal(digest), output: outputOf(s, digest), read: readMarks.get(s.id) });
 });
 
 api.get('/api/meta', async (_req, res) => {
@@ -338,12 +363,68 @@ api.get('/api/meta', async (_req, res) => {
     .map((s) => {
       // A remote agent's digest comes from its message folder, not the bulk
       // transcript pass — which never sees it.
-      if (isRemote(s.cli)) return { ...s, digest: remote.remoteDigest(s), remote: remote.remoteInfo(s) };
-      const d = digests.get(s.id);
-      if (d) { const { _ts, ...digest } = d; return { ...s, digest }; }
-      return { ...s, digest: null };
+      const digest = isRemote(s.cli) ? remote.remoteDigest(s) : (() => {
+        const d = digests.get(s.id);
+        if (!d) return null;
+        const { _ts, ...rest } = d;
+        return rest;
+      })();
+      const base = isRemote(s.cli)
+        ? { ...s, digest: stripInternal(digest), remote: remote.remoteInfo(s) }
+        : { ...s, digest: stripInternal(digest) };
+      return { ...base, output: outputOf(s, digest), read: readMarks.get(s.id) };
     });
+  // The one-time rollout baseline. Taken from the versions actually observed in
+  // this pass, not a timestamp, so a reply landing while it is being written is
+  // newer than anything captured here and stays eligible for Unread.
+  //
+  // It runs on the first pass that could observe anything at all, including one
+  // where nothing has spoken yet. Waiting for the first session WITH output
+  // looked safer and was the opposite: on a fresh install the baseline would sit
+  // untaken until some agent's first reply arrived, and then take that reply as
+  // history the operator had already read.
+  //
+  // `traceDigests()` has resolved by this point, so a session reporting no
+  // output here genuinely has none rather than not being parsed yet. It gets no
+  // mark, which is what leaves its first reply unread.
+  if (!readMarks.initialized()) {
+    readMarks.baseline(new Map(sessions.filter((s) => s.output).map((s) => [s.id, s.output])));
+    for (const s of sessions) s.read = readMarks.get(s.id);
+  }
+  readMarks.retain(new Set(store.list().map((s) => s.id)));
   res.json({ sessions, generatedAt: new Date().toISOString() });
+});
+
+/**
+ * "I was shown this reply." One route for both paths — a conversation scrolled
+ * to a visible latest answer, and the Unread section's Mark all read — because
+ * they make exactly the same claim and must be applied by exactly the same
+ * rules. A batch so the bulk action is one request rather than one per card.
+ *
+ * Every entry is answered individually. The client needs to know which of its
+ * marks landed: a rejected one is not a failure to retry, it means the reply it
+ * described is no longer the newest and something unseen has taken its place.
+ */
+api.post('/api/read', express.json({ limit: '64kb' }), async (req, res) => {
+  const marks = Array.isArray(req.body?.marks) ? req.body.marks : null;
+  if (!marks) return res.status(400).json({ error: 'expected { marks: [{ id, src, seq, hash }] }' });
+  // Refused rather than truncated. Silently dropping the tail of a batch and
+  // answering 200 for the part that fit is how a session stays unread while the
+  // client reports success; the client sends bounded chunks instead.
+  if (marks.length > 200) return res.status(413).json({ error: 'too many marks in one request; send at most 200' });
+  const digests = await traceDigests();
+  const results = {};
+  for (const m of marks) {
+    const s = store.get(String(m?.id || ''));
+    if (!s) { results[String(m?.id)] = 'unknown'; continue; }
+    const digest = isRemote(s.cli) ? remote.remoteDigest(s) : (digests.get(s.id) || null);
+    results[s.id] = readMarks.acknowledge(
+      s.id,
+      { src: String(m.src || ''), seq: Number(m.seq), hash: String(m.hash || '') },
+      outputOf(s, digest),
+    );
+  }
+  res.json({ results, marks: readMarks.all() });
 });
 
 // Whose turn a `user` message is attributed to in a remote log. The Space owner

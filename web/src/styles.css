@@ -347,6 +347,21 @@ body {
 /* --border-strong is a BORDER token: as text on the page background it lands at
    ~1.4:1 in either theme, i.e. a count nobody can read. */
 .ov-sortn { color: var(--muted); }
+/* Mark all read: a text button on the Unread heading, in the heading's own
+   voice rather than a control bolted beside it. Compact by treatment, not by
+   shrinking the hit area — the padding keeps a comfortable target on touch
+   while the type stays the same size as the label it sits on. */
+.ov-markread {
+  flex: none; background: none; border: none; padding: 4px 6px; margin: -4px -2px -4px 0;
+  font: inherit; font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em;
+  color: var(--accent); cursor: pointer; border-radius: var(--r-sm);
+}
+.ov-markread:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.ov-markread:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ov-markread:disabled { color: var(--muted); cursor: default; }
+/* A batch that did not save says so where it was triggered, and stays until it
+   is retried — there is no toast, because a read receipt is not news. */
+.ov-markerr { color: var(--danger); }
 /* The group an agent is in, when the feed is flat and no capsule says it. Both
    surfaces put it on the name's row, and on both the prefix is context while the
    name is the thing you are looking for — so the group is what gives way.
