@@ -48,17 +48,38 @@ to the rendering of that source. Only that file is adopted, never its directory
 or support files. Missing destinations can be installed. A modified destination
 or ambiguous source makes the whole skill conflict before writes. Other skills
 continue independently, and the server reports degraded distribution without
-stopping its other functions. Deleting a generated skill disables automatic
-generation of that name. Explicit recreation publishes the user's content but
-keeps automatic generation disabled. Saving changed generated content also
-pauses regeneration, so Settings changes and startup cannot erase those edits.
-These decisions store only a name flag, never a content copy. The editor explains
-this behavior before editing a generated skill and shows when regeneration is
-paused. Ordinary explicit saves and redistribution still publish the customized
-skill; there is no automatic resumption that can overwrite it. Generation cannot
-take over an existing user-created managed skill. Legacy environment content
-follows the same adoption checks, using the existing source to verify its
-installation before publishing new generated content.
+stopping its other functions.
+
+### Generated skills are read-only
+
+`environment.md` is derived from the Space configuration: the manager rebuilds
+it on every start and whenever secret descriptions or settings change. There is
+no authored content in it to protect, so it is **read-only**: `POST`, `PUT` and
+`DELETE /api/skills/environment.md` answer `403` with an explanation whatever
+revision is presented, and the editor offers no Edit, Save or Delete for it and
+says why. Keep your own instructions in a separate skill. The service is told
+which names are generated (`generated: ['environment.md']`); a record created
+by generation is read-only even before the name is configured.
+
+For a generated skill the **newest generated content is always authoritative**.
+The retry-with-the-same-content rule that protects hand-authored saves does not
+apply, because nobody can reproduce an earlier generation's bytes on purpose:
+when a generation finds the intent of an interrupted earlier one, it adopts the
+files that carry that intent's bytes (they were written by this manager), drops
+the intent, and publishes the new content. An installation that was modified by
+someone else is still refused by the ordinary ownership checks. Generation still
+cannot take over a user-created managed skill of the same name, and legacy
+environment content follows the same adoption checks, using the existing source
+to verify its installation before publishing new generated content.
+
+**Upgrading from the previous contract**, under which generated skills could be
+edited or deleted: a customized `environment.md` (recorded as
+`disabledGenerated`) is honoured for exactly one more generation — the editor
+shows that the edits are still in place and will be replaced next time — and
+replaced on the following one, after which the editor says the edits were
+replaced. Copy anything worth keeping into another skill during that window.
+A deleted `environment.md` is regenerated at the next generation; nothing is
+lost. Only a name flag is stored, never a content copy.
 
 Name matching alone cannot authorize deletion, even when the source is absent.
 After losing a manifest, removal returns not-found until ownership has been
@@ -93,10 +114,10 @@ operator header used by the web client). Origin attribution is not authenticatio
 | Call | Contract |
 | --- | --- |
 | `GET /api/skills` | Lists source names and pending operations, including records whose source is missing. |
-| `GET /api/skills/:name` | Returns content, an opaque `revision`, ownership/pending state, and exact managed installation paths with their current presence. |
-| `POST /api/skills/:name` | Create only, with a plain-text body. Existing source or installation-ID collisions return 409. |
-| `PUT /api/skills/:name` | Explicit save, with a plain-text body and `If-Match` set to the exact returned `revision`. Missing tags return 428; stale tags return 409. |
-| `DELETE /api/skills/:name` | Permanent removal of the recorded files, with the same required `If-Match` revision. No record returns 404 and removes nothing. |
+| `GET /api/skills/:name` | Returns content, an opaque `revision`, ownership/pending state, `readOnly` for generated skills (with the explanation in `problem`), and exact managed installation paths with their current presence. |
+| `POST /api/skills/:name` | Create only, with a plain-text body. Existing source or installation-ID collisions return 409. A generated name returns 403. |
+| `PUT /api/skills/:name` | Explicit save, with a plain-text body and `If-Match` set to the exact returned `revision`. Missing tags return 428; stale tags return 409. A generated skill returns 403 regardless of the tag. |
+| `DELETE /api/skills/:name` | Permanent removal of the recorded files, with the same required `If-Match` revision. No record returns 404 and removes nothing. A generated skill returns 403. |
 
 Revisions include current source content, ownership/operation metadata, observed
 installation contents and the configured target set. A stale tab or changed

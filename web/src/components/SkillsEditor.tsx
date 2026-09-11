@@ -152,11 +152,13 @@ export default function SkillsEditor() {
               <span className="spacer" />
               <div className="seg">
                 <button className={mode === 'view' ? 'on' : ''} disabled={busy} onClick={() => setMode('view')}>View</button>
-                <button className={mode === 'edit' ? 'on' : ''} disabled={busy || loaded?.pending === 'delete'} onClick={() => setMode('edit')}>Edit</button>
+                {/* Generated skills are derived from the Space configuration: the
+                    server refuses edits and deletion, and the alert above says why. */}
+                <button className={mode === 'edit' ? 'on' : ''} disabled={busy || loaded?.pending === 'delete' || loaded?.readOnly} title={loaded?.readOnly ? 'Generated skill — read-only' : undefined} onClick={() => setMode('edit')}>Edit</button>
               </div>
-              {mode === 'edit' && <button className="btn-primary" disabled={busy || loaded?.pending === 'delete'} onClick={save}>{loaded?.pending === 'write' ? 'Retry save' : 'Save'}</button>}
+              {mode === 'edit' && !loaded?.readOnly && <button className="btn-primary" disabled={busy || loaded?.pending === 'delete'} onClick={save}>{loaded?.pending === 'write' ? 'Retry save' : 'Save'}</button>}
               {dirty && <button className="btn-ghost" disabled={busy} onClick={() => setContent(loaded?.content || '')}>Discard edits</button>}
-              <button className="btn-ghost danger" title="Delete skill" disabled={busy || loaded?.pending === 'write' || !loaded?.managed} onClick={prepareDelete}><TrashGlyph /> Delete</button>
+              {!loaded?.readOnly && <button className="btn-ghost danger" title="Delete skill" disabled={busy || loaded?.pending === 'write' || !loaded?.managed} onClick={prepareDelete}><TrashGlyph /> Delete</button>}
             </div>
             {mode === 'view' ? (() => {
               const { meta, body } = parseFront(content);

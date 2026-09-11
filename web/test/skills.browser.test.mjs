@@ -156,6 +156,17 @@ try {
   assert.equal(deletes, 4); assert.equal(fs.existsSync(f.source('other.md')), false);
   for (let i = 0; i < 5; i++) assert.equal(fs.existsSync(f.target(i, 'other')), false);
   console.log('PASS reviewed external source edits can be saved and explicitly confirmed for deletion');
+
+  // The generated environment skill is read-only: the editor says why, offers
+  // no Save or Delete, and Edit is disabled.
+  await page.getByRole('button', { name: 'environment.md', exact: true }).click();
+  await page.getByRole('alert').filter({ hasText: 'read-only' }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Edit', exact: true }).isDisabled(), true);
+  assert.equal(await page.getByRole('button', { name: 'Save', exact: true }).count(), 0);
+  assert.equal(await page.getByTitle('Delete skill', { exact: true }).count(), 0);
+  assert.equal((await f.api('environment.md', 'PUT', '# edit', (await f.api('environment.md')).body.revision)).status, 403);
+  await screenshot(page, 'skills-generated-read-only');
+  console.log('PASS the generated environment skill is read-only in the editor and the API');
 } finally {
   releaseDelete?.();
   await browser?.close(); await f.cleanup();

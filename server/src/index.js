@@ -100,7 +100,9 @@ function ensureWorkspaceFolders() {
   }
 }
 ensureWorkspaceFolders();
-const skills = createSkillsService({ sourceRoot: SKILLS_DIR, stateRoot: path.join(STATE_DIR, 'skills'), targetRoots: skillTargetDirs() });
+// environment.md is derived from the Space configuration (generateEnvSkill), so it
+// is read-only in the editor and API and the newest generation always wins.
+const skills = createSkillsService({ sourceRoot: SKILLS_DIR, stateRoot: path.join(STATE_DIR, 'skills'), targetRoots: skillTargetDirs(), generated: ['environment.md'] });
 const reportSkills = (result) => {
   if (!result.ok) {
     const failures = (result.results || [result]).filter((r) => !r.ok)
@@ -1568,7 +1570,7 @@ What is different about them:
   which sleeps, drops off wifi, and closes lids. Ask once and move on.
 
 ## Shared skills
-- Reusable skills live in \`/data/workspaces/skills/\`. Create and publish them through the Skills editor or \`/api/skills\`: POST creates only; GET returns the revision required by PUT/DELETE in \`If-Match\`. If you edit a source through Files or on disk, review its current contents in Skills and explicitly Save to publish it. Startup leaves unreviewed source edits and independently modified installations untouched. Read skills for project conventions and recurring tasks.
+- Reusable skills live in \`/data/workspaces/skills/\`. Create and publish them through the Skills editor or \`/api/skills\`: POST creates only; GET returns the revision required by PUT/DELETE in \`If-Match\`. If you edit a source through Files or on disk, review its current contents in Skills and explicitly Save to publish it. Startup leaves unreviewed source edits and independently modified installations untouched. This \`environment.md\` is generated from the Space configuration and read-only; put your own instructions in a separate skill. Read skills for project conventions and recurring tasks.
 
 ## Tooling
 - A full Linux shell with \`git\`, \`ripgrep\` (\`rg\`), \`node\`, and \`python3\`, plus build tools. Reach for \`rg\` for fast search.
