@@ -14,6 +14,7 @@
  * Set SCREENSHOT_PUBLIC_DIR to a prebuilt web/dist to skip the build.
  * am-test: manual — Chromium, a full web build and SCREENSHOT_PORT; `npm run test:ui`.
  */
+import { nativeFetch as fetch } from './test/native-client.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

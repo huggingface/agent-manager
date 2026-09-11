@@ -458,6 +458,11 @@ Setup
   export AM=${base}
   export HF_TOKEN=<a Hugging Face token with READ access to that Space repo>
 
+Send X-AM-Request: 1 on manager API requests. This non-secret protocol marker
+declares request intent; it does not replace the private Space's access checks.
+If an older copied loop gets code "request-not-allowed", stop it and update its
+headers before resuming. Do not automatically repeat an uncertain write.
+
 The Space is private, so every call needs that token. Read access is enough —
 nothing here writes to the Hub. A fine-grained token scoped to just this one
 Space repo is the right thing; a token for a different namespace will NOT work
@@ -465,7 +470,7 @@ even if you own the Space.
 
 1. Check it works, before anything else:
 
-     curl -sS -H "authorization: Bearer $HF_TOKEN" "$AM/ping"
+     curl -sS -H 'X-AM-Request: 1' -H "authorization: Bearer $HF_TOKEN" "$AM/ping"
 
    Expect JSON: {"ok":true,"name":"${name}",...}
    Read the SHAPE, not the status code:
@@ -480,7 +485,7 @@ even if you own the Space.
 
 2. Say where you are (optional, once — it labels the pane):
 
-     curl -sS -X POST -H "authorization: Bearer $HF_TOKEN" \\
+     curl -sS -H 'X-AM-Request: 1' -X POST -H "authorization: Bearer $HF_TOKEN" \\
        -H 'content-type: application/json' \\
        -d '{"harness":"<your cli>","cwd":"'"$PWD"'","host":"'"$(hostname)"'"}' \\
        "$AM/hello?from=${origin}"
@@ -488,7 +493,7 @@ even if you own the Space.
 3. Then loop. One blocking call waits for work; it returns as soon as there is
    any, or empty when the wait expires:
 
-     curl -sS -N -H "authorization: Bearer $HF_TOKEN" \\
+     curl -sS -H 'X-AM-Request: 1' -N -H "authorization: Bearer $HF_TOKEN" \\
        "$AM/stream?since=$SEQ&wait=${WAIT_DEFAULT}"
 
    Lines starting with ':' are keep-alives — ignore them. The one JSON line is
@@ -508,7 +513,7 @@ even if you own the Space.
 
 4. Reply as you go — send the body as plain markdown:
 
-     curl -sS -X POST -H "authorization: Bearer $HF_TOKEN" \\
+     curl -sS -H 'X-AM-Request: 1' -X POST -H "authorization: Bearer $HF_TOKEN" \\
        -H 'content-type: text/plain' \\
        --data-binary @- "$AM/messages?from=${origin}" <<'EOF'
      Fixed the fixture — pad_token was None on the Qwen config. Suite is green.

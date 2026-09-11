@@ -1,3 +1,4 @@
+import { nativeFetch as fetch } from './native-client.mjs';
 // Actual production route stack, isolated state, no real agents or network.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -65,7 +66,7 @@ const start = async (locked = false) => {
       CODEX_HOME: path.join(home, 'codex'), CLAUDE_CONFIG_DIR: path.join(home, 'claude'),
       XDG_CONFIG_HOME: path.join(home, 'config'), XDG_DATA_HOME: path.join(home, 'share'),
       AM_REPIN_DIR: path.join(root, 'repin'), AM_INPUT_REQUIRED_DIR: path.join(root, 'input-required'), AM_BASHRC: '/nonexistent',
-      ...(locked ? { SPACE_ID: 'fixture/test', FIXTURE_PUBLIC: '1' } : {}),
+      ...(locked ? { SPACE_ID: 'fixture/test', SPACE_HOST: 'fixture-test.hf.space', FIXTURE_PUBLIC: '1' } : {}),
     }, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   child.stdout.on('data', (c) => { logs += c; }); child.stderr.on('data', (c) => { logs += c; });
@@ -128,7 +129,7 @@ try {
   assert.equal(upload.status, 200); assert.equal(fs.readFileSync(path.join(root, 'data', 'workspaces', 'fixture.json'), 'utf8'), '{"raw":"file"}');
   const abortedPath = path.join(root, 'data', 'workspaces', 'aborted-fixture.bin');
   const uploading = http.request(`${base}/api/files/${id}/upload?name=aborted-fixture.bin`, {
-    method: 'POST', headers: { 'x-am-origin': 'operator', 'content-type': 'application/octet-stream', 'content-length': 1000000 },
+    method: 'POST', headers: { 'x-am-origin': 'operator', 'x-am-request': '1', 'content-type': 'application/octet-stream', 'content-length': 1000000 },
   });
   uploading.on('error', () => {});
   uploading.write(Buffer.alloc(1024));
@@ -155,7 +156,7 @@ try {
   const paused = await call(`/api/remote/${name}/messages`, { text: 'fixture' }); assert.equal(paused.status, 409); assert.equal(paused.body.stop, true); assert.ok(paused.body.reason); assert.ok(paused.body.code);
   const client = (await call('/api/sessions', { cli: 'claude', name: 'not-started' })).body;
   const emptyAttachment = await fetch(`${base}/api/sessions/${client.id}/attachments`, {
-    method: 'POST', headers: { 'x-am-origin': 'operator', 'content-type': 'application/octet-stream', 'x-file-name': 'empty.txt' }, body: '', signal: AbortSignal.timeout(2000),
+    method: 'POST', headers: { 'x-am-origin': 'operator', 'x-am-request': '1', 'content-type': 'application/octet-stream', 'x-file-name': 'empty.txt' }, body: '', signal: AbortSignal.timeout(2000),
   });
   assert.equal(emptyAttachment.status, 413); assert.equal((await emptyAttachment.json()).code, 'payload-too-large');
   const trace = await call(`/api/trace/${client.id}?tail=1&v=2`, undefined, 'GET'); assert.equal(trace.status, 404); assert.equal(trace.body.code, 'no-trace');

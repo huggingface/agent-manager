@@ -1,3 +1,4 @@
+import { nativeFetch as fetch } from './native-client.mjs';
 // Unread, end to end: which reply the transcript produced, what an
 // acknowledgement is allowed to cover, and what survives a restart.
 //

@@ -16,6 +16,7 @@ import type { PaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
 import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph } from './icons';
 import * as api from '../api';
+import { terminalRetryDelay } from '../terminalRetry';
 import type { Attachment } from '../api';
 import {
   attachmentFileError, filesFromClipboardItems, filesFromTransfer,
@@ -45,7 +46,7 @@ const THEMES: Record<'light' | 'dark', ITheme> = {
   },
 };
 
-type ConnState = 'connecting' | 'connected' | 'closed' | 'exited';
+type ConnState = 'connecting' | 'connected' | 'closed' | 'exited' | 'paused';
 
 // Close code the server uses when the session's process exited for real (vs a
 // transient drop). The client must NOT auto-reconnect on this, or it would
@@ -235,7 +236,7 @@ export default function TerminalPane({
   // Reachable from the mode switch: a flick can still be coasting through the
   // terminal's scrollback when the reader covers it.
   const stopGlideRef = useRef<() => void>(() => {});
-  const reconnectRef = useRef<() => void>(() => {});
+  const reconnectRef = useRef<(restart?: boolean) => void>(() => {});
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
   const [preview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
@@ -679,7 +680,7 @@ export default function TerminalPane({
     let retry: ReturnType<typeof setTimeout> | null = null;
     // Reconnect with backoff: a sleeping/unreachable Space shouldn't be hammered
     // every second by every open pane. Reset once a connection succeeds.
-    let retryDelay = 1200;
+    let connectionFailures = 0;
 
     // Does the visible screen show real text in its UPPER two-thirds? Agent
     // TUIs paint their bottom input bar first and load the actual content
@@ -737,7 +738,6 @@ export default function TerminalPane({
       ws.binaryType = 'arraybuffer';
       ws.onopen = () => {
         setConn('connected');
-        retryDelay = 1200;
         // Selecting a terminal is an explicit foreground action on mobile.
         // Claim before reporting its fit so an already-open desktop does not
         // leave the phone rendering a clipped desktop-sized canonical grid.
@@ -753,6 +753,7 @@ export default function TerminalPane({
             const m = JSON.parse(d.slice(MODE_CTRL.length));
             if (m.t === 'grid' || m.t === 'restore') {
               if (m.t === 'restore') restoring = true;
+              connectionFailures = 0;
               controllerRef.current = !!m.controller;
               setHasInputControl(!!m.controller);
               const applyGrid = () => {
@@ -806,22 +807,28 @@ export default function TerminalPane({
         });
       };
       ws.onclose = (e) => {
-        // A real process exit: stop here and let the user relaunch. Anything
-        // else is a transient drop (sleep/wake, network) → auto-reconnect and
-        // reattach to the still-running backend session.
+        // A real process exit requires relaunch. Other closes get a bounded
+        // reconnect budget: browsers cannot distinguish admission refusal
+        // from a transient drop, so prolonged outages also need manual retry.
         endBoot();
         if (e.code === EXIT_CODE) { setConn('exited'); return; }
         setConn('closed');
         if (!closedByUs) {
+          const retryDelay = terminalRetryDelay(++connectionFailures, e.code);
+          if (retryDelay === null) { setConn('paused'); return; }
           retry = setTimeout(connect, retryDelay);
-          retryDelay = Math.min(retryDelay * 1.7, 15_000);
         }
       };
       ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
     };
     // Manual restart: clear the dead run's screen so the content probe watches
     // the new process paint, not leftovers.
-    reconnectRef.current = () => { if (retry) clearTimeout(retry); retryDelay = 1200; try { term.reset(); } catch { /* ignore */ } connect(); };
+    reconnectRef.current = (restart = false) => {
+      if (retry) clearTimeout(retry);
+      connectionFailures = 0;
+      if (restart) { try { term.reset(); } catch { /* ignore */ } }
+      connect();
+    };
 
     // Report the pane's preferred size without locally fitting its terminal.
     // Only the current controller's preference changes the canonical grid;
@@ -1343,6 +1350,15 @@ export default function TerminalPane({
           {conn === 'connecting' ? 'connecting' : `starting ${cli?.label || session.cli}`}<span className="et-cursor" />
         </div>
       )}
+      {!reading && conn === 'paused' && (
+        <div className="term-exit mono" role="status">
+          <div className="tx-row">
+            <span>Terminal connection paused. Check your connection and app origin settings.</span>
+            <button className="tx-btn" onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); reconnectRef.current(); }}>retry connection</button>
+          </div>
+        </div>
+      )}
       {!reading && conn === 'exited' && (
         <div className="term-exit mono">
           <div className="tx-row">
@@ -1350,7 +1366,7 @@ export default function TerminalPane({
             <button
               className="tx-btn"
               onMouseDown={(e) => e.stopPropagation()}
-              onClick={(e) => { e.stopPropagation(); reconnectRef.current(); }}
+              onClick={(e) => { e.stopPropagation(); reconnectRef.current(true); }}
             ><RefreshGlyph /> restart</button>
           </div>
         </div>

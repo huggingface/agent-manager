@@ -1,3 +1,4 @@
+import { nativeFetch as fetch } from '../native-client.mjs';
 // Disposable real-server fixture. No inherited credentials, Space ID, harness
 // homes, or PATH entries containing the operator's CLIs reach the child.
 import fs from 'node:fs';

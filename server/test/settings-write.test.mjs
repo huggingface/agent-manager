@@ -1,3 +1,4 @@
+import { nativeFetch as fetch } from './native-client.mjs';
 // Saving settings: what the answer means, and who is allowed to replace what.
 //
 // Settings are written on every change now, so these two files are rewritten

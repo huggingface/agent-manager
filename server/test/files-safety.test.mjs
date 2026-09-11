@@ -1,3 +1,4 @@
+import { nativeFetch as fetch } from './native-client.mjs';
 // Real file routes in an isolated server: conditional upload publication and
 // configured-folder dependency guards. Never touches the live workspace.
 import assert from 'node:assert/strict';
