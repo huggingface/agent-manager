@@ -12,6 +12,7 @@ import { STATE_LABEL, isRemote } from '../types';
 import StateLogo from './StateLogo';
 import TraceInfo from './TraceInfo';
 import ConversationView from './conversation/ConversationView';
+import MobileTerminalDraft from './MobileTerminalDraft';
 import type { ConversationSeen } from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
@@ -268,6 +269,8 @@ export default function TerminalPane({
   const [draft, setDraft] = useState(session.name);
   // Fallback paste sheet: shown only when we can't read the clipboard directly.
   const [pasteOpen, setPasteOpen] = useState(false);
+  const [writeOpen, setWriteOpen] = useState(false);
+  const [terminalDraft, setTerminalDraft] = useState('');
   const [imageDrop, setImageDrop] = useState(false);
   const [imageStatus, setImageStatus] = useState<{ kind: 'uploading' | 'success' | 'error'; text: string } | null>(null);
   const [imageUploadBusy, setImageUploadBusy] = useState(false);
@@ -1285,6 +1288,9 @@ export default function TerminalPane({
         // pickers, etc.). preventDefault keeps terminal focus so the keyboard
         // stays up; the send also refocuses the terminal.
         <div className="term-keybar mono" onPointerDown={(e) => e.preventDefault()}>
+          <button type="button" className="tk-btn tk-paste" aria-expanded={writeOpen}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => { setWriteOpen((open) => !open); setPasteOpen(false); }}>write</button>
           {([
             ['esc', '\x1b'], ['tab', '\t'],
             ['←', '\x1b[D'], ['↑', '\x1b[A'], ['↓', '\x1b[B'], ['→', '\x1b[C'],
@@ -1305,6 +1311,17 @@ export default function TerminalPane({
             onClick={(e) => { e.stopPropagation(); requestPaste(); }}
           >paste</button>
         </div>
+      )}
+      {isMobile && writeOpen && !reading && (
+        <MobileTerminalDraft draft={terminalDraft} onChange={setTerminalDraft}
+          onClose={() => setWriteOpen(false)} canInsert={conn === 'connected' && hasInputControl}
+          onInsert={() => {
+            if (conn !== 'connected' || !controllerRef.current || !termRef.current || !terminalDraft) return;
+            termRef.current.paste(terminalDraft);
+            setTerminalDraft('');
+            setWriteOpen(false);
+            focusTerm();
+          }} />
       )}
       {!reading && pasteOpen && (
         // Reached when the clipboard read was blocked (cross-origin iframe) or
