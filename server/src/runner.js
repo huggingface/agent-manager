@@ -1,3 +1,4 @@
+import { ApiError } from './api-errors.js';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -6,9 +7,11 @@ import { dismissCodexUpdatePrompt, trustCodexWorkspace } from './first-run.js';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { remoteState, setPaused } from './remote.js';
+import { fxSessionForPid } from './fx-process.js';
 import { cliById, cliVersion, isRemote, PORT, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
-import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace } from './traces.js';
+import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace,
+  captureFxSession } from './traces.js';
 import {
   buildPaletteIndex, snapshotToRestoreAnsi, styledSnapshotLines, textColumns,
 } from './snapshot.js';
@@ -1712,6 +1715,55 @@ function scheduleOpencodeCapture(session, workdir) {
   opencodeCapturing.set(session.id, t0);
 }
 
+const fxCapturing = new Map();
+
+// fx names its session directory with the conversation id and records the
+// binding in that session's manifest, so the same capture-and-pin story as
+// codex/opencode works without asking fx anything.
+function scheduleFxCapture(session, workdir) {
+  const prev = fxCapturing.get(session.id);
+  if (prev) clearTimeout(prev);
+  let since = session.fxCaptureSince || Date.now() - 2000;
+  let warnedShared = false;
+
+  const tick = () => {
+    if (!isRunning(session.id)) { fxCapturing.delete(session.id); return; }
+    const current = list().find((s) => s.id === session.id) || session;
+    const claimed = new Set(list().filter((s) => s.id !== session.id && s.fxSessionId).map((s) => s.fxSessionId));
+    const pinned = current.fxSessionId;
+    const owned = fxSessionForPid(paneRootPid(session.id));
+    if (owned && !claimed.has(owned.id)) {
+      if (owned.id !== pinned || current.fxCaptureSince) {
+        update(session.id, { fxSessionId: owned.id, fxCaptureSince: undefined });
+      }
+    } else if (folderIsShared(session.id, workdir, 'fx')) {
+      if (!warnedShared) {
+        warnedShared = true;
+        console.warn(`[fx] ${session.id}: folder shared with another live session — not following new conversations here`);
+      }
+      // Skipping is not enough. A conversation a rival started while we were
+      // sharing stays on disk, and the moment that rival stops we would be
+      // "alone" and adopt the newest one — which is theirs. Advance the floor
+      // so only conversations begun after the folder cleared are ever eligible.
+      since = Date.now();
+      if (!current.fxCaptureSince) update(session.id, { fxCaptureSince: since });
+    } else {
+      const hit = captureFxSession(workdir, since, claimed);
+      if (hit && hit.id !== pinned) {
+        if (pinned) console.warn(`[fx] re-pinning ${session.id}: ${pinned} -> ${hit.id} (conversation was replaced)`);
+        update(session.id, { fxSessionId: hit.id, fxCaptureSince: undefined });
+      }
+    }
+    const t = setTimeout(tick, REPIN_MS);
+    if (t.unref) t.unref();
+    fxCapturing.set(session.id, t);
+  };
+
+  const t0 = setTimeout(tick, 3000);
+  if (t0.unref) t0.unref();
+  fxCapturing.set(session.id, t0);
+}
+
 // Single-quote a string for embedding in an `sh -lc` command line.
 const shq = (t) => `'${String(t).replace(/'/g, `'\\''`)}'`;
 
@@ -1719,6 +1771,10 @@ const shq = (t) => `'${String(t).replace(/'/g, `'\\''`)}'`;
 // of a database rather than from us (Claude's uuid we mint ourselves). Shape-check
 // it so nothing but an opencode session id can ever be interpolated.
 const SES_ID = /^ses_[A-Za-z0-9_-]+$/;
+// fx session ids reach the launch line unquoted too. fx itself accepts ASCII
+// alphanumerics, '.', '_' and '-' up to 255 chars (newly minted ids are
+// <ms>-<ns>-<16 hex>), and that set is exactly what is safe to interpolate.
+const FX_ID = /^[A-Za-z0-9._-]{1,255}$/;
 
 export function commandFor(session) {
   const cli = cliById(session.cli) || cliById('shell');
@@ -1804,6 +1860,29 @@ export function commandFor(session) {
     return `${guard}${base}`;
   }
 
+  // fx: `--continue` resumes the latest session for the WORKSPACE, so two fx
+  // panes sharing a folder would both land on the same conversation. Resume the
+  // PINNED id instead (captured after launch — see scheduleFxCapture), and
+  // existence-check it in the shell exactly like Claude/Codex: a purged session
+  // then starts fresh honestly, rather than fx exiting 1 with "saved session
+  // not found." and killing the pane.
+  if (cli.id === 'fx' && session.everStarted && session.fxSessionId && FX_ID.test(session.fxSessionId)) {
+    const events = `"$HOME/.fx/sessions/${session.fxSessionId}/events.jsonl"`;
+    return `if [ -f ${events} ]; then exec ${cli.resume(session.fxSessionId)}; else exec ${cli.run}; fi`;
+  }
+  // Unpinned fx (first launch, or the pin is gone): remember that this pane has
+  // shared its folder. If the sibling is later deleted, its conversation is
+  // still on disk and `--continue` would adopt it. Keep starting fresh until
+  // this pane acquires an exact pin; the watcher clears the floor then.
+  if (cli.id === 'fx' && !session.fxSessionId) {
+    const folder = session.path ?? session.id;
+    const shared = list().some((o) => o.id !== session.id && o.cli === 'fx' && (o.path ?? o.id) === folder);
+    if (shared || session.fxCaptureSince) {
+      update(session.id, { fxCaptureSince: Date.now() });
+      if (session.everStarted) return `exec ${cli.run}`;
+    }
+  }
+
   // codex without a pinned conversation: `resume --last` scopes to the cwd,
   // so in a SHARED folder it can resume a SIBLING's conversation (cross-talk).
   // Only resume when this session has the folder to itself; otherwise start
@@ -1832,7 +1911,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   // Nothing to start: a remote agent starts itself, on its own machine. Both
   // callers guard this too; keep the refusal here so no future one can spawn
   // a PTY for a pane that can never use it.
-  if (isRemote(session.cli)) throw new Error('a remote agent runs on its own machine — nothing to start here');
+  if (isRemote(session.cli)) throw new ApiError(409, 'remote-agent', 'a remote agent runs on its own machine — nothing to start here');
   const existing = hosts.get(session.id);
   if (existing) return false;
   if (!ghostty) throw new Error(`libghostty-vt unavailable: ${ghosttyError}`);
@@ -1853,7 +1932,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   const realRoot = fs.realpathSync(WORKSPACES_DIR);
   const realWork = fs.realpathSync(workdir);
   if (realWork !== realRoot && !realWork.startsWith(`${realRoot}${path.sep}`)) {
-    throw new Error(`${folder} resolves to ${realWork}, outside the workspaces root — `
+    throw new ApiError(409, 'invalid-workspace', 'The folder resolves outside the workspaces root — '
       + 'a session has to run inside it. Point the session at a folder in the tree, '
       + 'or copy what you need into one.');
   }
@@ -2042,6 +2121,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   scheduleBreadcrumbCapture(session, workdir);
   if (session.cli === 'codex') scheduleCodexCapture(session, workdir);
   if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
+  if (session.cli === 'fx') scheduleFxCapture(session, workdir);
   if (session.cli === 'claude') scheduleClaudeCapture(session, workdir);
   return true;
 }
@@ -2058,7 +2138,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
 export function attach(session, cols, rows) {
   ensureRunning(session, cols, rows);
   const host = hosts.get(session.id);
-  if (!host) throw new Error('session failed to start');
+  if (!host) throw new ApiError(409, 'input-not-ready', 'session failed to start');
 
   const sub = {
     onData: () => {},
@@ -2124,7 +2204,7 @@ export function attach(session, cols, rows) {
 /** Type a line into the session's terminal (works with no browser attached). */
 export async function sendInput(id, text, { confirmEcho = false } = {}) {
   const host = hosts.get(id);
-  if (!host || stopping.has(id)) throw new Error('session is not running');
+  if (!host || stopping.has(id)) throw new ApiError(409, 'input-not-ready', 'session is not running');
   host.inputRequired.observeInput();
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
   // the inner newlines as soft line breaks instead of submitting early.
@@ -2143,7 +2223,7 @@ export async function sendInput(id, text, { confirmEcho = false } = {}) {
     let attempt = 0;
     let echoed = false;
     while (Date.now() < deadline && !echoed) {
-      if (hosts.get(id) !== host) throw new Error('session stopped while waiting for input acknowledgement');
+      if (hosts.get(id) !== host) throw new ApiError(409, 'input-not-ready', 'session stopped while waiting for input acknowledgement');
       if (attempt++) {
         host.pty.write('\x15'); // clear any attempt accepted too late to paint
         await new Promise((r) => setTimeout(r, 100));
@@ -2154,7 +2234,7 @@ export async function sendInput(id, text, { confirmEcho = false } = {}) {
       host.pty.write(payload);
       const attemptDeadline = Math.min(deadline, Date.now() + 1200);
       while (Date.now() < attemptDeadline) {
-        if (hosts.get(id) !== host) throw new Error('session stopped while waiting for input acknowledgement');
+        if (hosts.get(id) !== host) throw new ApiError(409, 'input-not-ready', 'session stopped while waiting for input acknowledgement');
         let screen = '';
         try { screen = host.vt.getVisibleText(); } catch {}
         echoed = host.outputSeq > beforeOutput && screen !== beforeScreen
@@ -2163,7 +2243,7 @@ export async function sendInput(id, text, { confirmEcho = false } = {}) {
         await new Promise((r) => setTimeout(r, 50));
       }
     }
-    if (!echoed) throw new Error('session did not acknowledge the input before the timeout — prompt was not submitted');
+    if (!echoed) throw new ApiError(409, 'input-not-ready', 'session did not acknowledge the input before the timeout — prompt was not submitted');
   } else {
     host.pty.write(payload);
   }
@@ -2174,7 +2254,7 @@ export async function sendInput(id, text, { confirmEcho = false } = {}) {
 /** Insert text into a running terminal's composer without submitting it. */
 export function pasteInput(id, text) {
   const host = hosts.get(id);
-  if (!host || stopping.has(id)) throw new Error('session is not running');
+  if (!host || stopping.has(id)) throw new ApiError(409, 'input-not-ready', 'session is not running');
   const value = String(text || '');
   if (!value) return;
   host.inputRequired.observeInput();
@@ -2195,7 +2275,7 @@ export async function waitForInputReady(id, timeoutMs = INPUT_READY_TIMEOUT_MS) 
   const deadline = Date.now() + Math.max(0, timeoutMs);
   while (Date.now() < deadline) {
     const host = hosts.get(id);
-    if (!host) throw new Error('session stopped while waiting for input readiness');
+    if (!host) throw new ApiError(409, 'input-not-ready', 'session stopped while waiting for input readiness');
     const lastActivity = Math.max(host.startedAt || 0, host.lastOutputAt || 0, host.screenChangedAt || 0);
     if (!host.startupHistory && !host.resizeCapture
       && Date.now() - lastActivity >= INPUT_READY_QUIET_MS) return true;

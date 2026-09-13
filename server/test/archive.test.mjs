@@ -6,6 +6,7 @@
 // the API directly — a caller that is not the UI has to meet it too.
 //
 // Run with:  node test/archive.test.mjs
+import { nativeFetch as fetch, NativeWebSocket as WebSocket } from './native-client.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';

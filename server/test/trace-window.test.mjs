@@ -312,7 +312,8 @@ assert.equal(ocGrown.window.end, 5);
 oc.exec("delete from part where message_id in ('msg_4', 'msg_5'); delete from message where id in ('msg_4', 'msg_5')");
 const shrunk = await readTrace(ocSession, { window: { at: 'after', version: 2, cursor: 5, min: 2 } });
 assert.equal(shrunk.window.reset, true, 'a deletion resets a cursor beyond the new end');
-assert.deepEqual(shrunk.turns.map(textOf), ['message 2', 'message 3']);
+// A reset uses the tail's minimum-history floor, not the requested page count.
+assert.deepEqual(shrunk.turns.map(textOf), ['streaming second', 'message 2', 'message 3']);
 assert.equal(shrunk.window.end, 3);
 oc.exec('delete from part; delete from message');
 const cleared = await readTrace(ocSession, { window: { at: 'after', version: 2, cursor: 3 } });

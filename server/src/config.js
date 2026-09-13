@@ -117,6 +117,15 @@ export const CLIS = [
   // `chat` = TUI in --local mode: embedded agent, no gateway/daemon needed.
   { id: 'openclaw', label: 'OpenClaw',    bin: 'openclaw', color: '#c83636', run: 'openclaw chat',  cont: null, resizeMode: 'repaint',
     setup: setupHint('ANTHROPIC_API_KEY') },
+  // fx has no config-dir override: its state (auth, settings, sessions) is
+  // hardcoded to ~/.fx, which entrypoint.sh points at local disk and
+  // checkpoints — the same treatment opencode and Hermes get.
+  { id: 'fx',       label: 'fx',          bin: 'fx',       color: '#626262', run: 'fx',             cont: 'fx --continue', resizeMode: 'repaint',
+    resume: (id) => `fx --resume ${id}`,
+    // fx has no "start interactive, seeded with this prompt" form: `fx ask` runs
+    // one request and exits, which would end the pane instead of opening it. So
+    // no withPrompt — a queued first prompt is typed into the TUI instead.
+    setup: setupHint('AI_GATEWAY_API_KEY') },
   // Test-only primary-screen repaint fixture. Absent from every normal runtime.
   ...(process.env.AM_TEST_REPAINT_CMD
     ? [{ id: 'test-repaint', label: 'Repaint fixture', bin: 'bash', color: '#8aa0ad', run: process.env.AM_TEST_REPAINT_CMD, cont: null, resizeMode: 'repaint' }]
@@ -159,6 +168,15 @@ function isConfigured(id) {
     case 'openclaw':
       return hasEnv('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY')
         || fileOk(path.join(env.OPENCLAW_STATE_DIR || path.join(home, '.openclaw'), 'openclaw.json'));
+    case 'fx': {
+      // One file per provider fx can sign into: the AI Gateway (`fx login` /
+      // `fx setup`), a ChatGPT subscription, or a Grok one. Any of them means
+      // configured. `fx status --json` would be authoritative, but this runs on
+      // every /api/clis poll and must not spawn a process.
+      const fxHome = path.join(home, '.fx');
+      return hasEnv('AI_GATEWAY_API_KEY')
+        || ['auth.json', 'chatgpt-auth.json', 'grok-auth.json'].some((f) => fileOk(path.join(fxHome, f)));
+    }
     default:
       // shell / files / trace need no auth, and a remote agent signs in on its
       // own machine — there is nothing to configure on this side.

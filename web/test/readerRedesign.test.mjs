@@ -17,7 +17,7 @@ await build({
     import TerminalPane from './src/components/TerminalPane';
     import {TraceUnavailable} from './src/api';
     window.sockets = []; window.sends = []; window.reads = [];
-    class FakeSocket { static OPEN=1; readyState=1; constructor(){window.sockets.push(this);} send(){} close(){this.readyState=3;} }
+    class FakeSocket { static OPEN=1; readyState=1; constructor(){window.sockets.push(this); if(window.refuseSockets)setTimeout(()=>{this.readyState=3;this.onclose?.({code:1006});},1);} send(){} close(){this.readyState=3;} }
     window.WebSocket = FakeSocket;
     let config = {}, root;
     const records = (count) => Array.from({length:count}, (_,i) => [
@@ -195,7 +195,12 @@ try {
   const afterSwitch = await anchor();
   assert.equal(afterSwitch.key, beforeSwitch.key, 'returning to a retained reader restores the manually read row');
   assert.ok(Math.abs(afterSwitch.offset-beforeSwitch.offset)<2, 'returning restores the manual pixel offset after measuring rows again');
-  await p.evaluate(() => window.fixture.mount({ id: 'paging-priority', count: 500, from: 490, hangAfter: true }));
+  // `from` has to leave more history loaded than the reader now fetches by
+  // itself: this case is about an explicit Earlier competing with a hung
+  // refresh, and a first window smaller than the automatic recent-history
+  // target would be filled to the beginning before the click, leaving nothing
+  // earlier to page to and no Earlier button to click.
+  await p.evaluate(() => window.fixture.mount({ id: 'paging-priority', count: 500, from: 400, hangAfter: true }));
   await p.getByText('Question 499', { exact: true }).waitFor();
   await p.getByRole('button', { name: 'Refresh transcript', exact: true }).click();
   await p.waitForFunction(() => window.reads.some((r) => r.id === 'paging-priority' && r.req.at === 'after'));
@@ -227,6 +232,23 @@ try {
   await p.waitForTimeout(200);
   await p.locator('.ca-reader').evaluate((el) => { el.scrollTop = 0; });
   await p.getByText('Task: inspect the fixture', { exact: true }).waitFor();
+  // Upgrade refusals must settle, and changing modes must not destroy a draft.
+  await p.evaluate(() => window.fixture.mount({ id: 'admission-refusal', behavior: 'no-trace' }));
+  await p.getByText('Start the conversation.', { exact: true }).waitFor();
+  await p.locator('.cxv-composer textarea').fill('Retain this unsent draft');
+  const socketCount = await p.evaluate(() => window.sockets.length);
+  await p.clock.pauseAt(await p.evaluate(() => Date.now() + 1000));
+  await p.evaluate(() => { window.refuseSockets = true; window.fixture.change({ mode: 'terminal' }); });
+  await p.clock.runFor(30_000);
+  await p.getByRole('button', { name: 'retry connection', exact: true }).waitFor();
+  assert.equal(await p.evaluate(() => window.sockets.length), socketCount + 5, 'refused upgrades have a finite retry budget');
+  await p.clock.runFor(60_000);
+  assert.equal(await p.evaluate(() => window.sockets.length), socketCount + 5, 'a paused terminal does not reconnect indefinitely');
+  await p.getByRole('button', { name: 'retry connection', exact: true }).click();
+  assert.equal(await p.evaluate(() => window.sockets.length), socketCount + 6, 'retry is an explicit operator action');
+  await p.evaluate(() => window.fixture.change({ mode: 'reader' }));
+  assert.equal(await p.locator('.cxv-composer textarea').inputValue(), 'Retain this unsent draft');
+  await p.clock.resume();
   assert.deepEqual(errors, []);
   if (process.env.AM_READER_SCREENSHOT) await p.screenshot({ path: process.env.AM_READER_SCREENSHOT });
   console.log('reader-redesign: first prompt, independent loading, timeout/retry, no PTY, bounded DOM/search, layout and retained history passed');
