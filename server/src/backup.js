@@ -1,8 +1,9 @@
+import { ApiError } from './api-errors.js';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './config.js';
-import { visibility } from './visibility.js';
+import { mountedBuckets } from './visibility.js';
 import { shareNamespace } from './share.js';
 
 // Bucket backup: every 1h/3h/24h, launch one HF Job that copies this Space's
@@ -163,8 +164,7 @@ function saveState(patch) {
 // local runs, where there is no Space and so no volume to discover.
 export function sourceBucket() {
   if (process.env.AM_BACKUP_SOURCE) return process.env.AM_BACKUP_SOURCE;
-  const v = visibility();
-  return (v.buckets && v.buckets[0]) || null;
+  return mountedBuckets()[0] || null;
 }
 
 export async function defaultsFor() {
@@ -457,15 +457,15 @@ async function targets(cfg) {
 /** Launch one backup Job now. Returns { job } — the Hub does the rest. */
 export async function runBackupNow(cfg) {
   const blocked = runNowBlockedBy();
-  if (blocked) throw new Error(blocked);
+  if (blocked) throw new ApiError(403, 'backup-unavailable', blocked);
   // Two runs at once would have two Jobs uploading to the same dataset, which
   // race. The timer skips for this reason too; on demand it is worth saying out
   // loud rather than silently doing nothing.
-  if (await isRunning()) throw new Error('a backup is already running');
+  if (await isRunning()) throw new ApiError(409, 'backup-running', 'a backup is already running');
   const source = sourceBucket();
   const { dataset, staging, exclude } = await targets(cfg);
   for (const [label, id] of [['source', source], ['dataset', dataset], ['staging', staging]]) {
-    if (!validRepoId(id)) throw new Error(`${label} "${id}" is not a valid repo id`);
+    if (!validRepoId(id)) throw new ApiError(400, 'invalid-input', `${label} is not a valid repo id`);
   }
   // Nothing is pre-created here. Both destinations are created explicitly
   // private INSIDE the Job and then read back before anything is written —

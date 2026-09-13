@@ -29,6 +29,8 @@ const env = {
   OPENCODE_DURABLE: path.join(data, 'state/opencode'),
   HERMES_LIVE: path.join(local, 'hermes'),
   HERMES_DURABLE: path.join(data, 'state/hermes'),
+  FX_LIVE: path.join(local, 'fx-home'),
+  FX_DURABLE: path.join(data, 'state/fx'),
 };
 
 let failures = 0;
@@ -62,10 +64,15 @@ try {
   const claudeRel = 'projects/work/session.jsonl';
   const geminiRel = 'tmp/work/chats/session-test.jsonl';
   const clawRel = 'agents/main/sessions/session.jsonl';
+  const fxRel = 'sessions/1787565046083-1787565046083966744-936b6f5838945f4a/events.jsonl';
   put(path.join(env.CODEX_DURABLE, codexRel), '{"turn":1}\n');
   put(path.join(env.CLAUDE_DURABLE, claudeRel), '{"turn":1}\n');
   put(path.join(env.GEMINI_DURABLE, geminiRel), '{"turn":1}\n');
   put(path.join(env.OPENCLAW_DURABLE, clawRel), '{"turn":1}\n');
+  put(path.join(env.FX_DURABLE, fxRel), '{"kind":"session_started"}\n');
+  // A durable tree written before the excludes existed can still hold these.
+  put(path.join(env.FX_DURABLE, 'sessions/1787565046083-1787565046083966744-936b6f5838945f4a/session.lock'), 'pid\n');
+  put(path.join(env.FX_DURABLE, 'sessions/index.pending'), 'partial\n');
 
   run('restore');
   check('Codex rollout restores to a real local directory',
@@ -77,6 +84,14 @@ try {
     fs.readFileSync(path.join(env.GEMINI_LIVE, geminiRel), 'utf8') === '{"turn":1}\n');
   check('OpenClaw transcript restores locally',
     fs.readFileSync(path.join(env.OPENCLAW_STATE_DIR, clawRel), 'utf8') === '{"turn":1}\n');
+  check('fx transcript restores locally',
+    fs.readFileSync(path.join(env.FX_LIVE, fxRel), 'utf8') === '{"kind":"session_started"}\n');
+  // A lock names a process that died with the old container, and the pending
+  // index is half-written — restoring either hands fx state nobody holds.
+  check('fx locks are not restored',
+    !fs.existsSync(path.join(env.FX_LIVE, 'sessions/1787565046083-1787565046083966744-936b6f5838945f4a/session.lock')));
+  check('fx pending index is not restored',
+    !fs.existsSync(path.join(env.FX_LIVE, 'sessions/index.pending')));
 
   // Re-running entrypoint in the same container must not replace newer live
   // state with an older bucket checkpoint.
@@ -112,6 +127,27 @@ try {
     fs.readFileSync(path.join(env.OPENCODE_DURABLE, 'setup.json'), 'utf8') === '{"configured":true}\n');
   check('Hermes ordinary files checkpoint before state.db exists',
     fs.readFileSync(path.join(env.HERMES_DURABLE, 'config.yaml'), 'utf8') === 'configured: true\n');
+
+  // fx: the credential and the transcript must reach the bucket; its live locks
+  // must not, or a restored container starts against a lock nobody holds.
+  put(path.join(env.FX_LIVE, 'auth.json'), '{"token":"x"}\n');
+  put(path.join(env.FX_LIVE, 'sessions/s1/events.jsonl'), '{"kind":"history_turn_committed"}\n');
+  put(path.join(env.FX_LIVE, 'sessions/s1/commit.lock'), 'pid\n');
+  put(path.join(env.FX_LIVE, 'sessions/s1/subagent/subagent-control.lock'), 'pid\n');
+  put(path.join(env.FX_LIVE, 'sessions/index.pending'), 'partial\n');
+  // Drop the copy the restore fixture above planted durably, so this asserts
+  // what the checkpoint just wrote rather than what was already there.
+  fs.rmSync(path.join(env.FX_DURABLE, 'sessions/index.pending'), { force: true });
+  run('checkpoint');
+  check('fx auth checkpoints to the bucket',
+    fs.readFileSync(path.join(env.FX_DURABLE, 'auth.json'), 'utf8') === '{"token":"x"}\n');
+  check('fx transcript checkpoints to the bucket',
+    fs.readFileSync(path.join(env.FX_DURABLE, 'sessions/s1/events.jsonl'), 'utf8') === '{"kind":"history_turn_committed"}\n');
+  check('fx locks stay out of the bucket',
+    !fs.existsSync(path.join(env.FX_DURABLE, 'sessions/s1/commit.lock'))
+      && !fs.existsSync(path.join(env.FX_DURABLE, 'sessions/s1/subagent/subagent-control.lock')));
+  check('fx pending index stays out of the bucket',
+    !fs.existsSync(path.join(env.FX_DURABLE, 'sessions/index.pending')));
 
   // Reproduce the Codex access pattern: append while holding the canonical
   // rollout FD open. Because the canonical file is now local, a different

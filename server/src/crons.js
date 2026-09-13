@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CronExpressionParser } from 'cron-parser';
 import { DATA_DIR } from './config.js';
+import { invalid } from './api-errors.js';
 
 export const CRONS_FILE = path.join(DATA_DIR, 'crons.json');
 const MAX_TIMER_MS = 2_147_000_000;
@@ -13,9 +14,9 @@ let fireJob = null;
 const timers = new Map();
 
 const cleanText = (value, field, max = 160) => {
-  if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} required`);
+  if (typeof value !== 'string' || !value.trim()) throw invalid(field, 'required');
   const text = value.trim();
-  if (text.length > max) throw new Error(`${field} is too long (max ${max} characters)`);
+  if (text.length > max) throw invalid(field, `is too long (max ${max} characters)`);
   return text;
 };
 
@@ -35,9 +36,9 @@ function persist() {
 }
 
 export function validateSchedule(value, id = '') {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('schedule required');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid('schedule', 'required');
   const cron = cleanText(value.cron, 'schedule.cron', 120).replace(/\s+/g, ' ');
-  if (cron.split(' ').length !== 5) throw new Error('schedule.cron must use the standard five fields: minute hour day month weekday');
+  if (cron.split(' ').length !== 5) throw invalid('schedule.cron', 'must use the standard five fields: minute hour day month weekday');
   const tz = cleanText(value.tz, 'schedule.tz', 100);
   try {
     // Intl is the runtime authority for IANA zone names; cron-parser then
@@ -45,7 +46,7 @@ export function validateSchedule(value, id = '') {
     new Intl.DateTimeFormat('en', { timeZone: tz }).format(new Date());
     CronExpressionParser.parse(cron, { tz, hashSeed: id || 'agent-manager-cron' }).next();
   } catch (e) {
-    throw new Error(`invalid schedule: ${e && e.message ? e.message : e}`);
+    throw invalid('schedule', 'invalid schedule: check the cron expression and time zone');
   }
   return { cron, tz };
 }
@@ -68,9 +69,9 @@ function normalizeInput(input, existing = null) {
     schedule: src.schedule === undefined ? existing.schedule : src.schedule,
   } : src;
   const agent = merged.agent;
-  if (!agent || typeof agent !== 'object' || Array.isArray(agent)) throw new Error('agent required');
+  if (!agent || typeof agent !== 'object' || Array.isArray(agent)) throw invalid('agent', 'required');
   const state = merged.state === undefined ? 'running' : merged.state;
-  if (!VALID_STATES.has(state)) throw new Error("state must be 'running' or 'stopped'");
+  if (!VALID_STATES.has(state)) throw invalid('state', "must be 'running' or 'stopped'");
   const id = existing?.id || `cron_${crypto.randomBytes(5).toString('hex')}`;
   return {
     ...(existing || {}),

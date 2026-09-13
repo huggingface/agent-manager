@@ -4,20 +4,25 @@ import { Terminal, type ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { ClipboardAddon, Base64 } from '@xterm/addon-clipboard';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { FileLinkScope, useFilePreview } from './FileLinkContent';
+import { installTerminalFileLinks, terminalLinkHandler, openTerminalLink } from '../lib/terminalFileLinks';
 import '@xterm/xterm/css/xterm.css';
 import type { Cli, Session } from '../types';
 import { STATE_LABEL, isRemote } from '../types';
 import StateLogo from './StateLogo';
 import TraceInfo from './TraceInfo';
 import ConversationView from './conversation/ConversationView';
+import type { ConversationSeen } from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
+import { LOCKED_CLOSE_CODE, announceLock, parseCloseReason } from '../lib/lockStatus';
 import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph } from './icons';
 import * as api from '../api';
+import { terminalRetryDelay } from '../terminalRetry';
 import type { Attachment } from '../api';
 import {
-  MAX_ATTACHMENTS, attachmentFileError, filesFromClipboardItems, filesFromTransfer,
+  attachmentFileError, filesFromClipboardItems, filesFromTransfer,
   transferMayContainFile,
 } from '../lib/attachments';
 
@@ -44,12 +49,14 @@ const THEMES: Record<'light' | 'dark', ITheme> = {
   },
 };
 
-type ConnState = 'connecting' | 'connected' | 'closed' | 'exited';
+type ConnState = 'connecting' | 'connected' | 'closed' | 'exited' | 'paused' | 'locked';
 
 // Close code the server uses when the session's process exited for real (vs a
 // transient drop). The client must NOT auto-reconnect on this, or it would
 // respawn the agent in a loop and trample an in-progress login flow.
 const EXIT_CODE = 4000;
+// The privacy lock refused or revoked this socket. Do not reconnect: the app's
+// shared status poll shows the lock page and reopens the pane once it clears.
 
 function workspaceLabel(p: string | null) {
   const rel = (p || '').replace(/^\.\/?/, '').replace(/^\/+|\/+$/g, '');
@@ -191,10 +198,14 @@ if (typeof window !== 'undefined') {
 export default function TerminalPane({
   session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal',
   dragId, isMobile, groupName, onBack, onDragActive, onFocus, onRename, onClose,
-  onShare,
+  onShare, seen,
 }: {
   session: Session;
   cli?: Cli;
+  // The unread cursor, passed straight to the reader. Only supplied while this
+  // pane is the active one, so a pane sitting behind another in a deck cannot
+  // acknowledge a reply nobody is looking at.
+  seen?: ConversationSeen;
   theme: 'light' | 'dark';
   groupName?: string | null; // the group this pane belongs to, if any
   focused?: boolean;
@@ -211,6 +222,7 @@ export default function TerminalPane({
   onRename?: (name: string) => void;
   onClose: () => void;
 }) {
+  const openFilePreview = useFilePreview();
   const hostRef = useRef<HTMLDivElement>(null);
   // Focus, unless the conversation is covering the terminal. Several paths grab
   // it — becoming active, the header, the key bar — and some fire after the mode
@@ -230,7 +242,7 @@ export default function TerminalPane({
   // Reachable from the mode switch: a flick can still be coasting through the
   // terminal's scrollback when the reader covers it.
   const stopGlideRef = useRef<() => void>(() => {});
-  const reconnectRef = useRef<() => void>(() => {});
+  const reconnectRef = useRef<(restart?: boolean) => void>(() => {});
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
   const [preview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
@@ -377,12 +389,7 @@ export default function TerminalPane({
       return;
     }
     if (imageUploadBusyRef.current) return;
-    const candidates = files;
-    if (candidates.length > MAX_ATTACHMENTS) {
-      showImageStatus({ kind: 'error', text: `Attach at most ${MAX_ATTACHMENTS} files at a time` }, 4000);
-      return;
-    }
-    const images = candidates.slice(0, MAX_ATTACHMENTS);
+    const images = files;
     if (!images.length) return;
     const invalid = images.map((file) => attachmentFileError(file)).find(Boolean);
     if (invalid) { showImageStatus({ kind: 'error', text: invalid }, 4000); return; }
@@ -479,6 +486,7 @@ export default function TerminalPane({
       // Let users make a local selection even when an agent TUI has grabbed
       // the mouse: ⌥-drag on macOS, Shift-drag elsewhere.
       macOptionClickForcesSelection: true,
+      linkHandler: terminalLinkHandler(session.id, openFilePreview),
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -507,18 +515,9 @@ export default function TerminalPane({
     // succeeded or was blocked, so there is no way to tell, and layering a
     // fallback behind it opens the link twice. noopener/noreferrer keep the
     // opened page from reaching back into the app through window.opener.
-    term.loadAddon(new WebLinksAddon((event, uri) => {
-      if (event?.defaultPrevented) return;
-      const a = document.createElement('a');
-      a.href = uri;
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    }));
+    term.loadAddon(new WebLinksAddon((event, uri) => openTerminalLink(event, uri, session.id, openFilePreview)));
     term.open(hostRef.current!);
+    installTerminalFileLinks(term, session.id, openFilePreview);
     termRef.current = term;
     const host = hostRef.current!;
 
@@ -679,17 +678,32 @@ export default function TerminalPane({
     let retry: ReturnType<typeof setTimeout> | null = null;
     // Reconnect with backoff: a sleeping/unreachable Space shouldn't be hammered
     // every second by every open pane. Reset once a connection succeeds.
-    let retryDelay = 1200;
+    let connectionFailures = 0;
 
     // Does the visible screen show real text in its UPPER two-thirds? Agent
     // TUIs paint their bottom input bar first and load the actual content
     // (banner, resumed history) seconds later — only the upper region tells us
     // the pane is genuinely ready. Shell prompts paint at the top anyway.
-    const screenHasContent = () => {
+    let restoring = false;  // a restore frame was seen: the next frame is its snapshot
+    let restored = false;   // and it carried a screen, so this is a reattachment
+    const screenHasContent = (whole = restored) => {
       try {
         const buf = term.buffer.active;
-        const upper = Math.max(2, Math.floor(term.rows * 2 / 3));
-        for (let y = 0; y < upper; y++) {
+        // The upper-region rule is a rule about a harness BOOTING, and it only
+        // applies while we are still waiting to find out what the screen looks
+        // like. Once an authoritative snapshot has been written the screen IS
+        // the answer, wherever its content sits, so the whole screen counts.
+        // Read the upper region after that and a bottom-anchored TUI never
+        // qualifies: the cover sat until the 20-second cap on every switch
+        // (#127, measured at 20.0s against 13ms of actual paint).
+        //
+        // A restore FRAME is not that evidence on its own. attach() calls
+        // ensureRunning() before restore() (server/src/runner.js), so a session
+        // this request just started is sent a restore frame too — carrying an
+        // empty snapshot of a terminal that has painted nothing yet. Its
+        // content is what tells the two apart, and `restored` is set from that.
+        const rows = whole ? term.rows : Math.max(2, Math.floor(term.rows * 2 / 3));
+        for (let y = 0; y < rows; y++) {
           const line = buf.getLine(buf.baseY + y);
           if (line && line.translateToString(true).trim().length >= 2) return true;
         }
@@ -698,11 +712,9 @@ export default function TerminalPane({
     };
     let bootLive = false;
     let bootTimer: ReturnType<typeof setTimeout> | null = null;   // safety cap
-    let bootCheck: ReturnType<typeof setTimeout> | null = null;   // throttled content probe
     const endBoot = () => {
       bootLive = false;
       if (bootTimer) { clearTimeout(bootTimer); bootTimer = null; }
-      if (bootCheck) { clearTimeout(bootCheck); bootCheck = null; }
       setBooting(false);
     };
     const connect = () => {
@@ -712,6 +724,7 @@ export default function TerminalPane({
       // A reconnect keeps the already-rendered xterm visible. On a fresh page,
       // `booting` instead exposes the saved preview until canonical restore has
       // painted real content.
+      restoring = false; restored = false;
       const needsCover = !screenHasContent();
       setBooting(needsCover);
       bootLive = needsCover;
@@ -723,7 +736,6 @@ export default function TerminalPane({
       ws.binaryType = 'arraybuffer';
       ws.onopen = () => {
         setConn('connected');
-        retryDelay = 1200;
         // Selecting a terminal is an explicit foreground action on mobile.
         // Claim before reporting its fit so an already-open desktop does not
         // leave the phone rendering a clipped desktop-sized canonical grid.
@@ -738,6 +750,8 @@ export default function TerminalPane({
           try {
             const m = JSON.parse(d.slice(MODE_CTRL.length));
             if (m.t === 'grid' || m.t === 'restore') {
+              if (m.t === 'restore') restoring = true;
+              connectionFailures = 0;
               controllerRef.current = !!m.controller;
               setHasInputControl(!!m.controller);
               const applyGrid = () => {
@@ -760,6 +774,7 @@ export default function TerminalPane({
                     followingBottom = true;
                   }
                   schedulePreview();
+                  if (bootLive && screenHasContent()) endBoot();
                 } catch { /* ignore */ }
               };
               // Writes are asynchronous. A queued empty write is a barrier so
@@ -772,32 +787,52 @@ export default function TerminalPane({
           } catch { /* ignore */ }
           return;
         }
-        term.write(d, schedulePreview);
-        // Probe shortly after each burst (throttled; write() is async).
-        if (bootLive && !bootCheck) {
-          bootCheck = setTimeout(() => {
-            bootCheck = null;
-            if (bootLive && screenHasContent()) endBoot();
-          }, 150);
-        }
+        // The write callback fires when this data has been parsed onto the
+        // screen, which is exactly the question the cover is waiting on. The
+        // old 150ms probe timer asked it late and kept painted content hidden
+        // for that long on every switch.
+        // One canonical snapshot follows a restore frame. Everything after it is
+        // live output.
+        const canonical = restoring;
+        restoring = false;
+        term.write(d, () => {
+          schedulePreview();
+          // An empty canonical snapshot is a terminal that was just started for
+          // this request, not a screen to trust: stay in cold-boot mode and let
+          // the upper-region rule wait for the harness to paint something real.
+          if (canonical && screenHasContent(true)) restored = true;
+          if (bootLive && screenHasContent()) endBoot();
+        });
       };
       ws.onclose = (e) => {
-        // A real process exit: stop here and let the user relaunch. Anything
-        // else is a transient drop (sleep/wake, network) → auto-reconnect and
-        // reattach to the still-running backend session.
+        // A real process exit requires relaunch. Other closes get a bounded
+        // reconnect budget: browsers cannot distinguish admission refusal
+        // from a transient drop, so prolonged outages also need manual retry.
         endBoot();
         if (e.code === EXIT_CODE) { setConn('exited'); return; }
+        if (e.code === LOCKED_CLOSE_CODE) {
+          setConn('locked');
+          const parsed = parseCloseReason(e.reason);
+          announceLock({ reason: parsed.reason, bucket: null, seq: parsed.seq, boot: parsed.boot });
+          return;
+        }
         setConn('closed');
         if (!closedByUs) {
+          const retryDelay = terminalRetryDelay(++connectionFailures, e.code);
+          if (retryDelay === null) { setConn('paused'); return; }
           retry = setTimeout(connect, retryDelay);
-          retryDelay = Math.min(retryDelay * 1.7, 15_000);
         }
       };
       ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
     };
     // Manual restart: clear the dead run's screen so the content probe watches
     // the new process paint, not leftovers.
-    reconnectRef.current = () => { if (retry) clearTimeout(retry); retryDelay = 1200; try { term.reset(); } catch { /* ignore */ } connect(); };
+    reconnectRef.current = (restart = false) => {
+      if (retry) clearTimeout(retry);
+      connectionFailures = 0;
+      if (restart) { try { term.reset(); } catch { /* ignore */ } }
+      connect();
+    };
 
     // Report the pane's preferred size without locally fitting its terminal.
     // Only the current controller's preference changes the canonical grid;
@@ -976,7 +1011,6 @@ export default function TerminalPane({
       closedByUs = true;
       if (retry) clearTimeout(retry);
       if (bootTimer) clearTimeout(bootTimer);
-      if (bootCheck) clearTimeout(bootCheck);
       if (resyncTimer) clearTimeout(resyncTimer);
       persistPreview();
       ro.disconnect();
@@ -1072,6 +1106,7 @@ export default function TerminalPane({
   const pathLabel = workspaceLabel(session.path);
   const group = groupLabel(groupName);
   return (
+    <FileLinkScope session={session.id}>
     <div
       className={`slot${focused ? ' focused' : ''}`}
       style={focused && tint ? { borderColor: `color-mix(in srgb, ${tint} 45%, var(--border))` } : undefined}
@@ -1219,6 +1254,7 @@ export default function TerminalPane({
               onCloseSearch={() => setSearchOpen(false)}
               onAttachPicker={setReaderAttach}
               onHead={(head) => { setReaderFacts(head); setReaderLoaded(head?.loaded); }}
+              seen={seen}
             />
           </div>
         )}
@@ -1319,6 +1355,15 @@ export default function TerminalPane({
           {conn === 'connecting' ? 'connecting' : `starting ${cli?.label || session.cli}`}<span className="et-cursor" />
         </div>
       )}
+      {!reading && conn === 'paused' && (
+        <div className="term-exit mono" role="status">
+          <div className="tx-row">
+            <span>Terminal connection paused. Check your connection and app origin settings.</span>
+            <button className="tx-btn" onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); reconnectRef.current(); }}>retry connection</button>
+          </div>
+        </div>
+      )}
       {!reading && conn === 'exited' && (
         <div className="term-exit mono">
           <div className="tx-row">
@@ -1326,11 +1371,12 @@ export default function TerminalPane({
             <button
               className="tx-btn"
               onMouseDown={(e) => e.stopPropagation()}
-              onClick={(e) => { e.stopPropagation(); reconnectRef.current(); }}
+              onClick={(e) => { e.stopPropagation(); reconnectRef.current(true); }}
             ><RefreshGlyph /> restart</button>
           </div>
         </div>
       )}
     </div>
+    </FileLinkScope>
   );
 }

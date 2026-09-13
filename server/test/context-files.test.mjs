@@ -77,6 +77,10 @@ check('self-host fallback files are written', selfHostWrite.written.length, 6);
 check('self-host fallback files contain context', selfHost.targets.every(({ file }) => (
   fs.readFileSync(file, 'utf8').includes(MANAGED_CONTEXT_START)
 )), true);
+const generatedContext = fs.readFileSync(selfHost.targets[0].file, 'utf8');
+check('every generated curl declares request intent', generatedContext.split('\n').filter((line) => line.startsWith('curl '))
+  .every((line) => line.includes("-H 'X-AM-Request: 1'")), true);
+check('generated URLs support the local-install internal host', generatedContext.includes('${AM_HOST:-localhost}'), true);
 
 console.log('\neach CLI resolves its supported global/user instruction location');
 const resolved = globalContextTargets(ENV);

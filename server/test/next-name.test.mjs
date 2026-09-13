@@ -8,6 +8,7 @@
 // and two creations racing on the same prefill still land on distinct names.
 //
 // Run with:  node test/next-name.test.mjs
+import { nativeFetch as fetch } from './native-client.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';

@@ -12,18 +12,18 @@ sibling folders, and you can see, watch, and message them through the local API.
 This block applies only when \`$AM_ID\` is set; otherwise ignore it.
 
 You are \`$AM_ID\` (display name \`$AM_NAME\`), talking to the manager on
-\`localhost:\${AM_PORT:-${port}}\`.
+\`\${AM_HOST:-localhost}:\${AM_PORT:-${port}}\`.
 
 \`\`\`sh
 # Who is here (state, folder, last prompt/answer, trace path):
-curl -sS --fail "http://localhost:\${AM_PORT:-${port}}/api/agents?from=$AM_ID" | jq .
+curl -sS --fail -H 'X-AM-Request: 1' "http://\${AM_HOST:-localhost}:\${AM_PORT:-${port}}/api/agents?from=$AM_ID" | jq .
 
 # Watch a peer instead of polling it:
-curl -sS --fail "http://localhost:\${AM_PORT:-${port}}/api/agents/$ID/tail?lines=120" | jq -r .text
-curl -sS --fail "http://localhost:\${AM_PORT:-${port}}/api/agents/$ID/wait?timeout=120"
+curl -sS --fail -H 'X-AM-Request: 1' "http://\${AM_HOST:-localhost}:\${AM_PORT:-${port}}/api/agents/$ID/tail?lines=120" | jq -r .text
+curl -sS --fail -H 'X-AM-Request: 1' "http://\${AM_HOST:-localhost}:\${AM_PORT:-${port}}/api/agents/$ID/wait?timeout=120"
 
 # Message a peer (body = the prompt):
-curl -sS --fail -X POST "http://localhost:\${AM_PORT:-${port}}/api/agents/$ID/prompt?from=$AM_ID" \\
+curl -sS --fail -H 'X-AM-Request: 1' -X POST "http://\${AM_HOST:-localhost}:\${AM_PORT:-${port}}/api/agents/$ID/prompt?from=$AM_ID" \\
   -H 'content-type: text/plain' --data-binary 'your message'
 \`\`\`
 

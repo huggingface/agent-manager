@@ -116,6 +116,10 @@ on local POSIX storage and is restored/checkpointed by
 database backups rather than copying live WAL files. See
 [`docs/agent-state-checkpoints.md`](docs/agent-state-checkpoints.md).
 Scheduled prompts are documented in [`docs/cron-jobs.md`](docs/cron-jobs.md).
+Reader and terminal file links open previews in new tabs; supported paths and
+additional file locations are documented in [`docs/file-links.md`](docs/file-links.md).
+API audit retention and credential filtering are documented in
+[`docs/api-audit-log.md`](docs/api-audit-log.md).
 
 ## Architecture
 
@@ -227,8 +231,8 @@ Four things it handles that catch people out by hand:
   a test run write to them. A dev instance gets a fresh bucket, so it starts
   empty and its own logins stay its own.
 - **Private, always.** The app authenticates nobody past HF's edge, so a public
-  instance is a shell for whoever finds it. It does lock itself when public, but
-  the right answer is not to publish it at all.
+  instance is a shell for whoever finds it. It does lock itself when public
+  (see `docs/privacy-lock.md`), but the right answer is not to publish it at all.
 - **LFS objects go up first.** Git hooks cannot run from a workspace on the
   bucket (object storage holds no exec bit), so the `git lfs` pre-push hook never
   fires and a plain `git push` sends an LFS *pointer* with no object behind it —
