@@ -167,6 +167,7 @@ sets the window (1 / 3 / 7 days, or off).
 | Var | Default | Purpose |
 |---|---|---|
 | `PORT` | `7860` | HTTP + WS port (HF `app_port`) |
+| `BIND_HOST` | `127.0.0.1` | HTTP + WS bind address (`0.0.0.0` in the container image) |
 | `DATA_DIR` | `/data` | Durable root (mounted private Storage Bucket) |
 | `AM_SCROLLBACK_BYTES` | `67108864` | Maximum Ghostty scrollback memory per session |
 | `AM_RESIZE_SETTLE_MS` | `120` | Quiet period before a resize is applied to the PTY |
@@ -186,6 +187,31 @@ cd server && npm install && npm run dev
 # frontend (proxies /api and /ws to the backend on :7860)
 cd web && npm install && npm run dev
 ```
+
+For a persistent local deployment (rather than an offline development server),
+install and verify the agent CLIs explicitly. Docker image build steps do not
+run when the backend is launched directly by Node or systemd:
+
+```bash
+./scripts/install-local-clis.sh
+
+# Or install only selected CLIs:
+./scripts/install-local-clis.sh opencode codex
+```
+
+The script installs into `${NPM_CONFIG_PREFIX:-$HOME/.local}`. Claude and Codex
+are required and a failure stops the run; Gemini, opencode and OpenClaw are
+best-effort, exactly as in the container image, and a CLI that does not install
+is listed at the end and shown as unavailable in the app. Include that prefix's `bin`
+directory in the service's `PATH`, then restart Agent Manager: CLI availability
+is cached for the lifetime of the backend process. The backend listens only on
+`127.0.0.1` by default because Agent Manager has no built-in authentication. If
+you set `BIND_HOST` to expose it on another interface, put an authenticated
+reverse proxy in front of it; never expose the backend directly to an untrusted
+network. For a non-Space production deployment, also set `AM_ALLOWED_ORIGINS`
+to the exact browser-facing origin (for example `https://agents.example.com`).
+This request-admission allowlist does not replace proxy authentication. Internal
+clients use `AM_HOST` and send `X-AM-Request: 1`, just like the generated skill.
 
 This repo *is* the Space — the build runs the `Dockerfile`.
 
