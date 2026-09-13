@@ -33,7 +33,7 @@ try {
   const css = ['src/styles.css', 'src/conversation.css', 'node_modules/@xterm/xterm/css/xterm.css']
     .map((file) => fs.readFileSync(path.join(web, file), 'utf8')).join('\n');
   await page.route('http://keyboard.test/**', (route) => route.fulfill({ contentType: 'text/html',
-    body: `<style>${css}\n#root{height:100vh}.slot{height:100%}</style><div id="root"></div>` }));
+    body: `<meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}\n#root{height:100vh}.slot{height:100%}</style><div id="root"></div>` }));
   await page.goto('http://keyboard.test/');
   await page.addScriptTag({ content: result.outputFiles[0].text });
   await page.getByRole('button', { name: 'write', exact: true }).click();
