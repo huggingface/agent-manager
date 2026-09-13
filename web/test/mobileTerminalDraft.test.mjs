@@ -39,6 +39,7 @@ try {
   await page.getByRole('button', { name: 'write', exact: true }).click();
   const input = page.getByPlaceholder('write a prompt…');
   await input.fill('a corrected prompt');
+  if (process.env.AM_KEYBOARD_SCREENSHOT) await page.screenshot({ path: process.env.AM_KEYBOARD_SCREENSHOT });
   assert.equal(await input.getAttribute('autocorrect'), 'on');
   assert.equal(await page.locator('.xterm-helper-textarea').getAttribute('autocorrect'), 'off', 'raw input remains literal');
   const inputs = () => page.evaluate(() => window.sent.filter((m) => m.t === 'i').map((m) => m.d));
