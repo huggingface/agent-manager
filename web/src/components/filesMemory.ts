@@ -8,6 +8,7 @@
 // The in-memory map is what makes a pane switch lossless. localStorage is the
 // second line: it also survives a reload of the whole app, which is the other
 // way people lose a buffer they never asked to lose.
+import type { FileLinkRequest } from '../lib/fileLinks';
 
 export interface Draft {
   path: string;
@@ -22,6 +23,7 @@ export interface FilesMemory {
   target: string | null;
   sort?: { key: 'name' | 'size' | 'time'; desc: boolean };
   draft: Draft | null;
+  linkedFile?: FileLinkRequest | null;
 }
 
 const EMPTY: FilesMemory = { root: '', viewing: null, target: null, draft: null };

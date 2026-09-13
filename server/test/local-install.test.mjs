@@ -150,7 +150,8 @@ assert.equal(launched.stdout.trim(), '3', 'the rcfile path stays one argument');
     env: {
       ...process.env, SPACE_ID: '', AM_DISTRIBUTE_SKILLS: '', PORT: String(port), BIND_HOST: bind,
       DATA_DIR: dataDir, PUBLIC_DIR: path.join(tmp, 'bind-public'),
-      AM_BASHRC: '/nonexistent', AM_ALLOW_MISSING_ORIGIN: '1', CLAUDE_CONFIG_DIR: statuslineCfg,
+      AM_BASHRC: '/nonexistent', NODE_ENV: 'test',
+      AM_ALLOWED_ORIGINS: 'https://agents.example.com', CLAUDE_CONFIG_DIR: statuslineCfg,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -161,6 +162,14 @@ assert.equal(launched.stdout.trim(), '3', 'the rcfile path stays one argument');
       if (!up) await new Promise((r) => setTimeout(r, 250));
     }
     assert.ok(up, 'the configured interface answers');
+    const internal = await fetch(`http://${bind}:${port}/api/crons/nonexistent/run`, {
+      method: 'POST', headers: { 'X-AM-Request': '1', 'x-am-origin': 'operator' },
+    });
+    assert.equal(internal.status, 404, `internal calls reach the cron route: ${await internal.text()}`);
+    const foreignOrigin = await fetch(`http://${bind}:${port}/api/crons/nonexistent/run`, {
+      method: 'POST', headers: { 'X-AM-Request': '1', 'x-am-origin': 'operator', Origin: `http://${bind}:${port}` },
+    });
+    assert.equal(foreignOrigin.status, 403, 'internal Host admission does not broaden browser-origin trust');
     // Without this the assertions below would pass on a wildcard bind too.
     const loopback = await fetch(`http://127.0.0.1:${port}/api/health`).then(() => true).catch(() => false);
     assert.equal(loopback, false, '127.0.0.1 is genuinely not bound');
@@ -172,6 +181,7 @@ assert.equal(launched.stdout.trim(), '3', 'the rcfile path stays one argument');
     const generated = fs.readFileSync(skill, 'utf8');
     assert.ok(!/localhost:/.test(generated), 'generated agent instructions no longer point at localhost');
     assert.ok(generated.includes(bind), 'they point at the address the server actually bound');
+    assert.ok(generated.includes("X-AM-Request: 1"), 'generated callers retain request-admission headers');
 
     // And the statusline this boot configured has to survive the shell: an
     // unquoted script path splits and the command silently never runs.

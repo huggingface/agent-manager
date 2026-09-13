@@ -2,6 +2,7 @@
 # End-to-end test of the remote-agent protocol against a throwaway server.
 SC=/tmp/claude-1000/-data-workspaces-agent-manager/bb5087f8-c501-4fae-ba56-6c57f9ab745e/scratchpad
 B=localhost:7901
+curl() { command curl -H 'X-AM-Request: 1' "$@"; }
 pass=0; fail=0
 ok()   { pass=$((pass+1)); echo "  PASS  $1"; }
 bad()  { fail=$((fail+1)); echo "  FAIL  $1"; echo "        got: $2"; }
@@ -91,7 +92,7 @@ check "stream works again" "$(curl -s -N --max-time 10 "$B/api/remote/laptop/str
 echo "== 12. no terminal, no spawn, no usage inflation =="
 check "/ws refuses it" "$(node -e "
 import('/app/server/node_modules/ws/index.js').then(({default:pkg})=>{
-  const {WebSocket}=pkg; const ws=new WebSocket('ws://$B/ws?session=$ID');
+  const {WebSocket}=pkg; const ws=new WebSocket('ws://$B/ws?session=$ID', {headers:{'X-AM-Request':'1'}});
   ws.on('message',m=>{console.log(String(m).trim());process.exit(0)});
   ws.on('error',()=>{console.log('error');process.exit(0)});
   setTimeout(()=>{console.log('timeout');process.exit(0)},5000);

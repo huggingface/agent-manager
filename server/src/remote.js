@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { outputHash } from './output-id.js';
 import path from 'node:path';
 import { WORKSPACES_DIR } from './config.js';
 import { update } from './sessions.js';
@@ -410,6 +411,13 @@ export function remoteDigest(session) {
     running: isListening(name) && !session.remote.paused,
     turnsLog: sinceTurns.slice(0, -1).reverse()
       .map((m) => ({ answer: clip(m.text), answerMd: clipRaw(m.text), ts: Date.parse(m.at || '') || 0 })),
+    // A remote log already numbers its messages, so the unread cursor uses that
+    // rather than deriving one: it is authoritative, monotonic, and survives a
+    // reconnect. The hash still comes from the full text, so an agent that
+    // edits and resends the same message is a new thing to read.
+    outSeq: answer ? answer.seq : 0,
+    outHash: answer ? outputHash(answer.text) : '',
+    outClipped: answer ? clipRaw(answer.text).length < String(answer.text || '').trim().length : false,
   };
 }
 
@@ -450,6 +458,11 @@ Setup
   export AM=${base}
   export HF_TOKEN=<a Hugging Face token with READ access to that Space repo>
 
+Send X-AM-Request: 1 on manager API requests. This non-secret protocol marker
+declares request intent; it does not replace the private Space's access checks.
+If an older copied loop gets code "request-not-allowed", stop it and update its
+headers before resuming. Do not automatically repeat an uncertain write.
+
 The Space is private, so every call needs that token. Read access is enough —
 nothing here writes to the Hub. A fine-grained token scoped to just this one
 Space repo is the right thing; a token for a different namespace will NOT work
@@ -457,7 +470,7 @@ even if you own the Space.
 
 1. Check it works, before anything else:
 
-     curl -sS -H "authorization: Bearer $HF_TOKEN" "$AM/ping"
+     curl -sS -H 'X-AM-Request: 1' -H "authorization: Bearer $HF_TOKEN" "$AM/ping"
 
    Expect JSON: {"ok":true,"name":"${name}",...}
    Read the SHAPE, not the status code:
@@ -472,7 +485,7 @@ even if you own the Space.
 
 2. Say where you are (optional, once — it labels the pane):
 
-     curl -sS -X POST -H "authorization: Bearer $HF_TOKEN" \\
+     curl -sS -H 'X-AM-Request: 1' -X POST -H "authorization: Bearer $HF_TOKEN" \\
        -H 'content-type: application/json' \\
        -d '{"harness":"<your cli>","cwd":"'"$PWD"'","host":"'"$(hostname)"'"}' \\
        "$AM/hello?from=${origin}"
@@ -480,7 +493,7 @@ even if you own the Space.
 3. Then loop. One blocking call waits for work; it returns as soon as there is
    any, or empty when the wait expires:
 
-     curl -sS -N -H "authorization: Bearer $HF_TOKEN" \\
+     curl -sS -H 'X-AM-Request: 1' -N -H "authorization: Bearer $HF_TOKEN" \\
        "$AM/stream?since=$SEQ&wait=${WAIT_DEFAULT}"
 
    Lines starting with ':' are keep-alives — ignore them. The one JSON line is
@@ -500,7 +513,7 @@ even if you own the Space.
 
 4. Reply as you go — send the body as plain markdown:
 
-     curl -sS -X POST -H "authorization: Bearer $HF_TOKEN" \\
+     curl -sS -H 'X-AM-Request: 1' -X POST -H "authorization: Bearer $HF_TOKEN" \\
        -H 'content-type: text/plain' \\
        --data-binary @- "$AM/messages?from=${origin}" <<'EOF'
      Fixed the fixture — pad_token was None on the Qwen config. Suite is green.

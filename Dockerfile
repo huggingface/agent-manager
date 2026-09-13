@@ -61,6 +61,22 @@ RUN npm install -g @google/gemini-cli@latest || echo "gemini-cli install failed"
 COPY gemini-system-defaults.json /etc/gemini-cli/system-defaults.json
 RUN npm install -g opencode-ai@latest || echo "opencode install failed"
 RUN npm install -g openclaw@latest || echo "openclaw install failed"
+# fx (Vercel Labs) ships as one static binary, not an npm package. Fetch the
+# PINNED tarball rather than piping the vendor's setup.sh into a shell: that
+# script resolves whatever `latest.txt` says on the day of the build, so the
+# image would stop being reproducible. Apache-2.0 asks that the notices travel
+# with a redistributed binary, hence the two doc files.
+#
+# Best-effort like the npm installs above, and for the same reason: one vendor
+# CDN being unreachable must not fail the whole image and take the Space down
+# with it. A missing binary is already a first-class state — cliCatalog() reports
+# fx unavailable and the launcher greys it out.
+RUN (curl -fsSL https://releases.fx.sh/v0.0.5/fx-linux-x86_64.tar.gz -o /tmp/fx.tar.gz \
+      && tar -xzf /tmp/fx.tar.gz -C /tmp fx LICENSE THIRD_PARTY_NOTICES.md \
+      && install -D -m 0755 /tmp/fx /usr/local/bin/fx \
+      && install -D -m 0644 -t /usr/local/share/doc/fx /tmp/LICENSE /tmp/THIRD_PARTY_NOTICES.md \
+      && fx --version) || echo "fx install failed"
+RUN rm -f /tmp/fx.tar.gz /tmp/fx /tmp/LICENSE /tmp/THIRD_PARTY_NOTICES.md
 # ccusage powers the Usage page (token/cost aggregation across agents). Its
 # platform binary ships without an execute bit and the package tries to chmod
 # itself on first run — which fails with EPERM at runtime as the non-root user.

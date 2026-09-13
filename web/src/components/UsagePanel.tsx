@@ -1,6 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import * as api from '../api';
 import type { ProviderUsage, QuotaWindow, Traces, TraceStats } from '../api';
+import {
+  DEFAULT_TRACE_SORT,
+  firstTraceSortDirection,
+  visibleTraceSessions,
+  type TraceSort,
+  type TraceSortKey,
+} from '../lib/usageTraces';
 import Logo from './Logo';
 
 const PROVS = [
@@ -10,6 +17,17 @@ const PROVS = [
   { id: 'hermes', label: 'Hermes', color: '#a78bfa' },
   { id: 'openclaw', label: 'OpenClaw', color: '#c83636' },
   { id: 'gemini', label: 'Gemini CLI', color: '#4796e3' },
+];
+
+const TRACE_COLUMNS: { key: TraceSortKey; label: string }[] = [
+  { key: 'agent', label: 'agent' },
+  { key: 'turns', label: 'turns' },
+  { key: 'prompts', label: 'prompts' },
+  { key: 'tools', label: 'tools' },
+  { key: 'web', label: 'web' },
+  { key: 'tokensIn', label: 'tok in' },
+  { key: 'tokensOut', label: 'tok out' },
+  { key: 'lastTs', label: 'last active' },
 ];
 
 const fmtTok = (n = 0) =>
@@ -64,12 +82,39 @@ function TraceRow({ label, cli, path, st, strong }: { label: string; cli?: strin
   );
 }
 
+function TraceSortHeader({ column, sort, onSort }: {
+  column: (typeof TRACE_COLUMNS)[number];
+  sort: TraceSort;
+  onSort: (key: TraceSortKey) => void;
+}) {
+  const active = sort.key === column.key;
+  const direction = active ? sort.direction : firstTraceSortDirection(column.key);
+  return (
+    <th aria-sort={active ? (sort.direction === 'asc' ? 'ascending' : 'descending') : undefined}>
+      <button
+        type="button"
+        className={`tr-sort${active ? ' active' : ''}`}
+        aria-label={`Sort by ${column.label}${active ? `, currently ${direction === 'asc' ? 'ascending' : 'descending'}` : ''}`}
+        onClick={() => onSort(column.key)}
+      >
+        <span>{column.label}</span>
+        <span className="tr-sort-arrow" aria-hidden="true">{active ? (sort.direction === 'asc' ? '↑' : '↓') : ''}</span>
+      </button>
+    </th>
+  );
+}
+
 export default function UsagePanel() {
   // Each provider loads independently (undefined = loading, null = failed), so
   // the page frame paints immediately and cards fill in as answers arrive —
   // one hung provider no longer blanks the whole page.
   const [prov, setProv] = useState<Record<string, ProviderUsage | null | undefined>>({});
   const [t, setT] = useState<Traces | null>(null);
+  const [sort, setSort] = useState<TraceSort>(DEFAULT_TRACE_SORT);
+  const sessions = useMemo(() => t ? visibleTraceSessions(t.sessions, sort) : [], [t, sort]);
+  const activateSort = (key: TraceSortKey) => setSort((current) => current.key === key
+    ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+    : { key, direction: firstTraceSortDirection(key) });
   useEffect(() => {
     let alive = true;
     for (const p of PROVS) {
@@ -137,14 +182,18 @@ export default function UsagePanel() {
 
       <h3>Traces</h3>
       <div className="s-help">
-        Parsed from every agent transcript stored on this Space (Claude, Codex, opencode, Hermes, OpenClaw) —
-        hover the tools count for the breakdown, tokens-in for the cache share. The total also counts
-        traces of deleted agents.
+        Parsed from every agent transcript stored on this Space (Claude, Codex, opencode, Hermes, OpenClaw, fx) —
+        hover the tools count for the breakdown, tokens-in for the cache share. Zero-token session rows are hidden;
+        the total still counts traces of deleted agents and all other parsed activity.
       </div>
       <div className="table-scroll">
         <table className="traces-table">
           <thead>
-            <tr><th>agent</th><th>turns</th><th>prompts</th><th>tools</th><th>web</th><th>tok in</th><th>tok out</th><th>last active</th></tr>
+            <tr>
+              {TRACE_COLUMNS.map((column) => (
+                <TraceSortHeader key={column.key} column={column} sort={sort} onSort={activateSort} />
+              ))}
+            </tr>
           </thead>
           <tbody>
             {!t ? (
@@ -153,7 +202,10 @@ export default function UsagePanel() {
               ))
             ) : (
               <>
-                {t.sessions.map((s) => <TraceRow key={s.id} label={s.name} cli={s.cli} path={s.path} st={s} />)}
+                {sessions.length === 0 && (
+                  <tr className="tr-empty"><td colSpan={8}>No sessions with recorded tokens</td></tr>
+                )}
+                {sessions.map((s) => <TraceRow key={s.id} label={s.name} cli={s.cli} path={s.path} st={s} />)}
                 <TraceRow label={`total (${t.totals.files} files)`} st={t.totals} strong />
               </>
             )}
