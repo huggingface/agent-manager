@@ -912,8 +912,51 @@ export default function TerminalPane({
     let touchY: number | null = null;
     let residual = 0;        // px of gesture not yet worth a whole row
     let glideFrame = 0;
-    let velocity = 0;        // px/ms, signed like deltaY (positive scrolls down)
-    let lastMoveAt = 0;
+    // Speed at release, measured on OUR clock over a trailing window.
+    //
+    // `e.timeStamp` cannot be used for this. WebKit delivers several touchmoves
+    // within one frame carrying the SAME timeStamp, so the per-event `dt` was 0
+    // and a `dt >= 4` guard rejected every sample: velocity stayed 0, nothing
+    // ever coasted, and each gesture stopped dead where the finger stopped.
+    // That guard was right to distrust a 2ms gap — dividing a coalesced jump by
+    // it would launch the glide through the whole buffer — but the fix is to
+    // stop dividing per event at all.
+    //
+    // Summing the distance over a short window and dividing ONCE by the elapsed
+    // time is correct however the stream arrives: coalesced (one event carrying
+    // a frame's travel) and batched (several events with no time between them)
+    // both put the same distance in the same window. performance.now() is read
+    // here rather than taken from the event, so it measures real elapsed time
+    // whatever the event reports.
+    // 120ms: long enough that a phone dropping to ~30Hz under load still puts
+    // three or four samples in the window, short enough that it reports the
+    // speed AT release rather than an average of the whole gesture — and short
+    // enough that a finger which stops to rest before lifting empties it, which
+    // is what stops a deliberate drag from coasting.
+    const VELOCITY_WINDOW_MS = 120;
+    const MIN_WINDOW_MS = 8;        // below this the elapsed time is noise
+    const MAX_TOUCH_SPEED = 4;      // px/ms — a hand tops out around here
+    let samples: { at: number; dy: number }[] = [];
+    // Distance strictly BETWEEN the first and last sample over the time between
+    // them: the first sample's travel happened before its own timestamp, so it
+    // contributes the window's start, not its distance.
+    const velocityNow = () => {
+      // Trim HERE, not only as samples arrive: a finger that stops and rests
+      // before lifting sends no further events, so trimming on arrival alone
+      // would leave the pre-pause samples standing and coast on speed the hand
+      // no longer had.
+      const cutoff = performance.now() - VELOCITY_WINDOW_MS;
+      while (samples.length && samples[0].at < cutoff) samples.shift();
+      if (samples.length < 2) return 0;
+      const elapsed = samples[samples.length - 1].at - samples[0].at;
+      if (elapsed < MIN_WINDOW_MS) return 0;
+      let distance = 0;
+      for (let i = 1; i < samples.length; i++) distance += samples[i].dy;
+      const v = distance / elapsed;
+      // The same ceiling the per-event clamp enforced, so the glide's reach is
+      // unchanged: a real flick still cannot be read as faster than a hand moves.
+      return Math.max(-MAX_TOUCH_SPEED, Math.min(MAX_TOUCH_SPEED, v));
+    };
     // The scroll area spans every line in the buffer, so its height over that
     // line count is the row height under whichever renderer is attached.
     const scrollByPixels = (px: number) => {
@@ -937,10 +980,9 @@ export default function TerminalPane({
     const onTouchStart = (e: TouchEvent) => {
       if (modeRef.current === 'reader') return;
       stopGlide();               // a new touch takes over from any coasting
-      velocity = 0;
+      samples = [];
       residual = 0;
       touchY = e.touches[0].clientY;
-      lastMoveAt = e.timeStamp;
     };
     const onTouchMove = (e: TouchEvent) => {
       if (modeRef.current === 'reader') return;
@@ -949,18 +991,11 @@ export default function TerminalPane({
       const deltaY = touchY - y;
       touchY = y;
       if (deltaY === 0) return;
-      const dt = e.timeStamp - lastMoveAt;
-      lastMoveAt = e.timeStamp;
-      // Weight the newest sample heavily: what matters is the speed at release,
-      // and a touch stream is noisy. Ignore a stale gap (a paused finger) and
-      // anything faster than a touch stream can legitimately be — a single
-      // coalesced jump over a 2ms gap is not a 48px/ms flick, and dividing by
-      // it would launch the glide clean through the buffer. A hand tops out
-      // around 4px/ms; real events arrive 8-16ms apart.
-      if (dt >= 4 && dt < 100) {
-        const sample = Math.max(-4, Math.min(4, deltaY / dt));
-        velocity = velocity * 0.3 + sample * 0.7;
-      }
+      // Drop what has aged out, so a finger that paused and then released does
+      // not coast on speed it had before the pause.
+      const at = performance.now();
+      samples.push({ at, dy: deltaY });
+      while (samples.length && samples[0].at < at - VELOCITY_WINDOW_MS) samples.shift();
       scrollByPixels(deltaY);
       if (e.cancelable) e.preventDefault(); // keep the page from rubber-banding
       // This listener runs in capture before xterm's listener on the same host.
@@ -969,8 +1004,8 @@ export default function TerminalPane({
     };
     const onTouchEnd = () => {
       touchY = null;
-      const v0 = velocity;
-      velocity = 0;
+      const v0 = velocityNow();
+      samples = [];
       // A drag that began on the terminal and ended after the switch flipped
       // must not launch anything: the mode is broadcast app-wide, so the flip
       // can come from another pane rather than from this hand.
@@ -999,7 +1034,7 @@ export default function TerminalPane({
       };
       glideFrame = requestAnimationFrame(glide);
     };
-    const onTouchCancel = () => { touchY = null; velocity = 0; stopGlide(); };
+    const onTouchCancel = () => { touchY = null; samples = []; stopGlide(); };
     frame.addEventListener('touchstart', onTouchStart, { passive: true });
     frame.addEventListener('touchmove', onTouchMove, { passive: false, capture: true });
     frame.addEventListener('touchend', onTouchEnd);

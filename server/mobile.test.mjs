@@ -30,6 +30,19 @@ const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  ${detail}` : ''}`);
   if (!ok) failures++;
 };
+// Return to the list the way a user does. The phone has had two back controls
+// since the pane header gained one: `.mback` in the stage bar when the pane does
+// not own back, and the header's own button when it does. A retained tile keeps
+// its header button too, so the header form must be scoped to the visible tile
+// or it matches the cached one as well.
+const backToList = async (target) => {
+  const stageBack = target.locator('.mback');
+  if (await stageBack.isVisible().catch(() => false)) {
+    await stageBack.click().catch(() => {});
+    return;
+  }
+  await target.locator('.tile-terminal:not(.tile-cached)').getByTitle('Back to list').click();
+};
 const waitFor = async (fn, timeout = 15_000) => {
   const until = Date.now() + timeout;
   while (Date.now() < until) {
@@ -244,7 +257,7 @@ try {
   // WebSocket. A mobile Back alone was never sufficient to catch this: it only
   // hides the whole stage without changing activeRef.
   const firstSocketUrl = initialSocket.url;
-  await page.getByTitle('Back to list').click();
+  await backToList(page);
   await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-second' }).first().click();
   await page.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
   const secondOpened = await waitFor(() => page.evaluate(() => window.__terminalSockets.length === 2));
@@ -264,7 +277,7 @@ try {
     const body = await (await fetch(`${API}/api/agents/${id}/tail?lines=400`)).json();
     return body.text?.includes('MOBILE-HISTORY-0280');
   });
-  await page.getByTitle('Back to list').click();
+  await backToList(page);
   await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
   await page.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
   await sleep(250);
@@ -593,8 +606,7 @@ try {
   // Coming back on a phone restores the pane you were reading, so `.app.m-stage`
   // hides the sidebar and its rows are unclickable. Return to the list the way a
   // user does. (The app gained that restore after this check was written.)
-  const backToList = page.locator('.mback');
-  if (await backToList.isVisible().catch(() => false)) await backToList.click();
+  await backToList(page);
   await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
   const previewVisible = await page.locator('.term-preview').filter({ hasText: 'MOBILE-HISTORY-0280' })
     .isVisible().catch(() => false);
@@ -616,6 +628,87 @@ try {
       body: JSON.stringify({ ref: `s:${sessionId}`, to: { kind: 'into', groupId: group.id } }),
     });
   }
+  // ---- momentum must not depend on what the browser puts in `timeStamp` ----
+  //
+  // Reported from an iPhone as "not fluid at all, essentially one line per
+  // gesture". WebKit can deliver several touchmoves within one frame carrying
+  // the SAME timeStamp; the velocity sampler used to divide per event by that
+  // difference, so `dt` was 0, every sample was rejected, and no gesture ever
+  // coasted — it stopped dead where the finger stopped.
+  //
+  // Chromium does not reproduce the engine, but it reproduces the MECHANISM
+  // exactly: freeze TouchEvent.prototype.timeStamp and the old sampler loses
+  // momentum entirely, while the windowed one measured on performance.now() is
+  // unaffected. Both cases are asserted below, and the pair is the point — a
+  // flick that coasts is worth nothing if a careful drag coasts too.
+  const frozenContext = await browser.newContext({
+    viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 },
+    deviceScaleFactor: 3, hasTouch: true, isMobile: true,
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
+  });
+  await frozenContext.addInitScript(() => {
+    Object.defineProperty(TouchEvent.prototype, 'timeStamp', { get() { return 1234; }, configurable: true });
+  });
+  const frozenPage = await frozenContext.newPage();
+  await frozenPage.goto(WEB, { waitUntil: 'domcontentloaded' });
+  await frozenPage.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
+  await frozenPage.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
+  await sleep(1200);
+  const timeStampIsFrozen = await frozenPage.evaluate(() => new TouchEvent('touchstart').timeStamp === 1234);
+
+  // The gesture is driven from INSIDE the page, spaced by real time. A CDP
+  // round trip on a shared box can take longer than the velocity window, and
+  // then "no momentum" is the correct answer — the harness, not the code, would
+  // be deciding the result. Dispatching here gives a fixed 12ms cadence, which
+  // is what a phone actually delivers.
+  //
+  // Synthetic events are the right tool for this one: the handler scrolls the
+  // terminal itself via scrollLines, so nothing here depends on the compositor.
+  // (The finger-tracking checks above use real CDP input, where it does.)
+  const frozenGesture = ({ distance, steps, gapMs }) => frozenPage.evaluate(async (opts) => {
+    const host = document.querySelector('.tile-terminal:not(.tile-cached) .term-host');
+    const viewport = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-viewport');
+    viewport.scrollTop = viewport.scrollHeight;
+    await new Promise((r) => setTimeout(r, 200));
+    const before = viewport.scrollTop;
+    const box = host.getBoundingClientRect();
+    const x = Math.round(box.left + box.width / 2);
+    const y0 = Math.round(box.top + Math.min(140, box.height / 2));
+    const point = (clientY) => new Touch({ identifier: 7, target: host, clientX: x, clientY });
+    const fire = (type, clientY) => host.dispatchEvent(new TouchEvent(type, {
+      touches: type === 'touchend' ? [] : [point(clientY)],
+      bubbles: true, cancelable: true,
+    }));
+    fire('touchstart', y0);
+    for (let i = 1; i <= opts.steps; i++) {
+      await new Promise((r) => setTimeout(r, opts.gapMs));
+      fire('touchmove', Math.round(y0 + opts.distance * i / opts.steps));
+    }
+    fire('touchend', 0);
+    // xterm moves its own ydisp synchronously but syncs the DOM viewport's
+    // scrollTop on the next frame, so reading it here would leave the last row
+    // or two of the DRAG to land afterwards and count as coasting. Settle two
+    // frames first; whatever moves after this really is momentum.
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const atRelease = viewport.scrollTop;
+    await new Promise((r) => setTimeout(r, 1400));
+    return { tracked: before - atRelease, glide: atRelease - viewport.scrollTop };
+  }, { distance, steps, gapMs });
+
+  // A flick: 300px in 12ms steps, the cadence a phone delivers.
+  const frozenFlick = await frozenGesture({ distance: 300, steps: 10, gapMs: 12 });
+  check('a flick still coasts when touch timestamps never advance',
+    timeStampIsFrozen && frozenFlick.glide > 60,
+    JSON.stringify({ timeStampIsFrozen, ...frozenFlick }));
+
+  // The other half: momentum must not appear where it is not wanted. Same
+  // distance, spread slowly — this must land where the finger left it.
+  const frozenSlow = await frozenGesture({ distance: 300, steps: 10, gapMs: 200 });
+  check('a slow, deliberate drag still lands where the finger left it',
+    frozenSlow.glide < 20, JSON.stringify(frozenSlow));
+
+  await frozenContext.close();
+
   const desktopContext = await browser.newContext({ viewport: { width: 1200, height: 800 } });
   const desktopPage = await desktopContext.newPage();
   await desktopPage.goto(WEB, { waitUntil: 'domcontentloaded' });
