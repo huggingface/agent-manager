@@ -1,5 +1,5 @@
 # ---------- build the frontend ----------
-FROM node:22-bookworm AS web
+FROM node:24-bookworm AS web
 WORKDIR /web
 COPY web/package.json ./
 RUN npm install
@@ -7,8 +7,15 @@ COPY web/ ./
 RUN npm run build
 
 # ---------- runtime ----------
-# Node 22+: required by OpenClaw (22.19+); everything else is version-agnostic.
-FROM node:22-bookworm AS runtime
+# Node 24 (LTS "Krypton"): OpenClaw requires `>=24.16.0 <25 || >=26.1.0`, so 22
+# cannot run it at all — that is why `openclaw` has never been in this image.
+# 24 over 26 because it is the LTS line; 25 is excluded by that range anyway.
+# bookworm stays: Debian 12's python3.11 is what Hermes's venv and /opt/py are
+# built against, and nothing here needs a newer base.
+# Everything else merely allows 24 — the highest floor among the other CLIs is
+# claude-code's >=22.0.0. Both native addons (node-pty, libghostty-vt-node) are
+# N-API, so they are not tied to a Node major.
+FROM node:24-bookworm AS runtime
 
 # System deps: git, build tools (node-pty native build),
 # tmux is still installed for AGENTS to use if they want it — the app itself no
@@ -167,6 +174,52 @@ RUN [ -x /home/node/.local/bin/hermes ] \
       && ln -sf /home/node/.local/bin/hermes /usr/local/bin/hermes \
       || true
 USER node
+
+# ---------- what actually installed ----------
+# Every install above is best-effort (`|| echo "… failed"`), so the build stays
+# green whether a CLI landed or not. That is how a missing OpenClaw shipped for
+# months without anyone noticing. This step makes the log SAY what the image
+# ended up with, per CLI and with versions, so a build can be read rather than
+# trusted.
+#
+# Deliberately non-fatal: `set +e`, and it always exits 0. Making a missing CLI
+# fail the build is a policy change nobody has asked for — see the PR.
+RUN set +e; \
+    echo "=================== IMAGE CLI INVENTORY ==================="; \
+    printf '  %-10s %s\n' node "$(node --version 2>/dev/null)"; \
+    printf '  %-10s %s\n' npm "$(npm --version 2>/dev/null)"; \
+    printf '  %-10s %s\n' python3 "$(python3 --version 2>&1)"; \
+    echo "  ----------------------------------------------------------"; \
+    missing=""; \
+    for c in claude codex gemini opencode openclaw hermes fx ccusage uv hf; do \
+      path="$(command -v "$c" 2>/dev/null)"; \
+      if [ -n "$path" ]; then \
+        ver="$(timeout 30 "$c" --version 2>&1 | head -1 | tr -d '\r')"; \
+        printf '  %-10s PRESENT  %-26s %s\n' "$c" "${ver:-(no --version output)}" "$path"; \
+      else \
+        printf '  %-10s MISSING  (not on PATH)\n' "$c"; \
+        missing="$missing $c"; \
+      fi; \
+    done; \
+    echo "  ----------------------------------------------------------"; \
+    if [ -f /app/server/node_modules/node-pty/build/Release/pty.node ]; then \
+      printf '  %-10s built    %s\n' node-pty "$(ls -la /app/server/node_modules/node-pty/build/Release/pty.node | awk '{print $5" bytes"}')"; \
+    else \
+      printf '  %-10s MISSING  native build did not produce pty.node\n' node-pty; \
+    fi; \
+    lg=/app/server/node_modules/@coder/libghostty-vt-node/prebuilds/linux-x64; \
+    [ -d "$lg" ] && printf '  %-10s ok       %s\n' libghostty "$lg" \
+                 || printf '  %-10s MISSING  no linux-x64 prebuild\n' libghostty; \
+    echo "  ----------------------------------------------------------"; \
+    if [ -n "$missing" ]; then \
+      echo "  !!  NOT INSTALLED:$missing"; \
+      echo "  !!  The build is still green on purpose; these will show as"; \
+      echo "  !!  unavailable in Settings. Read this block, not the exit code."; \
+    else \
+      echo "  all expected CLIs resolved"; \
+    fi; \
+    echo "=========================================================="; \
+    true
 
 # App code + built frontend + runtime config (prompt rcfile).
 COPY --chown=node:node server/ server/
