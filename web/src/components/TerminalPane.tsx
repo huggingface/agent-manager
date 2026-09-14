@@ -7,6 +7,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { FileLinkScope, useFilePreview } from './FileLinkContent';
 import { installTerminalFileLinks, terminalLinkHandler, openTerminalLink } from '../lib/terminalFileLinks';
 import '@xterm/xterm/css/xterm.css';
+import { touchDebug } from '../lib/touchDebug';
 import type { Cli, Session } from '../types';
 import { STATE_LABEL, isRemote } from '../types';
 import StateLogo from './StateLogo';
@@ -914,7 +915,20 @@ export default function TerminalPane({
     // gesture target however the box inside it is nested.
     const frame = frameRef.current ?? host;
     const viewport = host.querySelector<HTMLElement>('.xterm-viewport');
+    // Which finger owns the gesture, and where it was last seen. The identifier
+    // matters: `touches[0]` is whatever the browser lists first, so a second
+    // finger landing or lifting silently re-pointed this at a different hand.
+    let touchId: number | null = null;
     let touchY: number | null = null;
+    const ourTouch = (list: TouchList) => {
+      if (touchId == null) return null;
+      for (let i = 0; i < list.length; i++) if (list[i].identifier === touchId) return list[i];
+      return null;
+    };
+    const inList = (list: TouchList, id: number) => {
+      for (let i = 0; i < list.length; i++) if (list[i].identifier === id) return true;
+      return false;
+    };
     let residual = 0;        // px of gesture not yet worth a whole row
     let glideFrame = 0;
     // Speed at release, measured on OUR clock over a trailing window.
@@ -992,6 +1006,7 @@ export default function TerminalPane({
       if (!rows) return 0;
       residual -= rows * cell;
       term.scrollLines(rows);
+      touchDebug.rows(rows);
       return rows;
     };
     const stopGlide = () => { if (glideFrame) { cancelAnimationFrame(glideFrame); glideFrame = 0; } };
@@ -1003,19 +1018,45 @@ export default function TerminalPane({
     // phone, which is the only place this gesture exists.
     const onTouchStart = (e: TouchEvent) => {
       if (modeRef.current === 'reader') return;
+      // A second finger landing mid-drag does not start a new gesture, and must
+      // not reset the residual or the velocity window under the one in progress.
+      if (ourTouch(e.touches)) return;
+      const first = e.changedTouches[0] || e.touches[0];
+      if (!first) return;
       stopGlide();               // a new touch takes over from any coasting
       samples = [];
       residual = 0;
       measureCell();             // one layout read for the whole gesture
-
-      touchY = e.touches[0].clientY;
+      touchId = first.identifier;
+      touchY = first.clientY;
+      touchDebug.start(viewport ? viewport.scrollTop : 0);
     };
     const onTouchMove = (e: TouchEvent) => {
       if (modeRef.current === 'reader') return;
-      if (touchY == null || !e.touches.length) return;
-      const y = e.touches[0].clientY;
+      if (!e.touches.length) return;
+      let touch = ourTouch(e.touches);
+      if (!touch) {
+        // Not our finger. If we still hold an anchor this is somebody else's
+        // hand and is none of our business.
+        if (touchId != null) { touchDebug.foreign(); return; }
+        // Otherwise the anchor was taken away while a finger kept moving — iOS
+        // sends touchcancel when the system claims a gesture, and a stray
+        // touchend does the same. Re-acquire and carry on: the cost is this one
+        // event's travel, where ignoring it cost the whole rest of the drag.
+        touch = e.touches[0];
+        touchId = touch.identifier;
+        touchY = touch.clientY;
+        measureCell();
+        touchDebug.reacquire();
+        if (e.cancelable) e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
+      const y = touch.clientY;
+      if (touchY == null) { touchY = y; return; }
       const deltaY = touchY - y;
       touchY = y;
+      touchDebug.move(deltaY);
       if (deltaY === 0) return;
       // Drop what has aged out, so a finger that paused and then released does
       // not coast on speed it had before the pause.
@@ -1028,8 +1069,16 @@ export default function TerminalPane({
       // stopPropagation alone would still allow that second handler.
       e.stopImmediatePropagation();
     };
-    const onTouchEnd = () => {
+    const onTouchEnd = (e: TouchEvent) => {
+      // Only the finger that owns the gesture ends it. A thumb resting on the
+      // glass and lifting used to null the anchor and kill the rest of the drag.
+      // An event that names no touch at all carries no ownership information,
+      // so it ends the gesture rather than being ignored — ignoring it would
+      // strand the anchor and swallow the next drag.
+      if (touchId != null && e.changedTouches.length && !inList(e.changedTouches, touchId)) return;
+      touchId = null;
       touchY = null;
+      touchDebug.end(viewport ? viewport.scrollTop : 0);
       const v0 = velocityNow();
       samples = [];
       // A drag that began on the terminal and ended after the switch flipped
@@ -1060,7 +1109,11 @@ export default function TerminalPane({
       };
       glideFrame = requestAnimationFrame(glide);
     };
-    const onTouchCancel = () => { touchY = null; samples = []; stopGlide(); };
+        const onTouchCancel = (e: TouchEvent) => {
+      if (touchId != null && e.changedTouches.length && !inList(e.changedTouches, touchId)) return;
+      touchDebug.cancel();
+      touchId = null; touchY = null; samples = []; stopGlide();
+    };
     frame.addEventListener('touchstart', onTouchStart, { passive: true });
     frame.addEventListener('touchmove', onTouchMove, { passive: false, capture: true });
     frame.addEventListener('touchend', onTouchEnd);

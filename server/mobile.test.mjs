@@ -707,6 +707,70 @@ try {
   check('a slow, deliberate drag still lands where the finger left it',
     frozenSlow.glide < 20, JSON.stringify(frozenSlow));
 
+  // The touch diagnostic must stay invisible unless it is asked for: it is a
+  // fixed overlay, and shipping it on would cover the terminal for everyone.
+  const diagnosticVisible = await frozenPage.evaluate(() =>
+    [...document.querySelectorAll('pre')].some((n) => /moves:\d/.test(n.textContent || '')));
+  check('the touch diagnostic is off unless ?touchdebug=1 asks for it',
+    diagnosticVisible === false, JSON.stringify({ diagnosticVisible }));
+
+  // ---- a gesture survives losing its state mid-drag ----
+  //
+  // Reported from an iPhone: smooth for a few seconds, then only one or two
+  // lines per swipe. Both of these reproduce that exactly, in Chromium, and
+  // neither is engine-specific — they are the handler's own state machine:
+  //
+  //   * iOS sends `touchcancel` when the system claims a gesture. The handler
+  //     nulled its anchor and every remaining touchmove returned early, so the
+  //     rest of the drag did nothing AND there was no momentum on release.
+  //   * `touchend` from ANY finger did the same, because the anchor was not
+  //     tied to a touch identifier. A thumb resting on the glass and lifting
+  //     killed the drag the other finger was still making.
+  //
+  // Measured before the fix: 38% of the drag delivered in both cases, with the
+  // viewport frozen from the interruption onward.
+  const dragWith = (interruption) => frozenPage.evaluate(async (mode) => {
+    const host = document.querySelector('.tile-terminal:not(.tile-cached) .term-host');
+    const vp = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-viewport');
+    vp.scrollTop = vp.scrollHeight;
+    await new Promise((r) => setTimeout(r, 250));
+    const before = vp.scrollTop;
+    const box = host.getBoundingClientRect();
+    const x = Math.round(box.left + box.width / 2);
+    const y0 = Math.round(box.top + Math.min(140, box.height / 2));
+    const steps = 20; const distance = 340;
+    const T = (id, cy) => new Touch({ identifier: id, target: host, clientX: x, clientY: cy });
+    const at = (i) => Math.round(y0 + distance * i / steps);
+    const send = (type, touches, changed) => host.dispatchEvent(new TouchEvent(type, {
+      touches, changedTouches: changed, bubbles: true, cancelable: true }));
+    send('touchstart', [T(1, y0)], [T(1, y0)]);
+    for (let i = 1; i <= steps; i++) {
+      await new Promise((r) => setTimeout(r, 12));
+      if (i === steps / 2) {
+        if (mode === 'cancel') send('touchcancel', [], [T(1, at(i))]);
+        if (mode === 'secondfinger') {
+          send('touchstart', [T(1, at(i)), T(2, y0 + 5)], [T(2, y0 + 5)]);
+          send('touchend', [T(1, at(i))], [T(2, y0 + 5)]);
+        }
+      }
+      send('touchmove', [T(1, at(i))], [T(1, at(i))]);
+    }
+    send('touchend', [], [T(1, at(steps))]);
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    return before - vp.scrollTop;
+  }, interruption);
+
+  const plainDrag = await dragWith('none');
+  const cancelledDrag = await dragWith('cancel');
+  check('a touchcancel mid-drag does not kill the rest of the gesture',
+    plainDrag > 0 && cancelledDrag >= plainDrag * 0.85,
+    JSON.stringify({ plainDrag, cancelledDrag }));
+
+  const secondFingerDrag = await dragWith('secondfinger');
+  check('another finger lifting does not end the drag this one is making',
+    plainDrag > 0 && secondFingerDrag >= plainDrag * 0.95,
+    JSON.stringify({ plainDrag, secondFingerDrag }));
+
   // ---- the gesture must not force a layout read per event ----
   //
   // `viewport.scrollHeight` is a forced synchronous layout read. Taking one on
