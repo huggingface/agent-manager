@@ -883,7 +883,12 @@ export default function TerminalPane({
     const dataSub = term.onData((d) => {
       if (controllerRef.current) send({ t: 'i', d });
     });
-    const ro = new ResizeObserver(resync);
+    // The row height in CSS pixels, measured once per gesture rather than on
+    // every touch event. See the touch handlers below for why; invalidated here
+    // because a resize is the one thing that changes it, and it is also the one
+    // thing that can happen in the middle of a gesture's glide.
+    let cellPx = 0;
+    const ro = new ResizeObserver(() => { cellPx = 0; resync(); });
     ro.observe(hostRef.current!);
     window.addEventListener('focus', onReturn);
     document.addEventListener('visibilitychange', onVisible);
@@ -959,9 +964,28 @@ export default function TerminalPane({
     };
     // The scroll area spans every line in the buffer, so its height over that
     // line count is the row height under whichever renderer is attached.
-    const scrollByPixels = (px: number) => {
+    //
+    // Measured once per gesture, not per event. `scrollHeight` is a forced
+    // synchronous layout read, and doing one on every touchmove AND every glide
+    // frame means ~60 reflows per flick, interleaved with the DOM the renderer
+    // is already rewriting as output arrives — the hot path of a gesture is the
+    // worst place for it. Both operands also move underneath it: the buffer
+    // grows while a pane prints, so recomputing mid-gesture is a changing
+    // divisor for no benefit.
+    //
+    // Pinning it cannot go stale: a row's height is a function of font size and
+    // zoom, and neither can change while a finger is down — both arrive as a
+    // resize, which clears the cache above. That also keeps `residual` honest,
+    // since every remainder within one gesture is carried against one scale.
+    const measureCell = () => {
       const lines = term.buffer.active.length;
-      const cell = viewport && lines ? viewport.scrollHeight / lines : 0;
+      const measured = viewport && lines ? viewport.scrollHeight / lines : 0;
+      // Keep the last good value if a measurement lands mid-relayout.
+      if (measured > 0) cellPx = measured;
+      return cellPx;
+    };
+    const scrollByPixels = (px: number) => {
+      const cell = cellPx || measureCell();
       if (!cell) return 0;
       residual += px;
       const rows = Math.trunc(residual / cell);
@@ -982,6 +1006,8 @@ export default function TerminalPane({
       stopGlide();               // a new touch takes over from any coasting
       samples = [];
       residual = 0;
+      measureCell();             // one layout read for the whole gesture
+
       touchY = e.touches[0].clientY;
     };
     const onTouchMove = (e: TouchEvent) => {

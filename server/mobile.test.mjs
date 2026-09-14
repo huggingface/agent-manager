@@ -707,6 +707,55 @@ try {
   check('a slow, deliberate drag still lands where the finger left it',
     frozenSlow.glide < 20, JSON.stringify(frozenSlow));
 
+  // ---- the gesture must not force a layout read per event ----
+  //
+  // `viewport.scrollHeight` is a forced synchronous layout read. Taking one on
+  // every touchmove AND every glide frame costs ~80 reflows per flick, in the
+  // hot path of a gesture, interleaved with the DOM xterm is already rewriting
+  // as output arrives. Measuring the row height once per gesture makes it one.
+  //
+  // This counts reads rather than timing anything: a timing assertion on a
+  // shared box measures the box. Reverting to a per-event measurement takes
+  // this from 1 to ~82.
+  const layoutReads = await frozenPage.evaluate(async () => {
+    const proto = Element.prototype;
+    const orig = Object.getOwnPropertyDescriptor(proto, 'scrollHeight');
+    let reads = 0;
+    Object.defineProperty(proto, 'scrollHeight', {
+      configurable: true,
+      get() {
+        if (this.classList && this.classList.contains('xterm-viewport')) reads++;
+        return orig.get.call(this);
+      },
+    });
+    try {
+      const host = document.querySelector('.tile-terminal:not(.tile-cached) .term-host');
+      const vp = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-viewport');
+      vp.scrollTop = vp.scrollHeight;
+      await new Promise((r) => setTimeout(r, 200));
+      reads = 0;                       // ignore the setup above
+      const box = host.getBoundingClientRect();
+      const x = Math.round(box.left + box.width / 2);
+      const y0 = Math.round(box.top + Math.min(140, box.height / 2));
+      const pt = (cy) => new Touch({ identifier: 8, target: host, clientX: x, clientY: cy });
+      const fire = (t, cy) => host.dispatchEvent(new TouchEvent(t, {
+        touches: t === 'touchend' ? [] : [pt(cy)], bubbles: true, cancelable: true,
+      }));
+      fire('touchstart', y0);
+      for (let i = 1; i <= 10; i++) {
+        await new Promise((r) => setTimeout(r, 12));
+        fire('touchmove', Math.round(y0 + 300 * i / 10));
+      }
+      fire('touchend', 0);
+      await new Promise((r) => setTimeout(r, 1200));   // let the glide finish
+      return reads;
+    } finally {
+      Object.defineProperty(proto, 'scrollHeight', orig);
+    }
+  });
+  check('one flick forces one layout read, not one per touch event',
+    layoutReads > 0 && layoutReads <= 10, JSON.stringify({ layoutReads }));
+
   await frozenContext.close();
 
   const desktopContext = await browser.newContext({ viewport: { width: 1200, height: 800 } });
