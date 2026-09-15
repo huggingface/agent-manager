@@ -15,8 +15,11 @@ export const isOperatorPrompt = (t: TraceTurn) => {
   return !/^<(?:task-notification|environment_context|system-reminder|app-context|recommended_plugins|fork-boilerplate)(?:\s|>)/.test(text)
     // Codex injects AGENTS.md as a plain user message. Matched on the shape it
     // emits, so a prompt that merely mentions or quotes it still reads as one.
-    // Kept identical to `isHarnessText` in server/src/traces.js — readerHistory
-    // pins the two together.
+    // Kept identical to `isHarnessText` in server/src/traces.js. The server's
+    // half is what actually runs in production; it has its own coverage in
+    // server/test/harness-envelope.test.mjs, through the real normalizer on
+    // real rollout files. This copy exists for sources the client sees
+    // unnormalized, and is covered in web/test/readerHistory.test.mjs.
     && !/^#\s*AGENTS\.md instructions\s*\n(?:\s*\n)*<INSTRUCTIONS>/.test(text)
     && !text.startsWith('[Request interrupted')
     && !text.startsWith('[SYSTEM NOTIFICATION');

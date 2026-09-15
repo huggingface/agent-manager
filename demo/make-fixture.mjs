@@ -1,16 +1,28 @@
-// Builds the demo's bundled session file: one normalized turn per line, the
-// shape a trace window returns. Synthetic throughout — nothing here is copied
-// from a real conversation.
+// Builds the demo's RAW session file: a synthetic Codex rollout, the shape the
+// harness actually writes. `normalize.mjs` then runs it through the production
+// normalizer, so the demo is fed what production is fed — including the
+// injected envelopes, which the normalizer is what removes.
+//
+// Synthetic throughout: nothing here is copied from a real conversation.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const out = path.join(HERE, 'session.jsonl');
-const turns = [];
+const out = path.join(HERE, 'session.raw.jsonl');
+const records = [];
 let at = Date.parse('2026-09-12T09:00:00Z');
 const tick = (ms = 45_000) => (at += ms);
-const push = (t) => turns.push({ ...t, ts: t.ts ?? tick() });
+const stamp = () => new Date(tick()).toISOString();
+const item = (payload, ts = stamp()) => records.push({ timestamp: ts, type: 'response_item', payload });
+const say = (role, text) => item({ type: 'message', role,
+  content: [{ type: role === 'assistant' ? 'output_text' : 'input_text', text }] });
+const toolCall = (callId, name, args) => item({ type: 'custom_tool_call', call_id: callId, name, arguments: args });
+const toolOutput = (callId, output) => item({ type: 'custom_tool_call_output', call_id: callId, output });
+records.push({ timestamp: new Date(at).toISOString(), type: 'session_meta',
+  payload: { cwd: '/data/workspaces/demo', id: 'demo' } });
+records.push({ timestamp: new Date(at).toISOString(), type: 'turn_context',
+  payload: { model: 'demo-model', cwd: '/data/workspaces/demo' } });
 
 // Varied prose, so the demo reads like a conversation rather than filler. The
 // bulk lives in tool output, which is where it lives in a real tool-heavy
@@ -82,56 +94,44 @@ const ALL = [...TOPICS.map((t) => `early ${t}`), ...TOPICS.map((t) => `mid ${t}`
 // 1. The harness context the operator should never see as a prompt. Three
 //    shapes: the tagged envelope, the AGENTS.md envelope Codex injects, and a
 //    turn the server already normalized to `system`.
-push({ id: 'ctx-1', role: 'user', blocks: [{ type: 'text',
-  text: '<environment_context>\nworkspace: /data/workspaces/demo\nharness: demo\n</environment_context>' }] });
-push({ id: 'ctx-2', role: 'user', blocks: [{ type: 'text',
-  text: '# AGENTS.md instructions\n\n<INSTRUCTIONS>\n<!-- BEGIN DEMO CONTEXT -->\n# Demo environment\n\nThis block is injected by the harness before the conversation starts. It is not\nsomething the operator typed, and the reader must not draw it as a prompt or\ncount it as an exchange.\n<!-- END DEMO CONTEXT -->\n</INSTRUCTIONS>' }] });
-push({ id: 'ctx-3', role: 'system', blocks: [{ type: 'text',
-  text: 'skills loaded: environment, visual-taste, dataviz' }] });
+say('user', '<environment_context>\nworkspace: /data/workspaces/demo\nharness: demo\n</environment_context>');
+say('user', '# AGENTS.md instructions\n\n<INSTRUCTIONS>\n<!-- BEGIN DEMO CONTEXT -->\n# Demo environment\n\nThis block is injected by the harness before the conversation starts. It is not\nsomething the operator typed, and the reader must not draw it as a prompt or\ncount it as an exchange.\n<!-- END DEMO CONTEXT -->\n</INSTRUCTIONS>');
+// `developer` is how Codex carries its own instructions; the normalizer files
+// it as system without needing the text filter at all.
+item({ type: 'message', role: 'developer',
+  content: [{ type: 'input_text', text: '<skills_instructions>\nskills loaded: environment, visual-taste, dataviz\n</skills_instructions>' }] });
 
 ALL.forEach((topic, n) => {
   // The newest third is where the weight is.
   const recent = n >= ALL.length - 7;
   const long = recent && n % 2 === 0;
-  const bulk = recent ? 2.6 : 0.09;
+  const bulk = recent ? 2.6 : 0.85;
   const lines = (k) => Math.max(3, Math.round(k * bulk));
-  push({ id: `u${n}`, role: 'user', blocks: [{ type: 'text',
-    text: n === ALL.length - 4
+  say('user', n === ALL.length - 4
       ? 'read the environment skill and tell me what it says about <INSTRUCTIONS> blocks — I want a real prompt that mentions both and still shows up'
       : n === ALL.length - 9
       ? 'can you update AGENTS.md instructions for the new layout?'
-      : `Can you look at the ${topic} and tell me whether it explains what we saw in the last run?` }] });
+      : `Can you look at the ${topic} and tell me whether it explains what we saw in the last run?`);
 
   if (recent || n % 3 === 0) {
     const call = `call-${n}`;
-    push({ id: `a${n}-t`, role: 'assistant', blocks: [
-      { type: 'thinking', text: `Checking the ${topic} before answering.` },
-      { type: 'tool_use', id: call, name: 'Read', text: JSON.stringify({ path: `/data/runs/${topic.replace(/ /g, '-')}.json` }) },
-    ] });
-    push({ id: `r${n}`, role: 'user', blocks: [{ type: 'tool_result', id: call,
-      text: toolOut(topic, lines(340)) }] });
+    item({ type: 'reasoning', summary: [{ text: `Checking the ${topic} before answering.` }] });
+    toolCall(call, 'read_file', JSON.stringify({ path: `/data/runs/${topic.replace(/ /g, '-')}.json` }));
+    toolOutput(call, toolOut(topic, lines(340)));
   }
   if (recent || n % 4 === 1) {
     const call = `sh-${n}`;
-    push({ id: `a${n}-s`, role: 'assistant', blocks: [
-      { type: 'tool_use', id: call, name: 'Bash', text: JSON.stringify({ command: `grep -c "${topic}" /data/runs/*.log` }) },
-    ] });
-    push({ id: `rs${n}`, role: 'user', blocks: [{ type: 'tool_result', id: call, text: toolOut(topic, lines(110)) }] });
+    toolCall(call, 'shell', JSON.stringify({ command: `grep -c "${topic}" /data/runs/*.log` }));
+    toolOutput(call, toolOut(topic, lines(110)));
   }
 
-  push({ id: `a${n}`, role: 'assistant', kind: 'final', blocks: [{ type: 'text',
-    text: long
-      ? answer(topic, n, true)
-      : answer(topic, n, false) }] });
+  say('assistant', answer(topic, n, long));
+  item({ type: 'message', role: 'assistant', content: [] }, stamp());   // turn boundary
 
   // Injected context mid-conversation too, so the filter is exercised beyond
   // the opening page.
-  if (n === ALL.length - 12) {
-    push({ id: 'ctx-mid', role: 'user', blocks: [{ type: 'text',
-      text: '<system-reminder>\nthe operator changed a setting\n</system-reminder>' }] });
-  }
+  if (n === ALL.length - 12) say('user', '<system-reminder>\nthe operator changed a setting\n</system-reminder>');
 });
 
-fs.writeFileSync(out, turns.map((t) => JSON.stringify(t)).join('\n') + '\n');
-const users = turns.filter((t) => t.role === 'user' && t.blocks.some((b) => b.type === 'text')).length;
-console.log(`${out}: ${turns.length} turns, ${fs.statSync(out).size} bytes, ${users} user text turns`);
+fs.writeFileSync(out, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+console.log(`${out}: ${records.length} rollout records, ${fs.statSync(out).size} bytes`);

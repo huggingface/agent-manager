@@ -6,10 +6,18 @@ import ConversationView from '../../web/src/components/conversation/Conversation
 import { demo } from './fixtureApi';
 import type { Session } from '../../web/src/types';
 
-const session = {
-  id: 'demo', cli: 'claude', name: 'Reader demo', state: 'waiting',
+/**
+ * A fresh session id per run, which is what actually makes the reset cold.
+ * `readerFor` keeps its stores in a module registry keyed by session id and
+ * `readingPosition` keeps an in-memory map beside localStorage, so remounting
+ * with a new React key alone hands the run back the same loaded history and
+ * the same remembered place. Changing the identity is demo-only — no
+ * production caching is touched to make a demo control work.
+ */
+const sessionFor = (run: number) => ({
+  id: `demo-${run}`, cli: 'claude', name: 'Reader demo', state: 'waiting',
   running: false, everStarted: true, path: null, createdAt: new Date().toISOString(),
-} as unknown as Session;
+} as unknown as Session);
 
 function App() {
   // A fresh key remounts the reader with a cold store, which is what makes the
@@ -32,7 +40,7 @@ function App() {
       <button className="cxv-mini" onClick={reset}>reset · load again</button>
     </header>
     <div className="demo-pane">
-      <ConversationView key={run} session={session} readOnly />
+      <ConversationView key={run} session={sessionFor(run)} readOnly />
     </div>
   </div>;
 }

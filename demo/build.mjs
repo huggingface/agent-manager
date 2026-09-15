@@ -4,9 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { execFileSync } from 'node:child_process';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const web = path.join(HERE, '../web');
+// The served file is produced by the production normalizer, never by hand.
+execFileSync(process.execPath, [path.join(HERE, 'normalize.mjs')], { stdio: 'inherit' });
 const dist = path.join(HERE, 'dist');
 fs.rmSync(dist, { recursive: true, force: true });
 fs.mkdirSync(dist, { recursive: true });
@@ -50,9 +53,14 @@ fs.writeFileSync(path.join(dist, 'demo.css'),
   + fs.readFileSync(path.join(web, 'src/conversation.css'), 'utf8')
   + fs.readFileSync(path.join(HERE, 'demo.css'), 'utf8'));
 fs.copyFileSync(path.join(HERE, 'index.html'), path.join(dist, 'index.html'));
+// The Space card, so a rebuild never drops it.
+fs.copyFileSync(path.join(HERE, 'space-README.md'), path.join(dist, 'README.md'));
 // The fixture ships beside the page so it can be swapped without a rebuild of
 // anything but this bundle.
 fs.copyFileSync(path.join(HERE, 'session.jsonl'), path.join(dist, 'session.jsonl'));
+// The raw rollout ships too, so the Space carries the input as well as the
+// output and a real integration check can re-derive one from the other.
+fs.copyFileSync(path.join(HERE, 'session.raw.jsonl'), path.join(dist, 'session.raw.jsonl'));
 fs.copyFileSync(path.join(HERE, 'icon.svg'), path.join(dist, 'icon.svg'));
 for (const font of fs.readdirSync(path.join(web, 'public/fonts'))) {
   fs.mkdirSync(path.join(dist, 'fonts'), { recursive: true });

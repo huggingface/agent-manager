@@ -18,5 +18,19 @@ windows aligned to whole records, honouring the same `bytes`/`min` contract as
 `server/src/traces.js`. `ConversationView`, `ReaderStore`, `readerModel` and
 `splitExchanges` are the production modules, unmodified.
 
-`session.jsonl` is fetched at runtime, so replacing it in the Space changes the
-conversation without a rebuild.
+## The two session files
+
+| file | what it is |
+|---|---|
+| `session.raw.jsonl` | a synthetic **Codex rollout** — the format the harness writes. One record per line: `{timestamp, type: 'response_item', payload: {...}}`, plus `session_meta` and `turn_context`. This is the demo's *input*, and it still contains the injected envelopes. |
+| `session.jsonl` | what the page **serves**: the output of the production normalizer over the file above. One reader turn per line — `{ id, role, ts, kind?, blocks: [...] }`, exactly the objects a trace window's `turns` array holds. |
+
+`build.mjs` runs `normalize.mjs` first, so the served file is always derived by
+`server/src/traces.js` and never written by hand. That normalization is the step
+that files injected context as `system`; the build fails if any envelope
+survives as a user turn, so the demo cannot silently drift away from production
+behaviour.
+
+To swap the conversation: replace `session.jsonl` in the Space and reload — it
+is fetched at runtime. To change the *input*, edit `make-fixture.mjs`, then
+`node build.mjs`.
