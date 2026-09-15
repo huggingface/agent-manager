@@ -187,6 +187,11 @@ try {
       const e = document.querySelector('.cxv-body');
       return Math.round(e.scrollHeight - e.scrollTop - e.clientHeight);
     });
+    const geometry = () => p.evaluate(() => {
+      const el = document.querySelector('.cxv-body');
+      return { top: Math.round(el.scrollTop), height: el.scrollHeight, client: el.clientHeight,
+        fromBottom: Math.round(el.scrollHeight - el.scrollTop - el.clientHeight) };
+    });
     const label_ = () => p.evaluate(() => (document.querySelector('.cxv-status')?.textContent || '').includes('At latest')
       ? 'At latest' : 'Latest');
     const overReader = async () => {
@@ -259,6 +264,51 @@ try {
     check('an arrow key moves the reader off the end', () => {
       assert.ok(afterKey > 0, `ArrowUp left it ${afterKey}px from the end`);
     });
+
+    // ---- growing the VIEWPORT is not a person scrolling up ----
+    // scrollTop is confined to [0, scrollHeight - clientHeight]. Making the
+    // window taller shrinks that range, so the browser clamps the position
+    // down with no input at all. Classifying that as leaving is invisible at
+    // the time — the reader is still at the bottom — and only shows up later,
+    // when output the person is waiting for stops scrolling into view.
+    await settledAtEnd(`${label}-resize`);
+    const beforeResize = await geometry();
+    await p.setViewportSize({ width, height: height + 200 });
+    await p.waitForTimeout(600);
+    const afterResize = await geometry();
+    console.log(`  viewport ${height} -> ${height + 200}: client ${beforeResize.client} -> ${afterResize.client}, `
+      + `top ${beforeResize.top} -> ${afterResize.top} (${await label_()})`);
+    const resizeLabel = await label_();
+    check('a taller viewport does not end following', () => {
+      assert.equal(beforeResize.fromBottom, 0, 'it did not start at the end');
+      assert.ok(afterResize.client > beforeResize.client, 'the viewport did not actually grow');
+      assert.equal(resizeLabel, 'At latest', 'no one scrolled, yet it stopped following');
+    });
+    // The label is the claim; this is the behaviour behind it. Follow is only
+    // real if output that arrives AFTERWARDS still comes into view.
+    const resizedCount = await turnsLoaded();
+    await grow(84);
+    const afterResizeGrowth = await geometry();
+    const grownCount = await turnsLoaded();
+    const grownLabel = await label_();
+    console.log(`  after ${resizedCount} -> ${grownCount} turns: fromBottom ${afterResizeGrowth.fromBottom}`);
+    check('and output arriving after the resize still scrolls into view', () => {
+      assert.ok(grownCount > resizedCount, 'the new turns never arrived');
+      assert.ok(afterResizeGrowth.fromBottom <= AT_END_TOLERANCE,
+        `it is ${afterResizeGrowth.fromBottom}px behind the new output`);
+      assert.equal(grownLabel, 'At latest');
+    });
+    // Intent still has to survive the resize: a gentle wheel after it leaves.
+    await overReader();
+    for (let i = 0; i < 4; i++) { await p.mouse.wheel(0, -3); await p.waitForTimeout(100); }
+    const awayAfterResize = await fromBottom();
+    const awayLabel = await label_();
+    check('a gentle wheel after a resize still leaves the end', () => {
+      assert.ok(awayAfterResize >= 8, `four 3px notches moved it ${awayAfterResize}px`);
+      assert.equal(awayLabel, 'Latest', 'the resize left it unable to leave');
+    });
+    await p.setViewportSize({ width, height });
+    await p.waitForTimeout(400);
 
     await settledAtEnd(`${label}-wheel`);
     await overReader();

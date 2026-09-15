@@ -57,12 +57,12 @@ import { writePaneMode } from '../../lib/paneMode';
  * view. It decides when a reader has ARRIVED back at the end.
  *
  * It is deliberately not what grants permission to leave. Making a distance the
- * price of leaving is the bug this file had twice: at 48px a 20px wheel notch
- * was erased before the next one arrived, and at 4px a 3px notch still was.
- * Any threshold has that shape, because `hold()` in useVirtualRows resets a
+ * price of leaving is a bug this file had twice: at 48px a 20px wheel notch was
+ * erased before the next one arrived, and at 4px a 3px notch still was. Any
+ * threshold has that shape, because `hold()` in useVirtualRows resets a
  * following reader to the end between notches, so an increment smaller than the
  * threshold can never accumulate into one larger than it. Leaving is decided by
- * whether the reader MOVED UP, below.
+ * whether the reader MOVED UP within the scroll range available to it, below.
  */
 const AT_END_PX = 4;
 
@@ -93,11 +93,10 @@ export default function ConversationView({
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const following = useRef(true);
-  /** Where this scroller was at the previous scroll event, and how tall it was
-   *  — together they separate a person scrolling from the content resizing.
-   *  See onScroll. */
+  /** Where this scroller was at the previous scroll event. Compared against the
+   *  scroll range that exists now, it separates a person scrolling up from the
+   *  browser clamping the position when that range shrinks. See onScroll. */
   const lastTop = useRef(0);
-  const lastHeight = useRef(0);
   const [atLatest, setAtLatest] = useState(true);
   const touched = useRef(false);
   const [query, setQuery] = useState('');
@@ -526,29 +525,38 @@ export default function ConversationView({
         // dispatched before the wheel handler runs.
         //
         // So: leaving is "this scroller moved up", with no distance to reach,
-        // which is what lets a one-pixel nudge count. The two things that can
-        // move it up without anyone asking are handled directly rather than by
-        // a threshold:
+        // which is what lets a one-pixel nudge count. That makes it essential
+        // to know what else can move it up, and there is exactly one thing:
+        // scrollTop is confined to [0, scrollHeight - clientHeight], so when
+        // that range shrinks the browser CLAMPS the position down. Nobody
+        // scrolled; the range moved under a scroller that was already at its
+        // end. It shrinks whenever the content gets shorter OR the viewport
+        // gets taller — expanding the reader pane, a phone keyboard closing,
+        // an orientation change — and comparing heights catches only the first
+        // of those. (Our own pinning is not a third case: it moves the scroller
+        // DOWN.)
         //
-        //  - content SHRINKING under a reader at the end clamps scrollTop down.
-        //    That is the scroller being resized, not a person scrolling, so it
-        //    is excluded by the height check.
-        //  - our own pinning moves it DOWN, never up.
+        // So compare against where the previous position sits in the range that
+        // exists NOW. A clamp lands exactly on that maximum and reads as no
+        // movement, while a person's one-pixel nudge is still below it and
+        // reads as movement. No dead zone, and unlike a height comparison this
+        // does not swallow a real scroll that happens to share an event with a
+        // resize.
         //
         // Coming back is the opposite question — has it arrived at the end —
         // and that one is geometry, so it uses the tolerance. It also requires
         // moving DOWN, so a reader that has just nudged one pixel up, and is
         // therefore still inside the tolerance, is not immediately recaptured.
-        const far = el.scrollHeight - el.scrollTop - el.clientHeight >= AT_END_PX;
-        const shrank = el.scrollHeight < lastHeight.current;
-        const movedUp = el.scrollTop < lastTop.current - 0.5;
-        const movedDown = el.scrollTop > lastTop.current + 0.5;
-        if (following.current ? (movedUp && !shrank) : (!q && !far && movedDown)) {
+        const maxTop = el.scrollHeight - el.clientHeight;
+        const wasTop = Math.min(lastTop.current, maxTop);
+        const far = maxTop - el.scrollTop >= AT_END_PX;
+        const movedUp = el.scrollTop < wasTop - 0.5;
+        const movedDown = el.scrollTop > wasTop + 0.5;
+        if (following.current ? movedUp : (!q && !far && movedDown)) {
           following.current = !following.current;
           setAtLatest(following.current);
         }
         lastTop.current = el.scrollTop;
-        lastHeight.current = el.scrollHeight;
         virtual.onScroll(); capture();
         clearTimeout(settle.current); settle.current = setTimeout(() => { if (position.current) rememberReading(session.id, position.current); }, 150);
         if (touched.current && !q && el.scrollTop < 250 && !loadingEarlier) void loadOlder();
