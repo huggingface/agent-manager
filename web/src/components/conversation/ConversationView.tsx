@@ -48,6 +48,28 @@ import { writePaneMode } from '../../lib/paneMode';
 
 /** The reader owns presentation and draft state. The store owns the transcript;
  * the virtual list owns measurement. Neither requires a terminal attachment. */
+/**
+ * How close to the end still counts as being AT the end.
+ *
+ * This gates both directions of the follow latch below: leaving follow needs
+ * the reader to be at least this far from the bottom, and returning to follow
+ * needs it to be nearer than this. It used to be 48px, and that is the whole
+ * of the reported bug — a gentle upward wheel (one 20px notch) or a slow touch
+ * drag never reached 48 in a single step, and `hold()` in useVirtualRows pinned
+ * the reader back to the end before the next notch arrived, so small movements
+ * could never accumulate. Only a gesture bigger than 48px in one go escaped;
+ * measured on main, eight 20px notches left the reader at exactly the bottom.
+ *
+ * Deliberately ONE constant for both directions. Loosening only the leaving
+ * half would release the reader and then let the very next scroll event, still
+ * within 48px of the bottom, immediately recapture it.
+ *
+ * Small rather than zero because a settled scroller is not always at an exact
+ * integer: device-pixel rounding and zoom leave a pixel or two, and that must
+ * still read as "at the end" so new output keeps scrolling into view.
+ */
+const AT_END_PX = 4;
+
 export default function ConversationView({
   session, paused, isMobile, readOnly, onHandover, searchOpen, onCloseSearch, onAttachPicker, onHead, seen,
 }: {
@@ -503,7 +525,11 @@ export default function ConversationView({
         // reader a few hundred pixels short of the end. Attributing the scroll
         // event to the wheel that caused it is not an option: the scroll can be
         // dispatched before the wheel handler runs.
-        const far = el.scrollHeight - el.scrollTop - el.clientHeight >= 48;
+        //
+        // `movedUp` is what makes convergence safe, so the distance only has to
+        // say "not at the end any more" — see AT_END_PX, which is why a gentle
+        // scroll now works.
+        const far = el.scrollHeight - el.scrollTop - el.clientHeight >= AT_END_PX;
         const movedUp = el.scrollTop < lastTop.current - 1;
         if (following.current ? (movedUp && far) : (!q && !far)) {
           following.current = !following.current;
