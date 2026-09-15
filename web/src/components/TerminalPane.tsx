@@ -1046,6 +1046,12 @@ export default function TerminalPane({
       if (ourTouch(e.touches)) return;
       const firstTouch = e.changedTouches[0] || e.touches[0];
       if (!firstTouch) return;
+      // Taking ownership, so let go of the previous gesture's node first. It
+      // often never delivered an end — that is this whole bug — and leaving its
+      // listeners attached would let a stray move or end on an obsolete,
+      // detached span act on the gesture that replaced it. Placed after the
+      // early returns above so a second finger landing releases nothing.
+      releaseTouchNode();
       stopGlide();               // a new touch takes over from any coasting
       samples = [];
       residual = 0;
@@ -1175,6 +1181,11 @@ export default function TerminalPane({
       frame.removeEventListener('touchmove', onTouchMove, true);
       frame.removeEventListener('touchend', onTouchEnd);
       frame.removeEventListener('touchcancel', onTouchCancel);
+      // The frame's listeners are not the only ones: a gesture in flight holds
+      // listeners on its own node, which outlives this effect when the node was
+      // already detached. Without this, switching to reader mode or unmounting
+      // mid-drag leaves callbacks that would reach a disposed terminal.
+      releaseTouchNode();
       stopGlide();
       window.removeEventListener('focus', onReturn);
       document.removeEventListener('visibilitychange', onVisible);

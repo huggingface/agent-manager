@@ -764,6 +764,157 @@ try {
     detached.detached && intact.moved > 0 && detached.moved >= intact.moved * 0.9,
     JSON.stringify({ intact, detached }));
 
+  // ---- the per-node listeners must not outlive their gesture ----
+  //
+  // Following a gesture onto its own node means that node holds listeners, and
+  // the gesture that needs it is by definition one that never delivers an end.
+  // So the next gesture has to let go of the old node when it takes ownership.
+  //
+  // It is not enough that the two use different touch identifiers. The first
+  // finger is still down and the browser keeps dispatching ITS events to the
+  // old node — and those events carry the full `touches` list, including the
+  // new gesture's finger. A leaked listener reads the new finger out of an
+  // event meant for the old one and moves the terminal twice.
+  const lifecycle = await frozenPage.evaluate(async () => {
+    const rows = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-rows');
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    // Watch the listener bookkeeping itself. The behavioural route needs a
+    // second finger held down across two gestures, which cannot be simulated
+    // faithfully with dispatched events; what the fix actually promises is that
+    // the previous gesture's node is released when a new one takes ownership,
+    // and that a second finger releases nothing. That is exactly this.
+    const add = Element.prototype.addEventListener;
+    const remove = Element.prototype.removeEventListener;
+    const log = [];
+    Element.prototype.addEventListener = function (type, fn, opts) {
+      if (type === 'touchmove' && this.closest && this.closest('.xterm-rows')) log.push(['add', this]);
+      return add.call(this, type, fn, opts);
+    };
+    Element.prototype.removeEventListener = function (type, fn, opts) {
+      if (type === 'touchmove') log.push(['remove', this]);
+      return remove.call(this, type, fn, opts);
+    };
+    try {
+      const pick = (i) => { const rowEl = rows.children[i]; return { rowEl, node: rowEl.querySelector('span') || rowEl }; };
+      const a = pick(5);
+      const b = pick(9);
+      const box = a.node.getBoundingClientRect();
+      const x = Math.round(box.left + 10);
+      const yA = Math.round(box.top + box.height / 2);
+      const yB = Math.round(b.node.getBoundingClientRect().top + 8);
+      const T = (id, target, cy) => new Touch({ identifier: id, target, clientX: x, clientY: cy });
+      const at = (node, type, tl, ch) => node.dispatchEvent(new TouchEvent(type, {
+        touches: tl, changedTouches: ch, bubbles: true, cancelable: true }));
+
+      at(a.node, 'touchstart', [T(1, a.node, yA)], [T(1, a.node, yA)]);
+      await sleep(12);
+      at(a.node, 'touchmove', [T(1, a.node, yA + 20)], [T(1, a.node, yA + 20)]);
+      a.rowEl.replaceChildren(document.createElement('span'));
+      const orphaned = !a.node.isConnected;
+      const boundToA = log.some(([kind, node]) => kind === 'add' && node === a.node);
+
+      // A second finger, while the first still owns the drag: releases nothing.
+      const before = log.filter(([k]) => k === 'remove').length;
+      at(a.node, 'touchstart', [T(1, a.node, yA + 20), T(7, a.node, yA + 60)], [T(7, a.node, yA + 60)]);
+      await sleep(12);
+      const releasedBySecondFinger = log.filter(([k]) => k === 'remove').length > before;
+      // and the second finger lifts again, leaving the first still down
+      at(a.node, 'touchend', [T(1, a.node, yA + 20)], [T(7, a.node, yA + 60)]);
+      await sleep(12);
+
+      // A new gesture taking ownership: must let the orphaned node go.
+      // Re-query: xterm repaints continuously, so a node picked earlier may
+      // already be detached, and a touchstart on a detached node never reaches
+      // the frame's listener at all.
+      const b2 = pick(9);
+      const yB2 = Math.round(b2.node.getBoundingClientRect().top + 8);
+      const freshTargetConnected = b2.node.isConnected;
+      at(b2.node, 'touchstart', [T(2, b2.node, yB2)], [T(2, b2.node, yB2)]);
+      await sleep(12);
+      const releasedA = log.some(([kind, node]) => kind === 'remove' && node === a.node);
+      const boundToB = log.some(([kind, node]) => kind === 'add' && node === b2.node);
+      at(b2.node, 'touchend', [], [T(2, b2.node, yB2)]);
+      await sleep(30);
+      return { orphaned, boundToA, releasedBySecondFinger, releasedA, boundToB, freshTargetConnected };
+    } finally {
+      Element.prototype.addEventListener = add;
+      Element.prototype.removeEventListener = remove;
+    }
+  });
+
+  check('a second finger does not release the owning gesture\'s node',
+    lifecycle.boundToA && lifecycle.orphaned && lifecycle.releasedBySecondFinger === false,
+    JSON.stringify(lifecycle));
+  check('a new gesture releases the previous gesture\'s orphaned node',
+    lifecycle.releasedA === true, JSON.stringify(lifecycle));
+
+  // ---- and the pane going away must release them too ----
+  //
+  // The effect removed the frame's listeners and disposed the terminal, but
+  // never the per-node ones. A gesture in flight holds listeners on a node that
+  // has already left the document, so switching mode or unmounting mid-drag
+  // left callbacks that would reach a disposed terminal. Uses its own session so
+  // archiving it cannot disturb the checks around this one.
+  const teardownSession = await (await fetch(`${API}/api/sessions?from=operator`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'mobile-teardown', cli: 'shell', path: 'mobile-teardown' }),
+  })).json();
+  const downContext = await browser.newContext({
+    viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 },
+    deviceScaleFactor: 3, hasTouch: true, isMobile: true,
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
+  });
+  const downPage = await downContext.newPage();
+  await downPage.goto(WEB, { waitUntil: 'domcontentloaded' });
+  await downPage.locator('.sidebar .row').filter({ hasText: 'mobile-teardown' }).first().click();
+  await downPage.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
+  await sleep(1200);
+
+  await downPage.evaluate(async () => {
+    const rows = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-rows');
+    const add = Element.prototype.addEventListener;
+    const remove = Element.prototype.removeEventListener;
+    window.__td = { removed: false, node: null, bound: false };
+    Element.prototype.removeEventListener = function (type, fn, opts) {
+      if (type === 'touchmove' && this === window.__td.node) window.__td.removed = true;
+      return remove.call(this, type, fn, opts);
+    };
+    // Must be a SPAN inside a row: replaceChildren detaches children, not the
+    // row itself, so a row element would never orphan.
+    const rowEl = [...rows.children].find((r) => r.querySelector('span'));
+    if (!rowEl) { window.__td.noSpan = true; return; }
+    const node = rowEl.querySelector('span');
+    window.__td.node = node;
+    Element.prototype.addEventListener = function (type, fn, opts) {
+      if (type === 'touchmove' && this === node) window.__td.bound = true;
+      return add.call(this, type, fn, opts);
+    };
+    const box = node.getBoundingClientRect();
+    const x = Math.round(box.left + 10);
+    const y = Math.round(box.top + box.height / 2);
+    const T = () => new Touch({ identifier: 3, target: node, clientX: x, clientY: y });
+    node.dispatchEvent(new TouchEvent('touchstart', { touches: [T()], changedTouches: [T()], bubbles: true, cancelable: true }));
+    // The gesture is now holding this node, and the row is repainted away.
+    rowEl.replaceChildren(document.createElement('span'));
+    Element.prototype.addEventListener = add;   // leave removeEventListener patched
+  });
+
+  // Archive it: the pane unmounts and the effect cleanup runs.
+  // Archive then delete: archiving alone can leave the pane on screen, and the
+  // unmount is what exercises the effect cleanup.
+  await fetch(`${API}/api/sessions/${teardownSession.id}/archive?from=operator`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+  });
+  await sleep(500);
+  await fetch(`${API}/api/sessions/${teardownSession.id}?from=operator`, { method: 'DELETE' });
+  const paneGone = await waitFor(() => downPage.locator('.tile-terminal .xterm-screen').count().then((n) => n === 0));
+  await sleep(400);
+  const teardown = await downPage.evaluate(() => ({ ...window.__td, node: undefined, orphaned: window.__td.node ? !window.__td.node.isConnected : false }));
+  check('unmounting the pane releases a gesture still holding a detached node',
+    paneGone && teardown.bound && teardown.orphaned && teardown.removed === true,
+    JSON.stringify({ paneGone, ...teardown }));
+  await downContext.close();
+
   // ---- the diagnostic must record a gesture that never completes ----
   //
   // The phone reported that during a bad stall "there is also no new row in the
