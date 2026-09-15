@@ -1043,7 +1043,17 @@ export default function TerminalPane({
       if (!first(e)) return;
       // A second finger landing mid-drag does not start a new gesture, and must
       // not reset the residual or the velocity window under the one in progress.
-      if (ourTouch(e.touches)) return;
+      //
+      // `changedTouches` is what separates that from a reused identifier.
+      // Touch.identifier is only unique among CURRENTLY ACTIVE contacts, so once
+      // this handler has missed an end — the detached-node case this whole file
+      // is about — a later single-finger gesture can arrive carrying the very
+      // identifier we still think we own. Chromium does exactly that for
+      // sequential taps. Owned identifier in `touches` but NOT in
+      // `changedTouches` is our finger still down while another lands, so keep
+      // ownership; in `changedTouches` it is a new contact that reused the
+      // number, and it has to be allowed to replace stale ownership.
+      if (touchId != null && ourTouch(e.touches) && !inList(e.changedTouches, touchId)) return;
       const firstTouch = e.changedTouches[0] || e.touches[0];
       if (!firstTouch) return;
       // Taking ownership, so let go of the previous gesture's node first. It

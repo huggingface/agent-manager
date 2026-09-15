@@ -778,11 +778,10 @@ try {
   const lifecycle = await frozenPage.evaluate(async () => {
     const rows = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-rows');
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    // Watch the listener bookkeeping itself. The behavioural route needs a
-    // second finger held down across two gestures, which cannot be simulated
-    // faithfully with dispatched events; what the fix actually promises is that
-    // the previous gesture's node is released when a new one takes ownership,
-    // and that a second finger releases nothing. That is exactly this.
+    // Watch the listener bookkeeping. The behavioural route needs a contact held
+    // across two gestures, which dispatched events cannot reproduce faithfully;
+    // what the fix promises is that the previous gesture's node is released when
+    // a new one takes ownership, and that a real second finger releases nothing.
     const add = Element.prototype.addEventListener;
     const remove = Element.prototype.removeEventListener;
     const log = [];
@@ -795,16 +794,25 @@ try {
       return remove.call(this, type, fn, opts);
     };
     try {
-      const pick = (i) => { const rowEl = rows.children[i]; return { rowEl, node: rowEl.querySelector('span') || rowEl }; };
-      const a = pick(5);
-      const b = pick(9);
-      const box = a.node.getBoundingClientRect();
-      const x = Math.round(box.left + 10);
-      const yA = Math.round(box.top + box.height / 2);
-      const yB = Math.round(b.node.getBoundingClientRect().top + 8);
+      // Always re-query: xterm repaints continuously, and a touchstart on an
+      // already-detached node never reaches the frame's listener at all — which
+      // is how an earlier version of this test managed to assert nothing.
+      const freshRow = (skip) => {
+        const el = [...rows.children].find((r) => r !== skip && r.querySelector('span'));
+        return el ? { rowEl: el, node: el.querySelector('span') } : null;
+      };
+      const a = freshRow(null);
+      const boxA = a.node.getBoundingClientRect();
+      const x = Math.round(boxA.left + 10);
+      const yA = Math.round(boxA.top + boxA.height / 2);
       const T = (id, target, cy) => new Touch({ identifier: id, target, clientX: x, clientY: cy });
-      const at = (node, type, tl, ch) => node.dispatchEvent(new TouchEvent(type, {
-        touches: tl, changedTouches: ch, bubbles: true, cancelable: true }));
+      // Returns defaultPrevented: the handler calls preventDefault on every move
+      // it processes, so this says whether it ran.
+      const at = (node, type, tl, ch) => {
+        const ev = new TouchEvent(type, { touches: tl, changedTouches: ch, bubbles: true, cancelable: true });
+        node.dispatchEvent(ev);
+        return ev.defaultPrevented;
+      };
 
       at(a.node, 'touchstart', [T(1, a.node, yA)], [T(1, a.node, yA)]);
       await sleep(12);
@@ -813,40 +821,52 @@ try {
       const orphaned = !a.node.isConnected;
       const boundToA = log.some(([kind, node]) => kind === 'add' && node === a.node);
 
-      // A second finger, while the first still owns the drag: releases nothing.
-      const before = log.filter(([k]) => k === 'remove').length;
-      at(a.node, 'touchstart', [T(1, a.node, yA + 20), T(7, a.node, yA + 60)], [T(7, a.node, yA + 60)]);
+      // A REAL second finger: dispatched at a CONNECTED node so it reaches the
+      // frame handler, with the owning contact present in `touches` but absent
+      // from `changedTouches` — which is what a second finger landing looks like.
+      const c = freshRow(a.rowEl);
+      const secondFingerTargetConnected = !!c && c.node.isConnected;
+      const yC = Math.round(c.node.getBoundingClientRect().top + 8);
+      const removesBefore = log.filter(([k]) => k === 'remove').length;
+      at(c.node, 'touchstart', [T(1, a.node, yA + 20), T(7, c.node, yC)], [T(7, c.node, yC)]);
       await sleep(12);
-      const releasedBySecondFinger = log.filter(([k]) => k === 'remove').length > before;
-      // and the second finger lifts again, leaving the first still down
-      at(a.node, 'touchend', [T(1, a.node, yA + 20)], [T(7, a.node, yA + 60)]);
-      await sleep(12);
+      const releasedBySecondFinger = log.filter(([k]) => k === 'remove').length > removesBefore;
+      const boundToSecondFingerNode = log.some(([kind, node]) => kind === 'add' && node === c.node);
+      // The owner must still be handled afterwards.
+      const ownerStillWorks = at(a.node, 'touchmove', [T(1, a.node, yA + 120)], [T(1, a.node, yA + 120)]);
 
-      // A new gesture taking ownership: must let the orphaned node go.
-      // Re-query: xterm repaints continuously, so a node picked earlier may
-      // already be detached, and a touchstart on a detached node never reaches
-      // the frame's listener at all.
-      const b2 = pick(9);
+      // A later single-finger gesture REUSING the owned identifier. Touch
+      // identifiers are only unique among active contacts, and Chromium reuses
+      // them for sequential taps, so this is an ordinary next swipe after an end
+      // this handler never saw — not a second finger. It must replace ownership.
+      const b2 = freshRow(a.rowEl);
+      const freshTargetConnected = !!b2 && b2.node.isConnected;
       const yB2 = Math.round(b2.node.getBoundingClientRect().top + 8);
-      const freshTargetConnected = b2.node.isConnected;
-      at(b2.node, 'touchstart', [T(2, b2.node, yB2)], [T(2, b2.node, yB2)]);
+      at(b2.node, 'touchstart', [T(1, b2.node, yB2)], [T(1, b2.node, yB2)]);
       await sleep(12);
       const releasedA = log.some(([kind, node]) => kind === 'remove' && node === a.node);
+      // Also the reachability witness for the second-finger step above: the same
+      // kind of dispatch, at the same kind of node, does bind when it should.
       const boundToB = log.some(([kind, node]) => kind === 'add' && node === b2.node);
-      at(b2.node, 'touchend', [], [T(2, b2.node, yB2)]);
+      at(b2.node, 'touchend', [], [T(1, b2.node, yB2)]);
       await sleep(30);
-      return { orphaned, boundToA, releasedBySecondFinger, releasedA, boundToB, freshTargetConnected };
+      return { orphaned, boundToA, secondFingerTargetConnected, releasedBySecondFinger,
+        boundToSecondFingerNode, ownerStillWorks, freshTargetConnected, releasedA, boundToB };
     } finally {
       Element.prototype.addEventListener = add;
       Element.prototype.removeEventListener = remove;
     }
   });
 
-  check('a second finger does not release the owning gesture\'s node',
-    lifecycle.boundToA && lifecycle.orphaned && lifecycle.releasedBySecondFinger === false,
+  check('a second finger does not release or replace the owning gesture',
+    lifecycle.boundToA && lifecycle.orphaned && lifecycle.secondFingerTargetConnected
+      && lifecycle.releasedBySecondFinger === false
+      && lifecycle.boundToSecondFingerNode === false
+      && lifecycle.ownerStillWorks === true,
     JSON.stringify(lifecycle));
-  check('a new gesture releases the previous gesture\'s orphaned node',
-    lifecycle.releasedA === true, JSON.stringify(lifecycle));
+  check('a new gesture reusing the owned identifier still replaces stale ownership',
+    lifecycle.freshTargetConnected && lifecycle.releasedA === true && lifecycle.boundToB === true,
+    JSON.stringify(lifecycle));
 
   // ---- and the pane going away must release them too ----
   //
