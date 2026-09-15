@@ -8,7 +8,7 @@ session, deployed as a static Space. Nothing here is imported by `web/` or
 ln -sfn ../web/node_modules node_modules   # once, for esbuild
 node make-fixture.mjs                      # regenerate session.jsonl
 node build.mjs                             # -> dist/
-node check.mjs                             # drive dist/ in a browser
+node check.mjs                             # verify dist/ in a browser; exits nonzero on a regression
 node live.mjs                              # drive the deployed Space
 hf upload lvwerra/am-reader-demo ./dist . --repo-type space
 ```

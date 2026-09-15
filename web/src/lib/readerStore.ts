@@ -32,10 +32,18 @@ export const HISTORY_TARGET_EXCHANGES = 20;
  * tool-heavy conversation that budget runs out first: replayed against a real
  * session it stopped at nine exchanges after six backward pages, and once the
  * injected AGENTS.md envelope stopped counting as one, eight. The operator asks
- * for at least eight ACTUAL exchanges, so the floor gets its own, larger
- * allowance and the journey from the floor to the target keeps the modest one.
- * Still bounded — a trace of eight enormous records will stop short, and the
- * reader says so rather than looping.
+ * for at least eight ACTUAL exchanges, so while the reader is still short of
+ * the floor it may spend a larger allowance to get there.
+ *
+ * The spend is CUMULATIVE for the whole run and is never reset on reaching the
+ * floor. So the larger allowance buys the floor, not a second budget after it:
+ * a run that needed more than `FILL_MAX_REQUESTS` pages to reach eight has
+ * already exceeded the modest cap, and the next step stops at `limited` with
+ * the target unreached. That is deliberate. The floor is the promise; the
+ * target is what a run reaches when the conversation is cheap enough to let it,
+ * and on the tool-heavy traces the floor was written for it often will not.
+ * Bounded and honest either way — `fill: 'limited'`, the Earlier control stays
+ * usable, and nothing loops.
  */
 export const HISTORY_MIN_EXCHANGES = 8;
 /** A viewport of very short exchanges can ask for more than the target. Past
@@ -319,6 +327,11 @@ export class ReaderStore {
     // see, so it may spend more before giving up. `want` can be lower than the
     // floor (a small embedded reader asks for less); never spend more than it
     // actually wants.
+    //
+    // `this.spent` keeps accumulating across the crossing: reaching the floor
+    // lowers the cap rather than granting a fresh budget, so a run that spent
+    // more than the modest cap getting there stops at the floor. See
+    // HISTORY_MIN_EXCHANGES.
     const floor = Math.min(this.want, HISTORY_MIN_EXCHANGES);
     const reaching = have < floor;
     const maxRequests = reaching ? FILL_FLOOR_MAX_REQUESTS : FILL_MAX_REQUESTS;

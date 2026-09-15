@@ -234,9 +234,11 @@ for (const n of [0, 1, 2, 5]) {
   // Three separate bounds, because they are three separate quantities.
   assert.ok(biggest <= 2 * 1024 * 1024,
     `the server cannot grow one speculative page to megabytes (largest ${MiB(biggest)})`);
-  // Every cold run starts below the floor, so the floor's budget is the ceiling
-  // for the whole run even when it ends above the floor — which this one does,
-  // at eight exchanges. That is the floor's cost, paid only by traces whose
+  // Every cold run starts below the floor, so the floor's budget is the upper
+  // BOUND on what a run can retain, even one that ends above the floor — which
+  // this one does, at eight exchanges. It is a ceiling, not the cap in force
+  // throughout: crossing the floor lowers the cap to the modest one against the
+  // same cumulative spend. That is the floor's cost, paid only by traces whose
   // records are this large.
   const budget = FILL_FLOOR_MAX_RETAINED_BYTES;
   assert.ok(retained <= budget + biggest,
