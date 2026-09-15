@@ -49,24 +49,20 @@ import { writePaneMode } from '../../lib/paneMode';
 /** The reader owns presentation and draft state. The store owns the transcript;
  * the virtual list owns measurement. Neither requires a terminal attachment. */
 /**
- * How close to the end still counts as being AT the end.
+ * How close to the end still counts as being AT the end, in pixels.
  *
- * This gates both directions of the follow latch below: leaving follow needs
- * the reader to be at least this far from the bottom, and returning to follow
- * needs it to be nearer than this. It used to be 48px, and that is the whole
- * of the reported bug — a gentle upward wheel (one 20px notch) or a slow touch
- * drag never reached 48 in a single step, and `hold()` in useVirtualRows pinned
- * the reader back to the end before the next notch arrived, so small movements
- * could never accumulate. Only a gesture bigger than 48px in one go escaped;
- * measured on main, eight 20px notches left the reader at exactly the bottom.
+ * This is a GEOMETRY tolerance and nothing else: a settled scroller is not
+ * always on an integer — device-pixel rounding and zoom leave a pixel or two —
+ * and that has to read as "at the end" or new output would stop scrolling into
+ * view. It decides when a reader has ARRIVED back at the end.
  *
- * Deliberately ONE constant for both directions. Loosening only the leaving
- * half would release the reader and then let the very next scroll event, still
- * within 48px of the bottom, immediately recapture it.
- *
- * Small rather than zero because a settled scroller is not always at an exact
- * integer: device-pixel rounding and zoom leave a pixel or two, and that must
- * still read as "at the end" so new output keeps scrolling into view.
+ * It is deliberately not what grants permission to leave. Making a distance the
+ * price of leaving is the bug this file had twice: at 48px a 20px wheel notch
+ * was erased before the next one arrived, and at 4px a 3px notch still was.
+ * Any threshold has that shape, because `hold()` in useVirtualRows resets a
+ * following reader to the end between notches, so an increment smaller than the
+ * threshold can never accumulate into one larger than it. Leaving is decided by
+ * whether the reader MOVED UP, below.
  */
 const AT_END_PX = 4;
 
@@ -97,8 +93,11 @@ export default function ConversationView({
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const following = useRef(true);
-  /** Where this scroller was at the previous scroll event — see onScroll. */
+  /** Where this scroller was at the previous scroll event, and how tall it was
+   *  — together they separate a person scrolling from the content resizing.
+   *  See onScroll. */
   const lastTop = useRef(0);
+  const lastHeight = useRef(0);
   const [atLatest, setAtLatest] = useState(true);
   const touched = useRef(false);
   const [query, setQuery] = useState('');
@@ -526,16 +525,30 @@ export default function ConversationView({
         // event to the wheel that caused it is not an option: the scroll can be
         // dispatched before the wheel handler runs.
         //
-        // `movedUp` is what makes convergence safe, so the distance only has to
-        // say "not at the end any more" — see AT_END_PX, which is why a gentle
-        // scroll now works.
+        // So: leaving is "this scroller moved up", with no distance to reach,
+        // which is what lets a one-pixel nudge count. The two things that can
+        // move it up without anyone asking are handled directly rather than by
+        // a threshold:
+        //
+        //  - content SHRINKING under a reader at the end clamps scrollTop down.
+        //    That is the scroller being resized, not a person scrolling, so it
+        //    is excluded by the height check.
+        //  - our own pinning moves it DOWN, never up.
+        //
+        // Coming back is the opposite question — has it arrived at the end —
+        // and that one is geometry, so it uses the tolerance. It also requires
+        // moving DOWN, so a reader that has just nudged one pixel up, and is
+        // therefore still inside the tolerance, is not immediately recaptured.
         const far = el.scrollHeight - el.scrollTop - el.clientHeight >= AT_END_PX;
-        const movedUp = el.scrollTop < lastTop.current - 1;
-        if (following.current ? (movedUp && far) : (!q && !far)) {
+        const shrank = el.scrollHeight < lastHeight.current;
+        const movedUp = el.scrollTop < lastTop.current - 0.5;
+        const movedDown = el.scrollTop > lastTop.current + 0.5;
+        if (following.current ? (movedUp && !shrank) : (!q && !far && movedDown)) {
           following.current = !following.current;
           setAtLatest(following.current);
         }
         lastTop.current = el.scrollTop;
+        lastHeight.current = el.scrollHeight;
         virtual.onScroll(); capture();
         clearTimeout(settle.current); settle.current = setTimeout(() => { if (position.current) rememberReading(session.id, position.current); }, 150);
         if (touched.current && !q && el.scrollTop < 250 && !loadingEarlier) void loadOlder();

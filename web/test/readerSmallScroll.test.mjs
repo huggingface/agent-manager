@@ -1,27 +1,17 @@
-// Reader <-> Terminal, through the real TerminalPane lifecycle (#127).
+// The reader's follow latch, under real gentle input (#156).
 //
-// Two operator reports, both reproduced here before they were fixed:
+// The operator reported that scrolling the reader up is sometimes blocked. It
+// was: a reader following the end re-pins itself to the bottom whenever new
+// rows are measured, so a gesture only counted as "leaving" if one single
+// scroll event had already carried it further from the end than a fixed
+// distance. Wheel notches below that distance were erased between notches, no
+// matter how many of them a person made. Lowering the distance only shrinks
+// the dead band, so the fix separates the two things it was conflating: the
+// tolerance for deciding the reader is settled at the end (geometry) from
+// permission for a person to leave it (any upward input at all).
 //
-//   1. Showing the terminal took seconds. Measured, it was never the transport
-//      or xterm: the canonical restore lands and the screen paints in tens of
-//      milliseconds. It was the boot cover. That cover asks "has the harness
-//      painted its upper two-thirds yet", which is the right question for a
-//      COLD boot (an agent TUI draws its input bar first and loads history
-//      seconds later) and the wrong one for re-attaching to a session this
-//      page has already shown: every row of that screen came from the
-//      backend's canonical output. A screen whose content sits low — a TUI
-//      input bar, a mostly-empty screen with a prompt at the bottom — never
-//      satisfied it, so the cover sat until its 20-second safety cap. On top
-//      of that, the probe ran on a 150ms timer rather than on write()'s
-//      completion callback, so every switch hid painted content for that long.
-//
-//   2. Coming back to the reader landed above the bottom. Measured, this was
-//      not a switching bug at all: a reader following the end was ~340px short
-//      of the bottom on FIRST OPEN. Following converges over several passes
-//      (pin to the end, render the rows that lands on, measure them, pin
-//      again), and `onScroll` re-derived the follow latch from the geometry
-//      DURING that convergence, where the distance from the bottom is
-//      briefly large. One such sample turned following off for good.
+// Everything here is driven through trusted CDP input — real wheel notches and
+// a real touch drag — because programmatic scrollTop never reproduced it.
 //
 // Synthetic transport and trace API. Never starts an agent, never opens a real
 // socket, never sends a prompt.
@@ -34,17 +24,9 @@ import { build } from 'esbuild';
 import { chromium } from 'playwright';
 import { chromiumLaunchOptions } from '../../scripts/test-chromium.mjs';
 
-// Measured on this fixture: every switch becomes usable in 11-102ms (p50 13-62)
-// against 160-20026ms before. The budget is two orders of magnitude of
-// headroom over the measurement, so it fails on the regression and not on a
-// slow runner. Real transport latency is deliberately NOT inside it.
-const USABLE_BUDGET_MS = 1500;
-// A restored anchor is re-derived from freshly measured rows, so it lands within
-// a row's own layout rounding rather than exactly.
-const ANCHOR_TOLERANCE_PX = 40;
 
 const web = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mode-switch-'));
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-small-scroll-'));
 const bundle = path.join(tmp, 'fixture.js');
 await build({
   stdin: { resolveDir: web, loader: 'tsx', contents: `
@@ -163,6 +145,9 @@ const browser = await chromium.launch(chromiumLaunchOptions());
  *  ConversationView. The gestures below are deliberately larger than it and
  *  much smaller than the 48px this used to require. */
 const SMALL_WHEEL = 20;
+/** Matches AT_END_PX in ConversationView: the geometry tolerance for "at the
+ *  end", not a distance anyone has to travel to leave. */
+const AT_END_TOLERANCE = 4;
 let failed = 0;
 const check = (what, fn) => {
   try { fn(); console.log(`  ok   ${what}`); } catch (e) {
@@ -208,32 +193,100 @@ try {
       const box = await p.locator('.cxv-body').boundingBox();
       await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     };
+    const turnsLoaded = () => p.evaluate(() => Number(
+      (document.querySelector('.cxv-status')?.textContent || '').match(/(\d+) turns loaded/)?.[1] || 0));
+    /** The exchange at the top of the reading area — what the person is looking
+     *  at. Distance from the bottom alone cannot tell "held still" from
+     *  "drifted but the content grew". */
+    const anchor = () => p.evaluate(() => {
+      const el = document.querySelector('.cxv-body');
+      const top = el.getBoundingClientRect().top;
+      const row = [...document.querySelectorAll('[data-x]')].find((n) => n.getBoundingClientRect().bottom > top + 4);
+      return row ? { key: row.dataset.x, y: Math.round(row.getBoundingClientRect().top - top) } : null;
+    });
+    /** Make more conversation available AND wait for the reader to actually
+     *  ingest it. The fixture's timestamps are old, so this source polls on the
+     *  slow cadence; asserting after a fixed pause proves nothing, which is
+     *  exactly how the first version of these two checks passed without the
+     *  append ever arriving. */
+    const grow = async (to) => {
+      await p.evaluate((n) => window.fixture.change({ count: n }), to);
+      await p.waitForFunction((n) => {
+        const m = (document.querySelector('.cxv-status')?.textContent || '').match(/(\d+) turns loaded/);
+        return m && Number(m[1]) >= n;
+      }, to, { timeout: 30_000 }).catch(() => { throw new Error(`the reader never ingested ${to} turns`); });
+      await p.waitForTimeout(600);        // let the pin/anchor settle after it
+    };
 
-    // ---- a gentle wheel, the way a person nudges a page back ----
+    // ---- gentle wheels, the way a person nudges a page back ----
+    // 1px and 3px matter as much as 20px: each is smaller than any end
+    // tolerance, so if leaving follow cost a distance they could never
+    // accumulate past it. 1px also stays INSIDE the tolerance for the whole
+    // run, which is where a relatch would silently recapture the reader.
+    for (const notch of [1, 3, SMALL_WHEEL]) {
+      await settledAtEnd(`${label}-wheel-${notch}`);
+      await overReader();
+      const steps = [await fromBottom()];
+      for (let i = 0; i < 8; i++) { await p.mouse.wheel(0, -notch); await p.waitForTimeout(100); steps.push(await fromBottom()); }
+      const endLabel = await label_();
+      console.log(`  ${String(notch).padStart(2)}px wheel x8: ${JSON.stringify(steps)}  (${endLabel})`);
+      check(`${notch}px wheel notches accumulate away from the end`, () => {
+        assert.equal(steps[0], 0, 'the reader did not start at the end');
+        assert.ok(steps[1] >= notch - 1, `one notch moved it ${steps[1]}px`);
+        // Not asserted: that the distance grows strictly. Filling history
+        // prepends rows and measuring them replaces the 220px estimate, so the
+        // distance to the end legitimately jumps and dips by tens of pixels
+        // while the person scrolls. What must hold is that no notch is ever
+        // undone (main resets every one of them to 0) and that eight of them
+        // add up instead of plateauing at some threshold.
+        for (let i = 1; i < steps.length; i++) {
+          assert.ok(steps[i] >= notch - 1, `notch ${i} was reset to ${steps[i]}px: ${JSON.stringify(steps)}`);
+        }
+        assert.ok(steps.at(-1) >= steps[1] + 5 * notch,
+          `eight notches only reached ${steps.at(-1)}px from ${steps[1]}px: ${JSON.stringify(steps)}`);
+      });
+      check(`${notch}px notches are not recaptured inside the end tolerance`, () => {
+        assert.equal(endLabel, 'Latest', `it still says At latest ${steps.at(-1)}px from the end`);
+      });
+    }
+
+    // ---- the keyboard leaves the end too ----
+    await settledAtEnd(`${label}-keys`);
+    await p.locator('.cxv-body').focus();
+    await p.keyboard.press('ArrowUp');
+    await p.waitForTimeout(400);
+    const afterKey = await fromBottom();
+    check('an arrow key moves the reader off the end', () => {
+      assert.ok(afterKey > 0, `ArrowUp left it ${afterKey}px from the end`);
+    });
+
     await settledAtEnd(`${label}-wheel`);
     await overReader();
-    const steps = [await fromBottom()];
-    for (let i = 0; i < 8; i++) { await p.mouse.wheel(0, -SMALL_WHEEL); await p.waitForTimeout(100); steps.push(await fromBottom()); }
-    console.log(`  small wheel, distance from the end: ${JSON.stringify(steps)}`);
-    check(`${SMALL_WHEEL}px wheel notches move the reader away from the end`, () => {
-      assert.equal(steps[0], 0, 'the reader did not start at the end');
-      // Each notch must land further back than the one before: this is what
-      // "small movements accumulate" means, and on main every entry is 0.
-      assert.ok(steps[1] >= SMALL_WHEEL - 2, `one notch moved it ${steps[1]}px`);
-      assert.ok(steps.at(-1) > steps[1], `eight notches ended at ${steps.at(-1)}px, one at ${steps[1]}px`);
-    });
+    for (let i = 0; i < 8; i++) { await p.mouse.wheel(0, -SMALL_WHEEL); await p.waitForTimeout(100); }
     const movedLabel = await label_();
     check('and it stops claiming to be at the latest', () => {
       assert.equal(movedLabel, 'Latest', 'the status still says At latest');
     });
 
-    // ---- it must STAY away while rows measure and the agent writes ----
-    await p.evaluate(() => window.fixture.change({ count: 84 }));
-    await p.waitForTimeout(1200);
-    const afterGrowth = await fromBottom();
-    check('a reader nudged away is not pulled back when content arrives', () => {
-      assert.ok(afterGrowth >= SMALL_WHEEL,
-        `content growth pulled it back to ${afterGrowth}px from the end`);
+    // ---- it must STAY where it is while rows measure and the agent writes ----
+    const heldBefore = await anchor();
+    const countBefore = await turnsLoaded();
+    await grow(84);
+    const countAfter = await turnsLoaded();
+    const heldAfter = await anchor();
+    const stillAway = await fromBottom();
+    const labelAfterGrowth = await label_();
+    console.log(`  growth: ${countBefore} -> ${countAfter} turns; anchor ${heldBefore?.key}@${heldBefore?.y} -> ${heldAfter?.key}@${heldAfter?.y}`);
+    check('the new turns really were ingested', () => {
+      assert.ok(countAfter > countBefore, `turn count stayed at ${countAfter}`);
+    });
+    check('a reader nudged away keeps the message it was on when content arrives', () => {
+      assert.ok(heldBefore && heldAfter, 'no anchor row was visible');
+      assert.equal(heldAfter.key, heldBefore.key, 'the reader jumped to a different message');
+      assert.ok(Math.abs(heldAfter.y - heldBefore.y) <= 8,
+        `the anchor shifted ${heldAfter.y - heldBefore.y}px`);
+      assert.ok(stillAway > AT_END_TOLERANCE, `it was pulled back to ${stillAway}px from the end`);
+      assert.equal(labelAfterGrowth, 'Latest', 'it silently resumed following');
     });
 
     // ---- Latest still works, and following resumes ----
@@ -245,12 +298,14 @@ try {
       assert.ok(afterLatest <= 4, `Latest left it ${afterLatest}px from the end`);
       assert.equal(latestLabel, 'At latest');
     });
-    await p.evaluate(() => window.fixture.change({ count: 88 }));
-    await p.waitForTimeout(1200);
+    const beforeFollowed = await turnsLoaded();
+    await grow(88);
+    const followedCount = await turnsLoaded();
     const followed = await fromBottom();
-    check('and new content then keeps it at the end', () => {
-      assert.ok(followed <= 4, `it drifted ${followed}px from the end`);
-    });
+    check('and new content then arrives and keeps it at the end', () => {
+      assert.ok(followedCount > beforeFollowed, `turn count stayed at ${followedCount}`);
+      assert.ok(followed <= AT_END_TOLERANCE, `it drifted ${followed}px from the end`);
+      });
 
     // ---- a slow trusted touch drag, on the phone ----
     if (touch) {
