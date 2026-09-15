@@ -19,7 +19,7 @@ type Row = {
   mode: string;          // what the pane was showing
   starts: number; moves: number; ends: number; cancels: number;
   seen: number;          // touchmoves the terminal handler actually processed
-  foreign: number; reacq: number;
+  foreign: number; reacq: number; rescued: number; drag: number;
   finger: number;        // px of finger travel, from the raw events
   rows: number;          // rows the terminal handler applied
   scrolled: string;      // what moved, and by how much
@@ -58,7 +58,7 @@ const paneMode = () => {
 
 const blank = (target: string): Row => ({
   target, mode: paneMode(), starts: 0, moves: 0, ends: 0, cancels: 0, seen: 0,
-  foreign: 0, reacq: 0, finger: 0, rows: 0, scrolled: '', maxGap: 0, ms: 0, open: true,
+  foreign: 0, reacq: 0, rescued: 0, drag: 0, finger: 0, rows: 0, scrolled: '', maxGap: 0, ms: 0, open: true,
 });
 
 let row: Row | null = null;
@@ -77,8 +77,8 @@ const scrolledText = () => Object.entries(scrolls).map(([k, v]) => `${k}:${Math.
 const fmt = (r: Row) =>
   `${r.open ? '*' : ' '}${r.target} [${r.mode}]`
   + ` s:${r.starts} m:${r.moves} e:${r.ends} c:${r.cancels}`
-  + ` seen:${r.seen} fgn:${r.foreign} re:${r.reacq}`
-  + ` finger:${Math.round(r.finger)} rows:${r.rows}`
+  + ` seen:${r.seen} res:${r.rescued} fgn:${r.foreign} re:${r.reacq}`
+  + ` finger:${Math.round(r.finger)} drag:${Math.round(r.drag)} rows:${r.rows}`
   + ` moved:${(r === row ? scrolledText() : r.scrolled) || 'none'} gap:${Math.round(r.maxGap)}ms dur:${Math.round(r.ms)}ms`;
 
 const paint = () => {
@@ -215,9 +215,19 @@ export function installTouchDebug() {
 /** Called by the terminal's own handler, so its view can be compared with the
  *  document's. A gesture the handler never saw shows seen:0 against moves:N. */
 export const touchDebug = {
-  seen() { if (on && row) { row.seen += 1; paint(); } },
+  // `drag` is the travel the terminal handler actually saw. When it exceeds
+  // `finger` (measured at the document) the difference is events the document
+  // never received — the detached-target case.
+  seen(dy = 0) { if (on && row) { row.seen += 1; row.drag += Math.abs(dy); paint(); } },
+  // Handled only because we follow the gesture's original node after xterm
+  // detached it. `res` above zero, or `seen` above `m`, is this bug being
+  // caught rather than losing the rest of the drag.
+  rescued() { if (on && row) { row.rescued += 1; paint(); } },
   foreign() { if (on && row) row.foreign += 1; },
   reacquire() { if (on && row) row.reacq += 1; },
   cancel() { if (on && row) row.cancels += 1; },
+  // The terminal handler saw the gesture finish even though the document did
+  // not, so the row can be closed instead of sitting open and marked '*'.
+  ended() { if (on && row) { row.ends += 1; close(); } },
   rows(n: number) { if (on && row) row.rows += Math.abs(n); },
 };

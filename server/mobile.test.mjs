@@ -714,6 +714,56 @@ try {
   check('the touch diagnostic is off unless ?touchdebug=1 asks for it',
     diagnosticVisible === false, JSON.stringify({ diagnosticVisible }));
 
+  // ---- a drag survives xterm repainting the row it started on ----
+  //
+  // This is the cause the phone diagnostics pointed at. xterm's DOM renderer
+  // repaints a row with `replaceChildren`, which detaches the span a finger
+  // landed on — measured at 64-83ms into an ordinary drag, because our own
+  // scrolling is what triggers the repaint. Per the touch-events spec the rest
+  // of the gesture is still dispatched to that ORIGINAL target, so once it is
+  // out of the document the events reach neither .term-host nor the document:
+  // the drag goes silent with no touchend and no touchcancel.
+  //
+  // Phone evidence, nine of twelve swipes: `m:2 e:0 c:0 moved:18px` — one row
+  // moved, then nothing. With a trusted CDP drag the document saw 1 of 12
+  // touchmoves while the original target saw 11.
+  //
+  // The test detaches the target mid-gesture and keeps dispatching to it, which
+  // is exactly what a browser does. Before the fix the terminal stops moving.
+  const detachDrag = (detachMidway) => frozenPage.evaluate(async (detach) => {
+    const host = document.querySelector('.tile-terminal:not(.tile-cached) .term-host');
+    const vp = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-viewport');
+    const rows = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-rows');
+    vp.scrollTop = vp.scrollHeight;
+    await new Promise((r) => setTimeout(r, 250));
+    const before = vp.scrollTop;
+    // Start on a real text cell, the way a finger does — not on the stable frame.
+    const rowEl = rows.children[Math.floor(rows.children.length / 2)];
+    const target = rowEl.querySelector('span') || rowEl;
+    const box = target.getBoundingClientRect();
+    const x = Math.round(box.left + Math.min(20, box.width / 2));
+    const y0 = Math.round(box.top + box.height / 2);
+    const T = (id, cy) => new Touch({ identifier: id, target, clientX: x, clientY: cy });
+    const send = (type, tl, ch) => target.dispatchEvent(new TouchEvent(type, {
+      touches: tl, changedTouches: ch, bubbles: true, cancelable: true }));
+    send('touchstart', [T(1, y0)], [T(1, y0)]);
+    for (let i = 1; i <= 12; i++) {
+      await new Promise((r) => setTimeout(r, 12));
+      // What replaceChildren does to the node under the finger.
+      if (detach && i === 3) rowEl.replaceChildren(document.createElement('span'));
+      send('touchmove', [T(1, y0 + i * 22)], [T(1, y0 + i * 22)]);
+    }
+    send('touchend', [], [T(1, y0 + 264)]);
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    return { moved: before - vp.scrollTop, detached: detach ? !target.isConnected : false };
+  }, detachMidway);
+
+  const intact = await detachDrag(false);
+  const detached = await detachDrag(true);
+  check('a drag continues after xterm repaints the row it started on',
+    detached.detached && intact.moved > 0 && detached.moved >= intact.moved * 0.9,
+    JSON.stringify({ intact, detached }));
+
   // ---- the diagnostic must record a gesture that never completes ----
   //
   // The phone reported that during a bad stall "there is also no new row in the
