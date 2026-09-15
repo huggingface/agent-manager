@@ -13,6 +13,11 @@ export const isOperatorPrompt = (t: TraceTurn) => {
   const text = t.blocks.filter((b) => b.type === 'text').map((b) => ('text' in b ? b.text : '')).join('').trim();
   if (!text) return t.blocks.some((b) => b.type === 'image');
   return !/^<(?:task-notification|environment_context|system-reminder|app-context|recommended_plugins|fork-boilerplate)(?:\s|>)/.test(text)
+    // Codex injects AGENTS.md as a plain user message. Matched on the shape it
+    // emits, so a prompt that merely mentions or quotes it still reads as one.
+    // Kept identical to `isHarnessText` in server/src/traces.js — readerHistory
+    // pins the two together.
+    && !/^#\s*AGENTS\.md instructions\s*\n(?:\s*\n)*<INSTRUCTIONS>/.test(text)
     && !text.startsWith('[Request interrupted')
     && !text.startsWith('[SYSTEM NOTIFICATION');
 };
@@ -32,6 +37,10 @@ export function countExchanges(turns: TraceTurn[]): number {
   let open = false;
   for (const turn of turns) {
     if (isOperatorPrompt(turn)) { count++; open = true; }
+    // splitExchanges drops system turns from every exchange's steps, so one
+    // opening an exchange here would count a row the reader never draws — which
+    // is exactly how injected context made a short history look long enough.
+    else if (turn.role === 'system') continue;
     else if (!open) { count++; open = true; }
   }
   return count;

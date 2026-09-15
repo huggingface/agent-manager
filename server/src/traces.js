@@ -1329,7 +1329,15 @@ const queueKey = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 // `<task-notification>` is the harness talking to itself, not something the
 // operator typed. One of the five removes in the reference transcript is exactly
 // that, and showing it as a prompt would be a new bug in place of the old one.
+// Codex injects the project's AGENTS.md as an ordinary user message rather than
+// as a tagged envelope, so the tag list alone let it through and the reader
+// showed the manager's own environment instructions as the operator's first
+// prompt (and counted it as an exchange). Matched on the two-line SHAPE Codex
+// emits, not on the words: a prompt that merely mentions AGENTS.md or quotes a
+// skill is a real prompt and must survive.
+const AGENTS_ENVELOPE = /^#\s*AGENTS\.md instructions\s*\n(?:\s*\n)*<INSTRUCTIONS>/;
 const isHarnessText = (t) => /^<(?:task-notification|environment_context|system-reminder|app-context|recommended_plugins|fork-boilerplate)(?:\s|>)/.test(t.trimStart())
+  || AGENTS_ENVELOPE.test(t.trimStart())
   || t.startsWith('[Request interrupted') || t.startsWith('[SYSTEM NOTIFICATION');
 
 async function normalizeClaude(file, out, range, allowSubagent = false) {
