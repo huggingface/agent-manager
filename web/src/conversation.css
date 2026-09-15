@@ -491,6 +491,31 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 }
 .cxv-top:disabled { cursor: default; }
 .cxv-top:not(:disabled):hover { opacity: 1; text-decoration: underline; }
+
+/* The row has three states and only one of them does anything. The actionable
+   one carries the app's link colour and an upward arrow — the direction the
+   history actually arrives from — so it reads as a control rather than as a
+   caption. The terminal states ("Full history loaded", the oversized-record
+   notice) keep the row's height and centring but neither signal, because a
+   control that cannot be pressed should not look like one. */
+.cxv-top:not(:disabled) { color: var(--accent); opacity: 1; }
+.cxv-top-arrow { margin-right: 5px; font-size: 1.05em; line-height: 1; }
+.cxv-top-done { color: var(--muted); opacity: 0.75; }
+/* Busy is neither: it is the actionable row mid-flight, so it keeps the accent
+   and loses the pointer. */
+.cxv-top-busy { color: var(--accent); opacity: 0.85; }
+/* The same braille mark the reader already spins for a working agent — one
+   spinner in the app, reading the measured --mark-* contract beside `ov-spin`
+   rather than restating any of it. */
+.cxv-top-spin::before {
+  content: '⠋'; display: inline-flex; align-items: center; margin-right: 5px;
+  width: var(--mark-w); height: var(--mark-h);
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
+  color: currentColor; transform: translateY(var(--mark-optical-y));
+  animation: ov-spin 0.9s steps(1) infinite;
+}
+@media (prefers-reduced-motion: reduce) { .cxv-top-spin::before { animation: none; } }
 .cxv-foot {
   display: flex; align-items: center; gap: 8px; flex: none;
   padding: 5px 10px; border-top: 1px solid var(--border); background: var(--panel);

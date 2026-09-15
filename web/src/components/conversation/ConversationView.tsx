@@ -122,6 +122,9 @@ export default function ConversationView({
   // Child transcripts and previews deliberately do not (see the hook).
   const reader = useTraceWindows(src, `session:${session.id}`, { paused, onReset, history: HISTORY_TARGET_EXCHANGES });
   const { head, error, phase, loading, notice, version, atStart, blocked, loadOlder, loadNewer, reload } = reader;
+  // The automatic recent-history fill is loading too, and the row that says
+  // so is the same row.
+  const fillingHistory = reader.fill === 'filling';
   const loadingEarlier = loading === 'tail' || loading === 'before';
   const turns = reader.turns.current;
   const exchanges = useMemo(() => splitExchanges(turns), [turns]);
@@ -514,9 +517,22 @@ export default function ConversationView({
       <div className="cxv-col">
         {error && <div className="cxv-msg bad mono" role="status">{error}{head ? ' · Your last read is still here.' : ''} <button className="cxv-mini" onClick={() => void reload()}>Retry now</button></div>}
         {(notice || restoreNotice) && <div className="cxv-msg mono" role="status">{notice || restoreNotice} <button className="cxv-mini" onClick={() => { reader.dismissNotice(); setRestoreNotice(null); }}>Dismiss</button></div>}
-        {head && <button className="cxv-msg mono cxv-top" disabled={atStart || blocked || loadingEarlier} onClick={() => { following.current = false; void loadOlder(); }}>
-          {blocked ? 'Earlier history contains a record too large to display' : atStart ? 'Beginning of the conversation' : loading === 'before' ? 'Loading earlier turns…' : 'Load earlier turns'}
-        </button>}
+        {head && (() => {
+          // Three states, one row. Only the middle one is actionable, and it is
+          // the only one that looks it: the terminal states keep the row's size
+          // and rhythm but neither the arrow nor the link colour, so "there is
+          // no more" never reads as "click me and nothing happens".
+          const done = atStart || blocked;
+          const busy = loadingEarlier || fillingHistory;
+          return <button className={`cxv-msg mono cxv-top${done ? ' cxv-top-done' : ''}${busy ? ' cxv-top-busy' : ''}`}
+            disabled={done || busy} onClick={() => { following.current = false; void loadOlder(); }}>
+            {busy && <span className="cxv-top-spin" aria-hidden="true" />}
+            {blocked ? 'Earlier history contains a record too large to display'
+              : atStart ? 'Full history loaded'
+              : busy ? 'Loading earlier turns…'
+              : <><span className="cxv-top-arrow" aria-hidden="true">↑</span>Load earlier turns</>}
+          </button>;
+        })()}
         {head?.note && <div className="cxv-msg mono">{head.note}</div>}
         {q && <div className="cxv-msg mono">{shown.length} of {exchanges.length} loaded turns match{atStart ? '' : ' · Earlier history has not been searched'}</div>}
         {preparing && <div className="cxv-msg mono" role="status">Opening the conversation…</div>}

@@ -23,12 +23,13 @@ await build({
 const {
   ReaderStore, countExchanges: storeCount, HISTORY_TARGET_EXCHANGES, HISTORY_MAX_EXCHANGES,
   FILL_MAX_REQUESTS, FILL_MAX_RETAINED_BYTES, FILL_MAX_MS, FILL_STEP_MS,
+  HISTORY_MIN_EXCHANGES, FILL_FLOOR_MAX_REQUESTS, FILL_FLOOR_MAX_RETAINED_BYTES,
 } = await import(pathToFileURL(out).href);
 const model = await build({
   entryPoints: [path.join(HERE, '../src/lib/readerModel.ts')],
   outfile: out.replace('store.mjs', 'model.mjs'), format: 'esm', bundle: true, logLevel: 'error',
 }).then(() => import(pathToFileURL(out.replace('store.mjs', 'model.mjs')).href));
-const { countExchanges } = model;
+const { countExchanges, isOperatorPrompt } = model;
 
 const WINDOW_MIN_TURNS = 12;         // server/src/traces.js
 const WINDOW_MAX_BYTES = 8 * 1024 * 1024;
@@ -182,7 +183,12 @@ for (const n of [0, 1, 2, 5]) {
   assert.ok(countExchanges(state.turns) < HISTORY_TARGET_EXCHANGES, 'honestly short of the target');
   assert.ok(state.cursor && !state.cursor.atStart, 'and does not claim the beginning of the conversation');
   const backward = src.state.calls.filter((c) => c.at === 'before').length;
-  assert.ok(backward <= FILL_MAX_REQUESTS, `bounded request count (${backward} <= ${FILL_MAX_REQUESTS})`);
+  // This fixture never reaches the floor of visible exchanges, so it spends the
+  // floor's larger allowance rather than the ordinary one — the point of the
+  // floor. Bounded either way, which is what this asserts.
+  console.log(`  [3 MiB answers] ${countExchanges(state.turns)} exchanges after ${backward} backward pages`);
+  assert.ok(backward <= FILL_FLOOR_MAX_REQUESTS,
+    `bounded request count (${backward} <= ${FILL_FLOOR_MAX_REQUESTS})`);
   release();
 }
 
@@ -228,13 +234,97 @@ for (const n of [0, 1, 2, 5]) {
   // Three separate bounds, because they are three separate quantities.
   assert.ok(biggest <= 2 * 1024 * 1024,
     `the server cannot grow one speculative page to megabytes (largest ${MiB(biggest)})`);
-  assert.ok(retained <= FILL_MAX_RETAINED_BYTES + biggest,
+  // Every cold run starts below the floor, so the floor's budget is the upper
+  // BOUND on what a run can retain, even one that ends above the floor — which
+  // this one does, at eight exchanges. It is a ceiling, not the cap in force
+  // throughout: crossing the floor lowers the cap to the modest one against the
+  // same cumulative spend. That is the floor's cost, paid only by traces whose
+  // records are this large.
+  const budget = FILL_FLOOR_MAX_RETAINED_BYTES;
+  assert.ok(retained <= budget + biggest,
     `retained history stays inside the budget plus the page that crossed it `
-    + `(${MiB(retained)} for a ${MiB(FILL_MAX_RETAINED_BYTES)} budget, largest page ${MiB(biggest)})`);
+    + `(${MiB(retained)} for a ${MiB(budget)} budget, largest page ${MiB(biggest)})`);
   assert.ok(total <= backward.length * 2 * 1024 * 1024,
     `and the whole run's reads stay inside requests x page ceiling (${MiB(total)})`);
-  assert.ok(backward.length <= FILL_MAX_REQUESTS, `in ${backward.length} requests`);
+  assert.ok(backward.length <= FILL_FLOOR_MAX_REQUESTS, `in ${backward.length} requests`);
   release();
+}
+
+// ---- the floor: at least eight VISIBLE exchanges when the trace has them ----
+// The operator asked for at least eight, and the fill used to stop at the
+// target's modest budget well short of it on tool-heavy traces. Counting is the
+// other half: injected context that the reader never draws must not be what
+// satisfies the floor.
+for (const answerBytes of [4 * 1024, 120 * 1024, 900 * 1024]) {
+  const src = source(200, { answerBytes });
+  const store = new ReaderStore(src);
+  const release = store.retain();
+  store.wantHistory(HISTORY_TARGET_EXCHANGES);
+  const state = await settle(store);
+  const have = countExchanges(state.turns);
+  console.log(`  [floor] ${(answerBytes / 1024).toFixed(0)} KiB answers -> ${have} exchanges`);
+  assert.ok(have >= HISTORY_MIN_EXCHANGES,
+    `a 200-exchange trace with ${answerBytes} B answers delivers the floor (got ${have})`);
+  release();
+}
+
+// ---- a short conversation is not padded to the floor ----
+{
+  const src = source(3);
+  const store = new ReaderStore(src);
+  const release = store.retain();
+  store.wantHistory(HISTORY_TARGET_EXCHANGES);
+  const state = await settle(store);
+  assert.equal(countExchanges(state.turns), 3, 'three exchanges is three, not eight');
+  assert.ok(state.cursor?.atStart, 'and the source is exhausted, honestly');
+  assert.notEqual(state.fill, 'filling', 'with nothing left to spin for');
+  release();
+}
+
+// ---- a reader that wants less than the floor is not forced to it ----
+{
+  const src = source(200);
+  const store = new ReaderStore(src);
+  const release = store.retain();
+  store.wantHistory(3);
+  const state = await settle(store);
+  // The first window already holds more than three short exchanges, so what is
+  // being checked is the SPENDING: a reader wanting three must not page
+  // backward chasing a floor it never asked for.
+  const backward = src.state.calls.filter((c) => c.at === 'before').length;
+  assert.equal(backward, 0, `a consumer asking for three pages no history (${backward} backward reads)`);
+  assert.ok(countExchanges(state.turns) >= 3, 'and still has what it asked for');
+  assert.equal(state.fill, 'done', 'and considers itself finished');
+  release();
+}
+
+// ---- injected context is not an exchange; a prompt about it still is ----
+{
+  const sys = (id, text) => ({ id, role: 'user', ts: 1000, blocks: [{ type: 'text', text }] });
+  // Exactly the shape Codex injects AGENTS.md with: a heading, then the
+  // instructions envelope. Synthetic text, same structure.
+  const injected = '# AGENTS.md instructions\n\n<INSTRUCTIONS>\n<!-- BEGIN CONTEXT -->\nbe helpful\n</INSTRUCTIONS>';
+  assert.equal(isOperatorPrompt(sys('a', injected)), false,
+    'the injected AGENTS.md envelope is not an operator prompt');
+  assert.equal(isOperatorPrompt(sys('b', '<environment_context>\nstuff')), false,
+    'and neither is a tagged environment envelope');
+  // The prompts that must survive: a person writing ABOUT the same things.
+  for (const real of [
+    'can you update AGENTS.md instructions for the new layout?',
+    'the skill says to use <INSTRUCTIONS> — should we?',
+    '# AGENTS.md instructions\n\nthis heading is mine, there is no envelope here',
+    'read the environment skill and tell me what it says about ports',
+  ]) {
+    assert.equal(isOperatorPrompt(sys('c', real)), true, `a real prompt survives: ${real.slice(0, 40)}`);
+  }
+  // And counting agrees with drawing: a system turn draws nothing, so it opens
+  // no exchange on either side.
+  const turns = [
+    { id: 's', role: 'system', ts: 1, blocks: [{ type: 'text', text: 'injected' }] },
+    { id: 'u', role: 'user', ts: 2, blocks: [{ type: 'text', text: 'a real question' }] },
+    { id: 'a', role: 'assistant', ts: 3, blocks: [{ type: 'text', text: 'an answer' }] },
+  ];
+  assert.equal(countExchanges(turns), 1, 'a leading system turn does not count as an exchange');
 }
 
 // ---- an oversized record blocks progress: stop, do not loop ----

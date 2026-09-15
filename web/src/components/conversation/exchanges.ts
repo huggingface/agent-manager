@@ -52,6 +52,9 @@ export function splitExchanges(turns: TraceTurn[]): Exchange[] {
   // intermediate message jumped below the tool calls that came after it.
   turns.forEach((t, i) => {
     if (isOperatorPrompt(t)) { open(i, t); return; }
+    // Nothing of a system turn is drawn (see the steps push below), so it must
+    // not be what opens an exchange either — countExchanges matches this.
+    if (!cur && t.role === 'system') return;
     if (!cur) open(i, null);
     const x = cur!;
     if (t.ts) { if (!x.startTs) x.startTs = t.ts; x.endTs = Math.max(x.endTs, t.ts); }

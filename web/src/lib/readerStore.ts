@@ -25,11 +25,36 @@ export const SUMMARY_REFRESH_MS = 5 * 60_000;
  * against the fixtures in `web/test/readerHistory.test.mjs`; the operator asked
  * for "a bit more extensive" history, not for an exact number. */
 export const HISTORY_TARGET_EXCHANGES = 20;
+/**
+ * Exchanges a cold reader must deliver before it settles for a partial view.
+ *
+ * The target above is best effort inside one modest budget, and on a
+ * tool-heavy conversation that budget runs out first: replayed against a real
+ * session it stopped at nine exchanges after six backward pages, and once the
+ * injected AGENTS.md envelope stopped counting as one, eight. The operator asks
+ * for at least eight ACTUAL exchanges, so while the reader is still short of
+ * the floor it may spend a larger allowance to get there.
+ *
+ * The spend is CUMULATIVE for the whole run and is never reset on reaching the
+ * floor. So the larger allowance buys the floor, not a second budget after it:
+ * a run that needed more than `FILL_MAX_REQUESTS` pages to reach eight has
+ * already exceeded the modest cap, and the next step stops at `limited` with
+ * the target unreached. That is deliberate. The floor is the promise; the
+ * target is what a run reaches when the conversation is cheap enough to let it,
+ * and on the tool-heavy traces the floor was written for it often will not.
+ * Bounded and honest either way — `fill: 'limited'`, the Earlier control stays
+ * usable, and nothing loops.
+ */
+export const HISTORY_MIN_EXCHANGES = 8;
 /** A viewport of very short exchanges can ask for more than the target. Past
  * this the reader stops raising it, so tiny rows cannot page a whole trace. */
 export const HISTORY_MAX_EXCHANGES = 60;
 /** Backward pages one fill may spend. Six 384 KiB pages ≈ 2.3 MiB. */
 export const FILL_MAX_REQUESTS = 6;
+/** The same three bounds while still below the floor. Roughly 2.5× the reach,
+ *  which covers the measured shortfall without turning a pathological trace
+ *  into an unbounded read. */
+export const FILL_FLOOR_MAX_REQUESTS = 16;
 /**
  * Transcript one fill may ADD to what the reader retains, in bytes (indexed
  * rows charged at an assumed size).
@@ -44,8 +69,10 @@ export const FILL_MAX_REQUESTS = 6;
  * retaining 4.4 MiB, where an unbounded floor grew single pages to six.
  */
 export const FILL_MAX_RETAINED_BYTES = 3 * 1024 * 1024;
+export const FILL_FLOOR_MAX_RETAINED_BYTES = 8 * 1024 * 1024;
 /** Wall clock one continuous run may span, including waits between steps. */
 export const FILL_MAX_MS = 20_000;
+export const FILL_FLOOR_MAX_MS = 45_000;
 /** Between steps, so the paint, the live poll and user input all get a turn. */
 export const FILL_STEP_MS = 50;
 /**
@@ -296,8 +323,22 @@ export class ReaderStore {
     // Nothing more to fetch, or nothing we can fetch: an honest partial view.
     if (cursor.atStart || cursor.blocked || this.state.error || this.stalled) return this.limited();
     if (!this.spent.since) this.spent.since = Date.now();
-    if (this.spent.requests >= FILL_MAX_REQUESTS || this.spent.bytes >= FILL_MAX_RETAINED_BYTES
-      || Date.now() - this.spent.since >= FILL_MAX_MS) return this.limited();
+    // Below the floor the reader is still short of what the operator asked to
+    // see, so it may spend more before giving up. `want` can be lower than the
+    // floor (a small embedded reader asks for less); never spend more than it
+    // actually wants.
+    //
+    // `this.spent` keeps accumulating across the crossing: reaching the floor
+    // lowers the cap rather than granting a fresh budget, so a run that spent
+    // more than the modest cap getting there stops at the floor. See
+    // HISTORY_MIN_EXCHANGES.
+    const floor = Math.min(this.want, HISTORY_MIN_EXCHANGES);
+    const reaching = have < floor;
+    const maxRequests = reaching ? FILL_FLOOR_MAX_REQUESTS : FILL_MAX_REQUESTS;
+    const maxBytes = reaching ? FILL_FLOOR_MAX_RETAINED_BYTES : FILL_MAX_RETAINED_BYTES;
+    const maxMs = reaching ? FILL_FLOOR_MAX_MS : FILL_MAX_MS;
+    if (this.spent.requests >= maxRequests || this.spent.bytes >= maxBytes
+      || Date.now() - this.spent.since >= maxMs) return this.limited();
     if (this.state.fill !== 'filling') this.publish({ fill: 'filling' });
     this.fillTimer = setTimeout(() => {
       this.fillTimer = null;
