@@ -13,49 +13,81 @@ short_description: Private cloud manager for AI coding CLI sessions
 
 # Agent Manager
 
-A private, single-user cloud terminal manager for AI coding CLIs — **Claude Code**,
-**Codex**, **Gemini CLI**, **opencode**, and **Hermes** — plus a plain shell and a
-file browser, all in your browser. Each agent runs in a workspace folder you
-pick at creation (defaulting to where the last agent was created) — names are
-just labels, independent of folders, and several agents can share a folder.
-Groups are visual: they organize the sidebar and tile agents side by side.
-Sessions live in the
-backend, so they survive disconnects and can be watched from several devices at
-once. A **Skills** page distributes reusable
-`SKILL.md` files to every agent, and a **Usage** page shows tokens/cost and your
-5-hour / weekly quota.
+**Your coding agents, together in one private workspace.**
 
-> ## ⚠️ This app has no authentication — keep your Space **private**
-> Anyone who can open the Space gets a real shell and your logged-in agents.
-> Access control is the Space's **private** visibility and nothing else. Never
-> run a public instance with credentials. (This public page is a *template* to
-> duplicate, not a usable instance.)
+Run Claude Code, Codex, Gemini CLI, opencode, Hermes, OpenClaw and fx from your
+browser. Follow several tasks side by side, read the conversation or open the
+terminal, and pick up from another device while your Space stays running.
 
-## Run your own (private) instance
+[**Create your private Space →**](https://huggingface.co/spaces/lvwerra/agent-manager-template)
+· [Get started](#get-started)
+· [Development](docs/development.md)
+· [Report an issue](https://github.com/huggingface/agent-manager/issues)
 
-**Option A — one click:** press **⋮ → Duplicate this Space** at the top of this
-page. Keep visibility **Private**. Then create a private Storage Bucket and mount
-it at `/data` before logging in:
+![Agent Manager showing Claude Code and Codex conversations side by side, with grouped sessions in the sidebar.](docs/images/agent-manager.png)
 
-```python
-from huggingface_hub import HfApi, Volume, create_bucket
+*The current interface with example conversations.*
 
-api = HfApi()
-space_id = "your-username/agent-manager"
-bucket_id = "your-username/agent-manager-data"
+## What you can do
 
-create_bucket(bucket_id, private=True, exist_ok=True)
-api.set_space_volumes(
-    space_id,
-    volumes=[
-        Volume(type="bucket", source=bucket_id, mount_path="/data"),
-    ],
-)
-api.restart_space(space_id)
+- **Keep several tasks in view.** Group sessions by project, arrange them side by
+  side, and use Overview to see who is working and whose reply needs your attention.
+- **Read at the level you need.** Switch between the live terminal and a
+  conversation reader with formatted replies, expandable tool activity, search,
+  and earlier history. Reader support depends on the agent's transcript format.
+- **Work with your files.** Browse workspace folders, preview and edit files,
+  upload documents or screenshots, and keep a shell beside your agents.
+- **Give agents shared context.** Manage reusable skills in one place and let
+  agents discover, message, and wait for other sessions through the local API.
+- **Check usage and schedule work.** See token usage, estimated costs, and
+  available quota information; schedule prompts and enable device notifications.
+  Available usage details vary by provider.
+- **Bring another machine.** Connect an agent running on your laptop or a remote
+  server to the same workspace's conversation view.
+
+Each session has its own conversation. Sessions can share a folder when you want
+them to work on the same project; groups organize the interface and do not isolate
+files or credentials. Use your own provider login or API keys.
+
+## Get started
+
+You need a Hugging Face account and access to at least one supported coding agent.
+The app runs in a Docker Space; a **private storage bucket mounted at `/data`**
+keeps your files, logins, and conversation history across restarts.
+
+1. Open the [Agent Manager template](https://huggingface.co/spaces/lvwerra/agent-manager-template)
+   and choose **⋮ → Duplicate this Space**. Set visibility to **Private**.
+2. In your new Space's **Settings → Storage Buckets**, create or select a
+   **private** bucket, mount it at **`/data`**, and use **read-write** access.
+   Do this before signing in to agents. See the
+   [Hugging Face storage guide](https://huggingface.co/docs/hub/spaces-storage)
+   for the mount controls.
+3. Once the Space is running, open the app, press **+**, choose an agent, and
+   select its workspace folder. Follow that agent's first-run sign-in in its
+   terminal. You can also add provider API keys under the Space's **Secrets**.
+4. Send your first task. Add another session to review it, or create a group to
+   keep both in view. **Overview** brings you back to all your sessions.
+
+> **Keep both the Space and its bucket private.** Agent Manager has no login of
+> its own: anyone with access to the app can use its shell and logged-in agents.
+> The public template is an installation page. The
+> [privacy lock](docs/privacy-lock.md) helps detect an exposed instance.
+
+Agent Manager is open source under Apache 2.0. Your agent subscriptions or API
+usage, Space hardware, and storage follow their providers' billing.
+
+<details>
+<summary>Set up the Space and bucket with Python instead</summary>
+
+Install the Hub client and sign in with an account that can create Spaces and
+buckets in your namespace:
+
+```bash
+pip install -U huggingface_hub
+hf auth login
 ```
 
-**Option B — one script** (needs `pip install -U huggingface_hub` and
-`hf auth login`):
+Replace `your-username` in both names, then run:
 
 ```python
 from huggingface_hub import HfApi, Volume, create_bucket
@@ -76,160 +108,40 @@ api.duplicate_repo(
 )
 ```
 
-Then open your new private Space and **log in to each agent inside its terminal**
-(run `claude`, `codex`, etc. and follow the prompt). You can also set provider
-keys as Space **secrets** (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) instead of
-logging in interactively.
+Open `https://huggingface.co/spaces/your-username/agent-manager` when the build
+finishes, then continue from step 3 above. To attach a bucket to an existing
+Space, use the same Settings controls or the
+[Hub volume API](https://huggingface.co/docs/huggingface_hub/guides/manage-spaces#mount-volumes-in-your-space).
 
-## Storage bucket (required for real use)
+</details>
 
-Agent Manager expects a private Storage Bucket mounted read-write at `/data`.
-That bucket stores your sessions, workspaces, skills, CLI credentials, and
-history. Without the bucket mount, the Space can still boot for preview, but it
-falls back to ephemeral disk: sessions, logins, and history reset whenever the
-Space sleeps or rebuilds.
+## What happens when you leave?
 
-If you duplicated first, you can add or replace the mount later:
+Closing the browser or switching devices does **not** stop your agents. They run
+in the Space's backend as long as the Space stays awake.
 
-```python
-from huggingface_hub import HfApi, Volume, create_bucket
+A Space sleep, restart, or rebuild ends running processes. With the bucket
+mounted, saved workspace files and checkpointed CLI state survive. Agent Manager
+can restart eligible sessions and resume conversations where the CLI supports it;
+it cannot preserve a running shell command through a reboot. Configure this in
+**Settings → General → Restart sessions after a reboot**.
 
-api = HfApi()
-space_id = "your-username/agent-manager"
-bucket_id = "your-username/agent-manager-data"
+Without a bucket, local files and logins are temporary. For details on what is
+saved, see [state checkpoints](docs/agent-state-checkpoints.md) and
+[bucket backups](docs/bucket-backup.md).
 
-create_bucket(bucket_id, private=True, exist_ok=True)
-api.set_space_volumes(
-    space_id,
-    volumes=[
-        Volume(type="bucket", source=bucket_id, mount_path="/data"),
-    ],
-)
-api.restart_space(space_id)
-```
+## Go further
 
-Everything durable lives under `/data`: `sessions.json`, `groups.json`, `crons.json`,
-`workspaces/<path>/` (agent working dirs + shared `skills/`), and each
-CLI's closed state checkpoints under `/data/state`. Active harness state lives
-on local POSIX storage and is restored/checkpointed by
-[`scripts/agent-state.sh`](scripts/agent-state.sh); SQLite harnesses use online
-database backups rather than copying live WAL files. See
-[`docs/agent-state-checkpoints.md`](docs/agent-state-checkpoints.md).
-Scheduled prompts are documented in [`docs/cron-jobs.md`](docs/cron-jobs.md).
-Reader and terminal file links open previews in new tabs; supported paths and
-additional file locations are documented in [`docs/file-links.md`](docs/file-links.md).
-API audit retention and credential filtering are documented in
-[`docs/api-audit-log.md`](docs/api-audit-log.md).
+| Task | Guide |
+| --- | --- |
+| Manage shared skills | [Managed skills](docs/managed-skills.md) |
+| Run prompts on a schedule | [Scheduled prompts](docs/cron-jobs.md) |
+| Connect an agent on another machine | [Remote agents](docs/remote-agents.md) |
+| Upload files and follow file links | [Uploads](docs/workspace-file-uploads.md) · [File previews](docs/file-links.md) |
+| Inspect session operations | [API log](docs/api-audit-log.md) |
+| Run the source or deploy a development Space | [Development guide](docs/development.md) |
 
-## Architecture
-
-```
-browser (xterm.js panes)
-  └── WebSocket /ws?session=<id>          one connection per visible pane
-        └── Node backend (Express + ws)
-              └── node-pty per agent + a libghostty-vt grid   ← the live screen
-                    └── claude | codex | gemini | opencode | hermes | bash
-```
-
-Each agent is a PTY held by the backend, with a **libghostty-vt** terminal fed
-from its output. That grid is the authoritative screen, so reopening a pane is a
-canonical serialization of its retained history and styled screen rather than a
-truncated PTY byte replay, and agent state is read from the grid instead of
-shelling out per session. Several browsers can watch the same session, but one
-explicit controller owns input and PTY dimensions; interacting with a watcher
-claims control. This prevents background tabs and small phones from resizing a
-desktop session, and prevents several browser emulators from all answering the
-same terminal query.
-
-A resize is a controller request. The backend coalesces window-drag bursts,
-allows Ghostty to perform normal reflow, then tells every viewer the confirmed
-geometry before more PTY output arrives. Full history serialization is reserved
-for attach/reconnect. Browser zoom is presentation-only: it changes cell size
-and pans locally without resizing the PTY. Sessions survive browser disconnects
-but not a backend restart or Space sleep/rebuild; with storage the working
-directory and CLI state persist, so a reopened session resumes its own
-conversation. Claude
-sessions are pinned to a per-session conversation id at creation; Codex sessions
-are pinned right after first launch (the id is captured from the rollout file
-Codex creates) — so agents sharing a folder never resume each other's
-conversations.
-
-A backend restart or sleep is survivable in practice. The server snapshots which
-sessions are alive — and which have a command or background job actually running
-in them — and on the next boot starts the ones that were still yours: those you
-prompted inside the configured window, plus any that had work in flight. Their
-scrollback comes back from the terminal history checkpoint, so a reopened pane
-reads as you left it. Settings → General → *Restart sessions after a reboot*
-sets the window (1 / 3 / 7 days, or off).
-
-## Configuration (env)
-
-| Var | Default | Purpose |
-|---|---|---|
-| `PORT` | `7860` | HTTP + WS port (HF `app_port`) |
-| `DATA_DIR` | `/data` | Durable root (mounted private Storage Bucket) |
-| `AM_SCROLLBACK_BYTES` | `67108864` | Maximum Ghostty scrollback memory per session |
-| `AM_RESIZE_SETTLE_MS` | `120` | Quiet period before a resize is applied to the PTY |
-| `ANTHROPIC_API_KEY` | — | Claude Code / opencode / Hermes (Space **secret**) |
-| `OPENAI_API_KEY` / `CODEX_API_KEY` | — | Codex (Space secret) |
-| `GEMINI_API_KEY` | — | Gemini CLI (Space secret) |
-
-Logging in interactively inside a terminal works too — credentials are written to
-`HOME`/state dirs on `/data` and persist across restarts.
-
-## Local development
-
-```bash
-# backend (needs node >= 20.19 for libghostty-vt; only the Shell CLI works offline)
-cd server && npm install && npm run dev
-
-# frontend (proxies /api and /ws to the backend on :7860)
-cd web && npm install && npm run dev
-```
-
-This repo *is* the Space — the build runs the `Dockerfile`.
-
-### Deploying a branch to a dev Space
-
-Test a branch on real Space infrastructure — the FUSE bucket, HF's edge, tmux —
-without touching production:
-
-```bash
-export HF_TOKEN=<write access to your namespace>
-bash scripts/deploy-dev-space.sh am-dev-2 feat/my-branch
-```
-
-Idempotent, so re-run it to redeploy. It creates the Space **private** and gives
-it **its own bucket** (`<name>-data`) mounted at `/data`, force-pushes the branch
-as the Space's `main` (Spaces only build `main`), names the dashboard card, then
-waits for the build and checks `/api/health` answers JSON.
-
-Four things it handles that catch people out by hand:
-
-- **Its own bucket, never prod's.** Mounting production's bucket into a dev Space
-  gives it prod's sessions, workspaces *and* logged-in CLI credentials, and lets
-  a test run write to them. A dev instance gets a fresh bucket, so it starts
-  empty and its own logins stay its own.
-- **Private, always.** The app authenticates nobody past HF's edge, so a public
-  instance is a shell for whoever finds it. It does lock itself when public
-  (see `docs/privacy-lock.md`), but the right answer is not to publish it at all.
-- **LFS objects go up first.** Git hooks cannot run from a workspace on the
-  bucket (object storage holds no exec bit), so the `git lfs` pre-push hook never
-  fires and a plain `git push` sends an LFS *pointer* with no object behind it —
-  which the Hub rejects, confusingly, as "an LFS pointer pointed to a file that
-  does not exist". The script pushes objects explicitly first.
-- **The dashboard card is renamed on the Space only.** Every instance builds from
-  this same README, so they all show up as "Agent Manager" — useless when you
-  have three. After pushing, the script rewrites the front-matter *in the Space
-  repo* to `<name> (dev)` 🚧 with the branch and sha in the description. The
-  repo's own README is untouched, so production is never renamed. `README.md` is
-  not `COPY`'d by the `Dockerfile`, so that commit rebuilds no layers.
-
-To throw one away: delete the Space **and** its bucket (the bucket is a separate
-repo and outlives the Space otherwise).
-
-```python
-from huggingface_hub import HfApi, delete_bucket
-HfApi().delete_repo("you/am-dev-2", repo_type="space")
-delete_bucket("you/am-dev-2-data")   # buckets are not a repo_type — own function
-```
+Contributions and bug reports are welcome on
+[GitHub](https://github.com/huggingface/agent-manager). Include your agent type,
+browser, and steps to reproduce when reporting a problem. For a security issue,
+see [SECURITY.md](SECURITY.md).
