@@ -710,9 +710,79 @@ try {
   // The touch diagnostic must stay invisible unless it is asked for: it is a
   // fixed overlay, and shipping it on would cover the terminal for everyone.
   const diagnosticVisible = await frozenPage.evaluate(() =>
-    [...document.querySelectorAll('pre')].some((n) => /moves:\d/.test(n.textContent || '')));
+    [...document.querySelectorAll('pre')].some((n) => /\bdur:\d/.test(n.textContent || '')));
   check('the touch diagnostic is off unless ?touchdebug=1 asks for it',
     diagnosticVisible === false, JSON.stringify({ diagnosticVisible }));
+
+  // ---- the diagnostic must record a gesture that never completes ----
+  //
+  // The phone reported that during a bad stall "there is also no new row in the
+  // diagnostics box". The first version could only add a row from the terminal's
+  // own touchend, so a gesture that was cancelled, never lifted, or landed
+  // somewhere else left the box unchanged — indistinguishable from no touch at
+  // all. It now watches the document, and an unfinished gesture is flushed on a
+  // timer and marked with a leading '*'.
+  const diagContext = await browser.newContext({
+    viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 },
+    deviceScaleFactor: 3, hasTouch: true, isMobile: true,
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
+  });
+  const diagPage = await diagContext.newPage();
+  // Open the pane first: the overlay spans the top, so clicking the list under
+  // it is not what a real user does either.
+  await diagPage.goto(WEB, { waitUntil: 'domcontentloaded' });
+  await diagPage.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
+  await diagPage.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
+  await sleep(600);
+  await diagPage.goto(`${WEB}/?touchdebug=1`, { waitUntil: 'domcontentloaded' });
+  await diagPage.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
+  await sleep(1200);
+
+  const diagGesture = (mode) => diagPage.evaluate(async (m) => {
+    const host = document.querySelector('.tile-terminal:not(.tile-cached) .term-host');
+    const vp = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-viewport');
+    vp.scrollTop = vp.scrollHeight;
+    await new Promise((r) => setTimeout(r, 250));
+    const box = host.getBoundingClientRect();
+    const x = Math.round(box.left + box.width / 2);
+    const y0 = Math.round(box.top + 160);
+    const T = (id, cy) => new Touch({ identifier: id, target: host, clientX: x, clientY: cy });
+    const send = (t, tl, ch) => host.dispatchEvent(new TouchEvent(t, { touches: tl, changedTouches: ch, bubbles: true, cancelable: true }));
+    send('touchstart', [T(1, y0)], [T(1, y0)]);
+    for (let i = 1; i <= 10; i++) {
+      await new Promise((r) => setTimeout(r, 12));
+      send('touchmove', [T(1, y0 + i * 25)], [T(1, y0 + i * 25)]);
+    }
+    if (m === 'cancel') send('touchcancel', [], [T(1, y0 + 250)]);
+    else if (m === 'end') send('touchend', [], [T(1, y0 + 250)]);
+    // 'noend': the finger simply never lifts.
+    await new Promise((r) => setTimeout(r, m === 'noend' ? 1700 : 350));
+    const pre = document.querySelector('.am-touchdiag pre');
+    return (pre ? pre.textContent.split('\n').filter(Boolean)[0] : '') || '';
+  }, mode);
+
+  const diagEnd = await diagGesture('end');
+  check('an ordinary gesture is recorded with what the handler saw and what moved',
+    /s:1 m:10/.test(diagEnd) && /seen:[1-9]/.test(diagEnd) && /moved:[a-z]/.test(diagEnd),
+    JSON.stringify({ diagEnd }));
+
+  const diagCancel = await diagGesture('cancel');
+  check('a cancelled gesture still gets its own row', /c:1/.test(diagCancel), JSON.stringify({ diagCancel }));
+
+  const diagNoEnd = await diagGesture('noend');
+  check('a gesture that never lifts is flushed and marked, not lost',
+    diagNoEnd.startsWith('*') && /m:10/.test(diagNoEnd), JSON.stringify({ diagNoEnd }));
+
+  // The overlay must not sit where a thumb does, or it becomes part of the bug.
+  const overlayTransparent = await diagPage.evaluate(() => {
+    const b = document.querySelector('.am-touchdiag')?.getBoundingClientRect();
+    if (!b) return null;
+    const el = document.elementFromPoint(Math.round(b.left + b.width / 2), Math.round(b.top + 3));
+    return !el || !el.closest('.am-touchdiag');
+  });
+  check('the diagnostic overlay does not intercept touches it is measuring',
+    overlayTransparent === true, JSON.stringify({ overlayTransparent }));
+  await diagContext.close();
 
   // ---- a gesture survives losing its state mid-drag ----
   //

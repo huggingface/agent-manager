@@ -7,7 +7,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { FileLinkScope, useFilePreview } from './FileLinkContent';
 import { installTerminalFileLinks, terminalLinkHandler, openTerminalLink } from '../lib/terminalFileLinks';
 import '@xterm/xterm/css/xterm.css';
-import { touchDebug } from '../lib/touchDebug';
+import { touchDebug, installTouchDebug } from '../lib/touchDebug';
 import type { Cli, Session } from '../types';
 import { STATE_LABEL, isRemote } from '../types';
 import StateLogo from './StateLogo';
@@ -1029,7 +1029,6 @@ export default function TerminalPane({
       measureCell();             // one layout read for the whole gesture
       touchId = first.identifier;
       touchY = first.clientY;
-      touchDebug.start(viewport ? viewport.scrollTop : 0);
     };
     const onTouchMove = (e: TouchEvent) => {
       if (modeRef.current === 'reader') return;
@@ -1056,7 +1055,7 @@ export default function TerminalPane({
       if (touchY == null) { touchY = y; return; }
       const deltaY = touchY - y;
       touchY = y;
-      touchDebug.move(deltaY);
+      touchDebug.seen();
       if (deltaY === 0) return;
       // Drop what has aged out, so a finger that paused and then released does
       // not coast on speed it had before the pause.
@@ -1078,7 +1077,6 @@ export default function TerminalPane({
       if (touchId != null && e.changedTouches.length && !inList(e.changedTouches, touchId)) return;
       touchId = null;
       touchY = null;
-      touchDebug.end(viewport ? viewport.scrollTop : 0);
       const v0 = velocityNow();
       samples = [];
       // A drag that began on the terminal and ended after the switch flipped
@@ -1114,6 +1112,7 @@ export default function TerminalPane({
       touchDebug.cancel();
       touchId = null; touchY = null; samples = []; stopGlide();
     };
+    installTouchDebug();   // opt-in; a no-op unless ?touchdebug=1
     frame.addEventListener('touchstart', onTouchStart, { passive: true });
     frame.addEventListener('touchmove', onTouchMove, { passive: false, capture: true });
     frame.addEventListener('touchend', onTouchEnd);
