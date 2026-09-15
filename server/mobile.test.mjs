@@ -30,6 +30,19 @@ const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  ${detail}` : ''}`);
   if (!ok) failures++;
 };
+// Return to the list the way a user does. The phone has had two back controls
+// since the pane header gained one: `.mback` in the stage bar when the pane does
+// not own back, and the header's own button when it does. A retained tile keeps
+// its header button too, so the header form must be scoped to the visible tile
+// or it matches the cached one as well.
+const backToList = async (target) => {
+  const stageBack = target.locator('.mback');
+  if (await stageBack.isVisible().catch(() => false)) {
+    await stageBack.click().catch(() => {});
+    return;
+  }
+  await target.locator('.tile-terminal:not(.tile-cached)').getByTitle('Back to list').click();
+};
 const waitFor = async (fn, timeout = 15_000) => {
   const until = Date.now() + timeout;
   while (Date.now() < until) {
@@ -244,7 +257,7 @@ try {
   // WebSocket. A mobile Back alone was never sufficient to catch this: it only
   // hides the whole stage without changing activeRef.
   const firstSocketUrl = initialSocket.url;
-  await page.getByTitle('Back to list').click();
+  await backToList(page);
   await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-second' }).first().click();
   await page.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
   const secondOpened = await waitFor(() => page.evaluate(() => window.__terminalSockets.length === 2));
@@ -264,7 +277,7 @@ try {
     const body = await (await fetch(`${API}/api/agents/${id}/tail?lines=400`)).json();
     return body.text?.includes('MOBILE-HISTORY-0280');
   });
-  await page.getByTitle('Back to list').click();
+  await backToList(page);
   await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
   await page.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
   await sleep(250);
@@ -593,8 +606,7 @@ try {
   // Coming back on a phone restores the pane you were reading, so `.app.m-stage`
   // hides the sidebar and its rows are unclickable. Return to the list the way a
   // user does. (The app gained that restore after this check was written.)
-  const backToList = page.locator('.mback');
-  if (await backToList.isVisible().catch(() => false)) await backToList.click();
+  await backToList(page);
   await page.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
   const previewVisible = await page.locator('.term-preview').filter({ hasText: 'MOBILE-HISTORY-0280' })
     .isVisible().catch(() => false);
@@ -616,6 +628,491 @@ try {
       body: JSON.stringify({ ref: `s:${sessionId}`, to: { kind: 'into', groupId: group.id } }),
     });
   }
+  // ---- momentum must not depend on what the browser puts in `timeStamp` ----
+  //
+  // Reported from an iPhone as "not fluid at all, essentially one line per
+  // gesture". WebKit can deliver several touchmoves within one frame carrying
+  // the SAME timeStamp; the velocity sampler used to divide per event by that
+  // difference, so `dt` was 0, every sample was rejected, and no gesture ever
+  // coasted — it stopped dead where the finger stopped.
+  //
+  // Chromium does not reproduce the engine, but it reproduces the MECHANISM
+  // exactly: freeze TouchEvent.prototype.timeStamp and the old sampler loses
+  // momentum entirely, while the windowed one measured on performance.now() is
+  // unaffected. Both cases are asserted below, and the pair is the point — a
+  // flick that coasts is worth nothing if a careful drag coasts too.
+  const frozenContext = await browser.newContext({
+    viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 },
+    deviceScaleFactor: 3, hasTouch: true, isMobile: true,
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
+  });
+  await frozenContext.addInitScript(() => {
+    Object.defineProperty(TouchEvent.prototype, 'timeStamp', { get() { return 1234; }, configurable: true });
+  });
+  const frozenPage = await frozenContext.newPage();
+  await frozenPage.goto(WEB, { waitUntil: 'domcontentloaded' });
+  await frozenPage.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
+  await frozenPage.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
+  await sleep(1200);
+  const timeStampIsFrozen = await frozenPage.evaluate(() => new TouchEvent('touchstart').timeStamp === 1234);
+
+  // The gesture is driven from INSIDE the page, spaced by real time. A CDP
+  // round trip on a shared box can take longer than the velocity window, and
+  // then "no momentum" is the correct answer — the harness, not the code, would
+  // be deciding the result. Dispatching here gives a fixed 12ms cadence, which
+  // is what a phone actually delivers.
+  //
+  // Synthetic events are the right tool for this one: the handler scrolls the
+  // terminal itself via scrollLines, so nothing here depends on the compositor.
+  // (The finger-tracking checks above use real CDP input, where it does.)
+  const frozenGesture = ({ distance, steps, gapMs }) => frozenPage.evaluate(async (opts) => {
+    const host = document.querySelector('.tile-terminal:not(.tile-cached) .term-host');
+    const viewport = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-viewport');
+    viewport.scrollTop = viewport.scrollHeight;
+    await new Promise((r) => setTimeout(r, 200));
+    const before = viewport.scrollTop;
+    const box = host.getBoundingClientRect();
+    const x = Math.round(box.left + box.width / 2);
+    const y0 = Math.round(box.top + Math.min(140, box.height / 2));
+    const point = (clientY) => new Touch({ identifier: 7, target: host, clientX: x, clientY });
+    const fire = (type, clientY) => host.dispatchEvent(new TouchEvent(type, {
+      touches: type === 'touchend' ? [] : [point(clientY)],
+      bubbles: true, cancelable: true,
+    }));
+    fire('touchstart', y0);
+    for (let i = 1; i <= opts.steps; i++) {
+      await new Promise((r) => setTimeout(r, opts.gapMs));
+      fire('touchmove', Math.round(y0 + opts.distance * i / opts.steps));
+    }
+    fire('touchend', 0);
+    // xterm moves its own ydisp synchronously but syncs the DOM viewport's
+    // scrollTop on the next frame, so reading it here would leave the last row
+    // or two of the DRAG to land afterwards and count as coasting. Settle two
+    // frames first; whatever moves after this really is momentum.
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const atRelease = viewport.scrollTop;
+    await new Promise((r) => setTimeout(r, 1400));
+    return { tracked: before - atRelease, glide: atRelease - viewport.scrollTop };
+  }, { distance, steps, gapMs });
+
+  // A flick: 300px in 12ms steps, the cadence a phone delivers.
+  const frozenFlick = await frozenGesture({ distance: 300, steps: 10, gapMs: 12 });
+  check('a flick still coasts when touch timestamps never advance',
+    timeStampIsFrozen && frozenFlick.glide > 60,
+    JSON.stringify({ timeStampIsFrozen, ...frozenFlick }));
+
+  // The other half: momentum must not appear where it is not wanted. Same
+  // distance, spread slowly — this must land where the finger left it.
+  const frozenSlow = await frozenGesture({ distance: 300, steps: 10, gapMs: 200 });
+  check('a slow, deliberate drag still lands where the finger left it',
+    frozenSlow.glide < 20, JSON.stringify(frozenSlow));
+
+  // The touch diagnostic must stay invisible unless it is asked for: it is a
+  // fixed overlay, and shipping it on would cover the terminal for everyone.
+  const diagnosticVisible = await frozenPage.evaluate(() =>
+    [...document.querySelectorAll('pre')].some((n) => /\bdur:\d/.test(n.textContent || '')));
+  check('the touch diagnostic is off unless ?touchdebug=1 asks for it',
+    diagnosticVisible === false, JSON.stringify({ diagnosticVisible }));
+
+  // ---- a drag survives xterm repainting the row it started on ----
+  //
+  // This is the cause the phone diagnostics pointed at. xterm's DOM renderer
+  // repaints a row with `replaceChildren`, which detaches the span a finger
+  // landed on — measured at 64-83ms into an ordinary drag, because our own
+  // scrolling is what triggers the repaint. Per the touch-events spec the rest
+  // of the gesture is still dispatched to that ORIGINAL target, so once it is
+  // out of the document the events reach neither .term-host nor the document:
+  // the drag goes silent with no touchend and no touchcancel.
+  //
+  // Phone evidence, nine of twelve swipes: `m:2 e:0 c:0 moved:18px` — one row
+  // moved, then nothing. With a trusted CDP drag the document saw 1 of 12
+  // touchmoves while the original target saw 11.
+  //
+  // The test detaches the target mid-gesture and keeps dispatching to it, which
+  // is exactly what a browser does. Before the fix the terminal stops moving.
+  const detachDrag = (detachMidway) => frozenPage.evaluate(async (detach) => {
+    const host = document.querySelector('.tile-terminal:not(.tile-cached) .term-host');
+    const vp = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-viewport');
+    const rows = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-rows');
+    vp.scrollTop = vp.scrollHeight;
+    await new Promise((r) => setTimeout(r, 250));
+    const before = vp.scrollTop;
+    // Start on a real text cell, the way a finger does — not on the stable frame.
+    const rowEl = rows.children[Math.floor(rows.children.length / 2)];
+    const target = rowEl.querySelector('span') || rowEl;
+    const box = target.getBoundingClientRect();
+    const x = Math.round(box.left + Math.min(20, box.width / 2));
+    const y0 = Math.round(box.top + box.height / 2);
+    const T = (id, cy) => new Touch({ identifier: id, target, clientX: x, clientY: cy });
+    const send = (type, tl, ch) => target.dispatchEvent(new TouchEvent(type, {
+      touches: tl, changedTouches: ch, bubbles: true, cancelable: true }));
+    send('touchstart', [T(1, y0)], [T(1, y0)]);
+    for (let i = 1; i <= 12; i++) {
+      await new Promise((r) => setTimeout(r, 12));
+      // What replaceChildren does to the node under the finger.
+      if (detach && i === 3) rowEl.replaceChildren(document.createElement('span'));
+      send('touchmove', [T(1, y0 + i * 22)], [T(1, y0 + i * 22)]);
+    }
+    send('touchend', [], [T(1, y0 + 264)]);
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    return { moved: before - vp.scrollTop, detached: detach ? !target.isConnected : false };
+  }, detachMidway);
+
+  const intact = await detachDrag(false);
+  const detached = await detachDrag(true);
+  check('a drag continues after xterm repaints the row it started on',
+    detached.detached && intact.moved > 0 && detached.moved >= intact.moved * 0.9,
+    JSON.stringify({ intact, detached }));
+
+  // ---- the per-node listeners must not outlive their gesture ----
+  //
+  // Following a gesture onto its own node means that node holds listeners, and
+  // the gesture that needs it is by definition one that never delivers an end.
+  // So the next gesture has to let go of the old node when it takes ownership.
+  //
+  // It is not enough that the two use different touch identifiers. The first
+  // finger is still down and the browser keeps dispatching ITS events to the
+  // old node — and those events carry the full `touches` list, including the
+  // new gesture's finger. A leaked listener reads the new finger out of an
+  // event meant for the old one and moves the terminal twice.
+  const lifecycle = await frozenPage.evaluate(async () => {
+    const rows = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-rows');
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    // Watch the listener bookkeeping. The behavioural route needs a contact held
+    // across two gestures, which dispatched events cannot reproduce faithfully;
+    // what the fix promises is that the previous gesture's node is released when
+    // a new one takes ownership, and that a real second finger releases nothing.
+    const add = Element.prototype.addEventListener;
+    const remove = Element.prototype.removeEventListener;
+    const log = [];
+    Element.prototype.addEventListener = function (type, fn, opts) {
+      if (type === 'touchmove' && this.closest && this.closest('.xterm-rows')) log.push(['add', this]);
+      return add.call(this, type, fn, opts);
+    };
+    Element.prototype.removeEventListener = function (type, fn, opts) {
+      if (type === 'touchmove') log.push(['remove', this]);
+      return remove.call(this, type, fn, opts);
+    };
+    try {
+      // Always re-query: xterm repaints continuously, and a touchstart on an
+      // already-detached node never reaches the frame's listener at all — which
+      // is how an earlier version of this test managed to assert nothing.
+      const freshRow = (skip) => {
+        const el = [...rows.children].find((r) => r !== skip && r.querySelector('span'));
+        return el ? { rowEl: el, node: el.querySelector('span') } : null;
+      };
+      const a = freshRow(null);
+      const boxA = a.node.getBoundingClientRect();
+      const x = Math.round(boxA.left + 10);
+      const yA = Math.round(boxA.top + boxA.height / 2);
+      const T = (id, target, cy) => new Touch({ identifier: id, target, clientX: x, clientY: cy });
+      // Returns defaultPrevented: the handler calls preventDefault on every move
+      // it processes, so this says whether it ran.
+      const at = (node, type, tl, ch) => {
+        const ev = new TouchEvent(type, { touches: tl, changedTouches: ch, bubbles: true, cancelable: true });
+        node.dispatchEvent(ev);
+        return ev.defaultPrevented;
+      };
+
+      at(a.node, 'touchstart', [T(1, a.node, yA)], [T(1, a.node, yA)]);
+      await sleep(12);
+      at(a.node, 'touchmove', [T(1, a.node, yA + 20)], [T(1, a.node, yA + 20)]);
+      a.rowEl.replaceChildren(document.createElement('span'));
+      const orphaned = !a.node.isConnected;
+      const boundToA = log.some(([kind, node]) => kind === 'add' && node === a.node);
+
+      // A REAL second finger: dispatched at a CONNECTED node so it reaches the
+      // frame handler, with the owning contact present in `touches` but absent
+      // from `changedTouches` — which is what a second finger landing looks like.
+      const c = freshRow(a.rowEl);
+      const secondFingerTargetConnected = !!c && c.node.isConnected;
+      const yC = Math.round(c.node.getBoundingClientRect().top + 8);
+      const removesBefore = log.filter(([k]) => k === 'remove').length;
+      at(c.node, 'touchstart', [T(1, a.node, yA + 20), T(7, c.node, yC)], [T(7, c.node, yC)]);
+      await sleep(12);
+      const releasedBySecondFinger = log.filter(([k]) => k === 'remove').length > removesBefore;
+      const boundToSecondFingerNode = log.some(([kind, node]) => kind === 'add' && node === c.node);
+      // The owner must still be handled afterwards.
+      const ownerStillWorks = at(a.node, 'touchmove', [T(1, a.node, yA + 120)], [T(1, a.node, yA + 120)]);
+
+      // A later single-finger gesture REUSING the owned identifier. Touch
+      // identifiers are only unique among active contacts, and Chromium reuses
+      // them for sequential taps, so this is an ordinary next swipe after an end
+      // this handler never saw — not a second finger. It must replace ownership.
+      const b2 = freshRow(a.rowEl);
+      const freshTargetConnected = !!b2 && b2.node.isConnected;
+      const yB2 = Math.round(b2.node.getBoundingClientRect().top + 8);
+      at(b2.node, 'touchstart', [T(1, b2.node, yB2)], [T(1, b2.node, yB2)]);
+      await sleep(12);
+      const releasedA = log.some(([kind, node]) => kind === 'remove' && node === a.node);
+      // Also the reachability witness for the second-finger step above: the same
+      // kind of dispatch, at the same kind of node, does bind when it should.
+      const boundToB = log.some(([kind, node]) => kind === 'add' && node === b2.node);
+      at(b2.node, 'touchend', [], [T(1, b2.node, yB2)]);
+      await sleep(30);
+      return { orphaned, boundToA, secondFingerTargetConnected, releasedBySecondFinger,
+        boundToSecondFingerNode, ownerStillWorks, freshTargetConnected, releasedA, boundToB };
+    } finally {
+      Element.prototype.addEventListener = add;
+      Element.prototype.removeEventListener = remove;
+    }
+  });
+
+  check('a second finger does not release or replace the owning gesture',
+    lifecycle.boundToA && lifecycle.orphaned && lifecycle.secondFingerTargetConnected
+      && lifecycle.releasedBySecondFinger === false
+      && lifecycle.boundToSecondFingerNode === false
+      && lifecycle.ownerStillWorks === true,
+    JSON.stringify(lifecycle));
+  check('a new gesture reusing the owned identifier still replaces stale ownership',
+    lifecycle.freshTargetConnected && lifecycle.releasedA === true && lifecycle.boundToB === true,
+    JSON.stringify(lifecycle));
+
+  // ---- and the pane going away must release them too ----
+  //
+  // The effect removed the frame's listeners and disposed the terminal, but
+  // never the per-node ones. A gesture in flight holds listeners on a node that
+  // has already left the document, so switching mode or unmounting mid-drag
+  // left callbacks that would reach a disposed terminal. Uses its own session so
+  // archiving it cannot disturb the checks around this one.
+  const teardownSession = await (await fetch(`${API}/api/sessions?from=operator`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'mobile-teardown', cli: 'shell', path: 'mobile-teardown' }),
+  })).json();
+  const downContext = await browser.newContext({
+    viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 },
+    deviceScaleFactor: 3, hasTouch: true, isMobile: true,
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
+  });
+  const downPage = await downContext.newPage();
+  await downPage.goto(WEB, { waitUntil: 'domcontentloaded' });
+  await downPage.locator('.sidebar .row').filter({ hasText: 'mobile-teardown' }).first().click();
+  await downPage.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
+  await sleep(1200);
+
+  await downPage.evaluate(async () => {
+    const rows = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-rows');
+    const add = Element.prototype.addEventListener;
+    const remove = Element.prototype.removeEventListener;
+    window.__td = { removed: false, node: null, bound: false };
+    Element.prototype.removeEventListener = function (type, fn, opts) {
+      if (type === 'touchmove' && this === window.__td.node) window.__td.removed = true;
+      return remove.call(this, type, fn, opts);
+    };
+    // Must be a SPAN inside a row: replaceChildren detaches children, not the
+    // row itself, so a row element would never orphan.
+    const rowEl = [...rows.children].find((r) => r.querySelector('span'));
+    if (!rowEl) { window.__td.noSpan = true; return; }
+    const node = rowEl.querySelector('span');
+    window.__td.node = node;
+    Element.prototype.addEventListener = function (type, fn, opts) {
+      if (type === 'touchmove' && this === node) window.__td.bound = true;
+      return add.call(this, type, fn, opts);
+    };
+    const box = node.getBoundingClientRect();
+    const x = Math.round(box.left + 10);
+    const y = Math.round(box.top + box.height / 2);
+    const T = () => new Touch({ identifier: 3, target: node, clientX: x, clientY: y });
+    node.dispatchEvent(new TouchEvent('touchstart', { touches: [T()], changedTouches: [T()], bubbles: true, cancelable: true }));
+    // The gesture is now holding this node, and the row is repainted away.
+    rowEl.replaceChildren(document.createElement('span'));
+    Element.prototype.addEventListener = add;   // leave removeEventListener patched
+  });
+
+  // Archive it: the pane unmounts and the effect cleanup runs.
+  // Archive then delete: archiving alone can leave the pane on screen, and the
+  // unmount is what exercises the effect cleanup.
+  await fetch(`${API}/api/sessions/${teardownSession.id}/archive?from=operator`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+  });
+  await sleep(500);
+  await fetch(`${API}/api/sessions/${teardownSession.id}?from=operator`, { method: 'DELETE' });
+  const paneGone = await waitFor(() => downPage.locator('.tile-terminal .xterm-screen').count().then((n) => n === 0));
+  await sleep(400);
+  const teardown = await downPage.evaluate(() => ({ ...window.__td, node: undefined, orphaned: window.__td.node ? !window.__td.node.isConnected : false }));
+  check('unmounting the pane releases a gesture still holding a detached node',
+    paneGone && teardown.bound && teardown.orphaned && teardown.removed === true,
+    JSON.stringify({ paneGone, ...teardown }));
+  await downContext.close();
+
+  // ---- the diagnostic must record a gesture that never completes ----
+  //
+  // The phone reported that during a bad stall "there is also no new row in the
+  // diagnostics box". The first version could only add a row from the terminal's
+  // own touchend, so a gesture that was cancelled, never lifted, or landed
+  // somewhere else left the box unchanged — indistinguishable from no touch at
+  // all. It now watches the document, and an unfinished gesture is flushed on a
+  // timer and marked with a leading '*'.
+  const diagContext = await browser.newContext({
+    viewport: { width: 390, height: 844 }, screen: { width: 390, height: 844 },
+    deviceScaleFactor: 3, hasTouch: true, isMobile: true,
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
+  });
+  const diagPage = await diagContext.newPage();
+  // Open the pane first: the overlay spans the top, so clicking the list under
+  // it is not what a real user does either.
+  await diagPage.goto(WEB, { waitUntil: 'domcontentloaded' });
+  await diagPage.locator('.sidebar .row').filter({ hasText: 'mobile-terminal-e2e' }).first().click();
+  await diagPage.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
+  await sleep(600);
+  await diagPage.goto(`${WEB}/?touchdebug=1`, { waitUntil: 'domcontentloaded' });
+  await diagPage.locator('.tile-terminal:not(.tile-cached) .xterm-screen').waitFor({ state: 'visible' });
+  await sleep(1200);
+
+  const diagGesture = (mode) => diagPage.evaluate(async (m) => {
+    const host = document.querySelector('.tile-terminal:not(.tile-cached) .term-host');
+    const vp = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-viewport');
+    vp.scrollTop = vp.scrollHeight;
+    await new Promise((r) => setTimeout(r, 250));
+    const box = host.getBoundingClientRect();
+    const x = Math.round(box.left + box.width / 2);
+    const y0 = Math.round(box.top + 160);
+    const T = (id, cy) => new Touch({ identifier: id, target: host, clientX: x, clientY: cy });
+    const send = (t, tl, ch) => host.dispatchEvent(new TouchEvent(t, { touches: tl, changedTouches: ch, bubbles: true, cancelable: true }));
+    send('touchstart', [T(1, y0)], [T(1, y0)]);
+    for (let i = 1; i <= 10; i++) {
+      await new Promise((r) => setTimeout(r, 12));
+      send('touchmove', [T(1, y0 + i * 25)], [T(1, y0 + i * 25)]);
+    }
+    if (m === 'cancel') send('touchcancel', [], [T(1, y0 + 250)]);
+    else if (m === 'end') send('touchend', [], [T(1, y0 + 250)]);
+    // 'noend': the finger simply never lifts.
+    await new Promise((r) => setTimeout(r, m === 'noend' ? 1700 : 350));
+    const pre = document.querySelector('.am-touchdiag pre');
+    return (pre ? pre.textContent.split('\n').filter(Boolean)[0] : '') || '';
+  }, mode);
+
+  const diagEnd = await diagGesture('end');
+  check('an ordinary gesture is recorded with what the handler saw and what moved',
+    /s:1 m:10/.test(diagEnd) && /seen:[1-9]/.test(diagEnd) && /moved:[a-z]/.test(diagEnd),
+    JSON.stringify({ diagEnd }));
+
+  const diagCancel = await diagGesture('cancel');
+  check('a cancelled gesture still gets its own row', /c:1/.test(diagCancel), JSON.stringify({ diagCancel }));
+
+  const diagNoEnd = await diagGesture('noend');
+  check('a gesture that never lifts is flushed and marked, not lost',
+    diagNoEnd.startsWith('*') && /m:10/.test(diagNoEnd), JSON.stringify({ diagNoEnd }));
+
+  // The overlay must not sit where a thumb does, or it becomes part of the bug.
+  const overlayTransparent = await diagPage.evaluate(() => {
+    const b = document.querySelector('.am-touchdiag')?.getBoundingClientRect();
+    if (!b) return null;
+    const el = document.elementFromPoint(Math.round(b.left + b.width / 2), Math.round(b.top + 3));
+    return !el || !el.closest('.am-touchdiag');
+  });
+  check('the diagnostic overlay does not intercept touches it is measuring',
+    overlayTransparent === true, JSON.stringify({ overlayTransparent }));
+  await diagContext.close();
+
+  // ---- a gesture survives losing its state mid-drag ----
+  //
+  // Reported from an iPhone: smooth for a few seconds, then only one or two
+  // lines per swipe. Both of these reproduce that exactly, in Chromium, and
+  // neither is engine-specific — they are the handler's own state machine:
+  //
+  //   * iOS sends `touchcancel` when the system claims a gesture. The handler
+  //     nulled its anchor and every remaining touchmove returned early, so the
+  //     rest of the drag did nothing AND there was no momentum on release.
+  //   * `touchend` from ANY finger did the same, because the anchor was not
+  //     tied to a touch identifier. A thumb resting on the glass and lifting
+  //     killed the drag the other finger was still making.
+  //
+  // Measured before the fix: 38% of the drag delivered in both cases, with the
+  // viewport frozen from the interruption onward.
+  const dragWith = (interruption) => frozenPage.evaluate(async (mode) => {
+    const host = document.querySelector('.tile-terminal:not(.tile-cached) .term-host');
+    const vp = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-viewport');
+    vp.scrollTop = vp.scrollHeight;
+    await new Promise((r) => setTimeout(r, 250));
+    const before = vp.scrollTop;
+    const box = host.getBoundingClientRect();
+    const x = Math.round(box.left + box.width / 2);
+    const y0 = Math.round(box.top + Math.min(140, box.height / 2));
+    const steps = 20; const distance = 340;
+    const T = (id, cy) => new Touch({ identifier: id, target: host, clientX: x, clientY: cy });
+    const at = (i) => Math.round(y0 + distance * i / steps);
+    const send = (type, touches, changed) => host.dispatchEvent(new TouchEvent(type, {
+      touches, changedTouches: changed, bubbles: true, cancelable: true }));
+    send('touchstart', [T(1, y0)], [T(1, y0)]);
+    for (let i = 1; i <= steps; i++) {
+      await new Promise((r) => setTimeout(r, 12));
+      if (i === steps / 2) {
+        if (mode === 'cancel') send('touchcancel', [], [T(1, at(i))]);
+        if (mode === 'secondfinger') {
+          send('touchstart', [T(1, at(i)), T(2, y0 + 5)], [T(2, y0 + 5)]);
+          send('touchend', [T(1, at(i))], [T(2, y0 + 5)]);
+        }
+      }
+      send('touchmove', [T(1, at(i))], [T(1, at(i))]);
+    }
+    send('touchend', [], [T(1, at(steps))]);
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    return before - vp.scrollTop;
+  }, interruption);
+
+  const plainDrag = await dragWith('none');
+  const cancelledDrag = await dragWith('cancel');
+  check('a touchcancel mid-drag does not kill the rest of the gesture',
+    plainDrag > 0 && cancelledDrag >= plainDrag * 0.85,
+    JSON.stringify({ plainDrag, cancelledDrag }));
+
+  const secondFingerDrag = await dragWith('secondfinger');
+  check('another finger lifting does not end the drag this one is making',
+    plainDrag > 0 && secondFingerDrag >= plainDrag * 0.95,
+    JSON.stringify({ plainDrag, secondFingerDrag }));
+
+  // ---- the gesture must not force a layout read per event ----
+  //
+  // `viewport.scrollHeight` is a forced synchronous layout read. Taking one on
+  // every touchmove AND every glide frame costs ~80 reflows per flick, in the
+  // hot path of a gesture, interleaved with the DOM xterm is already rewriting
+  // as output arrives. Measuring the row height once per gesture makes it one.
+  //
+  // This counts reads rather than timing anything: a timing assertion on a
+  // shared box measures the box. Reverting to a per-event measurement takes
+  // this from 1 to ~82.
+  const layoutReads = await frozenPage.evaluate(async () => {
+    const proto = Element.prototype;
+    const orig = Object.getOwnPropertyDescriptor(proto, 'scrollHeight');
+    let reads = 0;
+    Object.defineProperty(proto, 'scrollHeight', {
+      configurable: true,
+      get() {
+        if (this.classList && this.classList.contains('xterm-viewport')) reads++;
+        return orig.get.call(this);
+      },
+    });
+    try {
+      const host = document.querySelector('.tile-terminal:not(.tile-cached) .term-host');
+      const vp = document.querySelector('.tile-terminal:not(.tile-cached) .xterm-viewport');
+      vp.scrollTop = vp.scrollHeight;
+      await new Promise((r) => setTimeout(r, 200));
+      reads = 0;                       // ignore the setup above
+      const box = host.getBoundingClientRect();
+      const x = Math.round(box.left + box.width / 2);
+      const y0 = Math.round(box.top + Math.min(140, box.height / 2));
+      const pt = (cy) => new Touch({ identifier: 8, target: host, clientX: x, clientY: cy });
+      const fire = (t, cy) => host.dispatchEvent(new TouchEvent(t, {
+        touches: t === 'touchend' ? [] : [pt(cy)], bubbles: true, cancelable: true,
+      }));
+      fire('touchstart', y0);
+      for (let i = 1; i <= 10; i++) {
+        await new Promise((r) => setTimeout(r, 12));
+        fire('touchmove', Math.round(y0 + 300 * i / 10));
+      }
+      fire('touchend', 0);
+      await new Promise((r) => setTimeout(r, 1200));   // let the glide finish
+      return reads;
+    } finally {
+      Object.defineProperty(proto, 'scrollHeight', orig);
+    }
+  });
+  check('one flick forces one layout read, not one per touch event',
+    layoutReads > 0 && layoutReads <= 10, JSON.stringify({ layoutReads }));
+
+  await frozenContext.close();
+
   const desktopContext = await browser.newContext({ viewport: { width: 1200, height: 800 } });
   const desktopPage = await desktopContext.newPage();
   await desktopPage.goto(WEB, { waitUntil: 'domcontentloaded' });

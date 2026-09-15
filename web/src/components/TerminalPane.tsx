@@ -7,6 +7,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { FileLinkScope, useFilePreview } from './FileLinkContent';
 import { installTerminalFileLinks, terminalLinkHandler, openTerminalLink } from '../lib/terminalFileLinks';
 import '@xterm/xterm/css/xterm.css';
+import { touchDebug, installTouchDebug } from '../lib/touchDebug';
 import type { Cli, Session } from '../types';
 import { STATE_LABEL, isRemote } from '../types';
 import StateLogo from './StateLogo';
@@ -883,7 +884,12 @@ export default function TerminalPane({
     const dataSub = term.onData((d) => {
       if (controllerRef.current) send({ t: 'i', d });
     });
-    const ro = new ResizeObserver(resync);
+    // The row height in CSS pixels, measured once per gesture rather than on
+    // every touch event. See the touch handlers below for why; invalidated here
+    // because a resize is the one thing that changes it, and it is also the one
+    // thing that can happen in the middle of a gesture's glide.
+    let cellPx = 0;
+    const ro = new ResizeObserver(() => { cellPx = 0; resync(); });
     ro.observe(hostRef.current!);
     window.addEventListener('focus', onReturn);
     document.addEventListener('visibilitychange', onVisible);
@@ -909,22 +915,113 @@ export default function TerminalPane({
     // gesture target however the box inside it is nested.
     const frame = frameRef.current ?? host;
     const viewport = host.querySelector<HTMLElement>('.xterm-viewport');
+    // Which finger owns the gesture, and where it was last seen. The identifier
+    // matters: `touches[0]` is whatever the browser lists first, so a second
+    // finger landing or lifting silently re-pointed this at a different hand.
+    // The node the gesture started on, and the events we have already handled.
+    //
+    // xterm's DOM renderer repaints a row with `replaceChildren`, which detaches
+    // the very span a finger landed on — measured at 66-82ms into an ordinary
+    // drag, because our own scrolling is what triggers the repaint. Per the
+    // touch-events spec every later touchmove/touchend of that gesture is still
+    // dispatched to the ORIGINAL target, so once it leaves the document those
+    // events reach neither .term-host nor the document: the drag goes silent
+    // with no touchend and no touchcancel, which is exactly what the phone
+    // reported. Listening on the target itself keeps receiving them.
+    let touchNode: Element | null = null;
+    const handled = new WeakSet<Event>();
+    // The frame's capture listener and the target's own listener both fire
+    // while the node is attached; this keeps a gesture from counting twice.
+    const first = (e: Event) => { if (handled.has(e)) return false; handled.add(e); return true; };
+    let touchId: number | null = null;
     let touchY: number | null = null;
+    const ourTouch = (list: TouchList) => {
+      if (touchId == null) return null;
+      for (let i = 0; i < list.length; i++) if (list[i].identifier === touchId) return list[i];
+      return null;
+    };
+    const inList = (list: TouchList, id: number) => {
+      for (let i = 0; i < list.length; i++) if (list[i].identifier === id) return true;
+      return false;
+    };
     let residual = 0;        // px of gesture not yet worth a whole row
     let glideFrame = 0;
-    let velocity = 0;        // px/ms, signed like deltaY (positive scrolls down)
-    let lastMoveAt = 0;
+    // Speed at release, measured on OUR clock over a trailing window.
+    //
+    // `e.timeStamp` cannot be used for this. WebKit delivers several touchmoves
+    // within one frame carrying the SAME timeStamp, so the per-event `dt` was 0
+    // and a `dt >= 4` guard rejected every sample: velocity stayed 0, nothing
+    // ever coasted, and each gesture stopped dead where the finger stopped.
+    // That guard was right to distrust a 2ms gap — dividing a coalesced jump by
+    // it would launch the glide through the whole buffer — but the fix is to
+    // stop dividing per event at all.
+    //
+    // Summing the distance over a short window and dividing ONCE by the elapsed
+    // time is correct however the stream arrives: coalesced (one event carrying
+    // a frame's travel) and batched (several events with no time between them)
+    // both put the same distance in the same window. performance.now() is read
+    // here rather than taken from the event, so it measures real elapsed time
+    // whatever the event reports.
+    // 120ms: long enough that a phone dropping to ~30Hz under load still puts
+    // three or four samples in the window, short enough that it reports the
+    // speed AT release rather than an average of the whole gesture — and short
+    // enough that a finger which stops to rest before lifting empties it, which
+    // is what stops a deliberate drag from coasting.
+    const VELOCITY_WINDOW_MS = 120;
+    const MIN_WINDOW_MS = 8;        // below this the elapsed time is noise
+    const MAX_TOUCH_SPEED = 4;      // px/ms — a hand tops out around here
+    let samples: { at: number; dy: number }[] = [];
+    // Distance strictly BETWEEN the first and last sample over the time between
+    // them: the first sample's travel happened before its own timestamp, so it
+    // contributes the window's start, not its distance.
+    const velocityNow = () => {
+      // Trim HERE, not only as samples arrive: a finger that stops and rests
+      // before lifting sends no further events, so trimming on arrival alone
+      // would leave the pre-pause samples standing and coast on speed the hand
+      // no longer had.
+      const cutoff = performance.now() - VELOCITY_WINDOW_MS;
+      while (samples.length && samples[0].at < cutoff) samples.shift();
+      if (samples.length < 2) return 0;
+      const elapsed = samples[samples.length - 1].at - samples[0].at;
+      if (elapsed < MIN_WINDOW_MS) return 0;
+      let distance = 0;
+      for (let i = 1; i < samples.length; i++) distance += samples[i].dy;
+      const v = distance / elapsed;
+      // The same ceiling the per-event clamp enforced, so the glide's reach is
+      // unchanged: a real flick still cannot be read as faster than a hand moves.
+      return Math.max(-MAX_TOUCH_SPEED, Math.min(MAX_TOUCH_SPEED, v));
+    };
     // The scroll area spans every line in the buffer, so its height over that
     // line count is the row height under whichever renderer is attached.
-    const scrollByPixels = (px: number) => {
+    //
+    // Measured once per gesture, not per event. `scrollHeight` is a forced
+    // synchronous layout read, and doing one on every touchmove AND every glide
+    // frame means ~60 reflows per flick, interleaved with the DOM the renderer
+    // is already rewriting as output arrives — the hot path of a gesture is the
+    // worst place for it. Both operands also move underneath it: the buffer
+    // grows while a pane prints, so recomputing mid-gesture is a changing
+    // divisor for no benefit.
+    //
+    // Pinning it cannot go stale: a row's height is a function of font size and
+    // zoom, and neither can change while a finger is down — both arrive as a
+    // resize, which clears the cache above. That also keeps `residual` honest,
+    // since every remainder within one gesture is carried against one scale.
+    const measureCell = () => {
       const lines = term.buffer.active.length;
-      const cell = viewport && lines ? viewport.scrollHeight / lines : 0;
+      const measured = viewport && lines ? viewport.scrollHeight / lines : 0;
+      // Keep the last good value if a measurement lands mid-relayout.
+      if (measured > 0) cellPx = measured;
+      return cellPx;
+    };
+    const scrollByPixels = (px: number) => {
+      const cell = cellPx || measureCell();
       if (!cell) return 0;
       residual += px;
       const rows = Math.trunc(residual / cell);
       if (!rows) return 0;
       residual -= rows * cell;
       term.scrollLines(rows);
+      touchDebug.rows(rows);
       return rows;
     };
     const stopGlide = () => { if (glideFrame) { cancelAnimationFrame(glideFrame); glideFrame = 0; } };
@@ -934,43 +1031,106 @@ export default function TerminalPane({
     // drag over the conversation was eaten here and spent on the hidden
     // terminal's scrollback: the trace could not be scrolled back at all on a
     // phone, which is the only place this gesture exists.
+    const releaseTouchNode = () => {
+      if (!touchNode) return;
+      touchNode.removeEventListener('touchmove', onTouchMove, true);
+      touchNode.removeEventListener('touchend', onTouchEnd, true);
+      touchNode.removeEventListener('touchcancel', onTouchCancel, true);
+      touchNode = null;
+    };
     const onTouchStart = (e: TouchEvent) => {
       if (modeRef.current === 'reader') return;
+      if (!first(e)) return;
+      // A second finger landing mid-drag does not start a new gesture, and must
+      // not reset the residual or the velocity window under the one in progress.
+      //
+      // `changedTouches` is what separates that from a reused identifier.
+      // Touch.identifier is only unique among CURRENTLY ACTIVE contacts, so once
+      // this handler has missed an end — the detached-node case this whole file
+      // is about — a later single-finger gesture can arrive carrying the very
+      // identifier we still think we own. Chromium does exactly that for
+      // sequential taps. Owned identifier in `touches` but NOT in
+      // `changedTouches` is our finger still down while another lands, so keep
+      // ownership; in `changedTouches` it is a new contact that reused the
+      // number, and it has to be allowed to replace stale ownership.
+      if (touchId != null && ourTouch(e.touches) && !inList(e.changedTouches, touchId)) return;
+      const firstTouch = e.changedTouches[0] || e.touches[0];
+      if (!firstTouch) return;
+      // Taking ownership, so let go of the previous gesture's node first. It
+      // often never delivered an end — that is this whole bug — and leaving its
+      // listeners attached would let a stray move or end on an obsolete,
+      // detached span act on the gesture that replaced it. Placed after the
+      // early returns above so a second finger landing releases nothing.
+      releaseTouchNode();
       stopGlide();               // a new touch takes over from any coasting
-      velocity = 0;
+      samples = [];
       residual = 0;
-      touchY = e.touches[0].clientY;
-      lastMoveAt = e.timeStamp;
+      measureCell();             // one layout read for the whole gesture
+      touchId = firstTouch.identifier;
+      touchY = firstTouch.clientY;
+      const node = e.target instanceof Element ? e.target : null;
+      if (node && node !== frame) {
+        touchNode = node;
+        node.addEventListener('touchmove', onTouchMove, { passive: false, capture: true });
+        node.addEventListener('touchend', onTouchEnd, true);
+        node.addEventListener('touchcancel', onTouchCancel, true);
+      }
     };
     const onTouchMove = (e: TouchEvent) => {
       if (modeRef.current === 'reader') return;
-      if (touchY == null || !e.touches.length) return;
-      const y = e.touches[0].clientY;
+      if (!first(e)) return;
+      if (!e.touches.length) return;
+      // Reached us only because we are listening on the detached node itself.
+      if (touchNode && !touchNode.isConnected) touchDebug.rescued();
+      let touch = ourTouch(e.touches);
+      if (!touch) {
+        // Not our finger. If we still hold an anchor this is somebody else's
+        // hand and is none of our business.
+        if (touchId != null) { touchDebug.foreign(); return; }
+        // Otherwise the anchor was taken away while a finger kept moving — iOS
+        // sends touchcancel when the system claims a gesture, and a stray
+        // touchend does the same. Re-acquire and carry on: the cost is this one
+        // event's travel, where ignoring it cost the whole rest of the drag.
+        touch = e.touches[0];
+        touchId = touch.identifier;
+        touchY = touch.clientY;
+        measureCell();
+        touchDebug.reacquire();
+        if (e.cancelable) e.preventDefault();
+        e.stopImmediatePropagation();
+        return;
+      }
+      const y = touch.clientY;
+      if (touchY == null) { touchY = y; return; }
       const deltaY = touchY - y;
       touchY = y;
+      touchDebug.seen(deltaY);
       if (deltaY === 0) return;
-      const dt = e.timeStamp - lastMoveAt;
-      lastMoveAt = e.timeStamp;
-      // Weight the newest sample heavily: what matters is the speed at release,
-      // and a touch stream is noisy. Ignore a stale gap (a paused finger) and
-      // anything faster than a touch stream can legitimately be — a single
-      // coalesced jump over a 2ms gap is not a 48px/ms flick, and dividing by
-      // it would launch the glide clean through the buffer. A hand tops out
-      // around 4px/ms; real events arrive 8-16ms apart.
-      if (dt >= 4 && dt < 100) {
-        const sample = Math.max(-4, Math.min(4, deltaY / dt));
-        velocity = velocity * 0.3 + sample * 0.7;
-      }
+      // Drop what has aged out, so a finger that paused and then released does
+      // not coast on speed it had before the pause.
+      const at = performance.now();
+      samples.push({ at, dy: deltaY });
+      while (samples.length && samples[0].at < at - VELOCITY_WINDOW_MS) samples.shift();
       scrollByPixels(deltaY);
       if (e.cancelable) e.preventDefault(); // keep the page from rubber-banding
       // This listener runs in capture before xterm's listener on the same host.
       // stopPropagation alone would still allow that second handler.
       e.stopImmediatePropagation();
     };
-    const onTouchEnd = () => {
+    const onTouchEnd = (e: TouchEvent) => {
+      if (!first(e)) return;
+      // Only the finger that owns the gesture ends it. A thumb resting on the
+      // glass and lifting used to null the anchor and kill the rest of the drag.
+      // An event that names no touch at all carries no ownership information,
+      // so it ends the gesture rather than being ignored — ignoring it would
+      // strand the anchor and swallow the next drag.
+      if (touchId != null && e.changedTouches.length && !inList(e.changedTouches, touchId)) return;
+      touchId = null;
       touchY = null;
-      const v0 = velocity;
-      velocity = 0;
+      releaseTouchNode();
+      touchDebug.ended();
+      const v0 = velocityNow();
+      samples = [];
       // A drag that began on the terminal and ended after the switch flipped
       // must not launch anything: the mode is broadcast app-wide, so the flip
       // can come from another pane rather than from this hand.
@@ -999,7 +1159,13 @@ export default function TerminalPane({
       };
       glideFrame = requestAnimationFrame(glide);
     };
-    const onTouchCancel = () => { touchY = null; velocity = 0; stopGlide(); };
+        const onTouchCancel = (e: TouchEvent) => {
+      if (touchId != null && e.changedTouches.length && !inList(e.changedTouches, touchId)) return;
+      if (!first(e)) return;
+      touchDebug.cancel();
+      touchId = null; touchY = null; releaseTouchNode(); samples = []; stopGlide();
+    };
+    installTouchDebug();   // opt-in; a no-op unless ?touchdebug=1
     frame.addEventListener('touchstart', onTouchStart, { passive: true });
     frame.addEventListener('touchmove', onTouchMove, { passive: false, capture: true });
     frame.addEventListener('touchend', onTouchEnd);
@@ -1025,6 +1191,11 @@ export default function TerminalPane({
       frame.removeEventListener('touchmove', onTouchMove, true);
       frame.removeEventListener('touchend', onTouchEnd);
       frame.removeEventListener('touchcancel', onTouchCancel);
+      // The frame's listeners are not the only ones: a gesture in flight holds
+      // listeners on its own node, which outlives this effect when the node was
+      // already detached. Without this, switching to reader mode or unmounting
+      // mid-drag leaves callbacks that would reach a disposed terminal.
+      releaseTouchNode();
       stopGlide();
       window.removeEventListener('focus', onReturn);
       document.removeEventListener('visibilitychange', onVisible);
