@@ -220,6 +220,10 @@ body {
 }
 /* Second picker row: everything you can make that is not one of the agents. */
 .quick-clis-2 { margin-top: 4px; }
+/* A real grid cell, not a margin: it holds a column so the CLI that wrapped off
+   row one stays separated from the session types on the same 6-column rhythm,
+   and the separation does not move when remote/shell/files are absent. */
+.quick-gap { pointer-events: none; }
 /* A field switched off because it means nothing for this type says so in its
    own box, rather than going grey and leaving you to guess. */
 .fp-current .fp-why { color: var(--muted); font-style: italic; }

@@ -310,6 +310,14 @@ export default function Sidebar({
   // tree — they are session types like any other, so they belong in the picker
   // rather than in a second place that does the same job.
   const quickable = clis.filter((c) => c.id !== 'shell' && !isPassive(c.id) && !isRemote(c.id));
+  // The picker is a 6-column grid. A seventh CLI used to wrap onto a third row
+  // by itself; instead the overflow joins the second row, ahead of the session
+  // types and separated from them by a real empty cell. Slicing by the column
+  // count rather than naming a CLI means the next one added lands there too,
+  // instead of stranding itself again.
+  const QUICK_COLUMNS = 6;
+  const quickRowOne = quickable.slice(0, QUICK_COLUMNS);
+  const quickWrapped = quickable.slice(QUICK_COLUMNS);
   const remoteCli = clis.find((c) => isRemote(c.id)) || null;
   const shellCli = clis.find((c) => c.id === 'shell') || null;
   const filesCli = clis.find((c) => c.id === 'files') || null;
@@ -746,6 +754,19 @@ export default function Sidebar({
     return anyVisible ? GroupBlock(g) : null;
   };
 
+  // One definition for both rows: a wrapped CLI is the same button in a
+  // different cell, and nothing about it should differ because of where it sat.
+  const quickCliButton = (c: typeof quickable[number]) => (
+    <button
+      key={c.id}
+      className={`quick-cli${quickMode === 'agent' && quickCli === c.id ? ' on' : ''}${c.available ? '' : ' off'}`}
+      title={cliTitle(c)}
+      disabled={!c.available || quickSending || quickImages.length > 0}
+      style={quickMode === 'agent' && quickCli === c.id ? { borderColor: c.color } : undefined}
+      onClick={() => { setQuickMode('agent'); if (quickCli !== c.id) resetQuickTarget(); setQuickCli(c.id); }}
+    ><Logo cli={c.id} size={14} /></button>
+  );
+
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -786,18 +807,11 @@ export default function Sidebar({
             }}
           >
             <div className="quick-clis">
-              {quickable.map((c) => (
-                <button
-                  key={c.id}
-                  className={`quick-cli${quickMode === 'agent' && quickCli === c.id ? ' on' : ''}${c.available ? '' : ' off'}`}
-                  title={cliTitle(c)}
-                  disabled={!c.available || quickSending || quickImages.length > 0}
-                  style={quickMode === 'agent' && quickCli === c.id ? { borderColor: c.color } : undefined}
-                  onClick={() => { setQuickMode('agent'); if (quickCli !== c.id) resetQuickTarget(); setQuickCli(c.id); }}
-                ><Logo cli={c.id} size={14} /></button>
-              ))}
+              {quickRowOne.map(quickCliButton)}
             </div>
             <div className="quick-clis quick-clis-2">
+              {quickWrapped.map(quickCliButton)}
+              {quickWrapped.length > 0 && <span className="quick-gap" aria-hidden="true" />}
               <button
                 className={`quick-cli quick-grp${quickMode === 'group' ? ' on' : ''}`}
                 title="Group — several agents created together, sharing a folder"
