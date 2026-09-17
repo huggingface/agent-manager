@@ -48,6 +48,24 @@ import { writePaneMode } from '../../lib/paneMode';
 
 /** The reader owns presentation and draft state. The store owns the transcript;
  * the virtual list owns measurement. Neither requires a terminal attachment. */
+/**
+ * How close to the end still counts as being AT the end, in pixels.
+ *
+ * This is a GEOMETRY tolerance and nothing else: a settled scroller is not
+ * always on an integer — device-pixel rounding and zoom leave a pixel or two —
+ * and that has to read as "at the end" or new output would stop scrolling into
+ * view. It decides when a reader has ARRIVED back at the end.
+ *
+ * It is deliberately not what grants permission to leave. Making a distance the
+ * price of leaving is a bug this file had twice: at 48px a 20px wheel notch was
+ * erased before the next one arrived, and at 4px a 3px notch still was. Any
+ * threshold has that shape, because `hold()` in useVirtualRows resets a
+ * following reader to the end between notches, so an increment smaller than the
+ * threshold can never accumulate into one larger than it. Leaving is decided by
+ * whether the reader MOVED UP within the scroll range available to it, below.
+ */
+const AT_END_PX = 4;
+
 export default function ConversationView({
   session, paused, isMobile, readOnly, onHandover, searchOpen, onCloseSearch, onAttachPicker, onHead, seen,
 }: {
@@ -75,7 +93,9 @@ export default function ConversationView({
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const following = useRef(true);
-  /** Where this scroller was at the previous scroll event — see onScroll. */
+  /** Where this scroller was at the previous scroll event. Compared against the
+   *  scroll range that exists now, it separates a person scrolling up from the
+   *  browser clamping the position when that range shrinks. See onScroll. */
   const lastTop = useRef(0);
   const [atLatest, setAtLatest] = useState(true);
   const touched = useRef(false);
@@ -503,9 +523,36 @@ export default function ConversationView({
         // reader a few hundred pixels short of the end. Attributing the scroll
         // event to the wheel that caused it is not an option: the scroll can be
         // dispatched before the wheel handler runs.
-        const far = el.scrollHeight - el.scrollTop - el.clientHeight >= 48;
-        const movedUp = el.scrollTop < lastTop.current - 1;
-        if (following.current ? (movedUp && far) : (!q && !far)) {
+        //
+        // So: leaving is "this scroller moved up", with no distance to reach,
+        // which is what lets a one-pixel nudge count. That makes it essential
+        // to know what else can move it up, and there is exactly one thing:
+        // scrollTop is confined to [0, scrollHeight - clientHeight], so when
+        // that range shrinks the browser CLAMPS the position down. Nobody
+        // scrolled; the range moved under a scroller that was already at its
+        // end. It shrinks whenever the content gets shorter OR the viewport
+        // gets taller — expanding the reader pane, a phone keyboard closing,
+        // an orientation change — and comparing heights catches only the first
+        // of those. (Our own pinning is not a third case: it moves the scroller
+        // DOWN.)
+        //
+        // So compare against where the previous position sits in the range that
+        // exists NOW. A clamp lands exactly on that maximum and reads as no
+        // movement, while a person's one-pixel nudge is still below it and
+        // reads as movement. No dead zone, and unlike a height comparison this
+        // does not swallow a real scroll that happens to share an event with a
+        // resize.
+        //
+        // Coming back is the opposite question — has it arrived at the end —
+        // and that one is geometry, so it uses the tolerance. It also requires
+        // moving DOWN, so a reader that has just nudged one pixel up, and is
+        // therefore still inside the tolerance, is not immediately recaptured.
+        const maxTop = el.scrollHeight - el.clientHeight;
+        const wasTop = Math.min(lastTop.current, maxTop);
+        const far = maxTop - el.scrollTop >= AT_END_PX;
+        const movedUp = el.scrollTop < wasTop - 0.5;
+        const movedDown = el.scrollTop > wasTop + 0.5;
+        if (following.current ? movedUp : (!q && !far && movedDown)) {
           following.current = !following.current;
           setAtLatest(following.current);
         }
