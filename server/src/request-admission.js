@@ -26,7 +26,7 @@ function originsSetting(value) {
   return values;
 }
 
-export function createRequestPolicy(env = process.env) {
+export function createRequestPolicy(env = process.env, internalHost) {
   const backendPort = port(env.PORT, 7860);
   const loopbacks = ['localhost', '127.0.0.1', '[::1]'];
   const backendOrigins = loopbacks.map((host) => `http://${host}:${backendPort}`);
@@ -50,6 +50,13 @@ export function createRequestPolicy(env = process.env) {
     const url = new URL(origin);
     return [url.host, `${url.hostname}:${url.port || (url.protocol === 'https:' ? '443' : '80')}`];
   }));
+  // A configured bind can be reachable only at a non-loopback address. Admit
+  // that configured upstream Host without granting it browser-origin trust.
+  if (internalHost) {
+    const internalOrigin = normalizeOrigin(`http://${internalHost}:${backendPort}`);
+    if (!internalOrigin) throw new Error('Invalid internal request host');
+    hosts.add(new URL(internalOrigin).host);
+  }
   return { origins, hosts };
 }
 

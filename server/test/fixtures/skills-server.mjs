@@ -44,7 +44,9 @@ export async function skillsServer() {
     child.stdout.on('data', (s) => { log += s; }); child.stderr.on('data', (s) => { log += s; });
     for (let i = 0; i < 100; i++) {
       if (child.exitCode !== null) throw new Error(`Fixture server exited: ${log}`);
-      if (log.includes(`Agent Manager :${port}`) && await fetch(`${url}/api/health`).then((r) => r.ok).catch(() => false)) return;
+      // Readiness is an API contract, not the formatting of the startup banner
+      // (local installs include the configured bind address there).
+      if (await fetch(`${url}/api/health`).then((r) => r.ok).catch(() => false)) return;
       await delay(50);
     }
     throw new Error(`Fixture server timeout: ${log}`);
