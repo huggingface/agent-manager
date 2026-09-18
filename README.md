@@ -38,13 +38,14 @@ page. Keep visibility **Private**. Then create a private Storage Bucket and moun
 it at `/data` before logging in:
 
 ```python
-from huggingface_hub import HfApi, Volume, create_bucket
+from huggingface_hub import HfApi, Volume
 
 api = HfApi()
-space_id = "your-username/agent-manager"
-bucket_id = "your-username/agent-manager-data"
+username = api.whoami()["name"]
+space_id = f"{username}/agent-manager"
+bucket_id = f"{username}/agent-manager-data"
 
-create_bucket(bucket_id, private=True, exist_ok=True)
+api.create_bucket(bucket_id, private=True, exist_ok=True)
 api.set_space_volumes(
     space_id,
     volumes=[
@@ -58,13 +59,14 @@ api.restart_space(space_id)
 `hf auth login`):
 
 ```python
-from huggingface_hub import HfApi, Volume, create_bucket
+from huggingface_hub import HfApi, Volume
 
 api = HfApi()
-space_id = "your-username/agent-manager"
-bucket_id = "your-username/agent-manager-data"
+username = api.whoami()["name"]
+space_id = f"{username}/agent-manager"
+bucket_id = f"{username}/agent-manager-data"
 
-create_bucket(bucket_id, private=True, exist_ok=True)
+api.create_bucket(bucket_id, private=True, exist_ok=True)
 api.duplicate_repo(
     from_id="lvwerra/agent-manager-template",
     to_id=space_id,
@@ -92,13 +94,14 @@ Space sleeps or rebuilds.
 If you duplicated first, you can add or replace the mount later:
 
 ```python
-from huggingface_hub import HfApi, Volume, create_bucket
+from huggingface_hub import HfApi, Volume
 
 api = HfApi()
-space_id = "your-username/agent-manager"
-bucket_id = "your-username/agent-manager-data"
+username = api.whoami()["name"]
+space_id = f"{username}/agent-manager"
+bucket_id = f"{username}/agent-manager-data"
 
-create_bucket(bucket_id, private=True, exist_ok=True)
+api.create_bucket(bucket_id, private=True, exist_ok=True)
 api.set_space_volumes(
     space_id,
     volumes=[
