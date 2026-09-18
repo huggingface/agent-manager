@@ -11,6 +11,8 @@ license: apache-2.0
 short_description: Private cloud manager for AI coding CLI sessions
 ---
 
+[![Hugging Face Space](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg)](https://huggingface.co/spaces/lvwerra/agent-manager-template)
+
 # Agent Manager
 
 A private, single-user cloud terminal manager for AI coding CLIs — **Claude Code**,
