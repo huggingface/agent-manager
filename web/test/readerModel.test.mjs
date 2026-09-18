@@ -71,6 +71,18 @@ try {
   await db.loadNewer(); await db.loadNewer();
   assert.deepEqual(db.getSnapshot().turns.map((t) => t.blocks[0].text), ['ask', 'complete'], 'mutable DB tail replaces in place without importing unloaded older rows');
   assert.equal(db.getSnapshot().cursor.start, 8);
+  indexed.push(page([turn('index:10', 'user', 'after revert')], 10, 11, { mode: 'index', replaceFrom: 10 }));
+  await db.loadNewer();
+  indexed.push(page([turn('index:0', 'user', 'surviving')], 0, 1, { mode: 'index', reset: true }));
+  await db.loadNewer();
+  assert.deepEqual(db.getSnapshot().turns.map(t => t.blocks[0].text), ['surviving'], 'shrink reset discards every deleted row');
+  indexed.push(page([turn('index:0', 'user', 'surviving')], 0, 1, { mode: 'index', replaceFrom: 0 }));
+  await db.loadNewer();
+  assert.equal(db.getSnapshot().turns.length, 1, 'the next poll does not duplicate the surviving row');
+  indexed.push(page([], 0, 0, { mode: 'index', reset: true }));
+  await db.loadNewer();
+  assert.equal(db.getSnapshot().phase, 'empty');
+  assert.deepEqual(db.getSnapshot().turns, []);
 
   let fail = true;
   const recover = new ReaderStore({ window: () => fail ? Promise.reject(new Error('offline')) : Promise.resolve(page([raw[0]], 0, 1)), summary: () => new Promise(() => {}) });

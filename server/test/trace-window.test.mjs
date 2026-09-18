@@ -6,12 +6,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-window-'));
 process.env.DATA_DIR = path.join(TMP, 'data');
+process.env.XDG_DATA_HOME = path.join(TMP, 'xdg');
 fs.mkdirSync(process.env.DATA_DIR, { recursive: true });
 
-const { readTraceByPath } = await import('../src/traces.js');
+const { readTrace, readTraceByPath } = await import('../src/traces.js');
 
 const textOf = (t) => t.blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
 const claudeLine = (i, pad = 0) => JSON.stringify({
@@ -263,6 +265,62 @@ for (const bytes of [16 * 1024, 32 * 1024, 64 * 1024]) {
     assert.equal(first.payload.type, 'task_started', `a window starts a task, not the middle of one (at ${at})`);
   }
 }
+
+// ---- SQLite readers invalidate on WAL writes, including in-place streaming ----
+const ocDir = path.join(process.env.XDG_DATA_HOME, 'opencode');
+fs.mkdirSync(ocDir, { recursive: true });
+const ocPath = path.join(ocDir, 'opencode.db');
+const oc = new DatabaseSync(ocPath);
+oc.exec(`
+  pragma journal_mode = WAL;
+  pragma wal_autocheckpoint = 0;
+  create table session (
+    id text primary key, directory text, title text, model text,
+    tokens_input integer, tokens_output integer, tokens_cache_read integer
+  );
+  create table message (id text primary key, session_id text, time_created integer, data text);
+  create table part (id text primary key, message_id text, time_created integer, data text);
+`);
+oc.prepare('insert into session values (?, ?, ?, ?, 0, 0, 0)').run(
+  'ses_reader', TMP, 'Reader test', JSON.stringify({ id: 'test-model' }),
+);
+oc.prepare('insert into message values (?, ?, ?, ?)').run(
+  'msg_1', 'ses_reader', 1, JSON.stringify({ role: 'assistant' }),
+);
+oc.prepare('insert into part values (?, ?, ?, ?)').run(
+  'part_1', 'msg_1', 1, JSON.stringify({ type: 'text', text: 'streaming first' }),
+);
+
+const ocSession = { id: 'oc-reader', cli: 'opencode', path: 'reader', opencodeSessionId: 'ses_reader' };
+const ocFirst = await readTrace(ocSession, { window: { at: 'tail', min: 2 } });
+assert.equal(textOf(ocFirst.turns.at(-1)), 'streaming first');
+const mainBefore = fs.statSync(ocPath);
+oc.prepare('update part set data = ? where id = ?').run(
+  JSON.stringify({ type: 'text', text: 'streaming second' }), 'part_1',
+);
+const mainAfter = fs.statSync(ocPath);
+assert.equal(mainAfter.mtimeMs, mainBefore.mtimeMs, 'the main db does not move while WAL receives the update');
+assert.equal(mainAfter.size, mainBefore.size, 'nor does its size');
+const ocSecond = await readTrace(ocSession, { window: { at: 'tail', min: 2 } });
+assert.equal(textOf(ocSecond.turns.at(-1)), 'streaming second', 'the Reader memo follows the WAL');
+for (let i = 2; i <= 5; i++) {
+  oc.prepare('insert into message values (?, ?, ?, ?)').run(`msg_${i}`, 'ses_reader', i, JSON.stringify({ role: 'user' }));
+  oc.prepare('insert into part values (?, ?, ?, ?)').run(`part_${i}`, `msg_${i}`, i, JSON.stringify({ type: 'text', text: `message ${i}` }));
+}
+const ocGrown = await readTrace(ocSession, { window: { at: 'tail', version: 2, min: 2 } });
+assert.equal(ocGrown.window.end, 5);
+oc.exec("delete from part where message_id in ('msg_4', 'msg_5'); delete from message where id in ('msg_4', 'msg_5')");
+const shrunk = await readTrace(ocSession, { window: { at: 'after', version: 2, cursor: 5, min: 2 } });
+assert.equal(shrunk.window.reset, true, 'a deletion resets a cursor beyond the new end');
+// A reset uses the tail's minimum-history floor, not the requested page count.
+assert.deepEqual(shrunk.turns.map(textOf), ['streaming second', 'message 2', 'message 3']);
+assert.equal(shrunk.window.end, 3);
+oc.exec('delete from part; delete from message');
+const cleared = await readTrace(ocSession, { window: { at: 'after', version: 2, cursor: 3 } });
+assert.equal(cleared.window.reset, true);
+assert.deepEqual(cleared.turns, []);
+assert.equal(cleared.window.end, 0);
+oc.close();
 
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log('trace-window: ok');
