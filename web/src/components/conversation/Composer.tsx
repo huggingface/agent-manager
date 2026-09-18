@@ -11,10 +11,11 @@ import { useState } from 'react';
 import type { ClipboardEvent, DragEvent, KeyboardEvent, ReactNode, RefObject } from 'react';
 import { filesFromTransfer, transferMayContainFile } from '../../lib/attachments';
 import { SendGlyph } from '../icons';
+import { useWritingAssistance } from '../../lib/writingAssistance';
 
 export default function Composer({
   draft, sending, isMobile, inputRef, className = '', containerClassName = '', above, canSend,
-  onChange, onSend, onCancel, onPasteFiles,
+  onChange, onSend, onCancel, onPasteFiles, sendLabel = 'Send', placeholder = 'reply…', sendDisabled,
 }: {
   draft: string;
   sending?: boolean;
@@ -26,6 +27,9 @@ export default function Composer({
   above?: ReactNode;
   /** Overrides the send-button condition, for example when files are attached without text. */
   canSend?: boolean;
+  sendLabel?: string;
+  sendDisabled?: boolean;
+  placeholder?: string;
   onChange: (v: string) => void;
   onSend: () => void;
   onCancel?: () => void;
@@ -37,6 +41,8 @@ export default function Composer({
   onPasteFiles?: (files: File[]) => void;
 }) {
   const [dropActive, setDropActive] = useState(false);
+  const [writingAssistance, setWritingAssistance] = useWritingAssistance();
+  const assisted = !!isMobile && writingAssistance;
   const filesEnabled = !!onPasteFiles && !sending;
   const grow = (el: HTMLTextAreaElement) => {
     el.style.height = 'auto';
@@ -52,6 +58,9 @@ export default function Composer({
   const acceptsDrop = (e: DragEvent<HTMLDivElement>) =>
     filesEnabled && transferMayContainFile(e.dataTransfer);
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Enter/Escape may accept or dismiss an IME/predictive composition rather
+    // than send/cancel the draft. Safari can report only the legacy 229 marker.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     // Desktop: Enter sends, Shift+Enter newlines. Mobile keyboards cannot do
     // Shift+Enter, so there Enter newlines and the button sends.
     if (e.key === 'Enter' && !e.shiftKey && !isMobile) { e.preventDefault(); onSend(); }
@@ -79,8 +88,9 @@ export default function Composer({
         rows={1}
         value={draft}
         disabled={sending}
-        placeholder={sending ? 'sending…' : 'reply…'}
-        autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+        placeholder={sending ? 'sending…' : placeholder}
+        autoComplete="off" autoCorrect={assisted ? 'on' : 'off'}
+        autoCapitalize={assisted ? 'sentences' : 'off'} spellCheck={assisted}
         onChange={(e) => { onChange(e.target.value); grow(e.currentTarget); }}
         onPaste={onPaste}
         // iOS does not resize the layout for the keyboard — scroll the input
@@ -89,9 +99,15 @@ export default function Composer({
         onKeyDown={onKeyDown}
       />
         {(canSend ?? !!draft.trim()) && (
-          <button className="ov-send" title="Send" onClick={onSend} disabled={sending}><SendGlyph /></button>
+          <button type="button" className="ov-send" title={sendLabel} aria-label={sendLabel} onClick={onSend} disabled={sending || sendDisabled}><SendGlyph /></button>
         )}
       </div>
+      {isMobile && (
+        <label className="writing-assistance">
+          <input type="checkbox" checked={writingAssistance} onChange={(e) => setWritingAssistance(e.target.checked)} />
+          Writing assistance
+        </label>
+      )}
     </div>
   );
 }
