@@ -146,6 +146,39 @@ export const checkUpdate = (): Promise<UpdateCheck> => fetch('/api/update/check'
 export const runUpdate = (): Promise<{ ok: boolean; reason?: string; upToDate?: boolean }> =>
   fetch('/api/update', { method: 'POST' }).then(json);
 
+// ---- installing the latest agent CLIs in place (no Space rebuild) ----
+export type CliUpdateState =
+  | 'idle' | 'pending' | 'installing' | 'restarting'
+  | 'updated' | 'installed' | 'current' | 'failed';
+export interface CliUpdatePane { id: string; name: string; state: string }
+export interface CliUpdateItem {
+  id: string; label: string; bin: string; npm: string;
+  state: CliUpdateState;
+  /** Version before the install, and after it. */
+  from: string | null;
+  to: string | null;
+  error: string | null;
+  installedAt?: number | null;
+  /** Panes this CLI's update restarts — named before the run, restarted during it. */
+  sessions: CliUpdatePane[];
+  restarted: { id: string; name: string; was: string; ok: boolean; error: string | null }[];
+}
+export interface CliUpdateStatus {
+  running: boolean;
+  startedAt: number | null;
+  finishedAt: number | null;
+  prefix: string | null;
+  installScript: string;
+  persistSnippet: string;
+  excluded: { id: string; label: string; reason: string }[];
+  items: CliUpdateItem[];
+  /** Panes still on a replaced binary when the run ended. Normally empty. */
+  stale: { id: string; name: string; cli: string; state: string }[];
+}
+export const getCliUpdate = (): Promise<CliUpdateStatus> => fetch('/api/clis/update').then(json);
+export const runCliUpdate = (): Promise<CliUpdateStatus> =>
+  fetch('/api/clis/update', { method: 'POST' }).then(json);
+
 export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
   jobs: { askAboveUsd: number };

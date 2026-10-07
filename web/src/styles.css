@@ -1445,6 +1445,45 @@ a.btn-ghost { text-decoration: none; }
 .ar-ver { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .ar-state { flex: none; width: 88px; text-align: right; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 .ar-state.ok { color: var(--go); }
+/* ---- update the agent CLIs in place ---- */
+/* Same hairline voice as .agent-row above it: this is the same list, acting. */
+.cu { margin-top: 14px; }
+.cu-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cu-busy { font-size: 12px; color: var(--muted); }
+.cu-inline { margin: 0; }
+.cu-rows { display: flex; flex-direction: column; margin-top: 10px; }
+.cu-item { padding: 7px 2px; font-size: 13px; }
+.cu-item + .cu-item { border-top: 1px solid var(--border); }
+.cu-row { display: flex; align-items: center; gap: 10px; }
+.cu-row .spacer { flex: 1; }
+.cu-state { flex: none; width: 92px; text-align: right; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.cu-state.ok { color: var(--go); }
+.cu-state.bad { color: var(--danger); }
+.cu-state.busy { color: var(--text); }
+.cu-err { margin-top: 3px; font-size: 11.5px; line-height: 1.45; color: var(--danger); white-space: pre-wrap; word-break: break-word; }
+.cu-sub { margin-top: 3px; font-size: 11.5px; color: var(--muted); }
+.cu-sub.bad { color: var(--danger); }
+.cu-note { margin-top: 10px; font-size: 12.5px; line-height: 1.5; color: var(--muted); }
+/* The warning before the install, and anything left undone after it. Bordered
+   because it is the one block here the operator must actually read. */
+.cu-note.hot, .cu-confirm {
+  padding: 9px 11px; border-radius: var(--r-md);
+  border: 1px solid var(--border); background: color-mix(in srgb, var(--text) 3%, transparent);
+  color: var(--text);
+}
+.cu-note.hot, .cu-confirm.hot {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+}
+.cu-count { margin-top: 6px; }
+.cu-quiet { color: var(--muted); }
+.cu-panes { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.cu-panes li { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.cu-panes .mono { font-size: 11.5px; }
+.cu-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); opacity: 0.5; }
+.cu-dot.hot { background: var(--danger); opacity: 1; }
+.cu-pane-name { font-weight: 500; color: var(--text); }
+.cu-snip { display: block; margin-top: 6px; padding: 7px 9px; border: 1px solid var(--border); border-radius: var(--r-md); font-family: var(--font-mono); font-size: 11.5px; color: var(--text); white-space: pre-wrap; word-break: break-all; user-select: all; }
 /* reserved (i) slot: same width on every row, snug against the state text */
 .ar-info { flex: none; width: 13px; height: 13px; margin-left: -5px; display: inline-flex; align-items: center; }
 /* (i) hover hint — a small explainer card (hover or keyboard focus) */
