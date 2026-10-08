@@ -11,11 +11,10 @@ import { useState } from 'react';
 import type { ClipboardEvent, DragEvent, KeyboardEvent, ReactNode, RefObject } from 'react';
 import { filesFromTransfer, transferMayContainFile } from '../../lib/attachments';
 import { SendGlyph } from '../icons';
-import { useWritingAssistance } from '../../lib/writingAssistance';
 
 export default function Composer({
   draft, sending, isMobile, inputRef, className = '', containerClassName = '', above, canSend,
-  onChange, onSend, onCancel, onPasteFiles, sendLabel = 'Send', placeholder = 'reply…', sendDisabled,
+  onChange, onSend, onCancel, onPasteFiles,
 }: {
   draft: string;
   sending?: boolean;
@@ -27,9 +26,6 @@ export default function Composer({
   above?: ReactNode;
   /** Overrides the send-button condition, for example when files are attached without text. */
   canSend?: boolean;
-  sendLabel?: string;
-  sendDisabled?: boolean;
-  placeholder?: string;
   onChange: (v: string) => void;
   onSend: () => void;
   onCancel?: () => void;
@@ -41,8 +37,7 @@ export default function Composer({
   onPasteFiles?: (files: File[]) => void;
 }) {
   const [dropActive, setDropActive] = useState(false);
-  const [writingAssistance, setWritingAssistance] = useWritingAssistance();
-  const assisted = !!isMobile && writingAssistance;
+  const assisted = !!isMobile;
   const filesEnabled = !!onPasteFiles && !sending;
   const grow = (el: HTMLTextAreaElement) => {
     el.style.height = 'auto';
@@ -88,7 +83,7 @@ export default function Composer({
         rows={1}
         value={draft}
         disabled={sending}
-        placeholder={sending ? 'sending…' : placeholder}
+        placeholder={sending ? 'sending…' : 'reply…'}
         autoComplete="off" autoCorrect={assisted ? 'on' : 'off'}
         autoCapitalize={assisted ? 'sentences' : 'off'} spellCheck={assisted}
         onChange={(e) => { onChange(e.target.value); grow(e.currentTarget); }}
@@ -99,15 +94,9 @@ export default function Composer({
         onKeyDown={onKeyDown}
       />
         {(canSend ?? !!draft.trim()) && (
-          <button type="button" className="ov-send" title={sendLabel} aria-label={sendLabel} onClick={onSend} disabled={sending || sendDisabled}><SendGlyph /></button>
+          <button type="button" className="ov-send" title="Send" aria-label="Send" onClick={onSend} disabled={sending}><SendGlyph /></button>
         )}
       </div>
-      {isMobile && (
-        <label className="writing-assistance">
-          <input type="checkbox" checked={writingAssistance} onChange={(e) => setWritingAssistance(e.target.checked)} />
-          Writing assistance
-        </label>
-      )}
     </div>
   );
 }

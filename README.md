@@ -166,16 +166,10 @@ sets the window (1 / 3 / 7 days, or off).
 
 On phones, Reader and Overview reply boxes allow the OS keyboard's writing
 assistance (autocorrection, sentence capitalization and spelling suggestions).
-The **Writing assistance** checkbox turns it off for literal code or commands;
-the choice is shared between composers and remembered in this browser.
+Assistance is always enabled in mobile reply boxes, with no toggle required.
 The OS still controls whether predictive suggestions appear: on iPhone enable
 Settings → General → Keyboard → Predictive Text.
 
-In terminal mode, tap **write** to compose in a normal text box, then **Paste draft
-into terminal**. Nothing is streamed while typing and no Enter is appended. You
-must have terminal control to paste. Multiple lines still follow the running
-program's paste behavior and may execute shell commands. Closing the buffer
-keeps its text while the pane remains mounted; reloading the page does not.
 The raw terminal keyboard and desktop reply behavior remain unchanged.
 
 ## Configuration (env)
