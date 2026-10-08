@@ -391,13 +391,13 @@ configureCliUpdate({
   },
 });
 
-// Panes still on a replaced binary after the run: one we could not restart, or
-// one that was opened while the install was in flight. Normally empty — it is
-// here so a failed restart cannot pass for a finished update.
+// Panes still on a replaced binary: one we could not restart, or one that was
+// opened while the install was in flight. Normally empty — it is here so a
+// failed restart cannot pass for a finished update.
 function staleAfterUpdate(status) {
-  if (status.running) return [];
   const info = agentInfo();
   return status.items.flatMap((item) => {
+    if (status.runningId === item.id) return [];
     if (!item.installedAt || (item.state !== 'updated' && item.state !== 'installed')) return [];
     return store.list()
       .filter((s) => s.cli === item.id && isRunning(s.id) && (startedAt(s.id) || 0) < item.installedAt)
@@ -412,9 +412,14 @@ const cliUpdateView = () => {
 
 api.get('/api/clis/update', (_req, res) => res.json(cliUpdateView()));
 
-api.post('/api/clis/update', (_req, res) => {
-  // One run at a time: two `npm install -g` into the same prefix corrupt it.
-  if (!startCliUpdate()) return res.status(409).json({ error: 'a CLI update is already running' });
+api.post('/api/clis/update', (req, res) => {
+  const id = String((req.body || {}).id || '');
+  const refused = startCliUpdate(id);
+  if (refused === 'not-updatable') {
+    return res.status(400).json({ error: `'${id}' is not a CLI this box installs through npm — see GET /api/clis/update` });
+  }
+  // One at a time: two `npm install -g` into the same prefix corrupt it.
+  if (refused) return res.status(409).json({ error: 'a CLI update is already running' });
   res.json(cliUpdateView());
 });
 

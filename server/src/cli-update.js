@@ -1,5 +1,5 @@
-// Install the latest CLIs without rebuilding the Space, and restart the panes
-// that were running the binary we just replaced.
+// Install the latest release of one CLI without rebuilding the Space, and
+// restart the panes that were running the binary it replaced.
 //
 // Why this can work at all: entrypoint.sh sets NPM_CONFIG_PREFIX to
 // $AM_LOCAL/npm and puts $AM_LOCAL/npm/bin ahead of /usr/local/bin on PATH, so
@@ -7,30 +7,32 @@
 // shadows the image's. Sessions launch their CLI as a bare command resolved
 // through PATH at spawn time, so a pane started after an install gets the new
 // one — but a pane already running keeps the executable it was exec'd with
-// until it exits. Hence the restart: a button that leaves four panes on the old
-// version has not updated anything the operator can see.
+// until it exits. Hence the restart: an update that leaves four panes on the
+// old version has not changed anything the operator can see.
 //
 // The restart is the dangerous half, so it is announced before it happens, not
-// reported after. `cliUpdatePreview()` answers "what will this restart, and what is it
-// doing right now" — by name and by state, per CLI, because updating Codex
-// restarts the Codex panes and nothing else. A `waiting` pane costs nothing to
-// restart; a `working` one loses whatever it is mid-way through. The operator
-// decides with that in front of them; a working pane makes the confirmation
-// louder, not impossible.
+// reported after. `willRestart` answers "what would updating THIS CLI restart,
+// and what is it doing right now" — updating Codex restarts the Codex panes and
+// nothing else. A `waiting` pane costs nothing to restart; a `working` one loses
+// whatever it is mid-way through. The operator decides with that in front of
+// them; a working pane makes the confirmation louder, not impossible.
+//
+// One CLI per run, and one run at a time: `npm install -g` writes into a prefix
+// they all share, and two of them at once corrupt it.
 //
 // What this cannot do: $AM_LOCAL is container disk and is wiped on every Space
 // restart, which takes the whole npm prefix with it. An update made here lasts
 // until the next restart. The durable half is $DATA_DIR/install.sh, which
 // entrypoint.sh runs on each boot — `persistSnippet()` is the line that belongs
 // in it. This module does not write that file: it is the operator's, it runs
-// blocking at boot behind a 600s timeout, and five npm installs added to it are
-// a minute on every start. Showing the line is help; appending to it is a
+// blocking at boot behind a 600s timeout, and the installs added to it cost
+// that time on every start. Showing the line is help; appending to it is a
 // decision that is not ours.
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { cliUpdatePlan, probeVersion, DATA_DIR } from './config.js';
 
-// One install, not the whole run: npm pulling a large CLI over a slow link is
+// One install, not a whole run: npm pulling a large CLI over a slow link is
 // normal, npm wedged on a dead registry is not.
 const INSTALL_TIMEOUT = 180_000;
 
@@ -59,7 +61,7 @@ let deps = {
   panes: () => [],
   /** Stop and start one pane by id; rejects if it could not come back. */
   restart: async () => { throw new Error('restart is not wired'); },
-  /** Is npm usable at all — one answer instead of the same ENOENT per package. */
+  /** Is npm usable at all — asked once, before the install it would break. */
   preflight: () => npm(['--version']),
   /** Install one package's latest release. */
   install: (pkg) => npm(['install', '-g', `${pkg}@latest`, '--no-fund', '--no-audit'], INSTALL_TIMEOUT),
@@ -68,14 +70,20 @@ let deps = {
 };
 export function configureCliUpdate(next) { deps = { ...deps, ...next }; }
 
-/** Last run, alive or finished. One at a time — npm's global prefix is shared. */
-let current = null;
+/** Last run per CLI id, so updating Codex does not erase what Claude reported. */
+const results = new Map();
+let runningId = null;
+
+/** Running panes for one CLI, with the state that decides what a restart costs. */
+function panesFor(id) {
+  try { return deps.panes(id).map((p) => ({ id: p.id, name: p.name, state: p.state })); } catch { return []; }
+}
 
 async function restartPanes(item) {
   // The panes named in the warning, not whatever is running now: a pane opened
   // during the install was never on the list the operator agreed to, and it
   // already has the new binary.
-  for (const pane of item.sessions) {
+  for (const pane of item.frozen) {
     const result = { id: pane.id, name: pane.name, was: pane.state, ok: false, error: null };
     item.restarted.push(result);
     try {
@@ -87,7 +95,14 @@ async function restartPanes(item) {
   }
 }
 
-async function installOne(item) {
+async function runOne(item) {
+  // One clear answer instead of an ENOENT dressed up as an install failure.
+  const probe = await deps.preflight();
+  if (!probe.ok) {
+    item.state = 'failed';
+    item.error = `npm is not usable here: ${probe.error}`;
+    return;
+  }
   item.state = 'installing';
   item.from = await deps.version(item.id);
   const { ok, error } = await deps.install(item.npm);
@@ -108,111 +123,89 @@ async function installOne(item) {
     // Nothing moved, so nothing is stale — restarting panes here would cost the
     // operator work for no change at all.
     item.state = 'current';
-    item.sessions = [];
+    item.frozen = [];
     return;
   }
   // When the new binary landed. A pane that started before this is on the old
-  // one; a pane that started after — including one we restarted below — is not.
+  // one; a pane that started after — including one restarted below — is not.
   item.installedAt = Date.now();
   item.state = item.from ? 'updated' : 'installed';
-  if (item.sessions.length) {
+  if (item.frozen.length) {
     item.state = 'restarting';
     await restartPanes(item);
     item.state = item.from ? 'updated' : 'installed';
   }
 }
 
-async function runAll(run) {
-  // One preflight instead of the same ENOENT five times over.
-  const probe = await deps.preflight();
-  if (!probe.ok) {
-    for (const item of run.items) { item.state = 'failed'; item.error = `npm is not usable here: ${probe.error}`; }
-  } else {
-    for (const item of run.items) {
-      try { await installOne(item); } catch (e) { item.state = 'failed'; item.error = tail(e?.message); }
-    }
-  }
-  run.running = false;
-  run.finishedAt = Date.now();
-}
-
-/** Running panes per CLI, with the state that decides how much a restart costs. */
-function panesFor(id) {
-  try { return deps.panes(id).map((p) => ({ id: p.id, name: p.name, state: p.state })); } catch { return []; }
-}
-
 /**
- * What pressing the button would do, as a question the operator can answer:
- * which CLIs get installed, and which panes that restarts — by name, with what
- * each one is doing right now.
+ * Start a run for one CLI. Returns a reason string when it cannot start, so the
+ * route can answer with something more useful than false.
  */
-export function cliUpdatePreview() {
-  const { targets, excluded } = cliUpdatePlan();
-  const items = targets.map((t) => ({ ...t, sessions: panesFor(t.id) }));
-  const sessions = items.flatMap((i) => i.sessions);
-  return {
-    items,
-    excluded,
-    restarts: sessions.length,
-    working: sessions.filter((s) => s.state === 'working').length,
-  };
-}
-
-/**
- * Start a run. Returns false if one is already going — the caller answers 409
- * rather than letting two npm processes fight over the same prefix.
- */
-export function startCliUpdate() {
-  if (current?.running) return false;
-  const { targets } = cliUpdatePlan();
-  current = {
-    running: true,
+export function startCliUpdate(id) {
+  if (runningId) return runningId === id ? 'already-running' : 'busy';
+  const target = cliUpdatePlan().targets.find((t) => t.id === id);
+  if (!target) return 'not-updatable';
+  const item = {
+    ...target,
+    state: 'pending',
+    from: null,
+    to: null,
+    error: null,
+    installedAt: null,
     startedAt: Date.now(),
     finishedAt: null,
-    items: targets.map((t) => ({
-      ...t,
-      state: 'pending',
-      from: null,
-      to: null,
-      error: null,
-      installedAt: null,
-      // Frozen here: this is the list the warning showed, and it is the list
-      // that gets restarted. Recomputing it later would restart panes nobody
-      // was warned about.
-      sessions: panesFor(t.id),
-      restarted: [],
-    })),
+    // Frozen here: this is the list the warning showed, and it is the list that
+    // gets restarted. Recomputing it later would restart panes nobody was
+    // warned about.
+    frozen: panesFor(id),
+    restarted: [],
   };
-  // Deliberately not awaited: `npm install -g` is tens of seconds per package
-  // and the request answers now. The client polls GET for progress.
-  runAll(current);
-  return true;
+  results.set(id, item);
+  runningId = id;
+  // Deliberately not awaited: `npm install -g` is tens of seconds and the
+  // request answers now. The client polls GET for progress.
+  runOne(item)
+    .catch((e) => { item.state = 'failed'; item.error = tail(e?.message); })
+    .finally(() => { item.finishedAt = Date.now(); runningId = null; });
+  return null;
 }
 
-/** The line that makes an update survive a Space restart. */
+/** The line that makes these updates survive a Space restart. */
 export function persistSnippet() {
   const { targets } = cliUpdatePlan();
   return `npm install -g ${targets.map((t) => `${t.npm}@latest`).join(' ')}`;
 }
 
+const publicItem = (item) => {
+  const { frozen, ...rest } = item;
+  return { ...rest, restarted: [...item.restarted] };
+};
+
 export function cliUpdateStatus() {
-  const preview = cliUpdatePreview();
+  const { targets, excluded } = cliUpdatePlan();
   return {
-    running: !!current?.running,
-    startedAt: current?.startedAt ?? null,
-    finishedAt: current?.finishedAt ?? null,
+    runningId,
     // Where the installs land. Absent outside the Space image, which means
     // `npm install -g` would be writing somewhere root owns — worth showing.
     prefix: process.env.NPM_CONFIG_PREFIX || null,
     installScript: path.join(DATA_DIR, 'install.sh'),
     persistSnippet: persistSnippet(),
-    excluded: preview.excluded,
-    // Idle: what a run would do. Running or finished: what it did.
-    items: current
-      ? current.items.map((i) => ({ ...i, sessions: [...i.sessions], restarted: [...i.restarted] }))
-      : preview.items.map((i) => ({ ...i, state: 'idle', from: null, to: null, error: null, installedAt: null, restarted: [] })),
+    excluded,
+    items: targets.map((t) => {
+      const item = results.get(t.id);
+      return {
+        ...(item ? publicItem(item) : {
+          ...t, state: 'idle', from: null, to: null, error: null,
+          installedAt: null, startedAt: null, finishedAt: null, restarted: [],
+        }),
+        // Always live: what updating this CLI would restart if pressed now.
+        // During its own run that is the frozen list, which is the same thing
+        // the confirmation showed.
+        willRestart: runningId === t.id ? [...(item?.frozen || [])] : panesFor(t.id),
+      };
+    }),
   };
 }
 
-/** Tests only: forget the run so each case starts from idle. */
-export function resetCliUpdate() { current = null; }
+/** Tests only: forget every run so each case starts from idle. */
+export function resetCliUpdate() { results.clear(); runningId = null; }

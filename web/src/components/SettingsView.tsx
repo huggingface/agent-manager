@@ -6,7 +6,7 @@ import {
   configSaver, secretsSaver, saverFor, settingsSlot, subscribeSettings, noteServerRead,
   pendingSettings, overwriteSettings, adoptServerSettings, type Kind,
 } from '../lib/settingsSaves';
-import { SunGlyph, MoonGlyph, RefreshGlyph, InfoGlyph } from './icons';
+import { SunGlyph, MoonGlyph, RefreshGlyph, RefreshOffGlyph, InfoGlyph } from './icons';
 import Logo from './Logo';
 import LazyPanel from './LazyPanel';
 import type { SettingsPage as Page } from './SettingsShell';
@@ -18,23 +18,22 @@ const loadApiLog = () => import('./ApiLog');
 const loadSkills = () => import('./SkillsEditor');
 const loadCron = () => import('./CronSettings');
 
-// One word per CLI-update outcome. 'already latest' and 'updated' must not read
-// the same: a silent success is the failure mode this panel exists to avoid.
-const CU_WORD: Record<string, string> = {
-  idle: '', pending: 'queued', installing: 'installing…', restarting: 'restarting…',
-  updated: 'updated', installed: 'installed', current: 'already latest', failed: 'failed',
-};
+// 'already the latest' and 'updated' must not read the same: a run where
+// nothing moved looking like one where something did is the failure mode this
+// reporting exists to avoid.
 const CU_TONE: Record<string, string> = {
-  updated: ' ok', installed: ' ok', failed: ' bad', installing: ' busy', restarting: ' busy',
+  updated: ' ok', installed: ' ok', failed: ' bad',
 };
-const cuList = (names: string[]) => (names.length < 2
-  ? names.join('')
-  : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`);
-const cuDetail = (i: api.CliUpdateItem) => {
-  if (i.state === 'updated') return `v${i.from} → v${i.to}`;
-  if (i.state === 'installed' || i.state === 'current') return i.to ? `v${i.to}` : '';
-  if (i.state === 'idle' || i.state === 'pending') return i.npm;
-  return i.from ? `v${i.from}` : '';
+const cuLine = (i: api.CliUpdateItem) => {
+  switch (i.state) {
+    case 'pending': return 'queued…';
+    case 'installing': return `installing ${i.npm}…`;
+    case 'restarting': return 'restarting its sessions…';
+    case 'updated': return `updated v${i.from} → v${i.to}`;
+    case 'installed': return `installed v${i.to}`;
+    case 'current': return `already the latest${i.to ? ` (v${i.to})` : ''}`;
+    default: return `could not install ${i.npm}`;
+  }
 };
 
 // Saving is silent until it isn't. A failure stays on screen — it does not fade
@@ -380,34 +379,35 @@ export default function SettingsView({
     } catch { setUpdState({ msg: 'Request failed.' }); }
   };
 
-  // Installing the latest agent CLIs in place. Two presses on purpose: the
-  // second one is the warning, because the install restarts the panes running
-  // the binary it replaces (a live CLI keeps the executable it was exec'd with).
+  // Installing the latest agent CLIs in place, one row at a time. Two presses
+  // on purpose: the second one is the warning, because the install restarts the
+  // sessions running the binary it replaces (a live CLI keeps the executable it
+  // was exec'd with).
   const [cu, setCu] = useState<api.CliUpdateStatus | null>(null);
-  const [cuConfirm, setCuConfirm] = useState(false);
+  const [cuAsk, setCuAsk] = useState<string | null>(null);
   const [cuErr, setCuErr] = useState('');
   const loadCu = useCallback(() => api.getCliUpdate().then(setCu).catch(() => {}), []);
   useEffect(() => { loadCu(); }, [loadCu]);
-  // Poll only while something is happening — the run is tens of seconds per
-  // package and the per-CLI state is the progress indicator.
+  // Poll only while something is happening — an install is tens of seconds and
+  // the row's own state is the progress indicator.
   useEffect(() => {
-    if (!cu?.running) return undefined;
+    if (!cu?.runningId) return undefined;
     const t = setInterval(loadCu, 1500);
     return () => clearInterval(t);
-  }, [cu?.running, loadCu]);
-  // The Agents rows above come from a catalog read at page load. When a run
-  // ends it is out of date by definition, so ask for a fresh one.
+  }, [cu?.runningId, loadCu]);
+  // The version beside each name came from a catalog read at page load. When a
+  // run ends it is out of date by definition, so ask for a fresh one.
   const cuWasRunning = useRef(false);
   useEffect(() => {
-    if (cuWasRunning.current && !cu?.running) onClisChanged?.();
-    cuWasRunning.current = !!cu?.running;
-  }, [cu?.running, onClisChanged]);
-  const cuPanes = (cu?.items || []).flatMap((i) => i.sessions.map((p) => ({ ...p, label: i.label })));
-  const cuWorking = cuPanes.filter((p) => p.state === 'working').length;
-  const doCliUpdate = async () => {
+    if (cuWasRunning.current && !cu?.runningId) onClisChanged?.();
+    cuWasRunning.current = !!cu?.runningId;
+  }, [cu?.runningId, onClisChanged]);
+  const cuItems = new Map((cu?.items || []).map((i) => [i.id, i]));
+  const cuExcluded = new Map((cu?.excluded || []).map((e) => [e.id, e]));
+  const doCliUpdate = async (id: string) => {
     setCuErr('');
-    setCuConfirm(false);
-    try { setCu(await api.runCliUpdate()); } catch (e) { setCuErr((e as Error).message || 'Could not start the update.'); }
+    setCuAsk(null);
+    try { setCu(await api.runCliUpdate(id)); } catch (e) { setCuErr((e as Error).message || 'Could not start the update.'); }
   };
 
   const doRelaunch = async () => {
@@ -492,141 +492,128 @@ export default function SettingsView({
                   readiness was never ours to report. */}
               {clis.filter((c) => c.id !== 'shell' && !isPassive(c.id) && !isRemote(c.id)).map((c) => {
                 const ready = c.available && c.ready;
+                const upd = cuItems.get(c.id);
+                const noUpd = cuExcluded.get(c.id);
+                const mine = cu?.runningId === c.id;
+                const asking = cuAsk === c.id;
+                const panes = upd?.willRestart || [];
+                const working = panes.filter((p) => p.state === 'working').length;
+                const stale = (cu?.stale || []).filter((p) => p.cli === c.id);
                 return (
-                  <div key={c.id} className="agent-row">
-                    <span
-                      className="status"
-                      style={ready
-                        ? { background: c.color }
-                        : { background: 'var(--muted)', opacity: 0.4 }}
-                    />
-                    <Logo cli={c.id} size={14} tint={c.color} />
-                    <span className="ar-name">{c.label}</span>
-                    <span className="spacer" />
-                    {c.available && c.version && <span className="ar-ver mono">v{c.version}</span>}
-                    <span className={`ar-state${ready ? ' ok' : ''}`}>{!c.available ? 'unavailable' : ready ? 'ready' : 'needs setup'}</span>
-                    {/* fixed slot so version/state columns align across rows */}
-                    <span className="ar-info">
-                      {c.available && !ready && c.setup && (
-                        <span className="tip" tabIndex={0} data-tip={c.setup}><InfoGlyph className="tip-i" /></span>
-                      )}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Install the latest CLIs without rebuilding the Space. The npm
-                prefix lives on container disk, so this is fast and temporary —
-                both of which the panel says out loud. */}
-            {cu && (
-              <div className="cu">
-                {cuConfirm && !cu.running && (
-                  <div className={`cu-note cu-confirm${cuWorking ? ' hot' : ''}`}>
-                    <div>
-                      Installs the latest release of {cuList(cu.items.map((i) => i.label))} into
-                      the Space&rsquo;s own npm prefix &mdash; about a minute, no rebuild &mdash; then <b>restarts
-                      the sessions running them</b>. A running CLI keeps the binary it started with, so
-                      without the restart nothing you can see would change. Conversations are resumed;
-                      work in flight is not.
+                  <div key={c.id} className="agent-row-wrap">
+                    <div className="agent-row">
+                      <span
+                        className="status"
+                        style={ready
+                          ? { background: c.color }
+                          : { background: 'var(--muted)', opacity: 0.4 }}
+                      />
+                      <Logo cli={c.id} size={14} tint={c.color} />
+                      <span className="ar-name">{c.label}</span>
+                      <span className="spacer" />
+                      {c.available && c.version && <span className="ar-ver mono">v{c.version}</span>}
+                      <span className={`ar-state${ready ? ' ok' : ''}`}>{!c.available ? 'unavailable' : ready ? 'ready' : 'needs setup'}</span>
+                      {/* fixed slot so version/state columns align across rows */}
+                      <span className="ar-info">
+                        {c.available && !ready && c.setup && (
+                          <span className="tip" tabIndex={0} data-tip={c.setup}><InfoGlyph className="tip-i" /></span>
+                        )}
+                      </span>
+                      {/* One question per row, asked once: can this be updated
+                          in place? The struck-through arrow answers "no, and
+                          here is why" — an (i) here would collide with the
+                          credentials (i) one column to its left. */}
+                      <span className="ar-upd">
+                        {upd && (
+                          <button
+                            className={`ar-upd-btn${asking ? ' on' : ''}`}
+                            title={mine ? 'updating…' : `Install the latest ${c.label} (${upd.npm})`}
+                            aria-label={`Update ${c.label}`}
+                            disabled={!!cu?.runningId}
+                            onClick={() => { setCuErr(''); loadCu(); setCuAsk(asking ? null : c.id); }}
+                          ><RefreshGlyph /></button>
+                        )}
+                        {noUpd && (
+                          <span className="tip" tabIndex={0}
+                            data-tip={`Not updatable from here — ${noUpd.reason}. Update it from a shell inside the Space.`}
+                          ><RefreshOffGlyph className="tip-i" /></span>
+                        )}
+                      </span>
                     </div>
-                    {cuPanes.length === 0 ? (
-                      <div className="cu-count cu-quiet">No sessions are running these CLIs, so nothing restarts.</div>
-                    ) : (
-                      <>
-                        <div className="cu-count">
-                          {cuPanes.length} session{cuPanes.length === 1 ? '' : 's'} will restart
-                          {cuWorking > 0
-                            ? <>, <b>{cuWorking} of them working right now</b> &mdash; {cuWorking === 1 ? 'that session loses' : 'those sessions lose'} whatever is mid-task.</>
-                            : <> &mdash; none are working.</>}
+
+                    {asking && upd && !cu?.runningId && (
+                      <div className={`cu-confirm${working ? ' hot' : ''}`}>
+                        <div>
+                          Installs the latest <span className="mono">{upd.npm}</span> into the Space&rsquo;s own npm
+                          prefix &mdash; no rebuild.{' '}
+                          {panes.length === 0
+                            ? `No sessions are running ${c.label}, so nothing restarts.`
+                            : 'A running CLI keeps the binary it started with, so the sessions using it restart. Conversations are resumed; work in flight is not.'}
                         </div>
-                        <ul className="cu-panes">
-                          {cuPanes.map((p) => (
-                            <li key={p.id}>
-                              <span className={`cu-dot${p.state === 'working' ? ' hot' : ''}`} />
-                              <span className="cu-pane-name">{p.name}</span>
-                              <span className="mono cu-quiet">{p.label} · {p.state}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </>
+                        {panes.length > 0 && (
+                          <>
+                            <div className="cu-count">
+                              {panes.length} session{panes.length === 1 ? '' : 's'} will restart
+                              {working > 0
+                                ? <>, <b>{working} of them working right now</b> &mdash; {working === 1 ? 'that session loses' : 'those sessions lose'} whatever is mid-task.</>
+                                : <> &mdash; none are working.</>}
+                            </div>
+                            <ul className="cu-panes">
+                              {panes.map((p) => (
+                                <li key={p.id}>
+                                  <span className={`cu-dot${p.state === 'working' ? ' hot' : ''}`} />
+                                  <span className="cu-pane-name">{p.name}</span>
+                                  <span className="mono cu-quiet">{p.state}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </>
+                        )}
+                        <div className="cu-bar">
+                          <button className="btn-primary" onClick={() => doCliUpdate(c.id)}>
+                            {panes.length
+                              ? `Update and restart ${panes.length} session${panes.length === 1 ? '' : 's'}`
+                              : 'Update now'}
+                          </button>
+                          <button className="btn-ghost" onClick={() => setCuAsk(null)}>Cancel</button>
+                        </div>
+                      </div>
                     )}
-                  </div>
-                )}
 
-                <div className="cu-bar">
-                  {cu.running ? (
-                    <span className="cu-busy mono">Updating…</span>
-                  ) : cuConfirm ? (
-                    <>
-                      <button className="btn-primary" onClick={doCliUpdate}>
-                        {cuPanes.length
-                          ? `Update and restart ${cuPanes.length} session${cuPanes.length === 1 ? '' : 's'}`
-                          : 'Update now'}
-                      </button>
-                      <button className="btn-ghost" onClick={() => setCuConfirm(false)}>Cancel</button>
-                    </>
-                  ) : (
-                    <button className="btn-ghost" onClick={() => { setCuErr(''); loadCu(); setCuConfirm(true); }}>
-                      <RefreshGlyph /> Update agent CLIs
-                    </button>
-                  )}
-                  {cuErr && <span className="s-warn cu-inline">{cuErr}</span>}
-                </div>
-
-                {/* The per-CLI report, once there is something to report. Before
-                    that the list above is the whole truth and a second copy of
-                    it with nothing in the state column is just noise. */}
-                {cu.startedAt ? (
-                  <div className="cu-rows">
-                    {cu.items.map((i) => (
-                      <div key={i.id} className="cu-item">
-                        <div className="cu-row">
-                          <span className="ar-name">{i.label}</span>
-                          <span className="spacer" />
-                          <span className="ar-ver mono">{cuDetail(i)}</span>
-                          <span className={`cu-state${CU_TONE[i.state] || ''}`}>{CU_WORD[i.state]}</span>
-                        </div>
-                        {i.error && <div className="cu-err mono">{i.error}</div>}
-                        {i.restarted.map((r) => (
-                          <div key={r.id} className={`cu-sub${r.ok ? '' : ' bad'}`}>
+                    {upd && upd.state !== 'idle' && (
+                      <div className="ar-sub">
+                        <div className={`cu-line${CU_TONE[upd.state] || ''}`}>{cuLine(upd)}</div>
+                        {upd.error && <div className="cu-err mono">{upd.error}</div>}
+                        {upd.restarted.map((r) => (
+                          <div key={r.id} className={`cu-line${r.ok ? '' : ' bad'}`}>
                             {r.ok
                               ? `restarted ${r.name} (was ${r.was})`
                               : `could not restart ${r.name} — ${r.error}`}
                           </div>
                         ))}
                       </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="cu-note">
-                    Installs the latest npm release of {cuList(cu.items.map((i) => i.label))}, and
-                    restarts the sessions running them.
-                  </div>
-                )}
+                    )}
 
-                {cu.stale.length > 0 && (
-                  <div className="cu-note hot">
-                    Still running the old binary: {cu.stale.map((p) => p.name).join(', ')}. Restart{' '}
-                    {cu.stale.length === 1 ? 'it' : 'them'} from the session menu to pick up the new version.
+                    {stale.length > 0 && (
+                      <div className="ar-sub">
+                        <div className="cu-line bad">
+                          still running the old binary: {stale.map((p) => p.name).join(', ')} — restart{' '}
+                          {stale.length === 1 ? 'it' : 'them'} from the session menu
+                        </div>
+                      </div>
+                    )}
                   </div>
-                )}
-
-                {cu.excluded.length > 0 && (
-                  <div className="cu-note">
-                    Not covered: {cu.excluded.map((e, n) => (
-                      <span key={e.id}>{n > 0 && '; '}<b>{e.label}</b> — {e.reason}</span>
-                    ))}. Update {cu.excluded.length === 1 ? 'it' : 'these'} from a shell inside the Space.
-                  </div>
-                )}
-
-                <div className="cu-note">
-                  This lasts until the Space restarts: <span className="mono">{cu.prefix || 'the npm prefix'}</span> is
-                  container disk and is wiped on every boot. To make it permanent, add this line
-                  to <span className="mono">{cu.installScript}</span>, which runs on each boot (and will add
-                  roughly a minute to every start):
-                  <code className="cu-snip">{cu.persistSnippet}</code>
-                </div>
+                );
+              })}
+            </div>
+            {cuErr && <div className="s-warn">{cuErr}</div>}
+            {cu && (
+              <div className="s-help cu-foot">
+                Updates install into <span className="mono">{cu.prefix || 'the npm prefix'}</span>, which is container
+                disk and is wiped on every Space restart. To keep them, put this line
+                in <span className="mono">{cu.installScript}</span> — it runs on every boot, and costs that time on
+                every start:
+                <code className="cu-snip">{cu.persistSnippet}</code>
               </div>
             )}
 

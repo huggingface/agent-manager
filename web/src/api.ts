@@ -158,26 +158,29 @@ export interface CliUpdateItem {
   from: string | null;
   to: string | null;
   error: string | null;
-  installedAt?: number | null;
-  /** Panes this CLI's update restarts — named before the run, restarted during it. */
-  sessions: CliUpdatePane[];
+  installedAt: number | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  /** Panes updating THIS CLI would restart, live — the warning before pressing. */
+  willRestart: CliUpdatePane[];
+  /** Panes it did restart, and whether each came back. */
   restarted: { id: string; name: string; was: string; ok: boolean; error: string | null }[];
 }
 export interface CliUpdateStatus {
-  running: boolean;
-  startedAt: number | null;
-  finishedAt: number | null;
+  /** The CLI being installed right now, if any. One at a time. */
+  runningId: string | null;
   prefix: string | null;
   installScript: string;
   persistSnippet: string;
+  /** Agent CLIs that did not arrive through npm, with the reason. */
   excluded: { id: string; label: string; reason: string }[];
   items: CliUpdateItem[];
-  /** Panes still on a replaced binary when the run ended. Normally empty. */
+  /** Panes still on a replaced binary. Normally empty. */
   stale: { id: string; name: string; cli: string; state: string }[];
 }
 export const getCliUpdate = (): Promise<CliUpdateStatus> => fetch('/api/clis/update').then(json);
-export const runCliUpdate = (): Promise<CliUpdateStatus> =>
-  fetch('/api/clis/update', { method: 'POST' }).then(json);
+export const runCliUpdate = (id: string): Promise<CliUpdateStatus> =>
+  fetch('/api/clis/update', { method: 'POST', headers: HEADERS, body: JSON.stringify({ id }) }).then(json);
 
 export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };

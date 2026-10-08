@@ -1,4 +1,4 @@
-// Updating the installed CLIs in place.
+// Updating one installed CLI in place.
 //
 // The install itself is npm's problem. What is tested here is the bookkeeping
 // around it, because that is where this feature can lie: calling an unchanged
@@ -16,20 +16,20 @@ import { once } from 'node:events';
 import { REQUEST_HEADERS } from '../src/request-admission.js';
 import { CLIS, cliUpdatePlan, PASSIVE_CLIS, isRemote } from '../src/config.js';
 import {
-  configureCliUpdate, startCliUpdate, cliUpdateStatus, cliUpdatePreview,
-  persistSnippet, resetCliUpdate,
+  configureCliUpdate, startCliUpdate, cliUpdateStatus, persistSnippet, resetCliUpdate,
 } from '../src/cli-update.js';
 
 const item = (id) => cliUpdateStatus().items.find((i) => i.id === id);
 const settle = async () => {
-  for (let n = 0; n < 2000 && cliUpdateStatus().running; n++) {
+  for (let n = 0; n < 2000 && cliUpdateStatus().runningId; n++) {
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
-  assert.equal(cliUpdateStatus().running, false, 'run finished');
+  assert.equal(cliUpdateStatus().runningId, null, 'run finished');
 };
 
-// A world where every CLI installs cleanly and reports `versions[id]`, with
-// `panes[id]` running. Overrides replace one piece at a time.
+// A world where the install succeeds and `<bin> --version` answers `versions`
+// before it and `after` once that package has been installed. Overrides replace
+// one piece at a time.
 const byPkg = new Map(cliUpdatePlan().targets.map((t) => [t.npm, t.id]));
 const world = ({ versions = {}, after = null, panes = {}, install, restart } = {}) => {
   const restarted = [];
@@ -41,8 +41,6 @@ const world = ({ versions = {}, after = null, panes = {}, install, restart } = {
       if (result.ok) done.add(byPkg.get(pkg));
       return result;
     },
-    // `after` only applies to a package that has actually been installed, so a
-    // CLI later in the run still reports its old version when asked first.
     version: async (id) => ((after && done.has(id)) ? after[id] ?? null : versions[id] ?? null),
     panes: (id) => panes[id] || [],
     restart: restart || (async (id) => { restarted.push(id); }),
@@ -57,60 +55,72 @@ const agents = CLIS.filter((c) => c.bin && c.run && c.id !== 'shell' && c.id !==
   && !PASSIVE_CLIS.includes(c.id) && !isRemote(c.id));
 assert.equal(
   plan.targets.length + plan.excluded.length, agents.length,
-  'every agent CLI is either a target or explicitly excluded — a new one cannot land in neither and be skipped in silence',
+  'every agent CLI is either updatable or explicitly excluded — a new one cannot land in neither and be skipped in silence',
 );
 assert.deepEqual(plan.targets.map((t) => t.id), ['claude', 'codex', 'gemini', 'opencode', 'openclaw']);
 assert.deepEqual(plan.excluded.map((e) => e.id), ['hermes', 'fx'], 'the two non-npm CLIs are named, not dropped');
-for (const e of plan.excluded) assert.ok(e.reason.length > 10, `${e.id} says why it is excluded`);
+for (const e of plan.excluded) assert.ok(e.reason.length > 10, `${e.id} says why it cannot be updated here`);
 for (const t of plan.targets) assert.ok(persistSnippet().includes(`${t.npm}@latest`), `${t.id} is in the durable snippet`);
 
-// ---- the preview is the warning: which panes, and what they are doing ----
+// ---- each row's warning is about its own sessions ----
 
 resetCliUpdate();
-world({ panes: { codex: [{ id: 's1', name: 'build', state: 'working' }, { id: 's2', name: 'notes', state: 'waiting' }] } });
-const preview = cliUpdatePreview();
-assert.equal(preview.restarts, 2);
-assert.equal(preview.working, 1, 'a working pane is counted apart — it is the one that loses work');
-assert.deepEqual(preview.items.find((i) => i.id === 'codex').sessions.map((s) => s.name), ['build', 'notes']);
-assert.deepEqual(preview.items.find((i) => i.id === 'claude').sessions, [], 'updating codex does not restart claude');
+world({
+  panes: {
+    codex: [{ id: 's1', name: 'build', state: 'working' }, { id: 's2', name: 'notes', state: 'waiting' }],
+    claude: [{ id: 's7', name: 'docs', state: 'waiting' }],
+  },
+});
+assert.deepEqual(item('codex').willRestart.map((p) => [p.name, p.state]), [['build', 'working'], ['notes', 'waiting']]);
+assert.deepEqual(item('claude').willRestart.map((p) => p.name), ['docs'], 'updating codex is not a claude warning');
+assert.deepEqual(item('gemini').willRestart, []);
 
-// ---- an unchanged version is reported as unchanged, and restarts nothing ----
+// ---- only the CLI that was asked for is touched ----
 
 resetCliUpdate();
 let restarted = world({
-  versions: { codex: '1.2.3' }, after: { codex: '1.2.3' },
-  panes: { codex: [{ id: 's1', name: 'build', state: 'waiting' }] },
-});
-assert.equal(startCliUpdate(), true);
-await settle();
-assert.equal(item('codex').state, 'current');
-assert.deepEqual(restarted, [], 'nothing moved, so no pane is thrown away for it');
-assert.deepEqual(item('codex').sessions, [], 'and the report does not claim a restart it did not do');
-
-// ---- a real upgrade reports both versions and restarts exactly its own panes ----
-
-resetCliUpdate();
-restarted = world({
   versions: { codex: '1.2.3', claude: '2.0.0' },
-  after: { codex: '1.3.0', claude: '2.0.0' },
-  panes: { codex: [{ id: 's1', name: 'build', state: 'working' }], claude: [{ id: 's9', name: 'docs', state: 'waiting' }] },
+  after: { codex: '1.3.0', claude: '9.9.9' },
+  panes: { codex: [{ id: 's1', name: 'build', state: 'working' }], claude: [{ id: 's7', name: 'docs', state: 'waiting' }] },
 });
-assert.equal(startCliUpdate(), true);
-assert.equal(startCliUpdate(), false, 'one run at a time — two npm installs share one prefix');
+assert.equal(startCliUpdate('codex'), null);
+assert.equal(startCliUpdate('claude'), 'busy', 'one at a time — two npm installs share one prefix');
 await settle();
 assert.equal(item('codex').state, 'updated');
 assert.equal(item('codex').from, '1.2.3');
 assert.equal(item('codex').to, '1.3.0');
-assert.equal(item('claude').state, 'current');
-assert.deepEqual(restarted, ['s1'], 'only the panes of the CLI that actually changed');
+assert.equal(item('claude').state, 'idle', 'claude was never asked for and reports nothing');
+assert.equal(item('claude').from, null);
+assert.deepEqual(restarted, ['s1'], 'and only the codex pane restarted');
 assert.deepEqual(item('codex').restarted, [{ id: 's1', name: 'build', was: 'working', ok: true, error: null }]);
 assert.ok(item('codex').installedAt > 0, 'when the new binary landed, so a pane started after it is not called stale');
+
+// ---- a second row's run does not erase the first one's result ----
+
+assert.equal(startCliUpdate('claude'), null);
+await settle();
+assert.equal(item('claude').state, 'updated');
+assert.equal(item('codex').state, 'updated', "codex still reports what it did");
+assert.equal(item('codex').to, '1.3.0');
+
+// ---- an unchanged version is reported as unchanged, and restarts nothing ----
+
+resetCliUpdate();
+restarted = world({
+  versions: { codex: '1.2.3' }, after: { codex: '1.2.3' },
+  panes: { codex: [{ id: 's1', name: 'build', state: 'waiting' }] },
+});
+assert.equal(startCliUpdate('codex'), null);
+await settle();
+assert.equal(item('codex').state, 'current');
+assert.deepEqual(restarted, [], 'nothing moved, so no pane is thrown away for it');
+assert.deepEqual(item('codex').restarted, [], 'and the report does not claim a restart it did not do');
 
 // ---- a CLI that was not installed at all reads as installed, not updated ----
 
 resetCliUpdate();
 world({ versions: {}, after: { gemini: '9.9.9' } });
-assert.equal(startCliUpdate(), true);
+assert.equal(startCliUpdate('gemini'), null);
 await settle();
 assert.equal(item('gemini').state, 'installed');
 assert.equal(item('gemini').from, null);
@@ -124,7 +134,7 @@ restarted = world({
   panes: { codex: [{ id: 's1', name: 'build', state: 'waiting' }] },
   install: async () => ({ ok: false, error: 'E404 Not Found - GET https://registry.npmjs.org/@openai%2fcodex' }),
 });
-assert.equal(startCliUpdate(), true);
+assert.equal(startCliUpdate('codex'), null);
 await settle();
 assert.equal(item('codex').state, 'failed');
 assert.match(item('codex').error, /E404/);
@@ -138,28 +148,26 @@ restarted = world({
   versions: { codex: '1.2.3' }, after: { codex: null },
   panes: { codex: [{ id: 's1', name: 'build', state: 'waiting' }] },
 });
-assert.equal(startCliUpdate(), true);
+assert.equal(startCliUpdate('codex'), null);
 await settle();
-assert.equal(item('codex').state, 'failed', 'a silent success is the failure mode this panel exists to avoid');
+assert.equal(item('codex').state, 'failed', 'a silent success is the failure mode this reporting exists to avoid');
 assert.match(item('codex').error, /did not answer/);
 assert.deepEqual(restarted, []);
 
-// ---- npm missing entirely: said once, not five times, and nothing is claimed ----
+// ---- npm missing entirely: one clear answer, and nothing is claimed ----
 
 resetCliUpdate();
 configureCliUpdate({
   preflight: async () => ({ ok: false, error: 'spawn npm ENOENT' }),
   install: async () => { throw new Error('install must not run when npm is unusable'); },
-  version: async () => null,
+  version: async () => { throw new Error('nothing to probe'); },
   panes: () => [],
   restart: async () => { throw new Error('nothing to restart'); },
 });
-assert.equal(startCliUpdate(), true);
+assert.equal(startCliUpdate('codex'), null);
 await settle();
-for (const i of cliUpdateStatus().items) {
-  assert.equal(i.state, 'failed');
-  assert.match(i.error, /npm is not usable here: spawn npm ENOENT/);
-}
+assert.equal(item('codex').state, 'failed');
+assert.match(item('codex').error, /npm is not usable here: spawn npm ENOENT/);
 
 // ---- a pane that will not come back is reported as such ----
 
@@ -169,7 +177,7 @@ world({
   panes: { codex: [{ id: 's1', name: 'build', state: 'working' }, { id: 's2', name: 'notes', state: 'waiting' }] },
   restart: async (id) => { if (id === 's1') throw new Error('did not exit within 15s — still running the old binary'); },
 });
-assert.equal(startCliUpdate(), true);
+assert.equal(startCliUpdate('codex'), null);
 await settle();
 assert.equal(item('codex').state, 'updated');
 assert.deepEqual(item('codex').restarted.map((r) => [r.id, r.ok]), [['s1', false], ['s2', true]]);
@@ -188,17 +196,27 @@ restarted = world({
   panes: live,
   install: async () => { live.codex.push({ id: 's2', name: 'opened mid-install', state: 'working' }); return { ok: true, error: null }; },
 });
-assert.equal(startCliUpdate(), true);
+assert.equal(startCliUpdate('codex'), null);
 await settle();
 assert.deepEqual(restarted, ['s1']);
+
+// ---- a CLI that does not come from npm has no update to start ----
+
+resetCliUpdate();
+world();
+assert.equal(startCliUpdate('hermes'), 'not-updatable');
+assert.equal(startCliUpdate('fx'), 'not-updatable');
+assert.equal(startCliUpdate('shell'), 'not-updatable');
+assert.equal(startCliUpdate(''), 'not-updatable');
+assert.equal(cliUpdateStatus().runningId, null, 'and nothing was started by asking');
 
 // ---- the install sits behind the same admission as every other mutation ----
 //
 // It runs `npm install -g` from a web request, so a page that cannot set the
 // request header — a file preview, an unrelated origin — must not be able to
 // start one. Only the REFUSAL is exercised against a live server: a POST that
-// got through would really install five packages. Reading the plan is a plain
-// GET, admitted like /api/sessions is.
+// got through would really install a package. Reading the plan is a plain GET,
+// admitted like /api/sessions is.
 
 resetCliUpdate();
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'am-cli-update-'));
@@ -224,19 +242,20 @@ try {
     assert.ok(n < 100 && server.exitCode === null, 'isolated backend started');
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  const blind = await fetch(`${origin}/api/clis/update`, { method: 'POST' });
+  const blind = await fetch(`${origin}/api/clis/update`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: 'codex' }),
+  });
   assert.equal(blind.status, 403, 'no request marker, no install');
   assert.equal((await blind.json()).code, 'request-not-allowed');
 
   const res = await fetch(`${origin}/api/clis/update`, { headers: REQUEST_HEADERS });
   assert.equal(res.status, 200);
   const body = await res.json();
-  assert.equal(body.running, false);
+  assert.equal(body.runningId, null, 'neither the refused POST nor reading the plan started a run');
   assert.deepEqual(body.items.map((i) => i.id), plan.targets.map((t) => t.id));
   assert.deepEqual(body.excluded.map((e) => e.id), ['hermes', 'fx']);
   assert.deepEqual(body.stale, []);
-  assert.ok(body.items.every((i) => i.state === 'idle'),
-    'neither the refused POST nor reading the plan started a run');
+  assert.ok(body.items.every((i) => i.state === 'idle' && Array.isArray(i.willRestart)));
   assert.ok(body.installScript.endsWith('/install.sh'), 'the durable file is named, not implied');
   assert.ok(body.persistSnippet.startsWith('npm install -g '));
 } finally {
