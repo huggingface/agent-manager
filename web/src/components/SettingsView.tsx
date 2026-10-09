@@ -534,9 +534,9 @@ export default function SettingsView({
                           ><RefreshGlyph /></button>
                         )}
                         {noUpd && (
-                          <span className="tip" tabIndex={0}
+                          <span className="tip ar-upd-mark" tabIndex={0}
                             data-tip={`Not updatable from here — ${noUpd.reason}. Update it from a shell inside the Space.`}
-                          ><RefreshOffGlyph className="tip-i" /></span>
+                          ><RefreshOffGlyph /></span>
                         )}
                       </span>
                     </div>

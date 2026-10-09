@@ -1451,14 +1451,21 @@ a.btn-ghost { text-decoration: none; }
    one visual block. */
 .agent-row-wrap + .agent-row-wrap { border-top: 1px solid var(--border); }
 /* The update column: one fixed slot on every row so the rail above it stays
-   straight whether the row can be updated or not. */
+   straight whether the row can be updated or not.
+   Both states share ONE box. The live arrow is a button with a 22px hit area;
+   the struck one used to be a bare 13px glyph that shrink-wrapped and sat flush
+   right, which put its centre 4.5px (9 device px at 2x) to the right of every
+   other row's. Giving the mark the button's geometry is what keeps the column
+   straight — a margin here would be the same bug again, hidden. */
 .ar-upd { flex: none; width: 24px; display: inline-flex; justify-content: flex-end; align-items: center; margin-left: 2px; }
-.ar-upd-btn {
+.ar-upd-btn, .ar-upd-mark {
   display: inline-flex; align-items: center; justify-content: center;
   width: 22px; height: 22px; padding: 0; border-radius: var(--r-sm);
-  border: 1px solid transparent; background: transparent; color: var(--muted); cursor: pointer;
+  border: 1px solid transparent;
 }
-.ar-upd-btn svg { width: 13px; height: 13px; }
+.ar-upd-btn, .ar-upd-mark { color: var(--muted); }
+.ar-upd-btn { background: transparent; cursor: pointer; }
+.ar-upd-btn svg, .ar-upd-mark svg { width: 13px; height: 13px; }
 .ar-upd-btn:hover:not(:disabled) { color: var(--text); border-color: var(--border); background: var(--panel-2); }
 .ar-upd-btn.on { color: var(--accent); border-color: var(--accent); }
 .ar-upd-btn:disabled { opacity: 0.35; cursor: not-allowed; }
