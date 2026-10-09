@@ -136,3 +136,34 @@ routing, model-tool identity, concurrent prompt delivery, server crash recovery
 or automatic shutdown of a legacy writer. Those remain separate gates in the
 plan; the test's active command is explicit `thread/shellCommand`, not a model
 turn.
+
+## Legacy handoff trial (Codex 0.162.0)
+
+A separate VPS trial verified a legacy standalone TUI → graceful `/quit` →
+`thread/resume` on the existing shared daemon → shared tmux client transition.
+The disposable test used a fresh home, a dummy provider and a fixed shell
+command, with no inference. Full paginated turn data matched before and after,
+as did the explicitly supplied model, reasoning, approval and sandbox settings.
+For this version, use **`--no-daemon`** when constructing a standalone fixture:
+ordinary `codex` now defaults to the shared background server.
+
+One eligible idle user task was subsequently transferred through the existing
+external tmux handoff helper. Its root and child histories matched byte-for-byte
+after canonical JSON serialization. The old shell pane survived; an adjacent
+window joined the same UUID through `--remote`. Unrelated writer identities
+were unchanged. This validates that standalone handoff boundary, not an AM
+production rollout or phone-side approval handling.
+
+Keep these gates for further migration:
+
+- Verify the exact kernel writer PID and process start time, full owned-thread
+  scope, idle turn state, pending inputs and an empty terminal composer.
+- Read and explicitly preserve execution settings. An absent historical
+  reasoning setting must not silently become a new server default; an ambiguous
+  candidate was deferred in this trial.
+- Hash all paginated history, release only the verified owner gracefully,
+  resume the same UUID, then verify history, settings and shared ownership.
+- Never restart an older production AM merely to activate bindings while it
+  still owns live legacy TUIs. It does not know how to preserve their ownership
+  or suppress standalone relaunch. AM migration still needs the integrated
+  release/coordinator path and a nondisruptive rollout strategy.
