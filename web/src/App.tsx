@@ -116,6 +116,11 @@ const writeStored = (k: string, v: string | null) => {
 
 export default function App() {
   const [clis, setClis] = useState<Cli[]>([]);
+  // Re-read after anything that can change a CLI's version or availability —
+  // today, Settings installing the latest ones in place. Without this the
+  // Agents list goes on showing the version that was there at page load, right
+  // next to a report saying it was replaced.
+  const refreshClis = useCallback(() => { api.getClis().then(setClis).catch(() => {}); }, []);
   const [tree, setTree] = useState<Tree>({ order: [], groups: [], sessions: [], hidden: [] });
   // Restored from the last visit, then re-validated against the tree once it
   // loads (the agent may be long gone). focusedId comes back too, so a group
@@ -489,7 +494,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    api.getClis().then(setClis).catch(() => {});
+    refreshClis();
     const manager = createLatestRefresh(
       (signal) => api.getTree(signal),
       (next) => { setTree(next); setTreeLoaded(true); },
@@ -1214,6 +1219,7 @@ export default function App() {
             theme={theme}
             onToggleTheme={toggleTheme}
             clis={clis}
+            onClisChanged={refreshClis}
             info={info}
             onShowWelcome={openWelcome}
             onOpenSharedTrace={openSharedTrace}

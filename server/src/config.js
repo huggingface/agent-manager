@@ -39,9 +39,8 @@ export function refreshVersions() {
     if (!c.bin || versionCache.has(c.id) || !commandExists(c.bin)) continue;
     execFile(c.bin, ['--version'], { timeout: 30000 }, (err, stdout = '') => {
       if (err) return;
-      const s = String(stdout);
-      const m = s.match(/\d+\.\d+\.\d+[\w.-]*/);
-      versionCache.set(c.id, m ? m[0] : s.trim().split('\n')[0].slice(0, 40));
+      const v = parseVersion(stdout);
+      if (v) versionCache.set(c.id, v);
     });
   }
 }
@@ -49,6 +48,63 @@ export function refreshVersions() {
 /** The installed version of one CLI, once the boot-time pass has answered. */
 export function cliVersion(id) {
   return versionCache.get(id) || null;
+}
+
+const parseVersion = (stdout) => {
+  const s = String(stdout);
+  const m = s.match(/\d+\.\d+\.\d+[\w.-]*/);
+  return m ? m[0] : (s.trim().split('\n')[0].slice(0, 40) || null);
+};
+
+/**
+ * Ask one CLI its version RIGHT NOW and write the answer into the cache.
+ *
+ * refreshVersions() is a boot-time best-effort that never re-asks a CLI it has
+ * an answer for — correct while nothing changes under it, wrong the moment the
+ * updater replaces a binary. The updater calls this before and after each
+ * install, so the catalog (and the Agents list) reports the new version on the
+ * next poll instead of the one from boot.
+ */
+export function probeVersion(id) {
+  const c = cliById(id);
+  if (!c || !c.bin) return Promise.resolve(null);
+  forgetCommandExists(c.bin);
+  if (!commandExists(c.bin)) { versionCache.delete(id); return Promise.resolve(null); }
+  return new Promise((resolve) => {
+    execFile(c.bin, ['--version'], { timeout: 30000 }, (err, stdout = '') => {
+      const v = err ? null : parseVersion(stdout);
+      if (v) versionCache.set(id, v); else versionCache.delete(id);
+      resolve(v);
+    });
+  });
+}
+
+/** Drop the memoized `command -v` answer — an install can make it stale. */
+export function forgetCommandExists(cmd) {
+  cmdExistsCache.delete(cmd);
+}
+
+// CLIs the updater refuses to touch even though they have a binary: the shell
+// is the image's, and the repaint fixture is a test prop.
+const NEVER_UPDATED = new Set(['shell', 'test-repaint']);
+
+/**
+ * What an "update the CLIs" run would do, derived from the registry so a CLI
+ * added later lands in one of the two lists without touching this code:
+ *  - `targets`  : has an `npm` package — the updater installs @latest
+ *  - `excluded` : an agent CLI that arrived some other way. Named out loud with
+ *                 the reason, because a button that quietly skips a row is worse
+ *                 than one that says it cannot help.
+ */
+export function cliUpdatePlan() {
+  const agents = CLIS.filter((c) => c.bin && c.run && !NEVER_UPDATED.has(c.id)
+    && !PASSIVE_CLIS.includes(c.id) && !isRemote(c.id));
+  return {
+    targets: agents.filter((c) => c.npm)
+      .map((c) => ({ id: c.id, label: c.label, bin: c.bin, npm: c.npm })),
+    excluded: agents.filter((c) => !c.npm)
+      .map((c) => ({ id: c.id, label: c.label, reason: c.noUpdate || 'not installed through npm' })),
+  };
 }
 
 // tmux is no longer part of the terminal path: sessions are PTYs held by this
@@ -98,29 +154,36 @@ export const CLIS = [
   // a conversation, so it gets a light and a digest like any other agent.
   { id: 'remote',   label: 'Remote agent', bin: null,      color: '#5ec2e0', run: null,             cont: null },
   { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue', resizeMode: 'repaint',
+    npm: '@anthropic-ai/claude-code',
     withPrompt: (q) => `claude ${q}`,
     setup: setupHint('ANTHROPIC_API_KEY') },
   { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: codexCommand(),   cont: codexCommand('resume --last'), resizeMode: 'repaint',
+    npm: '@openai/codex',
     resume: (id) => codexCommand(`resume ${id}`),
     // `q` and image paths arrive shell-quoted from runner.commandFor(). Repeat
     // -i because Codex's variadic flag would otherwise consume the prompt.
     withPrompt: (q, images = []) => `${codexCommand()}${images.length ? ` ${images.map((image) => `-i ${image}`).join(' ')}` : ''} ${q}`,
     setup: setupHint('OPENAI_API_KEY') },
   { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', run: 'gemini',         cont: null, resizeMode: 'repaint',
+    npm: '@google/gemini-cli',
     withPrompt: (q) => `gemini -i ${q}`, // -i = interactive session seeded with the prompt
     setup: setupHint('GEMINI_API_KEY') },
   { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: 'opencode --continue', resizeMode: 'repaint',
+    npm: 'opencode-ai',
     withPrompt: (q) => `opencode --prompt ${q}`,
     setup: setupHint('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY') },
   { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', run: 'hermes',         cont: 'hermes -c', resizeMode: 'repaint',
+    noUpdate: 'installed by the vendor script from hermes-agent.nousresearch.com, onto its own Python venv',
     setup: setupHint('HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY') },
   // `chat` = TUI in --local mode: embedded agent, no gateway/daemon needed.
   { id: 'openclaw', label: 'OpenClaw',    bin: 'openclaw', color: '#c83636', run: 'openclaw chat',  cont: null, resizeMode: 'repaint',
+    npm: 'openclaw',
     setup: setupHint('ANTHROPIC_API_KEY') },
   // fx has no config-dir override: its state (auth, settings, sessions) is
   // hardcoded to ~/.fx, which entrypoint.sh points at local disk and
   // checkpoints — the same treatment opencode and Hermes get.
   { id: 'fx',       label: 'fx',          bin: 'fx',       color: '#626262', run: 'fx',             cont: 'fx --continue', resizeMode: 'repaint',
+    noUpdate: 'a prebuilt binary from releases.fx.sh, not an npm package',
     resume: (id) => `fx --resume ${id}`,
     // fx has no "start interactive, seeded with this prompt" form: `fx ask` runs
     // one request and exits, which would end the pane instead of opening it. So

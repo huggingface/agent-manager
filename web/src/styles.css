@@ -1436,7 +1436,6 @@ a.btn-ghost { text-decoration: none; }
 /* plain hairline rows — no box (sidebar voice: boundaries only where they mean something) */
 .agent-rows { display: flex; flex-direction: column; margin-top: 4px; }
 .agent-row { display: flex; align-items: center; gap: 10px; padding: 9px 2px; font-size: 13px; }
-.agent-row + .agent-row { border-top: 1px solid var(--border); }
 .agent-row .spacer { flex: 1; }
 /* The name is the only elastic thing in the row: it ellipsizes so the
    version/state rail keeps its alignment in a narrow pane instead of pushing
@@ -1445,6 +1444,59 @@ a.btn-ghost { text-decoration: none; }
 .ar-ver { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .ar-state { flex: none; width: 88px; text-align: right; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 .ar-state.ok { color: var(--go); }
+/* ---- update the agent CLIs in place ---- */
+/* The control lives in the Agents row it is about, so a row is now a wrapper:
+   the line itself, plus whatever that one CLI has to say underneath. The
+   hairline moved to the wrapper so a row with a confirmation or a result stays
+   one visual block. */
+.agent-row-wrap + .agent-row-wrap { border-top: 1px solid var(--border); }
+/* The update column: one fixed slot on every row so the rail above it stays
+   straight whether the row can be updated or not.
+   Both states share ONE box. The live arrow is a button with a 22px hit area;
+   the struck one used to be a bare 13px glyph that shrink-wrapped and sat flush
+   right, which put its centre 4.5px (9 device px at 2x) to the right of every
+   other row's. Giving the mark the button's geometry is what keeps the column
+   straight — a margin here would be the same bug again, hidden. */
+.ar-upd { flex: none; width: 24px; display: inline-flex; justify-content: flex-end; align-items: center; margin-left: 2px; }
+.ar-upd-btn, .ar-upd-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; padding: 0; border-radius: var(--r-sm);
+  border: 1px solid transparent;
+}
+.ar-upd-btn, .ar-upd-mark { color: var(--muted); }
+.ar-upd-btn { background: transparent; cursor: pointer; }
+.ar-upd-btn svg, .ar-upd-mark svg { width: 13px; height: 13px; }
+.ar-upd-btn:hover:not(:disabled) { color: var(--text); border-color: var(--border); background: var(--panel-2); }
+.ar-upd-btn.on { color: var(--accent); border-color: var(--accent); }
+.ar-upd-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+/* What one row has to say after (or during) its own update. */
+.ar-sub { padding: 0 2px 8px 24px; display: flex; flex-direction: column; gap: 2px; }
+.cu-line { font-size: 11.5px; line-height: 1.45; color: var(--muted); }
+.cu-line.ok { color: var(--go); }
+.cu-line.bad { color: var(--danger); }
+.cu-err { font-size: 11.5px; line-height: 1.45; color: var(--danger); white-space: pre-wrap; word-break: break-word; }
+/* The warning, shown before anything is installed. Bordered because it is the
+   one block here the operator must actually read. */
+.cu-confirm {
+  margin: 0 2px 10px; padding: 10px 12px; border-radius: var(--r-md);
+  border: 1px solid var(--border); background: color-mix(in srgb, var(--text) 3%, transparent);
+  color: var(--text); font-size: 12.5px; line-height: 1.5;
+}
+.cu-confirm.hot {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+}
+.cu-count { margin-top: 6px; }
+.cu-quiet { color: var(--muted); }
+.cu-panes { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.cu-panes li { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.cu-panes .mono { font-size: 11.5px; }
+.cu-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); opacity: 0.5; }
+.cu-dot.hot { background: var(--danger); opacity: 1; }
+.cu-pane-name { font-weight: 500; color: var(--text); }
+.cu-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.cu-foot { margin-top: 12px; }
+.cu-snip { display: block; margin-top: 6px; padding: 7px 9px; border: 1px solid var(--border); border-radius: var(--r-md); font-family: var(--font-mono); font-size: 11.5px; color: var(--text); white-space: pre-wrap; word-break: break-all; user-select: all; }
 /* reserved (i) slot: same width on every row, snug against the state text */
 .ar-info { flex: none; width: 13px; height: 13px; margin-left: -5px; display: inline-flex; align-items: center; }
 /* (i) hover hint — a small explainer card (hover or keyboard focus) */

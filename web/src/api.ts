@@ -146,6 +146,42 @@ export const checkUpdate = (): Promise<UpdateCheck> => fetch('/api/update/check'
 export const runUpdate = (): Promise<{ ok: boolean; reason?: string; upToDate?: boolean }> =>
   fetch('/api/update', { method: 'POST' }).then(json);
 
+// ---- installing the latest agent CLIs in place (no Space rebuild) ----
+export type CliUpdateState =
+  | 'idle' | 'pending' | 'installing' | 'restarting'
+  | 'updated' | 'installed' | 'current' | 'failed';
+export interface CliUpdatePane { id: string; name: string; state: string }
+export interface CliUpdateItem {
+  id: string; label: string; bin: string; npm: string;
+  state: CliUpdateState;
+  /** Version before the install, and after it. */
+  from: string | null;
+  to: string | null;
+  error: string | null;
+  installedAt: number | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  /** Panes updating THIS CLI would restart, live — the warning before pressing. */
+  willRestart: CliUpdatePane[];
+  /** Panes it did restart, and whether each came back. */
+  restarted: { id: string; name: string; was: string; ok: boolean; error: string | null }[];
+}
+export interface CliUpdateStatus {
+  /** The CLI being installed right now, if any. One at a time. */
+  runningId: string | null;
+  prefix: string | null;
+  installScript: string;
+  persistSnippet: string;
+  /** Agent CLIs that did not arrive through npm, with the reason. */
+  excluded: { id: string; label: string; reason: string }[];
+  items: CliUpdateItem[];
+  /** Panes still on a replaced binary. Normally empty. */
+  stale: { id: string; name: string; cli: string; state: string }[];
+}
+export const getCliUpdate = (): Promise<CliUpdateStatus> => fetch('/api/clis/update').then(json);
+export const runCliUpdate = (id: string): Promise<CliUpdateStatus> =>
+  fetch('/api/clis/update', { method: 'POST', headers: HEADERS, body: JSON.stringify({ id }) }).then(json);
+
 export interface AmConfig {
   artifacts: { enabled: boolean; space: string; visibility: 'public' | 'private' };
   jobs: { askAboveUsd: number };

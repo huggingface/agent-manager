@@ -134,6 +134,15 @@ export function ghosttyReady() {
   return !!ghostty;
 }
 
+/**
+ * When this session's process was exec'd, or null if nothing is running.
+ * A CLI keeps the binary it was launched with, so this is what says whether a
+ * pane predates an upgrade.
+ */
+export function startedAt(id) {
+  return hosts.get(id)?.startedAt ?? null;
+}
+
 /** Sample the grid's rendered text and record when it last changed. */
 function sampleScreen(host) {
   const now = Date.now();
@@ -2304,6 +2313,37 @@ export function capturePane(id, lines = 80) {
   // Trailing blank rows are padding, not content: a short screen should not
   // arrive as 50 lines of nothing.
   return [...history, ...visible].join('\n').replace(/\s+$/, '');
+}
+
+/**
+ * Stop a session and bring it straight back up.
+ *
+ * Why not stop() + ensureRunning(): stop() only sends the kill. The host stays
+ * in `hosts` until the PTY's exit event fires, so an immediate ensureRunning()
+ * sees a live session and returns false — the pane would stay down. Wait for
+ * the exit this launch owns, then start. A process that will not die inside the
+ * window is reported, not worked around: the caller said it would restart this
+ * pane, and silently leaving it running makes that a lie.
+ *
+ * The new process resumes the session's pinned conversation like any other
+ * launch (claude --resume / codex resume …), so the transcript survives. What
+ * does not survive is whatever the agent was in the middle of.
+ */
+export async function restart(session, timeoutMs = 15_000) {
+  const host = hosts.get(session.id);
+  if (host) {
+    stop(session.id);
+    let timer;
+    await Promise.race([
+      host.exitPromise,
+      new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+    ]);
+    clearTimeout(timer);
+    if (hosts.has(session.id)) {
+      throw new Error(`did not exit within ${Math.round(timeoutMs / 1000)}s — still running the old binary`);
+    }
+  }
+  ensureRunning(session);
 }
 
 /** Stop a session entirely (kills the process; viewers get an exit close code). */

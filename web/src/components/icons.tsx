@@ -214,6 +214,19 @@ export const RefreshGlyph = ({ className }: { className?: string }) => (
   </G>
 );
 
+// "Not updatable here": the refresh arc with a slash through it. Deliberately
+// NOT an (i) — the row already ends with one of those for missing credentials,
+// and two info icons on one line meaning different things is worse than none.
+// Same glyph as the update control, struck out, so the column reads as one
+// question: can this row be updated in place?
+export const RefreshOffGlyph = ({ className }: { className?: string }) => (
+  <G className={className}>
+    <path d="M13.2 8A5.2 5.2 0 1 1 8 2.8" />
+    <path d="M5.8 0.9L8 2.8 5.9 4.9" />
+    <path d="M2.6 2.6l10.8 10.8" />
+  </G>
+);
+
 // Create: the folder/file glyphs above with a plus where the corner is free.
 export const FolderPlusGlyph = ({ className }: { className?: string }) => (
   <G className={className}>

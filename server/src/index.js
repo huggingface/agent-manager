@@ -13,6 +13,7 @@ import {
   ensureDirs, cliCatalog, cliById, slugify, workspacePath, refreshVersions, PASSIVE_CLIS, isRemote,
 } from './config.js';
 import { createSkillsService, skillTargetDirs } from './skills.js';
+import { cliUpdateStatus, startCliUpdate, configureCliUpdate } from './cli-update.js';
 import * as remote from './remote.js';
 import * as store from './sessions.js';
 import * as groups from './groups.js';
@@ -25,7 +26,7 @@ import * as crons from './crons.js';
 import { ensureClaudeDialogDefaults, trustWorkspacesRoot } from './first-run.js';
 import {
   attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning,
-  waitForInputReady, capturePane, ghosttyReady, ghosttyError,
+  waitForInputReady, capturePane, ghosttyReady, ghosttyError, startedAt, restart as restartSession,
   installClaudeRepinHook, installOpencodeRepinPlugin,
 } from './runner.js';
 
@@ -366,6 +367,61 @@ api.get('/api/health', (_req, res) =>
   res.json({ ok: true, engine: 'libghostty', ghostty: ghosttyReady(), ghosttyError }));
 
 api.get('/api/clis', (_req, res) => res.json(cliCatalog()));
+
+// Install the latest CLIs in place. Behind the same admission as every other
+// mutating route (app.use(requestAdmission) above), so it is not reachable from
+// a file preview or an untrusted page.
+//
+// The update restarts the panes running the CLI it replaced — a running process
+// keeps the binary it was exec'd with, so without that the button changes
+// nothing the operator can see. That is announced before the install, with the
+// panes named and their state shown, and it is the operator's call: a `waiting`
+// pane costs nothing, a `working` one loses what it was mid-way through.
+configureCliUpdate({
+  panes: (cli) => {
+    const info = agentInfo();
+    return store.list()
+      .filter((s) => s.cli === cli && isRunning(s.id))
+      .map((s) => ({ id: s.id, name: s.name, state: deriveState(s, info.get(s.id)) }));
+  },
+  restart: async (id) => {
+    const s = store.get(id);
+    if (!s) throw new Error('the session no longer exists');
+    await restartSession(s);
+  },
+});
+
+// Panes still on a replaced binary: one we could not restart, or one that was
+// opened while the install was in flight. Normally empty — it is here so a
+// failed restart cannot pass for a finished update.
+function staleAfterUpdate(status) {
+  const info = agentInfo();
+  return status.items.flatMap((item) => {
+    if (status.runningId === item.id) return [];
+    if (!item.installedAt || (item.state !== 'updated' && item.state !== 'installed')) return [];
+    return store.list()
+      .filter((s) => s.cli === item.id && isRunning(s.id) && (startedAt(s.id) || 0) < item.installedAt)
+      .map((s) => ({ id: s.id, name: s.name, cli: s.cli, state: deriveState(s, info.get(s.id)) }));
+  });
+}
+
+const cliUpdateView = () => {
+  const status = cliUpdateStatus();
+  return { ...status, stale: staleAfterUpdate(status) };
+};
+
+api.get('/api/clis/update', (_req, res) => res.json(cliUpdateView()));
+
+api.post('/api/clis/update', (req, res) => {
+  const id = String((req.body || {}).id || '');
+  const refused = startCliUpdate(id);
+  if (refused === 'not-updatable') {
+    return res.status(400).json({ error: `'${id}' is not a CLI this box installs through npm — see GET /api/clis/update` });
+  }
+  // One at a time: two `npm install -g` into the same prefix corrupt it.
+  if (refused) return res.status(409).json({ error: 'a CLI update is already running' });
+  res.json(cliUpdateView());
+});
 
 api.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.debug === '1', req.query.provider || null)));
 
