@@ -23,7 +23,7 @@ wss.on('connection', (ws) => ws.on('message', (raw) => {
   const msg = JSON.parse(raw); calls.push(msg.method);
   if (msg.method === 'initialized') return;
   ws.send(JSON.stringify({ id: msg.id, result: msg.method === 'initialize' ? { codexHome: home, userAgent: 'fixture/0.162.0' }
-    : { thread: { id: threadId, cwd: work, status: { type: status } } } }));
+    : { thread: { id: msg.params.threadId, name: 'Shared task', cwd: work, status: { type: status }, canAcceptDirectInput: true } } }));
 }));
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socket, resolve); });
 fs.chmodSync(socket, 0o600);
@@ -66,6 +66,7 @@ try {
   await start();
   const route = '/api/sessions/fixture/codex/binding', request = { threadId, expectedRevision: 0 };
   assert.equal((await call(route, request)).body.code, 'codex-pilot-disabled'); assert.equal(calls.length, 0);
+  assert.equal((await call('/api/codex/import', { threadId })).body.code, 'codex-pilot-disabled'); assert.equal(calls.length, 0);
   await stop(); await start({ enabled: true });
   assert.equal((await call('/api/codex/context')).status, 400);
   assert.equal((await call('/api/codex/context?threadId[]=bad')).status, 400);
@@ -80,9 +81,19 @@ try {
   assert.equal((await call('/api/sessions/fixture/input', { text: 'do not send' })).body.code, 'codex-shared-delivery-pending');
   assert.equal((await call('/api/sessions/fixture/stop', {})).body.code, 'codex-shared-stop-unsupported');
   assert.equal((await call('/api/sessions/fixture/archive', {})).status, 409);
+  assert.equal((await call('/api/codex/import', { threadId })).body.code, 'codex-existing-session');
+  assert.equal((await call('/api/codex/import', { threadId: 'bad' })).status, 400);
+  const importedThread = '33333333-3333-4333-8333-333333333333';
+  status = 'active'; assert.equal((await call('/api/codex/import', { threadId: importedThread })).status, 409); status = 'idle';
+  const imported = await call('/api/codex/import', { threadId: importedThread });
+  assert.equal(imported.status, 200, JSON.stringify(imported));
+  assert.equal(imported.body.session.codexSharedOnly, true);
+  assert.equal((await call('/api/codex/import', { threadId: importedThread })).body.session.id, imported.body.session.id);
+  assert.equal((await call('/api/codex/context?threadId=' + importedThread)).body.amSessionId, imported.body.session.id);
   const operations = (await call('/api/operations?limit=100')).body.operations;
   assert.ok(operations.some((op) => op.path === route && op.status === 200));
   await stop(); await start();
+  assert.equal((await call('/api/codex/context?threadId=' + importedThread)).body.amSessionId, imported.body.session.id);
   assert.equal((await call('/api/codex/context?threadId=' + threadId)).body.amSessionId, session.id);
   assert.equal((await call('/api/codex/client-target?session=Microduck')).status, 200);
   assert.ok(calls.every((method) => ['initialize', 'initialized', 'thread/read'].includes(method)));
@@ -90,6 +101,7 @@ try {
   assert.equal((await call('/api/codex/context?threadId=' + threadId)).status, 403);
   assert.equal((await call('/api/codex/client-target?session=Microduck')).status, 403);
   assert.equal((await call(route, request)).status, 403);
+  assert.equal((await call('/api/codex/import', { threadId: importedThread })).status, 403);
   console.log('Codex context HTTP: pilot gate, lookup, mapping, restart, client target, legacy guards, audit and privacy passed.');
 } finally {
   await stop(); for (const ws of wss.clients) ws.terminate();

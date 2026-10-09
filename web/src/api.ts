@@ -1001,6 +1001,7 @@ export type CodexSharedSnapshot = {
   connection: 'not-configured' | 'connected';
   observedAt: string;
   launchEnabled: false;
+  importEnabled?: boolean;
   launchBlockedReason: string;
   serverVersion?: string | null;
   tasks: Array<{
@@ -1012,3 +1013,6 @@ export type CodexSharedSnapshot = {
 };
 export const codexSharedSnapshot = (cursor?: string | null): Promise<CodexSharedSnapshot> =>
   fetch(`/api/codex/shared${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`).then(json);
+
+export const importCodexTask = (threadId: string): Promise<{ session: Session }> =>
+  fetch('/api/codex/import', { method: 'POST', headers: HEADERS, body: JSON.stringify({ threadId }) }).then(json);

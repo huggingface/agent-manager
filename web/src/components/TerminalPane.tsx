@@ -250,7 +250,7 @@ export default function TerminalPane({
   // The mode is app-wide (the bottom bar owns it, like zoom), but only an agent
   // has a conversation to read: a shell is a shell, and files/trace panels are
   // not this component's business at all.
-  const canRender = session.cli !== 'shell' && !isPassive(session.cli);
+  const canRender = session.cli !== 'shell' && !isPassive(session.cli) && !session.codexSharedOnly;
   const reading = mode === 'reader' && canRender;
   modeRef.current = reading ? 'reader' : 'terminal';
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
@@ -1338,6 +1338,7 @@ export default function TerminalPane({
           >
             {group && <span className="ph-group">[{group}]</span>}
             <span className="ph-name">{session.name}</span>
+            {session.codexSharedOnly && <span className="s-help" title="Same Codex conversation on this terminal and your phone. Reader view is not available in this pilot.">Shared</span>}
           </span>
         )}
         <div className="ph-right">

@@ -98,17 +98,19 @@ try {
   const started = await rpc.call('thread/start', { cwd, sandbox: 'read-only', approvalPolicy: 'never' });
   const threadId = started.thread.id;
   assert.match(await rpc.shell(threadId, 'printf am-pilot-original'), /am-pilot-original/);
-  fs.writeFileSync(path.join(data, 'sessions.json'), JSON.stringify([{ id: 'fixture', name: 'Pilot project', cli: 'codex', path: 'work', everStarted: true,
-    sessionUuid: '22222222-2222-4222-8222-222222222222', codexSessionId: threadId, createdAt: new Date().toISOString() }]));
+  fs.writeFileSync(path.join(data, 'sessions.json'), '[]');
   await startAM();
-  await call('/api/sessions/fixture/codex/binding', { threadId, expectedRevision: 0 });
+  const imported = await call('/api/codex/import', { threadId });
+  const amId = imported.session.id;
+  assert.equal(imported.session.codexSharedOnly, true);
+  assert.equal((await call('/api/codex/import', { threadId })).session.id, amId);
   // Fixed, explicit user-shell command only. No model or untrusted shell input.
   const helper = path.resolve('../scripts/am-codex-context.mjs');
   const quote = (s) => "'" + s.replaceAll("'", "'\\''") + "'";
   const lookup = `${quote(process.execPath)} ${quote(helper)} --base-url ${quote(base)} resolve --id-only`;
-  assert.equal((await rpc.shell(threadId, lookup)).trim(), 'fixture');
-  const target = await call('/api/codex/client-target?session=Pilot%20project'); assert.equal(target.threadId, threadId);
-  terminal = new NativeWebSocket(base.replace('http:', 'ws:') + '/ws?session=fixture&cols=120&rows=34');
+  assert.equal((await rpc.shell(threadId, lookup)).trim(), amId);
+  const target = await call('/api/codex/client-target?session=' + amId); assert.equal(target.threadId, threadId);
+  terminal = new NativeWebSocket(base.replace('http:', 'ws:') + '/ws?session=' + amId + '&cols=120&rows=34');
   let output = '';
   terminal.on('message', (raw) => {
     const text = raw.toString(); output += text;
@@ -132,9 +134,9 @@ try {
   await stop(am); assert.match(await work, /am-pilot-survived/);
   assert.equal(daemon.exitCode, null);
   await startAM();
-  assert.equal((await call('/api/codex/context?threadId=' + threadId)).amSessionId, 'fixture');
+  assert.equal((await call('/api/codex/context?threadId=' + threadId)).amSessionId, amId);
   assert.equal((await rpc.call('thread/read', { threadId, includeTurns: false })).thread.id, threadId);
-  console.log(JSON.stringify({ codex: rpc.init.userAgent.split(' ')[0], nativeLookup: true, amTuiExactHistory: true, amRestartPreservesServerWork: true, bindingSurvivesRestart: true, modelCalls: 0 }));
+  console.log(JSON.stringify({ codex: rpc.init.userAgent.split(' ')[0], importExistingThread: true, idempotentImport: true, nativeLookup: true, amTuiExactHistory: true, amRestartPreservesServerWork: true, bindingSurvivesRestart: true, modelCalls: 0 }));
 } finally {
   terminal?.terminate(); rpc?.close();
   for (const child of [...children].reverse()) await stop(child);

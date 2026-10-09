@@ -2,7 +2,8 @@
 
 This implements the first execution slice of the [shared-session plan](proposals/codex-shared-next-steps.md).
 An existing AM Codex session can be associated with its exact thread after that
-thread has been handed off to the configured Codex server. Opening its AM
+thread has been handed off to the configured Codex server. A thread already on
+that server can also be added as a new AM view. Opening its AM
 terminal then launches a client of that server. A tool running inside the
 thread can recover AM attribution from `CODEX_THREAD_ID`, including after AM
 restarts. No `AM_ID` override is needed in the Codex server.
@@ -21,7 +22,7 @@ pilot server through the same `AM_CODEX_SHARED_SOCKET` and
 plus `AM_CODEX_BINDINGS_PILOT=1`. Do not point the test instance at production
 AM data or migrate working sessions to exercise this feature.
 
-The binding route accepts only an **existing exact AM Codex pin**. The old AM
+The binding route below accepts only an **existing exact AM Codex pin**. The old AM
 terminal must already be stopped, with no queued prompt or images. The thread
 must already be loaded and idle on the verified server, in the exact same
 resolved workspace. Ambiguous AM pins, a wrong server home, unsafe socket
@@ -46,6 +47,44 @@ an exact AM ID or an unambiguous display name, verifies the endpoint and
 thread through AM, then launches `codex --remote unix://… resume EXACT_UUID`
 without a shell. A changed or unavailable endpoint fails; it never falls back
 to a standalone writer, `--last`, or a fresh thread.
+
+## Add an existing shared task to AM
+
+In Settings → Codex multi-device preview, check the server and use **Add to AM**
+on an idle task. This adds a session-list entry without starting another agent,
+copying its history or sending a prompt. Open the entry to join the same
+conversation that is available from a phone or another terminal.
+
+The equivalent API is:
+
+```sh
+curl --fail-with-body http://127.0.0.1:7861/api/codex/import \
+  -H 'X-AM-Request: 1' -H 'X-AM-Origin: operator' \
+  -H 'Content-Type: application/json' --data '{"threadId":"EXACT_CODEX_UUID"}'
+```
+
+It requires the same pilot flag, an idle loaded root thread accepting direct
+input, and a resolved cwd within AM's configured workspace root. A legacy AM
+pin refuses import and must follow the existing handoff path. Repeated imports
+return the same AM view. Archived views are not reactivated automatically.
+
+A new reference is durably saved with `codexSharedOnly` before binding. If the
+second write fails, that pending reference cannot launch a standalone TUI,
+receive managed prompt delivery or revive at boot. Retry the import after
+resolving the failure; it completes the existing reference rather than creating
+a duplicate. Imported views display a **Shared** label and use the terminal
+even when the global Reader preference is selected; API-backed Reader support
+is still a separate rollout gate.
+
+For an isolated host pilot, `AM_WORKSPACES_DIR` may select an existing absolute
+project root without moving files or sharing production AM data. This is an
+administrator setting, not an API input. All resolved workspace checks still
+apply; escaping symlinks are refused. Skills remain under
+`DATA_DIR/workspaces/skills`, so booting a pilot does not install generated
+skills in the existing project. `AM_BIND_HOST=127.0.0.1` restricts the listener
+to loopback; any private reverse proxy needs an exact `AM_ALLOWED_ORIGINS`
+entry. Do not replace the existing AM listener or restart its live terminals
+to run this pilot.
 
 ## AM attribution from any Codex client
 
@@ -118,20 +157,24 @@ this pilot as the production default yet.
 Run from `server/`:
 
 ```sh
-node ../scripts/run-suites.mjs codex-bindings codex-context codex-shared.test api-http api-boundary request-admission codex-repin revive
+node ../scripts/run-suites.mjs codex-import codex-bindings codex-context codex-shared.test api-http api-boundary request-admission codex-repin revive
 node test/codex-shared-pilot.test.mjs
 ```
 
 The manual pilot test requires the installed Codex CLI and local sockets. It
 starts its own AM and Codex processes under fresh homes with a dummy provider,
-creates a disposable thread, binds it, resolves AM identity from a native
+creates a disposable thread, imports it idempotently, resolves AM identity from a native
 Codex user-shell command, opens the actual AM terminal and checks the original
 history. It then restarts only AM while a fixed shell command is running and
 checks that server work completes and the binding survives. It cleans up only
 its own children and files. No credentials, inference, Remote pairing or live
 user threads are used.
 
-Validated with Codex 0.162.0. This does not yet prove phone-side approval
+Import was validated with Codex 0.162.1 (the earlier binding test used 0.162.0).
+Ten targeted server suites, the web build and the Chromium mobile import test
+passed. Import tests cover failed persistence, pending-reference recovery,
+duplicates, archived views, outside-root paths, cancellation and privacy locks.
+This does not yet prove phone-side approval
 routing, model-tool identity, concurrent prompt delivery, server crash recovery
 or automatic shutdown of a legacy writer. Those remain separate gates in the
 plan; the test's active command is explicit `thread/shellCommand`, not a model

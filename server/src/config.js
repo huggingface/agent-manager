@@ -5,10 +5,13 @@ import { execSync, execFile } from 'node:child_process';
 
 export const PORT = parseInt(process.env.PORT || '7860', 10);
 export const DATA_DIR = process.env.DATA_DIR || path.resolve(process.cwd(), 'data');
-export const WORKSPACES_DIR = path.join(DATA_DIR, 'workspaces');
+// Host-chosen root, never supplied by a request. Lets an isolated manager attach
+// existing projects without moving them or sharing production AM state.
+if (process.env.AM_WORKSPACES_DIR && !path.isAbsolute(process.env.AM_WORKSPACES_DIR)) throw new Error('AM_WORKSPACES_DIR must be absolute');
+export const WORKSPACES_DIR = process.env.AM_WORKSPACES_DIR ? path.resolve(process.env.AM_WORKSPACES_DIR) : path.join(DATA_DIR, 'workspaces');
 export const STATE_DIR = path.join(DATA_DIR, 'state');
 // Shared skills live in the workspace so agents can reach them (../skills).
-export const SKILLS_DIR = path.join(WORKSPACES_DIR, 'skills');
+export const SKILLS_DIR = path.join(DATA_DIR, 'workspaces', 'skills');
 export const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 export const PUBLIC_DIR = process.env.PUBLIC_DIR || path.resolve(process.cwd(), '..', 'web', 'dist');
 

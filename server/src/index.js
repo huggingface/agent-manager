@@ -1,4 +1,4 @@
-import { codexBindings, configuredEndpoint, contextForThread, bindExistingThread, contextError } from './codex-context.js';
+import { codexBindings, configuredEndpoint, contextForThread, bindExistingThread, importSharedThread, contextError } from './codex-context.js';
 import { ObservationClient, sharedCodexSnapshot, CodexObservationError } from './codex-shared.js';
 import http from 'node:http';
 import os from 'node:os';
@@ -380,7 +380,7 @@ api.get('/api/codex/shared', async (req, res) => {
   res.once('close', abort);
   try {
     const result = await sharedCodexSnapshot({ cursor, sessions: store.list(), signal: controller.signal });
-    res.set('Cache-Control', 'no-store').json(result);
+    res.set('Cache-Control', 'no-store').json({ ...result, importEnabled: process.env.AM_CODEX_BINDINGS_PILOT === '1' });
   } catch (error) {
     // Socket paths, daemon errors and protocol payloads can contain private data.
     const code = error instanceof CodexObservationError ? error.code : 'unavailable';
@@ -414,6 +414,23 @@ api.post('/api/sessions/:id/codex/binding', async (req, res) => {
     res.set('Cache-Control', 'no-store').json({ binding, launchMode: 'shared-client' });
   } catch (error) { throw contextError(error); }
   finally { res.off('close', abort); }
+});
+
+let codexImportPending = false;
+api.post('/api/codex/import', async (req, res) => {
+  if (process.env.AM_CODEX_BINDINGS_PILOT !== '1') throw new ApiError(409, 'codex-pilot-disabled', 'Shared task imports are disabled outside the pilot.');
+  if (codexImportPending) throw new ApiError(409, 'codex-import-busy', 'Another task is being added. Retry shortly.');
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  res.once('close', abort); codexImportPending = true;
+  try {
+    const result = await importSharedThread({ threadId: req.body?.threadId }, {
+      store, isRunning, signal: controller.signal,
+      beforeCommit: () => { if (isLocked()) throw new ApiError(403, 'space-locked', 'Space is locked.'); },
+    });
+    res.set('Cache-Control', 'no-store').json({ ...result, launchMode: 'shared-client' });
+  } catch (error) { throw contextError(error); }
+  finally { codexImportPending = false; res.off('close', abort); }
 });
 
 // Resolve one recognizable AM name (or exact ID); never choose by recency/CWD.
@@ -622,7 +639,7 @@ async function deliver(session, { text, attachments = [] }, from, { signal = nul
 
 async function deliverInner(session, { text, attachments }, from, { cancelled, signal }) {
   cancelled();
-  if (session.cli === 'codex' && codexBindings.forSession(session.id)) throw new ApiError(409, 'codex-shared-delivery-pending',
+  if (session.cli === 'codex' && (session.codexSharedOnly || codexBindings.forSession(session.id))) throw new ApiError(409, 'codex-shared-delivery-pending',
     'Use the Codex terminal or Remote for this pilot task; managed prompt delivery is not enabled yet.');
   if (isRemote(session.cli)) {
     if (attachments.length) throw new ApiError(400, 'invalid-input', 'files are not available for remote agents yet');
@@ -3608,7 +3625,7 @@ setTimeout(() => {
   });
 }, 8000);
 
-server.listen(PORT, () => {
+server.listen(PORT, process.env.AM_BIND_HOST || undefined, () => {
   console.log(`Agent Manager :${PORT}  engine=libghostty${ghosttyReady() ? '' : ' (UNAVAILABLE)'}  data=${DATA_DIR}`);
   console.log('⚠  No authentication: this app trusts whoever can reach it.');
   console.log('   Keep this Space PRIVATE — a public instance gives anyone a shell + your logged-in agents.');

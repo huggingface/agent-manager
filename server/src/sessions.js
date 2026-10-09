@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { dirname } from 'node:path';
 import { SESSIONS_FILE } from './config.js';
 
 let sessions = [];
@@ -82,6 +83,32 @@ export function update(id, patch) {
   Object.assign(s, patch);
   persist();
   return s;
+}
+
+// Imports are references, never fresh agents. Persist the fail-closed launch
+// marker before attempting a separate binding write. A crash between the two
+// writes leaves a repairable reference that cannot start a standalone TUI.
+export function createCodexReference({ name, path, threadId }) {
+  const session = { id: `codex-shared-${crypto.randomBytes(6).toString('hex')}`,
+    name, path, cli: 'codex', sessionUuid: crypto.randomUUID(),
+    codexSessionId: threadId, codexSharedOnly: true, everStarted: true,
+    createdAt: new Date().toISOString() };
+  const next = [...sessions, session];
+  const tmp = `${SESSIONS_FILE}.${crypto.randomUUID()}.tmp`;
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, JSON.stringify(next, null, 2)); fs.fsyncSync(fd);
+    fs.closeSync(fd); fd = undefined;
+    fs.renameSync(tmp, SESSIONS_FILE);
+    sessions = next; // Also keep the protective record if directory fsync fails.
+    fd = fs.openSync(dirname(SESSIONS_FILE), 'r');
+    fs.fsyncSync(fd);
+    return session;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    try { fs.unlinkSync(tmp); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
 }
 
 export function remove(id) {

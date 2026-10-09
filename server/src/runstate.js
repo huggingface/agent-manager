@@ -208,7 +208,7 @@ export async function reviveOnBoot({ enabled = true, days = 3 } = {}) {
     console.error('[revive] Codex bindings unavailable — skipping Codex revival');
     bound = new Set(listSessions().filter((s) => s.cli === 'codex').map((s) => s.id));
   }
-  const sessions = listSessions().filter((s) => !bound.has(s.id));
+  const sessions = listSessions().filter((s) => !bound.has(s.id) && !(s.cli === 'codex' && s.codexSharedOnly));
   const plan = selectRevivable({
     snapshot: previous,
     sessions,

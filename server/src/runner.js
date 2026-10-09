@@ -1785,6 +1785,7 @@ export function commandFor(session) {
   if (cli.id === 'codex') {
     let binding;
     try { binding = codexBindings.forSession(session.id); } catch (error) { throw contextError(error); }
+    if (!binding && session.codexSharedOnly) throw new ApiError(409, 'codex-import-incomplete', 'Finish adding this shared task before opening its terminal. No standalone session was started.');
     if (binding) {
       const helper = fileURLToPath(new URL('../../scripts/am-codex-context.mjs', import.meta.url));
       // The child verifies endpoint/home/thread via AM before exec. No --last,
@@ -1921,6 +1922,9 @@ export function commandFor(session) {
  * exactly the same path.
  */
 export function ensureRunning(session, cols = 120, rows = 34) {
+  if (session.cli === 'codex' && session.codexSharedOnly && !codexBindings.forSession(session.id)) {
+    throw new ApiError(409, 'codex-import-incomplete', 'Finish adding this shared task before opening its terminal.');
+  }
   // Nothing to start: a remote agent starts itself, on its own machine. Both
   // callers guard this too; keep the refusal here so no future one can spawn
   // a PTY for a pane that can never use it.

@@ -83,3 +83,50 @@ export function contextError(error) {
   const conflict = ['binding-conflict', 'bindings-busy'].includes(reason);
   return new ApiError(conflict ? 409 : 503, 'codex-context-unavailable', 'Codex context could not be verified or saved.', { reason });
 }
+
+// A new AM view of an existing shared conversation. No prompt, resume, process
+// launch, workspace creation or Codex mutation occurs here. A persisted pending
+// reference is safe to retry after a binding/fsync/connection failure.
+export async function importSharedThread({ threadId }, {
+  store, isRunning, bindings = codexBindings, config = observationConfig(),
+  connect = ObservationClient.connect, signal, beforeCommit = () => {},
+}) {
+  if (!validThreadId(threadId)) throw new ApiError(400, 'invalid-input', 'An exact Codex thread UUID is required.');
+  const endpoint = configuredEndpoint(config);
+  let client;
+  try {
+    client = await connect(config, { signal });
+    if (client.endpoint.socket !== endpoint.socket || client.endpoint.home !== endpoint.home) throw new ApiError(409, 'codex-endpoint-changed', 'The configured endpoint changed.');
+    const { thread } = await client.call('thread/read', { threadId, includeTurns: false });
+    if (thread?.id !== threadId || thread.status?.type !== 'idle' || thread.canAcceptDirectInput !== true || thread.parentThreadId) {
+      throw new ApiError(409, 'codex-handoff-required', 'Choose an idle root task already loaded on this shared server.');
+    }
+    const root = fs.realpathSync(WORKSPACES_DIR);
+    const cwd = typeof thread.cwd === 'string' ? fs.realpathSync(thread.cwd) : '';
+    if (cwd !== root && !cwd.startsWith(root + path.sep)) throw new ApiError(409, 'codex-workspace-mismatch', 'This task is outside this manager’s configured workspace root.');
+    const relative = path.relative(root, cwd);
+    if (signal?.aborted || client.closed) throw new ApiError(409, 'codex-verification-lost', 'Connection lost before import.');
+    beforeCommit();
+    // No await between duplicate checks and creating the protective record.
+    const matches = store.list().filter((s) => s.cli === 'codex' && s.codexSessionId === threadId);
+    if (matches.length > 1) throw new ApiError(409, 'codex-pin-ambiguous', 'More than one AM session claims this thread.');
+    let session = matches[0];
+    if (session && !session.codexSharedOnly) throw new ApiError(409, 'codex-existing-session', 'This thread already belongs to an AM session. Use its verified handoff and binding workflow.');
+    if (session?.archivedAt) throw new ApiError(409, 'codex-session-archived', 'The existing AM view is archived.');
+    if (!session) {
+      const name = (thread.name || thread.preview || 'Shared Codex task').replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 160);
+      session = store.createCodexReference({ name, path: relative, threadId });
+    }
+    const existing = bindings.forSession(session.id);
+    if (existing) {
+      const context = contextForThread(threadId, { sessions: store.list(), bindings, endpoint });
+      return { session, binding: existing, context };
+    }
+    // Reuse the full binding checks, including the stopped AM view, exact pin,
+    // workspace, pending inputs and a second live read after persistence.
+    const binding = await bindExistingThread({ sessionId: session.id, threadId, expectedRevision: 0 }, {
+      getSession: store.get, sessions: store.list, isRunning, bindings, config, connect, signal, beforeCommit,
+    });
+    return { session, binding, context: contextForThread(threadId, { sessions: store.list(), bindings, endpoint }) };
+  } finally { client?.close(); }
+}

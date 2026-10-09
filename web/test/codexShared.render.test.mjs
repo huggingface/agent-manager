@@ -54,6 +54,30 @@ try {
   await page.getByText('Task state is unknown', { exact: false }).waitFor();
   assert.equal(await page.getByText('No tasks on this page.').count(), 0, 'failed refresh clears old snapshot');
   assert.equal(await page.getByText('private server detail').count(), 0);
+  fail = false;
+  snapshot = { connection: 'connected', importEnabled: true, tasks: [
+    { id: 'ready', name: 'Existing conversation', cwd: '/work', status: 'idle', amSessions: [] },
+    { id: 'busy', name: 'Working conversation', cwd: '/work', status: 'working', amSessions: [] },
+  ], nextCursor: null };
+  let imports = 0;
+  await page.route('**/api/codex/import', async (route) => {
+    imports++;
+    assert.equal(route.request().method(), 'POST');
+    assert.deepEqual(route.request().postDataJSON(), { threadId: 'ready' });
+    assert.equal(route.request().headers()['x-am-origin'], 'operator');
+    if (imports === 1) return route.fulfill({ status: 409, json: { error: 'Task changed; refresh and retry.' } });
+    return route.fulfill({ json: { session: { id: 'am-ready', name: 'Existing conversation' } } });
+  });
+  await page.getByRole('button', { name: 'Check server' }).click();
+  await page.getByRole('button', { name: 'Add to AM' }).waitFor();
+  assert.equal(imports, 0, 'inspection never imports automatically');
+  assert.equal(await page.getByRole('button', { name: 'Add to AM' }).count(), 1, 'no import for busy task');
+  await page.getByRole('button', { name: 'Add to AM' }).click();
+  await page.getByText('Task changed; refresh and retry.').waitFor();
+  await page.getByRole('button', { name: 'Add to AM' }).click();
+  await page.getByText('Added Existing conversation.', { exact: false }).waitFor();
+  await page.getByText('AM: Existing conversation').waitFor();
+  assert.equal(imports, 2);
   assert.deepEqual(errors, []);
-  console.log('PASS: manual connection, pagination, unknown state, no mutations, escaped titles, mobile layout');
+  console.log('PASS: manual connection, pagination, unknown state, explicit pilot import with retry, escaped titles, mobile layout');
 } finally { await browser?.close(); await new Promise((r) => server.close(r)); }
