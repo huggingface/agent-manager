@@ -1,7 +1,9 @@
 # Shared Codex sessions in Agent Manager
 
-Status: **Draft proposal**. This change adds documentation only. The runtime,
-launch commands, session records, and deployed services remain unchanged.
+Status: **Draft proposal with a read-only pilot**. The
+[preview and compatibility experiment](../codex-shared-preview.md) implement
+observation only. Launch commands, session records, and deployed services remain
+unchanged. A cold-resume context failure currently blocks shared execution.
 
 Agent Manager should let an operator follow the same Codex thread in an AM
 terminal, a terminal over tmux/mosh, and Codex Remote. Today an independently
@@ -102,10 +104,12 @@ AM should inspect before subscribing and reconcile after reconnecting. Avoid
 loading every saved thread merely to list it. Use bounded pagination for history;
 keep legacy rollout readers for standalone sessions.
 
-## First opt-in integration
+## First launch integration
 
-Start with newly created, explicitly opted-in AM sessions. The default remains
-standalone. Before offering creation, check protocol compatibility, endpoint
+During a controlled pilot, start with newly created sessions on a development
+instance. After the compatibility gates pass, make shared execution the default
+for new Codex sessions, without a per-session checkbox. Until then, production
+launch remains standalone. Before offering creation, check protocol compatibility, endpoint
 identity, and the required per-thread configuration capabilities.
 
 1. Create a durable pending binding with an operation ID and validated workspace.
@@ -195,8 +199,10 @@ server. It does not restore a competing standalone writer.
 
 ## Delivery stages and acceptance gates
 
-Each stage should be a reviewable implementation PR with a default-off feature
-flag. This proposal does not implement these stages.
+Each stage should be a reviewable implementation PR, enabled first on an
+isolated pilot instance. The accompanying preview implements read-only
+observation; the remaining stages are not implemented. Shared creation becomes
+the default only after the compatibility and lifecycle gates pass.
 
 1. **Observe:** add a bounded local protocol adapter, capability checks, exact
    binding storage and read-only status. Test reconnects and unknown states.
@@ -243,8 +249,8 @@ compatibility strategy rather than an in-place downgrade.
 
 ## Decisions for review
 
-The recommended first scope is a local Unix endpoint and explicit opt-in for
-new sessions. Review should settle the initial supported CLI/server versions,
+The recommended first scope is a local Unix endpoint and an isolated pilot,
+followed by shared execution by default for new sessions. Review should settle the initial supported CLI/server versions,
 how per-thread AM context is represented, and which server-supported facility
 can correlate creation and TUI thread changes. These determine whether the
 first usable slice is safe; they are not reasons to migrate live sessions

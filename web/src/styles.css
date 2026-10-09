@@ -2221,3 +2221,8 @@ a.btn-ghost { text-decoration: none; }
 .skill-delete-dialog h2 { font-size: 17px; margin: 0 0 12px; }
 .skill-delete-dialog p, .skill-delete-dialog li { font-size: 13px; line-height: 1.6; }
 .skill-delete-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+
+.codex-shared-preview { margin-block: 16px; }
+.codex-shared-tasks { padding-left: 20px; overflow-wrap: anywhere; }
+.codex-shared-tasks li { margin-block: 10px; }
+.codex-shared-tasks details { font-size: 12px; margin-top: 4px; }

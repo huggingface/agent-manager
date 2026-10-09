@@ -1,3 +1,4 @@
+import { sharedCodexSnapshot, CodexObservationError } from './codex-shared.js';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -366,6 +367,27 @@ api.get('/api/health', (_req, res) =>
   res.json({ ok: true, engine: 'libghostty', ghostty: ghosttyReady(), ghosttyError }));
 
 api.get('/api/clis', (_req, res) => res.json(cliCatalog()));
+
+// Observation only, behind the same privacy/admission boundary as other APIs.
+api.get('/api/codex/shared', async (req, res) => {
+  const cursor = req.query.cursor ?? null;
+  if (cursor !== null && (typeof cursor !== 'string' || cursor.length > 4096)) {
+    throw new ApiError(400, 'invalid-input', 'Invalid pagination cursor');
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  res.once('close', abort);
+  try {
+    const result = await sharedCodexSnapshot({ cursor, sessions: store.list(), signal: controller.signal });
+    res.set('Cache-Control', 'no-store').json(result);
+  } catch (error) {
+    // Socket paths, daemon errors and protocol payloads can contain private data.
+    const code = error instanceof CodexObservationError ? error.code : 'unavailable';
+    throw new ApiError(code === 'busy' ? 429 : 503, 'codex-observation-unavailable',
+      'Codex observation is unavailable. Existing sessions have not been changed.',
+      { reason: code });
+  } finally { res.off('close', abort); }
+});
 
 api.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.debug === '1', req.query.provider || null)));
 

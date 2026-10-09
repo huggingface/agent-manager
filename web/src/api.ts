@@ -996,3 +996,19 @@ export interface Operation {
 }
 export const getOperations = (limit = 500): Promise<{ operations: Operation[]; generatedAt: string }> =>
   fetch(`/api/operations?limit=${limit}`).then(json);
+
+export type CodexSharedSnapshot = {
+  connection: 'not-configured' | 'connected';
+  observedAt: string;
+  launchEnabled: false;
+  launchBlockedReason: string;
+  serverVersion?: string | null;
+  tasks: Array<{
+    id: string; name: string | null; cwd: string | null;
+    status: 'working' | 'needs-input' | 'idle' | 'unloaded' | 'error' | 'unknown';
+    amSessions: Array<{ id: string; name: string }>;
+  }>;
+  nextCursor: string | null;
+};
+export const codexSharedSnapshot = (cursor?: string | null): Promise<CodexSharedSnapshot> =>
+  fetch(`/api/codex/shared${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`).then(json);
