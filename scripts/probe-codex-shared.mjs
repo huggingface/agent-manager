@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // A compatibility experiment, not a deployment script. Owns only the children
 // it spawns, uses a fresh CODEX_HOME, never starts model inference or pairs Remote.
-// Exit 0: tested invariants held; 2: observed context loss; 1: probe could not run.
+// Exit 0: legacy context held; 2: legacy context changed; 1: probe could not run.
+// Exit 2 alone does not block a design that resolves AM identity from the native thread ID.
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -79,9 +80,10 @@ async function start() {
     try {
       // Promise.all installs rejection handlers immediately on both operations.
       await Promise.all([done, call('thread/shellCommand', {
-        threadId, command: 'printf "%s" "$AM_ID"', timeoutMs: 5000,
+        threadId, command: 'printf "%s|%s" "$AM_ID" "$CODEX_THREAD_ID"', timeoutMs: 5000,
       })]);
-      return output;
+      const [amId, nativeThreadId] = (output || '').split('|');
+      return { amId, nativeThreadId };
     } finally { clearTimeout(timer); listeners.delete(onEvent); }
   };
   return { call, shellIdentity, version: /\/(\d+\.\d+\.\d+)/.exec(init.userAgent)?.[1] || null, child };
@@ -111,27 +113,28 @@ try {
     const threadId = result.thread.id;
     threads.push({ threadId, cwd, identity });
     const observed = await server.shellIdentity(threadId);
-    report.initial.push({ identityMatches: observed === identity, cwdMatches: result.cwd === cwd,
+    report.initial.push({ identityMatches: observed.amId === identity, nativeThreadMatches: observed.nativeThreadId === threadId, cwdMatches: result.cwd === cwd,
       approvalMatches: result.approvalPolicy === 'never', sandboxMatches: result.sandbox?.type === 'readOnly' });
   }
   // Check the first thread again after creating the second to detect shared env.
-  report.initialIsolation = await server.shellIdentity(threads[0].threadId) === threads[0].identity;
+  report.initialIsolation = (await server.shellIdentity(threads[0].threadId)).amId === threads[0].identity;
   await stop(server.child);
   server = await start();
   for (const { threadId, cwd, identity } of threads) {
     const result = await server.call('thread/resume', { threadId, excludeTurns: true });
     const observed = await server.shellIdentity(threadId);
     report.afterRestart.push({ sameThread: result.thread.id === threadId,
-      identityMatches: observed === identity, inheritedServerIdentity: observed === 'synthetic-server',
+      identityMatches: observed.amId === identity, nativeThreadMatches: observed.nativeThreadId === threadId, inheritedServerIdentity: observed.amId === 'synthetic-server',
       cwdMatches: result.cwd === cwd, approvalMatches: result.approvalPolicy === 'never',
       sandboxMatches: result.sandbox?.type === 'readOnly' });
   }
-  report.contextPreserved = report.initialIsolation && report.initial.every((r) => Object.values(r).every(Boolean))
+  report.legacyContextPreserved = report.initialIsolation && report.initial.every((r) => Object.values(r).every(Boolean))
     && report.afterRestart.every((r) => r.sameThread && r.identityMatches && r.cwdMatches && r.approvalMatches && r.sandboxMatches);
-  // A passing probe is necessary, not sufficient: no model tool, TUI, Remote
+  report.nativeThreadIdentityPreserved = [...report.initial, ...report.afterRestart].every((r) => r.nativeThreadMatches);
+  // Neither result settles launch readiness: no model tool, TUI, Remote
   // approval routing or active-turn survival is exercised by this experiment.
   console.log(JSON.stringify(report, null, 2));
-  process.exitCode = report.contextPreserved ? 0 : 2;
+  process.exitCode = report.legacyContextPreserved ? 0 : 2;
 } catch {
   console.error('Compatibility probe could not complete; no existing sessions were touched.');
   process.exitCode = 1;

@@ -8,7 +8,7 @@ import WebSocket from 'ws';
 const PAGE_SIZE = 20;
 const MAX_MESSAGE = 2 * 1024 * 1024;
 const METHODS = new Set(['initialize', 'thread/list', 'thread/read']);
-export const CONTEXT_GATE = 'Thread context must survive reconnect and server restart before shared launch is enabled.';
+export const CONTEXT_GATE = 'Shared launch awaits exact thread binding, cross-device approval and task lifecycle validation.';
 
 export class CodexObservationError extends Error {
   constructor(code) { super(code); this.code = code; }

@@ -63,9 +63,10 @@ enforcement. It deletes only its temporary fixture directory and stops only the
 child servers it spawned. It never searches for or signals existing daemons.
 
 Exit codes: `0` means these tested invariants held; `2` means the experiment
-observed context loss; `1` means it could not complete. A zero exit is necessary
-but not sufficient to enable shared execution: model tools, TUI reattachment,
-Remote approvals and active-turn survival still need separate tests.
+observed context loss; `1` means it could not complete. The report separately checks `CODEX_THREAD_ID`. Exit 2 diagnoses loss of legacy
+context; it is not by itself a blocker for native-thread-based AM attribution.
+Model tools, TUI reattachment, Remote approvals and active-turn survival still
+need separate tests.
 
 ### Result on Codex 0.162.0
 
@@ -75,22 +76,25 @@ The experiment on 2026-10-09 returned exit **2**:
 | --- | --- | --- |
 | Per-thread AM identity | Correct and isolated across both threads | Lost; both inherit the synthetic server identity |
 | Exact thread ID | Recorded | Preserved |
+| Native `CODEX_THREAD_ID` in commands | Matches each thread | Still matches each thread |
 | Working directory | Correct | Preserved |
 | Explicit approval policy | `never` | Reverts to server default `on-request` |
 | Read-only sandbox | Correct | Preserved |
 
-The approval change in this fixture is more restrictive, but demonstrates that
-an override is not reliably sticky across cold resumption. The identity loss
-could cause a session to attribute AM operations to the wrong agent. Therefore
-this PR exposes observation only; there is no switch that bypasses the gate.
+The fixture uses explicit user-shell commands rather than normal model turns.
+It establishes how this path behaves, not that all model-turn permission
+settings are lost. The approval change is more restrictive in this fixture.
 
-The next integration must either establish durable thread-scoped context that
-all clients honor, or introduce a reliable restoration mechanism covering every
-resume path, including Remote and server recovery. Restoring values only when
-AM attaches does not cover a task resumed directly from a phone. After that,
-implement exact binding and task/view lifecycle semantics before enabling the
-shared default. Do not use global environment rewrites or session-directory
-heuristics to bridge this gap.
+The reassessment found that `CODEX_THREAD_ID` remains correct for both threads
+before and after restart. AM can retain an exact thread-to-session mapping and
+resolve attribution when its API is called, instead of requiring `AM_ID` to
+survive in every tool environment. Confirm the native ID in normal model tools
+and Remote before shipping that helper; the environment-variable reference does
+not currently document it as a stable public interface.
+
+See [the revised action plan](proposals/codex-shared-next-steps.md). Shared launch
+remains unimplemented while binding, lifecycle and cross-client tests are
+completed. Restoring every legacy environment override is no longer the gate.
 
 ## Validation
 

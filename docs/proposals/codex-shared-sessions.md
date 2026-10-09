@@ -3,7 +3,8 @@
 Status: **Draft proposal with a read-only pilot**. The
 [preview and compatibility experiment](../codex-shared-preview.md) implement
 observation only. Launch commands, session records, and deployed services remain
-unchanged. A cold-resume context failure currently blocks shared execution.
+unchanged. The [revised action plan](codex-shared-next-steps.md) separates
+native-thread attribution from the remaining launch and lifecycle checks.
 
 Agent Manager should let an operator follow the same Codex thread in an AM
 terminal, a terminal over tmux/mosh, and Codex Remote. Today an independently
@@ -128,14 +129,20 @@ if the server provides one. Otherwise require explicit recovery; do not retry
 creation or adopt the newest thread in the folder. A failed durable binding write
 must likewise stop before any prompt is sent.
 
-**Per-thread context is a prerequisite.** A long-lived daemon does not inherit
-each connecting TUI's environment. Validate workspace confinement, instructions,
-sandbox and approval policy, attachments, model selection, and AM identity
-(`AM_ID`, `AM_SESSION`, and related context) at the execution side. Determine
-which settings are actually thread-scoped in the supported server schema. If
-AM identity or required isolation cannot be preserved without changing the
-daemon's global environment, keep this mode unavailable. Never weaken the
-sandbox to make the connection work.
+**Separate attribution from execution policy.** AM persists the exact thread
+binding. A helper resolves the native thread ID to the AM session when invoking
+AM operations; it must not trust an inherited `AM_ID` from the daemon. The
+compatibility fixture observes the correct `CODEX_THREAD_ID` after cold resume;
+normal model tools and Remote still require verification. Unknown or ambiguous
+bindings refuse attributed writes, without blocking unrelated Codex work.
+
+Use the operator's configured Codex execution policy; do not reconstruct the
+entire AM terminal environment. Verify workspace, attachments, instructions and
+permission behavior through actual model turns. Per-thread policy exceptions,
+if supported, must be honored across clients; never grant broader permissions
+to avoid approval-routing work. The shared daemon must start without another
+agent's AM identity in its environment. The revised plan lists the remaining
+acceptance gates.
 
 Initially retain native TUI input and approval UI. Managed prompts and scheduled
 prompts must have one delivery path with operation receipts, and must refuse

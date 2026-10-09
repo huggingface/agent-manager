@@ -7,7 +7,7 @@ const labels = {
 };
 
 // Deliberately not another live sidebar. This is a manual, read-only pilot;
-// task ownership and launch behavior remain unchanged until the context gate passes.
+// task ownership and launch behavior remain unchanged during this observation pilot.
 export default function CodexSharedSessions() {
   const [snapshot, setSnapshot] = useState<CodexSharedSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
@@ -51,7 +51,7 @@ export default function CodexSharedSessions() {
         {snapshot?.connection === 'connected' && <>
           <p className="s-help">Connected{snapshot.serverVersion ? ` · Codex ${snapshot.serverVersion}` : ''}
             {' · '}Checked {new Date(snapshot.observedAt).toLocaleTimeString()}. Refresh to update task states.</p>
-          <p className="s-help">Shared launch is not enabled: session identity and permissions must survive server restarts first.</p>
+          <p className="s-help">Shared launch is not enabled: cross-device approvals and task lifecycle checks are still pending.</p>
           {!snapshot.tasks.length && <p className="s-help">No tasks on this page.</p>}
           <ul className="codex-shared-tasks">
             {snapshot.tasks.map((task) => <li key={task.id}>
