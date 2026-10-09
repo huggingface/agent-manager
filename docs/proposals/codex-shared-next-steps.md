@@ -29,6 +29,12 @@ behavior before enabling new shared sessions.
 
 ## Implementation sequence
 
+Implemented first slice: [durable bindings and shared-client pilot](../codex-shared-bindings.md).
+Binding an already handed-off thread, native attribution lookup and exact AM
+terminal attachment now have code and isolated tests. Automatic legacy release
+and default creation remain pending.
+
+
 1. **Persist exact bindings and resolve attribution.** Store endpoint identity,
    Codex thread ID and AM session ID durably, with uniqueness and atomic writes.
    Provide a small local helper/API lookup using the native thread ID. Unknown
@@ -85,7 +91,8 @@ or a redesign of the sidebar. Unmapped tasks can remain Codex-only until
 explicitly associated. API actions requiring AM identity fail clearly when
 unmapped, while ordinary coding remains available.
 
-The current PR remains an observer and compatibility experiment. It does not
-yet implement the binding helper, shared creation or lifecycle changes above.
+The current PR contains the observer, compatibility experiment and isolated
+binding/client pilot. It does not yet enable default shared creation, automatic
+legacy release or the complete shared lifecycle/Reader integration.
 Protocol references: [app-server](https://learn.chatgpt.com/docs/app-server) and
 [environment variables](https://learn.chatgpt.com/docs/config-file/environment-variables).

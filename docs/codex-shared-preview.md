@@ -122,3 +122,10 @@ Protocol references: [app-server](https://learn.chatgpt.com/docs/app-server) and
 [CLI](https://learn.chatgpt.com/docs/cli/reference). The protocol remains
 experimental; the executable compatibility probe is the evidence for the
 specific cold-resume behavior above.
+
+## Binding and terminal pilot
+
+A separately gated [binding/client pilot](codex-shared-bindings.md) now adds
+durable attribution and exact shared-client launch for already handed-off
+threads. This observation panel itself remains read-only. Default creation and
+automatic legacy release remain disabled.

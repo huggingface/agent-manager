@@ -8,7 +8,7 @@ import WebSocket from 'ws';
 const PAGE_SIZE = 20;
 const MAX_MESSAGE = 2 * 1024 * 1024;
 const METHODS = new Set(['initialize', 'thread/list', 'thread/read']);
-export const CONTEXT_GATE = 'Shared launch awaits exact thread binding, cross-device approval and task lifecycle validation.';
+export const CONTEXT_GATE = 'Default shared creation awaits cross-device approval and task lifecycle validation.';
 
 export class CodexObservationError extends Error {
   constructor(code) { super(code); this.code = code; }
@@ -87,6 +87,7 @@ export class ObservationClient {
         capabilities: { experimentalApi: true },
       });
       if (typeof init?.codexHome !== 'string' || await fs.realpath(init.codexHome) !== before.home) throw fail('home-mismatch');
+      client.endpoint = { socket: before.socket, home: before.home };
       client.version = /\/(\d+\.\d+\.\d+(?:-[\w.]+)?)(?:\s|$)/.exec(init.userAgent || '')?.[1] || null;
       ws.send(JSON.stringify({ method: 'initialized' }));
       return client;

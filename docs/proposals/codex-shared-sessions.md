@@ -1,10 +1,11 @@
 # Shared Codex sessions in Agent Manager
 
-Status: **Draft proposal with a read-only pilot**. The
-[preview and compatibility experiment](../codex-shared-preview.md) implement
-observation only. Launch commands, session records, and deployed services remain
-unchanged. The [revised action plan](codex-shared-next-steps.md) separates
-native-thread attribution from the remaining launch and lifecycle checks.
+Status: **Draft with an isolated shared-client pilot**. The
+[inspector and compatibility experiment](../codex-shared-preview.md) are joined
+by [durable bindings and exact terminal attachment](../codex-shared-bindings.md).
+Binding writes are explicitly gated; default creation and automatic legacy
+release remain pending. No production deployment or user-session migration has
+been performed. See the [revised action plan](codex-shared-next-steps.md).
 
 Agent Manager should let an operator follow the same Codex thread in an AM
 terminal, a terminal over tmux/mosh, and Codex Remote. Today an independently
@@ -66,7 +67,10 @@ ChatGPT web conversations are outside this integration.
 ## Session identity and state
 
 Keep `cli: codex`; add a versioned runtime binding rather than a second CLI type.
-The following fields are proposed, not an existing API:
+The following fields describe the target runtime model. The first pilot stores
+associations separately in `codex-bindings.json`; see the
+[implemented binding pilot](../codex-shared-bindings.md). These are not yet
+fields in the session API:
 
 | Persisted field | Meaning |
 | --- | --- |

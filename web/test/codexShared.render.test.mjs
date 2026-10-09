@@ -42,7 +42,7 @@ try {
   await page.getByRole('button', { name: 'Check server' }).click();
   await page.getByText('Saved · not loaded', { exact: false }).waitFor();
   assert.equal(await page.locator('li img').count(), 0, 'thread titles are text, never HTML');
-  assert.ok(await page.getByText('Shared launch is not enabled:', { exact: false }).isVisible());
+  assert.ok(await page.getByText('Default shared creation is not enabled:', { exact: false }).isVisible());
   assert.equal(await page.getByRole('button', { name: /release|interrupt|enable/i }).count(), 0);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'mobile layout fits');
   snapshot = { connection: 'connected', tasks: [], nextCursor: null };
