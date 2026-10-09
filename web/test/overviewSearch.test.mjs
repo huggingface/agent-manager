@@ -119,6 +119,19 @@ try {
   assert.match(await page.locator('.usage-msg').textContent(), /no recent activity matches/, 'query-specific empty state');
   await search.press('Escape');
   assert.equal(await search.inputValue(), '', 'Escape clears the search');
+  // Exercise the real Composer inside the expanded Overview, including its
+  // document-level Escape handler (an isolated Composer test cannot catch it).
+  await page.locator('.ovt-tile').first().click();
+  const reply = page.locator('.ovw-backdrop textarea');
+  await reply.waitFor();
+  await reply.fill('unfinished composition');
+  for (const event of [{ key: 'Escape', isComposing: true }, { key: 'Escape', keyCode: 229 }]) {
+    await reply.dispatchEvent('keydown', event);
+    assert.equal(await page.locator('.ovw-backdrop').count(), 1, 'IME Escape keeps Overview open');
+    assert.equal(await reply.inputValue(), 'unfinished composition', 'IME Escape preserves the draft');
+  }
+  await reply.press('Escape');
+  assert.equal(await page.locator('.ovw-backdrop').count(), 0, 'ordinary Escape still closes Overview');
   await context.close();
 } finally {
   await browser.close();

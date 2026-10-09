@@ -636,7 +636,12 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
   };
   useEffect(() => {
     if (!openId) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpenId(null); };
+    const onKey = (e: KeyboardEvent) => {
+      // IME cancellation belongs to the editor, not the enclosing window.
+      // Safari may expose composition only through the legacy 229 marker.
+      if (e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Escape') setOpenId(null);
+    };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [openId]);

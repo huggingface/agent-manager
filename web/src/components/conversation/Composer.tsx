@@ -37,6 +37,7 @@ export default function Composer({
   onPasteFiles?: (files: File[]) => void;
 }) {
   const [dropActive, setDropActive] = useState(false);
+  const assisted = !!isMobile;
   const filesEnabled = !!onPasteFiles && !sending;
   const grow = (el: HTMLTextAreaElement) => {
     el.style.height = 'auto';
@@ -52,6 +53,9 @@ export default function Composer({
   const acceptsDrop = (e: DragEvent<HTMLDivElement>) =>
     filesEnabled && transferMayContainFile(e.dataTransfer);
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Enter/Escape may accept or dismiss an IME/predictive composition rather
+    // than send/cancel the draft. Safari can report only the legacy 229 marker.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     // Desktop: Enter sends, Shift+Enter newlines. Mobile keyboards cannot do
     // Shift+Enter, so there Enter newlines and the button sends.
     if (e.key === 'Enter' && !e.shiftKey && !isMobile) { e.preventDefault(); onSend(); }
@@ -80,7 +84,8 @@ export default function Composer({
         value={draft}
         disabled={sending}
         placeholder={sending ? 'sending…' : 'reply…'}
-        autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+        autoComplete="off" autoCorrect={assisted ? 'on' : 'off'}
+        autoCapitalize={assisted ? 'sentences' : 'off'} spellCheck={assisted}
         onChange={(e) => { onChange(e.target.value); grow(e.currentTarget); }}
         onPaste={onPaste}
         // iOS does not resize the layout for the keyboard — scroll the input
@@ -89,7 +94,7 @@ export default function Composer({
         onKeyDown={onKeyDown}
       />
         {(canSend ?? !!draft.trim()) && (
-          <button className="ov-send" title="Send" onClick={onSend} disabled={sending}><SendGlyph /></button>
+          <button type="button" className="ov-send" title="Send" aria-label="Send" onClick={onSend} disabled={sending}><SendGlyph /></button>
         )}
       </div>
     </div>
