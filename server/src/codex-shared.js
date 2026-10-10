@@ -44,11 +44,7 @@ export class ObservationClient {
       let msg;
       try { msg = JSON.parse(data.toString()); } catch { this.close('protocol'); return; }
       if (!msg || typeof msg !== 'object') { this.close('protocol'); return; }
-      // A read-only client must never answer an approval/tool request.
-      if (msg.method) {
-        if (msg.id !== undefined) this.close('unexpected-request');
-        return;
-      }
+      if (msg.method) { this.receiveServerMessage(msg); return; }
       const waiter = this.pending.get(msg.id);
       if (!waiter) return;
       this.pending.delete(msg.id); clearTimeout(waiter.timer);
@@ -67,7 +63,8 @@ export class ObservationClient {
       createConnection: () => net.connect(before.socket),
       handshakeTimeout: timeoutMs, maxPayload: MAX_MESSAGE, followRedirects: false,
     });
-    const client = new ObservationClient(ws, timeoutMs);
+    const Client = this || ObservationClient;
+    const client = new Client(ws, timeoutMs);
     const abort = () => client.close('cancelled');
     signal?.addEventListener('abort', abort, { once: true });
     client.cleanup = () => signal?.removeEventListener('abort', abort);
@@ -94,10 +91,19 @@ export class ObservationClient {
     } catch (error) { client.close(); throw error; }
   }
 
+  receiveServerMessage(msg) {
+    // A read-only client must never answer an approval/tool request.
+    if (msg.id !== undefined) this.close('unexpected-request');
+  }
+
+  allows(method, params) {
+    return METHODS.has(method)
+      && (method !== 'thread/read' || params?.includeTurns === false)
+      && (method !== 'thread/list' || (params?.useStateDbOnly === true && params?.limit === PAGE_SIZE));
+  }
+
   call(method, params) {
-    if (!METHODS.has(method)) return Promise.reject(fail('read-only'));
-    if (method === 'thread/read' && params?.includeTurns !== false) return Promise.reject(fail('read-only'));
-    if (method === 'thread/list' && (params?.useStateDbOnly !== true || params?.limit !== PAGE_SIZE)) return Promise.reject(fail('read-only'));
+    if (!this.allows(method, params)) return Promise.reject(fail('read-only'));
     if (this.closed || this.ws.readyState !== WebSocket.OPEN) return Promise.reject(fail('unavailable'));
     return new Promise((resolve, reject) => {
       const id = ++this.seq;

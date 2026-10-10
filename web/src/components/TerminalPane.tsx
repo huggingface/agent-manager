@@ -16,7 +16,6 @@ import ConversationView from './conversation/ConversationView';
 import type { ConversationSeen } from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
-import { writePaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
 import { LOCKED_CLOSE_CODE, announceLock, parseCloseReason } from '../lib/lockStatus';
 import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph } from './icons';
@@ -1423,7 +1422,6 @@ export default function TerminalPane({
           >
             <ConversationView
               session={session}
-              readOnly={sharedCodex}
               isMobile={isMobile}
               searchOpen={searchOpen}
               onCloseSearch={() => setSearchOpen(false)}
@@ -1431,7 +1429,6 @@ export default function TerminalPane({
               onHead={(head) => { setReaderFacts(head); setReaderLoaded(head?.loaded); }}
               seen={seen}
             />
-            {sharedCodex && <div className="cxv-msg" role="status">Shared conversation · reply in <button className="cxv-mini" onClick={() => writePaneMode('terminal')}>Terminal</button> or Codex Remote.</div>}
           </div>
         )}
       </div>

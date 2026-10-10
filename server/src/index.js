@@ -1,3 +1,4 @@
+import { CodexInput } from './codex-input.js';
 import { codexBindings, configuredEndpoint, contextForThread, bindExistingThread, importSharedThread, contextError } from './codex-context.js';
 import { ObservationClient, sharedCodexSnapshot, CodexObservationError } from './codex-shared.js';
 import http from 'node:http';
@@ -431,6 +432,31 @@ api.post('/api/codex/import', async (req, res) => {
     res.set('Cache-Control', 'no-store').json({ ...result, launchMode: 'shared-client' });
   } catch (error) { throw contextError(error); }
   finally { codexImportPending = false; res.off('close', abort); }
+});
+
+// Shared Reader input uses the exact server binding, never terminal keystrokes.
+const codexInput = new CodexInput({ getSession: store.get, listSessions: store.list,
+  assertWritable: () => { if (isLocked()) throw new ApiError(403, 'space-locked', 'Space is locked.'); } });
+const requireReaderOperator = (req) => {
+  if (req.headers['x-am-origin'] !== 'operator') throw new ApiError(403, 'operator-required', 'Use the operator Reader for this action.');
+};
+api.get('/api/sessions/:id/codex/reader', async (req, res) => {
+  res.set('Cache-Control', 'no-store').json(await codexInput.status(req.params.id));
+});
+api.post('/api/sessions/:id/codex/connect', async (req, res) => {
+  requireReaderOperator(req);
+  await codexInput.attach(req.params.id);
+  res.json({ ok: true });
+});
+api.post('/api/sessions/:id/codex/input', async (req, res) => {
+  requireReaderOperator(req);
+  const result = await codexInput.send(req.params.id, req.body || {}, { signal: res.locals.lockSignal });
+  touchInput(req.params.id);
+  res.json(result);
+});
+api.post('/api/sessions/:id/codex/answer', async (req, res) => {
+  requireReaderOperator(req);
+  res.json(await codexInput.answer(req.params.id, req.body || {}));
 });
 
 // Resolve one recognizable AM name (or exact ID); never choose by recency/CWD.

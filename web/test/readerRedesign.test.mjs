@@ -16,7 +16,8 @@ await build({
     import React from 'react'; import {createRoot} from 'react-dom/client'; import {flushSync} from 'react-dom';
     import TerminalPane from './src/components/TerminalPane';
     import {TraceUnavailable} from './src/api';
-    window.sockets = []; window.sends = []; window.reads = [];
+    window.sockets = []; window.sends = []; window.reads = []; window.sharedSends=[]; window.sharedAnswers=[];
+    const storage = new Map(); Object.defineProperty(window, 'localStorage', {value:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)}});
     class FakeSocket { static OPEN=1; readyState=1; constructor(){window.sockets.push(this); if(window.refuseSockets)setTimeout(()=>{this.readyState=3;this.onclose?.({code:1006});},1);} send(){} close(){this.readyState=3;} }
     window.WebSocket = FakeSocket;
     let config = {}, root;
@@ -50,6 +51,9 @@ await build({
         const from=child ? (config.childEarlier ? 160 : bytes>=2*1024*1024 ? 0 : 196) : (config.from||0)*2;
         return Promise.resolve(page(all.slice(from),from,all.length));
       },
+      codex(){return Promise.resolve({connected:true,status:config.sharedBusy?'working':'idle',requests:config.sharedRequest?[config.sharedRequest]:[],liveText:'',turnError:null});},
+      codexSend(id,text,requestId){window.sharedSends.push({id,text,requestId}); if(config.failSharedSend){config.failSharedSend=false;return Promise.reject(new Error('Delivery uncertain'));}return Promise.resolve({ok:true,turnId:'turn'});},
+      codexAnswer(id,key,response){window.sharedAnswers.push({id,key,response});config.sharedRequest=null;return Promise.resolve({ok:true});},
       summary(){return Promise.resolve({...page([]),total:2*(config.count||2),userTurns:[]});},
       roster(){return config.child?[{agentId:'child',toolUseId:'spawn',hasTranscript:true}]:[];},
     };
@@ -73,6 +77,10 @@ await build({
       export const getSubAgentWindow=(id,agentId,...args)=>window.fixtureApi.window(agentId,...args);
       export const getSubAgentSummary=()=>window.fixtureApi.summary();
       export const getSubAgents=()=>Promise.resolve({agents:window.fixtureApi.roster()});
+      export const getCodexReader=()=>window.fixtureApi.codex();
+      export const connectCodexReader=()=>Promise.resolve({ok:true});
+      export const sendCodexInput=(...args)=>window.fixtureApi.codexSend(...args);
+      export const answerCodexRequest=(...args)=>window.fixtureApi.codexAnswer(...args);
       export const sendInput=(id,text)=>{window.sends.push({id,text});return Promise.resolve({});};
     ` }));
   } }],
@@ -82,8 +90,8 @@ const errors = [];
 try {
   const p = await browser.newPage({ viewport: { width: 1000, height: 700 } });
   p.on('pageerror', (error) => errors.push(error.message));
-  await p.route('**/*', (route) => route.abort());
-  await p.setContent('<div id="fixture-root" style="display:flex;position:absolute;inset:10px"></div>');
+  await p.route('**/*', (route) => route.request().url() === 'https://reader.test/' ? route.fulfill({contentType:'text/html',body:'<div id="fixture-root" style="display:flex;position:absolute;inset:10px"></div>'}) : route.abort());
+  await p.goto('https://reader.test/');
   await p.addStyleTag({ path: bundle.replace(/\.js$/, '.css') });
   await p.addStyleTag({ content: fs.readFileSync(path.join(web, 'src/styles.css'), 'utf8') + fs.readFileSync(path.join(web, 'src/conversation.css'), 'utf8') });
   await p.addScriptTag({ path: bundle });
@@ -95,20 +103,39 @@ try {
   assert.deepEqual(await p.evaluate(() => window.sends), [{ id: 'new-session', text: 'First prompt from the reader' }]);
   assert.equal(await p.evaluate(() => window.sockets.length), 0, 'reader never attaches or starts a PTY');
 
-  // Imported and migrated Codex bindings both render Reader without a TUI or
-  // a composer that would attempt unsupported managed input delivery.
+  // Both kinds of shared binding can reply without creating a terminal.
   await p.setViewportSize({ width: 390, height: 844 });
   for (const flags of [{ shared: true }, { bound: true }]) {
     await p.evaluate((flags) => window.fixture.mount({ id: 'shared-' + JSON.stringify(flags), ...flags }), flags);
     await p.getByText('Question 1', { exact: true }).waitFor();
-    assert.equal(await p.locator('.cxv-composer textarea').count(), 0);
+    await p.getByText('Ready to reply', {exact:true}).waitFor();
+    assert.equal(await p.locator('.cxv-composer textarea').count(), 1);
     assert.equal(await p.getByRole('button', { name: 'Attach files' }).count(), 0);
     assert.equal(await p.locator('.term-fill, .xterm').count(), 0);
     assert.equal(await p.evaluate(() => window.sockets.length), 0);
-    await p.getByRole('button', { name: 'Terminal', exact: true }).waitFor();
-    const footer = await p.getByRole('status').filter({ hasText: 'Shared conversation' }).boundingBox();
-    assert.ok(footer && footer.y + footer.height <= 844, 'handoff hint remains visible on mobile');
   }
+  await p.evaluate(() => window.fixture.mount({id:'retry-shared',shared:true,failSharedSend:true}));
+  await p.getByText('Ready to reply', {exact:true}).waitFor();
+  await p.locator('.cxv-composer textarea').fill('Send directly to shared server');
+  await p.getByTitle('Send', {exact:true}).click();
+  await p.getByText('Delivery uncertain', {exact:true}).waitFor();
+  assert.equal(await p.locator('.cxv-composer textarea').inputValue(),'Send directly to shared server');
+  await p.getByTitle('Send', {exact:true}).click();
+  await p.waitForFunction(()=>window.sharedSends.length===2);
+  assert.equal(await p.evaluate(()=>window.sharedSends[0].requestId===window.sharedSends[1].requestId),true,'retry retains message identity');
+  await p.evaluate(()=>window.fixture.mount({id:'shared-approval',shared:true,sharedRequest:{key:'approval-1',method:'item/commandExecution/requestApproval',params:{command:'printf fixture',availableDecisions:['accept','decline']},item:null}}));
+  await p.getByText('Codex needs approval', {exact:true}).waitFor();
+  assert.equal(await p.evaluate(()=>window.sharedAnswers.length),0,'never automatically approve');
+  await p.getByRole('button',{name:'Approve once',exact:true}).click();
+  await p.waitForFunction(()=>window.sharedAnswers.length===1);
+  assert.deepEqual(await p.evaluate(()=>window.sharedAnswers[0].response),{decision:'accept'});
+  await p.evaluate(()=>window.fixture.mount({id:'shared-question',shared:true,sharedRequest:{key:'question-1',method:'item/tool/requestUserInput',params:{questions:[{id:'choice',question:'Which fixture?',options:[{label:'First',description:'First fixture'}]}]},item:null}}));
+  await p.getByText('Codex needs your answer', {exact:true}).waitFor();
+  await p.getByRole('button',{name:'First',exact:true}).click();
+  await p.getByRole('button',{name:'Submit answers',exact:true}).click();
+  await p.waitForFunction(()=>window.sharedAnswers.length===2);
+  assert.deepEqual(await p.evaluate(()=>window.sharedAnswers[1].response),{answers:{choice:'First'}});
+  assert.equal(await p.evaluate(()=>window.sockets.length),0,'Reader actions never attach a PTY');
   await p.setViewportSize({ width: 1000, height: 700 });
   // A hung leader cannot stop another pane, and it cannot hide the draft.
   await p.clock.install();

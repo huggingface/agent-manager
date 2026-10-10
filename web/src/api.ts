@@ -1016,3 +1016,19 @@ export const codexSharedSnapshot = (cursor?: string | null): Promise<CodexShared
 
 export const importCodexTask = (threadId: string): Promise<{ session: Session }> =>
   fetch('/api/codex/import', { method: 'POST', headers: HEADERS, body: JSON.stringify({ threadId }) }).then(json);
+
+// Explicit server-backed Reader actions. The legacy terminal-delivery API stays guarded.
+export interface CodexReaderRequest {
+  key: string; method: string; params: Record<string, any>; item: Record<string, any> | null;
+}
+export interface CodexReaderState {
+  connected: boolean; status: string; requests: CodexReaderRequest[]; liveText: string; turnError: string | null;
+}
+export const getCodexReader = (id: string, signal?: AbortSignal): Promise<CodexReaderState> =>
+  fetch(`/api/sessions/${encodeURIComponent(id)}/codex/reader`, { signal }).then(json);
+export const connectCodexReader = (id: string): Promise<{ok: boolean}> =>
+  fetch(`/api/sessions/${encodeURIComponent(id)}/codex/connect`, { method: 'POST', headers: HEADERS, body: '{}' }).then(json);
+export const sendCodexInput = (id: string, text: string, requestId: string): Promise<{ok: boolean; turnId: string}> =>
+  fetch(`/api/sessions/${encodeURIComponent(id)}/codex/input`, { method: 'POST', headers: HEADERS, body: JSON.stringify({text, requestId}) }).then(json);
+export const answerCodexRequest = (id: string, key: string, response: {decision?: string; answers?: Record<string, string>}): Promise<{ok: boolean}> =>
+  fetch(`/api/sessions/${encodeURIComponent(id)}/codex/answer`, { method: 'POST', headers: HEADERS, body: JSON.stringify({key, ...response}) }).then(json);

@@ -73,13 +73,30 @@ second write fails, that pending reference cannot launch a standalone TUI,
 receive managed prompt delivery or revive at boot. Retry the import after
 resolving the failure; it completes the existing reference rather than creating
 a duplicate. Shared views display a **Shared** label and support Reader in
-read-only mode. The reader resolves the exact durable binding through a bounded
+interactive mode. The reader resolves the exact durable binding through a bounded
 `thread/read` metadata call, validates the returned rollout header and path
 inside the configured Codex home, and uses the existing paged transcript and
 search APIs. It never loads a thread, attaches a TUI or falls back to a newer
 conversation with the same working directory. An unavailable server or invalid
 binding shows a retryable error. Live refresh follows the original rollout;
-there is no copied history. Reply through Terminal or Codex Remote for now.
+there is no copied history.
+
+The Reader composer sends text to the bound native thread through `turn/start`.
+It attaches only an already loaded task, passes no model, sandbox or approval
+settings overrides, and refuses input while the task is busy. It never types
+into or creates a terminal. Attachments are not supported in this preview.
+A message ID is saved before sending; private durable receipts prevent replay
+after a lost response or AM restart. An uncertain acknowledgement requires
+checking the transcript, rather than automatically submitting another turn.
+
+Sending connects live requests; **Connect live requests** also attaches without
+sending a message. The Reader displays server status, live response text,
+questions and approvals. Approval buttons allow only one-time accept/deny;
+unsupported requests and persistent permission changes stay in Terminal/Remote.
+Requests answered elsewhere disappear. Browser disconnection does not approve
+anything or stop the task. These controls use the existing private deployment,
+operator-intent, privacy-lock and exact-binding checks; they are not a new
+public authentication boundary.
 
 For an isolated host pilot, `AM_WORKSPACES_DIR` may select an existing absolute
 project root without moving files or sharing production AM data. This is an
@@ -149,7 +166,7 @@ view only detaches that view. Stopping AM closes its clients; the Codex server
 is an independent process. Generic stop/archive actions and managed prompt
 delivery refuse bound tasks in this pilot: these need explicit shared-task
 semantics, server-driven activity/history and approval routing before rollout.
-Use the Codex terminal or Remote itself for input in the meantime.
+Reader text input uses its own explicit operator routes; generic prompt delivery remains blocked.
 
 `/new` and fork are not automatically associated with the old AM identity. A
 new native ID is unmapped; the original durable mapping remains intact. The
@@ -165,6 +182,7 @@ Run from `server/`:
 ```sh
 node ../scripts/run-suites.mjs codex-reader codex-import codex-bindings codex-context codex-shared.test api-http api-boundary request-admission codex-repin revive
 node test/codex-shared-pilot.test.mjs
+node test/codex-reader-input-live.test.mjs
 ```
 
 The manual pilot test requires the installed Codex CLI and local sockets. It
@@ -180,8 +198,12 @@ Import was validated with Codex 0.162.1 (the earlier binding test used 0.162.0).
 Ten targeted server suites, the web build and the Chromium mobile import test
 passed. Import tests cover failed persistence, pending-reference recovery,
 duplicates, archived views, outside-root paths, cancellation and privacy locks.
-This does not yet prove phone-side approval
-routing, model-tool identity, concurrent prompt delivery, server crash recovery
+Reader input is additionally tested against a disposable Codex 0.162.1 server
+and a local deterministic Responses fixture: real text turns, one-time command
+approval, unchanged task settings, durable duplicate suppression and no TUI.
+Browser tests cover mobile reply, draft recovery with the same message ID,
+approval and question controls. No external inference calls are made.
+This does not yet prove model-tool identity, concurrent multi-client prompt delivery, server crash recovery
 or automatic shutdown of a legacy writer. Those remain separate gates in the
 plan; the test's active command is explicit `thread/shellCommand`, not a model
 turn.
