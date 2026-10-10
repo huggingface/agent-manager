@@ -15,13 +15,30 @@ const home = path.join(root, 'home'), codexHome = path.join(root, 'codex'), data
 const cwd = path.join(data, 'workspaces', 'work'), socket = path.join(root, 's');
 for (const dir of [home, codexHome, cwd]) fs.mkdirSync(dir, { recursive: true });
 let providerCalls=0, toolRequested=false, releaseResponse, imageReceived=false, holdExternal=false, emitFollowup;
+let scenario = null, scenarioToolSent = false, questionAnswerReceived = false;
 const provider=http.createServer(async(req,res)=>{
  let body='';for await(const chunk of req)body+=chunk;
  const input=JSON.parse(body);providerCalls++;imageReceived ||= JSON.stringify(input.input).includes('input_image');
  const wantsApproval=JSON.stringify(input.input).includes('READER_APPROVAL_FIXTURE');
  const commandTool=(input.tools||[]).find(t=>t.name==='exec_command');
  let item;
- if(wantsApproval&&!toolRequested&&commandTool){
+ if (scenario === 'question' && !scenarioToolSent) {
+  const tool = (input.tools || []).find(t => t.name === 'request_user_input');
+  assert.ok(tool, 'plan mode exposes request_user_input');
+  scenarioToolSent = true;
+  item = {type:'function_call', id:'fc_'+providerCalls, call_id:'call_question', name:tool.name,
+   arguments:JSON.stringify({questions:[{id:'choice',header:'Fixture',question:'Which fixture should continue?',
+    options:[{label:'First',description:'Use the first fixture'},{label:'Second',description:'Use the second fixture'}]}]})};
+ } else if (scenario === 'approval-external' && !scenarioToolSent) {
+  assert.ok(commandTool);
+  scenarioToolSent = true;
+  item = {type:'function_call', id:'fc_'+providerCalls, call_id:'call_external_approval', name:commandTool.name,
+   arguments:JSON.stringify({cmd:'printf external-approval-command',sandbox_permissions:'require_escalated',justification:'Isolated cross-client approval fixture'})};
+ } else if (scenario) {
+  if (scenario === 'question') questionAnswerReceived = JSON.stringify(input.input).includes('Second');
+  item = {type:'message',id:'msg_'+providerCalls,role:'assistant',status:'completed',
+   content:[{type:'output_text',text:'SCENARIO_FINISHED',annotations:[]}]};
+ } else if(wantsApproval&&!toolRequested&&commandTool){
   toolRequested=true;item={type:'function_call',id:'fc_'+providerCalls,call_id:'call_fixture',name:'exec_command',arguments:JSON.stringify({cmd:'printf reader-approval-command',sandbox_permissions:'require_escalated',justification:'Isolated Reader approval fixture'})};
  }else item={type:'message',id:'msg_'+providerCalls,role:'assistant',status:'completed',content:[{type:'output_text',text:wantsApproval?'READER_APPROVAL_FINISHED':'READER_REPLY_OK',annotations:[]}]};
  res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache'});
@@ -35,8 +52,8 @@ const provider=http.createServer(async(req,res)=>{
  }
  send('response.output_item.added',{output_index:0,item:{...item,status:'in_progress'}});
  if(item.type==='message')send('response.output_text.delta',{item_id:item.id,output_index:0,content_index:0,delta:item.content[0].text});
- if(holdExternal)emitFollowup=()=>{item.content[0].text+=' LIVE_AFTER_ATTACH';send('response.output_text.delta',{item_id:item.id,output_index:0,content_index:0,delta:' LIVE_AFTER_ATTACH'});};
- if(providerCalls===1||holdExternal)await new Promise(r=>releaseResponse=r);
+ if(holdExternal && item.type === 'message')emitFollowup=()=>{item.content[0].text+=' LIVE_AFTER_ATTACH';send('response.output_text.delta',{item_id:item.id,output_index:0,content_index:0,delta:' LIVE_AFTER_ATTACH'});};
+ if(providerCalls===1||(holdExternal && item.type === 'message'))await new Promise(r=>releaseResponse=r);
  send('response.output_item.done',{output_index:0,item});
  send('response.completed',{response:{id:'resp_'+providerCalls,status:'completed',output:[item],usage:{input_tokens:1,output_tokens:1,total_tokens:2}}});res.end();
 });
@@ -97,7 +114,7 @@ async function connect() {
     try { await Promise.all([done, call('thread/shellCommand', { threadId, command, timeoutMs: 10000 })]); return output; }
     finally { clearTimeout(timer); events.delete(fn); }
   };
-  return { call, shell, ws, init, close: () => ws.terminate() };
+  return { call, shell, ws, init, events, close: () => ws.terminate() };
 }
 const free = net.createServer().listen(0, '127.0.0.1'); await once(free, 'listening');
 const port = free.address().port; await new Promise((r) => free.close(r)); const base = `http://127.0.0.1:${port}`;
@@ -155,6 +172,53 @@ try {
   await call(prefix+'/input',{text:'Image fixture',attachmentIds:[attachmentId],requestId:randomUUID()});
   await waitFor(async()=>{const s=await view();return s.interaction.canSend;});
   assert.ok(imageReceived,'uploaded image reaches model input');
+  // A question issued by a model tool in another client must be answerable
+  // through the same Reader controls, without changing that client's settings.
+  scenario = 'question'; scenarioToolSent = false;
+  await rpc.call('turn/start', {threadId:thread.id,input:[{type:'text',text:'QUESTION_FIXTURE'}],
+    collaborationMode:{mode:'plan',settings:{model:'fixture',reasoning_effort:null,developer_instructions:null}}});
+  const question = await waitFor(async () => (await view()).interaction.requests.find(r => r.kind === 'question'));
+  assert.equal(question.questions[0].id, 'choice');
+  assert.deepEqual(question.questions[0].options.map(o => o.label), ['First','Second']);
+  await call(prefix+'/answer', {key:question.key,answers:{choice:'Second'}});
+  await waitFor(async () => (await view()).interaction.canSend);
+  assert.ok(questionAnswerReceived, 'the model receives the Reader answer');
+  scenario = null;
+
+  // Conversely, resolve a Reader-visible approval in the external client.
+  // Hold the following response open: turn completion must not be the thing
+  // that clears the old approval, and a stale Reader click must be rejected.
+  scenario = 'approval-external'; scenarioToolSent = false;
+  let externalRequest;
+  const watchApproval = msg => {
+    if (msg.method === 'item/commandExecution/requestApproval' && msg.params?.threadId === thread.id) externalRequest = msg;
+  };
+  rpc.events.add(watchApproval);
+  await rpc.call('turn/start', {threadId:thread.id,input:[{type:'text',text:'EXTERNAL_APPROVAL_FIXTURE'}],
+    collaborationMode:{mode:'default',settings:{model:'fixture',reasoning_effort:null,developer_instructions:null}}});
+  const sharedApproval = await waitFor(async () => (await view()).interaction.requests.find(r => r.kind === 'permission'));
+  await waitFor(async () => externalRequest);
+  holdExternal = true; releaseResponse = null;
+  rpc.ws.send(JSON.stringify({id:externalRequest.id,result:{decision:'accept'}}));
+  await waitFor(async () => releaseResponse);
+  const resolvedElsewhere = await waitFor(async () => {
+    const s = await view(); return !s.interaction.requests.length && s;
+  });
+  assert.equal(resolvedElsewhere.activity, 'working');
+  const staleReply = await fetch(base+prefix+'/answer', {method:'POST',
+    headers:{'x-am-origin':'operator','content-type':'application/json'},
+    body:JSON.stringify({key:sharedApproval.key,decision:'accept'})});
+  assert.equal(staleReply.status, 409);
+  assert.equal((await staleReply.json()).code, 'codex-request-stale');
+  const busyReply = await fetch(base+prefix+'/input', {method:'POST',
+    headers:{'x-am-origin':'operator','content-type':'application/json'},
+    body:JSON.stringify({text:'MUST_NOT_QUEUE',requestId:randomUUID()})});
+  assert.equal(busyReply.status, 409);
+  assert.equal((await busyReply.json()).code, 'codex-task-busy');
+  releaseResponse(); holdExternal = false;
+  await waitFor(async () => (await view()).interaction.canSend);
+  rpc.events.delete(watchApproval); scenario = null;
+
   // Work starts outside AM's Reader client, as it does from a TUI or Remote.
   // A warm Reader resumes from its byte cursor, not from a new tail window.
   const idlePage=await view();const cursor=idlePage.window.end;
@@ -208,7 +272,7 @@ try {
   for(const key of ['model','modelProvider','approvalPolicy','approvalsReviewer','sandbox','cwd'])assert.deepEqual(after[key],originalSettings[key],key+' changed');
   assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).state,'waiting','Server state is independent of a TUI');
   assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).terminalRunning,true,'closing the view leaves the TUI intact');
-  console.log(JSON.stringify({commonRoutes:true,externalClientTurn:true,coldAttachDuringWork:true,liveReasoning:true,liveTools:true,imageUpload:true,readerTextRoundTrip:true,deduplicated:true,approvalInReader:true,settingsPreserved:true,readerNeverStartsTUI:true,terminalHandoff:true,externalInferenceCalls:0,providerCalls}));
+  console.log(JSON.stringify({commonRoutes:true,externalClientTurn:true,coldAttachDuringWork:true,liveReasoning:true,liveTools:true,imageUpload:true,readerTextRoundTrip:true,deduplicated:true,approvalInReader:true,modelQuestionInReader:true,approvalResolvedElsewhere:true,staleAnswerRejected:true,busyExternalTurnRejectsInput:true,settingsPreserved:true,readerNeverStartsTUI:true,terminalHandoff:true,externalInferenceCalls:0,providerCalls}));
 } finally {
   releaseResponse?.();
   terminal?.terminate(); rpc?.close();
