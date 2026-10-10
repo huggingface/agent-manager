@@ -11,8 +11,10 @@ export interface Session {
   id: string;
   name: string;
   cli: string;
-  /** Reference to an existing shared Codex task, with terminal-only pilot UI. */
+  /** Reference to an existing shared Codex task; never launch standalone. */
   codexSharedOnly?: boolean;
+  /** Server-derived binding, including migrated legacy AM sessions. */
+  codexShared?: boolean;
   // Workspace-relative folder the agent runs in. Independent of `name` —
   // renaming never moves anything on disk. ''/null = the workspace root.
   path: string | null;

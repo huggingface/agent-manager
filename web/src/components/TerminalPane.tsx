@@ -16,6 +16,7 @@ import ConversationView from './conversation/ConversationView';
 import type { ConversationSeen } from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
+import { writePaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
 import { LOCKED_CLOSE_CODE, announceLock, parseCloseReason } from '../lib/lockStatus';
 import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph } from './icons';
@@ -250,7 +251,8 @@ export default function TerminalPane({
   // The mode is app-wide (the bottom bar owns it, like zoom), but only an agent
   // has a conversation to read: a shell is a shell, and files/trace panels are
   // not this component's business at all.
-  const canRender = session.cli !== 'shell' && !isPassive(session.cli) && !session.codexSharedOnly;
+  const sharedCodex = !!(session.codexSharedOnly || session.codexShared);
+  const canRender = session.cli !== 'shell' && !isPassive(session.cli);
   const reading = mode === 'reader' && canRender;
   modeRef.current = reading ? 'reader' : 'terminal';
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
@@ -1338,7 +1340,7 @@ export default function TerminalPane({
           >
             {group && <span className="ph-group">[{group}]</span>}
             <span className="ph-name">{session.name}</span>
-            {session.codexSharedOnly && <span className="s-help" title="Same Codex conversation on this terminal and your phone. Reader view is not available in this pilot.">Shared</span>}
+            {sharedCodex && <span className="s-help" title="Same Codex conversation in Reader, terminal and on your phone.">Shared</span>}
           </span>
         )}
         <div className="ph-right">
@@ -1416,11 +1418,12 @@ export default function TerminalPane({
           // 13px at 100%, so the two forms of the same session read alike.
           <div
             className="pane-reader"
-            style={{ '--cx-base': `${(13 * zoom) / 100}px` } as CSSProperties}
+            style={{ '--cx-base': `${(13 * zoom) / 100}px`, flexDirection: 'column' } as CSSProperties}
             onMouseDown={(e) => e.stopPropagation()}
           >
             <ConversationView
               session={session}
+              readOnly={sharedCodex}
               isMobile={isMobile}
               searchOpen={searchOpen}
               onCloseSearch={() => setSearchOpen(false)}
@@ -1428,6 +1431,7 @@ export default function TerminalPane({
               onHead={(head) => { setReaderFacts(head); setReaderLoaded(head?.loaded); }}
               seen={seen}
             />
+            {sharedCodex && <div className="cxv-msg" role="status">Shared conversation · reply in <button className="cxv-mini" onClick={() => writePaneMode('terminal')}>Terminal</button> or Codex Remote.</div>}
           </div>
         )}
       </div>

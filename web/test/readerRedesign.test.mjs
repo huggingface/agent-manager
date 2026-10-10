@@ -54,7 +54,7 @@ await build({
       roster(){return config.child?[{agentId:'child',toolUseId:'spawn',hasTranscript:true}]:[];},
     };
     function Pane({id}) {return <div className="tile" style={{position:'relative',flex:1,minWidth:0}}><TerminalPane
-      session={{id,cli:'claude',name:'Reader fixture',state:config.state||'waiting',running:true,everStarted:true,path:null,createdAt:new Date().toISOString()}}
+      session={{id,cli:config.shared?'codex':'claude',codexSharedOnly:config.shared,codexShared:config.bound,name:'Reader fixture',state:config.state||'waiting',running:true,everStarted:true,path:null,createdAt:new Date().toISOString()}}
       cli={{id:'claude',label:'Fixture',color:'#777'}} mode={config.mode||'reader'} theme="light" zoom={config.zoom||100}
       focused active={config.active!==false} visible onClose={()=>{}} /></div>}
     function App(){return <><Pane id={config.id}/>{config.group&&<Pane id="follower"/>}</>}
@@ -95,6 +95,21 @@ try {
   assert.deepEqual(await p.evaluate(() => window.sends), [{ id: 'new-session', text: 'First prompt from the reader' }]);
   assert.equal(await p.evaluate(() => window.sockets.length), 0, 'reader never attaches or starts a PTY');
 
+  // Imported and migrated Codex bindings both render Reader without a TUI or
+  // a composer that would attempt unsupported managed input delivery.
+  await p.setViewportSize({ width: 390, height: 844 });
+  for (const flags of [{ shared: true }, { bound: true }]) {
+    await p.evaluate((flags) => window.fixture.mount({ id: 'shared-' + JSON.stringify(flags), ...flags }), flags);
+    await p.getByText('Question 1', { exact: true }).waitFor();
+    assert.equal(await p.locator('.cxv-composer textarea').count(), 0);
+    assert.equal(await p.getByRole('button', { name: 'Attach files' }).count(), 0);
+    assert.equal(await p.locator('.term-fill, .xterm').count(), 0);
+    assert.equal(await p.evaluate(() => window.sockets.length), 0);
+    await p.getByRole('button', { name: 'Terminal', exact: true }).waitFor();
+    const footer = await p.getByRole('status').filter({ hasText: 'Shared conversation' }).boundingBox();
+    assert.ok(footer && footer.y + footer.height <= 844, 'handoff hint remains visible on mobile');
+  }
+  await p.setViewportSize({ width: 1000, height: 700 });
   // A hung leader cannot stop another pane, and it cannot hide the draft.
   await p.clock.install();
   await p.evaluate(() => window.fixture.mount({ id: 'hung', behavior: 'hang', group: true }));

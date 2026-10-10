@@ -2657,9 +2657,10 @@ api.get('/api/folders', (req, res) => {
 
 function sessionsWithState() {
   const info = agentInfo();
+  const shared = new Set(codexBindings.read().map((binding) => binding.amSessionId));
   return store.list().map((s) => {
     const state = deriveState(s, info.get(s.id));
-    return { ...s, state, running: state !== 'stopped', inputRequired: info.get(s.id)?.inputRequired || null };
+    return { ...s, codexShared: s.cli === 'codex' && (s.codexSharedOnly || shared.has(s.id)), state, running: state !== 'stopped', inputRequired: info.get(s.id)?.inputRequired || null };
   });
 }
 

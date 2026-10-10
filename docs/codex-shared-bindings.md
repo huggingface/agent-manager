@@ -72,9 +72,14 @@ A new reference is durably saved with `codexSharedOnly` before binding. If the
 second write fails, that pending reference cannot launch a standalone TUI,
 receive managed prompt delivery or revive at boot. Retry the import after
 resolving the failure; it completes the existing reference rather than creating
-a duplicate. Imported views display a **Shared** label and use the terminal
-even when the global Reader preference is selected; API-backed Reader support
-is still a separate rollout gate.
+a duplicate. Shared views display a **Shared** label and support Reader in
+read-only mode. The reader resolves the exact durable binding through a bounded
+`thread/read` metadata call, validates the returned rollout header and path
+inside the configured Codex home, and uses the existing paged transcript and
+search APIs. It never loads a thread, attaches a TUI or falls back to a newer
+conversation with the same working directory. An unavailable server or invalid
+binding shows a retryable error. Live refresh follows the original rollout;
+there is no copied history. Reply through Terminal or Codex Remote for now.
 
 For an isolated host pilot, `AM_WORKSPACES_DIR` may select an existing absolute
 project root without moving files or sharing production AM data. This is an
@@ -148,8 +153,9 @@ Use the Codex terminal or Remote itself for input in the meantime.
 
 `/new` and fork are not automatically associated with the old AM identity. A
 new native ID is unmapped; the original durable mapping remains intact. The
-current AM Reader/activity indicators still use the legacy implementation and
-are not authoritative for work performed from other clients. Do not enable
+Reader uses the verified shared transcript, but AM activity indicators still
+depend partly on the local terminal and are not authoritative for work
+performed from other clients. Do not enable
 this pilot as the production default yet.
 
 ## Validation
@@ -157,7 +163,7 @@ this pilot as the production default yet.
 Run from `server/`:
 
 ```sh
-node ../scripts/run-suites.mjs codex-import codex-bindings codex-context codex-shared.test api-http api-boundary request-admission codex-repin revive
+node ../scripts/run-suites.mjs codex-reader codex-import codex-bindings codex-context codex-shared.test api-http api-boundary request-admission codex-repin revive
 node test/codex-shared-pilot.test.mjs
 ```
 

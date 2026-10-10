@@ -113,7 +113,7 @@ export default function ConversationView({
   const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   const [sent, setSent] = useState<(PendingPrompt & { at: number }) | null>(null);
-  const allowAttachments = !isRemote(session.cli);
+  const allowAttachments = !readOnly && !isRemote(session.cli);
   const [openWork, setOpenWork] = useState(new Map<string, boolean>());
   const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
   /**
@@ -418,10 +418,11 @@ export default function ConversationView({
   }, [sent, live, session.inputRequired]);
 
   useEffect(() => {
+    if (readOnly) { onAttachPicker?.(null); return; }
     onAttachPicker?.({ open: () => filePicker.current?.click(), disabled: sending || !allowAttachments,
       reason: !allowAttachments ? 'Files are not available for remote agents yet.' : sending ? 'Wait for this message to send' : 'Attach files' });
     return () => onAttachPicker?.(null);
-  }, [onAttachPicker, sending, allowAttachments]);
+  }, [onAttachPicker, sending, allowAttachments, readOnly]);
   const reportHead = useRef(onHead); reportHead.current = onHead;
   useEffect(() => { reportHead.current?.(head); }, [head]);
   useEffect(() => () => reportHead.current?.(null), []);
