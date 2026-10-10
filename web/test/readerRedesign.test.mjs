@@ -16,7 +16,8 @@ await build({
     import React from 'react'; import {createRoot} from 'react-dom/client'; import {flushSync} from 'react-dom';
     import TerminalPane from './src/components/TerminalPane';
     import {TraceUnavailable} from './src/api';
-    window.sockets = []; window.sends = []; window.reads = [];
+    window.sockets = []; window.sends = []; window.reads = []; window.sharedSends=[]; window.sharedAnswers=[]; window.interrupts=[]; window.reconnections=[]; window.closes=0;
+    const storage = new Map(); Object.defineProperty(window, 'localStorage', {value:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)}});
     class FakeSocket { static OPEN=1; readyState=1; constructor(){window.sockets.push(this); if(window.refuseSockets)setTimeout(()=>{this.readyState=3;this.onclose?.({code:1006});},1);} send(){} close(){this.readyState=3;} }
     window.WebSocket = FakeSocket;
     let config = {}, root;
@@ -28,6 +29,7 @@ await build({
     const page = (turns, from=0, end=turns.length) => ({
       harness:'claude',harnessLabel:'Fixture',sessionId:config.id,title:'',model:null,cwd:null,firstTs:100000,lastTs:100500,
       usage:null,source:null,sharedBy:null,note:null,truncated:false,total:null,userTurns:null,activity:config.activity||'waiting',generation:'fixture',revision:'r1',turns,
+      ...((config.shared||config.bound)?{interaction:{canSend:!config.sharedBusy&&!config.sharedRequest,requests:config.sharedRequest?[config.sharedRequest]:[],error:null}}:{}),
       window:{mode:'bytes',start:from,end,atStart:from===0,atEnd:true,generation:'fixture',revision:'r1'},
     });
     window.fixtureApi = {
@@ -50,13 +52,17 @@ await build({
         const from=child ? (config.childEarlier ? 160 : bytes>=2*1024*1024 ? 0 : 196) : (config.from||0)*2;
         return Promise.resolve(page(all.slice(from),from,all.length));
       },
+      send(id,text){window.sends.push({id,text});if(config.shared||config.bound){window.sharedSends.push({id,text});if(config.failSharedSend){config.failSharedSend=false;return Promise.reject(new Error('Delivery uncertain'));}}return Promise.resolve({ok:true});},
+      reconnect(id,recoveryKey){window.reconnections.push({id,recoveryKey});return config.rejectReconnect?Promise.reject(new Error('Saved task changed')):Promise.resolve({ok:true});},
+      interrupt(id,turnId){window.interrupts.push({id,turnId});return config.rejectInterrupt?Promise.reject(new Error('That turn is no longer active')):Promise.resolve({ok:true,requested:true,turnId});},
+      answer(id,key,response){window.sharedAnswers.push({id,key,response});config.sharedRequest=null;return Promise.resolve({ok:true});},
       summary(){return Promise.resolve({...page([]),total:2*(config.count||2),userTurns:[]});},
       roster(){return config.child?[{agentId:'child',toolUseId:'spawn',hasTranscript:true}]:[];},
     };
     function Pane({id}) {return <div className="tile" style={{position:'relative',flex:1,minWidth:0}}><TerminalPane
-      session={{id,cli:'claude',name:'Reader fixture',state:config.state||'waiting',running:true,everStarted:true,path:null,createdAt:new Date().toISOString()}}
+      session={{id,cli:config.shared?'codex':'claude',codexSharedOnly:config.shared,codexShared:config.bound,interruptTurnId:config.turnId,recoveryKey:config.recoveryKey,archivedAt:config.archivedAt,name:'Reader fixture',state:config.state||'waiting',running:true,everStarted:true,path:null,createdAt:new Date().toISOString()}}
       cli={{id:'claude',label:'Fixture',color:'#777'}} mode={config.mode||'reader'} theme="light" zoom={config.zoom||100}
-      focused active={config.active!==false} visible onClose={()=>{}} /></div>}
+      isMobile={config.mobile} focused active={config.active!==false} visible onClose={()=>{window.closes++;}} /></div>}
     function App(){return <><Pane id={config.id}/>{config.group&&<Pane id="follower"/>}</>}
     window.fixture = {
       mount(options){if(root)flushSync(()=>root.unmount()); config={...options}; root=createRoot(document.getElementById('fixture-root')); flushSync(()=>root.render(<App/>));},
@@ -73,7 +79,10 @@ await build({
       export const getSubAgentWindow=(id,agentId,...args)=>window.fixtureApi.window(agentId,...args);
       export const getSubAgentSummary=()=>window.fixtureApi.summary();
       export const getSubAgents=()=>Promise.resolve({agents:window.fixtureApi.roster()});
-      export const sendInput=(id,text)=>{window.sends.push({id,text});return Promise.resolve({});};
+      export const answerSessionRequest=(...args)=>window.fixtureApi.answer(...args);
+      export const reconnectSession=(...args)=>window.fixtureApi.reconnect(...args);
+      export const interruptSession=(...args)=>window.fixtureApi.interrupt(...args);
+      export const sendInput=(...args)=>window.fixtureApi.send(...args);
     ` }));
   } }],
 });
@@ -82,8 +91,8 @@ const errors = [];
 try {
   const p = await browser.newPage({ viewport: { width: 1000, height: 700 } });
   p.on('pageerror', (error) => errors.push(error.message));
-  await p.route('**/*', (route) => route.abort());
-  await p.setContent('<div id="fixture-root" style="display:flex;position:absolute;inset:10px"></div>');
+  await p.route('**/*', (route) => route.request().url() === 'https://reader.test/' ? route.fulfill({contentType:'text/html',body:'<div id="fixture-root" style="display:flex;position:absolute;inset:10px"></div>'}) : route.abort());
+  await p.goto('https://reader.test/');
   await p.addStyleTag({ path: bundle.replace(/\.js$/, '.css') });
   await p.addStyleTag({ content: fs.readFileSync(path.join(web, 'src/styles.css'), 'utf8') + fs.readFileSync(path.join(web, 'src/conversation.css'), 'utf8') });
   await p.addScriptTag({ path: bundle });
@@ -95,6 +104,81 @@ try {
   assert.deepEqual(await p.evaluate(() => window.sends), [{ id: 'new-session', text: 'First prompt from the reader' }]);
   assert.equal(await p.evaluate(() => window.sockets.length), 0, 'reader never attaches or starts a PTY');
 
+  // Lifecycle controls use the exact displayed turn and never retry or interrupt on close.
+  for (const mode of ['reader','terminal']) {
+    await p.evaluate(mode=>window.fixture.mount({id:'lifecycle-'+mode,shared:true,mode,turnId:'turn-'+mode}),mode);
+    const before=await p.evaluate(()=>window.interrupts.length);
+    await p.getByRole('button',{name:'Interrupt current turn',exact:true}).click();
+    await p.getByText('Interruption requested…',{exact:true}).waitFor();
+    assert.equal(await p.getByRole('button',{name:'Interrupt current turn',exact:true}).isDisabled(),true);
+    assert.deepEqual(await p.evaluate(()=>window.interrupts.at(-1)),{id:'lifecycle-'+mode,turnId:'turn-'+mode});
+    await p.getByRole('button',{name:'Close view',exact:true}).click();
+    assert.equal(await p.evaluate(()=>window.interrupts.length),before+1);
+    await p.evaluate(()=>window.fixture.change({turnId:'new-turn',rejectInterrupt:true}));
+    await p.getByRole('button',{name:'Interrupt current turn',exact:true}).click();
+    await p.getByRole('alert').filter({hasText:'That turn is no longer active'}).waitFor();
+    await p.evaluate(()=>window.fixture.change({turnId:null}));
+    assert.equal(await p.getByRole('button',{name:'Interrupt current turn',exact:true}).count(),0);
+  }
+  await p.evaluate(()=>window.fixture.mount({id:'legacy',turnId:'legacy-turn'}));
+  assert.equal(await p.getByRole('button',{name:'Interrupt current turn',exact:true}).count(),0);
+  await p.evaluate(()=>window.fixture.mount({id:'archived',shared:true,turnId:'still-active',archivedAt:'2026-10-10'}));
+  assert.equal(await p.getByRole('button',{name:'Interrupt current turn',exact:true}).count(),0);
+  // Reset socket observations: the following cases deliberately exercise Reader only.
+  await p.evaluate(()=>{window.sockets=[];});
+
+  // Reopening a saved task is an explicit separate action and carries the verified key.
+  await p.evaluate(()=>window.fixture.mount({id:'recovery',shared:true,recoveryKey:'saved-settings',sharedBusy:true}));
+  const recoverySends=await p.evaluate(()=>window.sharedSends.length);
+  await p.getByRole('button',{name:'Reconnect task',exact:true}).click();
+  await p.waitForFunction(()=>window.reconnections.length===1);
+  assert.deepEqual(await p.evaluate(()=>window.reconnections[0]),{id:'recovery',recoveryKey:'saved-settings'});
+  assert.equal(await p.getByRole('button',{name:'Reconnect task',exact:true}).isDisabled(),true);
+  assert.equal(await p.evaluate(()=>window.sharedSends.length),recoverySends);
+  await p.evaluate(()=>window.fixture.change({recoveryKey:'changed-settings',rejectReconnect:true}));
+  await p.getByRole('button',{name:'Reconnect task',exact:true}).click();
+  await p.getByRole('alert').filter({hasText:'Saved task changed'}).waitFor();
+  await p.evaluate(()=>window.fixture.change({recoveryKey:null}));
+  assert.equal(await p.getByRole('button',{name:'Reconnect task',exact:true}).count(),0);
+
+  // Both kinds of shared binding can reply without creating a terminal.
+  await p.setViewportSize({ width: 390, height: 844 });
+  for (const flags of [{ shared: true }, { bound: true }]) {
+    await p.evaluate((flags) => window.fixture.mount({ id: 'shared-' + JSON.stringify(flags), ...flags, mobile:true }), flags);
+    await p.getByText('Question 1', { exact: true }).waitFor();
+    await p.locator('.cxv-composer textarea').waitFor();
+    assert.equal(await p.locator('.cxv-composer textarea').count(), 1);
+    assert.equal(await p.locator('.cxv-composer textarea').getAttribute('autocorrect'),'on');
+    assert.equal(await p.locator('.cxv-composer textarea').getAttribute('spellcheck'),'true');
+    assert.equal(await p.getByRole('button', { name: 'Attach files' }).count(), 1);
+    assert.equal(await p.locator('.term-fill, .xterm').count(), 0);
+    assert.equal(await p.getByText('Connect live requests',{exact:true}).count(),0);
+    assert.equal(await p.getByText('Live response',{exact:true}).count(),0);
+    assert.equal(await p.evaluate(() => window.sockets.length), 0);
+  }
+  await p.evaluate(() => window.fixture.mount({id:'retry-shared',shared:true,failSharedSend:true}));
+  await p.getByText('Question 1',{exact:true}).waitFor();
+  await p.locator('.cxv-composer textarea').fill('Send directly to shared server');
+  await p.getByTitle('Send', {exact:true}).click();
+  await p.getByText('Delivery uncertain', {exact:true}).waitFor();
+  assert.equal(await p.locator('.cxv-composer textarea').inputValue(),'Send directly to shared server');
+  await p.getByTitle('Send', {exact:true}).click();
+  await p.waitForFunction(()=>window.sharedSends.length===2);
+  assert.equal(await p.evaluate(()=>window.sharedSends[0].text===window.sharedSends[1].text),true,'retry retains draft');
+  await p.evaluate(()=>window.fixture.mount({id:'shared-approval',shared:true,sharedRequest:{key:'approval-1',kind:'permission',details:'printf fixture',choices:[{value:'accept',label:'Approve once'},{value:'decline',label:'Deny'}],terminalFallback:false}}));
+  await p.getByText('printf fixture', {exact:true}).waitFor();
+  assert.equal(await p.evaluate(()=>window.sharedAnswers.length),0,'never automatically approve');
+  await p.getByRole('button',{name:'Approve once',exact:true}).click();
+  await p.waitForFunction(()=>window.sharedAnswers.length===1);
+  assert.deepEqual(await p.evaluate(()=>window.sharedAnswers[0].response),{decision:'accept'});
+  await p.evaluate(()=>window.fixture.mount({id:'shared-question',shared:true,sharedRequest:{key:'question-1',kind:'question',details:'',questions:[{id:'choice',text:'Which fixture?',options:[{label:'First',description:'First fixture'}]}],choices:[],terminalFallback:false}}));
+  await p.getByText('Which fixture?', {exact:true}).waitFor();
+  await p.getByRole('button',{name:'First',exact:true}).click();
+  await p.getByRole('button',{name:'Submit answers',exact:true}).click();
+  await p.waitForFunction(()=>window.sharedAnswers.length===2);
+  assert.deepEqual(await p.evaluate(()=>window.sharedAnswers[1].response),{answers:{choice:'First'}});
+  assert.equal(await p.evaluate(()=>window.sockets.length),0,'Reader actions never attach a PTY');
+  await p.setViewportSize({ width: 1000, height: 700 });
   // A hung leader cannot stop another pane, and it cannot hide the draft.
   await p.clock.install();
   await p.evaluate(() => window.fixture.mount({ id: 'hung', behavior: 'hang', group: true }));

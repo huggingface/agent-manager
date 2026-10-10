@@ -1,3 +1,9 @@
+import {CodexMigration} from './codex-migrate.js';
+import {CodexCreation, sharedCreationEnabled} from './codex-create.js';
+import { SessionRuntime } from './session-runtime.js';
+import { CodexInput } from './codex-input.js';
+import { codexBindings, configuredEndpoint, contextForThread, bindExistingThread, importSharedThread, contextError } from './codex-context.js';
+import { ObservationClient, sharedCodexSnapshot, CodexObservationError } from './codex-shared.js';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -367,6 +373,146 @@ api.get('/api/health', (_req, res) =>
 
 api.get('/api/clis', (_req, res) => res.json(cliCatalog()));
 
+// Observation only, behind the same privacy/admission boundary as other APIs.
+api.get('/api/codex/shared', async (req, res) => {
+  const cursor = req.query.cursor ?? null;
+  if (cursor !== null && (typeof cursor !== 'string' || cursor.length > 4096)) {
+    throw new ApiError(400, 'invalid-input', 'Invalid pagination cursor');
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  res.once('close', abort);
+  try {
+    const result = await sharedCodexSnapshot({ cursor, sessions: store.list(), signal: controller.signal });
+    res.set('Cache-Control', 'no-store').json({ ...result, importEnabled: process.env.AM_CODEX_BINDINGS_PILOT === '1' });
+  } catch (error) {
+    // Socket paths, daemon errors and protocol payloads can contain private data.
+    const code = error instanceof CodexObservationError ? error.code : 'unavailable';
+    throw new ApiError(code === 'busy' ? 429 : 503, 'codex-observation-unavailable',
+      'Codex observation is unavailable. Existing sessions have not been changed.',
+      { reason: code });
+  } finally { res.off('close', abort); }
+});
+
+// Exact native-thread lookup works without AM_ID, including tools started by
+// Remote. It inherits the ordinary private API admission and privacy gates.
+api.get('/api/codex/context', (req, res) => {
+  try {
+    if (typeof req.query.threadId !== 'string') throw new ApiError(400, 'invalid-input', 'threadId is required.');
+    res.set('Cache-Control', 'no-store').json(contextForThread(req.query.threadId, { sessions: store.list() }));
+  } catch (error) { throw contextError(error); }
+});
+
+api.post('/api/sessions/:id/codex/binding', async (req, res) => {
+  if (process.env.AM_CODEX_BINDINGS_PILOT !== '1') throw new ApiError(409, 'codex-pilot-disabled', 'Codex binding writes are disabled outside the isolated pilot.');
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  res.once('close', abort);
+  try {
+    const binding = await bindExistingThread({ sessionId: req.params.id, threadId: req.body?.threadId,
+      expectedRevision: req.body?.expectedRevision }, {
+      getSession: store.get, sessions: store.list, isRunning, signal: controller.signal,
+      beforeCommit: () => { if (isLocked()) throw new ApiError(403, 'space-locked', 'Space is locked.'); },
+    });
+    if (isLocked()) throw new ApiError(403, 'space-locked', 'Space is locked.');
+    res.set('Cache-Control', 'no-store').json({ binding, launchMode: 'shared-client' });
+  } catch (error) { throw contextError(error); }
+  finally { res.off('close', abort); }
+});
+
+let codexImportPending = false;
+api.post('/api/codex/import', async (req, res) => {
+  if (process.env.AM_CODEX_BINDINGS_PILOT !== '1') throw new ApiError(409, 'codex-pilot-disabled', 'Shared task imports are disabled outside the pilot.');
+  if (codexImportPending) throw new ApiError(409, 'codex-import-busy', 'Another task is being added. Retry shortly.');
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  res.once('close', abort); codexImportPending = true;
+  try {
+    const result = await importSharedThread({ threadId: req.body?.threadId }, {
+      store, isRunning, signal: controller.signal,
+      beforeCommit: () => { if (isLocked()) throw new ApiError(403, 'space-locked', 'Space is locked.'); },
+    });
+    res.set('Cache-Control', 'no-store').json({ ...result, launchMode: 'shared-client' });
+  } catch (error) { throw contextError(error); }
+  finally { codexImportPending = false; res.off('close', abort); }
+});
+
+// Shared Reader input uses the exact server binding, never terminal keystrokes.
+const codexInput = new CodexInput({ getSession: store.get, listSessions: store.list,
+  assertWritable: () => { if (isLocked()) throw new ApiError(403, 'space-locked', 'Space is locked.'); } });
+const sessionRuntime = new SessionRuntime({ codex: codexInput, bindings: codexBindings });
+const codexCreation=new CodexCreation({store,bindings:codexBindings,input:codexInput,isRunning,
+ nextName:()=>nextName('codex'),place:(s,groupId)=>{if(groupId&&groups.get(groupId))groups.attach(groupId,s.id);else order.prepend(`s:${s.id}`);},
+ assertWritable:()=>{if(isLocked())throw new ApiError(403,'space-locked','Space is locked.');}});
+
+const requireReaderOperator = (req) => {
+  if (req.headers['x-am-origin'] !== 'operator') throw new ApiError(403, 'operator-required', 'Use the operator Reader for this action.');
+};
+// Migration is deliberately separate from stop/release: only an already
+// stopped, exact legacy session can transfer; preview never changes ownership.
+const codexMigration=new CodexMigration({store,bindings:codexBindings,isRunning,
+ assertWritable:()=>{if(isLocked())throw new ApiError(403,'space-locked','Space is locked.');}});
+api.get('/api/sessions/:id/codex/migration',async(req,res)=>{
+ const plan=await codexMigration.inspect(req.params.id,{signal:res.locals.lockSignal});
+ const {endpoint,stamp,...preview}=plan;
+ res.set('Cache-Control','no-store').json(preview);
+});
+api.post('/api/sessions/:id/codex/migration',async(req,res)=>{
+ requireReaderOperator(req);
+ res.json(await codexMigration.apply(req.params.id,req.body?.key,{signal:res.locals.lockSignal}));
+});
+
+// Native approvals are adapted to the same session interaction contract.
+api.post('/api/sessions/:id/reconnect', async (req, res) => {
+  requireReaderOperator(req);
+  const session=store.get(req.params.id);
+  if(!session)throw new ApiError(404,'not-found','Session not found.');
+  if(!sessionRuntime.shared(session))throw new ApiError(409,'reconnect-unsupported','Use this session’s terminal to reconnect it.');
+  const result=await codexInput.reconnect(session.id,req.body||{},{signal:res.locals.lockSignal});
+  await sessionRuntime.refresh(session);res.json(result);
+});
+
+api.post('/api/sessions/:id/interrupt', async (req, res) => {
+  requireReaderOperator(req);
+  const session = store.get(req.params.id);
+  if (!session) throw new ApiError(404, 'not-found', 'Session not found.');
+  if (!sessionRuntime.shared(session)) throw new ApiError(409, 'interrupt-unsupported', 'Use this session’s terminal to interrupt it.');
+  const result = await codexInput.interrupt(session.id, req.body || {}, {signal:res.locals.lockSignal});
+  await sessionRuntime.refresh(session);
+  res.json(result);
+});
+
+api.post('/api/sessions/:id/answer', async (req, res) => {
+  requireReaderOperator(req);
+  res.json(await codexInput.answer(req.params.id, req.body || {}));
+});
+
+// Resolve one recognizable AM name (or exact ID); never choose by recency/CWD.
+api.get('/api/codex/client-target', async (req, res) => {
+  const selection = req.query.session;
+  if (typeof selection !== 'string' || !selection || selection.length > 160) throw new ApiError(400, 'invalid-input', 'session is required.');
+  const exact = store.get(selection);
+  const candidates = exact ? [exact] : store.list().filter((s) => s.name.toLowerCase() === selection.toLowerCase());
+  if (!candidates.length) throw new ApiError(404, 'not-found', 'AM session not found.');
+  if (candidates.length !== 1) throw new ApiError(409, 'codex-selection-ambiguous', 'Use an exact AM session ID for this name.');
+  let client;
+  try {
+    const s = candidates[0];
+    const binding = codexBindings.forSession(s.id);
+    if (!binding) throw new ApiError(409, 'codex-unmapped', 'This session has not been associated with the shared server.');
+    const endpoint = configuredEndpoint();
+    const context = contextForThread(binding.threadId, { sessions: store.list(), endpoint });
+    client = await ObservationClient.connect(endpoint);
+    if (client.endpoint.socket !== endpoint.socket || client.endpoint.home !== endpoint.home) throw new ApiError(409, 'codex-endpoint-changed', 'The configured endpoint changed.');
+    const read = await client.call('thread/read', { threadId: binding.threadId, includeTurns: false });
+    if (read?.thread?.id !== binding.threadId || fs.realpathSync(read.thread.cwd) !== context.workdir) throw new ApiError(409, 'codex-thread-mismatch', 'Thread verification failed.');
+    // Re-read after network awaits. A deleted/changed session must not launch.
+    contextForThread(binding.threadId, { sessions: store.list(), endpoint });
+    res.set('Cache-Control', 'no-store').json({ ...context, socket: endpoint.socket, codexHome: endpoint.home });
+  } catch (error) { throw contextError(error); }
+  finally { client?.close(); }
+});
+
 api.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.debug === '1', req.query.provider || null)));
 
 // Newest first. The JSONL source lives under DATA_DIR; this bounded API is the
@@ -547,6 +693,8 @@ async function deliver(session, { text, attachments = [] }, from, { signal = nul
 
 async function deliverInner(session, { text, attachments }, from, { cancelled, signal }) {
   cancelled();
+  if (session.cli === 'codex' && (session.codexSharedOnly || codexBindings.forSession(session.id))) throw new ApiError(409, 'codex-shared-delivery-pending',
+    'Use the Codex terminal or Remote for this pilot task; managed prompt delivery is not enabled yet.');
   if (isRemote(session.cli)) {
     if (attachments.length) throw new ApiError(400, 'invalid-input', 'files are not available for remote agents yet');
     const name = session.remote?.name;
@@ -617,6 +765,12 @@ api.post('/api/sessions/:id/input', async (req, res) => {
   if (!text && (!Array.isArray(attachmentIds) || attachmentIds.length === 0)) return res.status(400).json({ error: 'empty' });
   try {
     const attachments = resolveAttachments(s.id, attachmentIds);
+    if (sessionRuntime.shared(s)) {
+      requireReaderOperator(req);
+      const prompt = attachments.some(a => a.kind !== 'image') ? formatAttachmentDelivery(s.cli, text, attachments.filter(a => a.kind !== 'image')) : text;
+      const result = await sessionRuntime.send(s, {text: prompt, attachments, requestId: req.body.requestId}, {signal: res.locals.lockSignal});
+      touchInput(s.id); return res.json(result);
+    }
     const started = await deliver(s, { text, attachments }, undefined, { signal: res.locals.lockSignal });
     touchInput(s.id);
     res.json({ ok: true, started });
@@ -795,10 +949,10 @@ function agentRow(s, act, d, selfId, mates) {
     name: s.name,
     cli: s.cli,
     ...(s.id === selfId ? { self: true } : {}),
-    state: deriveState(s, act),
+    state: sessionRuntime.presentation(s)?.state ?? deriveState(s, act),
     // Seconds since its screen last changed. Small = actively working.
     idleFor: act ? act.age : null,
-    inputRequired: act?.inputRequired || null,
+    inputRequired: sessionRuntime.presentation(s)?.inputRequired ?? act?.inputRequired ?? null,
     workdir: workspacePath(folder),
     path: folder,
     // Who else writes to this same folder — the actual collision hazard.
@@ -2563,9 +2717,11 @@ api.get('/api/folders', (req, res) => {
 
 function sessionsWithState() {
   const info = agentInfo();
+  const shared = new Set(codexBindings.read().map((binding) => binding.amSessionId));
   return store.list().map((s) => {
     const state = deriveState(s, info.get(s.id));
-    return { ...s, state, running: state !== 'stopped', inputRequired: info.get(s.id)?.inputRequired || null };
+    const runtime = sessionRuntime.presentation(s);
+    return { ...s, terminalRunning: isRunning(s.id), codexShared: s.cli === 'codex' && (s.codexSharedOnly || shared.has(s.id)), state, running: state !== 'stopped', inputRequired: info.get(s.id)?.inputRequired || null, ...runtime };
   });
 }
 
@@ -2658,6 +2814,7 @@ api.get('/api/next-name', (req, res) => {
 // the UI's POST /api/sessions and the agent API's spawn — one creation path, so
 // quickstart behaves identically whoever asked. Returns null for a bad path.
 function createSession({ name, cli, groupId, path: reqPath, prompt }) {
+  if(cli==='codex'&&sharedCreationEnabled())throw new ApiError(409,'codex-shared-operator-required','Create shared Codex tasks from the operator interface. Managed agent/cron creation is not enabled.');
   const finalName = name && name.trim() ? name.trim() : nextName(cli);
   // A remote agent's slug IS its folder and its API address, so it is minted
   // here, from the name, and never changes afterwards — the display name stays
@@ -2716,9 +2873,17 @@ function createSession({ name, cli, groupId, path: reqPath, prompt }) {
   return s;
 }
 
-api.post('/api/sessions', (req, res) => {
+api.post('/api/sessions', async (req, res) => {
   const { name, cli, groupId, path: reqPath, prompt } = req.body || {};
   if (!cli || !cliById(cli)) return res.status(400).json({ error: 'unknown cli' });
+  if(cli==='codex'&&sharedCreationEnabled()){
+    requireReaderOperator(req);
+    const chosen=cleanRelPath(typeof reqPath==='string'&&reqPath.trim()?reqPath:'.');
+    if(chosen===null||chosen===remote.REMOTE_FOLDER||chosen.startsWith(`${remote.REMOTE_FOLDER}/`))throw new ApiError(400,'invalid-input','Choose a valid workspace folder.');
+    if(groupId&&!groups.get(groupId))throw new ApiError(400,'invalid-input','The destination group no longer exists.');
+    const s=await codexCreation.create({requestId:req.body.requestId,name,path:chosen,groupId,prompt},{signal:res.locals.lockSignal});
+    await sessionRuntime.refresh(s);return res.status(201).json({...s,codexShared:true,terminalRunning:isRunning(s.id),...sessionRuntime.presentation(s)});
+  }
   const s = createSession({ name, cli, groupId, path: reqPath, prompt });
   if (!s) return res.status(400).json({ error: 'bad path' });
   if (s.error) return res.status(400).json({ error: s.error });
@@ -2871,7 +3036,10 @@ api.put('/api/sessions/:id', (req, res) => {
 api.post('/api/sessions/:id/archive', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  // Archiving stops the agent. Putting a session away while its CLI keeps
+  // Shared archive only changes AM visibility. Codex owns the task and its
+  // clients elsewhere; keep the binding, transcript and work intact.
+  if (sessionRuntime.shared(s)) return res.json(store.setArchived(s.id, true));
+  // Archiving a legacy session stops its agent. Putting it away while its CLI keeps
   // running is how you end up paying for work behind a row you can no longer
   // see. A remote agent has no process here — its connection is a separate
   // control that stays where it is, so archiving one only files it away.
@@ -2938,7 +3106,7 @@ api.post('/api/groups/:id/unpin', (req, res) => {
 api.post('/api/sessions/:id/unarchive', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  return res.json(store.update(s.id, { archivedAt: undefined }));
+  return res.json(sessionRuntime.shared(s) ? store.setArchived(s.id, false) : store.update(s.id, { archivedAt: undefined }));
 });
 
 api.post('/api/sessions/:id/stop', (req, res) => {
@@ -3146,7 +3314,8 @@ api.get('/api/trace/:id', async (req, res) => {
     }
     const target = store.get(source.ref);
     if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
-    res.json(await readTrace(target, opts));
+    const page = await readTrace(target, opts);
+    res.json(await sessionRuntime.trace(target, page, {interactive: pane.id === target.id && !opts.summary && !req.query.before}));
   } catch (e) {
     // These are expected states, not failures: no transcript yet, an
     // unsupported CLI, or a codex guardian rollout. The pane renders the reason.
@@ -3531,7 +3700,7 @@ setTimeout(() => {
   });
 }, 8000);
 
-server.listen(PORT, () => {
+server.listen(PORT, process.env.AM_BIND_HOST || undefined, () => {
   console.log(`Agent Manager :${PORT}  engine=libghostty${ghosttyReady() ? '' : ' (UNAVAILABLE)'}  data=${DATA_DIR}`);
   console.log('⚠  No authentication: this app trusts whoever can reach it.');
   console.log('   Keep this Space PRIVATE — a public instance gives anyone a shell + your logged-in agents.');

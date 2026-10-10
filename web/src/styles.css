@@ -987,7 +987,10 @@ body {
 .slot.focused { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); box-shadow: 0 4px 18px -10px rgba(0, 0, 0, 0.35); }
 .slot.focused .pane-head { background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
 
-.term-host { flex: 1; min-height: 0; background: var(--term-bg); overflow: hidden; }
+/* Only xterm's own viewport should scroll. `hidden` still allows the browser
+   to scroll this shell when revealing the focused helper textarea during a
+   keyboard resize, before ResizeObserver/remote grid sizing catches up. */
+.term-host { flex: 1; min-height: 0; background: var(--term-bg); overflow: clip; }
 .term-host.image-drop { outline: 2px dashed var(--accent); outline-offset: -8px; background: color-mix(in srgb, var(--drop) 45%, var(--term-bg)); }
 .term-image-status { position: absolute; z-index: 8; left: 50%; bottom: 10px; transform: translateX(-50%); max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: color-mix(in srgb, var(--term-bg) 92%, transparent); color: var(--muted); box-shadow: 0 4px 14px rgb(0 0 0 / 0.12); font-size: 10.5px; pointer-events: none; }
 .term-image-status.uploading { color: var(--accent); animation: breathe 1.2s ease-in-out infinite; }
@@ -2221,3 +2224,8 @@ a.btn-ghost { text-decoration: none; }
 .skill-delete-dialog h2 { font-size: 17px; margin: 0 0 12px; }
 .skill-delete-dialog p, .skill-delete-dialog li { font-size: 13px; line-height: 1.6; }
 .skill-delete-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+
+.codex-shared-preview { margin-block: 16px; }
+.codex-shared-tasks { padding-left: 20px; overflow-wrap: anywhere; }
+.codex-shared-tasks li { margin-block: 10px; }
+.codex-shared-tasks details { font-size: 12px; margin-top: 4px; }

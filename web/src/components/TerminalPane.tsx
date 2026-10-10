@@ -18,9 +18,10 @@ import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
 import { LOCKED_CLOSE_CODE, announceLock, parseCloseReason } from '../lib/lockStatus';
-import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph } from './icons';
+import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph, StopGlyph } from './icons';
 import * as api from '../api';
 import { terminalRetryDelay } from '../terminalRetry';
+import { captureTerminalAnchor, restoreTerminalAnchor, type TerminalScrollAnchor } from '../lib/terminalScrollAnchor';
 import type { Attachment } from '../api';
 import {
   attachmentFileError, filesFromClipboardItems, filesFromTransfer,
@@ -250,6 +251,7 @@ export default function TerminalPane({
   // The mode is app-wide (the bottom bar owns it, like zoom), but only an agent
   // has a conversation to read: a shell is a shell, and files/trace panels are
   // not this component's business at all.
+  const sharedCodex = !!(session.codexSharedOnly || session.codexShared);
   const canRender = session.cli !== 'shell' && !isPassive(session.cli);
   const reading = mode === 'reader' && canRender;
   modeRef.current = reading ? 'reader' : 'terminal';
@@ -552,12 +554,19 @@ export default function TerminalPane({
     };
     anchorMobileInput();
 
-    // Track the user's semantic scroll state independently of the viewport's
-    // pixel scrollTop. During a row-count change xterm can transiently report
-    // the old pixel position against the new scroll height.
-    let followingBottom = true;
+    // Capture scroll intent from the logical buffer at each grid barrier.
+    // Native DOM scrolling suppresses xterm's public onScroll notification,
+    // so an onScroll-only following latch can incorrectly stay true forever.
+    let pendingReset: { anchor?: TerminalScrollAnchor } | null = null;
+    let viewportAnchor: TerminalScrollAnchor | null = null;
+    // Browser layout changes can clamp DOM scrollTop before the server's new
+    // grid arrives. Capture before that clamp, and retain through its repaint.
+    const preserveViewportAnchor = () => { viewportAnchor ??= captureTerminalAnchor(term); };
+    const userScroll = () => { viewportAnchor = null; };
+    window.addEventListener('resize', preserveViewportAnchor);
+    window.visualViewport?.addEventListener('resize', preserveViewportAnchor);
+    host.addEventListener('wheel', userScroll, { passive: true, capture: true });
     const scrollSub = term.onScroll(() => {
-      followingBottom = term.buffer.active.viewportY >= term.buffer.active.baseY;
       schedulePreview();
     });
 
@@ -755,24 +764,23 @@ export default function TerminalPane({
               connectionFailures = 0;
               controllerRef.current = !!m.controller;
               setHasInputControl(!!m.controller);
+              const resetState: { anchor?: TerminalScrollAnchor } | null = m.reset ? {} : null;
+              if (resetState) pendingReset = resetState;
               const applyGrid = () => {
                 try {
-                  // xterm can retain the old pixel scrollTop when the viewport
-                  // gains rows (notably landscape -> portrait), which leaves a
-                  // formerly-live view stranded in history. Preserve the
-                  // semantic bottom anchor without disturbing someone who is
-                  // deliberately reading scrollback.
-                  const wasAtBottom = m.reset || followingBottom;
-                  if (m.reset) {
+                  const anchor = viewportAnchor || captureTerminalAnchor(term);
+                  if (resetState) {
+                    // The NEXT data frame is the canonical snapshot. Restore
+                    // only once it is parsed, never into an empty reset buffer.
+                    resetState.anchor = anchor;
                     term.reset();
                     term.clear();
                   }
                   if (m.cols > 0 && m.rows > 0 && (term.cols !== m.cols || term.rows !== m.rows)) {
                     term.resize(m.cols, m.rows);
                   }
-                  if (wasAtBottom) {
-                    term.scrollToBottom();
-                    followingBottom = true;
+                  if (!resetState) {
+                    restoreTerminalAnchor(term, anchor);
                   }
                   schedulePreview();
                   if (bootLive && screenHasContent()) endBoot();
@@ -795,8 +803,13 @@ export default function TerminalPane({
         // One canonical snapshot follows a restore frame. Everything after it is
         // live output.
         const canonical = restoring;
+        const resetState = pendingReset; pendingReset = null;
         restoring = false;
         term.write(d, () => {
+          if (resetState?.anchor) {
+            restoreTerminalAnchor(term, resetState.anchor);
+          }
+          viewportAnchor = null;
           schedulePreview();
           // An empty canonical snapshot is a terminal that was just started for
           // this request, not a screen to trust: stay in cold-boot mode and let
@@ -1020,6 +1033,7 @@ export default function TerminalPane({
       const rows = Math.trunc(residual / cell);
       if (!rows) return 0;
       residual -= rows * cell;
+      userScroll();
       term.scrollLines(rows);
       touchDebug.rows(rows);
       return rows;
@@ -1180,6 +1194,9 @@ export default function TerminalPane({
       if (resyncTimer) clearTimeout(resyncTimer);
       persistPreview();
       ro.disconnect();
+      window.removeEventListener('resize', preserveViewportAnchor);
+      window.visualViewport?.removeEventListener('resize', preserveViewportAnchor);
+      host.removeEventListener('wheel', userScroll, true);
       host.removeEventListener('pointerdown', onPointerDown, true);
       host.removeEventListener('paste', onPaste, true);
       host.removeEventListener('dragenter', onDragEnter, true);
@@ -1274,6 +1291,28 @@ export default function TerminalPane({
 
   // Focused panes tint toward THEIR agent's brand color, not the app accent.
   const tint = cli?.color;
+  const [interrupting, setInterrupting] = useState(false);
+  const [interruptedTurn, setInterruptedTurn] = useState<string | null>(null);
+  const [interruptError, setInterruptError] = useState('');
+  const sharedTask = !!(session.codexShared || session.codexSharedOnly);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectedKey, setReconnectedKey] = useState<string | null>(null);
+  const reconnectTask = async () => {
+    if(!session.recoveryKey || reconnecting || reconnectedKey===session.recoveryKey)return;
+    setReconnecting(true);setInterruptError('');
+    try {await api.reconnectSession(session.id,session.recoveryKey);setReconnectedKey(session.recoveryKey);}
+    catch(error){setInterruptError(error instanceof Error ? error.message : 'Could not reconnect. Refresh the task.');}
+    finally {setReconnecting(false);}
+  };
+  const interruptTurn = async () => {
+    const turnId = session.interruptTurnId;
+    if (!turnId || interrupting || interruptedTurn === turnId) return;
+    setInterrupting(true); setInterruptError('');
+    try { await api.interruptSession(session.id, turnId); setInterruptedTurn(turnId); }
+    catch (error) { setInterruptError(error instanceof Error ? error.message : 'Could not interrupt. Refresh the task.'); }
+    finally { setInterrupting(false); }
+  };
+  useEffect(() => { setInterruptError(''); }, [session.interruptTurnId]);
   const pathLabel = workspaceLabel(session.path);
   const group = groupLabel(groupName);
   return (
@@ -1338,6 +1377,7 @@ export default function TerminalPane({
           >
             {group && <span className="ph-group">[{group}]</span>}
             <span className="ph-name">{session.name}</span>
+            {sharedCodex && <span className="s-help" title="Same Codex conversation in Reader, terminal and on your phone.">Shared</span>}
           </span>
         )}
         <div className="ph-right">
@@ -1399,9 +1439,22 @@ export default function TerminalPane({
               onShare={onShare}
             />
           )}
-          <button className="ph-btn ph-close" title="Close" aria-label="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
+          {sharedTask && !session.archivedAt && session.recoveryKey && (
+            <button className="ph-btn" title="Reconnect saved task — no message will be resent" aria-label="Reconnect task"
+              disabled={reconnecting || reconnectedKey===session.recoveryKey} onMouseDown={e=>e.stopPropagation()}
+              onClick={e=>{e.stopPropagation();void reconnectTask();}}><RefreshGlyph /></button>
+          )}
+          {sharedTask && !session.archivedAt && session.interruptTurnId && (
+            <button className="ph-btn ph-interrupt" title="Interrupt current turn — keep the conversation"
+              aria-label="Interrupt current turn" disabled={interrupting || interruptedTurn === session.interruptTurnId}
+              onMouseDown={e => e.stopPropagation()}
+              onClick={e => { e.stopPropagation(); void interruptTurn(); }}><StopGlyph /></button>
+          )}
+          <button className="ph-btn ph-close" title={sharedTask ? "Close view — work continues" : "Close"} aria-label={sharedTask ? "Close view" : "Close"} onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
+      {interruptError && <div className="cxv-note" role="alert">{interruptError}</div>}
+      {interruptedTurn && interruptedTurn === session.interruptTurnId && <div className="cxv-note" role="status">Interruption requested…</div>}
       {/* `reading` releases the frame's touch-action: the phone rule pins it to
           `none` so the drag handler above owns terminal panning, and that also
           forbids the browser from panning anything nested inside — including
@@ -1415,7 +1468,7 @@ export default function TerminalPane({
           // 13px at 100%, so the two forms of the same session read alike.
           <div
             className="pane-reader"
-            style={{ '--cx-base': `${(13 * zoom) / 100}px` } as CSSProperties}
+            style={{ '--cx-base': `${(13 * zoom) / 100}px`, flexDirection: 'column' } as CSSProperties}
             onMouseDown={(e) => e.stopPropagation()}
           >
             <ConversationView

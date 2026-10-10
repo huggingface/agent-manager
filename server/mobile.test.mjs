@@ -488,6 +488,24 @@ try {
   check('clearing embedded keyboard geometry restores the terminal', geometryClosed,
     JSON.stringify(latestGrid()));
 
+  // Focus reveal may run synchronously before ResizeObserver moves xterm's
+  // helper and before the remote grid catches up. Exercise the full app shell,
+  // with only the visual viewport changing (the layout viewport stays tall).
+  const focusReveal = await page.evaluate(() => {
+    window.__setVisualViewport(360, 0);
+    const terminal = document.querySelector('.tile-terminal:not(.tile-cached) .term-host');
+    terminal.querySelector('.xterm-helper-textarea').scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const ancestors = [];
+    for (let el = terminal; el; el = el.parentElement) {
+      ancestors.push({ name: el.className || el.tagName, top: el.scrollTop });
+    }
+    return ancestors;
+  });
+  check('keyboard focus reveal leaves every terminal ancestor unscrolled',
+    focusReveal.every(el => el.top === 0), JSON.stringify(focusReveal));
+  await page.evaluate(() => window.__setVisualViewport(667, 0));
+  await page.waitForTimeout(300);
+
   const beforeKeyboardGrid = latestGrid();
   await page.evaluate(() => window.__setVisualViewportLate(360, 118));
   const keyboardResized = await waitFor(() => {
@@ -1151,6 +1169,16 @@ try {
     .count().then((count) => count === 2));
   check('Settings hides group terminals without recreating them', settingsRetained && settingsRestored,
     JSON.stringify({ settingsRetained, settingsRestored }));
+  // Explicit close evicts the browser terminal, unlike navigation caching.
+  const closingTile=desktopPage.locator('.tile-terminal:not(.tile-cached)').first();
+  await closingTile.evaluate(el=>el.setAttribute('data-close-probe','yes'));
+  const beforeClose=await (await fetch(`${API}/api/sessions`)).json();
+  await closingTile.getByRole('button',{name:'Close',exact:true}).click();
+  const explicitDetach=await waitFor(()=>desktopPage.locator('[data-close-probe="yes"]').count().then(n=>n===0));
+  const afterClose=await (await fetch(`${API}/api/sessions`)).json();
+  check('explicit close detaches only the view, preserving both backend sessions',explicitDetach
+    && [id,secondId].every(sid=>beforeClose.find(s=>s.id===sid)?.running && afterClose.find(s=>s.id===sid)?.running));
+
   await desktopContext.close();
 } catch (error) {
   check('mobile browser test completes', false, String(error?.stack || error));

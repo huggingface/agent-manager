@@ -113,7 +113,7 @@ export default function ConversationView({
   const [sending, setSending] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   const [sent, setSent] = useState<(PendingPrompt & { at: number }) | null>(null);
-  const allowAttachments = !isRemote(session.cli);
+  const allowAttachments = !readOnly && !isRemote(session.cli);
   const [openWork, setOpenWork] = useState(new Map<string, boolean>());
   const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
   /**
@@ -169,7 +169,7 @@ export default function ConversationView({
   const [preparing, setPreparing] = useState(() => !reader.turns.current.length);
   // A terminal redraw is not evidence of work. Only transcript lifecycle
   // events light the working line; connection/recovery is separate chrome.
-  const live = !!session.running && reader.activityConfirmed && head?.activity === 'working' && !session.inputRequired;
+  const live = !!(session.running || head?.interaction) && reader.activityConfirmed && head?.activity === 'working' && !(head.interaction ? head.interaction.requests.length : session.inputRequired);
   const [roster, setRoster] = useState<SubAgentEntry[] | null>(() => cachedRoster(session.id));
   useEffect(() => {
     if (paused) return;
@@ -217,7 +217,7 @@ export default function ConversationView({
   };
   const send = async () => {
     const text = draft.trim(), batch = attachmentsRef.current;
-    if ((!text && !batch.length) || sending || batch.some((item) => !item.attachment)) return;
+    if ((!text && !batch.length) || sending || batch.some((item) => !item.attachment) || head?.interaction?.canSend === false) return;
     const uploaded = batch.map((item) => item.attachment!);
     const optimistic = buildPendingPrompt(session.cli, text, uploaded);
     setSending(true); setFailed(null); setDraft(''); setSent({ ...optimistic, at: Date.now() });
@@ -418,10 +418,11 @@ export default function ConversationView({
   }, [sent, live, session.inputRequired]);
 
   useEffect(() => {
+    if (readOnly) { onAttachPicker?.(null); return; }
     onAttachPicker?.({ open: () => filePicker.current?.click(), disabled: sending || !allowAttachments,
       reason: !allowAttachments ? 'Files are not available for remote agents yet.' : sending ? 'Wait for this message to send' : 'Attach files' });
     return () => onAttachPicker?.(null);
-  }, [onAttachPicker, sending, allowAttachments]);
+  }, [onAttachPicker, sending, allowAttachments, readOnly]);
   const reportHead = useRef(onHead); reportHead.current = onHead;
   useEffect(() => { reportHead.current?.(head); }, [head]);
   useEffect(() => () => reportHead.current?.(null), []);
@@ -645,11 +646,14 @@ export default function ConversationView({
           <div>{phase === 'loading' ? 'Opening the conversation…' : error ? 'The transcript is temporarily unavailable.' : head && !atStart ? 'No messages in this stretch. Load earlier turns to continue reading.' : readOnly ? 'Nothing recorded yet.' : 'Start the conversation.'}</div>
           <p>{readOnly ? 'New messages will appear here when the trace updates.' : 'Send a prompt below. You don’t need to open the terminal first.'}</p>
         </div>}
-        {!readOnly && session.inputRequired && <InputRequiredNotice input={session.inputRequired} onOpenTerminal={() => writePaneMode('terminal')} />}
+        {!readOnly && !!(head?.interaction ? head.interaction.requests.length : session.inputRequired) && <InputRequiredNotice
+          input={session.inputRequired || {kind:head?.interaction?.requests[0]?.kind || 'confirmation',cli:session.cli,confidence:'high',detectedAt:''}}
+          requests={head?.interaction?.requests} sessionId={session.id} onAnswered={() => void reload()} onOpenTerminal={() => writePaneMode('terminal')} />}
+        {head?.interaction?.error && <div className="cxv-note" role="alert">{head.interaction.error}</div>}
       </div>
     </div>
     {!readOnly && <Composer className="cxv-live" containerClassName="cxv-composer" draft={draft} sending={sending} isMobile={isMobile} inputRef={inputRef}
-      canSend={(!!draft.trim() || attachments.length > 0) && attachments.every((item) => !!item.attachment)}
+      canSend={head?.interaction?.canSend !== false && (!!draft.trim() || attachments.length > 0) && attachments.every((item) => !!item.attachment)}
       above={<Attachments showPicker={false} attachments={attachments} disabled={sending || !allowAttachments}
         disabledReason={!allowAttachments ? 'Files are not available for remote agents yet.' : undefined} onFiles={addAttachments} onRemove={removeAttachment} onRetry={retryAttachment} />}
       onChange={setDraft} onSend={send} onPasteFiles={allowAttachments ? addAttachments : undefined} />}

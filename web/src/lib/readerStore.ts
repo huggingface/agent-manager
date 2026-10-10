@@ -1,6 +1,38 @@
 import type { TraceCursor, TraceReq, TraceSummary, TraceTurn, TraceWindow } from '../api';
 import { countExchanges, reconcileTrace } from './readerModel';
 
+// Persisted order is authoritative. Replace a native turn at its existing
+// position, never move it to the tail merely because it still has live data.
+export function mergeLiveTrace(raw: TraceTurn[], live?: TraceWindow['live']): TraceTurn[] {
+  if (!live?.turns.length) return raw;
+  const complete = new Set(raw.filter(t => t.event?.type === 'task-complete').map(t => t.nativeTurnId));
+  const replacements = new Set(live.replaceTurnIds);
+  const groups = new Map<string, TraceTurn[]>();
+  for (const t of live.turns) {
+    if (!t.nativeTurnId || !replacements.has(t.nativeTurnId) || complete.has(t.nativeTurnId)) continue;
+    const group = groups.get(t.nativeTurnId) || [];
+    group.push(t); groups.set(t.nativeTurnId, group);
+  }
+  const anchors = new Set(raw.map(t => t.nativeTurnId));
+  const emitted = new Set<string>();
+  const records: TraceTurn[] = [];
+  const emit = (id: string) => {
+    if (!emitted.has(id)) { records.push(...(groups.get(id) || [])); emitted.add(id); }
+  };
+  for (const t of raw) {
+    const id = t.nativeTurnId;
+    if (!id || !groups.has(id)) { records.push(t); continue; }
+    // A not-yet-persisted group preceding this anchor stays before it.
+    for (const pending of groups.keys()) {
+      if (pending === id) break;
+      if (!anchors.has(pending)) emit(pending);
+    }
+    emit(id);
+  }
+  for (const id of groups.keys()) emit(id);
+  return records;
+}
+
 export const INITIAL_WINDOW_BYTES = 128 * 1024;
 export const INITIAL_WINDOW_TURNS = 2;
 export const WINDOW_BYTES = 384 * 1024;
@@ -125,6 +157,9 @@ export function mergeMeta(prev: Meta | null, next: Meta): Meta {
   if (!prev) return next;
   const out = { ...prev };
   for (const [key, value] of Object.entries(next)) {
+    // Runtime state is authoritative, including unknown/null on disconnect.
+    // Historical metadata still keeps its previous nonempty values.
+    if (key === 'activity' && next.interaction) { out.activity = next.activity; continue; }
     if (value === null || value === undefined || value === '') continue;
     if (key === 'lastTs' && (value as number) < prev.lastTs) continue;
     if (key === 'firstTs' && (!value || (prev.firstTs && (value as number) > prev.firstTs))) continue;
@@ -194,7 +229,7 @@ export class ReaderStore {
       usage: this.meta?.usage || summary?.usage || null,
       firstTs: this.meta?.firstTs || summary?.firstTs || 0,
       // The matching full summary sees lifecycle markers outside a small tail.
-      activity: summary?.activity ?? this.meta?.activity ?? null,
+      activity: this.meta?.interaction ? this.meta.activity : summary?.activity ?? this.meta?.activity ?? null,
       loaded: turns.length, atStart: cursor.atStart, blocked: !!cursor.blocked } as TraceHeadInfo;
     for (const key of ['note', 'title', 'harnessLabel', 'sessionId', 'model', 'cwd', 'source', 'sharedBy'] as const) {
       if (!head[key] && summary?.[key]) (head as Record<string, unknown>)[key] = summary[key];
@@ -357,7 +392,7 @@ export class ReaderStore {
     clearTimeout(this.poll);
     if (!this.active) return;
     const recent = Date.now() - (this.meta?.lastTs || 0) < 120_000;
-    const cadence = this.state.cursor?.mode === 'index' ? 10_000 : recent ? 3_000 : 10_000;
+    const cadence = this.meta?.interaction ? (this.meta.activity === 'working' || this.meta.interaction.requests.length ? 1000 : 3000) : this.state.cursor?.mode === 'index' ? 10_000 : recent ? 3_000 : 10_000;
     this.poll = setTimeout(() => { this.poll = null; void this.loadNewer(); }, delay ?? (this.failures ? Math.min(30_000, 1500 * 2 ** Math.min(this.failures, 5)) : cadence));
   }
   private read(direction: 'tail' | 'before' | 'after', speculative = false): Promise<number> {
@@ -397,7 +432,7 @@ export class ReaderStore {
         if (reset) { this.raw = got; this.meta = metadata; this.summary = null; nextCursor = win; }
         else if (direction === 'before') {
           this.raw = [...got, ...this.raw]; this.meta = mergeMeta(this.meta, { ...metadata,
-            activity: this.meta?.activity, model: this.meta?.model, revision: this.meta?.revision });
+            live: this.meta?.live, interaction: this.meta?.interaction, activity: this.meta?.activity, model: this.meta?.model, revision: this.meta?.revision });
           nextCursor = { ...cursor, start: win.start, atStart: win.atStart, blocked: win.blocked };
         } else {
           if (win.mode === 'index' && win.replaceFrom !== undefined) {
@@ -413,7 +448,9 @@ export class ReaderStore {
           this.meta = mergeMeta(this.meta, metadata);
           nextCursor = { ...cursor, end: win.end, atEnd: win.atEnd, generation: win.generation, revision: win.revision };
         }
-        const turns = reconcileTrace(this.raw, reset ? [] : this.state.turns);
+        const live = this.meta?.live;
+        const records = mergeLiveTrace(this.raw, live);
+        const turns = reconcileTrace(records, reset ? [] : this.state.turns);
         const changed = turns !== this.state.turns;
         const count = turns.length - this.state.turns.length;
         const change: ReaderChange | undefined = reset ? { type: 'reset', count: turns.length }
@@ -422,7 +459,9 @@ export class ReaderStore {
         this.publish({ turns, cursor: nextCursor, head: this.head(turns, nextCursor), phase: turns.length ? 'ready' : 'empty',
           error: win.blocked && direction === 'after' ? 'A transcript record is too large to read. Download the raw trace to inspect it.' : null,
           errorCode: null, lastSuccess: Date.now(), version: this.state.version + (changed || reset ? 1 : 0),
-          activityConfirmed: direction !== 'before' ? !!win.atEnd : this.state.activityConfirmed,
+          // Live runtime metadata describes NOW, independently of which
+          // persisted history window this response has caught up to.
+          activityConfirmed: direction !== 'before' ? !!metadata.interaction || !!win.atEnd : this.state.activityConfirmed,
           notice: reset && cursor ? 'The transcript changed or was replaced. Showing its current content.' : this.state.notice }, change);
         if (reset) this.resetFill();
         this.scheduleSummary();

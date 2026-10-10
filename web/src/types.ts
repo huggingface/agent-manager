@@ -11,12 +11,21 @@ export interface Session {
   id: string;
   name: string;
   cli: string;
+  /** Reference to an existing shared Codex task; never launch standalone. */
+  codexSharedOnly?: boolean;
+  /** Server-derived binding, including migrated legacy AM sessions. */
+  codexShared?: boolean;
   // Workspace-relative folder the agent runs in. Independent of `name` —
   // renaming never moves anything on disk. ''/null = the workspace root.
   path: string | null;
   createdAt: string;
   everStarted: boolean;
   running: boolean;
+  /** Local terminal client, distinct from execution on a shared server. */
+  terminalRunning?: boolean;
+  /** Exact active turn offered for interruption; stale IDs are refused. */
+  recoveryKey?: string | null;
+  interruptTurnId?: string | null;
   state: SessionState;
   // Set when the operator archived this session — a stored decision, not the
   // idle window's verdict, which is computed in App.tsx and expires when the

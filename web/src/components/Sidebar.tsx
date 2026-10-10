@@ -59,7 +59,7 @@ export default function Sidebar({
   onRenameGroup: (id: string, name: string) => void;
   onRenameSession: (id: string, name: string) => void;
   onDeleteGroup: (id: string) => void;
-  // Archiving stops the agent and takes it out of the working list; it is
+  // Archiving hides shared tasks, or stops legacy agents, and removes the row; it is
   // also the only route to deleting one (the server enforces that).
   onArchiveSession: (id: string) => void;
   onUnarchiveSession: (id: string) => void;
@@ -648,15 +648,15 @@ export default function Sidebar({
               <>
                 <button className="mini-btn" title="Restore to the working list" aria-label="Restore"
                   onClick={(e) => { e.stopPropagation(); onUnarchiveSession(s.id); }}><UpGlyph /></button>
-                <button className="mini-btn danger-hover" title="Delete — the folder on disk is kept" aria-label="Delete"
-                  onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><TrashGlyph /></button>
+                {!s.codexShared && !s.codexSharedOnly && <button className="mini-btn danger-hover" title="Delete — the folder on disk is kept" aria-label="Delete"
+                  onClick={(e) => { e.stopPropagation(); onDeleteSession(s.id); }}><TrashGlyph /></button>}
               </>
             ) : (
-              <button className="mini-btn" title="Quiet for a while. Archive it to stop it and be able to delete it." aria-label="Archive"
+              <button className="mini-btn" title={s.codexShared || s.codexSharedOnly ? "Archive in AM — work continues in Codex" : "Quiet for a while. Archive it to stop it and be able to delete it."} aria-label="Archive"
                 onClick={(e) => { e.stopPropagation(); onArchiveSession(s.id); }}><CloseGlyph /></button>
             )
           ) : (
-            <button className="mini-btn" title="Archive — stops the agent and files it away" aria-label="Archive"
+            <button className="mini-btn" title={s.codexShared || s.codexSharedOnly ? "Archive in AM — work continues in Codex" : "Archive — stops the agent and files it away"} aria-label="Archive"
               onClick={(e) => { e.stopPropagation(); onArchiveSession(s.id); }}><CloseGlyph /></button>
           )}
         </span>

@@ -1,3 +1,4 @@
+import {withCreationIntent} from './lib/creationIntent';
 import type { Cli, Group, MoveTarget, RemoteInfo, RemoteMessage, Session, Tree } from './types';
 import { ApiError, connectionError, decodeJsonText, decodeResponse } from './apiResponse';
 export { ApiError } from './apiResponse';
@@ -40,7 +41,7 @@ const normalizePath = (path?: string) => (path && path.trim() ? path : '.');
 // Quickstart: create at the workspaces root, boot the CLI, and type the prompt
 // as soon as it's up — all server-side, no waiting in the UI.
 export const quickStart = (cli: string, prompt: string, name = '', path = '.'): Promise<Session> =>
-  fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ cli, name: name || undefined, path: path || '.', prompt: prompt || undefined }) }).then(json);
+  createRequest({ cli, name: name || undefined, path: path || '.', prompt: prompt || undefined });
 
 // The name this cli would get if created now. Used to prefill the create
 // panel; the panel only SENDS a name when the operator edits it, so the server
@@ -48,17 +49,25 @@ export const quickStart = (cli: string, prompt: string, name = '', path = '.'): 
 export const nextName = (cli: string): Promise<{ cli: string; name: string }> =>
   fetch(`/api/next-name?cli=${encodeURIComponent(cli)}`).then(json);
 
+const createRequest = (payload: {cli: string; name?: string; groupId?: string; path: string; prompt?: string}): Promise<Session> => {
+  const send = (requestId?: string) => fetch('/api/sessions', {method:'POST',headers:HEADERS,body:JSON.stringify({...payload,...(requestId?{requestId}:{})})}).then(json);
+  return payload.cli==='codex' ? withCreationIntent(payload,send) : send();
+};
+
 export const createSession = (name: string, cli: string, groupId?: string, path?: string): Promise<Session> =>
-  fetch('/api/sessions', { method: 'POST', headers: HEADERS, body: JSON.stringify({ name, cli, groupId, path: normalizePath(path) }) }).then(json);
+  createRequest({ name, cli, groupId, path: normalizePath(path) });
 
 export const listFolders = (p = ''): Promise<{ path: string; folders: string[] }> =>
   fetch(`/api/folders?path=${encodeURIComponent(p)}`).then(json);
 
+export const reconnectSession = (id: string, recoveryKey: string) => fetch(`/api/sessions/${encodeURIComponent(id)}/reconnect`, {method:'POST',headers:HEADERS,body:JSON.stringify({recoveryKey})}).then(json);
+export const interruptSession = (id: string, turnId: string): Promise<{ok: boolean; requested: boolean; turnId: string}> =>
+  fetch(`/api/sessions/${encodeURIComponent(id)}/interrupt`, {method:'POST',headers:HEADERS,body:JSON.stringify({turnId})}).then(json);
+
 export const stopSession = (id: string) =>
   fetch(`/api/sessions/${id}/stop`, { method: 'POST' }).then(json);
 
-// Put a session away: it stops, and it leaves the working list. The server
-// refuses to delete anything that has not been through here first.
+// Shared tasks are hidden in AM and continue running. Legacy sessions stop.
 export const archiveSession = (id: string) =>
   fetch(`/api/sessions/${id}/archive`, { method: 'POST' }).then(json);
 
@@ -466,8 +475,16 @@ export const insertAttachments = (
     method: 'POST', headers: HEADERS, body: JSON.stringify({ attachmentIds }),
   }).then(jsonOrError);
 
-export const sendInput = (id: string, text: string, attachmentIds: string[] = []): Promise<{ ok: boolean; started?: boolean }> =>
-  fetch(`/api/sessions/${id}/input`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ text, attachmentIds }) }).then(jsonOrError);
+export const sendInput = async (id: string, text: string, attachmentIds: string[] = []): Promise<{ ok: boolean; started?: boolean }> => {
+  const key='am-pending-input:'+id, content=JSON.stringify([text,attachmentIds]);
+  let pending: {content: string; requestId: string} | null=null;
+  try {pending=JSON.parse(localStorage.getItem(key)||'null');} catch { /* invalid saved draft */ }
+  if(!pending||pending.content!==content)pending={content,requestId:typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, c => (Number(c) ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> Number(c) / 4).toString(16))};
+  localStorage.setItem(key,JSON.stringify(pending));
+  const result=await fetch(`/api/sessions/${id}/input`, {method:'POST',headers:HEADERS,body:JSON.stringify({text,attachmentIds,requestId:pending.requestId})}).then(jsonOrError);
+  try {localStorage.removeItem(key);} catch { /* accepted receipt still prevents replay */ }
+  return result;
+};
 
 // ---- push notifications ----
 export const getPushKey = (): Promise<{ publicKey: string; devices: number }> =>
@@ -711,6 +728,7 @@ export interface TraceTurn {
   /** Stable record identity; messageId joins fragmented native messages. */
   id?: string;
   messageId?: string;
+  nativeTurnId?: string;
   event?: { type: 'queue'; operation: string; text: string } | { type: 'task-complete'; text: string };
   role: 'user' | 'assistant' | 'system';
   kind?: 'final' | 'update';
@@ -729,6 +747,8 @@ export interface TraceTurn {
 }
 
 export interface TracePage {
+  live?: {replaceTurnIds: string[]; turns: TraceTurn[]};
+  interaction?: SessionInteraction;
   generation?: string;
   revision?: string;
   activity?: 'working' | 'waiting' | null;
@@ -996,3 +1016,34 @@ export interface Operation {
 }
 export const getOperations = (limit = 500): Promise<{ operations: Operation[]; generatedAt: string }> =>
   fetch(`/api/operations?limit=${limit}`).then(json);
+
+export type CodexSharedSnapshot = {
+  connection: 'not-configured' | 'connected';
+  observedAt: string;
+  launchEnabled: false;
+  importEnabled?: boolean;
+  launchBlockedReason: string;
+  serverVersion?: string | null;
+  tasks: Array<{
+    id: string; name: string | null; cwd: string | null;
+    status: 'working' | 'needs-input' | 'idle' | 'unloaded' | 'error' | 'unknown';
+    amSessions: Array<{ id: string; name: string }>;
+  }>;
+  nextCursor: string | null;
+};
+export const codexSharedSnapshot = (cursor?: string | null): Promise<CodexSharedSnapshot> =>
+  fetch(`/api/codex/shared${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`).then(json);
+
+export const importCodexTask = (threadId: string): Promise<{ session: Session }> =>
+  fetch('/api/codex/import', { method: 'POST', headers: HEADERS, body: JSON.stringify({ threadId }) }).then(json);
+
+// The same interaction contract is used by every conversation surface.
+export interface SessionRequest {
+  key: string; kind: 'permission' | 'question' | 'confirmation'; details: string;
+  choices: {value: string; label: string}[];
+  questions?: {id: string; text: string; secret: boolean; options: {label: string; description: string}[]}[];
+  terminalFallback: boolean;
+}
+export interface SessionInteraction {canSend: boolean; requests: SessionRequest[]; error: string | null;}
+export const answerSessionRequest = (id: string, key: string, response: {decision?: string; answers?: Record<string, string>}): Promise<{ok: boolean}> =>
+  fetch(`/api/sessions/${encodeURIComponent(id)}/answer`, { method: 'POST', headers: HEADERS, body: JSON.stringify({key, ...response}) }).then(json);

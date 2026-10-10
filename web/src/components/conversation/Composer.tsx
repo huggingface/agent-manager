@@ -90,7 +90,7 @@ export default function Composer({
         onPaste={onPaste}
         // iOS does not resize the layout for the keyboard — scroll the input
         // into view once the keyboard has animated in.
-        onFocus={(e) => { const el = e.currentTarget; setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300); }}
+        onFocus={(e) => { const el = e.currentTarget; setTimeout(() => { const r=el.getBoundingClientRect(), vv=window.visualViewport; const top=vv?.offsetTop || 0, bottom=top+(vv?.height || innerHeight); if(r.bottom>bottom || r.top<top)el.scrollIntoView({block:'nearest',behavior:'instant'}); }, 300); }}
         onKeyDown={onKeyDown}
       />
         {(canSend ?? !!draft.trim()) && (

@@ -98,6 +98,12 @@ const putConfig = async (body) => {
 try {
   await start();
   const initial = await call('/api/tree', undefined, 'GET');
+  const codexPreview = await call('/api/codex/shared', undefined, 'GET');
+  assert.equal(codexPreview.status, 200);
+  assert.equal(codexPreview.body.connection, 'not-configured');
+  assert.equal(codexPreview.body.launchEnabled, false);
+  assert.equal((await call('/api/codex/shared?cursor[]=bad', undefined, 'GET')).status, 400);
+  assert.equal((await call('/api/codex/shared?cursor=' + 'x'.repeat(4097), undefined, 'GET')).status, 400);
   for (const bad of [{ cli: 'files', name: {} }, { cli: 'files', prompt: false }, { cli: 'files', groupId: 'missing' }]) assert.equal((await call('/api/sessions', bad)).status, 400);
   assert.deepEqual((await call('/api/tree', undefined, 'GET')).body, initial.body);
   const session = await call('/api/sessions', { cli: 'files', path: '.', name: 'fixture' }); assert.equal(session.status, 201);
@@ -175,6 +181,7 @@ try {
   await stop(); await start(true);
   // Locked from boot with reason 'checking' until the visibility monitor has a verdict (#131).
   for (let i = 0; i < 400 && (await call('/api/visibility', undefined, 'GET')).body.reason === 'checking'; i++) await new Promise((r) => setTimeout(r, 25));
+  assert.equal((await call('/api/codex/shared', undefined, 'GET')).status, 403);
   const locked = await call('/api/sessions', { cli: 'files' }); assert.equal(locked.status, 403); assert.equal(locked.body.code, 'locked'); assert.equal(locked.body.reason, 'public-space');
   console.log('Production HTTP: validation, side effects, settings/group semantics, streams/uploads, conflicts, traces, origins, lock and safe errors passed');
 } finally { await stop(); fs.rmSync(root, { recursive: true, force: true }); }

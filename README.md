@@ -116,6 +116,11 @@ on local POSIX storage and is restored/checkpointed by
 database backups rather than copying live WAL files. See
 [`docs/agent-state-checkpoints.md`](docs/agent-state-checkpoints.md).
 Scheduled prompts are documented in [`docs/cron-jobs.md`](docs/cron-jobs.md).
+A draft [proposal for shared Codex sessions](docs/proposals/codex-shared-sessions.md)
+describes the intended AM, TUI, and Codex Remote workflow. An experimental
+[read-only server preview](docs/codex-shared-preview.md) and an isolated
+[binding/client pilot](docs/codex-shared-bindings.md) are available. Default
+shared creation and automatic migration are not enabled.
 Reader and terminal file links open previews in new tabs; supported paths and
 additional file locations are documented in [`docs/file-links.md`](docs/file-links.md).
 API audit retention and credential filtering are documented in

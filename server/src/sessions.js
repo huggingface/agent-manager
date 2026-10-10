@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import { dirname } from 'node:path';
 import { SESSIONS_FILE } from './config.js';
 
 let sessions = [];
@@ -84,10 +85,75 @@ export function update(id, patch) {
   return s;
 }
 
+// Shared archive is a visibility decision, not a process stop. A failed write
+// must not acknowledge that decision or mutate the in-memory session first.
+export function setArchived(id, archived) {
+  const current = get(id);
+  if (!current) return null;
+  const nextSession = {...current, archivedAt: archived ? new Date().toISOString() : undefined,
+    ...(archived ? {pinnedAt:undefined} : {})};
+  const next = sessions.map(s => s.id === id ? nextSession : s);
+  const tmp = `${SESSIONS_FILE}.${crypto.randomUUID()}.tmp`;
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, JSON.stringify(next, null, 2)); fs.fsyncSync(fd);
+    fs.closeSync(fd); fd = undefined;
+    fs.renameSync(tmp, SESSIONS_FILE);
+    sessions = next;
+    fd = fs.openSync(dirname(SESSIONS_FILE), 'r'); fs.fsyncSync(fd);
+    return nextSession;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    try { fs.unlinkSync(tmp); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+}
+
+// Imports are references, never fresh agents. Persist the fail-closed launch
+// marker before attempting a separate binding write. A crash between the two
+// writes leaves a repairable reference that cannot start a standalone TUI.
+export function createCodexReference({ name, path, threadId }) {
+  const session = { id: `codex-shared-${crypto.randomBytes(6).toString('hex')}`,
+    name, path, cli: 'codex', sessionUuid: crypto.randomUUID(),
+    codexSessionId: threadId, codexSharedOnly: true, everStarted: true,
+    createdAt: new Date().toISOString() };
+  const next = [...sessions, session];
+  const tmp = `${SESSIONS_FILE}.${crypto.randomUUID()}.tmp`;
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, JSON.stringify(next, null, 2)); fs.fsyncSync(fd);
+    fs.closeSync(fd); fd = undefined;
+    fs.renameSync(tmp, SESSIONS_FILE);
+    sessions = next; // Also keep the protective record if directory fsync fails.
+    fd = fs.openSync(dirname(SESSIONS_FILE), 'r');
+    fs.fsyncSync(fd);
+    return session;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    try { fs.unlinkSync(tmp); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+}
+
 export function remove(id) {
   const before = sessions.length;
   sessions = sessions.filter((s) => s.id !== id);
   if (sessions.length !== before) persist();
   // NOTE: the working directory under DATA_DIR/workspaces/<id> is intentionally
   // left on disk so a delete never destroys the user's files.
+}
+
+// Keep the original AM identity, name, folder, group references and history pin.
+// Never acknowledge a migration guard before its durable replacement succeeds.
+export function prepareCodexMigration(id, migration) {
+  const current=get(id);
+  if(!current||current.cli!=='codex'||current.codexSessionId!==migration.threadId)throw Error('Migration identity changed');
+  const session={...current,codexSharedOnly:true,codexMigration:migration};
+  const next=sessions.map(s=>s.id===id?session:s),tmp=`${SESSIONS_FILE}.${crypto.randomUUID()}.tmp`;
+  let fd;
+  try {
+    fd=fs.openSync(tmp,'wx',0o600);fs.writeFileSync(fd,JSON.stringify(next,null,2));fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
+    fs.renameSync(tmp,SESSIONS_FILE);sessions=next;
+    fd=fs.openSync(dirname(SESSIONS_FILE),'r');fs.fsyncSync(fd);return session;
+  }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(tmp);}catch(e){if(e.code!=='ENOENT')throw e;}}
 }
