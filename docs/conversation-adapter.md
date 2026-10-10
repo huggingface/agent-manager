@@ -30,8 +30,12 @@ falls back to persisted history rather than replacing it with a partial cache.
 Mobile Composer permits predictive input/autocorrection and reveals its input
 only when it is outside the visible viewport, instead of centering the whole
 page on every focus. These are common component changes, not backend branches.
-Actual iOS keyboard behavior still needs an on-device check; Chromium's mobile
-viewport cannot establish it. The terminal renderer/resize pipeline is retained.
+The operator confirmed the terminal keyboard scrolling fix on the iPhone on
+2026-10-10. Browser focus reveal cannot scroll the outer terminal shell
+(`overflow: clip`); only xterm's own viewport scrolls. Chromium regressions cover
+the 369px jump reproduced before the fix, including the full AM layout. This
+confirmation does not establish every iOS workflow. The terminal renderer and
+resize pipeline are retained; main's predictive-input and IME guards are kept.
 Terminal resizes now retain the visible history row (or the live bottom) across
 both browser viewport changes and the server's reset/snapshot pair. The anchor
 is restored after snapshot parsing; native DOM scroll is accounted for rather
@@ -49,7 +53,12 @@ supply the full text. This is distinct from the current working/idle state.
 - Real disposable Codex server + deterministic local Responses provider: standard
   input route, text and reasoning visible before completion, tools while waiting
   for approval, explicit approval and attachment image delivery. No external
-  inference or live user task is used. Also exercises an external client, a cold
+  inference or live user task is used. A native model command resolves the exact
+  AM identity without AM_ID. A question from another client is answered in Reader;
+  an approval answered externally disappears before turn completion, and stale
+  Reader responses are rejected. Input into that active external turn is refused.
+  These are independent local protocol clients, not an automated iPhone app test.
+  Also exercises an external client, a cold
   mid-turn attachment and a real TUI submission followed by Reader polling while
   work continues; closing the terminal socket leaves the TUI/task intact.
 - Event adapter tests: exact task identity, thinking/tool/result normalization,

@@ -1,105 +1,84 @@
-Updated 2026-10-10: prioritize UI parity before new creation or further migration.
-The pilot now uses a backend conversation adapter; the earlier separate Reader
-controls have been removed. See [current contracts and validation](../conversation-adapter.md).
-The staged plan below records the broader rollout; statements about Reader being
-unimplemented are superseded by that document. iPhone keyboard/terminal behavior
-still needs on-device qualification before claiming full mobile parity.
+# Shared Codex rollout — current plan
 
-# Revised shared Codex action plan
+Updated 2026-10-10. Preserve AM's established Reader, Composer, terminal and
+interaction components; adapt execution behind their existing contracts.
+See [the adapter contract](../conversation-adapter.md) and
+[binding/import behavior](../codex-shared-bindings.md).
 
-Reassessment on 2026-10-09: no fundamental incompatibility has been established.
-The first experiment incorrectly made preserving the entire AM environment a
-prerequisite for shared execution. AM needs a durable association with the
-Codex thread and correct attribution for its own API operations. Codex can
-otherwise continue the task independently of AM.
+## Implemented in the opt-in pilot
 
-## Evidence and its limits
+- Durable unique native-thread ↔ AM-session bindings, exact import/resume,
+  verified workspace and endpoint identity; no standalone or CWD fallback.
+- Existing Reader and Composer: paged history, live text/reasoning/tool blocks,
+  attachments, questions and one-time approvals; exact-turn reconciliation.
+- Authoritative runtime activity independent of terminal presence and history
+  catch-up. Browser disconnects do not stop server work.
+- Durable input receipts prevent replay after uncertain delivery or AM restart.
+  Input while another client is working is refused rather than queued/steered.
+- The native context helper resolves AM identity at call time without `AM_ID`.
+- Mobile predictive input and IME safeguards from main are retained. The operator
+  confirmed the terminal keyboard scrolling correction on the iPhone on
+  2026-10-10. This confirms that reported symptom, not every iOS workflow.
 
-The disposable two-thread probe now checks `CODEX_THREAD_ID` as well as `AM_ID`.
-On Codex 0.162.0 the native ID is correct in both threads, including after server
-restart and exact-ID resume. The custom `AM_ID` override is lost on that path.
-This supports resolving attribution from native identity rather than restoring
-an entire terminal environment. It still needs verification in normal model
-tools, direct Remote use, and child threads; the observed variable is not a
-public interface guaranteed by the current environment-variable documentation.
+## Evidence and boundaries
 
-The previous approval-policy result used user-shell turns, not model turns.
-Do not infer from that fixture alone that real model-turn settings cannot
-persist. Test the intended Codex defaults and any supported exceptions directly.
-The experiment's exit 2 remains an accurate legacy-context diagnostic, not a
-verdict that shared launch is impossible.
+Disposable Codex 0.162.1 with a local deterministic Responses provider exercises
+real model-tool execution and server protocol behavior, without paid inference
+or access to live tasks. It verifies Reader text/images, a model question
+answered in Reader, an approval answered by an independent client while Reader
+is open, stale-answer rejection, and refusal to send into another client's
+active turn. A native model command resolves the exact AM session/thread/CWD.
+A real TUI submits work, its browser transport closes, and Reader follows work
+through completion. Explicit model/provider/approval/sandbox/CWD settings remain
+unchanged across these client transitions.
 
-Current AM code has concrete integration work left: `commandFor` and rollout
-capture assume standalone ownership; `runstate` revives PTYs; archive/stop kill
-PTYs; trace selection uses a recorded rollout path. These need explicit shared
-behavior before enabling new shared sessions.
+The separate restart fixture verifies that restarting only AM preserves ongoing
+server work and the durable binding. It does not prove recovery from a Codex
+server crash. Independent local RPC clients exercise the shared protocol, not
+Apple's app or the Remote relay: those approval/question paths still need an
+actual phone check. Earlier phone handoff and the scrolling fix were confirmed
+by the operator; do not extend those confirmations to untested cases.
 
-## Implementation sequence
+## Next changes, in order
 
-Implemented first slice: [durable bindings and shared-client pilot](../codex-shared-bindings.md).
-Binding an already handed-off thread, native attribution lookup and exact AM
-terminal attachment now have code and isolated tests. Automatic legacy release
-and default creation remain pending.
+1. **Consolidate the current PR.** Integrate current main without dropping mobile
+   writing assistance, retain the shared conversation components, run affected
+   regression suites and document the tested boundaries. Keep the opt-in pilot
+   separate from production; merging does not authorize restarting legacy TUIs.
+2. **Complete shared lifecycle actions.** Closing a view detaches it. Interrupt
+   targets a verified current turn and rejects a stale turn ID. Archive changes
+   AM visibility without implicitly killing shared work; provide unarchive.
+   Until implemented, generic stop/archive refuse shared tasks. Managed agent
+   and cron delivery remain guarded rather than silently changing semantics.
+3. **Recover after daemon failure.** Verify identity and settings on reconnect;
+   distinguish interrupted work from completed work; do not replay uncertain
+   input. Test a disposable daemon crash and an AM restart independently. Do
+   not promise survival of an in-flight turn through a daemon crash.
+4. **Create shared sessions by default.** First in the pilot, after lifecycle
+   and recovery gates pass. Persist the new exact native ID before delivery or
+   TUI attachment. Define recovery from an ambiguous creation acknowledgement.
+   Preserve explicit settings; never infer a replacement thread by recency.
+5. **Migrate legacy tasks individually.** Integrate verified-owner graceful
+   release, same-ID resume, full paginated history comparison and settings
+   checks. Leave busy/ambiguous tasks untouched. Keep tmux/mosh shells and
+   unrelated owners intact. Plan production deployment around live legacy
+   writers; do not restart the old AM underneath them.
 
+## Gates before default rollout
 
-1. **Persist exact bindings and resolve attribution.** Store endpoint identity,
-   Codex thread ID and AM session ID durably, with uniqueness and atomic writes.
-   Provide a small local helper/API lookup using the native thread ID. Unknown
-   or ambiguous threads cannot claim an AM sender. Never infer identity from
-   project directory or title. This labels callers; it is not a new security
-   boundary or replacement for the existing private API admission checks.
-   Find the AM endpoint through stable host configuration rather than another
-   thread's environment. A daemon must not inherit one agent's `AM_ID`.
-2. **Launch new sessions through the existing shared server in an isolated AM
-   pilot.** Make shared mode the default there, with no per-session checkbox.
-   Save the returned thread ID before managed delivery or TUI attachment; test
-   creation before the first message and ambiguous creation responses. Resume
-   only the exact thread, with no `--last`, rollout-existence or standalone
-   fallback. Existing standalone sessions retain their original mode.
-3. **Separate view, task and history lifecycle.** Close-view disconnects AM's
-   client; interrupt targets a confirmed current turn; archive explicitly
-   defines AM list visibility without implicitly killing shared work. Remove
-   standalone repinning and automatic writer recreation for shared bindings.
-   Read task status and history through server APIs, including paginated
-   history, so phone-originated work is visible without an AM terminal.
-4. **Validate the complete path.** Send a message and image from a TUI and from
-   Remote, verify one history and correct workspace, then return to AM. Exercise
-   one approval and concurrent clients. Close AM's view during disposable work;
-   restart only the isolated AM instance and verify the server work survives.
-   Separately restart the disposable Codex server and verify recovery without
-   promising that in-flight work survives a server crash.
-5. **Enable the default and migrate gradually.** After these checks pass, enable
-   shared creation in the intended installation. Offer migration of selected
-   idle standalone threads with verified owner identity. Busy or unknown owners
-   remain untouched; there is no bulk release. Existing tmux/mosh workflows keep
-   working, using a shared-client launch for new shared tasks.
+| Area | Still required |
+| --- | --- |
+| Phone interoperability | Approval and question round trips in the actual iPhone client, including resolution while AM is open. |
+| Task lifecycle | Exact-turn interruption, AM-only archive/unarchive, explicit managed-delivery behavior. |
+| Daemon recovery | Settings preservation, clear failed/interrupted state, durable no-replay behavior after a real disposable crash. |
+| New thread identity | Empty creation and persistence failure; `/new` and fork must not overwrite the original mapping. Unmapped threads stay Codex-only. |
+| Migration | Integrated owner checks and graceful release, nondisruptive production rollout. |
 
-## Remaining gates
+Automatic adoption of every phone-created task, arbitrary remote-machine
+endpoints, all child-thread workflows and a sidebar redesign are deferred.
+No architectural blocker has been established; the items above are concrete
+implementation or validation gaps, not reasons to replace AM's UI.
 
-| Point | Current evidence | Gate before enabling |
-| --- | --- | --- |
-| AM identity | Native ID survives the disposable user-shell test | Verify in normal tools and Remote; implement exact lookup |
-| Workspace and permissions | CWD and read-only policy survive the fixture; custom approval override changes | Exercise actual model commands and the chosen server policy; do not broaden it |
-| Cross-client input and approvals | Protocol exposes turns, steering and resolution events | Demonstrate no duplicate sends, lost approvals or stale responses in TUI/Remote |
-| Closing and restarting AM | Current AM lifecycle still manages PTY execution | Separate task ownership; demonstrate disposable work survives AM-only restart |
-| Thread binding and Reader | Exact-ID mapping design; current readers depend on rollouts | Test empty creation, persistence failure, `/new`, forks and paginated history |
-| Legacy migration | Local helper previously proved a disposable TUI handoff | Integrate later; not a blocker to new shared sessions |
-
-The first two rows need focused experiments, not an assumed upstream Codex fix.
-Lifecycle and Reader changes are implementation work. An inability to preserve
-the intended permissions or route an approval across actual clients would be
-a real blocker; neither has been established by the existing tests.
-
-## Deferred scope
-
-Do not make first delivery depend on automatic adoption of every task created
-on the phone, arbitrary remote-machine endpoints, all child-thread workflows,
-or a redesign of the sidebar. Unmapped tasks can remain Codex-only until
-explicitly associated. API actions requiring AM identity fail clearly when
-unmapped, while ordinary coding remains available.
-
-The current PR contains the observer, compatibility experiment and isolated
-binding/client pilot. It does not yet enable default shared creation, automatic
-legacy release or the complete shared lifecycle/Reader integration.
-Protocol references: [app-server](https://learn.chatgpt.com/docs/app-server) and
-[environment variables](https://learn.chatgpt.com/docs/config-file/environment-variables).
+Protocol reference: [official Codex app-server documentation](https://learn.chatgpt.com/docs/app-server).
+The installed binary's generated schemas and disposable runtime tests determine
+what this pilot actually supports; documentation alone is not a version test.

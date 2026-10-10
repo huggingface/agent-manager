@@ -9,6 +9,7 @@ import {randomUUID} from 'node:crypto';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import WebSocket from 'ws';
+import headless from '@xterm/headless';
 import { nativeFetch as fetch, NativeWebSocket } from './native-client.mjs';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'am-shared-pilot-'));
 const home = path.join(root, 'home'), codexHome = path.join(root, 'codex'), data = path.join(root, 'data');
@@ -16,9 +17,12 @@ const cwd = path.join(data, 'workspaces', 'work'), socket = path.join(root, 's')
 for (const dir of [home, codexHome, cwd]) fs.mkdirSync(dir, { recursive: true });
 let providerCalls=0, toolRequested=false, releaseResponse, imageReceived=false, holdExternal=false, emitFollowup;
 let scenario = null, scenarioToolSent = false, questionAnswerReceived = false;
+let identityCommand, identityOutput;
+const providerEvents = [];
+const heldResponses = new Set();
 const provider=http.createServer(async(req,res)=>{
  let body='';for await(const chunk of req)body+=chunk;
- const input=JSON.parse(body);providerCalls++;imageReceived ||= JSON.stringify(input.input).includes('input_image');
+ const input=JSON.parse(body);providerCalls++;const callNumber=providerCalls;providerEvents.push({event:'start',callNumber,scenario,toolCount:input.tools?.length||0});imageReceived ||= JSON.stringify(input.input).includes('input_image');
  const wantsApproval=JSON.stringify(input.input).includes('READER_APPROVAL_FIXTURE');
  const commandTool=(input.tools||[]).find(t=>t.name==='exec_command');
  let item;
@@ -26,25 +30,34 @@ const provider=http.createServer(async(req,res)=>{
   const tool = (input.tools || []).find(t => t.name === 'request_user_input');
   assert.ok(tool, 'plan mode exposes request_user_input');
   scenarioToolSent = true;
-  item = {type:'function_call', id:'fc_'+providerCalls, call_id:'call_question', name:tool.name,
+  item = {type:'function_call', id:'fc_'+callNumber, call_id:'call_question', name:tool.name,
    arguments:JSON.stringify({questions:[{id:'choice',header:'Fixture',question:'Which fixture should continue?',
     options:[{label:'First',description:'Use the first fixture'},{label:'Second',description:'Use the second fixture'}]}]})};
  } else if (scenario === 'approval-external' && !scenarioToolSent) {
   assert.ok(commandTool);
   scenarioToolSent = true;
-  item = {type:'function_call', id:'fc_'+providerCalls, call_id:'call_external_approval', name:commandTool.name,
+  item = {type:'function_call', id:'fc_'+callNumber, call_id:'call_external_approval', name:commandTool.name,
    arguments:JSON.stringify({cmd:'printf external-approval-command',sandbox_permissions:'require_escalated',justification:'Isolated cross-client approval fixture'})};
+ } else if (scenario === 'identity' && !scenarioToolSent) {
+  assert.ok(commandTool);
+  scenarioToolSent = true;
+  item = {type:'function_call',id:'fc_'+callNumber,call_id:'call_identity',name:commandTool.name,
+   arguments:JSON.stringify({cmd:identityCommand,sandbox_permissions:'require_escalated',justification:'Resolve isolated AM identity from a native model tool'})};
  } else if (scenario) {
-  if (scenario === 'question') questionAnswerReceived = JSON.stringify(input.input).includes('Second');
-  item = {type:'message',id:'msg_'+providerCalls,role:'assistant',status:'completed',
+  if (scenario === 'identity') identityOutput = (input.input || []).findLast(i => i.type === 'function_call_output')?.output;
+  if (scenario === 'question') {
+   const output = (input.input || []).findLast(i => i.type === 'function_call_output' && i.call_id === 'call_question')?.output;
+   questionAnswerReceived = typeof output === 'string' && output.includes('Second');
+  }
+  item = {type:'message',id:'msg_'+callNumber,role:'assistant',status:'completed',
    content:[{type:'output_text',text:'SCENARIO_FINISHED',annotations:[]}]};
  } else if(wantsApproval&&!toolRequested&&commandTool){
-  toolRequested=true;item={type:'function_call',id:'fc_'+providerCalls,call_id:'call_fixture',name:'exec_command',arguments:JSON.stringify({cmd:'printf reader-approval-command',sandbox_permissions:'require_escalated',justification:'Isolated Reader approval fixture'})};
- }else item={type:'message',id:'msg_'+providerCalls,role:'assistant',status:'completed',content:[{type:'output_text',text:wantsApproval?'READER_APPROVAL_FINISHED':'READER_REPLY_OK',annotations:[]}]};
+  toolRequested=true;item={type:'function_call',id:'fc_'+callNumber,call_id:'call_fixture',name:'exec_command',arguments:JSON.stringify({cmd:'printf reader-approval-command',sandbox_permissions:'require_escalated',justification:'Isolated Reader approval fixture'})};
+ }else item={type:'message',id:'msg_'+callNumber,role:'assistant',status:'completed',content:[{type:'output_text',text:wantsApproval?'READER_APPROVAL_FINISHED':'READER_REPLY_OK',annotations:[]}]};
  res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache'});
  const send=(type,extra)=>res.write('event: '+type+'\ndata: '+JSON.stringify({type,...extra})+'\n\n');
- send('response.created',{response:{id:'resp_'+providerCalls,status:'in_progress',output:[]}});
- if(providerCalls===1){
+ send('response.created',{response:{id:'resp_'+callNumber,status:'in_progress',output:[]}});
+ if(callNumber===1){
   send('response.output_item.added',{output_index:0,item:{id:'reasoning_fixture',type:'reasoning',summary:[]}});
   send('response.reasoning_summary_part.added',{item_id:'reasoning_fixture',output_index:0,summary_index:0,part:{type:'summary_text',text:''}});
   send('response.reasoning_summary_text.delta',{item_id:'reasoning_fixture',output_index:0,summary_index:0,delta:'LIVE_REASONING_FIXTURE'});
@@ -52,10 +65,13 @@ const provider=http.createServer(async(req,res)=>{
  }
  send('response.output_item.added',{output_index:0,item:{...item,status:'in_progress'}});
  if(item.type==='message')send('response.output_text.delta',{item_id:item.id,output_index:0,content_index:0,delta:item.content[0].text});
- if(holdExternal && item.type === 'message')emitFollowup=()=>{item.content[0].text+=' LIVE_AFTER_ATTACH';send('response.output_text.delta',{item_id:item.id,output_index:0,content_index:0,delta:' LIVE_AFTER_ATTACH'});};
- if(providerCalls===1||(holdExternal && item.type === 'message'))await new Promise(r=>releaseResponse=r);
+ if(holdExternal && commandTool && item.type === 'message')emitFollowup=()=>{item.content[0].text+=' LIVE_AFTER_ATTACH';send('response.output_text.delta',{item_id:item.id,output_index:0,content_index:0,delta:' LIVE_AFTER_ATTACH'});};
+ // The TUI can generate a title concurrently (a request with no tools).
+ // Do not let that auxiliary call steal the real turn's release handle.
+ // Response IDs are local to each request for the same reason.
+ if(callNumber===1||(holdExternal && commandTool && item.type === 'message'))await new Promise(r=>{const release=()=>{heldResponses.delete(release);providerEvents.push({event:'release',callNumber});r();};heldResponses.add(release);releaseResponse=release;});
  send('response.output_item.done',{output_index:0,item});
- send('response.completed',{response:{id:'resp_'+providerCalls,status:'completed',output:[item],usage:{input_tokens:1,output_tokens:1,total_tokens:2}}});res.end();
+ send('response.completed',{response:{id:'resp_'+callNumber,status:'completed',output:[item],usage:{input_tokens:1,output_tokens:1,total_tokens:2}}});res.end();providerEvents.push({event:'end',callNumber});
 });
 await new Promise(r=>provider.listen(0,'127.0.0.1',r));
 fs.writeFileSync(path.join(codexHome, 'config.toml'), `model="fixture"
@@ -151,7 +167,24 @@ try {
   await view();
   const input={text:'READER_HELLO_FIXTURE',requestId:randomUUID()};
   const sent=await call(prefix+'/input',input);assert.ok(sent.turnId);assert.equal((await call(prefix+'/input',input)).repeated,true);
-  async function waitFor(fn){for(let i=0;i<160;i++){const v=await fn();if(v)return v;await sleep(100);}throw Error('Condition timed out');}
+  async function waitFor(fn) {
+    for (let i = 0; i < 160; i++) {
+      const value = await fn();
+      if (value) return value;
+      await sleep(100);
+    }
+    const state = await view();
+    const recent = await rpc.call('thread/turns/list', {
+      threadId:thread.id,limit:2,itemsView:'full',sortDirection:'desc',
+    });
+    throw Error('Condition timed out: '+JSON.stringify({
+      activity:state.activity,interaction:state.interaction,
+      providerCalls,scenario,holdExternal,providerEvents,
+      native:recent.data.map(t => ({id:t.id,status:t.status,
+        items:t.items.map(i => ({id:i.id,type:i.type,status:i.status}))})),
+    }));
+  }
+
   const streaming=await waitFor(async()=>{const s=await view();return JSON.stringify(s.live).includes('READER_REPLY_OK')&&s;});
   assert.ok(streaming.live.turns.some(t=>t.blocks.some(b=>b.type==='thinking'&&b.text==='LIVE_REASONING_FIXTURE')));
   assert.equal(streaming.activity,'working');assert.equal(streaming.interaction.canSend,false);
@@ -219,6 +252,20 @@ try {
   await waitFor(async () => (await view()).interaction.canSend);
   rpc.events.delete(watchApproval); scenario = null;
 
+  // Verify attribution inside a real model tool, not only thread/shellCommand.
+  // This is a read-only lookup against this fixture's AM and requires no AM_ID.
+  const quote = value => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+  identityCommand = [process.execPath,path.resolve('../scripts/am-codex-context.mjs'),
+    '--base-url',base,'resolve'].map(quote).join(' ');
+  scenario = 'identity'; scenarioToolSent = false;
+  await rpc.call('turn/start', {threadId:thread.id,input:[{type:'text',text:'NATIVE_IDENTITY_FIXTURE'}]});
+  const identityApproval = await waitFor(async () => (await view()).interaction.requests.find(r => r.kind === 'permission'));
+  assert.ok(identityApproval.details.includes('am-codex-context.mjs'));
+  await call(prefix+'/answer', {key:identityApproval.key,decision:'accept'});
+  await waitFor(async () => (await view()).interaction.canSend);
+  for (const value of [session.id,thread.id,cwd]) assert.ok(identityOutput?.includes(value), 'model tool resolves exact context: '+identityOutput);
+  scenario = null;
+
   // Work starts outside AM's Reader client, as it does from a TUI or Remote.
   // A warm Reader resumes from its byte cursor, not from a new tail window.
   const idlePage=await view();const cursor=idlePage.window.end;
@@ -253,10 +300,12 @@ try {
   // exactly as a Terminal -> Reader switch does. No Ctrl-C or task interruption.
   const tuiCursor=(await view()).window.end;
   terminal=new NativeWebSocket(base.replace('http:','ws:')+'/ws?session='+session.id+'&cols=120&rows=34');
+  const terminalEmulator = new headless.Terminal({cols:120,rows:34,allowProposedApi:true});
+  terminalEmulator.onData(d => { if (terminal.readyState === 1) terminal.send(JSON.stringify({t:'i',d})); });
   let tuiOutput='';terminal.on('message',raw=>{
-    const text=raw.toString();tuiOutput+=text;
-    if(text.includes('\x1b[6n'))terminal.send(JSON.stringify({t:'i',d:'\x1b[1;1R'}));
-    if(text.includes('\x1b[c'))terminal.send(JSON.stringify({t:'i',d:'\x1b[?1;2c'}));
+    const text=raw.toString();
+    if (text.startsWith('\x00\x00AM:')) return;
+    tuiOutput+=text; terminalEmulator.write(text);
   });
   await once(terminal,'open');
   await waitFor(async()=>tuiOutput.includes('COLD_EXTERNAL_FIXTURE'));
@@ -270,11 +319,12 @@ try {
   await waitFor(async()=>{const s=await view();return s.interaction.canSend;});
   const after=await rpc.call('thread/resume',{threadId:thread.id,excludeTurns:true});
   for(const key of ['model','modelProvider','approvalPolicy','approvalsReviewer','sandbox','cwd'])assert.deepEqual(after[key],originalSettings[key],key+' changed');
+  terminalEmulator.dispose();
   assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).state,'waiting','Server state is independent of a TUI');
   assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).terminalRunning,true,'closing the view leaves the TUI intact');
-  console.log(JSON.stringify({commonRoutes:true,externalClientTurn:true,coldAttachDuringWork:true,liveReasoning:true,liveTools:true,imageUpload:true,readerTextRoundTrip:true,deduplicated:true,approvalInReader:true,modelQuestionInReader:true,approvalResolvedElsewhere:true,staleAnswerRejected:true,busyExternalTurnRejectsInput:true,settingsPreserved:true,readerNeverStartsTUI:true,terminalHandoff:true,externalInferenceCalls:0,providerCalls}));
+  console.log(JSON.stringify({commonRoutes:true,externalClientTurn:true,coldAttachDuringWork:true,liveReasoning:true,liveTools:true,imageUpload:true,readerTextRoundTrip:true,deduplicated:true,approvalInReader:true,modelQuestionInReader:true,nativeModelToolAttribution:true,approvalResolvedElsewhere:true,staleAnswerRejected:true,busyExternalTurnRejectsInput:true,settingsPreserved:true,readerNeverStartsTUI:true,terminalHandoff:true,externalInferenceCalls:0,providerCalls,auxiliaryCalls:providerEvents.filter(e=>e.event==='start'&&e.toolCount===0).length}));
 } finally {
-  releaseResponse?.();
+  for (const release of heldResponses) release();
   terminal?.terminate(); rpc?.close();
   for (const child of [...children].reverse()) await stop(child);
   await new Promise(r=>provider.close(r));

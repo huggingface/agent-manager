@@ -48,6 +48,7 @@ fs.writeFileSync(stub, `
   export const getSubAgentWindow = () => Promise.reject(new Error('not used'));
   export const getSubAgentSummary = () => Promise.reject(new Error('not used'));
   export const sendInput = () => Promise.resolve({ ok: true });
+  export const answerSessionRequest = () => Promise.reject(new Error('not used'));
 `);
 const sessions = [
   { ...session, id: 'one', name: 'Research Agent' },

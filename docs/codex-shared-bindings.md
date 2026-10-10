@@ -202,8 +202,12 @@ and a local deterministic Responses fixture: real text turns, one-time command
 approval, unchanged task settings, durable duplicate suppression and no TUI.
 Browser tests cover mobile reply, draft recovery with the same message ID,
 approval and question controls. No external inference calls are made.
-This does not yet prove model-tool identity, concurrent multi-client prompt delivery, server crash recovery
-or automatic shutdown of a legacy writer. Those remain separate gates in the
+The model-tool identity and cross-client approval checks are now covered by
+`codex-reader-input-live.test.mjs`, including Reader questions and stale-answer
+rejection. Concurrent AM submissions are serialized; an active external turn
+rejects AM input. A simultaneous race to start an idle thread from different
+native clients, actual phone approval routing, server crash recovery and
+automatic shutdown of a legacy writer remain unproven. Those remain separate gates in the
 plan; the test's active command is explicit `thread/shellCommand`, not a model
 turn.
 
