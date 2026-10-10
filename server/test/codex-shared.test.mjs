@@ -102,6 +102,8 @@ test('transport rejects all execution and full-history operations', async (t) =>
     }
     await assert.rejects(client.call('thread/read', { threadId: 'a', includeTurns: true }), /read-only/);
     await assert.rejects(client.call('thread/list', { limit: 999 }), /read-only/);
+    await assert.rejects(client.call('thread/turns/list', {threadId:'a',limit:2,itemsView:'summary',sortDirection:'desc'}), /read-only/);
+    await assert.rejects(client.call('thread/turns/list', {threadId:'a',limit:1,itemsView:'full',sortDirection:'desc'}), /read-only/);
   } finally { client.close(); }
   assert.ok(f.calls.every((x) => ['initialize', 'initialized'].includes(x.method)));
 });

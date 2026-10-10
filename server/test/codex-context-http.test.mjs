@@ -80,7 +80,9 @@ try {
   assert.equal(target.status, 200); assert.equal(target.body.socket, socket); assert.equal(target.body.threadId, threadId);
   assert.equal((await call('/api/sessions/fixture/input', { text: 'do not send' })).body.code, 'invalid-input');
   assert.equal((await call('/api/sessions/fixture/stop', {})).body.code, 'codex-shared-stop-unsupported');
-  assert.equal((await call('/api/sessions/fixture/archive', {})).status, 409);
+  assert.equal((await call('/api/sessions/fixture/archive', {})).status, 200);
+  assert.equal((await call('/api/codex/context?threadId=' + threadId)).body.amSessionId, session.id);
+  assert.equal((await call('/api/sessions/fixture/unarchive', {})).status, 200);
   assert.equal((await call('/api/codex/import', { threadId })).body.code, 'codex-existing-session');
   assert.equal((await call('/api/codex/import', { threadId: 'bad' })).status, 400);
   const importedThread = '33333333-3333-4333-8333-333333333333';

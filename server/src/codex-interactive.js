@@ -6,6 +6,7 @@ export class CodexInteractiveClient extends ObservationClient {
   allows(method, params) {
     return super.allows(method, params)
       || (method === 'thread/resume' && params?.threadId === this.threadId && params.excludeTurns === true && Object.keys(params).length === 2)
+      || (method === 'turn/interrupt' && params?.threadId === this.threadId && typeof params.turnId === 'string' && !!params.turnId && Object.keys(params).length === 2)
       || (method === 'turn/start' && params?.threadId === this.threadId && Object.keys(params).every(k => ['threadId', 'input', 'clientUserMessageId'].includes(k)))
       || (method === 'thread/turns/list' && params?.threadId === this.threadId && params.limit === 1 && params.itemsView === 'full');
   }

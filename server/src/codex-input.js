@@ -20,16 +20,16 @@ export class CodexInput {
     Object.assign(this, { getSession, listSessions, bindings, endpoint, connect, observe, receipts, enabled, assertWritable });
     this.clients = new Map(); this.busy = new Set(); this.attaching = new Map();
   }
-  context(id) {
+  context(id, { allowArchived = false } = {}) {
     if (!this.enabled()) throw fail('codex-pilot-disabled', 'Shared Reader input is disabled.');
     const s = this.getSession(id), binding = this.bindings.forSession(id), endpoint = this.endpoint();
-    if (!s || s.archivedAt || !binding) throw fail('codex-unmapped', 'This session has no active shared Codex binding.');
+    if (!s || (!allowArchived && s.archivedAt) || !binding) throw fail('codex-unmapped', 'This session has no active shared Codex binding.');
     const context = contextForThread(binding.threadId, { sessions: this.listSessions(), bindings: this.bindings, endpoint });
     if (context.amSessionId !== id) throw fail('codex-binding-stale', 'The shared binding changed.');
     return { ...context, endpoint, stamp: JSON.stringify([s.sessionUuid, binding.endpointId, binding.threadId, binding.revision, binding.cwd]) };
   }
-  check(id, context) {
-    if (this.context(id).stamp !== context.stamp) throw fail('codex-binding-stale', 'The shared binding changed.');
+  check(id, context, options) {
+    if (this.context(id, options).stamp !== context.stamp) throw fail('codex-binding-stale', 'The shared binding changed.');
   }
   async metadata(client, context) {
     if (client.endpoint.socket !== context.endpoint.socket || client.endpoint.home !== context.endpoint.home) throw fail('codex-endpoint-changed', 'The Codex server changed.');
@@ -43,14 +43,45 @@ export class CodexInput {
     return entry?.client;
   }
   async status(id) {
-    const context = this.context(id); let client = this.existing(id, context), temporary = false;
+    const context = this.context(id, { allowArchived: true }); let client = this.existing(id, context), temporary = false;
     try {
       if (!client) { client = await this.observe(context.endpoint); temporary = true; }
-      const thread = await this.metadata(client, context); this.check(id, context);
-      return { connected: !temporary, status: client.requests?.size ? 'needs-input' : taskStatus(thread.status), requests: temporary ? [] : client.requestView(),
+      const thread = await this.metadata(client, context);
+      const activeTurnId = await this.activeTurn(client, context, thread);
+      this.check(id, context, { allowArchived: true });
+      return { activeTurnId, connected: !temporary, status: client.requests?.size ? 'needs-input' : taskStatus(thread.status), requests: temporary ? [] : client.requestView(),
         liveText: temporary ? '' : [...(client.items?.values() || [])].filter(i => i.type === 'agentMessage').slice(-1)[0]?.text || '',
         turnError: client.turnError || null };
     } finally { if (temporary) client?.close(); }
+  }
+  async activeTurn(client, context, thread) {
+    if (thread.status?.type !== 'active') return null;
+    const page = await client.call('thread/turns/list', {
+      threadId: context.threadId, limit: 1, itemsView: 'summary', sortDirection: 'desc',
+    });
+    const turn = page?.data?.[0];
+    return turn?.status === 'inProgress' && typeof turn.id === 'string' ? turn.id : null;
+  }
+  async interrupt(id, { turnId }, { signal } = {}) {
+    if (typeof turnId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(turnId)) {
+      throw new ApiError(400, 'invalid-input', 'An exact turnId is required.');
+    }
+    const { client, context } = await this.attach(id);
+    const thread = await this.metadata(client, context);
+    if (await this.activeTurn(client, context, thread) !== turnId) {
+      throw fail('codex-turn-stale', 'That turn is no longer active. Refresh before interrupting.');
+    }
+    this.check(id, context); this.assertWritable();
+    if (signal?.aborted) throw fail('codex-interrupt-cancelled', 'The interruption was not submitted.');
+    try {
+      // The daemon checks this exact turn ID atomically. Never substitute a
+      // newer ID if the turn changes between verification and this request.
+      await client.call('turn/interrupt', { threadId: context.threadId, turnId });
+    } catch (error) {
+      if (error.code === 'rpc-error') throw fail('codex-interrupt-rejected', 'The server refused this interruption. Refresh the task.');
+      throw new ApiError(503, 'codex-interrupt-uncertain', 'The interruption could not be confirmed. Refresh the task before trying again.');
+    }
+    return { ok: true, requested: true, turnId };
   }
   async attach(id) {
     if (this.attaching.has(id)) return this.attaching.get(id);

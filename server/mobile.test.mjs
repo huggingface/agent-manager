@@ -1169,6 +1169,16 @@ try {
     .count().then((count) => count === 2));
   check('Settings hides group terminals without recreating them', settingsRetained && settingsRestored,
     JSON.stringify({ settingsRetained, settingsRestored }));
+  // Explicit close evicts the browser terminal, unlike navigation caching.
+  const closingTile=desktopPage.locator('.tile-terminal:not(.tile-cached)').first();
+  await closingTile.evaluate(el=>el.setAttribute('data-close-probe','yes'));
+  const beforeClose=await (await fetch(`${API}/api/sessions`)).json();
+  await closingTile.getByRole('button',{name:'Close',exact:true}).click();
+  const explicitDetach=await waitFor(()=>desktopPage.locator('[data-close-probe="yes"]').count().then(n=>n===0));
+  const afterClose=await (await fetch(`${API}/api/sessions`)).json();
+  check('explicit close detaches only the view, preserving both backend sessions',explicitDetach
+    && [id,secondId].every(sid=>beforeClose.find(s=>s.id===sid)?.running && afterClose.find(s=>s.id===sid)?.running));
+
   await desktopContext.close();
 } catch (error) {
   check('mobile browser test completes', false, String(error?.stack || error));

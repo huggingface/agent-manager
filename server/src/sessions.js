@@ -85,6 +85,30 @@ export function update(id, patch) {
   return s;
 }
 
+// Shared archive is a visibility decision, not a process stop. A failed write
+// must not acknowledge that decision or mutate the in-memory session first.
+export function setArchived(id, archived) {
+  const current = get(id);
+  if (!current) return null;
+  const nextSession = {...current, archivedAt: archived ? new Date().toISOString() : undefined,
+    ...(archived ? {pinnedAt:undefined} : {})};
+  const next = sessions.map(s => s.id === id ? nextSession : s);
+  const tmp = `${SESSIONS_FILE}.${crypto.randomUUID()}.tmp`;
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, JSON.stringify(next, null, 2)); fs.fsyncSync(fd);
+    fs.closeSync(fd); fd = undefined;
+    fs.renameSync(tmp, SESSIONS_FILE);
+    sessions = next;
+    fd = fs.openSync(dirname(SESSIONS_FILE), 'r'); fs.fsyncSync(fd);
+    return nextSession;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    try { fs.unlinkSync(tmp); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+}
+
 // Imports are references, never fresh agents. Persist the fail-closed launch
 // marker before attempting a separate binding write. A crash between the two
 // writes leaves a repairable reference that cannot start a standalone TUI.

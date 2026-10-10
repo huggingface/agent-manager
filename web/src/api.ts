@@ -54,11 +54,13 @@ export const createSession = (name: string, cli: string, groupId?: string, path?
 export const listFolders = (p = ''): Promise<{ path: string; folders: string[] }> =>
   fetch(`/api/folders?path=${encodeURIComponent(p)}`).then(json);
 
+export const interruptSession = (id: string, turnId: string): Promise<{ok: boolean; requested: boolean; turnId: string}> =>
+  fetch(`/api/sessions/${encodeURIComponent(id)}/interrupt`, {method:'POST',headers:HEADERS,body:JSON.stringify({turnId})}).then(json);
+
 export const stopSession = (id: string) =>
   fetch(`/api/sessions/${id}/stop`, { method: 'POST' }).then(json);
 
-// Put a session away: it stops, and it leaves the working list. The server
-// refuses to delete anything that has not been through here first.
+// Shared tasks are hidden in AM and continue running. Legacy sessions stop.
 export const archiveSession = (id: string) =>
   fetch(`/api/sessions/${id}/archive`, { method: 'POST' }).then(json);
 

@@ -18,13 +18,14 @@ function fixture() {
  const bindings = new CodexBindings(path.join(root, `bindings-${++n}`));
  bindings.bind({session,threadId:session.codexSessionId,endpointId:endpoint.id,cwd:root,expectedRevision:0});
  const thread = {id:session.codexSessionId,cwd:root,status:{type:'idle'},canAcceptDirectInput:true};
+ const turn = {id:'active-turn',status:'inProgress'};
  const calls=[], replies=[]; let locked=false, lost=false, connects=0;
  const client={endpoint,closed:false,requests:new Map(),items:new Map(),requestView(){return [...this.requests.values()];},
-  async call(method,params){calls.push({method,params});if(method==='turn/start'){if(lost)throw Error('timeout');return {turn:{id:'turn-fixture'}};}return {thread};},
+  async call(method,params){calls.push({method,params});if(method==='thread/turns/list')return {data:[turn]};if(method==='turn/interrupt')return {};if(method==='turn/start'){if(lost)throw Error('timeout');return {turn:{id:'turn-fixture'}};}return {thread};},
   close(){this.closed=true;},async answer(key,response){replies.push({key,response});this.requests.delete(key);}};
  const deps={getSession:()=>session,listSessions:()=>[session],bindings,endpoint:()=>endpoint,connect:async()=>{connects++;return client;},observe:async()=>client,
   receipts:path.join(root,`receipts-${n}`),enabled:()=>true,assertWritable:()=>{if(locked)throw Error('locked');}};
- return {session,thread,client,calls,replies,deps,hub:new CodexInput(deps),connects:()=>connects,lock:()=>locked=true,lose:()=>lost=true};
+ return {session,thread,turn,client,calls,replies,deps,hub:new CodexInput(deps),connects:()=>connects,lock:()=>locked=true,lose:()=>lost=true};
 }
 test.after(()=>fs.rmSync(root,{recursive:true,force:true}));
 test('exact UUID, unchanged settings, durable idempotency across retry and AM restart',async()=>{
@@ -77,4 +78,36 @@ test('events isolate tasks and clear requests resolved elsewhere',()=>{
  c.receiveServerMessage({method:'serverRequest/resolved',params:{threadId:'ours',requestId:1}});assert.equal(c.requests.size,0);
  assert.equal(c.allows('turn/interrupt',{threadId:'ours'}),false);
  assert.equal(c.allows('thread/resume',{threadId:'ours',excludeTurns:true,approvalPolicy:'never'}),false);
+});
+
+test('interrupt verifies exact active turn and never stops or unloads a task', async () => {
+ const f=fixture();f.thread.status={type:'active',activeFlags:[]};
+ const result=await f.hub.interrupt('am',{turnId:f.turn.id});
+ assert.deepEqual(result,{ok:true,requested:true,turnId:f.turn.id});
+ assert.deepEqual(f.calls.filter(c=>c.method==='turn/interrupt'),[{method:'turn/interrupt',params:{threadId:f.thread.id,turnId:f.turn.id}}]);
+ assert.ok(!f.calls.some(c=>['turn/start','thread/archive','thread/unsubscribe','process/kill'].includes(c.method)));
+});
+test('stale, idle, archived, cancelled and locked interruptions never reach the daemon', async () => {
+ for (const mutate of [f=>f.turn.id='newer',f=>f.thread.status={type:'idle'},f=>f.session.archivedAt='now',f=>f.lock()]) {
+  const f=fixture();f.thread.status={type:'active',activeFlags:[]};mutate(f);
+  await assert.rejects(f.hub.interrupt('am',{turnId:'active-turn'}));
+  assert.equal(f.calls.filter(c=>c.method==='turn/interrupt').length,0);
+ }
+ const f=fixture();f.thread.status={type:'active',activeFlags:[]};
+ await assert.rejects(f.hub.interrupt('am',{turnId:f.turn.id},{signal:AbortSignal.abort()}),{code:'codex-interrupt-cancelled'});
+ assert.equal(f.calls.filter(c=>c.method==='turn/interrupt').length,0);
+});
+test('binding is rechecked after reading active turn, and uncertain interrupts are not retried', async () => {
+ const f=fixture();f.thread.status={type:'active',activeFlags:[]};const original=f.client.call.bind(f.client);
+ f.client.call=async(method,params)=>{const result=await original(method,params);if(method==='thread/turns/list')f.session.codexSessionId=randomUUID();return result;};
+ await assert.rejects(f.hub.interrupt('am',{turnId:f.turn.id}));assert.equal(f.calls.filter(c=>c.method==='turn/interrupt').length,0);
+ const g=fixture();g.thread.status={type:'active',activeFlags:[]};const call=g.client.call.bind(g.client);
+ g.client.call=async(method,params)=>{const result=await call(method,params);if(method==='turn/interrupt')throw Error('connection lost');return result;};
+ await assert.rejects(g.hub.interrupt('am',{turnId:g.turn.id}),{code:'codex-interrupt-uncertain'});
+ assert.equal(g.calls.filter(c=>c.method==='turn/interrupt').length,1);
+});
+test('archived task status remains observable without resuming it', async () => {
+ const f=fixture();f.session.archivedAt='now';f.thread.status={type:'active',activeFlags:[]};
+ const status=await f.hub.status('am');assert.equal(status.status,'working');assert.equal(status.activeTurnId,f.turn.id);
+ assert.equal(f.calls.some(c=>c.method==='thread/resume'),false);
 });

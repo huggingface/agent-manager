@@ -7,6 +7,8 @@ See [the adapter contract](../conversation-adapter.md) and
 
 ## Implemented in the opt-in pilot
 
+- Separate close-view, exact-turn interrupt and AM-only archive/restore actions.
+  Active archive preserves native work and bindings; stale interruption IDs fail.
 - Durable unique native-thread ↔ AM-session bindings, exact import/resume,
   verified workspace and endpoint identity; no standalone or CWD fallback.
 - Existing Reader and Composer: paged history, live text/reasoning/tool blocks,
@@ -28,7 +30,9 @@ or access to live tasks. It verifies Reader text/images, a model question
 answered in Reader, an approval answered by an independent client while Reader
 is open, stale-answer rejection, and refusal to send into another client's
 active turn. A native model command resolves the exact AM session/thread/CWD.
-A real TUI submits work, its browser transport closes, and Reader follows work
+Lifecycle tests archive active work, restore its unchanged mapping, reject stale
+interruptions both in AM and the daemon, and interrupt one task while a second
+remains active. A real TUI submits work, its browser transport closes, and Reader follows work
 through completion. Explicit model/provider/approval/sandbox/CWD settings remain
 unchanged across these client transitions.
 
@@ -48,8 +52,8 @@ by the operator; do not extend those confirmations to untested cases.
 2. **Complete shared lifecycle actions.** Closing a view detaches it. Interrupt
    targets a verified current turn and rejects a stale turn ID. Archive changes
    AM visibility without implicitly killing shared work; provide unarchive.
-   Until implemented, generic stop/archive refuse shared tasks. Managed agent
-   and cron delivery remain guarded rather than silently changing semantics.
+   Implemented and tested in the pilot. Generic process stop/delete and managed
+   agent/cron delivery remain guarded rather than silently changing semantics.
 3. **Recover after daemon failure.** Verify identity and settings on reconnect;
    distinguish interrupted work from completed work; do not replay uncertain
    input. Test a disposable daemon crash and an AM restart independently. Do
@@ -69,7 +73,7 @@ by the operator; do not extend those confirmations to untested cases.
 | Area | Still required |
 | --- | --- |
 | Phone interoperability | Approval and question round trips in the actual iPhone client, including resolution while AM is open. |
-| Task lifecycle | Exact-turn interruption, AM-only archive/unarchive, explicit managed-delivery behavior. |
+| Managed delivery | Define agent/cron delivery semantics; currently refused for shared tasks. Close/interrupt/archive/restore are implemented. |
 | Daemon recovery | Settings preservation, clear failed/interrupted state, durable no-replay behavior after a real disposable crash. |
 | New thread identity | Empty creation and persistence failure; `/new` and fork must not overwrite the original mapping. Unmapped threads stay Codex-only. |
 | Migration | Integrated owner checks and graceful release, nondisruptive production rollout. |

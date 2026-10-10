@@ -73,8 +73,16 @@ supply the full text. This is distinct from the current working/idle state.
 
 ## Deliberate lifecycle boundaries
 
-Closing a Reader or terminal view detaches that view. It does not stop shared
-work. Existing generic stop/archive actions continue to refuse shared tasks;
-turn interruption requires a separate exact-turn action. New shared creation,
-automatic legacy migration, crash recovery and `/new`/fork adoption remain
-outside this parity change. The pilot is still opt-in, separate from main AM.
+Closing a Reader or terminal view explicitly evicts its browser terminal cache
+and disconnects its socket. Navigation still retains warm views. Neither action
+stops the TUI or shared task. The shared pane offers **Interrupt current turn**
+with the exact displayed native turn ID; AM verifies it again, and Codex rejects
+a stale ID atomically. An accepted request disables that turn's button while its
+completion arrives; uncertain failures are never retried automatically.
+
+**Archive** / **Restore** change only AM visibility, durably. Mapping and history
+are retained, ongoing work continues, and archived tasks remain observable but
+cannot accept Reader input. Generic process stop/delete and agent/cron delivery
+still refuse shared tasks. New shared creation, automatic legacy migration,
+crash recovery and `/new`/fork adoption remain outside this change. The pilot is
+still opt-in, separate from main AM.

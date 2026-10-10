@@ -16,7 +16,7 @@ await build({
     import React from 'react'; import {createRoot} from 'react-dom/client'; import {flushSync} from 'react-dom';
     import TerminalPane from './src/components/TerminalPane';
     import {TraceUnavailable} from './src/api';
-    window.sockets = []; window.sends = []; window.reads = []; window.sharedSends=[]; window.sharedAnswers=[];
+    window.sockets = []; window.sends = []; window.reads = []; window.sharedSends=[]; window.sharedAnswers=[]; window.interrupts=[]; window.closes=0;
     const storage = new Map(); Object.defineProperty(window, 'localStorage', {value:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)}});
     class FakeSocket { static OPEN=1; readyState=1; constructor(){window.sockets.push(this); if(window.refuseSockets)setTimeout(()=>{this.readyState=3;this.onclose?.({code:1006});},1);} send(){} close(){this.readyState=3;} }
     window.WebSocket = FakeSocket;
@@ -53,14 +53,15 @@ await build({
         return Promise.resolve(page(all.slice(from),from,all.length));
       },
       send(id,text){window.sends.push({id,text});if(config.shared||config.bound){window.sharedSends.push({id,text});if(config.failSharedSend){config.failSharedSend=false;return Promise.reject(new Error('Delivery uncertain'));}}return Promise.resolve({ok:true});},
+      interrupt(id,turnId){window.interrupts.push({id,turnId});return config.rejectInterrupt?Promise.reject(new Error('That turn is no longer active')):Promise.resolve({ok:true,requested:true,turnId});},
       answer(id,key,response){window.sharedAnswers.push({id,key,response});config.sharedRequest=null;return Promise.resolve({ok:true});},
       summary(){return Promise.resolve({...page([]),total:2*(config.count||2),userTurns:[]});},
       roster(){return config.child?[{agentId:'child',toolUseId:'spawn',hasTranscript:true}]:[];},
     };
     function Pane({id}) {return <div className="tile" style={{position:'relative',flex:1,minWidth:0}}><TerminalPane
-      session={{id,cli:config.shared?'codex':'claude',codexSharedOnly:config.shared,codexShared:config.bound,name:'Reader fixture',state:config.state||'waiting',running:true,everStarted:true,path:null,createdAt:new Date().toISOString()}}
+      session={{id,cli:config.shared?'codex':'claude',codexSharedOnly:config.shared,codexShared:config.bound,interruptTurnId:config.turnId,archivedAt:config.archivedAt,name:'Reader fixture',state:config.state||'waiting',running:true,everStarted:true,path:null,createdAt:new Date().toISOString()}}
       cli={{id:'claude',label:'Fixture',color:'#777'}} mode={config.mode||'reader'} theme="light" zoom={config.zoom||100}
-      isMobile={config.mobile} focused active={config.active!==false} visible onClose={()=>{}} /></div>}
+      isMobile={config.mobile} focused active={config.active!==false} visible onClose={()=>{window.closes++;}} /></div>}
     function App(){return <><Pane id={config.id}/>{config.group&&<Pane id="follower"/>}</>}
     window.fixture = {
       mount(options){if(root)flushSync(()=>root.unmount()); config={...options}; root=createRoot(document.getElementById('fixture-root')); flushSync(()=>root.render(<App/>));},
@@ -78,6 +79,7 @@ await build({
       export const getSubAgentSummary=()=>window.fixtureApi.summary();
       export const getSubAgents=()=>Promise.resolve({agents:window.fixtureApi.roster()});
       export const answerSessionRequest=(...args)=>window.fixtureApi.answer(...args);
+      export const interruptSession=(...args)=>window.fixtureApi.interrupt(...args);
       export const sendInput=(...args)=>window.fixtureApi.send(...args);
     ` }));
   } }],
@@ -99,6 +101,29 @@ try {
   await p.waitForFunction(() => window.sends.length === 1);
   assert.deepEqual(await p.evaluate(() => window.sends), [{ id: 'new-session', text: 'First prompt from the reader' }]);
   assert.equal(await p.evaluate(() => window.sockets.length), 0, 'reader never attaches or starts a PTY');
+
+  // Lifecycle controls use the exact displayed turn and never retry or interrupt on close.
+  for (const mode of ['reader','terminal']) {
+    await p.evaluate(mode=>window.fixture.mount({id:'lifecycle-'+mode,shared:true,mode,turnId:'turn-'+mode}),mode);
+    const before=await p.evaluate(()=>window.interrupts.length);
+    await p.getByRole('button',{name:'Interrupt current turn',exact:true}).click();
+    await p.getByText('Interruption requested…',{exact:true}).waitFor();
+    assert.equal(await p.getByRole('button',{name:'Interrupt current turn',exact:true}).isDisabled(),true);
+    assert.deepEqual(await p.evaluate(()=>window.interrupts.at(-1)),{id:'lifecycle-'+mode,turnId:'turn-'+mode});
+    await p.getByRole('button',{name:'Close view',exact:true}).click();
+    assert.equal(await p.evaluate(()=>window.interrupts.length),before+1);
+    await p.evaluate(()=>window.fixture.change({turnId:'new-turn',rejectInterrupt:true}));
+    await p.getByRole('button',{name:'Interrupt current turn',exact:true}).click();
+    await p.getByRole('alert').filter({hasText:'That turn is no longer active'}).waitFor();
+    await p.evaluate(()=>window.fixture.change({turnId:null}));
+    assert.equal(await p.getByRole('button',{name:'Interrupt current turn',exact:true}).count(),0);
+  }
+  await p.evaluate(()=>window.fixture.mount({id:'legacy',turnId:'legacy-turn'}));
+  assert.equal(await p.getByRole('button',{name:'Interrupt current turn',exact:true}).count(),0);
+  await p.evaluate(()=>window.fixture.mount({id:'archived',shared:true,turnId:'still-active',archivedAt:'2026-10-10'}));
+  assert.equal(await p.getByRole('button',{name:'Interrupt current turn',exact:true}).count(),0);
+  // Reset socket observations: the following cases deliberately exercise Reader only.
+  await p.evaluate(()=>{window.sockets=[];});
 
   // Both kinds of shared binding can reply without creating a terminal.
   await p.setViewportSize({ width: 390, height: 844 });

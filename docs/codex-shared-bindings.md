@@ -163,10 +163,22 @@ removal is implemented.
 For bound sessions, standalone launch fallbacks and rollout-based repinning
 are bypassed. AM boot does not revive their terminal clients. Closing a browser
 view only detaches that view. Stopping AM closes its clients; the Codex server
-is an independent process. Generic stop/archive actions and managed prompt
-delivery refuse bound tasks in this pilot: these need explicit shared-task
-semantics, server-driven activity/history and approval routing before rollout.
-The existing operator input route selects the shared adapter. Agent/cron prompt delivery remains guarded.
+is an independent process. Generic process stop/delete and managed agent/cron
+prompt delivery refuse bound tasks. The existing operator input route selects
+the shared adapter.
+
+`POST /api/sessions/:id/interrupt` is operator-only and requires `{turnId}`.
+It verifies the mapping, endpoint, workspace and currently active turn before
+submitting that exact ID. Codex 0.162.1 also rejects a stale ID at submission,
+closing the race with another client. It returns `{ok:true,requested:true,turnId}`;
+completion is asynchronous. A refused/stale turn returns 409; uncertain transport
+failure returns 503 with no automatic retry. It never kills a process.
+
+Archive/unarchive atomically persist AM visibility only; neither calls native
+thread/archive nor stops the TUI. The binding, native thread and conversation
+remain intact. Archived tasks are read-only in AM; Restore re-enables interaction.
+The sidebar hides destructive Delete for shared tasks. Explicitly closing a pane
+evicts that browser view, while ordinary navigation retains the warm terminal.
 
 `/new` and fork are not automatically associated with the old AM identity. A
 new native ID is unmapped; the original durable mapping remains intact. The

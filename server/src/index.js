@@ -443,6 +443,16 @@ const requireReaderOperator = (req) => {
   if (req.headers['x-am-origin'] !== 'operator') throw new ApiError(403, 'operator-required', 'Use the operator Reader for this action.');
 };
 // Native approvals are adapted to the same session interaction contract.
+api.post('/api/sessions/:id/interrupt', async (req, res) => {
+  requireReaderOperator(req);
+  const session = store.get(req.params.id);
+  if (!session) throw new ApiError(404, 'not-found', 'Session not found.');
+  if (!sessionRuntime.shared(session)) throw new ApiError(409, 'interrupt-unsupported', 'Use this session’s terminal to interrupt it.');
+  const result = await codexInput.interrupt(session.id, req.body || {}, {signal:res.locals.lockSignal});
+  await sessionRuntime.refresh(session);
+  res.json(result);
+});
+
 api.post('/api/sessions/:id/answer', async (req, res) => {
   requireReaderOperator(req);
   res.json(await codexInput.answer(req.params.id, req.body || {}));
@@ -2988,7 +2998,10 @@ api.put('/api/sessions/:id', (req, res) => {
 api.post('/api/sessions/:id/archive', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  // Archiving stops the agent. Putting a session away while its CLI keeps
+  // Shared archive only changes AM visibility. Codex owns the task and its
+  // clients elsewhere; keep the binding, transcript and work intact.
+  if (sessionRuntime.shared(s)) return res.json(store.setArchived(s.id, true));
+  // Archiving a legacy session stops its agent. Putting it away while its CLI keeps
   // running is how you end up paying for work behind a row you can no longer
   // see. A remote agent has no process here — its connection is a separate
   // control that stays where it is, so archiving one only files it away.
@@ -3055,7 +3068,7 @@ api.post('/api/groups/:id/unpin', (req, res) => {
 api.post('/api/sessions/:id/unarchive', (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
-  return res.json(store.update(s.id, { archivedAt: undefined }));
+  return res.json(sessionRuntime.shared(s) ? store.setArchived(s.id, false) : store.update(s.id, { archivedAt: undefined }));
 });
 
 api.post('/api/sessions/:id/stop', (req, res) => {

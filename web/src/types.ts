@@ -23,6 +23,8 @@ export interface Session {
   running: boolean;
   /** Local terminal client, distinct from execution on a shared server. */
   terminalRunning?: boolean;
+  /** Exact active turn offered for interruption; stale IDs are refused. */
+  interruptTurnId?: string | null;
   state: SessionState;
   // Set when the operator archived this session — a stored decision, not the
   // idle window's verdict, which is computed in App.tsx and expires when the

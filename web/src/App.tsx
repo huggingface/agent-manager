@@ -898,9 +898,7 @@ export default function App() {
   const renameGroup = (id: string, name: string) => api.renameGroup(id, name).then(refresh).catch(showErr('Couldn’t rename'));
   const renameSession = (id: string, name: string) => { if (name.trim()) api.renameSession(id, name.trim()).then(refresh).catch(showErr('Couldn’t rename')); };
   const deleteGroup = (id: string) => api.deleteGroup(id).then(() => { if (activeRef === `g:${id}`) setActiveRef(null); refresh(); }).catch(showErr('Couldn’t delete the group'));
-  // Archiving stops the agent server-side, so there is no separate stop call
-  // left in the UI — `api.stopSession` stays for the archive route's own use
-  // and for anything that needs to end a process without filing it away.
+  // Archive hides shared tasks in AM; legacy agents retain stop-and-archive.
   const archiveSession = (id: string) => api.archiveSession(id)
     .then(() => { if (activeRef === `s:${id}`) setActiveRef(null); closePane(id); refresh(); })
     .catch(showErr('Couldn’t archive that agent'));
@@ -995,9 +993,11 @@ export default function App() {
     if (isMobile) setMobileStage(true);
   };
   const closePane = (sid: string) => {
+    const detachView = () => setWarmTerminalIds(ids => ids.filter(id => id !== sid));
+    detachView();
     // On mobile ✕ just returns to the list — never the desktop ungroup gesture.
     if (isMobile) { setMobileStage(false); return; }
-    if (activeGroup) doMove(`s:${sid}`, { kind: 'after', ref: activeRef! });
+    if (activeGroup) void doMove(`s:${sid}`, { kind: 'after', ref: activeRef! }).then(detachView);
     else setActiveRef(null);
   };
   const setLayout = async (l: GridSpec | null) => {

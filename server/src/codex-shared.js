@@ -97,6 +97,9 @@ export class ObservationClient {
   }
 
   allows(method, params) {
+    if (method === 'thread/turns/list') return typeof params?.threadId === 'string'
+      && params.limit === 1 && params.itemsView === 'summary' && params.sortDirection === 'desc'
+      && Object.keys(params).length === 4;
     return METHODS.has(method)
       && (method !== 'thread/read' || params?.includeTurns === false)
       && (method !== 'thread/list' || (params?.useStateDbOnly === true && params?.limit === PAGE_SIZE));

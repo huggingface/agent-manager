@@ -322,7 +322,56 @@ try {
   terminalEmulator.dispose();
   assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).state,'waiting','Server state is independent of a TUI');
   assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).terminalRunning,true,'closing the view leaves the TUI intact');
-  console.log(JSON.stringify({commonRoutes:true,externalClientTurn:true,coldAttachDuringWork:true,liveReasoning:true,liveTools:true,imageUpload:true,readerTextRoundTrip:true,deduplicated:true,approvalInReader:true,modelQuestionInReader:true,nativeModelToolAttribution:true,approvalResolvedElsewhere:true,staleAnswerRejected:true,busyExternalTurnRejectsInput:true,settingsPreserved:true,readerNeverStartsTUI:true,terminalHandoff:true,externalInferenceCalls:0,providerCalls,auxiliaryCalls:providerEvents.filter(e=>e.event==='start'&&e.toolCount===0).length}));
+  // Shared lifecycle: hiding the AM row keeps work, ownership and history.
+  // Interruption uses an exact active turn, including a daemon-side stale-ID
+  // guard for the race between AM verification and submission.
+  const priorTurn = (await rpc.call('thread/turns/list',{threadId:thread.id,limit:1,itemsView:'summary'})).data[0].id;
+  holdExternal=true;releaseResponse=null;
+  const running=await rpc.call('turn/start',{threadId:thread.id,input:[{type:'text',text:'LIFECYCLE_TARGET_FIXTURE'}]});
+  await waitFor(async()=>releaseResponse);const releaseTarget=releaseResponse;
+  await view();
+  const beforeArchive=fs.readFileSync(path.join(data,'codex-bindings.json'),'utf8');
+  assert.ok((await call(prefix+'/archive',{})).archivedAt);
+  assert.equal(fs.readFileSync(path.join(data,'codex-bindings.json'),'utf8'),beforeArchive);
+  assert.equal((await rpc.call('thread/read',{threadId:thread.id,includeTurns:false})).thread.status.type,'active');
+  const archivedView=await view();assert.equal(archivedView.interaction.canSend,false);
+  assert.equal(archivedView.activity,'working');
+  assert.equal((await call('/api/codex/context?threadId='+thread.id)).amSessionId,session.id);
+  assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).terminalRunning,true);
+  await call(prefix+'/unarchive',{});await view();
+  assert.equal(fs.readFileSync(path.join(data,'codex-bindings.json'),'utf8'),beforeArchive);
+  const offered=await waitFor(async()=>{
+    const s=(await call('/api/sessions')).find(s=>s.id===session.id);return s.interruptTurnId===running.turn.id&&s;
+  });
+  assert.equal(offered.interruptTurnId,running.turn.id);
+  const rejectInterrupt=async(turnId,headers={'x-am-origin':'operator'})=>{
+    const response=await fetch(base+prefix+'/interrupt',{method:'POST',headers:{...headers,'content-type':'application/json'},body:JSON.stringify({turnId})});
+    assert.equal(response.status,headers['x-am-origin']?409:403);return response.json();
+  };
+  assert.equal((await rejectInterrupt(priorTurn)).code,'codex-turn-stale');
+  const forbidden=await fetch(base+prefix+'/interrupt',{method:'POST',headers:{'x-am-origin':session.id,'content-type':'application/json'},body:JSON.stringify({turnId:running.turn.id})});
+  assert.equal(forbidden.status,403);
+  await assert.rejects(rpc.call('turn/interrupt',{threadId:thread.id,turnId:priorTurn}),/expected active turn id/);
+  assert.equal((await rpc.call('thread/turns/list',{threadId:thread.id,limit:1,itemsView:'summary'})).data[0].status,'inProgress');
+  // Another thread is active at the same time; an exact interruption must leave it alone.
+  const other=(await rpc.call('thread/start',{cwd,sandbox:'read-only',approvalPolicy:'on-request'})).thread;
+  releaseResponse=null;
+  const otherTurn=await rpc.call('turn/start',{threadId:other.id,input:[{type:'text',text:'UNRELATED_LIFECYCLE_FIXTURE'}]});
+  await waitFor(async()=>releaseResponse);const releaseOther=releaseResponse;
+  const interrupted=await call(prefix+'/interrupt',{turnId:running.turn.id});
+  assert.deepEqual(interrupted,{ok:true,requested:true,turnId:running.turn.id});
+  await waitFor(async()=>{
+    const turn=(await rpc.call('thread/turns/list',{threadId:thread.id,limit:1,itemsView:'summary'})).data[0];
+    return turn.id===running.turn.id&&turn.status==='interrupted';
+  });
+  const untouched=(await rpc.call('thread/turns/list',{threadId:other.id,limit:1,itemsView:'summary'})).data[0];
+  assert.equal(untouched.id,otherTurn.turn.id);assert.equal(untouched.status,'inProgress');
+  assert.equal((await rejectInterrupt(running.turn.id)).code,'codex-turn-stale');
+  releaseTarget();releaseOther();holdExternal=false;
+  await waitFor(async()=>(await view()).interaction.canSend);
+  assert.ok(JSON.stringify(await view()).includes('READER_HELLO_FIXTURE'),'archive/interrupt keep conversation history');
+  assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).terminalRunning,true);
+  console.log(JSON.stringify({commonRoutes:true,sharedArchiveKeepsWork:true,archiveRestoreKeepsBinding:true,exactTurnInterruption:true,nativeStaleInterruptRejected:true,unrelatedThreadPreserved:true,externalClientTurn:true,coldAttachDuringWork:true,liveReasoning:true,liveTools:true,imageUpload:true,readerTextRoundTrip:true,deduplicated:true,approvalInReader:true,modelQuestionInReader:true,nativeModelToolAttribution:true,approvalResolvedElsewhere:true,staleAnswerRejected:true,busyExternalTurnRejectsInput:true,settingsPreserved:true,readerNeverStartsTUI:true,terminalHandoff:true,externalInferenceCalls:0,providerCalls,auxiliaryCalls:providerEvents.filter(e=>e.event==='start'&&e.toolCount===0).length}));
 } finally {
   for (const release of heldResponses) release();
   terminal?.terminate(); rpc?.close();

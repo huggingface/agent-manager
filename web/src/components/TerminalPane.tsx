@@ -18,7 +18,7 @@ import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
 import { LOCKED_CLOSE_CODE, announceLock, parseCloseReason } from '../lib/lockStatus';
-import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph } from './icons';
+import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph, StopGlyph } from './icons';
 import * as api from '../api';
 import { terminalRetryDelay } from '../terminalRetry';
 import { captureTerminalAnchor, restoreTerminalAnchor, type TerminalScrollAnchor } from '../lib/terminalScrollAnchor';
@@ -1291,6 +1291,19 @@ export default function TerminalPane({
 
   // Focused panes tint toward THEIR agent's brand color, not the app accent.
   const tint = cli?.color;
+  const [interrupting, setInterrupting] = useState(false);
+  const [interruptedTurn, setInterruptedTurn] = useState<string | null>(null);
+  const [interruptError, setInterruptError] = useState('');
+  const sharedTask = !!(session.codexShared || session.codexSharedOnly);
+  const interruptTurn = async () => {
+    const turnId = session.interruptTurnId;
+    if (!turnId || interrupting || interruptedTurn === turnId) return;
+    setInterrupting(true); setInterruptError('');
+    try { await api.interruptSession(session.id, turnId); setInterruptedTurn(turnId); }
+    catch (error) { setInterruptError(error instanceof Error ? error.message : 'Could not interrupt. Refresh the task.'); }
+    finally { setInterrupting(false); }
+  };
+  useEffect(() => { setInterruptError(''); }, [session.interruptTurnId]);
   const pathLabel = workspaceLabel(session.path);
   const group = groupLabel(groupName);
   return (
@@ -1417,9 +1430,17 @@ export default function TerminalPane({
               onShare={onShare}
             />
           )}
-          <button className="ph-btn ph-close" title="Close" aria-label="Close" onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
+          {sharedTask && !session.archivedAt && session.interruptTurnId && (
+            <button className="ph-btn ph-interrupt" title="Interrupt current turn — keep the conversation"
+              aria-label="Interrupt current turn" disabled={interrupting || interruptedTurn === session.interruptTurnId}
+              onMouseDown={e => e.stopPropagation()}
+              onClick={e => { e.stopPropagation(); void interruptTurn(); }}><StopGlyph /></button>
+          )}
+          <button className="ph-btn ph-close" title={sharedTask ? "Close view — work continues" : "Close"} aria-label={sharedTask ? "Close view" : "Close"} onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
+      {interruptError && <div className="cxv-note" role="alert">{interruptError}</div>}
+      {interruptedTurn && interruptedTurn === session.interruptTurnId && <div className="cxv-note" role="status">Interruption requested…</div>}
       {/* `reading` releases the frame's touch-action: the phone rule pins it to
           `none` so the drag handler above owns terminal panning, and that also
           forbids the browser from panning anything nested inside — including
