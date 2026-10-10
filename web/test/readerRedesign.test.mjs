@@ -16,7 +16,7 @@ await build({
     import React from 'react'; import {createRoot} from 'react-dom/client'; import {flushSync} from 'react-dom';
     import TerminalPane from './src/components/TerminalPane';
     import {TraceUnavailable} from './src/api';
-    window.sockets = []; window.sends = []; window.reads = []; window.sharedSends=[]; window.sharedAnswers=[]; window.interrupts=[]; window.closes=0;
+    window.sockets = []; window.sends = []; window.reads = []; window.sharedSends=[]; window.sharedAnswers=[]; window.interrupts=[]; window.reconnections=[]; window.closes=0;
     const storage = new Map(); Object.defineProperty(window, 'localStorage', {value:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)}});
     class FakeSocket { static OPEN=1; readyState=1; constructor(){window.sockets.push(this); if(window.refuseSockets)setTimeout(()=>{this.readyState=3;this.onclose?.({code:1006});},1);} send(){} close(){this.readyState=3;} }
     window.WebSocket = FakeSocket;
@@ -53,13 +53,14 @@ await build({
         return Promise.resolve(page(all.slice(from),from,all.length));
       },
       send(id,text){window.sends.push({id,text});if(config.shared||config.bound){window.sharedSends.push({id,text});if(config.failSharedSend){config.failSharedSend=false;return Promise.reject(new Error('Delivery uncertain'));}}return Promise.resolve({ok:true});},
+      reconnect(id,recoveryKey){window.reconnections.push({id,recoveryKey});return config.rejectReconnect?Promise.reject(new Error('Saved task changed')):Promise.resolve({ok:true});},
       interrupt(id,turnId){window.interrupts.push({id,turnId});return config.rejectInterrupt?Promise.reject(new Error('That turn is no longer active')):Promise.resolve({ok:true,requested:true,turnId});},
       answer(id,key,response){window.sharedAnswers.push({id,key,response});config.sharedRequest=null;return Promise.resolve({ok:true});},
       summary(){return Promise.resolve({...page([]),total:2*(config.count||2),userTurns:[]});},
       roster(){return config.child?[{agentId:'child',toolUseId:'spawn',hasTranscript:true}]:[];},
     };
     function Pane({id}) {return <div className="tile" style={{position:'relative',flex:1,minWidth:0}}><TerminalPane
-      session={{id,cli:config.shared?'codex':'claude',codexSharedOnly:config.shared,codexShared:config.bound,interruptTurnId:config.turnId,archivedAt:config.archivedAt,name:'Reader fixture',state:config.state||'waiting',running:true,everStarted:true,path:null,createdAt:new Date().toISOString()}}
+      session={{id,cli:config.shared?'codex':'claude',codexSharedOnly:config.shared,codexShared:config.bound,interruptTurnId:config.turnId,recoveryKey:config.recoveryKey,archivedAt:config.archivedAt,name:'Reader fixture',state:config.state||'waiting',running:true,everStarted:true,path:null,createdAt:new Date().toISOString()}}
       cli={{id:'claude',label:'Fixture',color:'#777'}} mode={config.mode||'reader'} theme="light" zoom={config.zoom||100}
       isMobile={config.mobile} focused active={config.active!==false} visible onClose={()=>{window.closes++;}} /></div>}
     function App(){return <><Pane id={config.id}/>{config.group&&<Pane id="follower"/>}</>}
@@ -79,6 +80,7 @@ await build({
       export const getSubAgentSummary=()=>window.fixtureApi.summary();
       export const getSubAgents=()=>Promise.resolve({agents:window.fixtureApi.roster()});
       export const answerSessionRequest=(...args)=>window.fixtureApi.answer(...args);
+      export const reconnectSession=(...args)=>window.fixtureApi.reconnect(...args);
       export const interruptSession=(...args)=>window.fixtureApi.interrupt(...args);
       export const sendInput=(...args)=>window.fixtureApi.send(...args);
     ` }));
@@ -124,6 +126,20 @@ try {
   assert.equal(await p.getByRole('button',{name:'Interrupt current turn',exact:true}).count(),0);
   // Reset socket observations: the following cases deliberately exercise Reader only.
   await p.evaluate(()=>{window.sockets=[];});
+
+  // Reopening a saved task is an explicit separate action and carries the verified key.
+  await p.evaluate(()=>window.fixture.mount({id:'recovery',shared:true,recoveryKey:'saved-settings',sharedBusy:true}));
+  const recoverySends=await p.evaluate(()=>window.sharedSends.length);
+  await p.getByRole('button',{name:'Reconnect task',exact:true}).click();
+  await p.waitForFunction(()=>window.reconnections.length===1);
+  assert.deepEqual(await p.evaluate(()=>window.reconnections[0]),{id:'recovery',recoveryKey:'saved-settings'});
+  assert.equal(await p.getByRole('button',{name:'Reconnect task',exact:true}).isDisabled(),true);
+  assert.equal(await p.evaluate(()=>window.sharedSends.length),recoverySends);
+  await p.evaluate(()=>window.fixture.change({recoveryKey:'changed-settings',rejectReconnect:true}));
+  await p.getByRole('button',{name:'Reconnect task',exact:true}).click();
+  await p.getByRole('alert').filter({hasText:'Saved task changed'}).waitFor();
+  await p.evaluate(()=>window.fixture.change({recoveryKey:null}));
+  assert.equal(await p.getByRole('button',{name:'Reconnect task',exact:true}).count(),0);
 
   // Both kinds of shared binding can reply without creating a terminal.
   await p.setViewportSize({ width: 390, height: 844 });

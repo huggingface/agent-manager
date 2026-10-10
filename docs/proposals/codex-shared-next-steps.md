@@ -7,6 +7,8 @@ See [the adapter contract](../conversation-adapter.md) and
 
 ## Implemented in the opt-in pilot
 
+- Explicit recovery of supported saved settings after daemon restart, native
+  interrupted/failed status, and durable no-replay after a lost acknowledgement.
 - Separate close-view, exact-turn interrupt and AM-only archive/restore actions.
   Active archive preserves native work and bindings; stale interruption IDs fail.
 - Durable unique native-thread ↔ AM-session bindings, exact import/resume,
@@ -37,8 +39,9 @@ through completion. Explicit model/provider/approval/sandbox/CWD settings remain
 unchanged across these client transitions.
 
 The separate restart fixture verifies that restarting only AM preserves ongoing
-server work and the durable binding. It does not prove recovery from a Codex
-server crash. Independent local RPC clients exercise the shared protocol, not
+server work and the durable binding. A second fixture crashes a disposable Codex
+daemon, drops an accepted input acknowledgement, restarts both processes, and
+verifies exact-thread recovery with read-only and workspace-write presets. Independent local RPC clients exercise the shared protocol, not
 Apple's app or the Remote relay: those approval/question paths still need an
 actual phone check. Earlier phone handoff and the scrolling fix were confirmed
 by the operator; do not extend those confirmations to untested cases.
@@ -57,7 +60,8 @@ by the operator; do not extend those confirmations to untested cases.
 3. **Recover after daemon failure.** Verify identity and settings on reconnect;
    distinguish interrupted work from completed work; do not replay uncertain
    input. Test a disposable daemon crash and an AM restart independently. Do
-   not promise survival of an in-flight turn through a daemon crash.
+   not promise survival of an in-flight turn through a daemon crash. Implemented
+   for the supported restricted presets; unsupported settings require native review.
 4. **Create shared sessions by default.** First in the pilot, after lifecycle
    and recovery gates pass. Persist the new exact native ID before delivery or
    TUI attachment. Define recovery from an ambiguous creation acknowledgement.
@@ -74,7 +78,7 @@ by the operator; do not extend those confirmations to untested cases.
 | --- | --- |
 | Phone interoperability | Approval and question round trips in the actual iPhone client, including resolution while AM is open. |
 | Managed delivery | Define agent/cron delivery semantics; currently refused for shared tasks. Close/interrupt/archive/restore are implemented. |
-| Daemon recovery | Settings preservation, clear failed/interrupted state, durable no-replay behavior after a real disposable crash. |
+| Daemon recovery | Supported restricted presets tested after real disposable crashes. Broader/custom permissions and nondefault modes remain manual; daemon supervision is external to AM. |
 | New thread identity | Empty creation and persistence failure; `/new` and fork must not overwrite the original mapping. Unmapped threads stay Codex-only. |
 | Migration | Integrated owner checks and graceful release, nondisruptive production rollout. |
 

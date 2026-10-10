@@ -111,3 +111,13 @@ test('archived task status remains observable without resuming it', async () => 
  const status=await f.hub.status('am');assert.equal(status.status,'working');assert.equal(status.activeTurnId,f.turn.id);
  assert.equal(f.calls.some(c=>c.method==='thread/resume'),false);
 });
+
+test('recovery refuses stale identity, archived tasks, locks, cancellation and concurrent attachment before native resume',async()=>{
+ for(const mutate of [f=>f.session.archivedAt='now',f=>f.thread.status={type:'active'},f=>f.lock(),f=>f.hub.attaching.set('am',Promise.resolve()),f=>f.hub.recovery=async()=>{f.session.codexSessionId=randomUUID();return {key:'a'.repeat(64),settings:{params:{},expected:{}}};}]){
+  const f=fixture();f.thread.status={type:'notLoaded'};f.hub.recovery=async()=>({key:'a'.repeat(64),settings:{params:{},expected:{}}});mutate(f);
+  await assert.rejects(f.hub.reconnect('am',{recoveryKey:'a'.repeat(64)}));assert.equal(f.calls.some(c=>c.method==='thread/resume'),false);
+ }
+ const f=fixture();f.thread.status={type:'notLoaded'};f.hub.recovery=async()=>({key:'a'.repeat(64),settings:{params:{},expected:{}}});
+ await assert.rejects(f.hub.reconnect('am',{recoveryKey:'a'.repeat(64)},{signal:AbortSignal.abort()}),{code:'codex-recovery-cancelled'});
+ assert.equal(f.calls.some(c=>c.method==='thread/resume'),false);
+});

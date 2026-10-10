@@ -5,6 +5,8 @@ import { ApiError } from './api-errors.js';
 import { DATA_DIR } from './config.js';
 import { codexBindings, configuredEndpoint, contextForThread } from './codex-context.js';
 import { ObservationClient, taskStatus } from './codex-shared.js';
+import { sharedCodexRollout } from './codex-reader.js';
+import { recoveryPlan, verifyRecovered } from './codex-recovery.js';
 import { CodexInteractiveClient } from './codex-interactive.js';
 
 const fail = (code, message) => new ApiError(409, code, message);
@@ -18,7 +20,7 @@ export class CodexInput {
     receipts = path.join(DATA_DIR, 'codex-input-receipts'), enabled = () => process.env.AM_CODEX_BINDINGS_PILOT === '1',
     assertWritable = () => {}, } = {}) {
     Object.assign(this, { getSession, listSessions, bindings, endpoint, connect, observe, receipts, enabled, assertWritable });
-    this.clients = new Map(); this.busy = new Set(); this.attaching = new Map();
+    this.clients = new Map(); this.busy = new Set(); this.attaching = new Map(); this.reconnecting = new Set();
   }
   context(id, { allowArchived = false } = {}) {
     if (!this.enabled()) throw fail('codex-pilot-disabled', 'Shared Reader input is disabled.');
@@ -47,20 +49,59 @@ export class CodexInput {
     try {
       if (!client) { client = await this.observe(context.endpoint); temporary = true; }
       const thread = await this.metadata(client, context);
-      const activeTurnId = await this.activeTurn(client, context, thread);
+      const latestTurn = await this.latestTurn(client, context);
+      const activeTurnId = thread.status?.type === 'active' && latestTurn?.status === 'inProgress' ? latestTurn.id : null;
+      let recoveryKey=null, recoveryError=null;
+      if(thread.status?.type==='notLoaded' && !this.getSession(id).archivedAt) {
+        try { recoveryKey=(await this.recovery(id,context,thread,latestTurn)).key; }
+        catch { recoveryError='Saved settings require review in Codex Terminal or Remote before reopening this task.'; }
+      }
       this.check(id, context, { allowArchived: true });
-      return { activeTurnId, connected: !temporary, status: client.requests?.size ? 'needs-input' : taskStatus(thread.status), requests: temporary ? [] : client.requestView(),
+      return { activeTurnId, recoveryKey, recoveryError, lastTurnStatus:latestTurn?.status || null, connected: !temporary, status: client.requests?.size ? 'needs-input' : taskStatus(thread.status), requests: temporary ? [] : client.requestView(),
         liveText: temporary ? '' : [...(client.items?.values() || [])].filter(i => i.type === 'agentMessage').slice(-1)[0]?.text || '',
         turnError: client.turnError || null };
     } finally { if (temporary) client?.close(); }
   }
   async activeTurn(client, context, thread) {
     if (thread.status?.type !== 'active') return null;
+    const turn = await this.latestTurn(client, context);
+    return turn?.status === 'inProgress' && typeof turn.id === 'string' ? turn.id : null;
+  }
+  async latestTurn(client, context) {
     const page = await client.call('thread/turns/list', {
       threadId: context.threadId, limit: 1, itemsView: 'summary', sortDirection: 'desc',
     });
-    const turn = page?.data?.[0];
-    return turn?.status === 'inProgress' && typeof turn.id === 'string' ? turn.id : null;
+    return page?.data?.[0] || null;
+  }
+  async recovery(id,context,thread,latestTurn) {
+    const file=await sharedCodexRollout(this.getSession(id),{bindings:this.bindings,config:context.endpoint});
+    return recoveryPlan(file,context,thread,latestTurn);
+  }
+  async reconnect(id,{recoveryKey},{signal}={}) {
+    if(typeof recoveryKey!=='string'||!/^[a-f0-9]{64}$/.test(recoveryKey))throw new ApiError(400,'invalid-input','A current recovery key is required.');
+    if(this.attaching.has(id)||this.busy.has(id))throw fail('codex-recovery-busy','The task is already connecting. Refresh before trying again.');
+    this.busy.add(id); this.reconnecting.add(id);
+    let client;
+    try {
+      const context=this.context(id);
+      client=await this.connect(context.endpoint);client.threadId=context.threadId;
+      const thread=await this.metadata(client,context);
+      if(thread.status?.type!=='notLoaded')throw fail('codex-recovery-stale','The task changed or is already loaded. Refresh before continuing.');
+      const plan=await this.recovery(id,context,thread,await this.latestTurn(client,context));
+      if(plan.key!==recoveryKey)throw fail('codex-recovery-stale','The saved task changed. Refresh before continuing.');
+      this.check(id,context);this.assertWritable();
+      if(signal?.aborted)throw fail('codex-recovery-cancelled','The task was not reopened.');
+      const params={threadId:context.threadId,excludeTurns:true,...plan.settings.params};
+      client.recoveryParams=params; // exact one-shot allowlist, never caller-supplied settings
+      let resumed;
+      try {resumed=await client.call('thread/resume',params);}
+      catch {throw new ApiError(503,'codex-recovery-uncertain','Reconnection could not be confirmed. Refresh before trying again; no message was sent.');}
+      finally {client.recoveryParams=null;}
+      verifyRecovered(resumed,plan.settings,context.threadId);
+      await client.hydrate();this.check(id,context);
+      this.clients.get(id)?.client.close();this.clients.set(id,{client,stamp:context.stamp});client=null;
+      return {ok:true,reconnected:true,threadId:context.threadId};
+    } finally {client?.close();this.busy.delete(id);this.reconnecting.delete(id);}
   }
   async interrupt(id, { turnId }, { signal } = {}) {
     if (typeof turnId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(turnId)) {
@@ -84,6 +125,7 @@ export class CodexInput {
     return { ok: true, requested: true, turnId };
   }
   async attach(id) {
+    if(this.reconnecting.has(id))throw fail('codex-recovery-busy','The task is reconnecting. Refresh shortly.');
     if (this.attaching.has(id)) return this.attaching.get(id);
     const pending = this.attachInner(id); this.attaching.set(id, pending);
     try { return await pending; } finally { this.attaching.delete(id); }
@@ -98,7 +140,7 @@ export class CodexInput {
     try {
       client.threadId = context.threadId;
       const thread = await this.metadata(client, context);
-      if (!['idle', 'active'].includes(thread.status?.type) || thread.canAcceptDirectInput !== true) throw fail('codex-not-loaded', 'Open this task in Codex Remote or Terminal first.');
+      if (!['idle', 'active'].includes(thread.status?.type) || thread.canAcceptDirectInput !== true) throw fail('codex-not-loaded', 'This task is saved but not loaded. Use Reconnect task after reviewing its last turn.');
       this.check(id, context); this.assertWritable();
       const resumed = await client.call('thread/resume', { threadId: context.threadId, excludeTurns: true });
       if (resumed?.thread?.id !== context.threadId) throw fail('codex-thread-mismatch', 'The server returned a different conversation.');

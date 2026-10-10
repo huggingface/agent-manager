@@ -1295,6 +1295,15 @@ export default function TerminalPane({
   const [interruptedTurn, setInterruptedTurn] = useState<string | null>(null);
   const [interruptError, setInterruptError] = useState('');
   const sharedTask = !!(session.codexShared || session.codexSharedOnly);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectedKey, setReconnectedKey] = useState<string | null>(null);
+  const reconnectTask = async () => {
+    if(!session.recoveryKey || reconnecting || reconnectedKey===session.recoveryKey)return;
+    setReconnecting(true);setInterruptError('');
+    try {await api.reconnectSession(session.id,session.recoveryKey);setReconnectedKey(session.recoveryKey);}
+    catch(error){setInterruptError(error instanceof Error ? error.message : 'Could not reconnect. Refresh the task.');}
+    finally {setReconnecting(false);}
+  };
   const interruptTurn = async () => {
     const turnId = session.interruptTurnId;
     if (!turnId || interrupting || interruptedTurn === turnId) return;
@@ -1429,6 +1438,11 @@ export default function TerminalPane({
               folder={pathLabel}
               onShare={onShare}
             />
+          )}
+          {sharedTask && !session.archivedAt && session.recoveryKey && (
+            <button className="ph-btn" title="Reconnect saved task — no message will be resent" aria-label="Reconnect task"
+              disabled={reconnecting || reconnectedKey===session.recoveryKey} onMouseDown={e=>e.stopPropagation()}
+              onClick={e=>{e.stopPropagation();void reconnectTask();}}><RefreshGlyph /></button>
           )}
           {sharedTask && !session.archivedAt && session.interruptTurnId && (
             <button className="ph-btn ph-interrupt" title="Interrupt current turn — keep the conversation"

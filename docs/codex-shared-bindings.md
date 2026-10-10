@@ -257,3 +257,34 @@ Keep these gates for further migration:
 
 See [conversation adapter and parity checks](conversation-adapter.md) for the
 current UI-preserving integration and remaining on-device verification.
+
+
+### Explicit recovery
+
+`POST /api/sessions/:id/reconnect` requires operator origin and `{recoveryKey}`
+from that session's presentation. It only reopens the already-bound saved task;
+there is no daemon startup, new thread, input replay, or process signal. The
+key covers binding identity and last persisted native settings. Archived,
+changed, already-loaded, unsupported or ambiguous tasks are refused.
+
+The installed 0.162.1 daemon does **not** reliably preserve a loaded thread's
+sandbox through a bare cold resume: the disposable test changes read-only to
+the workspace default. Recovery therefore restores the verified last-turn
+settings explicitly and checks the result. A complete allowlist compares the
+resolved restricted permission profile against the supported standard presets;
+it does not reduce arbitrary permission profiles to a sandbox label. Loaded
+resume ignores configuration overrides in this tested version, so a competing
+client that already loaded the task is not reconfigured by the recovery RPC.
+A mismatched returned configuration is rejected, without model input.
+
+The existing transcript resolver first verifies the rollout path and header.
+Recovery reads at most its last 8 MiB and requires a genuine `turn_context`
+record for the native latest turn. Text containing JSON is not a context.
+Missing context, partial writes and unsupported profiles fail closed. No
+conversation or configuration is copied to a new thread.
+
+The crash integration test kills only a disposable daemon. A local WebSocket
+proxy drops the input acknowledgement after acceptance, then both daemon and
+AM restart. The same request ID remains uncertain and cannot replay; a fresh
+explicit prompt succeeds after reconnecting the same thread. Both supported
+permission presets and unchanged bindings are verified with local inference.

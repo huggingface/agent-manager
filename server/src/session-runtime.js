@@ -17,7 +17,7 @@ export class SessionRuntime {
     const current=this.states.get(session.id);
     if(!current||Date.now()-current.at>3000)void this.refresh(session);
     const status=current?.status||'unknown';
-    return {interruptTurnId:session.archivedAt ? null : current?.activeTurnId || null, state:status==='working'?'working':['idle','needs-input'].includes(status)?'waiting':'stopped',
+    return {recoveryKey:session.archivedAt ? null : current?.recoveryKey || null, interruptTurnId:session.archivedAt ? null : current?.activeTurnId || null, state:status==='working'?'working':['idle','needs-input'].includes(status)?'waiting':'stopped',
       running:['idle','working','needs-input'].includes(status),
       inputRequired:status==='needs-input'?{kind:'permission',cli:'codex',confidence:'high',detectedAt:new Date(current.at).toISOString()}:null};
   }
@@ -36,9 +36,10 @@ export class SessionRuntime {
     if(client&&page.window?.atEnd)for(const t of page.turns||[]) {
       if(t.nativeTurnId&&t.event?.type==='task-complete'&&client.liveTurns?.get(t.nativeTurnId)?.done)client.liveTurns.delete(t.nativeTurnId);
     }
-    const live=client?liveView(client):{replaceTurnIds:[],turns:[]};
+    const live=client&&!client.closed?liveView(client):{replaceTurnIds:[],turns:[]};
+    const outcome={interrupted:'The last turn was interrupted; it did not complete. No message was resent.',failed:'The last turn failed. No message was resent.'}[state.lastTurnStatus];
     return {...page,activity:state.status==='working'?'working':['idle','needs-input'].includes(state.status)?'waiting':null,live,
-      interaction:{canSend:state.status==='idle'&&!requests.length,requests,error:problem||client?.turnError||null}};
+      interaction:{canSend:state.status==='idle'&&!requests.length,requests,error:[outcome,state.recoveryError||problem||client?.turnError].filter(Boolean).join(' ')||null}};
   }
   async send(session,input,options) {
     const result=await this.codex.send(session.id,input,options);

@@ -54,6 +54,7 @@ export const createSession = (name: string, cli: string, groupId?: string, path?
 export const listFolders = (p = ''): Promise<{ path: string; folders: string[] }> =>
   fetch(`/api/folders?path=${encodeURIComponent(p)}`).then(json);
 
+export const reconnectSession = (id: string, recoveryKey: string) => fetch(`/api/sessions/${encodeURIComponent(id)}/reconnect`, {method:'POST',headers:HEADERS,body:JSON.stringify({recoveryKey})}).then(json);
 export const interruptSession = (id: string, turnId: string): Promise<{ok: boolean; requested: boolean; turnId: string}> =>
   fetch(`/api/sessions/${encodeURIComponent(id)}/interrupt`, {method:'POST',headers:HEADERS,body:JSON.stringify({turnId})}).then(json);
 

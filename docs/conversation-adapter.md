@@ -84,5 +84,29 @@ completion arrives; uncertain failures are never retried automatically.
 are retained, ongoing work continues, and archived tasks remain observable but
 cannot accept Reader input. Generic process stop/delete and agent/cron delivery
 still refuse shared tasks. New shared creation, automatic legacy migration,
-crash recovery and `/new`/fork adoption remain outside this change. The pilot is
+and `/new`/fork adoption remain outside this change. The pilot is
 still opt-in, separate from main AM.
+
+
+## Recovery after a shared daemon crash
+
+A lost connection discards live deltas and pending approval/question keys. AM
+reconnects its observations to the configured endpoint and verifies home,
+thread ID, binding incarnation and workspace again. It never launches the
+daemon or silently resumes an unloaded thread. Native last-turn status supplies
+an explicit interrupted/failed notice, independent of any partial answer.
+
+When the saved settings are supported, the existing pane header offers
+**Reconnect task**. This operator-only action restores the last persisted turn's
+model/provider, approval policy/reviewer, sandbox, CWD, effort and service tier.
+It uses a key derived from that exact context and binding; stale keys fail.
+It verifies the resume response and starts no model turn. Ordinary input still
+requires a fresh explicit prompt. Delivery receipts survive both daemon and AM
+restarts, including an acknowledgement lost after Codex accepted a message.
+
+This is deliberately narrower than arbitrary configuration recovery: standard
+read-only and workspace-write restricted profiles, default collaboration mode,
+and no disabled plugins are supported. Custom permission profiles, broader
+access, absent/oversized context and unknown settings require review in native
+Codex. Settings changed after the last persisted turn are not reconstructed.
+A process crash cannot promise to preserve an in-flight tool or model turn.

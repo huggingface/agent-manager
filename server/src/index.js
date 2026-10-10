@@ -443,6 +443,15 @@ const requireReaderOperator = (req) => {
   if (req.headers['x-am-origin'] !== 'operator') throw new ApiError(403, 'operator-required', 'Use the operator Reader for this action.');
 };
 // Native approvals are adapted to the same session interaction contract.
+api.post('/api/sessions/:id/reconnect', async (req, res) => {
+  requireReaderOperator(req);
+  const session=store.get(req.params.id);
+  if(!session)throw new ApiError(404,'not-found','Session not found.');
+  if(!sessionRuntime.shared(session))throw new ApiError(409,'reconnect-unsupported','Use this session’s terminal to reconnect it.');
+  const result=await codexInput.reconnect(session.id,req.body||{},{signal:res.locals.lockSignal});
+  await sessionRuntime.refresh(session);res.json(result);
+});
+
 api.post('/api/sessions/:id/interrupt', async (req, res) => {
   requireReaderOperator(req);
   const session = store.get(req.params.id);

@@ -1,10 +1,11 @@
 // Only this explicit client can send input. The Settings observer stays read-only.
+import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { ObservationClient } from './codex-shared.js';
 
 export class CodexInteractiveClient extends ObservationClient {
   allows(method, params) {
-    return super.allows(method, params)
+    return (method === 'thread/resume' && this.recoveryParams && isDeepStrictEqual(params, this.recoveryParams)) || super.allows(method, params)
       || (method === 'thread/resume' && params?.threadId === this.threadId && params.excludeTurns === true && Object.keys(params).length === 2)
       || (method === 'turn/interrupt' && params?.threadId === this.threadId && typeof params.turnId === 'string' && !!params.turnId && Object.keys(params).length === 2)
       || (method === 'turn/start' && params?.threadId === this.threadId && Object.keys(params).every(k => ['threadId', 'input', 'clientUserMessageId'].includes(k)))
@@ -62,6 +63,10 @@ export class CodexInteractiveClient extends ObservationClient {
     } else if (['item/commandExecution/outputDelta','item/fileChange/outputDelta'].includes(msg.method) && typeof p.delta==='string') {
       const previous=this.items.get(p.itemId);if(previous)this.items.set(p.itemId,{...previous,aggregatedOutput:((previous.aggregatedOutput||'')+p.delta).slice(-100000)});
     }
+  }
+  close(code) {
+    this.requests?.clear(); this.items?.clear(); this.liveTurns?.clear(); this.recoveryParams=null;
+    super.close(code);
   }
   requestView() {
     return [...(this.requests?.values() || [])].map(({ key, method, params }) => ({ key, method, params,
