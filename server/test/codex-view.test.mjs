@@ -48,3 +48,28 @@ test('status notifications during hydration do not discard the current turn',asy
  };
  await c.hydrate();assert.equal(liveView(c).turns[0].blocks[0].text,'Terminal prompt');
 });
+
+test('hydration orders prompt before deltas arriving during the snapshot',async()=>{
+ const c=client();c.call=async()=>{
+  emit(c,'item/agentMessage/delta',{turnId:'current',itemId:'answer',delta:'newer streamed text'});
+  return {data:[{id:'current',status:'inProgress',items:[
+   {id:'prompt',type:'userMessage',content:[{type:'text',text:'Phone prompt'}]},
+   {id:'answer',type:'agentMessage',text:'older snapshot'}]}]};
+ };
+ await c.hydrate();assert.deepEqual(liveView(c).turns.map(t=>t.blocks[0].text),['Phone prompt','newer streamed text']);
+});
+test('completion on a catch-up page retires live data immediately',async()=>{
+ const c=client();emit(c,'item/started',{item:{id:'a',type:'agentMessage',text:'old'}});
+ emit(c,'turn/completed',{turn:{id:'turn'}});
+ const runtime=new SessionRuntime({bindings:{forSession:()=>({})},codex:{attach:async()=>({client:c}),status:async()=>({status:'idle'})}});
+ const page=await runtime.trace({id:'s',cli:'codex'},{turns:[{nativeTurnId:'turn',event:{type:'task-complete'}}],window:{atEnd:false}});
+ assert.equal(page.live.turns.length,0);
+});
+
+test('a fresh reader tail retires older completed live turns outside its page',async()=>{
+ const c=client();
+ for(const id of ['old','new']){emit(c,'item/started',{turnId:id,item:{id:'a-'+id,type:'agentMessage',text:id}});emit(c,'turn/completed',{turnId:id,turn:{id}});}
+ const runtime=new SessionRuntime({bindings:{forSession:()=>({})},codex:{attach:async()=>({client:c}),status:async()=>({status:'idle'})}});
+ const page=await runtime.trace({id:'s',cli:'codex'},{turns:[{nativeTurnId:'new',event:{type:'task-complete'}}],window:{atEnd:true,atStart:false}});
+ assert.equal(page.live.turns.length,0);
+});

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';import fs from 'node:fs';import os from 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'am-adapter-ui-'));
 async function load(file,name){const out=path.join(root,name+'.mjs');await build({entryPoints:[file],outfile:out,bundle:true,platform:'node',format:'esm',logLevel:'silent'});return import(pathToFileURL(out));}
 try{
- const {ReaderStore}=await load('src/lib/readerStore.ts','store');
+ const {ReaderStore,mergeLiveTrace}=await load('src/lib/readerStore.ts','store');
  const turn=(id,nativeTurnId,role,text)=>({id,nativeTurnId,role,blocks:[{type:'text',text}]});
  const old=turn('old','old','user','Older history'),user=turn('u','current','user','Question'),answer=turn('a','current','assistant','Partial');
  let page={harness:'codex',harnessLabel:'Codex',sessionId:'s',title:'',model:null,cwd:null,firstTs:0,lastTs:0,usage:null,truncated:false,total:null,userTurns:null,activity:'working',generation:'g',revision:'r',turns:[old,user,answer],window:{mode:'bytes',start:0,end:10,atStart:true,atEnd:true},live:{replaceTurnIds:['current'],turns:[turn('live-u','current','user','Question'),{id:'live-r',nativeTurnId:'current',role:'assistant',blocks:[{type:'thinking',text:'Reasoning'}]},turn('live-a','current','assistant','Partial streamed')]},interaction:{canSend:false,requests:[],error:null}};
@@ -21,6 +21,20 @@ try{
  assert.equal(state.activityConfirmed,true,'shared runtime activity does not wait for history catch-up');
  page={...page,activity:null,interaction:{canSend:false,requests:[],error:'Disconnected'},window:{...page.window,start:30,end:30,atEnd:true}};
  await store.loadNewer();state=store.getSnapshot();assert.equal(state.head.activity,null,'unknown runtime state clears an older working status');
+ // A Reader turn can remain live after a later Remote turn is on disk.
+ const first=turn('r-u','reader','user','Reader question'),firstAnswer=turn('r-a','reader','assistant','Reader answer');
+ const remote=turn('p-u','phone','user','Phone question'),remoteAnswer=turn('p-a','phone','assistant','Phone answer');
+ assert.deepEqual(mergeLiveTrace([first,firstAnswer,remote,remoteAnswer],{replaceTurnIds:['reader'],turns:[first,{...firstAnswer,blocks:[{type:'text',text:'Updated Reader answer'}]}]}).map(t=>t.blocks[0].text),['Reader question','Updated Reader answer','Phone question','Phone answer']);
+ page={...page,turns:[first,firstAnswer,remote,remoteAnswer],window:{...page.window,start:0,end:100,reset:true},
+  live:{replaceTurnIds:['reader','phone'],turns:[turn('lp-u','phone','user','Phone question'),turn('lp-a','phone','assistant','Phone streamed'),turn('lr-u','reader','user','Reader question'),turn('lr-a','reader','assistant','Reader streamed')]}};
+ await store.loadNewer();
+ assert.deepEqual(store.getSnapshot().turns.map(t=>t.blocks[0].text),['Reader question','Reader streamed','Phone question','Phone streamed'],'persisted native order wins over notification arrival order');
+ page={...page,turns:[],window:{...page.window,start:100,reset:false}};
+ await store.loadNewer();
+ assert.deepEqual(store.getSnapshot().turns.map(t=>t.nativeTurnId),['reader','reader','phone','phone']);
+ page={...page,turns:[{id:'phone-done',nativeTurnId:'phone',role:'system',blocks:[],event:{type:'task-complete',text:'Phone answer'}}],window:{...page.window,end:110}};
+ await store.loadNewer();
+ assert.equal(store.getSnapshot().turns.at(-1).blocks[0].text,'Phone answer');
  const memory=new Map();globalThis.localStorage={getItem:k=>memory.get(k)||null,setItem:(k,v)=>memory.set(k,v),removeItem:k=>memory.delete(k)};
  const requests=[];globalThis.fetch=async(url,init)=>{requests.push({url,body:JSON.parse(init.body)});if(requests.length===1)throw Error('lost response');return new Response('{"ok":true}',{headers:{'content-type':'application/json'}});};
  const api=await load('src/api.ts','api');await assert.rejects(api.sendInput('s','hello',['att-fixture']));await api.sendInput('s','hello',['att-fixture']);

@@ -1,6 +1,38 @@
 import type { TraceCursor, TraceReq, TraceSummary, TraceTurn, TraceWindow } from '../api';
 import { countExchanges, reconcileTrace } from './readerModel';
 
+// Persisted order is authoritative. Replace a native turn at its existing
+// position, never move it to the tail merely because it still has live data.
+export function mergeLiveTrace(raw: TraceTurn[], live?: TraceWindow['live']): TraceTurn[] {
+  if (!live?.turns.length) return raw;
+  const complete = new Set(raw.filter(t => t.event?.type === 'task-complete').map(t => t.nativeTurnId));
+  const replacements = new Set(live.replaceTurnIds);
+  const groups = new Map<string, TraceTurn[]>();
+  for (const t of live.turns) {
+    if (!t.nativeTurnId || !replacements.has(t.nativeTurnId) || complete.has(t.nativeTurnId)) continue;
+    const group = groups.get(t.nativeTurnId) || [];
+    group.push(t); groups.set(t.nativeTurnId, group);
+  }
+  const anchors = new Set(raw.map(t => t.nativeTurnId));
+  const emitted = new Set<string>();
+  const records: TraceTurn[] = [];
+  const emit = (id: string) => {
+    if (!emitted.has(id)) { records.push(...(groups.get(id) || [])); emitted.add(id); }
+  };
+  for (const t of raw) {
+    const id = t.nativeTurnId;
+    if (!id || !groups.has(id)) { records.push(t); continue; }
+    // A not-yet-persisted group preceding this anchor stays before it.
+    for (const pending of groups.keys()) {
+      if (pending === id) break;
+      if (!anchors.has(pending)) emit(pending);
+    }
+    emit(id);
+  }
+  for (const id of groups.keys()) emit(id);
+  return records;
+}
+
 export const INITIAL_WINDOW_BYTES = 128 * 1024;
 export const INITIAL_WINDOW_TURNS = 2;
 export const WINDOW_BYTES = 384 * 1024;
@@ -417,8 +449,7 @@ export class ReaderStore {
           nextCursor = { ...cursor, end: win.end, atEnd: win.atEnd, generation: win.generation, revision: win.revision };
         }
         const live = this.meta?.live;
-        const overridden = new Set(live?.replaceTurnIds || []);
-        const records = live ? [...this.raw.filter(t => !t.nativeTurnId || !overridden.has(t.nativeTurnId)), ...live.turns] : this.raw;
+        const records = mergeLiveTrace(this.raw, live);
         const turns = reconcileTrace(records, reset ? [] : this.state.turns);
         const changed = turns !== this.state.turns;
         const count = turns.length - this.state.turns.length;

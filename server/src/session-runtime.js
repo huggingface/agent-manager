@@ -33,8 +33,16 @@ export class SessionRuntime {
     catch(e){problem=e.message;}
     const state=await this.refresh(session);
     const requests=client?requestView(client):[];
-    if(client&&page.window?.atEnd)for(const t of page.turns||[]) {
-      if(t.nativeTurnId&&t.event?.type==='task-complete'&&client.liveTurns?.get(t.nativeTurnId)?.done)client.liveTurns.delete(t.nativeTurnId);
+    if(client)for(const t of page.turns||[]) {
+      if(t.nativeTurnId&&t.event?.type==='task-complete'&&client.liveTurns?.get(t.nativeTurnId)?.done) {
+        // Native notifications are ordered on this connection. A persisted
+        // completion also covers earlier completed turns, even if a new Reader
+        // starts after their history pages. Do not resurrect those at the tail.
+        for(const [id,turn] of client.liveTurns) {
+          if(turn.done)client.liveTurns.delete(id);
+          if(id===t.nativeTurnId)break;
+        }
+      }
     }
     const live=client&&!client.closed?liveView(client):{replaceTurnIds:[],turns:[]};
     const outcome={interrupted:'The last turn was interrupted; it did not complete. No message was resent.',failed:'The last turn failed. No message was resent.'}[state.lastTurnStatus];

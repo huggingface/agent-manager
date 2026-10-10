@@ -18,7 +18,14 @@ export class CodexInteractiveClient extends ObservationClient {
     for(const t of (page.data||[]).filter(t=>t.status==='inProgress')) {
       if((this.eventVersion||0)!==version && this.turnId && this.turnId!==t.id)continue;
       const turn=this.turn(t.id);this.turnId=t.id;if(t.startedAt)turn.ts=t.startedAt*1000;
-      for(const i of t.items||[])if(!turn.items.has(i.id)){if(turn.items.size>=100){turn.incomplete=true;break;}turn.items.set(i.id,i);}
+      // Snapshot order is authoritative, but events received during the read
+      // have newer values. Seed missing items in native order, then append items
+      // created after the snapshot. A delta must never put an answer before its prompt.
+      const ordered=new Map();
+      for(const i of t.items||[])ordered.set(i.id,turn.items.get(i.id)||i);
+      for(const [id,item] of turn.items)if(!ordered.has(id))ordered.set(id,item);
+      if(ordered.size>100)turn.incomplete=true;
+      turn.items=new Map([...ordered].slice(0,100));
       this.items=turn.items;
     }
   }
