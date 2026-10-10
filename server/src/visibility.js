@@ -98,7 +98,7 @@ export function classifyRepoResponse({ status, text }, expectedId) {
   return { verdict: null, error: `http-${status}` };
 }
 
-/** Authenticated Space read → { verdict: 'ok' | 'unauthorized' | null, buckets, spacePublic, error }. */
+/** Authenticated Space read → { verdict: 'ok' | 'unauthorized' | null, buckets, dataBucket, spacePublic, error }. */
 export function classifyDiscoveryResponse({ status, text }, expectedId) {
   if (status === 200) {
     const body = parseJson(text);
@@ -108,13 +108,15 @@ export function classifyDiscoveryResponse({ status, text }, expectedId) {
     const volumes = body.runtime.volumes;
     if (volumes !== undefined && !Array.isArray(volumes)) return { verdict: null, error: 'malformed-volumes' };
     const buckets = [];
+    let dataBucket = null;
     for (const v of volumes || []) {
       if (!isObject(v)) return { verdict: null, error: 'malformed-volume' };
       if (v.type !== 'bucket') continue;
       if (typeof v.source !== 'string' || !v.source) return { verdict: null, error: 'malformed-volume' };
       buckets.push(v.source);
+      if (v.mountPath === '/data') dataBucket = v.source;
     }
-    return { verdict: 'ok', buckets: [...new Set(buckets)], spacePublic: body.private === false, error: null };
+    return { verdict: 'ok', buckets: [...new Set(buckets)], dataBucket, spacePublic: body.private === false, error: null };
   }
   if (status === 401 || status === 403 || status === 404) {
     return isObject(parseJson(text)) ? { verdict: 'unauthorized', error: `http-${status}` } : { verdict: null, error: `http-${status}-malformed` };
@@ -149,7 +151,7 @@ export function createVisibilityMonitor({
   // verdict: unknown | ok | unauthorized. `buckets` is the accepted mount list
   // (null until a discovery succeeded). tokenKey remembers which credential the
   // evidence belongs to, so a changed token invalidates it.
-  const discovery = { ...blankEvidence(), buckets: null, tokenKey: null, unauthorizedStreak: 0, cyclesSinceRefusal: 0 };
+  const discovery = { ...blankEvidence(), buckets: null, dataBucket: null, tokenKey: null, unauthorizedStreak: 0, cyclesSinceRefusal: 0 };
   const buckets = new Map(); // id -> evidence
 
   let generation = 0;        // bumped per cycle and on stop(); results from older generations are dropped
@@ -293,6 +295,7 @@ export function createVisibilityMonitor({
         }
       }
       discovery.buckets = c.buckets;
+      discovery.dataBucket = c.dataBucket;
       if (c.spacePublic) { space.verdict = 'public'; space.verifiedAt = t; space.attemptedAt = t; space.error = null; }
     } else if (c.verdict === 'unauthorized') {
       discovery.cyclesSinceRefusal = 0;
@@ -320,12 +323,12 @@ export function createVisibilityMonitor({
       // any half-counted unauthorized streak belong to another credential.
       // Public bucket verdicts are kept — they are facts about the buckets, not
       // about the token.
-      discovery.verdict = 'unknown'; discovery.verifiedAt = 0; discovery.buckets = null; discovery.unauthorizedStreak = 0; discovery.cyclesSinceRefusal = 0; discovery.error = null;
+      discovery.verdict = 'unknown'; discovery.verifiedAt = 0; discovery.buckets = null; discovery.dataBucket = null; discovery.unauthorizedStreak = 0; discovery.cyclesSinceRefusal = 0; discovery.error = null;
       discovery.tokenKey = key;
     }
     if (!key && discovery.verdict !== 'unauthorized') {
       discovery.verdict = 'unauthorized'; discovery.verifiedAt = now(); discovery.attemptedAt = discovery.verifiedAt;
-      discovery.error = 'no-token'; discovery.buckets = null;
+      discovery.error = 'no-token'; discovery.buckets = null; discovery.dataBucket = null;
     }
     return key;
   }
@@ -457,6 +460,8 @@ export function createVisibilityMonitor({
     isLocked: () => effective().locked,
     /** Ids of the buckets a successful discovery listed (empty until then). */
     mountedBuckets: () => (discovery.verdict === 'ok' ? [...discovery.buckets] : []),
+    /** Source of the bucket mounted at /data, if discovery found one. */
+    mountedDataBucket: () => (discovery.verdict === 'ok' ? discovery.dataBucket : null),
     onChange: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
     // Test/diagnostic counters: how much upstream work a scenario cost.
     stats: () => ({ checks, requests, listeners: listeners.size, generation, inflight: !!inflight, expiryArmed: !!expiryTimer }),
@@ -480,8 +485,10 @@ export const isLocked = () => monitor.isLocked();
 /** { locked, reason, bucket, bucketUnverified, seq } — the one effective state, published. */
 export const lockState = () => monitor.snapshot();
 export const visibility = () => monitor.publicStatus();
-/** The mounted bucket ids, once discovery has succeeded (backup.js needs the source bucket). */
+/** The mounted bucket ids, once discovery has succeeded. */
 export const mountedBuckets = () => monitor.mountedBuckets();
+/** The mounted /data bucket id used as the backup source. */
+export const mountedDataBucket = () => monitor.mountedDataBucket();
 export const onVisibilityChange = (fn) => monitor.onChange(fn);
 /** Returns the first cycle's promise so startup can wait (bounded) for a verdict. */
 export const startVisibilityWatch = () => monitor.start();

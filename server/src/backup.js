@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './config.js';
-import { mountedBuckets } from './visibility.js';
+import { mountedDataBucket } from './visibility.js';
 import { shareNamespace } from './share.js';
 
 // Bucket backup: every 1h/3h/24h, launch one HF Job that copies this Space's
@@ -164,7 +164,7 @@ function saveState(patch) {
 // local runs, where there is no Space and so no volume to discover.
 export function sourceBucket() {
   if (process.env.AM_BACKUP_SOURCE) return process.env.AM_BACKUP_SOURCE;
-  return mountedBuckets()[0] || null;
+  return mountedDataBucket();
 }
 
 export async function defaultsFor() {
@@ -433,7 +433,7 @@ export function jobArgs({ source, dataset, staging, exclude = [] }) {
  */
 export function runNowBlockedBy() {
   if (!hasToken()) return 'needs a write-scoped HF_TOKEN secret on the Space';
-  if (!sourceBucket()) return 'no bucket is mounted on this Space';
+  if (!sourceBucket()) return 'no bucket is mounted at /data on this Space';
   return null;
 }
 
