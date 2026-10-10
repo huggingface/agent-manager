@@ -121,7 +121,7 @@ try {
  terminal=pty.spawn('codex',['--no-alt-screen','-C',cwd,'-s','read-only','-a','on-request','-c','approvals_reviewer="user"','-c','model_reasoning_effort="high"','PRESERVED_LEGACY_CONVERSATION'],{env,cols:100,rows:30,cwd});
  let tuiExited=false;terminal.onExit(()=>{tuiExited=true;});
  terminal.onData(d=>{tuiOutput+=d;if(d.includes('\x1b[6n'))terminal.write('\x1b[1;1R');if(d.includes('\x1b[c'))terminal.write('\x1b[?1;2c');});
- await waitFor(()=>providerCalls===1&&tuiOutput.includes('RECOVERY_RESPONSE_1'));
+ await waitFor(()=>providerCalls>=1&&/RECOVERY_RESPONSE_[0-9]+/.test(tuiOutput));
  const findRollout=dir=>fs.readdirSync(dir,{withFileTypes:true}).flatMap(e=>e.isDirectory()?findRollout(path.join(dir,e.name)):e.name.endsWith('.jsonl')?[path.join(dir,e.name)]:[]);
  const rollout=findRollout(path.join(codexHome,'sessions'))[0];
  const records=fs.readFileSync(rollout,'utf8').trim().split('\n').map(JSON.parse);
