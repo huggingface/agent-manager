@@ -646,7 +646,7 @@ export default function ConversationView({
           <div>{phase === 'loading' ? 'Opening the conversation…' : error ? 'The transcript is temporarily unavailable.' : head && !atStart ? 'No messages in this stretch. Load earlier turns to continue reading.' : readOnly ? 'Nothing recorded yet.' : 'Start the conversation.'}</div>
           <p>{readOnly ? 'New messages will appear here when the trace updates.' : 'Send a prompt below. You don’t need to open the terminal first.'}</p>
         </div>}
-        {!readOnly && (head?.interaction ? head.interaction.requests.length : session.inputRequired) && <InputRequiredNotice
+        {!readOnly && !!(head?.interaction ? head.interaction.requests.length : session.inputRequired) && <InputRequiredNotice
           input={session.inputRequired || {kind:head?.interaction?.requests[0]?.kind || 'confirmation',cli:session.cli,confidence:'high',detectedAt:''}}
           requests={head?.interaction?.requests} sessionId={session.id} onAnswered={() => void reload()} onOpenTerminal={() => writePaneMode('terminal')} />}
         {head?.interaction?.error && <div className="cxv-note" role="alert">{head.interaction.error}</div>}
