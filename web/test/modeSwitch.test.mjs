@@ -479,6 +479,29 @@ try {
   await p.locator('.xterm-helper-textarea').evaluate(e=>e.blur());await repaint(844);pos=await terminalPosition();
   check('keyboard hides: retains the history row',()=>assert.equal(pos.first,anchor.first,JSON.stringify({anchor,pos})));
 
+  // Browser focus reveal can happen before ResizeObserver moves the helper
+  // and before the remote PTY acknowledges a smaller keyboard-era grid.
+  const reveal = await p.evaluate(() => {
+    const root = document.getElementById('fixture-root');
+    root.style.bottom = '380px';
+    const input = document.querySelector('.xterm-helper-textarea');
+    input.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const ancestors = [];
+    for (let el = document.querySelector('.term-host'); el; el = el.parentElement) {
+      ancestors.push({ name: el.className || el.id || el.tagName, top: el.scrollTop });
+    }
+    root.style.bottom = '10px';
+    return ancestors;
+  });
+  check('keyboard focus reveal cannot scroll any terminal ancestor', () => {
+    assert.ok(reveal.every(el => el.top === 0), JSON.stringify(reveal));
+  });
+  await p.waitForTimeout(250);
+  pos = await terminalPosition();
+  check('hiding the keyboard after focus reveal retains the history row', () => {
+    assert.equal(pos.first, anchor.first, JSON.stringify({ anchor, pos }));
+  });
+
   console.log('\nsmall viewport and zoom');
   for (const [label, width, height, zoom] of [['phone', 390, 844, 100], ['desktop at 150%', 1000, 700, 150]]) {
     await p.setViewportSize({ width, height });
