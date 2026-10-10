@@ -66,6 +66,8 @@ by the operator; do not extend those confirmations to untested cases.
    and recovery gates pass. Persist the new exact native ID before delivery or
    TUI attachment. Define recovery from an ambiguous creation acknowledgement.
    Preserve explicit settings; never infer a replacement thread by recency.
+   Implemented behind the pilot creation flag, including empty tasks, durable
+   identity and refusal to replay ambiguous creation acknowledgements.
 5. **Migrate legacy tasks individually.** Integrate verified-owner graceful
    release, same-ID resume, full paginated history comparison and settings
    checks. Leave busy/ambiguous tasks untouched. Keep tmux/mosh shells and
@@ -79,7 +81,7 @@ by the operator; do not extend those confirmations to untested cases.
 | Phone interoperability | Approval and question round trips in the actual iPhone client, including resolution while AM is open. |
 | Managed delivery | Define agent/cron delivery semantics; currently refused for shared tasks. Close/interrupt/archive/restore are implemented. |
 | Daemon recovery | Supported restricted presets tested after real disposable crashes. Broader/custom permissions and nondefault modes remain manual; daemon supervision is external to AM. |
-| New thread identity | Empty creation and persistence failure; `/new` and fork must not overwrite the original mapping. Unmapped threads stay Codex-only. |
+| New thread identity | Empty creation and persistence failures tested. `/new` and fork must not overwrite the original mapping. Unmapped threads stay Codex-only. |
 | Migration | Integrated owner checks and graceful release, nondisruptive production rollout. |
 
 Automatic adoption of every phone-created task, arbitrary remote-machine

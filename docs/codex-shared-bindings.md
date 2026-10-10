@@ -288,3 +288,49 @@ proxy drops the input acknowledgement after acceptance, then both daemon and
 AM restart. The same request ID remains uncertain and cannot replay; a fresh
 explicit prompt succeeds after reconnecting the same thread. Both supported
 permission presets and unchanged bindings are verified with local inference.
+
+### Pilot shared creation
+
+With both `AM_CODEX_BINDINGS_PILOT=1` and `AM_CODEX_SHARED_CREATE=1`, the existing
+operator New session and quick-start actions create Codex tasks through the
+configured daemon. Other CLIs and installations without the flags keep their
+existing creation path. Agent/cron Codex creation is explicitly refused in this
+pilot, rather than silently launching a standalone writer.
+
+The browser persists a request UUID under a content hash, without storing the
+prompt. The server fsyncs intent before `thread/start`, saves the returned exact
+ID, names the thread (materializing even an empty rollout on 0.162.1), and saves
+the protected AM reference and binding before any prompt or TUI attachment.
+Only cwd and `ephemeral:false` are passed at creation; daemon/project defaults
+are preserved. Empty creation makes no model call. An initial prompt goes
+through the existing durable input receipts, with the same request UUID.
+
+Codex 0.162.1 has no creation idempotency parameter. If its acknowledgement is
+lost, the receipt stays uncertain and retries cannot start another thread or
+send the prompt, including after AM restarts. Inspect Shared Codex tasks and
+import the exact ID after identifying it; never adopt a task by name, cwd or
+recency automatically. A known returned ID survives later naming/binding errors.
+The task and all originals are retained; there is no automatic deletion.
+
+A never-used empty task has no last-turn settings record. Its name and native
+identity survive daemon restart, but AM's restricted recovery does not guess
+its configuration: reopen it through the native client after reviewing settings.
+Once it has a supported persisted turn context, normal explicit AM recovery
+applies. Production-wide defaults, agent/cron semantics and further migration
+remain outside this pilot.
+
+`codex-creation-live.test.mjs` uses isolated homes, a real Codex daemon and a
+local deterministic provider. It covers empty creation, exact mapping, lost
+native creation acknowledgement, AM restart/retry, one-time quick-start and
+Reader → independent native client → Reader ordering. No user tasks or external
+inference are used. This exercises the shared protocol, not the actual iPhone app.
+
+### Reader ordering across clients
+
+Live replacements retain their persisted native turn position instead of being
+appended at the end. Persisted completion wins over an older live snapshot;
+completion on any fetched history page retires its live cache. During cold
+hydration, native item order is restored while preserving newer event values,
+so a streamed answer cannot precede its own question. Regression fixtures cover
+both reversed live turn arrival and deltas received during hydration. No
+conversation files, timestamps or native histories are rewritten.

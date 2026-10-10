@@ -1,3 +1,4 @@
+import {CodexCreation, sharedCreationEnabled} from './codex-create.js';
 import { SessionRuntime } from './session-runtime.js';
 import { CodexInput } from './codex-input.js';
 import { codexBindings, configuredEndpoint, contextForThread, bindExistingThread, importSharedThread, contextError } from './codex-context.js';
@@ -439,6 +440,10 @@ api.post('/api/codex/import', async (req, res) => {
 const codexInput = new CodexInput({ getSession: store.get, listSessions: store.list,
   assertWritable: () => { if (isLocked()) throw new ApiError(403, 'space-locked', 'Space is locked.'); } });
 const sessionRuntime = new SessionRuntime({ codex: codexInput, bindings: codexBindings });
+const codexCreation=new CodexCreation({store,bindings:codexBindings,input:codexInput,isRunning,
+ nextName:()=>nextName('codex'),place:(s,groupId)=>{if(groupId&&groups.get(groupId))groups.attach(groupId,s.id);else order.prepend(`s:${s.id}`);},
+ assertWritable:()=>{if(isLocked())throw new ApiError(403,'space-locked','Space is locked.');}});
+
 const requireReaderOperator = (req) => {
   if (req.headers['x-am-origin'] !== 'operator') throw new ApiError(403, 'operator-required', 'Use the operator Reader for this action.');
 };
@@ -2794,6 +2799,7 @@ api.get('/api/next-name', (req, res) => {
 // the UI's POST /api/sessions and the agent API's spawn — one creation path, so
 // quickstart behaves identically whoever asked. Returns null for a bad path.
 function createSession({ name, cli, groupId, path: reqPath, prompt }) {
+  if(cli==='codex'&&sharedCreationEnabled())throw new ApiError(409,'codex-shared-operator-required','Create shared Codex tasks from the operator interface. Managed agent/cron creation is not enabled.');
   const finalName = name && name.trim() ? name.trim() : nextName(cli);
   // A remote agent's slug IS its folder and its API address, so it is minted
   // here, from the name, and never changes afterwards — the display name stays
@@ -2852,9 +2858,17 @@ function createSession({ name, cli, groupId, path: reqPath, prompt }) {
   return s;
 }
 
-api.post('/api/sessions', (req, res) => {
+api.post('/api/sessions', async (req, res) => {
   const { name, cli, groupId, path: reqPath, prompt } = req.body || {};
   if (!cli || !cliById(cli)) return res.status(400).json({ error: 'unknown cli' });
+  if(cli==='codex'&&sharedCreationEnabled()){
+    requireReaderOperator(req);
+    const chosen=cleanRelPath(typeof reqPath==='string'&&reqPath.trim()?reqPath:'.');
+    if(chosen===null||chosen===remote.REMOTE_FOLDER||chosen.startsWith(`${remote.REMOTE_FOLDER}/`))throw new ApiError(400,'invalid-input','Choose a valid workspace folder.');
+    if(groupId&&!groups.get(groupId))throw new ApiError(400,'invalid-input','The destination group no longer exists.');
+    const s=await codexCreation.create({requestId:req.body.requestId,name,path:chosen,groupId,prompt},{signal:res.locals.lockSignal});
+    await sessionRuntime.refresh(s);return res.status(201).json({...s,codexShared:true,terminalRunning:isRunning(s.id),...sessionRuntime.presentation(s)});
+  }
   const s = createSession({ name, cli, groupId, path: reqPath, prompt });
   if (!s) return res.status(400).json({ error: 'bad path' });
   if (s.error) return res.status(400).json({ error: s.error });
