@@ -14,10 +14,10 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'am-shared-pilot-'));
 const home = path.join(root, 'home'), codexHome = path.join(root, 'codex'), data = path.join(root, 'data');
 const cwd = path.join(data, 'workspaces', 'work'), socket = path.join(root, 's');
 for (const dir of [home, codexHome, cwd]) fs.mkdirSync(dir, { recursive: true });
-let providerCalls=0, toolRequested=false;
+let providerCalls=0, toolRequested=false, releaseResponse, imageReceived=false;
 const provider=http.createServer(async(req,res)=>{
  let body='';for await(const chunk of req)body+=chunk;
- const input=JSON.parse(body);providerCalls++;
+ const input=JSON.parse(body);providerCalls++;imageReceived ||= JSON.stringify(input.input).includes('input_image');
  const wantsApproval=JSON.stringify(input.input).includes('READER_APPROVAL_FIXTURE');
  const commandTool=(input.tools||[]).find(t=>t.name==='exec_command');
  let item;
@@ -27,8 +27,15 @@ const provider=http.createServer(async(req,res)=>{
  res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache'});
  const send=(type,extra)=>res.write('event: '+type+'\ndata: '+JSON.stringify({type,...extra})+'\n\n');
  send('response.created',{response:{id:'resp_'+providerCalls,status:'in_progress',output:[]}});
+ if(providerCalls===1){
+  send('response.output_item.added',{output_index:0,item:{id:'reasoning_fixture',type:'reasoning',summary:[]}});
+  send('response.reasoning_summary_part.added',{item_id:'reasoning_fixture',output_index:0,summary_index:0,part:{type:'summary_text',text:''}});
+  send('response.reasoning_summary_text.delta',{item_id:'reasoning_fixture',output_index:0,summary_index:0,delta:'LIVE_REASONING_FIXTURE'});
+  send('response.output_item.done',{output_index:0,item:{id:'reasoning_fixture',type:'reasoning',summary:[{type:'summary_text',text:'LIVE_REASONING_FIXTURE'}]}});
+ }
  send('response.output_item.added',{output_index:0,item:{...item,status:'in_progress'}});
  if(item.type==='message')send('response.output_text.delta',{item_id:item.id,output_index:0,content_index:0,delta:item.content[0].text});
+ if(providerCalls===1)await new Promise(r=>releaseResponse=r);
  send('response.output_item.done',{output_index:0,item});
  send('response.completed',{response:{id:'resp_'+providerCalls,status:'completed',output:[item],usage:{input_tokens:1,output_tokens:1,total_tokens:2}}});res.end();
 });
@@ -121,23 +128,39 @@ try {
   await rpc.shell(thread.id,'printf reader-fixture-seed');
   const originalSettings=await rpc.call('thread/resume',{threadId:thread.id,excludeTurns:true});
   fs.writeFileSync(path.join(data,'sessions.json'),'[]');await startAM();
-  const {session}=await call('/api/codex/import',{threadId:thread.id});const prefix='/api/sessions/'+session.id+'/codex';
+  const {session}=await call('/api/codex/import',{threadId:thread.id});const prefix='/api/sessions/'+session.id;
+  const view=()=>call('/api/trace/'+session.id+'?tail=1&v=2');
+  await view();
   const input={text:'READER_HELLO_FIXTURE',requestId:randomUUID()};
   const sent=await call(prefix+'/input',input);assert.ok(sent.turnId);assert.equal((await call(prefix+'/input',input)).repeated,true);
   async function waitFor(fn){for(let i=0;i<160;i++){const v=await fn();if(v)return v;await sleep(100);}throw Error('Condition timed out');}
-  await waitFor(async()=>{const s=await call(prefix+'/reader');return s.status==='idle'&&s.liveText.includes('READER_REPLY_OK');});
+  const streaming=await waitFor(async()=>{const s=await view();return JSON.stringify(s.live).includes('READER_REPLY_OK')&&s;});
+  assert.ok(streaming.live.turns.some(t=>t.blocks.some(b=>b.type==='thinking'&&b.text==='LIVE_REASONING_FIXTURE')));
+  assert.equal(streaming.activity,'working');assert.equal(streaming.interaction.canSend,false);
+  assert.ok(streaming.live.turns.some(t=>t.role==='user'&&t.blocks.some(b=>b.text==='READER_HELLO_FIXTURE')));
+  releaseResponse();
+  await waitFor(async()=>{const s=await view();return s.interaction.canSend;});
   const trace=await call('/api/trace/'+session.id+'?tail=1&v=2');assert.ok(JSON.stringify(trace).includes('READER_REPLY_OK'));
   assert.equal(providerCalls,1,'retry must not generate twice');
   await call(prefix+'/input',{text:'READER_APPROVAL_FIXTURE',requestId:randomUUID()});
-  const approval=await waitFor(async()=>{const s=await call(prefix+'/reader');return s.requests.find(r=>r.method==='item/commandExecution/requestApproval');});
-  assert.ok(toolRequested);assert.match(approval.params.command,/reader-approval-command/);
+  const approval=await waitFor(async()=>{const s=await view();return s.interaction.requests.find(r=>r.kind==='permission');});
+  const pendingView=await view();assert.ok([...pendingView.turns,...pendingView.live.turns].some(t=>t.blocks.some(b=>b.type==='tool_use'&&b.name==='exec_command')));
+  assert.ok(toolRequested);assert.match(approval.details,/reader-approval-command/);
   await call(prefix+'/answer',{key:approval.key,decision:'accept'});
-  await waitFor(async()=>{const s=await call(prefix+'/reader');return s.status==='idle'&&s.liveText.includes('READER_APPROVAL_FINISHED');});
+  await waitFor(async()=>{const s=await view();return s.interaction.canSend&&JSON.stringify(s).includes('READER_APPROVAL_FINISHED');});
+  const upload=await fetch(base+prefix+'/attachments?name=pixel.png',{method:'POST',headers:{'x-am-origin':'operator','content-type':'image/png'},body:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR4nGNI6dlCU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULACD2kFvlDRtSAAAAAElFTkSuQmCC','base64')});
+  const uploaded=await upload.json();assert.equal(upload.status,201,JSON.stringify(uploaded));
+  const attachmentId=uploaded.attachment?.id||uploaded.id;assert.ok(attachmentId);
+  await call(prefix+'/input',{text:'Image fixture',attachmentIds:[attachmentId],requestId:randomUUID()});
+  await waitFor(async()=>{const s=await view();return s.interaction.canSend;});
+  assert.ok(imageReceived,'uploaded image reaches model input');
   const after=await rpc.call('thread/resume',{threadId:thread.id,excludeTurns:true});
   for(const key of ['model','modelProvider','approvalPolicy','approvalsReviewer','sandbox','cwd'])assert.deepEqual(after[key],originalSettings[key],key+' changed');
-  assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).running,false,'Reader must not create a TUI');
-  console.log(JSON.stringify({readerTextRoundTrip:true,deduplicated:true,approvalInReader:true,settingsPreserved:true,noTUI:true,externalInferenceCalls:0,providerCalls}));
+  assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).state,'waiting','Server state is independent of a TUI');
+  assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).terminalRunning,false);
+  console.log(JSON.stringify({commonRoutes:true,liveReasoning:true,liveTools:true,imageUpload:true,readerTextRoundTrip:true,deduplicated:true,approvalInReader:true,settingsPreserved:true,noTUI:true,externalInferenceCalls:0,providerCalls}));
 } finally {
+  releaseResponse?.();
   terminal?.terminate(); rpc?.close();
   for (const child of [...children].reverse()) await stop(child);
   await new Promise(r=>provider.close(r));

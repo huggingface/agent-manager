@@ -78,7 +78,7 @@ try {
   assert.equal((await call('/api/codex/context?threadId=' + threadId)).body.amSessionId, session.id);
   const target = await call('/api/codex/client-target?session=Microduck');
   assert.equal(target.status, 200); assert.equal(target.body.socket, socket); assert.equal(target.body.threadId, threadId);
-  assert.equal((await call('/api/sessions/fixture/input', { text: 'do not send' })).body.code, 'codex-shared-delivery-pending');
+  assert.equal((await call('/api/sessions/fixture/input', { text: 'do not send' })).body.code, 'invalid-input');
   assert.equal((await call('/api/sessions/fixture/stop', {})).body.code, 'codex-shared-stop-unsupported');
   assert.equal((await call('/api/sessions/fixture/archive', {})).status, 409);
   assert.equal((await call('/api/codex/import', { threadId })).body.code, 'codex-existing-session');

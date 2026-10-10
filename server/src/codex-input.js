@@ -71,6 +71,7 @@ export class CodexInput {
       this.check(id, context); this.assertWritable();
       const resumed = await client.call('thread/resume', { threadId: context.threadId, excludeTurns: true });
       if (resumed?.thread?.id !== context.threadId) throw fail('codex-thread-mismatch', 'The server returned a different conversation.');
+      if(client.hydrate)await client.hydrate();
       this.check(id, context);
       this.clients.set(id, { client, stamp: context.stamp });
       return { client, context };
@@ -94,12 +95,12 @@ export class CodexInput {
       fd = fs.openSync(this.receipts, 'r'); fs.fsyncSync(fd);
     } finally { if (fd !== undefined) fs.closeSync(fd); if (!first) { try { fs.unlinkSync(file); } catch {} } }
   }
-  async send(id, { text, requestId }, { signal } = {}) {
-    if (!uuid(requestId) || typeof text !== 'string' || !text.trim() || text.length > 50000) throw new ApiError(400, 'invalid-input', 'A message and unique requestId are required.');
+  async send(id, { text, requestId, attachments = [] }, { signal } = {}) {
+    if (!uuid(requestId) || typeof text !== 'string' || (!text.trim() && !attachments.length) || text.length > 50000) throw new ApiError(400, 'invalid-input', 'A message and unique requestId are required.');
     if (this.busy.has(id)) throw fail('codex-send-busy', 'A message is already being submitted. Your draft is safe.');
     this.busy.add(id);
     try {
-      const context = this.context(id), hash = digest(text), existing = this.readReceipt(requestId);
+      const context = this.context(id), hash = digest(attachments.length ? JSON.stringify([text,attachments.map(a=>[a.id,a.path,a.kind])]) : text), existing = this.readReceipt(requestId);
       if (existing) {
         if (existing.session !== id || existing.stamp !== context.stamp || existing.hash !== hash) throw fail('codex-request-conflict', 'This message ID was used for different content.');
         if (existing.status === 'accepted') return { ok: true, turnId: existing.turnId, repeated: true };
@@ -115,7 +116,7 @@ export class CodexInput {
       // From this point, disconnects/timeout/restarts must never cause a retry.
       try {
         const result = await client.call('turn/start', { threadId: context.threadId,
-          input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: requestId });
+          input: [...(text ? [{ type: 'text', text, text_elements: [] }] : []), ...attachments.filter(a=>a.kind==='image').map(a=>({type:'localImage',path:a.path}))], clientUserMessageId: requestId });
         if (!result?.turn?.id) throw uncertain();
         this.saveReceipt(requestId, { ...receipt, status: 'accepted', turnId: result.turn.id });
         return { ok: true, turnId: result.turn.id };

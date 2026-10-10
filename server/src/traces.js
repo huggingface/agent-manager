@@ -1572,6 +1572,7 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
 
     // One per user turn, and the only place the model is named.
     if (j.type === 'turn_context') {
+      if (p.turn_id) out.nativeTurnId = p.turn_id;
       if (p.model) out.model = p.model;
       out.cwd = out.cwd || p.cwd || null;
       continue;
@@ -1649,6 +1650,7 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
     }
 
     if (j.type === 'event_msg') {
+      if (p.type === 'task_started') {out.nativeTurnId = p.turn_id || null; cur = null;}
       if (p.type === 'token_count') {
         const info = p.info || {};
         const tot = info.total_token_usage;
@@ -2011,6 +2013,7 @@ function newTrace(harness, range) {
     harness, harnessLabel: HARNESS_LABEL[harness] || harness, sessionId: null, title: '', model: null, cwd: null,
     firstTs: 0, lastTs: 0, usage: null, usageSum: null, source: null, sharedBy: null, note: null, messages: [],
     push(msg) {
+      if (this.nativeTurnId) msg.nativeTurnId = this.nativeTurnId;
       if (range?.reader && !msg.id) msg.id = `${harness}:${range.recordOffset ?? range.from}:${range.recordPart++ || 0}`;
       if (this.messages.length >= VIEW_MAX_MESSAGES) { this.truncated = true; return; }
       if (msg.ts) {

@@ -21,6 +21,8 @@ export interface Session {
   createdAt: string;
   everStarted: boolean;
   running: boolean;
+  /** Local terminal client, distinct from execution on a shared server. */
+  terminalRunning?: boolean;
   state: SessionState;
   // Set when the operator archived this session — a stored decision, not the
   // idle window's verdict, which is computed in App.tsx and expires when the

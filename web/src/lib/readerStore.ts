@@ -194,7 +194,7 @@ export class ReaderStore {
       usage: this.meta?.usage || summary?.usage || null,
       firstTs: this.meta?.firstTs || summary?.firstTs || 0,
       // The matching full summary sees lifecycle markers outside a small tail.
-      activity: summary?.activity ?? this.meta?.activity ?? null,
+      activity: this.meta?.interaction ? this.meta.activity : summary?.activity ?? this.meta?.activity ?? null,
       loaded: turns.length, atStart: cursor.atStart, blocked: !!cursor.blocked } as TraceHeadInfo;
     for (const key of ['note', 'title', 'harnessLabel', 'sessionId', 'model', 'cwd', 'source', 'sharedBy'] as const) {
       if (!head[key] && summary?.[key]) (head as Record<string, unknown>)[key] = summary[key];
@@ -357,7 +357,7 @@ export class ReaderStore {
     clearTimeout(this.poll);
     if (!this.active) return;
     const recent = Date.now() - (this.meta?.lastTs || 0) < 120_000;
-    const cadence = this.state.cursor?.mode === 'index' ? 10_000 : recent ? 3_000 : 10_000;
+    const cadence = this.meta?.interaction ? (this.meta.activity === 'working' || this.meta.interaction.requests.length ? 1000 : 3000) : this.state.cursor?.mode === 'index' ? 10_000 : recent ? 3_000 : 10_000;
     this.poll = setTimeout(() => { this.poll = null; void this.loadNewer(); }, delay ?? (this.failures ? Math.min(30_000, 1500 * 2 ** Math.min(this.failures, 5)) : cadence));
   }
   private read(direction: 'tail' | 'before' | 'after', speculative = false): Promise<number> {
@@ -397,7 +397,7 @@ export class ReaderStore {
         if (reset) { this.raw = got; this.meta = metadata; this.summary = null; nextCursor = win; }
         else if (direction === 'before') {
           this.raw = [...got, ...this.raw]; this.meta = mergeMeta(this.meta, { ...metadata,
-            activity: this.meta?.activity, model: this.meta?.model, revision: this.meta?.revision });
+            live: this.meta?.live, interaction: this.meta?.interaction, activity: this.meta?.activity, model: this.meta?.model, revision: this.meta?.revision });
           nextCursor = { ...cursor, start: win.start, atStart: win.atStart, blocked: win.blocked };
         } else {
           if (win.mode === 'index' && win.replaceFrom !== undefined) {
@@ -413,7 +413,10 @@ export class ReaderStore {
           this.meta = mergeMeta(this.meta, metadata);
           nextCursor = { ...cursor, end: win.end, atEnd: win.atEnd, generation: win.generation, revision: win.revision };
         }
-        const turns = reconcileTrace(this.raw, reset ? [] : this.state.turns);
+        const live = this.meta?.live;
+        const overridden = new Set(live?.replaceTurnIds || []);
+        const records = live ? [...this.raw.filter(t => !t.nativeTurnId || !overridden.has(t.nativeTurnId)), ...live.turns] : this.raw;
+        const turns = reconcileTrace(records, reset ? [] : this.state.turns);
         const changed = turns !== this.state.turns;
         const count = turns.length - this.state.turns.length;
         const change: ReaderChange | undefined = reset ? { type: 'reset', count: turns.length }

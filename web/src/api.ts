@@ -466,8 +466,16 @@ export const insertAttachments = (
     method: 'POST', headers: HEADERS, body: JSON.stringify({ attachmentIds }),
   }).then(jsonOrError);
 
-export const sendInput = (id: string, text: string, attachmentIds: string[] = []): Promise<{ ok: boolean; started?: boolean }> =>
-  fetch(`/api/sessions/${id}/input`, { method: 'POST', headers: HEADERS, body: JSON.stringify({ text, attachmentIds }) }).then(jsonOrError);
+export const sendInput = async (id: string, text: string, attachmentIds: string[] = []): Promise<{ ok: boolean; started?: boolean }> => {
+  const key='am-pending-input:'+id, content=JSON.stringify([text,attachmentIds]);
+  let pending: {content: string; requestId: string} | null=null;
+  try {pending=JSON.parse(localStorage.getItem(key)||'null');} catch { /* invalid saved draft */ }
+  if(!pending||pending.content!==content)pending={content,requestId:typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : '10000000-1000-4000-8000-100000000000'.replace(/[018]/g, c => (Number(c) ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> Number(c) / 4).toString(16))};
+  localStorage.setItem(key,JSON.stringify(pending));
+  const result=await fetch(`/api/sessions/${id}/input`, {method:'POST',headers:HEADERS,body:JSON.stringify({text,attachmentIds,requestId:pending.requestId})}).then(jsonOrError);
+  try {localStorage.removeItem(key);} catch { /* accepted receipt still prevents replay */ }
+  return result;
+};
 
 // ---- push notifications ----
 export const getPushKey = (): Promise<{ publicKey: string; devices: number }> =>
@@ -711,6 +719,7 @@ export interface TraceTurn {
   /** Stable record identity; messageId joins fragmented native messages. */
   id?: string;
   messageId?: string;
+  nativeTurnId?: string;
   event?: { type: 'queue'; operation: string; text: string } | { type: 'task-complete'; text: string };
   role: 'user' | 'assistant' | 'system';
   kind?: 'final' | 'update';
@@ -729,6 +738,8 @@ export interface TraceTurn {
 }
 
 export interface TracePage {
+  live?: {replaceTurnIds: string[]; turns: TraceTurn[]};
+  interaction?: SessionInteraction;
   generation?: string;
   revision?: string;
   activity?: 'working' | 'waiting' | null;
@@ -1017,18 +1028,13 @@ export const codexSharedSnapshot = (cursor?: string | null): Promise<CodexShared
 export const importCodexTask = (threadId: string): Promise<{ session: Session }> =>
   fetch('/api/codex/import', { method: 'POST', headers: HEADERS, body: JSON.stringify({ threadId }) }).then(json);
 
-// Explicit server-backed Reader actions. The legacy terminal-delivery API stays guarded.
-export interface CodexReaderRequest {
-  key: string; method: string; params: Record<string, any>; item: Record<string, any> | null;
+// The same interaction contract is used by every conversation surface.
+export interface SessionRequest {
+  key: string; kind: 'permission' | 'question' | 'confirmation'; details: string;
+  choices: {value: string; label: string}[];
+  questions?: {id: string; text: string; secret: boolean; options: {label: string; description: string}[]}[];
+  terminalFallback: boolean;
 }
-export interface CodexReaderState {
-  connected: boolean; status: string; requests: CodexReaderRequest[]; liveText: string; turnError: string | null;
-}
-export const getCodexReader = (id: string, signal?: AbortSignal): Promise<CodexReaderState> =>
-  fetch(`/api/sessions/${encodeURIComponent(id)}/codex/reader`, { signal }).then(json);
-export const connectCodexReader = (id: string): Promise<{ok: boolean}> =>
-  fetch(`/api/sessions/${encodeURIComponent(id)}/codex/connect`, { method: 'POST', headers: HEADERS, body: '{}' }).then(json);
-export const sendCodexInput = (id: string, text: string, requestId: string): Promise<{ok: boolean; turnId: string}> =>
-  fetch(`/api/sessions/${encodeURIComponent(id)}/codex/input`, { method: 'POST', headers: HEADERS, body: JSON.stringify({text, requestId}) }).then(json);
-export const answerCodexRequest = (id: string, key: string, response: {decision?: string; answers?: Record<string, string>}): Promise<{ok: boolean}> =>
-  fetch(`/api/sessions/${encodeURIComponent(id)}/codex/answer`, { method: 'POST', headers: HEADERS, body: JSON.stringify({key, ...response}) }).then(json);
+export interface SessionInteraction {canSend: boolean; requests: SessionRequest[]; error: string | null;}
+export const answerSessionRequest = (id: string, key: string, response: {decision?: string; answers?: Record<string, string>}): Promise<{ok: boolean}> =>
+  fetch(`/api/sessions/${encodeURIComponent(id)}/answer`, { method: 'POST', headers: HEADERS, body: JSON.stringify({key, ...response}) }).then(json);

@@ -1,3 +1,4 @@
+import { SessionRuntime } from './session-runtime.js';
 import { CodexInput } from './codex-input.js';
 import { codexBindings, configuredEndpoint, contextForThread, bindExistingThread, importSharedThread, contextError } from './codex-context.js';
 import { ObservationClient, sharedCodexSnapshot, CodexObservationError } from './codex-shared.js';
@@ -437,24 +438,12 @@ api.post('/api/codex/import', async (req, res) => {
 // Shared Reader input uses the exact server binding, never terminal keystrokes.
 const codexInput = new CodexInput({ getSession: store.get, listSessions: store.list,
   assertWritable: () => { if (isLocked()) throw new ApiError(403, 'space-locked', 'Space is locked.'); } });
+const sessionRuntime = new SessionRuntime({ codex: codexInput, bindings: codexBindings });
 const requireReaderOperator = (req) => {
   if (req.headers['x-am-origin'] !== 'operator') throw new ApiError(403, 'operator-required', 'Use the operator Reader for this action.');
 };
-api.get('/api/sessions/:id/codex/reader', async (req, res) => {
-  res.set('Cache-Control', 'no-store').json(await codexInput.status(req.params.id));
-});
-api.post('/api/sessions/:id/codex/connect', async (req, res) => {
-  requireReaderOperator(req);
-  await codexInput.attach(req.params.id);
-  res.json({ ok: true });
-});
-api.post('/api/sessions/:id/codex/input', async (req, res) => {
-  requireReaderOperator(req);
-  const result = await codexInput.send(req.params.id, req.body || {}, { signal: res.locals.lockSignal });
-  touchInput(req.params.id);
-  res.json(result);
-});
-api.post('/api/sessions/:id/codex/answer', async (req, res) => {
+// Native approvals are adapted to the same session interaction contract.
+api.post('/api/sessions/:id/answer', async (req, res) => {
   requireReaderOperator(req);
   res.json(await codexInput.answer(req.params.id, req.body || {}));
 });
@@ -737,6 +726,12 @@ api.post('/api/sessions/:id/input', async (req, res) => {
   if (!text && (!Array.isArray(attachmentIds) || attachmentIds.length === 0)) return res.status(400).json({ error: 'empty' });
   try {
     const attachments = resolveAttachments(s.id, attachmentIds);
+    if (sessionRuntime.shared(s)) {
+      requireReaderOperator(req);
+      const prompt = attachments.some(a => a.kind !== 'image') ? formatAttachmentDelivery(s.cli, text, attachments.filter(a => a.kind !== 'image')) : text;
+      const result = await sessionRuntime.send(s, {text: prompt, attachments, requestId: req.body.requestId}, {signal: res.locals.lockSignal});
+      touchInput(s.id); return res.json(result);
+    }
     const started = await deliver(s, { text, attachments }, undefined, { signal: res.locals.lockSignal });
     touchInput(s.id);
     res.json({ ok: true, started });
@@ -915,10 +910,10 @@ function agentRow(s, act, d, selfId, mates) {
     name: s.name,
     cli: s.cli,
     ...(s.id === selfId ? { self: true } : {}),
-    state: deriveState(s, act),
+    state: sessionRuntime.presentation(s)?.state ?? deriveState(s, act),
     // Seconds since its screen last changed. Small = actively working.
     idleFor: act ? act.age : null,
-    inputRequired: act?.inputRequired || null,
+    inputRequired: sessionRuntime.presentation(s)?.inputRequired ?? act?.inputRequired ?? null,
     workdir: workspacePath(folder),
     path: folder,
     // Who else writes to this same folder — the actual collision hazard.
@@ -2686,7 +2681,8 @@ function sessionsWithState() {
   const shared = new Set(codexBindings.read().map((binding) => binding.amSessionId));
   return store.list().map((s) => {
     const state = deriveState(s, info.get(s.id));
-    return { ...s, codexShared: s.cli === 'codex' && (s.codexSharedOnly || shared.has(s.id)), state, running: state !== 'stopped', inputRequired: info.get(s.id)?.inputRequired || null };
+    const runtime = sessionRuntime.presentation(s);
+    return { ...s, terminalRunning: isRunning(s.id), codexShared: s.cli === 'codex' && (s.codexSharedOnly || shared.has(s.id)), state, running: state !== 'stopped', inputRequired: info.get(s.id)?.inputRequired || null, ...runtime };
   });
 }
 
@@ -3267,7 +3263,8 @@ api.get('/api/trace/:id', async (req, res) => {
     }
     const target = store.get(source.ref);
     if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
-    res.json(await readTrace(target, opts));
+    const page = await readTrace(target, opts);
+    res.json(await sessionRuntime.trace(target, page, {interactive: pane.id === target.id && !opts.summary && !req.query.before}));
   } catch (e) {
     // These are expected states, not failures: no transcript yet, an
     // unsupported CLI, or a codex guardian rollout. The pane renders the reason.

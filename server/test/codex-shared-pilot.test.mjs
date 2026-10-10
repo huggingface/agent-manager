@@ -108,7 +108,7 @@ try {
   // AM CODEX_HOME. Never discover the newest neighbour sharing the same CWD.
   const trace = await call('/api/trace/' + amId + '?bytes=131072&min=2');
   assert.ok(JSON.stringify(trace.turns).includes('am-pilot-original'));
-  assert.equal((await call('/api/sessions')).find((s) => s.id === amId).running, false);
+  assert.equal((await call('/api/sessions')).find((s) => s.id === amId).terminalRunning, false);
   assert.ok(JSON.stringify(await call('/api/trace/' + amId + '/search?q=am-pilot-original')).includes('am-pilot-original'));
   await rpc.shell(threadId, 'printf am-reader-later');
   assert.ok(JSON.stringify((await call('/api/trace/' + amId)).turns).includes('am-reader-later'));

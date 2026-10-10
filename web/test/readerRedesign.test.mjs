@@ -29,6 +29,7 @@ await build({
     const page = (turns, from=0, end=turns.length) => ({
       harness:'claude',harnessLabel:'Fixture',sessionId:config.id,title:'',model:null,cwd:null,firstTs:100000,lastTs:100500,
       usage:null,source:null,sharedBy:null,note:null,truncated:false,total:null,userTurns:null,activity:config.activity||'waiting',generation:'fixture',revision:'r1',turns,
+      ...((config.shared||config.bound)?{interaction:{canSend:!config.sharedBusy&&!config.sharedRequest,requests:config.sharedRequest?[config.sharedRequest]:[],error:null}}:{}),
       window:{mode:'bytes',start:from,end,atStart:from===0,atEnd:true,generation:'fixture',revision:'r1'},
     });
     window.fixtureApi = {
@@ -51,16 +52,15 @@ await build({
         const from=child ? (config.childEarlier ? 160 : bytes>=2*1024*1024 ? 0 : 196) : (config.from||0)*2;
         return Promise.resolve(page(all.slice(from),from,all.length));
       },
-      codex(){return Promise.resolve({connected:true,status:config.sharedBusy?'working':'idle',requests:config.sharedRequest?[config.sharedRequest]:[],liveText:'',turnError:null});},
-      codexSend(id,text,requestId){window.sharedSends.push({id,text,requestId}); if(config.failSharedSend){config.failSharedSend=false;return Promise.reject(new Error('Delivery uncertain'));}return Promise.resolve({ok:true,turnId:'turn'});},
-      codexAnswer(id,key,response){window.sharedAnswers.push({id,key,response});config.sharedRequest=null;return Promise.resolve({ok:true});},
+      send(id,text){window.sends.push({id,text});if(config.shared||config.bound){window.sharedSends.push({id,text});if(config.failSharedSend){config.failSharedSend=false;return Promise.reject(new Error('Delivery uncertain'));}}return Promise.resolve({ok:true});},
+      answer(id,key,response){window.sharedAnswers.push({id,key,response});config.sharedRequest=null;return Promise.resolve({ok:true});},
       summary(){return Promise.resolve({...page([]),total:2*(config.count||2),userTurns:[]});},
       roster(){return config.child?[{agentId:'child',toolUseId:'spawn',hasTranscript:true}]:[];},
     };
     function Pane({id}) {return <div className="tile" style={{position:'relative',flex:1,minWidth:0}}><TerminalPane
       session={{id,cli:config.shared?'codex':'claude',codexSharedOnly:config.shared,codexShared:config.bound,name:'Reader fixture',state:config.state||'waiting',running:true,everStarted:true,path:null,createdAt:new Date().toISOString()}}
       cli={{id:'claude',label:'Fixture',color:'#777'}} mode={config.mode||'reader'} theme="light" zoom={config.zoom||100}
-      focused active={config.active!==false} visible onClose={()=>{}} /></div>}
+      isMobile={config.mobile} focused active={config.active!==false} visible onClose={()=>{}} /></div>}
     function App(){return <><Pane id={config.id}/>{config.group&&<Pane id="follower"/>}</>}
     window.fixture = {
       mount(options){if(root)flushSync(()=>root.unmount()); config={...options}; root=createRoot(document.getElementById('fixture-root')); flushSync(()=>root.render(<App/>));},
@@ -77,11 +77,8 @@ await build({
       export const getSubAgentWindow=(id,agentId,...args)=>window.fixtureApi.window(agentId,...args);
       export const getSubAgentSummary=()=>window.fixtureApi.summary();
       export const getSubAgents=()=>Promise.resolve({agents:window.fixtureApi.roster()});
-      export const getCodexReader=()=>window.fixtureApi.codex();
-      export const connectCodexReader=()=>Promise.resolve({ok:true});
-      export const sendCodexInput=(...args)=>window.fixtureApi.codexSend(...args);
-      export const answerCodexRequest=(...args)=>window.fixtureApi.codexAnswer(...args);
-      export const sendInput=(id,text)=>{window.sends.push({id,text});return Promise.resolve({});};
+      export const answerSessionRequest=(...args)=>window.fixtureApi.answer(...args);
+      export const sendInput=(...args)=>window.fixtureApi.send(...args);
     ` }));
   } }],
 });
@@ -106,31 +103,35 @@ try {
   // Both kinds of shared binding can reply without creating a terminal.
   await p.setViewportSize({ width: 390, height: 844 });
   for (const flags of [{ shared: true }, { bound: true }]) {
-    await p.evaluate((flags) => window.fixture.mount({ id: 'shared-' + JSON.stringify(flags), ...flags }), flags);
+    await p.evaluate((flags) => window.fixture.mount({ id: 'shared-' + JSON.stringify(flags), ...flags, mobile:true }), flags);
     await p.getByText('Question 1', { exact: true }).waitFor();
-    await p.getByText('Ready to reply', {exact:true}).waitFor();
+    await p.locator('.cxv-composer textarea').waitFor();
     assert.equal(await p.locator('.cxv-composer textarea').count(), 1);
-    assert.equal(await p.getByRole('button', { name: 'Attach files' }).count(), 0);
+    assert.equal(await p.locator('.cxv-composer textarea').getAttribute('autocorrect'),'on');
+    assert.equal(await p.locator('.cxv-composer textarea').getAttribute('spellcheck'),'true');
+    assert.equal(await p.getByRole('button', { name: 'Attach files' }).count(), 1);
     assert.equal(await p.locator('.term-fill, .xterm').count(), 0);
+    assert.equal(await p.getByText('Connect live requests',{exact:true}).count(),0);
+    assert.equal(await p.getByText('Live response',{exact:true}).count(),0);
     assert.equal(await p.evaluate(() => window.sockets.length), 0);
   }
   await p.evaluate(() => window.fixture.mount({id:'retry-shared',shared:true,failSharedSend:true}));
-  await p.getByText('Ready to reply', {exact:true}).waitFor();
+  await p.getByText('Question 1',{exact:true}).waitFor();
   await p.locator('.cxv-composer textarea').fill('Send directly to shared server');
   await p.getByTitle('Send', {exact:true}).click();
   await p.getByText('Delivery uncertain', {exact:true}).waitFor();
   assert.equal(await p.locator('.cxv-composer textarea').inputValue(),'Send directly to shared server');
   await p.getByTitle('Send', {exact:true}).click();
   await p.waitForFunction(()=>window.sharedSends.length===2);
-  assert.equal(await p.evaluate(()=>window.sharedSends[0].requestId===window.sharedSends[1].requestId),true,'retry retains message identity');
-  await p.evaluate(()=>window.fixture.mount({id:'shared-approval',shared:true,sharedRequest:{key:'approval-1',method:'item/commandExecution/requestApproval',params:{command:'printf fixture',availableDecisions:['accept','decline']},item:null}}));
-  await p.getByText('Codex needs approval', {exact:true}).waitFor();
+  assert.equal(await p.evaluate(()=>window.sharedSends[0].text===window.sharedSends[1].text),true,'retry retains draft');
+  await p.evaluate(()=>window.fixture.mount({id:'shared-approval',shared:true,sharedRequest:{key:'approval-1',kind:'permission',details:'printf fixture',choices:[{value:'accept',label:'Approve once'},{value:'decline',label:'Deny'}],terminalFallback:false}}));
+  await p.getByText('printf fixture', {exact:true}).waitFor();
   assert.equal(await p.evaluate(()=>window.sharedAnswers.length),0,'never automatically approve');
   await p.getByRole('button',{name:'Approve once',exact:true}).click();
   await p.waitForFunction(()=>window.sharedAnswers.length===1);
   assert.deepEqual(await p.evaluate(()=>window.sharedAnswers[0].response),{decision:'accept'});
-  await p.evaluate(()=>window.fixture.mount({id:'shared-question',shared:true,sharedRequest:{key:'question-1',method:'item/tool/requestUserInput',params:{questions:[{id:'choice',question:'Which fixture?',options:[{label:'First',description:'First fixture'}]}]},item:null}}));
-  await p.getByText('Codex needs your answer', {exact:true}).waitFor();
+  await p.evaluate(()=>window.fixture.mount({id:'shared-question',shared:true,sharedRequest:{key:'question-1',kind:'question',details:'',questions:[{id:'choice',text:'Which fixture?',options:[{label:'First',description:'First fixture'}]}],choices:[],terminalFallback:false}}));
+  await p.getByText('Which fixture?', {exact:true}).waitFor();
   await p.getByRole('button',{name:'First',exact:true}).click();
   await p.getByRole('button',{name:'Submit answers',exact:true}).click();
   await p.waitForFunction(()=>window.sharedAnswers.length===2);

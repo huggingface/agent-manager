@@ -80,12 +80,12 @@ export default function Composer({
         value={draft}
         disabled={sending}
         placeholder={sending ? 'sending…' : 'reply…'}
-        autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+        autoComplete={isMobile ? "on" : "off"} autoCorrect={isMobile ? "on" : "off"} autoCapitalize={isMobile ? "sentences" : "off"} spellCheck={!!isMobile}
         onChange={(e) => { onChange(e.target.value); grow(e.currentTarget); }}
         onPaste={onPaste}
         // iOS does not resize the layout for the keyboard — scroll the input
         // into view once the keyboard has animated in.
-        onFocus={(e) => { const el = e.currentTarget; setTimeout(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300); }}
+        onFocus={(e) => { const el = e.currentTarget; setTimeout(() => { const r=el.getBoundingClientRect(), vv=window.visualViewport; const top=vv?.offsetTop || 0, bottom=top+(vv?.height || innerHeight); if(r.bottom>bottom || r.top<top)el.scrollIntoView({block:'nearest',behavior:'instant'}); }, 300); }}
         onKeyDown={onKeyDown}
       />
         {(canSend ?? !!draft.trim()) && (

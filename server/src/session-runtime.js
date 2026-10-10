@@ -1,0 +1,42 @@
+// Select execution behind AM's existing HTTP contracts. Views never select a
+// transport; bindings remain the only authority for choosing the shared task.
+import { liveView, requestView } from './codex-view.js';
+export class SessionRuntime {
+  constructor({codex,bindings}) {this.codex=codex;this.bindings=bindings;this.states=new Map();this.checks=new Map();}
+  shared(session) {return session.cli==='codex'&&!!(session.codexSharedOnly||this.bindings.forSession(session.id));}
+  async refresh(session) {
+    if(!this.shared(session))return null;
+    if(this.checks.has(session.id))return this.checks.get(session.id);
+    const pending=this.codex.status(session.id).then(status=>{this.states.set(session.id,{...status,at:Date.now()});return status;})
+      .catch(()=>{const status={status:'unknown',at:Date.now()};this.states.set(session.id,status);return status;})
+      .finally(()=>this.checks.delete(session.id));
+    this.checks.set(session.id,pending);return pending;
+  }
+  presentation(session) {
+    if(!this.shared(session))return null;
+    const current=this.states.get(session.id);
+    if(!current||Date.now()-current.at>3000)void this.refresh(session);
+    const status=current?.status||'unknown';
+    return {state:status==='working'?'working':['idle','needs-input'].includes(status)?'waiting':'stopped',
+      running:['idle','working','needs-input'].includes(status),
+      inputRequired:status==='needs-input'?{kind:'permission',cli:'codex',confidence:'high',detectedAt:new Date(current.at).toISOString()}:null};
+  }
+  async trace(session,page,{interactive=true}={}) {
+    if(!this.shared(session)||!interactive)return page;
+    let client,problem=null;
+    try {({client}=await this.codex.attach(session.id));}
+    catch(e){problem=e.message;}
+    const state=await this.refresh(session);
+    const requests=client?requestView(client):[];
+    if(client&&page.window?.atEnd)for(const t of page.turns||[]) {
+      if(t.nativeTurnId&&t.event?.type==='task-complete'&&client.liveTurns?.get(t.nativeTurnId)?.done)client.liveTurns.delete(t.nativeTurnId);
+    }
+    const live=client?liveView(client):{replaceTurnIds:[],turns:[]};
+    return {...page,activity:state.status==='working'?'working':['idle','needs-input'].includes(state.status)?'waiting':null,live,
+      interaction:{canSend:state.status==='idle'&&!requests.length,requests,error:problem||client?.turnError||null}};
+  }
+  async send(session,input,options) {
+    const result=await this.codex.send(session.id,input,options);
+    this.states.set(session.id,{status:'working',at:Date.now()});return result;
+  }
+}

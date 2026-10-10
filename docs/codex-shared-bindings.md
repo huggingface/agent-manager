@@ -84,14 +84,14 @@ there is no copied history.
 The Reader composer sends text to the bound native thread through `turn/start`.
 It attaches only an already loaded task, passes no model, sandbox or approval
 settings overrides, and refuses input while the task is busy. It never types
-into or creates a terminal. Attachments are not supported in this preview.
+into or creates a terminal. Images and documents use the existing AM upload controls.
 A message ID is saved before sending; private durable receipts prevent replay
 after a lost response or AM restart. An uncertain acknowledgement requires
 checking the transcript, rather than automatically submitting another turn.
 
-Sending connects live requests; **Connect live requests** also attaches without
-sending a message. The Reader displays server status, live response text,
-questions and approvals. Approval buttons allow only one-time accept/deny;
+Opening the interactive Reader subscribes to the loaded task. The backend adapts
+server events to the existing Reader blocks and input-required controls; there
+is no separate connection button or live response panel. Approval buttons allow only one-time accept/deny;
 unsupported requests and persistent permission changes stay in Terminal/Remote.
 Requests answered elsewhere disappear. Browser disconnection does not approve
 anything or stop the task. These controls use the existing private deployment,
@@ -166,13 +166,12 @@ view only detaches that view. Stopping AM closes its clients; the Codex server
 is an independent process. Generic stop/archive actions and managed prompt
 delivery refuse bound tasks in this pilot: these need explicit shared-task
 semantics, server-driven activity/history and approval routing before rollout.
-Reader text input uses its own explicit operator routes; generic prompt delivery remains blocked.
+The existing operator input route selects the shared adapter. Agent/cron prompt delivery remains guarded.
 
 `/new` and fork are not automatically associated with the old AM identity. A
 new native ID is unmapped; the original durable mapping remains intact. The
-Reader uses the verified shared transcript, but AM activity indicators still
-depend partly on the local terminal and are not authoritative for work
-performed from other clients. Do not enable
+Reader uses the verified shared transcript, and session/roster status is adapted from the server independently of the local terminal.
+Overview digest content still relies on existing transcript extraction. Do not enable
 this pilot as the production default yet.
 
 ## Validation
@@ -238,3 +237,7 @@ Keep these gates for further migration:
   still owns live legacy TUIs. It does not know how to preserve their ownership
   or suppress standalone relaunch. AM migration still needs the integrated
   release/coordinator path and a nondisruptive rollout strategy.
+
+
+See [conversation adapter and parity checks](conversation-adapter.md) for the
+current UI-preserving integration and remaining on-device verification.

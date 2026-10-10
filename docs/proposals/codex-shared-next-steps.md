@@ -1,3 +1,10 @@
+Updated 2026-10-10: prioritize UI parity before new creation or further migration.
+The pilot now uses a backend conversation adapter; the earlier separate Reader
+controls have been removed. See [current contracts and validation](../conversation-adapter.md).
+The staged plan below records the broader rollout; statements about Reader being
+unimplemented are superseded by that document. iPhone keyboard/terminal behavior
+still needs on-device qualification before claiming full mobile parity.
+
 # Revised shared Codex action plan
 
 Reassessment on 2026-10-09: no fundamental incompatibility has been established.
