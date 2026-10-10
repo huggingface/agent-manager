@@ -167,6 +167,16 @@ scrollback comes back from the terminal history checkpoint, so a reopened pane
 reads as you left it. Settings → General → *Restart sessions after a reboot*
 sets the window (1 / 3 / 7 days, or off).
 
+## Mobile writing assistance
+
+On phones, Reader and Overview reply boxes allow the OS keyboard's writing
+assistance (autocorrection, sentence capitalization and spelling suggestions).
+Assistance is always enabled in mobile reply boxes, with no toggle required.
+The OS still controls whether predictive suggestions appear: on iPhone enable
+Settings → General → Keyboard → Predictive Text.
+
+The raw terminal keyboard and desktop reply behavior remain unchanged.
+
 ## Configuration (env)
 
 | Var | Default | Purpose |
