@@ -121,7 +121,7 @@ await build({
       session={{id,cli:'claude',name:'Switch fixture',state:config.state||'waiting',
         running:config.running!==false,everStarted:config.everStarted!==false,path:null,createdAt:new Date().toISOString()}}
       cli={{id:'claude',label:'Fixture',color:'#777'}} mode={config.mode||'reader'} theme="light" zoom={config.zoom||100}
-      focused active visible onClose={()=>{}} /></div>; }
+      isMobile={!!config.mobile} focused active visible onClose={()=>{}} /></div>; }
     function App(){ return <>
       <Pane id={config.id||'switch'} />
       {config.second && <Pane id={config.second === 'same' ? (config.id||'switch') : 'second'} />}
@@ -131,6 +131,12 @@ await build({
         root=createRoot(document.getElementById('fixture-root')); flushSync(()=>root.render(<App/>)); },
       change(options){ Object.assign(config, options); flushSync(()=>root.render(<App/>)); },
       reset(){ window.marks = []; },
+      grid(cols, rows, reset, snapshot){
+        for(const sock of window.sockets.filter(s=>s.readyState===1)) {
+          sock.onmessage?.({data:CTRL+JSON.stringify({t:'grid',controller:true,cols,rows,reset})});
+          if(snapshot!==undefined)sock.onmessage?.({data:snapshot});
+        }
+      },
       drop(){ for (const sock of window.sockets) if (sock.readyState === 1) sock.drop(); },
       live(){ return window.sockets.filter((s) => s.readyState === 1).length; },
     };
@@ -435,6 +441,44 @@ try {
     assert.ok(typed > 0, 'the terminal painted but never accepted input');
   });
 
+  console.log('\nkeyboard geometry and canonical repaint');
+  await p.setViewportSize({width:390,height:844});
+  await open({id:'keyboard',mobile:true,payload:[bigScreen]});await usable();
+  // The server sends a new grid, then reset + a canonical snapshot after the
+  // TUI repaint. Opening/hiding the keyboard both exercise this protocol.
+  const terminalPosition=()=>p.evaluate(()=>{
+    const v=document.querySelector('.xterm-viewport');
+    return {top:v.scrollTop,bottom:v.scrollHeight-v.clientHeight-v.scrollTop,
+      first:document.querySelector('.xterm-rows')?.firstElementChild?.textContent};
+  });
+  const repaint=async(height)=>{
+    const sent=await p.evaluate(()=>window.wsSends.length);
+    await p.setViewportSize({width:390,height});
+    // A real backend can reply only AFTER the browser measures the resized
+    // pane. This also includes the mobile key-bar in the negotiated geometry.
+    const grid=await p.waitForFunction(from=>window.wsSends.slice(from).map(s=>JSON.parse(s)).find(m=>m.t==='r'),sent).then(h=>h.jsonValue());
+    await p.evaluate(({grid,snapshot})=>{
+      window.fixture.grid(grid.cols,grid.rows,false);
+      window.fixture.grid(grid.cols,grid.rows,true,snapshot);
+    },{grid,snapshot:bigScreen});
+    await p.waitForTimeout(250);
+  };
+  // Stay at the live end through both shrink and expansion.
+  await p.locator('.xterm-helper-textarea').focus();
+  await repaint(470);let pos=await terminalPosition();
+  check('keyboard opens: following the live bottom',()=>assert.ok(pos.bottom<25,JSON.stringify(pos)));
+  await p.locator('.xterm-helper-textarea').evaluate(e=>e.blur());
+  await repaint(844);pos=await terminalPosition();
+  check('keyboard hides: following the live bottom',()=>assert.ok(pos.bottom<25,JSON.stringify(pos)));
+  // Reading history is a different intent and must survive reset too.
+  await p.mouse.move(180,250);await p.mouse.wheel(0,-7000);
+  await p.waitForTimeout(100);const anchor=await terminalPosition();
+  check('history gesture really leaves the bottom',()=>assert.ok(anchor.bottom>1000,JSON.stringify(anchor)));
+  await p.locator('.xterm-helper-textarea').focus();await repaint(470);pos=await terminalPosition();
+  check('keyboard opens: retains the history row',()=>assert.equal(pos.first,anchor.first,JSON.stringify({anchor,pos})));
+  await p.locator('.xterm-helper-textarea').evaluate(e=>e.blur());await repaint(844);pos=await terminalPosition();
+  check('keyboard hides: retains the history row',()=>assert.equal(pos.first,anchor.first,JSON.stringify({anchor,pos})));
+
   console.log('\nsmall viewport and zoom');
   for (const [label, width, height, zoom] of [['phone', 390, 844, 100], ['desktop at 150%', 1000, 700, 150]]) {
     await p.setViewportSize({ width, height });
@@ -518,7 +562,7 @@ try {
   console.log('\nthe cover is driven by the parse, not by a timer');
   const source = fs.readFileSync(path.join(web, 'src/components/TerminalPane.tsx'), 'utf8');
   check('the boot probe runs in the write completion callback', () => {
-    const write = source.match(/term\.write\(d, \(\) => \{[^}]*\}\)/s);
+    const write = source.match(/term\.write\(d, \(\) => \{.*?\n        \}\);/s);
     assert.ok(write, 'output is no longer written with a completion callback');
     assert.match(write[0], /bootLive && screenHasContent\(\) *\) *endBoot\(\)/);
   });

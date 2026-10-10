@@ -14,7 +14,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'am-shared-pilot-'));
 const home = path.join(root, 'home'), codexHome = path.join(root, 'codex'), data = path.join(root, 'data');
 const cwd = path.join(data, 'workspaces', 'work'), socket = path.join(root, 's');
 for (const dir of [home, codexHome, cwd]) fs.mkdirSync(dir, { recursive: true });
-let providerCalls=0, toolRequested=false, releaseResponse, imageReceived=false;
+let providerCalls=0, toolRequested=false, releaseResponse, imageReceived=false, holdExternal=false, emitFollowup;
 const provider=http.createServer(async(req,res)=>{
  let body='';for await(const chunk of req)body+=chunk;
  const input=JSON.parse(body);providerCalls++;imageReceived ||= JSON.stringify(input.input).includes('input_image');
@@ -35,7 +35,8 @@ const provider=http.createServer(async(req,res)=>{
  }
  send('response.output_item.added',{output_index:0,item:{...item,status:'in_progress'}});
  if(item.type==='message')send('response.output_text.delta',{item_id:item.id,output_index:0,content_index:0,delta:item.content[0].text});
- if(providerCalls===1)await new Promise(r=>releaseResponse=r);
+ if(holdExternal)emitFollowup=()=>{item.content[0].text+=' LIVE_AFTER_ATTACH';send('response.output_text.delta',{item_id:item.id,output_index:0,content_index:0,delta:' LIVE_AFTER_ATTACH'});};
+ if(providerCalls===1||holdExternal)await new Promise(r=>releaseResponse=r);
  send('response.output_item.done',{output_index:0,item});
  send('response.completed',{response:{id:'resp_'+providerCalls,status:'completed',output:[item],usage:{input_tokens:1,output_tokens:1,total_tokens:2}}});res.end();
 });
@@ -154,11 +155,60 @@ try {
   await call(prefix+'/input',{text:'Image fixture',attachmentIds:[attachmentId],requestId:randomUUID()});
   await waitFor(async()=>{const s=await view();return s.interaction.canSend;});
   assert.ok(imageReceived,'uploaded image reaches model input');
+  // Work starts outside AM's Reader client, as it does from a TUI or Remote.
+  // A warm Reader resumes from its byte cursor, not from a new tail window.
+  const idlePage=await view();const cursor=idlePage.window.end;
+  holdExternal=true;releaseResponse=null;
+  await rpc.call('turn/start',{threadId:thread.id,input:[{type:'text',text:'EXTERNAL_CLIENT_FIXTURE'}]});
+  await waitFor(async()=>releaseResponse);
+  const external=await waitFor(async()=>{const s=await call('/api/trace/'+session.id+'?after='+cursor+'&v=2');return JSON.stringify(s.live).includes('READER_APPROVAL_FINISHED')&&s;});
+  assert.equal(external.activity,'working','external turn activity is current');
+  assert.equal(external.interaction.canSend,false);
+  assert.ok(JSON.stringify(external).includes('EXTERNAL_CLIENT_FIXTURE'),'external prompt is visible');
+  assert.ok(JSON.stringify(external.live).includes('READER_APPROVAL_FINISHED'),'external streamed answer is visible');
+  releaseResponse();holdExternal=false;
+  await waitFor(async()=>{const s=await view();return s.interaction.canSend;});
+  // Restart only the disposable AM fixture: attach midway through another
+  // client's turn, without replaying its input.
+  await stop(am);await startAM();holdExternal=true;releaseResponse=null;
+  await rpc.call('turn/start',{threadId:thread.id,input:[{type:'text',text:'COLD_EXTERNAL_FIXTURE'}]});
+  await waitFor(async()=>releaseResponse);
+  const coldExternal=await view();
+  assert.equal(coldExternal.activity,'working');
+  assert.ok(JSON.stringify(coldExternal).includes('COLD_EXTERNAL_FIXTURE'));
+  assert.equal(coldExternal.interaction.error,null);
+  // Codex's paginated history contains persisted items, not a replay of every
+  // earlier text delta. Verify the newly attached reader receives subsequent
+  // live output, then the full final item (without issuing another turn).
+  emitFollowup();
+  await waitFor(async()=>JSON.stringify((await view()).live).includes('LIVE_AFTER_ATTACH'));
+  releaseResponse();holdExternal=false;
+  await waitFor(async()=>{const s=await view();return s.interaction.canSend;});
+  assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).terminalRunning,false,'Reader alone never starts a TUI');
+  // Finally exercise actual TUI input and close ONLY its browser transport,
+  // exactly as a Terminal -> Reader switch does. No Ctrl-C or task interruption.
+  const tuiCursor=(await view()).window.end;
+  terminal=new NativeWebSocket(base.replace('http:','ws:')+'/ws?session='+session.id+'&cols=120&rows=34');
+  let tuiOutput='';terminal.on('message',raw=>{
+    const text=raw.toString();tuiOutput+=text;
+    if(text.includes('\x1b[6n'))terminal.send(JSON.stringify({t:'i',d:'\x1b[1;1R'}));
+    if(text.includes('\x1b[c'))terminal.send(JSON.stringify({t:'i',d:'\x1b[?1;2c'}));
+  });
+  await once(terminal,'open');
+  await waitFor(async()=>tuiOutput.includes('COLD_EXTERNAL_FIXTURE'));
+  holdExternal=true;releaseResponse=null;
+  terminal.send(JSON.stringify({t:'i',d:'TUI_HANDOFF_FIXTURE'}));await sleep(100);
+  terminal.send(JSON.stringify({t:'i',d:'\r'}));
+  await waitFor(async()=>releaseResponse);terminal.close();
+  const tuiView=await waitFor(async()=>{const s=await call('/api/trace/'+session.id+'?after='+tuiCursor+'&v=2');return JSON.stringify(s.live).includes('TUI_HANDOFF_FIXTURE')&&s;});
+  assert.equal(tuiView.activity,'working');assert.equal(tuiView.interaction.canSend,false);
+  releaseResponse();holdExternal=false;
+  await waitFor(async()=>{const s=await view();return s.interaction.canSend;});
   const after=await rpc.call('thread/resume',{threadId:thread.id,excludeTurns:true});
   for(const key of ['model','modelProvider','approvalPolicy','approvalsReviewer','sandbox','cwd'])assert.deepEqual(after[key],originalSettings[key],key+' changed');
   assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).state,'waiting','Server state is independent of a TUI');
-  assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).terminalRunning,false);
-  console.log(JSON.stringify({commonRoutes:true,liveReasoning:true,liveTools:true,imageUpload:true,readerTextRoundTrip:true,deduplicated:true,approvalInReader:true,settingsPreserved:true,noTUI:true,externalInferenceCalls:0,providerCalls}));
+  assert.equal((await call('/api/sessions')).find(s=>s.id===session.id).terminalRunning,true,'closing the view leaves the TUI intact');
+  console.log(JSON.stringify({commonRoutes:true,externalClientTurn:true,coldAttachDuringWork:true,liveReasoning:true,liveTools:true,imageUpload:true,readerTextRoundTrip:true,deduplicated:true,approvalInReader:true,settingsPreserved:true,readerNeverStartsTUI:true,terminalHandoff:true,externalInferenceCalls:0,providerCalls}));
 } finally {
   releaseResponse?.();
   terminal?.terminate(); rpc?.close();

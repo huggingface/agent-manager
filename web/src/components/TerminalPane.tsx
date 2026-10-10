@@ -21,6 +21,7 @@ import { LOCKED_CLOSE_CODE, announceLock, parseCloseReason } from '../lib/lockSt
 import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph } from './icons';
 import * as api from '../api';
 import { terminalRetryDelay } from '../terminalRetry';
+import { captureTerminalAnchor, restoreTerminalAnchor, type TerminalScrollAnchor } from '../lib/terminalScrollAnchor';
 import type { Attachment } from '../api';
 import {
   attachmentFileError, filesFromClipboardItems, filesFromTransfer,
@@ -553,12 +554,19 @@ export default function TerminalPane({
     };
     anchorMobileInput();
 
-    // Track the user's semantic scroll state independently of the viewport's
-    // pixel scrollTop. During a row-count change xterm can transiently report
-    // the old pixel position against the new scroll height.
-    let followingBottom = true;
+    // Capture scroll intent from the logical buffer at each grid barrier.
+    // Native DOM scrolling suppresses xterm's public onScroll notification,
+    // so an onScroll-only following latch can incorrectly stay true forever.
+    let pendingReset: { anchor?: TerminalScrollAnchor } | null = null;
+    let viewportAnchor: TerminalScrollAnchor | null = null;
+    // Browser layout changes can clamp DOM scrollTop before the server's new
+    // grid arrives. Capture before that clamp, and retain through its repaint.
+    const preserveViewportAnchor = () => { viewportAnchor ??= captureTerminalAnchor(term); };
+    const userScroll = () => { viewportAnchor = null; };
+    window.addEventListener('resize', preserveViewportAnchor);
+    window.visualViewport?.addEventListener('resize', preserveViewportAnchor);
+    host.addEventListener('wheel', userScroll, { passive: true, capture: true });
     const scrollSub = term.onScroll(() => {
-      followingBottom = term.buffer.active.viewportY >= term.buffer.active.baseY;
       schedulePreview();
     });
 
@@ -756,24 +764,23 @@ export default function TerminalPane({
               connectionFailures = 0;
               controllerRef.current = !!m.controller;
               setHasInputControl(!!m.controller);
+              const resetState: { anchor?: TerminalScrollAnchor } | null = m.reset ? {} : null;
+              if (resetState) pendingReset = resetState;
               const applyGrid = () => {
                 try {
-                  // xterm can retain the old pixel scrollTop when the viewport
-                  // gains rows (notably landscape -> portrait), which leaves a
-                  // formerly-live view stranded in history. Preserve the
-                  // semantic bottom anchor without disturbing someone who is
-                  // deliberately reading scrollback.
-                  const wasAtBottom = m.reset || followingBottom;
-                  if (m.reset) {
+                  const anchor = viewportAnchor || captureTerminalAnchor(term);
+                  if (resetState) {
+                    // The NEXT data frame is the canonical snapshot. Restore
+                    // only once it is parsed, never into an empty reset buffer.
+                    resetState.anchor = anchor;
                     term.reset();
                     term.clear();
                   }
                   if (m.cols > 0 && m.rows > 0 && (term.cols !== m.cols || term.rows !== m.rows)) {
                     term.resize(m.cols, m.rows);
                   }
-                  if (wasAtBottom) {
-                    term.scrollToBottom();
-                    followingBottom = true;
+                  if (!resetState) {
+                    restoreTerminalAnchor(term, anchor);
                   }
                   schedulePreview();
                   if (bootLive && screenHasContent()) endBoot();
@@ -796,8 +803,13 @@ export default function TerminalPane({
         // One canonical snapshot follows a restore frame. Everything after it is
         // live output.
         const canonical = restoring;
+        const resetState = pendingReset; pendingReset = null;
         restoring = false;
         term.write(d, () => {
+          if (resetState?.anchor) {
+            restoreTerminalAnchor(term, resetState.anchor);
+          }
+          viewportAnchor = null;
           schedulePreview();
           // An empty canonical snapshot is a terminal that was just started for
           // this request, not a screen to trust: stay in cold-boot mode and let
@@ -1021,6 +1033,7 @@ export default function TerminalPane({
       const rows = Math.trunc(residual / cell);
       if (!rows) return 0;
       residual -= rows * cell;
+      userScroll();
       term.scrollLines(rows);
       touchDebug.rows(rows);
       return rows;
@@ -1181,6 +1194,9 @@ export default function TerminalPane({
       if (resyncTimer) clearTimeout(resyncTimer);
       persistPreview();
       ro.disconnect();
+      window.removeEventListener('resize', preserveViewportAnchor);
+      window.visualViewport?.removeEventListener('resize', preserveViewportAnchor);
+      host.removeEventListener('wheel', userScroll, true);
       host.removeEventListener('pointerdown', onPointerDown, true);
       host.removeEventListener('paste', onPaste, true);
       host.removeEventListener('dragenter', onDragEnter, true);

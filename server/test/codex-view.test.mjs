@@ -40,3 +40,11 @@ test('adapter translates server state, settles live records and never selects by
  assert.equal(await runtime.trace({id:'legacy',cli:'codex'},page),page);
  emit(c,'turn/completed',{turn:{id:'turn'}});const settled=await runtime.trace(s,{...page,turns:[{nativeTurnId:'turn',event:{type:'task-complete'}}]});assert.equal(settled.live.turns.length,0);
 });
+
+test('status notifications during hydration do not discard the current turn',async()=>{
+ const c=client();c.call=async()=>{
+  emit(c,'thread/status/changed',{turnId:undefined,status:{type:'active',activeFlags:[]}});
+  return {data:[{id:'current',status:'inProgress',items:[{id:'prompt',type:'userMessage',content:[{type:'text',text:'Terminal prompt'}]}]}]};
+ };
+ await c.hydrate();assert.equal(liveView(c).turns[0].blocks[0].text,'Terminal prompt');
+});

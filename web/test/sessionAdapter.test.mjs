@@ -12,6 +12,15 @@ try{
  await store.loadNewer();state=store.getSnapshot();assert.equal(state.turns.length,4);assert.equal(state.turns[0].blocks[0].text,'Older history');assert.equal(state.turns.at(-1).blocks[0].text,'Partial streamed further');
  page={...page,turns:[{id:'marker',nativeTurnId:'current',role:'system',blocks:[],event:{type:'task-complete',text:'Partial'}}],activity:'waiting',live:{replaceTurnIds:[],turns:[]},interaction:{canSend:true,requests:[],error:null},window:{...page.window,end:20}};
  await store.loadNewer();state=store.getSnapshot();assert.equal(state.turns.filter(t=>t.role==='user').length,2);assert.ok(!JSON.stringify(state.turns).includes('streamed'));assert.equal(state.turns.at(-1).kind,'final');
+ // Returning from Terminal can leave persisted history several pages behind,
+ // while the adapter already knows the current task is working.
+ page={...page,turns:[],activity:'working',interaction:{canSend:false,requests:[],error:null},
+   window:{...page.window,end:30,atEnd:false}};
+ await store.loadNewer();state=store.getSnapshot();
+ assert.equal(state.head.activity,'working');
+ assert.equal(state.activityConfirmed,true,'shared runtime activity does not wait for history catch-up');
+ page={...page,activity:null,interaction:{canSend:false,requests:[],error:'Disconnected'},window:{...page.window,start:30,end:30,atEnd:true}};
+ await store.loadNewer();state=store.getSnapshot();assert.equal(state.head.activity,null,'unknown runtime state clears an older working status');
  const memory=new Map();globalThis.localStorage={getItem:k=>memory.get(k)||null,setItem:(k,v)=>memory.set(k,v),removeItem:k=>memory.delete(k)};
  const requests=[];globalThis.fetch=async(url,init)=>{requests.push({url,body:JSON.parse(init.body)});if(requests.length===1)throw Error('lost response');return new Response('{"ok":true}',{headers:{'content-type':'application/json'}});};
  const api=await load('src/api.ts','api');await assert.rejects(api.sendInput('s','hello',['att-fixture']));await api.sendInput('s','hello',['att-fixture']);

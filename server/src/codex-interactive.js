@@ -14,7 +14,7 @@ export class CodexInteractiveClient extends ObservationClient {
     const page=await this.call('thread/turns/list',{threadId:this.threadId,limit:1,itemsView:'full',sortDirection:'desc'});
     // A snapshot may race events. Seed only missing items, never overwrite a delta.
     for(const t of (page.data||[]).filter(t=>t.status==='inProgress')) {
-      if((this.eventVersion||0)!==version && this.turnId!==t.id)continue;
+      if((this.eventVersion||0)!==version && this.turnId && this.turnId!==t.id)continue;
       const turn=this.turn(t.id);this.turnId=t.id;if(t.startedAt)turn.ts=t.startedAt*1000;
       for(const i of t.items||[])if(!turn.items.has(i.id)){if(turn.items.size>=100){turn.incomplete=true;break;}turn.items.set(i.id,i);}
       this.items=turn.items;

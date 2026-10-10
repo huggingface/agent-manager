@@ -125,6 +125,9 @@ export function mergeMeta(prev: Meta | null, next: Meta): Meta {
   if (!prev) return next;
   const out = { ...prev };
   for (const [key, value] of Object.entries(next)) {
+    // Runtime state is authoritative, including unknown/null on disconnect.
+    // Historical metadata still keeps its previous nonempty values.
+    if (key === 'activity' && next.interaction) { out.activity = next.activity; continue; }
     if (value === null || value === undefined || value === '') continue;
     if (key === 'lastTs' && (value as number) < prev.lastTs) continue;
     if (key === 'firstTs' && (!value || (prev.firstTs && (value as number) > prev.firstTs))) continue;
@@ -425,7 +428,9 @@ export class ReaderStore {
         this.publish({ turns, cursor: nextCursor, head: this.head(turns, nextCursor), phase: turns.length ? 'ready' : 'empty',
           error: win.blocked && direction === 'after' ? 'A transcript record is too large to read. Download the raw trace to inspect it.' : null,
           errorCode: null, lastSuccess: Date.now(), version: this.state.version + (changed || reset ? 1 : 0),
-          activityConfirmed: direction !== 'before' ? !!win.atEnd : this.state.activityConfirmed,
+          // Live runtime metadata describes NOW, independently of which
+          // persisted history window this response has caught up to.
+          activityConfirmed: direction !== 'before' ? !!metadata.interaction || !!win.atEnd : this.state.activityConfirmed,
           notice: reset && cursor ? 'The transcript changed or was replaced. Showing its current content.' : this.state.notice }, change);
         if (reset) this.resetFill();
         this.scheduleSummary();

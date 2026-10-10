@@ -32,17 +32,33 @@ only when it is outside the visible viewport, instead of centering the whole
 page on every focus. These are common component changes, not backend branches.
 Actual iOS keyboard behavior still needs an on-device check; Chromium's mobile
 viewport cannot establish it. The terminal renderer/resize pipeline is retained.
+Terminal resizes now retain the visible history row (or the live bottom) across
+both browser viewport changes and the server's reset/snapshot pair. The anchor
+is restored after snapshot parsing; native DOM scroll is accounted for rather
+than relying solely on xterm's public scroll event.
+
+Reader activity from the runtime adapter is authoritative even while byte-window
+history is catching up. A null runtime activity clears stale working state.
+Hydration also tolerates status-only notifications arriving during its history
+read. On a cold attachment, the installed Codex version does not replay text
+deltas emitted before subscription: new deltas appear live and completed items
+supply the full text. This is distinct from the current working/idle state.
 
 ## Validation
 
 - Real disposable Codex server + deterministic local Responses provider: standard
   input route, text and reasoning visible before completion, tools while waiting
   for approval, explicit approval and attachment image delivery. No external
-  inference or live user task is used.
+  inference or live user task is used. Also exercises an external client, a cold
+  mid-turn attachment and a real TUI submission followed by Reader polling while
+  work continues; closing the terminal socket leaves the TUI/task intact.
 - Event adapter tests: exact task identity, thinking/tool/result normalization,
   neutral request choices, final-marker retirement and existing rollout identity.
 - Common Reader store tests: live/persisted replacement without duplicate user
-  prompts, no loss of preceding history, and common delivery retry identity.
+  prompts, no loss of preceding history, common delivery retry identity, current
+  runtime activity during history catch-up, and unknown-state invalidation.
+- Mobile terminal fixture: keyboard open/hide, live-bottom and manual-history
+  anchors, native DOM scrolling, canonical reset/snapshot and control-key bar.
 - Existing Reader history, small-scroll, exchange, mode-switch, terminal resize,
   HTTP admission/privacy and Codex binding/transport/input safety tests.
 
