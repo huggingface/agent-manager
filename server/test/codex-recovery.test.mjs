@@ -29,6 +29,15 @@ test('recovery uses the exact latest native context, never quoted content or an 
   fs.appendFileSync(file,'{"partial":');await assert.rejects(recoveryPlan(file,context,thread,{id:'last-turn'}));
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+test('the exact installed TUI Default mode is accepted, custom or modified prompts are not',()=>{
+ const p=saved();
+ p.collaboration_mode.settings.developer_instructions=fs.readFileSync(new URL('./default-collaboration-162.txt',import.meta.url),'utf8');
+ assert.equal(recoverySettings(p,thread,cwd).params.model,p.model);
+ for(const text of ['custom instructions',p.collaboration_mode.settings.developer_instructions+' ']){
+  p.collaboration_mode.settings.developer_instructions=text;
+  assert.throws(()=>recoverySettings(p,thread,cwd),e=>e.code==='codex-recovery-review');
+ }
+});
 test('disconnected transport discards stale requests and live deltas; recovery RPC allowlist is one-shot',()=>{
  const ws=new EventEmitter();ws.terminate=()=>{};const c=new CodexInteractiveClient(ws);c.threadId='thread';
  c.receiveServerMessage({id:1,method:'item/commandExecution/requestApproval',params:{threadId:'thread',turnId:'turn'}});

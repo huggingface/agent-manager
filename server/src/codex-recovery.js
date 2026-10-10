@@ -6,13 +6,21 @@ import { isDeepStrictEqual } from 'node:util';
 import { ApiError } from './api-errors.js';
 const refused = () => new ApiError(409, 'codex-recovery-review', 'Saved settings cannot be restored safely here. Review this task in Codex Terminal or Remote.');
 const special = (kind, access) => ({path:{type:'special',value:{kind}},access});
+// Codex 0.162.1's TUI persists its built-in Default mode prompt here, while
+// app-server-created threads persist null. This exact literal was verified
+// against the installed binary; arbitrary client instructions still fail closed.
+const DEFAULT_MODE_162 = '1042cc643eb0147ca1039b19287c7462ceb297502f7f310d9664ac323a12feca';
+function standardDefaultInstructions(value) {
+  return value == null || (typeof value === 'string'
+    && createHash('sha256').update(value).digest('hex') === DEFAULT_MODE_162);
+}
 export function recoverySettings(p, thread, workdir) {
   if (!p || p.cwd !== workdir || typeof p.model !== 'string' || !p.model
       || typeof thread.modelProvider !== 'string' || !thread.modelProvider
       || !['untrusted','on-request','never'].includes(p.approval_policy)
       || !['user','auto_review'].includes(p.approvals_reviewer)
       || p.collaboration_mode?.mode !== 'default'
-      || p.collaboration_mode.settings?.developer_instructions != null
+      || !standardDefaultInstructions(p.collaboration_mode.settings?.developer_instructions)
       || p.disabled_plugin_ids?.length || p.realtime_active) throw refused();
   const policy=p.sandbox_policy, workspace=policy?.type==='workspace-write';
   // Only standard restricted profiles whose complete resolved permissions match

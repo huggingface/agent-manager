@@ -9,12 +9,13 @@ import {randomUUID} from 'node:crypto';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import WebSocket, {WebSocketServer} from 'ws';
+import pty from 'node-pty';
 import { nativeFetch as fetch } from './native-client.mjs';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'am-codex-migration-'));
 const home = path.join(root, 'home'), codexHome = path.join(root, 'codex'), data = path.join(root, 'data');
 const cwd = path.join(data, 'workspaces', 'work'), socket = path.join(root, 's');
 for (const dir of [home, codexHome, cwd]) fs.mkdirSync(dir, { recursive: true });
-let providerCalls=0, releaseResponse, holdExternal=false;
+let baselineCalls=0, providerCalls=0, releaseResponse, holdExternal=false;
 const heldResponses=new Set();
 const provider=http.createServer(async(req,res)=>{
  let body='';for await(const chunk of req)body+=chunk;JSON.parse(body);const n=++providerCalls;
@@ -114,22 +115,32 @@ const proxySocket=socket;
 async function waitFor(fn){for(let i=0;i<150;i++){const value=await fn();if(value)return value;await sleep(100);}throw Error('Migration fixture timeout');}
 async function startDaemon(){if(fs.existsSync(socket))fs.unlinkSync(socket);daemon=startChild('codex',['app-server','--listen',`unix://${socket}`]);await waitFor(()=>fs.existsSync(socket));rpc=await connect();}
 try {
+ // Start with a real standalone TUI: app-server-created fixtures omit the
+ // built-in collaboration prompt that legacy TUIs actually persist.
+ let tuiOutput='';
+ terminal=pty.spawn('codex',['--no-alt-screen','-C',cwd,'-s','read-only','-a','on-request','-c','approvals_reviewer="user"','-c','model_reasoning_effort="high"','PRESERVED_LEGACY_CONVERSATION'],{env,cols:100,rows:30,cwd});
+ let tuiExited=false;terminal.onExit(()=>{tuiExited=true;});
+ terminal.onData(d=>{tuiOutput+=d;if(d.includes('\x1b[6n'))terminal.write('\x1b[1;1R');if(d.includes('\x1b[c'))terminal.write('\x1b[?1;2c');});
+ await waitFor(()=>providerCalls===1&&tuiOutput.includes('RECOVERY_RESPONSE_1'));
+ const findRollout=dir=>fs.readdirSync(dir,{withFileTypes:true}).flatMap(e=>e.isDirectory()?findRollout(path.join(dir,e.name)):e.name.endsWith('.jsonl')?[path.join(dir,e.name)]:[]);
+ const rollout=findRollout(path.join(codexHome,'sessions'))[0];
+ const records=fs.readFileSync(rollout,'utf8').trim().split('\n').map(JSON.parse);
+ const thread={id:records[0].payload.id};
+ const saved=records.filter(r=>r.type==='turn_context').at(-1).payload;
+ assert.equal(saved.collaboration_mode.settings.developer_instructions,fs.readFileSync(new URL('./default-collaboration-162.txt',import.meta.url),'utf8'));
+ await sleep(600);terminal.write('/quit');await sleep(400);terminal.write('\r');await waitFor(()=>tuiExited);terminal=null;baselineCalls=providerCalls;
  await startDaemon();
- const thread=(await rpc.call('thread/start',{cwd,model:'fixture',sandbox:'read-only',approvalPolicy:'on-request',approvalsReviewer:'user',config:{model_reasoning_effort:'high'}})).thread;
- await rpc.call('thread/name/set',{threadId:thread.id,name:'Legacy fixture'});
- await rpc.call('turn/start',{threadId:thread.id,input:[{type:'text',text:'PRESERVED_LEGACY_CONVERSATION'}]});
- await waitFor(async()=>(await rpc.call('thread/turns/list',{threadId:thread.id,limit:1,itemsView:'summary',sortDirection:'desc'})).data[0]?.status==='completed');
- const originalSettings=await rpc.call('thread/resume',{threadId:thread.id,excludeTurns:true});
  const originalHistory=await rpc.call('thread/turns/list',{threadId:thread.id,limit:50,itemsView:'full',sortDirection:'desc'});
+ const {recoverySettings}=await import('../src/codex-recovery.js');
+ const originalSettings=recoverySettings(saved,{modelProvider:'fixture'},cwd).expected;
  const legacy={id:'legacy-fixture',name:'Legacy fixture',cli:'codex',path:'work',sessionUuid:randomUUID(),codexSessionId:thread.id,everStarted:true,createdAt:new Date().toISOString()};
  fs.writeFileSync(path.join(data,'sessions.json'),JSON.stringify([legacy]));
- rpc.close();await stop(daemon);await startDaemon();
  await startAM();
  const route='/api/sessions/'+legacy.id+'/codex/migration';
  const {CodexMigration}=await import('../src/codex-migrate.js');
  await new CodexMigration({store:{get:()=>legacy,list:()=>[legacy]},bindings:{forSession:()=>null},isRunning:()=>false,enabled:()=>true,root:path.join(data,'workspaces'),endpoint:()=>({socket:fs.realpathSync(socket),home:fs.realpathSync(codexHome),id:'fixture'})}).inspect(legacy.id);
  const preview=await call(route);assert.equal(preview.threadId,thread.id);assert.equal(preview.history.count,1);assert.ok(['free','absent'].includes(preview.owner.state));
- assert.equal((await call('/api/sessions'))[0].codexSharedOnly,undefined);assert.equal(providerCalls,1,'preview sends no inference');
+ assert.equal((await call('/api/sessions'))[0].codexSharedOnly,undefined);assert.equal(providerCalls,baselineCalls,'preview sends no inference');
  const refused=await fetch(base+route,{method:'POST',headers:{'x-am-origin':'operator','content-type':'application/json'},body:JSON.stringify({key:'0'.repeat(64)})});assert.equal(refused.status,409);assert.equal((await refused.json()).code,'codex-migration-stale');
  const result=await call(route,{key:preview.key});assert.equal(result.ok,true);assert.equal(result.threadId,thread.id);
  const migrated=(await call('/api/sessions'))[0];assert.equal(migrated.codexSharedOnly,true);for(const k of ['id','sessionUuid','codexSessionId','name','path'])assert.equal(migrated[k],legacy[k]);
@@ -139,6 +150,6 @@ try {
  assert.equal((await call('/api/codex/context?threadId='+thread.id)).amSessionId,legacy.id);
  const bindings=fs.readFileSync(path.join(data,'codex-bindings.json'),'utf8');await stop(am);await startAM();
  assert.equal(fs.readFileSync(path.join(data,'codex-bindings.json'),'utf8'),bindings);assert.equal((await call('/api/sessions'))[0].terminalRunning,false);
- assert.equal((await call('/api/trace/'+legacy.id+'?tail=1&v=2')).interaction.canSend,true);assert.equal(providerCalls,1);
- console.log(JSON.stringify({exactLegacyIdentity:true,previewReadOnly:true,staleKeyRefused:true,historyIdentical:true,settingsIdentical:true,durableGuard:true,amRestart:true,noTUI:true,externalInferenceCalls:0,providerCalls}));
-}finally{rpc?.close();for(const child of [...children].reverse())await stop(child);for(const release of [...heldResponses])release();provider.closeAllConnections();await new Promise(r=>provider.close(r));fs.rmSync(root,{recursive:true,force:true});}
+ assert.equal((await call('/api/trace/'+legacy.id+'?tail=1&v=2')).interaction.canSend,true);assert.equal(providerCalls,baselineCalls);
+ console.log(JSON.stringify({exactLegacyIdentity:true,previewReadOnly:true,staleKeyRefused:true,historyIdentical:true,settingsIdentical:true,durableGuard:true,amRestart:true,noTUI:true,externalInferenceCalls:0,providerCalls,baselineCalls,realStandaloneTUI:true}));
+}finally{terminal?.kill();rpc?.close();for(const child of [...children].reverse())await stop(child);for(const release of [...heldResponses])release();provider.closeAllConnections();await new Promise(r=>provider.close(r));fs.rmSync(root,{recursive:true,force:true});}

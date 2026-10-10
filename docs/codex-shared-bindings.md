@@ -387,3 +387,32 @@ requires an already stopped view on a compatible AM. Integrating graceful quit
 for server-owned PTYs and deploying without terminating those existing PTYs
 remain separate work. A stopped-looking row on an older manager is not permission
 to edit its files externally or import a duplicate into the pilot.
+
+
+### Production cutover from legacy AM
+
+Deploy the shared-capable backend against the existing AM data directory; do
+not concurrently run two managers against that directory. Preserve its binding
+host, workspace root, session IDs, groups and native thread pins. Before boot,
+place launch guards on candidate Codex rows and disable their automatic legacy
+revival. Run the migration preview/apply for each stopped, verified TUI, then
+restore legacy launch only for explicitly excluded, still-unbound rows.
+
+The 0.162.1 TUI stores its built-in Default collaboration prompt rather than
+null. Recovery recognizes only the exact prompt verified against that binary;
+custom instructions remain refused. Full migration-history pages have a 64 MiB
+transport bound; the ordinary Reader observation limit remains unchanged.
+
+An isolated live test now starts a real standalone Codex TUI against a local
+provider, exits it with `/quit`, and transfers its same thread and AM identity.
+It checks complete history, settings and persistence through an AM restart.
+No inference occurs during migration (fixture initialization is counted
+separately). Older permission layouts and unresolved reasoning defaults remain
+legacy until their equivalence can be verified; never silently broaden them.
+
+For systemd deployments, inspect cgroup membership before restarting AM:
+processes started from its terminals may share its service cgroup. Keep the
+Codex daemon and any independent pilot outside it. A migration controller
+running inside the old AM must finish its turn before an independent, audited
+worker closes it. A partial failure keeps exact native IDs and launch guards;
+never roll back to an old backend that ignores those guards.

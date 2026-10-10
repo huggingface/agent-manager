@@ -22,6 +22,9 @@ export async function writerOwner(home,threadId) {
   return JSON.parse(stdout);
 }
 export class MigrationClient extends ObservationClient {
+  // Full historical tool results can exceed the Reader's summary-page limit.
+  // Keep a finite limit on the trusted local endpoint, only for this verifier.
+  static maxPayload = 64 * 1024 * 1024;
   allows(method,p) {
     return super.allows(method,p)
       || (method==='thread/turns/list'&&p.threadId===this.threadId&&p.limit===50&&p.itemsView==='full'&&p.sortDirection==='desc'&&Object.keys(p).length===5)

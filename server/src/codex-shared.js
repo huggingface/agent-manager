@@ -59,11 +59,11 @@ export class ObservationClient {
   static async connect(config, { timeoutMs = 3000, signal } = {}) {
     if (signal?.aborted) throw fail('cancelled');
     const before = await verifiedSocket(config);
+    const Client = this || ObservationClient;
     const ws = new WebSocket('ws://localhost/', {
       createConnection: () => net.connect(before.socket),
-      handshakeTimeout: timeoutMs, maxPayload: MAX_MESSAGE, followRedirects: false,
+      handshakeTimeout: timeoutMs, maxPayload: Client.maxPayload || MAX_MESSAGE, followRedirects: false,
     });
-    const Client = this || ObservationClient;
     const client = new Client(ws, timeoutMs);
     const abort = () => client.close('cancelled');
     signal?.addEventListener('abort', abort, { once: true });
