@@ -142,3 +142,18 @@ export function remove(id) {
   // NOTE: the working directory under DATA_DIR/workspaces/<id> is intentionally
   // left on disk so a delete never destroys the user's files.
 }
+
+// Keep the original AM identity, name, folder, group references and history pin.
+// Never acknowledge a migration guard before its durable replacement succeeds.
+export function prepareCodexMigration(id, migration) {
+  const current=get(id);
+  if(!current||current.cli!=='codex'||current.codexSessionId!==migration.threadId)throw Error('Migration identity changed');
+  const session={...current,codexSharedOnly:true,codexMigration:migration};
+  const next=sessions.map(s=>s.id===id?session:s),tmp=`${SESSIONS_FILE}.${crypto.randomUUID()}.tmp`;
+  let fd;
+  try {
+    fd=fs.openSync(tmp,'wx',0o600);fs.writeFileSync(fd,JSON.stringify(next,null,2));fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
+    fs.renameSync(tmp,SESSIONS_FILE);sessions=next;
+    fd=fs.openSync(dirname(SESSIONS_FILE),'r');fs.fsyncSync(fd);return session;
+  }finally{if(fd!==undefined)fs.closeSync(fd);try{fs.unlinkSync(tmp);}catch(e){if(e.code!=='ENOENT')throw e;}}
+}

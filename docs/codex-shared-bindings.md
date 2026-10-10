@@ -334,3 +334,56 @@ hydration, native item order is restored while preserving newer event values,
 so a streamed answer cannot precede its own question. Regression fixtures cover
 both reversed live turn arrival and deltas received during hydration. No
 conversation files, timestamps or native histories are rewritten.
+
+### Migrate an already stopped legacy AM session
+
+This slice adds an explicit migration coordinator behind
+`AM_CODEX_BINDINGS_PILOT=1` **and** `AM_CODEX_MIGRATION=1`. It runs in the AM that
+owns the session record. It never edits another running manager's data files,
+stops a TUI, signals a process, removes a lock, or starts a model turn.
+
+```sh
+node scripts/am-codex-migrate.mjs http://localhost:7862 preview 'Exact session name'
+node scripts/am-codex-migrate.mjs http://localhost:7862 apply 'Exact session name' PREVIEW_KEY
+```
+
+Names must match exactly (case-insensitive) and uniquely; an AM session ID also
+works. Preview uses `GET /api/sessions/:id/codex/migration`. Apply is the same
+route with operator-origin POST and `{key}` from the current preview. A changed
+session, history, endpoint or saved settings invalidates that key.
+
+Requirements: the AM terminal is already closed, the exact native writer lock
+is free, no queued AM or native input, no active goal, no ambiguous AM pin,
+no active turn, and a supported complete persisted execution profile. Linux
+`/proc/locks`, the owner's PID/start ticks and a nonblocking flock probe verify
+ownership; Python's standard library reads discovered queue/goal schemas with
+SQLite read-only mode. Unknown schemas/owners fail closed. No lock is created
+or deleted. The native resume also arbitrates a competing writer atomically.
+
+Before resume, AM durably marks the **existing row** shared-only, preserving its
+ID, incarnation, name, path and native pin. This blocks revival/terminal launch
+as a standalone process even after a crash or failed binding. The coordinator
+resumes the same UUID with verified saved settings, compares the entire native
+paged parent-turn history hash before/after (bounded at 5,000 turns), checks
+returned settings and commits the existing binding. It does not copy or rewrite
+rollouts or child threads. All future clients use that exact mapping.
+
+A failed acknowledgement or binding leaves the guard in place. Refresh the
+preview; if the same thread is now loaded with unchanged history/settings, the
+coordinator verifies it before retrying the binding. It never replays input.
+If work/settings changed, leave the guard and review the exact thread manually.
+The stored `prepared` receipt records intent; a committed binding is the source
+of truth for a completed migration. No automatic rollback launches a legacy TUI.
+
+The real Codex 0.162.1 fixture verifies free-owner migration, unchanged AM
+identity and full native turn data, restored settings, stale preview rejection,
+and an AM restart with no TUI or inference during migration. Unit tests cover
+persistence failure, uncertain resume acknowledgement, failed binding, native
+queue races and retained guards. Kernel lock tests use only temporary locks.
+
+**Remaining deployment boundary:** production AM predating the guard cannot be
+replaced/restarted underneath its live legacy TUIs. The current coordinator
+requires an already stopped view on a compatible AM. Integrating graceful quit
+for server-owned PTYs and deploying without terminating those existing PTYs
+remain separate work. A stopped-looking row on an older manager is not permission
+to edit its files externally or import a duplicate into the pilot.

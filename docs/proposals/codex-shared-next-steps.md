@@ -73,6 +73,10 @@ by the operator; do not extend those confirmations to untested cases.
    checks. Leave busy/ambiguous tasks untouched. Keep tmux/mosh shells and
    unrelated owners intact. Plan production deployment around live legacy
    writers; do not restart the old AM underneath them.
+   The stopped-session coordinator is implemented behind a separate migration
+   flag: verified free writer, durable standalone-launch guard, same AM/native
+   identities, full paged parent history and saved settings verification.
+   Running PTY graceful release and nondisruptive production deployment remain.
 
 ## Gates before default rollout
 
@@ -82,7 +86,7 @@ by the operator; do not extend those confirmations to untested cases.
 | Managed delivery | Define agent/cron delivery semantics; currently refused for shared tasks. Close/interrupt/archive/restore are implemented. |
 | Daemon recovery | Supported restricted presets tested after real disposable crashes. Broader/custom permissions and nondefault modes remain manual; daemon supervision is external to AM. |
 | New thread identity | Empty creation and persistence failures tested. `/new` and fork must not overwrite the original mapping. Unmapped threads stay Codex-only. |
-| Migration | Integrated owner checks and graceful release, nondisruptive production rollout. |
+| Migration | Stopped-session owner/queue checks and guarded same-ID transfer implemented/tested. Running PTY graceful release and nondisruptive production rollout remain. |
 
 Automatic adoption of every phone-created task, arbitrary remote-machine
 endpoints, all child-thread workflows and a sidebar redesign are deferred.

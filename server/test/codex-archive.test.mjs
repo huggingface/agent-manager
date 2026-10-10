@@ -28,3 +28,17 @@ test('failed archive persistence does not acknowledge or mutate the visible sess
  assert.equal(store.get(session.id).archivedAt,undefined);
  assert.equal(fs.readFileSync(path.join(root,'sessions.json'),'utf8'),before);
 });
+
+test('migration guard keeps the legacy row identity and survives reload',()=>{
+ const s=store.create({name:'Legacy migration',cli:'codex',path:'.'});store.update(s.id,{codexSessionId:'exact-native-id',pinnedAt:'today'});
+ const result=store.prepareCodexMigration(s.id,{phase:'prepared',threadId:'exact-native-id',key:'preview'});
+ for(const k of ['id','sessionUuid','name','path','codexSessionId','pinnedAt'])assert.equal(result[k],s[k]);
+ store.init();assert.equal(store.get(s.id).codexSharedOnly,true);assert.equal(store.get(s.id).codexMigration.key,'preview');
+});
+test('failed migration guard write does not mutate memory or disk',t=>{
+ const s=store.create({name:'Cannot guard',cli:'codex',path:'.'});store.update(s.id,{codexSessionId:'exact-failed-id'});
+ const before=fs.readFileSync(path.join(root,'sessions.json'),'utf8'),open=fs.openSync;
+ t.mock.method(fs,'openSync',(...args)=>{if(args[1]==='wx')throw Error('fixture migration write failure');return open(...args);});
+ assert.throws(()=>store.prepareCodexMigration(s.id,{threadId:'exact-failed-id'}),/fixture migration write failure/);
+ assert.equal(store.get(s.id).codexSharedOnly,undefined);assert.equal(fs.readFileSync(path.join(root,'sessions.json'),'utf8'),before);
+});

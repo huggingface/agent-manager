@@ -1,3 +1,4 @@
+import {CodexMigration} from './codex-migrate.js';
 import {CodexCreation, sharedCreationEnabled} from './codex-create.js';
 import { SessionRuntime } from './session-runtime.js';
 import { CodexInput } from './codex-input.js';
@@ -447,6 +448,20 @@ const codexCreation=new CodexCreation({store,bindings:codexBindings,input:codexI
 const requireReaderOperator = (req) => {
   if (req.headers['x-am-origin'] !== 'operator') throw new ApiError(403, 'operator-required', 'Use the operator Reader for this action.');
 };
+// Migration is deliberately separate from stop/release: only an already
+// stopped, exact legacy session can transfer; preview never changes ownership.
+const codexMigration=new CodexMigration({store,bindings:codexBindings,isRunning,
+ assertWritable:()=>{if(isLocked())throw new ApiError(403,'space-locked','Space is locked.');}});
+api.get('/api/sessions/:id/codex/migration',async(req,res)=>{
+ const plan=await codexMigration.inspect(req.params.id,{signal:res.locals.lockSignal});
+ const {endpoint,stamp,...preview}=plan;
+ res.set('Cache-Control','no-store').json(preview);
+});
+api.post('/api/sessions/:id/codex/migration',async(req,res)=>{
+ requireReaderOperator(req);
+ res.json(await codexMigration.apply(req.params.id,req.body?.key,{signal:res.locals.lockSignal}));
+});
+
 // Native approvals are adapted to the same session interaction contract.
 api.post('/api/sessions/:id/reconnect', async (req, res) => {
   requireReaderOperator(req);
