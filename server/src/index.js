@@ -15,6 +15,7 @@ import {
 import { createSkillsService, skillTargetDirs } from './skills.js';
 import { cliUpdateStatus, startCliUpdate, configureCliUpdate } from './cli-update.js';
 import * as remote from './remote.js';
+import { writeGlobalContextFiles } from './context-files.js';
 import * as store from './sessions.js';
 import * as groups from './groups.js';
 import * as order from './order.js';
@@ -1223,7 +1224,8 @@ const BUILD_ENV_KEYS = (() => {
 // after the build-time snapshot, so its vars would otherwise be misdetected as
 // injected secrets. Keep this list in sync with entrypoint.sh.
 const NON_SECRET = new Set([
-  'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_DURABLE', 'CODEX_HOME', 'CODEX_DURABLE',
+  'HOME', 'AM_MANAGE_GLOBAL_CONTEXT',
+  'CLAUDE_CONFIG_DIR', 'CLAUDE_DURABLE', 'CODEX_HOME', 'CODEX_DURABLE',
   'GEMINI_CLI_HOME', 'GEMINI_LIVE', 'GEMINI_DURABLE',
   'OPENCLAW_STATE_DIR', 'OPENCLAW_HOME', 'OPENCLAW_DURABLE',
   'OPENCODE_LIVE', 'OPENCODE_DURABLE', 'HERMES_LIVE', 'HERMES_DURABLE',
@@ -3559,9 +3561,12 @@ wss.on('connection', (ws, req) => {
   // Detaching a viewer, NOT stopping the session: see the 'close' listener above.
 });
 
-// keep the environment skill current on boot — through the same reporting path,
-// so a damaged settings file is a reported derived failure rather than a crash
+// Keep derived skill failures reportable, matching the settings-save path.
 refreshEnvSkill();
+// User/global instruction files live in the harness homes, never in a user's
+// project checkout. The entrypoint-specific env vars make this a no-op in an
+// ordinary local development server (see context-files.js).
+writeGlobalContextFiles(process.env, PORT);
 
 // Warm ONLY the trace cache in the background (bounded: mtime-cached, tail-
 // capped, yields between files). The usage warmup is deliberately NOT run at
