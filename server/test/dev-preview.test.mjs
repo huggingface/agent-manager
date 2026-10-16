@@ -111,8 +111,12 @@ const fixtureApi = (o = origin) => async (url) => {
 };
 
 // ------------------------------------------------------------ fixture image + instance
+// entrypoint.sh's own layout step, run against a fixture dir instead of /app.
+const ENTRYPOINT = read(path.join(REPO_ROOT, 'entrypoint.sh'));
+const PREPARE = ENTRYPOINT.slice(ENTRYPOINT.indexOf('prepare_dev_preview_layout() {'), ENTRYPOINT.indexOf('\n}\n', ENTRYPOINT.indexOf('prepare_dev_preview_layout() {')) + 3);
+const prepareLayout = (appDir) => execFileSync('sh', ['-c', `${PREPARE.replaceAll('/app', appDir)}\nprepare_dev_preview_layout`], { env: { PATH: process.env.PATH } });
 let n = 0;
-function makeImage({ imageInputs = MAIN } = {}) {
+function makeImage({ imageInputs = MAIN, layout = true } = {}) {
   const dir = path.join(root, `inst-${++n}`);
   const appDir = path.join(dir, 'app');
   const localDir = path.join(dir, 'local');
@@ -142,6 +146,7 @@ function makeImage({ imageInputs = MAIN } = {}) {
     fs.mkdirSync('dist', { recursive: true });
     fs.writeFileSync('dist/index.html', 'built:' + fs.readFileSync('marker.txt', 'utf8').trim() + (fs.existsSync('other.txt') ? '+other' : ''));
   `);
+  if (layout) prepareLayout(appDir);
   return { appDir, localDir };
 }
 /** A server process on these dirs. Called again with the same dirs = after its restart. */
@@ -160,8 +165,8 @@ function server({ appDir, localDir, stateFile, faults = null, api = fixtureApi()
   return { dp, appDir, localDir, stateFile, restarts, audits };
 }
 function instance(opts = {}) {
-  const { stateFile = path.join(root, `state-${++n}.json`), imageInputs, ...rest } = opts;
-  return server({ ...makeImage({ imageInputs }), stateFile, ...rest });
+  const { stateFile = path.join(root, `state-${++n}.json`), imageInputs, layout, ...rest } = opts;
+  return server({ ...makeImage({ imageInputs, layout }), stateFile, ...rest });
 }
 const restarted = (i, extra = {}) => server({ appDir: i.appDir, localDir: i.localDir, stateFile: i.stateFile, ...extra });
 const settle = (i) => i.dp._wait();
@@ -413,7 +418,7 @@ test('a repository-local git redirect cannot change what is fetched', async () =
 // ------------------------------------------------------------ swap failures
 
 test('a failure at any swap or state-write boundary leaves the image serving and nothing pending', async () => {
-  const points = ['adopt:current', ...SWAPPED.flatMap((p) => [`adopt:${p}`, `adopt-link:${p}`]), 'state-write', 'swap'];
+  const points = ['state-write', 'swap'];
   for (const point of points) {
     const i = instance({ faults: new Set([point]) });
     i.dp.switchTo({ prs: [{ number: 1 }] });
@@ -435,6 +440,24 @@ test('a failure at any swap or state-write boundary leaves the image serving and
   i.dp.switchTo({ prs: [{ number: 2 }] });
   assert.equal((await settle(i)).job.state, 'failed');
   assert.equal(read(i.stateFile), '{"prs":[],"at":"before"}\n');
+});
+
+test('entrypoint.sh lays /app out once, keeping the image whole; without that layout nothing switches', async () => {
+  const i = instance();
+  assert.equal(fs.readlinkSync(path.join(i.appDir, 'current')), path.join(i.appDir, '.image'));
+  for (const name of SWAPPED) assert.equal(fs.readlinkSync(path.join(i.appDir, name)), path.join('current', name));
+  assert.deepEqual(imageContent(i.appDir), IMAGE);
+  prepareLayout(i.appDir); // a second boot of the same container: no change
+  assert.deepEqual(imageContent(i.appDir), IMAGE);
+  assert.equal(read(path.join(i.appDir, '.image/server/src/index.js')), IMAGE.server);
+
+  const bare = instance({ layout: false });
+  bare.dp.switchTo({ prs: [{ number: 1 }] });
+  const s = await settle(bare);
+  assert.equal(s.job.state, 'failed');
+  assert.match(s.job.error, /was not laid out for switching/);
+  assert.ok(fs.statSync(path.join(bare.appDir, 'server')).isDirectory(), 'the image dirs are left as they are');
+  assert.equal(s.job.steps.length, 0, 'refused before fetching anything');
 });
 
 test('a failed rollback leaves the release in place and says so', async () => {

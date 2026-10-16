@@ -127,7 +127,8 @@ export function describe(selection) {
 // ---------------------------------------------------------------- the service
 
 /**
- * Layout under appDir once the first switch has happened:
+ * Layout under appDir, made once per container by entrypoint.sh before the
+ * server starts (prepare_dev_preview_layout):
  *
  *   current        -> .image  |  <localDir>/releases/<id>     (THE switch)
  *   server         -> current/server
@@ -137,8 +138,7 @@ export function describe(selection) {
  *   .image/        the image's own copies, moved here once, never modified
  *
  * A switch or rollback is one rename of `current`, so the four paths can never
- * disagree. Every intermediate state of the one-time adoption serves the
- * image's content.
+ * disagree.
  *
  * @param {object} o
  * @param {string} o.appDir        where the image put the app (/app)
@@ -464,7 +464,7 @@ export function createDevPreview({
     return out;
   }
 
-  /** The image's own server dir. Valid once adoptImage() has run. */
+  /** The image's own server dir. */
   const imageServer = () => path.join(imageDir, 'server');
 
   // One install per cache entry at a time: a boot-time prewarm and a switch
@@ -512,35 +512,16 @@ export function createDevPreview({
   };
 
   /**
-   * Once per container: move the image's copies to .image/ and route each path
-   * through `current`. Idempotent, and every step leaves the image's content
-   * in place: `current` points at .image/ before any path is moved behind it.
+   * entrypoint.sh lays /app out once per container, before any server runs
+   * (an image directory cannot be renamed on the overlay filesystem, and must
+   * not be copied out from under a live server). Refuse rather than improvise.
    */
-  function adoptImage() {
-    fs.mkdirSync(imageDir, { recursive: true });
-    if (linkTarget() === null) { fault('adopt:current'); replaceLink(currentLink, imageDir); }
+  function requireLayout() {
+    if (linkTarget() === null) throw new Error('/app was not laid out for switching (entrypoint.sh prepare_dev_preview_layout); a restart of the Space redoes it');
     for (const name of SWAPPED) {
-      const live = path.join(appDir, name);
-      const kept = path.join(imageDir, name);
-      const via = path.join('current', name);
-      let st = null;
-      try { st = fs.lstatSync(live); } catch {}
-      if (st && st.isSymbolicLink() && fs.readlinkSync(live) === via) continue;
-      fault(`adopt:${name}`);
-      if (st && !st.isSymbolicLink()) {
-        fs.renameSync(live, kept);
-        // Between these two calls the path is briefly absent. If the link
-        // cannot be made, put the directory back rather than leave a hole.
-        try {
-          fault(`adopt-link:${name}`);
-          fs.symlinkSync(via, live);
-        } catch (e) {
-          try { fs.renameSync(kept, live); } catch {}
-          throw e;
-        }
-      } else if (fs.existsSync(kept)) {
-        replaceLink(live, via);
-      }
+      let to = null;
+      try { to = fs.readlinkSync(path.join(appDir, name)); } catch {}
+      if (to !== path.join('current', name)) throw new Error(`/app/${name} does not lead through /app/current; refusing to switch`);
     }
   }
 
@@ -550,7 +531,7 @@ export function createDevPreview({
    * links never disagree.
    */
   function commit(dir, nextSelection) {
-    adoptImage();
+    requireLayout();
     let before = null;
     try { before = fs.readFileSync(stateFile); } catch {}
     fault('state-write');
@@ -607,6 +588,7 @@ export function createDevPreview({
 
   async function doSwitch(prs, { pinned = null } = {}) {
     const t0 = Date.now();
+    requireLayout();
     const { base, prs: resolved } = pinned
       ? pinned
       : await step('resolve', () => resolveWithGitHub(prs));
@@ -637,15 +619,12 @@ export function createDevPreview({
       await run('tar', ['-xf', tar, '-C', build]);
       fs.rmSync(tar);
     });
-    const [srvModules, webModules] = await step('dependencies', () => {
-      // The release links the image's node_modules by its kept path, never
-      // through /app/server, which will lead to the release itself.
-      adoptImage();
-      return Promise.all([
-        serverModules(path.join(build, 'server')),
-        npmCi('web', path.join(build, 'web'), false),
-      ]);
-    });
+    // The release links the image's node_modules by its kept path, never
+    // through /app/server, which will lead to the release itself.
+    const [srvModules, webModules] = await step('dependencies', () => Promise.all([
+      serverModules(path.join(build, 'server')),
+      npmCi('web', path.join(build, 'web'), false),
+    ]));
     await step('build web', async () => {
       const web = path.join(build, 'web');
       fs.symlinkSync(webModules, path.join(web, 'node_modules'));

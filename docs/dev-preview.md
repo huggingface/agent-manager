@@ -48,11 +48,13 @@ Production and the template never set it.
    `node_modules` (the image has none) are cached the same way and pre-installed
    at boot for main's lockfile.
 6. Builds the web app with `vite build` (no type check; that is CI's job).
-7. Swaps the build in **one rename**. The first switch moves the image's
-   `server`, `scripts`, `public` and `session.bashrc` to `/app/.image/` and
-   routes each path through one link, `/app/current` (`/app/server` →
-   `current/server`, …); every intermediate step of that serves the image. A
-   switch then saves the selection (base SHA and PR SHAs) to
+7. Swaps the build in **one rename**. At boot, before any server runs,
+   `entrypoint.sh` moves the image's `server`, `scripts`, `public` and
+   `session.bashrc` to `/app/.image/` once and routes each path through one
+   link, `/app/current` (`/app/server` → `current/server`, …). This has to
+   happen there: on the container's overlay filesystem an image directory
+   cannot be renamed (`EXDEV`), only copied, and that must not happen under a
+   live server. A switch then saves the selection (base SHA and PR SHAs) to
    `/data/state/dev-preview.json` and repoints `/app/current` at the release.
    If that rename fails, the saved selection is put back, so the links and the
    selection never disagree. The current and previous releases are kept under

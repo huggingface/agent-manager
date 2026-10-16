@@ -253,9 +253,38 @@ supervise_app() {
     exit "$code"
   done
 }
+# Once per container, before any server runs: move the image's copies to
+# /app/.image and route each path through the one link a switch repoints,
+#   /app/current -> /app/.image,  /app/server -> current/server, …
+# This cannot be done by the running server: on the container's overlay
+# filesystem an image directory cannot be renamed (EXDEV), only copied, and a
+# copy-then-delete under a live server would pull files out from under it.
+prepare_dev_preview_layout() {
+  [ -L /app/current ] && return 0
+  mkdir -p /app/.image || return 1
+  for p in server scripts public session.bashrc; do
+    if [ -e "/app/$p" ] && [ ! -L "/app/$p" ]; then mv "/app/$p" "/app/.image/$p" || return 1; fi
+  done
+  ln -sfn /app/.image /app/.current.new && mv -Tf /app/.current.new /app/current || return 1
+  for p in server scripts public session.bashrc; do
+    ln -sfn "current/$p" "/app/.$p.new" && mv -Tf "/app/.$p.new" "/app/$p" || return 1
+  done
+}
 if [ "${AM_DEV_PREVIEW:-}" = "1" ]; then
-  boot "dev preview enabled: supervising the app so it can switch builds in place"
-  export AM_DEV_PREVIEW_SUPERVISED=1
+  PHASE_T0=$(date +%s)
+  if prepare_dev_preview_layout; then
+    boot "dev preview enabled: /app laid out for in-place switching in $(boot_elapsed "$PHASE_T0"); supervising the app"
+    export AM_DEV_PREVIEW_SUPERVISED=1
+  else
+    # Never boot without /app/server. Whatever was moved is put back; the
+    # app starts unsupervised, which disables switching (it says so).
+    echo "ERROR: dev preview could not lay out /app; switching is disabled" >&2
+    for p in server scripts public session.bashrc; do
+      [ -L "/app/$p" ] && rm -f "/app/$p"
+      [ -e "/app/$p" ] || { [ -e "/app/.image/$p" ] && mv "/app/.image/$p" "/app/$p"; }
+    done
+    rm -f /app/current
+  fi
   supervise_app &
 else
   node /app/server/src/index.js &
