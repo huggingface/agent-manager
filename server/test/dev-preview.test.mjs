@@ -647,7 +647,7 @@ test('after a container restart the saved selection is re-applied only if GitHub
   write(path.join(work, 'web/marker.txt'), 'pr1-moved\n');
   git(work, 'commit', '-qam', 'pr 1 moved');
   git(work, 'push', '-q', '-f', origin, 'HEAD:refs/pull/1/head');
-  try { await staysOnImage('moved since', undefined, /PR #1 moved to/); } finally {
+  try { await staysOnImage('moved since', undefined, /PR #1 moved to [0-9a-f]{7} since it was picked/); } finally {
     git(work, 'push', '-q', '-f', origin, `${prSha[1]}:refs/pull/1/head`);
   }
 });
