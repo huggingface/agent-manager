@@ -267,6 +267,12 @@ test('selections that touch image build inputs are refused with "needs a full re
   const s = await settle(stale);
   assert.equal(s.job.state, 'refused');
   assert.deepEqual(s.job.rebuild, [{ file: 'Dockerfile', why: 'differs from the running image' }]);
+
+  // An image built from #4's own Dockerfile runs #4 in place: what counts is
+  // the running image, not main.
+  const built = instance({ imageInputs: { ...MAIN, Dockerfile: 'FROM debian\n' } });
+  built.dp.switchTo({ prs: [{ number: 4 }] });
+  assert.equal((await settle(built)).job.state, 'done');
 });
 
 test('a selection that would remove the switcher itself is refused', async () => {
