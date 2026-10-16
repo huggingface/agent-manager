@@ -1,15 +1,16 @@
-// Dev preview switching against a local bare repository standing in for GitHub:
-// validation, merge order, conflicts, full-rebuild detection, rollback, and the
-// re-apply of a persisted selection after a container restart. The npm installs
-// and the web build run for real, against fixture packages with no
-// dependencies and a stub `vite` preloaded in the node_modules cache, so the
-// suite needs no network.
+// Dev preview switching against a local bare repository standing in for GitHub
+// (and a stubbed GitHub API): validation, open-PR binding, merge order,
+// conflicts, full-rebuild detection, the one-link swap and its failure paths,
+// rollback, credential filtering of build output, and the re-apply of a
+// persisted selection after a container restart. npm installs and the web
+// build run for real, against fixture packages with no dependencies and a stub
+// `vite` preloaded in the node_modules cache, so the suite needs no network.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   createDevPreview, validateSelection, lockKey, REBUILD_FILES, SWAPPED, DEV_PREVIEW_REPO, describe,
@@ -17,20 +18,15 @@ import {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(HERE, '..', '..');
+const MODULE = path.join(HERE, '..', 'src', 'dev-preview.js');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'am-dev-preview-'));
 const gitEnv = { PATH: process.env.PATH, HOME: root, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', LANG: 'C.UTF-8' };
 const git = (cwd, ...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'init.defaultBranch=main', ...args], { cwd, env: gitEnv, encoding: 'utf8' }).trim();
 const write = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); };
 const read = (file) => fs.readFileSync(file, 'utf8');
+const API = `https://api.github.com/repos/${DEV_PREVIEW_REPO}`;
 
 // ------------------------------------------------------------ fixture "GitHub"
-const origin = path.join(root, 'origin.git');
-const work = path.join(root, 'work');
-fs.mkdirSync(origin);
-git(origin, 'init', '-q', '--bare');
-git(origin, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
-git(root, 'init', '-q', work);
-
 const pkg = (name, version, extra = {}) => JSON.stringify({ name, version, ...extra }, null, 2);
 const lock = (name, version) => JSON.stringify({ name, version, lockfileVersion: 3, requires: true, packages: { '': { name, version } } }, null, 2);
 const MAIN = {
@@ -50,37 +46,76 @@ const MAIN = {
   'codex-requirements.toml': '# req\n',
   'gemini-system-defaults.json': '{}\n',
 };
-for (const [f, t] of Object.entries(MAIN)) write(path.join(work, f), t);
-git(work, 'add', '-A');
-git(work, 'commit', '-qm', 'main');
-git(work, 'push', '-q', origin, 'HEAD:refs/heads/main');
-const MAIN_SHA = git(work, 'rev-parse', 'HEAD');
 
-// One branch per PR, each off main, published where GitHub publishes them.
-const prSha = {};
-const makePr = (n, change) => {
-  git(work, 'checkout', '-q', '--detach', MAIN_SHA);
-  change(work);
+function makeOrigin(name, mainFiles) {
+  const origin = path.join(root, `${name}.git`);
+  const work = path.join(root, `${name}-work`);
+  fs.mkdirSync(origin);
+  git(origin, 'init', '-q', '--bare');
+  git(origin, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
+  git(root, 'init', '-q', work);
+  for (const [f, t] of Object.entries(mainFiles)) write(path.join(work, f), t);
   git(work, 'add', '-A');
-  git(work, 'commit', '-qm', `pr ${n}`);
-  git(work, 'push', '-q', '-f', origin, `HEAD:refs/pull/${n}/head`);
-  prSha[n] = git(work, 'rev-parse', 'HEAD');
+  git(work, 'commit', '-qm', 'main');
+  git(work, 'push', '-q', origin, 'HEAD:refs/heads/main');
+  const mainSha = git(work, 'rev-parse', 'HEAD');
+  const shas = {};
+  const pr = (n, change) => {
+    git(work, 'checkout', '-q', '--detach', mainSha);
+    change(work);
+    git(work, 'add', '-A');
+    git(work, 'commit', '-qm', `pr ${n}`);
+    git(work, 'push', '-q', '-f', origin, `HEAD:refs/pull/${n}/head`);
+    shas[n] = git(work, 'rev-parse', 'HEAD');
+  };
+  return { origin, work, mainSha, shas, pr };
+}
+
+const gh = makeOrigin('origin', MAIN);
+const { origin, work, mainSha: MAIN_SHA, shas: prSha } = gh;
+gh.pr(1, (w) => { write(path.join(w, 'web/marker.txt'), 'pr1\n'); write(path.join(w, 'server/src/index.js'), 'export const v = "pr1";\n'); });
+gh.pr(2, (w) => { write(path.join(w, 'scripts/two.sh'), 'echo two\n'); write(path.join(w, 'web/other.txt'), 'two\n'); });
+gh.pr(3, (w) => write(path.join(w, 'server/src/index.js'), 'export const v = "pr3";\n'));
+gh.pr(4, (w) => write(path.join(w, 'Dockerfile'), 'FROM debian\n'));
+gh.pr(5, (w) => fs.rmSync(path.join(w, 'server/src/dev-preview.js')));
+gh.pr(6, (w) => { write(path.join(w, 'server/package.json'), pkg('fx-server', '1.0.1')); write(path.join(w, 'server/package-lock.json'), lock('fx-server', '1.0.1')); });
+gh.pr(7, (w) => write(path.join(w, 'web/package.json'), pkg('fx-web', '1.0.0', { devDependencies: { playwright: '2.0.0' } })));
+gh.pr(8, (w) => write(path.join(w, 'entrypoint.sh'), '#!/bin/sh\necho changed\n'));
+// A PR whose build tries to print the parent process's environment.
+gh.pr(9, (w) => write(path.join(w, 'web/leak.js'), `
+  const fs = require('fs');
+  let out = '';
+  try { out = fs.readFileSync('/proc/' + process.ppid + '/environ', 'utf8').split('\\0').join('\\n'); } catch (e) { out = 'no environ: ' + e.message; }
+  process.stderr.write('LEAK-ATTEMPT\\n' + out + '\\n');
+  process.exit(1);
+`));
+gh.pr(10, (w) => write(path.join(w, 'web/marker.txt'), 'closed pr\n'));
+
+// The GitHub API as the fixture origin answers it right now. `closed` lists
+// PRs the API reports as closed although their refs/pull/N/head still exist.
+const closed = new Set([10]);
+const refOf = (o, ref) => {
+  const line = git(root, 'ls-remote', o, ref);
+  return line ? line.split('\t')[0] : null;
 };
-makePr(1, (w) => { write(path.join(w, 'web/marker.txt'), 'pr1\n'); write(path.join(w, 'server/src/index.js'), 'export const v = "pr1";\n'); });
-makePr(2, (w) => { write(path.join(w, 'scripts/two.sh'), 'echo two\n'); write(path.join(w, 'web/other.txt'), 'two\n'); });
-makePr(3, (w) => write(path.join(w, 'server/src/index.js'), 'export const v = "pr3";\n'));
-makePr(4, (w) => write(path.join(w, 'Dockerfile'), 'FROM debian\n'));
-makePr(5, (w) => fs.rmSync(path.join(w, 'server/src/dev-preview.js')));
-makePr(6, (w) => { write(path.join(w, 'server/package.json'), pkg('fx-server', '1.0.1')); write(path.join(w, 'server/package-lock.json'), lock('fx-server', '1.0.1')); });
-makePr(7, (w) => write(path.join(w, 'web/package.json'), pkg('fx-web', '1.0.0', { devDependencies: { playwright: '2.0.0' } })));
-makePr(8, (w) => write(path.join(w, 'entrypoint.sh'), '#!/bin/sh\necho changed\n'));
+const fixtureApi = (o = origin) => async (url) => {
+  if (url === `${API}/branches/main`) return { name: 'main', commit: { sha: refOf(o, 'refs/heads/main') } };
+  const m = url.match(/\/pulls\/(\d+)$/);
+  if (m) {
+    const n = Number(m[1]);
+    const head = refOf(o, `refs/pull/${n}/head`);
+    if (!head) throw Object.assign(new Error('not found'), { notFound: true });
+    return { number: n, state: closed.has(n) ? 'closed' : 'open', head: { sha: head }, base: { repo: { full_name: DEV_PREVIEW_REPO } } };
+  }
+  throw new Error(`unexpected API call ${url}`);
+};
 
 // ------------------------------------------------------------ fixture image + instance
 let n = 0;
-function instance({ stateFile = path.join(root, `state-${++n}.json`), localDir, imageInputs = MAIN } = {}) {
+function makeImage({ imageInputs = MAIN } = {}) {
   const dir = path.join(root, `inst-${++n}`);
   const appDir = path.join(dir, 'app');
-  localDir ||= path.join(dir, 'local');
+  const localDir = path.join(dir, 'local');
   // What the Dockerfile leaves in /app.
   write(path.join(appDir, 'server/src/index.js'), 'export const v = "image";\n');
   write(path.join(appDir, 'server/package.json'), MAIN['server/package.json']);
@@ -93,32 +128,51 @@ function instance({ stateFile = path.join(root, `state-${++n}.json`), localDir, 
     if (imageInputs[f] !== undefined) write(path.join(appDir, '.image-inputs', f), imageInputs[f]);
   }
   // The web deps of main, already installed: a stub vite that "builds" by
-  // writing which tree it saw.
+  // writing which tree it saw, and runs a PR's leak.js if there is one.
   const webSrc = path.join(dir, 'websrc');
   write(path.join(webSrc, 'package.json'), MAIN['web/package.json']);
   write(path.join(webSrc, 'package-lock.json'), MAIN['web/package-lock.json']);
-  const vite = path.join(localDir, 'node_modules-cache', `web-${lockKey(webSrc)}`, 'node_modules', 'vite');
+  const cache = path.join(localDir, 'node_modules-cache', `web-${lockKey(webSrc)}`);
+  write(path.join(cache, 'package-lock.json'), MAIN['web/package-lock.json']);
+  const vite = path.join(cache, 'node_modules', 'vite');
   write(path.join(vite, 'package.json'), '{"type":"commonjs"}');
   write(path.join(vite, 'bin/vite.js'), `
     const fs = require('fs');
+    if (fs.existsSync('leak.js')) require(require('path').resolve('leak.js'));
     fs.mkdirSync('dist', { recursive: true });
     fs.writeFileSync('dist/index.html', 'built:' + fs.readFileSync('marker.txt', 'utf8').trim() + (fs.existsSync('other.txt') ? '+other' : ''));
   `);
+  return { appDir, localDir };
+}
+/** A server process on these dirs. Called again with the same dirs = after its restart. */
+function server({ appDir, localDir, stateFile, faults = null, api = fixtureApi(), remote = origin }) {
   const restarts = [];
   const audits = [];
   const dp = createDevPreview({
     appDir, localDir, stateFile, supervised: true,
     restart: () => restarts.push(Date.now()),
     audit: (e) => audits.push(e),
-    testRemote: `file://${origin}`,
+    testRemote: `file://${remote}`,
     env: { PATH: process.env.PATH },
-    fetchJson: async () => { throw new Error('no network in tests'); },
+    fetchJson: api,
+    fault: (point) => { if (faults && faults.has(point)) { faults.delete(point); throw new Error(`injected fault at ${point}`); } },
   });
   return { dp, appDir, localDir, stateFile, restarts, audits };
 }
-const live = (appDir, name) => fs.realpathSync(path.join(appDir, name));
+function instance(opts = {}) {
+  const { stateFile = path.join(root, `state-${++n}.json`), imageInputs, ...rest } = opts;
+  return server({ ...makeImage({ imageInputs }), stateFile, ...rest });
+}
+const restarted = (i, extra = {}) => server({ appDir: i.appDir, localDir: i.localDir, stateFile: i.stateFile, ...extra });
 const settle = (i) => i.dp._wait();
-const waitRestart = async (i, count) => { for (let t = 0; t < 100 && i.restarts.length < count; t++) await new Promise((r) => setTimeout(r, 50)); };
+const waitRestart = async (i, count) => { for (let t = 0; t < 100 && i.restarts.length < count; t++) await new Promise((r) => setTimeout(r, 20)); };
+const imageContent = (appDir) => ({
+  server: read(path.join(appDir, 'server/src/index.js')),
+  scripts: read(path.join(appDir, 'scripts/hello.sh')),
+  public: read(path.join(appDir, 'public/index.html')),
+  rc: read(path.join(appDir, 'session.bashrc')),
+});
+const IMAGE = { server: 'export const v = "image";\n', scripts: 'echo image\n', public: 'image ui', rc: '# image rc\n' };
 
 // ------------------------------------------------------------ validation
 
@@ -142,12 +196,12 @@ test('selection validation accepts only PR numbers and full SHAs', () => {
 
 test('the repository is a constant: production passes no remote, and only file:// test remotes are accepted', () => {
   assert.equal(DEV_PREVIEW_REPO, 'huggingface/agent-manager');
-  const src = read(path.join(REPO_ROOT, 'server/src/dev-preview.js'));
+  const src = read(MODULE);
   assert.match(src, /const REPO_URL = `https:\/\/github\.com\/\$\{DEV_PREVIEW_REPO\}\.git`/);
   const index = read(path.join(REPO_ROOT, 'server/src/index.js'));
   const call = index.slice(index.indexOf('createDevPreview({'), index.indexOf('}) : null;'));
   assert.ok(call.length > 0);
-  assert.doesNotMatch(call, /testRemote|remote:|REPO|github|fetchJson/);
+  assert.doesNotMatch(call, /testRemote|remote:|REPO|github|fetchJson|fault/);
   for (const bad of ['https://github.com/evil/fork.git', 'git@github.com:evil/fork.git', '/tmp/x', 'ext::sh -c x']) {
     assert.throws(() => createDevPreview({ appDir: root, localDir: root, stateFile: path.join(root, 'x'), testRemote: bad }), /file:\/\//);
   }
@@ -158,9 +212,9 @@ test('every Dockerfile COPY source is either swapped in place or a full-rebuild 
   const covered = (src) => {
     const top = src.replace(/\/$/, '').split('/')[0];
     if (SWAPPED.includes(top) && top !== 'scripts') return true;          // server/, session.bashrc
-    if (src === 'scripts/' ) return true;                                  // swapped as a whole
+    if (src === 'scripts/') return true;                                   // swapped as a whole
     if (REBUILD_FILES.includes(src)) return true;
-    if (src === 'web/' ) return true;                                      // built into public/
+    if (src === 'web/') return true;                                       // built into public/
     if (src === 'web/package.json' || src === 'web/package-lock.json') return true; // pin check + npm ci
     return false;
   };
@@ -177,60 +231,66 @@ test('every Dockerfile COPY source is either swapped in place or a full-rebuild 
 
 // ------------------------------------------------------------ switching
 
-test('switch to one PR: merged onto main, built, swapped atomically, persisted, audited, restarted', async () => {
+test('switch to one PR: bound to the API head, merged onto main, built, swapped by one link, persisted, restarted', async () => {
   const i = instance();
   assert.equal(i.dp.running().kind, 'main');
-  i.dp.switchTo({ prs: [{ number: 1, sha: prSha[1] }] });
+  i.dp.switchTo({ prs: [{ number: 1 }] });
   const s = await settle(i);
   assert.equal(s.job.state, 'done', s.job.error);
-  // the image is kept whole for rollback
+  assert.deepEqual(s.job.steps.map((x) => x.name), ['resolve', 'fetch', 'merge', 'check', 'export', 'dependencies', 'build web', 'assemble', 'swap']);
+  // the image is kept whole for rollback; the four paths go through one link
   assert.equal(read(path.join(i.appDir, '.image/public/index.html')), 'image ui');
-  for (const name of SWAPPED) assert.ok(fs.lstatSync(path.join(i.appDir, name)).isSymbolicLink(), name);
+  for (const name of SWAPPED) assert.equal(fs.readlinkSync(path.join(i.appDir, name)), path.join('current', name), name);
+  assert.equal(fs.readlinkSync(path.join(i.appDir, 'current')), path.join(i.localDir, 'releases', s.next.id));
   assert.equal(read(path.join(i.appDir, 'public/index.html')), 'built:pr1');
   assert.equal(read(path.join(i.appDir, 'server/src/index.js')), 'export const v = "pr1";\n');
   // lockfile unchanged → the image's node_modules, no install
   assert.equal(fs.realpathSync(path.join(i.appDir, 'server/node_modules')), fs.realpathSync(path.join(i.appDir, '.image/server/node_modules')));
   assert.match(i.dp.status().log.join('\n'), /lockfile matches the image/);
   assert.match(i.dp.status().log.join('\n'), /web: lockfile [0-9a-f]+ cached, no install/);
-  const run = i.dp.running();
-  assert.equal(run.kind, 'prs');
-  assert.deepEqual(run.prs, [{ number: 1, sha: prSha[1] }]);
-  assert.equal(run.base, MAIN_SHA);
-  assert.equal(describe(run), `#1 ${prSha[1].slice(0, 7)}`);
+  // This process still runs the image: it says so, and that a restart is due.
+  assert.equal(s.running.kind, 'main');
+  assert.equal(s.restartPending, true);
+  assert.deepEqual(s.next.prs, [{ number: 1, sha: prSha[1] }]);
+  assert.equal(s.next.base, MAIN_SHA);
   assert.deepEqual(JSON.parse(read(i.stateFile)).prs, [{ number: 1, sha: prSha[1] }]);
   assert.equal(i.audits.at(-1).event, 'switch');
   assert.equal(i.audits.at(-1).ok, true);
   await waitRestart(i, 1);
   assert.equal(i.restarts.length, 1);
-  assert.deepEqual(s.job.steps.map((x) => x.name), ['fetch', 'merge', 'check', 'export', 'dependencies', 'build web', 'assemble', 'swap']);
+  // The restarted server is the one that claims the release.
+  const after = restarted(i);
+  assert.equal(after.dp.running().kind, 'prs');
+  assert.equal(describe(after.dp.running()), `#1 ${prSha[1].slice(0, 7)}`);
+  assert.equal(after.dp.summary().restartPending, false);
+  assert.equal(after.dp.boot(), null, 'nothing to re-apply');
 });
 
 test('a stack of two is merged onto main in the order given; rollback returns to the image', async () => {
   const i = instance();
-  i.dp.switchTo({ prs: [{ number: 2 }, { number: 1 }] });
+  i.dp.switchTo({ prs: [{ number: 2 }, { number: 1, sha: prSha[1] }] });
   const s = await settle(i);
   assert.equal(s.job.state, 'done', s.job.error);
   assert.equal(read(path.join(i.appDir, 'public/index.html')), 'built:pr1+other');
   assert.equal(read(path.join(i.appDir, 'scripts/two.sh')), 'echo two\n');
-  const run = i.dp.running();
-  assert.deepEqual(run.prs.map((p) => p.number), [2, 1]);
-  // merge order is recorded in history: first parent chain main → #2 → #1
   const repo = i.dp._paths.repoDir;
-  assert.match(git(repo, 'log', '-1', '--format=%s', run.merged), /preview: merge #1 /);
-  assert.match(git(repo, 'log', '-1', '--format=%s', `${run.merged}^1`), /preview: merge #2 /);
+  assert.match(git(repo, 'log', '-1', '--format=%s', s.next.merged), /preview: merge #1 /);
+  assert.match(git(repo, 'log', '-1', '--format=%s', `${s.next.merged}^1`), /preview: merge #2 /);
   await waitRestart(i, 1);
 
-  i.dp.rollback();
-  const r = await settle(i);
+  const up = restarted(i);
+  assert.deepEqual(up.dp.running().prs.map((p) => p.number), [2, 1]);
+  up.dp.rollback();
+  const r = await settle(up);
   assert.equal(r.job.state, 'done');
-  assert.equal(i.dp.running().kind, 'main');
-  assert.equal(read(path.join(i.appDir, 'public/index.html')), 'image ui');
-  assert.equal(read(path.join(i.appDir, 'server/src/index.js')), 'export const v = "image";\n');
-  assert.equal(live(i.appDir, 'server'), fs.realpathSync(path.join(i.appDir, '.image/server')));
-  assert.deepEqual(JSON.parse(read(i.stateFile)).prs, []);
-  await waitRestart(i, 2);
-  assert.equal(i.restarts.length, 2);
-  assert.equal(i.audits.at(-1).event, 'rollback');
+  assert.equal(r.restartPending, true);
+  assert.equal(r.next.kind, 'main');
+  assert.deepEqual(imageContent(up.appDir), IMAGE);
+  assert.deepEqual(JSON.parse(read(up.stateFile)).prs, []);
+  await waitRestart(up, 1);
+  assert.equal(up.restarts.length, 1);
+  assert.equal(up.audits.at(-1).event, 'rollback');
+  assert.equal(restarted(up).dp.running().kind, 'main');
 });
 
 test('a merge conflict stops the switch, names the files, and leaves the running build alone', async () => {
@@ -240,17 +300,17 @@ test('a merge conflict stops the switch, names the files, and leaves the running
   assert.equal(s.job.state, 'failed');
   assert.deepEqual(s.job.conflict, { pr: 3, onto: 'main + #1', files: ['server/src/index.js'] });
   assert.match(s.job.error, /#3 conflicts with main \+ #1 in server\/src\/index\.js/);
-  assert.equal(i.dp.running().kind, 'main');
-  assert.ok(!fs.lstatSync(path.join(i.appDir, 'server')).isSymbolicLink(), 'nothing swapped');
+  assert.equal(s.restartPending, false);
+  assert.deepEqual(imageContent(i.appDir), IMAGE);
   assert.equal(fs.existsSync(i.stateFile), false, 'selection not persisted');
   assert.equal(i.restarts.length, 0);
   assert.equal(i.audits.at(-1).ok, false);
-  // the checkout is usable again: a clean switch right after works
+  // a clean switch right after works
   i.dp.switchTo({ prs: [{ number: 3 }] });
   assert.equal((await settle(i)).job.state, 'done');
 });
 
-test('selections that touch image build inputs are refused with "needs a full rebuild" and the files', async () => {
+test('selections whose image build inputs differ from the running image are refused with the files', async () => {
   for (const [pr, file] of [[4, 'Dockerfile'], [8, 'entrypoint.sh'], [7, 'web/package.json (playwright pin)']]) {
     const i = instance();
     i.dp.switchTo({ prs: [{ number: 2 }, { number: pr }] });
@@ -258,7 +318,7 @@ test('selections that touch image build inputs are refused with "needs a full re
     assert.equal(s.job.state, 'refused', `#${pr}`);
     assert.match(s.job.error, /^needs a full rebuild: /);
     assert.deepEqual(s.job.rebuild, [{ file, why: 'changed by the selection' }]);
-    assert.equal(i.dp.running().kind, 'main');
+    assert.equal(s.restartPending, false);
     assert.equal(i.restarts.length, 0);
   }
   // main moved past the image: its own Dockerfile differs from the one built
@@ -281,7 +341,7 @@ test('a selection that would remove the switcher itself is refused', async () =>
   const s = await settle(i);
   assert.equal(s.job.state, 'failed');
   assert.match(s.job.error, /no server\/src\/dev-preview\.js/);
-  assert.equal(i.dp.running().kind, 'main');
+  assert.equal(s.restartPending, false);
 });
 
 test('npm ci runs only when the lockfile changed, and its result is cached by lockfile hash', async () => {
@@ -296,25 +356,169 @@ test('npm ci runs only when the lockfile changed, and its result is cached by lo
   assert.equal(fs.readlinkSync(path.join(i.appDir, 'server/node_modules')), path.join(i.localDir, 'node_modules-cache', `server-${key}`, 'node_modules'));
 });
 
-test('unknown PRs and PRs that moved since the list was loaded fail cleanly', async () => {
+// ------------------------------------------------------------ source boundary
+
+test('only open PRs, bound to the head SHA GitHub reports', async () => {
   const i = instance();
-  i.dp.switchTo({ prs: [{ number: 999 }] });
+  // #10 still has refs/pull/10/head, but GitHub says it is closed.
+  i.dp.switchTo({ prs: [{ number: 10 }] });
   let s = await settle(i);
   assert.equal(s.job.state, 'failed');
-  assert.match(s.job.error, /#999 does not exist/);
+  assert.match(s.job.error, /PR #10 is closed; only open PRs/);
+  // one closed PR anywhere in a stack refuses the stack
+  i.dp.switchTo({ prs: [{ number: 2 }, { number: 10 }] });
+  assert.match((await settle(i)).job.error, /#10 is closed/);
+  // unknown number
+  i.dp.switchTo({ prs: [{ number: 999 }] });
+  assert.match((await settle(i)).job.error, /#999 does not exist/);
+  // a SHA from the list that is no longer the head
   i.dp.switchTo({ prs: [{ number: 1, sha: prSha[2] }] });
-  s = await settle(i);
-  assert.equal(s.job.state, 'failed');
-  assert.match(s.job.error, /#1 moved/);
-  assert.equal(i.dp.running().kind, 'main');
+  assert.match((await settle(i)).job.error, /#1 moved/);
+  // a PR that GitHub says is on another repository
+  const elsewhere = instance({ api: async (url) => {
+    const r = await fixtureApi()(url);
+    return url.includes('/pulls/') ? { ...r, base: { repo: { full_name: 'someone/fork' } } } : r;
+  } });
+  elsewhere.dp.switchTo({ prs: [{ number: 1 }] });
+  assert.match((await settle(elsewhere)).job.error, /not a PR on huggingface\/agent-manager/);
+  assert.equal(i.restarts.length + elsewhere.restarts.length, 0);
+  assert.deepEqual(imageContent(i.appDir), IMAGE);
 });
 
-test('only one switch at a time', async () => {
+test('a repository-local git redirect cannot change what is fetched', async () => {
+  // Another "repository" with its own main and #1.
+  const evil = makeOrigin('evil', { ...MAIN, 'web/marker.txt': 'EVIL\n' });
+  evil.pr(1, (w) => write(path.join(w, 'web/marker.txt'), 'EVIL-PR\n'));
+  const i = instance();
+  // Plant a redirect where the checkout lives, as if left by anything that
+  // could write there.
+  const repo = i.dp._paths.repoDir;
+  git(root, 'init', '-q', repo);
+  git(repo, 'config', `url.file://${evil.origin}.insteadOf`, `file://${origin}`);
+  i.dp.switchTo({ prs: [{ number: 1 }] });
+  const s = await settle(i);
+  assert.equal(s.job.state, 'done', s.job.error);
+  assert.equal(read(path.join(i.appDir, 'public/index.html')), 'built:pr1');
+  assert.deepEqual(s.next.prs, [{ number: 1, sha: prSha[1] }]);
+  assert.equal(s.next.base, MAIN_SHA);
+  assert.doesNotMatch(read(path.join(repo, '.git', 'config')), /insteadOf/i, 'a fresh database');
+  // And if a fetch WERE redirected, the API-bound SHAs would not be there.
+  const redirected = instance({ remote: evil.origin });
+  redirected.dp.switchTo({ prs: [{ number: 1 }] });
+  const r = await settle(redirected);
+  assert.equal(r.job.state, 'failed');
+  assert.match(r.job.error, /is not available on huggingface\/agent-manager/);
+});
+
+// ------------------------------------------------------------ swap failures
+
+test('a failure at any swap or state-write boundary leaves the image serving and nothing pending', async () => {
+  const points = ['adopt:current', ...SWAPPED.flatMap((p) => [`adopt:${p}`, `adopt-link:${p}`]), 'state-write', 'swap'];
+  for (const point of points) {
+    const i = instance({ faults: new Set([point]) });
+    i.dp.switchTo({ prs: [{ number: 1 }] });
+    const s = await settle(i);
+    assert.equal(s.job.state, 'failed', point);
+    assert.match(s.job.error, new RegExp(`injected fault at ${point}`));
+    assert.deepEqual(imageContent(i.appDir), IMAGE, `${point}: all four paths still the image`);
+    assert.equal(s.restartPending, false, `${point}: no restart claimed`);
+    assert.equal(s.running.kind, 'main');
+    assert.equal(fs.existsSync(i.stateFile), false, `${point}: no selection saved`);
+    assert.equal(i.restarts.length, 0);
+    // and the next attempt goes through
+    i.dp.switchTo({ prs: [{ number: 1 }] });
+    assert.equal((await settle(i)).job.state, 'done', `${point}: retry`);
+  }
+  // A failed swap restores the previous saved selection byte for byte.
+  const i = instance({ faults: new Set(['swap']) });
+  write(i.stateFile, '{"prs":[],"at":"before"}\n');
+  i.dp.switchTo({ prs: [{ number: 2 }] });
+  assert.equal((await settle(i)).job.state, 'failed');
+  assert.equal(read(i.stateFile), '{"prs":[],"at":"before"}\n');
+});
+
+test('a failed rollback leaves the release in place and says so', async () => {
+  const i = instance();
+  i.dp.switchTo({ prs: [{ number: 2 }] });
+  await settle(i);
+  await waitRestart(i, 1);
+  const up = restarted(i, { faults: new Set(['swap']) });
+  up.dp.rollback();
+  const r = await settle(up);
+  assert.equal(r.job.state, 'failed');
+  assert.match(r.job.error, /roll back failed/);
+  assert.equal(r.restartPending, false);
+  assert.equal(r.running.kind, 'prs');
+  assert.equal(read(path.join(up.appDir, 'scripts/two.sh')), 'echo two\n');
+  assert.deepEqual(JSON.parse(read(up.stateFile)).prs.map((p) => p.number), [2]);
+  assert.equal(up.restarts.length, 0);
+});
+
+test('one switch at a time, and none while a restart into the last one is pending', async () => {
   const i = instance();
   i.dp.switchTo({ prs: [{ number: 2 }] });
   assert.throws(() => i.dp.switchTo({ prs: [{ number: 1 }] }), /already running/);
   assert.throws(() => i.dp.rollback(), /already running/);
-  await settle(i);
+  assert.equal((await settle(i)).job.state, 'done');
+  // built and swapped; this process has not restarted yet
+  assert.throws(() => i.dp.switchTo({ prs: [{ number: 1 }] }), (e) => e.code === 'busy' && /restarting into the last switch/.test(e.message));
+  assert.throws(() => i.dp.rollback(), (e) => e.code === 'busy');
+  // once restarted, it accepts again
+  const up = restarted(i);
+  up.dp.switchTo({ prs: [{ number: 1 }] });
+  assert.equal((await settle(up)).job.state, 'done');
+});
+
+// ------------------------------------------------------------ build output
+
+test('a build that prints the parent\'s environment leaks a secret into no status, log or audit', () => {
+  // A separate process that starts with the secrets in its environment, the
+  // way the manager does, so /proc/<ppid>/environ really contains them.
+  const known = 'am-canary-known-7f3e9d2c51b8';           // a Space secret (known value)
+  const pattern = `hf_${'Qz9'.repeat(12)}`;               // not configured; caught by the token pattern
+  const { appDir, localDir } = makeImage();
+  const stateFile = path.join(root, 'leak-state.json');
+  const durableLog = path.join(root, 'leak-durable.log');
+  const out = path.join(root, 'leak-out.json');
+  const runner = path.join(root, 'leak-runner.mjs');
+  write(runner, `
+    import fs from 'node:fs';
+    import { createDevPreview } from ${JSON.stringify(MODULE)};
+    const cfg = JSON.parse(process.argv[2]);
+    const audits = [];
+    const dp = createDevPreview({
+      appDir: cfg.appDir, localDir: cfg.localDir, stateFile: cfg.stateFile, durableLog: cfg.durableLog,
+      supervised: true, restart: () => {}, audit: (e) => audits.push(e),
+      knownSecrets: () => [process.env.AM_CANARY_KNOWN],
+      testRemote: 'file://' + cfg.origin, env: { PATH: process.env.PATH },
+      fetchJson: async (url) => url.endsWith('/branches/main') ? { commit: { sha: cfg.main } }
+        : { number: 9, state: 'open', head: { sha: cfg.head }, base: { repo: { full_name: 'huggingface/agent-manager' } } },
+    });
+    dp.switchTo({ prs: [{ number: 9 }] });
+    const s = await dp._wait();
+    fs.writeFileSync(cfg.out, JSON.stringify({ status: dp.status(), info: dp.summary(), audits, state: s.job.state, error: s.job.error }));
+  `);
+  const cfg = { appDir, localDir, stateFile, durableLog, out, origin, main: MAIN_SHA, head: prSha[9] };
+  const r = spawnSync(process.execPath, [runner, JSON.stringify(cfg)], {
+    env: { PATH: process.env.PATH, AM_CANARY_KNOWN: known, AM_CANARY_PATTERN: pattern }, encoding: 'utf8',
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const result = JSON.parse(read(out));
+  assert.equal(result.state, 'failed');
+  assert.equal(result.error, 'vite build failed (exit 1); its output is in the log', 'job.error carries no build output');
+  const logText = result.status.log.join('\n');
+  assert.match(logText, /LEAK-ATTEMPT/, 'the attempt really ran and its output reached the log');
+  assert.match(logText, /AM_CANARY_KNOWN=\[redacted\]/);
+  assert.match(logText, /AM_CANARY_PATTERN=\[redacted\]/);
+  const sinks = {
+    status: JSON.stringify(result.status), info: JSON.stringify(result.info), audit: JSON.stringify(result.audits),
+    localLog: read(path.join(localDir, 'last-switch.log')), durableLog: read(durableLog),
+  };
+  for (const [name, text] of Object.entries(sinks)) {
+    assert.ok(!text.includes(known), `known secret reached ${name}`);
+    assert.ok(!text.includes(pattern), `pattern secret reached ${name}`);
+  }
+  assert.equal(fs.existsSync(stateFile), false);
 });
 
 // ------------------------------------------------------------ restart
@@ -323,31 +527,36 @@ test('after a container restart the persisted selection is re-applied with the s
   const stateFile = path.join(root, 'durable-selection.json');
   const first = instance({ stateFile });
   first.dp.switchTo({ prs: [{ number: 2 }, { number: 1 }] });
-  assert.equal((await settle(first)).job.state, 'done');
-  const pinned = first.dp.running().prs;
+  const done = await settle(first);
+  assert.equal(done.job.state, 'done');
+  const pinned = done.next.prs;
 
-  // #1 gets a new commit after the switch; the restart must not pick it up.
+  // After the switch #1 gets a new commit and GitHub calls it closed; a
+  // restart must still bring back exactly what was accepted.
   git(work, 'checkout', '-q', '--detach', prSha[1]);
   write(path.join(work, 'web/marker.txt'), 'pr1-moved\n');
   git(work, 'commit', '-qam', 'pr 1 moved');
   git(work, 'push', '-q', '-f', origin, 'HEAD:refs/pull/1/head');
-
-  // A restart: /app is the image again and local disk is empty; /data kept the file.
-  const second = instance({ stateFile });
-  assert.equal(second.dp.running().kind, 'main');
-  assert.ok(second.dp.boot(), 'boot started a re-apply');
-  const s = await settle(second);
-  assert.equal(s.job.state, 'done', s.job.error);
-  assert.equal(s.job.source, 'boot');
-  assert.deepEqual(second.dp.running().prs, pinned);
-  assert.equal(second.dp.running().base, MAIN_SHA);
-  assert.equal(read(path.join(second.appDir, 'public/index.html')), 'built:pr1+other');
-  await waitRestart(second, 1);
-  assert.equal(second.restarts.length, 1);
-
-  // Its server restarting into the build: nothing left to re-apply.
-  assert.equal(second.dp.boot(), null);
-  git(work, 'push', '-q', '-f', origin, `${prSha[1]}:refs/pull/1/head`);
+  closed.add(1);
+  try {
+    // A restart: /app is the image again and local disk is empty; /data kept the file.
+    const second = instance({ stateFile, api: async () => { throw new Error('boot must not ask GitHub'); } });
+    assert.equal(second.dp.running().kind, 'main');
+    assert.ok(second.dp.boot(), 'boot started a re-apply');
+    const s = await settle(second);
+    assert.equal(s.job.state, 'done', s.job.error);
+    assert.equal(s.job.source, 'boot');
+    assert.deepEqual(s.next.prs, pinned);
+    assert.equal(s.next.base, MAIN_SHA);
+    assert.equal(read(path.join(second.appDir, 'public/index.html')), 'built:pr1+other');
+    await waitRestart(second, 1);
+    assert.equal(second.restarts.length, 1);
+    // Its server restarting into the build: nothing left to re-apply.
+    assert.equal(restarted(second).dp.boot(), null);
+  } finally {
+    closed.delete(1);
+    git(work, 'push', '-q', '-f', origin, `${prSha[1]}:refs/pull/1/head`);
+  }
 });
 
 test('a build the supervisor rolled back after a crash is reported and not re-applied', async () => {

@@ -11,15 +11,28 @@
 //   - the repository is a constant, never a parameter of any request;
 //   - a selection is a list of PR numbers (integers) and optional head SHAs
 //     (40 hex chars), checked before anything runs;
+//   - an operator's PR number is resolved through the GitHub API: it must be
+//     OPEN, and the switch is bound to the head SHA (and main SHA) the API
+//     reports — the fetched refs are never trusted for identity;
+//   - every fetch goes into a freshly created git database with global and
+//     system config ignored, so no `insteadOf` anywhere can redirect it;
 //   - every subprocess is execFile with an argument array (no shell), with an
-//     environment built from scratch rather than inherited from the server, so
-//     a PR's install scripts never see the Space's tokens;
-//   - git runs with global/system config ignored, so an `insteadOf` in the
-//     operator's ~/.gitconfig cannot redirect the fetch to another repository.
+//     environment built from scratch rather than inherited from the server;
+//   - nothing a subprocess prints reaches the status, logs or audit log
+//     without the same credential filter API audit records use.
+//
+// What this does NOT do: isolate the build from the manager. This container
+// has no user namespaces (seccomp) and no root, and /data is a FUSE mount that
+// is world-readable to any uid, so neither a sandbox nor a second user would
+// keep a build away from the Space's secrets. It would not change the trust
+// boundary either: once switched, the PR's server code IS the manager. The
+// boundary is that only collaborators can open PRs on the hard-coded repo and
+// the operator picks which run. See docs/dev-preview.md.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { createCredentialFilter } from './audit-credentials.js';
 
 export const DEV_PREVIEW_REPO = 'huggingface/agent-manager';
 const REPO_URL = `https://github.com/${DEV_PREVIEW_REPO}.git`;
@@ -114,6 +127,19 @@ export function describe(selection) {
 // ---------------------------------------------------------------- the service
 
 /**
+ * Layout under appDir once the first switch has happened:
+ *
+ *   current        -> .image  |  <localDir>/releases/<id>     (THE switch)
+ *   server         -> current/server
+ *   scripts        -> current/scripts
+ *   public         -> current/public
+ *   session.bashrc -> current/session.bashrc
+ *   .image/        the image's own copies, moved here once, never modified
+ *
+ * A switch or rollback is one rename of `current`, so the four paths can never
+ * disagree. Every intermediate state of the one-time adoption serves the
+ * image's content.
+ *
  * @param {object} o
  * @param {string} o.appDir        where the image put the app (/app)
  * @param {string} o.localDir      fast local disk for the checkout, caches, releases
@@ -122,13 +148,16 @@ export function describe(selection) {
  * @param {boolean} o.supervised   the entrypoint restarts the server on RESTART_EXIT_CODE
  * @param {() => void} o.restart   stop sessions and exit with RESTART_EXIT_CODE
  * @param {(entry) => void} o.audit  append an audit-log record
+ * @param {() => string[]} [o.knownSecrets] exact values to redact (the Space's injected secrets)
  * @param {string} [o.testRemote]  file:// URL standing in for GitHub in tests ONLY
  * @param {Function} [o.fetchJson] GitHub API reader (tests stub it)
+ * @param {(point: string) => void} [o.fault] failure injection for tests
  */
 export function createDevPreview({
   appDir, localDir, stateFile, durableLog = null, supervised = false,
-  restart = () => {}, audit = () => {}, testRemote = null, fetchJson = null,
+  restart = () => {}, audit = () => {}, knownSecrets = () => [], testRemote = null, fetchJson = null,
   githubToken = () => process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '', env = process.env,
+  fault = () => {},
 }) {
   if (testRemote !== null && !/^file:\/\//.test(testRemote)) throw new Error('testRemote must be a file:// URL');
   const remote = testRemote || REPO_URL;
@@ -139,6 +168,7 @@ export function createDevPreview({
   const crashFile = path.join(localDir, 'crashed');
   const imageDir = path.join(appDir, '.image');
   const imageInputs = path.join(appDir, '.image-inputs');
+  const currentLink = path.join(appDir, 'current');
 
   // A clean environment for every child: no Space secrets, no CLI homes.
   const childEnv = {
@@ -161,52 +191,72 @@ export function createDevPreview({
     '-c', 'core.hooksPath=/dev/null', '-c', 'advice.detachedHead=false',
   ];
 
+  // Built per use so a rotated secret is matched by its current value.
+  const scrub = (text) => {
+    try { return createCredentialFilter(knownSecrets() || [])(String(text)); } catch { return '[unfilterable output withheld]'; }
+  };
+
   let job = null;           // the switch in flight, or the last one
   let lastLog = [];
   let crashed = null;
   let prCache = null;
 
+  /** The only way text reaches the status, the logs or the audit record. */
   const log = (line) => {
-    const text = `[${new Date().toISOString().slice(11, 19)}] ${line}`;
-    lastLog.push(text);
+    for (const part of scrub(line).split('\n')) {
+      const text = `[${new Date().toISOString().slice(11, 19)}] ${part}`;
+      lastLog.push(text);
+      try { fs.appendFileSync(logFile, `${text}\n`); } catch {}
+    }
     if (lastLog.length > 2000) lastLog = lastLog.slice(-1500);
-    try { fs.appendFileSync(logFile, `${text}\n`); } catch {}
   };
 
-  const run = (cmd, args, { cwd, timeout = 600_000 } = {}) => new Promise((resolve, reject) => {
+  /**
+   * A failed subprocess's output goes to the (filtered) log, and only there.
+   * The error it raises is fixed text: job.error and the audit record never
+   * carry anything a build printed.
+   */
+  const run = (cmd, args, { cwd, timeout = 600_000, label = `${path.basename(cmd)} ${args[0] || ''}`.trim(), quiet = false } = {}) => new Promise((resolve, reject) => {
     execFile(cmd, args, { cwd, env: childEnv, timeout, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
-        const msg = String(stderr || err.message || '').trim().split('\n').slice(-25).join('\n');
-        reject(Object.assign(new Error(`${cmd} ${args[0] || ''} failed: ${msg}`), { stdout: String(stdout), stderr: String(stderr), exit: err.code }));
+        if (!quiet) {
+          const tail = String(stderr || stdout || '').trim().split('\n').slice(-40).join('\n');
+          if (tail) log(`${label} output:\n${tail}`);
+        }
+        const exit = typeof err.code === 'number' ? `exit ${err.code}` : (err.signal || 'killed');
+        reject(Object.assign(new Error(`${label} failed (${exit}); its output is in the log`), { stderr: String(stderr), exit: err.code }));
       } else resolve(String(stdout));
     });
   });
-  const git = (args, opts = {}) => run('git', [...gitBase, ...args], { cwd: repoDir, ...opts });
+  const git = (args, opts = {}) => run('git', [...gitBase, ...args], { cwd: repoDir, label: `git ${args[0]}`, ...opts });
 
   // ------------------------------------------------------------ what is running
 
-  /** Read from the filesystem, not from memory: the supervisor may have rolled back. */
-  function running() {
-    let target = null;
-    try { target = fs.readlinkSync(path.join(appDir, 'server')); } catch {}
+  const describeTarget = (target) => {
     if (!target || !target.startsWith(releasesDir + path.sep)) return { kind: 'main', label: 'main', image: true, id: 'image', prs: [] };
-    const release = readJson(path.join(path.dirname(target), 'release.json'));
-    if (!release) return { kind: 'unknown', label: 'unknown release', id: path.basename(path.dirname(target)), prs: [] };
+    const release = readJson(path.join(target, 'release.json'));
+    if (!release) return { kind: 'unknown', label: 'unknown release', id: path.basename(target), prs: [] };
     return { kind: 'prs', label: describe(release), id: release.id, base: release.base, prs: release.prs, merged: release.merged, builtAt: release.builtAt };
-  }
+  };
+  const linkTarget = () => { try { return fs.readlinkSync(currentLink); } catch { return null; } };
+  /** What `current` points at: the build the NEXT server start will load. */
+  const target = () => describeTarget(linkTarget());
+  // The build THIS process loaded, which is the one answering. Claimed as
+  // "running" — never the link, which can be ahead of it until the restart.
+  const loaded = target();
+  const running = () => loaded;
+  const restartPending = () => target().id !== loaded.id;
 
   const selection = () => readJson(stateFile) || { prs: [] };
-  // The build this process loaded. If the symlinks point elsewhere, a restart
-  // is still pending and the code answering is NOT what running() names.
-  const loadedId = running().id;
 
   function summary() {
+    const next = target();
     return {
       repo: DEV_PREVIEW_REPO,
       supervised,
-      running: running(),
-      loaded: loadedId,
-      restartPending: running().id !== loadedId,
+      running: loaded,
+      restartPending: next.id !== loaded.id,
+      next: next.id !== loaded.id ? next : null,
       selected: selection(),
       job: job && {
         id: job.id, kind: job.kind, source: job.source, state: job.state, step: job.step,
@@ -217,7 +267,7 @@ export function createDevPreview({
     };
   }
 
-  // ------------------------------------------------------------ PR list
+  // ------------------------------------------------------------ GitHub API
 
   async function defaultFetchJson(url) {
     const token = githubToken();
@@ -228,19 +278,20 @@ export function createDevPreview({
       },
       signal: AbortSignal.timeout(15_000),
     });
+    if (res.status === 404) throw Object.assign(new Error('not found'), { notFound: true });
     if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
     return res.json();
   }
+  const getJson = (url) => (fetchJson || defaultFetchJson)(url);
 
   async function listPrs() {
     if (prCache && Date.now() - prCache.at < 20_000) return prCache.value;
-    const get = fetchJson || defaultFetchJson;
     const [pulls, main] = await Promise.all([
-      get(`${API_URL}/pulls?state=open&per_page=100&sort=updated&direction=desc`),
-      get(`${API_URL}/branches/main`),
+      getJson(`${API_URL}/pulls?state=open&per_page=100&sort=updated&direction=desc`),
+      getJson(`${API_URL}/branches/main`),
     ]);
     const prs = (Array.isArray(pulls) ? pulls : [])
-      .filter((p) => validPrNumber(p?.number) && validSha(p?.head?.sha))
+      .filter((p) => validPrNumber(p?.number) && validSha(p?.head?.sha) && p?.state === 'open')
       .map((p) => ({
         number: p.number,
         title: String(p.title || '').slice(0, 300),
@@ -256,7 +307,39 @@ export function createDevPreview({
     return value;
   }
 
+  /**
+   * An operator's selection, bound to what GitHub says now: each PR must be
+   * open on DEV_PREVIEW_REPO, its head is the API's head SHA, and main is the
+   * API's main SHA. (A closed PR keeps its refs/pull/N/head, so the ref alone
+   * proves nothing.)
+   */
+  async function resolveWithGitHub(prs) {
+    let main;
+    try { main = await getJson(`${API_URL}/branches/main`); } catch (e) { throw new Error(`could not read main from GitHub: ${e.message}`); }
+    const base = main?.commit?.sha;
+    if (!validSha(base)) throw new Error('GitHub did not return a valid SHA for main');
+    const resolved = [];
+    for (const p of prs) {
+      let pr;
+      try { pr = await getJson(`${API_URL}/pulls/${p.number}`); } catch (e) {
+        throw new Error(e.notFound ? `PR #${p.number} does not exist on ${DEV_PREVIEW_REPO}` : `could not read PR #${p.number} from GitHub: ${e.message}`);
+      }
+      if (pr?.number !== p.number) throw new Error(`GitHub returned a different PR for #${p.number}`);
+      if (pr.base?.repo?.full_name !== DEV_PREVIEW_REPO) throw new Error(`PR #${p.number} is not a PR on ${DEV_PREVIEW_REPO}`);
+      if (pr.state !== 'open') throw new Error(`PR #${p.number} is ${String(pr.state || 'not open').slice(0, 20)}; only open PRs can be previewed`);
+      const head = pr.head?.sha;
+      if (!validSha(head)) throw new Error(`GitHub did not return a valid head SHA for #${p.number}`);
+      if (p.sha && p.sha !== head) {
+        throw new Error(`PR #${p.number} moved to ${short(head)} since the list was loaded (expected ${short(p.sha)}); refresh and try again`);
+      }
+      resolved.push({ number: p.number, sha: head });
+    }
+    return { base, prs: resolved };
+  }
+
   // ------------------------------------------------------------ the switch
+
+  const busy = () => (job && (job.state === 'running' || job.restarting)) || restartPending();
 
   function begin(kind, source, prs) {
     if (!supervised) {
@@ -264,8 +347,9 @@ export function createDevPreview({
       // the code answering. entrypoint.sh's supervisor is what restarts us.
       throw Object.assign(new Error('the server is not running under the entrypoint supervisor, so it cannot restart into a new build'), { statusCode: 409, code: 'not-supervised' });
     }
-    if (job && job.state === 'running') {
-      throw Object.assign(new Error(`a ${job.kind} is already running`), { statusCode: 409, code: 'busy' });
+    if (busy()) {
+      const what = job && job.state === 'running' ? `a ${job.kind} is already running` : 'the server is restarting into the last switch';
+      throw Object.assign(new Error(`${what}; try again once it is up`), { statusCode: 409, code: 'busy' });
     }
     lastLog = [];
     try { fs.mkdirSync(localDir, { recursive: true }); fs.writeFileSync(logFile, ''); } catch {}
@@ -287,72 +371,71 @@ export function createDevPreview({
     }
   }
 
-  async function ensureRepo() {
+  /** A new, empty git database for every switch: no config, refs or objects carry over. */
+  async function freshRepo() {
     fs.mkdirSync(childEnv.HOME, { recursive: true });
     fs.mkdirSync(childEnv.TMPDIR, { recursive: true });
-    if (!fs.existsSync(path.join(repoDir, '.git'))) {
-      fs.mkdirSync(repoDir, { recursive: true });
-      await git(['init', '-q']);
-    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.mkdirSync(repoDir, { recursive: true });
+    // --template= : no hooks or config from a template directory either.
+    await git(['init', '-q', '--template=']);
   }
 
   async function revParse(ref) {
-    try { return (await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).trim(); } catch { return null; }
+    try { return (await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { quiet: true })).trim(); } catch { return null; }
   }
   async function hasCommit(sha) { return (await revParse(sha)) === sha; }
 
   /**
-   * Fetch main and every PR head into refs/am/*. With `pinned` SHAs (a boot
-   * re-apply), make sure those exact commits are present even if the PR has
-   * moved on since, fetching them by SHA when the ref no longer points there.
+   * Fetch main and every PR head, then make sure each exact commit the switch
+   * is bound to is present, fetching it by SHA if a ref has moved since.
    */
-  async function fetchRefs(prs, base) {
+  async function fetchCommits(base, prs) {
     // The remote is passed on every fetch rather than stored as a configured
-    // remote, so nothing on disk can redirect it.
+    // remote, into a database created a moment ago.
     const specs = ['+refs/heads/main:refs/am/main', ...prs.map((p) => `+refs/pull/${p.number}/head:refs/am/pr/${p.number}`)];
     log(`fetching ${DEV_PREVIEW_REPO}: main${prs.map((p) => ` #${p.number}`).join('')}`);
     try {
-      await git(['fetch', '--no-tags', '--quiet', remote, ...specs], { timeout: 300_000 });
+      await git(['fetch', '--no-tags', '--quiet', remote, ...specs], { timeout: 300_000, quiet: true });
     } catch (e) {
-      const missing = (e.stderr || e.message).match(/refs\/pull\/(\d+)\/head/);
+      const missing = String(e.stderr || '').match(/refs\/pull\/(\d+)\/head/);
       if (missing) throw new Error(`PR #${missing[1]} does not exist on ${DEV_PREVIEW_REPO}`);
-      throw e;
+      log(`git fetch output:\n${String(e.stderr || '').trim().split('\n').slice(-20).join('\n')}`);
+      throw new Error(`fetching from ${DEV_PREVIEW_REPO} failed; its output is in the log`);
     }
-    const want = [...prs.filter((p) => p.sha).map((p) => p.sha), ...(base ? [base] : [])];
-    for (const sha of want) {
+    for (const sha of [base, ...prs.map((p) => p.sha)]) {
       if (await hasCommit(sha)) continue;
-      log(`fetching pinned commit ${short(sha)}`);
-      try { await git(['fetch', '--no-tags', '--quiet', remote, sha], { timeout: 300_000 }); } catch {}
-      if (!(await hasCommit(sha))) throw new Error(`commit ${short(sha)} is no longer available on ${DEV_PREVIEW_REPO}`);
+      log(`fetching ${short(sha)} by SHA`);
+      try { await git(['fetch', '--no-tags', '--quiet', remote, sha], { timeout: 300_000, quiet: true }); } catch {}
+      if (!(await hasCommit(sha))) throw new Error(`commit ${short(sha)} is not available on ${DEV_PREVIEW_REPO}`);
     }
   }
 
   /** Merge every PR onto main in the given order. Stops at the first conflict. */
   async function mergeStack(base, prs) {
-    await git(['reset', '-q', '--hard']);
     await git(['checkout', '-q', '--force', '--detach', base]);
-    await git(['clean', '-qfdx']);
     for (let i = 0; i < prs.length; i++) {
       const p = prs[i];
       log(`merging #${p.number} (${short(p.sha)})`);
       try {
-        await git(['merge', '--no-ff', '--no-edit', '-m', `preview: merge #${p.number} ${p.sha}`, p.sha]);
+        await git(['merge', '--no-ff', '--no-edit', '-m', `preview: merge #${p.number} ${p.sha}`, p.sha], { quiet: true });
       } catch (e) {
         let files = [];
-        try { files = (await git(['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean); } catch {}
-        try { await git(['merge', '--abort']); } catch {}
+        try { files = (await git(['diff', '--name-only', '--diff-filter=U'])).split('\n').filter(Boolean).map(scrub); } catch {}
+        try { await git(['merge', '--abort'], { quiet: true }); } catch {}
         const onto = ['main', ...prs.slice(0, i).map((q) => `#${q.number}`)].join(' + ');
         job.conflict = { pr: p.number, onto, files };
+        if (!files.length) log(`git merge output:\n${String(e.stderr || '').trim().split('\n').slice(-20).join('\n')}`);
         throw new Error(files.length
           ? `#${p.number} conflicts with ${onto} in ${files.join(', ')}`
-          : `#${p.number} could not be merged onto ${onto}: ${e.message}`);
+          : `#${p.number} could not be merged onto ${onto}; the output is in the log`);
       }
     }
     return (await git(['rev-parse', 'HEAD'])).trim();
   }
 
   const showFile = async (rev, file) => {
-    try { return await git(['show', `${rev}:${file}`]); } catch { return null; }
+    try { return await git(['show', `${rev}:${file}`], { quiet: true }); } catch { return null; }
   };
   const imageFile = (file) => { try { return fs.readFileSync(path.join(imageInputs, file), 'utf8'); } catch { return null; } };
 
@@ -396,56 +479,91 @@ export function createDevPreview({
   }
   async function installOnce(kind, srcDir, omitDev) {
     const key = lockKey(srcDir);
-    const target = path.join(nmDir, `${kind}-${key}`);
-    if (fs.existsSync(path.join(target, 'node_modules'))) {
+    const cached = path.join(nmDir, `${kind}-${key}`);
+    if (fs.existsSync(path.join(cached, 'package-lock.json'))) {
       log(`${kind}: lockfile ${key} cached, no install`);
-      return path.join(target, 'node_modules');
+      return path.join(cached, 'node_modules');
     }
     log(`${kind}: lockfile ${key} is new → npm ci${omitDev ? ' --omit=dev' : ''}`);
-    const work = `${target}.tmp-${process.pid}`;
+    const work = `${cached}.tmp-${process.pid}`;
     fs.rmSync(work, { recursive: true, force: true });
     fs.mkdirSync(work, { recursive: true });
     for (const f of ['package.json', 'package-lock.json']) fs.copyFileSync(path.join(srcDir, f), path.join(work, f));
-    await run('npm', ['ci', '--no-audit', '--no-fund', '--loglevel=error', ...(omitDev ? ['--omit=dev'] : [])], { cwd: work, timeout: 900_000 });
-    fs.rmSync(target, { recursive: true, force: true });
-    fs.renameSync(work, target);
-    return path.join(target, 'node_modules');
+    await run('npm', ['ci', '--no-audit', '--no-fund', '--loglevel=error', ...(omitDev ? ['--omit=dev'] : [])], { cwd: work, timeout: 900_000, label: `npm ci (${kind})` });
+    fs.rmSync(cached, { recursive: true, force: true });
+    fs.renameSync(work, cached);
+    return path.join(cached, 'node_modules');
   }
 
   async function serverModules(srcServer) {
     const img = imageServer();
-    const same = lockKey(srcServer) === lockKey(img);
-    if (same && fs.existsSync(path.join(img, 'node_modules'))) {
+    if (lockKey(srcServer) === lockKey(img) && fs.existsSync(path.join(img, 'node_modules'))) {
       log('server: lockfile matches the image, reusing its node_modules');
       return path.join(img, 'node_modules');
     }
     return npmCi('server', srcServer, true);
   }
 
-  /** Move the image's own copies aside once, leaving symlinks in their place. */
+  const replaceLink = (link, to) => {
+    const tmp = `${link}.swap-${process.pid}`;
+    try { fs.unlinkSync(tmp); } catch {}
+    fs.symlinkSync(to, tmp);
+    fs.renameSync(tmp, link);
+  };
+
+  /**
+   * Once per container: move the image's copies to .image/ and route each path
+   * through `current`. Idempotent, and every step leaves the image's content
+   * in place: `current` points at .image/ before any path is moved behind it.
+   */
   function adoptImage() {
     fs.mkdirSync(imageDir, { recursive: true });
+    if (linkTarget() === null) { fault('adopt:current'); replaceLink(currentLink, imageDir); }
     for (const name of SWAPPED) {
       const live = path.join(appDir, name);
       const kept = path.join(imageDir, name);
+      const via = path.join('current', name);
       let st = null;
       try { st = fs.lstatSync(live); } catch {}
+      if (st && st.isSymbolicLink() && fs.readlinkSync(live) === via) continue;
+      fault(`adopt:${name}`);
       if (st && !st.isSymbolicLink()) {
         fs.renameSync(live, kept);
-        fs.symlinkSync(kept, live);
-      } else if (!st && fs.existsSync(kept)) fs.symlinkSync(kept, live);
+        // Between these two calls the path is briefly absent. If the link
+        // cannot be made, put the directory back rather than leave a hole.
+        try {
+          fault(`adopt-link:${name}`);
+          fs.symlinkSync(via, live);
+        } catch (e) {
+          try { fs.renameSync(kept, live); } catch {}
+          throw e;
+        }
+      } else if (fs.existsSync(kept)) {
+        replaceLink(live, via);
+      }
     }
   }
 
-  /** Point every swapped path at `dir` — each one a single atomic rename. */
-  function pointAt(dir) {
+  /**
+   * The one switch: save the selection, then repoint `current` in a single
+   * rename. If the rename fails the saved selection is put back, so state and
+   * links never disagree.
+   */
+  function commit(dir, nextSelection) {
     adoptImage();
-    for (const name of SWAPPED) {
-      const live = path.join(appDir, name);
-      const tmp = path.join(appDir, `.${name}.swap-${process.pid}`);
-      try { fs.unlinkSync(tmp); } catch {}
-      fs.symlinkSync(path.join(dir, name), tmp);
-      fs.renameSync(tmp, live);
+    let before = null;
+    try { before = fs.readFileSync(stateFile); } catch {}
+    fault('state-write');
+    writeJson(stateFile, nextSelection);
+    try {
+      fault('swap');
+      replaceLink(currentLink, dir);
+    } catch (e) {
+      try {
+        if (before === null) fs.rmSync(stateFile, { force: true });
+        else { const tmp = `${stateFile}.restore`; fs.writeFileSync(tmp, before); fs.renameSync(tmp, stateFile); }
+      } catch {}
+      throw e;
     }
   }
 
@@ -454,16 +572,16 @@ export function createDevPreview({
     try { names = fs.readdirSync(releasesDir); } catch { return; }
     for (const n of names) {
       if (keep.includes(n)) continue;
-      fs.rmSync(path.join(releasesDir, n), { recursive: true, force: true });
+      try { fs.rmSync(path.join(releasesDir, n), { recursive: true, force: true }); } catch {}
     }
   }
 
   function finish(state, error = null) {
     job.state = state;
-    job.error = error;
+    job.error = error === null ? null : scrub(error);
     job.finishedAt = Date.now();
     const secs = ((job.finishedAt - job.startedAt) / 1000).toFixed(1);
-    log(state === 'done' ? `done in ${secs}s` : `${state} after ${secs}s: ${error}`);
+    log(state === 'done' ? `done in ${secs}s` : `${state} after ${secs}s: ${job.error}`);
     if (durableLog) {
       try { fs.mkdirSync(path.dirname(durableLog), { recursive: true }); fs.writeFileSync(durableLog, `${lastLog.join('\n')}\n`); } catch {}
     }
@@ -472,7 +590,7 @@ export function createDevPreview({
         event: job.kind, source: job.source, ok: state === 'done', state,
         request: { prs: job.prs },
         result: {
-          running: running().label, error, durationMs: job.finishedAt - job.startedAt,
+          running: loaded.label, next: target().label, error: job.error, durationMs: job.finishedAt - job.startedAt,
           ...(job.conflict ? { conflict: job.conflict } : {}), ...(job.rebuild ? { rebuild: job.rebuild } : {}),
         },
       });
@@ -482,26 +600,19 @@ export function createDevPreview({
   function scheduleRestart() {
     job.restarting = true;
     log('restarting the server');
-    // Long enough for a polling panel to see "done" before the socket drops.
-    setTimeout(() => { try { restart(); } catch (e) { console.error('[dev-preview] restart failed', e); } }, 1500).unref?.();
+    // Promptly: until the exit, the old in-memory server is answering in front
+    // of the new files. A polling panel learns the outcome from the new server.
+    setImmediate(() => { try { restart(); } catch (e) { console.error('[dev-preview] restart failed', e); } });
   }
 
-  async function doSwitch(prs, { base: pinnedBase = null } = {}) {
+  async function doSwitch(prs, { pinned = null } = {}) {
     const t0 = Date.now();
-    await step('fetch', async () => { await ensureRepo(); await fetchRefs(prs, pinnedBase); });
-    const base = pinnedBase || await revParse('refs/am/main');
-    if (!base) throw new Error('main could not be fetched');
-    const resolved = [];
-    for (const p of prs) {
-      const head = await revParse(`refs/am/pr/${p.number}`);
-      if (!head && !p.sha) throw new Error(`PR #${p.number} does not exist on ${DEV_PREVIEW_REPO}`);
-      if (p.sha && job.source !== 'boot' && head !== p.sha) {
-        throw new Error(`PR #${p.number} moved to ${short(head)} since the list was loaded (expected ${short(p.sha)}); refresh and try again`);
-      }
-      resolved.push({ number: p.number, sha: p.sha || head });
-    }
+    const { base, prs: resolved } = pinned
+      ? pinned
+      : await step('resolve', () => resolveWithGitHub(prs));
     job.prs = resolved;
     log(`base main ${short(base)}; stack ${describe({ prs: resolved })}`);
+    await step('fetch', async () => { await freshRepo(); await fetchCommits(base, resolved); });
 
     const merged = await step('merge', () => mergeStack(base, resolved));
     await step('check', async () => {
@@ -528,18 +639,18 @@ export function createDevPreview({
     });
     const [srvModules, webModules] = await step('dependencies', () => {
       // The release links the image's node_modules by its kept path, never
-      // through /app/server — that becomes a link to the release itself.
+      // through /app/server, which will lead to the release itself.
       adoptImage();
       return Promise.all([
-      serverModules(path.join(build, 'server')),
-      npmCi('web', path.join(build, 'web'), false),
+        serverModules(path.join(build, 'server')),
+        npmCi('web', path.join(build, 'web'), false),
       ]);
     });
     await step('build web', async () => {
       const web = path.join(build, 'web');
       fs.symlinkSync(webModules, path.join(web, 'node_modules'));
       // vite only: type-checking is the PR's CI's job, not a preview's.
-      await run(process.execPath, [path.join(web, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--logLevel', 'warn'], { cwd: web, timeout: 600_000 });
+      await run(process.execPath, [path.join(web, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--logLevel', 'warn'], { cwd: web, timeout: 600_000, label: 'vite build' });
     });
     await step('assemble', async () => {
       fs.renameSync(path.join(build, 'server'), path.join(rel, 'server'));
@@ -552,20 +663,22 @@ export function createDevPreview({
         id, base, prs: resolved, merged, builtAt: new Date().toISOString(), buildMs: Date.now() - t0,
       });
     });
-    const previous = running().id;
     await step('swap', async () => {
-      pointAt(rel);
-      writeJson(stateFile, { base, prs: resolved, at: new Date().toISOString() });
-      pruneReleases([id, previous]);
+      commit(rel, { base, prs: resolved, at: new Date().toISOString() });
+      pruneReleases([id, loaded.id]);
     });
   }
 
-  function startSwitch(prs, { source = 'operator', base = null } = {}) {
+  function startSwitch(prs, { source = 'operator', pinned = null } = {}) {
     begin('switch', source, prs);
     log(`switch to ${prs.map((p) => `#${p.number}`).join(' + ')} (${source})`);
-    doSwitch(prs, { base }).then(
+    doSwitch(prs, { pinned }).then(
       () => { finish('done'); scheduleRestart(); },
-      (e) => finish(job.rebuild ? 'refused' : 'failed', e.message),
+      (e) => {
+        // A switch that failed after building leaves nothing half-done: the
+        // swap is one rename and commit() restores the saved selection.
+        finish(job.rebuild ? 'refused' : 'failed', e.message);
+      },
     );
     return summary();
   }
@@ -575,15 +688,19 @@ export function createDevPreview({
     begin('rollback', source, []);
     log('roll back to main (the image build)');
     try {
-      const was = running();
-      if (fs.existsSync(imageDir)) pointAt(imageDir);
-      writeJson(stateFile, { prs: [], at: new Date().toISOString() });
-      log(`was ${was.label}`);
-      finish('done');
-      if (was.kind !== 'main') scheduleRestart();
-      else log('already on main; nothing to restart');
+      log(`was ${loaded.label}`);
+      if (loaded.kind === 'main' && linkTarget() === null) {
+        writeJson(stateFile, { prs: [], at: new Date().toISOString() });
+        finish('done');
+        log('already on main; nothing to restart');
+      } else {
+        commit(imageDir, { prs: [], at: new Date().toISOString() });
+        finish('done');
+        if (restartPending()) scheduleRestart();
+        else log('already on main; nothing to restart');
+      }
     } catch (e) {
-      finish('failed', e.message);
+      finish('failed', `roll back failed: ${e.message}`);
     }
     return summary();
   }
@@ -598,18 +715,17 @@ export function createDevPreview({
       const marker = fs.readFileSync(crashFile, 'utf8').trim();
       fs.rmSync(crashFile, { force: true });
       const bad = selection();
-      crashed = { at: new Date().toISOString(), detail: marker.slice(0, 500), selection: bad };
+      crashed = { at: new Date().toISOString(), detail: scrub(marker.slice(0, 500)), selection: bad };
       // Forget it, or every boot would rebuild the same crash.
       writeJson(stateFile, { prs: [], at: crashed.at, crashedFrom: bad });
       lastLog = [];
       log(`the previewed release exited right after starting (${marker.slice(0, 200)}); the supervisor rolled back to main`);
-      audit({ event: 'crash-rollback', source: 'supervisor', ok: false, state: 'rolled-back', request: { prs: bad.prs || [] }, result: { detail: marker.slice(0, 500) } });
+      audit({ event: 'crash-rollback', source: 'supervisor', ok: false, state: 'rolled-back', request: { prs: bad.prs || [] }, result: { detail: crashed.detail } });
     } catch {}
     try { lastLog = fs.readFileSync(logFile, 'utf8').split('\n').filter(Boolean).slice(-1500); } catch {
       try { if (durableLog) lastLog = fs.readFileSync(durableLog, 'utf8').split('\n').filter(Boolean).slice(-1500); } catch {}
     }
     const want = selection();
-    const now = running();
     const prewarm = () => {
       // The image has no web node_modules (the web is built in its own stage),
       // so the first switch after a container start would install them. Do it
@@ -619,27 +735,29 @@ export function createDevPreview({
       fs.mkdirSync(childEnv.TMPDIR, { recursive: true });
       npmCi('web', web, false).catch((e) => console.error('[dev-preview] web prewarm failed:', e.message));
     };
-    const same = (want.prs || []).length === now.prs.length
-      && (want.prs || []).every((p, i) => p.number === now.prs[i].number && p.sha === now.prs[i].sha);
+    const same = (want.prs || []).length === loaded.prs.length
+      && (want.prs || []).every((p, i) => p.number === loaded.prs[i].number && p.sha === loaded.prs[i].sha);
     if ((want.prs || []).length && !same) {
       const prs = want.prs.filter((p) => validPrNumber(p?.number) && validSha(p?.sha));
-      if (prs.length !== want.prs.length || (want.base && !validSha(want.base))) {
+      if (prs.length !== want.prs.length || !validSha(want.base)) {
         console.error('[dev-preview] persisted selection is malformed; staying on main');
         return null;
       }
+      // Exactly what was accepted before, by SHA; no GitHub lookup. A PR that
+      // has since closed or moved still re-applies what the operator chose.
       console.log(`[dev-preview] re-applying ${describe(want)} on main ${short(want.base)}`);
-      return startSwitch(prs, { source: 'boot', base: want.base || null });
+      return startSwitch(prs, { source: 'boot', pinned: { base: want.base, prs: prs.map((p) => ({ number: p.number, sha: p.sha })) } });
     }
-    if (now.kind === 'main') prewarm();
+    if (loaded.kind === 'main') prewarm();
     return null;
   }
 
   return {
-    summary, running, listPrs, boot, rollback,
+    summary, running, target, listPrs, boot, rollback,
     switchTo: (body) => startSwitch(validateSelection(body)),
     status: () => ({ ...summary(), log: lastLog.slice(-400) }),
     // tests
-    _paths: { repoDir, releasesDir, nmDir, logFile, crashFile, imageDir, imageInputs },
+    _paths: { repoDir, releasesDir, nmDir, logFile, crashFile, imageDir, imageInputs, currentLink },
     _wait: async () => { while (job && job.state === 'running') await new Promise((r) => setTimeout(r, 25)); return summary(); },
   };
 }

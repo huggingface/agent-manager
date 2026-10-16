@@ -348,8 +348,9 @@ export function operationMiddleware({
  * boot re-apply, a supervisor rollback. Same file and shape as the middleware's
  * records, so the API log shows it beside the call that started it.
  */
-export function appendSystemOperation({ origin, method = 'SYSTEM', path: opPath, request, result, ok, durationMs = 0 }, appendRecord = append) {
-  const filterString = createCredentialFilter([]);
+export function appendSystemOperation({ origin, method = 'SYSTEM', path: opPath, request, result, ok, durationMs = 0, knownValues = [] }, appendRecord = append) {
+  // The same known-value + pattern filter request records get.
+  const filterString = createCredentialFilter(knownValues);
   appendRecord({
     version: 2,
     id: crypto.randomUUID(),

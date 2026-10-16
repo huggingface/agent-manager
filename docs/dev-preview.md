@@ -20,9 +20,16 @@ Production and the template never set it.
 
 ## What a switch does
 
-1. Fetches `main` and `pull/<N>/head` for each picked PR from
-   `https://github.com/huggingface/agent-manager.git` into a checkout on local
-   disk (`$AM_LOCAL/dev-preview/repo`). The repository is a constant in
+1. Resolves each PR number through the GitHub API: it must be **open** on
+   `huggingface/agent-manager` (GitHub keeps `refs/pull/N/head` after a PR
+   closes, so the ref proves nothing), and the switch is bound to the head SHA
+   the API reports, and to main's SHA from the API. A SHA sent from the list
+   that is no longer the head is refused ("moved; refresh").
+   Fetches those commits from `https://github.com/huggingface/agent-manager.git`
+   into a **freshly created** git database on local disk
+   (`$AM_LOCAL/dev-preview/repo`, recreated every switch, global and system
+   config ignored), so no `insteadOf` anywhere can redirect it, and a commit
+   that is not there is refused. The repository is a constant in
    `server/src/dev-preview.js`; no request can name another.
 2. Merges the PRs onto main **in the order picked** (one PR is merged onto main
    too, the way GitHub's merge ref is). A conflict stops the switch and names the
@@ -41,43 +48,68 @@ Production and the template never set it.
    `node_modules` (the image has none) are cached the same way and pre-installed
    at boot for main's lockfile.
 6. Builds the web app with `vite build` (no type check; that is CI's job).
-7. Swaps `/app/server`, `/app/scripts`, `/app/public` and `/app/session.bashrc`.
-   The first switch moves the image's copies to `/app/.image/` and leaves
-   symlinks; each swap is one atomic `rename` of a symlink. The current and
-   previous releases are kept under `$AM_LOCAL/dev-preview/releases/`.
-8. Saves the selection (base SHA and PR SHAs) to `/data/state/dev-preview.json`
-   and exits the server with code 75. The supervisor in `entrypoint.sh` starts it
-   again; the container keeps running. All agent sessions restart with the server.
+7. Swaps the build in **one rename**. The first switch moves the image's
+   `server`, `scripts`, `public` and `session.bashrc` to `/app/.image/` and
+   routes each path through one link, `/app/current` (`/app/server` →
+   `current/server`, …); every intermediate step of that serves the image. A
+   switch then saves the selection (base SHA and PR SHAs) to
+   `/data/state/dev-preview.json` and repoints `/app/current` at the release.
+   If that rename fails, the saved selection is put back, so the links and the
+   selection never disagree. The current and previous releases are kept under
+   `$AM_LOCAL/dev-preview/releases/`.
+8. Exits the server with code 75. The supervisor in `entrypoint.sh` starts it
+   again; the container keeps running. All agent sessions restart with the
+   server. Until that happens the banner says what is still answering and
+   "restarting into …", and no other switch or rollback is accepted.
 
-**Roll back to main** points the symlinks back at `/app/.image/` and restarts:
+**Roll back to main** repoints `/app/current` at `/app/.image/` and restarts:
 no fetch, no build.
 
 ## Restarts and crashes
 
 A container restart puts `/app` back to the image and wipes local disk. On boot
 the server reads `/data/state/dev-preview.json` and re-applies the **same SHAs**
-(fetching them by SHA if a PR has moved on), then restarts into them. The banner
+(fetching them by SHA if a PR has moved on), then restarts into them. This is
+the one path that does not ask GitHub: it re-applies exactly what the operator
+accepted, even if that PR has since moved or closed. The banner
 says `main` until then.
 
 If a previewed build exits non-zero within two minutes of starting, the
-supervisor points the symlinks back at the image, leaves a marker, and starts the
+supervisor repoints `/app/current` at the image, leaves a marker, and starts the
 image. The image then reports the crash in the banner and panel, clears the saved
 selection (so the next boot does not rebuild the same crash) and logs it.
 
 ## Security
 
 This is code execution by design: whatever the picked PRs contain runs as the
-app. It sits behind the Space's HF auth like the rest of Agent Manager, and:
+app, with everything the app can reach. The boundary is that only
+collaborators can open PRs on the hard-coded repository, only open PRs can be
+picked, and the operator picks. It sits behind the Space's HF auth like the
+rest of Agent Manager, and:
 
 - the gate covers routes, `/api/info`, the UI and the boot path;
 - a switch body is `{prs: [{number, sha?}]}` only: JSON integers, 40-hex SHAs,
   no duplicates, at most 6, no other keys;
-- every subprocess is `execFile` with an argument array; git runs with global
-  and system config ignored and only `https` allowed, so an `insteadOf` cannot
-  redirect it; children get a fresh environment without the Space's secrets;
+- every subprocess is `execFile` with an argument array, with a fresh
+  environment that does not include the Space's secrets;
+- **nothing a subprocess prints is shown, saved or audited unfiltered**: every
+  log line passes the API audit log's credential filter, with the Space's
+  injected secret values as known values plus its token patterns; a failing
+  command's error (`job.error`, the audit record) is fixed text, its output only
+  in the filtered log;
 - every switch request is in the API log (`POST /api/dev-preview/switch`), and
   its outcome, boot re-applies and crash rollbacks are appended as `PREVIEW`
-  records from origin `dev-preview`.
+  records from origin `dev-preview`, through the same filter.
+
+**What is not isolated.** The install and build run as the manager's user.
+They can read what the manager can: its `/proc/<pid>/environ`, and `/data`. This
+container has no user namespaces (seccomp), no root, and `/data` is a FUSE
+mount readable by every uid, so neither a sandbox nor a second user would keep
+a build away from the Space's secrets. Filtering stops a secret from being
+*shown* by accident; it cannot stop a hostile build that encodes a secret, or
+sends it over the network. That is the same exposure the previewed server has
+once it runs, which is why the trust decision is which PRs can be picked, not
+how the build runs.
 
 ## API
 

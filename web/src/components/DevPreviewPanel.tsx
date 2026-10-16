@@ -93,7 +93,7 @@ export default function DevPreviewPanel() {
           </span>
         </div>
         {offline ? <div className="devpv-row devpv-dim">The server is restarting…</div> : null}
-        {status?.restartPending && !offline ? <div className="devpv-row devpv-dim">Restarting into this build; the server answering now is still the previous one.</div> : null}
+        {status?.restartPending && !offline ? <div className="devpv-row devpv-dim">Restarting into {status.next?.label ?? 'the new build'}; the server answering now is still the one above.</div> : null}
         {status?.crashed ? (
           <div className="devpv-row devpv-warn">The last preview exited right after starting and was rolled back to main ({status.crashed.detail}).</div>
         ) : null}

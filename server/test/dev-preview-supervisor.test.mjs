@@ -19,14 +19,15 @@ function fixture(name, nodeScript) {
   const app = path.join(dir, 'app');
   const local = path.join(dir, 'local');
   const bin = path.join(dir, 'bin');
+  // The layout dev-preview.js leaves: four paths behind one `current` link.
   for (const p of ['server', 'scripts', 'public']) {
     fs.mkdirSync(path.join(app, '.image', p), { recursive: true });
     fs.mkdirSync(path.join(app, 'rel', p), { recursive: true });
-    fs.symlinkSync(path.join(app, '.image', p), path.join(app, p));
   }
   fs.writeFileSync(path.join(app, '.image', 'session.bashrc'), '');
   fs.writeFileSync(path.join(app, 'rel', 'session.bashrc'), '');
-  fs.symlinkSync(path.join(app, '.image', 'session.bashrc'), path.join(app, 'session.bashrc'));
+  fs.symlinkSync(path.join(app, '.image'), path.join(app, 'current'));
+  for (const p of ['server', 'scripts', 'public', 'session.bashrc']) fs.symlinkSync(path.join('current', p), path.join(app, p));
   fs.mkdirSync(bin, { recursive: true });
   fs.mkdirSync(local, { recursive: true });
   fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh\n${nodeScript.replaceAll('$APP', app)}\n`, { mode: 0o755 });
@@ -46,9 +47,9 @@ test('exit 75 restarts in place; a previewed build that crashes on start is roll
   const f = fixture('cycle', `
     n=$(cat "$APP/count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$APP/count"
     case "$n" in
-      1) for p in server scripts public session.bashrc; do ln -sfn "$APP/rel/$p" "$APP/.$p.t" && mv -Tf "$APP/.$p.t" "$APP/$p"; done; exit 75 ;;
-      2) readlink "$APP/server" > "$APP/second-saw"; exit 1 ;;
-      *) readlink "$APP/server" > "$APP/third-saw"; exit 0 ;;
+      1) ln -sfn "$APP/rel" "$APP/.c.t" && mv -Tf "$APP/.c.t" "$APP/current"; exit 75 ;;
+      2) readlink -f "$APP/server" > "$APP/second-saw"; exit 1 ;;
+      *) readlink -f "$APP/server" > "$APP/third-saw"; exit 0 ;;
     esac`);
   const child = f.run();
   let out = '';
@@ -58,10 +59,11 @@ test('exit 75 restarts in place; a previewed build that crashes on start is roll
   assert.equal(fs.readFileSync(path.join(f.app, 'count'), 'utf8').trim(), '3');
   assert.equal(fs.readFileSync(path.join(f.app, 'second-saw'), 'utf8').trim(), path.join(f.app, 'rel', 'server'));
   assert.equal(fs.readFileSync(path.join(f.app, 'third-saw'), 'utf8').trim(), path.join(f.app, '.image', 'server'));
+  assert.equal(fs.readlinkSync(path.join(f.app, 'current')), path.join(f.app, '.image'));
   for (const p of ['server', 'scripts', 'public', 'session.bashrc']) {
-    assert.equal(fs.readlinkSync(path.join(f.app, p)), path.join(f.app, '.image', p), p);
+    assert.equal(fs.realpathSync(path.join(f.app, p)), path.join(f.app, '.image', p), p);
   }
-  assert.match(fs.readFileSync(path.join(f.local, 'dev-preview', 'crashed'), 'utf8'), /^exit 1 from .*rel\/server/);
+  assert.match(fs.readFileSync(path.join(f.local, 'dev-preview', 'crashed'), 'utf8'), /^exit 1 from .*\/rel$/m);
   assert.match(out, /asked for a restart/);
   assert.match(out, /rolling back to the image/);
 });

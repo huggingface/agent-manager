@@ -161,7 +161,11 @@ export interface DevPreviewJob {
   conflict: { pr: number; onto: string; files: string[] } | null;
 }
 export interface DevPreviewSummary {
-  repo: string; supervised: boolean; running: DevPreviewRunning; loaded: string; restartPending: boolean;
+  repo: string; supervised: boolean;
+  /** The build this server process loaded — the code answering right now. */
+  running: DevPreviewRunning;
+  /** True between a swap and the restart into it; `next` is that build. */
+  restartPending: boolean; next: DevPreviewRunning | null;
   selected: { base?: string; prs: DevPreviewPr[] };
   job: DevPreviewJob | null;
   crashed: { at: string; detail: string } | null;

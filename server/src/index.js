@@ -1490,9 +1490,14 @@ const devPreview = devPreviewEnabled() ? createDevPreview({
     try { await stopAll(); } catch {}
     process.exit(RESTART_EXIT_CODE);
   },
+  // The Space's injected secret values: every line a build prints is filtered
+  // against them (plus the audit log's token patterns) before it is shown,
+  // logged or audited.
+  knownSecrets: () => injectedEnvKeys().map((key) => process.env[key]),
   audit: ({ event, source, ok, request, result }) => appendSystemOperation({
     origin: { id: 'dev-preview', type: 'system', name: `dev preview (${source})` },
     method: 'PREVIEW', path: `/dev-preview/${event}`, request, result, ok, durationMs: result?.durationMs || 0,
+    knownValues: injectedEnvKeys().map((key) => process.env[key]),
   }),
 }) : null;
 if (devPreview) {
