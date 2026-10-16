@@ -347,25 +347,27 @@ export function createDevPreview({
   const imageFile = (file) => { try { return fs.readFileSync(path.join(imageInputs, file), 'utf8'); } catch { return null; } };
 
   /**
-   * Files that make this selection impossible to switch to in place. Two
-   * sources, both reported: what the PRs themselves change relative to main,
-   * and what differs from the copy the running image was built with (main can
-   * have moved since the image was built).
+   * Files that make this selection impossible to switch to in place: build
+   * inputs whose content differs from the copy the running image was built
+   * with. That is the rule, not "the PRs touch it": a PR that changes the
+   * Dockerfile is fine on an image built from that same Dockerfile, and main
+   * itself needs a rebuild once it has moved past the image. Each file says
+   * which it is. Without the image's copies (an image older than this feature)
+   * it falls back to what the selection changes relative to main.
    */
   async function rebuildNeeded(base, merged) {
     const changed = new Set((await git(['diff', '--name-only', base, merged])).split('\n').filter(Boolean));
-    const out = [];
     const haveInputs = fs.existsSync(imageInputs);
+    const why = (byPrs) => (byPrs ? 'changed by the selection' : 'differs from the running image');
+    const out = [];
     for (const file of REBUILD_FILES) {
-      const theirs = await showFile(merged, file);
-      if (changed.has(file)) out.push({ file, why: 'changed by the selection' });
-      else if (haveInputs && theirs !== imageFile(file)) out.push({ file, why: 'differs from the running image' });
+      const differs = haveInputs ? (await showFile(merged, file)) !== imageFile(file) : changed.has(file);
+      if (differs) out.push({ file, why: why(changed.has(file)) });
     }
     const pin = playwrightPin(await showFile(merged, PLAYWRIGHT_PIN_FILE));
     const basePin = playwrightPin(await showFile(base, PLAYWRIGHT_PIN_FILE));
     const imagePin = haveInputs ? playwrightPin(imageFile(PLAYWRIGHT_PIN_FILE)) : basePin;
-    if (pin !== basePin) out.push({ file: `${PLAYWRIGHT_PIN_FILE} (playwright pin)`, why: 'changed by the selection' });
-    else if (pin !== imagePin) out.push({ file: `${PLAYWRIGHT_PIN_FILE} (playwright pin)`, why: 'differs from the running image' });
+    if (pin !== imagePin) out.push({ file: `${PLAYWRIGHT_PIN_FILE} (playwright pin)`, why: why(pin !== basePin) });
     return out;
   }
 
