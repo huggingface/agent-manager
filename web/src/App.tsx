@@ -17,6 +17,7 @@ import Overview from './components/Overview';
 import Locked from './components/Locked';
 import { LOCKED_EVENT, createLockTracker, type LockAnnouncement } from './lib/lockStatus';
 import BackupBanner from './components/BackupBanner';
+import DevPreviewBar from './components/DevPreviewBar';
 import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
 import { configuredCount, keepOffering } from './components/WelcomeSetup';
@@ -1245,7 +1246,7 @@ export default function App() {
   return (
     <>
       {settingsOpen && (
-      <SettingsShell page={settingsPage} onPage={setSettingsPage} onClose={() => setSettingsOpen(false)}>
+      <SettingsShell page={settingsPage} onPage={setSettingsPage} onClose={() => setSettingsOpen(false)} devPreview={!!info?.devPreview}>
         <LazyPanel load={loadSettingsView} what="settings" onClose={() => setSettingsOpen(false)} render={(m) => (
           <m.default
             page={settingsPage}
@@ -1345,6 +1346,7 @@ export default function App() {
         onMove={doMove}
         onDragState={setSessionDrag}
         onOpenSettings={() => setSettingsOpen(true)}
+        previewBar={info?.devPreview ? <DevPreviewBar summary={info.devPreview} onOpenSettings={() => { setSettingsPage('preview'); setSettingsOpen(true); }} /> : null}
         theme={theme}
         onToggleTheme={toggleTheme}
         onQuickStart={quickStart}
