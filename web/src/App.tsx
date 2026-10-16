@@ -17,7 +17,7 @@ import Overview from './components/Overview';
 import Locked from './components/Locked';
 import { LOCKED_EVENT, createLockTracker, type LockAnnouncement } from './lib/lockStatus';
 import BackupBanner from './components/BackupBanner';
-import DevPreviewBanner from './components/DevPreviewBanner';
+import DevPreviewBar from './components/DevPreviewBar';
 import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
 import { configuredCount, keepOffering } from './components/WelcomeSetup';
@@ -1346,6 +1346,7 @@ export default function App() {
         onMove={doMove}
         onDragState={setSessionDrag}
         onOpenSettings={() => setSettingsOpen(true)}
+        previewBar={<DevPreviewBar summary={info?.devPreview} onOpenSettings={() => { setSettingsPage('preview'); setSettingsOpen(true); }} />}
         theme={theme}
         onToggleTheme={toggleTheme}
         onQuickStart={quickStart}
@@ -1381,7 +1382,6 @@ export default function App() {
         {/* Visible where you already are, on every view. Rides on /api/info,
             which is polled every 15s, so no new request for the normal case. */}
         <BackupBanner health={info?.backup} onOpenSettings={() => { setSettingsPage('general'); setSettingsOpen(true); }} />
-        <DevPreviewBanner summary={info?.devPreview} onOpen={() => { setSettingsPage('preview'); setSettingsOpen(true); }} />
         <div className="stage">
           {renderTiles(
             isMobile && !mobileStage

@@ -25,7 +25,7 @@ let status = { repo: 'huggingface/agent-manager', supervised: true, restartPendi
 window.__setStatus = (s) => { status = { ...status, ...s }; };
 export const getDevPreviewStatus = () => Promise.resolve(structuredClone(status));
 export const getDevPreviewPrs = () => Promise.resolve({ ok: true, repo: 'huggingface/agent-manager', main: { sha: '${M}' }, prs: [
-  { number: 182, title: 'Terminal fix', author: 'ana', sha: '${A}' },
+  { number: 182, title: 'Security: keep edge sign-in parameters out of the URL', author: 'ana', sha: '${A}' },
   { number: 190, title: 'Cron tweaks', author: 'bo', sha: '${B}', draft: true },
 ] });
 export const switchDevPreview = (prs) => {
@@ -43,20 +43,21 @@ await build({
     resolveDir: WEB, loader: 'tsx', contents: `
       import React from 'react';
       import { createRoot } from 'react-dom/client';
-      import DevPreviewBanner from './src/components/DevPreviewBanner.tsx';
+      import DevPreviewBar from './src/components/DevPreviewBar.tsx';
       import DevPreviewPanel from './src/components/DevPreviewPanel.tsx';
       import SettingsShell from './src/components/SettingsShell.tsx';
       const main = { kind: 'main', label: 'main', id: 'image', prs: [] };
-      const stack = { kind: 'prs', label: '', id: 'rel-2', base: '${M}', prs: [{ number: 190, sha: '${B}' }, { number: 182, sha: '${A}' }] };
+      const stack = { kind: 'prs', label: '#190 bbbbbbb + #182 aaaaaaa', id: 'rel-2', base: '${M}', prs: [{ number: 190, sha: '${B}' }, { number: 182, sha: '${A}' }] };
       const sum = (running, job = null) => ({ repo: 'huggingface/agent-manager', supervised: true, restartPending: false, next: null, running, selected: { prs: [] }, job, crashed: null });
       window.__render = (which) => {
         const root = document.getElementById('root');
         root.innerHTML = '';
         const r = createRoot(root);
-        if (which === 'none') r.render(<div id="x"><DevPreviewBanner summary={undefined} onOpen={() => {}} /></div>);
-        if (which === 'main') r.render(<DevPreviewBanner summary={sum(main)} onOpen={() => {}} />);
-        if (which === 'stack') r.render(<DevPreviewBanner summary={sum(stack, { kind: 'switch', state: 'running', step: 'build web' })} onOpen={() => {}} />);
-        if (which === 'pending') r.render(<DevPreviewBanner summary={{ ...sum(main), restartPending: true, next: { ...stack, label: '#190 bbbbbbb + #182 aaaaaaa' } }} onOpen={() => {}} />);
+        const bar = (summary) => <div className="sidebar" style={{ width: 260 }}><DevPreviewBar summary={summary} onOpenSettings={() => { window.__opened = (window.__opened || 0) + 1; }} /></div>;
+        if (which === 'none') r.render(<div id="x">{bar(undefined)}</div>);
+        if (which === 'main') r.render(bar(sum(main)));
+        if (which === 'stack') r.render(bar(sum(stack, { kind: 'switch', state: 'running', step: 'build web' })));
+        if (which === 'pending') r.render(bar({ ...sum(main), restartPending: true, next: { ...stack, label: '#190 bbbbbbb + #182 aaaaaaa' } }));
         if (which === 'shell-off') r.render(<SettingsShell page="general" onPage={() => {}} onClose={() => {}}><div /></SettingsShell>);
         if (which === 'shell-on') r.render(<SettingsShell page="preview" devPreview onPage={() => {}} onClose={() => {}}><DevPreviewPanel /></SettingsShell>);
       };
@@ -78,27 +79,52 @@ try {
   await page.addScriptTag({ path: bundle });
   const render = async (w) => { await page.evaluate((x) => window.__render(x), w); await page.waitForTimeout(50); };
 
-  await check('banner renders nothing without the server\'s devPreview object', async () => {
+  const bar = '[data-testid="dev-preview-bar"]';
+  await check('the sidebar row renders nothing without the server\'s devPreview object', async () => {
     await render('none');
-    assert.equal(await page.locator('[data-testid="dev-preview-banner"]').count(), 0);
+    assert.equal(await page.locator(bar).count(), 0);
   });
-  await check('banner says main when the image build runs', async () => {
+  await check('it is one small row: "Preview:", a dropdown on main, the settings button', async () => {
     await render('main');
-    assert.match(await page.locator('[data-testid="dev-preview-banner"]').innerText(), /preview\s+main/i);
+    await page.waitForFunction(() => document.querySelectorAll('#devpv-pick option').length > 1);
+    const box = await page.locator(bar).boundingBox();
+    assert.ok(box.height <= 40, `row is ${box.height}px tall`);
+    assert.match(await page.locator(bar).innerText(), /^Preview:/);
+    assert.equal(await page.getByTestId('dev-preview-pick').inputValue(), 'main');
+    const options = await page.locator('#devpv-pick option').allInnerTexts();
+    // a long title is cut to its first letters
+    assert.deepEqual(options, ['main', '#182 Security: keep edge s…', '#190 Cron tweaks']);
+    await page.getByTitle(/Preview settings/).click();
+    assert.equal(await page.evaluate(() => window.__opened), 1);
   });
-  await check('banner lists the stack with short SHAs, base, and an in-flight switch', async () => {
+  await check('picking a PR asks first, then switches to exactly that PR', async () => {
+    await render('main');
+    await page.waitForFunction(() => document.querySelectorAll('#devpv-pick option').length > 1);
+    await page.evaluate(() => { window.__calls.length = 0; });
+    page.once('dialog', (d) => d.dismiss());
+    await page.getByTestId('dev-preview-pick').selectOption('pr:190');
+    assert.deepEqual(await page.evaluate(() => window.__calls), [], 'declined: nothing sent');
+    await render('main');
+    await page.waitForFunction(() => document.querySelectorAll('#devpv-pick option').length > 1);
+    page.once('dialog', (d) => { assert.match(d.message(), /#190 \(Cron tweaks\).*every running agent/); d.accept(); });
+    await page.getByTestId('dev-preview-pick').selectOption('pr:190');
+    await page.waitForFunction(() => window.__calls.length > 0);
+    assert.deepEqual(await page.evaluate(() => window.__calls), [['switch', [{ number: 190, sha: B }]]]);
+    await page.waitForSelector('[data-testid="dev-preview-note"]');
+    assert.match(await page.getByTestId('dev-preview-note').innerText(), /conflicts/);
+  });
+  await check('a stack shows as what runs, and a switch in flight is a one-line note', async () => {
     await render('stack');
-    const text = await page.locator('[data-testid="dev-preview-banner"]').innerText();
-    assert.match(text, /#190 bbbbbbb \+ #182 aaaaaaa on main ccccccc/);
-    assert.match(text, /switching: build web/);
-    // this tab loaded on "image": it must offer the reload
-    assert.match(text, /reload to load this build's UI/);
+    await page.waitForFunction(() => document.querySelectorAll('#devpv-pick option').length > 2);
+    assert.equal(await page.getByTestId('dev-preview-pick').inputValue(), 'running');
+    assert.equal(await page.locator('#devpv-pick option:checked').innerText(), '#190 bbbbbbb + #182 aaaaaaa');
+    assert.equal(await page.getByTestId('dev-preview-pick').isDisabled(), true);
+    assert.match(await page.getByTestId('dev-preview-note').innerText(), /switching: build web/);
   });
-  await check('between the swap and the restart the banner names the code answering, and what comes next', async () => {
+  await check('between the swap and the restart it names what comes next', async () => {
     await render('pending');
-    const text = await page.locator('[data-testid="dev-preview-banner"]').innerText();
-    assert.match(text, /preview\s+main/i);
-    assert.match(text, /restarting into #190 bbbbbbb \+ #182 aaaaaaa/);
+    assert.equal(await page.getByTestId('dev-preview-pick').inputValue(), 'main');
+    assert.match(await page.getByTestId('dev-preview-note').innerText(), /restarting into #190 bbbbbbb \+ #182 aaaaaaa/);
   });
   await check('Settings has no Preview tab unless the Space is a preview Space', async () => {
     await render('shell-off');
@@ -116,6 +142,8 @@ try {
     await render('shell-on');
   });
   await check('the panel switches to PRs in the order ticked and shows the conflict', async () => {
+    await page.evaluate(() => { window.__calls.length = 0; window.__setStatus({ job: null }); });
+    await render('shell-on');
     await page.waitForSelector('.devpv-prs li');
     assert.match(await page.locator('[data-testid="dev-preview-running"]').innerText(), /main/);
     assert.equal(await page.getByRole('button', { name: 'Roll back to main' }).isDisabled(), true, 'already on main');

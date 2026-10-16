@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { Cli, MoveTarget, Group, Session, Tree } from '../types';
 import { STATE_LABEL, REMOTE_STATE_LABEL, isPassive, isRemote } from '../types';
 import * as api from '../api';
@@ -39,7 +40,7 @@ const fmtAgo = (ts?: number) => {
 export default function Sidebar({
   clis, tree, activeRef, focusedId, defaultPath, ages,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
-  onArchiveSession, onUnarchiveSession, onSetRemotePaused, onDeleteSession, onTraceHandover, handoverFor, onHandoverHandled, onMove, onDragState, onOpenSettings, theme, onToggleTheme, onQuickStart,
+  onArchiveSession, onUnarchiveSession, onSetRemotePaused, onDeleteSession, onTraceHandover, handoverFor, onHandoverHandled, onMove, onDragState, onOpenSettings, previewBar, theme, onToggleTheme, onQuickStart,
   onPrepareQuickStart,
   onAbandonQuickStart,
   archived, retired, showArchived, onToggleArchived,
@@ -54,6 +55,8 @@ export default function Sidebar({
   onActivate: (ref: string) => void;
   onOpenSession: (sessionId: string, groupId?: string) => void;
   onOpenSettings: () => void;
+  /** Dev-preview Spaces only: what code runs, and a quick switch. */
+  previewBar?: ReactNode;
   onNewSession: (name: string, cli: string, path: string, groupId?: string) => void;
   onNewGroup: (name: string, cart?: { cli: string; count: number }[], path?: string) => void | Promise<void>;
   onRenameGroup: (id: string, name: string) => void;
@@ -784,6 +787,7 @@ export default function Sidebar({
           <button className="icon-btn" onClick={onToggleTheme} title="Toggle light / dark">{theme === 'dark' ? <MoonGlyph /> : <SunGlyph />}</button>
         </div>
       </div>
+      {previewBar}
 
       {panel === 'quick' && (
         <div className="controls">
