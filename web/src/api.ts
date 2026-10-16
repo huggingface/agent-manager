@@ -161,7 +161,7 @@ export interface DevPreviewJob {
   conflict: { pr: number; onto: string; files: string[] } | null;
 }
 export interface DevPreviewSummary {
-  repo: string; supervised: boolean; running: DevPreviewRunning;
+  repo: string; supervised: boolean; running: DevPreviewRunning; loaded: string; restartPending: boolean;
   selected: { base?: string; prs: DevPreviewPr[] };
   job: DevPreviewJob | null;
   crashed: { at: string; detail: string } | null;

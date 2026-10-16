@@ -95,6 +95,12 @@ test('gate on: status and info report the running build; switch input is validat
       assert.equal(r.status, 400, JSON.stringify(body));
       assert.equal((await r.json()).code, 'invalid-input');
     }
+    // Valid, but this server is not under the entrypoint supervisor: it could
+    // not restart into the build, so it refuses rather than swap.
+    const valid = await post(s.base, '/api/dev-preview/switch', { prs: [{ number: 1 }] });
+    assert.equal(valid.status, 409);
+    assert.equal((await valid.json()).code, 'not-supervised');
+    assert.equal((await post(s.base, '/api/dev-preview/rollback', {})).status, 409);
     // Unattributed calls are refused like every other mutating call.
     const anon = await fetch(`${s.base}/api/dev-preview/switch`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"prs":[{"number":1}]}' });
     assert.equal(anon.status, 400);
@@ -104,8 +110,8 @@ test('gate on: status and info report the running build; switch input is validat
 
     const ops = fs.readFileSync(path.join(s.dir, 'data', 'operations.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     const switches = ops.filter((o) => o.path === '/api/dev-preview/switch');
-    assert.equal(switches.length, bad.length);
-    assert.ok(switches.every((o) => o.origin.id === 'operator' && o.status === 400));
+    assert.equal(switches.length, bad.length + 1);
+    assert.ok(switches.every((o) => o.origin.id === 'operator' && o.status >= 400));
   } finally { await stop(s); }
 });
 

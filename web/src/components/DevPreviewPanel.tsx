@@ -26,7 +26,7 @@ export default function DevPreviewPanel() {
       const s = await api.getDevPreviewStatus();
       setStatus(s);
       setOffline(false);
-      if (awaiting.current !== null && s.running.id !== awaiting.current && s.job?.state !== 'running') location.reload();
+      if (awaiting.current !== null && s.running.id !== awaiting.current && s.job?.state !== 'running' && !s.restartPending) location.reload();
     } catch { setOffline(true); }
   }, []);
   const loadPrs = useCallback(async () => {
@@ -35,7 +35,7 @@ export default function DevPreviewPanel() {
   }, []);
 
   useEffect(() => { loadStatus(); loadPrs(); }, [loadStatus, loadPrs]);
-  const busy = status?.job?.state === 'running' || !!status?.job?.restarting || offline;
+  const busy = status?.job?.state === 'running' || !!status?.restartPending || offline || status?.supervised === false;
   useEffect(() => {
     const t = setInterval(loadStatus, busy ? 1500 : 10_000);
     return () => clearInterval(t);
@@ -93,11 +93,12 @@ export default function DevPreviewPanel() {
           </span>
         </div>
         {offline ? <div className="devpv-row devpv-dim">The server is restarting…</div> : null}
+        {status?.restartPending && !offline ? <div className="devpv-row devpv-dim">Restarting into this build; the server answering now is still the previous one.</div> : null}
         {status?.crashed ? (
           <div className="devpv-row devpv-warn">The last preview exited right after starting and was rolled back to main ({status.crashed.detail}).</div>
         ) : null}
         {!status?.supervised && status ? (
-          <div className="devpv-row devpv-warn">Not running under the entrypoint supervisor: a switch builds and swaps, but you must restart the server yourself.</div>
+          <div className="devpv-row devpv-warn">Not running under the entrypoint supervisor, so switching is off: the server could not restart into a new build.</div>
         ) : null}
         <div className="devpv-actions">
           <button className="btn-ghost" disabled={busy || run?.kind === 'main'} onClick={doRollback}>Roll back to main</button>

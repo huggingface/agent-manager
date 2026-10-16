@@ -196,12 +196,17 @@ export function createDevPreview({
   }
 
   const selection = () => readJson(stateFile) || { prs: [] };
+  // The build this process loaded. If the symlinks point elsewhere, a restart
+  // is still pending and the code answering is NOT what running() names.
+  const loadedId = running().id;
 
   function summary() {
     return {
       repo: DEV_PREVIEW_REPO,
       supervised,
       running: running(),
+      loaded: loadedId,
+      restartPending: running().id !== loadedId,
       selected: selection(),
       job: job && {
         id: job.id, kind: job.kind, source: job.source, state: job.state, step: job.step,
@@ -254,6 +259,11 @@ export function createDevPreview({
   // ------------------------------------------------------------ the switch
 
   function begin(kind, source, prs) {
+    if (!supervised) {
+      // Swapping without a restart would make the banner name code that is not
+      // the code answering. entrypoint.sh's supervisor is what restarts us.
+      throw Object.assign(new Error('the server is not running under the entrypoint supervisor, so it cannot restart into a new build'), { statusCode: 409, code: 'not-supervised' });
+    }
     if (job && job.state === 'running') {
       throw Object.assign(new Error(`a ${job.kind} is already running`), { statusCode: 409, code: 'busy' });
     }
@@ -470,10 +480,6 @@ export function createDevPreview({
   }
 
   function scheduleRestart() {
-    if (!supervised) {
-      log('not running under the entrypoint supervisor: restart the server yourself to load it');
-      return;
-    }
     job.restarting = true;
     log('restarting the server');
     // Long enough for a polling panel to see "done" before the socket drops.
