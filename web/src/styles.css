@@ -79,12 +79,16 @@ body {
 .bkfail-why { color: var(--muted); }
 .bkfail-link { flex: none; border: none; background: transparent; padding: 0; font: inherit; font-size: 12px; color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; cursor: pointer; }
 /* Dev preview (only on a Space with AM_DEV_PREVIEW=1): one compact row under the sidebar logo. */
-.devpv-bar { padding: 0 12px 8px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
-.devpv-bar-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.brand.with-preview { border-bottom: none; padding-bottom: 8px; }
+/* Same side padding as .brand, and the divider .brand gave up. */
+.devpv-bar { padding: 0 14px 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.devpv-bar-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.devpv-bar-k { margin-right: 2px; }
 .devpv-bar-k { flex: none; color: var(--muted); }
-.devpv-pick { flex: 1; min-width: 0; height: 26px; padding: 0 6px; font-size: 12px; color: var(--text); background: var(--panel-2); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); border-radius: var(--r-md); text-overflow: ellipsis; }
+.devpv-pick { flex: 1; min-width: 0; height: 30px; padding: 0 6px; font-size: 12px; color: var(--text); background: var(--panel-2); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border)); border-radius: var(--r-md); text-overflow: ellipsis; }
 .devpv-pick:disabled { opacity: .65; }
-.devpv-bar-btn { flex: none; width: 26px; height: 26px; }
+/* .icon-btn's own 32x30, the same as the buttons beside the logo. */
+.devpv-bar-btn { flex: none; }
 .devpv-bar-note { color: var(--muted); font-size: 11.5px; line-height: 1.3; overflow-wrap: anywhere; }
 .devpv-bar-note.bad { color: var(--danger); }
 .devpv-dim { color: var(--muted); }
