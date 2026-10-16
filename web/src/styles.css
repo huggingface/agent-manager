@@ -110,6 +110,9 @@ body {
 .devpv-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .devpv-move { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; }
 .devpv-move .icon-btn { width: 26px; height: 24px; }
+.devpv-refused { opacity: .7; }
+.devpv-fork { color: var(--danger); font-weight: 700; }
+.devpv-refusal { margin-left: 34px; color: var(--danger); font-size: 12px; }
 .devpv-input { width: 120px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel-2); color: var(--text); font: inherit; }
 .bkfail-link:hover { color: var(--danger); text-decoration-style: solid; }
 .zoombar { display: flex; align-items: center; gap: 4px; padding: 4px 8px; margin-top: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); flex: none; }

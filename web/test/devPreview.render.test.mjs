@@ -25,8 +25,10 @@ let status = { repo: 'huggingface/agent-manager', supervised: true, restartPendi
 window.__setStatus = (s) => { status = { ...status, ...s }; };
 export const getDevPreviewStatus = () => Promise.resolve(structuredClone(status));
 export const getDevPreviewPrs = () => Promise.resolve({ ok: true, repo: 'huggingface/agent-manager', main: { sha: '${M}' }, prs: [
-  { number: 182, title: 'Security: keep edge sign-in parameters out of the URL', author: 'ana', sha: '${A}' },
-  { number: 190, title: 'Cron tweaks', author: 'bo', sha: '${B}', draft: true },
+  { number: 182, title: 'Security: keep edge sign-in parameters out of the URL', author: 'ana', association: 'MEMBER', headRepo: 'huggingface/agent-manager', fork: false, allowed: true, sha: '${A}' },
+  { number: 190, title: 'Cron tweaks', author: 'bo', association: 'COLLABORATOR', headRepo: 'huggingface/agent-manager', fork: false, allowed: true, sha: '${B}', draft: true },
+  { number: 191, title: 'Totally harmless', author: 'outsider', association: 'NONE', headRepo: 'outsider/agent-manager', fork: true, allowed: false,
+    refusal: 'its branch is on a fork (outsider/agent-manager); only branches on huggingface/agent-manager can be previewed', sha: '${'d'.repeat(40)}' },
 ] });
 export const switchDevPreview = (prs) => {
   window.__calls.push(['switch', prs]);
@@ -92,7 +94,7 @@ try {
     assert.match(await page.locator(bar).innerText(), /^Preview:/);
     assert.equal(await page.getByTestId('dev-preview-pick').inputValue(), 'main');
     const options = await page.locator('#devpv-pick option').allInnerTexts();
-    // a long title is cut to its first letters
+    // a long title is cut to its first letters; a refused PR is not offered at all
     assert.deepEqual(options, ['main', '#182 Security: keep edge s…', '#190 Cron tweaks']);
     const [pick, btn] = await Promise.all([page.getByTestId('dev-preview-pick').boundingBox(), page.getByTitle(/Preview settings/).boundingBox()]);
     assert.equal(pick.height, btn.height, `dropdown ${pick.height}px vs settings button ${btn.height}px`);
@@ -110,10 +112,13 @@ try {
     assert.deepEqual(await page.evaluate(() => window.__calls), [], 'declined: nothing sent');
     await render('main');
     await page.waitForFunction(() => document.querySelectorAll('#devpv-pick option').length > 1);
-    page.once('dialog', (d) => { assert.match(d.message(), /#190 \(Cron tweaks\).*every running agent/); d.accept(); });
+    let said = '';
+    page.once('dialog', (d) => { said = d.message(); d.accept(); });
     await page.getByTestId('dev-preview-pick').selectOption('pr:190');
     await page.waitForFunction(() => window.__calls.length > 0);
     assert.deepEqual(await page.evaluate(() => window.__calls), [['switch', [{ number: 190, sha: B }]]]);
+    assert.match(said, /#190 by bo \(collaborator\), branch on huggingface\/agent-manager/);
+    assert.match(said, /This code will run with this Space's secrets, bucket and agents/);
     await page.waitForSelector('[data-testid="dev-preview-note"]');
     assert.match(await page.getByTestId('dev-preview-note').innerText(), /conflicts/);
   });
@@ -157,8 +162,18 @@ try {
     await page.locator('.devpv-stack li', { hasText: '#182' }).getByTitle('Earlier').click();
     assert.deepEqual(await page.locator('.devpv-stack li b').allInnerTexts(), ['#182', '#190']);
     await page.locator('.devpv-stack li', { hasText: '#182' }).getByTitle('Later').click();
+    const fork = page.getByTestId('dev-preview-pr-191');
+    assert.equal(await fork.locator('input').isDisabled(), true, 'a refused PR cannot be ticked');
+    assert.match(await fork.innerText(), /outsider \(none\) · fork: outsider\/agent-manager/);
+    assert.match(await fork.innerText(), /not allowed: its branch is on a fork/);
+    assert.match(await page.getByTestId('dev-preview-pr-182').innerText(), /ana \(member\) · huggingface\/agent-manager/);
+    let said = '';
+    page.once('dialog', (d) => { said = d.message(); d.accept(); });
     await page.getByTestId('dev-preview-switch').click();
     await page.waitForSelector('[data-testid="dev-preview-job"]');
+    assert.match(said, /Run these PRs on this Space\?/);
+    assert.match(said, /#190 by bo \(collaborator\).*\n#182 by ana \(member\)/s);
+    assert.match(said, /secrets, bucket and agents/);
     const calls = await page.evaluate(() => window.__calls);
     assert.deepEqual(calls, [['switch', [{ number: 190, sha: B }, { number: 182, sha: A }]]]);
     const job = await page.locator('[data-testid="dev-preview-job"]').innerText();
