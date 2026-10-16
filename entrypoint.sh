@@ -224,30 +224,74 @@ AGENT_STATE_CHECKPOINT_SECONDS="${AGENT_STATE_CHECKPOINT_SECONDS:-15}"
 # Dev preview (AM_DEV_PREVIEW=1, dev Spaces only — see docs/dev-preview.md): the
 # app can repoint /app/current (behind /app/server, scripts, public and
 # session.bashrc) at a PR build and then exit 75 to be restarted into it, without restarting the
-# container. A previewed build that dies within its first two minutes is rolled
-# back to the image's own copy, so a broken PR cannot take the Space down.
+# container. A previewed build that exits, hangs or never comes up is rolled
+# back to the image's own copy (see preview_health_watch), so a broken PR
+# cannot take the Space down.
 # Without the variable this is exactly the plain `node … &` it always was.
+# The image's own code, not the previewed build's: whatever a PR does to its
+# copy of the switcher, this loop is what decides whether it keeps running.
+# A previewed build (/app/current not pointing at the image) is rolled back to
+# the image when it exits for any reason but 75, when it does not answer
+# /api/health within AM_DEV_PREVIEW_START_DEADLINE seconds, or when it stops
+# answering for AM_DEV_PREVIEW_HEALTH_FAILS checks in a row.
+preview_health_watch() {
+  _pid=$1; _t0=$(date +%s); _up=0; _fails=0
+  _deadline=${AM_DEV_PREVIEW_START_DEADLINE:-180}
+  _every=${AM_DEV_PREVIEW_HEALTH_EVERY:-10}
+  _max=${AM_DEV_PREVIEW_HEALTH_FAILS:-12}
+  while kill -0 "$_pid" 2>/dev/null; do
+    sleep "$_every"
+    kill -0 "$_pid" 2>/dev/null || return 0
+    if curl -fsS -m 5 -o /dev/null "http://127.0.0.1:${PORT:-7860}/api/health" 2>/dev/null; then
+      _up=1; _fails=0
+    else
+      _fails=$((_fails + 1))
+    fi
+    _why=""
+    if [ "$_up" -eq 0 ] && [ $(( $(date +%s) - _t0 )) -ge "$_deadline" ]; then
+      _why="did not answer /api/health within ${_deadline}s"
+    elif [ "$_up" -eq 1 ] && [ "$_fails" -ge "$_max" ]; then
+      _why="stopped answering /api/health ($_fails checks in a row)"
+    fi
+    if [ -n "$_why" ]; then
+      mkdir -p "$AM_LOCAL/dev-preview"
+      echo "$_why" > "$AM_LOCAL/dev-preview/health-failed"
+      echo "[dev-preview] previewed build $_why; stopping it"
+      kill -TERM "$_pid" 2>/dev/null
+      sleep 15
+      kill -KILL "$_pid" 2>/dev/null
+      return 0
+    fi
+  done
+}
 supervise_app() {
-  child=""
-  trap 'kill -TERM "$child" 2>/dev/null; wait "$child"; exit $?' TERM INT HUP
+  child=""; watch=""
+  trap 'kill "$watch" 2>/dev/null; kill -TERM "$child" 2>/dev/null; wait "$child"; exit $?' TERM INT HUP
   while :; do
-    started=$(date +%s)
+    rm -f "$AM_LOCAL/dev-preview/health-failed"
+    # /app/current is the one link a switch repoints (server/src/dev-preview.js).
+    target="$(readlink /app/current 2>/dev/null || true)"
     node /app/server/src/index.js &
     child=$!
+    watch=""
+    if [ -n "$target" ] && [ "$target" != /app/.image ]; then
+      preview_health_watch "$child" &
+      watch=$!
+    fi
     wait "$child"
     code=$?
-    if [ "$code" -eq 75 ]; then
+    [ -n "$watch" ] && { kill "$watch" 2>/dev/null; wait "$watch" 2>/dev/null; }
+    if [ "$code" -eq 75 ] && [ ! -f "$AM_LOCAL/dev-preview/health-failed" ]; then
       echo "[dev-preview] server asked for a restart; starting it again"
       continue
     fi
-    # /app/current is the one link a switch repoints (server/src/dev-preview.js).
-    target="$(readlink /app/current 2>/dev/null || true)"
-    if [ "$code" -ne 0 ] && [ -n "$target" ] && [ "$target" != /app/.image ] \
-       && [ $(( $(date +%s) - started )) -lt 120 ]; then
-      echo "[dev-preview] previewed build exited $code within 2 minutes; rolling back to the image"
+    if [ -n "$target" ] && [ "$target" != /app/.image ]; then
+      why="exit $code"
+      [ -f "$AM_LOCAL/dev-preview/health-failed" ] && why="$(cat "$AM_LOCAL/dev-preview/health-failed")"
+      echo "[dev-preview] previewed build stopped ($why); rolling back to the image"
       ln -sfn /app/.image /app/.current.rollback && mv -Tf /app/.current.rollback /app/current
       mkdir -p "$AM_LOCAL/dev-preview"
-      echo "exit $code from $target" > "$AM_LOCAL/dev-preview/crashed"
+      echo "$why from $target" > "$AM_LOCAL/dev-preview/crashed"
       continue
     fi
     exit "$code"

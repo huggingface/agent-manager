@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
 import type { DevPreviewSummary } from '../api';
 import { SlidersGlyph } from './icons';
+import { switchConfirmText } from '../lib/devPreview';
 
 // The build this tab's JavaScript came from. A switch replaces the server and
 // the web app; a tab opened before it keeps the old UI until reloaded, and
@@ -66,8 +67,7 @@ export default function DevPreviewBar({ summary, onOpenSettings }: {
   const pick = async (value: string) => {
     if (value === current) return;
     const pr = value.startsWith('pr:') ? prs?.find((p) => `pr:${p.number}` === value) : null;
-    const what = pr ? `#${pr.number} (${clip(pr.title)})` : 'main';
-    if (!window.confirm(`Switch this Space to ${what}? The app server restarts, and so does every running agent.`)) return;
+    if (!window.confirm(switchConfirmText(pr ? [pr] : []))) return;
     setErr(null);
     watching.current = running.id;
     try {
@@ -91,7 +91,7 @@ export default function DevPreviewBar({ summary, onOpenSettings }: {
           onChange={(e) => pick(e.target.value)} data-testid="dev-preview-pick">
           <option value="main">main</option>
           {current === 'running' ? <option value="running" disabled>{running.label}</option> : null}
-          {(prs || []).map((p) => <option key={p.number} value={`pr:${p.number}`}>#{p.number} {clip(p.title)}</option>)}
+          {(prs || []).filter((p) => p.allowed !== false).map((p) => <option key={p.number} value={`pr:${p.number}`}>#{p.number} {clip(p.title)}</option>)}
         </select>
         <button className="icon-btn devpv-bar-btn" onClick={onOpenSettings} title="Preview settings: stacks, log, rollback"><SlidersGlyph /></button>
       </div>

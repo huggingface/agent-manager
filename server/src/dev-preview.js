@@ -18,16 +18,19 @@
 //     system config ignored, so no `insteadOf` anywhere can redirect it;
 //   - every subprocess is execFile with an argument array (no shell), with an
 //     environment built from scratch rather than inherited from the server;
-//   - nothing a subprocess prints reaches the status, logs or audit log
-//     without the same credential filter API audit records use.
+//   - a subprocess's output is passed through the audit log's credential
+//     filter before it is shown or saved. That is hygiene against showing a
+//     secret by accident, not a control: a hostile build can encode anything.
 //
 // What this does NOT do: isolate the build from the manager. This container
 // has no user namespaces (seccomp) and no root, and /data is a FUSE mount that
 // is world-readable to any uid, so neither a sandbox nor a second user would
 // keep a build away from the Space's secrets. It would not change the trust
 // boundary either: once switched, the PR's server code IS the manager. The
-// boundary is that only collaborators can open PRs on the hard-coded repo and
-// the operator picks which run. See docs/dev-preview.md.
+// boundary is which PRs can be picked (ineligible(): open, branch on the repo
+// itself, author an owner/member/collaborator, checked here on every switch
+// and boot, not left to a repository setting) and that the operator picks
+// them. See docs/dev-preview.md.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -61,6 +64,24 @@ const SELF = 'server/src/dev-preview.js';
 export const RESTART_EXIT_CODE = 75;
 export const MAX_PRS = 6;
 const SHA = /^[0-9a-f]{40}$/;
+// Who may have their code run here, enforced on every listing, switch and boot
+// re-apply rather than left to the repository's PR-creation setting (which is
+// one toggle away from "anyone with a fork"):
+//   - the PR's head branch must live on DEV_PREVIEW_REPO itself. Pushing a
+//     branch there needs write access; a fork is refused, whoever owns it;
+//   - and its author must be an OWNER, MEMBER or COLLABORATOR of the repo.
+export const TRUSTED_ASSOCIATIONS = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+
+/** Why GitHub's PR object may not be previewed, or null when it may. */
+export function ineligible(pr) {
+  const head = pr?.head?.repo?.full_name;
+  if (pr?.base?.repo?.full_name !== DEV_PREVIEW_REPO) return `it is not a PR on ${DEV_PREVIEW_REPO}`;
+  if (head !== DEV_PREVIEW_REPO) return head ? `its branch is on a fork (${String(head).slice(0, 100)}); only branches on ${DEV_PREVIEW_REPO} can be previewed` : 'its branch is gone';
+  if (!TRUSTED_ASSOCIATIONS.includes(pr?.author_association)) {
+    return `its author is ${String(pr?.author_association || 'unknown').slice(0, 30)}, not an owner, member or collaborator of ${DEV_PREVIEW_REPO}`;
+  }
+  return null;
+}
 
 // ---------------------------------------------------------------- validation
 
@@ -296,17 +317,27 @@ export function createDevPreview({
       getJson(`${API_URL}/pulls?state=open&per_page=100&sort=updated&direction=desc`),
       getJson(`${API_URL}/branches/main`),
     ]);
+    // Every open PR is listed, so a refused one is visibly refused rather than
+    // silently missing; `allowed` is the same rule a switch enforces.
     const prs = (Array.isArray(pulls) ? pulls : [])
       .filter((p) => validPrNumber(p?.number) && validSha(p?.head?.sha) && p?.state === 'open')
-      .map((p) => ({
-        number: p.number,
-        title: String(p.title || '').slice(0, 300),
-        author: String(p.user?.login || '').slice(0, 100),
-        sha: p.head.sha,
-        draft: !!p.draft,
-        updatedAt: p.updated_at || null,
-        url: `https://github.com/${DEV_PREVIEW_REPO}/pull/${p.number}`,
-      }));
+      .map((p) => {
+        const refusal = ineligible(p);
+        return {
+          number: p.number,
+          title: String(p.title || '').slice(0, 300),
+          author: String(p.user?.login || '').slice(0, 100),
+          association: String(p.author_association || 'NONE').slice(0, 30),
+          headRepo: p.head?.repo?.full_name ? String(p.head.repo.full_name).slice(0, 140) : null,
+          fork: p.head?.repo?.full_name !== DEV_PREVIEW_REPO,
+          allowed: refusal === null,
+          ...(refusal ? { refusal } : {}),
+          sha: p.head.sha,
+          draft: !!p.draft,
+          updatedAt: p.updated_at || null,
+          url: `https://github.com/${DEV_PREVIEW_REPO}/pull/${p.number}`,
+        };
+      });
     const mainSha = validSha(main?.commit?.sha) ? main.commit.sha : null;
     const value = { repo: DEV_PREVIEW_REPO, main: { sha: mainSha }, prs };
     prCache = { at: Date.now(), value };
@@ -314,10 +345,11 @@ export function createDevPreview({
   }
 
   /**
-   * An operator's selection, bound to what GitHub says now: each PR must be
-   * open on DEV_PREVIEW_REPO, its head is the API's head SHA, and main is the
-   * API's main SHA. (A closed PR keeps its refs/pull/N/head, so the ref alone
-   * proves nothing.)
+   * A selection, bound to what GitHub says now: each PR must be open, pass
+   * ineligible(), and its head is the API's head SHA; main is the API's main
+   * SHA. (A closed PR keeps its refs/pull/N/head, so the ref alone proves
+   * nothing.) A given `sha` must still be the head: for an operator it came
+   * from the list, for a boot re-apply it is what the operator accepted.
    */
   async function resolveWithGitHub(prs) {
     let main;
@@ -331,14 +363,18 @@ export function createDevPreview({
         throw new Error(e.notFound ? `PR #${p.number} does not exist on ${DEV_PREVIEW_REPO}` : `could not read PR #${p.number} from GitHub: ${e.message}`);
       }
       if (pr?.number !== p.number) throw new Error(`GitHub returned a different PR for #${p.number}`);
-      if (pr.base?.repo?.full_name !== DEV_PREVIEW_REPO) throw new Error(`PR #${p.number} is not a PR on ${DEV_PREVIEW_REPO}`);
       if (pr.state !== 'open') throw new Error(`PR #${p.number} is ${String(pr.state || 'not open').slice(0, 20)}; only open PRs can be previewed`);
+      const refusal = ineligible(pr);
+      if (refusal) throw new Error(`PR #${p.number} cannot be previewed: ${refusal}`);
       const head = pr.head?.sha;
       if (!validSha(head)) throw new Error(`GitHub did not return a valid head SHA for #${p.number}`);
       if (p.sha && p.sha !== head) {
         throw new Error(`PR #${p.number} moved to ${short(head)} since the list was loaded (expected ${short(p.sha)}); refresh and try again`);
       }
-      resolved.push({ number: p.number, sha: head });
+      resolved.push({
+        number: p.number, sha: head,
+        author: String(pr.user?.login || '').slice(0, 100), association: pr.author_association,
+      });
     }
     return { base, prs: resolved };
   }
@@ -409,12 +445,23 @@ export function createDevPreview({
       log(`git fetch output:\n${String(e.stderr || '').trim().split('\n').slice(-20).join('\n')}`);
       throw new Error(`fetching from ${DEV_PREVIEW_REPO} failed; its output is in the log`);
     }
-    for (const sha of [base, ...prs.map((p) => p.sha)]) {
-      if (await hasCommit(sha)) continue;
-      log(`fetching ${short(sha)} by SHA`);
-      try { await git(['fetch', '--no-tags', '--quiet', remote, sha], { timeout: 300_000, quiet: true }); } catch {}
-      if (!(await hasCommit(sha))) throw new Error(`commit ${short(sha)} is not available on ${DEV_PREVIEW_REPO}`);
+    // Only what those refs carry. Never fetch by SHA: GitHub serves any
+    // commit of the fork network through the parent repository, so a SHA
+    // alone does not prove it belongs to this PR or to main.
+    for (const p of prs) {
+      const head = await revParse(`refs/am/pr/${p.number}`);
+      if (head !== p.sha) {
+        throw new Error(head
+          ? `PR #${p.number} moved to ${short(head)} while switching (expected ${short(p.sha)}); try again`
+          : `commit ${short(p.sha)} is not the head of PR #${p.number} on ${DEV_PREVIEW_REPO}`);
+      }
     }
+    const main = await revParse('refs/am/main');
+    let onMain = main === base;
+    if (!onMain && main && (await hasCommit(base))) {
+      try { await git(['merge-base', '--is-ancestor', base, main], { quiet: true }); onMain = true; } catch {}
+    }
+    if (!onMain) throw new Error(`commit ${short(base)} is not on main of ${DEV_PREVIEW_REPO}`);
   }
 
   /** Merge every PR onto main in the given order. Stops at the first conflict. */
@@ -593,11 +640,26 @@ export function createDevPreview({
     setImmediate(() => { try { restart(); } catch (e) { console.error('[dev-preview] restart failed', e); } });
   }
 
+  /**
+   * A boot re-apply runs only what the operator accepted AND what GitHub still
+   * allows: every PR open, eligible, and its head still the accepted SHA. Any
+   * doubt, including GitHub being unreachable, leaves the image running.
+   */
+  async function recheck(pinned) {
+    let now;
+    try { now = await resolveWithGitHub(pinned.prs.map((p) => ({ number: p.number, sha: p.sha }))); } catch (e) {
+      throw new Error(`not re-applying ${describe(pinned)}: ${e.message.replace(/; refresh and try again$/, '')}. Staying on main; pick again in Settings → Preview`);
+    }
+    // main may have moved on; the accepted base must still be on it (checked
+    // against the fetched main in fetchCommits).
+    return { base: pinned.base, prs: now.prs };
+  }
+
   async function doSwitch(prs, { pinned = null } = {}) {
     const t0 = Date.now();
     requireLayout();
     const { base, prs: resolved } = pinned
-      ? pinned
+      ? await step('re-check', () => recheck(pinned))
       : await step('resolve', () => resolveWithGitHub(prs));
     job.prs = resolved;
     log(`base main ${short(base)}; stack ${describe({ prs: resolved })}`);
@@ -729,8 +791,8 @@ export function createDevPreview({
         console.error('[dev-preview] persisted selection is malformed; staying on main');
         return null;
       }
-      // Exactly what was accepted before, by SHA; no GitHub lookup. A PR that
-      // has since closed or moved still re-applies what the operator chose.
+      // Exactly what was accepted before, by SHA, and only if GitHub still
+      // says each is an open, eligible PR at that head (recheck).
       console.log(`[dev-preview] re-applying ${describe(want)} on main ${short(want.base)}`);
       return startSwitch(prs, { source: 'boot', pinned: { base: want.base, prs: prs.map((p) => ({ number: p.number, sha: p.sha })) } });
     }

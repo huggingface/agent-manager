@@ -2,6 +2,7 @@
 // merged onto main in the order picked), switch, watch it build, roll back.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
+import { switchConfirmText } from '../lib/devPreview';
 
 type Status = Awaited<ReturnType<typeof api.getDevPreviewStatus>>;
 type Prs = Awaited<ReturnType<typeof api.getDevPreviewPrs>>;
@@ -60,6 +61,10 @@ export default function DevPreviewPanel() {
   };
 
   const doSwitch = async () => {
+    // A number added by hand has no author or repo yet: look it up so the one
+    // confirmation can name them.
+    const named = picked.map((p) => prs?.prs?.find((q) => q.number === p.number) || p);
+    if (!window.confirm(switchConfirmText(named))) return;
     setErr(null);
     try {
       awaiting.current = status?.running.id ?? null;
@@ -68,6 +73,7 @@ export default function DevPreviewPanel() {
     } catch (e) { awaiting.current = null; setErr((e as Error).message); }
   };
   const doRollback = async () => {
+    if (!window.confirm(switchConfirmText([]))) return;
     setErr(null);
     try {
       awaiting.current = status?.running.id ?? null;
@@ -162,14 +168,20 @@ export default function DevPreviewPanel() {
           <ul className="devpv-prs">
             {(prs.prs || []).map((p) => {
               const at = picked.findIndex((q) => q.number === p.number);
+              const refused = p.allowed === false;
               return (
-                <li key={p.number}>
-                  <label>
-                    <input type="checkbox" checked={at >= 0} onChange={() => toggle(p)} disabled={busy} />
+                <li key={p.number} className={refused ? 'devpv-refused' : undefined} data-testid={`dev-preview-pr-${p.number}`}>
+                  <label title={refused ? p.refusal : undefined}>
+                    <input type="checkbox" checked={at >= 0} onChange={() => toggle(p)} disabled={busy || refused} />
                     <span className="devpv-order">{at >= 0 ? at + 1 : ''}</span>
                     <b>#{p.number}</b> <span className="devpv-title">{p.title}</span>
-                    <span className="devpv-dim"> {p.author} · <span className="mono">{short(p.sha)}</span>{p.draft ? ' · draft' : ''}</span>
+                    <span className="devpv-dim">
+                      {' '}{p.author}{p.association ? ` (${p.association.toLowerCase()})` : ''}
+                      {' · '}{p.fork ? <b className="devpv-fork">fork: {p.headRepo || 'gone'}</b> : <span className="mono">{p.headRepo}</span>}
+                      {' · '}<span className="mono">{short(p.sha)}</span>{p.draft ? ' · draft' : ''}
+                    </span>
                   </label>
+                  {refused ? <div className="devpv-refusal">not allowed: {p.refusal}</div> : null}
                 </li>
               );
             })}

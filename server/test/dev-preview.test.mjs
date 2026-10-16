@@ -13,7 +13,7 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  createDevPreview, validateSelection, lockKey, REBUILD_FILES, SWAPPED, DEV_PREVIEW_REPO, describe,
+  createDevPreview, validateSelection, lockKey, REBUILD_FILES, SWAPPED, DEV_PREVIEW_REPO, describe, ineligible,
 } from '../src/dev-preview.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -92,8 +92,18 @@ gh.pr(9, (w) => write(path.join(w, 'web/leak.js'), `
 gh.pr(10, (w) => write(path.join(w, 'web/marker.txt'), 'closed pr\n'));
 
 // The GitHub API as the fixture origin answers it right now. `closed` lists
-// PRs the API reports as closed although their refs/pull/N/head still exist.
+// PRs the API reports as closed although their refs/pull/N/head still exist;
+// `as` overrides what GitHub says about a PR's author and branch.
 const closed = new Set([10]);
+const as = new Map();
+const ghPr = (n, head) => {
+  const o = as.get(n) || {};
+  return {
+    number: n, state: closed.has(n) ? 'closed' : 'open', title: `PR ${n}`, user: { login: 'member-dev' },
+    author_association: 'MEMBER', base: { repo: { full_name: DEV_PREVIEW_REPO } }, ...o,
+    head: { sha: head, repo: { full_name: DEV_PREVIEW_REPO }, ...(o.head || {}) },
+  };
+};
 const refOf = (o, ref) => {
   const line = git(root, 'ls-remote', o, ref);
   return line ? line.split('\t')[0] : null;
@@ -105,7 +115,12 @@ const fixtureApi = (o = origin) => async (url) => {
     const n = Number(m[1]);
     const head = refOf(o, `refs/pull/${n}/head`);
     if (!head) throw Object.assign(new Error('not found'), { notFound: true });
-    return { number: n, state: closed.has(n) ? 'closed' : 'open', head: { sha: head }, base: { repo: { full_name: DEV_PREVIEW_REPO } } };
+    return ghPr(n, head);
+  }
+  if (url.startsWith(`${API}/pulls?`)) {
+    const out = [];
+    for (const k of [1, 2, 3, 9, 10]) { const head = refOf(o, `refs/pull/${k}/head`); if (head) out.push(ghPr(k, head)); }
+    return out.filter((p) => p.state === 'open');
   }
   throw new Error(`unexpected API call ${url}`);
 };
@@ -256,9 +271,9 @@ test('switch to one PR: bound to the API head, merged onto main, built, swapped 
   // This process still runs the image: it says so, and that a restart is due.
   assert.equal(s.running.kind, 'main');
   assert.equal(s.restartPending, true);
-  assert.deepEqual(s.next.prs, [{ number: 1, sha: prSha[1] }]);
+  assert.deepEqual(s.next.prs.map(({ number, sha }) => ({ number, sha })), [{ number: 1, sha: prSha[1] }]);
   assert.equal(s.next.base, MAIN_SHA);
-  assert.deepEqual(JSON.parse(read(i.stateFile)).prs, [{ number: 1, sha: prSha[1] }]);
+  assert.deepEqual(JSON.parse(read(i.stateFile)).prs.map(({ number, sha }) => ({ number, sha })), [{ number: 1, sha: prSha[1] }]);
   assert.equal(i.audits.at(-1).event, 'switch');
   assert.equal(i.audits.at(-1).ok, true);
   await waitRestart(i, 1);
@@ -390,6 +405,46 @@ test('only open PRs, bound to the head SHA GitHub reports', async () => {
   assert.deepEqual(imageContent(i.appDir), IMAGE);
 });
 
+test('only branches on the repo itself, by owners, members or collaborators: in the list and in a switch', async () => {
+  const base = { base: { repo: { full_name: DEV_PREVIEW_REPO } }, head: { repo: { full_name: DEV_PREVIEW_REPO } } };
+  for (const a of ['OWNER', 'MEMBER', 'COLLABORATOR']) assert.equal(ineligible({ ...base, author_association: a }), null, a);
+  for (const a of ['NONE', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', undefined]) assert.match(ineligible({ ...base, author_association: a }), /not an owner, member or collaborator/);
+  // a fork is refused even from a collaborator; a deleted fork too
+  assert.match(ineligible({ ...base, author_association: 'COLLABORATOR', head: { repo: { full_name: 'member/agent-manager' } } }), /on a fork \(member\/agent-manager\)/);
+  assert.match(ineligible({ ...base, author_association: 'MEMBER', head: { repo: null } }), /branch is gone/);
+
+  // An outsider's fork PR: GitHub serves its refs/pull/N/head like any other.
+  as.set(2, { author_association: 'NONE', user: { login: 'outsider' }, head: { repo: { full_name: 'outsider/agent-manager' } } });
+  as.set(3, { author_association: 'COLLABORATOR', head: { repo: { full_name: 'collab/agent-manager' } } });
+  try {
+    const i = instance();
+    const list = await i.dp.listPrs();
+    const byNumber = Object.fromEntries(list.prs.map((p) => [p.number, p]));
+    assert.equal(byNumber[1].allowed, true);
+    assert.equal(byNumber[1].headRepo, DEV_PREVIEW_REPO);
+    assert.equal(byNumber[1].association, 'MEMBER');
+    assert.deepEqual([byNumber[2].allowed, byNumber[2].fork, byNumber[2].association, byNumber[2].author, byNumber[2].headRepo],
+      [false, true, 'NONE', 'outsider', 'outsider/agent-manager']);
+    assert.match(byNumber[2].refusal, /fork/);
+    assert.equal(byNumber[3].allowed, false, 'a collaborator\'s fork is listed but refused');
+
+    i.dp.switchTo({ prs: [{ number: 2 }] });
+    let r = await settle(i);
+    assert.equal(r.job.state, 'failed');
+    assert.match(r.job.error, /PR #2 cannot be previewed: its branch is on a fork \(outsider\/agent-manager\)/);
+    assert.deepEqual(r.job.steps.map((x) => x.name), ['resolve'], 'refused before fetching anything');
+    // in a stack, too
+    i.dp.switchTo({ prs: [{ number: 1 }, { number: 3 }] });
+    assert.match((await settle(i)).job.error, /PR #3 cannot be previewed/);
+    // a branch on the repo by an author GitHub calls NONE
+    as.set(2, { author_association: 'NONE' });
+    i.dp.switchTo({ prs: [{ number: 2 }] });
+    assert.match((await settle(i)).job.error, /its author is NONE/);
+    assert.deepEqual(imageContent(i.appDir), IMAGE);
+    assert.equal(i.restarts.length, 0);
+  } finally { as.clear(); }
+});
+
 test('a repository-local git redirect cannot change what is fetched', async () => {
   // Another "repository" with its own main and #1.
   const evil = makeOrigin('evil', { ...MAIN, 'web/marker.txt': 'EVIL\n' });
@@ -404,7 +459,7 @@ test('a repository-local git redirect cannot change what is fetched', async () =
   const s = await settle(i);
   assert.equal(s.job.state, 'done', s.job.error);
   assert.equal(read(path.join(i.appDir, 'public/index.html')), 'built:pr1');
-  assert.deepEqual(s.next.prs, [{ number: 1, sha: prSha[1] }]);
+  assert.deepEqual(s.next.prs.map(({ number, sha }) => ({ number, sha })), [{ number: 1, sha: prSha[1] }]);
   assert.equal(s.next.base, MAIN_SHA);
   assert.doesNotMatch(read(path.join(repo, '.git', 'config')), /insteadOf/i, 'a fresh database');
   // And if a fetch WERE redirected, the API-bound SHAs would not be there.
@@ -412,7 +467,7 @@ test('a repository-local git redirect cannot change what is fetched', async () =
   redirected.dp.switchTo({ prs: [{ number: 1 }] });
   const r = await settle(redirected);
   assert.equal(r.job.state, 'failed');
-  assert.match(r.job.error, /is not available on huggingface\/agent-manager/);
+  assert.match(r.job.error, /PR #1 moved to [0-9a-f]{7} while switching|is not the head of PR #1/);
 });
 
 // ------------------------------------------------------------ swap failures
@@ -515,7 +570,7 @@ test('a build that prints the parent\'s environment leaks a secret into no statu
       knownSecrets: () => [process.env.AM_CANARY_KNOWN],
       testRemote: 'file://' + cfg.origin, env: { PATH: process.env.PATH },
       fetchJson: async (url) => url.endsWith('/branches/main') ? { commit: { sha: cfg.main } }
-        : { number: 9, state: 'open', head: { sha: cfg.head }, base: { repo: { full_name: 'huggingface/agent-manager' } } },
+        : { number: 9, state: 'open', author_association: 'MEMBER', user: { login: 'm' }, head: { sha: cfg.head, repo: { full_name: 'huggingface/agent-manager' } }, base: { repo: { full_name: 'huggingface/agent-manager' } } },
     });
     dp.switchTo({ prs: [{ number: 9 }] });
     const s = await dp._wait();
@@ -546,39 +601,77 @@ test('a build that prints the parent\'s environment leaks a secret into no statu
 
 // ------------------------------------------------------------ restart
 
-test('after a container restart the persisted selection is re-applied with the same SHAs', async () => {
+test('after a container restart the saved selection is re-applied only if GitHub still allows exactly it', async () => {
   const stateFile = path.join(root, 'durable-selection.json');
   const first = instance({ stateFile });
   first.dp.switchTo({ prs: [{ number: 2 }, { number: 1 }] });
   const done = await settle(first);
   assert.equal(done.job.state, 'done');
-  const pinned = done.next.prs;
+  const pinned = done.next.prs.map(({ number, sha }) => ({ number, sha }));
+  const saved = read(stateFile);
+  const reboot = (api) => { write(stateFile, saved); return instance({ stateFile, api }); };
 
-  // After the switch #1 gets a new commit and GitHub calls it closed; a
-  // restart must still bring back exactly what was accepted.
+  // Unchanged: re-applied after a restart (/app back to the image, local disk empty).
+  const second = reboot();
+  assert.equal(second.dp.running().kind, 'main');
+  assert.ok(second.dp.boot(), 'boot started a re-apply');
+  let s = await settle(second);
+  assert.equal(s.job.state, 'done', s.job.error);
+  assert.equal(s.job.source, 'boot');
+  assert.deepEqual(s.job.steps[0].name, 're-check');
+  assert.deepEqual(s.next.prs.map(({ number, sha }) => ({ number, sha })), pinned);
+  assert.equal(s.next.base, MAIN_SHA);
+  assert.equal(read(path.join(second.appDir, 'public/index.html')), 'built:pr1+other');
+  await waitRestart(second, 1);
+  assert.equal(restarted(second).dp.boot(), null, 'its own restart: nothing left to re-apply');
+
+  // Each of these leaves the image running, says why, and restarts nothing.
+  const staysOnImage = async (label, api, why) => {
+    const i = reboot(api);
+    assert.ok(i.dp.boot(), label);
+    const r = await settle(i);
+    assert.equal(r.job.state, 'failed', label);
+    assert.match(r.job.error, why, label);
+    assert.match(r.job.error, /Staying on main/, label);
+    assert.deepEqual(imageContent(i.appDir), IMAGE, label);
+    assert.equal(r.restartPending, false, label);
+    assert.equal(i.restarts.length, 0, label);
+  };
+  closed.add(1);
+  try { await staysOnImage('closed since', undefined, /PR #1 is closed/); } finally { closed.delete(1); }
+  as.set(1, { author_association: 'NONE' });
+  try { await staysOnImage('author no longer trusted', undefined, /its author is NONE/); } finally { as.clear(); }
+  await staysOnImage('GitHub unreachable', async () => { throw new Error('getaddrinfo ENOTFOUND api.github.com'); }, /could not read main from GitHub/);
+  // #1 gets a new commit: the accepted SHA is no longer what the PR is.
   git(work, 'checkout', '-q', '--detach', prSha[1]);
   write(path.join(work, 'web/marker.txt'), 'pr1-moved\n');
   git(work, 'commit', '-qam', 'pr 1 moved');
   git(work, 'push', '-q', '-f', origin, 'HEAD:refs/pull/1/head');
-  closed.add(1);
-  try {
-    // A restart: /app is the image again and local disk is empty; /data kept the file.
-    const second = instance({ stateFile, api: async () => { throw new Error('boot must not ask GitHub'); } });
-    assert.equal(second.dp.running().kind, 'main');
-    assert.ok(second.dp.boot(), 'boot started a re-apply');
-    const s = await settle(second);
-    assert.equal(s.job.state, 'done', s.job.error);
-    assert.equal(s.job.source, 'boot');
-    assert.deepEqual(s.next.prs, pinned);
-    assert.equal(s.next.base, MAIN_SHA);
-    assert.equal(read(path.join(second.appDir, 'public/index.html')), 'built:pr1+other');
-    await waitRestart(second, 1);
-    assert.equal(second.restarts.length, 1);
-    // Its server restarting into the build: nothing left to re-apply.
-    assert.equal(restarted(second).dp.boot(), null);
-  } finally {
-    closed.delete(1);
+  try { await staysOnImage('moved since', undefined, /PR #1 moved to/); } finally {
     git(work, 'push', '-q', '-f', origin, `${prSha[1]}:refs/pull/1/head`);
+  }
+});
+
+test('a tampered saved selection cannot name commits that are not those PRs or main', async () => {
+  // A commit that exists on the origin (as any fork-network commit would) but
+  // is neither main nor the PR's head.
+  git(work, 'checkout', '-q', '--detach', MAIN_SHA);
+  write(path.join(work, 'web/marker.txt'), 'unreviewed\n');
+  git(work, 'commit', '-qam', 'not a PR head, not on main');
+  const stray = git(work, 'rev-parse', 'HEAD');
+  git(work, 'push', '-q', '-f', origin, `${stray}:refs/hidden/stray`);
+  for (const [label, sel, why] of [
+    ['as a PR head', { base: MAIN_SHA, prs: [{ number: 1, sha: stray }] }, /PR #1 moved to/],
+    ['as the base', { base: stray, prs: [{ number: 1, sha: prSha[1] }] }, /is not on main/],
+  ]) {
+    const stateFile = path.join(root, `tampered-${label.replace(/\W/g, '')}.json`);
+    write(stateFile, JSON.stringify(sel));
+    const i = instance({ stateFile });
+    assert.ok(i.dp.boot(), label);
+    const r = await settle(i);
+    assert.equal(r.job.state, 'failed', label);
+    assert.match(r.job.error, why, label);
+    assert.deepEqual(imageContent(i.appDir), IMAGE, label);
   }
 });
 

@@ -20,17 +20,27 @@ Production and the template never set it.
 
 ## What a switch does
 
-1. Resolves each PR number through the GitHub API: it must be **open** on
-   `huggingface/agent-manager` (GitHub keeps `refs/pull/N/head` after a PR
-   closes, so the ref proves nothing), and the switch is bound to the head SHA
-   the API reports, and to main's SHA from the API. A SHA sent from the list
-   that is no longer the head is refused ("moved; refresh").
-   Fetches those commits from `https://github.com/huggingface/agent-manager.git`
-   into a **freshly created** git database on local disk
-   (`$AM_LOCAL/dev-preview/repo`, recreated every switch, global and system
-   config ignored), so no `insteadOf` anywhere can redirect it, and a commit
-   that is not there is refused. The repository is a constant in
-   `server/src/dev-preview.js`; no request can name another.
+1. Resolves each PR number through the GitHub API and refuses it unless it is
+   **open**, its **head branch is on `huggingface/agent-manager` itself**
+   (pushing a branch there needs write access; a fork is refused, whoever owns
+   it) and its **author is an `OWNER`, `MEMBER` or `COLLABORATOR`** of the
+   repository (`ineligible()` in `server/src/dev-preview.js`). This does not
+   rely on the repository's PR-creation setting. The same rule marks PRs in the
+   list (refused ones are shown greyed out with the reason, forks flagged) and
+   is checked again on every boot re-apply. GitHub keeps `refs/pull/N/head`
+   after a PR closes, so the ref proves nothing on its own.
+   The switch is bound to the head SHA the API reports, and to main's SHA from
+   the API. A SHA sent from the list that is no longer the head is refused
+   ("moved; refresh").
+   Fetches main and the PR heads from
+   `https://github.com/huggingface/agent-manager.git` into a **freshly
+   created** git database on local disk (`$AM_LOCAL/dev-preview/repo`,
+   recreated every switch, global and system config ignored), so no `insteadOf`
+   anywhere can redirect it. Each PR's fetched head must be exactly the bound
+   SHA, and the base must be on the fetched main. Nothing is ever fetched by SHA:
+   GitHub serves any commit of the fork network through the parent repository,
+   so a SHA alone proves nothing. The repository is a constant; no request can
+   name another.
 2. Merges the PRs onto main **in the order picked** (one PR is merged onto main
    too, the way GitHub's merge ref is). A conflict stops the switch and names the
    PR and files.
@@ -70,48 +80,72 @@ no fetch, no build.
 ## Restarts and crashes
 
 A container restart puts `/app` back to the image and wipes local disk. On boot
-the server reads `/data/state/dev-preview.json` and re-applies the **same SHAs**
-(fetching them by SHA if a PR has moved on), then restarts into them. This is
-the one path that does not ask GitHub: it re-applies exactly what the operator
-accepted, even if that PR has since moved or closed. The sidebar row
-says `main` until then.
+the **image's** server reads `/data/state/dev-preview.json` and re-checks it
+with GitHub before running anything: every PR must still be open, still pass
+the rule in step 1, and still have the saved SHA as its head, and the saved base
+must be on main. Then it re-applies exactly those SHAs and restarts into them.
+If any of that fails, including GitHub being unreachable, it stays on the
+image and says why in the sidebar row and panel; pick again to switch. The
+sidebar row says `main` until a re-apply has restarted into its build.
 
-If a previewed build exits non-zero within two minutes of starting, the
-supervisor repoints `/app/current` at the image, leaves a marker, and starts the
-image. The image then reports the crash in the sidebar row and panel, clears the saved
-selection (so the next boot does not rebuild the same crash) and logs it.
+The supervisor in `entrypoint.sh` is the image's code, not the previewed
+build's, so it does not depend on a PR's own copy of the switcher. While
+`/app/current` points at a previewed build, it rolls back to the image (repoints
+`/app/current`, leaves a marker, starts the image) when that build:
+
+- exits for any reason other than "restart me" (75), at any time;
+- does not answer `/api/health` within `AM_DEV_PREVIEW_START_DEADLINE` seconds
+  (default 180); or
+- stops answering it for `AM_DEV_PREVIEW_HEALTH_FAILS` checks in a row (default
+  12, one every `AM_DEV_PREVIEW_HEALTH_EVERY` = 10 s).
+
+The image then reports it in the sidebar row and panel, clears the saved
+selection (so the next boot does not rebuild the same thing) and logs it.
+
+### Out-of-band recovery
+
+If a previewed build misbehaves while staying healthy (it runs, answers
+`/api/health`, but its switcher does not roll back), turn the feature off from
+the Hub: **delete the `AM_DEV_PREVIEW` variable** of the Space (Settings →
+Variables) and restart it. Without the variable, `entrypoint.sh` starts the
+image's server exactly as on any other Space: `/app` is the fresh image, no
+route exists, and the saved selection is never read. Setting the variable again
+later re-checks that selection with GitHub before applying it, as above. To
+forget it, delete `/data/state/dev-preview.json` first.
 
 ## Security
 
-This is code execution by design: whatever the picked PRs contain runs as the
-app, with everything the app can reach. The boundary is that only
-collaborators can open PRs on the hard-coded repository, only open PRs can be
-picked, and the operator picks. It sits behind the Space's HF auth like the
-rest of Agent Manager, and:
+This is code execution by design. Whatever the picked PRs contain runs with
+everything the app can reach: the Space's secrets, the `/data` bucket, every
+agent and its credentials. Their `npm ci` scripts and `vite build` do so as
+soon as a switch starts, before the operator sees the result. **The boundary is
+which PRs can be picked and who picks**, and it is enforced in code, not left to
+repository settings:
 
+- only open PRs whose branch is on `huggingface/agent-manager` itself and whose
+  author is an owner, member or collaborator (step 1), at switch time and again
+  on every boot;
+- the operator picks, behind the Space's HF auth, after one confirmation that
+  names each PR's author, role and branch repository, and says plainly that the
+  code will run with this Space's secrets, bucket and agents;
 - the gate covers routes, `/api/info`, the UI and the boot path;
 - a switch body is `{prs: [{number, sha?}]}` only: JSON integers, 40-hex SHAs,
-  no duplicates, at most 6, no other keys;
-- every subprocess is `execFile` with an argument array, with a fresh
-  environment that does not include the Space's secrets;
-- **nothing a subprocess prints is shown, saved or audited unfiltered**: every
-  log line passes the API audit log's credential filter, with the Space's
-  injected secret values as known values plus its token patterns; a failing
-  command's error (`job.error`, the audit record) is fixed text, its output only
-  in the filtered log;
+  no duplicates, at most 6, no other keys; every subprocess is `execFile` with
+  an argument array;
 - every switch request is in the API log (`POST /api/dev-preview/switch`), and
-  its outcome, boot re-applies and crash rollbacks are appended as `PREVIEW`
-  records from origin `dev-preview`, through the same filter.
+  its outcome, boot re-applies and rollbacks are appended as `PREVIEW` records
+  from origin `dev-preview`.
 
-**What is not isolated.** The install and build run as the manager's user.
-They can read what the manager can: its `/proc/<pid>/environ`, and `/data`. This
-container has no user namespaces (seccomp), no root, and `/data` is a FUSE
-mount readable by every uid, so neither a sandbox nor a second user would keep
-a build away from the Space's secrets. Filtering stops a secret from being
-*shown* by accident; it cannot stop a hostile build that encodes a secret, or
-sends it over the network. That is the same exposure the previewed server has
-once it runs, which is why the trust decision is which PRs can be picked, not
-how the build runs.
+**Not a control, just hygiene:** subprocesses get a fresh environment without
+the Space's secrets, and their output is passed through the API audit log's
+credential filter (the Space's secret values plus token patterns) before it is
+shown or saved, with fixed text for errors. That keeps a secret from being
+shown by accident. It does not keep anything from a hostile build, which can
+read the manager's `/proc/<pid>/environ` and `/data` (both readable by the same
+user) and encode or send what it finds. This container has no user namespaces
+(seccomp), no root, and `/data` is a FUSE mount readable by every uid, so the
+build cannot be sandboxed here; it would not matter much anyway, since a
+switched-in server is the manager.
 
 ## API
 
