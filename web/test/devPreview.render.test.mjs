@@ -21,7 +21,7 @@ fs.writeFileSync(stub, `
 export * from ${JSON.stringify(path.join(WEB, 'src/api.ts'))};
 window.__calls = [];
 const main = { kind: 'main', label: 'main', id: 'image', image: true, prs: [] };
-let status = { repo: 'huggingface/agent-manager', supervised: true, running: main, selected: { prs: [] }, job: null, crashed: null, log: [] };
+let status = { repo: 'huggingface/agent-manager', supervised: true, loaded: 'image', restartPending: false, running: main, selected: { prs: [] }, job: null, crashed: null, log: [] };
 window.__setStatus = (s) => { status = { ...status, ...s }; };
 export const getDevPreviewStatus = () => Promise.resolve(structuredClone(status));
 export const getDevPreviewPrs = () => Promise.resolve({ ok: true, repo: 'huggingface/agent-manager', main: { sha: '${M}' }, prs: [
@@ -48,7 +48,7 @@ await build({
       import SettingsShell from './src/components/SettingsShell.tsx';
       const main = { kind: 'main', label: 'main', id: 'image', prs: [] };
       const stack = { kind: 'prs', label: '', id: 'rel-2', base: '${M}', prs: [{ number: 190, sha: '${B}' }, { number: 182, sha: '${A}' }] };
-      const sum = (running, job = null) => ({ repo: 'huggingface/agent-manager', supervised: true, running, selected: { prs: [] }, job, crashed: null });
+      const sum = (running, job = null) => ({ repo: 'huggingface/agent-manager', supervised: true, loaded: 'image', restartPending: false, running, selected: { prs: [] }, job, crashed: null });
       window.__render = (which) => {
         const root = document.getElementById('root');
         root.innerHTML = '';
