@@ -247,7 +247,13 @@ export function createDevPreview({
   const running = () => loaded;
   const restartPending = () => target().id !== loaded.id;
 
-  const selection = () => readJson(stateFile) || { prs: [] };
+  // Read once, then kept in step with every write: summary() feeds /api/info,
+  // which every open tab polls, and a sync read on the /data bucket blocks the
+  // event loop that pumps the terminals.
+  let selectionCache = null;
+  const selection = () => (selectionCache ??= readJson(stateFile) || { prs: [] });
+  const saveSelection = (value) => { writeJson(stateFile, value); selectionCache = value; };
+  const forgetSelection = () => { selectionCache = null; };
 
   function summary() {
     const next = target();
@@ -535,7 +541,7 @@ export function createDevPreview({
     let before = null;
     try { before = fs.readFileSync(stateFile); } catch {}
     fault('state-write');
-    writeJson(stateFile, nextSelection);
+    saveSelection(nextSelection);
     try {
       fault('swap');
       replaceLink(currentLink, dir);
@@ -544,6 +550,7 @@ export function createDevPreview({
         if (before === null) fs.rmSync(stateFile, { force: true });
         else { const tmp = `${stateFile}.restore`; fs.writeFileSync(tmp, before); fs.renameSync(tmp, stateFile); }
       } catch {}
+      forgetSelection();
       throw e;
     }
   }
@@ -669,7 +676,7 @@ export function createDevPreview({
     try {
       log(`was ${loaded.label}`);
       if (loaded.kind === 'main' && linkTarget() === null) {
-        writeJson(stateFile, { prs: [], at: new Date().toISOString() });
+        saveSelection({ prs: [], at: new Date().toISOString() });
         finish('done');
         log('already on main; nothing to restart');
       } else {
@@ -696,7 +703,7 @@ export function createDevPreview({
       const bad = selection();
       crashed = { at: new Date().toISOString(), detail: scrub(marker.slice(0, 500)), selection: bad };
       // Forget it, or every boot would rebuild the same crash.
-      writeJson(stateFile, { prs: [], at: crashed.at, crashedFrom: bad });
+      saveSelection({ prs: [], at: crashed.at, crashedFrom: bad });
       lastLog = [];
       log(`the previewed release exited right after starting (${marker.slice(0, 200)}); the supervisor rolled back to main`);
       audit({ event: 'crash-rollback', source: 'supervisor', ok: false, state: 'rolled-back', request: { prs: bad.prs || [] }, result: { detail: crashed.detail } });
