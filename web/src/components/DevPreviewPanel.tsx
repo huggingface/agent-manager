@@ -138,6 +138,14 @@ export default function DevPreviewPanel() {
           <button className="devpv-link" onClick={() => setShowLog(!showLog)}>{showLog ? 'hide' : 'show'} log</button>
           {showLog ? <pre className="devpv-log mono">{(status?.log || []).join('\n')}</pre> : null}
         </section>
+      ) : status?.log?.length ? (
+        // A switch ends in a restart, and the new server has no job object;
+        // the last switch's log is kept on disk and still shown.
+        <section className="devpv-card" data-testid="dev-preview-lastlog">
+          <div className="devpv-row"><span className="devpv-k">Last log</span>
+            <button className="devpv-link" onClick={() => setShowLog(!showLog)}>{showLog ? 'hide' : 'show'}</button></div>
+          {showLog ? <pre className="devpv-log mono">{status.log.join('\n')}</pre> : null}
+        </section>
       ) : null}
 
       <section className="devpv-card">

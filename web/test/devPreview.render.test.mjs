@@ -106,6 +106,15 @@ try {
     await render('shell-on');
     assert.equal(await page.getByRole('button', { name: 'Preview', exact: true }).count(), 1);
   });
+  await check('after the restart the last switch log is still offered', async () => {
+    await page.evaluate(() => window.__setStatus({ job: null, log: ['[13:53:50] done in 11.6s'] }));
+    await render('shell-on');
+    await page.waitForSelector('[data-testid="dev-preview-lastlog"]');
+    await page.locator('[data-testid="dev-preview-lastlog"] button').click();
+    assert.match(await page.locator('[data-testid="dev-preview-lastlog"]').innerText(), /done in 11\.6s/);
+    await page.evaluate(() => window.__setStatus({ log: [] }));
+    await render('shell-on');
+  });
   await check('the panel switches to PRs in the order ticked and shows the conflict', async () => {
     await page.waitForSelector('.devpv-prs li');
     assert.match(await page.locator('[data-testid="dev-preview-running"]').innerText(), /main/);
