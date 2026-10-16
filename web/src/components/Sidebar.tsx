@@ -772,7 +772,8 @@ export default function Sidebar({
 
   return (
     <aside className="sidebar">
-      <div className="brand">
+      {/* With the preview row, the divider moves below it: one header block. */}
+      <div className={`brand${previewBar ? ' with-preview' : ''}`}>
         <div className="logo">
           <AmMark className="am-mark" />
           <h1>Agent Manager</h1>

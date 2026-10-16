@@ -88,12 +88,16 @@ try {
     await render('main');
     await page.waitForFunction(() => document.querySelectorAll('#devpv-pick option').length > 1);
     const box = await page.locator(bar).boundingBox();
-    assert.ok(box.height <= 40, `row is ${box.height}px tall`);
+    assert.ok(box.height <= 48, `row is ${box.height}px tall`); // 30px controls + padding + divider
     assert.match(await page.locator(bar).innerText(), /^Preview:/);
     assert.equal(await page.getByTestId('dev-preview-pick').inputValue(), 'main');
     const options = await page.locator('#devpv-pick option').allInnerTexts();
     // a long title is cut to its first letters
     assert.deepEqual(options, ['main', '#182 Security: keep edge s…', '#190 Cron tweaks']);
+    const [pick, btn] = await Promise.all([page.getByTestId('dev-preview-pick').boundingBox(), page.getByTitle(/Preview settings/).boundingBox()]);
+    assert.equal(pick.height, btn.height, `dropdown ${pick.height}px vs settings button ${btn.height}px`);
+    assert.equal(pick.y, btn.y, 'dropdown and button are aligned');
+    assert.equal(await page.locator(bar).evaluate((el) => getComputedStyle(el).borderBottomStyle), 'solid', 'the divider sits below the row');
     await page.getByTitle(/Preview settings/).click();
     assert.equal(await page.evaluate(() => window.__opened), 1);
   });

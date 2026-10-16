@@ -1346,7 +1346,7 @@ export default function App() {
         onMove={doMove}
         onDragState={setSessionDrag}
         onOpenSettings={() => setSettingsOpen(true)}
-        previewBar={<DevPreviewBar summary={info?.devPreview} onOpenSettings={() => { setSettingsPage('preview'); setSettingsOpen(true); }} />}
+        previewBar={info?.devPreview ? <DevPreviewBar summary={info.devPreview} onOpenSettings={() => { setSettingsPage('preview'); setSettingsOpen(true); }} /> : null}
         theme={theme}
         onToggleTheme={toggleTheme}
         onQuickStart={quickStart}
