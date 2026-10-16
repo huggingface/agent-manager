@@ -134,6 +134,8 @@ export interface Info {
   backup?: BackupHealth | null;
   welcomeSeen?: boolean;
   demoMode?: boolean;
+  /** Only on a dev-preview Space (AM_DEV_PREVIEW=1); absent everywhere else. */
+  devPreview?: DevPreviewSummary;
 }
 export const getInfo = (): Promise<Info> => fetch('/api/info').then(json);
 // Public-safe lock status alone; what the locked page polls.
@@ -143,6 +145,35 @@ export const dismissWelcome = () => fetch('/api/welcome/seen', { method: 'POST' 
 
 export const setDemo = (active: boolean): Promise<{ ok: boolean; active: boolean }> =>
   fetch('/api/demo', { method: 'POST', headers: HEADERS, body: JSON.stringify({ active }) }).then(json);
+
+// ---- dev preview (only exists when the Space sets AM_DEV_PREVIEW=1) ----
+export interface DevPreviewPr { number: number; sha: string; title?: string; author?: string; draft?: boolean; url?: string }
+export interface DevPreviewRunning {
+  kind: 'main' | 'prs' | 'unknown'; label: string; id: string; image?: boolean;
+  base?: string; prs: DevPreviewPr[]; merged?: string; builtAt?: string;
+}
+export interface DevPreviewJob {
+  id: string; kind: 'switch' | 'rollback'; source: string;
+  state: 'running' | 'done' | 'failed' | 'refused'; step: string;
+  steps: { name: string; ms: number }[]; startedAt: number; finishedAt: number | null;
+  error: string | null; prs: DevPreviewPr[]; restarting: boolean;
+  rebuild: { file: string; why: string }[] | null;
+  conflict: { pr: number; onto: string; files: string[] } | null;
+}
+export interface DevPreviewSummary {
+  repo: string; supervised: boolean; running: DevPreviewRunning;
+  selected: { base?: string; prs: DevPreviewPr[] };
+  job: DevPreviewJob | null;
+  crashed: { at: string; detail: string } | null;
+}
+export const getDevPreviewStatus = (): Promise<DevPreviewSummary & { log: string[] }> =>
+  fetch('/api/dev-preview/status').then(json);
+export const getDevPreviewPrs = (): Promise<{ ok: boolean; error?: string; repo?: string; main?: { sha: string | null }; prs?: DevPreviewPr[] }> =>
+  fetch('/api/dev-preview/prs').then(json);
+export const switchDevPreview = (prs: { number: number; sha?: string }[]): Promise<DevPreviewSummary> =>
+  fetch('/api/dev-preview/switch', { method: 'POST', headers: HEADERS, body: JSON.stringify({ prs }) }).then(json);
+export const rollbackDevPreview = (): Promise<DevPreviewSummary> =>
+  fetch('/api/dev-preview/rollback', { method: 'POST', headers: HEADERS, body: '{}' }).then(json);
 
 export const relaunchSpace = (): Promise<{ ok: boolean; reason?: string }> =>
   fetch('/api/relaunch', { method: 'POST' }).then(json);

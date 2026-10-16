@@ -229,6 +229,13 @@ COPY --chown=node:node scripts/ scripts/
 COPY --chown=node:node --from=web /web/dist /app/public
 COPY --chown=node:node entrypoint.sh /app/entrypoint.sh
 COPY --chown=node:node session.bashrc /app/
+# The build inputs a dev-preview switch cannot replace in place, kept so it can
+# tell whether a PR stack needs a full rebuild instead (server/src/dev-preview.js
+# REBUILD_FILES; the playwright pin is read from web/package.json). Small, and
+# inert unless the Space sets AM_DEV_PREVIEW=1.
+COPY --chown=node:node Dockerfile .dockerignore entrypoint.sh codex-requirements.toml gemini-system-defaults.json /app/.image-inputs/
+COPY --chown=node:node scripts/am-codex-repin-hook.sh /app/.image-inputs/scripts/
+COPY --chown=node:node web/package.json web/package-lock.json /app/.image-inputs/web/
 
 ENV PORT=7860 \
     BIND_HOST=0.0.0.0 \

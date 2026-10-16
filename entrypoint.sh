@@ -221,7 +221,46 @@ boot "starting the app — boot took $(boot_elapsed "$BOOT_T0")"
 # state checkpoint. The timer bounds loss on an ungraceful stop; the child is
 # stopped before the final checkpoint so SQLite and transcript state is quiet.
 AGENT_STATE_CHECKPOINT_SECONDS="${AGENT_STATE_CHECKPOINT_SECONDS:-15}"
-node /app/server/src/index.js &
+# Dev preview (AM_DEV_PREVIEW=1, dev Spaces only — see docs/dev-preview.md): the
+# app can swap /app/server, /app/scripts, /app/public and session.bashrc for a
+# PR build and then exit 75 to be restarted into it, without restarting the
+# container. A previewed build that dies within its first two minutes is rolled
+# back to the image's own copy, so a broken PR cannot take the Space down.
+# Without the variable this is exactly the plain `node … &` it always was.
+supervise_app() {
+  child=""
+  trap 'kill -TERM "$child" 2>/dev/null; wait "$child"; exit $?' TERM INT HUP
+  while :; do
+    started=$(date +%s)
+    node /app/server/src/index.js &
+    child=$!
+    wait "$child"
+    code=$?
+    if [ "$code" -eq 75 ]; then
+      echo "[dev-preview] server asked for a restart; starting it again"
+      continue
+    fi
+    target="$(readlink /app/server 2>/dev/null || true)"
+    if [ "$code" -ne 0 ] && [ -n "$target" ] && [ "$target" != /app/.image/server ] \
+       && [ $(( $(date +%s) - started )) -lt 120 ]; then
+      echo "[dev-preview] previewed build exited $code within 2 minutes; rolling back to the image"
+      for p in server scripts public session.bashrc; do
+        ln -sfn "/app/.image/$p" "/app/.$p.rollback" && mv -Tf "/app/.$p.rollback" "/app/$p"
+      done
+      mkdir -p "$AM_LOCAL/dev-preview"
+      echo "exit $code from $target" > "$AM_LOCAL/dev-preview/crashed"
+      continue
+    fi
+    exit "$code"
+  done
+}
+if [ "${AM_DEV_PREVIEW:-}" = "1" ]; then
+  boot "dev preview enabled: supervising the app so it can switch builds in place"
+  export AM_DEV_PREVIEW_SUPERVISED=1
+  supervise_app &
+else
+  node /app/server/src/index.js &
+fi
 APP_PID=$!
 
 checkpoint_loop() {
