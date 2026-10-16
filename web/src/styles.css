@@ -78,6 +78,31 @@ body {
 .bkfail-txt { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bkfail-why { color: var(--muted); }
 .bkfail-link { flex: none; border: none; background: transparent; padding: 0; font: inherit; font-size: 12px; color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; cursor: pointer; }
+/* Dev preview (only on a Space with AM_DEV_PREVIEW=1): which code is running. */
+.devpv { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; padding: 6px 10px; border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border)); background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: var(--r-md); font-size: 12.5px; line-height: 1.35; }
+.devpv.main { border-color: var(--border); background: var(--panel-2); }
+.devpv-tag { flex: none; font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 1px 6px; border-radius: 999px; background: var(--accent); color: var(--bg); }
+.devpv-txt { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.devpv-dim { color: var(--muted); }
+.devpv-warn, .devpv-err { color: var(--danger); }
+.devpv-link { flex: none; border: none; background: transparent; padding: 0; font: inherit; font-size: 12px; color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; cursor: pointer; }
+.devpv-panel { display: flex; flex-direction: column; gap: 12px; max-width: 860px; }
+.devpv-card { border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.devpv-row { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.devpv-k { flex: none; width: 92px; color: var(--muted); }
+.devpv-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.devpv-steps { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+.devpv-state.done { color: var(--accent); } .devpv-state.failed, .devpv-state.refused { color: var(--danger); }
+.devpv-files { margin: 4px 0 0 18px; padding: 0; }
+.devpv-log { max-height: 320px; overflow: auto; font-size: 11.5px; background: var(--panel-2); padding: 8px; border-radius: var(--r-md); white-space: pre-wrap; word-break: break-word; margin: 0; }
+.devpv-prs, .devpv-stack { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.devpv-stack { list-style: decimal; padding-left: 20px; }
+.devpv-prs label { display: flex; gap: 6px; align-items: baseline; cursor: pointer; min-width: 0; }
+.devpv-order { display: inline-block; width: 14px; text-align: center; color: var(--accent); font-weight: 700; font-size: 12px; }
+.devpv-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.devpv-move { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; }
+.devpv-move .icon-btn { width: 26px; height: 24px; }
+.devpv-input { width: 120px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel-2); color: var(--text); font: inherit; }
 .bkfail-link:hover { color: var(--danger); text-decoration-style: solid; }
 .zoombar { display: flex; align-items: center; gap: 4px; padding: 4px 8px; margin-top: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); flex: none; }
 .zoombar .spacer { flex: 1; }

@@ -19,6 +19,7 @@ const loadUsage = () => import('./UsagePanel');
 const loadApiLog = () => import('./ApiLog');
 const loadSkills = () => import('./SkillsEditor');
 const loadCron = () => import('./CronSettings');
+const loadPreview = () => import('./DevPreviewPanel');
 
 // 'already the latest' and 'updated' must not read the same: a run where
 // nothing moved looking like one where something did is the failure mode this
@@ -110,7 +111,7 @@ function ReadErrorNote({ kind }: { kind: Kind }) {
 }
 
 
-interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; engine?: string; ghostty?: boolean; canRelaunch?: boolean; secrets?: string[]; bucketUnverified?: boolean; }
+interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; engine?: string; ghostty?: boolean; canRelaunch?: boolean; secrets?: string[]; bucketUnverified?: boolean; devPreview?: api.DevPreviewSummary; }
 
 function urlBase64ToUint8Array(base64: string) {
   const padding = '='.repeat((4 - (base64.length % 4)) % 4);
@@ -1092,6 +1093,18 @@ export default function SettingsView({
             <h2>Cron</h2>
             <p className="s-help cron-intro">Send a prompt to an agent on a schedule. Jobs persist across Space restarts; if the named agent does not exist when a job fires, it is created first.</p>
             <LazyPanel load={loadCron} what="the cron page" render={(m) => <m.default clis={clis} />} />
+          </div>
+        )}
+
+        {page === 'preview' && info?.devPreview && (
+          <div className="settings-page wide">
+            <h2>Preview</h2>
+            <p className="s-help">
+              Run an open pull request of <span className="mono">{info.devPreview.repo}</span>, or a stack of them
+              merged onto main in the order you pick, on this Space without a rebuild. Switching restarts the app
+              server, which restarts every running agent. Only this dev Space has this page.
+            </p>
+            <LazyPanel load={loadPreview} what="the preview page" render={(m) => <m.default />} />
           </div>
         )}
     </>
