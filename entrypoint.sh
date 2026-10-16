@@ -222,8 +222,8 @@ boot "starting the app — boot took $(boot_elapsed "$BOOT_T0")"
 # stopped before the final checkpoint so SQLite and transcript state is quiet.
 AGENT_STATE_CHECKPOINT_SECONDS="${AGENT_STATE_CHECKPOINT_SECONDS:-15}"
 # Dev preview (AM_DEV_PREVIEW=1, dev Spaces only — see docs/dev-preview.md): the
-# app can swap /app/server, /app/scripts, /app/public and session.bashrc for a
-# PR build and then exit 75 to be restarted into it, without restarting the
+# app can repoint /app/current (behind /app/server, scripts, public and
+# session.bashrc) at a PR build and then exit 75 to be restarted into it, without restarting the
 # container. A previewed build that dies within its first two minutes is rolled
 # back to the image's own copy, so a broken PR cannot take the Space down.
 # Without the variable this is exactly the plain `node … &` it always was.
@@ -240,13 +240,12 @@ supervise_app() {
       echo "[dev-preview] server asked for a restart; starting it again"
       continue
     fi
-    target="$(readlink /app/server 2>/dev/null || true)"
-    if [ "$code" -ne 0 ] && [ -n "$target" ] && [ "$target" != /app/.image/server ] \
+    # /app/current is the one link a switch repoints (server/src/dev-preview.js).
+    target="$(readlink /app/current 2>/dev/null || true)"
+    if [ "$code" -ne 0 ] && [ -n "$target" ] && [ "$target" != /app/.image ] \
        && [ $(( $(date +%s) - started )) -lt 120 ]; then
       echo "[dev-preview] previewed build exited $code within 2 minutes; rolling back to the image"
-      for p in server scripts public session.bashrc; do
-        ln -sfn "/app/.image/$p" "/app/.$p.rollback" && mv -Tf "/app/.$p.rollback" "/app/$p"
-      done
+      ln -sfn /app/.image /app/.current.rollback && mv -Tf /app/.current.rollback /app/current
       mkdir -p "$AM_LOCAL/dev-preview"
       echo "exit $code from $target" > "$AM_LOCAL/dev-preview/crashed"
       continue

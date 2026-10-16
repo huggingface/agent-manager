@@ -38,7 +38,7 @@ export default function DevPreviewBanner({ summary, onOpen }: {
             {running.base ? <span className="devpv-dim"> on main <span className="mono">{short(running.base)}</span></span> : null}
           </>
         )}
-        {summary.restartPending ? <span className="devpv-dim"> · restarting into it…</span> : null}
+        {summary.restartPending ? <span className="devpv-dim"> · restarting into {summary.next?.label ?? 'the new build'}…</span> : null}
         {busy ? <span className="devpv-dim"> · {job!.kind === 'rollback' ? 'rolling back' : `switching: ${job!.step}`}…</span> : null}
         {crashed ? <span className="devpv-warn"> · the last preview crashed on start and was rolled back</span> : null}
       </span>
