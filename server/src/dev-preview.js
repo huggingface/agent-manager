@@ -349,7 +349,7 @@ export function createDevPreview({
 
   function begin(kind, source, prs) {
     if (!supervised) {
-      // Swapping without a restart would make the banner name code that is not
+      // Swapping without a restart would make the sidebar row name code that is not
       // the code answering. entrypoint.sh's supervisor is what restarts us.
       throw Object.assign(new Error('the server is not running under the entrypoint supervisor, so it cannot restart into a new build'), { statusCode: 409, code: 'not-supervised' });
     }

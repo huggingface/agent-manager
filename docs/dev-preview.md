@@ -13,7 +13,7 @@ or no value, is off:
 | --- | --- | --- |
 | `/api/dev-preview/*` | not registered (404) | registered |
 | `/api/info.devPreview` | absent | what runs, the last switch |
-| UI | nothing | header banner, Settings → Preview |
+| UI | nothing | "Preview:" row under the sidebar logo, Settings → Preview |
 | boot | `node` started as before | supervisor loop, re-apply of the saved selection |
 
 Production and the template never set it.
@@ -61,7 +61,7 @@ Production and the template never set it.
    `$AM_LOCAL/dev-preview/releases/`.
 8. Exits the server with code 75. The supervisor in `entrypoint.sh` starts it
    again; the container keeps running. All agent sessions restart with the
-   server. Until that happens the banner says what is still answering and
+   server. Until that happens the sidebar row says what is still answering and
    "restarting into …", and no other switch or rollback is accepted.
 
 **Roll back to main** repoints `/app/current` at `/app/.image/` and restarts:
@@ -73,12 +73,12 @@ A container restart puts `/app` back to the image and wipes local disk. On boot
 the server reads `/data/state/dev-preview.json` and re-applies the **same SHAs**
 (fetching them by SHA if a PR has moved on), then restarts into them. This is
 the one path that does not ask GitHub: it re-applies exactly what the operator
-accepted, even if that PR has since moved or closed. The banner
+accepted, even if that PR has since moved or closed. The sidebar row
 says `main` until then.
 
 If a previewed build exits non-zero within two minutes of starting, the
 supervisor repoints `/app/current` at the image, leaves a marker, and starts the
-image. The image then reports the crash in the banner and panel, clears the saved
+image. The image then reports the crash in the sidebar row and panel, clears the saved
 selection (so the next boot does not rebuild the same crash) and logs it.
 
 ## Security
