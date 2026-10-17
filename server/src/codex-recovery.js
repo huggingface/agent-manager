@@ -1,4 +1,5 @@
-// Recovery is bounded to an operator-opened view. No daemon launch or input replay.
+// Recovery serves an operator-opened view or an attributed agent delivery.
+// No daemon launch, permission widening or input replay.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';

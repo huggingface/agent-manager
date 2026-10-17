@@ -116,6 +116,10 @@ export function createValidator({ cliExists, sessionExists, groupExists }) {
     const b = prompt && typeof req.body === 'string' ? {} : object(req.body === undefined ? {} : req.body, 'body');
     if (prompt) {
       optional(b, 'from'); optional(b, route === '/api/agents' ? 'prompt' : 'text', text, { empty: true });
+      if(b.completion !== undefined) {
+        if(route !== '/api/agents/:id/prompt')throw invalid('completion','only supported when prompting an existing session');
+        oneOf(b.completion,'completion',['notify']);
+      }
       if (route === '/api/agents') { cli(q.cli, 'cli'); optional(q, 'name', text, { empty: true }); optional(q, 'path', pathText); }
       return; // sender, availability, self-target and nonempty prompt checks remain in the route
     }
