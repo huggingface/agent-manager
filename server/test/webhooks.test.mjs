@@ -142,3 +142,16 @@ test('interrupted native turn and rotated evidence are never reported completed'
  const rotated=fixture();rotated.receive();await rotated.service.tick();fs.renameSync(rotated.file,rotated.file+'.old');fs.writeFileSync(rotated.file,'');
  await rotated.service.tick();assert.equal(rotated.job().state,'uncertain');assert.equal(rotated.nativeCalls(),1);
 });
+test('split native completion survives restart without storing private final text',async()=>{
+ const f=fixture();f.receive();await f.service.tick();
+ const text=externalText(f.calls[0].principal,f.calls[0].payload.text),turn='split';
+ fs.appendFileSync(f.file,[{type:'event_msg',payload:{type:'task_started',turn_id:turn}},
+  {type:'response_item',payload:{type:'message',role:'user',content:[{type:'input_text',text}]}},
+  {type:'turn_context',payload:{turn_id:turn}},
+  {type:'response_item',payload:{type:'message',role:'assistant',phase:'final',content:[{type:'output_text',text:'PRIVATE SPLIT RESULT'}]}}
+ ].map(JSON.stringify).join('\n')+'\n');
+ await f.service.tick();assert.equal(f.job().state,'accepted');
+ assert.ok(!fs.readFileSync(path.join(f.deps.dir,f.job().key+'.json'),'utf8').includes('PRIVATE SPLIT RESULT'));
+ fs.appendFileSync(f.file,JSON.stringify({type:'event_msg',payload:{type:'task_complete',turn_id:turn}})+'\n');
+ const restarted=new Webhooks(f.deps);await restarted.tick();assert.equal([...restarted.jobs.values()][0].state,'completed');
+});

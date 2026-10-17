@@ -63,6 +63,7 @@ import * as runstate from './runstate.js';
 import { installSlowFsProbe } from './slowfs.js';
 import { operationMiddleware, readOperations } from './operations.js';
 import { dispatchesOf } from './dispatches.js';
+import {SessionEventInput} from './session-event-input.js';
 import { Webhooks, webhookServer } from './webhooks.js';
 import { loadSources, privateFile } from './webhook-providers.js';
 import { Delegations, traceCheckpoint } from './delegations.js';
@@ -510,8 +511,15 @@ if (process.env.AM_WEBHOOK_CONFIG) {
     if (!Number.isInteger(port) || port < 1024 || port > 65535 || port === PORT) throw new Error('Invalid port');
     const sources = () => loadSources(process.env.AM_WEBHOOK_CONFIG, WORKSPACES_DIR);
     sources(); // Reject unsafe configuration before opening any listener.
+    const eventInput = new SessionEventInput({dir:path.join(DATA_DIR,'session-event-receipts'),
+      getSession:store.get,codex:codexInput,running:isRunning,
+      state:s=>{const info=agentInfo().get(s.id);const state=deriveState(s,info);
+        return {status:info?.inputRequired?'needs-input':['waiting','idle'].includes(state)?'idle':state};},
+      resume:s=>ensureRunning(s,120,34,{exactResume:true}),ready:waitForInputReady,send:sendInput,
+      trace:async s=>sessionRuntime.shared(s)?{path:await sharedCodexRollout(s)}:traceLocation(s),
+      remote:{state:remote.remoteState,append:remote.append},assertWritable:()=>{if(isLocked())throw lockedError();}});
     const hooks = new Webhooks({dir:path.join(DATA_DIR,'webhook-events'),sources,
-      secret:source=>privateFile(source.secretFile,WORKSPACES_DIR,4096),input:codexInput,
+      secret:source=>privateFile(source.secretFile,WORKSPACES_DIR,4096),input:eventInput,
       trace:async id=>sharedCodexRollout(store.get(id)),
       assertWritable:()=>{if(isLocked())throw lockedError();}});
     const listener = webhookServer(hooks);

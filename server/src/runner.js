@@ -1,3 +1,4 @@
+import {exactEventResume} from './session-event-target.js';
 import { assertCodexLaunchAllowed, boundOrUnknown, sharedBinding, bindingIfKnown } from './codex-launch-policy.js';
 import { fileURLToPath } from 'node:url';
 import { ApiError } from './api-errors.js';
@@ -1823,7 +1824,8 @@ const SES_ID = /^ses_[A-Za-z0-9_-]+$/;
 // <ms>-<ns>-<16 hex>), and that set is exactly what is safe to interpolate.
 const FX_ID = /^[A-Za-z0-9._-]{1,255}$/;
 
-export function commandFor(session) {
+export function commandFor(session, {exactResume = false} = {}) {
+  if (exactResume) return exactEventResume(session);
   assertCodexLaunchAllowed(session);
   const cli = cliById(session.cli) || cliById('shell');
   if (cli.id === 'shell') return bashLaunch;
@@ -1965,7 +1967,7 @@ export function commandFor(session) {
  * Overview reply box waking a stopped agent and a browser opening a pane take
  * exactly the same path.
  */
-export function ensureRunning(session, cols = 120, rows = 34) {
+export function ensureRunning(session, cols = 120, rows = 34, options = {}) {
   assertCodexLaunchAllowed(session);
   // Nothing to start: a remote agent starts itself, on its own machine. Both
   // callers guard this too; keep the refusal here so no future one can spawn
@@ -2014,7 +2016,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   // this marker to discard nested agent lifecycle events BEFORE they can
   // overwrite the top-level pane's breadcrumb; runner validation repeats the
   // process-tree check before persisting anything.
-  const full = `export AM_PANE_PID=$$; ${commandFor(session)}`;
+  const full = `export AM_PANE_PID=$$; ${commandFor(session, options)}`;
   const captureResize = cliById(session.cli)?.resizeMode === 'repaint';
   const runId = crypto.randomUUID();
 
@@ -2437,7 +2439,7 @@ export async function sendInput(id, text, opts = {}) {
   }
 }
 
-async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
+async function typeAndSubmit(host, id, text, { confirmEcho = false, beforeWrite, beforeEnter } = {}) {
   // Typing a prompt onto a line that already holds something submits both as
   // one message. Clearing the line first would destroy what the operator
   // typed, so the send stops here instead and says what is in the way.
@@ -2447,10 +2449,15 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
     throw new ApiError(409, 'input-line-busy',
       `this session's terminal has unsent text on its input line (${JSON.stringify(shown)}), and sending now would submit both as one message. Send or clear that line in the terminal, then try again.`);
   }
+  if (hosts.get(id) !== host || stopping.has(id)) throw new ApiError(409, 'input-not-ready', 'session changed before input');
+  beforeWrite?.();
   host.inputRequired.observeInput();
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
   // the inner newlines as soft line breaks instead of submitting early.
   const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
+  // Track a guarded paste as unsubmitted until Enter succeeds. If a source
+  // is revoked during the gap, later sends must not append onto this text.
+  if (beforeWrite || beforeEnter) notePaneInput(host, payload);
   // The Enter must arrive as its OWN keypress: TUIs (codex) detect rapid input
   // bursts as a paste, and a CR inside the burst becomes a newline in the
   // composer instead of a submit. A short gap breaks the burst.
@@ -2490,6 +2497,8 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
     host.pty.write(payload);
   }
   await new Promise((r) => setTimeout(r, 300));
+  if (hosts.get(id) !== host || stopping.has(id)) throw new ApiError(409, 'input-not-ready', 'session changed before submit');
+  beforeEnter?.();
   host.pty.write('\r');
   clearPaneInput(id);   // our own Enter emptied it
 }

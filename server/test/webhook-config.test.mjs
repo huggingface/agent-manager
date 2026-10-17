@@ -30,3 +30,14 @@ test('unmapped and archived sessions require explicit migration/restore, never a
  assert.throws(()=>execFileSync(process.execPath,[tool,dir,'legacy',output],{stdio:'pipe'}));assert.equal(fs.existsSync(output),false);
 
 });
+test('offline source configuration covers every promptable AM engine and rejects executable/passive panes',t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'am-webhook-engines-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ for(const cli of ['claude','opencode','gemini','hermes','openclaw','fx','remote','shell','files','trace','voice']){
+  const session={id:cli,cli,sessionUuid:randomUUID(),path:cli,everStarted:true,remote:{name:'laptop'},opencodeSessionId:'ses_exact',fxSessionId:'fx_exact'};
+  fs.writeFileSync(path.join(dir,'sessions.json'),JSON.stringify([session]));const out=path.join(dir,cli+'.json');
+  if(['shell','files','trace','voice'].includes(cli)){assert.throws(()=>execFileSync(process.execPath,[tool,dir,cli,out],{stdio:'pipe'}));assert.equal(fs.existsSync(out),false);continue;}
+  execFileSync(process.execPath,[tool,dir,cli,out]);const source=JSON.parse(fs.readFileSync(out)).sources[0];
+  assert.equal(source.enabled,false);assert.equal(source.target.cli,cli);assert.equal(source.target.threadId,undefined);
+  assert.equal(JSON.parse(source.target.stamp)[0],session.sessionUuid);
+ }
+});

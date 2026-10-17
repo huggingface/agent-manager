@@ -29,7 +29,7 @@ export function loadSources(file, workspaces) {
     if (!ident(s.id) || sources.has(s.id) || typeof s.enabled !== 'boolean') throw reject(503);
     if (s.enabled) {
       if (!['granola','standard'].includes(s.provider) || !Number.isSafeInteger(s.revision) || s.revision < 1 || !iso(s.activatedAt)
-        || !ident(s.target?.sessionId) || !ident(s.target?.threadId) || typeof s.target?.stamp !== 'string' || s.target.stamp.length > 4096
+        || !ident(s.target?.sessionId) || !(ident(s.target?.threadId) || ident(s.target?.cli)) || typeof s.target?.stamp !== 'string' || s.target.stamp.length > 4096
         || !path.isAbsolute(s.secretFile || '')) throw reject(503);
       if (s.provider === 'granola' && (s.noteLookupVerified !== true || typeof s.ownerEmail !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.ownerEmail) || s.ownerEmail.length > 254)) throw reject(503);
       if (s.provider === 'standard' && (!Array.isArray(s.events) || !s.events.length || s.events.length > 20 || !s.events.every(ident)

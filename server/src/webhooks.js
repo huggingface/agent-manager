@@ -5,10 +5,10 @@ import {randomUUID} from 'node:crypto';
 import {traceCheckpoint, scanEvidence} from './delegations.js';
 import {hash, reject, policyStamp, verifyEvent, eventPrompt, externalPrincipal, externalText, privateFile} from './webhook-providers.js';
 
-const pending = new Set(['pending','sending','accepted','blocked']);
+const pending = new Set(['pending','sending','submitted','accepted','blocked']);
 const busy = new Set(['codex-task-busy','codex-send-busy','codex-recovery-busy']);
-const transient = new Set([...busy,'space-locked']);
-const uncertain = new Set(['codex-send-uncertain','codex-recovery-uncertain','codex-request-conflict']);
+const transient = new Set([...busy,'space-locked','event-target-busy','event-resume-required','input-line-busy','input-not-ready']);
+const uncertain = new Set(['codex-send-uncertain','codex-recovery-uncertain','codex-request-conflict','event-send-uncertain']);
 export class Webhooks {
   constructor({dir, sources, secret, input, trace, assertWritable = () => {}, now = Date.now, scan = scanEvidence}) {
     Object.assign(this, {dir,sources,secret,input,trace,assertWritable,now,scan});
@@ -44,8 +44,12 @@ export class Webhooks {
     this.assertWritable();
     const source = this.sources().get(job.sourceId);
     if (!source?.enabled || policyStamp(source) !== job.policy) throw reject(409);
-    const target = this.input.context(source.target.sessionId);
-    if (target.stamp !== source.target.stamp || target.threadId !== source.target.threadId) throw reject(409);
+    let target;
+    try {target=this.input.context(source.target.sessionId);}catch(e){
+      if(['event-target-unavailable','codex-unmapped','codex-binding-stale'].includes(e.code))throw reject(409);
+      throw e;
+    }
+    if (target.stamp !== source.target.stamp || (source.target.threadId !== undefined && target.threadId !== source.target.threadId)) throw reject(409);
     return source;
   }
   receive(id,headers,raw) {
@@ -82,19 +86,24 @@ export class Webhooks {
     if(this.now()-Date.parse(job.createdAt)>86400000) {
       this.transition(job,job.state==='pending'?'expired':'uncertain','observation-or-delivery-deadline');return;
     }
-    if(job.state==='accepted' || job.state==='blocked') {
+    if(['submitted','accepted','blocked'].includes(job.state)) {
       try {
-        const old=hash(JSON.stringify([job.cursor,job.evidence]));this.scan(job);
+        const old=hash(JSON.stringify([job.cursor,job.evidence]));
+        job.evidence.redact=true;
+        if(job.evidence.answer){job.evidence.answerHash=hash(job.evidence.answer);job.evidence.hasAnswer=true;delete job.evidence.answer;}
+        if(this.input.observe)await this.input.observe(job);else await this.scan(job);
+        this.current(job);
         if(job.evidence.outcome) {
           // Keep only a digest, not private result text, in webhook audit files.
-          job.resultHash=job.evidence.answer ? hash(job.evidence.answer) : null;
+          job.resultHash=job.evidence.answer ? hash(job.evidence.answer) : job.evidence.answerHash || null;
           delete job.evidence.answer;
           this.transition(job,job.evidence.outcome,job.evidence.reason);return;
         }
         const status=await this.input.status(job.target.sessionId);
         this.current(job);
         if(status.status==='needs-input')this.transition(job,'blocked','native-input-required');
-        else if(job.state==='blocked')this.transition(job,'accepted','observing-native-result');
+        else if(job.state==='blocked')this.transition(job,job.deliveryState||'accepted','observing-native-result');
+        if(job.state==='submitted'&&job.evidence.matched){job.deliveryState='accepted';this.transition(job,'accepted','native-input-observed');}
         if(old!==hash(JSON.stringify([job.cursor,job.evidence])))this.save(job);
       } catch {this.transition(job,'uncertain','native-evidence-unavailable');}
       return;
@@ -103,22 +112,27 @@ export class Webhooks {
     try {
       const receipt=this.input.readReceipt(job.requestId);
       // No receipt after a crash between journal and send is provably unsent:
-      // CodexInput fsyncs its sending receipt before any native queue call.
+      // Every transport fsyncs its intent before queueing, typing or appending.
       if(!receipt) {
         const status=await this.input.status(job.target.sessionId);this.current(job);
-        if(!['idle','unloaded'].includes(status.status))return;
-        const file=await this.trace(job.target.sessionId);this.current(job);
-        job.cursor=traceCheckpoint(file);job.evidence={};job.cli='codex';
+        if(!['idle','unloaded'].includes(status.status)){
+          this.transition(job,'pending',status.status==='needs-input'?'destination-input-required':status.status==='unknown'?'destination-status-unknown':'destination-busy');return;
+        }
+        if(this.input.prepare)await this.input.prepare(job);
+        else {const file=await this.trace(job.target.sessionId);job.cursor=traceCheckpoint(file);job.evidence={};job.cli='codex';}
+        this.current(job);
+        job.evidence.redact=true;
         job.expectedHash=hash(externalText(principal,text).trim());
         this.transition(job,'sending','native-submit-intent');
         // Always save a refreshed cursor even if already in sending state.
         this.save(job);
       }
       const result=await this.input.sendFromExternal(job.target.sessionId,{text,requestId:job.requestId},principal,{verifySource:()=>this.current(job)});
-      job.receipt={queuedSubmissionId:result.queuedSubmissionId};
-      this.transition(job,'accepted','native-queue-ack');
+      job.receipt={queuedSubmissionId:result.queuedSubmissionId,receiptId:result.receiptId};
+      job.deliveryState=result.deliveryState||'accepted';
+      this.transition(job,job.deliveryState,job.deliveryState==='submitted'?'transport-submitted':'native-queue-ack');
     } catch(e) {
-      if(transient.has(e.code)) {this.transition(job,'pending','waiting-for-destination');return;}
+      if(transient.has(e.code)) {this.transition(job,'pending',e.code==='event-resume-required'?'exact-resume-required':'waiting-for-destination');return;}
       this.transition(job,uncertain.has(e.code)?'uncertain':'review',uncertain.has(e.code)?'native-ack-uncertain':'delivery-requires-review');
     }
   }

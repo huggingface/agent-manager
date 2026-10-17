@@ -179,7 +179,7 @@ export function rateLimited(name) {
  * Append a message. Memory first (that is the truth), disk second — a failed
  * write is logged and never thrown, matching sessions.persist().
  */
-export function append(name, { role, text, from }) {
+export function append(name, { role, text, from }, {durable = false} = {}) {
   if (!ROLES.has(role)) throw new Error(`bad role '${role}'`);
   const log = logFor(name);
   const seq = (log.messages.length ? log.messages[log.messages.length - 1].seq : 0) + 1;
@@ -190,6 +190,20 @@ export function append(name, { role, text, from }) {
     at: new Date().toISOString(),
     text: String(text ?? '').slice(0, MAX_TEXT),
   };
+  if (durable) {
+    if (String(text ?? '').length > MAX_TEXT) throw new Error('Remote message exceeds limit');
+    ensureFolder(name);
+    let fd;
+    try {
+      fd=fs.openSync(path.join(folderFor(name),fileName(seq,role)),'wx',0o600);
+      fs.writeFileSync(fd,serialize(msg));fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
+      fd=fs.openSync(folderFor(name),'r');fs.fsyncSync(fd);
+    } finally {if(fd!==undefined)fs.closeSync(fd);}
+    log.messages.push(msg);
+    rate.set(name,[...(rate.get(name)||[]),Date.now()]);
+    if(role==='user')wake(name);
+    return msg;
+  }
   log.messages.push(msg);
   rate.set(name, [...(rate.get(name) || []), Date.now()]);
   try {
