@@ -1,3 +1,4 @@
+import {WebhookSettings,mountWebhookSettings} from './webhook-settings.js';
 import { assertCodexLaunchAllowed, assertLegacyCodexCreationAllowed } from './codex-launch-policy.js';
 import { sharedCodexRollout } from './codex-reader.js';
 import { conversationActivity, agentListOptions, filterAgentRows } from './agent-list.js';
@@ -63,6 +64,9 @@ import * as runstate from './runstate.js';
 import { installSlowFsProbe } from './slowfs.js';
 import { operationMiddleware, readOperations } from './operations.js';
 import { dispatchesOf } from './dispatches.js';
+import {SessionEventInput} from './session-event-input.js';
+import { Webhooks, webhookServer } from './webhooks.js';
+import { loadSources, privateFile } from './webhook-providers.js';
 import { Delegations, traceCheckpoint } from './delegations.js';
 import { findByName, filterAgentsByGroup, normalizeName } from './agent-list.js';
 import { fileLinkRoots, fileLinksRouter } from './file-links.js';
@@ -500,6 +504,32 @@ try {
   });
   delegations.start();
 } catch {console.error('[delegations] journal unavailable; automatic follow-up disabled');}
+
+mountWebhookSettings(api,new WebhookSettings({file:process.env.AM_WEBHOOK_CONFIG,workspaces:WORKSPACES_DIR,getSession:store.get}),{writable:()=>{if(isLocked())throw lockedError();}});
+
+// Opt-in isolated webhook ingress. It never shares the AM API listener.
+if (process.env.AM_WEBHOOK_CONFIG) {
+  try {
+    const port = Number(process.env.AM_WEBHOOK_PORT || 7861);
+    if (!Number.isInteger(port) || port < 1024 || port > 65535 || port === PORT) throw new Error('Invalid port');
+    const sources = () => loadSources(process.env.AM_WEBHOOK_CONFIG, WORKSPACES_DIR);
+    sources(); // Reject unsafe configuration before opening any listener.
+    const eventInput = new SessionEventInput({dir:path.join(DATA_DIR,'session-event-receipts'),
+      getSession:store.get,codex:codexInput,running:isRunning,
+      state:s=>{const info=agentInfo().get(s.id);const state=deriveState(s,info);
+        return {status:info?.inputRequired?'needs-input':['waiting','idle'].includes(state)?'idle':state};},
+      resume:s=>ensureRunning(s,120,34,{exactResume:true}),ready:waitForInputReady,send:sendInput,
+      trace:async s=>sessionRuntime.shared(s)?{path:await sharedCodexRollout(s)}:traceLocation(s),
+      remote:{state:remote.remoteState,append:remote.append},assertWritable:()=>{if(isLocked())throw lockedError();}});
+    const hooks = new Webhooks({dir:path.join(DATA_DIR,'webhook-events'),sources,
+      secret:source=>privateFile(source.secretFile,WORKSPACES_DIR,4096),input:eventInput,
+      trace:async id=>sharedCodexRollout(store.get(id)),
+      assertWritable:()=>{if(isLocked())throw lockedError();}});
+    const listener = webhookServer(hooks);
+    listener.on('error',()=>{hooks.stop();console.error('[webhooks] listener unavailable; delivery disabled');});
+    listener.listen(port,'127.0.0.1',()=>{hooks.start();console.log('[webhooks] isolated loopback ingress ready');});
+  } catch {console.error('[webhooks] configuration or journal unavailable; ingress disabled');}
+}
 
 const codexCreation=new CodexCreation({store,bindings:codexBindings,input:codexInput,isRunning,
  nextName:()=>nextName('codex'),place:(s,groupId)=>{if(groupId&&groups.get(groupId))groups.attach(groupId,s.id);else order.prepend(`s:${s.id}`);},

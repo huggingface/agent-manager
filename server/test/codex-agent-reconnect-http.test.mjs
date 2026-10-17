@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import http from 'node:http';import net from 'node:net';import {once} from 'node:events';
-import {spawn,execFileSync} from 'node:child_process';import {randomUUID,createHash} from 'node:crypto';
+import {spawn,execFileSync} from 'node:child_process';import {randomUUID,createHash,createHmac,randomBytes} from 'node:crypto';
 import {fileURLToPath} from 'node:url';import {WebSocketServer} from 'ws';
 import {CodexBindings,endpointIdentity} from '../src/codex-bindings.js';
 import {recoverySettings} from '../src/codex-recovery.js';import {nativeFetch as fetch} from './native-client.mjs';
@@ -54,12 +54,18 @@ await new Promise((resolve,reject)=>{native.once('error',reject);native.listen(s
 new CodexBindings(path.join(data,'codex-bindings.json')).bind({session:target,threadId:tid,endpointId:endpointIdentity({socket,home}),cwd:work,expectedRevision:0});
 new CodexBindings(path.join(data,'codex-bindings.json')).bind({session:worker,threadId:worker.codexSessionId,endpointId:endpointIdentity({socket,home}),cwd:work,expectedRevision:0});
 const free=net.createServer().listen(0,'127.0.0.1');await once(free,'listening');const port=free.address().port;await new Promise(r=>free.close(r));
+const hookFree=net.createServer().listen(0,'127.0.0.1');await once(hookFree,'listening');const hookPort=hookFree.address().port;await new Promise(r=>hookFree.close(r));
+const hookKey=randomBytes(32),hookSecret=path.join(root,'hook.key'),hookConfig=path.join(root,'hooks.json');
+fs.writeFileSync(hookSecret,'whsec_'+hookKey.toString('base64'),{mode:0o600});
+fs.writeFileSync(hookConfig,JSON.stringify({version:1,sources:[{id:'fixture-granola',provider:'granola',enabled:true,revision:1,
+ secretFile:hookSecret,activatedAt:new Date(Date.now()-60000).toISOString(),noteLookupVerified:true,ownerEmail:'fixture@example.test',
+ target:{sessionId:worker.id,threadId:worker.codexSessionId,stamp:JSON.stringify([worker.sessionUuid,endpointIdentity({socket,home}),worker.codexSessionId,1,work])}}]}),{mode:0o600});
 const preload=path.join(root,'preload.mjs');
 fs.writeFileSync(preload,`import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';const orig=cp.execFile;cp.execFile=(...args)=>{if(args[1]?.includes('--version')){queueMicrotask(()=>args.at(-1)(new Error('fixture')));return;}return orig(...args);};syncBuiltinESMExports();`);
 let child,log='';const base=`http://127.0.0.1:${port}`;
 const request=async(route,body)=>{const response=await fetch(base+route,{method:body===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)});return {status:response.status,body:await response.json()};};
 try {
- child=spawn(process.execPath,['--import',preload,'src/index.js'],{cwd:fileURLToPath(new URL('../',import.meta.url)),env:{PATH:process.env.PATH,TMPDIR:root,HOME:home,DATA_DIR:data,PORT:String(port),AM_BIND_HOST:'127.0.0.1',PUBLIC_DIR:path.join(root,'public'),CODEX_HOME:home,CLAUDE_CONFIG_DIR:path.join(home,'claude'),XDG_CONFIG_HOME:path.join(home,'config'),XDG_DATA_HOME:path.join(home,'share'),AM_REPIN_DIR:path.join(root,'repin'),AM_INPUT_REQUIRED_DIR:path.join(root,'input'),AM_BASHRC:'/nonexistent',AM_CODEX_SHARED_SOCKET:socket,AM_CODEX_SHARED_HOME:home,AM_CODEX_BINDINGS_PILOT:'1'},stdio:['ignore','pipe','pipe']});
+ child=spawn(process.execPath,['--import',preload,'src/index.js'],{cwd:fileURLToPath(new URL('../',import.meta.url)),env:{PATH:process.env.PATH,TMPDIR:root,HOME:home,DATA_DIR:data,PORT:String(port),AM_BIND_HOST:'127.0.0.1',PUBLIC_DIR:path.join(root,'public'),CODEX_HOME:home,CLAUDE_CONFIG_DIR:path.join(home,'claude'),XDG_CONFIG_HOME:path.join(home,'config'),XDG_DATA_HOME:path.join(home,'share'),AM_REPIN_DIR:path.join(root,'repin'),AM_INPUT_REQUIRED_DIR:path.join(root,'input'),AM_BASHRC:'/nonexistent',AM_CODEX_SHARED_SOCKET:socket,AM_CODEX_SHARED_HOME:home,AM_CODEX_BINDINGS_PILOT:'1',AM_WEBHOOK_CONFIG:hookConfig,AM_WEBHOOK_PORT:String(hookPort)},stdio:['ignore','pipe','pipe']});
  child.stdout.on('data',chunk=>log+=chunk);child.stderr.on('data',chunk=>log+=chunk);let ready=false;
  for(let i=0;i<150;i++){try{if((await request('/api/health')).status===200){ready=true;break;}}catch{}assert.equal(child.exitCode,null,log);await new Promise(r=>setTimeout(r,50));}assert(ready,log);
  assert.equal((await request('/api/sessions/target/reconnect?from=source',{recoveryKey:'a'.repeat(64)})).status,403);
@@ -102,6 +108,35 @@ try {
  const jobs=await request('/api/crons');assert.equal(jobs.body.crons.find(j=>j.id===cron.body.id).last.code,'codex-shared-delivery-pending');
  assert.equal(calls.filter(c=>c.method==='thread/queue/add').length,3,'unsupported native cron never borrows an agent identity');
  console.log('PASS: native shared cron remains explicitly unsupported, no extra queue operation.');
+ // Isolated webhook HTTP -> durable worker -> CodexInput -> native fixture -> result.
+ const event={event_id:randomUUID(),event_type:'note.generated',note_id:'not_1d3tmYTlCICgjy',occurred_at:new Date().toISOString()};
+ const raw=JSON.stringify(event),stamp=String(Math.floor(Date.now()/1000));
+ const headers={'content-type':'application/json','webhook-id':event.event_id,'webhook-timestamp':stamp,
+  'webhook-signature':'v1,'+createHmac('sha256',hookKey).update(`${event.event_id}.${stamp}.${raw}`).digest('base64')};
+ const hookUrl=`http://127.0.0.1:${hookPort}/hooks/fixture-granola`;
+ workerThread.status={type:'active'};
+ assert.equal((await fetch(hookUrl,{method:'POST',headers,body:raw})).status,202);
+ assert.equal((await fetch(hookUrl,{method:'POST',headers,body:raw})).status,202);
+ await new Promise(r=>setTimeout(r,3400));
+ assert.equal(calls.filter(c=>c.method==='thread/queue/add').length,3,'busy destination not interrupted');
+ workerThread.status={type:'idle'};
+ const journal=path.join(data,'webhook-events');let eventJob;
+ for(let i=0;i<100;i++){
+  eventJob=JSON.parse(fs.readFileSync(path.join(journal,fs.readdirSync(journal).find(n=>n.endsWith('.json')))));
+  if(eventJob.state==='completed')break;
+  await new Promise(r=>setTimeout(r,100));
+ }
+ assert.equal(eventJob.state,'completed',JSON.stringify(eventJob)+'\n'+log);
+ const webhookCalls=calls.filter(c=>c.method==='thread/queue/add'&&c.params.input[0].text.includes('[AM external source'));
+ assert.equal(webhookCalls.length,1);assert.equal(webhookCalls[0].params.threadId,worker.codexSessionId);
+ assert.doesNotMatch(webhookCalls[0].params.input[0].text,/\[AM source|\[message from/);
+ const receipt=JSON.parse(fs.readFileSync(path.join(data,'codex-input-receipts',eventJob.requestId+'.json')));
+ assert.equal(receipt.source.type,'webhook');assert.equal(receipt.status,'accepted');
+ assert(!calls.some(c=>['thread/start','turn/start','turn/steer','turn/interrupt'].includes(c.method)));
+ assert.equal((await fetch(hookUrl,{method:'POST',headers,body:raw})).status,202);
+ assert.equal(calls.filter(c=>c.method==='thread/queue/add').length,4);
+ console.log('PASS: signed webhook HTTP, busy queue, exact native thread, correlated result, one delivery, passive duplicate.');
+
 
 
 }finally{

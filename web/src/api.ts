@@ -1110,3 +1110,8 @@ export interface SessionRequest {
 export interface SessionInteraction {canSend: boolean; requests: SessionRequest[]; error: string | null;}
 export const answerSessionRequest = (id: string, key: string, response: {decision?: string; answers?: Record<string, string>}): Promise<{ok: boolean}> =>
   fetch(`/api/sessions/${encodeURIComponent(id)}/answer`, { method: 'POST', headers: HEADERS, body: JSON.stringify({key, ...response}) }).then(json);
+
+export type WebhookWorkflow = {mode:'research'|'drafts'|'drafts-calendar';instructions:string};
+export type WebhookSettingsData = {configured:boolean;revision:string|null;presets:({id:string;label:string}&WebhookWorkflow)[];sources:{id:string;provider:string;enabled:boolean;revision:number;sessionId:string|null;sessionName:string;workflow:WebhookWorkflow}[]};
+export const getWebhookSettings = ():Promise<WebhookSettingsData> => fetch('/api/webhooks/settings').then(json);
+export const saveWebhookWorkflow = (id:string,revision:string,workflow:WebhookWorkflow):Promise<WebhookSettingsData> => fetch(`/api/webhooks/${encodeURIComponent(id)}/workflow`,{method:'PUT',headers:HEADERS,body:JSON.stringify({revision,workflow})}).then(json);
