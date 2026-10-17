@@ -18,13 +18,30 @@ One worker uses the existing CodexInput native queue and recovery, without creat
 
 Jobs expire without dispatch after 24 hours; accepted observations expire to uncertain after 24 hours. A permanent/review error is held for operator review, not retried after an unsafe recovery. A transient busy condition stays queued. Configuration unavailable disables ingestion and delivery. The worker is owned by the AM process; a second listener cannot start a second worker on the same port. Do not configure two AM processes with different ports against the same journal.
 
+
+## Codex session coverage
+
+The mechanism is independent of Granola, session name, project, model and client UI. To prepare another source, use `node server/tools/webhook-config.mjs DATA_DIR AM_SESSION_ID OUTPUT_JSON standard` (the default), then choose its event allowlist and fixed authorized workflow. Several sources can target different existing sessions in one configuration.
+
+| Existing Codex session | Webhook behavior |
+| --- | --- |
+| Created in AM, imported from Remote, or migrated from a TUI | Same pinned shared-thread path |
+| Used through Reader, Terminal client, iPhone or several clients | Same conversation and native queue; UI does not choose the transport |
+| Loaded and idle | Native queue delivery |
+| Working or awaiting input/approval | Retain event; no interruption or automatic approval |
+| Saved/unloaded | Recover the exact model, workspace and permission profile, then deliver; ambiguous settings require review |
+| Standalone legacy TUI or unmapped Remote thread | Import/migrate that same native thread through AM first; no silent TUI fallback, duplicate writer or replacement conversation |
+| Archived, deleted or remapped | Refuse/suppress delivery; explicit operator reconfiguration required |
+
+This does not extend routing into another machine's Codex daemon or child agents that lack an independently addressable AM binding. Existing native ownership and permissions checks remain authoritative.
+
 ## Configuration and installation
 
 Set `AM_WEBHOOK_CONFIG` to an absolute file outside workspaces, owned by the AM OS user with mode 0600. All parent directories must be inaccessible to untrusted users. Signing secret files have the same restrictions; symlinks are rejected. Config is read fresh for revocation. Missing variable means no listener or worker. Configure a dedicated loopback port with `AM_WEBHOOK_PORT` (default 7861); no public bind setting exists.
 
 Use `docs/examples/granola-webhook.json` as a **disabled** template. Before enabling:
 
-1. Prepare a disabled configuration with `node server/tools/webhook-config.mjs DATA_DIR AM_SESSION_ID /private/am-secrets/webhooks.json`. This only reads the existing session/binding and creates a new mode-0600 file; it refuses overwrite and never starts a thread. Keep the directory outside workspaces with mode 0700. The captured `target.stamp` pins session UUID, endpoint, binding revision and cwd. Runtime checks the current server binding too; remigration requires deliberate rebinding.
+1. Prepare a disabled configuration with `node server/tools/webhook-config.mjs DATA_DIR AM_SESSION_ID /private/am-secrets/webhooks.json granola`. This only reads the existing session/binding and creates a new mode-0600 file; it refuses overwrite and never starts a thread. Keep the directory outside workspaces with mode 0700. The captured `target.stamp` pins session UUID, endpoint, binding revision and cwd. Runtime checks the current server binding too; remigration requires deliberate rebinding.
 2. In Granola Business/Enterprise, Settings → Connectors → Webhooks, create an endpoint for **note.generated only** and the minimum personal scope. Supply the public HTTPS `/hooks/granola-followups` URL. Store the one-time `whsec_…` secret privately; never paste it in a conversation, URL or repository. Do not enable public/workspace scope for this personal workflow. The MCP Plus plan alone is not proof of webhook eligibility.
 3. Verify retrieval of the native `not_…` ID through an approved Granola connection. The current vault broker `granola.read_note` takes a vault path, not this ID. MCP compatibility must be tested; otherwise an approved native API connector is required. Do not scrape/extract an API key or silently search all historical notes. Set `noteLookupVerified:true` only after this works.
 4. Set `ownerEmail`, an activation UTC timestamp and `enabled:true`. For Granola, the fixed workflow requires confirming owner and actual meeting creation/date after that cutoff before processing. Personal scope also includes shared notes; signature alone proves neither ownership nor a new meeting. Missing metadata/lookup causes a blocked report, not a historical sweep. This gate is enforced by the destination workflow, not by fetching note content in the ingress server.
