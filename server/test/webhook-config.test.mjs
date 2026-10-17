@@ -25,4 +25,8 @@ test('unmapped and archived sessions require explicit migration/restore, never a
  const sessions=[{id:'legacy',cli:'codex',sessionUuid:randomUUID(),codexSessionId:randomUUID()}];fs.writeFileSync(path.join(dir,'sessions.json'),JSON.stringify(sessions));
  const output=path.join(dir,'no.json');assert.throws(()=>execFileSync(process.execPath,[tool,dir,'legacy',output],{stdio:'pipe'}));assert.equal(fs.existsSync(output),false);
  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir,'sessions.json'))),sessions);
+ sessions[0].archivedAt=new Date().toISOString();fs.writeFileSync(path.join(dir,'sessions.json'),JSON.stringify(sessions));
+ fs.writeFileSync(path.join(dir,'codex-bindings.json'),JSON.stringify({version:1,bindings:[{amSessionId:'legacy',amSessionUuid:sessions[0].sessionUuid,threadId:sessions[0].codexSessionId,endpointId:'a'.repeat(64),cwd:dir,revision:1,boundAt:new Date().toISOString()}]}));
+ assert.throws(()=>execFileSync(process.execPath,[tool,dir,'legacy',output],{stdio:'pipe'}));assert.equal(fs.existsSync(output),false);
+
 });
