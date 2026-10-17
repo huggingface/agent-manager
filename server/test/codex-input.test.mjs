@@ -193,3 +193,21 @@ test('reconnect never resumes a held writer, queued input or active goal',async(
   await assert.rejects(f.hub.reconnect('am',{recoveryKey:'a'.repeat(64)}));assert.equal(f.calls.some(c=>c.method==='thread/resume'),false);
  }
 });
+
+test('federated delivery retains peer attribution through the actual native queue adapter',async()=>{
+ const {amAdapter}=await import('../src/federation/adapter.js');
+ const f=fixture();let committed=0;
+ const adapter=amAdapter({getSession:id=>id==='am'?f.session:null,shared:()=>true,isLocked:()=>false,input:f.hub,listRows:async()=>[]});
+ const message={id:randomUUID(),from:'laptop-agent',to:'am',text:'Review this change.'};
+ const context={peer:'laptop',instance:'vps',epoch:randomUUID(),requestId:randomUUID(),beforeDispatch:()=>committed++,verify:()=>{}};
+ assert.equal(await adapter.deliver(message,context),'accepted');assert.equal(committed,1);
+ const calls=f.calls.filter(c=>['turn/start','thread/queue/add','turn/steer','turn/interrupt'].includes(c.method));
+ assert.equal(calls.length,1);assert.equal(calls[0].method,'thread/queue/add');
+ assert.match(calls[0].params.input[0].text,/peer-attested identity/);
+ assert.match(calls[0].params.input[0].text,/"instance":"laptop"/);
+ assert.match(calls[0].params.input[0].text,/"sessionId":"laptop-agent"/);
+ assert.equal(calls[0].params.clientUserMessageId,context.requestId);
+ const receipt=JSON.parse(fs.readFileSync(path.join(f.deps.receipts,context.requestId+'.json'),'utf8'));
+ assert.equal(receipt.source.federation.messageId,message.id);assert.equal(receipt.status,'accepted');
+ assert(!JSON.stringify(receipt).includes(message.text));
+});

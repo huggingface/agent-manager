@@ -111,6 +111,7 @@ export function admissionFailure(req, policy, { websocket = false } = {}) {
 }
 
 export function protectedRead(pathname) {
+  if (/^\/api\/federation\/?$/i.test(pathname)) return true;
   // Express routes are case-insensitive and accept a trailing slash. Protect
   // HEAD too: Express falls back to GET handlers. Gate the whole messages route
   // so query-parser changes cannot turn a supposedly harmless read into contact.

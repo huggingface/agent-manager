@@ -162,3 +162,6 @@ Contributions and bug reports are welcome on
 [GitHub](https://github.com/huggingface/agent-manager). Include your agent type,
 browser, and steps to reproduce when reporting a problem. For a security issue,
 see [SECURITY.md](SECURITY.md).
+
+For opt-in VPS/laptop session discovery and messaging, see the experimental
+[Tailscale federation guide](docs/federation.md) and its threat model.
