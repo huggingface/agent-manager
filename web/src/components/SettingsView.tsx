@@ -18,6 +18,7 @@ import type { SettingsPage as Page } from './SettingsShell';
 const loadUsage = () => import('./UsagePanel');
 const loadApiLog = () => import('./ApiLog');
 const loadSkills = () => import('./SkillsEditor');
+const loadEvents = () => import('./EventSettings');
 const loadCron = () => import('./CronSettings');
 
 // 'already the latest' and 'updated' must not read the same: a run where
@@ -1086,6 +1087,8 @@ export default function SettingsView({
             <LazyPanel load={loadSkills} what="the skills editor" render={(m) => <m.default />} />
           </div>
         )}
+
+        {page === 'event-sources' && (<div className="settings-page wide"><h2>Triggers</h2><LazyPanel load={loadEvents} what="event-source settings" render={(m)=><m.default />} /></div>)}
 
         {page === 'cron' && (
           <div className="settings-page wide cron-page">

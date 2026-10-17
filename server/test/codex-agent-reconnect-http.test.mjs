@@ -54,12 +54,18 @@ await new Promise((resolve,reject)=>{native.once('error',reject);native.listen(s
 new CodexBindings(path.join(data,'codex-bindings.json')).bind({session:target,threadId:tid,endpointId:endpointIdentity({socket,home}),cwd:work,expectedRevision:0});
 new CodexBindings(path.join(data,'codex-bindings.json')).bind({session:worker,threadId:worker.codexSessionId,endpointId:endpointIdentity({socket,home}),cwd:work,expectedRevision:0});
 const free=net.createServer().listen(0,'127.0.0.1');await once(free,'listening');const port=free.address().port;await new Promise(r=>free.close(r));
+const proxySocket=path.join(root,'proxy.sock'),eventConfig=path.join(root,'events.json');let proxyCalls=0;
+const eventSource={id:'granola-followups',provider:'granola',transport:'poller',enabled:false,revision:1,intervalSeconds:30,ownerEmail:'fixture@example.org',workflow:{mode:'research',instructions:'Summarize this exact meeting.'},target:{sessionId:worker.id,threadId:worker.codexSessionId,stamp:JSON.stringify([worker.sessionUuid,endpointIdentity({socket,home}),worker.codexSessionId,1,work])}};
+const saveSource=()=>fs.writeFileSync(eventConfig,JSON.stringify({version:1,sources:[eventSource]}),{mode:0o600});saveSource();
+const proxy=http.createServer((req,res)=>{proxyCalls++;assert.equal(req.method,'GET');assert.equal(req.headers.authorization,undefined);assert(req.url.startsWith('/granola/v1/notes?'));
+ const date=new Date(Date.now()+1000).toISOString();res.setHeader('content-type','application/json');res.end(JSON.stringify({notes:[{id:'not_12345678901234',owner:{email:'fixture@example.org'},created_at:date,updated_at:date,deleted_at:null}],hasMore:false,cursor:null}));});
+await new Promise((resolve,reject)=>{proxy.once('error',reject);proxy.listen(proxySocket,resolve);});
 const preload=path.join(root,'preload.mjs');
-fs.writeFileSync(preload,`import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';const orig=cp.execFile;cp.execFile=(...args)=>{if(args[1]?.includes('--version')){queueMicrotask(()=>args.at(-1)(new Error('fixture')));return;}return orig(...args);};syncBuiltinESMExports();`);
+fs.writeFileSync(preload,`import http from 'node:http';const request=http.request;http.request=(opts,...args)=>request(opts?.socketPath==='/run/thomas-api-proxy/proxy.sock'?{...opts,socketPath:${JSON.stringify(proxySocket)}}:opts,...args);import cp from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';const orig=cp.execFile;cp.execFile=(...args)=>{if(args[1]?.includes('--version')){queueMicrotask(()=>args.at(-1)(new Error('fixture')));return;}return orig(...args);};syncBuiltinESMExports();`);
 let child,log='';const base=`http://127.0.0.1:${port}`;
 const request=async(route,body)=>{const response=await fetch(base+route,{method:body===undefined?'GET':'POST',headers:{'content-type':'application/json','X-AM-Request':'1'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)});return {status:response.status,body:await response.json()};};
 try {
- child=spawn(process.execPath,['--import',preload,'src/index.js'],{cwd:fileURLToPath(new URL('../',import.meta.url)),env:{PATH:process.env.PATH,TMPDIR:root,HOME:home,DATA_DIR:data,PORT:String(port),AM_BIND_HOST:'127.0.0.1',PUBLIC_DIR:path.join(root,'public'),CODEX_HOME:home,CLAUDE_CONFIG_DIR:path.join(home,'claude'),XDG_CONFIG_HOME:path.join(home,'config'),XDG_DATA_HOME:path.join(home,'share'),AM_REPIN_DIR:path.join(root,'repin'),AM_INPUT_REQUIRED_DIR:path.join(root,'input'),AM_BASHRC:'/nonexistent',AM_CODEX_SHARED_SOCKET:socket,AM_CODEX_SHARED_HOME:home,AM_CODEX_BINDINGS_PILOT:'1'},stdio:['ignore','pipe','pipe']});
+ child=spawn(process.execPath,['--import',preload,'src/index.js'],{cwd:fileURLToPath(new URL('../',import.meta.url)),env:{PATH:process.env.PATH,TMPDIR:root,HOME:home,DATA_DIR:data,PORT:String(port),AM_BIND_HOST:'127.0.0.1',PUBLIC_DIR:path.join(root,'public'),CODEX_HOME:home,CLAUDE_CONFIG_DIR:path.join(home,'claude'),XDG_CONFIG_HOME:path.join(home,'config'),XDG_DATA_HOME:path.join(home,'share'),AM_REPIN_DIR:path.join(root,'repin'),AM_INPUT_REQUIRED_DIR:path.join(root,'input'),AM_BASHRC:'/nonexistent',AM_CODEX_SHARED_SOCKET:socket,AM_CODEX_SHARED_HOME:home,AM_CODEX_BINDINGS_PILOT:'1',AM_EVENT_CONFIG:eventConfig},stdio:['ignore','pipe','pipe']});
  child.stdout.on('data',chunk=>log+=chunk);child.stderr.on('data',chunk=>log+=chunk);let ready=false;
  for(let i=0;i<150;i++){try{if((await request('/api/health')).status===200){ready=true;break;}}catch{}assert.equal(child.exitCode,null,log);await new Promise(r=>setTimeout(r,50));}assert(ready,log);
  assert.equal((await request('/api/sessions/target/reconnect?from=source',{recoveryKey:'a'.repeat(64)})).status,403);
@@ -121,10 +127,26 @@ try {
  assert.equal((await request('/api/codex/context?threadId='+tid)).body.messaging.allowed,true);
  console.log('PASS: resolved sender lifecycle explicit; ordinary/subscribed sends reject archived parents before native/legacy effects.');
 
+ const settingsView=await request('/api/event-sources/settings');assert.equal(settingsView.status,200);assert.equal(settingsView.body.sources[0].enabled,false);assert.equal(proxyCalls,0);
+ eventSource.enabled=true;eventSource.revision++;saveSource();
+ let eventJob;
+ for(let i=0;i<120;i++){
+  const eventDir=path.join(data,'source-events');const files=fs.readdirSync(eventDir).filter(f=>f.endsWith('.json'));
+  if(files.length)eventJob=JSON.parse(fs.readFileSync(path.join(eventDir,files[0])));
+  if(eventJob?.state==='completed')break;
+  await new Promise(r=>setTimeout(r,100));
+ }
+ assert.equal(eventJob?.state,'completed',JSON.stringify(eventJob)+'\n'+log);
+ assert.equal(proxyCalls,1);assert.equal(calls.filter(c=>c.method==='thread/queue/add').length,4);
+ const eventDelivery=calls.filter(c=>c.method==='thread/queue/add').at(-1);
+ assert.equal(eventDelivery.params.threadId,worker.codexSessionId);assert.match(eventDelivery.params.input[0].text,/"type":"poller"/);assert.match(eventDelivery.params.input[0].text,/not_12345678901234/);
+ assert(!calls.some(c=>['thread/start','turn/start','turn/steer','turn/interrupt'].includes(c.method)));
+ assert.equal(fingerprint(),originalHash);
+ console.log('PASS: full AM startup -> private proxy -> durable event -> exact native thread -> observed final, with zero disabled traffic.');
 
 
 
 }finally{
  if(child&&child.exitCode===null&&child.signalCode===null){const done=once(child,'exit');child.kill('SIGTERM');await done;}
- for(const ws of wss.clients)ws.terminate();await new Promise(r=>wss.close(r));await new Promise(r=>native.close(r));fs.rmSync(root,{recursive:true,force:true});
+ await new Promise(r=>proxy.close(r));for(const ws of wss.clients)ws.terminate();await new Promise(r=>wss.close(r));await new Promise(r=>native.close(r));fs.rmSync(root,{recursive:true,force:true});
 }

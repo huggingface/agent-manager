@@ -5,12 +5,13 @@
 // where they are, can pick a page and can leave.
 import type { ReactNode } from 'react';
 
-export type SettingsPage = 'general' | 'usage' | 'skills' | 'cron' | 'apilog';
+export type SettingsPage = 'general' | 'usage' | 'skills' | 'cron' | 'event-sources' | 'apilog';
 export const SETTINGS_PAGES: { id: SettingsPage; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'usage', label: 'Usage' },
   { id: 'skills', label: 'Skills' },
   { id: 'cron', label: 'Cron' },
+  { id: 'event-sources', label: 'Triggers' },
   { id: 'apilog', label: 'API log' },
 ];
 

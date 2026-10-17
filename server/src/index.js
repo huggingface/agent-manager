@@ -1,3 +1,8 @@
+import {SessionEvents} from './session-events.js';
+import {SessionEventInput} from './session-event-input.js';
+import {GranolaPoller} from './granola-poller.js';
+import {loadSources} from './session-event-policy.js';
+import {EventSettings,mountEventSettings} from './event-settings.js';
 import { assertCodexLaunchAllowed, assertLegacyCodexCreationAllowed } from './codex-launch-policy.js';
 import { sharedCodexRollout } from './codex-reader.js';
 import { conversationActivity, agentListOptions, filterAgentRows } from './agent-list.js';
@@ -500,6 +505,24 @@ try {
   });
   delegations.start();
 } catch {console.error('[delegations] journal unavailable; automatic follow-up disabled');}
+
+// Outbound-only sources. No webhook/HTTP ingress is created here.
+mountEventSettings(api,new EventSettings({file:process.env.AM_EVENT_CONFIG,workspaces:WORKSPACES_DIR,getSession:store.get}),{writable:()=>{if(isLocked())throw lockedError();}});
+let granolaPoller=null;
+if(process.env.AM_EVENT_CONFIG){
+ try{
+  const sources=()=>loadSources(process.env.AM_EVENT_CONFIG,WORKSPACES_DIR);sources();
+  const input=new SessionEventInput({dir:path.join(DATA_DIR,'session-event-receipts'),getSession:store.get,codex:codexInput,running:isRunning,
+   state:s=>{const info=agentInfo().get(s.id);const state=deriveState(s,info);return {status:info?.inputRequired?'needs-input':['waiting','idle'].includes(state)?'idle':state};},
+   resume:s=>ensureRunning(s,120,34,{exactResume:true}),ready:waitForInputReady,send:sendInput,
+   trace:async s=>sessionRuntime.shared(s)?{path:await sharedCodexRollout(s)}:traceLocation(s),
+   remote:{state:remote.remoteState,append:remote.append},assertWritable:()=>{if(isLocked())throw lockedError();}});
+  const events=new SessionEvents({dir:path.join(DATA_DIR,'source-events'),sources,input,trace:async id=>sharedCodexRollout(store.get(id)),assertWritable:()=>{if(isLocked())throw lockedError();}});
+  granolaPoller=new GranolaPoller({dir:path.join(DATA_DIR,'granola-poll-state'),sources,events});
+  granolaPoller.start();events.start();
+ }catch{console.error('[event-sources] unavailable; polling disabled');}
+}
+api.get('/api/event-sources/status',(_req,res)=>res.json({sources:granolaPoller?.status()||[]}));
 
 const codexCreation=new CodexCreation({store,bindings:codexBindings,input:codexInput,isRunning,
  nextName:()=>nextName('codex'),place:(s,groupId)=>{if(groupId&&groups.get(groupId))groups.attach(groupId,s.id);else order.prepend(`s:${s.id}`);},

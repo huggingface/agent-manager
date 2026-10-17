@@ -281,3 +281,17 @@ test('archived recipient is distinct from missing binding, remains observable, a
  await assert.rejects(f.hub.send('am',{requestId:randomUUID(),text:'must not arrive'}),{code:'codex-target-archived'});
  assert.equal(f.calls.length,0);delete f.session.archivedAt;assert.equal(f.hub.context('am').stamp,original.stamp);
 });
+
+test('external source native queue attribution, passive receipt, revocation and busy safety',async()=>{
+ const f=fixture(),source={type:'poller',id:'granola',provider:'granola',revision:1,eventId:randomUUID()},payload={text:'Fixed workflow',requestId:randomUUID()};
+ let revoked=false;const verifySource=()=>{if(revoked)throw Error('revoked');};
+ await f.hub.sendFromExternal('am',payload,source,{verifySource});
+ const queue=f.calls.filter(c=>c.method==='thread/queue/add');assert.equal(queue.length,1);
+ assert.match(queue[0].params.input[0].text,/AM external source/);assert.doesNotMatch(queue[0].params.input[0].text,/AM source|message from/);
+ assert.equal(f.hub.readReceipt(payload.requestId).source.type,'poller');
+ await new CodexInput(f.deps).sendFromExternal('am',payload,source,{verifySource});assert.equal(f.calls.filter(c=>c.method==='thread/queue/add').length,1);
+ revoked=true;await assert.rejects(f.hub.sendFromExternal('am',{...payload,requestId:randomUUID()},source,{verifySource}));
+ await assert.rejects(f.hub.sendFromExternal('am',payload,source));
+ const b=fixture();b.thread.status.type='active';await assert.rejects(b.hub.sendFromExternal('am',{...payload,requestId:randomUUID()},source,{verifySource:()=>{}}));
+ assert.equal(b.calls.filter(c=>c.method==='thread/queue/add').length,0);
+});

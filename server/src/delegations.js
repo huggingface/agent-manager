@@ -18,6 +18,13 @@ export function inputText(text, cli) {
 }
 
 
+// Webhook journals need correlation evidence, never private answer text.
+// Delegations retain their existing bounded answer for the requesting parent.
+function recordAnswer(e, text, append = false) {
+  if(e.redact){e.answerHash=hash(text);e.hasAnswer=Boolean(text);delete e.answer;}
+  else e.answer=(append?(e.answer||'')+text:text).slice(-16000);
+}
+
 // Only harness records can end the exact dispatched exchange. A tool output,
 // quoted marker, old answer, or pane state cannot establish completion.
 export function consumeEvidence(e, record, expectedHash, cli) {
@@ -40,10 +47,10 @@ export function consumeEvidence(e, record, expectedHash, cli) {
     if (record.isSidechain) return;
     if (record.type === 'assistant') {
       const text=textOf(m.content);
-      if (text) e.answer=((e.answer || '')+text).slice(-16000);
+      if (text) recordAnswer(e,text,true);
       if ((m.content || []).some?.(v=>v.type==='tool_use' && v.name==='AskUserQuestion')) e.blocked=true;
       if (m.stop_reason === 'end_turn' || m.stop_reason === 'stop_sequence') {
-        if (text && e.answer) {e.outcome='completed';e.reason='harness-end-turn';}
+        if (text && (e.answer || e.hasAnswer)) {e.outcome='completed';e.reason='harness-end-turn';}
       } else if (m.stop_reason && !['tool_use'].includes(m.stop_reason)) {e.outcome='failed';e.reason='harness-stop-'+m.stop_reason;}
       if (record.isApiErrorMessage) {e.outcome='failed';e.reason='harness-api-error';}
     }
@@ -54,9 +61,9 @@ export function consumeEvidence(e, record, expectedHash, cli) {
       if (e.turnId && e.turnId !== p.turn_id) {e.outcome='uncertain';e.reason='turn-changed';}
       else e.turnId=p.turn_id;
     }
-    if (record.type==='response_item' && p.role==='assistant' && p.type==='message' && ['final','final_answer'].includes(p.phase)) e.answer=textOf(p.content).slice(-16000);
+    if (record.type==='response_item' && p.role==='assistant' && p.type==='message' && ['final','final_answer'].includes(p.phase)) recordAnswer(e,textOf(p.content));
     if (record.type==='event_msg' && p.turn_id === e.turnId && e.turnId) {
-      if (p.type==='task_complete') {e.outcome=e.answer ? 'completed':'uncertain';e.reason=e.answer?'harness-task-complete':'no-final-result';}
+      if (p.type==='task_complete') {const answered=e.answer||e.hasAnswer;e.outcome=answered?'completed':'uncertain';e.reason=answered?'harness-task-complete':'no-final-result';}
       if (p.type==='turn_aborted') {e.outcome='failed';e.reason='harness-aborted';}
     }
   }

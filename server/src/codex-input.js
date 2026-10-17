@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { externalText } from './session-event-policy.js';
 import { ApiError } from './api-errors.js';
 import { DATA_DIR } from './config.js';
 import { codexBindings, configuredEndpoint, contextForThread } from './codex-context.js';
@@ -243,6 +244,21 @@ export class CodexInput {
     await this.attachForAgent(id, {signal, verifySource});
     return this.send(id, {text:attributedText, requestId},
       {signal, source, verifySource});
+  }
+  // Internal trusted adapter only: no public endpoint accepts an external identity.
+  async sendFromExternal(id, {text, requestId}, source, {verifySource, signal} = {}) {
+    if (typeof verifySource !== 'function' || source?.type !== 'poller' || !uuid(requestId)
+      || typeof text !== 'string' || !text.trim()) throw new ApiError(400, 'invalid-input', 'A verified external source is required.');
+    const target = this.context(id), sourceStamp = JSON.stringify(source);
+    const verify = () => {
+      verifySource(); this.check(id, target); this.assertWritable();
+      if (signal?.aborted || JSON.stringify(source) !== sourceStamp) throw fail('codex-source-stale', 'External source changed.');
+    };
+    const attributedText = externalText(source, text);
+    if (attributedText.length > 50000) throw new ApiError(400, 'invalid-input', 'External message too long.');
+    verify();
+    if (!this.readReceipt(requestId)) await this.attachForAgent(id, {signal, verifySource:verify});
+    return this.send(id, {text:attributedText, requestId}, {source, signal, verifySource:verify});
   }
   async send(id, { text, requestId, attachments = [] }, { signal, source = null, verifySource = () => {} } = {}) {
     if (!uuid(requestId) || typeof text !== 'string' || (!text.trim() && !attachments.length) || text.length > 50000) throw new ApiError(400, 'invalid-input', 'A message and unique requestId are required.');

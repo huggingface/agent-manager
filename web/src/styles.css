@@ -2327,3 +2327,8 @@ a.btn-ghost { text-decoration: none; }
 .codex-shared-tasks { padding-left: 20px; overflow-wrap: anywhere; }
 .codex-shared-tasks li { margin-block: 10px; }
 .codex-shared-tasks details { font-size: 12px; margin-top: 4px; }
+.event-source-settings { max-width: 850px; }
+.event-source-settings label { display: grid; gap: 6px; margin: 16px 0; }
+.event-source-settings select, .event-source-settings textarea { width: 100%; box-sizing: border-box; font: inherit; }
+.event-source-settings textarea { padding: 10px; resize: vertical; line-height: 1.5; }
+.event-source-settings button { margin: 8px 12px 8px 0; }

@@ -1110,3 +1110,8 @@ export interface SessionRequest {
 export interface SessionInteraction {canSend: boolean; requests: SessionRequest[]; error: string | null;}
 export const answerSessionRequest = (id: string, key: string, response: {decision?: string; answers?: Record<string, string>}): Promise<{ok: boolean}> =>
   fetch(`/api/sessions/${encodeURIComponent(id)}/answer`, { method: 'POST', headers: HEADERS, body: JSON.stringify({key, ...response}) }).then(json);
+
+export type EventWorkflow = {mode:'research'|'drafts'|'drafts-calendar';instructions:string};
+export type EventSettingsData = {configured:boolean;revision:string|null;presets:({id:string;label:string}&EventWorkflow)[];sources:{id:string;provider:string;enabled:boolean;revision:number;sessionId:string|null;sessionName:string;workflow:EventWorkflow}[]};
+export const getEventSettings = ():Promise<EventSettingsData> => fetch('/api/event-sources/settings').then(json);
+export const saveEventWorkflow = (id:string,revision:string,workflow:EventWorkflow):Promise<EventSettingsData> => fetch(`/api/event-sources/${encodeURIComponent(id)}/workflow`,{method:'PUT',headers:HEADERS,body:JSON.stringify({revision,workflow})}).then(json);
