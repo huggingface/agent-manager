@@ -106,3 +106,16 @@ test('uncertain recovery or mismatched restored settings never becomes an automa
   assert.equal(count,1);assert.match(f.d.get(id,'parent').state,/^notification-(uncertain|review)$/);
  }
 });
+
+
+test('cancellation during target observation or scan stays terminal across restart',async t=>{
+ for(const boundary of ['target','scan']){
+  const f=fixture(t),id=await start(f);f.state.parent='waiting';
+  let release,entered;const pending=new Promise(r=>release=r),seen=new Promise(r=>entered=r);
+  if(boundary==='target')f.d.state=async sid=>{if(sid==='target'){entered();await pending;}return f.state[sid]};
+  else {const scan=f.d.scan;f.d.scan=async j=>{scan(j);entered();await pending;};}
+  const ticking=f.d.tick();await seen;f.d.cancel(id,'parent');release();await ticking;
+  assert.equal(f.d.get(id,'parent').state,'cancelled',boundary);
+  f.append(answer());await f.create().tick();assert.equal(f.counts().notifications,0,boundary);
+ }
+});

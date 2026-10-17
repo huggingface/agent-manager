@@ -152,8 +152,10 @@ export class Delegations {
           if(!this.valid(j)){j.state='stale';this.save(j);continue;}
           if(!j.evidence.outcome) {
             try {await this.scan(j);}catch {j.evidence.outcome='uncertain';j.evidence.reason='trace-unavailable-or-changed';}
+            if(terminal.has(j.state))continue;
             if(!j.evidence.outcome && j.evidence.matched && j.evidence.caughtUp) {
               const state=await this.state(j.targetId);
+              if(terminal.has(j.state))continue;
               if(state==='input-required' || state==='needs-input' || j.evidence.blocked){j.evidence.outcome='blocked';j.evidence.reason='input-required';}
               else if(state==='stopped'){j.evidence.outcome='failed';j.evidence.reason='process-stopped-without-result';}
             }
