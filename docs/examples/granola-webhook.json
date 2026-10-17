@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "sources": [{
+    "id": "granola-followups",
+    "provider": "granola",
+    "enabled": false,
+    "revision": 1,
+    "secretFile": "/private/am-secrets/granola-webhook.key",
+    "activatedAt": "SET_AT_ACTIVATION",
+    "noteLookupVerified": false,
+    "ownerEmail": "operator@example.com",
+    "target": {
+      "sessionId": "existing-am-session-id",
+      "threadId": "00000000-0000-0000-0000-000000000000",
+      "stamp": "COPY_VERIFIED_LOCAL_BINDING_STAMP"
+    }
+  }]
+}

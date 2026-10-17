@@ -63,6 +63,8 @@ import * as runstate from './runstate.js';
 import { installSlowFsProbe } from './slowfs.js';
 import { operationMiddleware, readOperations } from './operations.js';
 import { dispatchesOf } from './dispatches.js';
+import { Webhooks, webhookServer } from './webhooks.js';
+import { loadSources, privateFile } from './webhook-providers.js';
 import { Delegations, traceCheckpoint } from './delegations.js';
 import { findByName, filterAgentsByGroup, normalizeName } from './agent-list.js';
 import { fileLinkRoots, fileLinksRouter } from './file-links.js';
@@ -500,6 +502,23 @@ try {
   });
   delegations.start();
 } catch {console.error('[delegations] journal unavailable; automatic follow-up disabled');}
+
+// Opt-in isolated webhook ingress. It never shares the AM API listener.
+if (process.env.AM_WEBHOOK_CONFIG) {
+  try {
+    const port = Number(process.env.AM_WEBHOOK_PORT || 7861);
+    if (!Number.isInteger(port) || port < 1024 || port > 65535 || port === PORT) throw new Error('Invalid port');
+    const sources = () => loadSources(process.env.AM_WEBHOOK_CONFIG, WORKSPACES_DIR);
+    sources(); // Reject unsafe configuration before opening any listener.
+    const hooks = new Webhooks({dir:path.join(DATA_DIR,'webhook-events'),sources,
+      secret:source=>privateFile(source.secretFile,WORKSPACES_DIR,4096),input:codexInput,
+      trace:async id=>sharedCodexRollout(store.get(id)),
+      assertWritable:()=>{if(isLocked())throw lockedError();}});
+    const listener = webhookServer(hooks);
+    listener.on('error',()=>{hooks.stop();console.error('[webhooks] listener unavailable; delivery disabled');});
+    listener.listen(port,'127.0.0.1',()=>{hooks.start();console.log('[webhooks] isolated loopback ingress ready');});
+  } catch {console.error('[webhooks] configuration or journal unavailable; ingress disabled');}
+}
 
 const codexCreation=new CodexCreation({store,bindings:codexBindings,input:codexInput,isRunning,
  nextName:()=>nextName('codex'),place:(s,groupId)=>{if(groupId&&groups.get(groupId))groups.attach(groupId,s.id);else order.prepend(`s:${s.id}`);},
