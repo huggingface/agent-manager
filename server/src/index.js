@@ -1,3 +1,4 @@
+import {WebhookSettings,mountWebhookSettings} from './webhook-settings.js';
 import { assertCodexLaunchAllowed, assertLegacyCodexCreationAllowed } from './codex-launch-policy.js';
 import { sharedCodexRollout } from './codex-reader.js';
 import { conversationActivity, agentListOptions, filterAgentRows } from './agent-list.js';
@@ -503,6 +504,8 @@ try {
   });
   delegations.start();
 } catch {console.error('[delegations] journal unavailable; automatic follow-up disabled');}
+
+mountWebhookSettings(api,new WebhookSettings({file:process.env.AM_WEBHOOK_CONFIG,workspaces:WORKSPACES_DIR,getSession:store.get}),{writable:()=>{if(isLocked())throw lockedError();}});
 
 // Opt-in isolated webhook ingress. It never shares the AM API listener.
 if (process.env.AM_WEBHOOK_CONFIG) {

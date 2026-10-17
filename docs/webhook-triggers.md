@@ -59,6 +59,16 @@ Config changes apply without restart; changing the listener port requires a rest
 
 Private local diagnostics: `node server/tools/webhook-status.mjs DATA_DIR/webhook-events` shows source/event, request UUID, state, reason and timestamps (no note contents, signature or secret). Journal lives outside workspaces, with 0700 directory/0600 files. Audit transitions and native receipts identify the external principal. Back up `webhook-events/`, `session-event-receipts/` and `codex-input-receipts/` together; deleting them permits replay. No HTTP diagnostic endpoint is exposed on the public listener.
 
+## Choosing and editing instructions
+
+After a source is installed, open **Settings → Webhooks** in the private AM UI. Choose a source, select a template or edit its instructions, choose an action boundary, then save explicitly. Three modes are available: research/report only, research plus unsent Gmail/Beeper drafts, or those drafts plus personal calendar events without guests. Instructions are editable independently of the engine and provider.
+
+The default post-meeting template researches Gmail, Slack, Beeper, approved notes/documents/calendar and the Internet as needed; checks newer exchanges before treating an action as open; produces a short contextual action summary; and prepares appropriate native drafts without replacing existing drafts or duplicating relances. Calendar creation requires verified dates/timezone, no duplicates, an approved writable connection and no attendee invitations. Missing capabilities produce proposals/blockers, never invented success. These are agent workflow instructions, **not** a technical reduction of the session's tool permissions: the broker and connector access policies remain authoritative.
+
+`workflow: {mode, instructions}` is saved in the protected source configuration. The UI cannot change its destination, secret, enabled flag or activation cutoff. Saves use an exact configuration revision and atomic mode-0600 replacement. Stale edits receive 409 and retain their local text. Saving increments source policy revision: queued events under the previous policy are revoked, not silently replayed with broader permissions; work already accepted may continue. No secret values, secret-file paths or binding stamps are returned by the settings API.
+
+The private routes are `GET /api/webhooks/settings` and operator-only `PUT /api/webhooks/:id/workflow` with `{revision, workflow}`. The normal private AM admission/origin and lock checks apply. They are never exposed by the public webhook listener. No configuration installed means the page says unconfigured; saving instructions alone does not activate Granola.
+
 ## Provider adapters
 
 `granola` accepts only the four documented fields and `note.generated`. `standard` is a minimal reusable adapter accepting `{event_id,event_type,resource_id,occurred_at}` with a configured event allowlist and fixed local `instruction`. It accepts no remote prompt, URL, file or target. Adding another provider means implementing signature/schema verification and a fixed prompt adapter; never route arbitrary payload text to an operator prompt.
