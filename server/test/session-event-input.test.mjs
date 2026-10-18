@@ -152,3 +152,12 @@ test('OpenCode readiness works for long histories, distinguishes tool turns and 
  d.add('error',{role:'assistant',parentID:'u-last',error:{name:'APIError'}});assert.equal(nativeEventReadiness(s,location),'needs-input');
  }finally{d.db.close();}
 });
+
+test('new archived-Codex diagnostic revokes a pending event durably and never revives it after restore',async()=>{
+ const f=fixture(),source={id:'fixture',provider:'granola',enabled:true,revision:1,ownerEmail:'owner@example.com',workflow:{mode:'research',instructions:'Summarize.'},target:localEventTarget(f.s)};
+ let archived=true;const input={context:()=>{if(archived)throw Object.assign(Error('archived'),{code:'codex-target-archived'});return source.target;},sendFromExternal:()=>{throw Error('must not dispatch');}};
+ const deps={dir:path.join(f.deps.dir,'archive-jobs'),sources:()=>new Map([[source.id,source]]),input};
+ const service=new SessionEvents(deps),at=new Date().toISOString();service.enqueue(source.id,{id:'not_12345678901234',resourceId:'not_12345678901234',type:'note.ready',occurredAt:at,activatedAt:at});
+ await service.tick();assert.equal([...service.jobs.values()][0].state,'revoked');
+ archived=false;const restart=new SessionEvents(deps);await restart.tick();assert.equal([...restart.jobs.values()][0].state,'revoked');
+});

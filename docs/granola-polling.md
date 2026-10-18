@@ -1,6 +1,7 @@
 # Outbound Granola polling and session events
 
-This branch builds on PR #189. It reuses internal delivery adapters developed for
+This feature builds on the shared delivery and delegation support merged in
+PRs #189 and #191. It reuses internal delivery adapters developed for
 closed PR #190 but includes no webhook receiver, signature secret, public ingress
 or relay. It does not reopen that PR. External observations have their own poller
 identity, never an invented operator or agent identity.

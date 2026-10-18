@@ -45,7 +45,7 @@ export class SessionEvents {
     if (!source?.enabled || policyStamp(source) !== job.policy) throw reject(409);
     let target;
     try {target=this.input.context(source.target.sessionId);}catch(e){
-      if(['event-target-unavailable','codex-unmapped','codex-binding-stale'].includes(e.code))throw reject(409);
+      if(['event-target-unavailable','codex-unmapped','codex-target-archived','codex-binding-stale'].includes(e.code))throw reject(409);
       throw e;
     }
     if (target.stamp !== source.target.stamp || (source.target.threadId !== undefined && target.threadId !== source.target.threadId)) throw reject(409);
