@@ -167,7 +167,8 @@ try {
  await waitFor(async()=>(await view()).interaction.canSend);
  assert.equal((await view()).interaction.error,null);
  // Repeat with the other supported standard permission preset.
- const workspace=(await rpc.call('thread/start',{cwd,model:'fixture-workspace',sandbox:'workspace-write',approvalPolicy:'on-request',approvalsReviewer:'user'})).thread;
+ const extraRoot=path.join(root,'visualizations');fs.mkdirSync(extraRoot);
+ const workspace=(await rpc.call('thread/start',{cwd,runtimeWorkspaceRoots:[cwd,extraRoot],model:'fixture-workspace',sandbox:'workspace-write',approvalPolicy:'on-request',approvalsReviewer:'user'})).thread;
  await rpc.shell(workspace.id,'printf workspace-seed');
  const workspaceOriginal=await rpc.call('thread/resume',{threadId:workspace.id,excludeTurns:true});
  const wsSession=(await call('/api/codex/import',{threadId:workspace.id})).session;
@@ -175,12 +176,19 @@ try {
  // A real model turn persists native turn_context, unlike a user shell command.
  await call('/api/sessions/'+wsSession.id+'/input',{text:'WORKSPACE_SETTINGS_FIXTURE',requestId:randomUUID()});
  await waitFor(async()=>(await call('/api/trace/'+wsSession.id+'?tail=1&v=2')).interaction.canSend);
+ const readContext=()=>fs.readFileSync(workspace.path,'utf8').trim().split('\n').map(JSON.parse).filter(r=>r.type==='turn_context').at(-1).payload;
+ const workspaceContext=readContext();
  await crashDaemon();await startDaemon();
  await call('/api/trace/'+wsSession.id+'?tail=1&v=2');
  const wsRow=await waitFor(async()=>{const s=(await call('/api/sessions')).find(s=>s.id===wsSession.id);return s.recoveryKey&&s;});
  await call('/api/sessions/'+wsSession.id+'/reconnect',{recoveryKey:wsRow.recoveryKey});
  const wsRestored=await rpc.call('thread/resume',{threadId:workspace.id,excludeTurns:true});
  for(const key of ['model','modelProvider','approvalPolicy','approvalsReviewer','sandbox','cwd','reasoningEffort','serviceTier'])assert.deepEqual(wsRestored[key],workspaceOriginal[key],key);
+ assert.deepEqual(wsRestored.runtimeWorkspaceRoots,[cwd,extraRoot]);
+ await call('/api/sessions/'+wsSession.id+'/input',{text:'VERIFY_RECOVERED_PERMISSIONS',requestId:randomUUID()});
+ await waitFor(async()=>(await call('/api/trace/'+wsSession.id+'?tail=1&v=2')).interaction.canSend);
+ const restoredContext=readContext();
+ for(const key of ['sandbox_policy','permission_profile','file_system_sandbox_policy','approval_policy','approvals_reviewer'])assert.deepEqual(restoredContext[key],workspaceContext[key],key);
  const competing=await rpc.call('thread/resume',{threadId:workspace.id,excludeTurns:true,model:'other-fixture',sandbox:'read-only',approvalPolicy:'never'});
  for(const key of ['model','sandbox','approvalPolicy'])assert.deepEqual(competing[key],wsRestored[key], 'loaded resume must ignore '+key);
 

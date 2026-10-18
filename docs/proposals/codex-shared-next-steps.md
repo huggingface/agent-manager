@@ -84,7 +84,7 @@ by the operator; do not extend those confirmations to untested cases.
 | --- | --- |
 | Phone interoperability | Approval and question round trips in the actual iPhone client, including resolution while AM is open. |
 | Managed delivery | Define agent/cron delivery semantics; currently refused for shared tasks. Close/interrupt/archive/restore are implemented. |
-| Daemon recovery | Supported restricted presets tested after real disposable crashes. Broader/custom permissions and nondefault modes remain manual; daemon supervision is external to AM. |
+| Daemon recovery | Supported restricted presets, including multiple runtime workspace roots and their protected subdirectories, tested after real disposable crashes. Recovery restores `runtimeWorkspaceRoots`, not unprotected extra writable paths; the saved canonical permission profile must match exactly. Broader/custom permissions and nondefault modes remain manual; daemon supervision is external to AM. |
 | New thread identity | Empty creation and persistence failures tested. `/new` and fork must not overwrite the original mapping. Unmapped threads stay Codex-only. |
 | Migration | Stopped-session owner/queue checks and guarded same-ID transfer implemented/tested. Running PTY graceful release and nondisruptive production rollout remain. |
 
