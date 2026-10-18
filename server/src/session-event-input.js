@@ -62,7 +62,7 @@ export class SessionEventInput {
   async sendFromExternal(id,{text,requestId},principal,{verifySource=()=>{}}={}) {
     const s=this.getSession(id),target=this.context(id);
     if(s.cli==='codex')return this.codex.sendFromExternal(id,{text,requestId},principal,{verifySource});
-    if(principal?.type!=='poller'||typeof text!=='string'||!text.trim()||text.length>40000)throw fail('event-invalid-request');
+    if(!['poller','local-monitor'].includes(principal?.type)||typeof text!=='string'||!text.trim()||text.length>40000)throw fail('event-invalid-request');
     const content=externalText(principal,text),digest=hash(content);
     if(/[\x00-\x08\x0b-\x1f\x7f]/.test(content))throw fail('event-invalid-text');
     if(this.inFlight.has(id))throw fail('event-target-busy');

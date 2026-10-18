@@ -12,7 +12,7 @@ export class EventSettings {
  }
  view(){
   const data=this.read();
-  return {configured:Boolean(data),revision:data?.revision||null,presets:WORKFLOW_PRESETS,sources:(data?.config.sources||[]).map(s=>({
+  return {configured:Boolean(data),revision:data?.revision||null,presets:WORKFLOW_PRESETS,sources:(data?.config.sources||[]).filter(s=>s.provider==='granola').map(s=>({
    id:s.id,provider:s.provider,enabled:s.enabled,revision:s.revision||0,
    sessionId:s.target?.sessionId||null,sessionName:this.getSession(s.target?.sessionId)?.name||s.target?.sessionId||'Unconfigured destination',
    workflow:s.workflow,
@@ -23,7 +23,7 @@ export class EventSettings {
    throw new ApiError(400,'invalid-input','Choose a valid workflow and instructions (up to 12000 characters).');
   const data=this.read();if(!data)throw unavailable();
   if(data.revision!==body.revision)throw new ApiError(409,'event-source-settings-conflict','Settings changed elsewhere. Reload before saving.');
-  const source=data.config.sources.find(s=>s.id===id);if(!source)throw new ApiError(404,'not-found','Event source not found.');
+  const source=data.config.sources.find(s=>s.id===id);if(!source||source.provider!=='granola')throw new ApiError(404,'not-found','Event source not found.');
   source.workflow={...body.workflow};source.revision=(source.revision||0)+1;
   // This endpoint cannot change the destination, polling frequency or
   // source enablement. New policy revision invalidates old pending events.

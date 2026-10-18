@@ -295,3 +295,34 @@ test('external source native queue attribution, passive receipt, revocation and 
  const b=fixture();b.thread.status.type='active';await assert.rejects(b.hub.sendFromExternal('am',{...payload,requestId:randomUUID()},source,{verifySource:()=>{}}));
  assert.equal(b.calls.filter(c=>c.method==='thread/queue/add').length,0);
 });
+
+test('local monitor uses native queue, exact pinned thread, durable attribution and no operator impersonation',async()=>{
+ const f=fixture();const source={type:'local-monitor',id:'docs-failures',provider:'local-monitor',revision:1,eventId:randomUUID()};
+ const payload={text:'Inspect incident batch; preserve approvals.',requestId:randomUUID()};
+ await f.hub.sendFromExternal('am',payload,source,{verifySource:()=>{}});
+ await new CodexInput(f.deps).sendFromExternal('am',payload,source,{verifySource:()=>{}});
+ const calls=f.calls.filter(c=>c.method==='thread/queue/add');assert.equal(calls.length,1);
+ assert.equal(calls[0].params.threadId,f.session.codexSessionId);
+ const receipt=f.hub.readReceipt(payload.requestId);assert.deepEqual(receipt.source,source);assert.equal(receipt.status,'accepted');
+ assert.ok(!f.calls.some(c=>['turn/interrupt','thread/archive'].includes(c.method)));
+ await assert.rejects(f.hub.sendFromExternal('am',{...payload,requestId:randomUUID()},source,{}));
+});
+
+test('local inbox through durable event journal reaches the exact native Codex queue once',async()=>{
+ const {LocalEventSpool}=await import('../src/local-event-spool.js');
+ const {SessionEvents}=await import('../src/session-events.js');
+ const f=fixture(),dir=fs.mkdtempSync(path.join(root,'pipeline-')),inbox=path.join(dir,'inbox');fs.mkdirSync(inbox,{mode:0o700});
+ const target=f.hub.context('am');
+ const source={id:'local-fixture',provider:'local-monitor',transport:'spool',enabled:true,revision:1,inbox,instructions:'Verify local incident without writes.',target:{sessionId:'am',threadId:target.threadId,stamp:target.stamp}};
+ const sources=()=>new Map([[source.id,source]]);
+ const input={context:id=>f.hub.context(id),status:id=>f.hub.status(id),readReceipt:id=>f.hub.readReceipt(id),prepare:async job=>{job.evidence={};},observe:async()=>{},sendFromExternal:(...args)=>f.hub.sendFromExternal(...args)};
+ const create=()=>new SessionEvents({dir:path.join(dir,'events'),sources,input});
+ let events=create();const spool=new LocalEventSpool({sources,events}),event={id:randomUUID(),type:'incident.ready',occurredAt:new Date().toISOString()};
+ const publish=()=>fs.writeFileSync(path.join(inbox,event.id+'.json'),JSON.stringify(event),{mode:0o600});
+ publish();spool.tick();f.thread.status={type:'active'};await events.tick();assert.equal(f.calls.filter(c=>c.method==='thread/queue/add').length,0);
+ f.thread.status={type:'idle'};events=create();spool.events=events;await events.tick();
+ publish();spool.tick();events=create();await events.tick();
+ const queued=f.calls.filter(c=>c.method==='thread/queue/add');assert.equal(queued.length,1);assert.equal(queued[0].params.threadId,f.session.codexSessionId);
+ assert.match(JSON.stringify(queued[0].params),/local-monitor/);assert.match(JSON.stringify(queued[0].params),new RegExp(event.id));
+ assert.equal([...events.jobs.values()][0].state,'accepted');
+});

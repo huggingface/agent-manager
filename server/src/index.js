@@ -1,3 +1,4 @@
+import {LocalEventSpool} from './local-event-spool.js';
 import {SessionEvents} from './session-events.js';
 import {SessionEventInput} from './session-event-input.js';
 import {GranolaPoller} from './granola-poller.js';
@@ -508,7 +509,7 @@ try {
 
 // Outbound-only sources. No webhook/HTTP ingress is created here.
 mountEventSettings(api,new EventSettings({file:process.env.AM_EVENT_CONFIG,workspaces:WORKSPACES_DIR,getSession:store.get}),{writable:()=>{if(isLocked())throw lockedError();}});
-let granolaPoller=null;
+let granolaPoller=null,localEventSpool=null;
 if(process.env.AM_EVENT_CONFIG){
  try{
   const sources=()=>loadSources(process.env.AM_EVENT_CONFIG,WORKSPACES_DIR);sources();
@@ -519,10 +520,11 @@ if(process.env.AM_EVENT_CONFIG){
    remote:{state:remote.remoteState,append:remote.append},assertWritable:()=>{if(isLocked())throw lockedError();}});
   const events=new SessionEvents({dir:path.join(DATA_DIR,'source-events'),sources,input,trace:async id=>sharedCodexRollout(store.get(id)),assertWritable:()=>{if(isLocked())throw lockedError();}});
   granolaPoller=new GranolaPoller({dir:path.join(DATA_DIR,'granola-poll-state'),sources,events});
-  granolaPoller.start();events.start();
+  localEventSpool=new LocalEventSpool({sources,events,workspaces:WORKSPACES_DIR});
+  granolaPoller.start();events.start();localEventSpool.start();
  }catch{console.error('[event-sources] unavailable; polling disabled');}
 }
-api.get('/api/event-sources/status',(_req,res)=>res.json({sources:granolaPoller?.status()||[]}));
+api.get('/api/event-sources/status',(_req,res)=>res.json({sources:[...(granolaPoller?.status()||[]),...(localEventSpool?.status()||[])]}));
 
 const codexCreation=new CodexCreation({store,bindings:codexBindings,input:codexInput,isRunning,
  nextName:()=>nextName('codex'),place:(s,groupId)=>{if(groupId&&groups.get(groupId))groups.attach(groupId,s.id);else order.prepend(`s:${s.id}`);},

@@ -53,10 +53,16 @@ export class SessionEvents {
   }
   enqueue(id,event){
     const source=this.sources().get(id);if(!source?.enabled)throw reject(404);
-    if(!/^not_[A-Za-z0-9]{14}$/.test(event.resourceId)||event.id!==event.resourceId||event.type!=='note.ready'
+    if(source.provider==='local-monitor'){
+      if(!event||Object.keys(event).sort().join(',')!=='id,occurredAt,type'||! /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(event.id)||event.type!=='incident.ready'
+        ||typeof event.occurredAt!=='string'||!Number.isFinite(Date.parse(event.occurredAt))||Date.parse(event.occurredAt)>this.now()+300000||this.now()-Date.parse(event.occurredAt)>86400000)throw reject();
+    }else if(!/^not_[A-Za-z0-9]{14}$/.test(event.resourceId)||event.id!==event.resourceId||event.type!=='note.ready'
       ||!Number.isFinite(Date.parse(event.activatedAt))||!Number.isFinite(Date.parse(event.occurredAt)))throw reject();
     const key=hash(JSON.stringify([id,event.id]));
-    if(this.jobs.has(key))return {ok:true,repeated:true};
+    if(this.jobs.has(key)){
+      if(source.provider==='local-monitor'&&hash(JSON.stringify(this.jobs.get(key).event))!==hash(JSON.stringify(event)))throw reject(409);
+      return {ok:true,repeated:true};
+    }
     const own=[...this.jobs.values()].filter(j=>j.sourceId===id);
     if(this.jobs.size>=10000||own.filter(j=>pending.has(j.state)).length>=100)throw reject(503);
     const job={version:1,key,sourceId:id,provider:source.provider,event,policy:policyStamp(source),target:source.target,

@@ -88,8 +88,8 @@ export class GranolaPoller {
    state.nextAt=this.now()+delay;this.save(state);
   }
  }
- async tick(){if(this.running)return;this.running=true;try{for(const source of this.sources().values())if(source.enabled)await this.poll(source);}finally{this.running=false;}}
- status(){return [...this.sources().values()].map(s=>{let state;try{state=this.load(s);}catch{return {id:s.id,enabled:s.enabled,status:'state-unavailable'};}
+ async tick(){if(this.running)return;this.running=true;try{for(const source of this.sources().values())if(source.enabled&&source.provider==='granola')await this.poll(source);}finally{this.running=false;}}
+ status(){return [...this.sources().values()].filter(s=>s.provider==='granola').map(s=>{let state;try{state=this.load(s);}catch{return {id:s.id,enabled:s.enabled,status:'state-unavailable'};}
   return {id:s.id,enabled:s.enabled,status:s.enabled?state.status:'disabled',reason:state.reason||null,activatedAt:state.watermark?state.activatedAt:null,lastSuccessAt:state.lastSuccessAt||null,nextAt:state.nextAt||null};});}
  start(){this.tick().catch(()=>{});this.timer=setInterval(()=>this.tick().catch(()=>{}),1000);this.timer.unref();}
  stop(){clearInterval(this.timer);}

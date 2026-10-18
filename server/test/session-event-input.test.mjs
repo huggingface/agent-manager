@@ -161,3 +161,12 @@ test('new archived-Codex diagnostic revokes a pending event durably and never re
  await service.tick();assert.equal([...service.jobs.values()][0].state,'revoked');
  archived=false;const restart=new SessionEvents(deps);await restart.tick();assert.equal([...restart.jobs.values()][0].state,'revoked');
 });
+
+test('local monitor principal is supported across every non-Codex adapter without sender impersonation',async()=>{
+ for(const cli of [...EVENT_CLIS].filter(x=>x!=='codex')){
+  const f=fixture(cli),requestId=randomUUID(),source={...principal,type:'local-monitor',provider:'local-monitor'};
+  await f.input.sendFromExternal(f.s.id,{text:'Inspect batch.',requestId},source);
+  assert.deepEqual(f.input.readReceipt(requestId).principal,source);
+  const text=cli==='remote'?f.calls[0].message.text:f.calls[0].text;assert.match(text,/local-monitor/);assert.doesNotMatch(text,/message from/);
+ }
+});

@@ -247,7 +247,7 @@ export class CodexInput {
   }
   // Internal trusted adapter only: no public endpoint accepts an external identity.
   async sendFromExternal(id, {text, requestId}, source, {verifySource, signal} = {}) {
-    if (typeof verifySource !== 'function' || source?.type !== 'poller' || !uuid(requestId)
+    if (typeof verifySource !== 'function' || !['poller','local-monitor'].includes(source?.type) || !uuid(requestId)
       || typeof text !== 'string' || !text.trim()) throw new ApiError(400, 'invalid-input', 'A verified external source is required.');
     const target = this.context(id), sourceStamp = JSON.stringify(source);
     const verify = () => {
