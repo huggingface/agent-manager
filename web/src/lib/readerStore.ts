@@ -1,5 +1,6 @@
 import type { TraceCursor, TraceReq, TraceSummary, TraceTurn, TraceWindow } from '../api';
 import { countExchanges, reconcileTrace } from './readerModel';
+import { liveConnected, onLiveEvent } from './liveEvents';
 
 // Persisted order is authoritative. Replace a native turn at its existing
 // position, never move it to the tail merely because it still has live data.
@@ -60,6 +61,8 @@ export const WINDOW_BYTES = 384 * 1024;
 export const REQUEST_TIMEOUT_MS = 12_000;
 export const SUMMARY_DELAY_MS = 400;
 export const SUMMARY_REFRESH_MS = 5 * 60_000;
+/** Pushed transcript changes read at most this often; a burst becomes one read. */
+export const NUDGE_GAP_MS = 250;
 
 /* ---- automatic recent-history fill (docs/reader-architecture.md §Initial history) ----
  *
@@ -229,6 +232,11 @@ export class ReaderStore {
   /** A speculative page in flight, and where the cursor was before it. */
   private step: { from: number; held: number } | null = null;
   private stalled = false;
+  /** A transcript-change push arrived while a forward read was in flight. */
+  private nudged = false;
+  /** Pushes are arriving from a live watch, so the poll is only a backstop. */
+  private watched = false;
+  private readAt = 0;
   constructor(private source: TraceSource) {}
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -304,6 +312,17 @@ export class ReaderStore {
     return this.read('before');
   };
   loadNewer = () => this.read(this.state.cursor ? 'after' : 'tail');
+  /**
+   * The server says this transcript just grew (lib/liveEvents.ts): read it now
+   * instead of at the next poll. Bursts coalesce to one read per NUDGE_GAP_MS,
+   * and a push during a forward read queues exactly one more.
+   */
+  nudge = (watched: boolean) => {
+    if (watched) this.watched = true;
+    if (!this.active || this.failures) return;
+    if (this.request && !this.request.speculative) { this.nudged = true; return; }
+    this.schedule(Math.max(0, this.readAt + NUDGE_GAP_MS - Date.now()));
+  };
   dismissNotice = () => this.publish({ notice: null });
 
   /**
@@ -413,7 +432,7 @@ export class ReaderStore {
     clearTimeout(this.poll);
     if (!this.active) return;
     const recent = Date.now() - (this.meta?.lastTs || 0) < 120_000;
-    const cadence = this.meta?.interaction ? (this.meta.activity === 'working' || this.meta.interaction.requests.length ? 1000 : 3000) : this.state.cursor?.mode === 'index' ? 10_000 : recent ? 3_000 : 10_000;
+    const cadence = this.meta?.interaction ? (this.meta.activity === 'working' || this.meta.interaction.requests.length ? 1000 : 3000) : this.state.cursor?.mode === 'index' || (this.watched && liveConnected()) ? 10_000 : recent ? 3_000 : 10_000;
     this.poll = setTimeout(() => { this.poll = null; void this.loadNewer(); }, delay ?? (this.failures ? Math.min(30_000, 1500 * 2 ** Math.min(this.failures, 5)) : cadence));
   }
   private read(direction: 'tail' | 'before' | 'after', speculative = false): Promise<number> {
@@ -431,6 +450,7 @@ export class ReaderStore {
       this.cancel();
     }
     if (direction === 'after' && !cursor) direction = 'tail';
+    if (direction !== 'before') this.readAt = Date.now();
     const token = ++this.sequence;
     const abort = new AbortController();
     const req: TraceReq = direction === 'tail' ? { at: 'tail' } : { at: direction,
@@ -501,7 +521,8 @@ export class ReaderStore {
         if (token !== this.sequence) return;
         this.request = null; this.publish({ loading: null });
         const catchup = direction !== 'before' && this.state.cursor && !this.state.cursor.atEnd && !this.failures && !this.state.error;
-        this.schedule(catchup ? 50 : undefined);
+        this.schedule(catchup ? 50 : this.nudged ? Math.max(0, this.readAt + NUDGE_GAP_MS - Date.now()) : undefined);
+        this.nudged = false;
         // After the slot is free, so a fill step never races the read that
         // produced it. Every accepted read re-decides: a fill that a user page
         // or a live append interrupted just continues from where the store is.
@@ -531,6 +552,10 @@ export class ReaderStore {
 }
 
 const readers = new Map<string, ReaderStore>();
+// A session's own reader is keyed `session:<id>` (ConversationView).
+onLiveEvent((event) => {
+  if (event.t === 'trace') readers.get(`session:${event.id}`)?.nudge(!!event.watched);
+});
 function pruneReaders() {
   const inactive = [...readers].filter(([, reader]) => !reader.active);
   let count = inactive.length;

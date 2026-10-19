@@ -34,6 +34,7 @@ import { paneOwnsBack } from './lib/mobileBack';
 import { isPassive, isRemote, isShareable } from './types';
 import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
 import { createLatestRefresh, observeAppReturns } from './lib/appRefresh';
+import { liveConnected, onLiveEvent, setLiveEvents, type LiveState } from './lib/liveEvents';
 
 // `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
 // when the app is embedded cross-origin. Read once: it never changes mid-run,
@@ -511,17 +512,38 @@ export default function App() {
     api.setOverviewHidden(ref, hide).then(refresh).catch(showErr('could not change what the overview shows'));
   };
 
+  // ---- pushed state (lib/liveEvents.ts) ----
+  //
+  // A session's state arrives over the event socket the moment it changes. It
+  // is kept here with the time it arrived, so a poll that was already in flight
+  // (answered from an older moment) cannot put the old state back: a pushed
+  // state is replaced only by a response to a request sent after it.
+  const live = useRef(new Map<string, LiveState & { at: number }>());
+  const sentAt = useRef(new WeakMap<object, number>());
+  const withLive = useCallback(<T extends Session>(sessions: T[], since: number): T[] => sessions.map((s) => {
+    const l = live.current.get(s.id);
+    if (!l || l.at <= since) return s;
+    return { ...s, state: l.state, running: l.running, inputRequired: l.inputRequired };
+  }), []);
+  const timed = useCallback(<T extends object>(read: Promise<T>, at: number) =>
+    read.then((value) => { sentAt.current.set(value, at); return value; }), []);
+
   useEffect(() => {
     refreshClis();
     const manager = createLatestRefresh(
-      (signal) => api.getTree(signal),
-      (next) => { setTree(next); setTreeLoaded(true); },
+      (signal) => timed(api.getTree(signal), Date.now()),
+      (next) => { setTree({ ...next, sessions: withLive(next.sessions, sentAt.current.get(next) ?? 0) }); setTreeLoaded(true); },
     );
     treeRefresh.current = manager;
     if (!lockedRef.current) void manager.refresh('replace');
-    // Same cadence and hidden-tab rule as before. Foreground catch-up is shared
-    // with metadata below so visibility/focus/pageshow/online cannot drift.
-    const t = setInterval(() => { if (!document.hidden && !lockedRef.current) void manager.refresh('poll'); }, 2500);
+    // Same hidden-tab rule as before. Foreground catch-up is shared with
+    // metadata below so visibility/focus/pageshow/online cannot drift. With the
+    // event socket up, state no longer rides this poll, so it halves its pace.
+    let beat = 0;
+    const t = setInterval(() => {
+      if (liveConnected() && beat++ % 2) return;
+      if (!document.hidden && !lockedRef.current) void manager.refresh('poll');
+    }, 2500);
     return () => {
       clearInterval(t);
       if (treeRefresh.current === manager) treeRefresh.current = null;
@@ -544,16 +566,21 @@ export default function App() {
     if (lockedRef.current) return Promise.resolve(null); // protected reads pause while locked
     return metaRefresh.current?.refresh('replace') ?? Promise.resolve(null);
   }, []);
+  // Set when a turn just ended: the next metadata read waits for the server's
+  // digest rebuild instead of taking its cached copy, so the unread mark and
+  // the card's answer belong to the turn that ended.
+  const metaFresh = useRef(false);
   useEffect(() => {
     let lastPayload = '';
     const manager = createLatestRefresh(
-      (signal) => api.getMeta(signal),
+      (signal) => { const fresh = metaFresh.current; metaFresh.current = false; return timed(api.getMeta(signal, fresh), Date.now()); },
       (r) => {
         setMetaReady(true);
-        const payload = JSON.stringify(r.sessions);
+        const sessions = withLive(r.sessions, sentAt.current.get(r) ?? 0);
+        const payload = JSON.stringify(sessions);
         if (payload === lastPayload) return;
         lastPayload = payload;
-        setMeta(Object.fromEntries(r.sessions.map((s) => [s.id, s])));
+        setMeta(Object.fromEntries(sessions.map((s) => [s.id, s])));
         setAges(Object.fromEntries(r.sessions.map((s) => [
           s.id, Math.max(s.digest?.lastAssistantTs || 0, s.digest?.lastPromptTs || 0),
         ])));
@@ -575,6 +602,52 @@ export default function App() {
       manager.dispose();
     };
   }, []);
+
+  useEffect(() => {
+    if (info?.locked) return undefined;
+    setLiveEvents(true);
+    return () => setLiveEvents(false);
+  }, [info?.locked]);
+  useEffect(() => {
+    let settle: ReturnType<typeof setTimeout> | null = null;
+    const off = onLiveEvent((e) => {
+      if (e.t === 'trace') return;
+      const at = Date.now();
+      const changed: Record<string, LiveState> = e.t === 'states' ? e.states : { [e.id]: e };
+      const patch = new Map<string, LiveState>();
+      for (const [id, l] of Object.entries(changed)) {
+        const v = { state: l.state, running: l.running, inputRequired: l.inputRequired ?? null };
+        live.current.set(id, { ...v, at });
+        patch.set(id, v);
+      }
+      const apply = <T extends Session>(s: T): T => {
+        const p = patch.get(s.id);
+        if (!p || (s.state === p.state && s.running === p.running
+          && JSON.stringify(s.inputRequired ?? null) === JSON.stringify(p.inputRequired))) return s;
+        return { ...s, ...p };
+      };
+      setTree((t) => {
+        const sessions = t.sessions.map(apply);
+        return sessions.some((s, i) => s !== t.sessions[i]) ? { ...t, sessions } : t;
+      });
+      setMeta((m) => {
+        let next: typeof m | null = null;
+        for (const id of patch.keys()) {
+          const cur = m[id]; if (!cur) continue;
+          const upd = apply(cur);
+          if (upd !== cur) (next ??= { ...m })[id] = upd;
+        }
+        return next ?? m;
+      });
+      // A turn ended: its answer and unread mark are in the transcript now.
+      if (e.t === 'state' && e.state !== 'working') {
+        metaFresh.current = true;
+        if (settle) clearTimeout(settle);
+        settle = setTimeout(() => { settle = null; void refreshMeta(); }, 150);
+      }
+    });
+    return () => { off(); if (settle) clearTimeout(settle); };
+  }, [refreshMeta]);
 
   // Browser returns arrive as different (often clustered) event shapes across
   // desktop, mobile and bfcache restoration. Refresh both independent resources

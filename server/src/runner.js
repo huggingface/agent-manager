@@ -81,10 +81,29 @@ export const __bashLaunchForTest = bashLaunch;
 // PTYs still end with this process, but canonical scrollback is checkpointed to
 // durable storage below and rejoined with the CLI's resumed screen on relaunch.
 
-// Rendered text unchanged for this long means the agent isn't working.
+// Rendered text unchanged for this long means the agent isn't working, even
+// when the screen still looks busy (a hung spinner, a long silent command).
 const BUSY_SECS = 4;
 // Re-rendering the grid to text on every chunk during a burst is wasteful.
+// The throttle has a trailing sample, so the last change of a burst is seen.
 const SAMPLE_THROTTLE_MS = 250;
+// Working is reported on the first changed frame; releasing it is asymmetric.
+// A screen that has gone quiet and no longer shows a busy marker (below) is
+// released after this short window. The agent CLIs animate a spinner and an
+// elapsed-time counter next to that marker for as long as a turn lasts, so a
+// quiet screen without one is the prompt waiting, not a pause in the work.
+const RELEASE_QUIET_MS = Number(process.env.AM_RELEASE_QUIET_MS || 350);
+// CLIs without a busy marker we know of pause mid-turn with nothing on screen
+// to say so; give them longer before calling the turn over.
+const RELEASE_UNMARKED_MS = Number(process.env.AM_RELEASE_UNMARKED_MS || 1500);
+// What a working TUI prints next to its spinner: Claude and Codex
+// "esc to interrupt", Gemini "esc to cancel", opencode "esc interrupt".
+const BUSY_MARKER = /\besc (?:to )?(?:interrupt|cancel)\b/i;
+const MARKED_CLIS = new Set(['claude', 'codex', 'gemini', 'opencode']);
+// The screen redrawing to echo a keystroke or a typed prompt is the operator,
+// not the agent. Output this soon after a non-submitting write does not start
+// "working" (unless it shows a busy marker); the Enter that submits does.
+const ECHO_MS = Number(process.env.AM_ECHO_MS || 150);
 // A prompt sent while a resumed TUI is still replaying its screen can be
 // discarded, or accept the text but swallow the Enter. Wait for the canonical
 // startup repaint and a genuinely quiet screen instead of guessing a boot
@@ -166,18 +185,86 @@ export function startedAt(id) {
   return hosts.get(id)?.startedAt ?? null;
 }
 
-/** Sample the grid's rendered text and record when it last changed. */
-function sampleScreen(host) {
+// Listeners for a session's activity changing: working began or ended, the
+// process started or exited. Fired on the transition itself, so the browser
+// learns it from a push instead of the next poll.
+const activityListeners = new Set();
+export function onActivity(fn) {
+  activityListeners.add(fn);
+  return () => activityListeners.delete(fn);
+}
+function notifyActivity(id, cause) {
+  for (const fn of activityListeners) {
+    try { fn(id, cause); } catch (e) { console.error('[runner] activity listener', e && e.message); }
+  }
+}
+
+/**
+ * Sample the grid's rendered text and record when it last changed.
+ *
+ * `repaint` marks a frame the server produced itself (a resize or a restored
+ * history): it moves the signature without counting as the agent working, or
+ * every window resize would flash the pane's state.
+ */
+function sampleScreen(host, repaint = false) {
   const now = Date.now();
-  if (host.lastSampleAt && now - host.lastSampleAt < SAMPLE_THROTTLE_MS) return;
+  if (!repaint && host.lastSampleAt && now - host.lastSampleAt < SAMPLE_THROTTLE_MS) {
+    if (!host.sampleTimer) {
+      host.sampleTimer = setTimeout(() => { host.sampleTimer = null; if (hosts.get(host.id) === host) sampleScreen(host); },
+        SAMPLE_THROTTLE_MS - (now - host.lastSampleAt));
+      if (host.sampleTimer.unref) host.sampleTimer.unref();
+    }
+    return;
+  }
   host.lastSampleAt = now;
   let text = '';
   try { text = host.vt.getVisibleText(); } catch { return; }
   const sig = djb2(text);
-  if (host.screenSig !== sig) {
-    host.screenSig = sig;
-    host.screenChangedAt = now;
+  if (host.screenSig === sig) return;
+  host.screenSig = sig;
+  if (repaint) return;
+  const marker = BUSY_MARKER.test(text);
+  if (!host.busy && !marker && host.lastOutputAt <= host.echoUntil) return;
+  // A trailing sample sees a change made by the burst's last chunk, so date it
+  // from that chunk rather than from the throttle's timer.
+  host.screenChangedAt = Math.min(now, host.lastOutputAt || now);
+  host.busyMarker = marker;
+  if (!host.busy) { host.busy = true; notifyActivity(host.id, 'working'); }
+  armRelease(host, host.screenChangedAt);
+}
+
+/** Note input written to the PTY, so its echo is not read as the agent working. */
+function noteWrite(host, d) {
+  host.echoUntil = /[\r\n]$/.test(String(d)) ? 0 : Date.now() + ECHO_MS;
+}
+
+function armRelease(host, changedAt) {
+  if (host.releaseTimer) clearTimeout(host.releaseTimer);
+  const quiet = host.busyMarker ? BUSY_SECS * 1000 + 500
+    : MARKED_CLIS.has(host.cli) || host.cli === 'shell' ? RELEASE_QUIET_MS : RELEASE_UNMARKED_MS;
+  host.releaseTimer = setTimeout(() => releaseBusy(host, changedAt), Math.max(0, changedAt + quiet - Date.now()));
+  if (host.releaseTimer.unref) host.releaseTimer.unref();
+}
+
+function releaseBusy(host, changedAt) {
+  host.releaseTimer = null;
+  if (hosts.get(host.id) !== host || host.screenChangedAt !== changedAt || !host.busy) return;
+  // A shell whose command is still running keeps the old long window: a build
+  // that pauses between steps must not blink idle.
+  if (host.cli === 'shell' && Date.now() - changedAt < BUSY_SECS * 1000 && hasChildren(host)) {
+    host.busyMarker = true;
+    armRelease(host, changedAt);
+    return;
   }
+  host.busy = false;
+  notifyActivity(host.id, 'quiet');
+}
+
+function hasChildren(host) {
+  const pid = host.pty?.pid;
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  try { return fs.readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim().length > 0; }
+  catch { return false; }
 }
 
 /**
@@ -192,11 +279,25 @@ export function agentInfo() {
     const changedAt = host.screenChangedAt || host.startedAt;
     map.set(id, {
       age: Math.round((now - changedAt) / 1000),
+      busy: !!host.busy,
       bells: host.bells || 0,
       inputRequired: host.inputRequired.get(),
     });
   }
   return map;
+}
+
+/** agentInfo() for one session, without visiting every other pane. */
+export function activityFor(id) {
+  const host = hosts.get(id);
+  if (!host) return undefined;
+  const changedAt = host.screenChangedAt || host.startedAt;
+  return {
+    age: Math.round((Date.now() - changedAt) / 1000),
+    busy: !!host.busy,
+    bells: host.bells || 0,
+    inputRequired: host.inputRequired.get(),
+  };
 }
 
 /**
@@ -212,7 +313,7 @@ export function deriveState(session, info) {
   // capture — there is no tmux session here to diff.
   if (isRemote(session.cli)) return remoteState(session);
   if (!info) return isRunning(session.id) ? 'idle' : 'stopped';
-  if (info.age <= BUSY_SECS) return 'working';
+  if (info.busy ?? info.age <= BUSY_SECS) return 'working';
   return session.cli === 'shell' ? 'idle' : 'waiting';
 }
 
@@ -511,7 +612,7 @@ function finishCapturedGrid(host, txn) {
       const ansi = viewerRestoreAnsi(host, host.vt, committed);
       for (const sub of host.subs) sub.onData(ansi);
       try { previous.dispose(); } catch {}
-      sampleScreen(host);
+      sampleScreen(host, true);
     }
   } finally {
     try { txn.vt.dispose(); } catch {}
@@ -685,7 +786,7 @@ function armTraceHydration(host) {
       const ansi = viewerRestoreAnsi(host, host.vt, committed);
       for (const sub of host.subs) sub.onData(ansi);
       try { previous.dispose(); } catch {}
-      sampleScreen(host);
+      sampleScreen(host, true);
       host.historyCheckpoint.schedule();
     } catch (error) {
       console.error('[runner] trace history restore', error && error.message);
@@ -2093,6 +2194,12 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     lastOutputAt: Date.now(),
     outputSeq: 0,
     screenChangedAt: Date.now(),
+    // A launching CLI counts as working until its screen settles, as before.
+    busy: true,
+    busyMarker: true,
+    releaseTimer: null,
+    sampleTimer: null,
+    echoUntil: 0,
     bells: 0,
   };
   host.inputRequired = createInputRequiredTracker({ id: session.id, runId, cli: session.cli });
@@ -2170,6 +2277,10 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     hosts.delete(session.id);
     clearPaneInput(session.id);   // a dead pane holds no input line
     host.inputRequired.close();
+    if (host.releaseTimer) { clearTimeout(host.releaseTimer); host.releaseTimer = null; }
+    if (host.sampleTimer) { clearTimeout(host.sampleTimer); host.sampleTimer = null; }
+    host.busy = false;
+    notifyActivity(session.id, 'exit');
     stopping.delete(session.id);
     if (host.gridTimer) { clearTimeout(host.gridTimer); host.gridTimer = null; }
     if (host.traceHistoryTimer) { clearTimeout(host.traceHistoryTimer); host.traceHistoryTimer = null; }
@@ -2187,6 +2298,8 @@ export function ensureRunning(session, cols = 120, rows = 34) {
 
   hosts.set(session.id, host);
   stopping.delete(session.id);
+  armRelease(host, host.screenChangedAt);
+  notifyActivity(session.id, 'start');
   if (!persistedHistory && captureResize) hydrateTraceHistory(session, host);
   if (!session.everStarted) update(session.id, {
     everStarted: true, pendingPrompt: undefined, pendingImagePaths: undefined,
@@ -2244,6 +2357,7 @@ export function attach(session, cols, rows) {
       // replayed after the Enter, where it starts a line of its own.
       if (host.sending) { host.heldInput.push(d); return; }
       notePaneInput(host, d);
+      noteWrite(host, d);
       try { host.pty.write(d); } catch {}
     },
     // Every viewer remembers what it can display, but only the current
@@ -2555,6 +2669,7 @@ export async function sendInput(id, text, opts = {}) {
     // Replay in order, now that the line is ours no longer.
     for (const chunk of held) {
       notePaneInput(host, chunk);
+      noteWrite(host, chunk);
       try { host.pty.write(chunk); } catch {}
     }
     done();
@@ -2591,12 +2706,14 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
     while (Date.now() < deadline && !echoed) {
       if (hosts.get(id) !== host) throw new ApiError(409, 'input-not-ready', 'session stopped while waiting for input acknowledgement');
       if (attempt++) {
+        noteWrite(host, '\x15');
         host.pty.write('\x15'); // clear any attempt accepted too late to paint
         await new Promise((r) => setTimeout(r, 100));
       }
       const beforeOutput = host.outputSeq;
       let beforeScreen = '';
       try { beforeScreen = host.vt.getVisibleText(); } catch {}
+      noteWrite(host, payload);
       host.pty.write(payload);
       const attemptDeadline = Math.min(deadline, Date.now() + 1200);
       while (Date.now() < attemptDeadline) {
@@ -2611,11 +2728,13 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
     }
     if (!echoed) throw new ApiError(409, 'input-not-ready', 'session did not acknowledge the input before the timeout — prompt was not submitted');
   } else {
+    noteWrite(host, payload);
     host.pty.write(payload);
   }
   const confirm = cliById(host.cli)?.confirmSubmit;
   if (confirm) return submitConfirmed(host, id, confirm, text);
   await new Promise((r) => setTimeout(r, 300));
+  noteWrite(host, '\r');
   host.pty.write('\r');
   clearPaneInput(id);   // our own Enter emptied it
 }
@@ -2705,6 +2824,7 @@ export function pasteInput(id, text) {
   host.inputRequired.observeInput();
   notePaneInput(host, value);
   const payload = value.includes('\n') ? `\x1b[200~${value}\x1b[201~` : value;
+  noteWrite(host, payload);
   host.pty.write(payload);
 }
 

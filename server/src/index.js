@@ -38,8 +38,9 @@ import { ensureClaudeDialogDefaults, trustWorkspacesRoot } from './first-run.js'
 import {
   attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning,
   waitForInputReady, capturePane, ghosttyReady, ghosttyError, startedAt, restart as restartSession,
-  installClaudeRepinHook, installOpencodeRepinPlugin,
+  installClaudeRepinHook, installOpencodeRepinPlugin, activityFor, onActivity,
 } from './runner.js';
+import { createLiveEvents } from './live-events.js';
 
 // Control frames ride the terminal socket behind a leading NUL pair, which real
 // PTY output never begins with. Same sentinel the old copy-mode hint used, so the
@@ -713,8 +714,10 @@ api.get('/api/meta/:id', async (req, res) => {
   res.json({ id: s.id, digest: stripInternal(digest), output: outputOf(s, digest), read: readMarks.get(s.id) });
 });
 
-api.get('/api/meta', async (_req, res) => {
-  const digests = await traceDigests();
+api.get('/api/meta', async (req, res) => {
+  // `fresh=1` (asked once when a turn ends) waits for a rebuild already under
+  // way rather than answering from the copy built before the turn's last record.
+  const digests = await traceDigests({ fresh: req.query.fresh === '1' });
   const hs = demo.active() ? demo.hiddenSessions() : null;
   const sessions = sessionsWithState()
     .filter((s) => s.cli !== 'shell' && !PASSIVE_CLIS.includes(s.cli))
@@ -3104,6 +3107,25 @@ function sessionsWithState() {
   });
 }
 
+// The state fields of one sessionsWithState() row, for a pushed change.
+function liveStateOf(s) {
+  const info = activityFor(s.id);
+  const runtime = sessionRuntime.presentation(s);
+  const state = runtime?.state ?? deriveState(s, info);
+  return {
+    state,
+    running: runtime?.running ?? state !== 'stopped',
+    inputRequired: runtime?.inputRequired !== undefined ? runtime.inputRequired : info?.inputRequired || null,
+  };
+}
+const liveEvents = createLiveEvents({
+  list: () => store.list(),
+  get: (id) => store.get(id),
+  stateOf: liveStateOf,
+  traceFileOf: async (s) => (await findTrace(s, store.list()))?.src || null,
+  onActivity,
+});
+
 // The whole sidebar tree in one call: ordered refs + groups + sessions(+state).
 api.get('/api/tree', (_req, res) => {
   let sessions = sessionsWithState();
@@ -3951,6 +3973,12 @@ wss.on('connection', (ws, req) => {
     if (eff.locked) { release(); refuse(eff); return; }
   }
   const url = new URL(req.url, 'http://localhost');
+  // The app's event channel: pushed state and transcript changes, no PTY.
+  // Admission and the privacy lock are the same as a terminal's above.
+  if (url.searchParams.get('events') === '1') {
+    liveEvents.addClient(ws);
+    return;
+  }
   const id = url.searchParams.get('session');
   const cols = parseInt(url.searchParams.get('cols') || '80', 10);
   const rows = parseInt(url.searchParams.get('rows') || '24', 10);

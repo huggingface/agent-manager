@@ -121,6 +121,8 @@ sets the window (1 / 3 / 7 days, or off).
 | `DATA_DIR` | see purpose | Data root; `/data` in Docker, `./data` from the backend working directory otherwise |
 | `AM_SCROLLBACK_BYTES` | `67108864` | Maximum Ghostty scrollback memory per session |
 | `AM_RESIZE_SETTLE_MS` | `120` | Quiet period before a resize is applied to the PTY |
+| `AM_RELEASE_QUIET_MS` | `350` | Quiet screen with no busy marker before a pane leaves working ([live events](live-events.md)) |
+| `AM_RELEASE_UNMARKED_MS` | `1500` | The same for CLIs with no known busy marker |
 | `BIND_HOST` | `127.0.0.1` | HTTP + WS bind address (`0.0.0.0` in the container image) |
 | `AM_FRAME_ANCESTORS` | — | Extra origins allowed to embed the app in a frame (comma-separated exact origins) |
 | `ANTHROPIC_API_KEY` | — | Claude Code / opencode / Hermes (Space **secret**) |

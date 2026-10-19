@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import * as api from '../api';
+import { onLiveEvent } from '../lib/liveEvents';
 import type { MetaSession, OutputVersion, TraceTurn } from '../api';
 import type { Cli, OverviewChip, OverviewFilter, OverviewSort, Session, SessionState, Tree } from '../types';
 import { chipBuckets, isPassive, isRemote, STATE_LABEL, REMOTE_STATE_LABEL } from '../types';
@@ -109,6 +110,18 @@ function useConversationTail(id: string, on: boolean, live: boolean) {
     setMissing(false);
     if (on) load();
   }, [load, on]);
+  // A pushed transcript change (lib/liveEvents.ts) reads now; a burst of them
+  // becomes one read per half second.
+  useEffect(() => {
+    if (!on) return undefined;
+    let last = 0;
+    let timer: number | undefined;
+    const off = onLiveEvent((e) => {
+      if (e.t !== 'trace' || e.id !== id || timer !== undefined) return;
+      timer = window.setTimeout(() => { timer = undefined; last = Date.now(); void load(); }, Math.max(0, last + 500 - Date.now()));
+    });
+    return () => { off(); window.clearTimeout(timer); };
+  }, [on, id, load]);
   // While the agent works the transcript is still being written.
   useEffect(() => {
     if (!on || !live) return undefined;
