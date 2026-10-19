@@ -202,9 +202,8 @@ private path), and a brand-new dataset took **~50 minutes** to become viewable. 
 recorded in the design doc. It remains the visual reference, and it is what a public share
 gets for free in a browser.
 
-Live examples to look at:
-`thomwolf/am-session-sharing-design` (public, renders),
-`thomwolf/am-session-sharing-design-gated` (gated, shows the gate).
+For reproducible examples, create synthetic public and gated datasets as described
+in [the sharing checks](session-sharing.md#14-reproducing-the-sharing-checks).
 
 ## 8. Suggested v1 scope
 
@@ -301,7 +300,7 @@ group cart, and a group's agent count. Adding a third passive pane type now mean
 
 ### Verified against real data
 
-- **9.46 MB live Claude transcript** (this session): 634 ms full parse, **worst event-loop
+- **9.46 MB live Claude transcript** (validation sample): 634 ms full parse, **worst event-loop
   block 2 ms**, 82 MB RSS; second call 3 ms off the memo. Counts reconciled against an
   independent pass over the raw file — 259 text blocks = 228 assistant + 28 prompts + 3
   reminders, exactly; 466/467 tool results filed next to their call.
@@ -343,7 +342,7 @@ group cart, and a group's agent count. Adding a third passive pane type now mean
 
 ## 12. Comparison against the Hub's own viewer (2026-07-29)
 
-Done on a real private share, `thomwolf/codex-session-019fac81`, by rendering the Hub's
+Validated against a private test share by rendering the Hub's
 Trace tab in headless Chromium and scraping it in document order, then taking an
 independent census of the 393-line file so the arbiter was the data rather than either
 renderer. Reproduce with `Network.setExtraHTTPHeaders` carrying a bearer token — the Hub
@@ -406,7 +405,7 @@ which the reader asks for 400 ms after its first paint. Until it lands the heade
 `N turns loaded` rather than inventing a total.
 
 **Cost.** Measured against `upstream/main` built and served from the same files, on
-two real traces on this Space: a 19 MB / ~1,420-turn **Claude** transcript and a 4.8 MB /
+two real traces in the validation environment: a 19 MB / ~1,420-turn **Claude** transcript and a 4.8 MB /
 ~1,200-turn **codex** rollout. Server time is `curl` against a local server; "first turn
 on screen" is Playwright, median of 5–9 opens of the pane.
 
@@ -501,7 +500,7 @@ this window is treated as a marker and never emitted. **That fallback is load-be
 
 With both, stitching every window of a codex rollout reproduces the full parse **exactly** —
 same turns, same blocks, same `final` accents — at 64 KB, 128 KB and 384 KB windows, on all
-eight rollouts on this Space (24 runs, independently reproduced in review).
+eight rollouts in the validation environment (24 runs, independently reproduced in review).
 
 **The one behavioural difference, and it is Claude's:** a harness message whose lines
 straddle a window boundary is split into two turns instead of merged into one. Stitching every window of
