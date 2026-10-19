@@ -7,6 +7,7 @@ import {hash, reject, policyStamp, eventPrompt, externalPrincipal, externalText,
 const pending = new Set(['pending','sending','submitted','accepted','blocked']);
 const busy = new Set(['codex-task-busy','codex-send-busy','codex-recovery-busy']);
 const transient = new Set([...busy,'space-locked','event-target-busy','event-resume-required','input-line-busy','input-not-ready']);
+const diagnosticCodes = new Set(['codex-recovery-review','codex-recovery-pending','codex-not-loaded','codex-client-limit','codex-binding-stale','codex-source-stale','codex-target-archived','codex-unmapped','codex-thread-mismatch','codex-send-uncertain','codex-recovery-uncertain','codex-request-conflict','event-send-uncertain','event-target-changed','event-target-unavailable','event-journal-unavailable']);
 const uncertain = new Set(['codex-send-uncertain','codex-recovery-uncertain','codex-request-conflict','event-send-uncertain']);
 export class SessionEvents {
   constructor({dir, sources, input, trace, assertWritable = () => {}, now = Date.now, scan = scanEvidence}) {
@@ -127,13 +128,23 @@ export class SessionEvents {
       job.deliveryState=result.deliveryState||'accepted';
       this.transition(job,job.deliveryState,job.deliveryState==='submitted'?'transport-submitted':'native-queue-ack');
     } catch(e) {
+      // Do not persist provider messages, paths, payloads or arbitrary codes.
+      job.deliveryError={code:diagnosticCodes.has(e.code)||transient.has(e.code)?e.code:'unclassified-delivery-error',stage:'native-submit',at:new Date(this.now()).toISOString()};
       if(transient.has(e.code)) {this.transition(job,'pending',e.code==='event-resume-required'?'exact-resume-required':'waiting-for-destination');return;}
       this.transition(job,uncertain.has(e.code)?'uncertain':'review',uncertain.has(e.code)?'native-ack-uncertain':'delivery-requires-review');
     }
   }
   async tick() {
     if(this.running)return;this.running=true;
-    try {for(const job of this.jobs.values())if(pending.has(job.state))await this.advance(job);}
+    try {
+      // One in-flight workflow per destination. A queue ACK is not completion:
+      // submitting the next note early would break native turn correlation.
+      const destinations=new Set();
+      const ordered=[...this.jobs.values()].sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.key.localeCompare(b.key));
+      for(const job of ordered)if(pending.has(job.state)&&!destinations.has(job.target.sessionId)){
+        destinations.add(job.target.sessionId);await this.advance(job);
+      }
+    }
     finally{this.running=false;}
   }
   start() {this.timer=setInterval(()=>this.tick().catch(()=>{}),3000);this.timer.unref();}

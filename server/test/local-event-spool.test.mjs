@@ -57,3 +57,19 @@ test('configuration validates local source; Granola never polls local monitor',a
  const p=new GranolaPoller({dir:path.join(f.dir,'granola'),sources:f.sources,events:f.events,request:async()=>{calls++;}});await p.tick();assert.equal(calls,0);assert.deepEqual(p.status(),[]);
  f.source.prompt='override';fs.writeFileSync(file,JSON.stringify({version:1,sources:[f.source]}));assert.throws(()=>loadSources(file));
 });
+
+test('delivery refusal records safe durable error code and never provider text or unknown codes',async()=>{
+ for(const code of ['codex-recovery-review','secret-provider-value']){
+  const f=fixture();f.input.sendFromExternal=async()=>{throw Object.assign(Error('SECRET raw response'),{code});};
+  f.publish();f.spool.tick();f.state('idle');await f.events.tick();f.restart();
+  const job=[...f.events.jobs.values()][0];assert.equal(job.state,'review');assert.equal(job.deliveryError.code,code==='codex-recovery-review'?code:'unclassified-delivery-error');assert.doesNotMatch(JSON.stringify(job),/SECRET|secret-provider-value/);
+ }
+});
+
+test('backlogged events for one native thread wait for the preceding result, including after restart',async()=>{
+ const f=fixture();f.publish();f.spool.tick();const first=[...f.events.jobs.values()][0];first.createdAt=new Date(Date.now()-1000).toISOString();f.events.save(first);
+ f.publish({...f.event,id:randomUUID()});f.spool.tick();f.state('idle');f.input.readReceipt=()=>null;
+ await f.events.tick();assert.equal(f.sends(),1);f.restart();await f.events.tick();assert.equal(f.sends(),1);
+ f.input.observe=async job=>{job.evidence.outcome='completed';job.evidence.reason='native-final';};await f.events.tick();assert.equal(f.sends(),1);
+ await f.events.tick();assert.equal(f.sends(),2);
+});

@@ -84,3 +84,23 @@ test('cold empty native index can recover only a verified completed last turn',a
   records.pop();records[1]={type:'response_item',payload:{text:JSON.stringify({type:'task_complete',turn_id:p.turn_id})}};write();await assert.rejects(recoveryPlan(file,context,t,null));
  }finally{fs.rmSync(root,{recursive:true,force:true});}
 });
+
+test('interrupted thread restores latest native effort and personality without changing other settings',async()=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'am-effort-')),file=path.join(root,'rollout.jsonl');
+ try{
+  const p=saved();p.effort='high';p.collaboration_mode.settings.reasoning_effort='high';
+  const t={...thread,id:'native',status:{type:'notLoaded'}},context={stamp:'binding',workdir:cwd};
+  const a={model:p.model,model_provider_id:t.modelProvider,cwd,approval_policy:p.approval_policy,approvals_reviewer:p.approvals_reviewer,permission_profile:p.permission_profile,collaboration_mode:structuredClone(p.collaboration_mode),runtime_workspace_roots:[cwd],disabled_plugin_ids:[],reasoning_effort:'medium',personality:'friendly'};
+  a.collaboration_mode.settings.reasoning_effort='medium';
+  const write=()=>fs.writeFileSync(file,[{type:'turn_context',payload:p},{type:'event_msg',payload:{type:'turn_aborted',turn_id:p.turn_id}},{type:'event_msg',payload:{type:'thread_settings_applied',thread_id:t.id,thread_settings:a}}].map(JSON.stringify).join('\n')+'\n');
+  write();
+  for(const last of [null,{id:p.turn_id,status:'interrupted'}]){
+   const result=await recoveryPlan(file,context,t,last);assert.equal(result.settings.params.config.model_reasoning_effort,'medium');assert.equal(result.settings.params.personality,'friendly');assert.equal(result.settings.params.sandbox,'read-only');
+  }
+  a.model='new-native-model';write();assert.equal((await recoveryPlan(file,context,t,{id:p.turn_id})).settings.params.model,'new-native-model');
+  const base=structuredClone(a);
+  for(const mutate of [a=>a.permission_profile={type:'disabled'},a=>a.cwd='/other',a=>a.collaboration_mode.settings.developer_instructions='custom',a=>a.reasoning_effort='ultra',a=>a.personality='unrecognized',a=>a.model='']){
+   Object.assign(a,structuredClone(base));mutate(a);write();await assert.rejects(recoveryPlan(file,context,t,{id:p.turn_id,status:'interrupted'}));
+  }
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});

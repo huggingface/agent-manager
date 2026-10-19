@@ -26,14 +26,23 @@ export function recoverySettings(p, thread, workdir) {
       || !standardDefaultInstructions(p.collaboration_mode.settings?.developer_instructions)
       || p.disabled_plugin_ids?.length || p.realtime_active) throw refused();
   const policy=p.sandbox_policy, workspace=policy?.type==='workspace-write', full=policy?.type==='danger-full-access';
+  // Extra runtime workspaces (e.g. Remote's visualization directory) carry
+  // protected .git/.agents/.codex/.aws subdirectories too. Restoring them as
+  // sandbox_workspace_write.writable_roots would silently lose those guards.
+  // Accept only the exact canonical multi-workspace profile, never infer roots
+  // from arbitrary permission entries or relax a custom profile.
+  const roots=workspace && Object.hasOwn(policy,'writable_roots') ? policy.writable_roots : [];
+  if(!Array.isArray(roots) || roots.some(r=>typeof r!=='string'||!path.isAbsolute(r)||path.normalize(r)!==r||/[\x00-\x1f]/.test(r)||r===workdir) || new Set(roots).size!==roots.length)throw refused();
   // Restore only exact installed presets, including an already-saved full-access
   // preset. Never infer full access from a missing or custom permission profile.
   const expectedPolicy=workspace ? {type:'workspace-write',network_access:false,exclude_tmpdir_env_var:false,exclude_slash_tmp:false} : full ? {type:'danger-full-access'} : {type:'read-only'};
+  if(workspace && Object.hasOwn(policy,'writable_roots'))expectedPolicy.writable_roots=roots;
   if(!isDeepStrictEqual(policy,expectedPolicy))throw refused();
   const entries=[special('root','read')];
-  if(workspace)entries.push({path:{type:'path',path:workdir},access:'write'},special('slash_tmp','write'),special('tmpdir','write'),
-    ...['.git','.agents','.codex','.aws'].map(name=>({path:{type:'path',path:path.join(workdir,name)},access:'read',missing_path_behavior:'skip'})));
+  if(workspace)entries.push(...[workdir,...roots].map(root=>({path:{type:'path',path:root},access:'write'})),special('slash_tmp','write'),special('tmpdir','write'),
+    ...['.git','.agents','.codex','.aws'].flatMap(name=>[workdir,...roots].map(root=>({path:{type:'path',path:path.join(root,name)},access:'read',missing_path_behavior:'skip'}))));
   if(!isDeepStrictEqual(p.permission_profile,full ? {type:'disabled'} : {type:'managed',file_system:{type:'restricted',entries},network:'restricted'}))throw refused();
+  if(!full && p.file_system_sandbox_policy!==undefined && !isDeepStrictEqual(p.file_system_sandbox_policy,{kind:'restricted',entries}))throw refused();
   const effort=p.effort??p.collaboration_mode.settings.reasoning_effort??null;
   if(effort!==null&&!['none','minimal','low','medium','high','xhigh','max','ultra'].includes(effort))throw refused();
   const serviceTier=p.service_tier??null;
@@ -43,9 +52,9 @@ export function recoverySettings(p, thread, workdir) {
   if(workspace)Object.assign(config,{'sandbox_workspace_write.network_access':false,'sandbox_workspace_write.writable_roots':[],
     'sandbox_workspace_write.exclude_tmpdir_env_var':false,'sandbox_workspace_write.exclude_slash_tmp':false});
   return {params:{model:p.model,modelProvider:thread.modelProvider,approvalPolicy:p.approval_policy,
-    approvalsReviewer:p.approvals_reviewer,sandbox:policy.type,cwd:workdir,...(serviceTier!==null?{serviceTier}:{}),...(Object.keys(config).length?{config}:{})},
+    approvalsReviewer:p.approvals_reviewer,sandbox:policy.type,cwd:workdir,...(p.personality!==undefined?{personality:p.personality}:{}),...(roots.length?{runtimeWorkspaceRoots:[workdir,...roots]}:{}),...(serviceTier!==null?{serviceTier}:{}),...(Object.keys(config).length?{config}:{})},
     expected:{model:p.model,modelProvider:thread.modelProvider,approvalPolicy:p.approval_policy,approvalsReviewer:p.approvals_reviewer,
-      cwd:workdir,reasoningEffort:effort,serviceTier,sandbox:workspace?{type:'workspaceWrite',writableRoots:[],networkAccess:false,excludeTmpdirEnvVar:false,excludeSlashTmp:false}:full?{type:'dangerFullAccess'}:{type:'readOnly',networkAccess:false}}};
+      cwd:workdir,reasoningEffort:effort,serviceTier,...(roots.length?{runtimeWorkspaceRoots:[workdir,...roots]}:{}),sandbox:workspace?{type:'workspaceWrite',writableRoots:roots,networkAccess:false,excludeTmpdirEnvVar:false,excludeSlashTmp:false}:full?{type:'dangerFullAccess'}:{type:'readOnly',networkAccess:false}}};
 }
 export function verifyRecovered(result, settings, threadId) {
   if(result?.thread?.id!==threadId||Object.entries(settings.expected).some(([key,value])=>!isDeepStrictEqual(result[key]??null,value)))throw refused();
@@ -66,20 +75,31 @@ export async function recoveryPlan(file, context, thread, latestTurn) {
       if(!applied && record.type==='event_msg' && record.payload?.type==='thread_settings_applied')applied=record.payload;
       if(record.type==='turn_context'){saved=record.payload;break;}}
     if(typeof saved?.turn_id!=='string' || !saved.turn_id)throw refused();
+    if(latestTurn?.status&&!['completed','interrupted','failed'].includes(latestTurn.status))throw refused();
     if(latestTurn?.id){if(saved.turn_id!==latestTurn.id)throw refused();}
     // Some 0.162.1 cold threads expose no turns until first resume. The verified
-    // native rollout may supply the missing ID only for a completed final turn,
+    // native rollout may supply the missing ID only for a completed or explicitly interrupted final turn,
     // with no later start or other turn. Never override a nonempty native index.
-    else if(thread.status?.type!=='notLoaded' || terminal?.type!=='task_complete'
+    else if(thread.status?.type!=='notLoaded' || !['task_complete','turn_aborted'].includes(terminal?.type)
         || terminal.turn_id!==saved.turn_id || [...nativeTurns].some(id=>id!==saved.turn_id))throw refused();
     // A native settings change after the last turn must never be overwritten
     // by stale turn_context (e.g. full access changed to a restricted profile).
     if(applied){
       const p=applied.thread_settings;
       if(applied.thread_id!==thread.id || !p || p.model_provider_id!==thread.modelProvider)throw refused();
-      for(const key of ['model','cwd','approval_policy','approvals_reviewer','permission_profile','collaboration_mode'])
+      for(const key of ['cwd','approval_policy','approvals_reviewer','permission_profile'])
         if(!isDeepStrictEqual(p[key],saved[key]))throw refused();
-      if(!isDeepStrictEqual(p.runtime_workspace_roots,[context.workdir])
+      // Native model/effort choices are configuration, not permission changes.
+      const mode=structuredClone(p.collaboration_mode);
+      if(!mode?.settings)throw refused();
+      mode.settings.reasoning_effort=saved.collaboration_mode?.settings?.reasoning_effort;
+      if(Object.hasOwn(mode.settings,'model'))mode.settings.model=saved.collaboration_mode?.settings?.model;
+      if(!isDeepStrictEqual(mode,saved.collaboration_mode))throw refused();
+      if(!Object.hasOwn(p,'reasoning_effort') && saved.effort!=null)throw refused();
+      if(p.personality!==undefined&&!['none','friendly','pragmatic'].includes(p.personality))throw refused();
+      if((p.reasoning_effort??null)!==(p.collaboration_mode.settings.reasoning_effort??null))throw refused();
+      saved={...saved,model:p.model,effort:p.reasoning_effort??null,collaboration_mode:p.collaboration_mode,...(p.personality!==undefined?{personality:p.personality}:{})};
+      if(!isDeepStrictEqual(p.runtime_workspace_roots,[context.workdir,...(saved.sandbox_policy?.writable_roots??[])])
           || !isDeepStrictEqual(p.disabled_plugin_ids??[],saved.disabled_plugin_ids??[])
           || (p.reasoning_effort??null)!==(saved.effort??saved.collaboration_mode?.settings?.reasoning_effort??null)
           || (p.service_tier??null)!==(saved.service_tier??null))throw refused();
