@@ -74,6 +74,15 @@ export function ensureFolder(name) {
 
 const pad = (n) => String(n).padStart(5, '0');
 const fileName = (seq, role) => `${pad(seq)}-${role}.md`;
+// The sequence is global — it is the `?since=` cursor — but a message's
+// filename carries its role, so `wx` on the filename only reserves one
+// spelling of a number. A stale listing could hand seq 3 to an `agent`
+// message while `00003-user.md` already existed, leaving two messages
+// numbered 3 and a reader at since=3 never seeing the second. This reserves
+// the NUMBER. Dot-prefixed and not `<digits>-<role>.md`, so it is not a
+// message to anything that reads this folder.
+const seqMarker = (seq) => `.seq-${pad(seq)}`;
+const SEQ_MARKER = /^\.seq-(\d+)$/;
 
 // Same frontmatter shape as skills (index.js parseSkillFile).
 function parseMessageFile(filename, content) {
@@ -247,8 +256,8 @@ function highestSeqOnDisk(dir) {
   if (!ok) return null;   // we could not look: zero would be a guess
   let high = 0;
   for (const f of files) {
-    if (!MESSAGE_FILE.test(f)) continue;
-    const n = parseInt(f, 10);
+    const marker = SEQ_MARKER.exec(f);
+    const n = marker ? parseInt(marker[1], 10) : (MESSAGE_FILE.test(f) ? parseInt(f, 10) : NaN);
     if (Number.isFinite(n) && n > high) high = n;
   }
   return high;
@@ -274,11 +283,29 @@ export function append(name, { role, text, from }) {
   // `wx` so an existing message is never replaced, whatever the listing said —
   // a bucket can answer with one seconds out of date. A name already taken
   // means the floor was low: take the next one.
+  const dir = folderFor(name);
   let seq = Math.max(loaded, floor) + 1;
   for (let attempt = 0; ; attempt++) {
+    // Claim the number first. `wx` on the marker is atomic and asks the
+    // filesystem rather than the listing, so a listing seconds out of date
+    // cannot hand the same number to two messages.
+    try {
+      fs.writeFileSync(path.join(dir, seqMarker(seq)), '', { flag: 'wx' });
+    } catch (e) {
+      if (e?.code === 'EEXIST' && attempt < 50) { seq++; continue; }
+      console.error('[remote.append]', name, e && e.message);
+      throw e;
+    }
+    // Messages written before markers existed have none, so the number can be
+    // taken without one. An exact stat per role is a far steadier question
+    // than a directory listing, and an append is rare enough to afford three.
+    if ([...ROLES].some((r) => fs.existsSync(path.join(dir, fileName(seq, r))))) {
+      if (attempt < 50) { seq++; continue; }
+      throw new Error(`cannot find a free message number in ${relPathFor(name)}`);
+    }
     msg.seq = seq;
     try {
-      fs.writeFileSync(path.join(folderFor(name), fileName(seq, role)), serialize(msg), { flag: 'wx' });
+      fs.writeFileSync(path.join(dir, fileName(seq, role)), serialize(msg), { flag: 'wx' });
       break;
     } catch (e) {
       if (e?.code === 'EEXIST' && attempt < 50) { seq++; continue; }

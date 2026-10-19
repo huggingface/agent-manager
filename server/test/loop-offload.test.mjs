@@ -214,6 +214,40 @@ test('a listing that is out of date does not cost a message', async () => {
   } finally { await fs.rm(data, { recursive: true, force: true }); }
 });
 
+test('a stale listing cannot number two messages the same', async () => {
+  // The sequence is global — it is the `?since=` cursor — but a message's
+  // filename carries its role. Reserving the FILENAME let a stale listing give
+  // seq 3 to an `agent` message while `00003-user.md` already held it: two
+  // messages numbered 3, and a reader at since=3 never sees the second.
+  const data = await fs.mkdtemp(path.join(os.tmpdir(), 'am-remote-role-'));
+  try {
+    const out = run(`
+      import fs from 'node:fs';
+      const remote = await import(${JSON.stringify(path.join(SRC, 'remote.js'))});
+      for (const t of ['one', 'two', 'three']) remote.append('roles', { role: 'user', text: t });
+      const dir = remote.folderFor('roles');
+      remote.forget('roles');
+      // A listing from before the third message landed.
+      const realList = fs.readdirSync;
+      fs.readdirSync = (d, ...rest) => String(d).includes('roles')
+        ? realList(d, ...rest).filter((f) => !/0*3[-.]/.test(f) && !/seq-0*3$/.test(f)) : realList(d, ...rest);
+      // A DIFFERENT role, so the filename seq 3 would write to is free.
+      const appended = remote.append('roles', { role: 'agent', text: 'from the agent' });
+      fs.readdirSync = realList;
+      const messages = realList(dir).filter((f) => /^\\d+-(user|agent|system)\\.md$/.test(f)).sort();
+      const seqs = messages.map((f) => parseInt(f, 10));
+      console.log(JSON.stringify({ appended: appended.seq, messages, seqs,
+        duplicated: seqs.length !== new Set(seqs).size,
+        // A reader that has seen everything up to 3 must still be told about it.
+        visibleAfter3: remote.allMessages('roles').filter((m) => m.seq > 3).length }));`,
+    { DATA_DIR: data });
+    assert.equal(out.duplicated, false, `two messages share a sequence: ${out.messages}`);
+    assert.notEqual(out.appended, 3, 'the agent message took a number already in use');
+    assert.equal(out.appended, 4);
+    assert.equal(out.visibleAfter3, 1, 'a reader at since=3 would never see the new message');
+  } finally { await fs.rm(data, { recursive: true, force: true }); }
+});
+
 test('a worker that stops answering is replaced, and the parse still returns', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'am-worker-stuck-'));
   const file = path.join(dir, 'rollout.jsonl');
