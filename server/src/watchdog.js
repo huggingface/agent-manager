@@ -67,3 +67,92 @@ export async function tracked(code, fn) {
   const prev = mark(code);
   try { return await fn(); } finally { mark(prev); }
 }
+
+// ---------- what was the stall? ----------
+// The breadcrumb above says which async operation was IN FLIGHT when the loop
+// wedged — not what wedged it. tracked() holds 'buildTraces' for a whole build,
+// awaits included, so any synchronous work elsewhere that lands during one is
+// reported as buildTraces. On 2026-10-19 that sent a diagnosis after the wrong
+// code. This names the code that actually held the loop.
+//
+// V8's sampling profiler runs continuously at a coarse interval (10ms: a few
+// samples per stall second is plenty, and the cost is noise). A main-thread
+// timer notices when it fired late by more than STALL_MS, i.e. the loop just
+// came back from a stall; the profile so far is stopped, the samples from the
+// stall window are attributed to the nearest frame in OUR source (so a stall
+// inside JSON.parse is charged to whoever called it), and the top few are
+// logged. The profile is restarted every ROTATE_MS regardless, so memory stays
+// bounded on a Space that never stalls.
+const PROFILE_INTERVAL_US = 10_000;
+const ROTATE_MS = 60_000;
+const OWN_SRC = new URL('.', import.meta.url).href;
+
+export async function startStallProfiler() {
+  if (process.env.AM_STALL_PROFILE === '0') return;
+  let session;
+  try {
+    const { Session } = await import('node:inspector');
+    session = new Session();
+    session.connect();
+  } catch { return; }
+  const post = (method, params) => new Promise((resolve, reject) =>
+    session.post(method, params, (err, res) => (err ? reject(err) : resolve(res))));
+  try {
+    await post('Profiler.enable');
+    await post('Profiler.setSamplingInterval', { interval: PROFILE_INTERVAL_US });
+    await post('Profiler.start');
+  } catch { return; }
+
+  let startedAt = Date.now();
+  let last = Date.now();
+  let busy = false;
+  const t = setInterval(async () => {
+    const now = Date.now();
+    const gap = now - last - 250;
+    last = now;
+    const stalled = gap > STALL_MS;
+    if (busy || (!stalled && now - startedAt < ROTATE_MS)) return;
+    busy = true;
+    try {
+      const { profile } = await post('Profiler.stop');
+      if (stalled) console.error(`[stall] ${Math.round(gap / 1000)}s on the main thread — ${summarize(profile, gap)}`);
+      await post('Profiler.start');
+      startedAt = Date.now();
+    } catch { /* profiling is best-effort */ }
+    finally { busy = false; last = Date.now(); }
+  }, 250);
+  t.unref();
+}
+
+// Self time over the last `windowMs` of the profile, charged to the innermost
+// frame from this app's own source; "(native/lib)" when no app frame is on the
+// stack (GC, or a stack that is all node internals).
+function summarize(profile, windowMs) {
+  const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+  const parent = new Map();
+  for (const n of profile.nodes) for (const c of n.children || []) parent.set(c, n.id);
+  const ownFrame = (id) => {
+    for (let cur = id; cur !== undefined; cur = parent.get(cur)) {
+      const f = byId.get(cur)?.callFrame;
+      if (f?.url?.startsWith(OWN_SRC)) return `${f.functionName || '(anonymous)'} ${f.url.slice(OWN_SRC.length)}:${f.lineNumber + 1}`;
+    }
+    const leaf = byId.get(id)?.callFrame;
+    return leaf?.functionName ? `(native/lib) ${leaf.functionName}` : '(native/lib)';
+  };
+  // Sample timestamps run forward from startTime; the stall is the tail.
+  const times = [];
+  let ts = profile.startTime;
+  for (const d of profile.timeDeltas) times.push((ts += d));
+  const from = profile.endTime - (windowMs + 1000) * 1000;
+  const cost = new Map();
+  for (let i = 0; i < profile.samples.length; i++) {
+    if (times[i] < from) continue;
+    const prev = i ? times[i - 1] : profile.startTime;
+    const leaf = byId.get(profile.samples[i])?.callFrame.functionName;
+    if (leaf === '(idle)' || leaf === '(program)') continue; // waiting, not working
+    const key = ownFrame(profile.samples[i]);
+    cost.set(key, (cost.get(key) || 0) + (times[i] - prev) / 1000);
+  }
+  const top = [...cost].sort((a, b) => b[1] - a[1]).slice(0, 6);
+  return top.length ? top.map(([k, ms]) => `${Math.round(ms)}ms ${k}`).join(' | ') : 'no samples';
+}

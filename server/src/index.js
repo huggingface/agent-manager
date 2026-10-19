@@ -50,7 +50,7 @@ import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTra
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isLocked, lockState, visibility, onVisibilityChange, lockError } from './visibility.js';
 import { kindOfName, kindOfFile, mimeOf, readTextHead, TEXT_MAX } from './preview.js';
-import { startWatchdog } from './watchdog.js';
+import { startWatchdog, startStallProfiler } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
@@ -209,8 +209,14 @@ initPush();
 // itself is bounded (visibility.js CYCLE_BUDGET_MS), so `firstVerdict` always
 // settles.
 const firstVerdict = startVisibilityWatch();
+// Remote panes' message logs are folders of one file per message on the
+// bucket. Load them concurrently now, under the same bounded wait, rather than
+// one blocking read at a time on the first request that touches the pane.
+const remoteLogsWarm = remote.preloadLogs(
+  store.list().filter((s) => isRemote(s.cli) && s.remote?.name).map((s) => s.remote.name),
+).catch((e) => console.error('[remote.preload]', e && e.message));
 await Promise.race([
-  firstVerdict,
+  Promise.all([firstVerdict, remoteLogsWarm]),
   new Promise((r) => setTimeout(r, 9000)),
 ]);
 
@@ -4049,6 +4055,7 @@ backup.startBackupTimer(loadAmConfig);
 // Off-thread stall detector — must start early so it's watching before the
 // first heavy build. Logs any event-loop wedge to the run logs (see watchdog.js).
 startWatchdog();
+startStallProfiler();
 
 // Start the sessions that were running before this Space went down. init() must
 // read the previous snapshot BEFORE the watch starts overwriting it, so it

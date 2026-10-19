@@ -121,6 +121,8 @@ function readFolder(dir) {
   return [];
 }
 
+const MESSAGE_FILE = /^\d+-(user|agent|system)\.md$/;
+
 function logFor(name) {
   let log = logs.get(name);
   if (!log) {
@@ -129,10 +131,14 @@ function logFor(name) {
   }
   if (log.loaded) return log;
   log.loaded = true; // even a failed read counts: never re-scan mid-life
+  // Synchronous fallback, for a pane preloadLogs() did not cover (one created
+  // after boot, whose folder is empty or nearly so). A long-lived pane's folder
+  // read this way costs one blocking bucket read PER MESSAGE — a 170-message
+  // log wedged the event loop for 34s at boot — which is what preload is for.
   const dir = folderFor(name);
   const out = [];
   for (const f of readFolder(dir)) {
-    if (!/^\d+-(user|agent|system)\.md$/.test(f)) continue;
+    if (!MESSAGE_FILE.test(f)) continue;
     let content = '';
     try { content = fs.readFileSync(path.join(dir, f), 'utf8'); } catch { continue; }
     const msg = parseMessageFile(f, content);
@@ -141,6 +147,36 @@ function logFor(name) {
   out.sort((a, b) => a.seq - b.seq);
   log.messages = out;
   return log;
+}
+
+/** Load these panes' logs off the event loop, reading each folder's files
+ *  concurrently (the libuv pool runs them in parallel against the bucket).
+ *  Call at boot, before serving: every later logFor() for these names is then
+ *  a memory hit. A pane already loaded (a request beat us to it through the
+ *  sync path) is left alone — its in-memory log may already hold appends. */
+export async function preloadLogs(names, concurrency = 16) {
+  for (const name of new Set(names)) {
+    if (logs.get(name)?.loaded) continue;
+    const dir = folderFor(name);
+    let files = [];
+    try { files = (await fs.promises.readdir(dir)).filter((f) => MESSAGE_FILE.test(f)); }
+    catch (e) { if (e?.code !== 'ENOENT') console.error('[remote.preload]', dir, e?.message); continue; }
+    const out = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < files.length) {
+        const f = files[next++];
+        let content;
+        try { content = await fs.promises.readFile(path.join(dir, f), 'utf8'); } catch { continue; }
+        const msg = parseMessageFile(f, content);
+        if (msg) out.push(msg);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, files.length) }, worker));
+    if (logs.get(name)?.loaded) continue; // lost the race to the sync path
+    out.sort((a, b) => a.seq - b.seq);
+    logs.set(name, { messages: out, loaded: true });
+  }
 }
 
 export function lastSeq(name) {
