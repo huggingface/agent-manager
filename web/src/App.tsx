@@ -17,7 +17,6 @@ import Overview from './components/Overview';
 import Locked from './components/Locked';
 import { LOCKED_EVENT, createLockTracker, type LockAnnouncement } from './lib/lockStatus';
 import BackupBanner from './components/BackupBanner';
-import DevPreviewBar from './components/DevPreviewBar';
 import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
 import { configuredCount, keepOffering } from './components/WelcomeSetup';
@@ -41,6 +40,8 @@ import { createLatestRefresh, observeAppReturns } from './lib/appRefresh';
 // and lazily imported so a debug surface is not part of the shipped bundle.
 const VV_DEBUG = new URLSearchParams(location.search).has('vvdebug');
 const ViewportDebug = lazy(() => import('./components/ViewportDebug'));
+// Only dev-preview Spaces render it (AM_DEV_PREVIEW=1), so it stays out of the entry chunk.
+const DevPreviewBar = lazy(() => import('./components/DevPreviewBar'));
 
 // Panels a visit may never open ship as their own chunks and are fetched when
 // first shown (LazyPanel). The terminal/reader pane is the app's reason to
@@ -1346,7 +1347,7 @@ export default function App() {
         onMove={doMove}
         onDragState={setSessionDrag}
         onOpenSettings={() => setSettingsOpen(true)}
-        previewBar={info?.devPreview ? <DevPreviewBar summary={info.devPreview} onOpenSettings={() => { setSettingsPage('preview'); setSettingsOpen(true); }} /> : null}
+        previewBar={info?.devPreview ? <Suspense fallback={null}><DevPreviewBar summary={info.devPreview} onOpenSettings={() => { setSettingsPage('preview'); setSettingsOpen(true); }} /></Suspense> : null}
         theme={theme}
         onToggleTheme={toggleTheme}
         onQuickStart={quickStart}
