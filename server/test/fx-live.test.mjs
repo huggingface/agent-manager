@@ -58,7 +58,8 @@ const second = sessions.create({ name: 'fx-second', cli: 'fx', path: 'shared' })
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 try {
   runner.ensureRunning(first); runner.ensureRunning(second);
-  await pause(5500);
+  for (const end = Date.now() + 15_000; Date.now() < end
+    && !(sessions.get(first.id).fxSessionId && sessions.get(second.id).fxSessionId);) await pause(100);
   const a = sessions.get(first.id).fxSessionId;
   const b = sessions.get(second.id).fxSessionId;
   assert.ok(a, 'first live pane acquires its exact conversation');
