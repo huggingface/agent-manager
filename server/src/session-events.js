@@ -97,6 +97,17 @@ export class SessionEvents {
         }
         const status=await this.input.status(job.target.sessionId);
         this.current(job);
+        if(status.status==='idle'&&!job.evidence.matched&&!job.queueStartUncertain&&this.input.startQueued) {
+          try {await this.input.startQueued(job,externalPrincipal(source,job.event),{verifySource:()=>this.current(job)});}
+          catch(e){
+            if(e.code==='codex-queue-start-uncertain'){
+              job.queueStartUncertain=true;job.deliveryError={code:e.code,stage:'native-queue-start',at:new Date(this.now()).toISOString()};this.save(job);
+              // Continue observing: a lost ACK can still produce native evidence.
+              return;
+            }
+            throw e;
+          }
+        }
         if(status.status==='needs-input')this.transition(job,'blocked','native-input-required');
         else if(job.state==='blocked')this.transition(job,job.deliveryState||'accepted','observing-native-result');
         if(job.state==='submitted'&&job.evidence.matched){job.deliveryState='accepted';this.transition(job,'accepted','native-input-observed');}

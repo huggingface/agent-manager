@@ -347,3 +347,44 @@ test('external delivery recovers interrupted native thread with latest effort, t
  await f.hub.sendFromExternal('am',{text:'Process the note.',requestId},source,{verifySource:()=>{}});
  assert.equal(f.calls.filter(c=>c.method==='thread/resume').length,1);const sent=f.calls.filter(c=>c.method==='thread/queue/add');assert.equal(sent.length,1);assert.equal(sent[0].params.clientUserMessageId,requestId);assert.equal(sent[0].params.threadId,f.thread.id);
 });
+
+test('dormant accepted queue item starts exactly once, never re-enqueues, and refuses foreign/busy heads',async()=>{
+ for(const mode of ['ok','foreign','busy','changed','lost-ack']){
+  const f=fixture(),requestId=randomUUID(),source={type:'poller',id:'granola',provider:'granola',revision:1,eventId:'note'};
+  await f.hub.sendFromExternal('am',{text:'original note',requestId},source,{verifySource:()=>{}});
+  const receipt=f.hub.readReceipt(requestId),add=f.calls.find(c=>c.method==='thread/queue/add'),call=f.client.call.bind(f.client);let starts=0;
+  f.client.call=async(method,params)=>{
+   if(method==='thread/queue/list')return {data:[{id:mode==='foreign'?'other':receipt.queuedSubmissionId,clientUserMessageId:requestId,input:mode==='changed'?[{type:'text',text:'changed'}]:add.params.input}]};
+   if(method==='thread/queue/start'){starts++;assert.equal(params.queuedSubmissionId,receipt.queuedSubmissionId);if(mode==='lost-ack')throw Error('lost');return {turn:{id:'started-original'}};}
+   return call(method,params);
+  };
+  if(mode==='busy')f.thread.status={type:'active'};
+  const start=()=>f.hub.startQueuedExternal('am',{requestId},source,{verifySource:()=>{}});
+  if(mode==='changed')await assert.rejects(start(),{code:'codex-request-conflict'});
+  else if(mode==='lost-ack'){await assert.rejects(start(),{code:'codex-queue-start-uncertain'});await assert.rejects(start(),{code:'codex-queue-start-uncertain'});}
+  else {await start();await start();}
+  assert.equal(starts,['ok','lost-ack'].includes(mode)?1:0);assert.equal(f.calls.filter(c=>c.method==='thread/queue/add').length,1);
+ }
+});
+
+
+test('queue recovery protocol stays scoped to one exact thread and item',()=>{
+ const c=Object.create(CodexInteractiveClient.prototype);c.threadId='ours';
+ assert.equal(c.allows('thread/queue/list',{threadId:'ours',limit:1}),true);
+ assert.equal(c.allows('thread/queue/start',{threadId:'ours',queuedSubmissionId:'item'}),true);
+ for(const params of [{threadId:'other',queuedSubmissionId:'item'},{threadId:'ours'},{threadId:'ours',queuedSubmissionId:null},{threadId:'ours',queuedSubmissionId:'item',input:[]}])assert.equal(!!c.allows('thread/queue/start',params),false);
+ assert.equal(!!c.allows('thread/queue/list',{threadId:'ours',limit:100}),false);
+});
+
+test('source revocation during native queue inspection prevents starting work',async()=>{
+ const f=fixture(),requestId=randomUUID(),source={type:'poller',id:'granola',provider:'granola',revision:1,eventId:'note'};
+ await f.hub.sendFromExternal('am',{text:'original note',requestId},source,{verifySource:()=>{}});
+ const receipt=f.hub.readReceipt(requestId),add=f.calls.find(c=>c.method==='thread/queue/add'),call=f.client.call.bind(f.client);let revoked=false,starts=0;
+ f.client.call=async(method,params)=>{
+  if(method==='thread/queue/list'){revoked=true;return {data:[{id:receipt.queuedSubmissionId,clientUserMessageId:requestId,input:add.params.input}]};}
+  if(method==='thread/queue/start')starts++;
+  return call(method,params);
+ };
+ await assert.rejects(f.hub.startQueuedExternal('am',{requestId},source,{verifySource:()=>{if(revoked)throw Error('source revoked');}}),/source revoked/);
+ assert.equal(starts,0);assert.equal(f.hub.readReceipt(requestId).queueStart,undefined);
+});

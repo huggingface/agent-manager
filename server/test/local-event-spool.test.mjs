@@ -73,3 +73,10 @@ test('backlogged events for one native thread wait for the preceding result, inc
  f.input.observe=async job=>{job.evidence.outcome='completed';job.evidence.reason='native-final';};await f.events.tick();assert.equal(f.sends(),1);
  await f.events.tick();assert.equal(f.sends(),2);
 });
+
+test('lost native queue-start ACK remains observable without starting again or allowing a second workflow',async()=>{
+ const f=fixture();f.publish();f.spool.tick();f.state('idle');await f.events.tick();let starts=0;
+ f.input.startQueued=async()=>{starts++;throw Object.assign(Error(),{code:'codex-queue-start-uncertain'});};
+ await f.events.tick();assert.equal(starts,1);f.restart();await f.events.tick();assert.equal(starts,1);assert.equal([...f.events.jobs.values()][0].state,'accepted');
+ f.input.observe=async job=>{job.evidence={matched:true,outcome:'completed',reason:'native-final'};};await f.events.tick();assert.equal([...f.events.jobs.values()][0].state,'completed');
+});

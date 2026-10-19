@@ -91,3 +91,21 @@ and first new-meeting end-to-end validation remain activation requirements.
 Native shared crons are still explicitly unsupported in the PR #189 base; polling
 uses the general external-source delivery primitive without borrowing an agent
 identity. This branch does not silently change scheduled-cron semantics.
+
+
+### Interrupted native Codex queues
+
+A queue ACK means accepted, not started or completed. After a prior interruption,
+Codex can retain an accepted input without starting a turn. AM inspects only the
+head of that exact thread's queue and starts the existing item if its native ID,
+request ID and content digest match the durable source receipt and the thread is
+idle. It never re-enqueues the text, skips another queued item, or interrupts an
+active turn. Source policy and binding are revalidated before starting.
+
+A durable start intent precedes the native call. If its acknowledgement is lost,
+AM keeps observing the original input but does not repeat the start; the journal
+records `codex-queue-start-uncertain` for reconciliation. Native final evidence,
+not queue acknowledgement or an idle state, establishes completion. Each target
+processes one event workflow at a time. This requires a native server supporting
+`thread/queue/list` and `thread/queue/start`; unavailable/ambiguous starts fail
+closed without resubmission.

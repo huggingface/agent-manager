@@ -54,6 +54,10 @@ export class SessionEventInput {
       job.cursor=openCodeCheckpoint(location.path,s.opencodeSessionId);job.observer='opencode';
     } else {job.observer='unavailable';job.cursor=null;}
   }
+  async startQueued(job, source, options) {
+    if(job.cli!=='codex')return {waiting:true};
+    return this.codex.startQueuedExternal(job.target.sessionId,{requestId:job.requestId},source,options);
+  }
   async observe(job) {
     if(job.observer==='jsonl'||(!job.observer&&job.cli==='codex'))scanEvidence(job);
     else if(job.observer==='opencode')scanOpenCode(job);

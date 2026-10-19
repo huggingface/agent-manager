@@ -298,6 +298,34 @@ export class CodexInput {
       } catch { throw uncertain(); }
     } finally { this.busy.delete(id); }
   }
+  // Queue/add may remain dormant after a native interruption. Start only the
+  // exact accepted head item; never enqueue text again or skip another item.
+  async startQueuedExternal(id, {requestId}, source, {verifySource} = {}) {
+    if(!uuid(requestId)||typeof verifySource!=='function'||!['poller','local-monitor'].includes(source?.type))throw fail('codex-source-stale','Verified external source required.');
+    if(this.busy.has(id))return {waiting:true};
+    this.busy.add(id);
+    try {
+      const context=this.context(id),receipt=this.readReceipt(requestId);
+      const verify=()=>{verifySource();this.check(id,context);this.assertWritable();};verify();
+      if(receipt?.status!=='accepted'||receipt.session!==id||receipt.stamp!==context.stamp||!receipt.queuedSubmissionId||JSON.stringify(receipt.source)!==JSON.stringify(source))throw fail('codex-request-conflict','Queue receipt does not match this source.');
+      if(receipt.queueStart?.status==='started')return {started:true};
+      if(receipt.queueStart)throw fail('codex-queue-start-uncertain','Queued item start requires reconciliation. No new input was submitted.');
+      const {client}=await this.attach(id);verify();
+      const queue=await client.call('thread/queue/list',{threadId:context.threadId,limit:1});verify();
+      const head=queue?.data?.[0];
+      if(head?.id!==receipt.queuedSubmissionId)return {waiting:true};
+      if(head.clientUserMessageId!==requestId||!Array.isArray(head.input)||head.input.some(i=>i.type!=='text')||digest(head.input.map(i=>i.text).join('\n'))!==receipt.hash)throw fail('codex-request-conflict','Native queued input does not match its receipt.');
+      const thread=await this.metadata(client,context);verify();
+      if(thread.status?.type!=='idle'||client.requests?.size)return {waiting:true};
+      this.saveReceipt(requestId,{...receipt,queueStart:{status:'starting',at:new Date().toISOString()}});
+      try {
+        const result=await client.call('thread/queue/start',{threadId:context.threadId,queuedSubmissionId:head.id});
+        if(typeof result?.turn?.id!=='string')throw Error('missing turn');
+        this.saveReceipt(requestId,{...receipt,queueStart:{status:'started',turnId:result.turn.id,at:new Date().toISOString()}});
+        return {started:true,turnId:result.turn.id};
+      }catch{throw fail('codex-queue-start-uncertain','Queued item start acknowledgement unavailable; never re-enqueue.');}
+    }finally{this.busy.delete(id);}
+  }
   async answer(id, { key, decision, answers }) {
     const context = this.context(id), client = this.existing(id, context), request = client?.requests?.get(key);
     if (!request) throw fail('codex-request-stale', 'This request was already answered or the connection changed. Refresh.');
