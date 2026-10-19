@@ -163,17 +163,27 @@ export async function preloadLogs(names, concurrency = 16) {
     catch (e) { if (e?.code !== 'ENOENT') console.error('[remote.preload]', dir, e?.message); continue; }
     const out = [];
     let next = 0;
+    let unread = 0;
     const worker = async () => {
       while (next < files.length) {
         const f = files[next++];
         let content;
-        try { content = await fs.promises.readFile(path.join(dir, f), 'utf8'); } catch { continue; }
+        // One retry: a bucket read that fails once often succeeds immediately.
+        try { content = await fs.promises.readFile(path.join(dir, f), 'utf8'); }
+        catch {
+          try { content = await fs.promises.readFile(path.join(dir, f), 'utf8'); }
+          catch (e) { unread++; console.error('[remote.preload]', path.join(dir, f), e?.message); continue; }
+        }
         const msg = parseMessageFile(f, content);
         if (msg) out.push(msg);
       }
     };
     await Promise.all(Array.from({ length: Math.min(concurrency, files.length) }, worker));
     if (logs.get(name)?.loaded) continue; // lost the race to the sync path
+    // A folder we could not read whole is not a log. Publishing it as loaded
+    // hid the missing message for the life of the process; left alone, the
+    // sync path reads it again on the next request.
+    if (unread) continue;
     out.sort((a, b) => a.seq - b.seq);
     logs.set(name, { messages: out, loaded: true });
   }
@@ -215,10 +225,30 @@ export function rateLimited(name) {
  * Append a message. Memory first (that is the truth), disk second — a failed
  * write is logged and never thrown, matching sessions.persist().
  */
+/**
+ * The highest sequence this folder already holds, read from the FILENAMES.
+ *
+ * A message whose body could not be read is still a message: it is on disk and
+ * it owns its number. Deriving the next sequence from the bodies we managed to
+ * load meant one failed read handed the number back out, and the next append of
+ * the same role wrote the same filename — replacing a message the operator had
+ * sent. Names are cheap and complete; bodies are neither.
+ */
+function highestSeqOnDisk(dir) {
+  let high = 0;
+  for (const f of readFolder(dir)) {
+    if (!MESSAGE_FILE.test(f)) continue;
+    const n = parseInt(f, 10);
+    if (Number.isFinite(n) && n > high) high = n;
+  }
+  return high;
+}
+
 export function append(name, { role, text, from }) {
   if (!ROLES.has(role)) throw new Error(`bad role '${role}'`);
   const log = logFor(name);
-  const seq = (log.messages.length ? log.messages[log.messages.length - 1].seq : 0) + 1;
+  const loaded = log.messages.length ? log.messages[log.messages.length - 1].seq : 0;
+  const seq = Math.max(loaded, highestSeqOnDisk(folderFor(name))) + 1;
   const msg = {
     seq,
     role,

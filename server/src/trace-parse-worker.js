@@ -8,7 +8,10 @@ import { statsFromFile } from './traces.js';
 // Jobs run one at a time: a worker is one thread, and overlapping two parses
 // here would only interleave their awaits, not run them in parallel.
 let queue = Promise.resolve();
-parentPort.on('message', ({ id, p, size, kind }) => {
+parentPort.on('message', ({ id, p, size, kind, probe }) => {
+  // What environment did this thread actually get? Asked by
+  // server/test/loop-offload.test.mjs, which cannot read it from outside.
+  if (probe === 'env') { parentPort.postMessage({ id, envKeys: Object.keys(process.env) }); return; }
   queue = queue.then(async () => {
     let parsed = null;
     try { parsed = await statsFromFile(p, size, kind); } catch { /* null: unreadable */ }
