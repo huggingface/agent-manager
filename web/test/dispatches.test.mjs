@@ -191,6 +191,53 @@ check('a short history caps the card to the room beside the icon inside it', () 
   assert.equal(p.top + p.maxHeight, 83 + 190 - 8);
 });
 
+// Shaped on the manager's real dispatches of 2026-10-19 (prompts redacted):
+// fix-restore-201 refused with 409 at 19:56:38 and resent at 19:57:20; "(go)"
+// to am-image-inputs at 19:37:47, whose Enter submitted the 19:36:20 prompt
+// left sitting in the composer — that turn started at 19:37:47.
+console.log('\nmade moot by another dispatch to the same session');
+const T0 = NOW - 3_600_000;
+const turn = (start, text) => ({ turns: [user(start, text), call(start + 5_000), said(start + 60_000, 'Reviewed: not yet.')], ended: true, truncated: false });
+const prompt = (at, o = {}) => disp({ kind: 'prompt', status: 200, at, prompt: 'Re-check of #201 … redacted …', exchange: turn(at + 3_000, 'Re-check'), ...o });
+const refused = (at) => prompt(at, { status: 409, ok: false, exchange: null });
+const nudge = (at) => prompt(at, { prompt: '(go)', exchange: null });
+const icon = (list) => { const [p] = iconsOf(list, NOW); return p; };
+check('refused (409), then resent and finished: superseded, and the session reads done', () => {
+  const p = icon([refused(T0), prompt(T0 + 42_000)]);
+  assert.deepEqual(p.results.map((r) => r.outcome), ['superseded', 'finished']);
+  assert.match(p.results[0].why, /refused \(409\), sent again/);
+  assert.equal(p.side, 'done');
+  assert.equal(p.latest.outcome, 'finished');
+});
+check('a nudge whose Enter submitted the stuck prompt before it: superseded, and the preview is that prompt', () => {
+  const stuck = prompt(T0, { exchange: turn(T0 + 87_000, 'Re-check, then (go)') });   // its turn starts with the nudge
+  const p = icon([stuck, nudge(T0 + 87_000)]);
+  assert.deepEqual(p.results.map((r) => r.outcome), ['finished', 'superseded']);
+  assert.equal(p.results[1].why, 'submitted the earlier prompt');
+  assert.equal(p.side, 'done');
+  assert.equal(p.latest.d.prompt, stuck.prompt, 'the preview shows the nudge, not the work');
+});
+check('refused and never resent: still failed', () => {
+  const p = icon([refused(T0)]);
+  assert.deepEqual(p.results.map((r) => r.outcome), ['failed']);
+  assert.equal(p.side, 'failed');
+});
+check('refused, and the resend never started either: both still failed', () => {
+  const p = icon([refused(T0), prompt(T0 + 30_000, { exchange: null })]);
+  assert.deepEqual(p.results.map((r) => r.outcome), ['failed', 'failed']);
+  assert.equal(p.side, 'failed');
+});
+check('a prompt that never started, after a turn that had ALREADY started: still failed', () => {
+  const p = icon([prompt(T0), nudge(T0 + 120_000)]);   // the earlier turn began at T0+3s
+  assert.deepEqual(p.results.map((r) => r.outcome), ['finished', 'failed']);
+  assert.equal(p.side, 'failed');
+});
+check('a refused send followed only by one to ANOTHER session: still failed', () => {
+  const other = prompt(T0 + 30_000, { target: { id: 'other-1', name: 'other', cli: 'codex', color: null, exists: true, state: 'waiting' } });
+  const icons = iconsOf([refused(T0), other], NOW);
+  assert.equal(icons.find((p) => p.key === 'canvas-1').side, 'failed');
+});
+
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed) { console.log(`\n${failed} failed`); process.exit(1); }
 console.log('\nall passed');

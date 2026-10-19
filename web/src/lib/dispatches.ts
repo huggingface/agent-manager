@@ -20,7 +20,7 @@ export type { Dispatch };
  * the records prove — the harness wrote an error turn, the call was refused,
  * the turn ended without a final message, or the prompt never started a turn.
  */
-export type Outcome = 'running' | 'queued' | 'finished' | 'failed' | 'gone' | 'unknown';
+export type Outcome = 'running' | 'queued' | 'finished' | 'failed' | 'gone' | 'unknown' | 'superseded';
 
 export interface DispatchResult {
   d: Dispatch;
@@ -61,6 +61,33 @@ export function resultOf(d: Dispatch, now = Date.now()): DispatchResult {
   // is waiting its turn. Idle long after the call: it never ran.
   if (d.target.state === 'working' || now - d.at < START_GRACE_MS) return { d, outcome: 'queued', x: null, answer: '' };
   return { d, outcome: 'failed', why: 'never started', x: null, answer: '' };
+}
+
+/**
+ * Dispatches to ONE session within one turn, oldest first, with the ones a
+ * later or earlier dispatch made moot marked `superseded` — drawn grey and
+ * folded under the one that worked, instead of red:
+ *
+ *  - refused, then resent: the call was refused (the input guard's 409, say)
+ *    and a later dispatch to the same session was accepted and did not fail;
+ *  - absorbed: it never started a turn of its own because its Enter is what
+ *    submitted an EARLIER dispatch left sitting in the composer — that
+ *    dispatch's turn started only once this one was sent. ("(go)" nudges.)
+ *
+ * A failure nothing followed up, or whose follow-up also failed, stays failed.
+ */
+export function supersede(rs: DispatchResult[]): DispatchResult[] {
+  return rs.map((r, i) => {
+    if (r.outcome !== 'failed' && r.outcome !== 'queued') return r;
+    if (!r.d.ok && rs.slice(i + 1).some((n) => n.d.ok && n.outcome !== 'failed' && n.outcome !== 'superseded')) {
+      return { ...r, outcome: 'superseded', why: `${r.why || 'refused'}, sent again` };
+    }
+    if (r.d.ok && !r.d.exchange) {
+      const into = rs.slice(0, i).reverse().find((e) => e.d.exchange && (e.x?.startTs ?? 0) >= r.d.at - SKEW_MS);
+      if (into) return { ...r, outcome: 'superseded', why: 'submitted the earlier prompt' };
+    }
+    return r;
+  });
 }
 
 /** A call logged a moment after its tool turn was written still belongs to it. */
