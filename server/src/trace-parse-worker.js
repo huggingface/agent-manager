@@ -12,6 +12,10 @@ parentPort.on('message', ({ id, p, size, kind, probe }) => {
   // What environment did this thread actually get? Asked by
   // server/test/loop-offload.test.mjs, which cannot read it from outside.
   if (probe === 'env') { parentPort.postMessage({ id, envKeys: Object.keys(process.env) }); return; }
+  // A worker that has stopped answering, on purpose: the pool's deadline is
+  // the only thing that can free its lane, and a test cannot wedge a real one
+  // on demand. Never set in production — see server/test/loop-offload.test.mjs.
+  if (process.env.AM_TRACE_WORKER_NEVER_REPLIES) return;
   queue = queue.then(async () => {
     let parsed = null;
     try { parsed = await statsFromFile(p, size, kind); } catch { /* null: unreadable */ }

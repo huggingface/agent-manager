@@ -106,20 +106,23 @@ const logs = new Map(); // name -> { messages: [...], loaded: boolean }
 // A directory listing on the bucket can omit files written seconds ago. This
 // only runs once per pane per process (on first touch), so a couple of retries
 // cost nothing and protect the one read that matters.
-function readFolder(dir) {
+function listFolder(dir) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return fs.readdirSync(dir);
+      return { ok: true, files: fs.readdirSync(dir) };
     } catch (e) {
-      if (e && e.code === 'ENOENT') return [];
+      // A folder that is not there holds no messages. Anything else means we
+      // do not know what it holds, which is not the same thing.
+      if (e && e.code === 'ENOENT') return { ok: true, files: [] };
       if (attempt === 2) {
         console.error('[remote.readFolder]', dir, e && e.message);
-        return [];
+        return { ok: false, files: [] };
       }
     }
   }
-  return [];
+  return { ok: false, files: [] };
 }
+function readFolder(dir) { return listFolder(dir).files; }
 
 const MESSAGE_FILE = /^\d+-(user|agent|system)\.md$/;
 
@@ -130,14 +133,19 @@ function logFor(name) {
     logs.set(name, log);
   }
   if (log.loaded) return log;
-  log.loaded = true; // even a failed read counts: never re-scan mid-life
+  // A listing we could not take is not an empty folder: leaving the pane
+  // unloaded means the next touch looks again, rather than serving nothing for
+  // the life of the process.
+  const listing = listFolder(folderFor(name));
+  if (!listing.ok) return log;
+  log.loaded = true; // a file we could not READ still counts: never re-scan mid-life
   // Synchronous fallback, for a pane preloadLogs() did not cover (one created
   // after boot, whose folder is empty or nearly so). A long-lived pane's folder
   // read this way costs one blocking bucket read PER MESSAGE — a 170-message
   // log wedged the event loop for 34s at boot — which is what preload is for.
   const dir = folderFor(name);
   const out = [];
-  for (const f of readFolder(dir)) {
+  for (const f of listing.files) {
     if (!MESSAGE_FILE.test(f)) continue;
     let content = '';
     try { content = fs.readFileSync(path.join(dir, f), 'utf8'); } catch { continue; }
@@ -235,8 +243,10 @@ export function rateLimited(name) {
  * sent. Names are cheap and complete; bodies are neither.
  */
 function highestSeqOnDisk(dir) {
+  const { ok, files } = listFolder(dir);
+  if (!ok) return null;   // we could not look: zero would be a guess
   let high = 0;
-  for (const f of readFolder(dir)) {
+  for (const f of files) {
     if (!MESSAGE_FILE.test(f)) continue;
     const n = parseInt(f, 10);
     if (Number.isFinite(n) && n > high) high = n;
@@ -248,22 +258,36 @@ export function append(name, { role, text, from }) {
   if (!ROLES.has(role)) throw new Error(`bad role '${role}'`);
   const log = logFor(name);
   const loaded = log.messages.length ? log.messages[log.messages.length - 1].seq : 0;
-  const seq = Math.max(loaded, highestSeqOnDisk(folderFor(name))) + 1;
+  const floor = highestSeqOnDisk(folderFor(name));
+  // Fail closed. Without a listing there is no safe number to write under: the
+  // folder may hold messages we cannot see, and guessing zero is how a message
+  // gets written over one already there. The caller retries; a remote agent
+  // polls again in seconds.
+  if (floor === null) throw new Error(`cannot list ${relPathFor(name)} — refusing to pick a message number`);
   const msg = {
-    seq,
     role,
     from: from || '',
     at: new Date().toISOString(),
     text: String(text ?? '').slice(0, MAX_TEXT),
   };
+  ensureFolder(name);
+  // `wx` so an existing message is never replaced, whatever the listing said —
+  // a bucket can answer with one seconds out of date. A name already taken
+  // means the floor was low: take the next one.
+  let seq = Math.max(loaded, floor) + 1;
+  for (let attempt = 0; ; attempt++) {
+    msg.seq = seq;
+    try {
+      fs.writeFileSync(path.join(folderFor(name), fileName(seq, role)), serialize(msg), { flag: 'wx' });
+      break;
+    } catch (e) {
+      if (e?.code === 'EEXIST' && attempt < 50) { seq++; continue; }
+      console.error('[remote.append]', name, e && e.message);
+      throw e;
+    }
+  }
   log.messages.push(msg);
   rate.set(name, [...(rate.get(name) || []), Date.now()]);
-  try {
-    ensureFolder(name);
-    fs.writeFileSync(path.join(folderFor(name), fileName(seq, role)), serialize(msg));
-  } catch (e) {
-    console.error('[remote.append]', name, e && e.message);
-  }
   if (role === 'user') wake(name);
   return msg;
 }

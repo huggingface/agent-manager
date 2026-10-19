@@ -153,24 +153,96 @@ test('a message that cannot be read keeps its number', async () => {
   } finally { await fs.rm(data, { recursive: true, force: true }); }
 });
 
+test('a folder that cannot be listed is not an empty folder', async () => {
+  // `readdirSync` failing used to read as "no messages here", so the next
+  // append took seq 1 and wrote over the first message. A listing we cannot
+  // take tells us nothing about what the folder holds.
+  const data = await fs.mkdtemp(path.join(os.tmpdir(), 'am-remote-blind-'));
+  try {
+    const out = run(`
+      import fs from 'node:fs';
+      const remote = await import(${JSON.stringify(path.join(SRC, 'remote.js'))});
+      for (const t of ['one', 'two', 'three']) remote.append('blind', { role: 'user', text: t });
+      const dir = remote.folderFor('blind');
+      const before = fs.readFileSync(dir + '/' + fs.readdirSync(dir).find((f) => /0*1-user/.test(f)), 'utf8');
+      remote.forget('blind');
+      const realList = fs.readdirSync;
+      fs.readdirSync = (d, ...rest) => {
+        if (String(d).includes('blind')) throw Object.assign(new Error('EIO'), { code: 'EIO' });
+        return realList(d, ...rest);
+      };
+      let threw = null;
+      try { remote.append('blind', { role: 'user', text: 'blind write' }); }
+      catch (e) { threw = e.message; }
+      fs.readdirSync = realList;
+      const after = fs.readFileSync(dir + '/' + fs.readdirSync(dir).find((f) => /0*1-user/.test(f)), 'utf8');
+      console.log(JSON.stringify({ threw, intact: before === after,
+        files: fs.readdirSync(dir).filter((f) => /^\\d+-/.test(f)).length }));`,
+    { DATA_DIR: data });
+    assert.ok(out.threw, 'the append went ahead without knowing what the folder held');
+    assert.equal(out.intact, true, 'the first message was written over');
+    assert.equal(out.files, 3, 'a message was added while the folder could not be listed');
+  } finally { await fs.rm(data, { recursive: true, force: true }); }
+});
+
+test('a listing that is out of date does not cost a message', async () => {
+  // The bucket can answer with a listing seconds old. The name is taken even
+  // when the listing says it is free, so the write must not replace it.
+  const data = await fs.mkdtemp(path.join(os.tmpdir(), 'am-remote-stale-'));
+  try {
+    const out = run(`
+      import fs from 'node:fs';
+      const remote = await import(${JSON.stringify(path.join(SRC, 'remote.js'))});
+      for (const t of ['one', 'two', 'three']) remote.append('stale', { role: 'user', text: t });
+      const dir = remote.folderFor('stale');
+      const third = fs.readdirSync(dir).find((f) => /0*3-user/.test(f));
+      const before = fs.readFileSync(dir + '/' + third, 'utf8');
+      remote.forget('stale');
+      // A listing from before the third message was written.
+      const realList = fs.readdirSync;
+      fs.readdirSync = (d, ...rest) => String(d).includes('stale')
+        ? realList(d, ...rest).filter((f) => !/0*3-user/.test(f)) : realList(d, ...rest);
+      const appended = remote.append('stale', { role: 'user', text: 'after a stale listing' });
+      fs.readdirSync = realList;
+      console.log(JSON.stringify({ appended: appended.seq,
+        intact: fs.readFileSync(dir + '/' + third, 'utf8') === before,
+        files: fs.readdirSync(dir).filter((f) => /^\\d+-/.test(f)).length }));`,
+    { DATA_DIR: data });
+    assert.equal(out.intact, true, 'a stale listing let the write replace an existing message');
+    assert.notEqual(out.appended, 3, 'the new message took a number already on disk');
+    assert.equal(out.files, 4);
+  } finally { await fs.rm(data, { recursive: true, force: true }); }
+});
+
 test('a worker that stops answering is replaced, and the parse still returns', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'am-worker-stuck-'));
   const file = path.join(dir, 'rollout.jsonl');
   try {
+    const other = path.join(dir, 'second.jsonl');
     await fs.writeFile(file, codexRows(6));
+    await fs.writeFile(other, codexRows(6));
     const code = `
-      const { digestFor } = await import(${JSON.stringify(path.join(SRC, 'traces.js'))});
+      const traces = await import(${JSON.stringify(path.join(SRC, 'traces.js'))});
       const t0 = Date.now();
-      const d = await digestFor({ id: 'x', cli: 'codex', codexRollout: ${JSON.stringify(file)} });
-      console.log(JSON.stringify({ ms: Date.now() - t0, d }));`;
+      const d = await traces.digestFor({ id: 'x', cli: 'codex', codexRollout: ${JSON.stringify(file)} });
+      // A second parse, of a different file so nothing is served from the
+      // digest cache: it must not queue behind the lane the first one left.
+      const d2 = await traces.digestFor({ id: 'y', cli: 'codex', codexRollout: ${JSON.stringify(other)} });
+      console.log(JSON.stringify({ ms: Date.now() - t0, d,
+        same: JSON.stringify(d.lastPromptTs) === JSON.stringify(d2.lastPromptTs),
+        started: traces.__workersStartedForTest?.() ?? 0 }));`;
     const inline = run(code, { DATA_DIR: dir, AM_TRACE_WORKERS: '0' });
-    // A deadline no worker can meet stands in for one that has stopped
-    // answering: the job must settle through the fallback either way, and the
-    // stuck slot must be terminated rather than left holding its lane.
-    const stuck = run(code, { DATA_DIR: dir, AM_TRACE_WORKERS: '1', AM_TRACE_JOB_DEADLINE_MS: '1' });
+    // The worker is told to swallow every parse message. Without a deadline
+    // the promise never settles and the whole lane is gone for the life of the
+    // process, which is exactly what this used to do.
+    const stuck = run(code, { DATA_DIR: dir, AM_TRACE_WORKERS: '1',
+      AM_TRACE_JOB_DEADLINE_MS: '400', AM_TRACE_WORKER_NEVER_REPLIES: '1' });
     assert.deepEqual(stuck.d, inline.d, 'the fallback did not produce the same digest');
     assert.ok(stuck.d.lastPromptTs > 0, 'fixture should produce a real digest');
-    assert.ok(stuck.ms < 20_000, `waited ${stuck.ms}ms on a worker that never answered`);
+    assert.equal(stuck.same, true, 'the second call did not get the same answer');
+    assert.ok(stuck.ms < 30_000, `waited ${stuck.ms}ms on a worker that never answered`);
+    assert.ok(stuck.started >= 2,
+      `the stuck worker was reused rather than replaced (${stuck.started} started)`);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
@@ -178,22 +250,43 @@ test('a worker that dies mid-parse falls back, and the next parse is whole', asy
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'am-worker-crash-'));
   const file = path.join(dir, 'rollout.jsonl');
   try {
-    await fs.writeFile(file, codexRows(6));
+    // Over MAX_TRACE_BYTES (12MB), so only the tail is read and the digest
+    // leans on the append cursor rather than on re-reading the whole file. A
+    // replacement worker resuming a delta for a file it has never seen would
+    // answer differently from one that scanned it.
+    const bulk = (n, from) => Array.from({ length: n }, (_, i) => JSON.stringify({
+      type: 'response_item', timestamp: new Date(Date.parse('2026-10-19T10:00:00Z') + (from + i) * 1000).toISOString(),
+      payload: { type: 'message', role: (from + i) % 2 ? 'assistant' : 'user',
+        content: [{ type: (from + i) % 2 ? 'output_text' : 'input_text', text: `turn ${from + i} ${'z'.repeat(220)}` }] },
+    })).join('\n') + '\n';
+    await fs.writeFile(file, bulk(50_000, 0));
+    assert.ok((await fs.stat(file)).size > 12 * 1024 * 1024, 'fixture must exceed the tail cap');
+    // Through the pool itself: digestFor keeps a heavy file on a cooldown, so
+    // it cannot be asked to parse one twice inside a test.
     const out = run(`
+      const fsmod = await import('node:fs');
       const traces = await import(${JSON.stringify(path.join(SRC, 'traces.js'))});
-      const session = { id: 'x', cli: 'codex', codexRollout: ${JSON.stringify(file)} };
-      const first = await traces.digestFor(session);
-      // Killed between parses. The replacement has no append cursor for this
-      // file — the cursor lives in the worker's own module state — so it must
-      // rescan the file whole rather than resume a delta against one it has
-      // never seen.
+      const p = ${JSON.stringify(file)};
+      const size = () => fsmod.statSync(p).size;
+      const first = await traces.__parseOffThreadForTest(p, size(), 'codex');
       await traces.__killWorkersForTest();
-      const second = await traces.digestFor(session);
-      console.log(JSON.stringify({ first, second }));`,
-    { DATA_DIR: dir, AM_TRACE_WORKERS: '1' });
-    assert.ok(out.first.lastPromptTs > 0, 'the first parse produced nothing');
-    assert.deepEqual(out.second, out.first,
-      'after the worker was replaced the parse returned a delta, not the whole file');
+      fsmod.appendFileSync(p, process.env.MORE);
+      const second = await traces.__parseOffThreadForTest(p, size(), 'codex');
+      console.log(JSON.stringify({ first: first?.digest ?? null, second: second?.digest ?? null,
+        started: traces.__workersStartedForTest?.() ?? 0 }));`,
+    { DATA_DIR: dir, AM_TRACE_WORKERS: '1', MORE: bulk(200, 50_000) });
+    // What the grown file says to something with no history of it at all.
+    const fresh = run(`
+      const fsmod = await import('node:fs');
+      const traces = await import(${JSON.stringify(path.join(SRC, 'traces.js'))});
+      const r = await traces.__parseOffThreadForTest(${JSON.stringify(file)}, fsmod.statSync(${JSON.stringify(file)}).size, 'codex');
+      console.log(JSON.stringify(r?.digest ?? null));`,
+    { DATA_DIR: dir, AM_TRACE_WORKERS: '0' });
+    assert.ok(out.first?.lastPromptTs > 0, 'the first parse produced nothing');
+    assert.ok(out.started >= 2, `the killed worker was not replaced (${out.started} started)`);
+    assert.notDeepEqual(out.second, out.first, 'the fixture did not change between parses');
+    assert.deepEqual(out.second, fresh,
+      'after the worker was replaced the parse resumed a delta instead of scanning the file');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

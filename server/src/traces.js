@@ -919,7 +919,9 @@ const MAX_PENDING = 64;
 // and provider keys included — and `execArgv: []` does not change that. This
 // is the entire environment one gets.
 const WORKER_ENV_KEYS = ['HOME', 'PATH', 'TZ', 'NODE_ENV', 'DATA_DIR', 'AM_WORKSPACES_DIR',
-  'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'OPENCLAW_STATE_DIR', 'XDG_DATA_HOME'];
+  'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'OPENCLAW_STATE_DIR', 'XDG_DATA_HOME',
+  // Test-only, and only ever set by server/test/loop-offload.test.mjs.
+  'AM_TRACE_WORKER_NEVER_REPLIES'];
 export function workerEnv(from = process.env) {
   const env = {};
   for (const k of WORKER_ENV_KEYS) if (from[k] !== undefined) env[k] = from[k];
@@ -951,6 +953,7 @@ function slotFor(p) {
   // env — see workerEnv: the default is the parent's entire environment.
   const worker = new Worker(new URL('./trace-parse-worker.js', import.meta.url),
     { execArgv: [], env: workerEnv() });
+  workersStarted++;
   const slot = { worker, index: i, pending: new Map(), inflight: new Map() };
   // Idle workers must not keep the process alive (tests, CLI scripts); a
   // worker is ref'd only while a job is outstanding on it.
@@ -1013,6 +1016,8 @@ async function parseOffThread(p, size, kind) {
 
 /** Seams for server/test/loop-offload.test.mjs: the pool is module state. */
 export const __parseOffThreadForTest = parseOffThread;
+let workersStarted = 0;
+export const __workersStartedForTest = () => workersStarted;
 /** What a real pool worker's environment holds. */
 export function __workerEnvKeysForTest(p = 'probe') {
   const slot = slotFor(p);
