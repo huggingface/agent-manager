@@ -92,6 +92,12 @@ const SAMPLE_THROTTLE_MS = 250;
 const INPUT_READY_QUIET_MS = Number(process.env.AM_INPUT_READY_QUIET_MS || BUSY_SECS * 1000);
 const INPUT_READY_TIMEOUT_MS = Number(process.env.AM_INPUT_READY_TIMEOUT_MS || 30000);
 const INPUT_ECHO_TIMEOUT_MS = Number(process.env.AM_INPUT_ECHO_TIMEOUT_MS || 20000);
+// For a CLI whose composer AM can read back (submitConfirmed): how long the
+// prompt gets to show there, how long startup may hold the Enter off, and how
+// long an Enter gets to take before AM presses again or reports the send failed.
+const PASTE_SHOWN_TIMEOUT_MS = Number(process.env.AM_PASTE_SHOWN_TIMEOUT_MS || 3000);
+const STARTUP_WAIT_MS = Number(process.env.AM_STARTUP_WAIT_MS || 30000);
+const SUBMIT_CONFIRM_TIMEOUT_MS = Number(process.env.AM_SUBMIT_CONFIRM_TIMEOUT_MS || 3000);
 // Despite the Node wrapper's `scrollbackLimit` name, Ghostty's native option is
 // a byte budget. Passing a line count such as 20,000 retains only a small native
 // allocation (about 700 ordinary rows). Keep the unit explicit at our boundary.
@@ -2062,6 +2068,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   const exitPromise = new Promise((resolve) => { resolveExit = resolve; });
   const host = {
     id: session.id,
+    cli: session.cli,
     runId,
     pty: term,
     vt,
@@ -2587,9 +2594,86 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
   } else {
     host.pty.write(payload);
   }
+  const reader = cliById(host.cli);
+  if (reader?.composer) return submitConfirmed(host, id, reader, text);
   await new Promise((r) => setTimeout(r, 300));
   host.pty.write('\r');
   clearPaneInput(id);   // our own Enter emptied it
+}
+
+/**
+ * Press Enter and make sure it took (Codex, Claude Code).
+ *
+ * Delivered prompts have been left sitting in the composer — Codex showing
+ * `› [Pasted Content N chars]`, a Claude pane likewise — with the session
+ * `waiting`, after AM pressed Enter and answered ok, until the operator pressed
+ * Enter by hand. The cause is not established: against a local Codex TUI an
+ * idle pane took the Enter every time, at every prompt size and gap tried. The
+ * one way it was seen locally is an Enter while Codex shows "Waiting for
+ * startup", which does nothing. So this does not bet on a cause. It reads the
+ * composer back:
+ *
+ *  - wait for the composer to hold the prompt, and for startup to end;
+ *  - press Enter and read the composer again: no longer holding the prompt is
+ *    the submit (the CLI moves it into the conversation and draws an empty
+ *    composer). A dialog drawn over the composer would read the same; AM
+ *    launches each CLI in the session's own folder, so the one such dialog seen
+ *    locally (Codex resuming from another directory) does not arise;
+ *  - while the prompt is visibly still in the composer, press Enter once more.
+ *    Never into a screen that does not show it: that Enter would answer
+ *    whatever is there instead;
+ *  - still in the composer after that: report the send as failed rather than
+ *    answer ok.
+ *
+ * The composer is read from the screen (`cli.composer`), not the cursor: Codex
+ * parks its cursor at the top-left until it is ready, so "the text in front of
+ * the cursor" looks empty whether or not the prompt is sitting there.
+ */
+async function submitConfirmed(host, id, cli, text) {
+  // Compared with all whitespace removed: the terminal wraps long lines, and a
+  // wrap can fall inside a word.
+  const squash = (v) => String(v || '').replace(/\s+/g, '');
+  const flat = squash(text);
+  const probe = flat.slice(-Math.min(24, flat.length));
+  const screen = () => { try { return host.vt.getVisibleText(); } catch { return ''; } };
+  const composerOf = () => { try { return cli.composer(screen()); } catch { return null; } };
+  const holds = (c) => c != null && ((cli.pasted?.test(c) || false) || squash(c).includes(probe));
+  const until = async (test, ms) => {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      if (hosts.get(id) !== host) throw new ApiError(409, 'input-not-ready', 'session stopped while its prompt was being submitted');
+      if (test()) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  };
+  const submitted = () => { const c = composerOf(); return c != null && !holds(c); };
+  if (!await until(() => holds(composerOf()), PASTE_SHOWN_TIMEOUT_MS)) {
+    // The composer cannot be read, or never showed the prompt: nothing to
+    // confirm against. Press Enter as before rather than refuse.
+    await new Promise((r) => setTimeout(r, 300));
+    host.pty.write('\r');
+    clearPaneInput(id);
+    return;
+  }
+  if (cli.starting) await until(() => !cli.starting.test(screen()), STARTUP_WAIT_MS);
+  // The Enter still goes as its own keypress, apart from the paste burst.
+  await new Promise((r) => setTimeout(r, 300));
+  host.pty.write('\r');
+  let ok = await until(submitted, SUBMIT_CONFIRM_TIMEOUT_MS);
+  if (!ok && holds(composerOf())) {
+    host.pty.write('\r');
+    ok = await until(submitted, SUBMIT_CONFIRM_TIMEOUT_MS);
+    if (ok) console.warn(`[input] ${id}: the first Enter did not submit the prompt; the second did`);
+  }
+  if (ok) { clearPaneInput(id); return; }
+  // Not submitted. Mark the line as holding something, so the next send is
+  // refused (input-line-busy) rather than glued onto the unsent prompt: a
+  // picture no screen can match reads as busy until someone submits the line.
+  lineTouched.add(id);
+  lineEmpty.set(id, { col: -1, alt: false, before: '\u0000unsent' });
+  throw new ApiError(409, 'input-not-submitted',
+    'the prompt was typed into this session\'s composer but pressing Enter did not submit it (tried twice). It is still on the input line: press Enter in the terminal to send it, or clear it.');
 }
 
 /** Insert text into a running terminal's composer without submitting it. */
