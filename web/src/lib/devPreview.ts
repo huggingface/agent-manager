@@ -1,8 +1,9 @@
 import type { DevPreviewPr } from '../api';
 
 const who = (p: DevPreviewPr) => {
-  const role = p.association ? p.association.toLowerCase() : 'unknown role';
-  return `#${p.number} by ${p.author || 'unknown'} (${role}), branch on ${p.headRepo || 'unknown repo'}`;
+  const role = p.permission ? `${p.permission} permission` : 'permission unknown';
+  const where = p.fork ? `branch on their fork ${p.headRepo || '(unknown)'}` : `branch on ${p.headRepo || 'unknown repo'}`;
+  return `#${p.number} by ${p.author || 'unknown'} (${role}), ${where}`;
 };
 
 /**

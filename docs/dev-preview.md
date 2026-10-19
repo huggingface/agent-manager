@@ -18,17 +18,33 @@ or no value, is off:
 
 Production and the template never set it.
 
+The Space also needs a **GitHub token** as a secret (`GH_TOKEN` or
+`GITHUB_TOKEN`), any token that can read the repository. Without one GitHub
+does not answer the permission check below, so every switch is refused and a
+saved selection is not re-applied. Listing open PRs works either way.
+
 ## What a switch does
 
-1. Resolves each PR number through the GitHub API and refuses it unless it is
-   **open**, its **head branch is on `huggingface/agent-manager` itself**
-   (pushing a branch there needs write access; a fork is refused, whoever owns
-   it) and its **author is an `OWNER`, `MEMBER` or `COLLABORATOR`** of the
-   repository (`ineligible()` in `server/src/dev-preview.js`). This does not
-   rely on the repository's PR-creation setting. The same rule marks PRs in the
-   list (refused ones are shown greyed out with the reason, forks flagged) and
-   is checked again on every boot re-apply. GitHub keeps `refs/pull/N/head`
-   after a PR closes, so the ref proves nothing on its own.
+1. Resolves each PR number through the GitHub API and refuses it unless:
+   - it is **open** (GitHub keeps `refs/pull/N/head` after a PR closes, so the
+     ref proves nothing on its own);
+   - its **head branch is on `huggingface/agent-manager` itself, or on a fork
+     owned by the PR's author** (a fork owned by anyone else is refused); and
+   - its **author currently has `write`, `maintain` or `admin` permission** on
+     `huggingface/agent-manager`, read from
+     `GET /repos/huggingface/agent-manager/collaborators/{author}/permission`
+     at that moment. `author_association` is not used: `MEMBER` covers the
+     whole huggingface organisation.
+
+   If the permission cannot be read (no token, rate limit, GitHub down, an
+   author that is not a plain user such as a bot), the PR is refused:
+   permission is never assumed. This is all in code (`headRefusal()`,
+   `permissionAllows()` and `eligibility()` in `server/src/dev-preview.js`)
+   and does not rely on the repository's PR-creation setting. The same rule
+   marks PRs in the list (refused ones greyed out with the reason; the
+   author's permission and branch repository shown; forks flagged, with an
+   allowed fork marked as the author's own) and is checked again, fresh, on
+   every boot re-apply.
    The switch is bound to the head SHA the API reports, and to main's SHA from
    the API. A SHA sent from the list that is no longer the head is refused
    ("moved; refresh").
@@ -82,8 +98,9 @@ no fetch, no build.
 A container restart puts `/app` back to the image and wipes local disk. On boot
 the **image's** server reads `/data/state/dev-preview.json` and re-checks it
 with GitHub before running anything: every PR must still be open, still pass
-the rule in step 1, and still have the saved SHA as its head, and the saved base
-must be on main. Then it re-applies exactly those SHAs and restarts into them.
+the rule in step 1 (so an author whose write access was revoked after the pick
+is refused), and still have the saved SHA as its head, and the saved base must
+be on main. Then it re-applies exactly those SHAs and restarts into them.
 If any of that fails, including GitHub being unreachable, it stays on the
 image and says why in the sidebar row and panel; pick again to switch. The
 sidebar row says `main` until a re-apply has restarted into its build.
@@ -122,12 +139,13 @@ soon as a switch starts, before the operator sees the result. **The boundary is
 which PRs can be picked and who picks**, and it is enforced in code, not left to
 repository settings:
 
-- only open PRs whose branch is on `huggingface/agent-manager` itself and whose
-  author is an owner, member or collaborator (step 1), at switch time and again
-  on every boot;
+- only open PRs whose author currently has write, maintain or admin
+  permission on `huggingface/agent-manager`, from a branch upstream or on the
+  author's own fork (step 1), checked with GitHub at every switch and again on
+  every boot; a permission GitHub does not confirm is a refusal;
 - the operator picks, behind the Space's HF auth, after one confirmation that
-  names each PR's author, role and branch repository, and says plainly that the
-  code will run with this Space's secrets, bucket and agents;
+  names each PR's author, their permission and the branch repository, and says
+  plainly that the code will run with this Space's secrets, bucket and agents;
 - the gate covers routes, `/api/info`, the UI and the boot path;
 - a switch body is `{prs: [{number, sha?}]}` only: JSON integers, 40-hex SHAs,
   no duplicates, at most 6, no other keys; every subprocess is `execFile` with
@@ -152,6 +170,6 @@ switched-in server is the manager.
 | Route | |
 | --- | --- |
 | `GET /api/dev-preview/status` | running build, saved selection, last job with steps and timings, log |
-| `GET /api/dev-preview/prs` | open PRs (number, title, author, head SHA) and main's SHA |
+| `GET /api/dev-preview/prs` | open PRs (number, title, author and their permission, head repo, head SHA, allowed or why not) and main's SHA |
 | `POST /api/dev-preview/switch` | `{prs: [{number, sha?}]}` → 202; progress via status |
 | `POST /api/dev-preview/rollback` | back to the image build |

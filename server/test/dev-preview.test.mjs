@@ -13,7 +13,7 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  createDevPreview, validateSelection, lockKey, REBUILD_FILES, SWAPPED, DEV_PREVIEW_REPO, describe, ineligible,
+  createDevPreview, validateSelection, lockKey, REBUILD_FILES, SWAPPED, DEV_PREVIEW_REPO, describe, headRefusal, permissionAllows,
 } from '../src/dev-preview.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -93,16 +93,26 @@ gh.pr(10, (w) => write(path.join(w, 'web/marker.txt'), 'closed pr\n'));
 
 // The GitHub API as the fixture origin answers it right now. `closed` lists
 // PRs the API reports as closed although their refs/pull/N/head still exist;
-// `as` overrides what GitHub says about a PR's author and branch.
+// `as` overrides what GitHub says about a PR's author and branch; `perms` is
+// each login's current permission on the repo, and a login in `permFails`
+// makes that lookup fail the way a rate limit or an outage would.
 const closed = new Set([10]);
 const as = new Map();
+const perms = new Map();
+const permFails = new Set();
 const ghPr = (n, head) => {
   const o = as.get(n) || {};
   return {
     number: n, state: closed.has(n) ? 'closed' : 'open', title: `PR ${n}`, user: { login: 'member-dev' },
-    author_association: 'MEMBER', base: { repo: { full_name: DEV_PREVIEW_REPO } }, ...o,
-    head: { sha: head, repo: { full_name: DEV_PREVIEW_REPO }, ...(o.head || {}) },
+    base: { repo: { full_name: DEV_PREVIEW_REPO } }, ...o,
+    head: { sha: head, repo: { full_name: DEV_PREVIEW_REPO, owner: { login: 'huggingface' } }, ...(o.head || {}) },
   };
+};
+const permissionOf = (login) => {
+  if (permFails.has(login)) throw new Error('GitHub answered 403');
+  const role = perms.get(login) ?? (login === 'member-dev' ? 'write' : 'read');
+  // the legacy field folds maintain into write and triage into read
+  return { role_name: role, permission: { maintain: 'write', triage: 'read' }[role] ?? role, user: { login } };
 };
 const refOf = (o, ref) => {
   const line = git(root, 'ls-remote', o, ref);
@@ -117,6 +127,8 @@ const fixtureApi = (o = origin) => async (url) => {
     if (!head) throw Object.assign(new Error('not found'), { notFound: true });
     return ghPr(n, head);
   }
+  const c = url.match(/\/collaborators\/([^/]+)\/permission$/);
+  if (c) return permissionOf(decodeURIComponent(c[1]));
   if (url.startsWith(`${API}/pulls?`)) {
     const out = [];
     for (const k of [1, 2, 3, 9, 10]) { const head = refOf(o, `refs/pull/${k}/head`); if (head) out.push(ghPr(k, head)); }
@@ -405,44 +417,67 @@ test('only open PRs, bound to the head SHA GitHub reports', async () => {
   assert.deepEqual(imageContent(i.appDir), IMAGE);
 });
 
-test('only branches on the repo itself, by owners, members or collaborators: in the list and in a switch', async () => {
-  const base = { base: { repo: { full_name: DEV_PREVIEW_REPO } }, head: { repo: { full_name: DEV_PREVIEW_REPO } } };
-  for (const a of ['OWNER', 'MEMBER', 'COLLABORATOR']) assert.equal(ineligible({ ...base, author_association: a }), null, a);
-  for (const a of ['NONE', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', undefined]) assert.match(ineligible({ ...base, author_association: a }), /not an owner, member or collaborator/);
-  // a fork is refused even from a collaborator; a deleted fork too
-  assert.match(ineligible({ ...base, author_association: 'COLLABORATOR', head: { repo: { full_name: 'member/agent-manager' } } }), /on a fork \(member\/agent-manager\)/);
-  assert.match(ineligible({ ...base, author_association: 'MEMBER', head: { repo: null } }), /branch is gone/);
+test('the author must have write, maintain or admin permission now, and the branch must be upstream or on their own fork', async () => {
+  // GitHub's answer, field by field
+  for (const role of ['write', 'maintain', 'admin']) assert.equal(permissionAllows({ role_name: role }), true, role);
+  for (const role of ['read', 'triage', 'none', undefined]) assert.equal(permissionAllows({ role_name: role }), false, String(role));
+  assert.equal(permissionAllows({ role_name: 'custom-reviewer', permission: 'write' }), true, 'an org custom role built on write');
+  assert.equal(permissionAllows({ role_name: 'custom-reader', permission: 'read' }), false);
+  const pr = (head, login = 'alice') => ({ user: { login }, base: { repo: { full_name: DEV_PREVIEW_REPO } }, head: { repo: head } });
+  assert.equal(headRefusal(pr({ full_name: DEV_PREVIEW_REPO, owner: { login: 'huggingface' } })), null, 'upstream branch');
+  assert.equal(headRefusal(pr({ full_name: 'Alice/agent-manager', owner: { login: 'Alice' } })), null, 'the author\'s own fork');
+  assert.match(headRefusal(pr({ full_name: 'mallory/agent-manager', owner: { login: 'mallory' } })), /fork not owned by its author alice/);
+  assert.match(headRefusal(pr(null)), /branch is gone/);
+  assert.match(headRefusal({ ...pr({ full_name: DEV_PREVIEW_REPO }), base: { repo: { full_name: 'x/y' } } }), /not a PR on/);
 
-  // An outsider's fork PR: GitHub serves its refs/pull/N/head like any other.
-  as.set(2, { author_association: 'NONE', user: { login: 'outsider' }, head: { repo: { full_name: 'outsider/agent-manager' } } });
-  as.set(3, { author_association: 'COLLABORATOR', head: { repo: { full_name: 'collab/agent-manager' } } });
+  as.set(2, { user: { login: 'reader' } });
+  as.set(3, { user: { login: 'collab' }, head: { repo: { full_name: 'collab/agent-manager', owner: { login: 'collab' } } } });
+  as.set(9, { user: { login: 'mallory' }, head: { repo: { full_name: 'other/agent-manager', owner: { login: 'other' } } } });
+  perms.set('reader', 'read');
+  perms.set('collab', 'write');
+  perms.set('mallory', 'admin');
   try {
     const i = instance();
-    const list = await i.dp.listPrs();
-    const byNumber = Object.fromEntries(list.prs.map((p) => [p.number, p]));
-    assert.equal(byNumber[1].allowed, true);
-    assert.equal(byNumber[1].headRepo, DEV_PREVIEW_REPO);
-    assert.equal(byNumber[1].association, 'MEMBER');
-    assert.deepEqual([byNumber[2].allowed, byNumber[2].fork, byNumber[2].association, byNumber[2].author, byNumber[2].headRepo],
-      [false, true, 'NONE', 'outsider', 'outsider/agent-manager']);
-    assert.match(byNumber[2].refusal, /fork/);
-    assert.equal(byNumber[3].allowed, false, 'a collaborator\'s fork is listed but refused');
+    const byNumber = Object.fromEntries((await i.dp.listPrs()).prs.map((p) => [p.number, p]));
+    assert.deepEqual([byNumber[1].allowed, byNumber[1].permission, byNumber[1].fork, byNumber[1].headRepo], [true, 'write', false, DEV_PREVIEW_REPO]);
+    assert.deepEqual([byNumber[2].allowed, byNumber[2].permission], [false, 'read']);
+    assert.match(byNumber[2].refusal, /its author reader has read permission on huggingface\/agent-manager, not write, maintain or admin/);
+    assert.deepEqual([byNumber[3].allowed, byNumber[3].fork, byNumber[3].headRepo], [true, true, 'collab/agent-manager'], 'a writer\'s own fork');
+    assert.equal(byNumber[9].allowed, false, 'even an admin\'s PR from someone else\'s fork');
+    assert.match(byNumber[9].refusal, /fork not owned by its author mallory/);
 
+    // read → refused before anything is fetched
     i.dp.switchTo({ prs: [{ number: 2 }] });
     let r = await settle(i);
     assert.equal(r.job.state, 'failed');
-    assert.match(r.job.error, /PR #2 cannot be previewed: its branch is on a fork \(outsider\/agent-manager\)/);
-    assert.deepEqual(r.job.steps.map((x) => x.name), ['resolve'], 'refused before fetching anything');
-    // in a stack, too
-    i.dp.switchTo({ prs: [{ number: 1 }, { number: 3 }] });
-    assert.match((await settle(i)).job.error, /PR #3 cannot be previewed/);
-    // a branch on the repo by an author GitHub calls NONE
-    as.set(2, { author_association: 'NONE' });
+    assert.match(r.job.error, /PR #2 cannot be previewed: its author reader has read permission/);
+    assert.deepEqual(r.job.steps.map((x) => x.name), ['resolve']);
+    // inside a stack, too
+    i.dp.switchTo({ prs: [{ number: 1 }, { number: 2 }] });
+    assert.match((await settle(i)).job.error, /PR #2 cannot be previewed/);
+    // a permission that cannot be read is a refusal, in the list and in a switch
+    permFails.add('member-dev');
+    i.dp.switchTo({ prs: [{ number: 1 }] });
+    r = await settle(i);
+    assert.match(r.job.error, /could not check member-dev's permission on huggingface\/agent-manager \(GitHub answered 403\); permission is never assumed/);
+    const fresh = instance();
+    const listed = (await fresh.dp.listPrs()).prs.find((p) => p.number === 1);
+    assert.deepEqual([listed.allowed, listed.permission], [false, null]);
+    permFails.clear();
+    // a bot or anything that is not a plain user login is never looked up
+    as.set(2, { user: { login: 'dependabot[bot]' } });
     i.dp.switchTo({ prs: [{ number: 2 }] });
-    assert.match((await settle(i)).job.error, /its author is NONE/);
+    assert.match((await settle(i)).job.error, /is not a GitHub user login/);
     assert.deepEqual(imageContent(i.appDir), IMAGE);
     assert.equal(i.restarts.length, 0);
-  } finally { as.clear(); }
+
+    // write → allowed; from the author's own fork as well
+    i.dp.switchTo({ prs: [{ number: 3 }] });
+    r = await settle(i);
+    assert.equal(r.job.state, 'done', r.job.error);
+    assert.deepEqual(r.next.prs.map(({ number, author, permission, headRepo }) => ({ number, author, permission, headRepo })),
+      [{ number: 3, author: 'collab', permission: 'write', headRepo: 'collab/agent-manager' }]);
+  } finally { as.clear(); perms.clear(); permFails.clear(); }
 });
 
 test('a repository-local git redirect cannot change what is fetched', async () => {
@@ -570,7 +605,8 @@ test('a build that prints the parent\'s environment leaks a secret into no statu
       knownSecrets: () => [process.env.AM_CANARY_KNOWN],
       testRemote: 'file://' + cfg.origin, env: { PATH: process.env.PATH },
       fetchJson: async (url) => url.endsWith('/branches/main') ? { commit: { sha: cfg.main } }
-        : { number: 9, state: 'open', author_association: 'MEMBER', user: { login: 'm' }, head: { sha: cfg.head, repo: { full_name: 'huggingface/agent-manager' } }, base: { repo: { full_name: 'huggingface/agent-manager' } } },
+        : url.endsWith('/permission') ? { role_name: 'write', permission: 'write' }
+        : { number: 9, state: 'open', user: { login: 'm' }, head: { sha: cfg.head, repo: { full_name: 'huggingface/agent-manager' } }, base: { repo: { full_name: 'huggingface/agent-manager' } } },
     });
     dp.switchTo({ prs: [{ number: 9 }] });
     const s = await dp._wait();
@@ -639,8 +675,12 @@ test('after a container restart the saved selection is re-applied only if GitHub
   };
   closed.add(1);
   try { await staysOnImage('closed since', undefined, /PR #1 is closed/); } finally { closed.delete(1); }
-  as.set(1, { author_association: 'NONE' });
-  try { await staysOnImage('author no longer trusted', undefined, /its author is NONE/); } finally { as.clear(); }
+  // the author's write access was revoked after the selection was made
+  perms.set('member-dev', 'read');
+  try { await staysOnImage('permission revoked since', undefined, /its author member-dev has read permission/); } finally { perms.clear(); }
+  // the permission cannot be read at boot: never assumed, the image keeps running
+  permFails.add('member-dev');
+  try { await staysOnImage('permission unreadable', undefined, /could not check member-dev's permission.*never assumed/); } finally { permFails.clear(); }
   await staysOnImage('GitHub unreachable', async () => { throw new Error('getaddrinfo ENOTFOUND api.github.com'); }, /could not read main from GitHub/);
   // #1 gets a new commit: the accepted SHA is no longer what the PR is.
   git(work, 'checkout', '-q', '--detach', prSha[1]);

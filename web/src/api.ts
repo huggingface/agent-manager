@@ -149,8 +149,8 @@ export const setDemo = (active: boolean): Promise<{ ok: boolean; active: boolean
 // ---- dev preview (only exists when the Space sets AM_DEV_PREVIEW=1) ----
 export interface DevPreviewPr {
   number: number; sha: string; title?: string; author?: string; draft?: boolean; url?: string;
-  /** GitHub's author_association, e.g. MEMBER; and the repo the head branch is on. */
-  association?: string; headRepo?: string | null; fork?: boolean;
+  /** The author's current permission on the repo (write, maintain, admin, read…), or null if it could not be read; and the repo the head branch is on. */
+  permission?: string | null; headRepo?: string | null; fork?: boolean;
   /** The server's eligibility rule (dev-preview.js ineligible()); refusal says why not. */
   allowed?: boolean; refusal?: string;
 }

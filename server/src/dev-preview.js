@@ -27,10 +27,10 @@
 // is world-readable to any uid, so neither a sandbox nor a second user would
 // keep a build away from the Space's secrets. It would not change the trust
 // boundary either: once switched, the PR's server code IS the manager. The
-// boundary is which PRs can be picked (ineligible(): open, branch on the repo
-// itself, author an owner/member/collaborator, checked here on every switch
-// and boot, not left to a repository setting) and that the operator picks
-// them. See docs/dev-preview.md.
+// boundary is which PRs can be picked (open; branch on the repo or on a fork
+// its author owns; author currently with write/maintain/admin permission,
+// asked from GitHub on every switch and boot, not left to a repository
+// setting) and that the operator picks them. See docs/dev-preview.md.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -64,23 +64,36 @@ const SELF = 'server/src/dev-preview.js';
 export const RESTART_EXIT_CODE = 75;
 export const MAX_PRS = 6;
 const SHA = /^[0-9a-f]{40}$/;
-// Who may have their code run here, enforced on every listing, switch and boot
-// re-apply rather than left to the repository's PR-creation setting (which is
-// one toggle away from "anyone with a fork"):
-//   - the PR's head branch must live on DEV_PREVIEW_REPO itself. Pushing a
-//     branch there needs write access; a fork is refused, whoever owns it;
-//   - and its author must be an OWNER, MEMBER or COLLABORATOR of the repo.
-export const TRUSTED_ASSOCIATIONS = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+// Who may have their code run here, decided from what GitHub says NOW and
+// enforced on every listing, operator switch and boot re-apply, never left to
+// the repository's PR-creation setting:
+//   - the PR's head branch is on DEV_PREVIEW_REPO itself, or on a fork OWNED
+//     by the PR's author;
+//   - and the author currently has write, maintain or admin permission on
+//     DEV_PREVIEW_REPO (GET /repos/{repo}/collaborators/{author}/permission).
+//     author_association is not used: MEMBER covers the whole organisation.
+// A permission that cannot be read (no token, rate limit, GitHub down, a login
+// that is not a plain user) is a refusal. Permission is never assumed.
+export const WRITE_ROLES = ['write', 'maintain', 'admin'];
+const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
-/** Why GitHub's PR object may not be previewed, or null when it may. */
-export function ineligible(pr) {
-  const head = pr?.head?.repo?.full_name;
+/** True when GitHub's permission answer grants write or more. */
+export function permissionAllows(answer) {
+  // role_name is the precise role (maintain, or an org's custom role); the
+  // legacy `permission` folds maintain into write and triage into read.
+  return WRITE_ROLES.includes(answer?.role_name) || ['write', 'admin'].includes(answer?.permission);
+}
+
+/** Why the PR's branch location is not acceptable, or null. */
+export function headRefusal(pr) {
   if (pr?.base?.repo?.full_name !== DEV_PREVIEW_REPO) return `it is not a PR on ${DEV_PREVIEW_REPO}`;
-  if (head !== DEV_PREVIEW_REPO) return head ? `its branch is on a fork (${String(head).slice(0, 100)}); only branches on ${DEV_PREVIEW_REPO} can be previewed` : 'its branch is gone';
-  if (!TRUSTED_ASSOCIATIONS.includes(pr?.author_association)) {
-    return `its author is ${String(pr?.author_association || 'unknown').slice(0, 30)}, not an owner, member or collaborator of ${DEV_PREVIEW_REPO}`;
-  }
-  return null;
+  const head = pr?.head?.repo;
+  if (!head?.full_name) return 'its branch is gone';
+  if (head.full_name === DEV_PREVIEW_REPO) return null;
+  const author = String(pr?.user?.login || '');
+  const owner = String(head.owner?.login || '');
+  if (author && owner && owner.toLowerCase() === author.toLowerCase()) return null;
+  return `its branch is on ${String(head.full_name).slice(0, 140)}, a fork not owned by its author ${author.slice(0, 40) || '(unknown)'}`;
 }
 
 // ---------------------------------------------------------------- validation
@@ -311,6 +324,32 @@ export function createDevPreview({
   }
   const getJson = (url) => (fetchJson || defaultFetchJson)(url);
 
+  /**
+   * The author's current permission on DEV_PREVIEW_REPO, as GitHub reports
+   * it, or { error } when it cannot be read. Never cached for a switch.
+   */
+  async function authorPermission(login) {
+    if (!LOGIN.test(String(login || ''))) return { error: `"${String(login || '').slice(0, 40)}" is not a GitHub user login` };
+    try {
+      const answer = await getJson(`${API_URL}/collaborators/${login}/permission`);
+      return { role: String(answer?.role_name || answer?.permission || 'none').slice(0, 40), allows: permissionAllows(answer) };
+    } catch (e) {
+      return { error: String(e?.message || e).slice(0, 120) };
+    }
+  }
+
+  /** Why GitHub's PR object may not be previewed now, or null. Asks GitHub. */
+  async function eligibility(pr, perms = new Map()) {
+    const where = headRefusal(pr);
+    const login = pr?.user?.login;
+    if (!perms.has(login)) perms.set(login, await authorPermission(login));
+    const perm = perms.get(login);
+    const refusal = where || (perm.error
+      ? `could not check ${String(login || 'its author').slice(0, 40)}'s permission on ${DEV_PREVIEW_REPO} (${perm.error}); permission is never assumed`
+      : !perm.allows ? `its author ${String(login).slice(0, 40)} has ${perm.role} permission on ${DEV_PREVIEW_REPO}, not write, maintain or admin` : null);
+    return { refusal, permission: perm.error ? null : perm.role };
+  }
+
   async function listPrs() {
     if (prCache && Date.now() - prCache.at < 20_000) return prCache.value;
     const [pulls, main] = await Promise.all([
@@ -319,15 +358,18 @@ export function createDevPreview({
     ]);
     // Every open PR is listed, so a refused one is visibly refused rather than
     // silently missing; `allowed` is the same rule a switch enforces.
-    const prs = (Array.isArray(pulls) ? pulls : [])
-      .filter((p) => validPrNumber(p?.number) && validSha(p?.head?.sha) && p?.state === 'open')
-      .map((p) => {
-        const refusal = ineligible(p);
-        return {
+    // One permission lookup per author per listing; a switch asks again.
+    const perms = new Map();
+    const open = (Array.isArray(pulls) ? pulls : [])
+      .filter((p) => validPrNumber(p?.number) && validSha(p?.head?.sha) && p?.state === 'open');
+    const prs = [];
+    for (const p of open) {
+      const { refusal, permission } = await eligibility(p, perms);
+      prs.push({
           number: p.number,
           title: String(p.title || '').slice(0, 300),
           author: String(p.user?.login || '').slice(0, 100),
-          association: String(p.author_association || 'NONE').slice(0, 30),
+          permission,
           headRepo: p.head?.repo?.full_name ? String(p.head.repo.full_name).slice(0, 140) : null,
           fork: p.head?.repo?.full_name !== DEV_PREVIEW_REPO,
           allowed: refusal === null,
@@ -336,8 +378,8 @@ export function createDevPreview({
           draft: !!p.draft,
           updatedAt: p.updated_at || null,
           url: `https://github.com/${DEV_PREVIEW_REPO}/pull/${p.number}`,
-        };
       });
+    }
     const mainSha = validSha(main?.commit?.sha) ? main.commit.sha : null;
     const value = { repo: DEV_PREVIEW_REPO, main: { sha: mainSha }, prs };
     prCache = { at: Date.now(), value };
@@ -346,7 +388,8 @@ export function createDevPreview({
 
   /**
    * A selection, bound to what GitHub says now: each PR must be open, pass
-   * ineligible(), and its head is the API's head SHA; main is the API's main
+   * eligibility() (branch location + the author's permission, asked fresh),
+   * and its head is the API's head SHA; main is the API's main
    * SHA. (A closed PR keeps its refs/pull/N/head, so the ref alone proves
    * nothing.) A given `sha` must still be the head: for an operator it came
    * from the list, for a boot re-apply it is what the operator accepted.
@@ -364,7 +407,7 @@ export function createDevPreview({
       }
       if (pr?.number !== p.number) throw new Error(`GitHub returned a different PR for #${p.number}`);
       if (pr.state !== 'open') throw new Error(`PR #${p.number} is ${String(pr.state || 'not open').slice(0, 20)}; only open PRs can be previewed`);
-      const refusal = ineligible(pr);
+      const { refusal, permission } = await eligibility(pr);
       if (refusal) throw new Error(`PR #${p.number} cannot be previewed: ${refusal}`);
       const head = pr.head?.sha;
       if (!validSha(head)) throw new Error(`GitHub did not return a valid head SHA for #${p.number}`);
@@ -373,7 +416,8 @@ export function createDevPreview({
       }
       resolved.push({
         number: p.number, sha: head,
-        author: String(pr.user?.login || '').slice(0, 100), association: pr.author_association,
+        author: String(pr.user?.login || '').slice(0, 100), permission,
+        headRepo: String(pr.head?.repo?.full_name || '').slice(0, 140),
       });
     }
     return { base, prs: resolved };

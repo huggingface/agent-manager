@@ -176,8 +176,10 @@ export default function DevPreviewPanel() {
                     <span className="devpv-order">{at >= 0 ? at + 1 : ''}</span>
                     <b>#{p.number}</b> <span className="devpv-title">{p.title}</span>
                     <span className="devpv-dim">
-                      {' '}{p.author}{p.association ? ` (${p.association.toLowerCase()})` : ''}
-                      {' · '}{p.fork ? <b className="devpv-fork">fork: {p.headRepo || 'gone'}</b> : <span className="mono">{p.headRepo}</span>}
+                      {' '}{p.author} ({p.permission ?? 'permission unknown'})
+                      {' · '}{p.fork
+                        ? <b className="devpv-fork">fork: <span className="mono">{p.headRepo || 'gone'}</span>{p.allowed ? ' (the author\'s own)' : ''}</b>
+                        : <span className="mono">{p.headRepo}</span>}
                       {' · '}<span className="mono">{short(p.sha)}</span>{p.draft ? ' · draft' : ''}
                     </span>
                   </label>
