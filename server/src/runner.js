@@ -2305,19 +2305,83 @@ export function attach(session, cols, rows) {
  */
 const lineTouched = new Set();      // panes typed into since their last submit
 const lineEmpty = new Map();        // id -> what an empty line looks like here
+const lastSubmitted = new Map();    // id -> the last prompt WE sent, as it reads on screen
 
 /** The cursor, and the text in front of it. */
+// A TUI's prompt is not plain spaces: Claude Code's idle composer is `❯`
+// followed by U+00A0. JS `\s` already covers NBSP and the other Unicode
+// spaces, so collapsing on it is enough to compare two spellings of the same
+// empty line — what the NBSP actually broke was the REPORT, because `trim()`
+// removed it and left a refusal quoting the bare "❯" as the unsent text. The
+// marker comes off separately, below, so what is quoted is what was typed.
+const flatten = (text) => String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+// The decoration a composer opens with, which is not something anyone typed.
+const PROMPT_MARKER = /^[\s\u2502\u2503|>\u276f\u203a\u27e9\u25b6]+/;
+/** Does this row open the way a composer does? */
+// A prompt marker stands alone: `❯ `, `› `, `> `. Codex's banner opens
+// `│ >_ OpenAI Codex (v0.154.0) │`, which is a logo, not somewhere to type —
+// and taking that box as the composer made a typed line read as an empty one.
+const startsWithMarker = (text) => /^[\s\u2502\u2503|]*[>\u276f\u203a\u27e9\u25b6](?:\s|$)/
+  .test(String(text || ''));
+/** A horizontal rule: the border a TUI draws around its composer. */
+const isRule = (text) => {
+  const bare = String(text || '').trim();
+  return bare.length >= 8 && /^[\u2500-\u257f\s]+$/.test(bare) && /[\u2500-\u257f]/.test(bare);
+};
+
+/**
+ * What is on this pane's input line.
+ *
+ * Located by the rules a TUI draws around its composer, NOT by the cursor's
+ * row. While the agent is working the cursor is wherever the redraw left it,
+ * and Claude Code echoes every submitted prompt into the transcript as its own
+ * `❯ <text>` line — so reading the cursor's row reported the operator's own
+ * previous message, already delivered and answered, as unsent input. The
+ * transcript is above the composer's top rule; nothing up there is input.
+ *
+ * Inside the box, the text in FRONT of the cursor is what has been typed: the
+ * hint an empty composer shows ("Try …") sits after it. With the cursor
+ * elsewhere the whole region is compared instead, which is stable because it is
+ * located the same way on both sides of the comparison.
+ */
 export function composerShape(snapshot) {
   if (!snapshot) return null;
-  const line = (snapshot.visibleLines || []).find((l) => l.row === snapshot.cursorRow);
+  const lines = snapshot.visibleLines || [];
+  // The lowest ruled box that holds a prompt. A TUI rules more than one thing:
+  // Codex's welcome box lists the model and directory between the same kind of
+  // rules, and taking that as the composer made a typed line read as an empty
+  // one — the opposite failure, and the one that matters.
+  const rules = [];
+  for (let i = lines.length - 1; i >= 0; i--) if (isRule(lines[i].text)) rules.push(i);
+  let top = -1, bottom = -1;
+  for (let r = 0; r + 1 < rules.length && top < 0; r++) {
+    const [low, high] = [rules[r], rules[r + 1]];
+    if (low <= high + 1) continue;
+    if (lines.slice(high + 1, low).some((l) => startsWithMarker(l.text))) { top = high; bottom = low; }
+  }
+  if (top >= 0) {
+    const rows = lines.slice(top + 1, bottom);
+    const at = rows.findIndex((l) => l.row === snapshot.cursorRow);
+    return {
+      alt: !!snapshot.isAltScreen,
+      located: true,
+      text: flatten(at >= 0 ? rows[at].text.slice(0, snapshot.cursorCol) : rows.map((l) => l.text).join(' ')),
+      cursorInside: at >= 0,
+    };
+  }
+  // No box to find — a shell, or a TUI that draws none. The cursor's row is all
+  // there is, and the baseline comparison carries it.
+  const line = lines.find((l) => l.row === snapshot.cursorRow);
   return {
-    col: snapshot.cursorCol,
     alt: !!snapshot.isAltScreen,
-    // Not the row number: arriving output scrolls the composer up the screen
-    // without anybody touching what is on it.
-    before: line ? line.text.slice(0, snapshot.cursorCol) : '',
+    located: false,
+    text: flatten(line ? line.text.slice(0, snapshot.cursorCol) : ''),
+    cursorInside: false,
   };
 }
+
+/** The composer with its decoration taken off: what someone actually typed. */
+export const composerBody = (shape) => shape ? shape.text.replace(PROMPT_MARKER, '').trim() : '';
 
 /**
  * Does `now` still look like the empty line `empty` was a picture of?
@@ -2327,18 +2391,12 @@ export function composerShape(snapshot) {
  * cursor's row holds only its tail, and widening puts the whole prompt back on
  * one row. The operator rotating a phone must not read as text appearing on the
  * line. Both directions, because a pane can go either way.
- *
- * The cursor column is not compared: it is the length of the text in front of
- * the cursor, so equal text already implies it, and a reflow changes it while
- * changing nothing about the line.
  */
 export const sameComposer = (a, b) => {
   if (!a || !b || a.alt !== b.alt) return false;
-  if (a.before === b.before) return true;
-  // One empty string is a suffix of everything, which would make any line look
-  // like an empty one.
-  if (!a.before || !b.before) return false;
-  return a.before.endsWith(b.before) || b.before.endsWith(a.before);
+  if (a.text === b.text) return true;
+  if (!a.text || !b.text) return false;
+  return a.text.endsWith(b.text) || b.text.endsWith(a.text);
 };
 
 /** Wait for the pane to stop painting, bounded. */
@@ -2362,10 +2420,22 @@ const shapeNow = (host) => {
  * Called with the keystroke still UNWRITTEN, which is what makes the first one
  * after a submit a reliable photograph of an empty composer.
  */
+// Reports a terminal sends on its own that could never put text on the line:
+// focus in/out, and mouse presses, releases and motion. `isTerminalReply`
+// covers the answers to a TUI's queries but not these, so opening a pane or
+// clicking in it counted as typing — the guard then photographed a baseline
+// with nothing typed and refused the next send on the difference.
+const NOT_TYPING = /^(?:\x1b\[[IO]|\x1b\[M[\s\S]{3}|\x1b\[<[0-9;]*[Mm])+$/;
+/** Could this input put text on the line? Reports a terminal sends cannot. */
+export const isTypedInput = (data) => {
+  const text = String(data == null ? '' : data);
+  return !!text && !NOT_TYPING.test(text);
+};
+
 function notePaneInput(host, data) {
   const id = host.id;
   const text = String(data == null ? '' : data);
-  if (!text) return;
+  if (!isTypedInput(text)) return;
   if (!lineTouched.has(id)) {
     const shape = shapeNow(host);
     if (shape) lineEmpty.set(id, shape); else lineEmpty.delete(id);
@@ -2378,7 +2448,7 @@ function notePaneInput(host, data) {
 }
 
 /** Forget the line: it was submitted by us, or the pane is gone. */
-function clearPaneInput(id) { lineTouched.delete(id); lineEmpty.delete(id); }
+function clearPaneInput(id) { lineTouched.delete(id); lineEmpty.delete(id); lastSubmitted.delete(id); }
 
 /**
  * What is in the way of sending, or null when the line is clear.
@@ -2390,17 +2460,28 @@ export function unsubmittedInput(id) {
   const host = hosts.get(id);
   if (!host) { clearPaneInput(id); return null; }
   if (!lineTouched.has(id)) return null;
-  const empty = lineEmpty.get(id);
   const now = shapeNow(host);
-  // No picture to compare against, or no grid to read: refuse. The alternative
-  // is sending blind into a line we have reason to think was typed into.
-  if (!empty || !now) return 'something that could not be read';
+  if (!now) return null;   // no grid to read: say nothing rather than block
+  // A composer we can see into answers for itself. Everything in front of the
+  // cursor is what was typed, and with the box located that cannot be the
+  // transcript above it — which is where our own prompts are echoed back.
+  if (now.located && now.cursorInside) {
+    const body = composerBody(now);
+    if (!body) { lineTouched.delete(id); return null; }
+    if (body === (lastSubmitted.get(id) || '')) {
+      // Our own text, read back off the screen. Never a reason to refuse.
+      lineTouched.delete(id);
+      return null;
+    }
+    return body;
+  }
+  const empty = lineEmpty.get(id);
+  if (!empty) return null;   // nothing to compare against: do not block on a guess
   if (sameComposer(now, empty)) { lineTouched.delete(id); return null; }
-  // Show what is actually on the line rather than what we think was typed: if
-  // the composer still starts the way an empty one does, the rest is theirs.
-  const shown = now.before.startsWith(empty.before)
-    ? now.before.slice(empty.before.length) : now.before.trim();
-  return shown.trim() || 'an edit in progress';
+  const shown = now.text.startsWith(empty.text)
+    ? now.text.slice(empty.text.length).trim() : composerBody(now);
+  if (!shown || shown === (lastSubmitted.get(id) || '')) { lineTouched.delete(id); return null; }
+  return shown;
 }
 
 /** Type a line into the session's terminal (works with no browser attached). */
@@ -2492,6 +2573,7 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
   await new Promise((r) => setTimeout(r, 300));
   host.pty.write('\r');
   clearPaneInput(id);   // our own Enter emptied it
+  lastSubmitted.set(id, flatten(text).replace(PROMPT_MARKER, '').trim());
 }
 
 /** Insert text into a running terminal's composer without submitting it. */
