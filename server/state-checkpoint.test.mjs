@@ -310,19 +310,44 @@ try {
     return { r, e };
   };
   // An rsync that sleeps first, or fails for one slice only, and otherwise is
-  // the real one — so a failure sits in ONE branch of the parallel pool.
+  // the real one — so a failure sits in ONE branch of the parallel pool. With
+  // STUB_TRACE set it also records each run as a read of the mount (an
+  // argument under STUB_MOUNT, i.e. $DATA_DIR) or of anything else, and how
+  // many runs of that kind were in flight when it started.
   const realRsync = execFileSync('sh', ['-c', 'command -v rsync'], { encoding: 'utf8' }).trim();
   const wrapRsync = (dir) => {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'rsync'), [
       '#!/bin/sh',
+      'if [ -n "${STUB_TRACE:-}" ]; then',
+      '  kind=other',
+      '  for a in "$@"; do case "$a" in "$STUB_MOUNT"/*) kind=mount ;; esac; done',
+      '  mkdir -p "$STUB_TRACE/$kind"; mkdir "$STUB_TRACE/$kind/live.$$"',
+      '  ls -d "$STUB_TRACE/$kind"/live.* | wc -l | tr -d " " >> "$STUB_TRACE/$kind.inflight"',
+      'fi',
       '[ -n "${STUB_SLEEP:-}" ] && sleep "$STUB_SLEEP"',
       'if [ -n "${STUB_FAIL_MATCH:-}" ]; then',
       '  for a in "$@"; do case "$a" in *"$STUB_FAIL_MATCH"*) echo "stub: failing $a" >&2; exit 23 ;; esac; done',
       'fi',
-      `exec ${realRsync} "$@"`,
+      `${realRsync} "$@"; rc=$?`,
+      '[ -n "${STUB_TRACE:-}" ] && rmdir "$STUB_TRACE/$kind/live.$$"',
+      'exit $rc',
     ].join('\n'));
     fs.chmodSync(path.join(dir, 'rsync'), 0o755);
+  };
+  // Per kind of rsync (mount / other): how many ran, and the most at once.
+  const rsyncTrace = (dir, kind) => {
+    const f = path.join(dir, `${kind}.inflight`);
+    const counts = fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim().split('\n').map(Number) : [];
+    return { runs: counts.length, most: Math.max(0, ...counts) };
+  };
+  // The bucket API, faked: `hf` in dir, serving the fixture's own $DATA_DIR
+  // as bucket test/bucket. Returns the env that routes a restore through it.
+  const fakeHf = (dir, e) => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(path.join(here, 'fixtures/fake-hf.py'), path.join(dir, 'hf'));
+    fs.chmodSync(path.join(dir, 'hf'), 0o755);
+    return { AGENT_STATE_BUCKET: 'test/bucket', FAKE_BUCKET_ROOT: e.DATA_DIR, FAKE_HF_LOG: path.join(dir, 'hf.log') };
   };
   // Run a mode with stdout+stderr to a file, so what is printed AFTER it exits
   // (a heartbeat that outlived it) is visible.
@@ -350,10 +375,12 @@ try {
   {
     // Progress lines, and a heartbeat that stops with the restore.
     const { r, e } = fresh('progress');
+    // Through the (fake) bucket API: only copies from its local mirror are
+    // split into a parallel pool.
     const bin = path.join(r, 'bin'); wrapRsync(bin);
     for (let i = 0; i < 30; i++) put(path.join(e.CLAUDE_DURABLE, `projects/p${i % 3}/s${i}.jsonl`), `{"n":${i}}\n`);
     put(path.join(e.CODEX_DURABLE, 'sessions/2026/10/15/rollout.jsonl'), '{}\n');
-    const slow = { PATH: `${bin}:${e.PATH}`, STUB_SLEEP: '1.2', AGENT_STATE_HEARTBEAT: '1' };
+    const slow = { ...fakeHf(bin, e), PATH: `${bin}:${e.PATH}`, STUB_SLEEP: '1.2', AGENT_STATE_HEARTBEAT: '1' };
     const out = path.join(r, 'out.txt');
     const res = await runTo(e, 'restore', out, slow).done;
     const text = fs.readFileSync(out, 'utf8');
@@ -362,7 +389,7 @@ try {
         && /agent-state: claude done: 30 files, \S+ in \d+s/.test(text)
         && /agent-state: codex done: 1 files/.test(text), text.slice(0, 500));
     check('a heartbeat reports local progress while the restore runs',
-      /agent-state: still restoring after \d+s: .*files on local disk so far/.test(text), text.slice(0, 500));
+      /agent-state: still restoring after \d+s \(\S+ of the budget left\): .*files on local disk so far/.test(text), text.slice(0, 500));
     check('the heartbeat stops when the restore succeeds', await quietAfter(out, 2500));
 
     // …when it fails…
@@ -550,7 +577,8 @@ try {
   }
 
   // A hot restart through the parallel slices still keeps newer local state,
-  // with a pool and without one.
+  // with a pool (from the API mirror, whose mtimes come from the bucket's) and
+  // without one.
   for (const jobs of ['6', '1']) {
     const { r, e } = fresh(`hot-${jobs}`);
     const rel = 'projects/work/session.jsonl';
@@ -560,12 +588,222 @@ try {
     fs.utimesSync(path.join(e.CLAUDE_DURABLE, rel), t - 60, t - 60);
     fs.utimesSync(path.join(e.CLAUDE_CONFIG_DIR, rel), t, t);
     put(path.join(e.CLAUDE_DURABLE, 'projects/other/a.jsonl'), 'restored');
-    execFileSync('sh', [script, 'restore'], { env: { ...e, AGENT_STATE_JOBS: jobs } });
+    const bin = path.join(r, 'bin');
+    const api = jobs === '1' ? {} : { ...fakeHf(bin, e), PATH: `${bin}:${e.PATH}` };
+    execFileSync('sh', [script, 'restore'], { env: { ...e, ...api, AGENT_STATE_JOBS: jobs } });
     check(`hot restart keeps newer local state through ${jobs === '1' ? 'one rsync' : 'parallel slices'}`,
       fs.readFileSync(path.join(e.CLAUDE_CONFIG_DIR, rel), 'utf8') === 'new-local'
         && fs.readFileSync(path.join(e.CLAUDE_CONFIG_DIR, 'projects/other/a.jsonl'), 'utf8') === 'restored');
     fs.rmSync(r, { recursive: true, force: true });
   }
+
+  // ---------- the bucket API route, its fallbacks, and the time budget ----------
+  // A fake `hf` (fixtures/fake-hf.py) serves each fixture's own $DATA_DIR as
+  // the bucket, so the API and the mount hold the same files, and the traced
+  // rsync tells which one a restore read: an rsync naming $DATA_DIR is a
+  // direct mount read; one from the mirror is not.
+  let apiRuns = 0;
+  const apiFixture = (label) => {
+    const { r, e } = fresh(label);
+    const bin = path.join(r, 'bin'); wrapRsync(bin);
+    const trace = path.join(r, 'trace');
+    const api = { ...fakeHf(bin, e), PATH: `${bin}:${e.PATH}`, STUB_TRACE: trace, STUB_MOUNT: e.DATA_DIR };
+    const stamps = Array.from({ length: 8 }, (_, i) => 1792000000000 + i * 1000);
+    for (const s of stamps) put(path.join(e.CLAUDE_DURABLE, `backups/.claude.json.backup.${s}`), `${s}`);
+    for (let i = 0; i < 6; i++) put(path.join(e.CLAUDE_DURABLE, `projects/p${i}/s.jsonl`), `{"p":${i}}\n`);
+    put(path.join(e.CODEX_DURABLE, 'sessions/2026/10/19/rollout.jsonl'), '{"turn":1}\n');
+    put(path.join(e.CODEX_DURABLE, 'mcp-oauth-locks/4242'), 'pid');
+    put(path.join(e.CODEX_DURABLE, 'logs_1.db'), 'not restored');
+    put(path.join(e.FX_DURABLE, 'sessions/s1/events.jsonl'), '{}\n');
+    put(path.join(e.FX_DURABLE, 'sessions/s1/session.lock'), 'pid');
+    put(path.join(e.GEMINI_DURABLE, 'settings.json'), '{}');
+    put(path.join(e.OPENCLAW_DURABLE, 'agents/main/sessions/s.jsonl'), '{}');
+    for (const [dir, name] of [[e.OPENCODE_DURABLE, 'opencode.db'], [e.HERMES_DURABLE, 'state.db']]) {
+      fs.mkdirSync(path.join(dir, 'checkpoints'), { recursive: true });
+      sql(path.join(dir, 'checkpoints', name), 'create table t(x); insert into t values (42);');
+    }
+    const restored = () => fs.existsSync(path.join(e.CODEX_HOME, 'sessions/2026/10/19/rollout.jsonl'))
+      && fs.existsSync(path.join(e.CLAUDE_CONFIG_DIR, 'projects/p5/s.jsonl'))
+      && fs.existsSync(path.join(e.FX_LIVE, 'sessions/s1/events.jsonl'))
+      && fs.existsSync(path.join(e.GEMINI_LIVE, 'settings.json'))
+      && fs.existsSync(path.join(e.OPENCLAW_STATE_DIR, 'agents/main/sessions/s.jsonl'))
+      && sql(path.join(e.OPENCODE_LIVE, 'opencode.db'), 'select x from t') === '42'
+      && sql(path.join(e.HERMES_LIVE, 'state.db'), 'select x from t') === '42';
+    const backups = () => {
+      const dir = path.join(e.CLAUDE_CONFIG_DIR, 'backups');
+      return JSON.stringify(fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [])
+        === JSON.stringify(stamps.slice(-5).map((s) => `.claude.json.backup.${s}`));
+    };
+    const hfLog = () => (fs.existsSync(api.FAKE_HF_LOG) ? fs.readFileSync(api.FAKE_HF_LOG, 'utf8') : '');
+    const restore = async (extra = {}) => {
+      const out = path.join(r, `out-${++apiRuns}.txt`);
+      const t = Date.now();
+      const res = await runTo(e, 'restore', out, { ...api, ...extra }).done;
+      return { code: res.code, out: fs.readFileSync(out, 'utf8'), secs: (Date.now() - t) / 1000 };
+    };
+    return { r, e, api, bin, trace, restored, backups, hfLog, restore };
+  };
+
+  {
+    // The happy path: every adapter over the API, nothing read from the mount.
+    const f = apiFixture('api');
+    const old = Math.floor(Date.now() / 1000) - 86400;
+    fs.utimesSync(path.join(f.e.CLAUDE_DURABLE, 'projects/p0/s.jsonl'), old, old);
+    const res = await f.restore({ STUB_SLEEP: '0.3' });
+    const log = f.hfLog();
+    check('API: the restore succeeds over the bucket API', res.code === 0 && f.restored(), res.out.slice(-800));
+    check('API: every adapter is planned and applied over the API',
+      (log.match(/ --plan /g) || []).length === 7 && (log.match(/ --apply /g) || []).length === 7, log);
+    check('API: nothing is read from the mount directly', rsyncTrace(f.trace, 'mount').runs === 0, JSON.stringify(rsyncTrace(f.trace, 'mount')));
+    check('API: copies from the local mirror still run in parallel', rsyncTrace(f.trace, 'other').most > 1, JSON.stringify(rsyncTrace(f.trace, 'other')));
+    check('API: exactly the newest five Claude backups come back', f.backups());
+    check('API: restored files keep the bucket\'s mtimes',
+      Math.abs(fs.statSync(path.join(f.e.CLAUDE_CONFIG_DIR, 'projects/p0/s.jsonl')).mtimeMs / 1000 - old) < 1.5);
+    const downloads = log.split('\n').filter((l) => l.startsWith('download '));
+    check('API: #180\'s discards are not downloaded (Codex *.db, mcp-oauth-locks, fx locks; old backups)',
+      !downloads.some((l) => /logs_1\.db|mcp-oauth-locks|session\.lock/.test(l))
+        && downloads.filter((l) => /backups\//.test(l)).length === 5, downloads.join(' | '));
+    check('API: the mirror is gone afterwards', !fs.existsSync(path.join(f.e.AM_LOCAL, 'agent-state-mirror')));
+    fs.rmSync(f.r, { recursive: true, force: true });
+  }
+
+  {
+    // No token: the mount, as before the API route, with a hint — and with
+    // every direct mount read strictly one at a time across ALL adapters.
+    const f = apiFixture('no-token');
+    const { AGENT_STATE_BUCKET: _unused, ...noBucket } = f.api;
+    const out = path.join(f.r, 'out.txt');
+    const res = await runTo(f.e, 'restore', out, { ...noBucket, SPACE_ID: 'test/space', STUB_SLEEP: '0.4', AGENT_STATE_JOBS: '8' }).done;
+    const text = fs.readFileSync(out, 'utf8');
+    const mount = rsyncTrace(f.trace, 'mount');
+    check('no token: restores from the mount, with a hint to add HF_TOKEN',
+      res.code === 0 && f.restored() && f.backups() && f.hfLog() === ''
+        && /bucket API not usable \(HF_TOKEN is not set; add an HF_TOKEN that can read the bucket/.test(text), text.slice(-800));
+    check('mount reads run strictly one at a time across all seven adapters',
+      mount.runs >= 7 && mount.most === 1, JSON.stringify(mount));
+    fs.rmSync(f.r, { recursive: true, force: true });
+  }
+
+  {
+    // The API fails (after its retry): that adapter falls back to the mount.
+    const f = apiFixture('api-fail');
+    const res = await f.restore({ FAKE_HF_SYNC: 'fail', STUB_SLEEP: '0.2' });
+    const mount = rsyncTrace(f.trace, 'mount');
+    check('API fails → retried, then restored from the mount',
+      res.code === 0 && f.restored() && f.backups()
+        && /claude: bucket transfer failed, retrying/.test(res.out)
+        && /claude: could not fetch from bucket test\/bucket \(exit 1: Error: 503/.test(res.out), res.out.slice(-800));
+    check('…with those mount reads one at a time too', mount.runs >= 7 && mount.most === 1, JSON.stringify(mount));
+    fs.rmSync(f.r, { recursive: true, force: true });
+  }
+
+  for (const [mode, extra, why] of [
+    ['fail', {}, /listing the Claude backups failed \(exit 29: Error: 429/],
+    ['hang', { AGENT_STATE_API_TIMEOUT: '2' }, /listing the Claude backups timed out/],
+    ['garbage', {}, /the Claude backup listing is not a JSON file list/],
+  ]) {
+    // A backup listing we cannot trust is never read as "no backups": Claude
+    // falls back to the mount, which restores the newest five.
+    const f = apiFixture(`list-${mode}`);
+    const res = await f.restore({ FAKE_HF_LIST: mode, ...extra });
+    check(`backup listing ${mode}: Claude falls back to the mount, newest five backups restored`,
+      res.code === 0 && f.restored() && f.backups() && why.test(res.out)
+        && /claude: could not fetch from bucket/.test(res.out) && /codex: fetched over the bucket API/.test(res.out), res.out.slice(-800));
+    if (mode === 'hang') {
+      check('…the hung listing is cut off by the API cap, its whole process group with it',
+        res.secs < 30 && processesNaming(f.r).length === 0, `${res.secs}s; left: ${processesNaming(f.r).join(' | ')}`);
+    }
+    fs.rmSync(f.r, { recursive: true, force: true });
+  }
+
+  {
+    // Always a full restore: a mirror an earlier, killed restore left behind
+    // (where this one's attempt would go, too) is deleted, never restored from.
+    const f = apiFixture('stale-mirror');
+    for (const rel of ['codex/sessions/stale.jsonl', 'codex/try1/sessions/stale.jsonl']) {
+      put(path.join(f.e.AM_LOCAL, 'agent-state-mirror', rel), '{"stale":true}\n');
+    }
+    const res = await f.restore();
+    check('a stale mirror from an earlier attempt is never restored from',
+      res.code === 0 && f.restored() && !fs.existsSync(path.join(f.e.CODEX_HOME, 'sessions/stale.jsonl')), res.out.slice(-600));
+    fs.rmSync(f.r, { recursive: true, force: true });
+  }
+
+  {
+    // The budget is for the whole restore: a hung API with a cap longer than
+    // the budget fails closed, naming the adapter and the step, and leaves
+    // nothing running.
+    const f = apiFixture('budget-api');
+    const res = await f.restore({ FAKE_HF_SYNC: 'hang', AGENT_STATE_BUDGET: '4', AGENT_STATE_API_TIMEOUT: '60' });
+    check('budget: a hung API fails the restore once the budget is out, naming adapter and step',
+      res.code === 1 && /codex FAILED after \d+s: out of time — the restore budget \(AGENT_STATE_BUDGET=4s\) ran out during: fetching over the API \(plan\)/.test(res.out)
+        && /refusing to start/.test(res.out) && !/could not fetch/.test(res.out), res.out.slice(-800));
+    check('…promptly, with no process of it left', res.secs < 20 && processesNaming(f.r).length === 0,
+      `${res.secs}s; left: ${processesNaming(f.r).join(' | ')}`);
+    fs.rmSync(f.r, { recursive: true, force: true });
+
+    // The same on the mount route: slow serial reads run the budget out.
+    const g = apiFixture('budget-mount');
+    const { AGENT_STATE_BUCKET: _unused, ...noBucket } = g.api;
+    const out = path.join(g.r, 'out.txt');
+    const t = Date.now();
+    const m = await runTo(g.e, 'restore', out, { ...noBucket, STUB_SLEEP: '3', AGENT_STATE_BUDGET: '5' }).done;
+    const text = fs.readFileSync(out, 'utf8');
+    check('budget: slow mount reads fail the restore once the budget is out, naming adapter and step',
+      m.code === 1 && /\w+ FAILED after \d+s: out of time — the restore budget \(AGENT_STATE_BUDGET=5s\) ran out during: (rsync from |waiting for )/.test(text), text.slice(-800));
+    check('…promptly, with no process of it left', (Date.now() - t) / 1000 < 20 && processesNaming(g.r).length === 0,
+      processesNaming(g.r).join(' | '));
+    fs.rmSync(g.r, { recursive: true, force: true });
+
+    // A step with no timeout of its own (here a SQLite check that never
+    // returns) is stopped by the watchdog shortly after the budget. Kept
+    // deterministic: no API, and opencode is the only adapter with state, so
+    // what runs before that check is a handful of near-empty rsyncs, far
+    // inside the budget even on a busy box — and the fake sqlite3 leaves a
+    // marker proving the restore was in that very step when time ran out.
+    const { r: hr, e: he } = fresh('budget-watchdog');
+    const hbin = path.join(hr, 'bin');
+    fs.mkdirSync(path.join(he.OPENCODE_DURABLE, 'checkpoints'), { recursive: true });
+    sql(path.join(he.OPENCODE_DURABLE, 'checkpoints/opencode.db'), 'create table t(x);');
+    const reached = path.join(hr, 'sqlite-reached');
+    fs.mkdirSync(hbin, { recursive: true });
+    fs.writeFileSync(path.join(hbin, 'sqlite3'), `#!/bin/sh\n: > '${reached}'\nsleep 1000; :\n`);
+    fs.chmodSync(path.join(hbin, 'sqlite3'), 0o755);
+    const hOut = path.join(hr, 'out.txt');
+    const ht = Date.now();
+    const w = await runTo(he, 'restore', hOut, { PATH: `${hbin}:${he.PATH}`, AGENT_STATE_BUDGET: '8' }).done;
+    const wText = fs.readFileSync(hOut, 'utf8');
+    check('budget: a step without its own timeout is stopped by the watchdog, naming the step',
+      w.code === 1 && fs.existsSync(reached)
+        && /opencode FAILED: out of time — the restore budget \(AGENT_STATE_BUDGET=8s\) ran out during: checking the restored SQLite database/.test(wText)
+        && /refusing to start/.test(wText) && !/restore finished/.test(wText), wText.slice(-800));
+    check('…promptly, with no process of it left', (Date.now() - ht) / 1000 < 40 && processesNaming(hr).length === 0,
+      processesNaming(hr).join(' | '));
+    fs.rmSync(hr, { recursive: true, force: true });
+
+    // The mount-side backup listing: Claude on the mount (its API listing
+    // failed), and `ls` of the backups hung until the budget stopped it. A
+    // stopped listing is not an empty one — Claude fails, and so does the
+    // restore, instead of finishing without the backups.
+    const k = apiFixture('mount-ls-hang');
+    const realLs = execFileSync('sh', ['-c', 'command -v ls'], { encoding: 'utf8' }).trim();
+    fs.writeFileSync(path.join(k.bin, 'ls'), [
+      '#!/bin/sh',
+      'for a in "$@"; do case "$a" in */state/claude/backups) sleep 1000; : ;; esac; done',
+      `exec ${realLs} "$@"`,
+    ].join('\n'));
+    fs.chmodSync(path.join(k.bin, 'ls'), 0o755);
+    const kr = await k.restore({ FAKE_HF_LIST: 'fail', AGENT_STATE_BUDGET: '6' });
+    const kBackups = path.join(k.e.CLAUDE_CONFIG_DIR, 'backups');
+    check('budget: a hung mount-side backup listing fails Claude and the restore, never "no backups"',
+      kr.code === 1 && /claude: could not fetch from bucket/.test(kr.out)
+        && /claude FAILED after \d+s: out of time — the restore budget \(AGENT_STATE_BUDGET=6s\) ran out during: listing \S+\/state\/claude\/backups/.test(kr.out)
+        && !/restore finished/.test(kr.out) && !/claude done/.test(kr.out), kr.out.slice(-800));
+    check('…promptly, with no process of it left', kr.secs < 25 && processesNaming(k.r).length === 0
+      && !(fs.existsSync(kBackups) && fs.readdirSync(kBackups).length), processesNaming(k.r).join(' | '));
+    fs.rmSync(k.r, { recursive: true, force: true });
+  }
+
 } catch (error) {
   check('no unexpected exception', false, error?.stack || String(error));
 } finally {

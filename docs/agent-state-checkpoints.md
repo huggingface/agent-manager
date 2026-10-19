@@ -57,6 +57,59 @@ raw DB/WAL layout is accepted only as a one-release migration fallback. The
 server refuses to start if restore is incomplete, avoiding a new lineage from
 being written over partially restored state.
 
+Restore READS go over the bucket API, not the mount. Each durable tree is
+first pulled with `hf buckets sync` (plan, then apply) into a local mirror
+under `$AM_LOCAL/agent-state-mirror/`, with the bucket's mtimes reapplied from
+the plan; the rsync restore described above then runs from that mirror instead
+of from `/data`, so its filters, newest-N Claude backups, SQLite validation and
+`--update` semantics are unchanged. Bulk junk (Codex `tmp/`, caches, `*.db`,
+`mcp-oauth-locks/`; fx locks and `index.pending`; all but the newest Claude
+backups) is filtered out of the download itself. The newest backups come from
+one API listing; a listing that fails, hangs or does not parse is never read as
+"no backups" — Claude then falls back to the mount. Every restore is a full
+one: it deletes any mirror an earlier, killed restore left, each attempt fills
+an empty directory of its own, and only a completed attempt is restored from.
+The mirror is deleted when the restore ends.
+
+Why: on 2026-10-19 hf-mount stopped serving reads ~90 s into two consecutive
+boots — every read hung ~90 s then failed with EIO, rsync exited 23 and the
+Space never started — while the same files came over the API in under a second
+each. Measured from outside HF against that bucket, the API restore of all
+seven adapters (5,780 files, 3.7 GB) took 4m50s, against 10m23s for Claude
+alone through the mount.
+
+The bucket is discovered from `GET /api/spaces/$SPACE_ID` (the volume mounted
+at `$DATA_DIR`) using `HF_TOKEN`; `AGENT_STATE_BUCKET` overrides it. The token is optional for this
+app, so when the API can't be used — no `HF_TOKEN`, the bucket can't be
+discovered, the backup listing fails, or a transfer still fails after one
+retry — that adapter restores straight from `$DATA_DIR`, and the log says why.
+Every read straight from `$DATA_DIR` holds one global lock
+(`$AM_LOCAL/agent-state-mount-read.lock`), so those reads run **one rsync at a
+time across all adapters**.
+That is the one mount read pattern that has held up: parallel cold reads are the
+failure (a fresh container's 8 parallel rsyncs stopped at 1,538 of 4,689 files,
+every time, while a single rsync copied everything, in ~9 minutes). Parallel
+slices are used only when copying from the local mirror. Without a bucket at
+`$DATA_DIR` (a local run, or a Space with none attached) the same direct copy
+reads ordinary local disk.
+`HF_XET_DATA_MAX_CONCURRENT_FILE_DOWNLOADS` defaults to 64 (measured on
+cpu-upgrade: 4 → 128 s, default → ~63 s, 16 → 38 s, 64 → ~29 s for 2.8 GB).
+
+The whole restore has one time budget, `AGENT_STATE_BUDGET` (default 1200 s,
+counted from when it starts, lock wait included). Every step that can block —
+bucket discovery, the backup listing, each API plan/download, each rsync from
+the mount or the mirror — runs under `timeout` with at most what is left, in
+its own process group that is stopped whole on expiry (and by an interrupted
+restore). Each API attempt is also capped at `AGENT_STATE_API_TIMEOUT`
+(default 240 s), with one retry, so a hung API leaves most of the budget to the
+mount. When the budget runs out the adapter fails closed — no fallback — with
+`<adapter> FAILED …: out of time — the restore budget … ran out during: <step>`,
+and the entrypoint refuses to start. A watchdog stops anything still running
+15 s after the budget (a step with no timeout of its own, such as a stat of a
+hung mount). The heartbeat shows the budget left. A dry run
+(`AGENT_STATE_DRY_RUN`) still lists from `$DATA_DIR` and fetches nothing.
+Checkpoints are unchanged: they still write closed files through the mount.
+
 While the server is running, one supervisor loop calls
 `scripts/agent-state.sh checkpoint` every
 `$AGENT_STATE_CHECKPOINT_SECONDS` (default 15). A local `flock` prevents a
