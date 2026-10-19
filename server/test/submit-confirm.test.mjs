@@ -25,7 +25,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
-import { codexComposer, claudeComposer } from '../src/config.js';
+import { composerShape, composerBody } from '../src/runner.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let failed = 0;
@@ -35,38 +35,24 @@ const check = (what, fn) => {
   }
 };
 
-// ---- reading the composer, on screens captured from the real CLIs ----
+// ---- reading the composer: the input guard's own locator (composerShape) ----
 const SCREENS = JSON.parse(fs.readFileSync(path.join(HERE, 'fixtures/input-lines.json'), 'utf8'));
-const asText = (snap) => { const rows = []; for (const l of snap.visibleLines) rows[l.row] = l.text; return Array.from(rows, (v) => v || '').join('\n'); };
-console.log('\n# composers, read off real screens');
-for (const [cli, read] of [['claude', claudeComposer], ['codex', codexComposer]]) {
-  check(`${cli}: the typed text is in the composer, and only there`, () => {
-    assert.match(read(asText(SCREENS[cli].typed)), /^half typed thought/);
-    assert.doesNotMatch(read(asText(SCREENS[cli].empty)), /half typed thought/);
+const body = (snap) => { const shape = composerShape(snap); return shape && (shape.located || shape.marked) ? composerBody(shape) : null; };
+const snap = (rows, cursorRow, cursorCol) => ({ cursorRow, cursorCol, isAltScreen: false, visibleLines: rows.map((text, row) => ({ row, text })) });
+console.log('\n# composers, read with the input guard\'s locator');
+for (const cli of ['claude', 'codex']) {
+  check(`${cli} (captured screens): typed text is the composer's body, an empty one has none`, () => {
+    assert.equal(body(SCREENS[cli].typed), 'half typed thought');
+    assert.equal(body(SCREENS[cli].empty), '');
   });
 }
-// Captured from Codex 0.162.1 (conversation text redacted).
-check('codex: a prompt left unsubmitted is in the composer', () => {
-  assert.match(codexComposer('  >_ OpenAI Codex (v0.162.1)\n› [Pasted Content 1169 chars]\n  Waiting for startup  · esc cancel'),
-    /^\[Pasted Content 1169 chars\]/);
+check('a placeholder wrapped over two rows of a narrow pane is read whole', () => {
+  // Codex at 20 columns, cursor after the placeholder on the second row.
+  const b = body(snap(['  >_ OpenAI Codex', '› [Pasted Content 1', '169 chars]'], 2, 10));
+  assert.equal(b.replace(/\s+/g, ''), '[PastedContent1169chars]');
 });
-check('codex: after a submit the composer is the fresh line below the conversation', () => {
-  const c = codexComposer([
-    '› [message from manager:] **Review PR #N** … redacted …',
-    '  … redacted … nonce-178881',
-    '• Working (1s • esc to interrupt)',
-    '› Ask Codex to do anything',
-    '  gpt-5 default · ~/work · ⠸',
-  ].join('\n'));
-  assert.match(c, /^Ask Codex to do anything/);
-  assert.doesNotMatch(c, /nonce-178881|Pasted Content/);
-});
-check('claude: the composer ends at its closing rule, below the conversation', () => {
-  const c = claudeComposer(['❯ an earlier prompt', '⏺ Done.', '─'.repeat(40), '❯ [Pasted text #1 +40 lines]', '─'.repeat(40), '  ⏵⏵ auto mode on'].join('\n'));
-  assert.equal(c, '[Pasted text #1 +40 lines]');
-});
-check('a screen without a composer reads as none', () => {
-  assert.equal(codexComposer('  >_ OpenAI Codex (v0.162.1)\n  Resuming session…'), null);
+check('a cursor on a line that opens with no prompt marker is not a composer', () => {
+  assert.equal(body(snap(['  Resuming session…', ''], 0, 19)), null);
 });
 
 // ---- and the whole path, through a real server and a fake TUI ----
@@ -94,7 +80,7 @@ const home = path.join(root, 'home'); fs.mkdirSync(home);
 const backend = spawn('node', ['src/index.js'], {
   cwd: path.join(HERE, '..'), stdio: ['ignore', 'pipe', 'pipe'],
   env: { ...inherited, HOME: home, PORT, DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '',
-    AM_ALLOW_MISSING_ORIGIN: '1', AM_SUBMIT_CONFIRM_TIMEOUT_MS: '1500', AM_PASTE_SHOWN_TIMEOUT_MS: '3000',
+    AM_ALLOW_MISSING_ORIGIN: '1', AM_SUBMIT_CONFIRM_TIMEOUT_MS: '1500', AM_PASTE_SHOWN_TIMEOUT_MS: '3000', AM_STARTUP_WAIT_MS: '8000',
     // One command: the pane runs `exec <run>`, and the login shell may drop
     // a fixture's PATH, so the interpreter is named absolutely.
     AM_TEST_SUBMIT_CMD: `env FAKE_DIR=${FAKE_DIR} ${process.execPath} ${path.join(HERE, 'fixtures', 'fake-submit-tui.mjs')}` },
@@ -112,9 +98,9 @@ const post = (p, body) => fetch(API + p, { method: 'POST',
   headers: { 'content-type': 'application/json', 'x-am-request': '1' },
   body: body === undefined ? undefined : JSON.stringify(body) });
 const PROMPT = `[message from manager:] **Review PR #197**\n${'Check the install page and report. '.repeat(30)}`;
-const openPane = async (name) => {
+const openPane = async (name, cols = 100) => {
   const made = await (await post('/api/sessions', { cli: 'test-submit', name, path: '.' })).json();
-  const ws = new WebSocket(`${API.replace('http', 'ws')}/ws?session=${made.id}&cols=100&rows=30`, { headers: { 'x-am-request': '1' } });
+  const ws = new WebSocket(`${API.replace('http', 'ws')}/ws?session=${made.id}&cols=${cols}&rows=30`, { headers: { 'x-am-request': '1' } });
   await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
   await sleep(2500);
   return { id: made.id, ws };
@@ -162,14 +148,41 @@ try {
     assert.deepEqual(read('enters'), ['with-text'], 'Enter pressed while it was still starting');
   });
 
+  console.log('\n# a narrow pane, where the placeholder wraps over two rows');
+  pane.ws.close();
+  pane = await openPane('fake-codex-narrow', 20);
+  setMode({ swallow: 1 });
+  const narrow = await send();
+  check('the wrapped placeholder is still seen: the swallowed Enter is retried and the prompt submitted', () => {
+    assert.equal(narrow.status, 200, JSON.stringify(narrow.body));
+    assert.equal(read('submitted').length, 1, 'nothing was submitted');
+    assert.deepEqual(read('enters'), ['with-text', 'with-text']);
+  });
+
   console.log('\n# an Enter that opens a dialog over the composer instead of submitting');
+  pane.ws.close();
+  pane = await openPane('fake-codex-dialog');
   setMode({ dialog: true });
-  await send();
-  check('gets no second Enter pressed into the dialog', () => {
+  const modal = await send();
+  check('is not a submit: the send fails, and no second Enter goes into the dialog', () => {
+    assert.equal(modal.status, 409, `answered ${modal.status}: ${JSON.stringify(modal.body)}`);
+    assert.equal(modal.body.code, 'input-not-submitted');
     assert.equal(read('submitted').length, 0);
     assert.deepEqual(read('enters'), ['with-text'], 'an Enter was pressed into the dialog');
   });
-  // That pane is wedged in its dialog now; the rest get a fresh one.
+
+  console.log('\n# a paste painted later than AM watches for it');
+  pane.ws.close();
+  pane = await openPane('fake-codex-late');
+  setMode({ paintMs: 5000 });
+  const unseen = await send();
+  await sleep(2500);                      // let the late paint land
+  check('is not reported delivered, and AM presses no Enter into a screen it could not read', () => {
+    assert.equal(unseen.status, 409, `answered ${unseen.status}: ${JSON.stringify(unseen.body)}`);
+    assert.equal(unseen.body.code, 'input-not-confirmed');
+    assert.equal(read('submitted').length, 0);
+    assert.deepEqual(read('enters'), [], 'an Enter was pressed without the prompt in view');
+  });
   pane.ws.close();
   pane = await openPane('fake-codex-2');
 

@@ -24,7 +24,15 @@ let swallow = 0;
 let startingUntil = 0;
 let dialog = false, inDialog = false;
 let inPaste = false, pasted = '';
-const draw = () => process.stdout.write(`\r\x1b[2K› ${shown ? line : ''}${Date.now() < startingUntil ? '   Waiting for startup  · esc cancel' : ''}`);
+// The composer is redrawn whole, however many rows it wraps onto at this
+// width: up to its first row, clear to the end of the screen, draw.
+let drawnRows = 1;
+const draw = () => {
+  const content = `› ${shown ? line : ''}${Date.now() < startingUntil ? '   Waiting for startup  · esc cancel' : ''}`;
+  const cols = process.stdout.columns || 80;
+  process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J${content}`);
+  drawnRows = Math.max(1, Math.ceil([...content].length / cols));
+};
 process.stdin.setRawMode?.(true);
 process.stdout.write('fake codex\r\n');
 draw();
@@ -52,10 +60,10 @@ process.stdin.on('data', (chunk) => {
       if (Date.now() < startingUntil) continue;
       if (!line) continue;
       if (!shown || swallow > 0) { if (shown) swallow--; continue; }
-      if (dialog) { inDialog = true; process.stdout.write('\r\x1b[2K  Choose a directory\r\n› 1. Use session directory\r\n  2. Use current directory'); continue; }
+      if (dialog) { inDialog = true; process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J  Choose a directory\r\n› 1. Use session directory\r\n  2. Use current directory`); continue; }
       log('submitted', line);
-      process.stdout.write(`\r\x1b[2K› ${pasted.replace(/\n/g, '\r\n  ')}\r\n• Worked for 0s\r\n`);
-      line = ''; draw();
+      process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J› ${pasted.replace(/\n/g, '\r\n  ')}\r\n• Worked for 0s\r\n`);
+      line = ''; drawnRows = 1; draw();
     } else if (ch === '\x15') { line = ''; draw(); }
     else if (ch >= ' ') { line += ch; draw(); }
   }

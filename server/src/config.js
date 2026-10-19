@@ -197,25 +197,15 @@ const CODEX_INPUT_SIGNALS = '-c \'tui.notifications=["approval-requested","plan-
 // answer has to be in the file (see trustCodexWorkspace in first-run.js).
 const codexCommand = (tail = '') => `codex ${CODEX_INPUT_SIGNALS}${tail ? ` ${tail}` : ''}`;
 
+
 /**
- * A TUI composer, read off the visible screen: from the last line that starts
- * with `marker` down to the next horizontal rule (Claude closes its composer
- * with one) or the bottom (Codex's footer never holds a prompt). A submitted
- * prompt moves up into the conversation and a fresh composer is drawn below it,
- * so the LAST marker line is always the composer. null when none is on screen.
- * Used to confirm a delivered prompt was actually submitted (runner.js).
+ * What confirms a delivered prompt was submitted (runner.js submitConfirmed),
+ * matched against whitespace-free text so a wrapped placeholder still matches:
+ * the CLI's placeholder for a collapsed paste, and its busy indicator.
+ * `starting` is a notice during which Enter does nothing.
  */
-export const composerAfter = (marker) => (screen) => {
-  const lines = String(screen || '').split('\n');
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (!lines[i].trimStart().startsWith(marker)) continue;
-    const end = lines.findIndex((l, j) => j > i && /^\s*─{3,}\s*$/.test(l));
-    return lines.slice(i, end < 0 ? undefined : end).join('\n').trimStart().slice(marker.length).replace(/^\s/, '');
-  }
-  return null;
-};
-export const codexComposer = composerAfter('›');
-export const claudeComposer = composerAfter('❯');
+const CODEX_CONFIRM = { pasted: /\[PastedContent\d+chars\]/, busy: /esc to interrupt/, starting: /Waiting for startup/ };
+const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
 
 export const CLIS = [
   { id: 'shell',    label: 'Shell',       bin: 'bash',     color: '#8aa0ad', run: 'exec bash -il',  cont: null },
@@ -227,15 +217,15 @@ export const CLIS = [
   // nothing to launch HERE (that is the point), but unlike files/trace it holds
   // a conversation, so it gets a light and a digest like any other agent.
   { id: 'remote',   label: 'Remote agent', bin: null,      color: '#5ec2e0', run: null,             cont: null },
-  // composer/pasted: delivered prompts have been left unsubmitted in the
+  // confirmSubmit: delivered prompts have been left unsubmitted in the
   // composer; sends read it back to confirm the submit (runner.js).
   { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue', resizeMode: 'repaint',
-    composer: claudeComposer, pasted: /\[Pasted text #\d+/,
+    confirmSubmit: CLAUDE_CONFIRM,
     npm: '@anthropic-ai/claude-code',
     withPrompt: (q) => `claude ${q}`,
     secrets: ['ANTHROPIC_API_KEY'], setup: setupHint('ANTHROPIC_API_KEY') },
   { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: codexCommand(),   cont: codexCommand('resume --last'), resizeMode: 'repaint',
-    composer: codexComposer, pasted: /\[Pasted Content \d+ chars\]/, starting: /Waiting for startup/,
+    confirmSubmit: CODEX_CONFIRM,
     npm: '@openai/codex',
     resume: (id) => codexCommand(`resume ${id}`),
     // `q` and image paths arrive shell-quoted from runner.commandFor(). Repeat
@@ -274,7 +264,7 @@ export const CLIS = [
   // A fake TUI for the submit-confirmation tests, read like Codex.
   ...(process.env.AM_TEST_SUBMIT_CMD
     ? [{ id: 'test-submit', label: 'Submit fixture', bin: 'node', color: '#8aa0ad', run: process.env.AM_TEST_SUBMIT_CMD, cont: null,
-      composer: codexComposer, pasted: /\[Pasted Content \d+ chars\]/, starting: /Waiting for startup/ }]
+      confirmSubmit: CODEX_CONFIRM }]
     : []),
 ];
 

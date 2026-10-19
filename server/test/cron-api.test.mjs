@@ -11,9 +11,32 @@ const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-cron-api-'));
 const bin = path.join(DATA_DIR, 'bin');
 fs.mkdirSync(bin, { recursive: true });
 const fakeClaude = path.join(bin, 'claude');
-fs.writeFileSync(fakeClaude, `#!/bin/sh
-printf '%s\\n' "$*" >> "$DATA_DIR/fake-claude.log"
-sleep 120
+// A minimal Claude: logs its arguments, draws a composer (a `❯` line between
+// rules) and submits what is on it on Enter. AM confirms a delivered prompt
+// actually left the composer, so a fake that never reads its input would make
+// every typed delivery an honest failure.
+fs.writeFileSync(fakeClaude, `#!${process.execPath}
+const fs = require('fs');
+fs.appendFileSync(process.env.DATA_DIR + '/fake-claude.log', process.argv.slice(2).join(' ') + '\\n');
+const rule = '─'.repeat(40);
+let line = '', paste = false, buf = '';
+const draw = () => process.stdout.write('\\x1b[H\\x1b[J' + rule + '\\r\\n❯ ' + line + '\\r\\n' + rule + '\\x1b[2;' + (3 + line.length) + 'H');
+process.stdin.setRawMode && process.stdin.setRawMode(true);
+draw();
+process.stdin.on('data', (c) => {
+  buf += c.toString();
+  for (;;) {
+    if (buf.startsWith('\\x1b[200~')) { paste = true; buf = buf.slice(6); continue; }
+    if (buf.startsWith('\\x1b[201~')) { paste = false; buf = buf.slice(6); continue; }
+    if (!buf) break;
+    const ch = buf[0]; buf = buf.slice(1);
+    if (ch === '\\r' && !paste) { fs.appendFileSync(process.env.DATA_DIR + '/fake-claude.log', 'submitted: ' + line + '\\n'); line = ''; }
+    else if (ch >= ' ') line += ch;
+    else if (ch === '\\n') line += ' ';
+  }
+  draw();
+});
+setTimeout(() => process.exit(0), 120000);
 `, { mode: 0o755 });
 
 const seed = (id, name) => ({
