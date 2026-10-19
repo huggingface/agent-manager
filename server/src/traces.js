@@ -2,6 +2,8 @@ import { traceActivity } from './trace-activity.js';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
+import { Worker } from 'node:worker_threads';
 import readline from 'node:readline';
 import * as store from './sessions.js';
 import { WORKSPACES_DIR, PASSIVE_CLIS, isRemote } from './config.js';
@@ -843,18 +845,202 @@ async function statsFor(p, parser, quietMs = 0) {
   // actively written changes every poll; re-parsing tens of MB once a second
   // starves every other request (blank app). Heavy files therefore re-parse
   // on a duty cycle: at most ~10% of wall time, capped at one parse per 10s.
-  if (c && c.cost > 150 && Date.now() - c.at < Math.min(10_000, c.cost * 10)) return c.parsed;
-  let parsed;
+  //
+  // The wait is cost × 10 with NO 10s ceiling below it: a ceiling turns the
+  // 10% into "one parse per 10s whatever it costs", so a transcript that takes
+  // 7s to parse held the loop ~70% of the time (the 2026-10-19 Overview lag).
+  // Parses now run on a worker (parseOffThread), so this guards a core rather
+  // than the loop — but a cold or failed pool falls back to parsing here, and
+  // a heavy file re-parsed every 10s is a core lost even off-thread. The 60s
+  // ceiling bounds how stale such a file's digest can get.
+  if (c && c.cost > 150 && Date.now() - c.at < Math.min(60_000, c.cost * 10)) return c.parsed;
+  const kind = PARSER_KIND.get(parser);
   const t0 = Date.now();
-  try { parsed = parser(await readTraceFile(p, m.size)); } catch { return null; }
-  if (m.size > MAX_TRACE_BYTES) {
+  const parsed = await parseOffThread(p, m.size, kind);
+  const cost = Date.now() - t0;
+  if (!parsed) return null;
+  // Name the file: "buildTraces stalled" in the watchdog says which phase, and
+  // only this says which transcript grew heavy enough to matter.
+  if (cost > 1000) console.error(`[traces] slow parse ${cost}ms ${kind} ${(m.size / 1048576).toFixed(1)}MB ${p}`);
+  fileCache.set(p, { key, parsed, cost, at: t0, statAt: now, mtimeMs: m.mtimeMs });
+  return parsed;
+}
+
+const PARSERS = { claude: parseClaude, codex: parseCodex, openclaw: parseOpenClaw, fx: parseFx };
+const PARSER_KIND = new Map(Object.entries(PARSERS).map(([k, fn]) => [fn, k]));
+
+/** Read and parse one transcript, start to finish. Runs on a trace-parse
+ *  worker (see trace-parse-worker.js), or here when no worker is available.
+ *  Returns null when the file can't be read or parsed. */
+export async function statsFromFile(p, size, kind) {
+  const parser = PARSERS[kind];
+  let parsed;
+  try { parsed = parser(await readTraceFile(p, size)); } catch { return null; }
+  if (size > MAX_TRACE_BYTES) {
     if (parser === parseCodex || parser === parseClaude) {
       try { Object.assign(parsed.digest, await traceActivity(p, parser, emptyDigest)); }
       catch { parsed.digest.activityError = 'activity-unavailable'; }
     } else parsed.digest.activityError = 'activity-incomplete';
   }
-  fileCache.set(p, { key, parsed, cost: Date.now() - t0, at: t0, statAt: now, mtimeMs: m.mtimeMs });
   return parsed;
+}
+
+// ---------- parsing off the event loop ----------
+// Parsing is synchronous JSON over whole transcripts. On the main thread it
+// held ONE core and froze every request while it ran, however many cores the
+// Space has; here it runs on a small pool and the loop only awaits a message.
+//
+// A file always goes to the same worker (hashed by path): traceActivity keeps
+// a per-file append cursor in module state, and a worker that has seen the file
+// resumes from it instead of rescanning from byte 0.
+//
+// AM_TRACE_WORKERS=0 parses in-process (the old behaviour). Any worker failure
+// also falls back to in-process for that call, so a broken pool degrades to
+// slow rather than to empty stats.
+const POOL_SIZE = (() => {
+  const env = process.env.AM_TRACE_WORKERS;
+  if (env !== undefined && env !== '') return Math.max(0, Number(env) | 0);
+  return Math.max(1, Math.min(4, os.availableParallelism() - 1));
+})();
+const pool = []; // index -> slot | undefined
+let nextJob = 0;
+
+// A parse that has not answered by now is not going to. The 24MB trace the
+// review measured took 0.5s, so this is not a deadline anyone meets honestly —
+// it is the point at which a silent worker stops holding its lane.
+const JOB_DEADLINE_MS = Math.max(50, Number(process.env.AM_TRACE_JOB_DEADLINE_MS) || 30_000);
+// Beyond this many outstanding jobs on one worker, parse in-process instead of
+// queueing. A worker is one thread: a queue it cannot drain is just a slower
+// way to never answer.
+const MAX_PENDING = 64;
+
+// A worker needs the paths a transcript might live under, and nothing else.
+// Worker threads inherit the parent's whole environment by default — tokens
+// and provider keys included — and `execArgv: []` does not change that. This
+// is the entire environment one gets.
+const WORKER_ENV_KEYS = ['HOME', 'PATH', 'TZ', 'NODE_ENV', 'DATA_DIR', 'AM_WORKSPACES_DIR',
+  'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'OPENCLAW_STATE_DIR', 'XDG_DATA_HOME',
+  // Test-only, and only ever set by server/test/loop-offload.test.mjs.
+  'AM_TRACE_WORKER_NEVER_REPLIES'];
+export function workerEnv(from = process.env) {
+  const env = {};
+  for (const k of WORKER_ENV_KEYS) if (from[k] !== undefined) env[k] = from[k];
+  // Nested pools help nobody: a worker parses in-process.
+  env.AM_TRACE_WORKERS = '0';
+  return env;
+}
+
+/** Settle every job waiting on this slot through the in-process fallback. */
+function retireSlot(slot, why) {
+  if (pool[slot.index] === slot) pool[slot.index] = undefined;
+  for (const job of slot.pending.values()) { clearTimeout(job.timer); job.resolve({ fallback: true }); }
+  slot.pending.clear();
+  slot.inflight.clear();
+  if (why === 'deadline') {
+    console.error('[traces] parse worker stopped answering; replacing it');
+    // Terminate, or the thread keeps the file handle and the CPU it is stuck on.
+    try { slot.worker.terminate(); } catch { /* already gone */ }
+  }
+}
+
+function slotFor(p) {
+  let h = 0;
+  for (let i = 0; i < p.length; i++) h = (h * 31 + p.charCodeAt(i)) | 0;
+  const i = Math.abs(h) % POOL_SIZE;
+  if (pool[i]) return pool[i];
+  // execArgv: [] — a worker inherits the parent's node flags by default, and
+  // some (--input-type, --eval) are rejected in a worker and kill it at start.
+  // env — see workerEnv: the default is the parent's entire environment.
+  const worker = new Worker(new URL('./trace-parse-worker.js', import.meta.url),
+    { execArgv: [], env: workerEnv() });
+  workersStarted++;
+  const slot = { worker, index: i, pending: new Map(), inflight: new Map() };
+  // Idle workers must not keep the process alive (tests, CLI scripts); a
+  // worker is ref'd only while a job is outstanding on it.
+  worker.unref();
+  worker.on('message', ({ id, parsed, fallback }) => {
+    const job = slot.pending.get(id);
+    if (!job) return;
+    clearTimeout(job.timer);
+    slot.pending.delete(id);
+    slot.inflight.delete(job.key);
+    if (!slot.pending.size) worker.unref();
+    job.resolve(fallback ? { fallback: true } : { parsed });
+  });
+  worker.on('error', (e) => { console.error('[traces] parse worker error:', e && e.message); retireSlot(slot, 'error'); });
+  worker.on('exit', () => retireSlot(slot, 'exit'));
+  pool[i] = slot;
+  return slot;
+}
+
+/**
+ * One job on one slot, shared by every caller asking for the same read.
+ *
+ * A fresh worker has no append cursor for any file — the cursor lives in that
+ * thread's own module state — so the first parse after a replacement rescans
+ * from byte 0 rather than resuming a delta against a file it never saw. That
+ * is what makes replacing a stuck worker safe, and it is why the cursor is not
+ * carried across.
+ */
+function postJob(slot, key, p, size, kind) {
+  const id = ++nextJob;
+  const job = { key };
+  const promise = new Promise((resolve) => {
+    job.resolve = resolve;
+    job.timer = setTimeout(() => retireSlot(slot, 'deadline'), JOB_DEADLINE_MS);
+    job.timer.unref?.();
+    slot.pending.set(id, job);
+    slot.worker.ref();
+    slot.worker.postMessage({ id, p, size, kind });
+  });
+  slot.inflight.set(key, promise);
+  return promise;
+}
+
+async function parseOffThread(p, size, kind) {
+  if (POOL_SIZE > 0) {
+    let res;
+    try {
+      const slot = slotFor(p);
+      // The same read asked for twice while the first is in flight is one job:
+      // a rebuild and a request can land on the same path together.
+      const key = `${p}\u0000${size}\u0000${kind}`;
+      res = await (slot.inflight.get(key)
+        || (slot.pending.size >= MAX_PENDING ? Promise.resolve({ fallback: true })
+          : postJob(slot, key, p, size, kind)));
+    } catch { res = { fallback: true }; }
+    if (!res.fallback) return res.parsed;
+  }
+  return statsFromFile(p, size, kind);
+}
+
+/** Seams for server/test/loop-offload.test.mjs: the pool is module state. */
+export const __parseOffThreadForTest = parseOffThread;
+let workersStarted = 0;
+export const __workersStartedForTest = () => workersStarted;
+/** What a real pool worker's environment holds. */
+export function __workerEnvKeysForTest(p = 'probe') {
+  const slot = slotFor(p);
+  const id = ++nextJob;
+  return new Promise((resolve) => {
+    const onMessage = (m) => {
+      if (m.id !== id) return;
+      slot.worker.off('message', onMessage);
+      resolve(m.envKeys);
+    };
+    slot.worker.on('message', onMessage);
+    slot.worker.ref();
+    slot.worker.postMessage({ id, probe: 'env' });
+  });
+}
+export function __killWorkersForTest() {
+  const gone = pool.filter(Boolean).map((slot) => {
+    const done = slot.worker.terminate().catch(() => {});
+    retireSlot(slot, 'test');
+    return done;
+  });
+  pool.length = 0;
+  return Promise.all(gone);
 }
 
 // Directory walks (readdir over FUSE) also add up when repeated per rebuild —
