@@ -326,3 +326,24 @@ test('local inbox through durable event journal reaches the exact native Codex q
  assert.match(JSON.stringify(queued[0].params),/local-monitor/);assert.match(JSON.stringify(queued[0].params),new RegExp(event.id));
  assert.equal([...events.jobs.values()][0].state,'accepted');
 });
+
+test('external delivery recovers interrupted native thread with latest effort, then queues the original ID once',async()=>{
+ const {recoveryPlan}=await import('../src/codex-recovery.js');
+ const f=fixture();f.thread.status={type:'notLoaded'};f.thread.modelProvider='openai';f.turn.status='interrupted';
+ const p={turn_id:f.turn.id,cwd:root,model:'saved-model',approval_policy:'on-request',approvals_reviewer:'auto_review',effort:'high',sandbox_policy:{type:'read-only'},permission_profile:{type:'managed',file_system:{type:'restricted',entries:[{path:{type:'special',value:{kind:'root'}},access:'read'}]},network:'restricted'},collaboration_mode:{mode:'default',settings:{developer_instructions:null,reasoning_effort:'high'}}};
+ const applied={model:p.model,model_provider_id:'openai',cwd:root,approval_policy:p.approval_policy,approvals_reviewer:p.approvals_reviewer,permission_profile:p.permission_profile,collaboration_mode:{...p.collaboration_mode,settings:{...p.collaboration_mode.settings,reasoning_effort:'medium'}},runtime_workspace_roots:[root],reasoning_effort:'medium',personality:'friendly',disabled_plugin_ids:[]};
+ const file=path.join(root,'external-recovery.jsonl');fs.writeFileSync(file,[{type:'turn_context',payload:p},{type:'event_msg',payload:{type:'turn_aborted',turn_id:p.turn_id}},{type:'event_msg',payload:{type:'thread_settings_applied',thread_id:f.thread.id,thread_settings:applied}}].map(JSON.stringify).join('\n')+'\n');
+ f.hub.recovery=(_id,context,thread,last)=>recoveryPlan(file,context,thread,last);
+ f.hub.connect=f.hub.observe=async()=>{f.client.closed=false;return f.client;};
+ const call=f.client.call.bind(f.client);f.client.call=async(method,params)=>{
+  if(method==='thread/resume'){
+   f.calls.push({method,params});assert.equal(params.config.model_reasoning_effort,'medium');assert.equal(params.personality,'friendly');assert.equal(params.sandbox,'read-only');
+   const plan=await f.hub.recovery('am',f.hub.context('am'),f.thread,f.turn);f.thread.status={type:'idle'};return {...plan.settings.expected,thread:f.thread};
+  }
+  return call(method,params);
+ };
+ const requestId=randomUUID(),source={type:'poller',id:'granola',provider:'granola',revision:1,eventId:'not_fixture'};
+ await f.hub.sendFromExternal('am',{text:'Process the note.',requestId},source,{verifySource:()=>{}});
+ await f.hub.sendFromExternal('am',{text:'Process the note.',requestId},source,{verifySource:()=>{}});
+ assert.equal(f.calls.filter(c=>c.method==='thread/resume').length,1);const sent=f.calls.filter(c=>c.method==='thread/queue/add');assert.equal(sent.length,1);assert.equal(sent[0].params.clientUserMessageId,requestId);assert.equal(sent[0].params.threadId,f.thread.id);
+});
