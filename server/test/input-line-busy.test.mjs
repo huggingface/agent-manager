@@ -260,6 +260,39 @@ try {
   pane.ws.send(JSON.stringify({ t: 'r', cols: 100, rows: 30 }));
   await sleep(800);
 
+  // Recalling what AM itself just sent is still the operator's unsent input.
+  // The guard briefly matched the line against the last prompt it had sent, as
+  // a second way to recognise its own echo, and that let this merge through.
+  console.log('\n# the operator recalls the command AM just sent');
+  at = ran().length;
+  await post(`/api/sessions/${pane.id}/input`, { text: runs('FIRST') });
+  await until(() => ran().includes('FIRST'), 8000);
+  pane.type('\x1b[A');                    // Up: that exact command is back on the line
+  await sleep(1200);
+  const afterRecall = await post(`/api/sessions/${pane.id}/input`, { text: runs('SECOND') });
+  await sleep(1500);
+  check('the recalled command is not merged with the next prompt', () => {
+    assert.equal(afterRecall.status, 409, `POST /input answered ${afterRecall.status}`);
+    assert.deepEqual(ran().slice(at), ['FIRST'], 'bash ran a merged line');
+  });
+  pane.type('\x15');                      // clear it again
+  await sleep(900);
+
+  // The same, typed out by hand rather than recalled.
+  at = ran().length;
+  await post(`/api/sessions/${pane.id}/input`, { text: runs('THIRD') });
+  await until(() => ran().includes('THIRD'), 8000);
+  pane.type(runs('THIRD'));               // retyped, character for character
+  await sleep(900);
+  const afterRetype = await post(`/api/sessions/${pane.id}/input`, { text: runs('FOURTH') });
+  await sleep(1500);
+  check('retyping it is not merged either', () => {
+    assert.equal(afterRetype.status, 409, `POST /input answered ${afterRetype.status}`);
+    assert.deepEqual(ran().slice(at), ['THIRD'], 'bash ran a merged line');
+  });
+  pane.type('\x15');
+  await sleep(900);
+
   console.log('\n# a line that only LOOKS busy');
   // Scrollback ending in the same words is not the composer: this used to
   // refuse a send against an empty prompt, then tell the operator to clear it.
