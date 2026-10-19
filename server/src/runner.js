@@ -2305,7 +2305,6 @@ export function attach(session, cols, rows) {
  */
 const lineTouched = new Set();      // panes typed into since their last submit
 const lineEmpty = new Map();        // id -> what an empty line looks like here
-const lastSubmitted = new Map();    // id -> the last prompt WE sent, as it reads on screen
 
 /** The cursor, and the text in front of it. */
 // A TUI's prompt is not plain spaces: Claude Code's idle composer is `❯`
@@ -2362,26 +2361,35 @@ export function composerShape(snapshot) {
   if (top >= 0) {
     const rows = lines.slice(top + 1, bottom);
     const at = rows.findIndex((l) => l.row === snapshot.cursorRow);
+    // EVERY row of the box, not just the cursor's. A line that fills its row
+    // exactly leaves the cursor at the start of the wrapped continuation, and
+    // reading only that row called a full line of typing an empty one.
+    const all = rows.map((l) => l.text).join(' ');
     return {
       alt: !!snapshot.isAltScreen,
       located: true,
-      text: flatten(at >= 0 ? rows[at].text.slice(0, snapshot.cursorCol) : rows.map((l) => l.text).join(' ')),
       cursorInside: at >= 0,
+      // What is in FRONT of the cursor is what was typed; the hint an empty
+      // composer shows sits after it.
+      typed: at >= 0
+        ? flatten(rows.slice(0, at).map((l) => l.text).concat(rows[at].text.slice(0, snapshot.cursorCol)).join(' '))
+        : '',
+      full: flatten(all),
     };
   }
   // No box to find — a shell, or a TUI that draws none. The cursor's row is all
   // there is, and the baseline comparison carries it.
   const line = lines.find((l) => l.row === snapshot.cursorRow);
-  return {
-    alt: !!snapshot.isAltScreen,
-    located: false,
-    text: flatten(line ? line.text.slice(0, snapshot.cursorCol) : ''),
-    cursorInside: false,
-  };
+  const before = flatten(line ? line.text.slice(0, snapshot.cursorCol) : '');
+  return { alt: !!snapshot.isAltScreen, located: false, cursorInside: false, typed: before, full: before };
 }
 
+// ONE prompt marker, not every glyph that could be one: stripping greedily
+// turned a typed `❯ >` into nothing at all and let the send through.
+const ONE_MARKER = /^[\s\u2502\u2503|]*[>\u276f\u203a\u27e9\u25b6][^\S\r\n]?/;
 /** The composer with its decoration taken off: what someone actually typed. */
-export const composerBody = (shape) => shape ? shape.text.replace(PROMPT_MARKER, '').trim() : '';
+export const composerBody = (shape) => shape
+  ? (shape.cursorInside ? shape.typed : shape.full).replace(ONE_MARKER, '').trim() : '';
 
 /**
  * Does `now` still look like the empty line `empty` was a picture of?
@@ -2394,9 +2402,9 @@ export const composerBody = (shape) => shape ? shape.text.replace(PROMPT_MARKER,
  */
 export const sameComposer = (a, b) => {
   if (!a || !b || a.alt !== b.alt) return false;
-  if (a.text === b.text) return true;
-  if (!a.text || !b.text) return false;
-  return a.text.endsWith(b.text) || b.text.endsWith(a.text);
+  if (a.full === b.full) return true;
+  if (!a.full || !b.full) return false;
+  return a.full.endsWith(b.full) || b.full.endsWith(a.full);
 };
 
 /** Wait for the pane to stop painting, bounded. */
@@ -2448,7 +2456,7 @@ function notePaneInput(host, data) {
 }
 
 /** Forget the line: it was submitted by us, or the pane is gone. */
-function clearPaneInput(id) { lineTouched.delete(id); lineEmpty.delete(id); lastSubmitted.delete(id); }
+function clearPaneInput(id) { lineTouched.delete(id); lineEmpty.delete(id); }
 
 /**
  * What is in the way of sending, or null when the line is clear.
@@ -2456,32 +2464,41 @@ function clearPaneInput(id) { lineTouched.delete(id); lineEmpty.delete(id); last
  * A pane nobody has touched since its last submit needs no grid read at all,
  * which is the overwhelmingly common case and costs nothing.
  */
+/**
+ * The verdict on one reading of the line: null when it is clear, otherwise the
+ * text in the way. Exported so the grids in the tests exercise the decision and
+ * not only the formatter that feeds it.
+ *
+ * Nothing here compares against what AM last sent. It did, as a second way to
+ * recognise our own prompt echoed back, and that was a hole: pressing Up recalls
+ * the exact command we just sent, so a line holding REAL unsent input matched
+ * and was called clear — the merge this guard exists to prevent, arrived at by
+ * the guard itself. Our echo is excluded by WHERE it is, in the transcript above
+ * the composer's rule, which does not care what it says.
+ */
+export function lineVerdict(now, empty) {
+  if (!now) return null;   // no grid to read: say nothing rather than block
+  if (now.located && now.cursorInside) {
+    // A composer we can see into answers for itself.
+    const body = composerBody(now);
+    return body || null;
+  }
+  // The cursor is elsewhere, or there is no box: the only honest question left
+  // is whether this looks like the picture taken when the line was empty.
+  if (!empty) return composerBody(now) || null;
+  if (sameComposer(now, empty)) return null;
+  const shown = now.full.startsWith(empty.full)
+    ? now.full.slice(empty.full.length).trim() : composerBody(now);
+  return shown || null;
+}
+
 export function unsubmittedInput(id) {
   const host = hosts.get(id);
   if (!host) { clearPaneInput(id); return null; }
   if (!lineTouched.has(id)) return null;
-  const now = shapeNow(host);
-  if (!now) return null;   // no grid to read: say nothing rather than block
-  // A composer we can see into answers for itself. Everything in front of the
-  // cursor is what was typed, and with the box located that cannot be the
-  // transcript above it — which is where our own prompts are echoed back.
-  if (now.located && now.cursorInside) {
-    const body = composerBody(now);
-    if (!body) { lineTouched.delete(id); return null; }
-    if (body === (lastSubmitted.get(id) || '')) {
-      // Our own text, read back off the screen. Never a reason to refuse.
-      lineTouched.delete(id);
-      return null;
-    }
-    return body;
-  }
-  const empty = lineEmpty.get(id);
-  if (!empty) return null;   // nothing to compare against: do not block on a guess
-  if (sameComposer(now, empty)) { lineTouched.delete(id); return null; }
-  const shown = now.text.startsWith(empty.text)
-    ? now.text.slice(empty.text.length).trim() : composerBody(now);
-  if (!shown || shown === (lastSubmitted.get(id) || '')) { lineTouched.delete(id); return null; }
-  return shown;
+  const verdict = lineVerdict(shapeNow(host), lineEmpty.get(id));
+  if (!verdict) lineTouched.delete(id);
+  return verdict;
 }
 
 /** Type a line into the session's terminal (works with no browser attached). */
@@ -2573,7 +2590,6 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
   await new Promise((r) => setTimeout(r, 300));
   host.pty.write('\r');
   clearPaneInput(id);   // our own Enter emptied it
-  lastSubmitted.set(id, flatten(text).replace(PROMPT_MARKER, '').trim());
 }
 
 /** Insert text into a running terminal's composer without submitting it. */

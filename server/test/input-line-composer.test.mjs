@@ -21,7 +21,7 @@
 //
 // Run with:  node test/input-line-composer.test.mjs
 import assert from 'node:assert/strict';
-import { composerShape, composerBody, sameComposer, isTypedInput } from '../src/runner.js';
+import { composerShape, composerBody, sameComposer, isTypedInput, lineVerdict } from '../src/runner.js';
 
 let failed = 0;
 const check = (what, fn) => {
@@ -103,18 +103,55 @@ check('a working session with an empty composer is empty', () => {
   assert.equal(composerBody(shape), '', `read the transcript as input: ${JSON.stringify(composerBody(shape))}`);
 });
 check('the prompt echoed into the transcript is not input', () => {
-  assert.ok(!composerShape(busy).text.includes('still an issue'),
+  assert.ok(!composerShape(busy).full.includes('still an issue'),
     'the operator\'s delivered message was read off the transcript');
 });
 check('a wrapped, cropped echo is not input either', () => {
   const shape = composerShape(wrapped);
   assert.equal(composerBody(shape), '');
-  assert.ok(!shape.text.includes('let me past'), 'the cropped echo was read as unsent text');
+  assert.ok(!shape.full.includes('let me past'), 'the cropped echo was read as unsent text');
 });
 check('a half-typed composer still blocks', () => {
   const shape = composerShape(halfTyped);
   assert.equal(shape.cursorInside, true);
   assert.equal(composerBody(shape), 'let me paste the err');
+});
+
+console.log('\n# input the guard used to erase');
+// Decided through lineVerdict, which is what the send path asks, rather than
+// through the formatter alone.
+const verdict = (g, empty) => lineVerdict(composerShape(g), empty ? composerShape(empty) : null);
+
+// A single typed `>`: stripping every marker glyph greedily left nothing.
+const typedAngle = grid([RULE, '❯\u00a0>', RULE], 1, 4);
+check('a typed > is not decoration', () => {
+  assert.equal(verdict(typedAngle), '>', 'the line was erased by the marker strip');
+});
+
+// Typing that fills the row exactly: the cursor sits at the start of the
+// wrapped continuation, so the cursor's own row holds nothing.
+const exactWrap = grid([
+  RULE,
+  '❯\u00a0rm -rf the-wrong-directory --no-preserve-root --force',
+  '',
+  RULE,
+], 2, 0);
+check('a line that fills its row exactly still blocks', () => {
+  assert.equal(verdict(exactWrap), 'rm -rf the-wrong-directory --no-preserve-root --force');
+});
+
+// Up-recall: the composer holds exactly what AM last sent. It is still the
+// operator's unsent input, and merging it is the failure this guard is for.
+const recalled = grid([
+  '❯ echo FIRST >> probe',
+  '',
+  RULE,
+  '❯\u00a0echo FIRST >> probe',
+  RULE,
+], 3, 22);
+check('recalling the last sent command still blocks', () => {
+  assert.equal(verdict(recalled), 'echo FIRST >> probe',
+    'matching a previous send was treated as proof the line is clear');
 });
 
 console.log('\n# Codex, which draws no box');
