@@ -7,9 +7,10 @@
  *   - ...without letting that lingering selection shadow Ctrl+C's SIGINT
  *
  * Set TERMUI_PUBLIC_DIR to a prebuilt web/dist to skip the build.
- * am-test: manual — Chromium, a full web build and port 7897; `npm run test:ui`.
+ * am-test: manual — Chromium, a full web build and a free port; `npm run test:ui`.
  */
 import { nativeFetch as fetch, NativeWebSocket as WebSocket } from './test/native-client.mjs';
+import { freePort } from './test/free-port.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,8 +22,9 @@ import { chromiumLaunchOptions } from '../scripts/test-chromium.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-termui-'));
-const PUBLIC_DIR = process.env.TERMUI_PUBLIC_DIR || path.join(DATA_DIR, 'public');
-const API = 'http://127.0.0.1:7897';
+const PUBLIC_DIR = process.env.TERMUI_PUBLIC_DIR || process.env.AM_TEST_DIST || path.join(DATA_DIR, 'public');
+const PORT = String(await freePort());
+const API = `http://127.0.0.1:${PORT}`;
 const LINK = 'https://example.com/probe-link';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -42,7 +44,7 @@ const waitFor = async (fn, timeout = 15_000) => {
 const tail = async (id, lines = 400) =>
   (await (await fetch(`${API}/api/agents/${id}/tail?lines=${lines}`)).json()).text || '';
 
-if (!process.env.TERMUI_PUBLIC_DIR) {
+if (!process.env.TERMUI_PUBLIC_DIR && !process.env.AM_TEST_DIST) {
   const build = spawnSync('npm', ['run', 'build', '--', '--outDir', PUBLIC_DIR], {
     cwd: path.join(ROOT, 'web'), encoding: 'utf8',
   });
@@ -59,7 +61,7 @@ const { SPACE_ID, AM_DISTRIBUTE_SKILLS, ...BASE_ENV } = process.env;
 
 const backend = spawn('node', ['src/index.js'], {
   cwd: HERE,
-  env: { ...BASE_ENV, PORT: '7897', DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '', AM_ALLOW_MISSING_ORIGIN: '1' },
+  env: { ...BASE_ENV, PORT, DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '', AM_ALLOW_MISSING_ORIGIN: '1' },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 let logs = '';
@@ -85,7 +87,7 @@ try {
 
   // Put the fixture text on screen before any browser attaches, so the pane is
   // painted from the server's grid exactly as a reattaching client would be.
-  feed = new WebSocket(`ws://127.0.0.1:7897/ws?session=${id}&cols=120&rows=30`);
+  feed = new WebSocket(`ws://127.0.0.1:${PORT}/ws?session=${id}&cols=120&rows=30`);
   await new Promise((resolve, reject) => { feed.once('open', resolve); feed.once('error', reject); });
   await sleep(400);
   feed.send(JSON.stringify({ t: 'i', d: `printf 'docs at ${LINK} end\\nSELECT-ME-9137 tail\\n'\r` }));
@@ -103,7 +105,7 @@ try {
   })).json();
   mouseId = mouseCreated.id;
   if (!mouseId) throw new Error(`mouse fixture session creation failed: ${JSON.stringify(mouseCreated)}`);
-  mouseFeed = new WebSocket(`ws://127.0.0.1:7897/ws?session=${mouseId}&cols=120&rows=30`);
+  mouseFeed = new WebSocket(`ws://127.0.0.1:${PORT}/ws?session=${mouseId}&cols=120&rows=30`);
   await new Promise((resolve, reject) => { mouseFeed.once('open', resolve); mouseFeed.once('error', reject); });
   await sleep(400);
   mouseFeed.send(JSON.stringify({

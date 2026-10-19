@@ -9,12 +9,13 @@
 //
 // Run with:  node test/next-name.test.mjs
 import { nativeFetch as fetch } from './native-client.mjs';
+import { freePort } from './free-port.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const PORT = 7893;
+const PORT = await freePort();
 const API = `http://localhost:${PORT}`;
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'next-name-'));
 

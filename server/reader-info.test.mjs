@@ -14,6 +14,7 @@
  * am-test: manual — Chromium, a full web build and READER_INFO_PORT; `npm run test:ui`.
  */
 import { nativeFetch as fetch } from './test/native-client.mjs';
+import { freePort } from './test/free-port.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,8 +28,8 @@ const ROOT = path.dirname(HERE);
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'am-reader-info-'));
 const DATA_DIR = path.join(TMP, 'data');
 const HOME = path.join(TMP, 'home');
-const PUBLIC_DIR = process.env.READER_INFO_PUBLIC_DIR || path.join(TMP, 'public');
-const PORT = process.env.READER_INFO_PORT || '7899';
+const PUBLIC_DIR = process.env.READER_INFO_PUBLIC_DIR || process.env.AM_TEST_DIST || path.join(TMP, 'public');
+const PORT = process.env.READER_INFO_PORT || String(await freePort());
 const API = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -48,7 +49,7 @@ const waitFor = async (fn, timeout = 15_000) => {
   return false;
 };
 
-if (!process.env.READER_INFO_PUBLIC_DIR) {
+if (!process.env.READER_INFO_PUBLIC_DIR && !process.env.AM_TEST_DIST) {
   const build = spawnSync('npm', ['run', 'build', '--', '--outDir', PUBLIC_DIR], {
     cwd: path.join(ROOT, 'web'), encoding: 'utf8',
   });

@@ -13,10 +13,10 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test:ui": "node terminal-ui.test.mjs && node screenshot-input.test.mjs && node reader-info.test.mjs",
-    "test:screenshots": "node screenshot-input.test.mjs",
-    "test:mobile": "node mobile.test.mjs",
-    "test": "node test/queued-prompts.test.mjs && node ../scripts/run-suites.mjs"
+    "test:ui": "node ../scripts/run-suites.mjs terminal-ui screenshot-input reader-info --manual",
+    "test:screenshots": "node ../scripts/run-suites.mjs screenshot-input --manual",
+    "test:mobile": "node ../scripts/run-suites.mjs mobile.test --manual",
+    "test": "node ../scripts/run-suites.mjs"
   },
   "engines": {
     "node": ">=24.16"

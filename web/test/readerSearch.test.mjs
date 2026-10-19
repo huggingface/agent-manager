@@ -195,16 +195,20 @@ try {
   results.push({ case: 'unloaded match found', loadedExchanges: loaded, hits: found });
 
   // ---------- opening a hit does not drag the transcript back to it ----------
+  const hitMark = await p.evaluate(() => window.reads.length);
   await p.locator('.cxv-hitrow').last().click();
   await p.waitForFunction(() => window.probe.historic() > 0, null, { timeout: 20_000 });
   // Counting reads outright would be flaky — the live reader keeps polling and
   // may still be filling. The invariants that actually distinguish a jump from
   // a walk are the SHAPE of the read and the total: reaching exchange 0 of this
-  // fixture page by page is roughly 28 backward windows.
-  const jump = await p.evaluate(() => {
-    const opened = window.reads[window.reads.length - 1];
+  // fixture page by page is roughly 28 backward windows. The opening read is the
+  // first backward one after the click, not the last read: once the page is on
+  // screen the reader may already be fetching the window above it, and on a busy
+  // machine that read lands before this check runs.
+  const jump = await p.evaluate((mark) => {
+    const opened = window.reads.slice(mark).find((r) => r.at === 'before');
     return { opened, backward: window.reads.filter((r) => r.at === 'before').length };
-  });
+  }, hitMark);
   assert.equal(jump.opened.at, 'before', 'a hit is opened with the locator the search handed back');
   assert.equal(jump.opened.bytes, 256 * 1024, 'including its window size, so it is that exact page');
   assert.ok(jump.backward <= 10,

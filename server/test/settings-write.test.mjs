@@ -1,4 +1,5 @@
 import { nativeFetch as fetch } from './native-client.mjs';
+import { freePort } from './free-port.mjs';
 // Saving settings: what the answer means, and who is allowed to replace what.
 //
 // Settings are written on every change now, so these two files are rewritten
@@ -15,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const PORT = 7906;
+const PORT = await freePort();
 const API = `http://127.0.0.1:${PORT}`;
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-settings-write-'));
 const CONFIG = path.join(DATA_DIR, 'am-config.json');

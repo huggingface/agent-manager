@@ -71,8 +71,10 @@ await build({
       drop() { if (this.readyState !== 3) window.live--; this.readyState = 3; this.onclose?.({ code: 1006 }); }
     }
     window.WebSocket = FakeSocket;
+    // lastTs is "now" so the reader polls on its recent-activity cadence (3s)
+    // rather than the idle one (10s): grow() below waits for a poll each time.
     const empty = { harness:'claude',harnessLabel:'Fixture',sessionId:'s',title:'',model:null,cwd:null,
-      firstTs:0,lastTs:0,usage:null,source:null,sharedBy:null,note:null,truncated:false,total:null,
+      firstTs:0,lastTs:Date.now(),usage:null,source:null,sharedBy:null,note:null,truncated:false,total:null,
       userTurns:null,activity:'waiting',generation:'g',revision:'r1' };
     const page = (turns, from=0, end=turns.length) => ({ ...empty, turns,
       window:{mode:'bytes',start:from,end,atStart:from===0,atEnd:true,generation:'g',revision:'r1'} });
@@ -211,10 +213,9 @@ try {
       return row ? { key: row.dataset.x, y: Math.round(row.getBoundingClientRect().top - top) } : null;
     });
     /** Make more conversation available AND wait for the reader to actually
-     *  ingest it. The fixture's timestamps are old, so this source polls on the
-     *  slow cadence; asserting after a fixed pause proves nothing, which is
-     *  exactly how the first version of these two checks passed without the
-     *  append ever arriving. */
+     *  ingest it. It arrives on the reader's next poll; asserting after a fixed
+     *  pause proves nothing, which is exactly how the first version of these
+     *  two checks passed without the append ever arriving. */
     const grow = async (to) => {
       await p.evaluate((n) => window.fixture.change({ count: n }), to);
       await p.waitForFunction((n) => {

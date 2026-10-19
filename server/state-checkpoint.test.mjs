@@ -495,7 +495,7 @@ try {
     for (const rel of junk) put(path.join(e.CODEX_DURABLE, rel), 'x');
     const lockFile = path.join(e.AM_LOCAL, 'agent-state-checkpoint.lock');
     fs.mkdirSync(e.AM_LOCAL, { recursive: true });
-    const holder = spawn('flock', [lockFile, 'sh', '-c', 'echo held; sleep 30'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const holder = spawn('flock', [lockFile, 'sh', '-c', 'echo held; sleep 30'], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     await waitFor(holder, 'held');
     const prune = spawn('sh', [script, 'prune'], { env: e, stdio: ['ignore', 'pipe', 'pipe'] });
     let pruneOut = '';
@@ -506,7 +506,9 @@ try {
       prune.exitCode === null && junk.every((rel) => fs.existsSync(path.join(e.CODEX_DURABLE, rel))), pruneOut);
     const newest = 1793000000000;
     put(path.join(e.CLAUDE_DURABLE, `backups/.claude.json.backup.${newest}`), 'just published');
-    holder.kill('SIGKILL');
+    // The whole group: the `sleep` child inherits the lock's fd, so killing
+    // flock alone left the lock held for the rest of the 30 seconds.
+    process.kill(-holder.pid, 'SIGKILL');
     const pruneCode = await pruneDone;
     const afterRace = fs.readdirSync(path.join(e.CLAUDE_DURABLE, 'backups')).filter((n) => n.startsWith('.claude.json.backup.')).sort();
     check('…then prunes once the checkpoint lets go',
@@ -514,7 +516,7 @@ try {
     // At shutdown the entrypoint stops a running prune (stop-prune) before the
     // final checkpoint: its whole group goes, and the lock is free at once.
     for (const rel of junk) put(path.join(e.CODEX_DURABLE, rel), 'x');
-    const holder2 = spawn('flock', [lockFile, 'sh', '-c', 'echo held; sleep 30'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const holder2 = spawn('flock', [lockFile, 'sh', '-c', 'echo held; sleep 30'], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     await waitFor(holder2, 'held');
     const running = spawn('setsid', ['-w', 'sh', script, 'prune'], { env: e, stdio: ['ignore', 'pipe', 'pipe'] });
     const runningDone = new Promise((resolve) => running.on('exit', resolve));
@@ -526,7 +528,7 @@ try {
     const groupBefore = inGroup(pruneGroup).length;
     const stopped = execFileSync('sh', [script, 'stop-prune'], { env: e, encoding: 'utf8' });
     await Promise.race([runningDone, sleep(5000)]);
-    holder2.kill('SIGKILL');
+    process.kill(-holder2.pid, 'SIGKILL');
     check('stop-prune ends a running prune and every process of it',
       groupBefore > 0 && inGroup(pruneGroup).length === 0 && /stopped the junk prune/.test(stopped), `${groupBefore} in group before; ${stopped}`);
     check('…before it deleted anything it was still waiting to',

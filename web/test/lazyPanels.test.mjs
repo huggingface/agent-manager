@@ -10,7 +10,7 @@
 // on mocked imports.
 //
 // Builds the web app into a temp dir (or uses $AM_TEST_DIST), boots the server
-// on 7904 with the fixture fleet from helpers/fixture-server.mjs.
+// on a free port with the fixture fleet from helpers/fixture-server.mjs.
 // Run with:  node test/lazyPanels.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -19,7 +19,6 @@ import { chromiumLaunchOptions } from '../../scripts/test-chromium.mjs';
 import { startFixtureServer, buildWeb } from './helpers/fixture-server.mjs';
 import { MARK, FRAME } from './helpers/markers.mjs';
 
-const PORT = 7904;
 const PANEL_CHUNK = /\/assets\/(FilesPane|TracePane|SettingsView|ApiLog|CronSettings|UsagePanel|SkillsEditor)-[^/]+\.js/;
 const chunkOf = (name) => new RegExp(`/assets/${name}-[^/]+\\.js`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -33,7 +32,7 @@ const check = async (what, fn) => {
 };
 
 const dist = buildWeb(spawnSync, 'am-lazy-dist-');
-const server = await startFixtureServer({ port: PORT, publicDir: dist, tag: 'am-lazy-' });
+const server = await startFixtureServer({ publicDir: dist, tag: 'am-lazy-' });
 const browser = await chromium.launch(chromiumLaunchOptions());
 
 // A fresh browser profile with the remembered selection already in place, and

@@ -366,7 +366,15 @@ try {
   check('no staging file left behind', fs.readdirSync(filesDir).filter((f) => f.includes('am-upload')).length === 0, fs.readdirSync(filesDir).join(','));
   const li = await waitFor(() => lateInput.then((x) => x), 3000);
   check('the delayed prompt request was cut by the lock', !!li && li.status !== 200, JSON.stringify(li));
-  const typedAtLock = imagesTyped();
+  // A command whose text was written before the lock still gets its Enter
+  // (sendInput submits 300ms after typing), so count once typing has gone quiet
+  // for a second. An insertion the lock failed to stop types every ~800ms and
+  // never goes quiet before all five, which the check below rejects.
+  let typedAtLock = imagesTyped();
+  for (let quietSince = Date.now(), end = Date.now() + 8000; Date.now() - quietSince < 1000 && Date.now() < end;) {
+    await sleep(100);
+    if (imagesTyped() !== typedAtLock) { typedAtLock = imagesTyped(); quietSince = Date.now(); }
+  }
   await sleep(4500); // the slow agents become ready in here; the insertion would have finished
   check('a prompt still waiting for readiness when the lock landed is never typed', !stdinOf('slow').includes('late-input'), JSON.stringify(stdinOf('slow').slice(-80)));
   check('...and the slow agent itself keeps running (one restart, from before the lock)', startsOf('slow') === 2);

@@ -2,6 +2,7 @@
 // Uses a `shell` session so it costs no agent tokens.
 //   node migration.test.mjs
 import { nativeFetch as fetch, NativeWebSocket as WebSocket } from './test/native-client.mjs';
+import { freePort } from './test/free-port.mjs';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -44,7 +45,7 @@ fi
 PS1='test$ '
 `);
 
-const PORT = 7893;
+const PORT = await freePort();
 const CTRL = '\x00\x00AM:';
 const base = `http://localhost:${PORT}`;
 

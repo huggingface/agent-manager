@@ -1,0 +1,10 @@
+{
+  "name": "agent-manager",
+  "private": true,
+  "description": "Repository root: `npm test` runs every server and web suite and the web typecheck (see docs/testing.md). The app itself lives in server/ and web/.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/test-all.mjs"
+  }
+}

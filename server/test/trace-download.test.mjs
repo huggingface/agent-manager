@@ -4,6 +4,7 @@
 // workspace, so the Files pane cannot reach it. Run with:
 //   node test/trace-download.test.mjs
 import { nativeFetch as fetch } from './native-client.mjs';
+import { freePort } from './free-port.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,7 +16,7 @@ const ROOT = path.dirname(HERE);
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'am-trace-download-'));
 const DATA_DIR = path.join(TMP, 'data');
 const HOME = path.join(TMP, 'home');
-const PORT = process.env.TRACE_DOWNLOAD_PORT || '7898';
+const PORT = process.env.TRACE_DOWNLOAD_PORT || String(await freePort());
 const API = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 fs.mkdirSync(DATA_DIR, { recursive: true });

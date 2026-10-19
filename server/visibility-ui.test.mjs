@@ -33,7 +33,7 @@ import { chromiumLaunchOptions } from '../scripts/test-chromium.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-visui-'));
-const PUBLIC_DIR = process.env.VISUI_PUBLIC_DIR || path.join(DATA_DIR, 'public');
+const PUBLIC_DIR = process.env.VISUI_PUBLIC_DIR || process.env.AM_TEST_DIST || path.join(DATA_DIR, 'public');
 const SPACE_ID = 'fixture-owner/fixture-space';
 const BUCKET_ID = 'fixture-owner/fixture-bucket';
 const CHECK_MS = 1000;
@@ -61,7 +61,7 @@ const freePort = () => new Promise((resolve, reject) => {
   s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
 });
 
-if (!process.env.VISUI_PUBLIC_DIR) {
+if (!process.env.VISUI_PUBLIC_DIR && !process.env.AM_TEST_DIST) {
   const build = spawnSync('npm', ['run', 'build', '--', '--outDir', PUBLIC_DIR], { cwd: path.join(ROOT, 'web'), encoding: 'utf8' });
   if (build.status !== 0) throw new Error(`web build failed:\n${build.stdout}\n${build.stderr}`);
 }

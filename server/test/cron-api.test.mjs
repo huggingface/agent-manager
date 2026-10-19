@@ -1,11 +1,12 @@
 // Cron API, durable boot behavior, scheduled identity, and same-name creation.
 import { nativeFetch as fetch } from './native-client.mjs';
+import { freePort } from './free-port.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const PORT = 7902;
+const PORT = await freePort();
 const API = `http://127.0.0.1:${PORT}`;
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-cron-api-'));
 const bin = path.join(DATA_DIR, 'bin');

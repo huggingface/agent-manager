@@ -6,6 +6,7 @@
 // viewer controls input and PTY geometry; Ghostty remains the durable authority.
 //   node resize.test.mjs
 import { nativeFetch as fetch, NativeWebSocket as WebSocket } from './test/native-client.mjs';
+import { freePort } from './test/free-port.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
@@ -21,7 +22,7 @@ import { snapshotToRestoreAnsi, styledTerminalRows } from './src/snapshot.js';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-resize-'));
 const FIXTURE = path.join(HERE, 'fixtures', 'repaint-tui.mjs');
-const PORT = 7895;
+const PORT = await freePort();
 const CTRL = '\x00\x00AM:';
 const base = `http://localhost:${PORT}`;
 

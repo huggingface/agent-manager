@@ -62,10 +62,13 @@ privacy checks apply only when running as a Space.
 
 ## Build and check
 
-From `web/`, `npm run build` typechecks and builds the frontend; `npm test` runs
-the web suites. From `server/`, `npm test` runs the server suites. Browser tests
-also need Playwright's matching Chromium (`npx playwright install chromium`
-from `web/`). Browser and integration test files document any additional setup.
+From `web/`, `npm run build` typechecks and builds the frontend. From the
+repository root, `npm test` runs every server and web suite plus the typecheck
+in parallel (about two minutes); `npm test` in `server/` or `web/` runs one
+package. Browser tests also need Playwright's matching Chromium
+(`npx playwright install chromium` from `web/`). [Testing](testing.md) covers
+running one suite, the manual and live suites, and writing a suite that is safe
+to run in parallel.
 
 The repository is also a Docker Space: the `Dockerfile` builds the frontend and
 runs the backend. It installs coding CLIs, with optional installations marked

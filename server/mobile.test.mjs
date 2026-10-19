@@ -5,9 +5,10 @@
 // visual viewport is replaced with a controllable EventTarget so the keyboard
 // test covers both viewport height and iOS's non-zero offsetTop.
 //
-// am-test: manual — Chromium, a full web build and port 7896; `npm run test:mobile`.
+// am-test: manual — Chromium, a full web build and a free port; `npm run test:mobile`.
 //   npm run test:mobile
 import { nativeFetch as fetch, NativeWebSocket as WebSocket } from './test/native-client.mjs';
+import { freePort } from './test/free-port.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,8 +20,9 @@ import { chromiumLaunchOptions } from '../scripts/test-chromium.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-mobile-'));
-const PUBLIC_DIR = process.env.MOBILE_PUBLIC_DIR || path.join(DATA_DIR, 'public');
-const API = 'http://127.0.0.1:7896';
+const PUBLIC_DIR = process.env.MOBILE_PUBLIC_DIR || process.env.AM_TEST_DIST || path.join(DATA_DIR, 'public');
+const PORT = String(await freePort());
+const API = `http://127.0.0.1:${PORT}`;
 const WEB = API;
 const CTRL = '\x00\x00AM:';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -52,7 +54,7 @@ const waitFor = async (fn, timeout = 15_000) => {
   return false;
 };
 
-if (!process.env.MOBILE_PUBLIC_DIR) {
+if (!process.env.MOBILE_PUBLIC_DIR && !process.env.AM_TEST_DIST) {
   const build = spawnSync('npm', ['run', 'build', '--', '--outDir', PUBLIC_DIR], {
     cwd: path.join(ROOT, 'web'), encoding: 'utf8',
   });
@@ -74,7 +76,7 @@ const backend = spawn('node', ['src/index.js'], {
   // reached through localhost, and the origin guard should validate it as such.
   env: {
     ...BASE_ENV,
-    PORT: '7896', DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '', AM_ALLOW_MISSING_ORIGIN: '1',
+    PORT, DATA_DIR, PUBLIC_DIR, AM_BASHRC: '/nonexistent', SPACE_HOST: '', AM_ALLOW_MISSING_ORIGIN: '1',
   },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -108,7 +110,7 @@ try {
   if (!secondId) throw new Error(`second session creation failed: ${JSON.stringify(second)}`);
 
   const desktopFrames = [];
-  desktop = new WebSocket(`ws://127.0.0.1:7896/ws?session=${id}&cols=140&rows=45`);
+  desktop = new WebSocket(`ws://127.0.0.1:${PORT}/ws?session=${id}&cols=140&rows=45`);
   desktop.on('message', (raw) => {
     const text = raw.toString();
     if (text.startsWith(CTRL)) desktopFrames.push(JSON.parse(text.slice(CTRL.length)));

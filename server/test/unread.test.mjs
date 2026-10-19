@@ -1,4 +1,5 @@
 import { nativeFetch as fetch } from './native-client.mjs';
+import { freePort } from './free-port.mjs';
 // Unread, end to end: which reply the transcript produced, what an
 // acknowledgement is allowed to cover, and what survives a restart.
 //
@@ -13,7 +14,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const PORT = 7889;
+const PORT = await freePort();
 const API = `http://localhost:${PORT}`;
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'unread-srv-'));
 const CLAUDE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'unread-claude-'));
@@ -319,7 +320,7 @@ try {
   console.log('\na fresh install does not baseline away its first reply');
   {
     const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'unread-fresh-'));
-    const port = PORT + 1;
+    const port = await freePort();
     const child = spawn('node', ['src/index.js'], {
       env: { ...BASE_ENV, PORT: String(port), DATA_DIR: fresh, AM_BASHRC: '/nonexistent', AM_ALLOW_MISSING_ORIGIN: '1', CLAUDE_CONFIG_DIR: CLAUDE_DIR },
       stdio: ['ignore', 'pipe', 'pipe'],

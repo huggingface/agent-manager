@@ -46,7 +46,10 @@ const failures = [];
 const FRAMING_IIFE = (await esbuild({ entryPoints: [path.join(web, 'src/lib/framing.ts')], bundle: true, write: false,
   format: 'iife', globalName: 'framing', logLevel: 'silent' })).outputFiles[0].text;
 try {
-  await build({ root: web, logLevel: 'silent', build: { outDir: fixture.publicDir, emptyOutDir: true } });
+  // The run's shared build when there is one (scripts/run-suites.mjs), copied
+  // because this suite adds a page to it; otherwise its own.
+  if (process.env.AM_TEST_DIST) fs.cpSync(process.env.AM_TEST_DIST, fixture.publicDir, { recursive: true });
+  else await build({ root: web, logLevel: 'silent', build: { outDir: fixture.publicDir, emptyOutDir: true } });
   // A page of the app's own origin that frames the app (same-origin framing).
   fs.writeFileSync(path.join(fixture.publicDir, 'frame-self.html'),
     '<!doctype html><body style="margin:0"><iframe id="app" src="/" style="border:0;width:1200px;height:700px"></iframe></body>');

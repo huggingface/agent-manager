@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { freePort } from '../../../server/test/free-port.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(HERE, '..', '..', '..');
@@ -24,7 +25,9 @@ const assertPortFree = (port) => new Promise((resolve, reject) => {
   probe.listen(port, '127.0.0.1', () => probe.close(() => resolve()));
 });
 
+/** `port` defaults to a free one, so suites using this can run side by side. */
 export async function startFixtureServer({ port, publicDir, tag = 'am-fixture-' }) {
+  port ??= await freePort();
   // Never seed a listener this helper did not start: with the port taken, the
   // child dies of EADDRINUSE while /api/health from the OTHER server answers
   // 200, and every fixture write below would land in that instance — and the

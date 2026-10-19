@@ -15,6 +15,9 @@ const { operationMiddleware, readOperations } = await import('../src/operations.
 const { remoteStream } = await import('../src/api-streams.js');
 const secret = 'synthetic-private-data /private/example token_fixture <private-markup>';
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Waits for a condition rather than a fixed time: a release that takes 20ms on an
+// idle machine can take longer while other suites share the CPU.
+const until = async (cond, ms = 2000) => { for (const end = Date.now() + ms; !cond() && Date.now() < end;) await delay(5); };
 const app = express();
 app.use(express.json({ limit: '1kb' }));
 app.use(operationMiddleware({ resolveOrigin: (raw) => raw === 'operator' ? { id: raw, type: 'operator' } : null }));
@@ -83,7 +86,7 @@ try {
         const body = await r.json();
         if (mode !== 'late') { assert.equal(body.code, 'internal-error'); assert.ok(body.error); }
         assert.ok(!JSON.stringify(body).includes('private'));
-        await delay(15);
+        await until(() => completed > count); await delay(15);
         assert.equal(completed, count + 1);
       }
       assert.deepEqual(unhandled, []);
@@ -130,6 +133,8 @@ try {
     const pending = fetch(base + '/api/failure/disconnected', { method: 'POST', headers: { 'x-am-origin': 'operator' }, signal: controller.signal });
     setTimeout(() => controller.abort(), 20);
     await assert.rejects(pending);
+    // The handler answers 100ms after the abort; give it time to try, then some.
+    await until(() => readOperations(100).some((entry) => entry.path === '/api/failure/disconnected'));
     await delay(150);
     const rows = readOperations(100).filter((entry) => entry.path === '/api/failure/disconnected');
     assert.equal(rows.length, 1); assert.equal(rows[0].ok, false); assert.equal(rows[0].incomplete, true);
@@ -174,7 +179,7 @@ try {
     assert.equal(source.destroyed, true);
     const controller = new AbortController();
     const open = await fetch(base + '/api/file/open', { signal: controller.signal }); await open.body.getReader().read(); controller.abort();
-    await delay(20); assert.equal(source.destroyed, true);
+    await until(() => source.destroyed); assert.equal(source.destroyed, true);
     const pre = await fetch(base + '/api/poll/before'); assert.equal(pre.status, 500);
     const old = released;
     const timer = await fetch(base + '/api/poll/timer'); await assert.rejects(timer.text());
@@ -183,7 +188,7 @@ try {
     const good = await fetch(base + '/api/poll/normal'); const bytes = await good.text();
     assert.match(bytes, /^:connected\n/); assert.match(bytes, /"seq":7/); assert.ok(!bytes.includes('internal-error'));
     const ac = new AbortController(); const poll = await fetch(base + '/api/poll/normal', { signal: ac.signal }); await poll.body.getReader().read(); ac.abort();
-    await delay(20); assert.equal(released, old + 3);
+    await until(() => released >= old + 3); assert.equal(released, old + 3);
   });
 } finally {
   server.closeAllConnections(); await new Promise((resolve) => server.close(resolve));

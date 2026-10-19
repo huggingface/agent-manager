@@ -8,7 +8,6 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { startFixtureServer } from './helpers/fixture-server.mjs';
 
-const PORT = 7909;
 const hits = [];
 const stub = http.createServer((req, res) => {
   hits.push(`${req.method} ${req.url}`);
@@ -16,7 +15,8 @@ const stub = http.createServer((req, res) => {
   // Answers like a healthy server that belongs to somebody else.
   res.end(JSON.stringify({ ok: true, dataDir: '/somebody/elses/data', id: 'x' }));
 });
-await new Promise((r) => stub.listen(PORT, '127.0.0.1', r));
+await new Promise((r) => stub.listen(0, '127.0.0.1', r));
+const PORT = stub.address().port;
 
 let failed = 0;
 const check = (what, ok, detail = '') => { console.log(`  ${ok ? 'ok ' : 'FAIL'} ${what}${detail ? `  ${detail}` : ''}`); if (!ok) failed++; };

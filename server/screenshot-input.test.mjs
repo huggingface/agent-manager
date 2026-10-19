@@ -15,6 +15,7 @@
  * am-test: manual — Chromium, a full web build and SCREENSHOT_PORT; `npm run test:ui`.
  */
 import { nativeFetch as fetch } from './test/native-client.mjs';
+import { freePort } from './test/free-port.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -26,8 +27,8 @@ import { chromiumLaunchOptions } from '../scripts/test-chromium.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-screenshot-ui-'));
-const PUBLIC_DIR = process.env.SCREENSHOT_PUBLIC_DIR || path.join(DATA_DIR, 'public');
-const PORT = process.env.SCREENSHOT_PORT || '7896';
+const PUBLIC_DIR = process.env.SCREENSHOT_PUBLIC_DIR || process.env.AM_TEST_DIST || path.join(DATA_DIR, 'public');
+const PORT = process.env.SCREENSHOT_PORT || String(await freePort());
 const API = `http://127.0.0.1:${PORT}`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -61,7 +62,7 @@ const apiJson = async (url, init) => {
   return { response, body };
 };
 
-if (!process.env.SCREENSHOT_PUBLIC_DIR) {
+if (!process.env.SCREENSHOT_PUBLIC_DIR && !process.env.AM_TEST_DIST) {
   const build = spawnSync('npm', ['run', 'build', '--', '--outDir', PUBLIC_DIR], {
     cwd: path.join(ROOT, 'web'), encoding: 'utf8',
   });
