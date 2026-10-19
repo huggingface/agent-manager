@@ -20,6 +20,20 @@ import {
   HISTORY_MAX_EXCHANGES, HISTORY_TARGET_EXCHANGES, useTraceWindows,
   type TraceHeadInfo, type TraceSource,
 } from '../../lib/traceWindows';
+import { readerFor } from '../../lib/readerStore';
+
+/** The session's transcript, as the main reader reads it. */
+const sessionSource = (id: string): TraceSource => ({
+  window: (req, bytes, min, signal) => api.getTraceWindow(id, req, bytes, min, signal),
+  summary: (signal) => api.getTraceSummary(id, signal),
+});
+const readerKey = (id: string) => `session:${id}`;
+
+/** Read this session's first transcript window into the shared store before the
+ *  reader is ever shown (TerminalPane). One bounded read; see `prewarm`. */
+export function prewarmConversation(id: string): void {
+  readerFor(readerKey(id), sessionSource(id)).prewarm();
+}
 
 /** Longest a cold reader will hold its first transcript back (see `preparing`). */
 const PREPARE_MAX_MS = 2_000;
@@ -136,14 +150,11 @@ export default function ConversationView({
   const scanAbort = useRef<AbortController | null>(null);
   const hitAbort = useRef<AbortController | null>(null);
 
-  const src = useMemo<TraceSource>(() => ({
-    window: (req, bytes, min, signal) => api.getTraceWindow(session.id, req, bytes, min, signal),
-    summary: (signal) => api.getTraceSummary(session.id, signal),
-  }), [session.id]);
+  const src = useMemo(() => sessionSource(session.id), [session.id]);
   const onReset = useCallback(() => { following.current = true; setAtLatest(true); }, []);
   // The main reader asks for a useful amount of recent conversation up front.
   // Child transcripts and previews deliberately do not (see the hook).
-  const reader = useTraceWindows(src, `session:${session.id}`, { paused, onReset, history: HISTORY_TARGET_EXCHANGES });
+  const reader = useTraceWindows(src, readerKey(session.id), { paused, onReset, history: HISTORY_TARGET_EXCHANGES });
   const { head, error, phase, loading, notice, version, atStart, blocked, loadOlder, loadNewer, reload } = reader;
   // The automatic recent-history fill is loading too, and the row that says
   // so is the same row.

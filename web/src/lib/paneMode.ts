@@ -14,6 +14,12 @@ export function readPaneMode(): PaneMode {
   try { return localStorage.getItem(KEY) === 'reader' ? 'reader' : 'terminal'; } catch { return 'terminal'; }
 }
 
+/** Whether this browser has ever chosen a mode. Someone who never toggled has
+ *  never asked for the reader, so nothing should be read ahead on their behalf. */
+export function paneModeChosen(): boolean {
+  try { return localStorage.getItem(KEY) !== null; } catch { return false; }
+}
+
 export function writePaneMode(mode: PaneMode): void {
   try { localStorage.setItem(KEY, mode); } catch { /* private mode: this session only */ }
   window.dispatchEvent(new CustomEvent(EVENT, { detail: mode }));
