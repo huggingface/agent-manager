@@ -66,6 +66,9 @@ import { dispatchesOf } from './dispatches.js';
 import { Delegations, traceCheckpoint } from './delegations.js';
 import { findByName, filterAgentsByGroup, normalizeName } from './agent-list.js';
 import { fileLinkRoots, fileLinksRouter } from './file-links.js';
+import { checkAdoption, ADOPT_NOTE } from './claude-adopt.js';
+// Absolute path of the repo's scripts/, for helpers the agent guide names.
+const SCRIPTS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts');
 import { ApiError, apiRoutes, apiNotFound, apiErrorHandler, errorEnvelope, pipeResponse } from './api-errors.js';
 import { createValidator } from './api-validation.js';
 import { remoteStream } from './api-streams.js';
@@ -1315,11 +1318,41 @@ api.post('/api/delegations/:id/cancel', (req,res)=>{
   res.json(delegations.cancel(req.params.id,from.session.id));
 });
 
+// Register an existing Claude conversation (typically the caller's own, run
+// outside AM) as a stopped session. Opening it later resumes that conversation.
+function adoptFromAgent(req, res, from) {
+  const q = req.query;
+  const g = groups.resolveSpawnGroup(q.group, from.session.id);
+  if (g.error) return res.status(400).json({ error: g.error });
+  const r = adoptClaudeSession({
+    name: typeof q.name === 'string' ? q.name : '',
+    groupId: g.groupId,
+    path: typeof q.path === 'string' ? q.path : (from.session.path ?? from.session.id),
+    adoptSessionUuid: q.adoptSessionUuid,
+    prompt: bodyText(req, 'prompt'),
+  });
+  if (r.error) return res.status(r.status).json({ error: r.error, code: r.code });
+  const joined = g.groupId ? groups.get(g.groupId) : null;
+  res.status(201).json({
+    id: r.id, name: r.name, cli: r.cli, path: r.path, workdir: workspacePath(r.path),
+    group: joined ? joined.name : null, sessionUuid: r.sessionUuid, state: 'stopped', adopted: true, note: ADOPT_NOTE,
+  });
+}
+api.post('/api/agents/adopt', promptBody, (req, res) => {
+  const from = sender(req);
+  if (from.error) return res.status(400).json({ error: from.error });
+  adoptFromAgent(req, res, from);
+});
+
 // Launch a peer, already working on the prompt you give it.
 api.post('/api/agents', promptBody, async (req, res) => {
   const from = sender(req);
   if (from.error) return res.status(400).json({ error: from.error });
   const q = req.query;
+  if (q.adoptSessionUuid !== undefined) {
+    if (q.cli !== undefined && q.cli !== 'claude') return res.status(400).json({ error: 'only a Claude conversation can be adopted (cli=claude)', code: 'adopt-cli' });
+    return adoptFromAgent(req, res, from);
+  }
   const cli = String(q.cli || '').trim();
   const def = cliById(cli);
   if (!def || !promptable({ cli })) return res.status(400).json({ error: `unknown agent cli '${cli}' — see clis[] in GET /api/agents` });
@@ -2426,6 +2459,12 @@ to leave it ungrouped. The prompt is required — it starts working on it
 immediately. Spawn one agent for one clearly separable job; several agents in
 one folder is fine, but this Space is a small CPU box, so don't build a fleet.
 
+To register a Claude conversation that runs **outside** AM (e.g. started in a
+shell pane) as a stopped Claude session, run from inside it
+\`node ${SCRIPTS_DIR}/am-adopt.mjs [uuid] [--name N] [--group G]\` (or
+\`POST /api/agents/adopt?adoptSessionUuid=<uuid>&path=…&from=$AM_ID\`). It starts
+nothing; exit that original \`claude\` before opening the new session in AM.
+
 The response carries the new agent's \`id\`. Creation starts the initial task but does not subscribe to a completion callback. Observe that initial task while your turn remains active: it is a
 dispatch and the rule under **Send an ordinary message** applies —
 start the background \`wait\` loop right then, and read its screen before you
@@ -3252,9 +3291,29 @@ function createSession({ name, cli, groupId, path: reqPath, prompt }) {
   return s;
 }
 
+// Adoption records a stopped Claude session bound to an existing conversation.
+// Nothing is launched; the runner's resume branch takes over when it is opened.
+// Returns the session, or { status, code, error }.
+function adoptClaudeSession({ name, groupId, path: reqPath, adoptSessionUuid, prompt }) {
+  const chosen = cleanRelPath(typeof reqPath === 'string' && reqPath.trim() ? reqPath : '.');
+  if (chosen === null) return { status: 400, code: 'invalid-input', error: 'bad path' };
+  const check = checkAdoption({ uuid: adoptSessionUuid, cli: 'claude', prompt, workdir: workspacePath(chosen), sessions: store.list() });
+  if (check.error) return check;
+  const s = createSession({ name, cli: 'claude', groupId, path: chosen });
+  if (!s || s.error) return { status: 400, code: 'invalid-input', error: s?.error || 'bad path' };
+  return store.update(s.id, { sessionUuid: adoptSessionUuid, everStarted: true, adoptedAt: new Date().toISOString() });
+}
+
 api.post('/api/sessions', async (req, res) => {
-  const { name, cli, groupId, path: reqPath, prompt } = req.body || {};
+  const { name, cli, groupId, path: reqPath, prompt, adoptSessionUuid } = req.body || {};
   if (!cli || !cliById(cli)) return res.status(400).json({ error: 'unknown cli' });
+  if (adoptSessionUuid !== undefined) {
+    if (cli !== 'claude') return res.status(400).json({ error: 'only a Claude conversation can be adopted (cli=claude)', code: 'adopt-cli' });
+    if (groupId && !groups.get(groupId)) return res.status(400).json({ error: 'the destination group no longer exists' });
+    const s = adoptClaudeSession({ name, groupId, path: reqPath, adoptSessionUuid, prompt });
+    if (s.error) return res.status(s.status).json({ error: s.error, code: s.code });
+    return res.status(201).json({ ...s, running: false, state: 'stopped', adopted: true, note: ADOPT_NOTE });
+  }
   if(cli==='codex'&&sharedCreationEnabled()){
     requireReaderOperator(req);
     const chosen=cleanRelPath(typeof reqPath==='string'&&reqPath.trim()?reqPath:'.');
