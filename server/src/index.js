@@ -61,7 +61,8 @@ import {
 } from './attachments.js';
 import * as runstate from './runstate.js';
 import { installSlowFsProbe } from './slowfs.js';
-import { operationMiddleware, readOperations } from './operations.js';
+import { operationMiddleware, readOperations, appendSystemOperation } from './operations.js';
+import { createDevPreview, devPreviewEnabled, RESTART_EXIT_CODE } from './dev-preview.js';
 import { dispatchesOf } from './dispatches.js';
 import { Delegations, traceCheckpoint } from './delegations.js';
 import { findByName, filterAgentsByGroup, normalizeName } from './agent-list.js';
@@ -1548,6 +1549,57 @@ function injectedEnvKeys() {
     .sort();
 }
 
+// Dev preview (docs/dev-preview.md): switch this Space between open PRs of
+// huggingface/agent-manager in place. Only when the Space sets AM_DEV_PREVIEW=1;
+// otherwise none of these routes exist (a plain 404) and /api/info says nothing.
+// The repository is a constant inside dev-preview.js, never an input.
+const devPreview = devPreviewEnabled() ? createDevPreview({
+  appDir: '/app',
+  localDir: path.join(process.env.AM_LOCAL || '/home/node/local', 'dev-preview'),
+  stateFile: path.join(STATE_DIR, 'dev-preview.json'),
+  durableLog: path.join(STATE_DIR, 'dev-preview-last.log'),
+  // Set by entrypoint.sh's supervisor loop, which restarts the server when it
+  // exits with RESTART_EXIT_CODE instead of letting the container stop.
+  supervised: process.env.AM_DEV_PREVIEW_SUPERVISED === '1',
+  restart: async () => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    try { await stopAll(); } catch {}
+    process.exit(RESTART_EXIT_CODE);
+  },
+  // The Space's injected secret values: every line a build prints is filtered
+  // against them (plus the audit log's token patterns) before it is shown,
+  // logged or audited.
+  knownSecrets: () => injectedEnvKeys().map((key) => process.env[key]),
+  audit: ({ event, source, ok, request, result }) => appendSystemOperation({
+    origin: { id: 'dev-preview', type: 'system', name: `dev preview (${source})` },
+    method: 'PREVIEW', path: `/dev-preview/${event}`, request, result, ok, durationMs: result?.durationMs || 0,
+    knownValues: injectedEnvKeys().map((key) => process.env[key]),
+  }),
+}) : null;
+if (devPreview) {
+  api.get('/api/dev-preview/status', (_req, res) => res.json(devPreview.status()));
+  api.get('/api/dev-preview/prs', async (_req, res) => {
+    try { res.json({ ok: true, ...(await devPreview.listPrs()) }); }
+    catch (e) { res.json({ ok: false, error: String(e?.message || e).slice(0, 300) }); }
+  });
+  // Both answer at once; progress is read from /status. The request itself is
+  // in the audit log like every POST, and the outcome is appended when the
+  // background job ends.
+  api.post('/api/dev-preview/switch', (req, res) => {
+    let summary;
+    try { summary = devPreview.switchTo(req.body); }
+    catch (e) { throw new ApiError(e.statusCode || 400, e.code || 'invalid-input', e.message); }
+    res.status(202).json({ ok: true, ...summary });
+  });
+  api.post('/api/dev-preview/rollback', (_req, res) => {
+    let summary;
+    try { summary = devPreview.rollback(); }
+    catch (e) { throw new ApiError(e.statusCode || 400, e.code || 'invalid-input', e.message); }
+    res.json({ ok: true, ...summary });
+  });
+}
+
 api.get('/api/info', (_req, res) => res.json({
   dataDir: DATA_DIR,
   home: process.env.HOME || null,
@@ -1579,6 +1631,8 @@ api.get('/api/info', (_req, res) => res.json({
   welcomeSeen: welcomeSeen(),
   // Demo mode: current sessions hidden from view; forces the welcome to show.
   demoMode: demo.active(),
+  // Only on a dev-preview Space: what code is running, for the header banner.
+  ...(devPreview && !isLocked() ? { devPreview: devPreview.summary() } : {}),
 }));
 
 // Demo mode toggle. Activating snapshots the current sessions/groups as the
@@ -4079,6 +4133,9 @@ server.listen(PORT, BIND_HOST, () => {
   console.log(`Agent Manager ${BIND_HOST}:${PORT}  engine=libghostty${ghosttyReady() ? '' : ' (UNAVAILABLE)'}  data=${DATA_DIR}`);
   console.log('⚠  No authentication: this app trusts whoever can reach it.');
   console.log('   Keep this Space PRIVATE — a public instance gives anyone a shell + your logged-in agents.');
+  // A container restart puts /app back to the image: re-apply the persisted PR
+  // selection (exact SHAs) in the background, then restart into it.
+  if (devPreview) { try { devPreview.boot(); } catch (e) { console.error('[dev-preview] boot', e && e.message); } }
   // Scheduled fires use the public cron-run route too. That keeps one execution
   // path and gives the operations log a first-class `cron:<id>` origin instead
   // of inventing a session that does not exist.
