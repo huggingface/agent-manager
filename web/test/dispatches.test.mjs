@@ -22,7 +22,7 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-'));
 for (const [name, entry] of [['d.mjs', '../src/lib/dispatches.ts'], ['v.mjs', '../src/lib/dispatchView.ts'], ['x.mjs', '../src/components/conversation/exchanges.ts']]) {
   await build({ entryPoints: [path.join(HERE, entry)], outfile: path.join(dir, name), format: 'esm', bundle: true, logLevel: 'error' });
 }
-const { resultOf, byExchange, dispatchBlocks } = await import(pathToFileURL(path.join(dir, 'd.mjs')).href);
+const { resultOf, byExchange, dispatchBlocks, isResendOf } = await import(pathToFileURL(path.join(dir, 'd.mjs')).href);
 const { iconsOf, ordered, placeCard, within } = await import(pathToFileURL(path.join(dir, 'v.mjs')).href);
 const { splitExchanges, stepsOf } = await import(pathToFileURL(path.join(dir, 'x.mjs')).href);
 
@@ -189,6 +189,81 @@ check('a short history caps the card to the room beside the icon inside it', () 
   assert.equal(p.side, 'below');
   assert.equal(p.top, 131);
   assert.equal(p.top + p.maxHeight, 83 + 190 - 8);
+});
+
+// Shaped on the manager's real dispatches of 2026-10-19 (prompts redacted):
+// fix-restore-201 refused with 409 at 19:56:38 and resent at 19:57:20; "(go)"
+// to am-image-inputs at 19:37:47, whose Enter submitted the 19:36:20 prompt
+// left sitting in the composer — that turn started at 19:37:47.
+console.log('\nmade moot by another dispatch to the same session');
+const T0 = NOW - 3_600_000;
+const turn = (start, text) => ({ turns: [user(start, text), call(start + 5_000), said(start + 60_000, 'Reviewed: not yet.')], ended: true, truncated: false });
+const prompt = (at, o = {}) => disp({ kind: 'prompt', status: 200, at, prompt: 'Re-check of #201 … redacted …', exchange: turn(at + 3_000, 'Re-check'), ...o });
+const refused = (at, text) => prompt(at, { status: 409, ok: false, exchange: null, ...(text ? { prompt: text } : {}) });
+const nudge = (at) => prompt(at, { prompt: '(go)', exchange: null });
+const icon = (list) => { const [p] = iconsOf(list, NOW); return p; };
+check('refused (409), then resent and finished: superseded, and the session reads done', () => {
+  const p = icon([refused(T0), prompt(T0 + 42_000)]);
+  assert.deepEqual(p.results.map((r) => r.outcome), ['superseded', 'finished']);
+  assert.match(p.results[0].why, /refused \(409\), sent again/);
+  assert.equal(p.side, 'done');
+  assert.equal(p.latest.outcome, 'finished');
+});
+check('a nudge whose Enter submitted the stuck prompt before it: superseded, and the preview is that prompt', () => {
+  const stuck = prompt(T0, { exchange: turn(T0 + 87_000, 'Re-check, then (go)') });   // its turn starts with the nudge
+  const p = icon([stuck, nudge(T0 + 87_000)]);
+  assert.deepEqual(p.results.map((r) => r.outcome), ['finished', 'superseded']);
+  assert.equal(p.results[1].why, 'submitted the earlier prompt');
+  assert.equal(p.side, 'done');
+  assert.equal(p.latest.d.prompt, stuck.prompt, 'the preview shows the nudge, not the work');
+});
+check('refused and never resent: still failed', () => {
+  const p = icon([refused(T0)]);
+  assert.deepEqual(p.results.map((r) => r.outcome), ['failed']);
+  assert.equal(p.side, 'failed');
+});
+check('refused, and the resend never started either: both still failed', () => {
+  const p = icon([refused(T0), prompt(T0 + 30_000, { exchange: null })]);
+  assert.deepEqual(p.results.map((r) => r.outcome), ['failed', 'failed']);
+  assert.equal(p.side, 'failed');
+});
+check('a prompt that never started, after a turn that had ALREADY started: still failed', () => {
+  const p = icon([prompt(T0), nudge(T0 + 120_000)]);   // the earlier turn began at T0+3s
+  assert.deepEqual(p.results.map((r) => r.outcome), ['finished', 'failed']);
+  assert.equal(p.side, 'failed');
+});
+check('refused, then a DIFFERENT task to the same session: the refusal stays failed (review of #204)', () => {
+  const p = icon([refused(T0, 'Fix issue A'), prompt(T0 + 30_000, { prompt: 'Summarize unrelated document B' })]);
+  assert.deepEqual(p.results.map((r) => r.outcome), ['failed', 'finished']);
+  assert.equal(p.side, 'failed');
+});
+// The real resend: a note in front, one clause dropped, the rest identical.
+const TASK = 'Re-check of your #201 at e26df6c: not yet, with one blocking fail-open left. The restore treats a '
+  + 'failed listing as an empty bucket, so a transient API error wipes nothing but also restores nothing, without '
+  + 'just raising the number blindly. Make a failed listing fail the restore, add the regression, push, and reply on the PR.';
+check('refused, then resent with a note in front and a clause dropped: superseded', () => {
+  const resent = `(Ignore my 'ping' just now.) ${TASK.replace(', without just raising the number blindly', '')}`;
+  const p = icon([refused(T0, TASK), prompt(T0 + 42_000, { prompt: resent })]);
+  assert.deepEqual(p.results.map((r) => r.outcome), ['superseded', 'finished']);
+});
+check('a nudge whose text is NOT in the turn that started after it: still failed', () => {
+  const stuck = prompt(T0, { exchange: turn(T0 + 87_000, 'Re-check only') });
+  const p = icon([stuck, nudge(T0 + 87_000)]);
+  assert.deepEqual(p.results.map((r) => r.outcome), ['finished', 'failed']);
+});
+check('what counts as a resend', () => {
+  assert.equal(isResendOf('[message from manager:] Fix issue A', 'Fix issue A'), true, 'envelope aside, equal');
+  assert.equal(isResendOf('Please: Fix issue A now', 'Fix issue A'), true, 'contains it');
+  assert.equal(isResendOf('Summarize unrelated document B', 'Fix issue A'), false);
+  assert.equal(isResendOf('(go)', 'Fix issue A'), false);
+  assert.equal(isResendOf('Fix issue B', 'Fix issue A'), false, 'short and different');
+  const half = TASK.split(' ').slice(0, 20).join(' ') + ' and then something else entirely, a different request with new wording throughout';
+  assert.equal(isResendOf(half, TASK), false, 'sharing the opening is not enough');
+});
+check('a refused send followed only by one to ANOTHER session: still failed', () => {
+  const other = prompt(T0 + 30_000, { target: { id: 'other-1', name: 'other', cli: 'codex', color: null, exists: true, state: 'waiting' } });
+  const icons = iconsOf([refused(T0), other], NOW);
+  assert.equal(icons.find((p) => p.key === 'canvas-1').side, 'failed');
 });
 
 fs.rmSync(dir, { recursive: true, force: true });
