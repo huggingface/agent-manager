@@ -63,27 +63,64 @@ export function resultOf(d: Dispatch, now = Date.now()): DispatchResult {
   return { d, outcome: 'failed', why: 'never started', x: null, answer: '' };
 }
 
+/** A prompt as text to compare: no `[message from …]` envelope, one space per run. */
+const promptText = (t: string) => String(t || '').replace(/^(?:\s*\[message from [^\]]*\]\s*)+/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+/**
+ * Is `later` a resend of `earlier` — the same task, not just the next one?
+ * Equal or containing it, or carrying nearly all of its wording: a real resend
+ * (2026-10-19) added "(Ignore my 'ping' just now.) " in front and dropped one
+ * clause, keeping 97% of the text. Measured as the share of the earlier
+ * prompt's four-word runs found in the later one. Two different tasks share
+ * almost none, and anything short of the bar is not a resend: unsure stays red.
+ */
+export function isResendOf(later: string, earlier: string): boolean {
+  const a = promptText(earlier), b = promptText(later);
+  if (!a) return false;
+  if (b === a || b.includes(a)) return true;
+  const words = a.split(' ');
+  if (words.length < 4) return false;            // too short to judge by wording
+  const have = new Set<string>();
+  const bw = b.split(' ');
+  for (let i = 0; i + 4 <= bw.length; i++) have.add(bw.slice(i, i + 4).join(' '));
+  let hit = 0, all = 0;
+  for (let i = 0; i + 4 <= words.length; i++, all++) if (have.has(words.slice(i, i + 4).join(' '))) hit++;
+  return hit / all >= RESEND_SHARE;
+}
+const RESEND_SHARE = 0.8;
+
+/** What the user side of a dispatch's exchange said: every user turn's text. */
+const userText = (d: Dispatch) => (d.exchange?.turns || []).filter((t) => t.role === 'user')
+  .flatMap((t) => t.blocks).map((b) => ('text' in b ? b.text || '' : '')).join(' ');
+
 /**
  * Dispatches to ONE session within one turn, oldest first, with the ones a
  * later or earlier dispatch made moot marked `superseded` — drawn grey and
- * folded under the one that worked, instead of red:
+ * folded under the one that worked, instead of red. Only on evidence that it
+ * is the SAME task:
  *
  *  - refused, then resent: the call was refused (the input guard's 409, say)
- *    and a later dispatch to the same session was accepted and did not fail;
- *  - absorbed: it never started a turn of its own because its Enter is what
- *    submitted an EARLIER dispatch left sitting in the composer — that
- *    dispatch's turn started only once this one was sent. ("(go)" nudges.)
+ *    and a later dispatch to the same session that is a resend of it
+ *    (isResendOf) was accepted and did not fail. A different task sent next
+ *    does not make the refusal moot;
+ *  - absorbed: it never started a turn of its own because its Enter submitted
+ *    an EARLIER dispatch left sitting in the composer — that dispatch's turn
+ *    started only once this one was sent, and carries this one's text too.
+ *    ("(go)" nudges.)
  *
- * A failure nothing followed up, or whose follow-up also failed, stays failed.
+ * A failure nothing resent, or whose resend also failed, stays failed.
  */
 export function supersede(rs: DispatchResult[]): DispatchResult[] {
   return rs.map((r, i) => {
     if (r.outcome !== 'failed' && r.outcome !== 'queued') return r;
-    if (!r.d.ok && rs.slice(i + 1).some((n) => n.d.ok && n.outcome !== 'failed' && n.outcome !== 'superseded')) {
+    if (!r.d.ok && rs.slice(i + 1).some((n) => n.d.ok && n.outcome !== 'failed' && n.outcome !== 'superseded'
+      && isResendOf(n.d.prompt, r.d.prompt))) {
       return { ...r, outcome: 'superseded', why: `${r.why || 'refused'}, sent again` };
     }
     if (r.d.ok && !r.d.exchange) {
-      const into = rs.slice(0, i).reverse().find((e) => e.d.exchange && (e.x?.startTs ?? 0) >= r.d.at - SKEW_MS);
+      const mine = promptText(r.d.prompt);
+      const into = rs.slice(0, i).reverse().find((e) => e.d.exchange && (e.x?.startTs ?? 0) >= r.d.at - SKEW_MS
+        && !!mine && promptText(userText(e.d)).includes(mine));
       if (into) return { ...r, outcome: 'superseded', why: 'submitted the earlier prompt' };
     }
     return r;
