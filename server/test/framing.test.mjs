@@ -107,6 +107,9 @@ test('every response carries frame-ancestors, off a Space', async () => {
     assert.equal(csp(await fetch(srv.base + '/')), "frame-ancestors 'self'", 'no fetch directive on the page');
     const info = await (await fetch(srv.base + '/api/info')).json();
     assert.deepEqual(info.frameAncestors, []);
+    // A local install's disk is durable: no bucket question (storage.js).
+    assert.equal(info.storage.persistent, true);
+    assert.equal(info.storage.reason, 'not-a-space');
   } finally { await srv.stop(); }
 });
 
@@ -120,6 +123,10 @@ test('every response carries frame-ancestors, in a Space (Hub allowed)', async (
     assert.equal(csp(await fetch(srv.base + '/')), "frame-ancestors 'self' https://huggingface.co");
     const info = await (await fetch(srv.base + '/api/info')).json();
     assert.deepEqual(info.frameAncestors, ['https://huggingface.co']);
+    // A Space whose data lives in a temp folder rather than the /data bucket.
+    assert.equal(info.storage.persistent, false);
+    assert.equal(info.storage.reason, 'fallback');
+    assert.equal(info.storage.dataDir, info.dataDir);
   } finally { await srv.stop(); }
 });
 

@@ -3,6 +3,7 @@ import type { SessionState } from '../types';
 import { describeVerification, type LockStatus } from '../lib/lockStatus';
 import { SlidersGlyph, SunGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
 import StateLogo from './StateLogo';
+import HfHeaderIcon from './HfHeaderIcon';
 
 export const REPO_URL = 'https://github.com/huggingface/agent-manager';
 // The launch film, from a public dataset. A new cut changes only this.
@@ -247,8 +248,8 @@ api.duplicate_repo(
           <div className="step">
             <div className="step-head"><span className="step-n mono">1</span><h3>Duplicate this Space</h3></div>
             <p className="locked-sub">
-              Open the <b>⋮ menu</b> at the top of this page and choose <b>Duplicate this Space</b>.
-              Set the new Space's visibility to <b>Private</b>.
+              Click <HfHeaderIcon /> at the top right of this page to show the Space's menu bar, then open
+              the <b>⋮ menu</b> and choose <b>Duplicate this Space</b>. Set the new Space's visibility to <b>Private</b>.
             </p>
             <img src="/install/duplicate-space.png" alt="The Space's ⋮ menu with 'Duplicate this Space' highlighted" />
           </div>

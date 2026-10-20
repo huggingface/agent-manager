@@ -19,6 +19,7 @@ import { LOCKED_EVENT, createLockTracker, type LockAnnouncement } from './lib/lo
 import BackupBanner from './components/BackupBanner';
 import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
+import BucketPrompt, { NoBucketBanner } from './components/BucketPrompt';
 import { configuredCount, keepOffering } from './components/WelcomeSetup';
 import * as api from './api';
 import { pinnedSessionIds } from './lib/pinned';
@@ -35,6 +36,7 @@ import { isPassive, isRemote, isShareable } from './types';
 import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
 import { createLatestRefresh, observeAppReturns } from './lib/appRefresh';
 import { serverReach } from './lib/serverReach';
+import { needsBucket } from './lib/storageGate';
 
 // `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
 // when the app is embedded cross-origin. Read once: it never changes mid-run,
@@ -471,6 +473,32 @@ export default function App() {
     api.dismissWelcome().catch(() => {});
   };
   const openWelcome = () => { setSettingsOpen(false); setShowWelcome(true); };
+
+  // No bucket on a Space: ask about one BEFORE getting started (BucketPrompt).
+  // "Continue without a bucket" lets the welcome through for this load and
+  // leaves the banner, whose link reopens the question.
+  const noBucket = needsBucket(info);
+  const [bucketSkipped, setBucketSkipped] = useState(false);
+  const [bucketAsked, setBucketAsked] = useState(false);
+  const [bucketWaiting, setBucketWaiting] = useState(false);
+  const showBucket = noBucket && ((showWelcome && !bucketSkipped) || bucketAsked);
+  const skipBucket = () => { setBucketSkipped(true); setBucketAsked(false); setBucketWaiting(false); };
+  // "Yes, I've attached it" while the server still sees none: attaching
+  // restarts the Space, so wait for the new server to report the bucket, then
+  // reload into it. /api/info is re-read every few seconds; while the Space is
+  // down the read fails and serverReach's shared poll takes over, and its
+  // onBack (above) re-reads /api/info the moment the server answers again.
+  useEffect(() => {
+    if (!bucketWaiting) return;
+    const t = window.setInterval(() => {
+      api.getInfo().then((next) => {
+        serverReach.noteBoot(next.visibility?.boot);
+        if (next.storage?.persistent) location.reload();
+      }).catch(() => serverReach.reportOutage());
+    }, 3000);
+    return () => window.clearInterval(t);
+  }, [bucketWaiting]);
+  useEffect(() => { if (bucketWaiting && info?.storage?.persistent) location.reload(); }, [bucketWaiting, info?.storage?.persistent]);
   // Demo mode: hide current sessions from view (nothing is deleted). Toggling
   // off restores the full sidebar. Turning it on shows the welcome; off hides it.
   const toggleDemo = async () => {
@@ -1284,7 +1312,9 @@ export default function App() {
         along — but the history it keeps still shows the displacement happening. */}
     {VV_DEBUG && <Suspense fallback={null}><ViewportDebug /></Suspense>}
     <div className={`app${settingsOpen ? ' app-suspended' : ''}${isMobile ? (mobileStage ? ' m-stage' : ' m-home') : ''}`}>
-      {showWelcome && (
+      {showBucket ? (
+        <BucketPrompt waiting={bucketWaiting} onAttached={() => setBucketWaiting(true)} onSkip={skipBucket} />
+      ) : showWelcome && (
         <Welcome
           onClose={dismissWelcome}
           clis={clis}
@@ -1403,6 +1433,7 @@ export default function App() {
         )}
         {/* Visible where you already are, on every view. Rides on /api/info,
             which is polled every 15s, so no new request for the normal case. */}
+        {noBucket && !showBucket && <NoBucketBanner onShow={() => { setSettingsOpen(false); setBucketAsked(true); }} />}
         <BackupBanner health={info?.backup} onOpenSettings={() => { setSettingsPage('general'); setSettingsOpen(true); }} />
         <div className="stage">
           {renderTiles(
