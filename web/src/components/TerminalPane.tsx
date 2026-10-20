@@ -16,7 +16,7 @@ import TraceInfo from './TraceInfo';
 import ConversationView, { prewarmConversation } from './conversation/ConversationView';
 import type { ConversationSeen } from './conversation/ConversationView';
 import { isPassive } from '../types';
-import { paneModeChosen, type PaneMode } from '../lib/paneMode';
+import type { PaneMode } from '../lib/paneMode';
 import { groupLabel, sessionTitle } from '../lib/sessionTitle';
 import { LOCKED_CLOSE_CODE, announceLock, parseCloseReason } from '../lib/lockStatus';
 import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph, StopGlyph } from './icons';
@@ -200,7 +200,7 @@ if (typeof window !== 'undefined') {
 
 // Long enough for the terminal's own attach to go first; short enough to land
 // before a person reaches for the toggle.
-const READER_PREWARM_MS = 1500;
+const READER_PREWARM_MS = 500;
 // Output a terminal under the reader holds back before it detaches instead.
 const HIDDEN_HOLD_BYTES = 64 * 1024;
 
@@ -1412,11 +1412,11 @@ export default function TerminalPane({
   }, [active, reading]);
 
   // The first switch to the reader should paint text, not wait for the network.
-  // Once the terminal is up and idle, read the reader's first window into its
-  // store — only for an agent pane that is being looked at, only in a browser
-  // that has used the reader toggle before, and only once (the store keeps it).
+  // Once the terminal is up, read the reader's first window into its store —
+  // only for an agent pane that is being looked at, and only once (the store
+  // keeps it): one bounded tail read, no polling and no history fill.
   useEffect(() => {
-    if (!active || reading || readerBuilt || !canRender || isRemote(session.cli) || !paneModeChosen()) return;
+    if (!active || reading || readerBuilt || !canRender || isRemote(session.cli)) return;
     const timer = setTimeout(() => prewarmConversation(session.id), READER_PREWARM_MS);
     return () => clearTimeout(timer);
   }, [active, reading, readerBuilt, canRender, session.id, session.cli]);

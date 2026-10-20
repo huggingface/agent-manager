@@ -674,6 +674,25 @@ try {
   check(`no transcript window is re-read (${JSON.stringify(reads)})`, () => {
     assert.deepEqual(reads.filter((r) => r !== 'trace.after'), []);
   });
+  console.log('\nthe first switch to the reader does not wait for the network');
+  // A pane shown in terminal mode reads the reader's first window ahead of the
+  // toggle: one tail read, no history pages, no polling. The first switch then
+  // paints text in the same task, from the warm store, with a fresh browser.
+  await p.evaluate(() => { try { localStorage.clear(); } catch {} });
+  await p.evaluate((screen) => window.fixture.mount({ mode: 'terminal', id: 'prewarm', payload: [screen], slowTrace: 0 }), shellScreen);
+  await p.evaluate(() => window.fixture.reset());
+  await p.waitForSelector('.xterm');
+  await p.waitForTimeout(1500);
+  const ahead = await p.evaluate(() => window.marks.filter((m) => m.name.startsWith('trace.')).map((m) => m.name));
+  const firstOpen = await p.evaluate(() => {
+    window.fixture.change({ mode: 'reader' });
+    return document.querySelectorAll('.cxv-body [data-x]').length;
+  });
+  check(`one tail read ahead of the toggle (${JSON.stringify(ahead)}), and the first switch paints at once`, () => {
+    assert.deepEqual(ahead, ['trace.tail']);
+    assert.ok(firstOpen > 0, 'the first reader open waited for the network');
+  });
+
   console.log('\nunder the reader the terminal does no work');
   // The review of #205: a terminal kept under the reader still parsed every
   // frame an agent printed. Frames are now held unparsed and replayed in order
