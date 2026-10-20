@@ -2,6 +2,11 @@
 // never loaded, and opening it without dragging every page in between through
 // the browser.
 //
+// am-test: serial — under a fully loaded parallel run the reader came back
+// from an old window 337px off its reading position (always the same state:
+// 78px → 415px), which no isolated, throttled or delayed run reproduces. It runs
+// alone until that is understood; the failure message carries the reads.
+//
 // The premise every case here depends on: the needle is in the FIRST exchange
 // of a transcript far larger than the reader's history budget, so a test that
 // could be satisfied by filtering loaded turns would fail immediately.
@@ -265,6 +270,7 @@ try {
       st: el.scrollTop, sh: el.scrollHeight, ch: el.clientHeight,
       rows: document.querySelectorAll('[data-x]').length };
   });
+  const readsAtAnchor = await p.evaluate(() => window.reads.length);
   await searchAll.click();
   await p.waitForFunction(() => window.probe.hitRows() > 0, null, { timeout: 20_000 });
   await p.locator('.cxv-hitrow').last().click();
@@ -304,10 +310,11 @@ try {
     const row = document.querySelector(`[data-x="${key}"]`);
     return row ? Math.round(row.getBoundingClientRect().top) : null;
   }, anchored.key);
-  const settledState = await p.evaluate(() => {
+  const settledState = await p.evaluate((mark) => {
     const el = document.querySelector('.cxv-body');
-    return { st: el.scrollTop, sh: el.scrollHeight, ch: el.clientHeight, rows: document.querySelectorAll('[data-x]').length };
-  });
+    return { st: el.scrollTop, sh: el.scrollHeight, ch: el.clientHeight, rows: document.querySelectorAll('[data-x]').length,
+      readsSinceAnchor: window.reads.slice(mark) };
+  }, readsAtAnchor);
   assert.notEqual(returned, null, 'the row that was being read is still rendered');
   assert.ok(Math.abs(returned - anchored.top) <= 2,
     `and in the same place (${anchored.top}px before opening a hit, ${returned}px after coming back; before ${JSON.stringify(anchored)}, after ${JSON.stringify(settledState)})`);

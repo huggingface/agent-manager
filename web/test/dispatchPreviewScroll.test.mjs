@@ -1,5 +1,8 @@
 // A capped preview must scroll, and the history must still scroll around it.
 //
+// am-test: serial — real wheel and touch gestures; with the CPU saturated by a
+// parallel run, a slow touch drag on the sheet chained into the history.
+//
 // The operator, on am-dev-2 at 9f2c92a: "the scrolling seems to be blocked when
 // the preview widget doesnt have enough space". In a short reader pane the card
 // was capped, drew a scrollbar, and would not scroll — every scroll it got
