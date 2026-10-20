@@ -35,6 +35,7 @@ await build({ stdin: { resolveDir: process.cwd(), loader: 'tsx', contents: `
   };
 ` }, outfile: bundle, bundle: true, platform: 'browser', format: 'iife', define: { 'process.env.NODE_ENV': '"production"' }, logLevel: 'silent' });
 let mutations = 0;
+const uploads = []; // the session id of every upload the server received
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://fixture');
   const send = (status, body) => { if (res.destroyed) return; res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
@@ -46,6 +47,7 @@ const server = http.createServer((req, res) => {
   }
   if (req.method !== 'GET') mutations++;
   if (url.pathname.endsWith('/attachments')) {
+    uploads.push(url.pathname.split('/')[3]);
     req.resume();
     req.once('end', () => {
       if (url.pathname.includes('/large/')) send(413, { error: 'File is too large.', code: 'payload-too-large' });
@@ -115,6 +117,7 @@ try {
   await page.getByRole('button', { name: 'Overwrite', exact: true }).waitFor();
   assert.equal(await editor.innerText(), 'unsaved file draft');
   const before = mutations;
+  const uploadsBefore = uploads.length;
   const upload = await page.evaluate(async () => {
     const file = new File(['x'.repeat(2 * 1024 * 1024)], 'fixture.txt', { type: 'text/plain' });
     const progress = [];
@@ -135,7 +138,14 @@ try {
   assert.equal(upload.success.id, 'attachment'); assert.ok(upload.progress.some((n) => n > 0));
   assert.equal(upload.failures[0].status, 413); assert.equal(upload.failures[1].status, 502); assert.ok(!upload.failures[1].message.includes('private'));
   assert.deepEqual(upload.failures.slice(2).map((e) => e.code), ['canceled', 'timeout', 'canceled']);
-  assert.equal(mutations - before, 5, 'no mutation replay; canceled-before-send upload never starts');
+  // Per upload rather than a total: the two 'slow' ones are cut 30ms in, and
+  // on a loaded machine that can be before the request reaches the server.
+  // What must hold is that nothing is sent twice and the upload cancelled
+  // before sending never arrives.
+  const seen = uploads.slice(uploadsBefore);
+  const count = (id) => seen.filter((x) => x === id).length;
+  assert.deepEqual([count('one'), count('large'), count('bad')], [1, 1, 1], `no mutation replay; canceled-before-send upload never starts (${seen.join(',')})`);
+  assert.ok(count('slow') <= 2 && mutations - before === seen.length, `no mutation replay (${seen.join(',')})`);
   assert.deepEqual(errors, []);
   console.log('Actual controls retain drafts, show domain errors, keep reader composer and XHR progress/cancel/timeout');
 } finally { await browser.close(); server.closeAllConnections(); await new Promise((r) => server.close(r)); fs.rmSync(root, { recursive: true, force: true }); }

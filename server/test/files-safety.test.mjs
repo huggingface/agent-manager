@@ -189,11 +189,17 @@ try {
     });
     request.on('error', reject);
     request.write('FIRST-HALF');
-    setTimeout(() => {
+    // Swap once the server is writing into actual-a (its staging file is
+    // there), not after a fixed 50ms: on a loaded machine the server may not
+    // have resolved the destination yet, and then there is no change to catch.
+    const staged = () => fs.readdirSync(path.join(WORK, 'actual-a')).some((n) => n.includes('.am-upload-'));
+    const swap = () => {
       fs.unlinkSync(switcher);
       fs.symlinkSync(path.join(WORK, 'actual-b'), switcher);
       request.end('SECOND');
-    }, 50);
+    };
+    const started = Date.now();
+    (function poll() { if (staged() || Date.now() - started > 5000) swap(); else setTimeout(poll, 10); }());
   });
   assert.equal(switched.status, 409);
   assert.equal(switched.body.code, 'destination-changed');

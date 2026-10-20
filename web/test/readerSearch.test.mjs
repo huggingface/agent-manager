@@ -108,6 +108,9 @@ await build({
       },
       summary(){ return Promise.resolve({...page(0,0), total:records.length, userTurns:[]}); },
     };
+    // Reads still on their way, so a check can wait for a reader that is at rest.
+    { const read = window.fixtureApi.window; window.inFlight = 0;
+      window.fixtureApi.window = async (...args) => { window.inFlight++; try { return await read.apply(window.fixtureApi, args); } finally { window.inFlight--; } }; }
 
     function App(){ return <div style={{position:'absolute',inset:0,display:'flex'}}><div className="pane-reader">
       <ConversationView session={{id:cfg.id,cli:'claude',name:'F',state:'waiting',running:false,everStarted:true,
@@ -246,7 +249,14 @@ try {
   await box.fill('Question');
   await p.waitForFunction(() => document.querySelectorAll('[data-x]').length > 2);
   await p.evaluate(() => { document.querySelector('.cxv-body').scrollTop = 140; });
-  await new Promise((r) => setTimeout(r, 250));
+  // Near the top, so the live view may load an earlier page. Record the anchor
+  // once that has landed (nothing in flight, height unchanged for 300ms), not
+  // after a fixed 250ms: a page arriving later moves the row for its own reasons.
+  await p.waitForFunction(() => {
+    const h = document.querySelector('.cxv-body').scrollHeight;
+    if (window.inFlight || window.__settleH !== h) { window.__settleH = h; window.__settleAt = performance.now(); return false; }
+    return performance.now() - window.__settleAt >= 300;
+  }, null, { timeout: 10_000, polling: 50 });
   const anchored = await p.evaluate(() => {
     const el = document.querySelector('.cxv-body');
     const edge = el.getBoundingClientRect().top;
