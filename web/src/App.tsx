@@ -4,6 +4,7 @@ import type { QuickStartAttachmentOptions } from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
 import PaneFilePreview from './components/PaneFilePreview';
 import { retainFileViewer } from './lib/fileViewer';
+import { nextWarmPanes } from './lib/warmPanes';
 import type { FileLinkRequest } from './lib/fileLinks';
 import RemotePane from './components/RemotePane';
 import SettingsShell, { type SettingsPage } from './components/SettingsShell';
@@ -795,19 +796,13 @@ export default function App() {
   const retainedTerminalIds = [...visibleTerminalIds, ...warmTerminalIds]
     .filter((id, i, all) => !!sessById[id] && all.indexOf(id) === i)
     .slice(0, Math.max(WARM_TERMINAL_LIMIT, visibleTerminalIds.length));
-  // The visible panes and the few seen just before them keep both views.
+  // The visible panes and the few seen just before them keep both views. The
+  // bound applies on every route, including ones that show no pane at all.
   const [recentIds, setRecentIds] = useState<string[]>([]);
   useEffect(() => {
-    if (!visibleTerminalIds.length) return;
-    setRecentIds((previous) => {
-      const next = [...visibleTerminalIds, ...previous]
-        .filter((id, i, all) => all.indexOf(id) === i)
-        .slice(0, visibleTerminalIds.length + WARM_BOTH_LIMIT);
-      return next.length === previous.length && next.every((id, i) => id === previous[i])
-        ? previous : next;
-    });
+    setRecentIds((previous) => nextWarmPanes(previous, visibleTerminalIds, WARM_BOTH_LIMIT, (id) => !!sessById[id]));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleTerminalKey]);
+  }, [visibleTerminalKey, sessionIdsKey]);
   // Visible panes count on the render that shows them; the effect above
   // remembers them for later renders and applies the bound.
   const warmBoth = new Set([...visibleTerminalIds, ...recentIds]);
