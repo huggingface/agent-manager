@@ -674,6 +674,51 @@ try {
   check(`no transcript window is re-read (${JSON.stringify(reads)})`, () => {
     assert.deepEqual(reads.filter((r) => r !== 'trace.after'), []);
   });
+  console.log('\nunder the reader the terminal does no work');
+  // The review of #205: a terminal kept under the reader still parsed every
+  // frame an agent printed. Frames are now held unparsed and replayed in order
+  // when it is shown; past 64 KiB the socket is closed and it reattaches.
+  await open({ id: 'quiet', payload: [shellScreen] });
+  await p.evaluate(() => { window.sockets.length = 0; });
+  await toTerminal();
+  await toReader();
+  const emit = (data) => p.evaluate((d) => { for (const s of window.sockets) if (s.readyState === 1) s.onmessage?.({ data: d }); }, data);
+  const screenText = () => p.evaluate(() => document.querySelector('.xterm-rows')?.textContent || '');
+  await emit('quiet line one\r\n'); await emit('quiet line two\r\n');
+  await p.waitForTimeout(200);
+  const whileHidden = await screenText();
+  await p.evaluate(() => window.fixture.change({ mode: 'terminal' }));
+  await p.waitForFunction(() => (document.querySelector('.xterm-rows')?.textContent || '').includes('quiet line two'), null, { timeout: 3000 }).catch(() => {});
+  const afterShow = await screenText();
+  const quietSockets = await p.evaluate(() => ({ live: window.fixture.live(), total: window.sockets.length }));
+  check('a quiet agent\'s output is held while reading and shown, in order, on return', () => {
+    assert.ok(!whileHidden.includes('quiet line'), 'the hidden terminal parsed output nobody could see');
+    assert.ok(afterShow.indexOf('quiet line one') >= 0 && afterShow.indexOf('quiet line one') < afterShow.indexOf('quiet line two'), afterShow.slice(-200));
+    assert.deepEqual(quietSockets, { live: 1, total: 1 }, 'and on the same socket');
+  });
+  await open({ id: 'chatty', payload: [shellScreen] });
+  await p.evaluate(() => { window.sockets.length = 0; });
+  await toTerminal();
+  await toReader();
+  const chunk = Array.from({ length: 400 }, (_, i) => `busy output line ${i} with some padding to fill the frame`).join('\r\n') + '\r\n';
+  for (let i = 0; i < 8; i++) await emit(chunk);
+  const chatty = await p.evaluate(() => ({ live: window.fixture.live(), total: window.sockets.length,
+    parsed: (document.querySelector('.xterm-rows')?.textContent || '').includes('busy output') }));
+  check(`a busy agent past 64 KiB detaches instead of buffering (${JSON.stringify(chatty)})`, () => {
+    assert.deepEqual(chatty, { live: 0, total: 1, parsed: false });
+  });
+  const reattach = await p.evaluate(async () => {
+    const t0 = performance.now();
+    window.fixture.change({ mode: 'terminal' });
+    const stale = (document.querySelector('.xterm-rows')?.textContent || '').includes('you/workspaces $');
+    while (performance.now() - t0 < 5000 && window.fixture.live() !== 1) await new Promise((r) => setTimeout(r, 10));
+    return { stale, live: window.fixture.live(), total: window.sockets.length,
+      cover: !!document.querySelector('.term-preview, .term-boot') };
+  });
+  check('shown again, it paints the last screen at once and reattaches behind it', () => {
+    assert.deepEqual(reattach, { stale: true, live: 1, total: 2, cover: false });
+  });
+
   // Outside the app's warm set a pane keeps only the view it shows, as before.
   await open({ id: 'released', payload: [shellScreen], warm: false });
   await settleReader();

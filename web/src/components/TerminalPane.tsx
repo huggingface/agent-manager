@@ -201,6 +201,8 @@ if (typeof window !== 'undefined') {
 // Long enough for the terminal's own attach to go first; short enough to land
 // before a person reaches for the toggle.
 const READER_PREWARM_MS = 1500;
+// Output a terminal under the reader holds back before it detaches instead.
+const HIDDEN_HOLD_BYTES = 64 * 1024;
 
 // `inert` keeps a hidden surface out of focus, find-in-page and the tab order.
 // React 18 does not know the attribute, so it is passed through as a string.
@@ -259,6 +261,8 @@ export default function TerminalPane({
   // terminal's scrollback when the reader covers it.
   const stopGlideRef = useRef<() => void>(() => {});
   const reconnectRef = useRef<(restart?: boolean) => void>(() => {});
+  // Shows the terminal's held output, or reattaches it (see `hold`).
+  const revealRef = useRef<() => void>(() => {});
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
   const [preview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
@@ -816,8 +820,23 @@ export default function TerminalPane({
         if (isMobile && !document.hidden) claimControl();
         requestSize();
       };
+      const sock = ws;
       ws.onmessage = (e) => {
+        if (sock !== ws) return;
         const d = typeof e.data === 'string' ? e.data : new Uint8Array(e.data as ArrayBuffer);
+        // Under the reader nothing is parsed: frames wait, in order, for the
+        // terminal to be shown (see `hold`).
+        if (modeRef.current === 'reader') { hold(d); return; }
+        if (held.length) flushHeld();
+        handle(d);
+      };
+      ws.onclose = (e) => {
+        if (sock !== ws) return;
+        onClose(e);
+      };
+      ws.onerror = () => { try { sock.close(); } catch { /* ignore */ } };
+    };
+    const handle = (d: string | Uint8Array) => {
         // Control frame: a leading NUL sentinel that raw pty output never
         // produces — handle it instead of writing to the term.
         if (typeof d === 'string' && d.startsWith(MODE_CTRL)) {
@@ -890,8 +909,8 @@ export default function TerminalPane({
           if (canonical && screenHasContent(true)) restored = true;
           if (bootLive && screenHasContent()) endBoot();
         });
-      };
-      ws.onclose = (e) => {
+    };
+    const onClose = (e: CloseEvent) => {
         // A real process exit requires relaunch. Other closes get a bounded
         // reconnect budget: browsers cannot distinguish admission refusal
         // from a transient drop, so prolonged outages also need manual retry.
@@ -905,12 +924,44 @@ export default function TerminalPane({
         }
         setConn('closed');
         if (!closedByUs) {
+          // Nobody is looking: reconnect when the terminal is shown instead.
+          if (modeRef.current === 'reader') { parked = true; held = []; heldBytes = 0; return; }
           const retryDelay = terminalRetryDelay(++connectionFailures, e.code);
           if (retryDelay === null) { setConn('paused'); return; }
           retry = setTimeout(connect, retryDelay);
         }
-      };
-      ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
+    };
+
+    // A terminal kept under the reader must not spend the reader's CPU on an
+    // agent's output. Its frames are held, unparsed, and replayed in order when
+    // it is shown — a quiet agent's few lines cost nothing either way. Past
+    // HIDDEN_HOLD_BYTES the agent is busy enough that a fresh canonical
+    // snapshot is cheaper than the backlog, so the socket is closed (no more
+    // bandwidth either) and the terminal reattaches when shown. The last screen
+    // stays painted until that snapshot replaces it, so the switch is still
+    // instant; it is just a few frames stale for one round trip.
+    let held: (string | Uint8Array)[] = [];
+    let heldBytes = 0;
+    let parked = false;
+    const flushHeld = () => {
+      const backlog = held;
+      held = []; heldBytes = 0;
+      for (const d of backlog) handle(d);
+    };
+    const hold = (d: string | Uint8Array) => {
+      held.push(d);
+      heldBytes += typeof d === 'string' ? d.length : d.byteLength;
+      if (heldBytes <= HIDDEN_HOLD_BYTES) return;
+      held = []; heldBytes = 0; parked = true;
+      const sock = ws;
+      ws = null;
+      controllerRef.current = false;
+      setHasInputControl(false);
+      try { sock?.close(); } catch { /* ignore */ }
+    };
+    revealRef.current = () => {
+      if (parked) { parked = false; connectionFailures = 0; connect(); }
+      else if (held.length) flushHeld();
     };
     // Manual restart: clear the dead run's screen so the content probe watches
     // the new process paint, not leftovers.
@@ -1301,6 +1352,7 @@ export default function TerminalPane({
       term.dispose();
       termRef.current = null;
       resyncRef.current = () => {};
+      revealRef.current = () => {};
       reconcileScrollRef.current = () => {};
       claimRef.current = () => {};
       uploadImagesRef.current = () => {};
@@ -1335,6 +1387,9 @@ export default function TerminalPane({
   // including non-focused panes in a group. Coming out from under the reader
   // also re-reports its size: requests are held while reading, and the window
   // may have changed meanwhile (the server ignores a non-controller's report).
+  useLayoutEffect(() => {
+    if (!reading) revealRef.current();
+  }, [reading]);
   useLayoutEffect(() => {
     if (!visible || reading) return;
     reconcileScrollRef.current();
