@@ -5,6 +5,7 @@ import { ApiError, connectionError, decodeJsonText, decodeResponse } from './api
 export { ApiError } from './apiResponse';
 import { requestHeaders } from './requestIntent';
 import { announceLock, type LockStatus } from './lib/lockStatus';
+import { EDGE_REFUSED, isEdgeRefusal } from './lib/edgeRefusal';
 
 const HEADERS = { 'content-type': 'application/json' };
 // A refused-because-locked answer is the same on every route: 403 with
@@ -138,9 +139,18 @@ export interface Info {
   welcomeSeen?: boolean;
   demoMode?: boolean;
 }
-export const getInfo = (): Promise<Info> => fetch('/api/info').then(json);
+// The lock status reads tell HF's edge refusing an unsigned request (the Space
+// was made private under an open tab) from AM's own answers: lib/edgeRefusal.ts.
+const status = (r: Response) => {
+  if (isEdgeRefusal(r)) {
+    void r.body?.cancel().catch(() => {});
+    throw new ApiError('Hugging Face refused this request: the Space may have just been made private.', r.status, EDGE_REFUSED);
+  }
+  return json(r);
+};
+export const getInfo = (): Promise<Info> => fetch('/api/info').then(status);
 // Public-safe lock status alone; what the locked page polls.
-export const getVisibility = (): Promise<LockStatus> => fetch('/api/visibility').then(json);
+export const getVisibility = (): Promise<LockStatus> => fetch('/api/visibility').then(status);
 
 export const dismissWelcome = () => fetch('/api/welcome/seen', { method: 'POST' }).then(json);
 

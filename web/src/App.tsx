@@ -16,6 +16,7 @@ import StateLogo from './components/StateLogo';
 import Overview from './components/Overview';
 import Locked from './components/Locked';
 import { LOCKED_EVENT, createLockTracker, type LockAnnouncement } from './lib/lockStatus';
+import { EDGE_REFUSED, EDGE_STREAK } from './lib/edgeRefusal';
 import BackupBanner from './components/BackupBanner';
 import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
@@ -395,13 +396,26 @@ export default function App() {
   const lockTracker = useRef(createLockTracker());
   const lockedRef = useRef(false);
   lockedRef.current = !!info?.locked;
+  // Made private under a locked tab: HF's edge now refuses the tab's unsigned
+  // polls with its own page (lib/edgeRefusal.ts). Two in a row while locked
+  // switch the locked page to "reload to open it"; any answer of AM's, or an
+  // outage, starts the count again.
+  const edgeStreak = useRef(0);
+  const [nowPrivate, setNowPrivate] = useState(false);
   const loadInfo = useCallback(async () => {
     const began = lockTracker.current.begin();
     try {
       const next = await api.getInfo();
+      edgeStreak.current = 0;
+      setNowPrivate(false);
       serverReach.noteBoot(next.visibility?.boot);
       if (lockTracker.current.accept(began, { locked: !!next.locked, seq: next.visibility?.seq, boot: next.visibility?.boot })) setInfo(next);
-    } catch { /* offline, or the server is restarting */ }
+    } catch (e) {
+      // Otherwise: offline, or the server is restarting.
+      const refused = e instanceof api.ApiError && e.code === EDGE_REFUSED && lockedRef.current;
+      edgeStreak.current = refused ? edgeStreak.current + 1 : 0;
+      if (edgeStreak.current >= EDGE_STREAK) setNowPrivate(true);
+    }
   }, []);
   useEffect(() => {
     loadInfo();
@@ -1284,7 +1298,8 @@ export default function App() {
     );
   };
 
-  if (info?.locked) return <Locked spaceId={info.spaceId} reason={info.lockReason} bucket={info.lockBucket} status={info.visibility} />;
+  if (info?.locked) return <Locked spaceId={info.spaceId} reason={info.lockReason} bucket={info.lockBucket} status={info.visibility}
+    nowPrivate={nowPrivate} onCheckNow={loadInfo} />;
 
   return (
     <>

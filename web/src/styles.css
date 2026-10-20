@@ -783,6 +783,8 @@ body {
 .install-code summary:hover .install-code-caret { color: var(--text); }
 .install-code[open] summary { margin-bottom: 4px; }
 .install-relock { border-bottom: 1px solid var(--border); padding-bottom: 16px; }
+.install-relock .locked-check { padding: 3px 9px; font-size: 12px; margin-left: 4px; vertical-align: baseline; }
+.locked-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .locked-cmd { position: relative; margin-top: 8px; }
 .locked-cmd pre { margin: 0; overflow-x: hidden; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--r-md); padding: 42px 14px 14px; font-size: 12px; line-height: 1.5; }
 .locked-copy { position: absolute; top: 10px; right: 10px; width: 30px; height: 30px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--muted); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
