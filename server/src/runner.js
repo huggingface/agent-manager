@@ -92,6 +92,12 @@ const SAMPLE_THROTTLE_MS = 250;
 const INPUT_READY_QUIET_MS = Number(process.env.AM_INPUT_READY_QUIET_MS || BUSY_SECS * 1000);
 const INPUT_READY_TIMEOUT_MS = Number(process.env.AM_INPUT_READY_TIMEOUT_MS || 30000);
 const INPUT_ECHO_TIMEOUT_MS = Number(process.env.AM_INPUT_ECHO_TIMEOUT_MS || 20000);
+// For a CLI whose composer AM can read back (submitConfirmed): how long the
+// prompt gets to show there, how long startup may hold the Enter off, and how
+// long an Enter gets to take before AM presses again or reports the send failed.
+const PASTE_SHOWN_TIMEOUT_MS = Number(process.env.AM_PASTE_SHOWN_TIMEOUT_MS || 10000);
+const STARTUP_WAIT_MS = Number(process.env.AM_STARTUP_WAIT_MS || 30000);
+const SUBMIT_CONFIRM_TIMEOUT_MS = Number(process.env.AM_SUBMIT_CONFIRM_TIMEOUT_MS || 3000);
 // Despite the Node wrapper's `scrollbackLimit` name, Ghostty's native option is
 // a byte budget. Passing a line count such as 20,000 retains only a small native
 // allocation (about 700 ordinary rows). Keep the unit explicit at our boundary.
@@ -2062,6 +2068,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   const exitPromise = new Promise((resolve) => { resolveExit = resolve; });
   const host = {
     id: session.id,
+    cli: session.cli,
     runId,
     pty: term,
     vt,
@@ -2377,12 +2384,31 @@ export function composerShape(snapshot) {
       full: flatten(all),
     };
   }
-  // No box to find — a shell, or a TUI that draws none. The cursor's row is all
-  // there is, and the baseline comparison carries it.
-  const line = lines.find((l) => l.row === snapshot.cursorRow);
-  const before = flatten(line ? line.text.slice(0, snapshot.cursorCol) : '');
-  return { alt: !!snapshot.isAltScreen, located: false, cursorInside: false, typed: before, full: before };
+  // No box to find — a shell, or a TUI that draws none (Codex). The cursor's
+  // row, and when that row is the continuation of a wrapped prompt line, the
+  // rows above it back to the one the prompt marker opens: a narrow pane wraps
+  // `› [Pasted Content 1063 chars]` over two rows, and the cursor's row alone
+  // held only its tail. Bounded, and only up to a marker; without one the
+  // cursor's row stands alone as before.
+  const at = lines.findIndex((l) => l.row === snapshot.cursorRow);
+  let from = at;
+  if (at >= 0 && !startsWithMarker(lines[at].text)) {
+    for (let i = at - 1; i >= Math.max(0, at - WRAP_ROWS); i--) {
+      if (isRule(lines[i].text) || !lines[i].text.trim()) break;
+      if (startsWithMarker(lines[i].text)) { from = i; break; }
+    }
+  }
+  const before = at < 0 ? ''
+    : flatten(lines.slice(from, at).map((l) => l.text).concat(lines[at].text.slice(0, snapshot.cursorCol)).join(' '));
+  return {
+    alt: !!snapshot.isAltScreen, located: false, cursorInside: false, typed: before, full: before,
+    // Whether what was read opens with a prompt marker: a composer, rather
+    // than whatever line the cursor happens to be on.
+    marked: at >= 0 && startsWithMarker(lines[from].text),
+  };
 }
+// How far up a wrapped prompt line is followed (see composerShape).
+const WRAP_ROWS = 8;
 
 // ONE prompt marker, not every glyph that could be one: stripping greedily
 // turned a typed `❯ >` into nothing at all and let the send through.
@@ -2587,9 +2613,87 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
   } else {
     host.pty.write(payload);
   }
+  const confirm = cliById(host.cli)?.confirmSubmit;
+  if (confirm) return submitConfirmed(host, id, confirm, text);
   await new Promise((r) => setTimeout(r, 300));
   host.pty.write('\r');
   clearPaneInput(id);   // our own Enter emptied it
+}
+
+/**
+ * Press Enter and make sure it took (Codex, Claude Code).
+ *
+ * Delivered prompts have been left sitting in the composer — Codex showing
+ * `› [Pasted Content N chars]`, a Claude pane likewise — with the session
+ * `waiting`, after AM pressed Enter and answered ok, until the operator pressed
+ * Enter by hand. The cause is not established: against a local Codex TUI an
+ * idle pane took the Enter every time, at every prompt size and gap tried. The
+ * one way it was seen locally is an Enter while Codex shows "Waiting for
+ * startup", which does nothing. So this does not bet on a cause. It reads the
+ * composer back, with the same locator the input guard uses (composerShape),
+ * and answers ok only on positive evidence:
+ *
+ *  - the prompt must be seen in the composer first. Not seen within the bound:
+ *    the send FAILS, and no Enter is pressed — "not observed" is never
+ *    "delivered", and an Enter into an unknown screen answers whatever is there;
+ *  - after the Enter, a submit is the prompt gone from the composer AND either
+ *    an empty composer or the CLI's busy indicator. Anything else — a dialog,
+ *    a screen with no composer on it — is not a submit;
+ *  - while the prompt is visibly still in the composer, Enter is pressed once
+ *    more. Never into anything else;
+ *  - otherwise the send fails (input-not-submitted), and the line is marked as
+ *    holding something, so the next send is refused rather than glued on.
+ */
+async function submitConfirmed(host, id, confirm, text) {
+  // Compared with all whitespace removed: the terminal wraps long lines, and a
+  // wrap can fall inside a word — or inside `[Pasted Content 1063 chars]`.
+  const squash = (v) => String(v || '').replace(/\s+/g, '');
+  const flat = squash(text);
+  const probe = flat.slice(-Math.min(24, flat.length));
+  const look = () => {
+    let shape = null, screen = '';
+    try { shape = composerShape(host.vt.snapshot({ includeCells: false })); } catch {}
+    try { screen = host.vt.getVisibleText(); } catch {}
+    // A composer: a ruled box with a prompt in it, or rows opening with a
+    // prompt marker. The cursor's row on its own could be anything.
+    const body = shape && (shape.located || shape.marked) ? squash(composerBody(shape)) : null;
+    const holds = body != null && (confirm.pasted.test(body) || body.includes(probe));
+    const busy = confirm.busy.test(screen);
+    return { holds, submitted: !holds && (body === '' || busy), starting: !!confirm.starting?.test(screen) };
+  };
+  const until = async (test, ms) => {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      if (hosts.get(id) !== host) throw new ApiError(409, 'input-not-ready', 'session stopped while its prompt was being submitted');
+      if (test(look())) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  };
+  const unsent = (code, message) => {
+    // A picture no screen can match reads as busy until someone submits the line.
+    lineTouched.add(id);
+    lineEmpty.set(id, { alt: false, located: false, typed: '\u0000unsent', full: '\u0000unsent' });
+    return new ApiError(409, code, message);
+  };
+  if (!await until((v) => v.holds, PASTE_SHOWN_TIMEOUT_MS)) {
+    throw unsent('input-not-confirmed',
+      'the prompt was typed into this session\'s terminal, but it never showed in the composer, so AM did not press Enter and cannot say it was delivered. Check the terminal: send or clear what is on its input line.');
+  }
+  if (confirm.starting) await until((v) => !v.starting, STARTUP_WAIT_MS);
+  // The Enter still goes as its own keypress, apart from the paste burst.
+  await new Promise((r) => setTimeout(r, 300));
+  host.pty.write('\r');
+  let ok = await until((v) => v.submitted, SUBMIT_CONFIRM_TIMEOUT_MS);
+  if (!ok && look().holds) {
+    host.pty.write('\r');
+    ok = await until((v) => v.submitted, SUBMIT_CONFIRM_TIMEOUT_MS);
+    if (ok) console.warn(`[input] ${id}: the first Enter did not submit the prompt; the second did`);
+  }
+  if (ok) { clearPaneInput(id); return; }
+  throw unsent('input-not-submitted', look().holds
+    ? 'the prompt was typed into this session\'s composer but pressing Enter did not submit it (tried twice). It is still on the input line: press Enter in the terminal to send it, or clear it.'
+    : 'the prompt was typed into this session\'s composer and Enter was pressed, but the screen then showed neither an empty composer nor the session working, so AM cannot say it was delivered. Check the terminal before sending it again.');
 }
 
 /** Insert text into a running terminal's composer without submitting it. */

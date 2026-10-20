@@ -112,7 +112,7 @@ export function forgetCommandExists(cmd) {
 
 // CLIs the updater refuses to touch even though they have a binary: the shell
 // is the image's, and the repaint fixture is a test prop.
-const NEVER_UPDATED = new Set(['shell', 'test-repaint']);
+const NEVER_UPDATED = new Set(['shell', 'test-repaint', 'test-submit']);
 
 /**
  * What an "update the CLIs" run would do, derived from the registry so a CLI
@@ -197,6 +197,16 @@ const CODEX_INPUT_SIGNALS = '-c \'tui.notifications=["approval-requested","plan-
 // answer has to be in the file (see trustCodexWorkspace in first-run.js).
 const codexCommand = (tail = '') => `codex ${CODEX_INPUT_SIGNALS}${tail ? ` ${tail}` : ''}`;
 
+
+/**
+ * What confirms a delivered prompt was submitted (runner.js submitConfirmed),
+ * matched against whitespace-free text so a wrapped placeholder still matches:
+ * the CLI's placeholder for a collapsed paste, and its busy indicator.
+ * `starting` is a notice during which Enter does nothing.
+ */
+const CODEX_CONFIRM = { pasted: /\[PastedContent\d+chars\]/, busy: /esc to interrupt/, starting: /Waiting for startup/ };
+const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
+
 export const CLIS = [
   { id: 'shell',    label: 'Shell',       bin: 'bash',     color: '#8aa0ad', run: 'exec bash -il',  cont: null },
   { id: 'files',    label: 'Files',       bin: null,       color: '#d99a2b', run: null,             cont: null },
@@ -207,11 +217,15 @@ export const CLIS = [
   // nothing to launch HERE (that is the point), but unlike files/trace it holds
   // a conversation, so it gets a light and a digest like any other agent.
   { id: 'remote',   label: 'Remote agent', bin: null,      color: '#5ec2e0', run: null,             cont: null },
+  // confirmSubmit: delivered prompts have been left unsubmitted in the
+  // composer; sends read it back to confirm the submit (runner.js).
   { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue', resizeMode: 'repaint',
+    confirmSubmit: CLAUDE_CONFIRM,
     npm: '@anthropic-ai/claude-code',
     withPrompt: (q) => `claude ${q}`,
     secrets: ['ANTHROPIC_API_KEY'], setup: setupHint('ANTHROPIC_API_KEY') },
   { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: codexCommand(),   cont: codexCommand('resume --last'), resizeMode: 'repaint',
+    confirmSubmit: CODEX_CONFIRM,
     npm: '@openai/codex',
     resume: (id) => codexCommand(`resume ${id}`),
     // `q` and image paths arrive shell-quoted from runner.commandFor(). Repeat
@@ -246,6 +260,11 @@ export const CLIS = [
   // Test-only primary-screen repaint fixture. Absent from every normal runtime.
   ...(process.env.AM_TEST_REPAINT_CMD
     ? [{ id: 'test-repaint', label: 'Repaint fixture', bin: 'bash', color: '#8aa0ad', run: process.env.AM_TEST_REPAINT_CMD, cont: null, resizeMode: 'repaint' }]
+    : []),
+  // A fake TUI for the submit-confirmation tests, read like Codex.
+  ...(process.env.AM_TEST_SUBMIT_CMD
+    ? [{ id: 'test-submit', label: 'Submit fixture', bin: 'node', color: '#8aa0ad', run: process.env.AM_TEST_SUBMIT_CMD, cont: null,
+      confirmSubmit: CODEX_CONFIRM }]
     : []),
 ];
 
