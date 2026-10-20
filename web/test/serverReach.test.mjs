@@ -190,5 +190,29 @@ await test('a new boot seen by an ordinary check, with no outage reported, is a 
   assert.equal(backs.length, 2, 'announced a boot it already knew');
 });
 
+await test('a superseded boot arriving late is ignored, not a restart back (review P2)', async () => {
+  // The page knows A; a probe sees B; an /api/info issued before the restart
+  // lands late carrying A; the recovery's own re-read returns B again. One
+  // restart, so exactly one recovery and one build check.
+  const h = harness();
+  h.server.boot = 'A';
+  await h.reach.answers();
+  const backs = [];
+  h.reach.onBack((b) => backs.push(b));
+  h.server.boot = 'B';
+  await h.reach.answers();
+  h.reach.noteBoot('A');                         // the stale in-flight info
+  h.reach.noteBoot('B');                         // recovery's own info
+  await h.reach.answers();
+  await h.advance(SPREAD_MS);
+  assert.deepEqual(backs, [{ rebooted: true }]);
+  assert.equal(h.server.pages, 1, 'build checks');
+  // A genuinely new boot after that is still a recovery.
+  h.server.boot = 'C';
+  await h.reach.answers();
+  await h.advance(SPREAD_MS);
+  assert.equal(backs.length, 2);
+});
+
 if (failed) { console.log(`server reach: ${failed} failed`); process.exit(1); }
 console.log('server reach: all passed');

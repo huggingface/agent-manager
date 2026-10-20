@@ -69,9 +69,17 @@ export function createServerReach(deps: ReachDeps) {
   // reader-only page whose polls happened to miss it) still left every view
   // reading state from a server that is no longer running, and possibly an
   // old client against a new build.
+  //
+  // Boot ids are unique per server process, so one seen before and since
+  // replaced can only come from a response that was already in flight (App's
+  // /api/info landing after a newer probe). It is ignored: going back to it
+  // would read A→B→A→B as three restarts.
+  const seenBoots = new Set<string>();
   function noteBoot(boot: string | null | undefined) {
-    if (!boot) return;
-    const changed = !!knownBoot && knownBoot !== boot;
+    if (!boot || boot === knownBoot) return;
+    if (seenBoots.has(boot)) return;
+    seenBoots.add(boot);
+    const changed = knownBoot !== null;
     knownBoot = boot;
     if (changed) { bootChanged = true; recovered(); }
   }
