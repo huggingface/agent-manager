@@ -73,11 +73,9 @@ also take:
   passes on an idle machine fails when 8 suites share the CPU.
 
 If a suite really needs the machine to itself, put `am-test: serial` and the
-reason in its header. It then runs alone after the parallel ones. Three do
-today: `server/test/loop-offload` (it measures event-loop lag in milliseconds),
-`web/test/dispatchPreviewScroll` (real wheel and touch gestures) and
-`web/test/readerSearch` (an unexplained misplacement seen only under a
-saturated parallel run; its failure message carries the reads).
+reason in its header. It then runs alone after the parallel ones. Two do today:
+`server/test/loop-offload` (it measures event-loop lag in milliseconds) and
+`web/test/dispatchPreviewScroll` (real wheel and touch gestures).
 
 The runner records how long each suite took in
 `web/node_modules/.cache/am-suite-times.json` and starts the longest ones first.

@@ -2,11 +2,6 @@
 // never loaded, and opening it without dragging every page in between through
 // the browser.
 //
-// am-test: serial — under a fully loaded parallel run the reader came back
-// from an old window 337px off its reading position (always the same state:
-// 78px → 415px), which no isolated, throttled or delayed run reproduces. It runs
-// alone until that is understood; the failure message carries the reads.
-//
 // The premise every case here depends on: the needle is in the FIRST exchange
 // of a transcript far larger than the reader's history budget, so a test that
 // could be satisfied by filtering loaded turns would fail immediately.
@@ -254,14 +249,25 @@ try {
   await box.fill('Question');
   await p.waitForFunction(() => document.querySelectorAll('[data-x]').length > 2);
   await p.evaluate(() => { document.querySelector('.cxv-body').scrollTop = 140; });
-  // Near the top, so the live view may load an earlier page. Record the anchor
-  // once that has landed (nothing in flight, height unchanged for 300ms), not
-  // after a fixed 250ms: a page arriving later moves the row for its own reasons.
-  await p.waitForFunction(() => {
+  // At rest: no read in flight and the height unchanged for 300ms. Near the
+  // top the live view may load an earlier page, and the results appearing
+  // above the rows make the reader hold its row by scrolling.
+  const atRest = () => p.waitForFunction(() => {
     const h = document.querySelector('.cxv-body').scrollHeight;
     if (window.inFlight || window.__settleH !== h) { window.__settleH = h; window.__settleAt = performance.now(); return false; }
     return performance.now() - window.__settleAt >= 300;
   }, null, { timeout: 10_000, polling: 50 });
+  await atRest();
+  await searchAll.click();
+  await p.waitForFunction(() => window.probe.hitRows() > 0, null, { timeout: 20_000 });
+  // The place to come back to is where the reader is when the hit is OPENED.
+  // Reaching the result means scrolling to it, and a click does that itself
+  // when the row is out of view, so scroll first and record the anchor after;
+  // otherwise whether the click had to scroll (it depends on whether the
+  // reader had already held its row below the new results) decides the answer.
+  const hitRow = p.locator('.cxv-hitrow').last();
+  await hitRow.scrollIntoViewIfNeeded();
+  await atRest();
   const anchored = await p.evaluate(() => {
     const el = document.querySelector('.cxv-body');
     const edge = el.getBoundingClientRect().top;
@@ -271,9 +277,7 @@ try {
       rows: document.querySelectorAll('[data-x]').length };
   });
   const readsAtAnchor = await p.evaluate(() => window.reads.length);
-  await searchAll.click();
-  await p.waitForFunction(() => window.probe.hitRows() > 0, null, { timeout: 20_000 });
-  await p.locator('.cxv-hitrow').last().click();
+  await hitRow.click();
   await p.waitForFunction(() => window.probe.historic() > 0, null, { timeout: 20_000 });
   // Opened from a position part-way up the live transcript, so the live list's
   // own anchor points at a row that is now hidden and measures as nothing. The

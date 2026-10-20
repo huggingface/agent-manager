@@ -1,7 +1,8 @@
 // A capped preview must scroll, and the history must still scroll around it.
 //
-// am-test: serial — real wheel and touch gestures; with the CPU saturated by a
-// parallel run, a slow touch drag on the sheet chained into the history.
+// am-test: serial — real wheel and touch gestures. Once in ten saturated
+// parallel runs the history moved during a drag on the sheet (not yet
+// explained; the failure now prints both positions), so it runs alone.
 //
 // The operator, on am-dev-2 at 9f2c92a: "the scrolling seems to be blocked when
 // the preview widget doesnt have enough space". In a short reader pane the card
@@ -87,7 +88,7 @@ try {
     const scrolled = await cardOf(p, '.dx-pop');
     const h1 = await history(p);
     check('the wheel over a capped card scrolls the card', () => assert.ok(scrolled && scrolled.scrollTop > 0, `card scrollTop ${scrolled?.scrollTop}`));
-    check('and not the history behind it', () => assert.equal(h1.scrollTop, opened.scrollTop));
+    check('and not the history behind it', () => assert.equal(h1.scrollTop, opened.scrollTop, `history scrollTop ${opened.scrollTop} -> ${h1.scrollTop} (height ${opened.scrollHeight} -> ${h1.scrollHeight})`));
     // to its end, and past: contained
     for (let i = 0; i < 6; i++) { await p.mouse.wheel(0, 200); await p.waitForTimeout(80); }
     await p.waitForTimeout(500);
@@ -151,7 +152,7 @@ try {
     const sheet2 = await cardOf(p, '.dx-sheet');
     const h1 = await history(p);
     check('a drag on the sheet scrolls the sheet', () => assert.ok(sheet2 && sheet2.scrollTop > 0, `sheet scrollTop ${sheet2?.scrollTop}`));
-    check('and not the history behind it', () => assert.equal(h1.scrollTop, opened.scrollTop));
+    check('and not the history behind it', () => assert.equal(h1.scrollTop, opened.scrollTop, `history scrollTop ${opened.scrollTop} -> ${h1.scrollTop} (height ${opened.scrollHeight} -> ${h1.scrollHeight})`));
 
     // a drag on the history, above the sheet: the history scrolls
     const sb2 = await p.locator('.dx-sheet').boundingBox();
