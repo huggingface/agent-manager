@@ -66,6 +66,8 @@ PRUNE_MAX="${AGENT_STATE_PRUNE_MAX:-50000}"
 # The whole restore, start to finish, waiting for locks included, must end
 # within this many seconds; see bounded.
 BUDGET="${AGENT_STATE_BUDGET:-1200}"
+# Seconds past the budget before the watchdog stops whatever is still running.
+WATCHDOG_GRACE="${AGENT_STATE_WATCHDOG_GRACE:-15}"
 # Diagnostic: `restore` with this set only lists what the tree rsyncs would
 # copy (`rsync -n`) and writes nothing — no stamps, no databases.
 DRY_RUN="${AGENT_STATE_DRY_RUN:-}"
@@ -818,7 +820,7 @@ heartbeat() {
 watchdog() {
   _parent="$1" _sp=""
   trap 'kill $_sp 2>/dev/null; exit 0' TERM INT HUP
-  sleep "$(( DEADLINE + 15 - $(now) ))" & _sp=$!
+  sleep "$(( DEADLINE + WATCHDOG_GRACE - $(now) ))" & _sp=$!
   wait "$_sp"
   kill -USR1 "$_parent" 2>/dev/null
 }

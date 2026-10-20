@@ -773,7 +773,9 @@ try {
     fs.chmodSync(path.join(hbin, 'sqlite3'), 0o755);
     const hOut = path.join(hr, 'out.txt');
     const ht = Date.now();
-    const w = await runTo(he, 'restore', hOut, { PATH: `${hbin}:${he.PATH}`, AGENT_STATE_BUDGET: '8' }).done;
+    // A 2 s watchdog grace instead of the default 15: the step is the same, the
+    // wait for it is not.
+    const w = await runTo(he, 'restore', hOut, { PATH: `${hbin}:${he.PATH}`, AGENT_STATE_BUDGET: '8', AGENT_STATE_WATCHDOG_GRACE: '2' }).done;
     const wText = fs.readFileSync(hOut, 'utf8');
     check('budget: a step without its own timeout is stopped by the watchdog, naming the step',
       w.code === 1 && fs.existsSync(reached)
