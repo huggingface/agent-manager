@@ -15,7 +15,7 @@
 // from the run. Discovery removes the shared line: adding `test/foo.test.mjs` is
 // enough to make it run.
 //
-// PARALLEL, BOUNDED. Suites run `--jobs` at a time (default: one per core),
+// PARALLEL, BOUNDED. Suites run `--jobs` at a time (default: one per free core),
 // longest first by the durations recorded on the previous run, so a slow browser
 // suite starts at once instead of being the last thing the run waits for. That
 // is safe because no suite in the default set binds a fixed port or a fixed path:
@@ -122,6 +122,18 @@ const writeTimes = (times) => {
   try { fs.mkdirSync(path.dirname(timesFile), { recursive: true }); fs.writeFileSync(timesFile, JSON.stringify(times, null, 1)); } catch { /* best effort */ }
 };
 
+// One job per core that is actually free when the run starts: several suites
+// here time real gestures, PTY settles and event-loop lag, and other work
+// already on the machine (another checkout's run, an agent building) leaves
+// them less CPU than one each. At least 3 so a busy machine still finishes
+// in reasonable time; --jobs / AM_TEST_JOBS override.
+const defaultJobs = (() => {
+  const cores = os.availableParallelism();
+  const busy = os.loadavg()[0];
+  const n = Math.max(3, Math.min(cores, Math.round(cores - busy)));
+  return { n, why: `${cores} cores, load ${busy.toFixed(1)}` };
+})();
+
 /** Runs one command; resolves { code, signal, output, secs, timedOut }. */
 function runTask(task, { stream, env }) {
   return new Promise((resolve) => {
@@ -182,7 +194,8 @@ export async function runSuites({ pkgDirs, filters = [], wantManual = false, job
     return 1;
   }
 
-  jobs = Math.max(1, jobs || os.availableParallelism());
+  const why = jobs ? 'as asked' : defaultJobs.why;
+  jobs = Math.max(1, jobs || defaultJobs.n);
   const tasks = [...extraTasks, ...suites];
   const stream = jobs === 1 && tasks.length === suites.length;
   const times = readTimes();
@@ -191,7 +204,7 @@ export async function runSuites({ pkgDirs, filters = [], wantManual = false, job
   const est = (t) => times[t.name] ?? 60;
   const parallel = tasks.filter((t) => !t.serial).sort((a, b) => est(b) - est(a));
   const serial = tasks.filter((t) => t.serial);
-  console.log(`${label}: ${plural(suites.length)}${extraTasks.length ? ` + ${extraTasks.map((t) => t.name).join(', ')}` : ''}, ${jobs} at a time\n`);
+  console.log(`${label}: ${plural(suites.length)}${extraTasks.length ? ` + ${extraTasks.map((t) => t.name).join(', ')}` : ''}, ${jobs} at a time (${why})\n`);
 
   const t0 = performance.now();
   let dist = process.env.AM_TEST_DIST || null;

@@ -82,6 +82,9 @@ const clickTerm = async (page) => {
   const r = await page.locator('.xterm-screen').boundingBox();
   await page.mouse.click(r.x + 40, r.y + r.height - 20);
 };
+// The copy is an async clipboard write: wait for it to land before reading
+// what was copied (an absence is still checked after settle(), as before).
+const copied = (page, n) => page.waitForFunction((k) => window.copies.length >= k, n, { timeout: 10_000 });
 const settle = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
 
 try {
@@ -114,9 +117,11 @@ try {
   assert.equal(await copies(page).then((c) => c.length), 0, 'a program copy alone writes nothing');
   await settle(page);
   await page.keyboard.press('Meta+c');
+  await copied(page, 1);
   assert.deepEqual(await copies(page), [payload], 'Cmd+C copies the text on show');
   await page.getByText('copied', { exact: true }).waitFor();
   await page.keyboard.press('Meta+c');
+  await settle(page);
   assert.equal((await copies(page)).length, 1, 'once used, it is not on offer any more');
   await page.clock.runFor(2000);
   assert.equal(await toast(page).count(), 0);
@@ -128,6 +133,7 @@ try {
   assert.equal(await toast(page).count(), 1);
   await settle(page);
   await page.keyboard.press('Meta+c');
+  await copied(page, 2);
   assert.deepEqual((await copies(page)).slice(1), ['second']);
   await page.clock.runFor(2000);
 
@@ -135,9 +141,10 @@ try {
   await out(page, `\x1b]52;c;${b64('dismiss me')}\x07`);
   await toast(page).waitFor();
   await toast(page).getByRole('button', { name: 'Dismiss copy' }).click();
-  assert.equal(await toast(page).count(), 0);
+  await toast(page).waitFor({ state: 'detached' });
   await clickTerm(page);
   await page.keyboard.press('Meta+c');
+  await settle(page);
   assert.equal((await copies(page)).length, 2, 'dismissed text is gone');
 
   // Expired: same.
@@ -146,6 +153,7 @@ try {
   await page.clock.runFor(PROGRAM_COPY_MS + 1000);
   assert.equal(await toast(page).count(), 0);
   await page.keyboard.press('Meta+c');
+  await settle(page);
   assert.equal((await copies(page)).length, 2, 'expired text is gone');
 
   // An empty write withdraws the offer.
@@ -154,12 +162,15 @@ try {
   await out(page, '\x1b]52;c;\x07');
   await toast(page).waitFor({ state: 'detached' });
   await page.keyboard.press('Meta+c');
+  await settle(page);
   assert.equal((await copies(page)).length, 2);
 
   // A visible selection wins over pending text.
   await out(page, '\r\nSELECTME\r\n');
   await out(page, `\x1b]52;c;${b64('program text')}\x07`);
   await toast(page).waitFor();
+  // The terminal draws on its own render tick: wait for the row to be there.
+  await page.waitForFunction(() => [...document.querySelectorAll('.xterm-rows > div')].some((r) => r.textContent.includes('SELECTME')));
   const box = await page.evaluate(() => {
     const row = [...document.querySelectorAll('.xterm-rows > div')].find((r) => r.textContent.includes('SELECTME'));
     const r = row.getBoundingClientRect();
@@ -167,10 +178,12 @@ try {
   });
   await page.mouse.dblclick(box.x, box.y);
   await page.keyboard.press('Meta+c');
+  await copied(page, 3);
   assert.equal((await copies(page)).at(-1), 'SELECTME', 'the selection is copied, not the program text');
   assert.equal(await toast(page).count(), 1, 'and the program copy stays on offer');
   // A click on the notice copies it too.
   await toast(page).locator('.tpc-copy').click();
+  await copied(page, 4);
   assert.equal((await copies(page)).at(-1), 'program text');
 
   // Paste is the operator's: a paste event reaches the PTY, bracketed.
@@ -199,6 +212,7 @@ try {
   await toast(phone).waitFor();
   assert.match(await toast(phone).textContent(), /tap to copy/);
   await toast(phone).locator('.tpc-copy').tap();
+  await copied(phone, 1);
   assert.deepEqual(await copies(phone), ['from the phone']);
   assert.equal(await reads(phone), 1);
   if (process.env.AM_CLIP_SCREENSHOT) await phone.screenshot({ path: process.env.AM_CLIP_SCREENSHOT });

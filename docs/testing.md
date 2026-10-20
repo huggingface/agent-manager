@@ -18,7 +18,8 @@ npm test
 ```
 
 This runs every server and web suite plus the web typecheck (`tsc --noEmit`) in
-one pool, one job per core, and takes about two minutes on an 8-core machine.
+one pool, one job per free core (cores minus the load average, at least 3). It
+takes about two minutes on an idle 8-core machine, longer on a busy one.
 Each finished suite prints one line. A failing suite prints its whole output.
 The run doesn't stop at a failure: it finishes everything, then lists every
 failed suite and exits non-zero.
@@ -30,7 +31,7 @@ Options (after `--`, e.g. `npm test -- --jobs 4`):
 | Option | Effect |
 |---|---|
 | `<substring> …` | only suites whose path (`server/test/pin.test.mjs`) contains one of them |
-| `--jobs N` / `-j N` | N suites at a time (default: one per core; also `AM_TEST_JOBS`) |
+| `--jobs N` / `-j N` | N suites at a time (default: one per free core, at least 3; also `AM_TEST_JOBS`) |
 | `--serial` | one at a time, output streamed live (same as `--jobs 1`) |
 | `--verbose` | print every suite's output, not only failures |
 | `--manual` | with a substring, also run matching suites marked manual |

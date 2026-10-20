@@ -327,12 +327,21 @@ try {
     await waitFor(() => v.bytes.includes('TRAP-READY'));
     v.events.length = 0;
     v.resize(73, 21);
-    const repainted = await waitFor(() => v.events.some((event) => event.type === 'data'
-      && event.text.includes('RESIZE-AT-73x21')));
+    // The event in which the repaint text STARTS. Output can arrive in several
+    // chunks on a busy machine, so read the data stream as a whole rather than
+    // expecting the marker inside one chunk.
+    const startedAt = (marker) => {
+      const data = v.events.map((event, i) => [i, event]).filter(([, event]) => event.type === 'data');
+      const at = data.map(([, event]) => event.text).join('').indexOf(marker);
+      if (at < 0) return -1;
+      let seen = 0;
+      for (const [i, event] of data) { seen += event.text.length; if (seen > at) return i; }
+      return -1;
+    };
+    const repainted = await waitFor(() => startedAt('RESIZE-AT-73x21') >= 0);
     const gridAt = v.events.findIndex((event) => event.type === 'frame'
       && event.frame.t === 'grid' && event.frame.cols === 73 && event.frame.rows === 21);
-    const repaintAt = v.events.findIndex((event) => event.type === 'data'
-      && event.text.includes('RESIZE-AT-73x21'));
+    const repaintAt = startedAt('RESIZE-AT-73x21');
     check('SIGWINCH repaint arrives after the confirmed grid', repainted && gridAt >= 0 && gridAt < repaintAt,
       `grid event ${gridAt}, repaint event ${repaintAt}`);
     if (Headless) {

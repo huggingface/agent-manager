@@ -419,8 +419,12 @@ try {
     const workersBefore = processesNaming(r).length;
     kill.kill('SIGTERM');
     const k = await exited;
-    const leftovers = processesNaming(r);
     const closed = await Promise.race([eof, sleep(4000).then(() => false)]);
+    // A process that got its signal can take a moment to be gone on a busy
+    // machine. The stubbed workers sleep 25s, so one that survived is still
+    // here after this wait; one that is merely dying is not.
+    let leftovers = processesNaming(r);
+    for (let i = 0; i < 30 && leftovers.length; i++) { await sleep(100); leftovers = processesNaming(r); }
     check('a TERM ends the restore with a failure status', k.code !== 0, JSON.stringify(k));
     check('…its stdout reaches EOF: no worker is left holding it', closed === true);
     check('…and no xargs, slice shell, rsync or sleep of it is left running',

@@ -979,6 +979,15 @@ if [ "$MODE" = restore ]; then
       sleep 0.1; _i=$((_i + 1))
     done
     for _g in $_groups; do kill -KILL "-$_g" 2>/dev/null; done
+    # KILL is delivered, not done: give the groups a moment to be gone, so a
+    # restore that reports failure has really stopped writing.
+    _i=0
+    while [ "$_i" -lt 20 ]; do
+      _alive=0
+      for _g in $_groups; do kill -0 "-$_g" 2>/dev/null && _alive=1; done
+      [ "$_alive" -eq 0 ] && break
+      sleep 0.1; _i=$((_i + 1))
+    done
     kill "$hb" "$wd" 2>/dev/null
     wait
   }
