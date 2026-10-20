@@ -41,6 +41,7 @@ import { searchIndex } from './readerSearch';
 import { useVirtualRows } from './useVirtualRows';
 import { cachedRoster, loadRoster } from '../../lib/subagentRoster';
 import { anyMoving, byExchange, cachedDispatches, loadDispatches, type Dispatch } from '../../lib/dispatches';
+import { serverReach } from '../../lib/serverReach';
 import ExchangeView, { PendingExchange } from './Exchange';
 import Attachments from '../Attachments';
 import Composer from './Composer';
@@ -180,7 +181,8 @@ export default function ConversationView({
     const tick = () => loadRoster(session.id, true).then((agents) => { if (alive) setRoster(agents); }).catch(() => {});
     void tick();
     const timer = session.running ? window.setInterval(tick, 15_000) : undefined;
-    return () => { alive = false; window.clearInterval(timer); };
+    const offBack = serverReach.onBack(() => { void tick(); });
+    return () => { alive = false; window.clearInterval(timer); offBack(); };
   }, [session.id, session.running, paused]);
 
   // The sessions this one launched or prompted, from the start of the loaded
@@ -199,7 +201,11 @@ export default function ConversationView({
       .then((list) => { if (alive) setDispatches(list); }).catch(() => {});
     void tick(false);
     const timer = session.running || moving ? window.setInterval(() => tick(true), session.running ? 10_000 : 15_000) : undefined;
-    return () => { alive = false; window.clearInterval(timer); };
+    // A dispatch judged during a server outage (its target stopped, its turn
+    // cut off) reads as failed and is no longer moving, so nothing asked
+    // again: the card stayed red after the agents resumed, until a reload.
+    const offBack = serverReach.onBack(() => { void tick(true); });
+    return () => { alive = false; window.clearInterval(timer); offBack(); };
   }, [session.id, session.running, paused, since, moving]);
   const dispatchesOf = useMemo(() => byExchange(exchanges, dispatches || []), [exchanges, dispatches]);
 

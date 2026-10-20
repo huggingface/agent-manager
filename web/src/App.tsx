@@ -34,6 +34,7 @@ import { paneOwnsBack } from './lib/mobileBack';
 import { isPassive, isRemote, isShareable } from './types';
 import { EyeGlyph, EyeOffGlyph, GridGlyph, ListGlyph, SortGlyph } from './components/icons';
 import { createLatestRefresh, observeAppReturns } from './lib/appRefresh';
+import { serverReach } from './lib/serverReach';
 
 // `?vvdebug=1` — a phone has no devtools, and the keyboard layout is a guess
 // when the app is embedded cross-origin. Read once: it never changes mid-run,
@@ -396,6 +397,7 @@ export default function App() {
     const began = lockTracker.current.begin();
     try {
       const next = await api.getInfo();
+      serverReach.noteBoot(next.visibility?.boot);
       if (lockTracker.current.accept(began, { locked: !!next.locked, seq: next.visibility?.seq, boot: next.visibility?.boot })) setInfo(next);
     } catch { /* offline, or the server is restarting */ }
   }, []);
@@ -514,7 +516,13 @@ export default function App() {
   useEffect(() => {
     refreshClis();
     const manager = createLatestRefresh(
-      (signal) => api.getTree(signal),
+      // The tree is polled on every view, so it is where an outage is noticed
+      // when no terminal is open to notice it (serverReach then announces
+      // its end to the reader's dispatch cards and everything else).
+      (signal) => api.getTree(signal).catch((error) => {
+        if (!signal.aborted) void serverReach.answers().then((up) => { if (!up) serverReach.reportOutage(); });
+        throw error;
+      }),
       (next) => { setTree(next); setTreeLoaded(true); },
     );
     treeRefresh.current = manager;
@@ -580,6 +588,14 @@ export default function App() {
   // desktop, mobile and bfcache restoration. Refresh both independent resources
   // once; the reader owns its own equivalent lifecycle and is not touched here.
   useEffect(() => observeAppReturns(() => Promise.allSettled([refresh(), refreshMeta()])), [refresh, refreshMeta]);
+  // The end of a server outage is a return too: everything read during it was
+  // a failure or a restarting server's view, so re-read now rather than on the
+  // next tick. A restart that also shipped a new web build cannot be fixed by
+  // re-reading: the page runs the old client, so offer the reload.
+  const [updateReady, setUpdateReady] = useState(serverReach.updateReady);
+  useEffect(() => serverReach.onBack(() => { void Promise.allSettled([refresh(), refreshMeta(), loadInfo()]); }),
+    [refresh, refreshMeta, loadInfo]);
+  useEffect(() => serverReach.onUpdateReady(() => setUpdateReady(true)), []);
 
   // ---- what the operator has read ----
   //
@@ -1375,6 +1391,14 @@ export default function App() {
             ) : (
               <span className="mtitle mono">{activeRef === 'overview' ? 'Overview' : activeSingle?.name}</span>
             )}
+          </div>
+        )}
+        {/* A restart shipped a new web build (serverReach): offered, never forced,
+            so an unsent draft is not lost to an automatic reload. */}
+        {updateReady && (
+          <div className="bkfail" role="status">
+            <span className="bkfail-txt"><b>Agent Manager was updated.</b> Reload to run the new version.</span>
+            <button className="bkfail-link" onClick={() => location.reload()}>reload</button>
           </div>
         )}
         {/* Visible where you already are, on every view. Rides on /api/info,

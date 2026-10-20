@@ -176,9 +176,13 @@ try {
   p.on('pageerror', (error) => errors.push(error.message));
   // A real origin, so readingPosition uses the localStorage it uses in the app
   // rather than silently falling back to its in-memory map.
+  // The origin answers its health probe, so a dropped socket is a transient
+  // drop by a server that is up (an outage is lib/serverReach's, tested apart).
   await p.route('**/*', (route) => (route.request().url() === 'http://fixture.test/'
     ? route.fulfill({ contentType: 'text/html', body: '<!doctype html><div id="fixture-root" style="display:flex;position:absolute;inset:10px"></div>' })
-    : route.abort()));
+    : route.request().url() === 'http://fixture.test/api/visibility'
+      ? route.fulfill({ contentType: 'application/json', body: '{"boot":"fixture"}' })
+      : route.abort()));
   await p.goto('http://fixture.test/');
   await p.addStyleTag({ path: bundle.replace(/\.js$/, '.css') });
   await p.addStyleTag({ content: fs.readFileSync(path.join(web, 'src/styles.css'), 'utf8')

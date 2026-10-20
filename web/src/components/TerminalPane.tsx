@@ -22,6 +22,7 @@ import { LOCKED_CLOSE_CODE, announceLock, parseCloseReason } from '../lib/lockSt
 import { BackGlyph, CloseGlyph, RefreshGlyph , SearchGlyph, StopGlyph } from './icons';
 import * as api from '../api';
 import { terminalRetryDelay } from '../terminalRetry';
+import { serverReach } from '../lib/serverReach';
 import { captureTerminalAnchor, restoreTerminalAnchor, type TerminalScrollAnchor } from '../lib/terminalScrollAnchor';
 import type { Attachment } from '../api';
 import {
@@ -52,7 +53,7 @@ const THEMES: Record<'light' | 'dark', ITheme> = {
   },
 };
 
-type ConnState = 'connecting' | 'connected' | 'closed' | 'exited' | 'paused' | 'locked';
+type ConnState = 'connecting' | 'connected' | 'closed' | 'exited' | 'paused' | 'offline' | 'locked';
 
 // Close code the server uses when the session's process exited for real (vs a
 // transient drop). The client must NOT auto-reconnect on this, or it would
@@ -725,6 +726,11 @@ export default function TerminalPane({
     // Reconnect with backoff: a sleeping/unreachable Space shouldn't be hammered
     // every second by every open pane. Reset once a connection succeeds.
     let connectionFailures = 0;
+    // Why this pane is not retrying on its own timer: the server did not
+    // answer (an outage, waited out through serverReach), or it answered and
+    // the refusal budget ran out (paused). Either one resumes by itself: the
+    // first when the server is back, the second on the next return to the app.
+    let waiting: 'offline' | 'paused' | null = null;
 
     // Does the visible screen show real text in its UPPER two-thirds? Agent
     // TUIs paint their bottom input bar first and load the actual content
@@ -876,11 +882,22 @@ export default function TerminalPane({
           return;
         }
         setConn('closed');
-        if (!closedByUs) {
+        if (closedByUs) return;
+        if (e.code === 1008) { waiting = 'paused'; setConn('paused'); return; }
+        // Ask the origin before charging the failure: only a server that
+        // answers can have refused this socket. One that does not is
+        // restarting or unreachable, and is waited out without a budget.
+        void serverReach.answers().then((up) => {
+          if (closedByUs) return;
+          if (!up) {
+            waiting = 'offline'; setConn('offline');
+            serverReach.reportOutage();
+            return;
+          }
           const retryDelay = terminalRetryDelay(++connectionFailures, e.code);
-          if (retryDelay === null) { setConn('paused'); return; }
+          if (retryDelay === null) { waiting = 'paused'; setConn('paused'); return; }
           retry = setTimeout(connect, retryDelay);
-        }
+        });
       };
       ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
     };
@@ -888,10 +905,20 @@ export default function TerminalPane({
     // the new process paint, not leftovers.
     reconnectRef.current = (restart = false) => {
       if (retry) clearTimeout(retry);
-      connectionFailures = 0;
+      connectionFailures = 0; waiting = null;
       if (restart) { try { term.reset(); } catch { /* ignore */ } }
       connect();
     };
+    // Resume by itself. A pane waiting out an outage reconnects when the
+    // server answers again (serverReach spreads that across panes). A paused
+    // one gets a fresh budget when the operator comes back to the app — a
+    // retry they would otherwise have had to click, never a background loop.
+    const offBack = serverReach.onBack(() => { if (waiting && !closedByUs) reconnectRef.current(); });
+    const onComeBack = () => { if (waiting === 'paused' && !closedByUs && !document.hidden) reconnectRef.current(); };
+    const onComeBackVisible = () => { if (!document.hidden) onComeBack(); };
+    window.addEventListener('online', onComeBack);
+    window.addEventListener('focus', onComeBack);
+    document.addEventListener('visibilitychange', onComeBackVisible);
 
     // Report the pane's preferred size without locally fitting its terminal.
     // Only the current controller's preference changes the canonical grid;
@@ -1235,6 +1262,10 @@ export default function TerminalPane({
     return () => {
       closedByUs = true;
       if (retry) clearTimeout(retry);
+      offBack();
+      window.removeEventListener('online', onComeBack);
+      window.removeEventListener('focus', onComeBack);
+      document.removeEventListener('visibilitychange', onComeBackVisible);
       if (bootTimer) clearTimeout(bootTimer);
       if (resyncTimer) clearTimeout(resyncTimer);
       persistPreview();
@@ -1666,6 +1697,15 @@ export default function TerminalPane({
             <span>Terminal connection paused. Check your connection and app origin settings.</span>
             <button className="tx-btn" onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => { e.stopPropagation(); reconnectRef.current(); }}>retry connection</button>
+          </div>
+        </div>
+      )}
+      {!reading && conn === 'offline' && (
+        <div className="term-exit mono" role="status">
+          <div className="tx-row">
+            <span>Server unreachable. The terminal reconnects as soon as it answers again.</span>
+            <button className="tx-btn" onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); reconnectRef.current(); }}>retry now</button>
           </div>
         </div>
       )}

@@ -92,7 +92,10 @@ const errors = [];
 try {
   const p = await browser.newPage({ viewport: { width: 1000, height: 700 } });
   p.on('pageerror', (error) => errors.push(error.message));
-  await p.route('**/*', (route) => route.request().url() === 'https://reader.test/' ? route.fulfill({contentType:'text/html',body:'<div id="fixture-root" style="display:flex;position:absolute;inset:10px"></div>'}) : route.abort());
+  // The origin answers its health probe: a refused upgrade below is a refusal by
+  // a server that is up, not an outage (which lib/serverReach waits out).
+  await p.route('**/*', (route) => route.request().url() === 'https://reader.test/' ? route.fulfill({contentType:'text/html',body:'<div id="fixture-root" style="display:flex;position:absolute;inset:10px"></div>'})
+    : route.request().url() === 'https://reader.test/api/visibility' ? route.fulfill({contentType:'application/json',body:'{"boot":"fixture"}'}) : route.abort());
   await p.goto('https://reader.test/');
   await p.addStyleTag({ path: bundle.replace(/\.js$/, '.css') });
   await p.addStyleTag({ content: fs.readFileSync(path.join(web, 'src/styles.css'), 'utf8') + fs.readFileSync(path.join(web, 'src/conversation.css'), 'utf8') });
@@ -331,8 +334,11 @@ try {
   const socketCount = await p.evaluate(() => window.sockets.length);
   await p.clock.pauseAt(await p.evaluate(() => Date.now() + 1000));
   await p.evaluate(() => { window.refuseSockets = true; window.fixture.change({ mode: 'terminal' }); });
-  await p.clock.runFor(30_000);
-  await p.getByRole('button', { name: 'retry connection', exact: true }).waitFor();
+  // Stepped, not one jump: each failure first asks the origin whether it
+  // answers (a real request), and only then schedules the next retry.
+  const retryButton = p.getByRole('button', { name: 'retry connection', exact: true });
+  for (let step = 0; step < 120 && !(await retryButton.isVisible()); step++) await p.clock.runFor(500);
+  await retryButton.waitFor();
   assert.equal(await p.evaluate(() => window.sockets.length), socketCount + 5, 'refused upgrades have a finite retry budget');
   await p.clock.runFor(60_000);
   assert.equal(await p.evaluate(() => window.sockets.length), socketCount + 5, 'a paused terminal does not reconnect indefinitely');
