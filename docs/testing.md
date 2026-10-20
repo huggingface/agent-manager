@@ -18,8 +18,17 @@ npm test
 ```
 
 This runs every server and web suite plus the web typecheck (`tsc --noEmit`) in
-one pool, one job per free core (cores minus the load average, at least 3). It
-takes about two minutes on an idle 8-core machine, longer on a busy one.
+one pool, one job per free core (cores minus the load average, at least 3).
+How long it takes depends on how busy the machine is. Measured on the shared
+8-core Space:
+
+| Machine | Jobs | Full run |
+|---|---:|---:|
+| fairly quiet | 8 | 107–140 s |
+| load 7–12, some runs with 2 extra CPU burners | 3 | 273–286 s |
+| load ~6–7 (a second measurement) | 3 | 360–362 s |
+
+For comparison, running every suite one at a time takes about 13–14 minutes.
 Each finished suite prints one line. A failing suite prints its whole output.
 The run doesn't stop at a failure: it finishes everything, then lists every
 failed suite and exits non-zero.
