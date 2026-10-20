@@ -1,0 +1,1083 @@
+// Session sharing: publish one agent session's trace as a Hub dataset.
+// Design and rationale: docs/session-sharing.md (§4 bundle, §5 access, §6 pipeline).
+//
+// Scope: trace only, publish + optional per-user access grants. Telling the
+// recipient is deliberately NOT here — the operator sends them the dataset link
+// and they open it with the Trace button in their own Space. The mailbox design
+// (a PR on a recipient's am-inbox) is kept in docs/session-sharing.md §5 for
+// whenever that is picked up; it is not in the code.
+//
+// Two hard rules this module exists to honour:
+//
+//  1. NOTHING heavy runs on the event loop. A transcript is routinely megabytes
+//     and redaction is a regex sweep over all of it, so the bundle is built in a
+//     CHILD PROCESS (scripts/share-session.mjs) — the same script that can be run
+//     by hand. This app already wedged once on synchronous work (see
+//     watchdog.js), and a share must never be the next cause.
+//  2. Redaction is not optional, and a share — public or gated — BLOCKS on any
+//     secret hit. The exporter reports what it caught; we refuse to publish
+//     rather than asking the operator to notice a warning.
+//
+// And one about order: a gated repo is a public repo with an access gate, so
+// the gate goes on (and is checked) while the repo is still empty. See
+// shareSession().
+
+import fs from 'node:fs';
+import { ApiError } from './api-errors.js';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { WORKSPACES_DIR, DATA_DIR } from './config.js';
+import { sharedCodexRollout } from './codex-reader.js';
+
+const HF = 'https://huggingface.co';
+const hfToken = () =>
+  process.env.HF_TOKEN || process.env.HUGGING_FACE_HUB_TOKEN || process.env.HF_API_TOKEN || null;
+
+// Repo root, so we can find scripts/share-session.mjs from server/src/.
+// fileURLToPath, not URL.pathname: a checkout whose path contains a space
+// arrives percent-encoded from pathname, and the exporter is then looked for at
+// a path that does not exist.
+const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
+const EXPORTER = path.join(REPO_ROOT, 'scripts', 'share-session.mjs');
+// Exposed for the local-install regression: buildBundle only reaches this path
+// after it has found a transcript, so a checkout-name bug here is otherwise
+// invisible until a real share fails.
+export const __exporterPathForTest = EXPORTER;
+
+// Rules whose hits block a share (public and gated alike). `email` is deliberately NOT here:
+// it is redacted like everything else, but a redacted address is not a reason to
+// refuse — a leaked credential is.
+const isSecretRule = (rule) => rule !== 'email' && rule !== 'unparseable-line';
+
+const run = (cmd, args, opts = {}) =>
+  new Promise((resolve, reject) => {
+    execFile(cmd, args, { timeout: 300_000, maxBuffer: 8 << 20, ...opts }, (err, stdout, stderr) => {
+      if (err) {
+        err.stdout = String(stdout || '');
+        err.stderr = String(stderr || '');
+        return reject(err);
+      }
+      resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
+    });
+  });
+
+async function hfApi(pathname, { method = 'GET', body } = {}) {
+  const token = hfToken();
+  if (!token) throw new ApiError(403, 'no-hf-token', 'no HF_TOKEN — add it as a Space secret to share sessions');
+  const r = await fetch(`${HF}${pathname}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${token}`,
+      'user-agent': 'agent-manager',
+      ...(body ? { 'content-type': 'application/json' } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const text = await r.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* non-JSON error body */ }
+  if (!r.ok) {
+    const msg = (json && (json.error || json.message)) || text.slice(0, 200) || r.statusText;
+    const e = new Error(`HF ${r.status}: ${msg}`);
+    e.status = r.status;
+    throw e;
+  }
+  return json;
+}
+
+/** The Hub username this Space's token belongs to — the namespace we publish under. */
+export async function shareNamespace() {
+  if (!hfToken()) return null;
+  try {
+    const me = await hfApi('/api/whoami-v2');
+    return (me && me.name) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Locate a Claude session's transcript. The filename IS the session id, so this
+ * is a search for `<sessionUuid>.jsonl` under any projects/ dir we know about.
+ * Returns null when the session has never produced a transcript.
+ *
+ * Claude keys its project dir on the working directory, so the SAME session id
+ * can appear under more than one of them — resuming a session from a different
+ * cwd (e.g. after moving into a git worktree) relocates it. Claude normally
+ * moves the file rather than forking it, but if both ever exist the newest is
+ * the live one, so pick by mtime instead of trusting directory order.
+ */
+/** Every Claude transcript on disk. Mirrors claudeFiles() in traces.js. */
+async function claudeTranscripts() {
+  const home = process.env.HOME || '';
+  const roots = [process.env.CLAUDE_CONFIG_DIR, path.join(home, '.claude'), path.join(home, '.config', 'claude')]
+    .filter(Boolean)
+    .filter((d, i, a) => a.indexOf(d) === i);
+  const out = [];
+  for (const root of roots) {
+    const proj = path.join(root, 'projects');
+    let entries = [];
+    try { entries = await fsp.readdir(proj, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      let files = [];
+      try { files = await fsp.readdir(path.join(proj, e.name)); } catch { continue; }
+      for (const f of files) if (f.endsWith('.jsonl')) out.push(path.join(proj, e.name, f));
+    }
+  }
+  return out;
+}
+
+/**
+ * The `cwd` a transcript records, without slurping the file.
+ *
+ * NOT the first line. A transcript opens with metadata lines that carry no cwd
+ * at all — `mode`, `permission-mode`, `file-history-snapshot`, `ai-title`,
+ * `worktree-state` — and only the conversation lines have it. Measured across
+ * ten real transcripts: the first line with a cwd is line 4 or 5 every time.
+ * Reading line 1 alone always returned null, which silently disabled the
+ * cwd-attribution fallback below for its whole existence.
+ *
+ * Bounded on both axes: a `file-history-snapshot` line can be megabytes, so cap
+ * bytes as well as lines rather than trusting either alone.
+ */
+const CWD_SCAN_LINES = 64;
+const CWD_SCAN_BYTES = 512 * 1024;
+
+async function transcriptHead(p) {
+  let fh;
+  try {
+    fh = await fsp.open(p, 'r');
+    let carry = '';
+    let read = 0;
+    let lines = 0;
+    while (read < CWD_SCAN_BYTES && lines < CWD_SCAN_LINES) {
+      const buf = Buffer.alloc(Math.min(65536, CWD_SCAN_BYTES - read));
+      const { bytesRead } = await fh.read(buf, 0, buf.length, read);
+      if (!bytesRead) break;
+      read += bytesRead;
+      carry += buf.toString('utf8', 0, bytesRead);
+      let nl;
+      while ((nl = carry.indexOf('\n')) >= 0 && lines < CWD_SCAN_LINES) {
+        const line = carry.slice(0, nl);
+        carry = carry.slice(nl + 1);
+        lines++;
+        if (!line.trim()) continue;
+        let j;
+        try { j = JSON.parse(line); } catch { continue; }
+        if (j && j.cwd) return { cwd: j.cwd, timestamp: j.timestamp || null };
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+}
+
+async function transcriptCwd(p) {
+  const head = await transcriptHead(p);
+  return (head && head.cwd) || null;
+}
+
+/**
+ * Locate a Claude session's transcript.
+ *
+ * Normally the filename IS the session id. Two things stop that being enough:
+ *
+ *  - Claude keys its project dir on the working directory, so one session id can
+ *    appear under several of them (resuming from a different cwd, e.g. after
+ *    moving into a git worktree, relocates it). Pick the newest by mtime.
+ *  - The pin can be WRONG. runner.js launches `claude --session-id <uuid> ||
+ *    exec claude`; when the first invocation exits non-zero (onboarding on a
+ *    fresh install does this), the fallback starts Claude with an id of its own
+ *    and the session's sessionUuid matches nothing on disk. Observed live.
+ *
+ * So fall back to attributing by working directory — the same approach traces.js
+ * already uses for codex/hermes/opencode, including the ambiguity guard: only
+ * claim a transcript by cwd when this session has that folder to itself.
+ */
+export async function findTranscript(session, allSessions = []) {
+  const files = await claudeTranscripts();
+
+  // 1. By pinned id. `startsWith` rather than an exact name, matching the
+  //    `<uuid>*` glob runner.js uses for its own transcript check.
+  if (session.sessionUuid) {
+    let best = null;
+    for (const p of files) {
+      if (!path.basename(p).startsWith(session.sessionUuid)) continue;
+      try {
+        const st = await fsp.stat(p);
+        if (!best || st.mtimeMs > best.mtimeMs) best = { p, mtimeMs: st.mtimeMs };
+      } catch { /* raced away */ }
+    }
+    if (best) return best.p;
+  }
+
+  // 2. By working directory, only if unambiguous.
+  const folder = session.path ?? session.id;
+  const workdir = path.join(WORKSPACES_DIR, folder);
+  const rivals = allSessions.filter((o) => o.id !== session.id && o.cli === 'claude' && (o.path ?? o.id) === folder);
+  if (rivals.length) return null; // shared folder — refuse to guess
+
+  let best = null;
+  for (const p of files) {
+    if (await transcriptCwd(p) !== workdir) continue;
+    try {
+      const st = await fsp.stat(p);
+      if (!best || st.mtimeMs > best.mtimeMs) best = { p, mtimeMs: st.mtimeMs };
+    } catch { /* raced away */ }
+  }
+  return best && best.p;
+}
+
+/**
+ * Locate a codex session's rollout.
+ *
+ * Codex picks its own conversation id, and runner.js captures it after launch
+ * (codexSessionId + codexRollout), so the pinned path is authoritative when it
+ * still exists. Otherwise fall back to the newest rollout whose recorded cwd is
+ * this session's folder -- with the same ambiguity guard as the Claude path, and
+ * additionally skipping codex's internal guardian/subagent rollouts, which share
+ * the cwd but are not the user's conversation.
+ */
+export async function findRollout(session, allSessions = []) {
+  const shared = await sharedCodexRollout(session);
+  if (shared !== undefined) return shared;
+  if (session.codexRollout) {
+    try { if ((await fsp.stat(session.codexRollout)).isFile()) return session.codexRollout; } catch { /* rotated away */ }
+  }
+
+  const folder = session.path ?? session.id;
+  const workdir = path.join(WORKSPACES_DIR, folder);
+  if (allSessions.some((o) => o.id !== session.id && o.cli === 'codex' && (o.path ?? o.id) === folder)) return null;
+
+  const root = path.join(process.env.CODEX_HOME || path.join(process.env.HOME || '', '.codex'), 'sessions');
+  const found = [];
+  const walk = async (dir, depth) => {
+    if (depth > 5) return;
+    let ents = [];
+    try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) await walk(p, depth + 1);
+      else if (e.name.startsWith('rollout-') && e.name.endsWith('.jsonl')) found.push(p);
+    }
+  };
+  await walk(root, 0);
+
+  let best = null;
+  for (const p of found) {
+    let meta;
+    try { meta = JSON.parse(await firstLineOf(p)); } catch { continue; }
+    const mp = (meta && meta.payload) || {};
+    if (mp.cwd !== workdir) continue;
+    if (mp.thread_source === 'subagent' || (mp.source && mp.source.subagent)) continue;
+    try {
+      const st = await fsp.stat(p);
+      if (!best || st.mtimeMs > best.mtimeMs) best = { p, mtimeMs: st.mtimeMs };
+    } catch { /* raced away */ }
+  }
+  return best && best.p;
+}
+
+/** First line of a file without reading all of it (codex meta lines are large). */
+async function firstLineOf(p) {
+  let fh;
+  try {
+    fh = await fsp.open(p, 'r');
+    const buf = Buffer.alloc(131072);
+    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+    const nl = buf.indexOf(0x0a);
+    return buf.toString('utf8', 0, nl >= 0 ? nl : bytesRead);
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+}
+
+/**
+ * Locate an fx session's event log. The pin (fxSessionId, captured by
+ * runner.js) names the directory, so it is authoritative when the log is still
+ * there. Without a pin, fall back to the one session bound to this folder —
+ * and only when no sibling pane shares it, the same ambiguity guard the other
+ * harnesses use.
+ */
+async function findFxEvents(session, allSessions = []) {
+  const root = path.join(process.env.HOME || '', '.fx', 'sessions');
+  const eventsOf = (id) => path.join(root, id, 'events.jsonl');
+  if (session.fxSessionId) {
+    const p = eventsOf(session.fxSessionId);
+    try { if ((await fsp.stat(p)).isFile()) return p; } catch { /* purged */ }
+  }
+  const folder = session.path ?? session.id;
+  if (allSessions.some((o) => o.id !== session.id && o.cli === 'fx' && (o.path ?? o.id) === folder)) return null;
+  const dir = path.resolve(WORKSPACES_DIR, folder);
+  let ents = [];
+  try { ents = await fsp.readdir(root, { withFileTypes: true }); } catch { return null; }
+  let best = null;
+  for (const e of ents) {
+    if (!e.isDirectory()) continue;
+    let m;
+    try { m = JSON.parse(await fsp.readFile(path.join(root, e.name, 'session.json'), 'utf8')); } catch { continue; }
+    if (!m || !m.workspace_root || path.resolve(m.workspace_root) !== dir) continue;
+    const ts = m.updated_at_ms || m.created_at_ms || 0;
+    if (!best || ts > best.ts) best = { id: e.name, ts };
+  }
+  if (!best) return null;
+  const p = eventsOf(best.id);
+  try { if ((await fsp.stat(p)).isFile()) return p; } catch { /* raced */ }
+  return null;
+}
+
+const opencodeDbPath = () =>
+  path.join(process.env.XDG_DATA_HOME || path.join(process.env.HOME || '', '.local', 'share'), 'opencode', 'opencode.db');
+const hermesDbPath = () => path.join(process.env.HOME || '', '.hermes', 'state.db');
+
+/**
+ * SQLite-backed harnesses. The trace is a QUERY, not a file, so what we locate
+ * is (db path, session id). Never the db itself — opencode's holds OAuth tokens
+ * (§2), which is why the exporter selects one conversation rather than copying.
+ *
+ * opencode carries a pin (runner.js captures opencodeSessionId); hermes has none,
+ * so it is attributed by recorded cwd, with the usual ambiguity guard.
+ */
+async function findDbSession(session, allSessions) {
+  const folder = session.path ?? session.id;
+  const workdir = path.join(WORKSPACES_DIR, folder);
+  const rivals = allSessions.some((o) => o.id !== session.id && o.cli === session.cli && (o.path ?? o.id) === folder);
+
+  if (session.cli === 'opencode') {
+    const db = opencodeDbPath();
+    if (!fs.existsSync(db)) return null;
+    if (session.opencodeSessionId) return { db, sessionId: session.opencodeSessionId };
+    if (rivals) return null;
+    const id = await queryNewest(db, 'select id from session where directory = ? order by time_updated desc limit 1', workdir);
+    return id && { db, sessionId: id };
+  }
+  if (session.cli === 'hermes') {
+    const db = hermesDbPath();
+    if (!fs.existsSync(db)) return null;
+    if (rivals) return null;
+    const id = await queryNewest(db, 'select id from sessions where cwd = ? order by started_at desc limit 1', workdir);
+    return id && { db, sessionId: String(id) };
+  }
+  return null;
+}
+
+// One tiny read-only query, off the request path (share runs async) and never on
+// a hot loop — these dbs are the wedge-prone ones (traces.js, watchdog.js).
+async function queryNewest(dbPath, sql, arg) {
+  let DatabaseSync;
+  try { ({ DatabaseSync } = await import('node:sqlite')); } catch { return null; }
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const row = db.prepare(sql).get(arg);
+    return (row && row.id) || null;
+  } catch { return null; } finally { try { db?.close(); } catch {} }
+}
+
+/** OpenClaw writes one JSONL per session under agents/<agent>/sessions/. */
+async function findOpenClaw(session, allSessions) {
+  const folder = session.path ?? session.id;
+  if (allSessions.some((o) => o.id !== session.id && o.cli === 'openclaw' && (o.path ?? o.id) === folder)) return null;
+  const home = process.env.OPENCLAW_HOME || process.env.HOME || '';
+  const agents = path.join(home, '.openclaw', 'agents');
+  let best = null;
+  const walk = async (dir, depth) => {
+    if (depth > 4) return;
+    let ents = [];
+    try { ents = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of ents) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) await walk(p, depth + 1);
+      else if (e.name.endsWith('.jsonl')) {
+        try { const st = await fsp.stat(p); if (!best || st.mtimeMs > best.mtimeMs) best = { p, mtimeMs: st.mtimeMs }; } catch {}
+      }
+    }
+  };
+  await walk(agents, 0);
+  return best && best.p;
+}
+
+/**
+ * The trace for any supported harness, as { src, sessionId } — sessionId is only
+ * meaningful for the db-backed ones, where it selects the conversation.
+ */
+export async function findTrace(session, allSessions = []) {
+  switch (session.cli) {
+    case 'claude': { const p = await findTranscript(session, allSessions); return p && { src: p }; }
+    case 'codex': { const p = await findRollout(session, allSessions); return p && { src: p }; }
+    case 'openclaw': { const p = await findOpenClaw(session, allSessions); return p && { src: p }; }
+    case 'fx': { const p = await findFxEvents(session, allSessions); return p && { src: p }; }
+    case 'opencode':
+    case 'hermes': {
+      const hit = await findDbSession(session, allSessions);
+      return hit && { src: hit.db, sessionId: hit.sessionId };
+    }
+    default: return null;
+  }
+}
+
+// fx is deliberately absent: scripts/share-session.mjs has no exporter for it
+// (native passthrough is Hub-specific, and there is no STS conversion yet), so
+// listing it here would ship a Share button that always fails. Its trace still
+// resolves through findTrace() for the reader.
+export const SHAREABLE_CLIS = ['claude', 'codex', 'hermes', 'opencode', 'openclaw'];
+export const HARNESS_LABEL = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes',
+                               opencode: 'opencode', openclaw: 'OpenClaw', fx: 'fx' };
+
+/** Dataset card. `configs` pins the data file so meta/ can't collide on schema (§4). */
+function datasetCard({ title, visibility, traceName, stats, redaction, harnessLabel }) {
+  const gated = visibility === 'gated';
+  const gateBlock = gated
+    ? `extra_gated_heading: "Request access to this agent session"
+extra_gated_prompt: >-
+  This repository holds a coding-agent trace. Agent traces can contain source code, local
+  file paths, command output and other context from the machine that produced them. Access
+  is granted per user so the owner can see who has read the session.
+`
+    : '';
+  const redactionLine = Object.entries(redaction || {})
+    .map(([k, v]) => `${k} × ${v}`)
+    .join(', ') || 'nothing matched';
+
+  return `---
+pretty_name: ${JSON.stringify(title)}
+license: apache-2.0
+language:
+  - en
+tags:
+  - agent-traces
+  - agent-manager
+  - coding-agent
+  - traces
+  - tool-use
+configs:
+  - config_name: default
+    data_files:
+      - split: train
+        path: "*.jsonl"
+${gateBlock}---
+
+# ${title}
+
+One ${harnessLabel} session, exported from [Agent Manager](https://huggingface.co/spaces/lvwerra/agent-manager-template).
+
+${gated
+    ? '> **Access: approved people only.** The repo name, this card and the file list are public; reading the trace requires per-user approval.'
+    : '> **Access: public.** Anyone with the link can read this trace.'}
+
+## At a glance
+
+- **${stats.prompts}** prompts · **${stats.turns}** assistant turns · **${stats.toolCalls}** tool calls
+- Trace: \`${traceName}\`
+
+## What's in here
+
+| Path | Contents |
+|---|---|
+| \`${traceName}\` | the session, native ${harnessLabel} JSONL |
+| \`meta/manifest.json\` | provenance: harness, session ids, stats, content hash, lineage |
+| \`meta/briefing.md\` | mechanically generated handoff summary |
+| \`meta/redaction.json\` | which redaction rules ran and what they caught |
+
+## Redaction
+
+Before upload the trace passed ruleset v2: token-shaped patterns, **value** matching against
+this Space's secret-bearing environment variables, and an email rule. Derived artifacts go
+through the same pass. \`file-history-snapshot\` lines are dropped — they embed full file
+contents. Result: ${redactionLine}.
+
+Traces can still contain local paths and command output. Review before relying on this being clean.
+`;
+}
+
+/**
+ * Build the share bundle for a session in a temp dir. Runs the exporter as a
+ * child process (see rule 1 at the top of this file).
+ * Returns { dir, report } where report is the exporter's JSON summary.
+ */
+export async function buildBundle(session, { title, visibility, allSessions = [], traceName }) {
+  const hit = await findTrace(session, allSessions);
+  if (!hit) throw new ApiError(409, 'no-transcript', 'no transcript on disk for this session yet — run it first');
+
+  // The exporter must be present in the image (Dockerfile copies scripts/).
+  // Fail with the actual cause rather than an unparseable-output error.
+  if (!fs.existsSync(EXPORTER)) throw new Error(`exporter missing at ${EXPORTER} — scripts/ was not deployed`);
+
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'am-share-'));
+  const { stdout } = await run(process.execPath, [EXPORTER, hit.src, dir, session.cli, hit.sessionId || '-', ...(traceName ? [traceName] : [])], {
+    // The exporter matches env-var VALUES against the trace, so it needs the
+    // same environment we have — that is the point of the value rules.
+    env: process.env,
+    cwd: REPO_ROOT,
+  });
+
+  let report;
+  try {
+    report = JSON.parse(stdout);
+  } catch {
+    throw new Error(`exporter produced no report: ${stdout.slice(0, 200)}`);
+  }
+
+  await fsp.writeFile(
+    path.join(dir, 'README.md'),
+    datasetCard({
+      title,
+      visibility,
+      traceName: report.trace,
+      stats: report.stats,
+      redaction: report.redaction_hits,
+      harnessLabel: HARNESS_LABEL[session.cli] || session.cli,
+    }),
+  );
+
+  return { dir, report };
+}
+
+// ---------- publishing ----------
+
+/** A raw authenticated Hub request (hfApi is JSON-only). Throws with `status`. */
+async function hubRequest(url, { method = 'GET', headers = {}, body, auth = true, timeoutMs = 300_000 } = {}) {
+  const token = hfToken();
+  // Headers, not an object spread: names are case-insensitive, and two spellings
+  // of `authorization` would otherwise both be sent (the Hub then answers 401).
+  const h = new Headers({ 'user-agent': 'agent-manager' });
+  if (auth && token) h.set('authorization', `Bearer ${token}`);
+  for (const [k, v] of Object.entries(headers)) h.set(k, v);
+  const r = await fetch(url.startsWith('http') ? url : `${HF}${url}`, {
+    method,
+    headers: h,
+    ...(body !== undefined ? { body } : {}),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!r.ok) {
+    const text = await r.text().catch(() => '');
+    let msg = text.slice(0, 200) || r.statusText;
+    try { const j = JSON.parse(text); msg = j.error || j.message || msg; } catch { /* not JSON */ }
+    throw Object.assign(new Error(`HF ${r.status}: ${msg}`), { status: r.status });
+  }
+  return r;
+}
+
+const LFS_JSON = 'application/vnd.git-lfs+json';
+
+/** Every file under dir, as repo-relative posix paths. */
+async function listFiles(dir, prefix = '') {
+  const out = [];
+  for (const e of await fsp.readdir(path.join(dir, prefix), { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${e.name}` : e.name;
+    if (e.isDirectory()) out.push(...await listFiles(dir, rel));
+    else if (e.isFile()) out.push(rel);
+  }
+  return out.sort();
+}
+
+/**
+ * Commit every file in `dir` to the root of an EXISTING dataset repo, in one
+ * commit on main whose parent must be `parentCommit`. Small text files go
+ * inline; anything the Hub asks for as LFS is uploaded through the LFS batch
+ * API first (basic or multipart). Nothing here creates a repo: every endpoint
+ * 404s for one that is not there.
+ */
+export async function commitDir(repo, dir, { parentCommit, summary }) {
+  if (!parentCommit) throw new Error('commitDir needs the verified parent commit');
+  const files = [];
+  for (const rel of await listFiles(dir)) {
+    const buf = await fsp.readFile(path.join(dir, rel));
+    files.push({ path: rel, buf, size: buf.length, oid: crypto.createHash('sha256').update(buf).digest('hex') });
+  }
+
+  const pre = await (await hubRequest(`/api/datasets/${repo}/preupload/main`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ files: files.map((f) => ({ path: f.path, size: f.size, sample: f.buf.subarray(0, 512).toString('base64') })) }),
+  })).json();
+  const mode = new Map((pre.files || []).map((f) => [f.path, f.uploadMode]));
+  const lfs = files.filter((f) => mode.get(f.path) === 'lfs');
+
+  if (lfs.length) {
+    const batch = await (await hubRequest(`${HF}/datasets/${repo}.git/info/lfs/objects/batch`, {
+      method: 'POST', headers: { accept: LFS_JSON, 'content-type': LFS_JSON },
+      body: JSON.stringify({ operation: 'upload', transfers: ['basic', 'multipart'], hash_algo: 'sha256',
+        objects: lfs.map((f) => ({ oid: f.oid, size: f.size })) }),
+    })).json();
+    for (const obj of batch.objects || []) {
+      const f = lfs.find((x) => x.oid === obj.oid);
+      if (!f) continue;
+      if (obj.error) throw new Error(`LFS refused ${f.path}: ${obj.error.message || obj.error.code}`);
+      const up = obj.actions && obj.actions.upload;
+      if (!up) continue; // already stored
+      const hdr = up.header || {};
+      // Presigned storage URLs: their own headers only, never our token.
+      if (hdr.chunk_size) {
+        const size = Number(hdr.chunk_size);
+        const parts = [];
+        for (const key of Object.keys(hdr).filter((k) => /^\d+$/.test(k)).sort((a, b) => a - b)) {
+          const n = Number(key);
+          const r = await hubRequest(hdr[key], { method: 'PUT', auth: false, body: f.buf.subarray((n - 1) * size, n * size) });
+          parts.push({ partNumber: n, etag: r.headers.get('etag') });
+        }
+        await hubRequest(up.href, { method: 'POST', headers: { accept: LFS_JSON, 'content-type': LFS_JSON },
+          body: JSON.stringify({ oid: f.oid, parts }) });
+      } else {
+        await hubRequest(up.href, { method: 'PUT', auth: false, headers: hdr, body: f.buf });
+      }
+      const verify = obj.actions.verify;
+      if (verify) {
+        // Our token, not the action's own Authorization header.
+        const extra = Object.fromEntries(Object.entries(verify.header || {}).filter(([k]) => k.toLowerCase() !== 'authorization'));
+        await hubRequest(verify.href, { method: 'POST', headers: { accept: LFS_JSON, 'content-type': LFS_JSON, ...extra },
+          body: JSON.stringify({ oid: f.oid, size: f.size }) });
+      }
+    }
+  }
+
+  const lines = [{ key: 'header', value: { summary, description: '', parentCommit } }];
+  for (const f of files) {
+    lines.push(mode.get(f.path) === 'lfs'
+      ? { key: 'lfsFile', value: { path: f.path, algo: 'sha256', oid: f.oid, size: f.size } }
+      : { key: 'file', value: { path: f.path, content: f.buf.toString('base64'), encoding: 'base64' } });
+  }
+  return (await hubRequest(`/api/datasets/${repo}/commit/main`, {
+    method: 'POST', headers: { 'content-type': 'application/x-ndjson' },
+    body: lines.map((l) => JSON.stringify(l)).join('\n'),
+  })).json();
+}
+// Every Hub call a share makes, behind one seam so the whole sequence can run
+// against a fake Hub (server/test/share-publish.test.mjs). Each method throws on
+// failure; `info` throws an error with `status: 404` for a repo that is not there.
+const repoParts = (repo) => { const [organization, name] = repo.split('/'); return { organization, name }; };
+export const hub = {
+  whoami: () => hfApi('/api/whoami-v2'),
+  info: (repo) => hfApi(`/api/datasets/${repo}`),
+  // No exist-ok: a name that is taken is a refusal, never a repo to push into.
+  createRepo: (repo) => hfApi('/api/repos/create', {
+    method: 'POST', body: { type: 'dataset', ...repoParts(repo), private: false },
+  }),
+  setGated: (repo) => hfApi(`/api/datasets/${repo}/settings`, { method: 'PUT', body: { gated: 'manual' } }),
+  setPrivate: (repo) => hfApi(`/api/datasets/${repo}/settings`, { method: 'PUT', body: { private: true } }),
+  deleteRepo: (repo) => hfApi('/api/repos/delete', { method: 'DELETE', body: { type: 'dataset', ...repoParts(repo) } }),
+  // A commit, not `hf upload`: that one runs its own create_repo(exist_ok) first,
+  // so it would happily create (or reuse) a repo nobody gated. The commit API
+  // only writes to a repo that exists, and `parentCommit` makes the Hub refuse
+  // it unless the head is still the commit we verified.
+  upload: (repo, dir, { parentCommit }) => commitDir(repo, dir, {
+    parentCommit, summary: 'Add Agent Manager session trace',
+  }),
+  grant: (repo, user) => hfApi(`/api/datasets/${repo}/user-access-request/grant`, { method: 'POST', body: { user } }),
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+};
+
+// A fresh random suffix per share. Never derived from the session, so a re-share
+// can't land on (or be predicted into) an earlier repo.
+const freshSuffix = () => crypto.randomBytes(5).toString('hex');
+
+// A gated share's repo name, card title and file list are public even though the
+// trace is not, so none of them may come from the session: no name, no id.
+const GATED_TRACE_NAME = 'trace.jsonl';
+const NEUTRAL_TITLE = 'Agent Manager session';
+
+/** Why a share stopped, in words the dialog can show as-is. */
+function shareError(status, code, message, share) {
+  return new ApiError(status, code, message, { share });
+}
+
+/**
+ * Publish a session as a dataset repo.
+ *
+ * Order, and why (a gated repo is a PUBLIC repo with an access gate, so until
+ * the gate is on, anything in it is world-readable):
+ *
+ *   1. redaction gate — refuse on any secret hit, public or gated;
+ *   2. create the repo, public and EMPTY; a taken name is refused;
+ *   3. gated: set `gated: manual`, then re-read it and check it took. If not,
+ *      delete the still-empty repo and stop — nothing has been uploaded;
+ *   4. re-check it is the same repo (id, head commit, gate, still empty), then
+ *      commit the bundle with that head as `parentCommit`, so the Hub refuses
+ *      the commit if the repo was replaced in between;
+ *   5. grant users; 6. re-read and check the result.
+ *
+ * Fail closed: anything that fails after the upload starts rolls the repo back
+ * to private, or failing that deletes it, and the error says which. If even
+ * that fails, the error says the trace may be public and where.
+ *
+ * @param session          the session record
+ * @param visibility       'public' | 'gated'
+ * @param name             optional repo name (public only; namespace is this token's user)
+ * @param grantTo          usernames to pre-authorize (gated only)
+ * @param hub              Hub client (tests pass a fake)
+ */
+export async function shareSession(session, { visibility = 'public', name, grantTo = [], allSessions = [], hub: h = hub, verifyDelayMs = 1000 } = {}) {
+  if (!hfToken()) throw new ApiError(403, 'no-hf-token', 'no HF_TOKEN — add it as a Space secret to share sessions');
+  if (!['public', 'gated'].includes(visibility)) throw new Error(`bad visibility: ${visibility}`);
+  const gated = visibility === 'gated';
+  const ns = await h.whoami().then((me) => (me && me.name) || null, () => null);
+  if (!ns) throw new Error('cannot resolve the Hub namespace — check HF_TOKEN');
+
+  const slug = (name || session.name || 'session')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'session';
+  const repo = gated ? `${ns}/am-session-${freshSuffix()}` : `${ns}/am-session-${slug}-${freshSuffix()}`;
+  const url = `${HF}/datasets/${repo}`;
+
+  const title = gated ? NEUTRAL_TITLE : `Agent Manager session — ${session.name || slug}`;
+  const { dir, report } = await buildBundle(session, {
+    title, visibility, allSessions, traceName: gated ? GATED_TRACE_NAME : undefined,
+  });
+
+  try {
+    // 1. Redaction gate, for BOTH visibilities: a gated repo's trace is one
+    //    mistaken grant (or one failed gate) away from public, and "we warned
+    //    you" is not good enough for something irreversible.
+    const secrets = Object.entries(report.redaction_hits || {}).filter(([r]) => isSecretRule(r));
+    if (secrets.length) {
+      throw new ApiError(409, 'redaction-blocked',
+        `refusing to publish: ${secrets.map(([r, n]) => `${r} × ${n}`).join(', ')}`,
+        { hits: report.redaction_hits });
+    }
+
+    // 2. Create, empty. If this fails there is no repo of ours to clean up — and
+    //    a name that already exists is someone's (or an earlier share's), so it
+    //    is never touched.
+    try {
+      await h.createRepo(repo);
+    } catch (e) {
+      console.error(`[share] create ${repo} failed: ${e.message}`);
+      if (e.status === 409 || /exist/i.test(e.message || '')) {
+        throw shareError(409, 'share-name-taken', `Not shared: a dataset named ${repo} already exists, and a share never writes into an existing one. Nothing was uploaded. Try again.`, { stage: 'create', outcome: 'not-created' });
+      }
+      throw shareError(424, 'share-create-failed', 'Not shared: the dataset could not be created on the Hub. Nothing was uploaded.', { stage: 'create', outcome: 'not-created' });
+    }
+
+    // 3. Gate the empty repo and prove it took before a single trace byte goes up.
+    //    The verified read also pins WHICH repo this is (its id and head commit):
+    //    the upload is bound to exactly that.
+    let bound = null;
+    if (gated) {
+      let why = null;
+      try {
+        await h.setGated(repo);
+        const info = await readBack(h, repo, verifyDelayMs, (i) => i && i.gated === 'manual');
+        if (!info || info.gated !== 'manual') why = 'the Hub did not report the dataset as gated';
+        else bound = info;
+      } catch (e) {
+        console.error(`[share] gating ${repo} failed: ${e.message}`);
+        why = 'the access gate could not be turned on';
+      }
+      if (why) {
+        const gone = await deleteAndConfirm(h, repo);
+        throw shareError(424, 'share-gate-failed', gone
+          ? `Not shared: ${why}, so the empty dataset was deleted. Nothing was uploaded.`
+          : `Not shared: ${why}. Nothing was uploaded, but an empty dataset is left at ${url} — delete it on the Hub.`,
+        { stage: 'gate', outcome: gone ? 'deleted' : 'left-empty', url });
+      }
+    } else {
+      bound = await h.info(repo).catch(() => null);
+    }
+
+    // 3b. Right before the upload, check it is still that repo, still empty, and
+    //     (gated) still gated. If it is gone or replaced, it is not ours to
+    //     touch; if it is ours but changed, delete it. Either way nothing went up.
+    {
+      const now = await h.info(repo).catch((e) => (e.status === 404 ? null : undefined));
+      const ours = bound && now && bound._id && now._id === bound._id;
+      const intact = ours && bound.sha && now.sha === bound.sha && (!gated || now.gated === 'manual')
+        && (now.siblings || []).every((f) => f.rfilename === '.gitattributes');
+      if (!intact) {
+        const gone = ours ? await deleteAndConfirm(h, repo) : false;
+        const what = now === null ? 'the dataset disappeared before the upload'
+          : ours ? 'the dataset changed before the upload' : 'the dataset could not be confirmed as the one just created';
+        throw shareError(424, 'share-bind-failed', ours
+          ? `Not shared: ${what}. Nothing was uploaded${gone ? ', and the dataset was deleted' : `; check ${url} on the Hub`}.`
+          : `Not shared: ${what}. Nothing was uploaded, and no other dataset was touched.`,
+        { stage: 'bind', outcome: ours ? (gone ? 'deleted' : 'left-empty') : 'not-uploaded', url });
+      }
+    }
+
+    // From here on the repo may hold trace bytes: any failure rolls back.
+    let stage = 'upload';
+    const granted = [];
+    try {
+      await h.upload(repo, dir, { parentCommit: bound.sha });
+
+      stage = 'grant';
+      const failedUsers = [];
+      if (gated) {
+        for (const user of grantTo) {
+          try {
+            await h.grant(repo, user);
+            granted.push(user);
+          } catch (e) {
+            // 400 already-has-access is a success from the caller's point of view.
+            if (e.status === 400 && /already/i.test(e.message)) granted.push(user);
+            else { console.error(`[share] grant ${user} on ${repo} failed: ${e.message}`); failedUsers.push(user); }
+          }
+        }
+      }
+      if (failedUsers.length) {
+        throw Object.assign(new Error('grant failed'), { why: `access could not be granted to ${failedUsers.join(', ')} (check the username)` });
+      }
+
+      // 6. The final word is what the Hub says now, not what we asked for.
+      stage = 'verify';
+      const ok = (i) => i && (i.siblings || []).some((f) => f.rfilename === report.trace) && (!gated || i.gated === 'manual');
+      const info = await readBack(h, repo, verifyDelayMs, ok);
+      if (!ok(info)) {
+        throw Object.assign(new Error('verify failed'), {
+          why: gated && info && info.gated !== 'manual' ? 'the dataset was no longer gated after upload' : 'the uploaded trace was not found on the Hub',
+        });
+      }
+
+      return {
+        repo,
+        visibility,
+        url,
+        sha: (info && info.sha) || null,
+        trace: report.trace,
+        stats: report.stats,
+        redaction: report.redaction_hits,
+        dropped: report.dropped,
+        granted,
+      };
+    } catch (e) {
+      if (!e.why) console.error(`[share] ${stage} for ${repo} failed: ${e.message}`);
+      const why = e.why || (stage === 'upload' ? 'the upload failed' : stage === 'grant' ? 'granting access failed' : 'the final check failed');
+      throw await rollBack(h, repo, url, stage, why, verifyDelayMs, bound._id);
+    }
+  } finally {
+    // The bundle is a copy; the session's own transcript is untouched.
+    fs.rm(dir, { recursive: true, force: true }, () => {});
+  }
+}
+
+/** Re-read repo info until `ok(info)` or a few tries pass. Returns the last read. */
+async function readBack(h, repo, delayMs, ok, tries = 3) {
+  let info = null;
+  for (let i = 0; i < tries; i++) {
+    if (i) await h.sleep(delayMs);
+    info = await h.info(repo);
+    if (ok(info)) return info;
+  }
+  return info;
+}
+
+/** Delete and confirm the Hub no longer has it. Never throws. */
+async function deleteAndConfirm(h, repo) {
+  try {
+    await h.deleteRepo(repo);
+  } catch (e) {
+    console.error(`[share] delete ${repo} failed: ${e.message}`);
+  }
+  // Judge by what the Hub says now, not by whether the delete call answered.
+  try { await h.info(repo); return false; } catch (e) { return e.status === 404; }
+}
+
+/**
+ * A failure after the upload started: the repo may hold the trace. Make it
+ * private (and check), else delete it (and check), and return the error that
+ * says which — or, if neither worked, that the trace may be public right now.
+ */
+async function rollBack(h, repo, url, stage, why, delayMs, boundId) {
+  // Only ever roll back the repo this share created. If it is gone, or the name
+  // now belongs to a different repo, the commit had nowhere to land (it was
+  // bound to our repo's head), so there is nothing of ours to undo.
+  const now = await h.info(repo).catch((e) => (e.status === 404 ? null : undefined));
+  if (now === null) {
+    return shareError(424, 'share-rolled-back', `Not shared: ${why}. The dataset no longer exists.`,
+      { stage, outcome: 'deleted', url });
+  }
+  if (now && now._id !== boundId) {
+    return shareError(424, 'share-rolled-back',
+      `Not shared: ${why}. The dataset was replaced by another one before the upload; nothing was written to it, and it was not touched.`,
+      { stage, outcome: 'not-uploaded', url });
+  }
+  let madePrivate = false;
+  try {
+    await h.setPrivate(repo);
+    const info = await readBack(h, repo, delayMs, (i) => i && i.private === true);
+    madePrivate = !!(info && info.private === true);
+  } catch (e) {
+    console.error(`[share] rollback: making ${repo} private failed: ${e.message}`);
+  }
+  if (madePrivate) {
+    return shareError(424, 'share-rolled-back',
+      `Not shared: ${why}. The dataset was made private, so only you can read it: ${url} — delete it on the Hub if you don't need it.`,
+      { stage, outcome: 'made-private', url });
+  }
+  if (await deleteAndConfirm(h, repo)) {
+    return shareError(424, 'share-rolled-back', `Not shared: ${why}. The dataset was deleted.`,
+      { stage, outcome: 'deleted', url });
+  }
+  return shareError(424, 'share-exposed',
+    `This trace may be public at ${url} — check it now. Sharing failed (${why}) and the dataset could not be made private or deleted.`,
+    { stage, outcome: 'exposed', url });
+}
+
+export async function shareAccess(repo) {
+  const [accepted, pending] = await Promise.all([
+    hfApi(`/api/datasets/${repo}/user-access-request/accepted`).catch(() => []),
+    hfApi(`/api/datasets/${repo}/user-access-request/pending`).catch(() => []),
+  ]);
+  const names = (rows) => (Array.isArray(rows) ? rows.map((r) => r.user?.user || r.username || null).filter(Boolean) : []);
+  return { accepted: names(accepted), pending: names(pending) };
+}
+
+export async function grantAccess(repo, users) {
+  const granted = [];
+  for (const user of users) {
+    await hfApi(`/api/datasets/${repo}/user-access-request/grant`, { method: 'POST', body: { user } });
+    granted.push(user);
+  }
+  return granted;
+}
+
+/**
+ * Revoke access. Must move the user to `rejected`, not `pending`: a user added
+ * by grant_access never filed a request, so the "cancel" path (which moves a
+ * request back to pending) 404s with "No pending access request found". Learned
+ * the hard way — the hub docstring lists both as revocation options.
+ */
+export async function revokeAccess(repo, users) {
+  const revoked = [];
+  for (const user of users) {
+    await hfApi(`/api/datasets/${repo}/user-access-request/handle`, {
+      method: 'POST',
+      body: { user, status: 'rejected' },
+    });
+    revoked.push(user);
+  }
+  return revoked;
+}
+
+// ---------- receiving: materialise a shared trace on this Space ----------
+// A share bundle IS a dataset repo: one `<name>.jsonl` at the root plus `meta/`.
+// Pulling it into DATA_DIR/traces/<ref>/ is all a trace pane needs to render it
+// (traces.js readTraceBundle), and it is exactly the step the accept-a-delivery
+// flow will perform once the inbox side lands — so it lives here, not in a
+// one-off script.
+//
+// Works for a private repo because the request carries this Space's token: the
+// dataset viewer is blocked for a gated/private repo, authenticated download is
+// not (docs/session-sharing.md §5).
+
+export const TRACES_DIR = path.join(DATA_DIR, 'traces');
+
+// A local directory name for a repo id. Must satisfy the route's `[\w.-]+`
+// guard, so the namespace separator becomes '--'.
+export const bundleRef = (repo) => repo.replace(/\//g, '--');
+
+const MAX_TRACE_BYTES = 96 << 20; // a 6 MB session is normal; 96 MB is a mistake
+
+/** Stream one file out of a dataset repo to disk. Never buffers it in memory. */
+async function downloadTo(repo, rev, file, dest) {
+  const token = hfToken();
+  const url = `${HF}/datasets/${repo}/resolve/${encodeURIComponent(rev)}/${file.split('/').map(encodeURIComponent).join('/')}`;
+  const r = await fetch(url, {
+    headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), 'user-agent': 'agent-manager' },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(300_000),
+  });
+  if (!r.ok) throw new Error(`HF ${r.status} fetching ${file}`);
+  const declared = Number(r.headers.get('content-length') || 0);
+  if (declared > MAX_TRACE_BYTES) throw new Error(`${file} is ${Math.round(declared / 1e6)} MB — refusing to import`);
+  await fsp.mkdir(path.dirname(dest), { recursive: true });
+  const { Writable } = await import('node:stream');
+  const { pipeline } = await import('node:stream/promises');
+  const out = fs.createWriteStream(dest);
+  let bytes = 0;
+  await pipeline(
+    r.body,
+    new Writable({
+      write(chunk, _enc, cb) {
+        bytes += chunk.length;
+        if (bytes > MAX_TRACE_BYTES) return cb(new Error(`${file} exceeded ${MAX_TRACE_BYTES} bytes mid-download`));
+        out.write(chunk, cb);
+      },
+      final(cb) { out.end(cb); },
+      destroy(err, cb) { out.destroy(); cb(err); },
+    }),
+  );
+  return bytes;
+}
+
+/**
+ * Import a share bundle from a dataset repo into DATA_DIR/traces/<ref>/.
+ * Returns { ref, dir, repo, sha, files, bytes, manifest } — `ref` is what a
+ * trace pane's traceSource.ref should be set to.
+ */
+export async function importBundle(repo) {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw Object.assign(new Error('expected a dataset id like "user/name"'), { code: 'bad-repo' });
+  if (!hfToken()) throw Object.assign(new Error('no HF_TOKEN — add it as a Space secret to open shared traces'), { code: 'no-hf-token' });
+
+  let info;
+  try {
+    info = await hfApi(`/api/datasets/${repo}`);
+  } catch (e) {
+    // 401/403/404 all mean the same thing to the operator: this token can't read
+    // that repo. Say so, rather than leaking a status code into the UI.
+    if (e.status === 404 || e.status === 401 || e.status === 403) {
+      throw Object.assign(new Error(`can't read ${repo} — it doesn't exist, or this Space's token has no access`), { code: 'no-access' });
+    }
+    throw e;
+  }
+
+  const names = (info.siblings || []).map((s) => s.rfilename);
+  const traces = names.filter((n) => n.endsWith('.jsonl') && !n.includes('/'));
+  if (!traces.length) throw Object.assign(new Error(`${repo} has no trace file at its root — is it a session share?`), { code: 'not-a-bundle' });
+  // One session per repo is the share unit (§4). More than one means this is
+  // some other dataset that happens to hold jsonl; guessing would be wrong.
+  if (traces.length > 1) throw Object.assign(new Error(`${repo} holds ${traces.length} .jsonl files; a session share has exactly one`), { code: 'not-a-bundle' });
+
+  const wanted = [traces[0], ...names.filter((n) => n.startsWith('meta/'))];
+  const ref = bundleRef(repo);
+  const dir = path.join(TRACES_DIR, ref);
+  // Re-importing replaces: a bundle is a snapshot of a repo revision, and half
+  // of an old one mixed with half of a new one is worse than either.
+  await fsp.rm(dir, { recursive: true, force: true });
+  await fsp.mkdir(dir, { recursive: true });
+
+  const rev = info.sha || 'main';
+  let bytes = 0;
+  for (const file of wanted) bytes += await downloadTo(repo, rev, file, path.join(dir, file));
+
+  let manifest = null;
+  try { manifest = JSON.parse(await fsp.readFile(path.join(dir, 'meta', 'manifest.json'), 'utf8')); } catch { /* older bundle, or none */ }
+
+  // Provenance: where this came from and when. A received trace that can't say
+  // whose it is has lost the thing that makes it trustworthy.
+  await fsp.writeFile(path.join(dir, 'meta', 'source.json'), JSON.stringify({
+    repo, sha: rev, private: !!info.private, gated: info.gated || false,
+    author: info.author || null, importedAt: new Date().toISOString(),
+    url: `${HF}/datasets/${repo}`,
+  }, null, 2));
+
+  return { ref, dir, repo, sha: rev, files: wanted, bytes, manifest };
+}
+
+/** Bundles already on disk, newest import first. */
+export async function listBundles() {
+  const out = [];
+  for (const name of await fsp.readdir(TRACES_DIR).catch(() => [])) {
+    const dir = path.join(TRACES_DIR, name);
+    try { if (!(await fsp.stat(dir)).isDirectory()) continue; } catch { continue; }
+    let source = null, manifest = null;
+    try { source = JSON.parse(await fsp.readFile(path.join(dir, 'meta', 'source.json'), 'utf8')); } catch {}
+    try { manifest = JSON.parse(await fsp.readFile(path.join(dir, 'meta', 'manifest.json'), 'utf8')); } catch {}
+    out.push({
+      ref: name,
+      repo: (source && source.repo) || null,
+      url: (source && source.url) || null,
+      importedAt: (source && source.importedAt) || null,
+      harness: (manifest && manifest.harness && (manifest.harness.name || manifest.harness.id)) || null,
+      name: (manifest && manifest.session && manifest.session.name) || null,
+      from: (manifest && manifest.origin && manifest.origin.user) || null,
+    });
+  }
+  return out.sort((a, b) => String(b.importedAt || '').localeCompare(String(a.importedAt || '')));
+}

@@ -1,0 +1,42 @@
+{
+  "name": "agent-manager-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent Manager backend (Express + ws + node-pty + libghostty-vt)",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/huggingface/agent-manager"
+  },
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test:ui": "node ../scripts/run-suites.mjs terminal-ui screenshot-input reader-info --manual",
+    "test:screenshots": "node ../scripts/run-suites.mjs screenshot-input --manual",
+    "test:mobile": "node ../scripts/run-suites.mjs mobile.test --manual",
+    "test": "node ../scripts/run-suites.mjs"
+  },
+  "engines": {
+    "node": ">=24.16"
+  },
+  "dependencies": {
+    "@coder/libghostty-vt-node": "0.1.0-beta.0",
+    "cron-parser": "^5.10.0",
+    "express": "^4.22.3",
+    "node-pty": "^1.0.0",
+    "smol-toml": "^1.9.0",
+    "web-push": "^3.6.7",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@xterm/headless": "^6.0.0",
+    "playwright": "^1.62.1"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true,
+    "@coder/libghostty-vt-node@0.1.0-beta.0": true,
+    "fsevents@2.3.2": false
+  }
+}

@@ -1,0 +1,2034 @@
+{
+ "shell": {
+  "empty": {
+   "cursorRow": 0,
+   "cursorCol": 10,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": "bash-5.2$"
+    },
+    {
+     "row": 1,
+     "text": ""
+    },
+    {
+     "row": 2,
+     "text": ""
+    },
+    {
+     "row": 3,
+     "text": ""
+    },
+    {
+     "row": 4,
+     "text": ""
+    },
+    {
+     "row": 5,
+     "text": ""
+    },
+    {
+     "row": 6,
+     "text": ""
+    },
+    {
+     "row": 7,
+     "text": ""
+    },
+    {
+     "row": 8,
+     "text": ""
+    },
+    {
+     "row": 9,
+     "text": ""
+    },
+    {
+     "row": 10,
+     "text": ""
+    },
+    {
+     "row": 11,
+     "text": ""
+    },
+    {
+     "row": 12,
+     "text": ""
+    },
+    {
+     "row": 13,
+     "text": ""
+    },
+    {
+     "row": 14,
+     "text": ""
+    },
+    {
+     "row": 15,
+     "text": ""
+    },
+    {
+     "row": 16,
+     "text": ""
+    },
+    {
+     "row": 17,
+     "text": ""
+    },
+    {
+     "row": 18,
+     "text": ""
+    },
+    {
+     "row": 19,
+     "text": ""
+    },
+    {
+     "row": 20,
+     "text": ""
+    },
+    {
+     "row": 21,
+     "text": ""
+    },
+    {
+     "row": 22,
+     "text": ""
+    },
+    {
+     "row": 23,
+     "text": ""
+    },
+    {
+     "row": 24,
+     "text": ""
+    },
+    {
+     "row": 25,
+     "text": ""
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": ""
+    },
+    {
+     "row": 28,
+     "text": ""
+    },
+    {
+     "row": 29,
+     "text": ""
+    }
+   ]
+  },
+  "typed": {
+   "cursorRow": 0,
+   "cursorCol": 28,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": "bash-5.2$ half typed thought"
+    },
+    {
+     "row": 1,
+     "text": ""
+    },
+    {
+     "row": 2,
+     "text": ""
+    },
+    {
+     "row": 3,
+     "text": ""
+    },
+    {
+     "row": 4,
+     "text": ""
+    },
+    {
+     "row": 5,
+     "text": ""
+    },
+    {
+     "row": 6,
+     "text": ""
+    },
+    {
+     "row": 7,
+     "text": ""
+    },
+    {
+     "row": 8,
+     "text": ""
+    },
+    {
+     "row": 9,
+     "text": ""
+    },
+    {
+     "row": 10,
+     "text": ""
+    },
+    {
+     "row": 11,
+     "text": ""
+    },
+    {
+     "row": 12,
+     "text": ""
+    },
+    {
+     "row": 13,
+     "text": ""
+    },
+    {
+     "row": 14,
+     "text": ""
+    },
+    {
+     "row": 15,
+     "text": ""
+    },
+    {
+     "row": 16,
+     "text": ""
+    },
+    {
+     "row": 17,
+     "text": ""
+    },
+    {
+     "row": 18,
+     "text": ""
+    },
+    {
+     "row": 19,
+     "text": ""
+    },
+    {
+     "row": 20,
+     "text": ""
+    },
+    {
+     "row": 21,
+     "text": ""
+    },
+    {
+     "row": 22,
+     "text": ""
+    },
+    {
+     "row": 23,
+     "text": ""
+    },
+    {
+     "row": 24,
+     "text": ""
+    },
+    {
+     "row": 25,
+     "text": ""
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": ""
+    },
+    {
+     "row": 28,
+     "text": ""
+    },
+    {
+     "row": 29,
+     "text": ""
+    }
+   ]
+  }
+ },
+ "fx": {
+  "empty": {
+   "cursorRow": 8,
+   "cursorCol": 2,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": "\u25cf Skills: 1 discovery issue; some skills may be missing (ctrl o to view)"
+    },
+    {
+     "row": 1,
+     "text": ""
+    },
+    {
+     "row": 2,
+     "text": "\u25cf Keychain: fx could not access profile file. Continuing without an API key."
+    },
+    {
+     "row": 3,
+     "text": ""
+    },
+    {
+     "row": 4,
+     "text": "\u25cf Config: 1 configuration issue (ctrl o to view)"
+    },
+    {
+     "row": 5,
+     "text": ""
+    },
+    {
+     "row": 6,
+     "text": "\u25cf History: durable prompt history unavailable"
+    },
+    {
+     "row": 7,
+     "text": ""
+    },
+    {
+     "row": 8,
+     "text": "\u2503"
+    },
+    {
+     "row": 9,
+     "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    },
+    {
+     "row": 10,
+     "text": "   Welcome to fx"
+    },
+    {
+     "row": 11,
+     "text": ""
+    },
+    {
+     "row": 12,
+     "text": "   fx can access AI models with an account, subscription, or API key."
+    },
+    {
+     "row": 13,
+     "text": "   Choose a sign-in option below, or add your own API key."
+    },
+    {
+     "row": 14,
+     "text": ""
+    },
+    {
+     "row": 15,
+     "text": "   You can change this anytime with /setup."
+    },
+    {
+     "row": 16,
+     "text": ""
+    },
+    {
+     "row": 17,
+     "text": "   Get started"
+    },
+    {
+     "row": 18,
+     "text": "   \u203a Sign in with Vercel"
+    },
+    {
+     "row": 19,
+     "text": "     Sign in with Codex"
+    },
+    {
+     "row": 20,
+     "text": "     Sign in with Grok"
+    },
+    {
+     "row": 21,
+     "text": "     Add an API key"
+    },
+    {
+     "row": 22,
+     "text": "   \u26a0\ufe0e Note: fx is experimental and defaults to auto mode. Learn more"
+    },
+    {
+     "row": 23,
+     "text": ""
+    },
+    {
+     "row": 24,
+     "text": ""
+    },
+    {
+     "row": 25,
+     "text": "   Esc to set up later \u00b7 Explore all commands with /help"
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": ""
+    },
+    {
+     "row": 28,
+     "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    },
+    {
+     "row": 29,
+     "text": "auto \u00b7 glm-5.2"
+    }
+   ]
+  },
+  "typed": {
+   "cursorRow": 8,
+   "cursorCol": 20,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": "\u25cf Skills: 1 discovery issue; some skills may be missing (ctrl o to view)"
+    },
+    {
+     "row": 1,
+     "text": ""
+    },
+    {
+     "row": 2,
+     "text": "\u25cf Keychain: fx could not access profile file. Continuing without an API key."
+    },
+    {
+     "row": 3,
+     "text": ""
+    },
+    {
+     "row": 4,
+     "text": "\u25cf Config: 1 configuration issue (ctrl o to view)"
+    },
+    {
+     "row": 5,
+     "text": ""
+    },
+    {
+     "row": 6,
+     "text": "\u25cf History: durable prompt history unavailable"
+    },
+    {
+     "row": 7,
+     "text": ""
+    },
+    {
+     "row": 8,
+     "text": "\u2503 half typed thought"
+    },
+    {
+     "row": 9,
+     "text": ""
+    },
+    {
+     "row": 10,
+     "text": "run /login \u00b7 auto \u00b7 glm-5.2"
+    },
+    {
+     "row": 11,
+     "text": ""
+    },
+    {
+     "row": 12,
+     "text": ""
+    },
+    {
+     "row": 13,
+     "text": ""
+    },
+    {
+     "row": 14,
+     "text": ""
+    },
+    {
+     "row": 15,
+     "text": ""
+    },
+    {
+     "row": 16,
+     "text": ""
+    },
+    {
+     "row": 17,
+     "text": ""
+    },
+    {
+     "row": 18,
+     "text": ""
+    },
+    {
+     "row": 19,
+     "text": ""
+    },
+    {
+     "row": 20,
+     "text": ""
+    },
+    {
+     "row": 21,
+     "text": ""
+    },
+    {
+     "row": 22,
+     "text": ""
+    },
+    {
+     "row": 23,
+     "text": ""
+    },
+    {
+     "row": 24,
+     "text": ""
+    },
+    {
+     "row": 25,
+     "text": ""
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": ""
+    },
+    {
+     "row": 28,
+     "text": ""
+    },
+    {
+     "row": 29,
+     "text": ""
+    }
+   ]
+  }
+ },
+ "hermes": {
+  "empty": {
+   "cursorRow": 28,
+   "cursorCol": 2,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": "\u2502                                                 data-science: jupyter-live-kernel                \u2502"
+    },
+    {
+     "row": 1,
+     "text": "\u2502  no model configured \u2014 run /model or hermes     devops: sdlc-review                              \u2502"
+    },
+    {
+     "row": 2,
+     "text": "\u2502  setup                                          email: email-inbox-triage, himalaya              \u2502"
+    },
+    {
+     "row": 3,
+     "text": "\u2502  /data/workspaces/agent-manager                 general: character, environment, skill, +2 more  \u2502"
+    },
+    {
+     "row": 4,
+     "text": "\u2502  Session: 20261014_102115_efd3f6                github: github-auth, github-code-review, +3      \u2502"
+    },
+    {
+     "row": 5,
+     "text": "\u2502                                                 more                                             \u2502"
+    },
+    {
+     "row": 6,
+     "text": "\u2502                                                 media: gif-search, heartmula, songsee, +1 more   \u2502"
+    },
+    {
+     "row": 7,
+     "text": "\u2502                                                 mlops: audiocraft-audio-generation, +6 more      \u2502"
+    },
+    {
+     "row": 8,
+     "text": "\u2502                                                 note-taking: obsidian                            \u2502"
+    },
+    {
+     "row": 9,
+     "text": "\u2502                                                 productivity: airtable, box, +15 more            \u2502"
+    },
+    {
+     "row": 10,
+     "text": "\u2502                                                 research: arxiv, blogwatcher, +5 more            \u2502"
+    },
+    {
+     "row": 11,
+     "text": "\u2502                                                 smart-home: openhue                              \u2502"
+    },
+    {
+     "row": 12,
+     "text": "\u2502                                                 social-media: xurl                               \u2502"
+    },
+    {
+     "row": 13,
+     "text": "\u2502                                                 software-development: codebase-inspection, +12   \u2502"
+    },
+    {
+     "row": 14,
+     "text": "\u2502                                                 more                                             \u2502"
+    },
+    {
+     "row": 15,
+     "text": "\u2502                                                 web: blocked-page-recovery                       \u2502"
+    },
+    {
+     "row": 16,
+     "text": "\u2502                                                                                                  \u2502"
+    },
+    {
+     "row": 17,
+     "text": "\u2502                                                 24 tools \u00b7 87 skills \u00b7 /help for commands        \u2502"
+    },
+    {
+     "row": 18,
+     "text": "\u2502                                                 \u26a0 16987 commits behind \u2014 run hermes update to    \u2502"
+    },
+    {
+     "row": 19,
+     "text": "\u2502                                                 update                                           \u2502"
+    },
+    {
+     "row": 20,
+     "text": "\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f"
+    },
+    {
+     "row": 21,
+     "text": ""
+    },
+    {
+     "row": 22,
+     "text": "Welcome to Hermes Agent! Type your message or /help for commands."
+    },
+    {
+     "row": 23,
+     "text": "\u2726 Tip: GPT and Codex models get special system prompt guidance for tool discipline and mandatory"
+    },
+    {
+     "row": 24,
+     "text": "tool use."
+    },
+    {
+     "row": 25,
+     "text": ""
+    },
+    {
+     "row": 26,
+     "text": " \u2624 unknown \u2502 ctx -- \u2502 [\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591] -- \u2502 1s \u2502 \u23f2 0s"
+    },
+    {
+     "row": 27,
+     "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    },
+    {
+     "row": 28,
+     "text": "\u276f Turn these notes into a to-do list"
+    },
+    {
+     "row": 29,
+     "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    }
+   ]
+  },
+  "typed": {
+   "cursorRow": 28,
+   "cursorCol": 20,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": "\u2502                                                 data-science: jupyter-live-kernel                \u2502"
+    },
+    {
+     "row": 1,
+     "text": "\u2502  no model configured \u2014 run /model or hermes     devops: sdlc-review                              \u2502"
+    },
+    {
+     "row": 2,
+     "text": "\u2502  setup                                          email: email-inbox-triage, himalaya              \u2502"
+    },
+    {
+     "row": 3,
+     "text": "\u2502  /data/workspaces/agent-manager                 general: character, environment, skill, +2 more  \u2502"
+    },
+    {
+     "row": 4,
+     "text": "\u2502  Session: 20261014_102115_efd3f6                github: github-auth, github-code-review, +3      \u2502"
+    },
+    {
+     "row": 5,
+     "text": "\u2502                                                 more                                             \u2502"
+    },
+    {
+     "row": 6,
+     "text": "\u2502                                                 media: gif-search, heartmula, songsee, +1 more   \u2502"
+    },
+    {
+     "row": 7,
+     "text": "\u2502                                                 mlops: audiocraft-audio-generation, +6 more      \u2502"
+    },
+    {
+     "row": 8,
+     "text": "\u2502                                                 note-taking: obsidian                            \u2502"
+    },
+    {
+     "row": 9,
+     "text": "\u2502                                                 productivity: airtable, box, +15 more            \u2502"
+    },
+    {
+     "row": 10,
+     "text": "\u2502                                                 research: arxiv, blogwatcher, +5 more            \u2502"
+    },
+    {
+     "row": 11,
+     "text": "\u2502                                                 smart-home: openhue                              \u2502"
+    },
+    {
+     "row": 12,
+     "text": "\u2502                                                 social-media: xurl                               \u2502"
+    },
+    {
+     "row": 13,
+     "text": "\u2502                                                 software-development: codebase-inspection, +12   \u2502"
+    },
+    {
+     "row": 14,
+     "text": "\u2502                                                 more                                             \u2502"
+    },
+    {
+     "row": 15,
+     "text": "\u2502                                                 web: blocked-page-recovery                       \u2502"
+    },
+    {
+     "row": 16,
+     "text": "\u2502                                                                                                  \u2502"
+    },
+    {
+     "row": 17,
+     "text": "\u2502                                                 24 tools \u00b7 87 skills \u00b7 /help for commands        \u2502"
+    },
+    {
+     "row": 18,
+     "text": "\u2502                                                 \u26a0 16987 commits behind \u2014 run hermes update to    \u2502"
+    },
+    {
+     "row": 19,
+     "text": "\u2502                                                 update                                           \u2502"
+    },
+    {
+     "row": 20,
+     "text": "\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f"
+    },
+    {
+     "row": 21,
+     "text": ""
+    },
+    {
+     "row": 22,
+     "text": "Welcome to Hermes Agent! Type your message or /help for commands."
+    },
+    {
+     "row": 23,
+     "text": "\u2726 Tip: GPT and Codex models get special system prompt guidance for tool discipline and mandatory"
+    },
+    {
+     "row": 24,
+     "text": "tool use."
+    },
+    {
+     "row": 25,
+     "text": ""
+    },
+    {
+     "row": 26,
+     "text": " \u2624 unknown \u2502 ctx -- \u2502 [\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591] -- \u2502 3s \u2502 \u23f2 0s"
+    },
+    {
+     "row": 27,
+     "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    },
+    {
+     "row": 28,
+     "text": "\u276f half typed thought"
+    },
+    {
+     "row": 29,
+     "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    }
+   ]
+  }
+ },
+ "claude": {
+  "empty": {
+   "cursorRow": 6,
+   "cursorCol": 2,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": " \u2590\u259b\u2588\u2588\u2588\u259b\u2588   Claude Code v2.1.293"
+    },
+    {
+     "row": 1,
+     "text": "\u259d\u259c\u2588\u2588\u2588\u2588\u2588\u2588\u2580  Opus 5.5 \u00b7 Claude Team"
+    },
+    {
+     "row": 2,
+     "text": " \u259d\u259d   \u259d\u259d   /data/workspaces/agent-manager"
+    },
+    {
+     "row": 3,
+     "text": ""
+    },
+    {
+     "row": 4,
+     "text": ""
+    },
+    {
+     "row": 5,
+     "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    },
+    {
+     "row": 6,
+     "text": "\u276f\u00a0Try \"fix lint errors\""
+    },
+    {
+     "row": 7,
+     "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    },
+    {
+     "row": 8,
+     "text": "  \u26a0 Transcript saving is off \u2014 inherited CLAUDE_CODE_CHILD_SESSION marker \u00b7 restart with CLAUDE_C\u2026"
+    },
+    {
+     "row": 9,
+     "text": "  \u23f5\u23f5 auto mode on (shift+tab to cycle)                                          \u25d0 medium \u00b7 /effort"
+    },
+    {
+     "row": 10,
+     "text": ""
+    },
+    {
+     "row": 11,
+     "text": ""
+    },
+    {
+     "row": 12,
+     "text": ""
+    },
+    {
+     "row": 13,
+     "text": ""
+    },
+    {
+     "row": 14,
+     "text": ""
+    },
+    {
+     "row": 15,
+     "text": ""
+    },
+    {
+     "row": 16,
+     "text": ""
+    },
+    {
+     "row": 17,
+     "text": ""
+    },
+    {
+     "row": 18,
+     "text": ""
+    },
+    {
+     "row": 19,
+     "text": ""
+    },
+    {
+     "row": 20,
+     "text": ""
+    },
+    {
+     "row": 21,
+     "text": ""
+    },
+    {
+     "row": 22,
+     "text": ""
+    },
+    {
+     "row": 23,
+     "text": ""
+    },
+    {
+     "row": 24,
+     "text": ""
+    },
+    {
+     "row": 25,
+     "text": ""
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": ""
+    },
+    {
+     "row": 28,
+     "text": ""
+    },
+    {
+     "row": 29,
+     "text": ""
+    }
+   ]
+  },
+  "typed": {
+   "cursorRow": 6,
+   "cursorCol": 20,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": " \u2590\u259b\u2588\u2588\u2588\u259b\u2588   Claude Code v2.1.293"
+    },
+    {
+     "row": 1,
+     "text": "\u259d\u259c\u2588\u2588\u2588\u2588\u2588\u2588\u2580  Opus 5.5 \u00b7 Claude Team"
+    },
+    {
+     "row": 2,
+     "text": " \u259d\u259d   \u259d\u259d   /data/workspaces/agent-manager"
+    },
+    {
+     "row": 3,
+     "text": ""
+    },
+    {
+     "row": 4,
+     "text": ""
+    },
+    {
+     "row": 5,
+     "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    },
+    {
+     "row": 6,
+     "text": "\u276f\u00a0half typed thought"
+    },
+    {
+     "row": 7,
+     "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    },
+    {
+     "row": 8,
+     "text": "  \u26a0 Transcript saving is off \u2014 inherited CLAUDE_CODE_CHILD_SESSION marker \u00b7 restart with CLAUDE_C\u2026"
+    },
+    {
+     "row": 9,
+     "text": "  Opus 5.5                                                                      \u25d0 medium \u00b7 /effort"
+    },
+    {
+     "row": 10,
+     "text": "  \u23f5\u23f5 auto mode on (shift+tab to cycle)"
+    },
+    {
+     "row": 11,
+     "text": ""
+    },
+    {
+     "row": 12,
+     "text": ""
+    },
+    {
+     "row": 13,
+     "text": ""
+    },
+    {
+     "row": 14,
+     "text": ""
+    },
+    {
+     "row": 15,
+     "text": ""
+    },
+    {
+     "row": 16,
+     "text": ""
+    },
+    {
+     "row": 17,
+     "text": ""
+    },
+    {
+     "row": 18,
+     "text": ""
+    },
+    {
+     "row": 19,
+     "text": ""
+    },
+    {
+     "row": 20,
+     "text": ""
+    },
+    {
+     "row": 21,
+     "text": ""
+    },
+    {
+     "row": 22,
+     "text": ""
+    },
+    {
+     "row": 23,
+     "text": ""
+    },
+    {
+     "row": 24,
+     "text": ""
+    },
+    {
+     "row": 25,
+     "text": ""
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": ""
+    },
+    {
+     "row": 28,
+     "text": ""
+    },
+    {
+     "row": 29,
+     "text": ""
+    }
+   ]
+  }
+ },
+ "codex": {
+  "empty": {
+   "cursorRow": 21,
+   "cursorCol": 2,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e"
+    },
+    {
+     "row": 1,
+     "text": "\u2502 \u2728\u200aUpdate available! 0.154.0 -> 0.162.1         \u2502"
+    },
+    {
+     "row": 2,
+     "text": "\u2502 Run npm install -g @openai/codex to update.     \u2502"
+    },
+    {
+     "row": 3,
+     "text": "\u2502                                                 \u2502"
+    },
+    {
+     "row": 4,
+     "text": "\u2502 See full release notes:                         \u2502"
+    },
+    {
+     "row": 5,
+     "text": "\u2502 https://github.com/openai/codex/releases/latest \u2502"
+    },
+    {
+     "row": 6,
+     "text": "\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f"
+    },
+    {
+     "row": 7,
+     "text": ""
+    },
+    {
+     "row": 8,
+     "text": "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e"
+    },
+    {
+     "row": 9,
+     "text": "\u2502 >_ OpenAI Codex (v0.154.0)                      \u2502"
+    },
+    {
+     "row": 10,
+     "text": "\u2502                                                 \u2502"
+    },
+    {
+     "row": 11,
+     "text": "\u2502 model:       gpt-6-astra max   /model to change \u2502"
+    },
+    {
+     "row": 12,
+     "text": "\u2502 directory:   /data/workspaces/agent-manager     \u2502"
+    },
+    {
+     "row": 13,
+     "text": "\u2502 permissions: YOLO mode                          \u2502"
+    },
+    {
+     "row": 14,
+     "text": "\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f"
+    },
+    {
+     "row": 15,
+     "text": ""
+    },
+    {
+     "row": 16,
+     "text": "  Tip: Use /rename to rename your threads for easier thread resuming."
+    },
+    {
+     "row": 17,
+     "text": ""
+    },
+    {
+     "row": 18,
+     "text": "\u2022 You have 3 usage limit resets available. Run /usage to use one."
+    },
+    {
+     "row": 19,
+     "text": ""
+    },
+    {
+     "row": 20,
+     "text": ""
+    },
+    {
+     "row": 21,
+     "text": "\u203a Ask Codex to do anything"
+    },
+    {
+     "row": 22,
+     "text": ""
+    },
+    {
+     "row": 23,
+     "text": "  gpt-6-astra max \u00b7 /data/workspaces/agent-manager"
+    },
+    {
+     "row": 24,
+     "text": ""
+    },
+    {
+     "row": 25,
+     "text": ""
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": ""
+    },
+    {
+     "row": 28,
+     "text": ""
+    },
+    {
+     "row": 29,
+     "text": ""
+    }
+   ]
+  },
+  "typed": {
+   "cursorRow": 21,
+   "cursorCol": 20,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e"
+    },
+    {
+     "row": 1,
+     "text": "\u2502 \u2728\u200aUpdate available! 0.154.0 -> 0.162.1         \u2502"
+    },
+    {
+     "row": 2,
+     "text": "\u2502 Run npm install -g @openai/codex to update.     \u2502"
+    },
+    {
+     "row": 3,
+     "text": "\u2502                                                 \u2502"
+    },
+    {
+     "row": 4,
+     "text": "\u2502 See full release notes:                         \u2502"
+    },
+    {
+     "row": 5,
+     "text": "\u2502 https://github.com/openai/codex/releases/latest \u2502"
+    },
+    {
+     "row": 6,
+     "text": "\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f"
+    },
+    {
+     "row": 7,
+     "text": ""
+    },
+    {
+     "row": 8,
+     "text": "\u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e"
+    },
+    {
+     "row": 9,
+     "text": "\u2502 >_ OpenAI Codex (v0.154.0)                      \u2502"
+    },
+    {
+     "row": 10,
+     "text": "\u2502                                                 \u2502"
+    },
+    {
+     "row": 11,
+     "text": "\u2502 model:       gpt-6-astra max   /model to change \u2502"
+    },
+    {
+     "row": 12,
+     "text": "\u2502 directory:   /data/workspaces/agent-manager     \u2502"
+    },
+    {
+     "row": 13,
+     "text": "\u2502 permissions: YOLO mode                          \u2502"
+    },
+    {
+     "row": 14,
+     "text": "\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f"
+    },
+    {
+     "row": 15,
+     "text": ""
+    },
+    {
+     "row": 16,
+     "text": "  Tip: Use /rename to rename your threads for easier thread resuming."
+    },
+    {
+     "row": 17,
+     "text": ""
+    },
+    {
+     "row": 18,
+     "text": "\u2022 You have 3 usage limit resets available. Run /usage to use one."
+    },
+    {
+     "row": 19,
+     "text": ""
+    },
+    {
+     "row": 20,
+     "text": ""
+    },
+    {
+     "row": 21,
+     "text": "\u203a half typed thought"
+    },
+    {
+     "row": 22,
+     "text": ""
+    },
+    {
+     "row": 23,
+     "text": "  gpt-6-astra max \u00b7 /data/workspaces/agent-manager"
+    },
+    {
+     "row": 24,
+     "text": ""
+    },
+    {
+     "row": 25,
+     "text": ""
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": ""
+    },
+    {
+     "row": 28,
+     "text": ""
+    },
+    {
+     "row": 29,
+     "text": ""
+    }
+   ]
+  }
+ },
+ "openclaw": {
+  "empty": {
+   "cursorRow": 29,
+   "cursorCol": 39,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": ""
+    },
+    {
+     "row": 1,
+     "text": "OpenClaw 2026.9.4 (3a9d69d)"
+    },
+    {
+     "row": 2,
+     "text": "Your second brain, except this one actually remembers where you left things."
+    },
+    {
+     "row": 3,
+     "text": ""
+    },
+    {
+     "row": 4,
+     "text": "10:22:18 [state-migrations] Auto-migrated legacy state:"
+    },
+    {
+     "row": 5,
+     "text": "- Kept existing shared SQLite config.lastTouchedAt state"
+    },
+    {
+     "row": 6,
+     "text": "\u2502"
+    },
+    {
+     "row": 7,
+     "text": "\u25c7  Doctor changes \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e"
+    },
+    {
+     "row": 8,
+     "text": "\u2502                                                            \u2502"
+    },
+    {
+     "row": 9,
+     "text": "\u2502  - Kept existing shared SQLite config.lastTouchedAt state  \u2502"
+    },
+    {
+     "row": 10,
+     "text": "\u2502                                                            \u2502"
+    },
+    {
+     "row": 11,
+     "text": "\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f"
+    },
+    {
+     "row": 12,
+     "text": "OpenClaw config is invalid"
+    },
+    {
+     "row": 13,
+     "text": "File: $OPENCLAW_HOME/.openclaw/openclaw.json"
+    },
+    {
+     "row": 14,
+     "text": "Problem:"
+    },
+    {
+     "row": 15,
+     "text": "  - openclaw.json:140 \u2014 meta: Unrecognized key: \"lastTouchedAt\""
+    },
+    {
+     "row": 16,
+     "text": "  - openclaw.json:28 \u2014 gateway.controlUi: Unrecognized key: \"allowInsecureAuth\""
+    },
+    {
+     "row": 17,
+     "text": "  - openclaw.json:24 \u2014 gateway.tailscale: Unrecognized key: \"resetOnExit\""
+    },
+    {
+     "row": 18,
+     "text": "  - openclaw.json:31 \u2014 gateway.nodes: Unrecognized key: \"denyCommands\""
+    },
+    {
+     "row": 19,
+     "text": "Legacy config keys detected:"
+    },
+    {
+     "row": 20,
+     "text": "  - gateway.tailscale.resetOnExit: gateway.tailscale.resetOnExit is retired because managed routes n"
+    },
+    {
+     "row": 21,
+     "text": "ow follow the Gateway lifecycle automatically. Run \"openclaw doctor --fix\"."
+    },
+    {
+     "row": 22,
+     "text": "  - agents.defaults.models: Legacy agents.defaults.models restricts model overrides; run \"openclaw d"
+    },
+    {
+     "row": 23,
+     "text": "octor --fix\" to migrate valid refs to agents.defaults.modelPolicy.allow."
+    },
+    {
+     "row": 24,
+     "text": "  - : Approved tier-eval configuration surfaces were consolidated. Run \"openclaw doctor --fix\"."
+    },
+    {
+     "row": 25,
+     "text": "  - : Final layout aliases were retired. Run \"openclaw doctor --fix\"."
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": "Inspect: openclaw config validate"
+    },
+    {
+     "row": 28,
+     "text": "Audit, status, health, logs, tasks list/audit, and doctor commands still run with invalid config."
+    },
+    {
+     "row": 29,
+     "text": "Run \"openclaw doctor --fix\" now? [Y/n]"
+    }
+   ]
+  },
+  "typed": {
+   "cursorRow": 29,
+   "cursorCol": 57,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": ""
+    },
+    {
+     "row": 1,
+     "text": "OpenClaw 2026.9.4 (3a9d69d)"
+    },
+    {
+     "row": 2,
+     "text": "Your second brain, except this one actually remembers where you left things."
+    },
+    {
+     "row": 3,
+     "text": ""
+    },
+    {
+     "row": 4,
+     "text": "10:22:18 [state-migrations] Auto-migrated legacy state:"
+    },
+    {
+     "row": 5,
+     "text": "- Kept existing shared SQLite config.lastTouchedAt state"
+    },
+    {
+     "row": 6,
+     "text": "\u2502"
+    },
+    {
+     "row": 7,
+     "text": "\u25c7  Doctor changes \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e"
+    },
+    {
+     "row": 8,
+     "text": "\u2502                                                            \u2502"
+    },
+    {
+     "row": 9,
+     "text": "\u2502  - Kept existing shared SQLite config.lastTouchedAt state  \u2502"
+    },
+    {
+     "row": 10,
+     "text": "\u2502                                                            \u2502"
+    },
+    {
+     "row": 11,
+     "text": "\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f"
+    },
+    {
+     "row": 12,
+     "text": "OpenClaw config is invalid"
+    },
+    {
+     "row": 13,
+     "text": "File: $OPENCLAW_HOME/.openclaw/openclaw.json"
+    },
+    {
+     "row": 14,
+     "text": "Problem:"
+    },
+    {
+     "row": 15,
+     "text": "  - openclaw.json:140 \u2014 meta: Unrecognized key: \"lastTouchedAt\""
+    },
+    {
+     "row": 16,
+     "text": "  - openclaw.json:28 \u2014 gateway.controlUi: Unrecognized key: \"allowInsecureAuth\""
+    },
+    {
+     "row": 17,
+     "text": "  - openclaw.json:24 \u2014 gateway.tailscale: Unrecognized key: \"resetOnExit\""
+    },
+    {
+     "row": 18,
+     "text": "  - openclaw.json:31 \u2014 gateway.nodes: Unrecognized key: \"denyCommands\""
+    },
+    {
+     "row": 19,
+     "text": "Legacy config keys detected:"
+    },
+    {
+     "row": 20,
+     "text": "  - gateway.tailscale.resetOnExit: gateway.tailscale.resetOnExit is retired because managed routes n"
+    },
+    {
+     "row": 21,
+     "text": "ow follow the Gateway lifecycle automatically. Run \"openclaw doctor --fix\"."
+    },
+    {
+     "row": 22,
+     "text": "  - agents.defaults.models: Legacy agents.defaults.models restricts model overrides; run \"openclaw d"
+    },
+    {
+     "row": 23,
+     "text": "octor --fix\" to migrate valid refs to agents.defaults.modelPolicy.allow."
+    },
+    {
+     "row": 24,
+     "text": "  - : Approved tier-eval configuration surfaces were consolidated. Run \"openclaw doctor --fix\"."
+    },
+    {
+     "row": 25,
+     "text": "  - : Final layout aliases were retired. Run \"openclaw doctor --fix\"."
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": "Inspect: openclaw config validate"
+    },
+    {
+     "row": 28,
+     "text": "Audit, status, health, logs, tasks list/audit, and doctor commands still run with invalid config."
+    },
+    {
+     "row": 29,
+     "text": "Run \"openclaw doctor --fix\" now? [Y/n] half typed thought"
+    }
+   ]
+  }
+ },
+ "gemini": {
+  "empty": {
+   "cursorRow": 9,
+   "cursorCol": 30,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": "Please visit the following URL to authorize the application:"
+    },
+    {
+     "row": 1,
+     "text": ""
+    },
+    {
+     "row": 2,
+     "text": "https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=https%3A%2F%2Fcodeassist.google.com%2Fauth"
+    },
+    {
+     "row": 3,
+     "text": "code&access_type=offline&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform%20https%3A%2"
+    },
+    {
+     "row": 4,
+     "text": "F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo."
+    },
+    {
+     "row": 5,
+     "text": "profile&code_challenge_method=S256&code_challenge=gax1NZ48yICiHuC6XatIdAkTKGSf5b9PeZwMOVcIDuU&state="
+    },
+    {
+     "row": 6,
+     "text": "7bdcde638aa8e1500aad4047739cbc5207001c5aec16a684f88742b8b5861f0e&response_type=code&client_id=681255"
+    },
+    {
+     "row": 7,
+     "text": "809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+    },
+    {
+     "row": 8,
+     "text": ""
+    },
+    {
+     "row": 9,
+     "text": "Enter the authorization code:"
+    },
+    {
+     "row": 10,
+     "text": ""
+    },
+    {
+     "row": 11,
+     "text": ""
+    },
+    {
+     "row": 12,
+     "text": ""
+    },
+    {
+     "row": 13,
+     "text": ""
+    },
+    {
+     "row": 14,
+     "text": ""
+    },
+    {
+     "row": 15,
+     "text": ""
+    },
+    {
+     "row": 16,
+     "text": ""
+    },
+    {
+     "row": 17,
+     "text": ""
+    },
+    {
+     "row": 18,
+     "text": ""
+    },
+    {
+     "row": 19,
+     "text": ""
+    },
+    {
+     "row": 20,
+     "text": ""
+    },
+    {
+     "row": 21,
+     "text": ""
+    },
+    {
+     "row": 22,
+     "text": ""
+    },
+    {
+     "row": 23,
+     "text": ""
+    },
+    {
+     "row": 24,
+     "text": ""
+    },
+    {
+     "row": 25,
+     "text": ""
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": ""
+    },
+    {
+     "row": 28,
+     "text": ""
+    },
+    {
+     "row": 29,
+     "text": ""
+    }
+   ]
+  },
+  "typed": {
+   "cursorRow": 9,
+   "cursorCol": 48,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": "Please visit the following URL to authorize the application:"
+    },
+    {
+     "row": 1,
+     "text": ""
+    },
+    {
+     "row": 2,
+     "text": "https://accounts.google.com/o/oauth2/v2/auth?redirect_uri=https%3A%2F%2Fcodeassist.google.com%2Fauth"
+    },
+    {
+     "row": 3,
+     "text": "code&access_type=offline&scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform%20https%3A%2"
+    },
+    {
+     "row": 4,
+     "text": "F%2Fwww.googleapis.com%2Fauth%2Fuserinfo.email%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fuserinfo."
+    },
+    {
+     "row": 5,
+     "text": "profile&code_challenge_method=S256&code_challenge=gax1NZ48yICiHuC6XatIdAkTKGSf5b9PeZwMOVcIDuU&state="
+    },
+    {
+     "row": 6,
+     "text": "7bdcde638aa8e1500aad4047739cbc5207001c5aec16a684f88742b8b5861f0e&response_type=code&client_id=681255"
+    },
+    {
+     "row": 7,
+     "text": "809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+    },
+    {
+     "row": 8,
+     "text": ""
+    },
+    {
+     "row": 9,
+     "text": "Enter the authorization code: half typed thought"
+    },
+    {
+     "row": 10,
+     "text": ""
+    },
+    {
+     "row": 11,
+     "text": ""
+    },
+    {
+     "row": 12,
+     "text": ""
+    },
+    {
+     "row": 13,
+     "text": ""
+    },
+    {
+     "row": 14,
+     "text": ""
+    },
+    {
+     "row": 15,
+     "text": ""
+    },
+    {
+     "row": 16,
+     "text": ""
+    },
+    {
+     "row": 17,
+     "text": ""
+    },
+    {
+     "row": 18,
+     "text": ""
+    },
+    {
+     "row": 19,
+     "text": ""
+    },
+    {
+     "row": 20,
+     "text": ""
+    },
+    {
+     "row": 21,
+     "text": ""
+    },
+    {
+     "row": 22,
+     "text": ""
+    },
+    {
+     "row": 23,
+     "text": ""
+    },
+    {
+     "row": 24,
+     "text": ""
+    },
+    {
+     "row": 25,
+     "text": ""
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": ""
+    },
+    {
+     "row": 28,
+     "text": ""
+    },
+    {
+     "row": 29,
+     "text": ""
+    }
+   ]
+  }
+ },
+ "opencode": {
+  "empty": {
+   "cursorRow": 15,
+   "cursorCol": 16,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": ""
+    },
+    {
+     "row": 1,
+     "text": ""
+    },
+    {
+     "row": 2,
+     "text": ""
+    },
+    {
+     "row": 3,
+     "text": ""
+    },
+    {
+     "row": 4,
+     "text": ""
+    },
+    {
+     "row": 5,
+     "text": ""
+    },
+    {
+     "row": 6,
+     "text": ""
+    },
+    {
+     "row": 7,
+     "text": ""
+    },
+    {
+     "row": 8,
+     "text": "                                                                \u2584"
+    },
+    {
+     "row": 9,
+     "text": "                               \u2588\u2580\u2580\u2588 \u2588\u2580\u2580\u2588 \u2588\u2580\u2580\u2588 \u2588\u2580\u2580\u2584 \u2588\u2580\u2580\u2580 \u2588\u2580\u2580\u2588 \u2588\u2580\u2580\u2588 \u2588\u2580\u2580\u2588"
+    },
+    {
+     "row": 10,
+     "text": "                               \u2588  \u2588 \u2588  \u2588 \u2588\u2580\u2580\u2580 \u2588  \u2588 \u2588    \u2588  \u2588 \u2588  \u2588 \u2588\u2580\u2580\u2580"
+    },
+    {
+     "row": 11,
+     "text": "                               \u2580\u2580\u2580\u2580 \u2588\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580"
+    },
+    {
+     "row": 12,
+     "text": ""
+    },
+    {
+     "row": 13,
+     "text": ""
+    },
+    {
+     "row": 14,
+     "text": "             \u2503"
+    },
+    {
+     "row": 15,
+     "text": "             \u2503  Ask anything\u2026 \"What is the tech stack of this project?\""
+    },
+    {
+     "row": 16,
+     "text": "             \u2503"
+    },
+    {
+     "row": 17,
+     "text": "             \u2503  Build \u00b7 Kimi K3 Hugging Face \u00b7 max"
+    },
+    {
+     "row": 18,
+     "text": "             \u2579\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580"
+    },
+    {
+     "row": 19,
+     "text": "                                                             tab agents  ctrl+p commands"
+    },
+    {
+     "row": 20,
+     "text": ""
+    },
+    {
+     "row": 21,
+     "text": ""
+    },
+    {
+     "row": 22,
+     "text": ""
+    },
+    {
+     "row": 23,
+     "text": ""
+    },
+    {
+     "row": 24,
+     "text": ""
+    },
+    {
+     "row": 25,
+     "text": ""
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": ""
+    },
+    {
+     "row": 28,
+     "text": "  /data/workspaces/agent-manager                                                           1.18.31"
+    },
+    {
+     "row": 29,
+     "text": ""
+    }
+   ]
+  },
+  "typed": {
+   "cursorRow": 15,
+   "cursorCol": 34,
+   "visibleLines": [
+    {
+     "row": 0,
+     "text": ""
+    },
+    {
+     "row": 1,
+     "text": ""
+    },
+    {
+     "row": 2,
+     "text": ""
+    },
+    {
+     "row": 3,
+     "text": ""
+    },
+    {
+     "row": 4,
+     "text": ""
+    },
+    {
+     "row": 5,
+     "text": ""
+    },
+    {
+     "row": 6,
+     "text": ""
+    },
+    {
+     "row": 7,
+     "text": ""
+    },
+    {
+     "row": 8,
+     "text": "                                                                \u2584"
+    },
+    {
+     "row": 9,
+     "text": "                               \u2588\u2580\u2580\u2588 \u2588\u2580\u2580\u2588 \u2588\u2580\u2580\u2588 \u2588\u2580\u2580\u2584 \u2588\u2580\u2580\u2580 \u2588\u2580\u2580\u2588 \u2588\u2580\u2580\u2588 \u2588\u2580\u2580\u2588"
+    },
+    {
+     "row": 10,
+     "text": "                               \u2588  \u2588 \u2588  \u2588 \u2588\u2580\u2580\u2580 \u2588  \u2588 \u2588    \u2588  \u2588 \u2588  \u2588 \u2588\u2580\u2580\u2580"
+    },
+    {
+     "row": 11,
+     "text": "                               \u2580\u2580\u2580\u2580 \u2588\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580 \u2580\u2580\u2580\u2580"
+    },
+    {
+     "row": 12,
+     "text": ""
+    },
+    {
+     "row": 13,
+     "text": ""
+    },
+    {
+     "row": 14,
+     "text": "             \u2503"
+    },
+    {
+     "row": 15,
+     "text": "             \u2503  half typed thought"
+    },
+    {
+     "row": 16,
+     "text": "             \u2503"
+    },
+    {
+     "row": 17,
+     "text": "             \u2503  Build \u00b7 Kimi K3 Hugging Face \u00b7 max"
+    },
+    {
+     "row": 18,
+     "text": "             \u2579\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580"
+    },
+    {
+     "row": 19,
+     "text": "                                                             tab agents  ctrl+p commands"
+    },
+    {
+     "row": 20,
+     "text": ""
+    },
+    {
+     "row": 21,
+     "text": ""
+    },
+    {
+     "row": 22,
+     "text": ""
+    },
+    {
+     "row": 23,
+     "text": ""
+    },
+    {
+     "row": 24,
+     "text": ""
+    },
+    {
+     "row": 25,
+     "text": ""
+    },
+    {
+     "row": 26,
+     "text": ""
+    },
+    {
+     "row": 27,
+     "text": ""
+    },
+    {
+     "row": 28,
+     "text": "  /data/workspaces/agent-manager                                                           1.18.31"
+    },
+    {
+     "row": 29,
+     "text": ""
+    }
+   ]
+  }
+ }
+}

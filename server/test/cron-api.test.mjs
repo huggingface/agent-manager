@@ -1,0 +1,208 @@
+// Cron API, durable boot behavior, scheduled identity, and same-name creation.
+import { nativeFetch as fetch } from './native-client.mjs';
+import { freePort } from './free-port.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+
+const PORT = await freePort();
+const API = `http://127.0.0.1:${PORT}`;
+const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'am-cron-api-'));
+const bin = path.join(DATA_DIR, 'bin');
+fs.mkdirSync(bin, { recursive: true });
+const fakeClaude = path.join(bin, 'claude');
+// A minimal Claude: logs its arguments, draws a composer (a `❯` line between
+// rules) and submits what is on it on Enter. AM confirms a delivered prompt
+// actually left the composer, so a fake that never reads its input would make
+// every typed delivery an honest failure.
+fs.writeFileSync(fakeClaude, `#!${process.execPath}
+const fs = require('fs');
+fs.appendFileSync(process.env.DATA_DIR + '/fake-claude.log', process.argv.slice(2).join(' ') + '\\n');
+const rule = '─'.repeat(40);
+let line = '', paste = false, buf = '';
+const draw = () => process.stdout.write('\\x1b[H\\x1b[J' + rule + '\\r\\n❯ ' + line + '\\r\\n' + rule + '\\x1b[2;' + (3 + line.length) + 'H');
+process.stdin.setRawMode && process.stdin.setRawMode(true);
+draw();
+process.stdin.on('data', (c) => {
+  buf += c.toString();
+  for (;;) {
+    if (buf.startsWith('\\x1b[200~')) { paste = true; buf = buf.slice(6); continue; }
+    if (buf.startsWith('\\x1b[201~')) { paste = false; buf = buf.slice(6); continue; }
+    if (!buf) break;
+    const ch = buf[0]; buf = buf.slice(1);
+    if (ch === '\\r' && !paste) { fs.appendFileSync(process.env.DATA_DIR + '/fake-claude.log', 'submitted: ' + line + '\\n'); line = ''; }
+    else if (ch >= ' ') line += ch;
+    else if (ch === '\\n') line += ' ';
+  }
+  draw();
+});
+setTimeout(() => process.exit(0), 120000);
+`, { mode: 0o755 });
+
+const seed = (id, name) => ({
+  id, name,
+  agent: { name: 'shared-cron-agent', cli: 'claude' },
+  prompt: `Run ${name}.`,
+  schedule: { cron: '0 * * * *', tz: 'UTC' },
+  runOnRestart: true,
+  state: 'running',
+  createdAt: '2026-08-19T00:00:00.000Z',
+  updatedAt: '2026-08-19T00:00:00.000Z',
+});
+fs.writeFileSync(path.join(DATA_DIR, 'crons.json'), JSON.stringify([
+  seed('cron_boot_one', 'boot one'), seed('cron_boot_two', 'boot two'),
+]));
+
+let pass = 0; let fail = 0;
+const check = (name, ok, detail = '') => {
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? `  ${detail}` : ''}`);
+  ok ? pass++ : fail++;
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Sessions run in a LOGIN shell, and /etc/profile rebuilds PATH, so the fake
+// binary has to be put back by the fixture HOME's own profile — otherwise the
+// real CLI starts in its place.
+fs.mkdirSync(path.join(DATA_DIR, 'home'), { recursive: true });
+fs.writeFileSync(path.join(DATA_DIR, 'home', '.profile'), `export PATH="${bin}:$PATH"\n`);
+
+const { SPACE_ID, AM_DISTRIBUTE_SKILLS, ...BASE_ENV } = process.env;
+const server = spawn('node', ['src/index.js'], {
+  env: {
+    ...BASE_ENV,
+    PATH: `${bin}:${BASE_ENV.PATH || ''}`,
+    PORT: String(PORT), DATA_DIR, HOME: path.join(DATA_DIR, 'home'),
+    CLAUDE_CONFIG_DIR: path.join(DATA_DIR, 'home', '.claude'),
+    AM_BASHRC: '/nonexistent',
+  },
+  stdio: ['ignore', 'pipe', 'pipe'],
+});
+let log = '';
+server.stdout.on('data', (chunk) => { log += chunk; });
+server.stderr.on('data', (chunk) => { log += chunk; });
+
+const api = async (route, init = {}) => {
+  const headers = new Headers(init.headers || {});
+  if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
+  if (init.method && init.method !== 'GET') headers.set('x-am-origin', 'operator');
+  const response = await fetch(`${API}${route}`, { ...init, headers });
+  const body = await response.json().catch(() => null);
+  return { status: response.status, body };
+};
+
+try {
+  for (let i = 0; i < 80; i++) {
+    if (await fetch(`${API}/api/health`).then((r) => r.ok).catch(() => false)) break;
+    await sleep(250);
+  }
+
+  // Both boot jobs fire, but name lookup + synchronous creation gives them one
+  // shared agent. This is the race the feature must be idempotent across.
+  let sessions = [];
+  let operations = [];
+  for (let i = 0; i < 60; i++) {
+    sessions = (await api('/api/sessions')).body || [];
+    operations = (await api('/api/operations?limit=50')).body?.operations || [];
+    const cronOps = operations.filter((row) => row.origin?.type === 'cron');
+    if (sessions.length === 1 && cronOps.length >= 2) break;
+    await sleep(250);
+  }
+  check('two restart jobs naming one agent create exactly one session', sessions.length === 1, `sessions ${sessions.length}`);
+  check('the cron-created workspace follows workspaces/<agent-name>', sessions[0]?.path === 'shared-cron-agent', `path ${sessions[0]?.path}`);
+  const cronOps = operations.filter((row) => row.origin?.type === 'cron');
+  check('scheduled runs are attributed to cron identities in operations',
+    cronOps.length >= 2 && cronOps.every((row) => row.origin.id.startsWith('cron:') && row.origin.name.startsWith('boot')),
+    JSON.stringify(cronOps.map((row) => row.origin)));
+
+  let listed = await api('/api/crons');
+  for (let i = 0; i < 80 && !listed.body?.crons?.every((job) => job.last); i++) {
+    await sleep(250);
+    listed = await api('/api/crons');
+  }
+  check('GET lists both durable jobs', listed.status === 200 && listed.body?.crons?.length === 2);
+  check('run-on-restart records delivery outcomes', listed.body.crons.every((job) => job.last?.status === 'ok'),
+    JSON.stringify(listed.body.crons.map((job) => job.last)));
+
+  const manual = await api('/api/crons/cron_boot_one/run', { method: 'POST' });
+  check('Run now is accepted and reuses the agent', manual.status === 202 && manual.body?.agentCreated === false,
+    JSON.stringify(manual.body));
+
+  const stopped = await api('/api/crons/cron_boot_one', {
+    method: 'PUT', body: JSON.stringify({ state: 'stopped' }),
+  });
+  check('stop keeps the job and clears its next fire', stopped.status === 200 && stopped.body.state === 'stopped' && stopped.body.next === null);
+
+  const created = await api('/api/crons', {
+    method: 'POST', body: JSON.stringify({
+      name: 'Zurich morning', agent: { name: 'morning', cli: 'claude' }, prompt: 'Good morning.',
+      schedule: { cron: '0 9 * * 1-5', tz: 'Europe/Zurich' }, runOnRestart: false,
+    }),
+  });
+  check('POST stores the timezone and returns the next UTC instant',
+    created.status === 201 && created.body.schedule.tz === 'Europe/Zurich' && /Z$/.test(created.body.next),
+    JSON.stringify(created.body));
+
+  const invalid = await api('/api/crons', {
+    method: 'POST', body: JSON.stringify({
+      name: 'bad zone', agent: { name: 'bad', cli: 'claude' }, prompt: 'No.',
+      schedule: { cron: '0 9 * * *', tz: 'Moon/Sea' },
+    }),
+  });
+  check('invalid timezone is a readable 400', invalid.status === 400 && /invalid schedule/.test(invalid.body?.error || ''), JSON.stringify(invalid.body));
+
+  const deleted = await api('/api/crons/cron_boot_two', { method: 'DELETE' });
+  check('delete is distinct from stop and removes the job', deleted.status === 200
+    && !(await api('/api/crons')).body.crons.some((job) => job.id === 'cron_boot_two'));
+
+  // A cron keeps its target when a nameless session is created later. Names
+  // are compared ignoring case everywhere, so automatic name allocation must
+  // use the same rule: with `Claude-Code-1` present, the next free name is
+  // `claude-code-2`, never a `claude-code-1` that an exact-name preference
+  // would then pick over the cron's real target.
+  const mixed = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ name: 'Claude-Code-1', cli: 'claude', path: 'first-project' }) });
+  check('a mixed-case session is created', mixed.status === 201, JSON.stringify(mixed.body));
+  const target = await api('/api/crons', {
+    method: 'POST', body: JSON.stringify({
+      name: 'lower-case target', agent: { name: 'claude-code-1', cli: 'claude' }, prompt: 'Report.',
+      schedule: { cron: '0 9 * * *', tz: 'UTC' }, runOnRestart: false,
+    }),
+  });
+  const before = ((await api('/api/sessions')).body || []).length;
+  const firstRun = await api(`/api/crons/${target.body.id}/run`, { method: 'POST' });
+  check('a cron naming the session in another case reuses it instead of spawning a twin',
+    firstRun.status === 202 && firstRun.body?.agentCreated === false && ((await api('/api/sessions')).body || []).length === before,
+    JSON.stringify(firstRun.body));
+  const hintAfter = await api('/api/next-name?cli=claude');
+  check('the next automatic name skips the case-variant that exists', hintAfter.body?.name === 'claude-code-2', JSON.stringify(hintAfter.body));
+  const nameless = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ cli: 'claude', path: 'second-project' }) });
+  check('a nameless creation gets that name', nameless.status === 201 && nameless.body?.name === 'claude-code-2', JSON.stringify(nameless.body));
+  const secondRun = await api(`/api/crons/${target.body.id}/run`, { method: 'POST' });
+  const after = (await api('/api/sessions')).body || [];
+  const original = after.find((s) => s.id === mixed.body.id);
+  const newcomer = after.find((s) => s.id === nameless.body.id);
+  check('the cron still fires into its original session, not the newcomer',
+    secondRun.status === 202 && secondRun.body?.agentCreated === false && original?.everStarted === true && newcomer?.everStarted === false,
+    `original=${JSON.stringify({ everStarted: original?.everStarted })} newcomer=${JSON.stringify({ name: newcomer?.name, everStarted: newcomer?.everStarted })}`);
+
+  // The roster filter, through the real route: a group named one way, asked for another.
+  const hunter = await api('/api/groups', { method: 'POST', body: JSON.stringify({ name: 'Hunter' }) });
+  const member = await api('/api/sessions', { method: 'POST', body: JSON.stringify({ name: 'in-hunter', cli: 'claude', path: 'hunter-project', groupId: hunter.body?.id }) });
+  const roster = await api('/api/agents?group=HUNTER');
+  check('GET /api/agents?group= matches the group name ignoring case',
+    hunter.status === 201 && member.status === 201 && roster.status === 200 && roster.body?.agents?.length === 1 && roster.body.agents[0].id === member.body.id,
+    JSON.stringify({ group: hunter.body, agents: roster.body?.agents?.map((a) => a.name) }));
+
+  const disk = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'crons.json'), 'utf8'));
+  check('the final state is on DATA_DIR, not local process memory',
+    disk.some((job) => job.id === 'cron_boot_one' && job.state === 'stopped')
+      && !disk.some((job) => job.id === 'cron_boot_two'));
+} catch (error) {
+  check(`suite threw: ${error && error.message}`, false, log.slice(-1200));
+} finally {
+  server.kill('SIGTERM');
+  await Promise.race([new Promise((resolve) => server.once('exit', resolve)), sleep(3000)]);
+  fs.rmSync(DATA_DIR, { recursive: true, force: true });
+}
+
+console.log(`\n${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);

@@ -1,0 +1,1099 @@
+import CodexSharedSessions from './CodexSharedSessions';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { isPassive, isRemote, type Cli } from '../types';
+import * as api from '../api';
+import { appRootUrl } from '../lib/appUrl';
+import { useSaverState } from '../lib/saveQueue';
+import {
+  configSaver, secretsSaver, saverFor, settingsSlot, subscribeSettings, noteServerRead,
+  pendingSettings, overwriteSettings, adoptServerSettings, type Kind,
+} from '../lib/settingsSaves';
+import { SunGlyph, MoonGlyph, RefreshGlyph, RefreshOffGlyph, InfoGlyph } from './icons';
+import Logo from './Logo';
+import LazyPanel from './LazyPanel';
+import type { SettingsPage as Page } from './SettingsShell';
+
+// Each subpage is its own chunk, fetched the first time its tab is opened; the
+// General page is this module. Module-level so the loader cache keys on them.
+const loadUsage = () => import('./UsagePanel');
+const loadApiLog = () => import('./ApiLog');
+const loadSkills = () => import('./SkillsEditor');
+const loadCron = () => import('./CronSettings');
+
+// 'already the latest' and 'updated' must not read the same: a run where
+// nothing moved looking like one where something did is the failure mode this
+// reporting exists to avoid.
+const CU_TONE: Record<string, string> = {
+  updated: ' ok', installed: ' ok', failed: ' bad',
+};
+const cuLine = (i: api.CliUpdateItem) => {
+  switch (i.state) {
+    case 'pending': return 'queued…';
+    case 'installing': return `installing ${i.npm}…`;
+    case 'restarting': return 'restarting its sessions…';
+    case 'updated': return `updated v${i.from} → v${i.to}`;
+    case 'installed': return `installed v${i.to}`;
+    case 'current': return `already the latest${i.to ? ` (v${i.to})` : ''}`;
+    default: return `could not install ${i.npm}`;
+  }
+};
+
+// Saving is silent until it isn't. A failure stays on screen — it does not fade
+// the way the tick does — because the change it describes is still only in this
+// browser, and the buttons are the ways back: Retry for a write that failed,
+// and, when someone else got there first, a choice between their version and
+// this one. Nothing here overwrites anything without being clicked.
+function SaveFlag({ kind, onAdopt }: { kind: Kind; onAdopt: (value: any) => void }) {
+  const state = useSaverState(saverFor(kind));
+  const slot = useSettingsSlot(kind);
+  if (state.status === 'idle') return null;
+  if (state.status === 'error') {
+    if (slot.conflict && !slot.readError) {
+      return (
+        <span className="save-flag save-flag-err">
+          changed elsewhere
+          <button className="save-retry" onClick={() => { void overwriteSettings(kind); }}
+            title="Save my version over the one that is stored">Keep mine</button>
+          <button
+            className="save-retry"
+            onClick={() => { const theirs = adoptServerSettings(kind); if (theirs) onAdopt(theirs); }}
+            title="Throw away my change and show what is stored"
+          >Use theirs</button>
+        </span>
+      );
+    }
+    return (
+      <span className="save-flag save-flag-err" title={state.error || undefined}>
+        {state.unresolved ? 'not confirmed' : `not saved${state.error ? ` — ${state.error}` : ''}`}
+        <button className="save-retry" onClick={() => { void saverFor(kind).retry(); }}>Retry</button>
+      </span>
+    );
+  }
+  return <span className="save-flag">{state.status === 'saving' ? 'saving…' : 'saved ✓'}</span>;
+}
+
+// The savers outlive this panel, so their bookkeeping is read through a
+// subscription rather than held in component state.
+function useSettingsSlot(kind: Kind) {
+  return useSyncExternalStore(subscribeSettings, () => settingsSlot(kind), () => settingsSlot(kind));
+}
+
+// Saving settings and telling the agents about them are two outcomes, and only
+// one of them is what "saved ✓" is about.
+function DerivedNote({ kind }: { kind: Kind }) {
+  const slot = useSettingsSlot(kind);
+  const derived = slot.derived;
+  if (!derived) return null;
+  if (derived.error) {
+    return (
+      <div className="s-help save-derived" title={derived.error}>
+        Saved — but the <span className="mono">environment</span> skill agents read could not be
+        updated: {derived.error}
+      </div>
+    );
+  }
+  // Rebuilding it takes a moment and normally says nothing. It says something
+  // when the moment has passed and it is still going.
+  if (derived.pending && slot.derivedSlow) {
+    return <div className="s-help">Saved. Still updating the <span className="mono">environment</span> skill agents read…</div>;
+  }
+  return null;
+}
+
+// A settings file that cannot be read is not a settings file that is empty.
+// Nothing may be written over it, so the panel says so instead of showing
+// defaults that look like the current values.
+function ReadErrorNote({ kind }: { kind: Kind }) {
+  const slot = useSettingsSlot(kind);
+  if (!slot.readError) return null;
+  return <div className="s-help save-derived" title={slot.readError}>{slot.readError} — nothing was changed, and saving is refused until it is repaired.</div>;
+}
+
+
+interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; engine?: string; ghostty?: boolean; canRelaunch?: boolean; secrets?: string[]; bucketUnverified?: boolean; }
+
+function urlBase64ToUint8Array(base64: string) {
+  const padding = '='.repeat((4 - (base64.length % 4)) % 4);
+  const raw = atob((base64 + padding).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+type PushState = 'checking' | 'unsupported' | 'framed' | 'denied' | 'off' | 'on' | 'busy';
+
+// "Enable notifications" for THIS device: agents can then message the operator
+// (only when explicitly asked to — see the environment skill).
+export function PushRow() {
+  const [state, setState] = useState<PushState>('checking');
+  const [note, setNote] = useState('');
+  useEffect(() => {
+    (async () => {
+      // Inside the huggingface.co iframe the browser blocks notification
+      // permission + push — only the Space's direct URL works.
+      if (window.top !== window.self) return setState('framed');
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) return setState('unsupported');
+      if (Notification.permission === 'denied') return setState('denied');
+      try {
+        // `ready` can hang in odd contexts — don't leave the row stuck forever.
+        const reg = await Promise.race([
+          navigator.serviceWorker.ready,
+          new Promise<null>((r) => setTimeout(() => r(null), 4000)),
+        ]);
+        if (!reg) return setState('unsupported');
+        setState((await reg.pushManager.getSubscription()) ? 'on' : 'off');
+      } catch { setState('unsupported'); }
+    })();
+  }, []);
+
+  const enable = async () => {
+    setState('busy');
+    setNote('');
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') { setState(perm === 'denied' ? 'denied' : 'off'); return; }
+      const { publicKey } = await api.getPushKey();
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey) });
+      await api.subscribePush(sub);
+      setState('on');
+      setNote('This device will receive agent notifications.');
+    } catch {
+      setState('off');
+      setNote('Could not subscribe — on iPhone, add the app to your Home Screen first.');
+    }
+    setTimeout(() => setNote(''), 6000);
+  };
+
+  const disable = async () => {
+    setState('busy');
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) { await api.unsubscribePush(sub.endpoint); await sub.unsubscribe(); }
+    } catch { /* ignore */ }
+    setState('off');
+  };
+
+  const test = async () => {
+    setNote('');
+    try {
+      const r = await api.sendTestNotification();
+      setNote(r.sent > 0 ? 'Sent — check your notifications.' : 'No delivery — is this device subscribed?');
+    } catch { setNote('Failed to send.'); }
+    setTimeout(() => setNote(''), 6000);
+  };
+
+  return (
+    <>
+      <div className="setting-row" style={{ marginTop: 12 }}>
+        <div>
+          <div className="s-label">Notifications</div>
+          <div className="s-help">
+            Agents can message this device when you explicitly ask them to ("notify me when the tests pass").
+            On iPhone: add the app to your Home Screen first, then enable here.
+          </div>
+          {note && <div className="s-help" style={{ marginTop: 6 }}>{note}</div>}
+        </div>
+        {state === 'framed' ? (
+          <a className="btn-ghost" href={appRootUrl()} target="_blank" rel="noreferrer">Open directly to enable ↗</a>
+        ) : state === 'unsupported' ? (
+          <span className="s-muted">not supported here</span>
+        ) : state === 'denied' ? (
+          <span className="s-muted">blocked in browser settings</span>
+        ) : state === 'on' ? (
+          <span className="confirm-del">
+            <button className="btn-ghost" onClick={test}>Send test</button>
+            <button className="btn-ghost" onClick={disable}>Disable</button>
+          </span>
+        ) : (
+          <button className="btn-ghost" disabled={state === 'busy' || state === 'checking'} onClick={enable}>
+            {state === 'busy' ? '…' : 'Enable on this device'}
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
+export default function SettingsView({
+  page, onClose, theme, onToggleTheme, clis, onClisChanged, info, onShowWelcome, demoMode, onToggleDemo,
+  onOpenSharedTrace,
+}: {
+  page: Page;
+  /** Closing from inside a page (a shared trace opened). The shell owns the tabs. */
+  onClose: () => void;
+  theme: 'light' | 'dark';
+  onToggleTheme: () => void;
+  clis: Cli[];
+  /** Re-read the CLI catalog: an in-place update changes the versions above. */
+  onClisChanged?: () => void;
+  info: Info | null;
+  onShowWelcome?: () => void;
+  /** Pull a session someone shared as a Hub dataset and open it as a trace. */
+  onOpenSharedTrace?: (repo: string) => Promise<void>;
+  demoMode?: boolean;
+  onToggleDemo?: () => void;
+}) {
+  const [relaunch, setRelaunch] = useState<{ busy?: boolean; msg?: string; confirm?: boolean }>({});
+  const [sharedTrace, setSharedTrace] = useState('');
+  const [sharedTraceBusy, setSharedTraceBusy] = useState(false);
+  const [sharedTraceErr, setSharedTraceErr] = useState<string | null>(null);
+  // Failures here are ordinary and specific (no access, not a share, no token),
+  // so show what the server said: the fix is usually a different id.
+  const openSharedTrace = async () => {
+    const repo = sharedTrace.trim();
+    if (!repo || !onOpenSharedTrace) return;
+    setSharedTraceBusy(true);
+    setSharedTraceErr(null);
+    try {
+      await onOpenSharedTrace(repo);
+      setSharedTrace('');
+      onClose();
+    } catch (e) {
+      setSharedTraceErr(e instanceof Error ? e.message : 'could not open that trace');
+    } finally {
+      setSharedTraceBusy(false);
+    }
+  };
+  const [secretKeys, setSecretKeys] = useState<string[]>([]);
+  // Reopening shows the value still owed to the server, not the older one a
+  // fresh read would put over it.
+  const [notes, setNotes] = useState<Record<string, string>>(() => pendingSettings('secrets') || {});
+  // What the server has been asked for, so loading a value doesn't read as an
+  // edit of it. Compared as JSON because these are rebuilt objects, not the ones
+  // that came back.
+  const notesAsked = useRef(JSON.stringify(pendingSettings('secrets') || {}));
+  useEffect(() => {
+    api.getSecrets().then((d) => {
+      setSecretKeys(d.detected);
+      noteServerRead('secrets', d);
+      const owed = pendingSettings('secrets');
+      if (owed) return;                       // an edit of ours is still in flight or failed
+      notesAsked.current = JSON.stringify(d.notes || {});
+      setNotes(d.notes || {});
+    }).catch(() => {});
+  }, []);
+  // One-line textareas that grow with their content.
+  const grow = (el: HTMLTextAreaElement) => { el.style.height = 'auto'; el.style.height = `${el.scrollHeight}px`; };
+  const growRef = (el: HTMLTextAreaElement | null) => { if (el) grow(el); };
+  useEffect(() => {
+    document.querySelectorAll<HTMLTextAreaElement>('textarea.secret-desc').forEach(grow);
+  }, [secretKeys]);
+  // Every change is sent the moment it is made: no debounce to sit out, no blur
+  // to remember, nothing left unsaved by closing the panel. While a write is out
+  // the newest value waits in one slot and follows it the instant it settles —
+  // see saveQueue, which is also what keeps an older answer from speaking for a
+  // newer edit.
+  useEffect(() => {
+    const json = JSON.stringify(notes);
+    if (json === notesAsked.current) return;
+    notesAsked.current = json;
+    void secretsSaver.request(notes);
+  }, [notes]);
+
+  // Operator config (artifacts hub, jobs policy): load once, save on every edit.
+  const [cfg, setCfg] = useState<api.AmConfig | null>(() => (pendingSettings('config') as api.AmConfig) || null);
+  const cfgAsked = useRef<string | null>(cfg ? JSON.stringify(cfg) : null);
+  useEffect(() => {
+    api.getConfig().then((c) => {
+      noteServerRead('config', c);
+      const owed = pendingSettings('config') as api.AmConfig | null;
+      if (owed) { setCfg(owed); return; }
+      cfgAsked.current = JSON.stringify(c);
+      setCfg(c);
+    }).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (!cfg) return;
+    const json = JSON.stringify(cfg);
+    if (json === cfgAsked.current) return;
+    cfgAsked.current = json;
+    void configSaver.request(cfg);
+  }, [cfg]);
+  const cfgState = useSaverState(configSaver);
+  const cfgSaved = cfgState.status;
+  // A number being typed is not a number yet. The box keeps what was typed —
+  // including the empty moment between "1" and "17" — while the setting keeps
+  // its last valid value, so an incomplete edit cannot be saved as a reset to 0.
+  const [usdDraft, setUsdDraft] = useState<string | null>(null);
+  const usdOf = (text: string) => {
+    const t = text.trim();
+    if (t === '') return null;
+    const n = Number(t);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  const usdValue = usdDraft === null ? (cfg?.jobs.askAboveUsd ?? 0) : usdOf(usdDraft);
+  const usdText = usdDraft === null ? String(cfg?.jobs.askAboveUsd ?? 0) : usdDraft;
+
+  // Bucket backup: the copying happens in an HF Job, so the row reports what the
+  // Hub says about the last one rather than anything we remember locally.
+  const [bk, setBk] = useState<api.BackupStatus | null>(null);
+  const [bkBusy, setBkBusy] = useState(false);
+  const [bkMsg, setBkMsg] = useState('');
+  const [skipDraft, setSkipDraft] = useState('');
+  const loadBackup = () => api.backupStatus().then(setBk).catch(() => {});
+  useEffect(() => { loadBackup(); }, []);
+  // Re-read after a save lands, so the interval and privacy dot stop disagreeing
+  // with what was just chosen.
+  useEffect(() => { if (cfgSaved === 'saved') loadBackup(); }, [cfgSaved]);
+  // While a Job is in flight, follow it: the copying happens on the Hub, so the
+  // only way to see it finish is to ask.
+  useEffect(() => {
+    if (!bk?.running) return;
+    const t = setInterval(loadBackup, 10_000);
+    return () => clearInterval(t);
+  }, [bk?.running]);
+  // One token per commit, deduped, whitespace and shell characters dropped — the
+  // server normalizes again, since it is the side that must not be trusted.
+  const addSkip = () => {
+    if (!cfg) return;
+    const t = skipDraft.trim().replace(/^\/+/, '').replace(/\/+$/, '');
+    setSkipDraft('');
+    if (!t || !/^[A-Za-z0-9._*?/-]+$/.test(t) || cfg.backup.exclude.includes(t)) return;
+    setCfg({ ...cfg, backup: { ...cfg.backup, exclude: [...cfg.backup.exclude, t] } });
+  };
+
+  const doBackup = async () => {
+    setBkBusy(true);
+    setBkMsg('');
+    try {
+      // On success the status line takes over — it names the running job and
+      // links to it, so repeating the id here would just be noise.
+      await api.runBackup();
+    } catch (e) {
+      setBkMsg((e as Error).message || 'Could not launch the backup.');
+    }
+    await loadBackup();
+    setBkBusy(false);
+  };
+
+  // App self-update: version check on open, update on confirm.
+  const [upd, setUpd] = useState<api.UpdateCheck | null>(null);
+  const [updState, setUpdState] = useState<{ busy?: boolean; msg?: string; confirm?: boolean }>({});
+  useEffect(() => { api.checkUpdate().then(setUpd).catch(() => {}); }, []);
+  const doUpdate = async () => {
+    setUpdState({ busy: true });
+    try {
+      const r = await api.runUpdate();
+      if (r.ok && r.upToDate) setUpdState({ msg: 'Already up to date.' });
+      else if (r.ok) setUpdState({ msg: 'Update pushed. The Space rebuilds now (1 to 2 min); reload once it is back.' });
+      else if (r.reason === 'no-token') setUpdState({ msg: 'Add a write-scoped HF_TOKEN secret to the Space to enable updates.' });
+      // The reason is the point: every one of these used to arrive as
+      // "Request failed." with nothing to act on.
+      else setUpdState({ msg: `Update failed (${r.reason})${r.detail ? `: ${r.detail}` : ''}` });
+    } catch { setUpdState({ msg: 'Request failed.' }); }
+  };
+
+  // Installing the latest agent CLIs in place, one row at a time. Two presses
+  // on purpose: the second one is the warning, because the install restarts the
+  // sessions running the binary it replaces (a live CLI keeps the executable it
+  // was exec'd with).
+  const [cu, setCu] = useState<api.CliUpdateStatus | null>(null);
+  const [cuAsk, setCuAsk] = useState<string | null>(null);
+  const [cuErr, setCuErr] = useState('');
+  const loadCu = useCallback(() => api.getCliUpdate().then(setCu).catch(() => {}), []);
+  useEffect(() => { loadCu(); }, [loadCu]);
+  // Poll only while something is happening — an install is tens of seconds and
+  // the row's own state is the progress indicator.
+  useEffect(() => {
+    if (!cu?.runningId) return undefined;
+    const t = setInterval(loadCu, 1500);
+    return () => clearInterval(t);
+  }, [cu?.runningId, loadCu]);
+  // The version beside each name came from a catalog read at page load. When a
+  // run ends it is out of date by definition, so ask for a fresh one.
+  const cuWasRunning = useRef(false);
+  useEffect(() => {
+    if (cuWasRunning.current && !cu?.runningId) onClisChanged?.();
+    cuWasRunning.current = !!cu?.runningId;
+  }, [cu?.runningId, onClisChanged]);
+  const cuItems = new Map((cu?.items || []).map((i) => [i.id, i]));
+  const cuExcluded = new Map((cu?.excluded || []).map((e) => [e.id, e]));
+  const doCliUpdate = async (id: string) => {
+    setCuErr('');
+    setCuAsk(null);
+    try { setCu(await api.runCliUpdate(id)); } catch (e) { setCuErr((e as Error).message || 'Could not start the update.'); }
+  };
+
+  const doRelaunch = async () => {
+    setRelaunch({ busy: true });
+    try {
+      const r = await api.relaunchSpace();
+      if (r.ok) setRelaunch({ msg: 'Rebuilding — the Space will restart in ~1–2 min. Reload once it\'s back.' });
+      else if (r.reason === 'no-token') setRelaunch({ msg: 'Add an HF_TOKEN secret (write access) to the Space to enable one-click relaunch, or use ⋮ → Factory reboot.' });
+      else setRelaunch({ msg: `Couldn't relaunch (${r.reason}).` });
+    } catch { setRelaunch({ msg: 'Request failed.' }); }
+  };
+  // The shell around these pages (Back, title, tabs) is SettingsShell, rendered
+  // by App so it is there before this module is.
+  return (
+    <>
+        {page === 'general' && (
+          <div className="settings-page">
+            <h2>General</h2>
+
+            <div className="setting-row">
+              <div><div className="s-label">Theme</div><div className="s-help">Defaults to your system setting.</div></div>
+              <button className="btn-ghost" onClick={onToggleTheme}>{theme === 'dark' ? <><MoonGlyph /> Dark</> : <><SunGlyph /> Light</>}</button>
+            </div>
+
+            {/* Opening someone else's shared session. This used to be a widget
+                in the sidebar, which is a lot of standing furniture for
+                something you do when a link arrives — and the sidebar is for
+                agents that exist. It is the one thing the Files pane's trace
+                viewer cannot do (that reads files in the workspace; this pulls a
+                dataset off the Hub), so it moved rather than went away. */}
+            {onOpenSharedTrace && (
+              <div className="setting-row row-top">
+                <div>
+                  <div className="s-label">Open a shared trace</div>
+                  <div className="s-help">
+                    Paste the dataset id or URL someone sent you. Private and gated shares work
+                    too — this Space downloads with its own token.
+                  </div>
+                  <input
+                    className="cfg-input trace-open"
+                    placeholder="user/session-name — or the dataset URL"
+                    value={sharedTrace}
+                    disabled={sharedTraceBusy}
+                    onChange={(e) => { setSharedTrace(e.target.value); setSharedTraceErr(null); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') openSharedTrace(); }}
+                  />
+                  {sharedTraceErr && <div className="s-help s-err" role="alert">{sharedTraceErr}</div>}
+                </div>
+                <button
+                  className="btn-ghost"
+                  disabled={sharedTraceBusy || !sharedTrace.trim()}
+                  onClick={openSharedTrace}
+                >{sharedTraceBusy ? 'Fetching…' : 'Open'}</button>
+              </div>
+            )}
+
+            {onShowWelcome && (
+              <div className="setting-row">
+                <div><div className="s-label">Welcome guide</div><div className="s-help">A quick tour of how the tool works.</div></div>
+                <button className="btn-ghost" onClick={onShowWelcome}>Show guide</button>
+              </div>
+            )}
+
+            {onToggleDemo && (
+              <div className="setting-row">
+                <div>
+                  <div className="s-label">Demo mode{demoMode && <span className="save-flag">on</span>}</div>
+                  <div className="s-help">Hides your current sessions from the sidebar so the Space looks fresh. Nothing is deleted, logins and secrets stay valid, and anything you start while it's on stays visible. Turn it off to bring everything back.</div>
+                </div>
+                <button className={demoMode ? 'btn-primary' : 'btn-ghost'} onClick={onToggleDemo}>
+                  {demoMode ? 'Deactivate demo mode' : 'Start demo mode'}
+                </button>
+              </div>
+            )}
+
+            <h3>Agents</h3>
+            <div className="s-help">A coloured dot means the agent is configured and ready. Log in once inside a session (or set a key as a Space secret) — credentials persist on the bucket across restarts and all sessions.</div>
+            <div className="agent-rows">
+              {/* Only the CLIs this Space installs and you sign into. Shell needs
+                  no credentials; files/trace are panels rather than processes; a
+                  remote agent authenticates wherever it actually runs, so its
+                  readiness was never ours to report. */}
+              {clis.filter((c) => c.id !== 'shell' && !isPassive(c.id) && !isRemote(c.id)).map((c) => {
+                const ready = c.available && c.ready;
+                const upd = cuItems.get(c.id);
+                const noUpd = cuExcluded.get(c.id);
+                const mine = cu?.runningId === c.id;
+                const asking = cuAsk === c.id;
+                const panes = upd?.willRestart || [];
+                const working = panes.filter((p) => p.state === 'working').length;
+                const stale = (cu?.stale || []).filter((p) => p.cli === c.id);
+                return (
+                  <div key={c.id} className="agent-row-wrap">
+                    <div className="agent-row">
+                      <span
+                        className="status"
+                        style={ready
+                          ? { background: c.color }
+                          : { background: 'var(--muted)', opacity: 0.4 }}
+                      />
+                      <Logo cli={c.id} size={14} tint={c.color} />
+                      <span className="ar-name">{c.label}</span>
+                      <span className="spacer" />
+                      {c.available && c.version && <span className="ar-ver mono">v{c.version}</span>}
+                      <span className={`ar-state${ready ? ' ok' : ''}`}>{!c.available ? 'unavailable' : ready ? 'ready' : 'needs setup'}</span>
+                      {/* fixed slot so version/state columns align across rows */}
+                      <span className="ar-info">
+                        {c.available && !ready && c.setup && (
+                          <span className="tip" tabIndex={0} data-tip={c.setup}><InfoGlyph className="tip-i" /></span>
+                        )}
+                      </span>
+                      {/* One question per row, asked once: can this be updated
+                          in place? The struck-through arrow answers "no, and
+                          here is why" — an (i) here would collide with the
+                          credentials (i) one column to its left. */}
+                      <span className="ar-upd">
+                        {upd && (
+                          <button
+                            className={`ar-upd-btn${asking ? ' on' : ''}`}
+                            title={mine ? 'updating…' : `Install the latest ${c.label} (${upd.npm})`}
+                            aria-label={`Update ${c.label}`}
+                            disabled={!!cu?.runningId}
+                            onClick={() => { setCuErr(''); loadCu(); setCuAsk(asking ? null : c.id); }}
+                          ><RefreshGlyph /></button>
+                        )}
+                        {noUpd && (
+                          <span className="tip ar-upd-mark" tabIndex={0}
+                            data-tip={`Not updatable from here — ${noUpd.reason}. Update it from a shell inside the Space.`}
+                          ><RefreshOffGlyph /></span>
+                        )}
+                      </span>
+                    </div>
+
+                    {asking && upd && !cu?.runningId && (
+                      <div className={`cu-confirm${working ? ' hot' : ''}`}>
+                        <div>
+                          Installs the latest <span className="mono">{upd.npm}</span> into the Space&rsquo;s own npm
+                          prefix &mdash; no rebuild.{' '}
+                          {panes.length === 0
+                            ? `No sessions are running ${c.label}, so nothing restarts.`
+                            : 'A running CLI keeps the binary it started with, so the sessions using it restart. Conversations are resumed; work in flight is not.'}
+                        </div>
+                        {panes.length > 0 && (
+                          <>
+                            <div className="cu-count">
+                              {panes.length} session{panes.length === 1 ? '' : 's'} will restart
+                              {working > 0
+                                ? <>, <b>{working} of them working right now</b> &mdash; {working === 1 ? 'that session loses' : 'those sessions lose'} whatever is mid-task.</>
+                                : <> &mdash; none are working.</>}
+                            </div>
+                            <ul className="cu-panes">
+                              {panes.map((p) => (
+                                <li key={p.id}>
+                                  <span className={`cu-dot${p.state === 'working' ? ' hot' : ''}`} />
+                                  <span className="cu-pane-name">{p.name}</span>
+                                  <span className="mono cu-quiet">{p.state}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </>
+                        )}
+                        <div className="cu-bar">
+                          <button className="btn-primary" onClick={() => doCliUpdate(c.id)}>
+                            {panes.length
+                              ? `Update and restart ${panes.length} session${panes.length === 1 ? '' : 's'}`
+                              : 'Update now'}
+                          </button>
+                          <button className="btn-ghost" onClick={() => setCuAsk(null)}>Cancel</button>
+                        </div>
+                      </div>
+                    )}
+
+                    {upd && upd.state !== 'idle' && (
+                      <div className="ar-sub">
+                        <div className={`cu-line${CU_TONE[upd.state] || ''}`}>{cuLine(upd)}</div>
+                        {upd.error && <div className="cu-err mono">{upd.error}</div>}
+                        {upd.restarted.map((r) => (
+                          <div key={r.id} className={`cu-line${r.ok ? '' : ' bad'}`}>
+                            {r.ok
+                              ? `restarted ${r.name} (was ${r.was})`
+                              : `could not restart ${r.name} — ${r.error}`}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {stale.length > 0 && (
+                      <div className="ar-sub">
+                        <div className="cu-line bad">
+                          still running the old binary: {stale.map((p) => p.name).join(', ')} — restart{' '}
+                          {stale.length === 1 ? 'it' : 'them'} from the session menu
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {cuErr && <div className="s-warn">{cuErr}</div>}
+            {cu && (
+              <div className="s-help cu-foot">
+                {info?.spaceId ? (
+                  <>
+                    Updates install into <span className="mono">{cu.prefix || 'the npm prefix'}</span>, which is container
+                    disk and is wiped on every Space restart. To keep them, put this line
+                    in <span className="mono">{cu.installScript}</span> — it runs on every boot, and costs that time on
+                    every start:
+                    <code className="cu-snip">{cu.persistSnippet}</code>
+                  </>
+                ) : (
+                  // Not a Space: the prefix is ordinary disk, nothing wipes it on
+                  // restart, and install.sh-on-boot is a Space mechanism. Saying
+                  // otherwise sends a local operator to fix a problem they do not
+                  // have — and `prefix` being null here is itself worth flagging,
+                  // because an unset NPM_CONFIG_PREFIX means npm writes wherever
+                  // it defaults to, which may be root-owned.
+                  <>
+                    Updates install into{' '}
+                    <span className="mono">{cu.prefix || 'npm\u2019s default global prefix'}</span> and persist like any
+                    other global npm install.{!cu.prefix && (
+                      <> Set <span className="mono">NPM_CONFIG_PREFIX</span> to a directory this
+                      process owns, or <span className="mono">npm install -g</span> may need root.</>
+                    )} Restart Agent Manager to pick up a new version.
+                  </>
+                )}
+              </div>
+            )}
+
+            <h3>Secrets &amp; variables<SaveFlag kind="secrets" onAdopt={(theirs) => {
+              const taken = (theirs || {}) as Record<string, string>;
+              notesAsked.current = JSON.stringify(taken);
+              setNotes(taken);
+            }} /></h3>
+            <ReadErrorNote kind="secrets" />
+            <DerivedNote kind="secrets" />
+            <div className="s-help">Detected by diffing the runtime environment against a build-time snapshot — names only, never values. Describe what each is for (saved automatically); this publishes an <span className="mono">environment</span> skill so every agent knows what's available.</div>
+            {secretKeys.length === 0 ? (
+              <div className="s-muted" style={{ marginTop: 8 }}>None detected.</div>
+            ) : (
+              <div className="secret-list">
+                {secretKeys.map((k) => (
+                  <div key={k} className="secret-row">
+                    <div className="secret-name mono">{k}</div>
+                    <textarea
+                      className="secret-desc"
+                      placeholder="What is this used for?"
+                      rows={1}
+                      value={notes[k] || ''}
+                      ref={growRef}
+                      onChange={(e) => { setNotes((n) => ({ ...n, [k]: e.target.value })); grow(e.currentTarget); }}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <h3>Agent output &amp; compute<SaveFlag kind="config" onAdopt={(theirs) => {
+              const taken = theirs as api.AmConfig;
+              cfgAsked.current = JSON.stringify(taken);
+              setUsdDraft(null);
+              setCfg(taken);
+            }} /></h3>
+            <ReadErrorNote kind="config" />
+            <DerivedNote kind="config" />
+            <div className="s-help">Both policies are published to agents through the <span className="mono">environment</span> skill.</div>
+            {cfg && (
+              <>
+                <div className="setting-row">
+                  <div>
+                    <div className="s-label">Web artifacts</div>
+                    <div className="s-help">Agents render rich results (reports, dashboards, visualizations) as HTML pages and publish them to a central artifacts Space with an index and direct links per page.</div>
+                  </div>
+                  <span className="cfg-ctl">
+                    <div className="seg cfg-seg">
+                      <button className={cfg.artifacts.enabled ? 'on' : ''} onClick={() => setCfg({ ...cfg, artifacts: { ...cfg.artifacts, enabled: true } })}>on</button>
+                      <button className={!cfg.artifacts.enabled ? 'on' : ''} onClick={() => setCfg({ ...cfg, artifacts: { ...cfg.artifacts, enabled: false } })}>off</button>
+                    </div>
+                  </span>
+                </div>
+                <div className={cfg.artifacts.enabled ? undefined : 'cfg-off'}>
+                  <div className="setting-row">
+                    <div>
+                      <div className="s-label">Artifacts Space</div>
+                      <div className="s-help">Created by the first agent that needs it.</div>
+                    </div>
+                    <span className="cfg-ctl">
+                      <input
+                        className="cfg-input mono"
+                        placeholder={cfg.defaultArtifactsSpace || 'user/agent-artifacts'}
+                        value={cfg.artifacts.space}
+                        onChange={(e) => setCfg({ ...cfg, artifacts: { ...cfg.artifacts, space: e.target.value } })}
+                      />
+                    </span>
+                  </div>
+                  <div className="setting-row">
+                    <div>
+                      <div className="s-label">Default visibility</div>
+                      <div className="s-help">Whether new artifact pages are visible to anyone with the link.</div>
+                    </div>
+                    <span className="cfg-ctl">
+                      <div className="seg cfg-seg">
+                        <button className={cfg.artifacts.visibility === 'public' ? 'on' : ''} onClick={() => setCfg({ ...cfg, artifacts: { ...cfg.artifacts, visibility: 'public' } })}>public</button>
+                        <button className={cfg.artifacts.visibility === 'private' ? 'on' : ''} onClick={() => setCfg({ ...cfg, artifacts: { ...cfg.artifacts, visibility: 'private' } })}>private</button>
+                      </div>
+                    </span>
+                  </div>
+                </div>
+                <div className="setting-row">
+                  <div>
+                    <div className="s-label">Ask before HF Jobs above</div>
+                    <div className="s-help">Agents run expensive compute (GPU, long batch work) as HF Jobs. Above this estimated cost they must ask you first. 0 means always ask.</div>
+                    {usdDraft !== null && usdValue === null && (
+                      <div className="s-help cfg-bad-note">Not a number yet — the saved threshold is still ${cfg.jobs.askAboveUsd}.</div>
+                    )}
+                  </div>
+                  <span className="cfg-ctl">
+                    <span className="mono cfg-usd">$</span>
+                    <input
+                      className={`cfg-input cfg-num mono${usdDraft !== null && usdValue === null ? ' cfg-bad' : ''}`}
+                      type="number" min={0} step={1}
+                      value={usdText}
+                      onChange={(e) => {
+                        const typed = e.target.value;
+                        setUsdDraft(typed);
+                        // An empty box on the way to "17" is not a request to
+                        // ask about every job. Nothing is sent until the field
+                        // says a number again.
+                        const n = usdOf(typed);
+                        if (n !== null) setCfg({ ...cfg, jobs: { askAboveUsd: n } });
+                      }}
+                      onBlur={() => setUsdDraft(null)}
+                    />
+                  </span>
+                </div>
+
+                {/* row-top: the description runs four lines, and the interval is
+                    the thing you read it for — it belongs level with the text, not
+                    floating halfway down beside it. */}
+                <div className="setting-row row-top">
+                  <div>
+                    <div className="s-label">Back up the bucket</div>
+                    <div className="s-help">
+                      Snapshots your work — workspaces, transcripts, config — to a private dataset on
+                      the Hub every hour, so you can get back any past version. Caches and dependency
+                      folders are skipped, and saved logins are left out: a snapshot is never a place
+                      to keep credentials. Nothing is ever written to or deleted from your bucket.
+                    </div>
+                    {/* A kv table, not a run-on sentence: the destinations and a
+                        timestamp are things you scan, not read. The two repos
+                        default to the same id string — one a dataset, one a
+                        bucket — so each row says which it is. */}
+                    {bk?.canRunNow && (bk.last || cfg.backup.every !== 'never') && (
+                      <div className="kv kv-inline">
+                        <div>
+                          <span>Backup dataset</span>
+                          <b>
+                            <a
+                              className="mono"
+                              href={`https://huggingface.co/datasets/${bk.dataset || bk.defaults.dataset}`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              {bk.dataset || bk.defaults.dataset}
+                            </a>
+                            {bk.datasetPrivate === false && (
+                              <span style={{ color: 'var(--danger)' }}> — not private</span>
+                            )}
+                          </b>
+                        </div>
+                        <div>
+                          <span>Backup jobs</span>
+                          <b><a href={bk.jobsUrl} target="_blank" rel="noreferrer">{bk.jobName}</a></b>
+                        </div>
+                        {/* A timestamp, not a stage. The job's own state belongs
+                            on the jobs page linked above — reporting it here meant
+                            reporting it wrongly whenever the Hub did not answer. */}
+                        <div>
+                          <span>Last updated</span>
+                          <b>{bk.lastSuccessAt ? new Date(bk.lastSuccessAt).toLocaleString() : 'never'}</b>
+                        </div>
+                        {/* The dashboard strip says a backup is failing; this says
+                            what the Job actually reported, which is what tells you
+                            whether it is yours to fix. The message and the Job's own
+                            reason are a paragraph you read once, so they hang off the
+                            timestamp as a tooltip rather than wrapping across the
+                            table and pushing every other row around. */}
+                        {bk.lastFailure && (
+                          <div>
+                            <span>Last failure</span>
+                            <b className="kv-fail">
+                              {new Date(bk.lastFailure.at).toLocaleString()}
+                              {bk.failures > 1 ? ` (${bk.failures} in a row)` : ''}
+                              {(bk.lastFailure.message || bk.lastFailure.reason) && (
+                                <span
+                                  className="tip"
+                                  tabIndex={0}
+                                  data-tip={[bk.lastFailure.message, bk.lastFailure.reason].filter(Boolean).join(' — ')}
+                                ><InfoGlyph className="tip-i" /></span>
+                              )}
+                            </b>
+                          </div>
+                        )}
+                        {bk.error && (
+                          <div>
+                            <span>Could not launch</span>
+                            <b style={{ color: 'var(--danger)' }}>{bk.error}</b>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <span className="cfg-ctl">
+                    <div className="seg cfg-seg">
+                      {(['never', '1h', '3h', '24h'] as const).map((e) => (
+                        <button
+                          key={e}
+                          className={cfg.backup.every === e ? 'on' : ''}
+                          disabled={!bk?.hasToken && e !== 'never'}
+                          onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, every: e } })}
+                        >
+                          {e === 'never' ? 'off' : e}
+                        </button>
+                      ))}
+                    </div>
+                  </span>
+                </div>
+                {/* Full width, outside the row: whichever of these applies is the
+                    thing to read before touching the control above. Without a
+                    token, why the intervals are dead; with one, who pays. */}
+                {!bk?.hasToken ? (
+                  <div className="s-warn">
+                    Only <b>off</b> is available: backing up needs a write-scoped{' '}
+                    <span className="mono">HF_TOKEN</span> Space secret, and this Space has none. Without one
+                    there is no way to launch the Job or write to the Hub.
+                  </div>
+                ) : (
+                  <div className="s-warn">
+                    Each run is an <b>HF Job billed to your account</b> — cpu-basic, $0.01 per hour of runtime,
+                    so a few minutes per backup — plus Hub storage for both copies (the mirror is about the size
+                    of your bucket). Every 1h means 24 runs a day.
+                  </div>
+                )}
+
+                {/* On demand regardless of the interval: taking one backup
+                    before a risky change should not mean switching on a
+                    schedule. It belongs directly under the intervals it stands
+                    beside — it used to sit past the skip-folders field, a screen
+                    away from the control it relates to. The cost note stays
+                    above it: that is what you want to have read before pressing
+                    a button that starts a billed Job. Disabled while a run is in
+                    flight — two Jobs uploading to one dataset would race. */}
+                {bk?.canRunNow && (
+                  <button
+                    className="btn-ghost bk-now"
+                    disabled={bkBusy || bk.running}
+                    onClick={doBackup}
+                  >
+                    {bkBusy ? 'Launching…' : bk.running ? 'Backing up…' : 'Back up now'}
+                  </button>
+                )}
+                {bkMsg && <div className="s-help" style={{ marginTop: 6 }}>{bkMsg}</div>}
+
+                {/* Folders to keep out of the history. An env directory is
+                    thousands of files the backup has to hash and none of them
+                    worth keeping — measured, that is 7s of work versus 1s.
+                    Full width, outside the row: thirty chips wrapping inside the
+                    label column read as a wall, and the field they belong to is a
+                    text input, which wants the whole measure. */}
+                {bk?.canRunNow && (
+                  <>
+                    <div className="s-help skiphead" style={{ marginTop: 10 }}>
+                      <span>
+                        Skip these folders — type a name and press Enter. Anywhere they appear
+                        (<span className="mono">node_modules</span>, <span className="mono">.venv</span>),
+                        they stay out of the history. Everything here is something a command puts
+                        back; nothing is skipped for being large. Remove any you want kept.
+                      </span>
+                      {/* The default list is long and picked from measurements, so an operator
+                          who trims it has no way back without retyping 30 names. Hidden when
+                          the list already matches the defaults, so it is never a no-op —
+                          compared against the local edit rather than the server's copy, or it
+                          would linger until the next status poll. */}
+                      {bk.excludeDefaults?.length > 0
+                        && (cfg.backup.exclude.length !== bk.excludeDefaults.length
+                          || cfg.backup.exclude.some((t, i) => t !== bk.excludeDefaults[i])) && (
+                        <button
+                          className="btn-ghost skiprestore"
+                          onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, exclude: [...bk.excludeDefaults] } })}
+                        >Restore defaults</button>
+                      )}
+                    </div>
+                    <div className="tagf" onClick={(e) => {
+                      if (e.target === e.currentTarget) (e.currentTarget.querySelector('input') as HTMLInputElement)?.focus();
+                    }}>
+                      {cfg.backup.exclude.map((t) => (
+                        <span className="tagf-chip mono" key={t}>
+                          {t}
+                          <button
+                            className="tagf-x"
+                            aria-label={`Stop skipping ${t}`}
+                            onClick={() => setCfg({ ...cfg, backup: { ...cfg.backup, exclude: cfg.backup.exclude.filter((x) => x !== t) } })}
+                          >×</button>
+                        </span>
+                      ))}
+                      <input
+                        className="tagf-input mono"
+                        placeholder={cfg.backup.exclude.length ? 'add another…' : 'node_modules'}
+                        value={skipDraft}
+                        onChange={(e) => setSkipDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          // Enter or comma commits; Backspace on an empty box
+                          // takes the last chip back, as tag fields do.
+                          if (e.key === 'Enter' || e.key === ',') {
+                            e.preventDefault();
+                            addSkip();
+                          } else if (e.key === 'Backspace' && !skipDraft && cfg.backup.exclude.length) {
+                            setCfg({ ...cfg, backup: { ...cfg.backup, exclude: cfg.backup.exclude.slice(0, -1) } });
+                          }
+                        }}
+                        onBlur={addSkip}
+                      />
+                    </div>
+                  </>
+                )}
+                <div className="setting-row">
+                  <div>
+                    <div className="s-label">Restart sessions after a reboot</div>
+                    <div className="s-help">
+                      When the Space wakes or reboots, sessions that were running come back on their own: the ones
+                      you sent something to within this window, plus any that still had a command or background
+                      job running. Agents resume their own conversation and wait for you; nothing is re-sent.
+                    </div>
+                  </div>
+                  <span className="cfg-ctl">
+                    <div className="seg cfg-seg">
+                      {([1, 3, 7] as const).map((d) => (
+                        <button
+                          key={d}
+                          className={cfg.revive.enabled && cfg.revive.days === d ? 'on' : ''}
+                          onClick={() => setCfg({ ...cfg, revive: { enabled: true, days: d } })}
+                        >{d === 1 ? '1 day' : `${d} days`}</button>
+                      ))}
+                      <button
+                        className={!cfg.revive.enabled ? 'on' : ''}
+                        onClick={() => setCfg({ ...cfg, revive: { ...cfg.revive, enabled: false } })}
+                      >off</button>
+                    </div>
+                  </span>
+                </div>
+
+                <div className="setting-row">
+                  <div>
+                    <div className="s-label">Archive inactive sessions</div>
+                    <div className="s-help">Sessions with no activity beyond this window disappear from the sidebar and overview. Nothing is deleted; the "archived" checkbox in the sidebar brings them back.</div>
+                  </div>
+                  <span className="cfg-ctl">
+                    <div className="seg cfg-seg">
+                      {(['week', 'month', 'never'] as const).map((a) => (
+                        <button key={a} className={cfg.archive.after === a ? 'on' : ''} onClick={() => setCfg({ ...cfg, archive: { after: a } })}>
+                          {a === 'week' ? '1 week' : a === 'month' ? '1 month' : 'never'}
+                        </button>
+                      ))}
+                    </div>
+                  </span>
+                </div>
+              </>
+            )}
+
+            <CodexSharedSessions />
+
+            <PushRow />
+
+            <div className="setting-row" style={{ marginTop: 12 }}>
+              <div>
+                <div className="s-label">Update CLIs</div>
+                <div className="s-help">
+                  Factory-reboots the Space to reinstall every CLI at its latest version and relaunch. Sessions survive on the bucket.
+                </div>
+                {!info?.canRelaunch && (
+                  <div className="s-help" style={{ marginTop: 6 }}>
+                    This button needs a write-scoped <span className="mono">HF_TOKEN</span> Space secret. Without one,
+                    update manually: open your Space's <b>Settings</b> tab on Hugging Face and press{' '}
+                    <b>Factory reboot</b> — same effect.
+                  </div>
+                )}
+              </div>
+              {!info?.canRelaunch ? (
+                <button className="btn-ghost" disabled title="Add a write-scoped HF_TOKEN secret to the Space to enable"><RefreshGlyph /> Relaunch &amp; update</button>
+              ) : relaunch.confirm ? (
+                <span className="confirm-del">
+                  <span className="s-muted">Rebuild now?</span>
+                  <button className="btn-primary" disabled={relaunch.busy} onClick={doRelaunch}>{relaunch.busy ? '…' : 'Relaunch'}</button>
+                  <button className="btn-ghost" onClick={() => setRelaunch({})}>Cancel</button>
+                </span>
+              ) : (
+                <button className="btn-ghost" onClick={() => setRelaunch({ confirm: true })}><RefreshGlyph /> Relaunch &amp; update</button>
+              )}
+            </div>
+            {relaunch.msg && <div className="s-help" style={{ marginTop: 6 }}>{relaunch.msg}</div>}
+
+            <div className="setting-row">
+              <div>
+                <div className="s-label">Update Agent Manager</div>
+                <div className="s-help">
+                  Pulls the latest app version from{' '}
+                  {upd?.sourceUrl
+                    ? <a href={upd.sourceUrl} target="_blank" rel="noreferrer">{upd.source}</a>
+                    : 'the upstream repo'}{' '}
+                  into this Space and rebuilds. Your agents, logins, and files live on the bucket and are untouched.
+                  {upd?.ok && !upd.behind && <> Currently up to date <span className="mono">({(upd.current || '').slice(0, 7)})</span>.</>}
+                  {upd?.ok && upd.behind && <> Update available: <span className="mono">{(upd.current || '').slice(0, 7)} → {(upd.latest || '').slice(0, 7)}</span>.</>}
+                </div>
+              </div>
+              {!upd?.ok || !upd.canUpdate ? (
+                <button className="btn-ghost" disabled title="Needs a write-scoped HF_TOKEN Space secret"><RefreshGlyph /> Update app</button>
+              ) : !upd.behind ? (
+                <button className="btn-ghost" disabled><RefreshGlyph /> Up to date</button>
+              ) : updState.confirm ? (
+                <span className="confirm-del">
+                  <span className="s-muted">Replace app code and rebuild?</span>
+                  <button className="btn-primary" disabled={updState.busy} onClick={doUpdate}>{updState.busy ? '…' : 'Update'}</button>
+                  <button className="btn-ghost" onClick={() => setUpdState({})}>Cancel</button>
+                </span>
+              ) : (
+                <button className="btn-primary" onClick={() => setUpdState({ confirm: true })}><RefreshGlyph /> Update app</button>
+              )}
+            </div>
+            {updState.msg && <div className="s-help" style={{ marginTop: 6 }}>{updState.msg}</div>}
+
+            <h3>Space</h3>
+            {info?.bucketUnverified && (
+              <div className="s-warn">
+                Can’t verify your storage bucket is private — without a write-scoped <span className="mono">HF_TOKEN</span> the
+                app can’t discover which bucket is mounted. A public bucket exposes everything agents saved (including
+                credentials). Double-check the bucket is <b>Private</b>, or add an <span className="mono">HF_TOKEN</span> secret to enable the automatic check.
+              </div>
+            )}
+            <div className="kv">
+              <div><span>Space</span><b>{info?.spaceId || '—'}</b></div>
+              <div><span>Durable storage</span><b className="mono">{info?.dataDir || '—'}</b></div>
+              <div><span>Home</span><b className="mono">{info?.home || '—'}</b></div>
+              <div><span>terminal</span><b>{info?.ghostty ? 'libghostty' : 'unavailable'}</b></div>
+            </div>
+
+          </div>
+        )}
+
+        {page === 'usage' && (
+          <div className="settings-page wide">
+            <h2>Usage</h2>
+            <LazyPanel load={loadUsage} what="the usage page" render={(m) => <m.default />} />
+          </div>
+        )}
+
+        {page === 'apilog' && (
+          <div className="settings-page wide">
+            <h2>API log</h2>
+            <p className="s-help">
+              Every call that changed something, plus the waits that resolved — who asked whom to do
+              what, when, and in their own words. Full non-secret content is retained; new entries use
+              best-effort filtering for recognizable credentials. This remains sensitive private data:
+              deleting the source does not delete its audit copy, and older entries were not rewritten.
+            </p>
+            <LazyPanel load={loadApiLog} what="the API log" render={(m) => <m.default />} />
+          </div>
+        )}
+
+        {page === 'skills' && (
+          <div className="settings-page wide">
+            <h2>Skills</h2>
+            <p className="s-help">Reusable markdown/text skills. Saved skills are published as <span className="mono">SKILL.md</span> to every agent (Claude, Codex, Gemini, opencode, Hermes) and available in all new sessions. View renders markdown; Edit is plain text.</p>
+            <LazyPanel load={loadSkills} what="the skills editor" render={(m) => <m.default />} />
+          </div>
+        )}
+
+        {page === 'cron' && (
+          <div className="settings-page wide cron-page">
+            <h2>Cron</h2>
+            <p className="s-help cron-intro">Send a prompt to an agent on a schedule. Jobs persist across Space restarts; if the named agent does not exist when a job fires, it is created first.</p>
+            <LazyPanel load={loadCron} what="the cron page" render={(m) => <m.default clis={clis} />} />
+          </div>
+        )}
+    </>
+  );
+}

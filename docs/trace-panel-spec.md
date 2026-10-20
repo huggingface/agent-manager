@@ -1,0 +1,517 @@
+# Trace panel — implementation spec
+
+Status: **built** (2026-07-29) · Branch: `worktree-session-sharing` · PR: huggingface/agent-manager#8
+
+A handoff document. Everything here was verified against this codebase and the live Hub on
+2026-07-27/28. Read `docs/session-sharing.md` for the wider design; this file is only the
+panel, and is written to be self-contained.
+
+**§11 records what actually shipped**, including four places where the implementation
+departed from this spec on purpose. Sections 1–10 are the brief as written; where they
+disagree with §11, §11 is the code.
+
+## 1. What to build
+
+A read-only panel inside Agent Manager that renders one agent session as a readable
+conversation — turns, tool calls, thinking blocks, token counts — close in spirit to the
+**Hugging Face agent trace viewer** (Data Studio's session modal).
+
+Two sources, same component:
+
+1. **A local session of your own** — the immediate value, and the only way to exercise all
+   five readers against real data. Ship this first.
+2. **An accepted incoming trace** — a bundle downloaded from a Hub dataset, landing in
+   `DATA_DIR/traces/<envelope-id>/`. The receive half is not built yet.
+
+The panel also hosts **Fork** and **Handoff** buttons (see §8 of the design doc), but those
+are not required for a first version.
+
+## 2. Hard constraints
+
+These are not style preferences; each one has already caused an incident in this repo.
+
+- **No LLM calls, anywhere.** The whole feature is deterministic parsing. The operator has
+  explicitly ruled out inline model calls in Agent Manager.
+- **Nothing heavy on the event loop.** A single session here is **6.15 MB**. This app has
+  wedged on synchronous work before — see `server/src/watchdog.js`, a worker thread that
+  exists solely to report main-thread stalls, with breadcrumbs (`mark`/`tracked`) around the
+  known-heavy paths. Parse off the request path, or in a child process as
+  `server/src/share.js` does.
+- **Virtualize the message list from the start.** The Hub's own session modal fails to
+  render our 2.13 MB single-row dataset. Do not assume a session fits in the DOM.
+- **Do not extend the Overview's memoized parse.** `traces.js` parses *every* session on a
+  poll and memoizes by mtime; making those parsers also retain every turn would balloon
+  memory across all sessions. Add a **separate on-demand function for one session** — put it
+  in `traces.js` so the line-shape knowledge stays in one file and drift is visible in
+  review, but keep it out of `buildTraces()`/`traceDigests()`.
+- **The filesystem is a FUSE bucket and it lies.** Stale directory listings (a file written
+  seconds earlier reading as absent), exec bits stripped from `node_modules/.bin` and git
+  hooks, and paths occasionally materialised as *directories* (`.git/hooks/pre-commit`,
+  `~/.gemini/projects.json`, and historically `opencode.json` — see the guard at
+  `runner.js:415`). Retry before concluding a file is missing.
+
+## 3. Where it plugs in — already done
+
+| Piece | State |
+|---|---|
+| `trace` in the CLI catalog | ✅ `server/src/config.js:69` — `bin: null, run: null`, colour `#7c8cf8` |
+| Treated as a passive panel, never launched | ✅ `server/src/runner.js:135` returns `'idle'` for `files` and `trace` |
+| Pane dispatch | ⬜ `web/src/App.tsx:423` — currently `s.cli === 'files' ? <FilesPane/> : <TerminalPane/>`; add a branch |
+| Component | ⬜ new `web/src/components/TracePane.tsx` |
+| Reader endpoint | ⬜ new, see §5 |
+
+**Model your component on `web/src/components/FilesPane.tsx`** (181 lines) — the existing
+passive, non-process pane. It shows the house style: plain `fetch` through `web/src/api.ts`,
+no state library, CSS appended to `web/src/styles.css` with flat `.kebab-case` class names.
+There is no modal/dialog framework; `.welcome-backdrop` + `.welcome-card` in `styles.css` is
+the established overlay pattern (`ShareDialog.tsx` uses it).
+
+## 4. Why the digest is NOT enough
+
+The operator initially expected the existing digest would do. It will not, and here is the
+precise reason so nobody re-litigates it:
+
+`traces.js` `emptyDigest()` (line 48) returns `lastPromptText`, `lastAssistantText`,
+`sinceTurns`, `sinceToolCalls`, `sinceTools` (tool **names** and counts only), `sinceFiles`,
+`sinceTokens`, `running`, and `turnsLog`. And `turnsLog`:
+
+- is **reset at the start of every request** — `traces.js:60`, commented "arrows only walk
+  the current request's turns";
+- is **capped** at `MAX_TURNS_LOG` (24, `traces.js:56`);
+- holds only `{ answer, answerMd, ts }` — assistant text, with no paired user prompt.
+
+So the digest is a "what did this agent just do" summary that powers the Overview card. It
+carries no conversation history, no tool arguments, no tool results and no thinking blocks —
+exactly what a viewer needs. A full parse is required.
+
+## 5. The reader
+
+Suggested shape — one function, one session, on demand:
+
+```js
+// server/src/traces.js  (NOT part of buildTraces/traceDigests)
+export async function readTrace(session, { offset = 0, limit = 200 } = {}) → {
+  harness, sessionId, model, cwd, firstTs, lastTs, total,
+  turns: [ Turn, … ]   // ordered oldest→newest, sliced by offset/limit
+}
+```
+
+```ts
+type Turn = {
+  role: 'user' | 'assistant' | 'system' | 'tool';
+  text: string;             // rendered as markdown for assistant/user
+  thinking?: string;        // collapsed by default
+  ts?: number;              // epoch ms
+  model?: string;
+  usage?: { in: number; out: number; cacheRead: number };
+  toolCalls?: { id: string; name: string; args: unknown }[];
+  toolResult?: { id: string; content: string; isError?: boolean };
+};
+```
+
+Paginate at the API rather than sending 6 MB. Endpoint suggestion:
+`GET /api/trace/:sessionId?offset=&limit=` for a live session, and
+`GET /api/trace/bundle/:envelopeId?offset=&limit=` for an accepted one.
+
+**Locating the file is already solved** — reuse `findTrace(session, allSessions)` exported
+from `server/src/share.js`. It returns `{ src, sessionId? }`, handles all five harnesses,
+prefers the per-session pin where one exists (`sessionUuid`, `codexSessionId`,
+`opencodeSessionId`), falls back to attribution by recorded working directory, and refuses to
+guess when two sessions of the same harness share a folder. It also skips codex's
+guardian/subagent rollouts. Do not reimplement this.
+
+## 6. The five formats — verified line shapes
+
+`scripts/share-session.mjs` already contains **working readers for all five**, written and
+tested against real and faithful-synthetic data. Read it before writing anything: the
+knowledge below is what it encodes, and reusing it avoids a second source of truth.
+
+### Claude Code — `$CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<uuid>.jsonl`
+One JSON object per line; the **filename is the session id**.
+- `{type:'user', timestamp, cwd, gitBranch, message:{role:'user', content: string | [{type:'text',text}]}}`
+- `{type:'assistant', timestamp, uuid, message:{id, model, role:'assistant', content:[{type:'text',text} | {type:'thinking',thinking} | {type:'tool_use',id,name,input}], usage:{input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens}}}`
+- Tool **results** come back as `type:'user'` lines carrying `toolUseResult` and a
+  `content:[{type:'tool_result',tool_use_id,content}]`.
+- **Dedupe assistant lines by `message.id`** — streaming writes the same message id more
+  than once, and counting naively double-counts turns and tokens.
+- Skip `isMeta` and `sourceToolUseID` user lines; they are not prompts.
+- **`file-history-snapshot` / `file-history-delta` lines embed whole file contents.** The
+  share pipeline drops them outright. A viewer should ignore them too.
+
+### Codex — `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`
+Everything is wrapped in `payload`.
+- `{type:'session_meta', payload:{cwd, timestamp, thread_source?, source?}}` — if
+  `thread_source === 'subagent'` or `source.subagent`, this is an internal guardian rollout,
+  **not the user's conversation**. Refuse it.
+- `{type:'response_item', payload:{type:'message', role, content:[{text}]}}` — codex wraps
+  environment/instruction blobs as `role:'user'` items whose text starts with `<`; skip those
+  or your prompt count is wrong.
+- `{type:'response_item', payload:{type:'function_call'|'custom_tool_call'|'local_shell_call'|'web_search_call', name, arguments}}` —
+  `apply_patch` carries touched paths in its patch header:
+  `/\*\*\* (?:Update|Add|Delete) File: ([^\n"]+)/`.
+- `{type:'event_msg', payload:{type:'token_count', info:{total_token_usage:{input_tokens, cached_input_tokens, output_tokens, total_tokens}}}}` —
+  **cumulative per run**, so keep the last one, and subtract `cached_input_tokens` from
+  `input_tokens` to match Claude's "fresh input" convention.
+- `{type:'event_msg', payload:{type:'task_complete', last_agent_message}}` — the
+  authoritative final answer for a task.
+
+### OpenClaw — `$OPENCLAW_HOME/.openclaw/agents/<agent>/sessions/<uuid>.jsonl`
+Already close to the Hub's STS shape:
+`{type:'message', timestamp, message:{role, content: string | [{type,text|name|input}], usage:{input,output,cacheRead}}}`.
+Content blocks whose `type` matches `/tool/i` are tool calls.
+
+### opencode — **SQLite**, `${XDG_DATA_HOME:-~/.local/share}/opencode/opencode.db`
+A session is a *query*, not a file.
+- `session(id, directory, title, time_created, time_updated, tokens_input, tokens_output, tokens_cache_read)`
+- `message(id, session_id, time_created, data)` — `data` is JSON with `role`
+- `part(id, message_id, session_id, time_created, data)` — `data` is JSON with
+  `type: 'text' | 'tool' | 'step-finish'`, plus `text`, `tool`, `state.input`, `state.output`
+- **Never copy or ship this database**: `account.access_token`, `account.refresh_token` and a
+  `credential` table live in it. Select one conversation.
+- Live data is on **local disk via a symlink**. Durable state is a verified
+  SQLite online-backup checkpoint; copying a live DB/WAL/SHM set with `rsync`
+  is not transactionally safe. This layout also prevents a synchronous read of
+  FUSE-backed SQLite from freezing the whole server. Open **read-only**, and
+  never on a hot path.
+
+### Hermes — **SQLite**, `~/.hermes/state.db`
+- `sessions(id, cwd, title, started_at, input_tokens, output_tokens, cache_read_tokens)`
+- `messages(id, session_id, role, content, timestamp, tool_name, token_count, active)` —
+  flat `content`; a row with `tool_name` set is a tool interaction. `timestamp` is **seconds**
+  (multiply by 1000). Same local-live/online-checkpoint note as opencode.
+- Hermes has **no per-session pin** in Agent Manager, so it is attributed by `cwd`.
+- Alternative worth knowing: `hermes sessions export --format trace` emits Claude-Code JSONL
+  specifically for the HF viewer, and `--redact` exists. We chose direct SQLite reads for one
+  code path with opencode; either is defensible.
+
+## 7. What the Hub's viewer does, for reference
+
+Verified live. A dataset containing raw session `.jsonl` files gets auto-tagged
+`format:agent-traces`, and the Hub aggregates **one file into one row**, deriving columns:
+`harness`, `session_id`, `prompt`, `messages`, `tools`, `metadata`, `sent_at`,
+`num_user_messages`, `num_tool_calls`, `trace`, `file_path`.
+
+Clicking the row opens a **Session modal** showing: user/assistant turns with role badges and
+timestamps, the model name as a chip, per-turn token counts (`491↓ 520↑ (1,408 cached)`), a
+collapsible **Thinking** block with a one-line preview, collapsed `N tool call (bash)`
+summaries, rendered markdown including tables, and a Collapsed/Expanded toggle.
+
+It is embeddable and deep-linkable — `…/embed/viewer/default/train?row=0` renders the modal
+inside an iframe. **We deliberately do not use it**: it cannot render a *gated* repo (the
+private path), and a brand-new dataset took **~50 minutes** to become viewable. Both are
+recorded in the design doc. It remains the visual reference, and it is what a public share
+gets for free in a browser.
+
+For reproducible examples, create synthetic public and gated datasets as described
+in [the sharing checks](session-sharing.md#14-reproducing-the-sharing-checks).
+
+## 8. Suggested v1 scope
+
+Ordered by value. The operator asked for full fidelity with everything collapsed by default.
+
+1. Ordered turns with role, timestamp, markdown-rendered text
+2. Thinking blocks — collapsed, one-line preview
+3. Tool calls — collapsed, showing name and a short argument summary; expand for full args
+4. Tool results — collapsed, truncated with an expand
+5. Per-turn token counts and the model chip
+6. Search / filter within the session
+7. Header: harness, model, window, totals — reuse the stats the share manifest already computes
+
+Skip: statistics panels, prev/next row navigation, editing anything. The panel is read-only.
+
+## 9. Traps that cost me time
+
+- **`const` does not hoist.** Twice I put helpers or accumulators after the loop that used
+  them and got a temporal-dead-zone crash on the first line parsed. Declare state above.
+- **Verify your success checks.** I once printed "ok" from a grep that matched a comment, and
+  another time from `head`'s exit status rather than the compiler's. Both hid real failures.
+- `tsc`/`vite` cannot execute from `node_modules/.bin` on the FUSE mount (exec bit stripped).
+  Run them as `node node_modules/typescript/bin/tsc …`, or install into `/tmp`.
+- `web/` and `server/` have **no `node_modules` in the repo** — deps live at `/app/*/node_modules`
+  in the container. Symlink them for local runs.
+- Test the server on a spare port with `PORT=… DATA_DIR=/tmp/… node src/index.js`, and
+  `PUBLIC_DIR=<worktree>/web/dist` to serve a locally built UI. **Never `pkill -f` a pattern
+  that could match `/app/server/src/index.js`** — that is the live Space at PID 1.
+- The app has **no authentication at all**; it only serves a usable backend while the Space is
+  private (`visibility.js`, `index.js:142`). A fresh `DATA_DIR` starts with the Welcome
+  overlay, which intercepts clicks — `POST /api/welcome/seen` to dismiss it in tests.
+
+## 10. Open questions for whoever builds this
+
+1. **Where does "open the trace" live?** A button on the session row next to Share, an item
+   in the pane header, or an entry in the Overview card? A `trace` session needs creating and
+   pointing at a source, and the session record has no field for that yet — suggest
+   `traceSource: { kind: 'session' | 'bundle', ref: string }`.
+2. **Does one panel follow a live session as it grows**, or is it a frozen snapshot? Following
+   means re-polling and appending; frozen is simpler and matches "trace".
+3. **How much tool output to retain in memory** once expanded — a single `Bash` result here
+   can be hundreds of KB.
+
+## 11. As built (2026-07-29)
+
+Landed. Files: `server/src/traces.js` (reader appended at the bottom),
+`server/src/index.js` (two routes), `web/src/components/TracePane.tsx` (new),
+`web/src/api.ts`, `web/src/types.ts`, `web/src/styles.css`, plus the entry point in
+`App.tsx` / `Sidebar.tsx`.
+
+### Four deliberate departures from §5–§8
+
+1. **Blocks, not a `Turn` with a single `toolResult`.** §5's shape can't represent the
+   transcripts. Claude emits tool *results* on a separate `type:'user'` line, and parallel
+   calls finish out of order, so one `toolResult` slot per turn silently drops all but one.
+   `readTrace()` returns `{ role, kind?, ts?, model?, usage?, blocks: [...] }` with a
+   `makeStitcher()` that files each result next to its own call by `tool_use_id` — which is
+   also what makes the collapsed `3 tool calls (Bash, Read)` row possible at all.
+2. **`kind: 'final'`** on the last assistant turn before each prompt. **Corrected
+   2026-07-29:** the original claim here — that codex's `task_complete` is an authoritative
+   answer separate from the `response_item` text, and that non-final text should render
+   dimmed — was wrong on both counts. `task_complete.last_agent_message` is byte-identical
+   to the preceding assistant message in every task of the rollout checked, so treating it
+   as separate rendered all 8 answers twice; and the Hub *emphasises* the final turn with an
+   accent rule rather than dimming the others. `markFinalTurns()` now derives the final turn
+   for every harness in one reverse pass, and `task_complete` only marks it.
+3. **Codex gets a stitcher too.** Codex writes a call and its output as two separate
+   top-level items, so before this every call and every result was its own row and nothing
+   ever folded. Caught in testing: `0 paired, 1 standalone` → `1 paired, 0 standalone`.
+4. **Environment blobs become `role:'system'`, not dropped.** Claude's `<system-reminder>`,
+   codex's `<`-prefixed user items, and codex's whole `role:'developer'` stream are context,
+   not prompts. Dimmed and collapsed behind their own tag name rather than hidden, because
+   removing them makes the conversation read wrong — but one of them here is 27 KB, so
+   expanded they bury the session before it starts. The Hub instead labels these "User" and
+   expands them, or omits them entirely; this is a deliberate divergence.
+
+### The three open questions in §10, as answered
+
+1. **Entry point:** a Trace button on the session row, next to Share. `traceSource` was kept
+   verbatim, and is only needed for a pane pointed at something *else* — a plain agent
+   session reads its own transcript, so `GET /api/trace/<agent-session-id>` works with no new
+   record. Panes are reused per source rather than piling up.
+2. **Frozen per read**, cheap to follow: the memo key includes `mtimeMs`+`size`, so
+   re-requesting after the file grows reparses and `total` climbs. No incremental machinery.
+3. **Capped at parse time**, 20 000 chars per block, with `more` reported so the UI says
+   "+412 KB not retained" instead of pretending.
+
+### `trace` is a passive pane, like `files`
+
+`PASSIVE_CLIS = ['files', 'trace']` in `server/src/config.js`, mirrored as `isPassive()` in
+`web/src/types.ts`. It gates: the agent list in `/api/meta`, `buildTraces()`, the input route
+(a trace pane refuses keystrokes), the Overview cards, archiving, the quickstart picker, the
+group cart, and a group's agent count. Adding a third passive pane type now means one array.
+
+### Verified against real data
+
+- **9.46 MB live Claude transcript** (validation sample): 634 ms full parse, **worst event-loop
+  block 2 ms**, 82 MB RSS; second call 3 ms off the memo. Counts reconciled against an
+  independent pass over the raw file — 259 text blocks = 228 assistant + 28 prompts + 3
+  reminders, exactly; 466/467 tool results filed next to their call.
+- **Real opencode db** (3.4 MB): 79 turns, 57 thinking blocks, 98/101 results paired. The two
+  guesses flagged in the drop were both confirmed against the live schema (`state.input` /
+  `state.output`, `reasoning.text`) — and `session.model` is a JSON blob, not a string.
+- **A real STS bundle** produced by `scripts/share-session.mjs` and read back through
+  `readTraceBundle()` — which is how an accepted trace will arrive.
+- **codex / openclaw / hermes fixtures** built from the shapes in `parseCodex` and
+  `share-session.mjs`'s converters. Hermes's seconds-not-milliseconds timestamps render as
+  correct dates; codex guardian rollouts are refused with `trace-not-user-conversation`.
+- **Headless Chromium over CDP** (no playwright in this image) against the built bundle, for
+  each harness: pane mounts, header reads
+  `Claude Code | claude-opus-5 | 555 turns | 1,840,279↓ 398,440↑ (138,147,880 cached)`,
+  **14 rows in the DOM for 555 turns**, folds open, scrolling to 70 % pages in with no
+  placeholders left, search reports what it searched, zero JS exceptions.
+- Refusals render as sentences, not failures: an unsupported CLI, a missing transcript, a
+  guardian rollout, a missing bundle. Bad bundle refs are rejected at write *and* read.
+
+### Two bugs this testing caught that a curl check would not
+
+- A bundle manifest stores `harness` as an **object** (`{id,name,version}`) while an STS
+  session line stores a **string**. Both reach `harnessLabel`, which the header renders
+  directly — React throws on an object child. Hence `label()`.
+- Claude sessions had **no token total** in the header: usage is per-message there, so the
+  session sum has to be accumulated (`usageSum`), while codex and the db-backed harnesses
+  keep their own authoritative total.
+
+### Not done
+
+- Fork / Handoff are header slots only (design doc §8).
+- Search is client-side over fetched turns and says so; server-side wants a `?q=` returning
+  matching offsets — a small addition to `pageOf()`.
+- No `compaction` block is ever produced; Claude's `type:'summary'` / `system` lines and
+  `attachment` lines are ignored. The block type exists for when that's wired up.
+- The incoming half (accept/decline on an inbox PR) is **out of scope** as of 2026-07-29 —
+  see the scope note at the top of `docs/session-sharing.md`. A `bundle` source is populated
+  by pasting a dataset URL into the sidebar's **Trace** button, which is the intended flow.
+
+## 12. Comparison against the Hub's own viewer (2026-07-29)
+
+Validated against a private test share by rendering the Hub's
+Trace tab in headless Chromium and scraping it in document order, then taking an
+independent census of the 393-line file so the arbiter was the data rather than either
+renderer. Reproduce with `Network.setExtraHTTPHeaders` carrying a bearer token — the Hub
+serves the blob page and its viewer with one.
+
+Findings are in §11's list and in commit `08714a5`. What is worth keeping here:
+
+**Both agree on totals, not on attribution.** The Hub's first assistant row claims
+`16 tool calls (exec_command, apply_patch, write_stdin)` and then exactly `1 tool call`
+for each of the next five turns. The file has 2, 2, 1, 3, 6, 7 between successive
+assistant texts. Both sum to 21, so nothing is lost — but the per-turn attribution
+differs, and the file backs ours. Its first row's token figure (`354↑`, `31,488 cached`)
+is likewise the *last* model call of that task shown on the task's *first* row.
+
+**The Hub has no System or Developer row type.** Measured: `System: 0, Developer: 0`
+across the rendered window. It shows `<recommended_plugins>` as a User turn, expanded as
+markdown, and omits codex's seven `role:'developer'` messages entirely.
+
+**Two streams, and the same content in both.** This is the single most important thing
+about the codex format and it is documented at `normalizeCodex` in `traces.js`:
+`response_item` is what went to and from the model, `event_msg` is what the TUI showed.
+`agent_message` duplicates the assistant `response_item`s exactly; `agent_reasoning`
+arrives *first* and repeats what a later `reasoning` item's summary entries contain, so
+dedupe per ENTRY, not per joined string; and web searches exist ONLY as `web_search_end`.
+
+**Encrypted reasoning is normal.** 49 of 56 reasoning items carried only
+`encrypted_content`. Say so in the UI; do not leave the impression the model didn't think.
+
+## 13. Tail-first reading (2026-08-09)
+
+§5 shipped one way of asking for turns: `offset`/`limit` over a whole-file parse. It is
+the right shape for the surfaces that want a fixed slice (the Overview card, RENDER mode)
+and the wrong one for the reader, because it can only answer *any* question after
+normalizing the entire transcript — 19 MB and 1,395 turns for the longest session on this
+Space — and the pane then opened on the OLDEST turn, which is never the one you came for.
+
+The reader now opens at the end and pages backwards.
+
+**Wire.** Same endpoints, three modes (`server/src/index.js` `traceOpts`):
+
+| Request | Answers with |
+|---|---|
+| `?tail=1&bytes=` | the last window of the transcript |
+| `?before=<cursor>` | the window in front of one you hold |
+| `?after=<cursor>` | whatever has been appended since |
+| `?summary=1` | whole-trace facts (`total`, `userTurns`, `usage`, `firstTs`), no turns |
+| `?offset=&limit=` | unchanged — index paging over the full parse |
+
+A window is a byte range of the .jsonl run through the same normalizers
+(`rangeJsonLines`), and the cursors it hands back are line-aligned, so consecutive
+windows abut exactly: no line is read twice and none is skipped. A window that starts
+mid-line drops that fragment (the window before it owns the line); a window that ends at
+a half-written line stops before it, so a live tail picks it up once it is whole. The
+SQLite harnesses have no byte offsets to seek — they answer the same shape with message
+indices as cursors (`window.mode`), and the reader treats a cursor as opaque either way.
+
+**What a window cannot know**, and therefore does not claim: `total`, `userTurns`,
+`firstTs` and the session's `usage` are whole-trace facts. They arrive from `?summary=1`,
+which the reader asks for 400 ms after its first paint. Until it lands the header says
+`N turns loaded` rather than inventing a total.
+
+**Cost.** Measured against `upstream/main` built and served from the same files, on
+two real traces in the validation environment: a 19 MB / ~1,420-turn **Claude** transcript and a 4.8 MB /
+~1,200-turn **codex** rollout. Server time is `curl` against a local server; "first turn
+on screen" is Playwright, median of 5–9 opens of the pane.
+
+| | Claude 19 MB | | codex 4.8 MB | |
+|---|---|---|---|---|
+| | before | after | before | after |
+| bytes, first request | 676 KB | **82 KB** | 513 KB | **151 KB** |
+| server time, transcript changed since the last request | 160 ms | **6 ms** | 46 ms | **6 ms** |
+| server time, transcript unchanged (parse memo hit) | 6 ms | 6 ms | 5 ms | 6 ms |
+| the `?summary=1` read, 400 ms after the paint | — | 176 ms | — | 46 ms |
+| bytes `pread` to page the whole trace back | — | 20.8 MB / 35 windows | — | 5.7 MB / 13 windows |
+| first turn on screen, localhost | 181 ms | **167 ms** | 172 ms | 189 ms |
+| first turn on screen, 10 Mbps / 40 ms link | 866 ms | **267 ms** | 868 ms | **355 ms** |
+| opens on | oldest turn | **newest turn** | oldest turn | **newest turn** |
+
+Read that table with the summary row in view: the whole-file parse is **deferred, not
+removed**. The reader still asks for `?summary=1` once per pane open, and on a transcript
+being appended to (the memo is keyed on mtime) that is the same 160–176 ms parse as before,
+just after the first paint instead of in front of it. What the window buys is the first
+view and every subsequent page; what it does not buy is a server that never reads the whole
+file. The honest summary of the server work is: one bounded read on the critical path, one
+whole-file read off it, and none at all for the pages after the first.
+
+Read honestly: **on loopback this is a wash** — both are ~170–190 ms, dominated by render
+and app work, and the codex case is if anything marginally slower. The win is the bytes,
+and it shows the moment there is a real link between the browser and the Space (3.2× and
+2.4×), plus the server work that vanishes: the "changed since the last request" row is the
+one a *working* agent hits, because the parse memo is keyed on mtime and every append
+invalidates it. The memo-hit row is what an idle trace costs, and there the two are the
+same — main was never slow at *serving* a memoized parse, only at building one and at
+putting 676 KB on the wire to show you the wrong end of the conversation.
+
+The 384 KB default window was chosen by sweeping 128 KB – 1 MB in a browser: paint time is
+flat (155–171 ms median, since the list is virtualized either way) and only the payload
+moves, so the smallest window that still opens on a full-looking conversation wins. The
+turn floor that makes a window grow (`WINDOW_MIN_TURNS`) is deliberately low for the same
+reason: at 30 it grew the codex rollout's window to 1.5 MB and its response to 591 KB,
+which is the whole-file cost this exists to avoid.
+
+**Scroll anchoring is measured, not modelled.** The first version restored the reading
+position from the prefix-sum height model, which is only ever approximately right for rows
+it has not measured yet: on a codex rollout — whose collapsed tool groups are several
+times `ROW_EST` — a prepend moved the text under the reader by ~280 px on the Space and
+~30 px locally. The reader now records the anchor row's real `getBoundingClientRect()`
+position and re-applies *that* after the layout, falling back to the model only for a row
+that has scrolled out of the rendered window. Drift on both traces is 0 px.
+
+**"Am I at the top?" is only answerable after measurement.** The reader fetches the window
+above when `scrollTop` enters a 400 px band, and `scrollTop` means nothing until the rows
+have been measured: before the first measuring pass every row is `ROW_EST` (44 px), so a
+window of 19 dense codex turns models as 800 px when it is really 3,600 — inside the band,
+and one older window was fetched on every open. Paging is therefore gated on a flag that
+waits for both the first measurement and the first placement of the scroller. Opening a
+pane now costs exactly two requests, the tail and the summary, on both traces.
+
+**Things a review caught, all of them about a window claiming more than it knows.** The
+codex guardian guard read a fixed 16 KB and parsed the first line; a real `session_meta`
+carries `base_instructions` and runs 18–44 KB, so the parse always threw and the `catch`
+turned "I could not tell" into "not a subagent" — the guard never fired on a real rollout.
+It now grows the read until the line is whole, and a head it genuinely cannot read falls
+back to the whole-file reader rather than guessing. A window's `note` (codex's count of
+encrypted reasoning steps) is a per-parse number and was being rendered as a statement
+about the session, changing as you scrolled — it now travels with `usage`/`firstTs` as a
+summary-only fact. A single line larger than `WINDOW_MAX_BYTES` (a file-history blob)
+cannot be paged past; the reader used to conclude it had reached the beginning of the
+conversation, and now says what actually happened. A last line that never becomes valid
+JSON no longer costs the final answer its accent: having READ to EOF is what makes a
+window the end, not having consumed every byte. And in the pane, every load now carries a
+generation stamp, so a window in flight when you switch files cannot be spliced into the
+next transcript with the previous one's byte cursors.
+
+**codex windows are cut at task boundaries, not at arbitrary bytes.** A byte window is
+sound for a format whose lines stand alone. Codex's do not: `event_msg/task_complete`
+points BACK at the assistant message it marks, and a dangling pointer does not degrade —
+`normalizeCodex` cannot find the answer, so it pushes a verbatim second copy of it.
+Measured on a real 4.8 MB rollout at 128 KB windows: 955 stitched turns against the full
+parse's 953, two answers shown twice. A rollout describes its own unit
+(`task_started` … `task_complete`) and every backward reference lives inside one task, so a
+codex window now begins on a `task_started` line. Measured over every rollout on this
+Space: 339 `task_started`, 333 `task_complete`, none outside a started task, largest task
+768 KB — inside the 8 MB growth ceiling with room to spare. A task bigger than the ceiling
+cannot be aligned; there the pointer is treated as a marker only, since the answer it names
+is rendered (and marked) in the window that holds it. Verified: a synthetic 10 MB
+single-task rollout yields exactly one copy of its answer.
+
+Be precise about which half does what, because the first version of this section claimed
+more than the code delivers. Alignment is an *optimization*: when a window happens to hold a
+`task_started` it begins there and the task's grouping is not split at the seam. Most windows
+hold none (at 64 KB, with tasks up to 768 KB, almost none do) and are cut mid-task anyway —
+what keeps those correct is the second rule, that a `task_complete` whose answer is not in
+this window is treated as a marker and never emitted. **That fallback is load-bearing.**
+
+With both, stitching every window of a codex rollout reproduces the full parse **exactly** —
+same turns, same blocks, same `final` accents — at 64 KB, 128 KB and 384 KB windows, on all
+eight rollouts in the validation environment (24 runs, independently reproduced in review).
+
+**The one behavioural difference, and it is Claude's:** a harness message whose lines
+straddle a window boundary is split into two turns instead of merged into one. Stitching every window of
+that transcript gives 1,433 turns against the full parse's 1,420, with character-for-
+character identical content — thirteen turns show as two rows each. Checked as a multiset
+of blocks against the full parse across the six largest Claude transcripts and the six
+largest codex rollouts here, at three window sizes: **0 blocks missing and 0 duplicated in
+all 36 runs**. The `final` accent is withheld (never wrongly added) from a window that
+cannot see whether an answer is the last one before the next prompt: at the shipped 384 KB
+window the accents match the full parse exactly on both formats; at an unusually small
+64 KB window a 19 MB Claude transcript withholds 3 of 56. Covered by
+`server/test/trace-window.test.mjs`, which also pins the edges: paging back terminates at
+byte 0, an appended turn arrives exactly once, a torn last line is not a turn until it is
+whole, and a transcript with no trailing newline still ends in one.

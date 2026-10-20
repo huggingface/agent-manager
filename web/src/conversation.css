@@ -1,0 +1,726 @@
+/* The conversation grammar (docs/conversation-view.md §4.3), shared by the
+   Overview card and the pane's RENDER mode. App tokens only — --panel, --border,
+   --accent, --muted, --font-mono. Nothing terminal-flavoured: no --term-bg, no
+   uppercase role pills, no per-row chips.
+
+   ONE base size, and every type size below in em of it. --cx-base is 13px
+   everywhere by default — the size the card has always been — and reader mode
+   hands it the bottom bar's zoom instead (set on .pane-reader, TerminalPane), so
+   the zoom control moves a rendered conversation the way it moves a terminal.
+   Type scales; the spacing between it does not, same as everywhere else in the
+   app. Anything that lines a column up with a glyph (the step rail, the field
+   labels) is in em too, or it would stop lining up when zoomed. */
+
+/* ---------- one exchange ---------- */
+/* padding-left is the gutter the prompt's ❯ hangs into. Everything else —
+   answer, work, fold control — starts at the content edge, so the arrow is the
+   only mark outside the column and turns are findable while scrolling. */
+.cx { display: flex; flex-direction: column; gap: 7px; min-width: 0; padding: 2px 0 2px 1.23em;
+  font-size: var(--cx-base, 13px); }
+.cx.dim { opacity: 0.72; }
+.cx.dim .cx-answer { -webkit-line-clamp: 6; }
+
+/* one meta row, under the prompt: the work on the left, which turn on the right.
+   Nothing sits above the prompt any more. */
+.cx-meta {
+  display: flex; align-items: baseline; gap: 8px; min-width: 0;
+  font-size: 0.85em; color: var(--muted);
+  /* the cell the fold's ▸ hangs in, so the summary starts on the text column —
+     one number, read by .cx-fold's negative margin and by the glyph's width */
+  --cx-mark: calc(1em + 5px);
+}
+/* the same spacer serves both rows that carry the turn's facts: the meta row,
+   and the working line when the turn has no meta row of its own yet */
+.cx-meta .spacer, .cx-running .spacer { flex: 1; min-width: 4px; }
+/* .cx-running has no `gap` on purpose — the spinner is a ::before flex item and
+   a gap would push `working` off the text column — so the facts space themselves */
+.cx-running .cx-model, .cx-running .cx-n, .cx-running .cx-time { flex: none; margin-left: 8px; }
+.cx-n, .cx-time, .cx-model { flex: none; font-variant-numeric: tabular-nums; }
+.cx-n { color: color-mix(in srgb, var(--accent) 65%, var(--muted)); }
+.cx-model { opacity: 0.8; }
+
+/* the prompt: a lightly tinted band between hairlines, with the chevron hanging
+   in the gutter — what your eye lands on when scrolling a long conversation.
+   The gutter is em: it holds the ❯, so a zoomed conversation widens it instead
+   of running the glyph into the first word. */
+.cx-prompt {
+  position: relative; margin-left: -1.23em; padding: 6px 10px 7px 1.23em;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  font-size: 1em; font-weight: 550; color: var(--text);
+  overflow-wrap: break-word;
+}
+/* The prompt renders as markdown, and the band is a strip in a rhythm — not a
+   document. So:
+   - the shared .markdown card's border, background, 14px, 1.6 and scroller are
+     all reset. It is a card elsewhere; here it is the band's own text, at the
+     band's own size, in the band's weight.
+   - the first and last block give up their margins, so a one-line prompt is
+     exactly as tall as it was as raw text. Everything about this band's height
+     is read as rhythm, and a <p>'s 12px would have added an eighth of a line
+     top and bottom to every turn in the reader.
+   - inline-block, so the `queued` pill still trails the last line instead of
+     dropping below the block. It also means the band shrink-wraps its text,
+     which is why the pre/table rules below claim the width back.
+   - `white-space: normal`: the band no longer sets pre-wrap. It used to hold
+     raw text and the newlines were the text's own; they are <br>s now (marked
+     with `breaks`), and pre-wrap over rendered HTML would turn the newline
+     marked leaves between block tags into blank lines inside the band. */
+.markdown.cx-pmd {
+  display: inline-block; max-width: 100%; vertical-align: baseline;
+  flex: none; overflow: visible; border: none; background: none; padding: 0;
+  font-size: 1em; line-height: inherit; white-space: normal;
+}
+.cx-pmd > :first-child { margin-top: 0; }
+.cx-pmd > :last-child { margin-bottom: 0; }
+/* One block's worth of air between blocks — the same 6px a step's prose uses,
+   which is what a band-sized register asks for; 12px reads as a document. */
+.cx-pmd p, .cx-pmd ul, .cx-pmd ol, .cx-pmd blockquote, .cx-pmd pre, .cx-pmd table { margin: 0 0 6px; }
+.cx-pmd ul, .cx-pmd ol { padding-left: 1.5em; }
+/* A heading in a prompt is someone structuring a long ask, not titling a page:
+   the shared sizes are 22/18/15px absolute, which inside a band reads as a
+   different voice entirely and does not scale with the conversation. */
+.cx-pmd h1, .cx-pmd h2, .cx-pmd h3, .cx-pmd h4 { margin: 7px 0 3px; line-height: 1.3; font-size: 1.05em; }
+/* Mono at the band's 550 renders heavier than the same fence in an answer, and
+   a prompt is not more emphatic than the reply. The block keeps the band's tint
+   rather than taking --term-bg: a white slab inside a tinted strip reads as a
+   card dropped into the band, and this is the band's own content. */
+.cx-pmd code { font-weight: 450; }
+/* No width here: a percentage against a shrink-wrapping parent is circular, and
+   it does not need one — shrink-to-fit asks the content how wide it wants to be,
+   so a wide fence fills the band up to max-width while a short one stays a small
+   slab instead of a full-bleed strip.
+   A fence in a PROMPT wraps, where a fence in an answer scrolls. The two are
+   deliberately different: this band held the operator's own text as pre-wrap
+   until now, so every character of a pasted error was on screen, and trading
+   that for a horizontal swipe inside a slab is the same mistake as putting
+   something behind a hover — worst exactly where the band is widest relative to
+   the screen. An answer's fence is code an agent wrote, where the line structure
+   is the content and reflowing it lies about it; a prompt's is a paste. */
+.cx-pmd pre {
+  font-size: 0.88em;
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  border-color: color-mix(in srgb, var(--border-strong) 60%, transparent);
+  white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible;
+}
+/* the queue marker: a quiet aside on the band, not a second voice */
+.cx-queued {
+  margin-left: 7px; padding: 0 4px; border: 1px solid var(--border); border-radius: var(--r-sm);
+  font-size: 0.78em; font-weight: 500; color: var(--muted); vertical-align: 1px; white-space: nowrap;
+}
+.cx-prompt::before {
+  content: '❯'; position: absolute; left: 0.23em; top: 6px;
+  font-family: var(--font-mono); color: var(--accent); font-weight: 700;
+}
+
+/* the fold control names what it hides — never a bare caret */
+.cx-fold {
+  display: inline-flex; align-items: baseline; gap: 5px; min-width: 0;
+  background: none; border: none; padding: 0; margin: 0;
+  /* the ▸ hangs in the gutter (see below), so the summary starts on the column */
+  margin-left: calc(-1 * var(--cx-mark));
+  font: inherit; color: var(--muted); cursor: pointer; text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* The triangle hangs in the gutter, so the SUMMARY starts on the text column —
+   the same column as the prompt's words, the answer's words and the step rows'
+   text. §3.2's rule is that the prompt's ❯ is the only thing outside that
+   column, and a mark that pushes its own row's text sideways breaks it: a turn
+   with no tool calls has no triangle, so its summary used to start 19px right of
+   everything else (the operator: "they are a bit to the right because of the
+   whitespace where the uncollapse arrow would be"). Reserving the gutter for a
+   control that cannot exist in that state was the bug; now nothing reserves it,
+   because the mark is outside the column in both states. */
+.cx-fold .cs-tri { width: 1em; }
+.cx-fold.flat { cursor: default; margin-left: 0; }
+.cx-fold:hover { color: var(--text); }
+.cx-fold.on { color: var(--text); }
+/* the rail's triangle, borrowed into the smaller meta row: it steps down from
+   .cs-head's type there, so name the ratio that keeps it the same glyph here */
+.cx-fold .cs-tri { color: var(--muted); font-size: 0.9em; }
+.cx-fold.on .cs-tri { color: var(--accent); }
+
+/* ---------- the work: a rail of one-line steps ---------- */
+/* ---------- sub-agents ---------- */
+/* A sub-agent is a step row with a life of its own, so it borrows the rail's
+   own anatomy — mark, label, detail — and adds the facts its completion
+   notification reported. No second list, no second disclosure: the count reads
+   in the summary line and the rows are in the step list where the spawn is. */
+.cs.agent .cs-label { color: var(--accent); }
+.cs.agent .cs-detail { color: var(--text); }
+.cs.agent.no-result .cs-detail, .cs.agent.stalled .cs-detail { color: var(--muted); }
+.cs-facts { flex: none; display: flex; gap: 9px; font-family: var(--font-mono); font-size: 0.8em;
+  color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cs-facts .dim { color: color-mix(in srgb, var(--muted) 72%, transparent); }
+.cs-facts .depth { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
+.cs-facts .who { color: color-mix(in srgb, var(--accent) 60%, var(--muted)); }
+/* The two states that are the ABSENCE of a record say so in words, in the same
+   quiet mono as the rest of the row's facts. They were pills with a dashed
+   border; a sub-agent does not get its own badge vocabulary — `failed` and
+   `killed` are already the rail's red ✗, and these two are the cases where
+   nothing was recorded at all. */
+.cs-state { flex: none; font-family: var(--font-mono); font-size: 0.8em; color: var(--muted); white-space: nowrap; }
+.cs.agent.stalled .cs-state { color: color-mix(in srgb, var(--danger) 60%, var(--muted)); }
+.ca-msg { padding: 3px 0 2px 1.2em; font-size: 0.82em; color: var(--muted); }
+/* Nothing wraps the nested trace. The step body it sits in already indents it,
+   and that indent IS the hierarchy: what renders inside is an ordinary
+   exchange — the task as its own prompt band, then steps, tools and timings
+   exactly as the reader draws them at the top level. The rail, the clamped task
+   panel and the "show the whole task" button that used to live here were a
+   second visual language for content the reader can already draw. */
+.cs-body > .cx { padding-left: 1.23em; }
+
+/* ---------- the live strip: what is working under the working line ---------- */
+/* Collapsed exchange, mid-turn. The pane's spinner says it is working; these say
+   what is working underneath it, one line each, without expanding anything.
+   The strip is all-or-nothing: it holds every sub-agent of the turn — finished
+   ones included — until the last one lands, and then it is gone and they are in
+   the work with every other step. One appearance and one disappearance per turn
+   is why there is no fade here any more. */
+.cx-live { display: flex; flex-direction: column; padding: 1px 0 0;
+  /* the tree hangs off the working line's spinner, which lives in the gutter,
+     so the strip starts there too and the rail column lands under it */
+  margin-left: calc(-1 * var(--mark-w)); }
+.cx-live .cs-head { padding-top: 1px; padding-bottom: 1px; position: relative; }
+.cx-live-more { position: relative; padding: 1px 0; font-size: 0.8em; color: var(--muted); }
+/* the rails themselves are the file browser's — .rails/.rail in styles.css — so
+   there is one implementation of the tree in the app, not two */
+.cx-live .rail { width: var(--mark-w); }
+/* the rail cell is the mark cell wide, so the row pays exactly that much for it
+   — the em padding the file browser uses would leave the text 0.1em short and
+   the elbow would touch the spinner */
+.cx-live .cs-head.railed, .cx-live-more { padding-left: var(--mark-w) !important; }
+/* the spinner, borrowed from the working line: same cell, same animation, so a
+   sub-agent's "running" is the same statement the pane makes about itself */
+.cs-mark.spin::before {
+  content: '⠋'; display: inline-flex; align-items: center;
+  width: var(--mark-w); height: var(--mark-h);
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
+  color: var(--accent); transform: translateY(var(--mark-optical-y));
+  animation: ov-spin 0.9s steps(1) infinite;
+}
+
+.cx-steps { display: flex; flex-direction: column; padding: 1px 0; }
+.cs { min-width: 0; }
+.cs-head {
+  display: flex; align-items: baseline; gap: 6px; width: 100%; min-width: 0;
+  background: none; border: none; padding: 2px 4px 2px 0; margin: 0;
+  font: inherit; font-size: 0.92em; color: var(--text); text-align: left; cursor: pointer;
+  border-radius: var(--r-sm);
+}
+.cs-head:hover:not(:disabled) { background: color-mix(in srgb, var(--border) 45%, transparent); }
+.cs-head:disabled { cursor: default; }
+/* one column, two meanings: a tool reports its outcome, everything else offers
+   to open. Greyed triangle = nothing more to see. */
+.cs-tri, .cs-mark {
+  flex: none; width: 1.1em; font-size: 0.85em; line-height: 1.6;
+  font-family: var(--font-mono); color: var(--muted);
+}
+.cs-tri.off { color: color-mix(in srgb, var(--border-strong) 65%, transparent); }
+.cs-mark { font-size: 0.92em; }
+.cs-mark.ok { color: color-mix(in srgb, var(--ok, #4b9e6a) 85%, var(--muted)); }
+.cs-mark.bad { color: var(--danger, #c05353); }
+.cs-label { flex: none; font-size: 0.92em; font-weight: 600; color: var(--muted); }
+.cs.tools .cs-label { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
+.cs.think .cs-label { color: #8b73c4; }
+.cs-detail {
+  min-width: 0; flex: 1; font-size: 0.96em; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* No `.full` variant any more: a text step used to expand IN the head row, and
+   now the row hands its text to the body to be rendered (see .cs-md below), so
+   the detail is always the one truncated line. */
+.cs.note .cs-detail { color: var(--text); opacity: 0.78; }
+.cs-more { font-size: 0.77em; color: var(--muted); padding: 2px 0 0; }
+/* left inset = the rail column above it, so a body hangs under its own row */
+.cs-body { padding: 2px 0 6px 1em; }
+/* An open note is TWO COLUMNS: the disclosure gutter, and the prose beside it.
+   A note has no label, so once its text moved to the body the head row had
+   nothing left in it — and a row whose only content is a 14px triangle still
+   takes a line, which is the "empty line at the beginning" it read as. Nothing
+   was wrong with the markdown: no empty node, no uncollapsed margin, no leading
+   newline in the source (markdown drops those anyway). The blank line WAS the
+   row. So the triangle now sits beside the first line it belongs to, and the
+   gutter it lives in is what you press to close the step again.
+   `think` and `compact` keep the stacked layout: their row says `thinking` or
+   `context compacted`, so it is not an empty line. */
+.cs.note.open { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; }
+.cs.note.open > .cs-head { grid-column: 1; width: auto; align-self: stretch; padding-right: 0; }
+.cs.note.open > .cs-head .cs-detail { display: none; }
+.cs.note.open > .cs-body { grid-column: 2; padding: 0 0 6px 0.45em; }
+
+/* Prose inside a step — an aside, thinking, a compaction — is the same markdown
+   as an answer, one register quieter. A step is a row in a rail, so its headings
+   step down to something that reads as emphasis rather than as a title of the
+   page, and the margins are tight enough that a three-line aside does not
+   present itself as a reply. Same resets as .cx-md: the shared .markdown card
+   brings a border, a background and 14px, none of which belong in a rail. */
+.markdown.cs-md { flex: none; border: none; background: none; padding: 0; font-size: 0.96em; line-height: 1.5; }
+.cs-md > :first-child { margin-top: 0; }
+.cs-md > :last-child { margin-bottom: 0; }
+.cs-md p, .cs-md ul, .cs-md ol, .cs-md blockquote, .cs-md pre, .cs-md table { margin: 0 0 6px; }
+.cs-md ul, .cs-md ol { padding-left: 1.5em; }
+.cs-md h1, .cs-md h2, .cs-md h3, .cs-md h4 { margin: 7px 0 3px; line-height: 1.3; }
+.cs-md h1 { font-size: 1.15em; }
+.cs-md h2 { font-size: 1.08em; }
+.cs-md h3, .cs-md h4 { font-size: 1em; }
+.cs-md pre { font-size: 0.9em; }
+/* and each kind keeps the colour it had as plain text, or a rendered aside would
+   read as the agent's reply and rendered thinking would stop looking like
+   thinking (the same two colours .cs-detail and .cs-pre.think already use) */
+.cs.think .cs-md { color: color-mix(in srgb, #8b73c4 70%, var(--text)); }
+.cs.note .cs-md { color: var(--text); opacity: 0.85; }
+.cs.compact .cs-md { color: var(--muted); }
+.cs-pre {
+  white-space: pre-wrap; word-break: break-word; margin: 3px 0; padding: 6px 8px;
+  background: var(--panel-2); border-radius: var(--r-sm);
+  font-family: var(--font-mono); font-size: 0.85em; line-height: 1.5;
+  /* em, not rem: the cap is really "about twenty lines", and that should stay
+     twenty lines when the conversation is zoomed rather than becoming ten */
+  max-height: 29em; overflow: auto;
+}
+.cs-pre.out { color: var(--muted); }
+.cs-pre.out.bad {
+  border: 1px solid color-mix(in srgb, var(--danger, #c05353) 55%, transparent);
+  background: color-mix(in srgb, var(--danger, #c05353) 7%, var(--panel-2));
+}
+.cs-pre.think { color: color-mix(in srgb, #8b73c4 70%, var(--text)); }
+.cs-img { max-width: 100%; max-height: 18rem; border-radius: var(--r-sm); }
+
+/* ---------- the answer: the one thing written for the reader ---------- */
+.cx-answer { min-width: 0; }
+.markdown.cx-md { border: none; background: none; padding: 0; font-size: 0.96em; line-height: 1.55; }
+.cx-md > :first-child { margin-top: 0; }
+.cx-md > :last-child { margin-bottom: 0; }
+.cx-md pre { font-size: 0.88em; }
+/* The shared .markdown heading sizes are absolute px, which would leave an
+   answer's headings behind when the rest of it scales. Same proportions, in em
+   of the answer's own size — and this file loads after styles.css, so these win
+   at equal specificity. */
+.cx-md h1 { font-size: 1.76em; }
+.cx-md h2 { font-size: 1.44em; }
+.cx-md h3 { font-size: 1.2em; }
+.cx-note { font-size: 0.81em; color: var(--muted); padding-top: 4px; }
+
+.cx-running {
+  /* the spinner is a mark, so it hangs in the gutter with the other marks and
+     `working` starts on the text column rather than a cell's width right of it */
+  display: flex; align-items: baseline; min-width: 0; font-size: 0.96em; color: var(--muted);
+  margin-left: calc(-1 * var(--mark-w));
+}
+.cx-running-at { margin-left: 7px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }
+.cx-running::before {
+  /* The spinner's type and cell are declared with the animation in styles.css
+     and read by everything that draws it — this, .ov-busy, and the static
+     path that stands in for it while an agent is not working. */
+  content: '⠋'; display: inline-flex; align-items: center;
+  width: var(--mark-w); height: var(--mark-h);
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
+  color: var(--accent); transform: translateY(var(--mark-optical-y));
+  animation: ov-spin 0.9s steps(1) infinite;
+}
+
+/* ---------- card: history grows upward, one exchange at a time ---------- */
+.cx-earlier { display: flex; align-items: center; justify-content: center; gap: 12px; font-size: 0.85em; }
+.cx-earlier-btn {
+  background: none; border: none; padding: 0; font: inherit; font-size: 0.95em;
+  color: var(--accent); cursor: pointer;
+}
+.cx-earlier-btn:hover { text-decoration: underline; }
+.cx-earlier-n { color: var(--muted); }
+.cx-earlier-note { color: var(--muted); }
+
+/* ---------- search hits ---------- */
+mark.cx-hit {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  color: inherit; border-radius: 2px; padding: 0 1px;
+}
+mark.cx-hit.on { background: var(--accent); color: var(--panel); }
+
+/* ---------- RENDER mode: the same thing, stacked ---------- */
+/* The reader is one surface: its bar, its turns, its reply line and its footer
+   all take their size from the same base, so the zoom control moves the whole
+   thing. A toolbar left at 10.5px while the conversation grew would be the part
+   you zoomed in because you could not read. */
+.cxv { display: flex; flex-direction: column; min-height: 0; font-size: var(--cx-base, 13px); }
+.cxv-windowed { overflow-anchor: none; }
+.cxv-status { min-height: 29px; }
+.cxv-welcome { padding: 28px 8px; color: var(--text); }
+.cxv-welcome p { margin: 8px 0 0; color: var(--muted); font-size: 0.9em; line-height: 1.6; }
+.ca-reader { max-height: min(65vh, 600px); overflow: auto; overflow-anchor: none; overscroll-behavior: contain; }
+.cxv-windowed:focus-visible, .ca-reader:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+.cxv-bar {
+  /* wraps at ANY width, not behind a media query: a pane is a container, and
+     a 390px pane on a desktop never triggers a viewport media query */
+  display: flex; align-items: center; gap: 7px 8px; flex: none; flex-wrap: wrap;
+  padding: 5px 9px; background: var(--panel-2); border-bottom: 1px solid var(--border);
+  font-size: 0.81em; color: var(--muted);
+}
+.cxv-bar .spacer { flex: 1; }
+.cxv-when { font-variant-numeric: tabular-nums; }
+
+/* The facts panel. Anchored to the `i` in the bar's leading corner, and it
+   OVERLAYS the conversation instead of pushing it down: opening it must not
+   move the text under the reader's thumb. */
+.cxv-bar .cxv-mini {
+  flex: none; min-width: max(24px, 1.75em); min-height: 24px; height: 1.75em;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0 4px; border-radius: var(--r-sm);
+}
+.cxv-mini {
+  flex: none; white-space: nowrap; background: none; border: 1px solid transparent; border-radius: var(--r-sm);
+  padding: 1px 5px; font: inherit; font-size: 1em; color: var(--muted); cursor: pointer;
+}
+.cxv-mini:hover { color: var(--text); border-color: var(--border); }
+.cxv-mini.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.cxv-nav { display: inline-flex; gap: 2px; }
+.cxv-hits { flex: none; font-variant-numeric: tabular-nums; color: var(--muted); }
+.cxv-search {
+  flex: 1 1 7rem; width: auto; min-width: 4.5rem; max-width: 22rem;
+  padding: 2px 6px; font: inherit; font-size: 1.05em;
+  background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: var(--r-sm);
+}
+
+/* Panel background, and a column that FILLS the pane. A fixed reading width
+   left a gutter of nothing on each side while the prompt band — which is what
+   you scan for — still spanned the full width, so the two disagreed about where
+   the conversation began. The pane is the measure: make it narrow and the
+   conversation is narrow. */
+/* The gutter is a variable because the prompt band bleeds INTO it (below). A
+   hardcoded bleed against a padding that changes at a breakpoint drifts apart,
+   and the band ends up wider than the scroller it sits in — which is exactly
+   how the phone gained a sideways scroll: 14px of bleed, 8px of padding. */
+/* The tail is the paragraph rhythm, not a reserve. 30px here — chosen when the
+   reader's bottom edge was the pane's, before a composer sat under it — put 32px
+   between the last line and the composer's border while the blocks above it are
+   12px apart, which reads as one blank line too many at the end of every
+   conversation. 12px makes the end of the flow spaced like the flow. */
+.cxv-body { --cx-gutter: 14px; --cx-tail: 12px; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--panel); padding: 4px var(--cx-gutter) var(--cx-tail); display: flex; flex-direction: column; }
+
+/* The scrollbar is invisible until something scrolls, then fades back out.
+   `.cxv-scrolling` is put on the node by the reader itself, on every scroll
+   event, so this answers to a wheel, a trackpad, a touch drag, Page Down, and
+   the reader's own jump to the newest exchange alike — they all scroll, and
+   scrolling is what the class listens to.
+
+   Only the THUMB'S COLOUR changes. No width is set here on purpose: the track
+   keeps whatever room the platform already gives it, so the reading column is
+   the same width whether the bar is showing or not and the text never steps
+   sideways as you scroll. On a platform with overlay scrollbars (macOS, iOS)
+   nothing is reserved before or after, and the thumb is transparent at rest —
+   which is what those platforms already do, so this does not fight them.
+
+   Appearing is immediate (`transition: none` on the way in); leaving is a fade
+   after a short hold, so a pause between two flicks does not blink at you.
+
+   The colour and the 8px width both come from the app-wide scrollbar in
+   styles.css, so the reader's bar is the same bar every other pane has — the
+   only difference is that this one is not there when you are not scrolling. */
+.cxv-body {
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 420ms ease 260ms;
+}
+.cxv-body.cxv-scrolling {
+  scrollbar-color: var(--border-strong) transparent;
+  transition: none;
+}
+.cxv-body::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  transition: background-color 420ms ease 260ms;
+}
+.cxv-body.cxv-scrolling::-webkit-scrollbar-thumb {
+  background-color: var(--border-strong);
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The global kill switch already removes animations; this drops the fade's
+     delay too, so the bar simply goes rather than lingering. */
+  .cxv-body, .cxv-body::-webkit-scrollbar-thumb { transition: none; }
+}
+/* `flex: 1 0 auto` rather than `min-height: 100%`: a percentage resolves
+   against the scroller's CONTENT box, so a full-height column plus the
+   scroller's own padding is taller than the scroller and every short
+   conversation gets 16px of scrollbar it has no content for. */
+.cxv-col { display: flex; flex-direction: column; min-width: 0; flex: 1 0 auto; }
+/* Conversation grows from the BOTTOM while it is shorter than the window.
+ *
+ * The reader opens following the latest message, so once the transcript is
+ * taller than the window a prepended older page moves nothing on screen: the
+ * bottom stays the bottom. Below that height there is no scroll offset to
+ * compensate with, and a top-aligned transcript would be pushed down the screen
+ * by every page of history that arrived after it. Anchoring the rows to the
+ * bottom removes that case instead of trying to correct it, and costs nothing
+ * once the content is tall enough — `auto` margins absorb only free space.
+ * Applied only when there ARE exchanges, so an empty reader keeps its welcome
+ * text where it has always been. */
+.cxv-rows { margin-top: auto; }
+/* Laid out and measured, not painted. `visibility` rather than `display` or
+   `content-visibility` precisely because the rows must still have real boxes:
+   the question being answered while this is on is whether a page of measured
+   conversation exists yet, which an unlaid-out subtree cannot answer. */
+.cxv-preparing { visibility: hidden; }
+/* Whole-conversation results: a list of places, not a second transcript. It
+   sits above the reader's own content and scrolls with it, so there is still
+   exactly one scroll owner. */
+.cxv-scan { display: flex; flex-direction: column; gap: 1px; padding-bottom: 6px; }
+.cxv-hitrow { display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left;
+  padding: 4px 6px; border: 1px solid transparent; border-radius: 3px; background: transparent;
+  color: var(--text); font: inherit; cursor: pointer; }
+.cxv-hitrow:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.cxv-hitrow:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.cxv-hitrow.on { border-color: var(--accent); }
+.cxv-hitwho { flex: none; color: var(--muted); font-size: 0.85em; min-width: 3.2em; }
+.cxv-hittext { flex: 1; min-width: 0; font-size: 0.85em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cxv-hittext mark { background: var(--accent); color: var(--panel); }
+.cxv-msg { font-size: 0.85em; color: var(--muted); padding: 6px 0; }
+/* The line above the oldest loaded exchange. Fixed height on purpose: it sits
+   above everything in the column, so a line that grew or vanished when the
+   reader reached the start would shove the whole conversation. Its em height and
+   `font: inherit` mean it follows the zoom with the column, so the space it
+   holds open stays one line at any size. */
+.cxv-top {
+  height: 1.5em; line-height: 1.5em; padding: 0; text-align: center; opacity: 0.75;
+  display: block; width: 100%; background: none; border: 0; color: inherit;
+  /* `font: inherit` is here to shed the button's UA font, but it also resets the
+     size this element gets from .cxv-msg — it was landing on the app's 16px in a
+     column of 11px messages. Say the size it is one of. */
+  font: inherit; font-size: 0.85em; cursor: pointer;
+}
+.cxv-top:disabled { cursor: default; }
+.cxv-top:not(:disabled):hover { opacity: 1; text-decoration: underline; }
+
+/* The row has three states and only one of them does anything. The actionable
+   one carries the app's link colour and an upward arrow — the direction the
+   history actually arrives from — so it reads as a control rather than as a
+   caption. The terminal states ("Full history loaded", the oversized-record
+   notice) keep the row's height and centring but neither signal, because a
+   control that cannot be pressed should not look like one. */
+.cxv-top:not(:disabled) { color: var(--accent); opacity: 1; }
+.cxv-top-arrow { margin-right: 5px; font-size: 1.05em; line-height: 1; }
+.cxv-top-done { color: var(--muted); opacity: 0.75; }
+/* Busy is neither: it is the actionable row mid-flight, so it keeps the accent
+   and loses the pointer. */
+.cxv-top-busy { color: var(--accent); opacity: 0.85; }
+/* The same braille mark the reader already spins for a working agent — one
+   spinner in the app, reading the measured --mark-* contract beside `ov-spin`
+   rather than restating any of it. */
+.cxv-top-spin::before {
+  content: '⠋'; display: inline-flex; align-items: center; margin-right: 5px;
+  width: var(--mark-w); height: var(--mark-h);
+  font-family: var(--font-mono); font-size: var(--mark-size);
+  font-weight: var(--mark-weight); line-height: 1;
+  color: currentColor; transform: translateY(var(--mark-optical-y));
+  animation: ov-spin 0.9s steps(1) infinite;
+}
+@media (prefers-reduced-motion: reduce) { .cxv-top-spin::before { animation: none; } }
+.cxv-foot {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 5px 10px; border-top: 1px solid var(--border); background: var(--panel);
+  color: var(--muted); font-size: 0.81em; overflow: hidden;
+}
+.cxv-foot .spacer { flex: 1; min-width: 4px; }
+
+/* The prompt band used to stick to the top of this scroller, on the theory that
+   deep inside a long turn you want what you asked for overhead. In a pane-sized
+   reader it reads as the message refusing to scroll away — and on a phone,
+   where the band can be a third of what you can see, that is most of the screen
+   held back. It scrolls with everything else now; the tint is what marks it.
+   The opaque background that came with it went too: it existed so scrolling
+   content would not show through a floating band, and over .cxv-body's --panel
+   the base transparent tint composites to the same colour. */
+
+/* …and it spans the pane. Reaching into the left gutter but stopping at the
+   text column on the right made it read as a card floating over the answer
+   rather than as the head of it. Full bleed both sides, with the text inside
+   still on the column. */
+.cxv-col .cx-prompt { margin-right: calc(-1 * var(--cx-gutter)); padding-right: var(--cx-gutter); }
+/* No px restatement of .cx's own 1.23em gutter here. The rule that used to sit
+   on this line never matched anything (every exchange is wrapped in a row div,
+   so no .cx is a direct child of .cxv-col) — and the moment one was, it would
+   have pinned the newest turn to 16px while every turn above it kept the em and
+   moved under zoom. */
+
+/* Grouping: the meta row is the prompt's, not the answer's, so it sits tight
+   under the band. What separates one exchange from the next is the band itself
+   — its top hairline and tint — not a margin: the rule that used to add 15px
+   here needed two .cx siblings directly under .cxv-col, and there has never
+   been one pair (every exchange sits in its own row div). Removed with the
+   other dead gutter rule above rather than left to be read as live. */
+.cxv-col .cx-prompt + .cx-meta { margin-top: -3px; }
+
+/* ---------- phone ---------- */
+@media (max-width: 720px) {
+  /* only the gutter narrows here: the padding itself is written once above, so a
+     phone cannot drift from the desktop tail the way it drifted from the bleed */
+  .cxv-body { --cx-gutter: 8px; }
+  .cs-detail { font-size: 1em; }
+}
+
+/* ---------- reader mode inside a session pane ---------- */
+/* Drawn over the live terminal, which stays mounted underneath. */
+/* Above the terminal's own covers (.term-preview/.term-boot/.term-exit sit at
+   4), not just above the terminal. Those are gated off while reading, but the
+   overlay outranking anything the terminal can raise is the belt to that
+   brace: a cover winning here does not look like a bug, it looks like the
+   reader turning into a terminal. */
+.term-host.reading { display: flex; overflow: clip; min-width: 0; }
+.pane-reader { flex: 1; min-width: 0; min-height: 0; display: flex; overflow: clip; background: var(--panel); }
+.pane-reader > .cxv { flex: 1; min-width: 0; }
+/* The one thing the reader can render that is not inside .cxv — so it reads the
+   base itself rather than inheriting a size from it. */
+.cxv-empty { margin: auto; padding: 24px; font-size: calc(var(--cx-base, 13px) * 0.885); color: var(--muted); text-align: center; }
+.ph-modes { flex: none; }
+.ph-modes button { padding: 1px 7px; font-size: 9.5px; letter-spacing: 0.06em; }
+
+/* The overlay needs a positioned host; .term-host is otherwise plain. */
+.slot .term-host { position: relative; }
+
+/* ---------- the card inline in the Overview list ---------- */
+/* There it is a summary, not a room: one turn, the answer clamped. The window
+   (and RENDER mode) is where a conversation gets to be long. */
+.ov-card.ov-compact .cx-answer .markdown {
+  display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* ---------- an expanded tool call ---------- */
+.cs-call { display: flex; flex-direction: column; }
+.ct-cap { font-size: 0.81em; color: var(--muted); padding: 3px 0 1px; overflow-wrap: anywhere; }
+.ct-note { font-size: 0.85em; color: var(--muted); padding: 1px 0 2px; }
+.cs-pre.ct-cmd { color: var(--text); }
+.cs-pre.ct-cmd::before { content: '$ '; color: var(--accent); }
+/* a before and an after — tinted, not barred */
+.cs-pre.ct-was { background: color-mix(in srgb, var(--danger, #c05353) 8%, var(--panel-2)); }
+.cs-pre.ct-now { background: color-mix(in srgb, var(--ok, #4b9e6a) 9%, var(--panel-2)); }
+.ct-fields { margin: 3px 0 0; font-size: 0.85em; }
+/* the label column is em, not rem: it holds field names, so it has to grow with
+   them rather than stay 72px wide while the text zooms past it */
+.ct-row { display: grid; grid-template-columns: minmax(6.5em, auto) 1fr; gap: 8px; padding: 1px 0; align-items: baseline; }
+.ct-row dt { color: var(--muted); }
+.ct-row dd { margin: 0; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+/* already inside .ct-fields' smaller type — don't step down a second time */
+.ct-row dd .cs-pre { margin: 2px 0; font-size: 1em; }
+
+/* The reply line under a rendered conversation — the card's own composer, so
+   answering an agent looks the same wherever you are reading it. */
+.cxv-composer { flex: none; padding: 6px 12px; border-top: 1px solid var(--border); background: var(--panel); font-size: 1em; }
+.cxv-composer .cxv-live { padding: 0; border-top: 0; background: transparent; }
+/* The card's reply line is a fixed 13px; here it follows the conversation above
+   it, the way the remote pane's composer follows its log. */
+.cxv-live .ov-p, .cxv-live textarea { font-size: 1em; }
+/* Two selectors set this on the SAME element — the reader's composer carries
+   both classes — so this one is written to win on specificity (0,2,0 against
+   styles.css's 0,1,0) rather than on which stylesheet main.tsx imports second.
+   Swapping those two imports would otherwise drop the reader back to a
+   hardcoded 13px line and mis-centre the controls at every zoom but 100%. */
+.ov-composer.cxv-composer { --ov-first-line: calc(1.45em + 4px); }
+.cxv-note { flex: none; padding: 0 12px 6px; }
+.input-required {
+  flex: none; display: flex; align-items: center; gap: 5px; min-width: 0; min-height: 24px;
+  padding: 2px 9px; border-top: 1px solid var(--border); background: var(--panel-2);
+  color: var(--muted); font: 0.81em/1.2 var(--font-mono);
+}
+.input-required-mark, .input-required-label { color: var(--accent); font-weight: 700; }
+.input-required-copy { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.input-required button {
+  flex: none; margin-left: auto; height: 20px; padding: 0 7px;
+  border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel);
+  color: var(--muted); font: inherit; line-height: 1; cursor: pointer;
+}
+.input-required button:hover { color: var(--text); border-color: var(--border-strong); }
+.input-required + .ov-composer { border-top: 0; }
+.cxv-col > .input-required {
+  align-self: stretch; max-width: none; min-height: 0;
+  margin: 8px calc(-1 * var(--cx-gutter)) 2px 0;
+  padding: 5px var(--cx-gutter) 5px 8px; border: 0; border-radius: 0;
+  background: var(--accent); color: var(--accent-fg);
+}
+.cxv-col > .input-required :is(.input-required-mark, .input-required-label, button) { color: inherit; }
+.cxv-col > .input-required button { height: 18px; border-color: color-mix(in srgb, var(--accent-fg) 40%, transparent); background: transparent; }
+.cxv-col > .input-required button:hover { color: inherit; border-color: var(--accent-fg); background: color-mix(in srgb, var(--accent-fg) 12%, transparent); }
+@media (max-width: 720px) and (pointer: coarse) {
+  /* Restating styles.css's iOS guard: 16px is what stops zoom-on-focus, and the
+     rule above is later in the cascade, so it would otherwise win. A phone
+     keyboard field is the one place the zoom does not reach. */
+  .cxv-live textarea { font-size: 16px; }
+  /* …and the first line the controls align to is that pinned 16px one, not the
+     conversation's own type size, or they sit a couple of pixels high of it. */
+  .ov-composer.cxv-composer { --ov-first-line: calc(1.45 * 16px + 4px); }
+}
+
+/* ---------- dispatched sessions: peers this turn handed work to ---------- */
+/* One CLI logo per session, in the StateLogo frame the rest of the app uses
+   for agent state: running animates, finished is the ordinary frame, and a
+   failure the records prove is the same frame in --danger. No new mark.
+   The strip fills the summary line up to the turn number and wraps inside that
+   room; on a narrow pane it takes a line of its own. */
+/* The container is the reader's column, not each turn: a container is a
+   stacking context, and one per turn would put the preview under the next. */
+.cxv-col { container-type: inline-size; }
+.cx-meta.dx-meta { align-items: flex-start; }
+.cx-meta.dx-meta > .cx-fold, .cx-meta.dx-meta > .cx-n, .cx-meta.dx-meta > .cx-time, .cx-meta.dx-meta > .cx-model { line-height: 22px; }
+.cx-meta.dx-meta > .spacer { display: none; }
+.dx-strip { flex: 1 1 0; min-width: 0; display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
+@container (max-width: 440px) {
+  /* the summary keeps its one line (ellipsized, as always); only the icons wrap */
+  .cx-meta.dx-meta { flex-wrap: wrap; }
+  .cx-meta.dx-meta > .cx-fold { flex: 1 1 0; min-width: 0; }
+  .dx-strip { order: 10; flex: 1 0 100%; gap: 2px; }
+}
+.dx-icon { background: none; border: none; padding: 1px; margin: 0; border-radius: var(--r-sm); cursor: pointer; display: inline-flex; }
+.dx-icon:hover, .dx-icon.on { background: color-mix(in srgb, var(--border) 55%, transparent); }
+.dx-logo { display: inline-flex; flex: none; }
+.dx-logo.bad .state-logo { color: var(--danger); }
+.dx-logo.gone .cli-logo { opacity: 0.45; filter: grayscale(1); }
+
+/* the preview: this turn's latest prompt to the session and the turn it started */
+/* An overlay on document.body, placed in viewport coordinates against its
+   icon (Dispatches.tsx, Floating): it must take no part in the reader's
+   scrolling layout, or opening it near the bottom moves the history. */
+.dx-pop { position: fixed; z-index: 900; overflow: hidden; border-radius: var(--r-lg); box-shadow: 0 8px 28px rgb(0 0 0 / 0.18); }
+.dx-pop > .dx-card { box-shadow: none; }
+.dx-pop.capped { overflow-y: auto; overscroll-behavior: contain; }
+.dx-pop > .dx-card { min-height: 0; }
+.dx-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 10px 12px;
+  box-shadow: 0 8px 28px rgb(0 0 0 / 0.18); font-family: var(--font-sans); font-size: 13px; color: var(--text);
+  white-space: normal; text-align: left; }
+.dx-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dx-card-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dx-word { margin-left: auto; flex: none; font-family: var(--font-mono); font-size: 0.85em; color: var(--muted); white-space: nowrap; }
+.dx-word.running { color: var(--accent); }
+.dx-word.failed { color: var(--danger); }
+.dx-card-sub { font-size: 11px; color: var(--muted); margin: 3px 0 6px; }
+.dx-nested { padding-left: 1.23em; font-size: 12.5px; }
+.dx-clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.dx-answer .markdown { max-height: 9.5em; overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
+.dx-none { font-size: 0.88em; color: var(--muted); }
+.dx-card-foot { display: flex; justify-content: flex-end; margin-top: 8px; }
+.dx-open { background: var(--accent); color: var(--accent-fg); border: none; border-radius: var(--r-md); padding: 5px 11px;
+  font-size: 12px; cursor: pointer; }
+.dx-open:disabled { opacity: 0.45; cursor: default; }
+
+/* touch: the first tap shows the preview as a sheet */
+/* the backdrop dims and lets every gesture through; Dispatches.tsx closes the
+   sheet on a touch outside it (and a drag there scrolls the history) */
+.dx-sheet-wrap { position: fixed; inset: 0; z-index: 1000; background: rgb(0 0 0 / 0.28); display: flex; align-items: flex-end; pointer-events: none; }
+.dx-sheet-wrap > .dx-sheet { pointer-events: auto; }
+/* 60%, not more: some history stays in view above it, to read and to drag */
+.dx-sheet { width: 100%; max-height: 60vh; max-height: 60dvh; overflow: auto; overscroll-behavior: contain; background: var(--panel); border-radius: 14px 14px 0 0;
+  padding: 6px 4px calc(14px + env(safe-area-inset-bottom)); box-shadow: 0 -8px 30px rgb(0 0 0 / 0.25); }
+.dx-sheet .dx-card { border: none; box-shadow: none; }
+.dx-sheet .dx-open { padding: 9px 16px; font-size: 13px; }
+.dx-grab { width: 36px; height: 4px; border-radius: 2px; background: var(--border-strong); margin: 2px auto 4px; }
+
+/* the step: the call that launched or prompted, in place of its Bash line */
+.dx-row > .cs-head { cursor: default; align-items: center; }
+.dx-row > .cs-head:hover { background: none; }
+.dx-chips { display: flex; flex-wrap: wrap; gap: 3px 10px; min-width: 0; }
+.dx-chip { display: inline-flex; align-items: center; gap: 5px; background: none; border: none; padding: 1px 4px 1px 1px;
+  border-radius: var(--r-sm); font: inherit; font-size: 0.96em; color: var(--text); cursor: pointer; }
+.dx-chip:hover, .dx-chip.on { background: color-mix(in srgb, var(--border) 55%, transparent); }
+/* capped, the card scrolls; its one action stays in reach at the bottom edge */
+.dx-pop.capped .dx-card-foot { position: sticky; bottom: -10px; margin: 8px -12px -10px; padding: 8px 12px 10px;
+  background: var(--panel); border-top: 1px solid var(--border); }

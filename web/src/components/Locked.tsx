@@ -1,0 +1,288 @@
+import { useEffect, useState, type ReactNode } from 'react';
+import type { SessionState } from '../types';
+import { describeVerification, type LockStatus } from '../lib/lockStatus';
+import { SlidersGlyph, SunGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
+import StateLogo from './StateLogo';
+
+export const REPO_URL = 'https://github.com/huggingface/agent-manager';
+// The launch film, from a public dataset. A new cut changes only this.
+// (The app's CSP is frame-ancestors alone, so nothing restricts where media loads from.)
+const FILM_BASE = 'https://huggingface.co/datasets/lvwerra/agent-manager-video/resolve/main';
+export const LAUNCH_FILM = {
+  src: `${FILM_BASE}/agent-manager-720.mp4`,
+  hd: `${FILM_BASE}/agent-manager-1080.mp4`,
+  poster: `${FILM_BASE}/poster.jpg`,
+} as const;
+
+// The standard GitHub mark.
+function GitHubLink() {
+  return (
+    <a className="install-github" href={REPO_URL} target="_blank" rel="noreferrer" aria-label="Agent Manager on GitHub" title="Agent Manager on GitHub">
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+      </svg>
+    </a>
+  );
+}
+
+// Every locked page's heading, with the GitHub link beside it.
+const Title = ({ children }: { children: ReactNode }) => (
+  <div className="install-title"><h1>{children}</h1><GitHubLink /></div>
+);
+
+// A frozen, slightly dimmed replica of the real sidebar so the install page
+// looks like the product it unlocks. Pure decoration: no handlers, no state.
+type MockSession = { name: string; cli: string; tint: string; state: SessionState };
+type MockItem = MockSession | { group: string; members: MockSession[] };
+const MOCK: MockItem[] = [
+  { group: 'research', members: [
+    { name: 'writer', cli: 'claude', tint: '#d97757', state: 'working' },
+    { name: 'reviewer', cli: 'codex', tint: '#5eb6a6', state: 'waiting' },
+  ] },
+  { name: 'refactor-bot', cli: 'claude', tint: '#d97757', state: 'idle' },
+  { name: 'gemini-cli-1', cli: 'gemini', tint: '#4796e3', state: 'stopped' },
+  { name: 'shell-1', cli: 'shell', tint: '#8aa0ad', state: 'stopped' },
+];
+
+function MockRow({ s, nested }: { s: MockSession; nested?: boolean }) {
+  return (
+    <div className={`row session${nested ? ' nested' : ''}`}>
+      <StateLogo cli={s.cli} state={s.state} size={12} tint={s.tint} />
+      <span className="name">{s.name}</span>
+    </div>
+  );
+}
+
+function MockSidebar() {
+  return (
+    <aside className="sidebar mock-side" aria-hidden="true">
+      <div className="brand">
+        <div className="logo"><AmMark className="am-mark" /><h1>Agent Manager</h1></div>
+        <div className="brand-actions">
+          <span className="icon-btn add-btn"><PlusGlyph /></span>
+          <span className="icon-btn"><SlidersGlyph /></span>
+          <span className="icon-btn"><SunGlyph /></span>
+        </div>
+      </div>
+      <div className="ov-fixed">
+        <div className="row ov-row">
+          <span className="ov-tile"><GridGlyph /></span>
+          <span className="name">overview</span>
+        </div>
+      </div>
+      <div className="tree">
+        {MOCK.map((item) => 'group' in item ? (
+          <div key={item.group} className="group">
+            <div className="row group-head">
+              <span className="caret">▾</span>
+              <span className="name">{item.group}</span>
+              <span className="count">{item.members.length}</span>
+            </div>
+            {item.members.map((m) => <MockRow key={m.name} s={m} nested />)}
+          </div>
+        ) : (
+          <MockRow key={item.name} s={item} />
+        ))}
+      </div>
+      <div className="legend">
+        <span><StateLogo frameOnly state="working" size={12} /> working</span>
+        <span><StateLogo frameOnly state="waiting" size={12} /> your turn</span>
+        <span><StateLogo frameOnly state="idle" size={12} /> idle</span>
+        <span><StateLogo frameOnly state="stopped" size={12} /> stopped</span>
+      </div>
+    </aside>
+  );
+}
+
+// Shown when the server locks itself (server/src/visibility.js), one page per
+// reason so nobody is told to fix the wrong thing:
+//   public-space              visitors get the install guide; the owner, a fix
+//   public-bucket             the owner's bucket is public — everything the
+//                             agents saved is readable, credentials included
+//   checking                  a fresh start, not yet verified private
+//   verification-unavailable  verified before, but not recently enough — an
+//                             outage of the check, never proof of exposure
+export default function Locked({ spaceId, reason, bucket, status }: {
+  spaceId?: string | null;
+  reason?: string | null;
+  bucket?: string | null;
+  status?: LockStatus | null;
+}) {
+  // The "N s ago" copy has to move without a status refresh.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (reason !== 'checking' && reason !== 'verification-unavailable') return;
+    const t = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(t);
+  }, [reason]);
+  const id = spaceId || 'owner/space-name';
+  const cmd = `from huggingface_hub import HfApi, Volume, create_bucket
+
+api = HfApi()
+space_id = "your-username/agent-manager"
+bucket_id = "your-username/agent-manager-data"
+
+create_bucket(bucket_id, private=True, exist_ok=True)
+api.duplicate_repo(
+    from_id="${id}",
+    to_id=space_id,
+    repo_type="space",
+    private=True,
+    space_volumes=[
+        Volume(
+            type="bucket",
+            source=bucket_id,
+            mount_path="/data",
+        ),
+    ],
+)`;
+  const [copied, setCopied] = useState(false);
+  const flash = () => { setCopied(true); setTimeout(() => setCopied(false), 1500); };
+  // The Locked page is shown to embedded (HF App-tab) visitors, where the async
+  // Clipboard API is blocked — fall back to execCommand within the click gesture.
+  const legacyCopy = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = cmd; ta.style.position = 'fixed'; ta.style.top = '-9999px';
+      document.body.appendChild(ta); ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch { return false; }
+  };
+  const copy = () => {
+    if (legacyCopy()) { flash(); return; }
+    navigator.clipboard?.writeText(cmd).then(flash).catch(() => {});
+  };
+
+  if (reason === 'checking' || reason === 'verification-unavailable') {
+    const v = describeVerification(status, now);
+    const checking = reason === 'checking';
+    return (
+      <div className="app locked-app">
+        <MockSidebar />
+        <div className="main locked-main">
+          <div className="install" data-lock-reason={reason}>
+            <Title>{checking ? 'Checking that this Space is private…' : 'Couldn’t re-verify that this Space is private'}</Title>
+            <p className="locked-lead">
+              {checking ? (
+                <>Agent Manager only serves terminals once it has confirmed that this Space and the
+                bucket mounted at <span className="mono">/data</span> are <b>private</b>. That check is
+                running now; the app opens by itself as soon as it succeeds.</>
+              ) : (
+                <>The privacy check has not succeeded for more than {v.grace}, so the terminals are
+                locked as a precaution. This is a <b>verification outage</b>, not a sign that anything
+                is public — nothing was observed to be exposed.</>
+              )}
+            </p>
+            <div className="step">
+              <div className="step-head"><span className="step-n mono">…</span><h3>{checking ? 'What happens next' : 'Nothing to duplicate or reconfigure'}</h3></div>
+              <p className="locked-sub">
+                {v.lastVerified} {v.lastAttempt} It retries {v.cadence} and this page reopens automatically
+                once a check succeeds.{checking ? null : <> If it keeps failing, check that the Space can
+                reach <span className="mono">huggingface.co</span>.</>}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (reason === 'public-bucket') {
+    return (
+      <div className="app locked-app">
+        <MockSidebar />
+        <div className="main locked-main">
+          <div className="install">
+            <Title>Your storage bucket is public</Title>
+            <p className="locked-lead">
+              The bucket mounted at <span className="mono">/data</span>
+              {bucket ? <> (<span className="mono">{bucket}</span>)</> : null} is <b>public</b> —
+              everything your agents saved is readable by anyone, including credentials and
+              shell history. The terminals stay disabled until it's private.
+            </p>
+            <div className="step">
+              <div className="step-head"><span className="step-n mono">!</span><h3>Make the bucket private</h3></div>
+              <p className="locked-sub">
+                Open <b>{bucket ? <a href={`https://huggingface.co/buckets/${bucket}/settings`} target="_blank" rel="noreferrer">the bucket's settings</a> : 'the bucket’s settings on Hugging Face'}</b> and
+                switch its visibility to <b>Private</b>. This page unlocks automatically within a minute —
+                and consider rotating any credentials that were stored while it was public.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app locked-app">
+      <MockSidebar />
+      <div className="main locked-main">
+        <div className="install">
+          <div>
+            <Title>Set up the Agent Manager in two steps</Title>
+            <p className="locked-lead">
+              A private cloud workspace for Claude Code, Codex, Gemini CLI and friends —
+              dispatch agents from anywhere, they keep working when you close the tab.
+            </p>
+          </div>
+          <p className="locked-sub">
+            This copy is <b>public</b>, so its terminals are disabled: the app has no login of its
+            own — a public instance would hand anyone a shell. Your duplicate stays private and unlocks itself.
+          </p>
+          <p className="locked-sub install-relock">
+            <b>Is this your Space?</b> Set it back to <b>Private</b> in Settings → Change visibility —
+            it unlocks automatically within a minute.
+          </p>
+
+          <figure className="install-film">
+            {/* No autoplay: nothing downloads until the visitor presses play. */}
+            <video controls preload="none" playsInline poster={LAUNCH_FILM.poster} src={LAUNCH_FILM.src}
+              aria-label="Agent Manager launch film" />
+            <figcaption><a href={LAUNCH_FILM.hd} target="_blank" rel="noreferrer">Watch in 1080p ↗</a></figcaption>
+          </figure>
+
+          <div className="step">
+            <div className="step-head"><span className="step-n mono">1</span><h3>Duplicate this Space</h3></div>
+            <p className="locked-sub">
+              Open the <b>⋮ menu</b> at the top of this page and choose <b>Duplicate this Space</b>.
+              Set the new Space's visibility to <b>Private</b>.
+            </p>
+            <img src="/install/duplicate-space.png" alt="The Space's ⋮ menu with 'Duplicate this Space' highlighted" />
+          </div>
+
+          <div className="step">
+            <div className="step-head"><span className="step-n mono">2</span><h3>Attach a private bucket</h3></div>
+            <p className="locked-sub">
+              In your new Space: <b>Settings → Storage → Mount a bucket</b>. Create a new bucket,
+              keep it <b>Private</b>, set the mount path to <span className="mono">/data</span> and
+              access to <b>Read &amp; Write</b>. The Space restarts — and that bucket is where your
+              agents' work, logins and history survive rebuilds and sleep.
+            </p>
+            <img src="/install/mount-bucket.png" alt="The Mount a bucket dialog: private bucket, mount path /data, read & write" />
+            <p className="install-done">That's it — the Space restarts, unlocks itself, and you're ready to go. Open it and spawn your first agent.</p>
+          </div>
+
+          <details className="install-code step">
+            <summary className="step-head">
+              <span className="step-n mono">&gt;_</span>
+              <h3>Prefer code? Both steps in one script</h3>
+              <svg className="install-code-caret" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.8 3.2h6.4L5 7.4z" fill="currentColor" /></svg>
+            </summary>
+            <div className="locked-cmd">
+              <pre><code>{cmd}</code></pre>
+              <button className="locked-copy" onClick={copy} aria-label="Copy setup code" title={copied ? 'Copied' : 'Copy'}>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="9" y="8" width="10" height="12" rx="2" />
+                  <path d="M6 16H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                </svg>
+              </button>
+            </div>
+          </details>
+        </div>
+      </div>
+    </div>
+  );
+}
