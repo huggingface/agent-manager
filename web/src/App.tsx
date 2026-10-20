@@ -4,6 +4,7 @@ import type { QuickStartAttachmentOptions } from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
 import PaneFilePreview from './components/PaneFilePreview';
 import { retainFileViewer } from './lib/fileViewer';
+import { nextWarmPanes } from './lib/warmPanes';
 import type { FileLinkRequest } from './lib/fileLinks';
 import RemotePane from './components/RemotePane';
 import SettingsShell, { type SettingsPage } from './components/SettingsShell';
@@ -74,6 +75,13 @@ function autoGrid(n: number): GridSpec {
 
 const ROOT_PATH = '.';
 const WARM_TERMINAL_LIMIT = 12;
+// Of those retained panes, how many (besides the visible ones) keep BOTH views
+// once built — the terminal attached under the reader, the reader mounted under
+// the terminal — so the reader <-> terminal toggle is a visibility change. The
+// rest keep only the view being shown, as before: a hidden reader holds its
+// rendered rows and a hidden terminal its socket, and neither is free. A
+// released reader still keeps its cached transcript window (readerStore).
+const WARM_BOTH_LIMIT = 3;
 const normalizePath = (p?: string | null) => (p && p.trim() ? p : ROOT_PATH);
 // The Overview's filter chips. The label IS the chip, so there is no second
 // display string that can drift from the value; the tooltips carry the rest.
@@ -804,6 +812,16 @@ export default function App() {
   const retainedTerminalIds = [...visibleTerminalIds, ...warmTerminalIds]
     .filter((id, i, all) => !!sessById[id] && all.indexOf(id) === i)
     .slice(0, Math.max(WARM_TERMINAL_LIMIT, visibleTerminalIds.length));
+  // The visible panes and the few seen just before them keep both views. The
+  // bound applies on every route, including ones that show no pane at all.
+  const [recentIds, setRecentIds] = useState<string[]>([]);
+  useEffect(() => {
+    setRecentIds((previous) => nextWarmPanes(previous, visibleTerminalIds, WARM_BOTH_LIMIT, (id) => !!sessById[id]));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleTerminalKey, sessionIdsKey]);
+  // Visible panes count on the render that shows them; the effect above
+  // remembers them for later renders and applies the bound.
+  const warmBoth = new Set([...visibleTerminalIds, ...recentIds]);
 
   // Pane rearrangement (drag a pane header onto another tile).
   const [paneDrag, setPaneDrag] = useState(false);
@@ -1163,6 +1181,7 @@ export default function App() {
                 theme={theme}
                 zoom={zoom}
                 mode={paneMode}
+                warm={warmBoth.has(s.id)}
                 groupName={groupNameOf[s.id]}
                 focused={shown && sessions.length > 1 && s.id === focusedId}
                 visible={shown && deckVisible}

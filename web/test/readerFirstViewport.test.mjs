@@ -1,8 +1,9 @@
 // Real React, real layout, real measured rows; a synthetic source only.
 //
 // Two properties this covers that no unit test can:
-//   1. the first transcript a cold reader presents FILLS the reader, with real
-//      conversation rows rather than estimated spacer height, and
+//   1. a cold reader shows its latest exchange as soon as the first window
+//      lands, and then fills the reader with real conversation rows rather
+//      than estimated spacer height, and
 //   2. the older pages that arrive afterwards do not push that text down the
 //      screen — measured every frame, not only at the end.
 //
@@ -230,24 +231,31 @@ try {
     await p.evaluate(() => { delete window.__last; });
   };
 
-  // ---------- 0. the FIRST transcript the user sees is a page of conversation ----------
-  // Not "eventually covered": covered on the frame it first becomes visible.
-  // The first window is two exchanges on this fixture, and older pages are slow,
-  // so a reader that painted its first response would be caught here.
+  // ---------- 0. a cold open shows the latest exchange as soon as it lands ----------
+  // The first window is two exchanges on this fixture and every older page
+  // takes 250ms, so a reader that waits for history before showing anything
+  // (it used to wait for a page of it: ~2s on a large trace) is caught here.
+  // The latest exchange is what someone opening the reader came for. The
+  // budget is the operator's: visible within 300ms of opening, with the first
+  // read answering at once here, so the bound is rendering, not transport.
+  const FIRST_PAINT_MS = 300;
   await p.evaluate(() => window.fixture.mount({
     count: 200, toolBytes: 90 * 1024, answerLines: 6, beforeDelay: 250 }));
   await p.evaluate(() => window.probe.watchReveal());
   await p.waitForFunction(() => window.probe.shown(), null, { timeout: 20_000 });
   const reveal = await p.evaluate(() => window.probe.stopReveal());
   assert.ok(reveal, 'the transcript became visible');
-  assert.ok(reveal.covered,
-    `the first transcript the reader shows covers it (${JSON.stringify(reveal)})`);
-  assert.ok(reveal.ex > 2,
-    `and is more than the first window's two exchanges (${reveal.ex})`);
+  assert.ok(reveal.atMs <= FIRST_PAINT_MS,
+    `the first window is shown within ${FIRST_PAINT_MS}ms of opening (${JSON.stringify(reveal)})`);
+  assert.ok(await p.getByText('Question 199', { exact: true }).isVisible(), 'and it is the latest exchange');
+  assert.ok(await p.evaluate(() => window.probe.atBottom()), 'shown at the bottom, where Latest is');
   assert.equal(await p.locator('.cxv-composer textarea').count(), 1,
     'the composer was never part of the wait');
+  // Older history still arrives on its own, after the paint (drift is pinned
+  // in section 2): the reader goes on to cover the screen.
+  await p.waitForFunction(() => window.probe.coverage()?.covered, null, { timeout: 15_000 });
   results.push({ case: 'first visible transcript', exchanges: reveal.ex,
-    covered: reveal.covered, revealedAtMs: reveal.atMs });
+    coveredAtReveal: reveal.covered, revealedAtMs: reveal.atMs });
 
   // A conversation with nothing more to load must not wait for anything.
   await p.evaluate(() => window.fixture.mount({ count: 3, answerLines: 2, beforeDelay: 5_000 }));
@@ -293,9 +301,8 @@ try {
   results.push({ case: 'anchor drift while filling', samples: samples.length, driftPx: drift, framesNotAtLatest: lost });
 
   // ---------- 3. a transcript shorter than the reader sits at the bottom ----------
-  // Preparation means a cold reader rarely reveals an underfilled transcript,
-  // but a conversation that IS shorter than the window is revealed at once, and
-  // it must sit against the composer rather than floating at the top. That is
+  // A conversation that IS shorter than the window must sit against the
+  // composer rather than floating at the top. That is
   // also what makes any later page grow the transcript upward instead of
   // pushing the readable text down.
   await p.evaluate(() => window.fixture.mount({ count: 3, answerLines: 2 }));

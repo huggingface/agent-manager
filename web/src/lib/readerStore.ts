@@ -288,6 +288,17 @@ export class ReaderStore {
     this.request?.abort.abort(); this.request = null;
     if (this.state.loading) this.publish({ loading: null });
   }
+  /**
+   * Read the first window ahead of anyone showing it, so the first switch to
+   * the reader paints text instead of waiting on the network. One read and
+   * nothing else: an unretained store schedules no poll, no summary and no
+   * history fill (each checks `active`), and a store that already has a window
+   * or a reader of its own is left alone.
+   */
+  prewarm = () => {
+    if (this.active || this.request || this.state.cursor) return;
+    void this.read('tail');
+  };
   /** Explicit refresh/foreground recovery replaces a possibly frozen request. */
   refresh = () => {
     this.cancel(); this.resetFill(); this.failures = 0;
