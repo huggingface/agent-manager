@@ -342,6 +342,32 @@ export function operationMiddleware({
   };
 }
 
+/**
+ * A record for something the server did on its own behalf rather than in
+ * answer to one request — a dev-preview switch finishing in the background, a
+ * boot re-apply, a supervisor rollback. Same file and shape as the middleware's
+ * records, so the API log shows it beside the call that started it.
+ */
+export function appendSystemOperation({ origin, method = 'SYSTEM', path: opPath, request, result, ok, durationMs = 0, knownValues = [] }, appendRecord = append) {
+  // The same known-value + pattern filter request records get.
+  const filterString = createCredentialFilter(knownValues);
+  appendRecord({
+    version: 2,
+    id: crypto.randomUUID(),
+    at: new Date().toISOString(),
+    audit: { credentialFilter: { policy: AUDIT_CREDENTIAL_POLICY, status: 'applied' } },
+    origin: sanitizeMetadata(origin, filterString),
+    method,
+    path: filterString(opPath),
+    query: {},
+    request: summarizePayload(request, 'body', filterString),
+    status: ok ? 200 : 500,
+    ok: !!ok,
+    durationMs,
+    result: summarizePayload(result, 'result', filterString),
+  });
+}
+
 export function readOperations(limit = 200, before = null) {
   const take = Math.max(1, Math.min(1000, Number(limit) || 200));
   let fd;
