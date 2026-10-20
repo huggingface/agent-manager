@@ -13,10 +13,10 @@ showing it.
 
 | Stage | Before | After |
 | --- | --- | --- |
-| Turn starts → sidebar shows working | 0.3–1.5 s (tree poll, 2.5 s) | ~5 ms |
-| Turn ends → server says waiting/idle | 4.5 s (4 s quiet window, rounded) | ~350 ms |
-| Turn ends → sidebar shows it | 4.6–6.9 s | ~350 ms |
-| New transcript record → reader shows it | 0.6–4.3 s (reader poll, 3 s) | ~10 ms |
+| Turn starts → sidebar shows working | 0.9 s median, up to 1.6 s (tree poll, 2.5 s) | ~5 ms |
+| Turn ends → server says waiting/idle | 4.5 s (4 s quiet window, rounded) | ~370 ms |
+| Turn ends → sidebar shows it | 4.9–6.8 s | ~350 ms |
+| New transcript record → reader shows it | 1.2–2.7 s (reader poll, 3 s) | ~8 ms |
 
 ## How it works
 
