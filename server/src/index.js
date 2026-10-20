@@ -70,6 +70,7 @@ import { ApiError, apiRoutes, apiNotFound, apiErrorHandler, errorEnvelope, pipeR
 import { createValidator } from './api-validation.js';
 import { remoteStream } from './api-streams.js';
 import { fileWriteError, receiveWorkspaceFile, replaceWorkspaceText } from './safe-write.js';
+import { storage } from './storage.js';
 
 // Before anything else touches the mount: a sync fs call to /data is ~85ms of
 // frozen event loop here, and nothing else in the stack can see it. See slowfs.js.
@@ -1550,6 +1551,9 @@ function injectedEnvKeys() {
 
 api.get('/api/info', (_req, res) => res.json({
   dataDir: DATA_DIR,
+  // Will this survive a restart? On a Space without a bucket the app asks
+  // about one before getting started (storage.js).
+  storage: storage(DATA_DIR),
   home: process.env.HOME || null,
   spaceId: process.env.SPACE_ID || null,
   spaceHost: process.env.SPACE_HOST || null,

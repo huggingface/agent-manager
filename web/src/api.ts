@@ -117,8 +117,11 @@ export interface BackupHealth {
   message: string | null; reason: string | null;
   lastSuccessAt: number | null; jobsUrl: string;
 }
+/** Will this survive a restart? See server/src/storage.js. */
+export interface StorageStatus { persistent: boolean; dataDir: string; reason: string }
 export interface Info {
   dataDir?: string;
+  storage?: StorageStatus;
   home?: string;
   spaceId: string | null;
   spaceHost: string | null;
