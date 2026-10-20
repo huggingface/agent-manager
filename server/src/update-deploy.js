@@ -95,29 +95,48 @@ const fail = (reason, detail) => ({ ok: false, reason, detail: detail ? String(d
  */
 export async function deployUpstreamTree({ sourceUrl, branch = 'main', ownUrl, dir, git, record = () => {} }) {
   const one = (text) => String(text || '').trim();
+  const head = `refs/heads/${branch}`;
+  // A fresh, empty repo, and both sides fetched into it at depth 1 — never the
+  // Space fetched into a full clone of upstream. HF's git server dies in that
+  // negotiation (`fatal: expected 'acknowledgments'`) once the client holds the
+  // whole GitHub history, and the old code read that failure as "the Space is
+  // empty" and pushed a parentless commit, which HF then refused as
+  // non-fast-forward. Only the two tips are needed: upstream's tree to deploy
+  // and the Space's commit to stand on.
   try {
-    await git(['clone', '--quiet', '--branch', branch, '--single-branch', sourceUrl, dir]);
-  } catch (error) { return fail('upstream-unreachable', error.message); }
+    await git(['init', '--quiet', dir]);
+    await git(['remote', 'add', 'upstream', sourceUrl], dir);
+    await git(['remote', 'add', 'own', ownUrl], dir);
+  } catch (error) { return fail('init-failed', error.message); }
+
+  // Whether the Space is empty is asked of the Space, not inferred from a fetch
+  // that failed. No ref is the first deploy; a ref we then cannot fetch is an
+  // error, because a deploy without its parent can only ever be refused.
+  let advertised;
+  try {
+    advertised = one(await git(['ls-remote', 'own', head], dir)).split('\n')
+      .map((line) => line.split(/\s+/)).find(([, name]) => name === head)?.[0] || null;
+  } catch (error) { return fail('own-unreachable', error.message); }
+
+  // The Space first, into the empty repo, so there is nothing to negotiate.
+  let parent = null;
+  if (advertised) {
+    try {
+      await git(['fetch', '--quiet', '--depth', '1', 'own', `+${head}:refs/remotes/own/${branch}`], dir);
+      parent = one(await git(['rev-parse', `refs/remotes/own/${branch}`], dir)) || null;
+    } catch (error) { return fail('own-fetch-failed', error.message); }
+    if (!parent) return fail('own-fetch-failed', `${head} is advertised as ${advertised} but nothing was fetched`);
+  }
 
   let upstream;
   let tree;
   try {
-    upstream = one(await git(['rev-parse', 'HEAD'], dir));
-    tree = one(await git(['rev-parse', 'HEAD^{tree}'], dir));
+    await git(['fetch', '--quiet', '--depth', '1', 'upstream', `+${head}:refs/remotes/upstream/${branch}`], dir);
+  } catch (error) { return fail('upstream-unreachable', error.message); }
+  try {
+    upstream = one(await git(['rev-parse', `refs/remotes/upstream/${branch}`], dir));
+    tree = one(await git(['rev-parse', `${upstream}^{tree}`], dir));
   } catch (error) { return fail('upstream-unreadable', error.message); }
-
-  try {
-    await git(['remote', 'add', 'own', ownUrl], dir);
-  } catch (error) { return fail('own-remote-failed', error.message); }
-
-  // A Space whose `main` is empty or unreachable is not an error yet: with no
-  // parent the deploy is simply the first commit. Anything else that goes wrong
-  // here surfaces when the push is refused, with git's own words.
-  let parent = null;
-  try {
-    await git(['fetch', '--quiet', 'own', branch], dir);
-    parent = one(await git(['rev-parse', 'FETCH_HEAD'], dir)) || null;
-  } catch { parent = null; }
 
   if (parent) {
     try {
@@ -156,6 +175,11 @@ export async function deployUpstreamTree({ sourceUrl, branch = 'main', ownUrl, d
   try { pointers = one(await git(['lfs', 'ls-files', '-n', commit], dir)); }
   catch (error) { return fail('lfs-scan-failed', error.message); }
   if (pointers) {
+    // Nothing was checked out, so no smudge filter ever downloaded the objects:
+    // they are fetched from upstream for exactly this tree, then sent on.
+    try {
+      await git(['lfs', 'fetch', 'upstream', upstream], dir);
+    } catch (error) { return fail('lfs-fetch-failed', error.message); }
     try {
       await git(['lfs', 'push', 'own', ref], dir);
     } catch (error) { return fail('lfs-push-failed', error.message); }

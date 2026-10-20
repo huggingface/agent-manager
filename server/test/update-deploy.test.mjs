@@ -80,7 +80,7 @@ function world(name) {
     // git-lfs needs a server, which a bare path remote is not. The transfer
     // itself is out of scope here; that it is attempted, and attempted BEFORE
     // the refs, is exactly what this fixture can prove.
-    if (args[0] === 'lfs' && args[1] === 'push') return resolve('');
+    if (args[0] === 'lfs' && (args[1] === 'push' || args[1] === 'fetch')) return resolve('');
     execFile('git', args, { cwd, env: ENV, timeout: 120_000 },
       (err, stdout, stderr) => (err ? reject(new Error(String(stderr || err.message))) : resolve(stdout)));
   });
@@ -125,10 +125,28 @@ test('deploying the tree puts upstream\'s files in place as one commit', async (
 test('LFS objects are sent before the refs that need them', async () => {
   const w = world('lfs');
   await w.deploy();
+  const fetched = w.calls.findIndex((c) => c === `lfs fetch upstream ${w.upstreamSha}`);
   const lfs = w.calls.findIndex((c) => c.startsWith('lfs push'));
   const push = w.calls.findIndex((c) => c.startsWith('push own'));
+  // Nothing is checked out any more, so no smudge filter downloads them for us.
+  assert.ok(fetched >= 0, `the tree's objects were never fetched from upstream: ${w.calls.join(' | ')}`);
   assert.ok(lfs >= 0, `no lfs push was attempted: ${w.calls.join(' | ')}`);
-  assert.ok(lfs < push, 'a tree of pointers whose objects never arrived is a broken Space');
+  assert.ok(fetched < lfs && lfs < push, 'a tree of pointers whose objects never arrived is a broken Space');
+});
+
+test('an LFS fetch that failed never reaches the ref push', async () => {
+  const w = world('lfs-fetch');
+  const calls = [];
+  const result = await w.deploy({
+    git: (args, cwd) => {
+      calls.push(args.join(' '));
+      if (args[0] === 'lfs' && args[1] === 'fetch') return Promise.reject(new Error('batch response: Repository not found'));
+      return w.git(args, cwd);
+    },
+  });
+  assert.deepEqual([result.ok, result.reason], [false, 'lfs-fetch-failed']);
+  assert.ok(!calls.some((c) => c.startsWith('lfs push') || c.startsWith('push own')), calls.join(' | '));
+  assert.equal(w.ownHead(), w.ownSha);
 });
 
 test('a pointer scan that failed never reaches the ref push', async () => {
@@ -252,6 +270,76 @@ test('the first deploy into an empty Space has no parent to stand on', async () 
   assert.equal(result.from, null);
   assert.equal(sh(['rev-list', '--count', 'main'], w.own).trim(), '1');
   assert.equal(w.ownFile('README.md'), 'v2\n');
+});
+
+test('a Space that has a main but cannot be fetched is an error, never an orphan', async () => {
+  // Today's failure: HF's git server dies fetching the Space into a repo that
+  // holds GitHub's full history (`fatal: expected 'acknowledgments'`), and the
+  // old code read that as "empty Space" and pushed a parentless commit, which
+  // HF refused as `! [rejected] am-deploy -> main (fetch first)`.
+  const w = world('own-fetch');
+  const calls = [];
+  const result = await w.deploy({
+    git: (args, cwd) => {
+      calls.push(args.join(' '));
+      if (args[0] === 'fetch' && args.includes('own')) {
+        return Promise.reject(new Error("fatal: expected 'acknowledgments'"));
+      }
+      return w.git(args, cwd);
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'own-fetch-failed');
+  assert.match(result.detail, /expected 'acknowledgments'/, 'git\'s own words reach the operator');
+  assert.ok(!calls.some((c) => c.startsWith('commit-tree') || c.startsWith('push')), calls.join(' | '));
+  assert.equal(w.ownHead(), w.ownSha, 'and the Space is left as it was');
+});
+
+test('an unreachable Space is not an empty one either', async () => {
+  const w = world('own-unreachable');
+  const result = await w.deploy({ ownUrl: path.join(root, 'no-such-space.git') });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'own-unreachable');
+  assert.ok(result.detail);
+});
+
+test('both sides are fetched shallowly into a fresh repo, and the push is a fast-forward', async () => {
+  const w = world('shallow');
+  // Give the Space real history, so depth 1 actually leaves something out.
+  const seed = path.join(w.dir, 'seed');
+  for (const n of [1, 2, 3]) {
+    fs.writeFileSync(path.join(seed, 'README.md'), `older ${n}\n`);
+    sh(['commit', '--quiet', '-am', `space commit ${n}`], seed);
+  }
+  sh(['push', '--quiet', w.own, 'main'], seed);
+  const before = w.ownHead();
+  const dir = path.join(w.dir, 'shallow-work');
+  const result = await w.deploy({ dir });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.from, before);
+
+  // No clone, and both fetches at depth 1 — the Space's before upstream's.
+  assert.ok(!w.calls.some((c) => c.startsWith('clone')), w.calls.join(' | '));
+  const ownFetch = w.calls.findIndex((c) => c.startsWith('fetch') && c.includes(' own '));
+  const upFetch = w.calls.findIndex((c) => c.startsWith('fetch') && c.includes(' upstream '));
+  assert.ok(ownFetch >= 0 && upFetch > ownFetch, w.calls.join(' | '));
+  assert.ok(w.calls[ownFetch].includes('--depth 1') && w.calls[upFetch].includes('--depth 1'));
+  assert.equal(sh(['rev-list', '--count', '--all'], dir).trim(), '3',
+    'the work repo holds the two tips and the deploy commit, nothing more');
+  assert.ok(fs.existsSync(path.join(dir, '.git', 'shallow')));
+
+  // On the Space: a fast-forward from what it had, carrying upstream's tree.
+  assert.equal(sh(['rev-parse', 'main^'], w.own).trim(), before);
+  assert.equal(sh(['merge-base', '--is-ancestor', before, 'main'], w.own), '');
+  assert.equal(sh(['rev-list', '--count', 'main'], w.own).trim(), '5');
+  assert.equal(sh(['rev-parse', 'main^{tree}'], w.own).trim(), sh(['rev-parse', 'HEAD^{tree}'], w.upstream).trim());
+  assert.equal(w.ownFile('docs/images/agent-manager.png'), POINTER);
+
+  // And the next run, also shallow, is the same-tree no-op.
+  const records = [];
+  const again = await w.deploy({ record: (upstream, ownSha) => records.push({ upstream, ownSha }) });
+  assert.equal(again.upToDate, true);
+  assert.deepEqual(records, [{ upstream: w.upstreamSha, ownSha: w.ownHead() }]);
 });
 
 test('the local record is believed only about the commit the Space is on', () => {
