@@ -22,7 +22,8 @@
 // servers listen on a port the kernel hands out, and scratch state lives in
 // mkdtemp dirs. A new suite that does need the machine to itself says so in its
 // header with a line containing `am-test: serial` and the reason; it then runs
-// alone, after the parallel ones. Before reaching for that, give it a free port.
+// alone, after the parallel ones (loop-offload, which measures event-loop lag in
+// milliseconds, is one). For a port or a path, give it its own instead.
 //
 // ONE WEB BUILD PER RUN. A suite that serves the production build (it mentions
 // AM_TEST_DIST, normally through `buildWeb()` in web/test/helpers/) waits for a

@@ -283,14 +283,24 @@ try {
   await new Promise((r) => setTimeout(r, 200));
   await p.getByRole('button', { name: 'Back to the current view' }).click();
   await p.waitForFunction(() => window.probe.historic() === 0);
-  await new Promise((r) => setTimeout(r, 400));
+  // Wait for the row to settle back rather than sampling it after a fixed
+  // 400ms: the live list re-measures its rows after it is shown again, and on
+  // a loaded machine that lands later. A row that never comes back still fails.
+  await p.waitForFunction(({ key, top }) => {
+    const row = document.querySelector(`[data-x="${key}"]`);
+    return row && Math.abs(Math.round(row.getBoundingClientRect().top) - top) <= 2;
+  }, { key: anchored.key, top: anchored.top }, { timeout: 5_000 }).catch(() => {});
   const returned = await p.evaluate((key) => {
     const row = document.querySelector(`[data-x="${key}"]`);
     return row ? Math.round(row.getBoundingClientRect().top) : null;
   }, anchored.key);
+  const settledState = await p.evaluate(() => {
+    const el = document.querySelector('.cxv-body');
+    return { st: el.scrollTop, sh: el.scrollHeight, ch: el.clientHeight, rows: document.querySelectorAll('[data-x]').length };
+  });
   assert.notEqual(returned, null, 'the row that was being read is still rendered');
   assert.ok(Math.abs(returned - anchored.top) <= 2,
-    `and in the same place (${anchored.top}px before opening a hit, ${returned}px after coming back)`);
+    `and in the same place (${anchored.top}px before opening a hit, ${returned}px after coming back; before ${JSON.stringify(anchored)}, after ${JSON.stringify(settledState)})`);
   results.push({ case: 'return from an old hit', anchorDriftPx: Math.abs(returned - anchored.top) });
 
   // ---------- a term that is nowhere is reported as nowhere, once complete ----------

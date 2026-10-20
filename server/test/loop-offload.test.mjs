@@ -6,6 +6,9 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+// am-test: serial — compares event-loop lag in milliseconds, which other suites
+// competing for the CPU swamp (63ms vs 95ms seen under a full parallel run).
+//
 // Event-loop wedges seen on the live Space (2026-10-19), each pinned down
 // here so it can't quietly come back:
 //   1. transcript parsing ran synchronously on the main thread — a heavy file
