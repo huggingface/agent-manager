@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import type { SessionState } from '../types';
 import { describeVerification, type LockStatus } from '../lib/lockStatus';
+import { reloadThroughHub } from '../lib/edgeRefusal';
 import { SlidersGlyph, SunGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
 import StateLogo from './StateLogo';
 import HfHeaderIcon from './HfHeaderIcon';
@@ -103,12 +104,25 @@ function MockSidebar() {
 //   checking                  a fresh start, not yet verified private
 //   verification-unavailable  verified before, but not recently enough — an
 //                             outage of the check, never proof of exposure
-export default function Locked({ spaceId, reason, bucket, status }: {
+// and one the browser infers rather than the server reports:
+//   nowPrivate                the Space was made private under this tab, so HF
+//                             refuses its unsigned polls (lib/edgeRefusal.ts);
+//                             only a reload through the Hub opens it
+export default function Locked({ spaceId, reason, bucket, status, nowPrivate, onCheckNow }: {
   spaceId?: string | null;
   reason?: string | null;
   bucket?: string | null;
   status?: LockStatus | null;
+  nowPrivate?: boolean;
+  /** Runs the status poll now (App's loadInfo). */
+  onCheckNow?: () => Promise<unknown>;
 }) {
+  const [checkingNow, setCheckingNow] = useState(false);
+  const checkNow = () => {
+    if (!onCheckNow || checkingNow) return;
+    setCheckingNow(true);
+    void onCheckNow().finally(() => setCheckingNow(false));
+  };
   // The "N s ago" copy has to move without a status refresh.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -155,6 +169,27 @@ api.duplicate_repo(
     if (legacyCopy()) { flash(); return; }
     navigator.clipboard?.writeText(cmd).then(flash).catch(() => {});
   };
+
+  if (nowPrivate) {
+    return (
+      <div className="app locked-app">
+        <MockSidebar />
+        <div className="main locked-main">
+          <div className="install" data-lock-reason="now-private">
+            <Title>This Space is now private</Title>
+            <p className="locked-lead">
+              Reload the page to open it. This tab was opened while the Space was public, so
+              Hugging Face has not signed it in; a reload through the Space's page does.
+            </p>
+            <div className="locked-actions">
+              <button className="btn-primary" data-lock-action="reload" onClick={() => reloadThroughHub(window, spaceId)}>Reload</button>
+              <span className="locked-sub">If nothing happens, press <b>⌘R</b> / <b>Ctrl+R</b>.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (reason === 'checking' || reason === 'verification-unavailable') {
     const v = describeVerification(status, now);
@@ -236,6 +271,8 @@ api.duplicate_repo(
           <p className="locked-sub install-relock">
             <b>Is this your Space?</b> Set it back to <b>Private</b> in Settings → Change visibility —
             it unlocks automatically within a minute.
+            {onCheckNow ? <> <button className="btn-ghost locked-check" data-lock-action="check-now" disabled={checkingNow}
+              onClick={checkNow}>{checkingNow ? 'Checking…' : 'Check now'}</button></> : null}
           </p>
 
           <figure className="install-film">

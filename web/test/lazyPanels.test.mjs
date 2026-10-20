@@ -130,7 +130,14 @@ try {
     // Node differed (v24.22.0 here). Both numbers sit under 790 and over 780, so
     // the budget holds either way, but do not expect the byte counts above to
     // reproduce exactly.
-    assert.ok(entry.length <= 790 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 790 kB budget`);
+    //
+    // The locked page noticing that its Space was made private (2026-10-20,
+    // lib/edgeRefusal.ts, Locked.tsx's "now private" screen and "Check now")
+    // adds 2,031 characters: main measured 808,371 here, this branch 810,402.
+    // It cannot be lazy: it is shown exactly when HF's edge refuses every
+    // request this tab makes, a chunk fetch included. Raised to 792, keeping
+    // ~0.6 kB of headroom, as tight as main had.
+    assert.ok(entry.length <= 792 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 792 kB budget`);
     // One literal only that panel's module contains — a dynamic import that
     // merely wraps an unchanged graph would leave these in the entry.
     for (const [panel, marker] of [
