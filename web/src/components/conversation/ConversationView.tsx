@@ -168,17 +168,16 @@ export default function ConversationView({
   const virtual = useVirtualRows(keys, scroller, following);
   const keysRef = useRef(keys); keysRef.current = keys;
   /**
-   * A cold reader holds the first transcript back until it is worth showing.
+   * A cold reader shows "Opening the conversation…" only until its FIRST window
+   * lands, and then shows that window at once.
    *
-   * The first window is 128 KiB, which on a tool-heavy trace is two exchanges.
-   * Bottom-anchoring stops the pages that follow from pushing that text down,
-   * but it does not make two messages and a screen of empty space an acceptable
-   * first page — the reader is supposed to open on a page of conversation.
-   * Rows are laid out and measured throughout, so this is a paint delay and not
-   * a fetch delay, and it is bounded four ways: coverage, the start of the
-   * conversation, an unusable source, and a deadline. The composer is never
-   * part of it, and a warm store starts revealed because its text is already
-   * readable.
+   * It used to hold the transcript back until older pages filled the screen, so
+   * the first page was never two messages and empty space. That cost a cold open
+   * a dozen sequential page reads — about two seconds on a large trace — before
+   * any text. The latest exchange is what someone opening the reader came for,
+   * so it is shown as soon as it is here; bottom-anchoring keeps it still while
+   * older history fills in above (readerFirstViewport.test.mjs pins both). The
+   * deadline remains for a source that never answers.
    */
   const [preparing, setPreparing] = useState(() => !reader.turns.current.length);
   // A terminal redraw is not evidence of work. Only transcript lifecycle
@@ -458,13 +457,12 @@ export default function ConversationView({
   }, [virtual.offsets, virtual.measuredHeight, exchanges.length, atStart, blocked, error, paused, reader.wantHistory]);
   useLayoutEffect(() => {
     if (!preparing) return;
-    // Anything that means more history is not coming, or is not needed.
-    if (atStart || blocked || error || phase === 'empty' || reader.fill === 'limited' || covered()) setPreparing(false);
-  }, [preparing, atStart, blocked, error, phase, reader.fill, virtual.offsets, exchanges.length]);
+    // The first window is here (or will not come): show what there is.
+    if (exchanges.length || error || phase !== 'loading') setPreparing(false);
+  }, [preparing, error, phase, exchanges.length]);
   useEffect(() => {
     if (!preparing) return;
-    // The safety bound. Preparation is meant to be brief; if the source is slow
-    // enough that it is not, an honestly partial page beats a spinner.
+    // The safety bound, for a first read that hangs.
     const timer = setTimeout(() => setPreparing(false), PREPARE_MAX_MS);
     return () => clearTimeout(timer);
   }, [preparing]);
