@@ -14,7 +14,7 @@ import { build } from 'esbuild';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'server-reach-')), 'serverReach.mjs');
 await build({ entryPoints: [path.join(HERE, '../src/lib/serverReach.ts')], outfile: out, format: 'esm', bundle: true, platform: 'node', logLevel: 'error' });
-const { createServerReach, pollDelay, SPREAD_MS } = await import(pathToFileURL(out).href);
+const { createServerReach, pollDelay, SPREAD_MS, RETIRED_BOOTS } = await import(pathToFileURL(out).href);
 
 function harness({ loaded = '/assets/index-OLD.js', hidden = false } = {}) {
   let now = 0;
@@ -212,6 +212,21 @@ await test('a superseded boot arriving late is ignored, not a restart back (revi
   await h.reach.answers();
   await h.advance(SPREAD_MS);
   assert.equal(backs.length, 2);
+});
+
+await test('the remembered boots stay bounded across many restarts', async () => {
+  const h = harness();
+  let backs = 0;
+  h.reach.onBack(() => backs++);
+  for (let i = 0; i < 500; i++) h.reach.noteBoot(`boot-${i}`);
+  await h.advance(SPREAD_MS);
+  assert.equal(backs, 499);
+  assert.equal(h.reach.seenBootCount, RETIRED_BOOTS + 1);
+  // Still bounded, still one recovery per restart: A, B, a late A, B again.
+  h.reach.noteBoot('A'); h.reach.noteBoot('B'); h.reach.noteBoot('A'); h.reach.noteBoot('B');
+  await h.advance(SPREAD_MS);
+  assert.equal(backs, 499 + 2, 'A and B are two restarts; the late A and repeated B are none');
+  assert.equal(h.reach.seenBootCount, RETIRED_BOOTS + 1);
 });
 
 if (failed) { console.log(`server reach: ${failed} failed`); process.exit(1); }

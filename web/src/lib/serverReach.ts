@@ -32,6 +32,8 @@ export interface ReachDeps {
 export const pollDelay = (n: number) => Math.min(2000 * 1.5 ** Math.max(0, n - 1), 20_000);
 /** How far the end of an outage is spread across listeners. */
 export const SPREAD_MS = 1500;
+/** Retired boot ids remembered besides the current one (see noteBoot). */
+export const RETIRED_BOOTS = 32;
 
 const ENTRY = /\/assets\/index-[\w-]+\.js/;
 
@@ -73,12 +75,16 @@ export function createServerReach(deps: ReachDeps) {
   // Boot ids are unique per server process, so one seen before and since
   // replaced can only come from a response that was already in flight (App's
   // /api/info landing after a newer probe). It is ignored: going back to it
-  // would read A→B→A→B as three restarts.
+  // would read A→B→A→B as three restarts. Stale responses can only come from
+  // the few requests in flight across a restart, so the current boot plus the
+  // last RETIRED_BOOTS are enough; the oldest is dropped (a Set iterates in
+  // insertion order), and a long-lived tab does not grow one entry per restart.
   const seenBoots = new Set<string>();
   function noteBoot(boot: string | null | undefined) {
     if (!boot || boot === knownBoot) return;
     if (seenBoots.has(boot)) return;
     seenBoots.add(boot);
+    while (seenBoots.size > RETIRED_BOOTS + 1) seenBoots.delete(seenBoots.values().next().value as string);
     const changed = knownBoot !== null;
     knownBoot = boot;
     if (changed) { bootChanged = true; recovered(); }
@@ -138,6 +144,7 @@ export function createServerReach(deps: ReachDeps) {
     onUpdateReady(fn: () => void): () => void { updateListeners.add(fn); return () => { updateListeners.delete(fn); }; },
     noteBoot,
     get down() { return down; },
+    get seenBootCount() { return seenBoots.size; },
     get updateReady() { return updateReady; },
   };
 }
