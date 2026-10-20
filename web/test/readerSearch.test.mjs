@@ -101,6 +101,7 @@ await build({
           if (next >= at) break;
           at = next; atStart = at <= 0;
         }
+        window.hitCursors = hits.map((h) => h.window.cursor);
         return {query:q, mode:'bytes', hits, next: atStart ? null : String(at),
           complete: atStart, blocked:false, clipped:!!cfg.searchClipped, scanned:size-at, boundary:size,
           generation:'g1', revision:'r1'};
@@ -201,15 +202,16 @@ try {
   // Counting reads outright would be flaky — the live reader keeps polling and
   // may still be filling. The invariants that actually distinguish a jump from
   // a walk are the SHAPE of the read and the total: reaching exchange 0 of this
-  // fixture page by page is roughly 28 backward windows. The opening read is the
-  // first backward one after the click, not the last read: once the page is on
-  // screen the reader may already be fetching the window above it, and on a busy
-  // machine that read lands before this check runs.
+  // fixture page by page is roughly 28 backward windows. The opening read is
+  // the one at a cursor the search handed back, not simply the last or first
+  // read after the click: the live reader keeps reading around it (its own
+  // 384 KB windows), and on a busy machine those land on either side of it.
   const jump = await p.evaluate((mark) => {
-    const opened = window.reads.slice(mark).find((r) => r.at === 'before');
+    const opened = window.reads.slice(mark).find((r) => window.hitCursors.includes(r.cursor))
+      || { at: null, bytes: null, reads: window.reads.slice(mark) };
     return { opened, backward: window.reads.filter((r) => r.at === 'before').length };
   }, hitMark);
-  assert.equal(jump.opened.at, 'before', 'a hit is opened with the locator the search handed back');
+  assert.equal(jump.opened.at, 'before', `a hit is opened with the locator the search handed back ${JSON.stringify(jump.opened)}`);
   assert.equal(jump.opened.bytes, 256 * 1024, 'including its window size, so it is that exact page');
   assert.ok(jump.backward <= 10,
     `and nothing walked the transcript back to it (${jump.backward} backward reads in total)`);

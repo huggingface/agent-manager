@@ -122,6 +122,10 @@ context.setDefaultTimeout(10_000);
 await context.route('https://example.test/**',(route)=>route.fulfill({body:'External destination'}));
 const errors=[];context.on('page',(page)=>page.on('pageerror',(error)=>errors.push(error.message)));
 const page=await context.newPage();
+// The dialog opening or closing settles over a frame or two (inert, focus,
+// the pager's selection); on a loaded machine a read straight after the click
+// can land before it. Wait for the state instead of sampling it once.
+const settles=(target,fn,arg)=>target.waitForFunction(fn,arg,{timeout:10_000});
 try {
   await page.goto(origin);
   const original=page.url(), title=await page.title();
@@ -132,7 +136,7 @@ try {
   await openReadme();
   assert.equal(context.pages().length,1);assert.equal(page.url(),original);assert.equal(await page.title(),title);
   assert.equal(await page.evaluate(()=>window.mounts),1);
-  assert.equal(await page.locator('.pane-file-session').evaluate((el)=>el.inert),true);
+  await settles(page,()=>document.querySelector('.pane-file-session')?.inert===true);
   assert.equal(await page.locator('.xterm').count(),1,'original terminal stays mounted');
   await page.locator('#neighbor').click(); // other tiles are not blocked
   await dialog.getByRole('link',{name:'Next',exact:true}).click();
@@ -141,10 +145,12 @@ try {
   await dialog.getByRole('heading',{name:'Readme preview'}).waitFor();
   if(process.env.FILE_LINK_SHOTS){fs.mkdirSync(process.env.FILE_LINK_SHOTS,{recursive:true});await page.screenshot({path:path.join(process.env.FILE_LINK_SHOTS,'session-preview-desktop.png')});}
   await dialog.getByRole('button',{name:'Close preview',exact:true}).click();
+  await dialog.waitFor({state:'hidden'});
+  await settles(page,()=>document.querySelector('.pane-file-session')?.inert===false);
+  await settles(page,()=>document.activeElement?.closest('#conversation')&&document.activeElement.textContent==='Readme')
+    .catch(()=>{throw new Error('focus returns to source');});
   assert.equal(await reader.evaluate((el)=>el.scrollTop),scroll);
   assert.equal(await reader.getByRole('textbox',{name:'Draft'}).inputValue(),'Keep this draft');
-  assert.equal(await page.locator('.pane-file-session').evaluate((el)=>el.inert),false);
-  assert.equal(await reader.getByRole('link',{name:'Readme',exact:true}).evaluate((el)=>el===document.activeElement),true,'focus returns to source');
   const clickCell=async(row)=>{
     const box=await page.locator('.xterm-screen').boundingBox();
     await page.mouse.move(box.x+3.5*box.width/60,box.y+(row+.5)*box.height/5);
@@ -193,8 +199,9 @@ try {
   await app.getByRole('dialog').waitFor({state:'hidden'});
   await app.locator('.tile .file-link-page').getByRole('heading',{name:'Readme preview'}).waitFor();
   assert.equal(await app.getByRole('dialog').count(),0);
-  assert.equal(await app.locator('.rp-agent').count(),0,'group pager selects the new Files pane');
-  assert.equal(await app.evaluate(()=>localStorage.getItem('am-focused-id')),'retained');
+  await settles(app,()=>!document.querySelector('.rp-agent')).catch(()=>{throw new Error('group pager selects the new Files pane');});
+  await settles(app,()=>localStorage.getItem('am-focused-id')==='retained')
+    .catch(async()=>{throw new Error(`focused id ${await app.evaluate(()=>localStorage.getItem('am-focused-id'))}, not retained`);});
   if(process.env.FILE_LINK_SHOTS)await app.screenshot({path:path.join(process.env.FILE_LINK_SHOTS,'app-retained-viewer.png')});
   await app.close();
   assert.deepEqual(errors,[]);

@@ -37,7 +37,9 @@ export async function startFixtureServer({ port, publicDir, tag = 'am-fixture-' 
   const cfgDir = path.join(dataDir, 'claude-config');
   const binDir = path.join(dataDir, 'bin');
   fs.mkdirSync(binDir, { recursive: true });
-  fs.writeFileSync(path.join(binDir, 'claude'), '#!/bin/sh\necho "fixture claude stub — nothing to see"; sleep 3600\n', { mode: 0o755 });
+  // `--version` fails at once, as the old stub's 30s timeout did in effect,
+  // without leaving a `sleep 3600` behind for every server this starts.
+  fs.writeFileSync(path.join(binDir, 'claude'), '#!/bin/sh\n[ "$1" = --version ] && exit 1\necho "fixture claude stub — nothing to see"; sleep 3600\n', { mode: 0o755 });
 
   // No skill publishing from a test server (SPACE_ID would fan this checkout's
   // templates into every live agent's skills dir), no production hostname.

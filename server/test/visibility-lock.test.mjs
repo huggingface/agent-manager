@@ -248,6 +248,9 @@ try {
   // ---- 2. verification succeeds: opens on its own ----
   mode.space = 'private';
   const t1 = Date.now();
+  // Until now every discovery attempt failed and was retried once a cycle, so
+  // how many there were depends on how long the setup above took.
+  const discoveryOpen = hubCalls.length;
   i = await waitFor(async () => { const x = await info(); return x && !x.locked ? x : null; }, 4 * CHECK_MS);
   check(`unlocks within a check cycle of valid evidence (${Date.now() - t1} ms)`, !!i && i.lockReason === null && i.bucketUnverified === false);
   check('verified Space and bucket are both reported', i.visibility.space.verdict === 'private' && i.visibility.buckets.some((b) => b.id === BUCKET_ID && b.verdict === 'private'));
@@ -493,7 +496,8 @@ try {
   await sleep(3 * CHECK_MS);
   const inWindow = hubCalls.filter((c) => c.at >= windowStart).length;
   check(`bounded checks: ${inWindow} Hub requests in ${3 * CHECK_MS} ms (≤ 2 per cycle: space + bucket)`, inWindow <= 2 * 4 && inWindow >= 2);
-  check('discovery ran once (deployment-scoped cache)', hubCalls.filter((c) => c.auth).length <= 2, `${hubCalls.filter((c) => c.auth).length} authenticated calls`);
+  const discoveries = hubCalls.slice(discoveryOpen).filter((c) => c.auth).length;
+  check('discovery ran once (deployment-scoped cache)', discoveries === 1, `${discoveries} authenticated calls once the Space could verify`);
   check('the fixture token never appears in server output', !log.includes('hf_fixture_not_a_real_token'));
 } catch (e) {
   check('suite completed', false, e && e.stack);
