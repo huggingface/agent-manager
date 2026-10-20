@@ -911,9 +911,11 @@ export default function TerminalPane({
     };
     // Resume by itself. A pane waiting out an outage reconnects when the
     // server answers again (serverReach spreads that across panes). A paused
-    // one gets a fresh budget when the operator comes back to the app — a
-    // retry they would otherwise have had to click, never a background loop.
-    const offBack = serverReach.onBack(() => { if (waiting && !closedByUs) reconnectRef.current(); });
+    // one was refused by a server that WAS answering, so the server answering
+    // says nothing new about it: it gets a fresh budget only when the operator
+    // comes back to the app — a retry they would otherwise have had to click,
+    // never a background loop.
+    const offBack = serverReach.onBack(() => { if (waiting === 'offline' && !closedByUs) reconnectRef.current(); });
     const onComeBack = () => { if (waiting === 'paused' && !closedByUs && !document.hidden) reconnectRef.current(); };
     const onComeBackVisible = () => { if (!document.hidden) onComeBack(); };
     window.addEventListener('online', onComeBack);

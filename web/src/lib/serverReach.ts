@@ -55,6 +55,7 @@ export function createServerReach(deps: ReachDeps) {
           const boot = (await res.json())?.boot;
           if (typeof boot === 'string') noteBoot(boot);
         } catch { /* an edge page, not ours: still an answer */ }
+        if (down) recovered();
         return true;
       } catch { return false; }
     })().finally(() => { probing = null; });
@@ -62,10 +63,17 @@ export function createServerReach(deps: ReachDeps) {
   };
 
   let bootChanged = false;
+  // A new boot id is a recovery wherever it is first seen: this module's own
+  // probe, or App's /api/info poll. A restart short enough to be over before
+  // anything reported an outage (the first check a dropped pane makes, or a
+  // reader-only page whose polls happened to miss it) still left every view
+  // reading state from a server that is no longer running, and possibly an
+  // old client against a new build.
   function noteBoot(boot: string | null | undefined) {
     if (!boot) return;
-    if (knownBoot && knownBoot !== boot) bootChanged = true;
+    const changed = !!knownBoot && knownBoot !== boot;
     knownBoot = boot;
+    if (changed) { bootChanged = true; recovered(); }
   }
 
   const checkBuild = async () => {
@@ -99,7 +107,7 @@ export function createServerReach(deps: ReachDeps) {
   const tick = async () => {
     timer = null;
     if (!down) return;
-    if (await probe()) recovered(); else schedule();
+    if (!(await probe())) schedule();
   };
   /** Ask now (a return event, or a caller that just failed). */
   const wake = () => {

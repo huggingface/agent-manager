@@ -36,6 +36,8 @@ await build({
   stdin: { resolveDir: web, loader: 'tsx', contents: `
     import React from 'react'; import {createRoot} from 'react-dom/client'; import {flushSync} from 'react-dom';
     import TerminalPane from './src/components/TerminalPane';
+    import { serverReach } from './src/lib/serverReach';
+    window.serverReach = serverReach;
     const W = window.WebSocket;
     window.opens = [];
     window.WebSocket = class extends W { constructor(u, p) { super(u, p);
@@ -93,7 +95,9 @@ async function kill() {
 
 let failed = 0;
 const check = async (what, fn) => {
-  if (!fixture.up) await start();   // a failed case must not take the next one down with it
+  // A failed case must not take the next one down with it.
+  if (!fixture.up) await start();
+  fixture.refuse = false;
   try { await fn(); console.log(`  ok  ${what}`); } catch (e) {
     failed++; console.log(`  FAIL ${what}\n       ${e.message.split('\n')[0]}`);
   }
@@ -148,6 +152,14 @@ try {
     assert.equal(fixture.upgrades - before, 4, 'retries after the drop (the drop is the first failure)');
     await new Promise((r) => setTimeout(r, 3000));
     assert.equal(fixture.upgrades - before, 4, 'kept retrying after pausing');
+    // The end of an outage says nothing new about a server that was answering
+    // while it refused (review P2): an outage noticed elsewhere on the page
+    // ends, and this pane stays paused until the operator comes back.
+    await p.evaluate(() => window.serverReach.reportOutage());
+    await until(p, 'the outage to end', () => p.evaluate(() => !window.serverReach.down), 10_000);
+    await new Promise((r) => setTimeout(r, 2500));   // past the 1.5s spread
+    assert.equal(fixture.upgrades - before, 4, 'the end of an outage resumed a refusal pause');
+    assert.ok((await text(p)).includes('connection paused'), 'no longer paused');
     fixture.refuse = false;
     await p.evaluate(() => window.dispatchEvent(new Event('focus')));
     await until(p, 'the resume on return', async () => !(await text(p)).includes('connection paused')

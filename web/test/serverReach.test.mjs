@@ -164,5 +164,31 @@ await test('a restart with the same build, or no restart, is only a reconnect', 
   assert.equal(h.server.pages, 1, 'checked the build without a restart');
 });
 
+await test('a new boot seen by an ordinary check, with no outage reported, is a recovery (review P1)', async () => {
+  // A restart over before anything polled: the first check a dropped pane
+  // makes already answers, from a different boot. Nothing had reported an
+  // outage, and the views and the build check must still hear of it.
+  const h = harness();
+  await h.reach.answers();                       // learns boot-1
+  const backs = [];
+  h.reach.onBack((b) => backs.push(b));
+  h.server.boot = 'boot-2'; h.server.entry = '/assets/index-NEW.js';
+  assert.equal(await h.reach.answers(), true);
+  await h.advance(SPREAD_MS);
+  assert.deepEqual(backs, [{ rebooted: true }]);
+  assert.equal(h.reach.updateReady, true);
+  assert.equal(h.server.pages, 1);
+  // Seen first by App's /api/info poll instead: the same recovery.
+  h.reach.noteBoot('boot-3');
+  await h.advance(SPREAD_MS);
+  assert.deepEqual(backs, [{ rebooted: true }, { rebooted: true }]);
+  // The same boot again, from either path, is nothing.
+  h.server.boot = 'boot-3';
+  h.reach.noteBoot('boot-3');
+  await h.reach.answers();
+  await h.advance(SPREAD_MS);
+  assert.equal(backs.length, 2, 'announced a boot it already knew');
+});
+
 if (failed) { console.log(`server reach: ${failed} failed`); process.exit(1); }
 console.log('server reach: all passed');
