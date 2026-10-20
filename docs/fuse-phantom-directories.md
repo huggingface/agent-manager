@@ -20,7 +20,7 @@ home/.cache/claude/home               ← because  .cache/claude-cli-nodejs     
 
 A negative lookup that should return `ENOENT` becomes a directory inode. This broke
 `git commit` (git *skips* a missing hook but **execs** a directory — fatal) and the Gemini
-CLI (`EISDIR` reading its registry). Both are repaired on this Space; see
+CLI (`EISDIR` reading its registry). Both are repaired in the affected deployment; see
 [What was applied](#what-was-applied-2026-07-28).
 
 It is **not** "FUSE turns an atomic write into a directory", which is what
@@ -28,7 +28,7 @@ It is **not** "FUSE turns an atomic write into a directory", which is what
 
 ## Environment
 
-- `/data` is `hf-mount` FUSE, backing bucket **`thomwolf/agent-manager-data`**.
+- `/data` is `hf-mount` FUSE, backed by an operator-configured bucket.
 - Upstream source inspected at **v0.9.0 / `ff83aca`** (HEAD, 2026-07-28). Both faulty code
   paths are present there; the fix exists only on the unmerged PR #207 branch.
 
@@ -154,7 +154,7 @@ Ordinary tooling generates vulnerable name pairs constantly:
 The evidence establishes application breakage and incorrect filesystem semantics. It does
 **not** establish stored-object corruption, data loss, or a security vulnerability.
 
-## Known sites on this Space
+## Known sites in the affected deployment
 
 | Phantom path | Key it prefix-matches | Impact | Now |
 |---|---|---|---|

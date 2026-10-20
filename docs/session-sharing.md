@@ -172,7 +172,7 @@ rather than to STS-Format. We follow that precedent.
   "schema": "am-session-share/1",
   "harness": { "id": "claude", "version": "2.1.220" },
   "session": { "id": "<am session id>", "uuid": "<sessionUuid>", "name": "…", "model": "…" },
-  "origin": { "user": "thomwolf", "space": "<space id>", "cwdSlug": "-data-workspaces-Agent-manager" },
+  "origin": { "user": "<username>", "space": "<space id>", "cwdSlug": "<workspace-slug>" },
   "trace": { "path": "trace.jsonl", "nativePath": "projects/<cwd-slug>/<uuid>.jsonl",
              "sha256": "…", "lines": 1234, "converted": false },
   "stats": { "turns": 0, "prompts": 0, "toolCalls": 0, "tokensIn": 0, "tokensOut": 0,
@@ -280,7 +280,7 @@ api.update_repo_settings(repo_id=REPO, repo_type="dataset", gated="manual")
 api.grant_access(REPO, "teammate-username", repo_type="dataset")
 ```
 
-Verified against `thomwolf/am-session-sharing-design-gated` on 2026-07-26: the endpoint is
+Verified against a gated test dataset on 2026-07-26: the endpoint is
 `POST /api/datasets/<repo>/user-access-request/grant` with `{"user": …}`; a probe for a
 nonexistent user returns **404** (not 403), confirming the Space token has write rights to
 drive this. Errors are usefully specific — 400 not-gated, 400 already-has-access,
@@ -502,7 +502,7 @@ adding a second token path.
 ## 11. Risks and open questions
 
 1. ~~Can a non-collaborator open a PR on someone else's dataset?~~ **Confirmed possible**
-   (manually verified by @thomwolf, 2026-07-26). The transport assumption holds; the API is
+   (manually verified, 2026-07-26). The transport assumption holds; the API is
    `create_discussion(pull_request=True)` / `create_commit(create_pr=True)`.
 2. **Does the receiving user's `HF_TOKEN` see PRs on their own repo?** `get_repo_discussions`
    must list PRs opened by others. Very likely fine given (1); confirm in Phase 3 when the
@@ -526,18 +526,18 @@ adding a second token path.
    behaved identically). So the share flow **must not hand the user a link and claim it is
    readable.** It needs a "viewer still processing" state, and should point at the *Files*
    tab as the immediate fallback — that works from the first second.
-6. **Large transcripts** — a 3.5 MB transcript exists on this Space today. Fine for upload;
+6. **Large transcripts** — a 3.5 MB transcript was used during validation. Fine for upload;
    our panel must virtualize.
 7. **One session per repo makes one very fat row.** Ours is **2.13 MB** in a single row, and
    the Hub's own session modal never rendered it (it renders `TeichAI`'s smaller rows fine).
    Cheap mitigations at export: strip inline base64 images and cap oversized tool results.
    Confirm against the `-noimg` control before deciding whether this is a real limit.
 8. **Gemini CLI is unsupported** by both the Hub's detection and our own parsers, and is
-   currently broken here anyway (§12). Out of scope.
+   affected by the filesystem issue described in §12. Out of scope.
 
 ## 12. Adjacent bug found while surveying
 
-Gemini CLI is broken on this Space: `/data/home/.gemini/projects.json` is a **directory**
+An affected deployment had a broken Gemini CLI: `/data/home/.gemini/projects.json` is a **directory**
 (containing `home`), so the CLI dies with
 `Critical failure reading project registry: EISDIR: illegal operation on a directory, read`.
 Same failure class as the opencode `opencode.json` bug that `runner.js:329-332` already
@@ -575,29 +575,21 @@ runner.js captures, falling back to cwd.
 
 Phases 1 and 2 are each shippable alone. Phase 3 is the one that needs Phase 0 to pass.
 
-## 14. Reference examples
+## 14. Reproducing the sharing checks
 
-Published 2026-07-26 from *this* session by the phase-1 prototype
-(`share-session.mjs`: locate → redact → assemble, then `huggingface_hub` publish).
+Use synthetic transcripts and test datasets owned by the tester. Do not publish
+real conversations or deployment identifiers as shared test fixtures.
 
-| Repo | Access | Notes |
+| Fixture | Access | Check |
 |---|---|---|
-| [`thomwolf/am-session-sharing-design`](https://huggingface.co/datasets/thomwolf/am-session-sharing-design) | public | the reference public share |
-| [`thomwolf/am-session-sharing-design-gated`](https://huggingface.co/datasets/thomwolf/am-session-sharing-design-gated) | `gated="auto"` | gate UI verified logged-out |
-| [`thomwolf/am-session-sharing-design-noimg`](https://huggingface.co/datasets/thomwolf/am-session-sharing-design-noimg) | public | images stripped; a control for risk (5) |
+| `<namespace>/session-share-test` | public | Card, manifest, briefing and trace render |
+| `<namespace>/session-share-test-gated` | gated | Logged-out content access is denied; metadata remains public |
+| `<namespace>/session-share-test-noimg` | public | Compare rendering with inline images removed |
 
-What the run established:
+Verify the export's record filtering and redaction report before publishing.
+Viewer indexing can lag publication; distinguish indexing delays from export
+failures. Test gated access separately from anonymous dataset-server access.
 
-- **The export pipeline works end to end.** 221 transcript lines → 213 published, 8
-  `file-history-*` lines dropped, 7 email redactions, **zero secret matches** (pattern rules
-  and env-value rules both clean). Card, manifest, briefing and redaction report generated.
-- **Gating works and looks right.** A logged-out visitor gets *"This repository is publicly
-  accessible, but you have to accept the conditions to access its files and content"* with
-  our `extra_gated_prompt`, above a fully visible card. Contents protected, metadata public
-  — exactly the trade-off §5 describes.
-- **The trace viewer had not finished processing** any of the three at time of writing; see
-  risk (5). The gated one additionally is invisible to the anonymous datasets-server.
-- **Publishing internal-looking content needs a provenance check, not a vibe.** This
-  transcript quotes ~1,200 lines of `server/src`, which looked like an INTERNAL-repo leak
-  until the files were diffed against the public template Space and found byte-identical.
-  The export flow should make that check explicit rather than leaving it to judgement.
+Before publishing code quoted in a transcript, verify its provenance against an
+already public source. A successful secret scan does not authorize publishing a
+private conversation or proprietary source code.
