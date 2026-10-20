@@ -2336,3 +2336,5 @@ a.btn-ghost { text-decoration: none; }
 .codex-shared-tasks { padding-left: 20px; overflow-wrap: anywhere; }
 .codex-shared-tasks li { margin-block: 10px; }
 .codex-shared-tasks details { font-size: 12px; margin-top: 4px; }
+
+.hf-header-icon { display: inline-block; vertical-align: -5px; margin: 0 2px; }
