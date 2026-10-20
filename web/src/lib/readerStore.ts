@@ -319,7 +319,9 @@ export class ReaderStore {
    */
   nudge = (watched: boolean) => {
     if (watched) this.watched = true;
-    if (!this.active || this.failures) return;
+    // Not gated on earlier failures: a session's first read fails with no-trace
+    // until its CLI creates the file, and this push is the file appearing.
+    if (!this.active) return;
     if (this.request && !this.request.speculative) { this.nudged = true; return; }
     this.schedule(Math.max(0, this.readAt + NUDGE_GAP_MS - Date.now()));
   };

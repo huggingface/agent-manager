@@ -208,7 +208,8 @@ function notifyActivity(id, cause) {
  */
 function sampleScreen(host, repaint = false) {
   const now = Date.now();
-  if (!repaint && host.lastSampleAt && now - host.lastSampleAt < SAMPLE_THROTTLE_MS) {
+  // Only a busy pane is throttled: the first frame of a turn starts it at once.
+  if (!repaint && host.busy && host.lastSampleAt && now - host.lastSampleAt < SAMPLE_THROTTLE_MS) {
     if (!host.sampleTimer) {
       host.sampleTimer = setTimeout(() => { host.sampleTimer = null; if (hosts.get(host.id) === host) sampleScreen(host); },
         SAMPLE_THROTTLE_MS - (now - host.lastSampleAt));
