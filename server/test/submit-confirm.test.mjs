@@ -328,6 +328,18 @@ try {
     assert.match(String(selectSend.body.error || ''), /neither an empty composer nor the session working/);
   });
 
+  // Fourth review: only known noise is ignored when comparing the screens. A
+  // digit that changes is a change.
+  console.log('\n# an Enter that moves a step counter and keeps the prompt selected');
+  await fresh('fake-codex-steps');
+  setMode({ dialog: 'steps' });
+  const steps = await sendText('Continue');
+  check('"Step 1 of 2" becoming "Step 2 of 2" is a change: no second Enter', () => {
+    assert.equal(steps.status, 409, `answered ${steps.status}: ${JSON.stringify(steps.body)}`);
+    assert.equal(steps.body.code, 'input-not-submitted');
+    assert.deepEqual(read('enters'), ['with-text'], 'an Enter was pressed into the confirmation');
+  });
+
   console.log('\n# a prompt that is a numbered list');
   await fresh('fake-codex-numbered');
   setMode({});

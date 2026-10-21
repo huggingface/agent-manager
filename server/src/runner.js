@@ -2730,7 +2730,8 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
  *    a screen with no composer on it — is not a submit;
  *  - Enter is pressed once more only if the first visibly did nothing: the
  *    prompt still in the composer AND the screen otherwise as it was just
- *    before that Enter (cursor, spinners and digits aside). An Enter that
+ *    before that Enter (cursor, a row's spinner glyph and the busy row's
+ *    elapsed time aside; see stillScreen). An Enter that
  *    changed the screen opened something — a dialog, a menu, a new layout —
  *    and one that happens to show the prompt's words must not get another;
  *  - otherwise the send fails (input-not-submitted), and the line is marked as
@@ -2771,10 +2772,10 @@ async function submitConfirmed(host, id, confirm, text) {
   if (confirm.starting) await until((v) => !v.starting, STARTUP_WAIT_MS);
   // The Enter still goes as its own keypress, apart from the paste burst.
   await new Promise((r) => setTimeout(r, 300));
-  const before = stillScreen(host);
+  const before = stillScreen(host, confirm);
   host.pty.write('\r');
   let ok = await until((v) => v.submitted, SUBMIT_CONFIRM_TIMEOUT_MS);
-  const untouched = !ok && look().holds && stillScreen(host) === before;
+  const untouched = !ok && look().holds && stillScreen(host, confirm) === before;
   if (untouched) {
     host.pty.write('\r');
     ok = await until((v) => v.submitted, SUBMIT_CONFIRM_TIMEOUT_MS);
@@ -2787,14 +2788,22 @@ async function submitConfirmed(host, id, confirm, text) {
 }
 
 /**
- * The visible screen, less what changes on an idle one: spinner and bullet
- * glyphs, and digits (elapsed times, clocks). The cursor is not in it.
+ * The visible screen, less only what is known to change on its own: the
+ * spinner glyph a row opens with (Codex's blinking `•`/`◦`, braille and
+ * quarter-circle spinners, Claude Code's `✻`-family), and the elapsed time on
+ * the CLI's own busy row (the one its `busy` pattern matches, e.g. Codex's
+ * `Working (12s • esc to interrupt)`). The cursor is not in the text. Every
+ * other character — digits included — must match: "Step 1 of 2" becoming
+ * "Step 2 of 2" is a change, and a change means no second Enter.
  */
-const STILL_NOISE = /[\u2800-\u28ff\u25d0-\u25d3\u2022\u25e6\u00b7\u2722\u2733\u2736\u273b\u273d]/g;
-function stillScreen(host) {
+const SPINNER_LEAD = /^(\s*)[\u2800-\u28ff\u25d0-\u25d3\u2022\u25e6\u00b7*\u2722\u2733\u2736\u273b\u273d](?=\s)/;
+function stillScreen(host, confirm) {
   let screen = '';
   try { screen = host.vt.getVisibleText(); } catch {}
-  return screen.replace(STILL_NOISE, '').replace(/\d+/g, '#').replace(/[^\S\n]+$/gm, '');
+  return screen.split('\n').map((row) => {
+    const bare = row.replace(SPINNER_LEAD, '$1').replace(/\s+$/, '');
+    return confirm.busy.test(bare) ? bare.replace(/\d+/g, '#') : bare;
+  }).join('\n');
 }
 
 /** Insert text into a running terminal's composer without submitting it. */

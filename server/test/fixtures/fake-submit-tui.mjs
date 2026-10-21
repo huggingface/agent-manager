@@ -21,6 +21,9 @@
 //              "select" draws an unnumbered choice whose selected label is
 //              the prompt itself — `› Continue` over `  Quit` — with the
 //              cursor after it, just like a composer holding the prompt.
+//              "steps" shows `Step 1 of 2` above the composer; the Enter
+//              turns it into `Step 2 of 2` — a confirmation over the same
+//              rows, the prompt still selected — and nothing else moves.
 // Every Enter received is appended to $FAKE_DIR/enters, every submit to
 // $FAKE_DIR/submitted.
 import fs from 'node:fs';
@@ -42,6 +45,7 @@ const draw = () => {
   const content = `› ${shown ? line : ''}${Date.now() < startingUntil ? '   Waiting for startup  · esc cancel' : ''}`;
   const cols = process.stdout.columns || 80;
   const rows = content.split('\n').map((l, i) => (i ? `  ${l}` : l));
+  if (dialog === 'steps') rows.unshift(`Step ${inDialog ? 2 : 1} of 2`);
   process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J${rows.join('\r\n')}`);
   drawnRows = rows.reduce((n, l) => n + Math.max(1, Math.ceil([...l].length / cols)), 0);
 };
@@ -77,6 +81,7 @@ process.stdin.on('data', (chunk) => {
       if (dialog) {
         inDialog = true;
         const up = `\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J`;
+        if (dialog === 'steps') { draw(); continue; }
         if (dialog === 'select') { process.stdout.write(`${up}› ${line}\r\n  Quit\x1b[A\r\x1b[${2 + line.length}C`); continue; }
         const pick = dialog === 'plain' ? ' ' : '›';
         process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J  Choose a directory\r\n${pick} 1. Use session directory\r\n  2. Use current directory`);
