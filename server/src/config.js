@@ -204,7 +204,14 @@ const codexCommand = (tail = '') => `codex ${CODEX_INPUT_SIGNALS}${tail ? ` ${ta
  * the CLI's placeholder for a collapsed paste, and its busy indicator.
  * `starting` is a notice during which Enter does nothing.
  */
-const CODEX_CONFIRM = { pasted: /\[PastedContent\d+chars\]/, busy: /esc to interrupt/, starting: /Waiting for startup/ };
+// `notice` is that startup notice as Codex draws it after the composer's
+// text, on the same row: removed before the composer is compared with the
+// prompt, and only in this exact trailing form, never from the prompt itself.
+const CODEX_CONFIRM = { pasted: /\[PastedContent\d+chars\]/, busy: /esc to interrupt/, starting: /Waiting for startup/,
+  notice: / {2,}Waiting for startup {2}\u00b7 esc cancel\s*$/,
+  // The elapsed time in Codex's busy row, the one part of it that changes on
+  // its own (runner.js stillScreen): `Working (1m 05s • esc to interrupt)`.
+  elapsed: /(Working \()(?:\d+h )?(?:\d+m )?\d+s( \u2022 esc to interrupt\))/g };
 const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
 
 export const CLIS = [

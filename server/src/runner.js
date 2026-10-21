@@ -98,6 +98,11 @@ const INPUT_ECHO_TIMEOUT_MS = Number(process.env.AM_INPUT_ECHO_TIMEOUT_MS || 200
 const PASTE_SHOWN_TIMEOUT_MS = Number(process.env.AM_PASTE_SHOWN_TIMEOUT_MS || 10000);
 const STARTUP_WAIT_MS = Number(process.env.AM_STARTUP_WAIT_MS || 30000);
 const SUBMIT_CONFIRM_TIMEOUT_MS = Number(process.env.AM_SUBMIT_CONFIRM_TIMEOUT_MS || 3000);
+// A single-line prompt longer than this goes to such a CLI as a paste, not
+// typed (typeAndSubmit).
+const LONG_LINE_CHARS = 512;
+// Bracketed-paste start/end markers, which must not occur inside a paste.
+const PASTE_MARKS = /\x1b\[20[01]~/g;
 // Despite the Node wrapper's `scrollbackLimit` name, Ghostty's native option is
 // a byte budget. Passing a line count such as 20,000 retains only a small native
 // allocation (about 700 ordinary rows). Keep the unit explicit at our boundary.
@@ -2410,6 +2415,80 @@ export function composerShape(snapshot) {
 // How far up a wrapped prompt line is followed (see composerShape).
 const WRAP_ROWS = 8;
 
+/**
+ * The composer a prompt was just typed into, for the submit check — or null
+ * when it cannot be positively identified.
+ *
+ * A ruled box (Claude Code) answers for itself, as in composerShape. Codex
+ * draws none, and from 0.162 shows a paste under 1000 chars as its text: over
+ * as many rows as it takes, a blank row for each blank line in it, the cursor
+ * at its end. composerShape's short walk up from the cursor does not reach the
+ * marker of such a composer. Walking further is only safe anchored to the
+ * LIVE composer, never to "some row with a marker above the cursor": Codex
+ * echoes every submitted prompt into the transcript as `› …`, and a dialog
+ * drawn below that echo would otherwise read as a composer holding it. So:
+ *  - only the bottom-most marker row on the screen opens the composer;
+ *  - the cursor sits on it or below it, with no rule in between;
+ *  - nothing below the cursor is a numbered option or a dialog's key hints;
+ *  - and the block is what the caller compares, in full (promptInComposer).
+ * Text alone cannot tell a composer from a dialog that happens to show the
+ * same words; that is settled around the Enter instead (submitConfirmed).
+ * `scrolled` is Codex's mark on a composer too tall for the screen: the `↑` at
+ * the end of its top row, which then shows only the prompt's tail.
+ * `notice` is a status drawn on the cursor's row after the text (Codex's
+ * "Waiting for startup"), in its exact form; it is not part of the composer.
+ */
+const MENU_ROW = /^[\s│┃|]*(?:[>❯›⟩▶]\s*)?\d+[.)]\s/;
+const DIALOG_HINT = /\b(?:enter to (?:confirm|continue|select|submit)|esc to (?:cancel|skip|close|go back)|enter continue|esc skip|press enter)\b/i;
+const SCROLLED = /↑\s*$/;
+export function liveComposer(snapshot, { notice = null } = {}) {
+  const shape = composerShape(snapshot);
+  if (!shape || shape.located) return shape;
+  const lines = snapshot.visibleLines || [];
+  let from = -1;
+  for (let i = lines.length - 1; i >= 0 && from < 0; i--) if (startsWithMarker(lines[i].text)) from = i;
+  const at = lines.findIndex((l) => l.row === snapshot.cursorRow);
+  if (from < 0 || at < from) return null;
+  const block = lines.slice(from, at + 1).map((l) => l.text);
+  if (block.some(isRule)) return null;
+  if (lines.slice(at + 1).some((l) => MENU_ROW.test(l.text) || DIALOG_HINT.test(l.text))) return null;
+  let last = block[block.length - 1].slice(0, snapshot.cursorCol);
+  if (notice) last = last.replace(notice, '');
+  const scrolled = SCROLLED.test(block[0]);
+  const rows = block.slice(0, -1).concat(last);
+  if (scrolled) rows[0] = rows[0].replace(SCROLLED, '');
+  const typed = flatten(rows.join(' '));
+  return { alt: !!snapshot.isAltScreen, located: false, cursorInside: false, typed, full: typed, marked: true, scrolled };
+}
+
+/**
+ * Is `text` what the composer holds? `{ body, holds }`, body null when no
+ * composer could be identified, '' when it is empty.
+ *
+ * Compared with all whitespace removed: the terminal wraps long lines, and a
+ * wrap can fall inside a word — or inside `[Pasted Content 1063 chars]`. In a
+ * ruled box the prompt's placeholder or its last characters are enough, since
+ * the box holds nothing else. Codex's composer is found by a wider walk, so
+ * there the whole block must BE the prompt, from the marker row down: its
+ * placeholder exactly, or the prompt itself — or only its tail once Codex has
+ * scrolled the composer and marked it so. Anything else in the block (a
+ * transcript line, a dialog) and it is not ours.
+ */
+export function promptInComposer(snapshot, confirm, text) {
+  const squash = (v) => String(v || '').replace(/\s+/g, '');
+  const shape = liveComposer(snapshot, { notice: confirm.notice });
+  if (!shape || !(shape.located || shape.marked)) return { body: null, holds: false };
+  const body = squash(composerBody(shape));
+  const flat = squash(text);
+  if (!body) return { body, holds: false };
+  if (shape.located) {
+    return { body, holds: confirm.pasted.test(body) || body.includes(flat.slice(-Math.min(24, flat.length))) };
+  }
+  const placeholder = new RegExp(`^(?:${confirm.pasted.source})$`);
+  return { body, holds: placeholder.test(body) || body === flat
+    || (shape.scrolled && body.length >= Math.min(24, flat.length) && flat.endsWith(body)) };
+}
+
 // ONE prompt marker, not every glyph that could be one: stripping greedily
 // turned a typed `❯ >` into nothing at all and let the send through.
 const ONE_MARKER = /^[\s\u2502\u2503|]*[>\u276f\u203a\u27e9\u25b6][^\S\r\n]?/;
@@ -2572,9 +2651,18 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
       `this session's terminal has unsent text on its input line (${JSON.stringify(shown)}), and sending now would submit both as one message. Send or clear that line in the terminal, then try again.`);
   }
   host.inputRequired.observeInput();
+  const confirm = cliById(host.cli)?.confirmSubmit;
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
-  // the inner newlines as soft line breaks instead of submitting early.
-  const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
+  // the inner newlines as soft line breaks instead of submitting early. So do
+  // long single lines to a CLI whose composer is read back: typed in one burst,
+  // Codex 0.162 can keep only the first 1024 chars, or take the Enter after
+  // them as a newline instead of a submit. Pasted, it holds them whole and the
+  // Enter submits.
+  const paste = text.includes('\n') || (confirm && text.length > LONG_LINE_CHARS);
+  // An end-of-paste marker inside the prompt would end the paste early and
+  // type the rest — newlines and all — as keystrokes.
+  if (paste) text = text.replace(PASTE_MARKS, '');
+  const payload = paste ? `\x1b[200~${text}\x1b[201~` : text;
   // The Enter must arrive as its OWN keypress: TUIs (codex) detect rapid input
   // bursts as a paste, and a CR inside the burst becomes a newline in the
   // composer instead of a submit. A short gap breaks the burst.
@@ -2613,7 +2701,6 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
   } else {
     host.pty.write(payload);
   }
-  const confirm = cliById(host.cli)?.confirmSubmit;
   if (confirm) return submitConfirmed(host, id, confirm, text);
   await new Promise((r) => setTimeout(r, 300));
   host.pty.write('\r');
@@ -2633,33 +2720,35 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
  * composer back, with the same locator the input guard uses (composerShape),
  * and answers ok only on positive evidence:
  *
- *  - the prompt must be seen in the composer first. Not seen within the bound:
+ *  - the prompt must be seen in the composer first — its paste placeholder, or
+ *    the end of its text (codex-cli 0.162 shows a paste under 1000 chars as
+ *    text, which can fill most of the screen). Not seen within the bound:
  *    the send FAILS, and no Enter is pressed — "not observed" is never
  *    "delivered", and an Enter into an unknown screen answers whatever is there;
  *  - after the Enter, a submit is the prompt gone from the composer AND either
  *    an empty composer or the CLI's busy indicator. Anything else — a dialog,
  *    a screen with no composer on it — is not a submit;
- *  - while the prompt is visibly still in the composer, Enter is pressed once
- *    more. Never into anything else;
+ *  - Enter is pressed once more only if the first visibly did nothing: the
+ *    prompt still in the composer AND the screen otherwise as it was just
+ *    before that Enter (cursor, a row's spinner glyph and the busy row's
+ *    elapsed time aside; see stillScreen). An Enter that
+ *    changed the screen opened something — a dialog, a menu, a new layout —
+ *    and one that happens to show the prompt's words must not get another;
  *  - otherwise the send fails (input-not-submitted), and the line is marked as
  *    holding something, so the next send is refused rather than glued on.
  */
 async function submitConfirmed(host, id, confirm, text) {
-  // Compared with all whitespace removed: the terminal wraps long lines, and a
-  // wrap can fall inside a word — or inside `[Pasted Content 1063 chars]`.
-  const squash = (v) => String(v || '').replace(/\s+/g, '');
-  const flat = squash(text);
-  const probe = flat.slice(-Math.min(24, flat.length));
   const look = () => {
-    let shape = null, screen = '';
-    try { shape = composerShape(host.vt.snapshot({ includeCells: false })); } catch {}
+    let reading = { body: null, holds: false }, screen = '';
+    try { reading = promptInComposer(host.vt.snapshot({ includeCells: false }), confirm, text); } catch {}
     try { screen = host.vt.getVisibleText(); } catch {}
-    // A composer: a ruled box with a prompt in it, or rows opening with a
-    // prompt marker. The cursor's row on its own could be anything.
-    const body = shape && (shape.located || shape.marked) ? squash(composerBody(shape)) : null;
-    const holds = body != null && (confirm.pasted.test(body) || body.includes(probe));
+    const { body, holds } = reading;
     const busy = confirm.busy.test(screen);
-    return { holds, submitted: !holds && (body === '' || busy), starting: !!confirm.starting?.test(screen) };
+    // The notice in its own place, where one is known: a prompt that merely
+    // mentions it must not hold the Enter off.
+    const starting = confirm.notice ? screen.split('\n').some((row) => confirm.notice.test(row))
+      : !!confirm.starting?.test(screen);
+    return { holds, submitted: !holds && (body === '' || busy), starting };
   };
   const until = async (test, ms) => {
     const deadline = Date.now() + ms;
@@ -2683,17 +2772,42 @@ async function submitConfirmed(host, id, confirm, text) {
   if (confirm.starting) await until((v) => !v.starting, STARTUP_WAIT_MS);
   // The Enter still goes as its own keypress, apart from the paste burst.
   await new Promise((r) => setTimeout(r, 300));
+  const before = stillScreen(host, confirm);
   host.pty.write('\r');
   let ok = await until((v) => v.submitted, SUBMIT_CONFIRM_TIMEOUT_MS);
-  if (!ok && look().holds) {
+  const untouched = !ok && look().holds && stillScreen(host, confirm) === before;
+  if (untouched) {
     host.pty.write('\r');
     ok = await until((v) => v.submitted, SUBMIT_CONFIRM_TIMEOUT_MS);
     if (ok) console.warn(`[input] ${id}: the first Enter did not submit the prompt; the second did`);
   }
   if (ok) { clearPaneInput(id); return; }
-  throw unsent('input-not-submitted', look().holds
+  throw unsent('input-not-submitted', untouched
     ? 'the prompt was typed into this session\'s composer but pressing Enter did not submit it (tried twice). It is still on the input line: press Enter in the terminal to send it, or clear it.'
     : 'the prompt was typed into this session\'s composer and Enter was pressed, but the screen then showed neither an empty composer nor the session working, so AM cannot say it was delivered. Check the terminal before sending it again.');
+}
+
+/**
+ * The visible screen, less only what is known to change on its own: the
+ * spinner glyph a row opens with (Codex's blinking `•`/`◦`, braille and
+ * quarter-circle spinners, Claude Code's `✻`-family), that one cell replaced
+ * by a fixed mark; and the elapsed time in the CLI's exact busy form, where it
+ * has one (`confirm.elapsed`: Codex's `Working (<duration> • esc to
+ * interrupt)`), that token only. The cursor is not in the text. Every other
+ * character — digits included, on any row — must match: "Step 1 of 2"
+ * becoming "Step 2 of 2" is a change, and a change means no second Enter.
+ */
+const SPINNER_LEAD = /^(\s*)[⠀-⣿◐-◓•◦·*✢✳✶✻✽](?=\s)/;
+function stillScreen(host, confirm) {
+  let screen = '';
+  try { screen = host.vt.getVisibleText(); } catch {}
+  return stillText(screen, confirm);
+}
+export function stillText(screen, confirm) {
+  return String(screen || '').split('\n').map((row) => {
+    const still = row.replace(SPINNER_LEAD, '$1◌').replace(/\s+$/, '');
+    return confirm.elapsed ? still.replace(confirm.elapsed, '$1#$2') : still;
+  }).join('\n');
 }
 
 /** Insert text into a running terminal's composer without submitting it. */
@@ -2704,7 +2818,7 @@ export function pasteInput(id, text) {
   if (!value) return;
   host.inputRequired.observeInput();
   notePaneInput(host, value);
-  const payload = value.includes('\n') ? `\x1b[200~${value}\x1b[201~` : value;
+  const payload = value.includes('\n') ? `\x1b[200~${value.replace(PASTE_MARKS, '')}\x1b[201~` : value;
   host.pty.write(payload);
 }
 
