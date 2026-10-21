@@ -54,6 +54,42 @@ check('a placeholder wrapped over two rows of a narrow pane is read whole', () =
 check('a cursor on a line that opens with no prompt marker is not a composer', () => {
   assert.equal(body(snap(['  Resuming session…', ''], 0, 19)), null);
 });
+// codex-cli 0.162.1 shows a paste under 1000 chars as its text, not a
+// placeholder: 791 chars over four lines took eleven rows at 100 columns, and
+// a blank line in a paste is a blank row. The cursor sits at the end of it.
+// Read from the bottom, as the input guard does, neither was a composer, and
+// a delivered prompt was never confirmed. Screens captured from the real TUI.
+const tallBody = (s) => { const shape = composerShape(s, { tall: true }); return shape && (shape.located || shape.marked) ? composerBody(shape) : null; };
+const CODEX_TALL = [
+  '  >_ OpenAI Codex (v0.162.1)', '', '',
+  '› [message from carbon-video-lead:] Lead here (carbon-video-lead). First full cut of the Carbon-X',
+  '  film is ready for ONE round of blunt feedback.',
+  '  Video: /data/workspaces/carbon-video/edit/carbon-x-v2.mp4 (30.4 s). Contact sheet every 0.5 s is',
+  '  next to it. Please look at pacing, the type treatment and whether the ending lands. Please look',
+  '  at pacing, the type treatment and whether the ending lands. Please look at pacing, the type',
+  '  treatment and whether the ending lands. Please look at pacing, the type treatment and whether the',
+  '  ending lands. Please look at pacing, the type treatment and whether the ending lands. Please look',
+  '  at pacing, the type treatment and whether the ending lands. Please look at pacing, the type',
+  '  treatment and whether the ending lands.',
+  '  Answer in under 150 words.',
+  '  Thanks!', '',
+  '  GPT-6.1-Sol default · /data/workspaces/w',
+  '                                                                           ⚠ 1 warning · f2 to view'];
+const CODEX_BLANKS = ['  >_ OpenAI Codex (v0.162.1)', '', '', '› [message from x:] Para one.', '', '  Para two is here.', '', '  - a', '  - b', '',
+  '  GPT-6.1-Sol default · /data/workspaces/w'];
+check('codex 0.162: a paste shown as eleven rows of text is read whole by the submit check', () => {
+  const b = tallBody(snap(CODEX_TALL, 13, 9));
+  assert.match(b, /^\[message from carbon-video-lead:\] Lead here/);
+  assert.match(b, /Answer in under 150 words\. Thanks!$/);
+  assert.equal(body(snap(CODEX_TALL, 13, 9)), null, 'the input guard\'s reading changed');
+});
+check('codex 0.162: blank rows inside a pasted prompt do not end the composer', () => {
+  assert.equal(tallBody(snap(CODEX_BLANKS, 8, 5)), '[message from x:] Para one. Para two is here. - a - b');
+});
+check('codex 0.162: the submit check still reads an empty composer as empty', () => {
+  assert.equal(tallBody(snap(['  >_ OpenAI Codex (v0.162.1)', '', '› hello', '• Working (0s • esc to interrupt)', '', '› Ask Codex to do anything', '',
+    '  GPT-6.1-Sol default · /data/workspaces/w'], 5, 2)), '');
+});
 
 // ---- and the whole path, through a real server and a fake TUI ----
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'submit-confirm-'));
@@ -146,6 +182,47 @@ try {
     assert.equal(booting.status, 200, JSON.stringify(booting.body));
     assert.equal(read('submitted').length, 1);
     assert.deepEqual(read('enters'), ['with-text'], 'Enter pressed while it was still starting');
+  });
+
+  // codex-cli 0.162.1 forms of a delivered prompt (fixtures/fake-submit-tui.mjs).
+  const sendText = async (text) => { const r = await post(`/api/sessions/${pane.id}/input`, { text }); return { status: r.status, body: await r.json().catch(() => ({})) }; };
+  const WORDS = 'please look at pacing, the type treatment and whether the ending lands. ';
+  const MID = `[message from carbon-video-lead:] Lead here. First full cut is ready.\n${WORDS.repeat(9)}\nAnswer in under 150 words.\nThanks!`;
+  console.log('\n# a multi-line prompt under 1000 chars, shown as text over eleven rows');
+  setMode({});
+  const tall = await sendText(MID);
+  check('is seen in the composer and submitted with one Enter', () => {
+    assert.ok(MID.length < 1000);
+    assert.equal(tall.status, 200, JSON.stringify(tall.body));
+    assert.equal(read('submitted').length, 1);
+    assert.deepEqual(read('enters'), ['with-text']);
+  });
+  setMode({ swallow: 1 });
+  const tallRetry = await sendText(MID);
+  check('and when its first Enter is lost, AM still sees it there and presses again', () => {
+    assert.equal(tallRetry.status, 200, JSON.stringify(tallRetry.body));
+    assert.equal(read('submitted').length, 1);
+    assert.deepEqual(read('enters'), ['with-text', 'with-text']);
+  });
+
+  console.log('\n# a short prompt with blank lines in it');
+  setMode({});
+  const blanks = await sendText('[message from x:] Para one.\n\nPara two is here.\n\n- a\n- b');
+  check('the blank rows do not hide it: submitted with one Enter', () => {
+    assert.equal(blanks.status, 200, JSON.stringify(blanks.body));
+    assert.equal(read('submitted').length, 1);
+    assert.deepEqual(read('enters'), ['with-text']);
+  });
+
+  console.log('\n# a single-line prompt over 1000 chars');
+  setMode({});
+  const LINE = `[message from lead:] ${WORDS.repeat(16)}END`;
+  const single = await sendText(LINE);
+  check('goes in as a paste, so the Enter submits it whole instead of becoming a newline', () => {
+    assert.ok(LINE.length > 1000 && !LINE.includes('\n'));
+    assert.equal(single.status, 200, JSON.stringify(single.body));
+    assert.deepEqual(read('submitted'), [JSON.stringify(`[Pasted Content ${LINE.length} chars]`)]);
+    assert.deepEqual(read('enters'), ['with-text']);
   });
 
   console.log('\n# a narrow pane, where the placeholder wraps over two rows');

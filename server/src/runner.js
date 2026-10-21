@@ -98,6 +98,9 @@ const INPUT_ECHO_TIMEOUT_MS = Number(process.env.AM_INPUT_ECHO_TIMEOUT_MS || 200
 const PASTE_SHOWN_TIMEOUT_MS = Number(process.env.AM_PASTE_SHOWN_TIMEOUT_MS || 10000);
 const STARTUP_WAIT_MS = Number(process.env.AM_STARTUP_WAIT_MS || 30000);
 const SUBMIT_CONFIRM_TIMEOUT_MS = Number(process.env.AM_SUBMIT_CONFIRM_TIMEOUT_MS || 3000);
+// A single-line prompt longer than this goes to such a CLI as a paste, not
+// typed (typeAndSubmit).
+const LONG_LINE_CHARS = 512;
 // Despite the Node wrapper's `scrollbackLimit` name, Ghostty's native option is
 // a byte budget. Passing a line count such as 20,000 retains only a small native
 // allocation (about 700 ordinary rows). Keep the unit explicit at our boundary.
@@ -2350,7 +2353,7 @@ const isRule = (text) => {
  * elsewhere the whole region is compared instead, which is stable because it is
  * located the same way on both sides of the comparison.
  */
-export function composerShape(snapshot) {
+export function composerShape(snapshot, { tall = false } = {}) {
   if (!snapshot) return null;
   const lines = snapshot.visibleLines || [];
   // The lowest ruled box that holds a prompt. A TUI rules more than one thing:
@@ -2390,11 +2393,18 @@ export function composerShape(snapshot) {
   // `› [Pasted Content 1063 chars]` over two rows, and the cursor's row alone
   // held only its tail. Bounded, and only up to a marker; without one the
   // cursor's row stands alone as before.
+  //
+  // `tall` follows a composer holding a whole multi-line prompt: Codex shows a
+  // paste under 1000 chars as its text, not a placeholder, over as many rows as
+  // it needs (up to most of the screen) and with a blank row for each blank
+  // line in it, cursor at the end. Read from the bottom only, that was "no
+  // composer" — and a delivered prompt was never confirmed (submitConfirmed).
+  // Opt-in, so the input guard's picture of an empty line is unchanged.
   const at = lines.findIndex((l) => l.row === snapshot.cursorRow);
   let from = at;
   if (at >= 0 && !startsWithMarker(lines[at].text)) {
-    for (let i = at - 1; i >= Math.max(0, at - WRAP_ROWS); i--) {
-      if (isRule(lines[i].text) || !lines[i].text.trim()) break;
+    for (let i = at - 1; i >= (tall ? 0 : Math.max(0, at - WRAP_ROWS)); i--) {
+      if (isRule(lines[i].text) || (!tall && !lines[i].text.trim())) break;
       if (startsWithMarker(lines[i].text)) { from = i; break; }
     }
   }
@@ -2572,9 +2582,15 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
       `this session's terminal has unsent text on its input line (${JSON.stringify(shown)}), and sending now would submit both as one message. Send or clear that line in the terminal, then try again.`);
   }
   host.inputRequired.observeInput();
+  const confirm = cliById(host.cli)?.confirmSubmit;
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
-  // the inner newlines as soft line breaks instead of submitting early.
-  const payload = text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
+  // the inner newlines as soft line breaks instead of submitting early. So do
+  // long single lines to a CLI whose composer is read back: typed in one burst,
+  // Codex 0.162 can keep only the first 1024 chars, or take the Enter after
+  // them as a newline instead of a submit. Pasted, it holds them whole and the
+  // Enter submits.
+  const paste = text.includes('\n') || (confirm && text.length > LONG_LINE_CHARS);
+  const payload = paste ? `\x1b[200~${text}\x1b[201~` : text;
   // The Enter must arrive as its OWN keypress: TUIs (codex) detect rapid input
   // bursts as a paste, and a CR inside the burst becomes a newline in the
   // composer instead of a submit. A short gap breaks the burst.
@@ -2613,7 +2629,6 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
   } else {
     host.pty.write(payload);
   }
-  const confirm = cliById(host.cli)?.confirmSubmit;
   if (confirm) return submitConfirmed(host, id, confirm, text);
   await new Promise((r) => setTimeout(r, 300));
   host.pty.write('\r');
@@ -2633,7 +2648,9 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
  * composer back, with the same locator the input guard uses (composerShape),
  * and answers ok only on positive evidence:
  *
- *  - the prompt must be seen in the composer first. Not seen within the bound:
+ *  - the prompt must be seen in the composer first — its paste placeholder, or
+ *    the end of its text (codex-cli 0.162 shows a paste under 1000 chars as
+ *    text, which can fill most of the screen). Not seen within the bound:
  *    the send FAILS, and no Enter is pressed — "not observed" is never
  *    "delivered", and an Enter into an unknown screen answers whatever is there;
  *  - after the Enter, a submit is the prompt gone from the composer AND either
@@ -2652,7 +2669,7 @@ async function submitConfirmed(host, id, confirm, text) {
   const probe = flat.slice(-Math.min(24, flat.length));
   const look = () => {
     let shape = null, screen = '';
-    try { shape = composerShape(host.vt.snapshot({ includeCells: false })); } catch {}
+    try { shape = composerShape(host.vt.snapshot({ includeCells: false }), { tall: true }); } catch {}
     try { screen = host.vt.getVisibleText(); } catch {}
     // A composer: a ruled box with a prompt in it, or rows opening with a
     // prompt marker. The cursor's row on its own could be anything.

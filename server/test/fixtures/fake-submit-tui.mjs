@@ -1,9 +1,14 @@
 #!/usr/bin/env node
 // A composer that behaves like the Codex TUI where it matters for delivery
-// (server/test/submit-confirm.test.mjs): a bracketed paste collapses to
-// `› [Pasted Content N chars]`, Enter submits it, echoes it into the
-// conversation above and draws a fresh composer. Faults are configurable per
-// paste, read from $FAKE_DIR/mode as JSON:
+// (server/test/submit-confirm.test.mjs), as seen on codex-cli 0.162.1:
+//   - a bracketed paste over 1000 chars collapses to `› [Pasted Content N
+//     chars]`; a shorter one is shown as its text, over as many rows as it
+//     takes, a blank row for each blank line, the cursor at its end;
+//   - an Enter right after a long run of TYPED characters (over 1000, no
+//     bracketed paste) is taken as a newline, not a submit;
+//   - otherwise Enter submits, echoes the prompt into the conversation above
+//     and draws a fresh composer.
+// Faults are configurable per paste, read from $FAKE_DIR/mode as JSON:
 //   swallow  — this many Enters after the paste do nothing;
 //   paintMs  — the placeholder is drawn this late, and an Enter before it is
 //              drawn is lost (a paste still being collapsed);
@@ -24,14 +29,16 @@ let swallow = 0;
 let startingUntil = 0;
 let dialog = false, inDialog = false;
 let inPaste = false, pasted = '';
+let typedRun = 0, lastTypedAt = 0;   // the current burst of typed characters
 // The composer is redrawn whole, however many rows it wraps onto at this
 // width: up to its first row, clear to the end of the screen, draw.
 let drawnRows = 1;
 const draw = () => {
   const content = `› ${shown ? line : ''}${Date.now() < startingUntil ? '   Waiting for startup  · esc cancel' : ''}`;
   const cols = process.stdout.columns || 80;
-  process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J${content}`);
-  drawnRows = Math.max(1, Math.ceil([...content].length / cols));
+  const rows = content.split('\n').map((l, i) => (i ? `  ${l}` : l));
+  process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J${rows.join('\r\n')}`);
+  drawnRows = rows.reduce((n, l) => n + Math.max(1, Math.ceil([...l].length / cols)), 0);
 };
 process.stdin.setRawMode?.(true);
 process.stdout.write('fake codex\r\n');
@@ -48,7 +55,8 @@ process.stdin.on('data', (chunk) => {
       swallow = m.swallow || 0;
       dialog = !!m.dialog;
       if (m.startMs) { startingUntil = Date.now() + m.startMs; setTimeout(draw, m.startMs + 10); }
-      line = `[Pasted Content ${pasted.length} chars]`;
+      line = pasted.length > 1000 ? `[Pasted Content ${pasted.length} chars]` : pasted;
+      typedRun = 0;
       if (m.paintMs) { shown = false; setTimeout(() => { shown = true; draw(); }, m.paintMs); } else draw();
       continue;
     }
@@ -59,12 +67,18 @@ process.stdin.on('data', (chunk) => {
       if (inDialog) continue;
       if (Date.now() < startingUntil) continue;
       if (!line) continue;
+      if (typedRun > 1000) { typedRun = 0; line += '\n'; draw(); continue; }
       if (!shown || swallow > 0) { if (shown) swallow--; continue; }
       if (dialog) { inDialog = true; process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J  Choose a directory\r\n› 1. Use session directory\r\n  2. Use current directory`); continue; }
-      log('submitted', line);
-      process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J› ${pasted.replace(/\n/g, '\r\n  ')}\r\n• Worked for 0s\r\n`);
+      log('submitted', JSON.stringify(line));
+      const said = line.startsWith('[Pasted Content') ? pasted : line;
+      process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J› ${said.replace(/\n/g, '\r\n  ')}\r\n• Worked for 0s\r\n`);
       line = ''; drawnRows = 1; draw();
     } else if (ch === '\x15') { line = ''; draw(); }
-    else if (ch >= ' ') { line += ch; draw(); }
+    else if (ch >= ' ') {
+      if (Date.now() - lastTypedAt > 50) typedRun = 0;
+      typedRun++; lastTypedAt = Date.now();
+      line += ch; draw();
+    }
   }
 });
