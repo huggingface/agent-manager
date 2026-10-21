@@ -775,7 +775,7 @@ export type TraceBlock =
   | { type: 'text'; text: string; more?: number }
   | { type: 'thinking'; text: string; more?: number }
   | { type: 'tool_use'; id?: string; name: string; text: string; more?: number }
-  | { type: 'tool_result'; id?: string; text: string; more?: number; failed?: boolean }
+  | { type: 'tool_result'; id?: string; text: string; more?: number; failed?: boolean; durationMs?: number }
   | { type: 'shell'; command: string; stdout?: string; stderr?: string; exitCode?: number }
   | { type: 'image'; src: string; mediaType?: string }
   | { type: 'compaction'; text: string };
