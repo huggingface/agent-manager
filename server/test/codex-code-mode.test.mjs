@@ -18,6 +18,8 @@ test.after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
 const { readTraceByPath, __parseCodexForTest: parseCodex } = await import('../src/traces.js');
 const { codeModeCalls, codeModeOutput, stripDataUrls } = await import('../src/codex-code-mode.js');
+// Parsed objects have no prototype (a key is only a key); compare them as data.
+const callsOf = (code) => JSON.parse(JSON.stringify(codeModeCalls(code).calls));
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'codex-code-mode.jsonl');
 const PATCHED = '/data/workspaces/carbon-video/edit/astra-feedback-v2.md';
@@ -91,14 +93,14 @@ test('classic calls are untouched', async () => {
 
 test('the parser reads literals and never runs the code', () => {
   globalThis.__ran = false;
-  const { calls } = codeModeCalls('globalThis.__ran = true; await tools.exec_command({cmd:`echo ${x}`, "workdir": \'/a\', n: 0x10, ok: true, xs: [1, null,], /* c */ });');
+  const calls = callsOf('globalThis.__ran = true; await tools.exec_command({cmd:`echo ${x}`, "workdir": \'/a\', n: 0x10, ok: true, xs: [1, null,], /* c */ });');
   assert.equal(globalThis.__ran, false);
   assert.deepEqual(calls, [{ name: 'exec_command', args: { cmd: 'echo ${x}', workdir: '/a', n: 16, ok: true, xs: [1, null] } }]);
 
   // A variable argument is kept as source; a tool name inside a string is not a call.
-  assert.deepEqual(codeModeCalls('const s = "tools.exec_command({cmd:1})"; tools.view_image(opts);').calls,
-    [{ name: 'view_image', args: { raw: 'opts' } }]);
-  assert.deepEqual(codeModeCalls('paths.map(p=>tools.view_image({path:`/f/${p}.png`}))').calls,
+  assert.deepEqual(callsOf('const s = "tools.exec_command({cmd:1})"; tools.view_image(opts);'),
+    [{ name: 'view_image', raw: 'opts' }]);
+  assert.deepEqual(callsOf('paths.map(p=>tools.view_image({path:`/f/${p}.png`}))'),
     [{ name: 'view_image', args: { path: '/f/${p}.png' } }]);
   assert.equal(codeModeCalls('text(1+1)').parsed, false);
   assert.equal(codeModeCalls('tools.exec_command({cmd:"unterminated').parsed, false, 'a call that never closes is a script');
@@ -138,7 +140,7 @@ const resultOf = (blocks, id) => blocks.find((b) => b.type === 'tool_result' && 
 
 test('1. an escape naming no character stays as written instead of throwing', async () => {
   const input = 'tools.exec_command({cmd:"\\u{110000}"})';
-  assert.deepEqual(codeModeCalls(input).calls, [{ name: 'exec_command', args: { cmd: '\\u{110000}' } }]);
+  assert.deepEqual(callsOf(input), [{ name: 'exec_command', args: { cmd: '\\u{110000}' } }]);
   const { blocks, digest } = await readScript(input, [wrapper, txt({ exit_code: 0, output: '' })]);
   assert.equal(JSON.parse(blocks.find((b) => b.type === 'tool_use').text).cmd, '\\u{110000}');
   assert.deepEqual(digest.stats.tools, { exec_command: 1 });
@@ -185,7 +187,8 @@ test('4. each call gets its own output and failure, or the script gets the lot',
   assert.deepEqual([resultOf(blocks, 'c:0').text, !!resultOf(blocks, 'c:0').failed], ['(exit 1)', true]);
   assert.deepEqual([resultOf(blocks, 'c:1').text, !!resultOf(blocks, 'c:1').failed], ['OK', false]);
   // text({i, ...r})
-  ({ blocks } = await readScript(input, [wrapper,
+  const settled = 'const rs=await Promise.allSettled([tools.exec_command({cmd:"false"}),tools.exec_command({cmd:"echo OK"})]); rs.forEach((r, i) => text({ i, ...r }));';
+  ({ blocks } = await readScript(settled, [wrapper,
     txt({ i: 0, status: 'fulfilled', value: fail }), txt({ i: 1, status: 'fulfilled', value: ok })]));
   assert.deepEqual([resultOf(blocks, 'c:0').text, !!resultOf(blocks, 'c:0').failed], ['(exit 1)', true]);
   assert.deepEqual([resultOf(blocks, 'c:1').text, !!resultOf(blocks, 'c:1').failed], ['OK', false]);
@@ -231,4 +234,50 @@ test('malformed outputs never break the parse', async () => {
     const { blocks } = await readScript('text(await tools.exec_command({cmd:"ls"}))', output);
     assert.equal(blocks.find((b) => b.type === 'tool_use').name, 'exec_command');
   }
+});
+
+// ---------------------------------------------------------------- re-review #220
+test('6. whitespace and a comment before the closing paren are read in linear time', async () => {
+  const input = 'tools.exec_command({cmd:"ok"}' + ' '.repeat(50000) + '/*x*/)';
+  const t = performance.now();
+  assert.deepEqual(callsOf(input), [{ name: 'exec_command', args: { cmd: 'ok' } }]);
+  assert.ok(performance.now() - t < 50, `took ${Math.round(performance.now() - t)} ms`);
+  const { blocks } = await readScript(input, [wrapper, txt({ exit_code: 0, output: 'ok\n' })]);
+  assert.equal(blocks.find((b) => b.type === 'tool_use').text, '{"cmd":"ok"}');
+});
+
+test('7. argument objects are data: `raw` and `toString` are only keys', async () => {
+  const input = 'tools.exec_command({raw:{toString:null}})';
+  const { blocks, digest } = await readScript(input, [wrapper, txt({ exit_code: 0, output: '' })]);
+  assert.equal(blocks.find((b) => b.type === 'tool_use').text, '{"raw":{"toString":null}}');
+  assert.deepEqual(digest.stats.tools, { exec_command: 1 });
+  assert.deepEqual(callsOf('tools.x({__proto__:{a:1},constructor:2})'), [{ name: 'x', args: { ['__proto__']: { a: 1 }, constructor: 2 } }]);
+});
+
+test('8. a rejection whose message is not text does not throw', async () => {
+  const { blocks } = await readScript('text(await tools.exec_command({cmd:"x"}))',
+    [wrapper, txt('{"status":"rejected","reason":{"message":{"toString":null}}}')]);
+  const r = resultOf(blocks, 'c');
+  assert.deepEqual([r.text, r.failed], ['{"message":{"toString":null}}', true]);
+});
+
+test('9. a printed number is never taken for an index', async () => {
+  const input = 'text((await tools.exec_command({cmd:"echo 0"})).output.trim());text(await tools.exec_command({cmd:"echo second"}));';
+  const { blocks } = await readScript(input, [wrapper, txt('0'), txt({ exit_code: 0, output: 'second\n' })]);
+  assert.deepEqual([resultOf(blocks, 'c:0').text, resultOf(blocks, 'c:1').text], ['', '']);
+  const script = blocks.find((b) => b.type === 'tool_use' && b.name === 'script');
+  assert.equal(resultOf(blocks, script.id).text, '0\nsecond');
+  // Even in the labelled loop form, a result that prints a number makes the
+  // labels unreadable rather than shifting outputs between calls.
+  const loop = 'const rs=await Promise.allSettled([tools.exec_command({cmd:"echo 1"}),tools.exec_command({cmd:"echo b"})]);for(let i=0;i<rs.length;i++){text(i);text(rs[i].value.output.trim())}';
+  const r = await readScript(loop, [wrapper, txt('0'), txt('1'), txt('1'), txt('b')]);
+  assert.ok(r.blocks.some((b) => b.name === 'script'), 'ambiguous labels go to the script');
+  assert.deepEqual([resultOf(r.blocks, 'c:0').text, resultOf(r.blocks, 'c:1').text], ['', '']);
+});
+
+test('10. a data URL hidden by a JSON escape is still stripped', async () => {
+  const { blocks } = await readScript('text(await tools.exec_command({cmd:"x"}))', [wrapper, txt('{"output":"data:image\\/png;base64,AAAA"}')]);
+  assert.equal(resultOf(blocks, 'c').text, '[image, 0 KB]');
+  assert.equal(stripDataUrls('{"u":"data:image\\/png;base64,AB\\/CD"}'), '{"u":"[image, 0 KB]"}');
+  for (const s of [null, undefined, 5, {}, { toString: null }]) assert.equal(stripDataUrls(s), '');
 });

@@ -14,7 +14,7 @@ import { mark, tracked, PHASE } from './watchdog.js';
 import { findTrace, HARNESS_LABEL } from './share.js';
 import { cachedTrace, traceRevision } from './trace-revision.js';
 import { outputHash } from './output-id.js';
-import { codeModeCalls, codeModeParts, pairParts, renderParts, classicArgs, patchFiles, stripDataUrls } from './codex-code-mode.js';
+import { codeModeUses, codeModeResults, patchFiles, stripDataUrls } from './codex-code-mode.js';
 
 // Workspace-wide trace analytics: parse every Claude transcript and Codex
 // rollout on the Space into per-conversation stats (turns, tool calls, web
@@ -258,10 +258,16 @@ function parseClaude(txt, dg = emptyDigest()) {
 // ---------- Codex rollouts (CODEX_HOME/sessions/**/rollout-*-<uuid>.jsonl) ----------
 // Codex "code mode" wraps every tool call in one `exec` script (codex-code-mode.js).
 const isCodeModeExec = (p) => p.type === 'custom_tool_call' && p.name === 'exec' && typeof p.input === 'string';
-const isCodeModeOutput = (p) => Array.isArray(p.output) && /^Script (?:completed|failed|errored|timed out)/.test(String(p.output[0]?.text || ''));
-// Reading a script must never take the trace parse down with it.
-const safeCodeModeCalls = (code) => { try { return codeModeCalls(code); } catch { return { calls: [], parsed: false }; } };
-const scriptUse = (id, code) => ({ type: 'tool_use', id, name: 'script', ...capText(JSON.stringify({ description: 'Ran a script', code: stripDataUrls(code) })) });
+const isCodeModeOutput = (p) => Array.isArray(p.output) && p.output.length > 0 && p.output[0] !== null
+  && typeof p.output[0] === 'object' && typeof p.output[0].text === 'string' && p.output[0].text.startsWith('Script ');
+// Reading a script must never take the trace parse down with it: anything it
+// cannot read is a script.
+const codeModeUsesSafe = (code) => { try { return codeModeUses(code); } catch { return null; } };
+const scriptUse = (id, code) => {
+  let text = '{"description":"Ran a script"}';
+  try { text = JSON.stringify({ description: 'Ran a script', code: stripDataUrls(code) }); } catch { /* keep the label */ }
+  return { type: 'tool_use', id, name: 'script', ...capText(text) };
+};
 const codexText = (p) => (Array.isArray(p.content) ? p.content.map((c) => (c && c.text) || '').join(' ') : '');
 
 function parseCodex(txt, dg = emptyDigest()) {
@@ -305,15 +311,19 @@ function parseCodex(txt, dg = emptyDigest()) {
         case 'local_shell_call': {
           // Code mode: one `exec` script calling several tools. Count the tools
           // it called, the way the classic format would have recorded them.
-          const calls = isCodeModeExec(p) ? safeCodeModeCalls(p.input) : null;
-          const list = calls && calls.parsed
-            ? calls.calls.map((c) => ({ name: c.name, args: classicArgs(c.name, c.args) }))
-            : [{ name: p.name || p.type, args: p.arguments ?? p.input }];
-          for (const { name, args } of list) {
-            st.toolCalls++;
-            st.tools[name] = (st.tools[name] || 0) + 1;
+          let list = null;
+          if (isCodeModeExec(p)) {
+            const uses = codeModeUsesSafe(p.input);
+            list = uses ? uses.map((u) => ({ name: u.name, file: u.file })) : [{ name: 'exec', file: null }];
+          } else {
+            const name = p.name || p.type;
+            const args = p.arguments ?? p.input;
             // apply_patch arguments carry the touched files in the patch header
-            const file = name === 'apply_patch' && typeof args === 'string' ? patchFiles(args)[0] || null : null;
+            list = [{ name, file: name === 'apply_patch' && typeof args === 'string' ? patchFiles(args)[0] || null : null }];
+          }
+          for (const { name, file } of list) {
+            st.toolCalls++;
+            st.tools[name] = (Object.hasOwn(st.tools, name) ? st.tools[name] : 0) + 1;
             digestTool(dg, name, file);
           }
           break;
@@ -1831,7 +1841,8 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
   const seenThinking = new Set();
   let cur = null;      // the assistant turn being built
   let encrypted = 0;   // reasoning items with no readable summary
-  const unpacked = new Map(); // exec call_id -> the { id, name } of each call it unpacked into
+  const unpacked = new Map(); // exec call_id -> { code, calls: [{ id, name }] } it unpacked into
+  let execSeq = 0;            // ids for scripts that came without one
 
   // Blocks attach to the open assistant turn; a user/system message closes it.
   const assistant = (ts) => {
@@ -1926,71 +1937,75 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
         const text = parts.join('\n');
         out.push({ role: 'system', ts, blocks: [textBlock('text', text.includes('Sender:') ? text : `${from}\n${text}`)] });
       } else if (isCodeModeExec(p)) {
-        // One script, several tool calls: each becomes the call the classic
-        // format writes, so the reader labels, groups and expands it the same.
-        const id = p.call_id || p.id;
-        let uses;
+        // Never let one step take the whole trace down: it becomes a script.
         try {
-          const { calls, parsed } = codeModeCalls(p.input);
-          uses = parsed
-            ? calls.map((c, i) => ({ type: 'tool_use', id: calls.length === 1 ? id : `${id}:${i}`, name: c.name, ...capText(classicArgs(c.name, c.args)) }))
-            : null;
-        } catch { uses = null; }
-        // Nothing to unpack: a script, shown as code rather than as a label.
-        if (!uses) uses = [scriptUse(id, p.input)];
-        const msg = assistant(ts);
-        for (const use of uses) { msg.blocks.push(use); stitch.register(use, msg); }
-        if (id) unpacked.set(id, { code: p.input, calls: uses.map((u) => ({ id: u.id, name: u.name })) });
+          // One script, several tool calls: each becomes the call the classic
+          // format writes, so the reader labels, groups and expands it the same.
+          const id = typeof p.call_id === 'string' ? p.call_id : typeof p.id === 'string' ? p.id : `exec-${++execSeq}`;
+          const made = codeModeUsesSafe(p.input);
+          const uses = made && made.length
+            ? made.map((u, i) => ({ type: 'tool_use', id: made.length === 1 ? id : `${id}:${i}`, name: u.name, ...capText(u.text) }))
+            : [scriptUse(id, p.input)];
+          const msg = assistant(ts);
+          for (const use of uses) { msg.blocks.push(use); stitch.register(use, msg); }
+          unpacked.set(id, { code: p.input, calls: uses.map((u) => ({ id: u.id, name: u.name })) });
+        } catch {
+          assistant(ts).blocks.push(scriptUse(`exec-${++execSeq}`, p.input));
+        }
       } else if (['function_call', 'custom_tool_call', 'local_shell_call', 'web_search_call'].includes(p.type)) {
         const use = { type: 'tool_use', id: p.call_id || p.id, name: p.name || p.type, ...capText(p.arguments ?? p.input) };
         const msg = assistant(ts);
         msg.blocks.push(use);
         stitch.register(use, msg);
-      } else if (p.type === 'custom_tool_call_output' && (unpacked.has(p.call_id) || isCodeModeOutput(p))) {
-        // (A window can open between a script and its output, hence the shape test.)
-        const script = unpacked.get(p.call_id);
-        const calls = script ? script.calls : [{ id: p.call_id, name: null }];
-        // Results and images placed after the block `id` was filed against.
-        const place = (id, res, after) => {
-          if (!stitch.file(id, res)) { assistant(ts).blocks.push(res, ...after); return; }
-          if (!after.length) return;
-          for (let k = out.messages.length - 1; k >= 0; k--) {
-            const at = out.messages[k].blocks.indexOf(res);
-            if (at !== -1) { out.messages[k].blocks.splice(at + 1, 0, ...after); break; }
+      } else if (p.type === 'custom_tool_call_output' && (unpacked.has(p.call_id) || isCodeModeOutput(p) || typeof p.call_id !== 'string')) {
+        try {
+          // (A window can open between a script and its output, hence the shape
+          // test; and an output with no usable id cannot be a classic call's.)
+          const oid = typeof p.call_id === 'string' ? p.call_id : `exec-${++execSeq}`;
+          const script = unpacked.get(oid);
+          const calls = script ? script.calls : [{ id: oid, name: null }];
+          let plan;
+          try { plan = codeModeResults(p.output, script ? script.code : '', calls.length); } catch { plan = null; }
+          if (!plan || !(plan.perCall || plan.script)) plan = { script: { text: '', images: [], failed: false }, wallMs: null };
+          const images = (r) => r.images.map(({ src }) => ({ type: 'image', src }));
+          // A result filed next to its call, and the blocks that follow it after it.
+          const place = (id, res, after) => {
+            if (!stitch.file(id, res)) { assistant(ts).blocks.push(res, ...after); return; }
+            if (!after.length) return;
+            for (let k = out.messages.length - 1; k >= 0; k--) {
+              const at = out.messages[k].blocks.indexOf(res);
+              if (at !== -1) { out.messages[k].blocks.splice(at + 1, 0, ...after); break; }
+            }
+          };
+          if (plan.perCall) {
+            // The script said which output was whose: each call gets its own
+            // output, failure and images. Images go as image blocks, never as
+            // base64 text in a result, where search and digests would read it.
+            calls.forEach((c, i) => {
+              const r = plan.perCall[i];
+              place(c.id, { type: 'tool_result', id: c.id, ...capText(r.text), ...(r.failed ? { failed: true } : {}),
+                ...(calls.length === 1 && plan.wallMs != null ? { durationMs: plan.wallMs } : {}) }, images(r));
+            });
+          } else {
+            // It did not: the calls show as made, and the combined output goes
+            // once, on the script that printed it, rather than on a guess.
+            const r = plan.script;
+            const sid = `${oid}:script`;
+            const res = { type: 'tool_result', id: sid, ...capText(r.text), ...(r.failed ? { failed: true } : {}),
+              ...(plan.wallMs != null ? { durationMs: plan.wallMs } : {}) };
+            for (const c of calls) place(c.id, { type: 'tool_result', id: c.id, text: '' }, []);
+            const tail = [scriptUse(sid, script ? script.code : ''), res, ...images(r)];
+            const last = calls[calls.length - 1].id;
+            let anchor = null;
+            for (let k = out.messages.length - 1; k >= 0 && !anchor; k--) {
+              const at = out.messages[k].blocks.findIndex((b) => b.type === 'tool_result' && b.id === last);
+              if (at !== -1) anchor = [out.messages[k], at];
+            }
+            if (anchor) anchor[0].blocks.splice(anchor[1] + 1, 0, ...tail);
+            else assistant(ts).blocks.push(...tail);
           }
-        };
-        const images = (r) => r.images.map(({ src }) => ({ type: 'image', src }));
-        let ran;
-        try { ran = codeModeParts(p.output); } catch { ran = { parts: [], wallMs: null, failed: false }; }
-        let segs = null;
-        try { segs = pairParts(ran.parts, calls.length); } catch { segs = null; }
-        if (segs) {
-          // Each call gets its own output, failure and images — the script
-          // said which part was whose. Images go as image blocks, never as
-          // base64 text in a result, where search and digests would read it.
-          calls.forEach((c, i) => {
-            const r = renderParts(segs[i]);
-            const failed = r.failed || (ran.failed && (calls.length === 1 || (!r.text && !r.images.length)));
-            place(c.id, { type: 'tool_result', id: c.id, ...capText(r.text), ...(failed ? { failed: true } : {}),
-              ...(calls.length === 1 && ran.wallMs != null ? { durationMs: ran.wallMs } : {}) }, images(r));
-          });
-        } else {
-          // It did not say: the calls show as made, and the combined output
-          // goes once, on the script that printed it, rather than on a guess.
-          const r = renderParts(ran.parts);
-          for (const c of calls) place(c.id, { type: 'tool_result', id: c.id, text: '' }, []);
-          const sid = `${p.call_id}:script`;
-          const use = scriptUse(sid, script ? script.code : '');
-          const res = { type: 'tool_result', id: sid, ...capText(r.text), ...(ran.failed || r.failed ? { failed: true } : {}),
-            ...(ran.wallMs != null ? { durationMs: ran.wallMs } : {}) };
-          const last = calls.at(-1).id;
-          let anchor = null;
-          for (let k = out.messages.length - 1; k >= 0 && !anchor; k--) {
-            const at = out.messages[k].blocks.findIndex((b) => b.type === 'tool_result' && b.id === last);
-            if (at !== -1) anchor = [out.messages[k], at];
-          }
-          if (anchor) anchor[0].blocks.splice(anchor[1] + 1, 0, use, res, ...images(r));
-          else assistant(ts).blocks.push(use, res, ...images(r));
+        } catch {
+          assistant(ts).blocks.push({ type: 'tool_result', id: `exec-${++execSeq}`, text: '' });
         }
       } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
         const res = { type: 'tool_result', id: p.call_id, ...capText(flattenToolContent(p.output)) };
