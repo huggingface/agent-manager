@@ -570,7 +570,7 @@ export const traceDownloadUrl = (id: string) => `/api/trace/${encodeURIComponent
 // ---- files ----
 // 'trace' is content-detected, not name-detected: a transcript is a .jsonl like
 // any other until /preview reads a line of it (see the route).
-export type FileKind = 'text' | 'markdown' | 'html' | 'image' | 'pdf' | 'binary' | 'trace';
+export type FileKind = 'text' | 'markdown' | 'html' | 'image' | 'pdf' | 'video' | 'audio' | 'binary' | 'trace';
 export interface FileEntry { name: string; dir: boolean; size: number; mtime: number; kind?: FileKind; }
 export interface FileListing { path: string; root: string; entries: FileEntry[]; }
 export interface FilePreview {

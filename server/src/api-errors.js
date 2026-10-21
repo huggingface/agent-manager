@@ -111,6 +111,9 @@ export function apiErrorHandler(error, req, res, next) {
     }[error?.type];
     failure = parser ? new ApiError(...parser)
       : error instanceof URIError ? new ApiError(400, 'invalid-path', 'Request path is malformed.')
+      // res.sendFile answers Range requests itself; a range outside the file
+      // reaches us as send's 416, with its `Content-Range: bytes */size` set.
+      : error?.status === 416 ? new ApiError(416, 'range-not-satisfiable', 'Requested range is outside the file.')
       : new ApiError(500, 'internal-error', 'The request could not be completed. Please try again.');
   }
   const data = {};

@@ -15,6 +15,18 @@ const IMAGE_MIME = {
   '.svg': 'image/svg+xml',
 };
 
+// Played with <video>/<audio>. Whether the browser can decode a given file is
+// only known once it tries (an .mkv or .mov may or may not play), so the viewer
+// owns the "can't play this" fallback; the server just names the type.
+const VIDEO_MIME = {
+  '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
+  '.ogv': 'video/ogg', '.mkv': 'video/x-matroska',
+};
+const AUDIO_MIME = {
+  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.oga': 'audio/ogg',
+  '.opus': 'audio/ogg', '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.flac': 'audio/flac',
+};
+
 // Extensions we render as markdown rather than as plain text.
 const MARKDOWN_EXT = new Set(['.md', '.markdown', '.mdx']);
 const HTML_EXT = new Set(['.html', '.htm']);
@@ -43,7 +55,7 @@ const TEXT_NAMES = new Set([
 ]);
 
 const MIME = {
-  ...IMAGE_MIME,
+  ...IMAGE_MIME, ...VIDEO_MIME, ...AUDIO_MIME,
   '.pdf': 'application/pdf',
   '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
@@ -55,7 +67,7 @@ const MIME = {
 const ext = (name) => path.extname(name).toLowerCase();
 
 // The viewer kind for a name alone (no disk access): 'image' | 'markdown' |
-// 'html' | 'pdf' | 'text' | null. null = "ask the bytes" (see kindOfFile).
+// 'html' | 'pdf' | 'video' | 'audio' | 'text' | null. null = "ask the bytes" (see kindOfFile).
 export function kindOfName(name) {
   const e = ext(name);
   const base = name.toLowerCase();
@@ -63,6 +75,8 @@ export function kindOfName(name) {
   if (MARKDOWN_EXT.has(e)) return 'markdown';
   if (HTML_EXT.has(e)) return 'html';
   if (e === '.pdf') return 'pdf';
+  if (VIDEO_MIME[e]) return 'video';
+  if (AUDIO_MIME[e]) return 'audio';
   if (TEXT_EXT.has(e) || TEXT_NAMES.has(base) || TEXT_NAMES.has(base.replace(/^\./, ''))) return 'text';
   return null;
 }
@@ -95,8 +109,8 @@ export function kindOfFile(file) {
 }
 
 // Content type for serving a file inline. Text-ish things become text/plain so
-// the browser never sniffs something scriptable out of them; html/pdf/images
-// keep their real type because the viewer relies on it. Bytes we couldn't read
+// the browser never sniffs something scriptable out of them; html/pdf/images/
+// video/audio keep their real type because the viewer relies on it. Bytes we couldn't read
 // as anything are octet-stream — text/plain would be a lie the UI repeats.
 export function mimeOf(name, kind) {
   if (kind === 'binary') return 'application/octet-stream';
@@ -123,3 +137,4 @@ export function readTextHead(file, max = TEXT_MAX) {
     try { fs.closeSync(fd); } catch {}
   }
 }
+

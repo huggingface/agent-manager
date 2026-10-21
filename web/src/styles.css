@@ -1355,6 +1355,12 @@ body {
   background-size: 18px 18px; background-position: 0 0, 9px 9px; }
 .fv-image img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: var(--r-sm); box-shadow: 0 2px 14px -6px rgba(0, 0, 0, 0.4); }
 
+/* Video fits the pane whole, letterboxed, never cropped or scrolled; audio is
+   just its controls, at a width a scrubber can be aimed with. */
+.fv-media { flex: 1; min-width: 0; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 14px; background: var(--tile); overflow: hidden; }
+.fv-media video { display: block; max-width: 100%; max-height: 100%; min-width: min(100%, 320px); object-fit: contain; background: #000; border-radius: var(--r-sm); box-shadow: 0 2px 14px -6px rgba(0, 0, 0, 0.4); }
+.fv-media audio { width: min(100%, 560px); }
+
 .fv-frame { flex: 1; min-height: 0; width: 100%; border: none; background: #fff; }
 .fv-foot { flex: none; padding: 4px 11px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 11px; }
 .fv-foot a, .link-btn { color: var(--accent); }

@@ -16,6 +16,7 @@ import FileWrapToggle from './FileWrapToggle';
 // namespace stays intact when LazyPanel retries the production chunk by URL.
 export { FileWrapToggle };
 import PdfView from './PdfView';
+import MediaView, { AudioGlyph, VideoGlyph } from './MediaView';
 import type { TraceHeadInfo, TraceSource } from '../lib/traceWindows';
 import LazyPanel from './LazyPanel';
 import {
@@ -84,6 +85,8 @@ const CODE_RE = /\.(js|mjs|cjs|jsx|ts|tsx|py|rb|go|rs|java|kt|swift|c|h|cc|cpp|c
 // Kind glyphs, one pen: a listing should read as one set, not a sticker album.
 const KindGlyph = ({ name, kind, className }: { name: string; kind?: FileKind; className?: string }) => {
   if (kind === 'image') return <ImageGlyph className={className} />;
+  if (kind === 'video') return <VideoGlyph className={className} />;
+  if (kind === 'audio') return <AudioGlyph className={className} />;
   if (kind === 'html') return <GlobeGlyph className={className} />;
   if (kind === 'markdown') return <DocGlyph className={className} />;
   if (kind === 'text') return CODE_RE.test(name) ? <CodeGlyph className={className} /> : <DocGlyph className={className} />;
@@ -91,7 +94,8 @@ const KindGlyph = ({ name, kind, className }: { name: string; kind?: FileKind; c
 };
 
 const KIND_LABEL: Record<FileKind, string> = {
-  text: 'text', markdown: 'markdown', html: 'html', image: 'image', pdf: 'pdf', binary: 'binary',
+  text: 'text', markdown: 'markdown', html: 'html', image: 'image', pdf: 'pdf', video: 'video', audio: 'audio',
+  binary: 'binary',
   trace: 'trace',
 };
 
@@ -1062,6 +1066,14 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved,
     // its PDF viewer on a sandboxed resource — in a frame OR in its own tab. See
     // PdfView.
     if (meta.kind === 'pdf') return <PdfView src={rawSrc} onPages={setPages} />;
+    if (meta.kind === 'video' || meta.kind === 'audio') {
+      return (
+        <MediaView
+          key={rawSrc} kind={meta.kind} src={rawSrc} name={meta.name}
+          onFacts={setDims} onDownload={() => triggerDownload(downloadSrc, meta.name)}
+        />
+      );
+    }
     return (
       <div className="fv-empty">
         No preview for this kind of file.
@@ -1077,7 +1089,7 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved,
   // base; rendered markdown keeps its 14px reading base, with its nested type
   // expressed in em below so headings, code and tables move with it. A rendered
   // trace already spends the same zoom inside TraceView (13px, like the session
-  // reader). Images and PDF pages keep their intrinsic scale: a text-size control
+  // reader). Images, PDF pages and video keep their intrinsic scale: a text-size control
   // should not enlarge pixels. Rendered HTML lives in an opaque sandboxed frame,
   // so the parent cannot safely reach in and restyle its document; its Source
   // view still zooms as code.
