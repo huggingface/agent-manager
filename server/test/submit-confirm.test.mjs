@@ -25,7 +25,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
-import { composerShape, composerBody, promptInComposer } from '../src/runner.js';
+import { composerShape, composerBody, promptInComposer, stillText } from '../src/runner.js';
 import { CLIS } from '../src/config.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -144,6 +144,16 @@ check('the startup notice is removed only in its own trailing form, never from t
   assert.equal(inComposer(snap([`› ${asked}`, ...FOOTER], 0, asked.length + 2), asked).holds, true);
   const row = '› [Pasted Content 1080 chars]   Waiting for startup  · esc cancel';
   assert.equal(inComposer(snap([row, ...FOOTER], 0, row.length), 'x'.repeat(1080)).holds, true);
+});
+// What the retry Enter compares (stillText): only known noise is ignored.
+check('screens compared around an Enter: only the spinner cell and Codex\'s elapsed token are noise', () => {
+  const same = (a, b) => stillText(a, CODEX) === stillText(b, CODEX);
+  assert.ok(same('• Working (3s • esc to interrupt)\n› hi', '◦ Working (1m 04s • esc to interrupt)\n› hi'));
+  assert.ok(same('⠋ Loading\n› hi', '⠙ Loading\n› hi'));
+  assert.ok(!same('Step 1 of 2\n› Continue', 'Step 2 of 2\n› Continue'));
+  assert.ok(!same('Step 1 of 2 (esc to interrupt)\n› Continue', 'Step 2 of 2 (esc to interrupt)\n› Continue'));
+  assert.ok(!same('• Working (3s • esc to interrupt) 1 of 2', '• Working (3s • esc to interrupt) 2 of 2'));
+  assert.ok(!same('• Working (3s • esc to interrupt)', '• Thinking (3s • esc to interrupt)'));
 });
 check('the placeholder must be the whole composer, and other text is not the prompt', () => {
   assert.equal(inComposer(snap(['› [Pasted Content 1080 chars]', ...FOOTER], 0, 30), 'x'.repeat(1080)).holds, true);
@@ -337,6 +347,18 @@ try {
   check('"Step 1 of 2" becoming "Step 2 of 2" is a change: no second Enter', () => {
     assert.equal(steps.status, 409, `answered ${steps.status}: ${JSON.stringify(steps.body)}`);
     assert.equal(steps.body.code, 'input-not-submitted');
+    assert.deepEqual(read('enters'), ['with-text'], 'an Enter was pressed into the confirmation');
+  });
+
+  // Fifth review: on a row that says "esc to interrupt", only Codex's exact
+  // elapsed token is noise, not every number.
+  console.log('\n# the same, with the counter on a row that says "esc to interrupt"');
+  await fresh('fake-codex-steps-busy');
+  setMode({ dialog: 'steps', stepTail: ' (esc to interrupt)' });
+  const stepsBusy = await sendText('Continue');
+  check('"Step 1 of 2 (esc to interrupt)" becoming "Step 2 of 2 (…)" is a change: no second Enter', () => {
+    assert.equal(stepsBusy.status, 409, `answered ${stepsBusy.status}: ${JSON.stringify(stepsBusy.body)}`);
+    assert.equal(stepsBusy.body.code, 'input-not-submitted');
     assert.deepEqual(read('enters'), ['with-text'], 'an Enter was pressed into the confirmation');
   });
 

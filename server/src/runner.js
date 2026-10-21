@@ -2790,19 +2790,23 @@ async function submitConfirmed(host, id, confirm, text) {
 /**
  * The visible screen, less only what is known to change on its own: the
  * spinner glyph a row opens with (Codex's blinking `•`/`◦`, braille and
- * quarter-circle spinners, Claude Code's `✻`-family), and the elapsed time on
- * the CLI's own busy row (the one its `busy` pattern matches, e.g. Codex's
- * `Working (12s • esc to interrupt)`). The cursor is not in the text. Every
- * other character — digits included — must match: "Step 1 of 2" becoming
- * "Step 2 of 2" is a change, and a change means no second Enter.
+ * quarter-circle spinners, Claude Code's `✻`-family), that one cell replaced
+ * by a fixed mark; and the elapsed time in the CLI's exact busy form, where it
+ * has one (`confirm.elapsed`: Codex's `Working (<duration> • esc to
+ * interrupt)`), that token only. The cursor is not in the text. Every other
+ * character — digits included, on any row — must match: "Step 1 of 2"
+ * becoming "Step 2 of 2" is a change, and a change means no second Enter.
  */
-const SPINNER_LEAD = /^(\s*)[\u2800-\u28ff\u25d0-\u25d3\u2022\u25e6\u00b7*\u2722\u2733\u2736\u273b\u273d](?=\s)/;
+const SPINNER_LEAD = /^(\s*)[⠀-⣿◐-◓•◦·*✢✳✶✻✽](?=\s)/;
 function stillScreen(host, confirm) {
   let screen = '';
   try { screen = host.vt.getVisibleText(); } catch {}
-  return screen.split('\n').map((row) => {
-    const bare = row.replace(SPINNER_LEAD, '$1').replace(/\s+$/, '');
-    return confirm.busy.test(bare) ? bare.replace(/\d+/g, '#') : bare;
+  return stillText(screen, confirm);
+}
+export function stillText(screen, confirm) {
+  return String(screen || '').split('\n').map((row) => {
+    const still = row.replace(SPINNER_LEAD, '$1◌').replace(/\s+$/, '');
+    return confirm.elapsed ? still.replace(confirm.elapsed, '$1#$2') : still;
   }).join('\n');
 }
 

@@ -24,6 +24,7 @@
 //              "steps" shows `Step 1 of 2` above the composer; the Enter
 //              turns it into `Step 2 of 2` — a confirmation over the same
 //              rows, the prompt still selected — and nothing else moves.
+//   stepTail — text after the step counter, e.g. " (esc to interrupt)".
 // Every Enter received is appended to $FAKE_DIR/enters, every submit to
 // $FAKE_DIR/submitted.
 import fs from 'node:fs';
@@ -35,7 +36,7 @@ let line = '';           // what is on the composer
 let shown = true;        // whether it has been painted yet
 let swallow = 0;
 let startingUntil = 0;
-let dialog = false, inDialog = false;
+let dialog = false, inDialog = false, stepTail = '';
 let inPaste = false, pasted = '';
 let typedRun = 0, lastTypedAt = 0;   // the current burst of typed characters
 // The composer is redrawn whole, however many rows it wraps onto at this
@@ -45,7 +46,7 @@ const draw = () => {
   const content = `› ${shown ? line : ''}${Date.now() < startingUntil ? '   Waiting for startup  · esc cancel' : ''}`;
   const cols = process.stdout.columns || 80;
   const rows = content.split('\n').map((l, i) => (i ? `  ${l}` : l));
-  if (dialog === 'steps') rows.unshift(`Step ${inDialog ? 2 : 1} of 2`);
+  if (dialog === 'steps') rows.unshift(`Step ${inDialog ? 2 : 1} of 2${stepTail}`);
   process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J${rows.join('\r\n')}`);
   drawnRows = rows.reduce((n, l) => n + Math.max(1, Math.ceil([...l].length / cols)), 0);
 };
@@ -62,7 +63,7 @@ process.stdin.on('data', (chunk) => {
       pasted += buf.slice(0, end); buf = buf.slice(end + 6); inPaste = false;
       const m = mode();
       swallow = m.swallow || 0;
-      dialog = m.dialog || false;
+      dialog = m.dialog || false; stepTail = m.stepTail || '';
       if (m.startMs) { startingUntil = Date.now() + m.startMs; setTimeout(draw, m.startMs + 10); }
       line = pasted.length > 1000 ? `[Pasted Content ${pasted.length} chars]` : pasted;
       typedRun = 0;
@@ -94,7 +95,7 @@ process.stdin.on('data', (chunk) => {
     } else if (ch === '\x15') { line = ''; draw(); }
     else if (ch >= ' ') {
       // A prompt typed rather than pasted takes the same per-prompt faults.
-      if (!line) { const m = mode(); swallow = m.swallow || 0; dialog = m.dialog || false; }
+      if (!line) { const m = mode(); swallow = m.swallow || 0; dialog = m.dialog || false; stepTail = m.stepTail || ''; }
       if (Date.now() - lastTypedAt > 50) typedRun = 0;
       typedRun++; lastTypedAt = Date.now();
       line += ch; draw();
