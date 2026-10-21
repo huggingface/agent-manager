@@ -315,9 +315,29 @@ const isMimeChar = (c) => isIdChar(c) || c === '.' || c === '+' || c === '-';
 const isParamChar = (c) => isMimeChar(c) || c === '=';
 const isB64Char = (c) => isIdChar(c) || c === '+' || c === '/' || c === '=' || c === '-';
 
-// End of the base64 data URL starting at `k` (at "data:"), or -1. JSON's
-// escaped slash (`image\/png`, `ab\/cd`) counts as a slash: this runs on text
-// before it is decoded as well as after.
+// `word` (lower-case ASCII) at `i`, in any case.
+function ciAt(t, i, word) {
+  if (i + word.length > t.length) return false;
+  for (let k = 0; k < word.length; k++) {
+    const c = t.charCodeAt(i + k);
+    if ((c >= 65 && c <= 90 ? c + 32 : c) !== word.charCodeAt(k)) return false;
+  }
+  return true;
+}
+
+// The next "data:" at or after `from`, in any case, or -1.
+function findData(t, from) {
+  for (let i = from; i + 5 <= t.length; i++) {
+    const c = t.charCodeAt(i);
+    if ((c === 100 || c === 68) && ciAt(t, i, 'data:')) return i;
+  }
+  return -1;
+}
+
+// End of the base64 data URL starting at `k` (at "data:"), or -1. Scheme,
+// media type and `base64` match in any case, as URLs do. JSON's escaped slash
+// (`image\/png`, `ab\/cd`) counts as a slash: this runs on text before it is
+// decoded as well as after.
 function dataUrlEnd(t, k) {
   let i = k + 5;
   const run = (ok) => { const s = i; while (i < t.length && ok(t[i])) i++; return i > s; };
@@ -330,7 +350,7 @@ function dataUrlEnd(t, k) {
   for (;;) {
     if (t[i] !== ';') return -1;
     i++;
-    if (t.startsWith('base64,', i)) { i += 7; break; }
+    if (ciAt(t, i, 'base64,')) { i += 7; break; }
     if (!run(isParamChar)) return -1;
   }
   for (;;) {
@@ -344,17 +364,17 @@ function dataUrlEnd(t, k) {
 /** `text` with every base64 data URL replaced by a short marker; '' for a non-string. */
 export function stripDataUrls(text) {
   if (typeof text !== 'string') return '';
-  let k = text.indexOf('data:');
+  let k = findData(text, 0);
   if (k === -1) return text;
   let out = '';
   let from = 0;
   while (k !== -1) {
     const end = dataUrlEnd(text, k);
-    if (end === -1) { k = text.indexOf('data:', k + 5); continue; }
-    const kind = text.startsWith('data:image', k) ? 'image' : 'data';
+    if (end === -1) { k = findData(text, k + 5); continue; }
+    const kind = ciAt(text, k, 'data:image') ? 'image' : 'data';
     out += `${text.slice(from, k)}[${kind}, ${Math.round(((end - k) * 3) / 4 / 1024)} KB]`;
     from = end;
-    k = text.indexOf('data:', end);
+    k = findData(text, end);
   }
   return out + text.slice(from);
 }
@@ -550,7 +570,8 @@ const asLabelled = (t) => {
 };
 
 // The output split per call, or null when the snippet did not label it in a
-// form we know, or the output does not follow that form exactly.
+// form we know, or the output does not follow that form exactly: every call
+// labelled once, 0 to n-1, in order.
 function split(parts, code, n) {
   if (n === 1) return [parts];
   const form = labelForm(code);
@@ -571,14 +592,17 @@ function split(parts, code, n) {
       }
     } else if (text !== null) {
       const at = asLabelled(text);
-      if (at === null || at <= cur || at >= n) return null;
+      if (at === null || at !== cur + 1 || at >= n) return null;
       cur = at;
     }
     if (cur === -1) return null;
     segs[cur].push(p);
   }
-  if (form === 'marker' && cur !== n - 1) return null;
-  return cur === -1 ? null : segs;
+  // The labels must cover every call the snippet made, exactly. A batch that
+  // is only some of them — a setup call before a Promise.allSettled — numbers
+  // its own results from 0, and mapping those onto the right calls would be a
+  // guess.
+  return cur === n - 1 ? segs : null;
 }
 
 /**

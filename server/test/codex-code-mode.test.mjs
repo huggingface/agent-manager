@@ -281,3 +281,35 @@ test('10. a data URL hidden by a JSON escape is still stripped', async () => {
   assert.equal(stripDataUrls('{"u":"data:image\\/png;base64,AB\\/CD"}'), '{"u":"[image, 0 KB]"}');
   for (const s of [null, undefined, 5, {}, { toString: null }]) assert.equal(stripDataUrls(s), '');
 });
+
+// ---------------------------------------------------------------- third review #220
+test('11. labels that number only a batch, not every call, go to the script', async () => {
+  const input = 'await tools.exec_command({cmd:"setup"}); const r=await Promise.allSettled([tools.exec_command({cmd:"false"}),tools.exec_command({cmd:"echo OK"})]); r.forEach((r,i)=>text({i,...r}));';
+  const { blocks } = await readScript(input, [wrapper,
+    txt({ i: 0, status: 'fulfilled', value: { exit_code: 1, output: '' } }),
+    txt({ i: 1, status: 'fulfilled', value: { exit_code: 0, output: 'OK\n' } })]);
+  assert.deepEqual(['c:0', 'c:1', 'c:2'].map((id) => [resultOf(blocks, id).text, !!resultOf(blocks, id).failed]),
+    [['', false], ['', false], ['', false]], 'no call gets another call\'s output or failure');
+  const script = blocks.find((b) => b.type === 'tool_use' && b.name === 'script');
+  assert.deepEqual([resultOf(blocks, script.id).text, resultOf(blocks, script.id).failed], ['(exit 1)\nOK', true]);
+  // The same in the loop form: two labels for three calls.
+  const loop = 'await tools.exec_command({cmd:"setup"}); const r=await Promise.allSettled([tools.exec_command({cmd:"a"}),tools.exec_command({cmd:"b"})]); for(let i=0;i<r.length;i++){text(i);text(r[i].value)}';
+  const l = await readScript(loop, [wrapper, txt('0'), txt({ exit_code: 0, output: 'a' }), txt('1'), txt({ exit_code: 0, output: 'b' })]);
+  assert.equal(resultOf(l.blocks, 'c:0').text, '');
+  // The whole output, its printed labels included: it is shown, not interpreted.
+  assert.equal(resultOf(l.blocks, l.blocks.find((b) => b.name === 'script').id).text, '0\na\n1\nb');
+  // And a labelled batch that skips an index is not a cover either.
+  const gap = 'const r=await Promise.allSettled([tools.exec_command({cmd:"a"}),tools.exec_command({cmd:"b"})]); r.forEach((r,i)=>text({i,...r}));';
+  const g = await readScript(gap, [wrapper, txt({ i: 1, status: 'fulfilled', value: { exit_code: 0, output: 'b' } })]);
+  assert.ok(g.blocks.some((b) => b.name === 'script'));
+});
+
+test('12. data URLs are stripped in any case', async () => {
+  for (const url of ['DATA:image/png;base64,QUJD', 'data:image/png;BASE64,QUJD', 'Data:IMAGE/PNG;Base64,QUJD', 'DATA:image\\/png;BASE64,QU\\/JD']) {
+    assert.equal(stripDataUrls(`a ${url} b`), 'a [image, 0 KB] b', url);
+  }
+  assert.equal(stripDataUrls('DATA:text/plain;BASE64,QUJD'), '[data, 0 KB]');
+  const { blocks } = await readScript('tools.write_file({content:"DATA:image/png;base64,QUJD"})',
+    [wrapper, txt({ exit_code: 0, output: 'data:image/png;BASE64,QUJD' })]);
+  assert.ok(blocks.every((b) => !('text' in b) || !/base64/i.test(b.text)), JSON.stringify(blocks));
+});

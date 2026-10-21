@@ -41,14 +41,19 @@ const INPUTS = [
   'text((await tools.exec_command({cmd:"echo 0"})).output.trim());text(await tools.exec_command({cmd:"echo second"}));',
   'const rs=await Promise.allSettled([tools.exec_command({cmd:"a"}),tools.view_image({path:"/b.png"})]); rs.forEach((r,i)=>text({i,...r}));',
   'tools.write_file({content:"data:image\\/png;base64,QUJD"})',
+  'tools.write_file({content:"DATA:image/png;base64,QUJD"})',
+  'tools.write_file({content:"data:image/png;BASE64,QUJD"})',
+  'await tools.exec_command({cmd:"setup"}); const r=await Promise.allSettled([tools.exec_command({cmd:"false"}),tools.exec_command({cmd:"echo OK"})]); r.forEach((r,i)=>text({i,...r}));',
 ];
 const OUTPUTS = lines.filter((p) => p.type === 'custom_tool_call_output').map((p) => p.output);
 const TOKENS = ['tools.', 'tools.exec_command(', 'tools["x"](', '(', ')', '[', ']', '{', '}', '"', "'", '`', '${', '\\', '\\u{', '\\u{110000}',
   '\\x4', '/*', '*/', '//', '\n', ',', ':', '...', '0x', '1e999', '-', '__proto__:', 'toString:null', 'for(let i=0;i<r.length;i++){text(i);',
-  'text({i,...r})', 'data:image/png;base64,QUJD', 'data:image\\/png;base64,QUJD', ' '.repeat(64), '0', '1', '"\\n"'];
+  'text({i,...r})', 'data:image/png;base64,QUJD', 'data:image\\/png;base64,QUJD',
+  'DATA:image/png;base64,QUJD', 'data:image/png;BASE64,QUJD', 'Data:Image\\/PNG;Base64,QUJD', ' '.repeat(64), '0', '1', '"\\n"'];
 const JSONS = [{ toString: null }, { status: 'rejected', reason: { message: { toString: null } } }, { status: 'rejected', reason: null },
   { i: 0, status: 'fulfilled', value: { output: 'data:image\\/png;base64,AAAA', exit_code: 'x' } }, { i: 1, status: 'rejected', reason: 5 },
   { output: { toString: null } }, { exit_code: 1e308, output: 'x' }, { exit_code: 2, output: 'data:image/png;base64,AAAA' },
+  { output: 'DATA:image/png;base64,AAAA' }, { output: 'data:image\\/png;BASE64,AAAA' },
   { output: '0' }, { i: 9, status: 'fulfilled' }, [1, 2], 'str', 0, null];
 
 function mutate(s) {
@@ -83,7 +88,7 @@ function mutateOutput(output) {
 }
 
 // A base64 data URL as plain text, with or without JSON's escaped slash.
-const DATA_URL = /data:[\w.+$-]+(?:\\\/|\/)[\w.+$-]+(?:;[\w.+=$-]+)*;base64,/;
+const DATA_URL = /data:[\w.+$-]+(?:\\\/|\/)[\w.+$-]+(?:;[\w.+=$-]+)*;base64,/i;
 const clean = (text, where) => assert.ok(!DATA_URL.test(text), `${where}: ${text.slice(0, 200)}`);
 
 // The parse's own cost: a slow reading is taken again and the faster kept, so
