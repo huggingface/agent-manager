@@ -128,7 +128,7 @@ export type Step =
   | { kind: 'dispatch'; call: TraceBlock; failed: boolean; blocks: TraceBlock[] }
   | { kind: 'note'; text: string; more?: number }
   | { kind: 'shell'; command: string; out: string; failed: boolean }
-  | { kind: 'image'; src: string }
+  | { kind: 'image'; src: string; width?: number; height?: number }
   | { kind: 'compact'; text: string };
 
 /**
@@ -263,7 +263,7 @@ export function stepsOf(turns: TraceTurn[], dispatched?: (call: TraceBlock) => b
       } else if (b.type === 'compaction') {
         out.push({ kind: 'compact', text: b.text });
       } else if (b.type === 'image') {
-        out.push({ kind: 'image', src: b.src });
+        out.push({ ...b, kind: 'image' });
       } else if (b.type === 'text' && b.text.trim()) {
         out.push({ kind: 'note', text: b.text, more: b.more });
       }

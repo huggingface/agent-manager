@@ -57,7 +57,10 @@ test('the reader shows the tools a script called, not the script', async () => {
   // The allSettled script's images follow the view_image call that made each.
   const settled = blocks.slice(blocks.indexOf(uses[1]), blocks.indexOf(uses[3]) + 2).map((b) => b.type);
   assert.deepEqual(settled, ['tool_use', 'tool_result', 'image', 'tool_use', 'tool_result', 'image', 'tool_use', 'tool_result']);
-  assert.match(blocks.find((b) => b.type === 'image').src, /^data:image\/png;base64,/);
+  // By reference, never by value: the bytes are served by the trace image route.
+  const image = blocks.find((b) => b.type === 'image');
+  assert.match(image.ref, /^[0-9a-z]+\.[0-9a-f]{24}$/);
+  assert.equal(image.src, undefined);
   assert.equal(blocks.filter((b) => b.type === 'image').length, 2);
 });
 

@@ -2140,7 +2140,7 @@ a.btn-ghost { text-decoration: none; }
 /* Tool arguments and output are reference material: readable, capped, scrollable
    in place so one 20k-char result can't own the whole pane. */
 .tv-pre.small { font-size: 0.85em; max-height: 22rem; overflow: auto; }
-.tv-img { max-width: 100%; max-height: 20rem; border-radius: var(--r-sm); }
+.tv-img { --img-max-h: 20rem; display: block; max-width: 100%; max-height: var(--img-max-h); border-radius: var(--r-sm); }
 
 .tv-fold { margin: 2px 0; }
 .tv-fold-head { display: flex; align-items: center; gap: 5px; width: 100%; min-width: 0; background: none; border: 0; padding: 1px 3px; font: inherit; font-size: 0.85em; color: var(--muted); cursor: pointer; text-align: left; border-radius: var(--r-sm); }

@@ -117,6 +117,20 @@ const firstArgs = (blocks: TraceBlock[]) => {
   return first ? first.text : '';
 };
 
+// An image by reference, fetched when it is about to be seen and laid out at
+// its known size first. The reader's TraceImage does the same; it is not shared
+// because it lives in the reader's on-demand chunk, and pulling that chunk (or
+// splitting TraceImage out of it) into this one would cost the entry chunk.
+function PaneImage({ b }: { b: Extract<TraceBlock, { type: 'image' }> }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <span className="trace-img-missing mono tv-img">image unavailable</span>;
+  const { width: w, height: h } = b;
+  return (
+    <img className="tv-img" src={b.src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)}
+      {...(w && h ? { width: w, height: h, style: { aspectRatio: `${w}/${h}`, height: 'auto', width: `min(100%,${w}px,calc(var(--img-max-h)*${w / h}))` } } : {})} />
+  );
+}
+
 function Blocks({ turn }: { turn: TraceTurn }) {
   const out: ReactNode[] = [];
   const bs = turn.blocks;
@@ -148,7 +162,7 @@ function Blocks({ turn }: { turn: TraceTurn }) {
         <pre className="tv-pre small">{b.stdout}{b.stderr}</pre>
       </Collapsible>);
     } else if (b.type === 'image') {
-      out.push(<img key={i} className="tv-img" src={b.src} alt="" />);
+      out.push(<PaneImage key={i} b={b} />);
     } else if (b.type === 'text') {
       // System rows are the harness talking to the model — instructions, skills,
       // environment. One of them here is 27 KB, so expanded they bury the
