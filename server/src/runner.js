@@ -2429,11 +2429,19 @@ const WRAP_ROWS = 8;
  * drawn below that echo would otherwise read as a composer holding it. So:
  *  - only the bottom-most marker row on the screen opens the composer;
  *  - the cursor sits on it or below it, with no rule in between;
- *  - nothing below the cursor is a numbered menu row (a dialog's options);
+ *  - nothing below the cursor is a numbered option or a dialog's key hints;
+ *  - the block is not itself a menu: a numbered row under the marker, more
+ *    numbered rows under it;
  *  - and the block is what the caller compares, in full (promptInComposer).
+ * `scrolled` is Codex's mark on a composer too tall for the screen: the `↑` at
+ * the end of its top row, which then shows only the prompt's tail.
+ * `notice` is a status drawn on the cursor's row after the text (Codex's
+ * "Waiting for startup"), in its exact form; it is not part of the composer.
  */
-const MENU_ROW = /^[\s\u2502\u2503|]*(?:[>\u276f\u203a\u27e9\u25b6]\s*)?\d+[.)]\s/;
-export function liveComposer(snapshot) {
+const MENU_ROW = /^[\s│┃|]*(?:[>❯›⟩▶]\s*)?\d+[.)]\s/;
+const DIALOG_HINT = /\b(?:enter to (?:confirm|continue|select|submit)|esc to (?:cancel|skip|close|go back)|enter continue|esc skip|press enter)\b/i;
+const SCROLLED = /↑\s*$/;
+export function liveComposer(snapshot, { notice = null } = {}) {
   const shape = composerShape(snapshot);
   if (!shape || shape.located) return shape;
   const lines = snapshot.visibleLines || [];
@@ -2441,11 +2449,17 @@ export function liveComposer(snapshot) {
   for (let i = lines.length - 1; i >= 0 && from < 0; i--) if (startsWithMarker(lines[i].text)) from = i;
   const at = lines.findIndex((l) => l.row === snapshot.cursorRow);
   if (from < 0 || at < from) return null;
-  if (lines.slice(from, at + 1).some((l) => isRule(l.text))) return null;
-  if (lines.slice(at + 1).some((l) => MENU_ROW.test(l.text))) return null;
-  const typed = flatten(lines.slice(from, at).map((l) => l.text)
-    .concat(lines[at].text.slice(0, snapshot.cursorCol)).join(' '));
-  return { alt: !!snapshot.isAltScreen, located: false, cursorInside: false, typed, full: typed, marked: true };
+  const block = lines.slice(from, at + 1).map((l) => l.text);
+  if (block.some(isRule)) return null;
+  if (lines.slice(at + 1).some((l) => MENU_ROW.test(l.text) || DIALOG_HINT.test(l.text))) return null;
+  if (MENU_ROW.test(block[0]) && block.slice(1).some((t) => MENU_ROW.test(t))) return null;
+  let last = block[block.length - 1].slice(0, snapshot.cursorCol);
+  if (notice) last = last.replace(notice, '');
+  const scrolled = SCROLLED.test(block[0]);
+  const rows = block.slice(0, -1).concat(last);
+  if (scrolled) rows[0] = rows[0].replace(SCROLLED, '');
+  const typed = flatten(rows.join(' '));
+  return { alt: !!snapshot.isAltScreen, located: false, cursorInside: false, typed, full: typed, marked: true, scrolled };
 }
 
 /**
@@ -2456,30 +2470,24 @@ export function liveComposer(snapshot) {
  * wrap can fall inside a word — or inside `[Pasted Content 1063 chars]`. In a
  * ruled box the prompt's placeholder or its last characters are enough, since
  * the box holds nothing else. Codex's composer is found by a wider walk, so
- * there the whole block must BE the prompt: its placeholder exactly, the
- * prompt itself, or — once Codex scrolls a tall composer, marking its top row
- * `↑` — the prompt's tail. Anything else in the block (a transcript line, a
- * dialog) and it is not ours.
+ * there the whole block must BE the prompt, from the marker row down: its
+ * placeholder exactly, or the prompt itself — or only its tail once Codex has
+ * scrolled the composer and marked it so. Anything else in the block (a
+ * transcript line, a dialog) and it is not ours.
  */
 export function promptInComposer(snapshot, confirm, text) {
   const squash = (v) => String(v || '').replace(/\s+/g, '');
-  const shape = liveComposer(snapshot);
+  const shape = liveComposer(snapshot, { notice: confirm.notice });
   if (!shape || !(shape.located || shape.marked)) return { body: null, holds: false };
-  let shown = composerBody(shape);
-  // A notice drawn after the paste on the same row, not part of it.
-  const notice = confirm.starting ? shown.search(confirm.starting) : -1;
-  if (notice >= 0) shown = shown.slice(0, notice);
-  const body = squash(shown);
+  const body = squash(composerBody(shape));
   const flat = squash(text);
   if (!body) return { body, holds: false };
   if (shape.located) {
     return { body, holds: confirm.pasted.test(body) || body.includes(flat.slice(-Math.min(24, flat.length))) };
   }
   const placeholder = new RegExp(`^(?:${confirm.pasted.source})$`);
-  const bare = (v) => v.replace(/[\u2191\u2193]/g, '');
-  const tail = bare(body);
-  return { body, holds: placeholder.test(body) || tail === bare(flat)
-    || (tail.length >= Math.min(24, flat.length) && bare(flat).endsWith(tail)) };
+  return { body, holds: placeholder.test(body) || body === flat
+    || (shape.scrolled && body.length >= Math.min(24, flat.length) && flat.endsWith(body)) };
 }
 
 // ONE prompt marker, not every glyph that could be one: stripping greedily
@@ -2733,7 +2741,11 @@ async function submitConfirmed(host, id, confirm, text) {
     try { screen = host.vt.getVisibleText(); } catch {}
     const { body, holds } = reading;
     const busy = confirm.busy.test(screen);
-    return { holds, submitted: !holds && (body === '' || busy), starting: !!confirm.starting?.test(screen) };
+    // The notice in its own place, where one is known: a prompt that merely
+    // mentions it must not hold the Enter off.
+    const starting = confirm.notice ? screen.split('\n').some((row) => confirm.notice.test(row))
+      : !!confirm.starting?.test(screen);
+    return { holds, submitted: !holds && (body === '' || busy), starting };
   };
   const until = async (test, ms) => {
     const deadline = Date.now() + ms;

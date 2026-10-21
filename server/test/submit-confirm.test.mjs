@@ -121,6 +121,29 @@ check('nor a cursor above the bottom-most marker, or a menu below the cursor', (
   const menu = ['  >_ OpenAI Codex (v0.162.1)', '', ...CUT_ROWS, '', '  1. Allow', '  2. Deny'];
   assert.equal(inComposer(snap(menu, 13, 9), CUT).holds, false);
 });
+// Second review of #222: a tail of the prompt is only enough where Codex has
+// marked the composer scrolled, and a prompt that mentions the startup notice
+// is not the notice.
+const CHOICES = 'Explain these choices:\n1. Use session directory\n2. Use current directory';
+check('a numbered dialog matching the prompt\'s last lines is not the composer', () => {
+  const rows = ['  >_ OpenAI Codex (v0.162.1)', '', '  Choose a directory', '› 1. Use session directory', '  2. Use current directory'];
+  assert.equal(inComposer(snap(rows, 4, 26), CHOICES).holds, false);
+  // Even a prompt that is nothing but those options: a menu is not ours.
+  assert.equal(inComposer(snap(rows, 4, 26), '1. Use session directory\n2. Use current directory').holds, false);
+});
+check('a tail of the prompt without Codex\'s ↑ is not enough; the same rows marked ↑ are', () => {
+  const rows = ['  >_ OpenAI Codex (v0.162.1)', '', '› at pacing, the type treatment and whether the ending lands. Please look at pacing, the type',
+    '  treatment and whether the ending lands.', '  Answer in under 150 words.', '  Thanks!', ...FOOTER];
+  assert.equal(inComposer(snap(rows, 5, 9), CUT).holds, false);
+  rows[2] += '↑';
+  assert.equal(inComposer(snap(rows, 5, 9), CUT).holds, true);
+});
+check('the startup notice is removed only in its own trailing form, never from the prompt', () => {
+  const asked = 'What does Waiting for startup mean?';
+  assert.equal(inComposer(snap([`› ${asked}`, ...FOOTER], 0, asked.length + 2), asked).holds, true);
+  const row = '› [Pasted Content 1080 chars]   Waiting for startup  · esc cancel';
+  assert.equal(inComposer(snap([row, ...FOOTER], 0, row.length), 'x'.repeat(1080)).holds, true);
+});
 check('the placeholder must be the whole composer, and other text is not the prompt', () => {
   assert.equal(inComposer(snap(['› [Pasted Content 1080 chars]', ...FOOTER], 0, 30), 'x'.repeat(1080)).holds, true);
   assert.equal(inComposer(snap(['› [Pasted Content 1080 chars] and more', ...FOOTER], 0, 39), 'x'.repeat(1080)).holds, false);
@@ -279,6 +302,29 @@ try {
     assert.equal(marked.status, 200, JSON.stringify(marked.body));
     assert.deepEqual(read('submitted'), [JSON.stringify(`[Pasted Content ${MARKED.length - 6} chars]`)]);
     assert.deepEqual(read('enters'), ['with-text']);
+  });
+
+  console.log('\n# a prompt whose last lines read like the dialog its Enter opens');
+  await fresh('fake-codex-choices');
+  setMode({ dialog: true });
+  const choices = await sendText(CHOICES);
+  check('the dialog is not the composer: the send fails, and no Enter goes into it', () => {
+    assert.equal(choices.status, 409, `answered ${choices.status}: ${JSON.stringify(choices.body)}`);
+    assert.equal(choices.body.code, 'input-not-submitted');
+    assert.deepEqual(read('enters'), ['with-text'], 'an Enter was pressed into the dialog');
+  });
+
+  console.log('\n# a prompt that mentions the startup notice');
+  await fresh('fake-codex-mentions-startup');
+  setMode({});
+  const t0 = Date.now();
+  const mention = await sendText('What does Waiting for startup mean?');
+  const took = Date.now() - t0;
+  check('is the prompt, not the notice: submitted with one Enter, without waiting for a startup', () => {
+    assert.equal(mention.status, 200, JSON.stringify(mention.body));
+    assert.deepEqual(read('enters'), ['with-text']);
+    assert.equal(read('submitted').length, 1);
+    assert.ok(took < 5000, `took ${took} ms`);
   });
 
   console.log('\n# a dialog drawn below the same prompt, already echoed in the conversation');
