@@ -18,6 +18,9 @@
 //              composer; further Enters are recorded and ignored. "plain"
 //              draws it with no `›` on any row, so the nearest marker above
 //              the cursor is the last prompt echoed in the conversation.
+//              "select" draws an unnumbered choice whose selected label is
+//              the prompt itself — `› Continue` over `  Quit` — with the
+//              cursor after it, just like a composer holding the prompt.
 // Every Enter received is appended to $FAKE_DIR/enters, every submit to
 // $FAKE_DIR/submitted.
 import fs from 'node:fs';
@@ -73,6 +76,8 @@ process.stdin.on('data', (chunk) => {
       if (!shown || swallow > 0) { if (shown) swallow--; continue; }
       if (dialog) {
         inDialog = true;
+        const up = `\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J`;
+        if (dialog === 'select') { process.stdout.write(`${up}› ${line}\r\n  Quit\x1b[A\r\x1b[${2 + line.length}C`); continue; }
         const pick = dialog === 'plain' ? ' ' : '›';
         process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J  Choose a directory\r\n${pick} 1. Use session directory\r\n  2. Use current directory`);
         continue;
@@ -83,6 +88,8 @@ process.stdin.on('data', (chunk) => {
       line = ''; drawnRows = 1; draw();
     } else if (ch === '\x15') { line = ''; draw(); }
     else if (ch >= ' ') {
+      // A prompt typed rather than pasted takes the same per-prompt faults.
+      if (!line) { const m = mode(); swallow = m.swallow || 0; dialog = m.dialog || false; }
       if (Date.now() - lastTypedAt > 50) typedRun = 0;
       typedRun++; lastTypedAt = Date.now();
       line += ch; draw();

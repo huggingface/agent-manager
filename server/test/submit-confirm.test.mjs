@@ -128,8 +128,9 @@ const CHOICES = 'Explain these choices:\n1. Use session directory\n2. Use curren
 check('a numbered dialog matching the prompt\'s last lines is not the composer', () => {
   const rows = ['  >_ OpenAI Codex (v0.162.1)', '', '  Choose a directory', '› 1. Use session directory', '  2. Use current directory'];
   assert.equal(inComposer(snap(rows, 4, 26), CHOICES).holds, false);
-  // Even a prompt that is nothing but those options: a menu is not ours.
-  assert.equal(inComposer(snap(rows, 4, 26), '1. Use session directory\n2. Use current directory').holds, false);
+  // A prompt that is nothing but those options reads the same as the menu:
+  // text cannot tell them apart, so the Enter decides (submitConfirmed).
+  assert.equal(inComposer(snap(rows, 4, 26), '1. Use session directory\n2. Use current directory').holds, true);
 });
 check('a tail of the prompt without Codex\'s ↑ is not enough; the same rows marked ↑ are', () => {
   const rows = ['  >_ OpenAI Codex (v0.162.1)', '', '› at pacing, the type treatment and whether the ending lands. Please look at pacing, the type',
@@ -312,6 +313,29 @@ try {
     assert.equal(choices.status, 409, `answered ${choices.status}: ${JSON.stringify(choices.body)}`);
     assert.equal(choices.body.code, 'input-not-submitted');
     assert.deepEqual(read('enters'), ['with-text'], 'an Enter was pressed into the dialog');
+  });
+
+  // Third review of #222: an Enter that opens a dialog showing the prompt's own
+  // words as its selected option must not get a second one.
+  console.log('\n# an Enter that opens a choice whose selected label is the prompt');
+  await fresh('fake-codex-select');
+  setMode({ dialog: 'select' });
+  const selectSend = await sendText('Continue');
+  check('the screen changed, so no second Enter: the send fails for the operator to look', () => {
+    assert.equal(selectSend.status, 409, `answered ${selectSend.status}: ${JSON.stringify(selectSend.body)}`);
+    assert.equal(selectSend.body.code, 'input-not-submitted');
+    assert.deepEqual(read('enters'), ['with-text'], 'an Enter was pressed into the dialog');
+    assert.match(String(selectSend.body.error || ''), /neither an empty composer nor the session working/);
+  });
+
+  console.log('\n# a prompt that is a numbered list');
+  await fresh('fake-codex-numbered');
+  setMode({});
+  const numbered = await sendText('1. Review code\n2. Run tests');
+  check('is a prompt, not a menu: submitted with one Enter', () => {
+    assert.equal(numbered.status, 200, JSON.stringify(numbered.body));
+    assert.deepEqual(read('enters'), ['with-text']);
+    assert.equal(read('submitted').length, 1);
   });
 
   console.log('\n# a prompt that mentions the startup notice');

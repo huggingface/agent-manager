@@ -2430,9 +2430,9 @@ const WRAP_ROWS = 8;
  *  - only the bottom-most marker row on the screen opens the composer;
  *  - the cursor sits on it or below it, with no rule in between;
  *  - nothing below the cursor is a numbered option or a dialog's key hints;
- *  - the block is not itself a menu: a numbered row under the marker, more
- *    numbered rows under it;
  *  - and the block is what the caller compares, in full (promptInComposer).
+ * Text alone cannot tell a composer from a dialog that happens to show the
+ * same words; that is settled around the Enter instead (submitConfirmed).
  * `scrolled` is Codex's mark on a composer too tall for the screen: the `↑` at
  * the end of its top row, which then shows only the prompt's tail.
  * `notice` is a status drawn on the cursor's row after the text (Codex's
@@ -2452,7 +2452,6 @@ export function liveComposer(snapshot, { notice = null } = {}) {
   const block = lines.slice(from, at + 1).map((l) => l.text);
   if (block.some(isRule)) return null;
   if (lines.slice(at + 1).some((l) => MENU_ROW.test(l.text) || DIALOG_HINT.test(l.text))) return null;
-  if (MENU_ROW.test(block[0]) && block.slice(1).some((t) => MENU_ROW.test(t))) return null;
   let last = block[block.length - 1].slice(0, snapshot.cursorCol);
   if (notice) last = last.replace(notice, '');
   const scrolled = SCROLLED.test(block[0]);
@@ -2729,8 +2728,11 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
  *  - after the Enter, a submit is the prompt gone from the composer AND either
  *    an empty composer or the CLI's busy indicator. Anything else — a dialog,
  *    a screen with no composer on it — is not a submit;
- *  - while the prompt is visibly still in the composer, Enter is pressed once
- *    more. Never into anything else;
+ *  - Enter is pressed once more only if the first visibly did nothing: the
+ *    prompt still in the composer AND the screen otherwise as it was just
+ *    before that Enter (cursor, spinners and digits aside). An Enter that
+ *    changed the screen opened something — a dialog, a menu, a new layout —
+ *    and one that happens to show the prompt's words must not get another;
  *  - otherwise the send fails (input-not-submitted), and the line is marked as
  *    holding something, so the next send is refused rather than glued on.
  */
@@ -2769,17 +2771,30 @@ async function submitConfirmed(host, id, confirm, text) {
   if (confirm.starting) await until((v) => !v.starting, STARTUP_WAIT_MS);
   // The Enter still goes as its own keypress, apart from the paste burst.
   await new Promise((r) => setTimeout(r, 300));
+  const before = stillScreen(host);
   host.pty.write('\r');
   let ok = await until((v) => v.submitted, SUBMIT_CONFIRM_TIMEOUT_MS);
-  if (!ok && look().holds) {
+  const untouched = !ok && look().holds && stillScreen(host) === before;
+  if (untouched) {
     host.pty.write('\r');
     ok = await until((v) => v.submitted, SUBMIT_CONFIRM_TIMEOUT_MS);
     if (ok) console.warn(`[input] ${id}: the first Enter did not submit the prompt; the second did`);
   }
   if (ok) { clearPaneInput(id); return; }
-  throw unsent('input-not-submitted', look().holds
+  throw unsent('input-not-submitted', untouched
     ? 'the prompt was typed into this session\'s composer but pressing Enter did not submit it (tried twice). It is still on the input line: press Enter in the terminal to send it, or clear it.'
     : 'the prompt was typed into this session\'s composer and Enter was pressed, but the screen then showed neither an empty composer nor the session working, so AM cannot say it was delivered. Check the terminal before sending it again.');
+}
+
+/**
+ * The visible screen, less what changes on an idle one: spinner and bullet
+ * glyphs, and digits (elapsed times, clocks). The cursor is not in it.
+ */
+const STILL_NOISE = /[\u2800-\u28ff\u25d0-\u25d3\u2022\u25e6\u00b7\u2722\u2733\u2736\u273b\u273d]/g;
+function stillScreen(host) {
+  let screen = '';
+  try { screen = host.vt.getVisibleText(); } catch {}
+  return screen.replace(STILL_NOISE, '').replace(/\d+/g, '#').replace(/[^\S\n]+$/gm, '');
 }
 
 /** Insert text into a running terminal's composer without submitting it. */
