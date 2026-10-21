@@ -28,7 +28,7 @@ function range(o: Record<string, unknown>): string {
 }
 
 const SHOWN_ELSEWHERE = new Set([
-  'command', 'description', 'file_path', 'path', 'notebook_path', 'content',
+  'command', 'cmd', 'description', 'file_path', 'path', 'notebook_path', 'content',
   'old_string', 'new_string', 'offset', 'limit', 'replace_all',
 ]);
 
@@ -64,12 +64,13 @@ export default function ToolCall({ name, text }: { name: string; text: string })
   const file = [o.file_path, o.path, o.notebook_path].find((v) => typeof v === 'string') as string | undefined;
   const note = typeof o.description === 'string' ? o.description : '';
 
-  // A shell call is a command.
-  if (typeof o.command === 'string') {
+  // A shell call is a command (codex's exec_command calls it `cmd`).
+  const command = typeof o.command === 'string' ? o.command : typeof o.cmd === 'string' ? o.cmd : null;
+  if (command != null) {
     return (
       <>
         {note && <Caption>{note}</Caption>}
-        <Block kind="ct-cmd">{o.command}</Block>
+        <Block kind="ct-cmd">{command}</Block>
         <Fields o={o} skip={SHOWN_ELSEWHERE} />
       </>
     );

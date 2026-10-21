@@ -144,13 +144,32 @@ export const proseOf = (s: Step): string =>
   (s.kind === 'think' || s.kind === 'note' || s.kind === 'compact' ? s.text : '');
 
 // The one field of a tool call worth a line: what it acted on.
-const ARG_KEYS = ['file_path', 'path', 'notebook_path', 'command', 'pattern', 'glob', 'url', 'query', 'prompt', 'description', 'subagent_type'];
+const ARG_KEYS = ['file_path', 'path', 'notebook_path', 'command', 'cmd', 'pattern', 'glob', 'url', 'query', 'prompt', 'description', 'subagent_type'];
 const shortPath = (p: string) => {
   const parts = p.split('/').filter(Boolean);
   return parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : p;
 };
 
+const PATCH_VERB: Record<string, string> = { Add: 'Added', Update: 'Edited', Delete: 'Deleted' };
+
+/** "Added …/edit/notes.md (+11 -0)": what a codex apply_patch did, read from its headers. */
+export function patchSummary(text: string): string {
+  const files: string[] = [];
+  let cur: { verb: string; file: string; add: number; del: number } | null = null;
+  const flush = () => { if (cur) files.push(`${cur.verb} ${shortPath(cur.file)} (+${cur.add} -${cur.del})`); };
+  for (const line of text.split('\n')) {
+    const m = /^\*\*\* (Add|Update|Delete) File: (.+)$/.exec(line);
+    if (m) { flush(); cur = { verb: PATCH_VERB[m[1]], file: m[2].trim(), add: 0, del: 0 }; continue; }
+    if (!cur || line.startsWith('***')) continue;
+    if (line.startsWith('+')) cur.add++;
+    else if (line.startsWith('-')) cur.del++;
+  }
+  flush();
+  return oneLine(files.join(', '), 70);
+}
+
 export function argSummary(text: string): string {
+  if (text.startsWith('*** Begin Patch')) return patchSummary(text) || oneLine(text, 70);
   let v: unknown = null;
   try { v = JSON.parse(text); } catch {
     // A block the reader had to cut mid-JSON still names what it acted on.

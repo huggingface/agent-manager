@@ -172,7 +172,7 @@ function StepRow({ s, q }: { s: Step; q?: string }) {
                 <ToolCall name={b.name} text={b.text} />
                 {!!b.more && <div className="cs-more mono">…{moreLabel(b.more)}</div>}
               </div>
-            ) : b.type === 'tool_result' ? (
+            ) : b.type === 'tool_result' && (b.text.trim() || b.more) ? (
               <pre key={i} className={`cs-pre out${b.failed ? ' bad' : ''}`}><Hi text={b.text.trim()} q={q} />{b.more ? `\n…${moreLabel(b.more)}` : ''}</pre>
             ) : null
           ))}

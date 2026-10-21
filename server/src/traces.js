@@ -14,6 +14,7 @@ import { mark, tracked, PHASE } from './watchdog.js';
 import { findTrace, HARNESS_LABEL } from './share.js';
 import { cachedTrace, traceRevision } from './trace-revision.js';
 import { outputHash } from './output-id.js';
+import { codeModeCalls, codeModeOutput, classicArgs, patchFiles } from './codex-code-mode.js';
 
 // Workspace-wide trace analytics: parse every Claude transcript and Codex
 // rollout on the Space into per-conversation stats (turns, tool calls, web
@@ -255,6 +256,9 @@ function parseClaude(txt, dg = emptyDigest()) {
 }
 
 // ---------- Codex rollouts (CODEX_HOME/sessions/**/rollout-*-<uuid>.jsonl) ----------
+// Codex "code mode" wraps every tool call in one `exec` script (codex-code-mode.js).
+const isCodeModeExec = (p) => p.type === 'custom_tool_call' && p.name === 'exec' && typeof p.input === 'string';
+const isCodeModeOutput = (p) => Array.isArray(p.output) && /^Script (?:completed|failed|errored|timed out)/.test(String(p.output[0]?.text || ''));
 const codexText = (p) => (Array.isArray(p.content) ? p.content.map((c) => (c && c.text) || '').join(' ') : '');
 
 function parseCodex(txt, dg = emptyDigest()) {
@@ -296,16 +300,19 @@ function parseCodex(txt, dg = emptyDigest()) {
         case 'function_call':
         case 'custom_tool_call':
         case 'local_shell_call': {
-          st.toolCalls++;
-          const name = p.name || p.type;
-          st.tools[name] = (st.tools[name] || 0) + 1;
-          // apply_patch arguments carry the touched files in the patch header
-          let file = null;
-          if (name === 'apply_patch' && typeof p.arguments === 'string') {
-            const m = p.arguments.match(/\*\*\* (?:Update|Add|Delete) File: ([^\\\n"]+)/);
-            if (m) file = m[1].trim();
+          // Code mode: one `exec` script calling several tools. Count the tools
+          // it called, the way the classic format would have recorded them.
+          const calls = isCodeModeExec(p) ? codeModeCalls(p.input) : null;
+          const list = calls && calls.parsed
+            ? calls.calls.map((c) => ({ name: c.name, args: classicArgs(c.name, c.args) }))
+            : [{ name: p.name || p.type, args: p.arguments ?? p.input }];
+          for (const { name, args } of list) {
+            st.toolCalls++;
+            st.tools[name] = (st.tools[name] || 0) + 1;
+            // apply_patch arguments carry the touched files in the patch header
+            const file = name === 'apply_patch' && typeof args === 'string' ? patchFiles(args)[0] || null : null;
+            digestTool(dg, name, file);
           }
-          digestTool(dg, name, file);
           break;
         }
         case 'web_search_call':
@@ -1821,6 +1828,7 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
   const seenThinking = new Set();
   let cur = null;      // the assistant turn being built
   let encrypted = 0;   // reasoning items with no readable summary
+  const unpacked = new Map(); // exec call_id -> the { id, name } of each call it unpacked into
 
   // Blocks attach to the open assistant turn; a user/system message closes it.
   const assistant = (ts) => {
@@ -1914,11 +1922,49 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
         const from = p.author ? `Sender: ${p.author}` : '';
         const text = parts.join('\n');
         out.push({ role: 'system', ts, blocks: [textBlock('text', text.includes('Sender:') ? text : `${from}\n${text}`)] });
+      } else if (isCodeModeExec(p)) {
+        // One script, several tool calls: each becomes the call the classic
+        // format writes, so the reader labels, groups and expands it the same.
+        const id = p.call_id || p.id;
+        const { calls, parsed } = codeModeCalls(p.input);
+        const uses = parsed
+          ? calls.map((c, i) => ({ type: 'tool_use', id: i === calls.length - 1 ? id : `${id}:${i}`, name: c.name, ...capText(classicArgs(c.name, c.args)) }))
+          // Nothing to unpack: a script, shown as code rather than as a label.
+          : [{ type: 'tool_use', id, name: 'script', ...capText(JSON.stringify({ description: 'Ran a script', code: p.input })) }];
+        const msg = assistant(ts);
+        for (const use of uses) { msg.blocks.push(use); stitch.register(use, msg); }
+        if (id) unpacked.set(id, uses.map((u) => ({ id: u.id, name: u.name })));
       } else if (['function_call', 'custom_tool_call', 'local_shell_call', 'web_search_call'].includes(p.type)) {
         const use = { type: 'tool_use', id: p.call_id || p.id, name: p.name || p.type, ...capText(p.arguments ?? p.input) };
         const msg = assistant(ts);
         msg.blocks.push(use);
         stitch.register(use, msg);
+      } else if (p.type === 'custom_tool_call_output' && (unpacked.has(p.call_id) || isCodeModeOutput(p))) {
+        // (A window can open between a script and its output, hence the shape test.)
+        const calls = unpacked.get(p.call_id) || [{ id: p.call_id, name: null }];
+        const ran = codeModeOutput(p.output);
+        // Images go as image blocks — never as base64 text in a result, where
+        // search and digests would read it — after the view_image calls that
+        // made them: one each when the counts agree, else all after the last.
+        const viewers = calls.filter((c) => c.name === 'view_image');
+        const imagesFor = new Map();
+        const images = ran.images.map(({ src }) => ({ type: 'image', src }));
+        if (viewers.length && viewers.length === images.length) viewers.forEach((c, i) => imagesFor.set(c.id, [images[i]]));
+        else if (images.length) imagesFor.set((viewers.at(-1) || calls.at(-1)).id, images);
+        // The script's one text output goes on its last call; the others get
+        // an empty result, so they do not read as still running.
+        calls.forEach((c, i) => {
+          const last = i === calls.length - 1;
+          const res = { type: 'tool_result', id: c.id, ...(last ? capText(ran.text) : { text: '' }),
+            ...(ran.failed ? { failed: true } : {}), ...(last && ran.wallMs != null ? { durationMs: ran.wallMs } : {}) };
+          const after = imagesFor.get(c.id) || [];
+          if (!stitch.file(c.id, res)) { assistant(ts).blocks.push(res, ...after); return; }
+          if (!after.length) return;
+          for (let k = out.messages.length - 1; k >= 0; k--) {
+            const at = out.messages[k].blocks.indexOf(res);
+            if (at !== -1) { out.messages[k].blocks.splice(at + 1, 0, ...after); break; }
+          }
+        });
       } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
         const res = { type: 'tool_result', id: p.call_id, ...capText(flattenToolContent(p.output)) };
         if (!stitch.file(res.id, res)) assistant(ts).blocks.push(res);
