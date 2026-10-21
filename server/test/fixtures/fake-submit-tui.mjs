@@ -15,7 +15,9 @@
 //   startMs  — "Waiting for startup" is shown this long after the paste, and
 //              an Enter meanwhile does nothing (Codex before it is ready);
 //   dialog   — the first Enter does not submit but draws a menu over the
-//              composer; further Enters are recorded and ignored.
+//              composer; further Enters are recorded and ignored. "plain"
+//              draws it with no `›` on any row, so the nearest marker above
+//              the cursor is the last prompt echoed in the conversation.
 // Every Enter received is appended to $FAKE_DIR/enters, every submit to
 // $FAKE_DIR/submitted.
 import fs from 'node:fs';
@@ -53,7 +55,7 @@ process.stdin.on('data', (chunk) => {
       pasted += buf.slice(0, end); buf = buf.slice(end + 6); inPaste = false;
       const m = mode();
       swallow = m.swallow || 0;
-      dialog = !!m.dialog;
+      dialog = m.dialog || false;
       if (m.startMs) { startingUntil = Date.now() + m.startMs; setTimeout(draw, m.startMs + 10); }
       line = pasted.length > 1000 ? `[Pasted Content ${pasted.length} chars]` : pasted;
       typedRun = 0;
@@ -69,7 +71,12 @@ process.stdin.on('data', (chunk) => {
       if (!line) continue;
       if (typedRun > 1000) { typedRun = 0; line += '\n'; draw(); continue; }
       if (!shown || swallow > 0) { if (shown) swallow--; continue; }
-      if (dialog) { inDialog = true; process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J  Choose a directory\r\n› 1. Use session directory\r\n  2. Use current directory`); continue; }
+      if (dialog) {
+        inDialog = true;
+        const pick = dialog === 'plain' ? ' ' : '›';
+        process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J  Choose a directory\r\n${pick} 1. Use session directory\r\n  2. Use current directory`);
+        continue;
+      }
       log('submitted', JSON.stringify(line));
       const said = line.startsWith('[Pasted Content') ? pasted : line;
       process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J› ${said.replace(/\n/g, '\r\n  ')}\r\n• Worked for 0s\r\n`);

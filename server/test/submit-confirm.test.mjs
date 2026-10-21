@@ -25,7 +25,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
-import { composerShape, composerBody } from '../src/runner.js';
+import { composerShape, composerBody, promptInComposer } from '../src/runner.js';
+import { CLIS } from '../src/config.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let failed = 0;
@@ -58,10 +59,14 @@ check('a cursor on a line that opens with no prompt marker is not a composer', (
 // placeholder: 791 chars over four lines took eleven rows at 100 columns, and
 // a blank line in a paste is a blank row. The cursor sits at the end of it.
 // Read from the bottom, as the input guard does, neither was a composer, and
-// a delivered prompt was never confirmed. Screens captured from the real TUI.
-const tallBody = (s) => { const shape = composerShape(s, { tall: true }); return shape && (shape.located || shape.marked) ? composerBody(shape) : null; };
-const CODEX_TALL = [
-  '  >_ OpenAI Codex (v0.162.1)', '', '',
+// a delivered prompt was never confirmed. Screens captured from the real TUI
+// (paths shortened).
+const CODEX = CLIS.find((c) => c.id === 'codex').confirmSubmit;
+const inComposer = (s, text) => promptInComposer(s, CODEX, text);
+const CUT = '[message from carbon-video-lead:] Lead here (carbon-video-lead). First full cut of the Carbon-X film is ready for ONE round of blunt feedback.\n'
+  + `Video: /data/workspaces/carbon-video/edit/carbon-x-v2.mp4 (30.4 s). Contact sheet every 0.5 s is next to it. ${'Please look at pacing, the type treatment and whether the ending lands. '.repeat(7)}\n`
+  + 'Answer in under 150 words.\nThanks!';
+const CUT_ROWS = [
   '› [message from carbon-video-lead:] Lead here (carbon-video-lead). First full cut of the Carbon-X',
   '  film is ready for ONE round of blunt feedback.',
   '  Video: /data/workspaces/carbon-video/edit/carbon-x-v2.mp4 (30.4 s). Contact sheet every 0.5 s is',
@@ -72,23 +77,54 @@ const CODEX_TALL = [
   '  at pacing, the type treatment and whether the ending lands. Please look at pacing, the type',
   '  treatment and whether the ending lands.',
   '  Answer in under 150 words.',
-  '  Thanks!', '',
-  '  GPT-6.1-Sol default · /data/workspaces/w',
-  '                                                                           ⚠ 1 warning · f2 to view'];
-const CODEX_BLANKS = ['  >_ OpenAI Codex (v0.162.1)', '', '', '› [message from x:] Para one.', '', '  Para two is here.', '', '  - a', '  - b', '',
-  '  GPT-6.1-Sol default · /data/workspaces/w'];
-check('codex 0.162: a paste shown as eleven rows of text is read whole by the submit check', () => {
-  const b = tallBody(snap(CODEX_TALL, 13, 9));
-  assert.match(b, /^\[message from carbon-video-lead:\] Lead here/);
-  assert.match(b, /Answer in under 150 words\. Thanks!$/);
+  '  Thanks!'];
+const FOOTER = ['', '  GPT-6.1-Sol default · /data/workspaces/w', '                                                    ⚠ 1 warning · f2 to view'];
+const CODEX_TALL = ['  >_ OpenAI Codex (v0.162.1)', '', '', ...CUT_ROWS, ...FOOTER];
+const BLANKS = '[message from x:] Para one.\n\nPara two is here.\n\n- a\n- b';
+const CODEX_BLANKS = ['  >_ OpenAI Codex (v0.162.1)', '', '', '› [message from x:] Para one.', '', '  Para two is here.', '', '  - a', '  - b', ...FOOTER];
+check('codex 0.162: a prompt shown as eleven rows of text is seen in the composer', () => {
+  assert.equal(inComposer(snap(CODEX_TALL, 13, 9), CUT).holds, true);
   assert.equal(body(snap(CODEX_TALL, 13, 9)), null, 'the input guard\'s reading changed');
 });
 check('codex 0.162: blank rows inside a pasted prompt do not end the composer', () => {
-  assert.equal(tallBody(snap(CODEX_BLANKS, 8, 5)), '[message from x:] Para one. Para two is here. - a - b');
+  assert.equal(inComposer(snap(CODEX_BLANKS, 8, 5), BLANKS).holds, true);
 });
-check('codex 0.162: the submit check still reads an empty composer as empty', () => {
-  assert.equal(tallBody(snap(['  >_ OpenAI Codex (v0.162.1)', '', '› hello', '• Working (0s • esc to interrupt)', '', '› Ask Codex to do anything', '',
-    '  GPT-6.1-Sol default · /data/workspaces/w'], 5, 2)), '');
+check('codex 0.162: a tall composer scrolled to its tail (↑ on its top row) is seen', () => {
+  // 100x14: Codex shows the last rows of the prompt and marks the top one.
+  const rows = ['  >_ OpenAI Codex (v0.162.1)', '',
+    '› ending lands. Please look at pacing, the type treatment and whether the ending lands. Please look↑',
+    '  at pacing, the type treatment and whether the ending lands. Please look at pacing, the type',
+    '  treatment and whether the ending lands.', '  Answer in under 150 words.', '  Thanks!', ...FOOTER];
+  assert.equal(inComposer(snap(rows, 6, 9), CUT).holds, true);
+});
+check('codex 0.162: an empty composer after the submit reads as empty', () => {
+  const r = inComposer(snap(['  >_ OpenAI Codex (v0.162.1)', '', ...CUT_ROWS, '• Working (0s • esc to interrupt)', '', '› Ask Codex to do anything', ...FOOTER], 15, 2), CUT);
+  assert.deepEqual(r, { body: '', holds: false });
+});
+// Review of #222: walking up past blank rows to "some › row" took the prompt
+// echoed in the transcript for the composer, and an Enter went into a dialog.
+check('a dialog below the same prompt echoed in the transcript is not a composer holding it', () => {
+  const rows = ['  >_ OpenAI Codex (v0.162.1)', '', ...CUT_ROWS, '• Worked for 0s', '',
+    '  Choose a directory', '  1. Use session directory', '  2. Use current directory'];
+  assert.equal(inComposer(snap(rows, rows.length - 1, 26), CUT).holds, false);
+});
+check('nor is a stale placeholder in the transcript above a dialog', () => {
+  const rows = ['› [Pasted Content 1080 chars]', '• Worked for 0s', '', '  Choose a directory', '  1. Use session directory', '  2. Use current directory'];
+  assert.equal(inComposer(snap(rows, 5, 26), 'x'.repeat(1080)).holds, false);
+});
+check('nor a transcript echo with no composer under it', () => {
+  const rows = ['  >_ OpenAI Codex (v0.162.1)', '', ...CUT_ROWS, '', '• Working (3s • esc to interrupt)', '', ''];
+  assert.equal(inComposer(snap(rows, rows.length - 1, 0), CUT).holds, false);
+});
+check('nor a cursor above the bottom-most marker, or a menu below the cursor', () => {
+  assert.equal(inComposer(snap(CODEX_TALL, 3, 5), CUT).holds, false);
+  const menu = ['  >_ OpenAI Codex (v0.162.1)', '', ...CUT_ROWS, '', '  1. Allow', '  2. Deny'];
+  assert.equal(inComposer(snap(menu, 13, 9), CUT).holds, false);
+});
+check('the placeholder must be the whole composer, and other text is not the prompt', () => {
+  assert.equal(inComposer(snap(['› [Pasted Content 1080 chars]', ...FOOTER], 0, 30), 'x'.repeat(1080)).holds, true);
+  assert.equal(inComposer(snap(['› [Pasted Content 1080 chars] and more', ...FOOTER], 0, 39), 'x'.repeat(1080)).holds, false);
+  assert.equal(inComposer(snap(['› something else entirely', ...FOOTER], 0, 25), CUT).holds, false);
 });
 
 // ---- and the whole path, through a real server and a fake TUI ----
@@ -185,10 +221,14 @@ try {
   });
 
   // codex-cli 0.162.1 forms of a delivered prompt (fixtures/fake-submit-tui.mjs).
+  // Each on a pane of its own: a case that fails leaves its prompt unsent,
+  // and the next send would then be refused for that instead.
   const sendText = async (text) => { const r = await post(`/api/sessions/${pane.id}/input`, { text }); return { status: r.status, body: await r.json().catch(() => ({})) }; };
+  const fresh = async (name, cols) => { pane.ws.close(); pane = await openPane(name, cols); };
   const WORDS = 'please look at pacing, the type treatment and whether the ending lands. ';
   const MID = `[message from carbon-video-lead:] Lead here. First full cut is ready.\n${WORDS.repeat(9)}\nAnswer in under 150 words.\nThanks!`;
   console.log('\n# a multi-line prompt under 1000 chars, shown as text over eleven rows');
+  await fresh('fake-codex-tall');
   setMode({});
   const tall = await sendText(MID);
   check('is seen in the composer and submitted with one Enter', () => {
@@ -197,6 +237,7 @@ try {
     assert.equal(read('submitted').length, 1);
     assert.deepEqual(read('enters'), ['with-text']);
   });
+  await fresh('fake-codex-tall-retry');
   setMode({ swallow: 1 });
   const tallRetry = await sendText(MID);
   check('and when its first Enter is lost, AM still sees it there and presses again', () => {
@@ -206,6 +247,7 @@ try {
   });
 
   console.log('\n# a short prompt with blank lines in it');
+  await fresh('fake-codex-blanks');
   setMode({});
   const blanks = await sendText('[message from x:] Para one.\n\nPara two is here.\n\n- a\n- b');
   check('the blank rows do not hide it: submitted with one Enter', () => {
@@ -215,15 +257,45 @@ try {
   });
 
   console.log('\n# a single-line prompt over 1000 chars');
+  // Wide enough that the typed line fits the rows main's reader could follow:
+  // what is tested is the Enter after it, not finding it.
+  await fresh('fake-codex-long-line', 200);
   setMode({});
   const LINE = `[message from lead:] ${WORDS.repeat(16)}END`;
   const single = await sendText(LINE);
-  check('goes in as a paste, so the Enter submits it whole instead of becoming a newline', () => {
+  check('goes in as a paste, so one Enter submits it instead of becoming a newline', () => {
     assert.ok(LINE.length > 1000 && !LINE.includes('\n'));
     assert.equal(single.status, 200, JSON.stringify(single.body));
+    assert.deepEqual(read('enters'), ['with-text'], 'the first Enter did not submit it');
     assert.deepEqual(read('submitted'), [JSON.stringify(`[Pasted Content ${LINE.length} chars]`)]);
+  });
+
+  console.log('\n# a prompt with an end-of-paste marker inside it');
+  await fresh('fake-codex-paste-mark');
+  setMode({});
+  const MARKED = `[message from x:] ${WORDS.repeat(16)}\nthe marker \x1b[201~ is in the middle.\nLast line.`;
+  const marked = await sendText(MARKED);
+  check('it cannot end the paste early: the prompt arrives as one paste, less the marker', () => {
+    assert.equal(marked.status, 200, JSON.stringify(marked.body));
+    assert.deepEqual(read('submitted'), [JSON.stringify(`[Pasted Content ${MARKED.length - 6} chars]`)]);
     assert.deepEqual(read('enters'), ['with-text']);
   });
+
+  console.log('\n# a dialog drawn below the same prompt, already echoed in the conversation');
+  for (const [what, text] of [['eleven rows', MID], ['two lines', '[message from x:] Status?\nOne line is enough.']]) {
+    await fresh('fake-codex-echo-dialog');
+    setMode({});
+    const first = await sendText(text);
+    setMode({ dialog: 'plain' });
+    const again = await sendText(text);
+    check(`(${what}) the echo is not the composer: the send fails, and no Enter goes into the dialog`, () => {
+      assert.equal(first.status, 200, JSON.stringify(first.body));
+      assert.equal(again.status, 409, `answered ${again.status}: ${JSON.stringify(again.body)}`);
+      assert.equal(again.body.code, 'input-not-submitted');
+      assert.deepEqual(read('enters'), ['with-text'], 'an Enter was pressed into the dialog');
+      assert.equal(read('submitted').length, 0);
+    });
+  }
 
   console.log('\n# a narrow pane, where the placeholder wraps over two rows');
   pane.ws.close();

@@ -101,6 +101,8 @@ const SUBMIT_CONFIRM_TIMEOUT_MS = Number(process.env.AM_SUBMIT_CONFIRM_TIMEOUT_M
 // A single-line prompt longer than this goes to such a CLI as a paste, not
 // typed (typeAndSubmit).
 const LONG_LINE_CHARS = 512;
+// Bracketed-paste start/end markers, which must not occur inside a paste.
+const PASTE_MARKS = /\x1b\[20[01]~/g;
 // Despite the Node wrapper's `scrollbackLimit` name, Ghostty's native option is
 // a byte budget. Passing a line count such as 20,000 retains only a small native
 // allocation (about 700 ordinary rows). Keep the unit explicit at our boundary.
@@ -2353,7 +2355,7 @@ const isRule = (text) => {
  * elsewhere the whole region is compared instead, which is stable because it is
  * located the same way on both sides of the comparison.
  */
-export function composerShape(snapshot, { tall = false } = {}) {
+export function composerShape(snapshot) {
   if (!snapshot) return null;
   const lines = snapshot.visibleLines || [];
   // The lowest ruled box that holds a prompt. A TUI rules more than one thing:
@@ -2393,18 +2395,11 @@ export function composerShape(snapshot, { tall = false } = {}) {
   // `› [Pasted Content 1063 chars]` over two rows, and the cursor's row alone
   // held only its tail. Bounded, and only up to a marker; without one the
   // cursor's row stands alone as before.
-  //
-  // `tall` follows a composer holding a whole multi-line prompt: Codex shows a
-  // paste under 1000 chars as its text, not a placeholder, over as many rows as
-  // it needs (up to most of the screen) and with a blank row for each blank
-  // line in it, cursor at the end. Read from the bottom only, that was "no
-  // composer" — and a delivered prompt was never confirmed (submitConfirmed).
-  // Opt-in, so the input guard's picture of an empty line is unchanged.
   const at = lines.findIndex((l) => l.row === snapshot.cursorRow);
   let from = at;
   if (at >= 0 && !startsWithMarker(lines[at].text)) {
-    for (let i = at - 1; i >= (tall ? 0 : Math.max(0, at - WRAP_ROWS)); i--) {
-      if (isRule(lines[i].text) || (!tall && !lines[i].text.trim())) break;
+    for (let i = at - 1; i >= Math.max(0, at - WRAP_ROWS); i--) {
+      if (isRule(lines[i].text) || !lines[i].text.trim()) break;
       if (startsWithMarker(lines[i].text)) { from = i; break; }
     }
   }
@@ -2419,6 +2414,73 @@ export function composerShape(snapshot, { tall = false } = {}) {
 }
 // How far up a wrapped prompt line is followed (see composerShape).
 const WRAP_ROWS = 8;
+
+/**
+ * The composer a prompt was just typed into, for the submit check — or null
+ * when it cannot be positively identified.
+ *
+ * A ruled box (Claude Code) answers for itself, as in composerShape. Codex
+ * draws none, and from 0.162 shows a paste under 1000 chars as its text: over
+ * as many rows as it takes, a blank row for each blank line in it, the cursor
+ * at its end. composerShape's short walk up from the cursor does not reach the
+ * marker of such a composer. Walking further is only safe anchored to the
+ * LIVE composer, never to "some row with a marker above the cursor": Codex
+ * echoes every submitted prompt into the transcript as `› …`, and a dialog
+ * drawn below that echo would otherwise read as a composer holding it. So:
+ *  - only the bottom-most marker row on the screen opens the composer;
+ *  - the cursor sits on it or below it, with no rule in between;
+ *  - nothing below the cursor is a numbered menu row (a dialog's options);
+ *  - and the block is what the caller compares, in full (promptInComposer).
+ */
+const MENU_ROW = /^[\s\u2502\u2503|]*(?:[>\u276f\u203a\u27e9\u25b6]\s*)?\d+[.)]\s/;
+export function liveComposer(snapshot) {
+  const shape = composerShape(snapshot);
+  if (!shape || shape.located) return shape;
+  const lines = snapshot.visibleLines || [];
+  let from = -1;
+  for (let i = lines.length - 1; i >= 0 && from < 0; i--) if (startsWithMarker(lines[i].text)) from = i;
+  const at = lines.findIndex((l) => l.row === snapshot.cursorRow);
+  if (from < 0 || at < from) return null;
+  if (lines.slice(from, at + 1).some((l) => isRule(l.text))) return null;
+  if (lines.slice(at + 1).some((l) => MENU_ROW.test(l.text))) return null;
+  const typed = flatten(lines.slice(from, at).map((l) => l.text)
+    .concat(lines[at].text.slice(0, snapshot.cursorCol)).join(' '));
+  return { alt: !!snapshot.isAltScreen, located: false, cursorInside: false, typed, full: typed, marked: true };
+}
+
+/**
+ * Is `text` what the composer holds? `{ body, holds }`, body null when no
+ * composer could be identified, '' when it is empty.
+ *
+ * Compared with all whitespace removed: the terminal wraps long lines, and a
+ * wrap can fall inside a word — or inside `[Pasted Content 1063 chars]`. In a
+ * ruled box the prompt's placeholder or its last characters are enough, since
+ * the box holds nothing else. Codex's composer is found by a wider walk, so
+ * there the whole block must BE the prompt: its placeholder exactly, the
+ * prompt itself, or — once Codex scrolls a tall composer, marking its top row
+ * `↑` — the prompt's tail. Anything else in the block (a transcript line, a
+ * dialog) and it is not ours.
+ */
+export function promptInComposer(snapshot, confirm, text) {
+  const squash = (v) => String(v || '').replace(/\s+/g, '');
+  const shape = liveComposer(snapshot);
+  if (!shape || !(shape.located || shape.marked)) return { body: null, holds: false };
+  let shown = composerBody(shape);
+  // A notice drawn after the paste on the same row, not part of it.
+  const notice = confirm.starting ? shown.search(confirm.starting) : -1;
+  if (notice >= 0) shown = shown.slice(0, notice);
+  const body = squash(shown);
+  const flat = squash(text);
+  if (!body) return { body, holds: false };
+  if (shape.located) {
+    return { body, holds: confirm.pasted.test(body) || body.includes(flat.slice(-Math.min(24, flat.length))) };
+  }
+  const placeholder = new RegExp(`^(?:${confirm.pasted.source})$`);
+  const bare = (v) => v.replace(/[\u2191\u2193]/g, '');
+  const tail = bare(body);
+  return { body, holds: placeholder.test(body) || tail === bare(flat)
+    || (tail.length >= Math.min(24, flat.length) && bare(flat).endsWith(tail)) };
+}
 
 // ONE prompt marker, not every glyph that could be one: stripping greedily
 // turned a typed `❯ >` into nothing at all and let the send through.
@@ -2590,6 +2652,9 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
   // them as a newline instead of a submit. Pasted, it holds them whole and the
   // Enter submits.
   const paste = text.includes('\n') || (confirm && text.length > LONG_LINE_CHARS);
+  // An end-of-paste marker inside the prompt would end the paste early and
+  // type the rest — newlines and all — as keystrokes.
+  if (paste) text = text.replace(PASTE_MARKS, '');
   const payload = paste ? `\x1b[200~${text}\x1b[201~` : text;
   // The Enter must arrive as its OWN keypress: TUIs (codex) detect rapid input
   // bursts as a paste, and a CR inside the burst becomes a newline in the
@@ -2662,19 +2727,11 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
  *    holding something, so the next send is refused rather than glued on.
  */
 async function submitConfirmed(host, id, confirm, text) {
-  // Compared with all whitespace removed: the terminal wraps long lines, and a
-  // wrap can fall inside a word — or inside `[Pasted Content 1063 chars]`.
-  const squash = (v) => String(v || '').replace(/\s+/g, '');
-  const flat = squash(text);
-  const probe = flat.slice(-Math.min(24, flat.length));
   const look = () => {
-    let shape = null, screen = '';
-    try { shape = composerShape(host.vt.snapshot({ includeCells: false }), { tall: true }); } catch {}
+    let reading = { body: null, holds: false }, screen = '';
+    try { reading = promptInComposer(host.vt.snapshot({ includeCells: false }), confirm, text); } catch {}
     try { screen = host.vt.getVisibleText(); } catch {}
-    // A composer: a ruled box with a prompt in it, or rows opening with a
-    // prompt marker. The cursor's row on its own could be anything.
-    const body = shape && (shape.located || shape.marked) ? squash(composerBody(shape)) : null;
-    const holds = body != null && (confirm.pasted.test(body) || body.includes(probe));
+    const { body, holds } = reading;
     const busy = confirm.busy.test(screen);
     return { holds, submitted: !holds && (body === '' || busy), starting: !!confirm.starting?.test(screen) };
   };
@@ -2721,7 +2778,7 @@ export function pasteInput(id, text) {
   if (!value) return;
   host.inputRequired.observeInput();
   notePaneInput(host, value);
-  const payload = value.includes('\n') ? `\x1b[200~${value}\x1b[201~` : value;
+  const payload = value.includes('\n') ? `\x1b[200~${value.replace(PASTE_MARKS, '')}\x1b[201~` : value;
   host.pty.write(payload);
 }
 
