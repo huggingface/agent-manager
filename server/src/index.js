@@ -2736,8 +2736,11 @@ api.get('/api/files/:id/preview', async (req, res) => {
   res.json(meta);
 });
 
-// Raw bytes, inline — the <img>/<iframe> source for image, html and pdf
-// previews. The CSP sandbox is the load-bearing part: workspace files are
+// Raw bytes, inline — the <img>/<iframe>/<video> source for image, html, pdf
+// and media previews. sendFile answers Range requests itself (206, 416): without
+// them a video can't seek, and Safari won't play it at all.
+//
+// The CSP sandbox is the load-bearing part: workspace files are
 // written by agents and may contain anything, and this app has no auth of its
 // own. `sandbox` (without allow-same-origin) puts the document in an opaque
 // origin, so even opened directly in a tab it can't read this app's storage or
@@ -2780,7 +2783,7 @@ api.put('/api/files/:id/write', express.text({ limit: '8mb', type: '*/*' }), asy
   if (!st.isFile()) return res.status(400).json({ error: 'not a file' });
 
   const kind = kindOfFile(f);
-  if (kind === 'binary' || kind === 'image' || kind === 'pdf') {
+  if (kind === 'binary' || kind === 'image' || kind === 'pdf' || kind === 'video' || kind === 'audio') {
     return res.status(415).json({ error: 'not a text file' });
   }
   if (st.size > TEXT_MAX) {

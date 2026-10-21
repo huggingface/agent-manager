@@ -5,7 +5,7 @@ originating session pane**. Back/Escape returns through followed links; Close
 returns directly to the session. The session stays mounted, at the same size,
 with its scroll position and composer intact. Other panes remain usable.
 Previewing does not create a session or start/attach to another agent.
-Markdown, source code, images, HTML and PDFs use the existing Files viewer.
+Markdown, source code, images, HTML, PDFs, video and audio use the existing Files viewer.
 Unknown binary files offer a download. Transcript JSONL files open as source.
 
 **Open in file viewer** keeps the resolved file in a separate Files pane in the
