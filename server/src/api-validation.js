@@ -105,7 +105,7 @@ export function createValidator({ cliExists, sessionExists, groupExists }) {
         && (!req.headers['content-length'] || req.headers['content-length'] === '0')) req.body = '';
       text(req.body, 'body', { empty: true }); return;
     }
-    const prompt = route === '/api/agents' || route === '/api/agents/:id/prompt' || route === '/api/agents/:id/stop' || route === '/api/remote/:name/messages';
+    const prompt = route === '/api/agents' || route === '/api/agents/adopt' || route === '/api/agents/:id/prompt' || route === '/api/agents/:id/stop' || route === '/api/remote/:name/messages';
     const mediaType = (req.headers['content-type'] || '').split(';', 1)[0].trim().toLowerCase();
     // req.is() returns null for zero-byte bodies, even with a JSON content
     // type. Bodyless commands remain valid with or without that header.
@@ -115,12 +115,14 @@ export function createValidator({ cliExists, sessionExists, groupExists }) {
     }
     const b = prompt && typeof req.body === 'string' ? {} : object(req.body === undefined ? {} : req.body, 'body');
     if (prompt) {
-      optional(b, 'from'); optional(b, route === '/api/agents' ? 'prompt' : 'text', text, { empty: true });
+      optional(b, 'from'); optional(b, route === '/api/agents' || route === '/api/agents/adopt' ? 'prompt' : 'text', text, { empty: true });
       if(b.completion !== undefined) {
         if(route !== '/api/agents/:id/prompt')throw invalid('completion','only supported when prompting an existing session');
         oneOf(b.completion,'completion',['notify']);
       }
       if (route === '/api/agents') { cli(q.cli, 'cli'); optional(q, 'name', text, { empty: true }); optional(q, 'path', pathText); }
+      if (route === '/api/agents/adopt') { text(q.adoptSessionUuid, 'adoptSessionUuid'); optional(q, 'name', text, { empty: true }); optional(q, 'path', pathText); }
+      if (q.adoptSessionUuid !== undefined) text(q.adoptSessionUuid, 'adoptSessionUuid');
       return; // sender, availability, self-target and nonempty prompt checks remain in the route
     }
     if (route === '/api/config') {
@@ -135,6 +137,7 @@ export function createValidator({ cliExists, sessionExists, groupExists }) {
       for (const value of Object.values(b.notes || {})) text(value, 'notes entry', { empty: true });
     } else if (route === '/api/sessions') {
       cli(b.cli, 'cli'); optional(b, 'name', text, { empty: true }); optional(b, 'prompt', text, { empty: true }); optional(b, 'path', pathText);
+      optional(b, 'adoptSessionUuid', text);
       if (b.groupId !== undefined) exists(b.groupId, 'groupId', groupExists);
     } else if (route === '/api/sessions/:id') {
       text(b.name, 'name');
