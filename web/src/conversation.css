@@ -691,6 +691,7 @@ mark.cx-hit.on { background: var(--accent); color: var(--panel); }
 .dx-word { margin-left: auto; flex: none; font-family: var(--font-mono); font-size: 0.85em; color: var(--muted); white-space: nowrap; }
 .dx-word.running { color: var(--accent); }
 .dx-word.failed { color: var(--danger); }
+.dx-moot { color: var(--muted); }
 .dx-card-sub { font-size: 11px; color: var(--muted); margin: 3px 0 6px; }
 .dx-nested { padding-left: 1.23em; font-size: 12.5px; }
 .dx-clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
