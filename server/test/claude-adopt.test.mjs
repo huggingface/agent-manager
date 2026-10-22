@@ -30,6 +30,8 @@ transcript(workspaces, atRoot); transcript(folder, inProj); transcript(workspace
 
 // ---- unit: validation ----
 assert.equal(projectDirName('/home/u/srv/agent-manager-data/workspaces'), '-home-u-srv-agent-manager-data-workspaces');
+// Over 200 characters Claude truncates and appends Math.abs(javaHash(path)).toString(36).
+assert.equal(projectDirName(`/${'a'.repeat(210)}`), `-${'a'.repeat(199)}-${Math.abs(Array.from(`/${'a'.repeat(210)}`).reduce((h, c) => (h << 5) - h + c.charCodeAt(0) | 0, 0)).toString(36)}`);
 assert.deepEqual(findTranscripts(atRoot, claudeDir).length, 1);
 const sessions = [{id: 'owner', cli: 'claude', sessionUuid: owned, archivedAt: '2026-01-01'}];
 const check = (over) => checkAdoption({uuid: atRoot, cli: 'claude', prompt: '', workdir: workspaces, sessions, configDir: claudeDir, ...over});
@@ -100,6 +102,7 @@ try {
 
   // Agent routes: alias and ?adoptSessionUuid on POST /api/agents; default folder is the caller's.
   assert.equal((await post(`/api/agents/adopt?adoptSessionUuid=${inProj}&from=caller`, {text: 'do work'})).body.code, 'adopt-prompt');
+  assert.equal((await call(`/api/agents/adopt?adoptSessionUuid=${inProj}&from=caller`, {json: {prompt: 7}})).status, 400, 'a JSON prompt is validated, not ignored');
   assert.equal((await post(`/api/agents/adopt?adoptSessionUuid=${inProj}&path=&from=caller`)).body.code, 'adopt-wrong-folder');
   assert.equal((await post(`/api/agents/adopt?adoptSessionUuid=${inProj}`)).status, 400, 'from is required');
   assert.equal((await post(`/api/agents?cli=codex&adoptSessionUuid=${inProj}&from=caller`)).body.code, 'adopt-cli');
