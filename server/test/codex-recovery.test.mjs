@@ -8,6 +8,62 @@ const cwd='/tmp/work',thread={modelProvider:'fixture'};
 function saved(){return {turn_id:'last-turn',cwd,model:'fixture-model',approval_policy:'on-request',approvals_reviewer:'user',
  collaboration_mode:{mode:'default',settings:{reasoning_effort:null,developer_instructions:null}},sandbox_policy:{type:'read-only'},
  permission_profile:{type:'managed',file_system:{type:'restricted',entries:[{path:{type:'special',value:{kind:'root'}},access:'read'}]},network:'restricted'}};}
+function workspaceSaved(roots=['/tmp/visualizations','/tmp/second']){
+ const p=saved(),all=[cwd,...roots];
+ p.sandbox_policy={type:'workspace-write',writable_roots:roots,network_access:false,exclude_tmpdir_env_var:false,exclude_slash_tmp:false};
+ const entry=(root,access)=>({path:{type:'path',path:root},access});
+ p.permission_profile.file_system.entries.push(...all.map(r=>entry(r,'write')),
+  ...['slash_tmp','tmpdir'].map(kind=>({path:{type:'special',value:{kind}},access:'write'})),
+  ...['.git','.agents','.codex','.aws'].flatMap(name=>all.map(r=>({...entry(path.join(r,name),'read'),missing_path_behavior:'skip'}))));
+ p.file_system_sandbox_policy={kind:'restricted',entries:structuredClone(p.permission_profile.file_system.entries)};
+ return p;
+}
+test('extra runtime roots retain every protected subdirectory, not just writable roots',()=>{
+ const p=workspaceSaved(),before=structuredClone(p),s=recoverySettings(p,thread,cwd);
+ assert.deepEqual(p,before);
+ assert.deepEqual(s.params.runtimeWorkspaceRoots,[cwd,...p.sandbox_policy.writable_roots]);
+ assert.deepEqual(s.params.config['sandbox_workspace_write.writable_roots'],[]);
+ assert.deepEqual(s.expected.sandbox.writableRoots,p.sandbox_policy.writable_roots);
+ verifyRecovered({...s.expected,thread:{id:'same'}},s,'same');
+ for(const result of [{runtimeWorkspaceRoots:[cwd]},{sandbox:{...s.expected.sandbox,writableRoots:[]}},{approvalPolicy:'never'},{approvalsReviewer:'auto_review'}])
+  assert.throws(()=>verifyRecovered({...s.expected,...result,thread:{id:'same'}},s,'same'));
+});
+test('missing, extra or altered subdirectory protections and inconsistent effective profiles fail closed',()=>{
+ for(const change of [p=>p.permission_profile.file_system.entries.pop(),p=>p.permission_profile.file_system.entries.at(-1).access='write',
+  p=>p.permission_profile.file_system.entries.at(-1).missing_path_behavior='create',p=>p.permission_profile.network='enabled',
+  p=>p.file_system_sandbox_policy.entries.pop(),p=>p.sandbox_policy.network_access=true,
+  p=>p.permission_profile.file_system.entries.push({path:{type:'path',path:'/private'},access:'none'})]){
+  const p=workspaceSaved();change(p);assert.throws(()=>recoverySettings(p,thread,cwd));
+ }
+});
+test('invalid or ambiguous root lists are never normalized into new permissions',()=>{
+ for(const roots of [null,'/tmp/x',['relative'],['/tmp/x/../y'],['/tmp/x/'],[cwd],['/tmp/x','/tmp/x'],['/tmp/\u0000x']]){
+  const p=workspaceSaved();p.sandbox_policy.writable_roots=roots;assert.throws(()=>recoverySettings(p,thread,cwd));
+ }
+ // Even an otherwise canonical profile cannot make a protected subdirectory writable.
+ for(const roots of [[cwd+'/.git'],[cwd+'/.codex/x'],['/tmp/x','/tmp/x/.aws']])assert.throws(()=>recoverySettings(workspaceSaved(roots),thread,cwd));
+});
+test('workspace presets with omitted or empty extra roots still recover',()=>{
+ for(const omit of [false,true]){
+  const p=workspaceSaved([]);if(omit)delete p.sandbox_policy.writable_roots;
+  const s=recoverySettings(p,thread,cwd);assert.deepEqual(s.expected.sandbox.writableRoots,[]);
+ }
+});
+test('later native runtime-root or profile changes cannot be overwritten by multi-root recovery',async()=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'am-recovery-roots-')),file=path.join(root,'rollout.jsonl');
+ try{
+  const p=workspaceSaved(),t={...thread,id:'native'},context={stamp:'binding',workdir:cwd};
+  const a={model:p.model,model_provider_id:t.modelProvider,cwd,approval_policy:p.approval_policy,approvals_reviewer:p.approvals_reviewer,permission_profile:p.permission_profile,collaboration_mode:p.collaboration_mode,runtime_workspace_roots:[cwd,...p.sandbox_policy.writable_roots],disabled_plugin_ids:[]};
+  const write=applied=>fs.writeFileSync(file,[{type:'turn_context',payload:p},{type:'event_msg',payload:{type:'thread_settings_applied',thread_id:t.id,thread_settings:applied}}].map(JSON.stringify).join('\n')+'\n');
+  write(a);await recoveryPlan(file,context,t,{id:p.turn_id});
+  const badSaved=structuredClone(p);badSaved.sandbox_policy.writable_roots=7;
+  fs.writeFileSync(file,[{type:'turn_context',payload:badSaved},{type:'event_msg',payload:{type:'thread_settings_applied',thread_id:t.id,thread_settings:a}}].map(JSON.stringify).join('\n')+'\n');
+  await assert.rejects(recoveryPlan(file,context,t,{id:p.turn_id}),{statusCode:409});
+  for(const change of [a=>a.runtime_workspace_roots.pop(),a=>a.permission_profile.file_system.entries.pop(),a=>a.approval_policy='never']){
+   const bad=structuredClone(a);change(bad);write(bad);await assert.rejects(recoveryPlan(file,context,t,{id:p.turn_id}));
+  }
+ }finally{fs.rmSync(root,{recursive:true,force:true});}
+});
 test('recovery preserves the explicit restricted policy and rejects permission loss or unknown settings',()=>{
  const p=saved(),settings=recoverySettings(p,thread,cwd);
  assert.equal(settings.params.sandbox,'read-only');assert.equal(settings.params.model,'fixture-model');
