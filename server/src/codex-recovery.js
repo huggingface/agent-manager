@@ -33,6 +33,8 @@ export function recoverySettings(p, thread, workdir) {
   // from arbitrary permission entries or relax a custom profile.
   const roots=workspace && Object.hasOwn(policy,'writable_roots') ? policy.writable_roots : [];
   if(!Array.isArray(roots) || roots.some(r=>typeof r!=='string'||!path.isAbsolute(r)||path.normalize(r)!==r||/[\x00-\x1f]/.test(r)||r===workdir) || new Set(roots).size!==roots.length)throw refused();
+  // A root inside any root's protected subdirectory would grant write access there.
+  if(roots.some(r=>[workdir,...roots].some(q=>['.git','.agents','.codex','.aws'].some(name=>{const d=path.join(q,name);return r===d||r.startsWith(d+path.sep);}))))throw refused();
   // Restore only exact installed presets, including an already-saved full-access
   // preset. Never infer full access from a missing or custom permission profile.
   const expectedPolicy=workspace ? {type:'workspace-write',network_access:false,exclude_tmpdir_env_var:false,exclude_slash_tmp:false} : full ? {type:'danger-full-access'} : {type:'read-only'};
@@ -81,6 +83,8 @@ export async function recoveryPlan(file, context, thread, latestTurn) {
     // with no later start or other turn. Never override a nonempty native index.
     else if(thread.status?.type!=='notLoaded' || terminal?.type!=='task_complete'
         || terminal.turn_id!==saved.turn_id || [...nativeTurns].some(id=>id!==saved.turn_id))throw refused();
+    // Validate the saved settings before comparing them with later native changes.
+    const settings=recoverySettings(saved,thread,context.workdir);
     // A native settings change after the last turn must never be overwritten
     // by stale turn_context (e.g. full access changed to a restricted profile).
     if(applied){
@@ -88,12 +92,11 @@ export async function recoveryPlan(file, context, thread, latestTurn) {
       if(applied.thread_id!==thread.id || !p || p.model_provider_id!==thread.modelProvider)throw refused();
       for(const key of ['model','cwd','approval_policy','approvals_reviewer','permission_profile','collaboration_mode'])
         if(!isDeepStrictEqual(p[key],saved[key]))throw refused();
-      if(!isDeepStrictEqual(p.runtime_workspace_roots,[context.workdir,...(saved.sandbox_policy?.writable_roots??[])])
+      if(!isDeepStrictEqual(p.runtime_workspace_roots,settings.params.runtimeWorkspaceRoots??[context.workdir])
           || !isDeepStrictEqual(p.disabled_plugin_ids??[],saved.disabled_plugin_ids??[])
           || (p.reasoning_effort??null)!==(saved.effort??saved.collaboration_mode?.settings?.reasoning_effort??null)
           || (p.service_tier??null)!==(saved.service_tier??null))throw refused();
     }
-    const settings=recoverySettings(saved,thread,context.workdir);
     const key=createHash('sha256').update(JSON.stringify([context.stamp,saved.turn_id,settings])).digest('hex');
     return {key,settings};
   } finally {await fd.close();}

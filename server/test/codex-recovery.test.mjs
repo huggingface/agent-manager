@@ -40,6 +40,8 @@ test('invalid or ambiguous root lists are never normalized into new permissions'
  for(const roots of [null,'/tmp/x',['relative'],['/tmp/x/../y'],['/tmp/x/'],[cwd],['/tmp/x','/tmp/x'],['/tmp/\u0000x']]){
   const p=workspaceSaved();p.sandbox_policy.writable_roots=roots;assert.throws(()=>recoverySettings(p,thread,cwd));
  }
+ // Even an otherwise canonical profile cannot make a protected subdirectory writable.
+ for(const roots of [[cwd+'/.git'],[cwd+'/.codex/x'],['/tmp/x','/tmp/x/.aws']])assert.throws(()=>recoverySettings(workspaceSaved(roots),thread,cwd));
 });
 test('workspace presets with omitted or empty extra roots still recover',()=>{
  for(const omit of [false,true]){
@@ -54,6 +56,9 @@ test('later native runtime-root or profile changes cannot be overwritten by mult
   const a={model:p.model,model_provider_id:t.modelProvider,cwd,approval_policy:p.approval_policy,approvals_reviewer:p.approvals_reviewer,permission_profile:p.permission_profile,collaboration_mode:p.collaboration_mode,runtime_workspace_roots:[cwd,...p.sandbox_policy.writable_roots],disabled_plugin_ids:[]};
   const write=applied=>fs.writeFileSync(file,[{type:'turn_context',payload:p},{type:'event_msg',payload:{type:'thread_settings_applied',thread_id:t.id,thread_settings:applied}}].map(JSON.stringify).join('\n')+'\n');
   write(a);await recoveryPlan(file,context,t,{id:p.turn_id});
+  const badSaved=structuredClone(p);badSaved.sandbox_policy.writable_roots=7;
+  fs.writeFileSync(file,[{type:'turn_context',payload:badSaved},{type:'event_msg',payload:{type:'thread_settings_applied',thread_id:t.id,thread_settings:a}}].map(JSON.stringify).join('\n')+'\n');
+  await assert.rejects(recoveryPlan(file,context,t,{id:p.turn_id}),{statusCode:409});
   for(const change of [a=>a.runtime_workspace_roots.pop(),a=>a.permission_profile.file_system.entries.pop(),a=>a.approval_policy='never']){
    const bad=structuredClone(a);change(bad);write(bad);await assert.rejects(recoveryPlan(file,context,t,{id:p.turn_id}));
   }
