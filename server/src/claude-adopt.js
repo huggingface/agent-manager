@@ -14,7 +14,16 @@ export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 
 export const claudeConfigDir = (env = process.env) => env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 
-export const projectDirName = (workdir) => path.resolve(workdir).replace(/[^a-zA-Z0-9]/g, '-');
+// Claude caps the name at 200 characters and then appends a base-36 Java-style
+// string hash of the full path (its sanitizePath), so long folders still match.
+export const projectDirName = (workdir) => {
+  const abs = path.resolve(workdir);
+  const name = abs.replace(/[^a-zA-Z0-9]/g, '-');
+  if (name.length <= 200) return name;
+  let hash = 0;
+  for (let i = 0; i < abs.length; i++) hash = (hash << 5) - hash + abs.charCodeAt(i) | 0;
+  return `${name.slice(0, 200)}-${Math.abs(hash).toString(36)}`;
+};
 
 // Every projects/<dir>/<uuid>.jsonl (a conversation moved between folders can
 // leave more than one). Unreadable directories count as absent.
