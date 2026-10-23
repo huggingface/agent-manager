@@ -123,6 +123,24 @@ message('ses_gap', 'gs1', summaryMsg, [{ type: 'text', text: '## Objective\n- bu
 message('ses_gap', 'ge1', { role: 'assistant', mode: 'build', agent: 'build' });
 message('ses_gap', 'ga1', step('stop'), [{ type: 'text', text: 'Carried on by itself.' }]);
 message('ses_gap', 'gu2', user(), [{ type: 'text', text: 'build it' }]);
+// 5. Same words, different attachments: "Describe this" + image A, a
+//    successful automatic compaction, then "Describe this" + image B (or A and
+//    B). The second is the operator's prompt. The same words with the same
+//    image straight after the summary are still opencode's replay.
+const image = (name, bytes) => ({ type: 'file', mime: 'image/png', filename: name, url: `data:image/png;base64,${bytes}` });
+for (const [sid, second] of [
+  ['ses_img_other', [image('b.png', 'QkJC')]],
+  ['ses_img_more', [image('a.png', 'QUFB'), image('b.png', 'QkJC')]],
+  ['ses_img_same', [image('a.png', 'QUFB')]],
+]) {
+  addSession.run(sid, '/w', 'Image', '{"id":"deepseek"}', 1, 2);
+  message(sid, `${sid}-u1`, user(), [{ type: 'text', text: 'Describe this' }, image('a.png', 'QUFB')]);
+  message(sid, `${sid}-a1`, step(), [bash('ls', 'ok')]);
+  message(sid, `${sid}-c1`, user(), [{ type: 'compaction', auto: true, overflow: true }]);
+  message(sid, `${sid}-s1`, summaryMsg, [{ type: 'text', text: '## Objective\n- describe the image' }]);
+  message(sid, `${sid}-u2`, user(), [{ type: 'text', text: 'Describe this' }, ...second]);
+  message(sid, `${sid}-a2`, step('stop'), [{ type: 'text', text: 'A picture.' }]);
+}
 // 4. Ten automatic compactions in one turn, each followed by a replay, and ten
 //    each followed by opencode's "carry on" note. Any length of chain must
 //    read as one prompt, in the reader and the digest alike.
@@ -203,6 +221,12 @@ const read = async (sid) => (await readTrace({ id: sid, cli: 'opencode', path: '
   assert.ok(turns.some((t) => t.blocks.some((b) => b.type === 'compaction')), 'the compaction still shows');
 }
 
+for (const [sid, prompts] of [['ses_img_other', 2], ['ses_img_more', 2], ['ses_img_same', 1]]) {
+  const turns = await read(sid);
+  assert.equal(turns.filter((t) => t.role === 'user').length, prompts,
+    `${sid}: ${prompts === 2 ? 'different attachments make it a new prompt' : 'the same image replayed is still a replay'}`);
+}
+
 for (const sid of ['ses_chain_replay', 'ses_chain_note']) {
   const turns = await read(sid);
   assert.deepEqual(turns.filter((t) => t.role === 'user').map((t) => texts(t).join('')), [PROMPT], `${sid}: one prompt`);
@@ -239,6 +263,10 @@ for (const sid of ['ses_chain_replay', 'ses_chain_note']) {
     assert.equal(chain.digest.lastAssistantText, 'Finished.');
   }
   assert.equal(rows.get('ses_gap').stats.prompts, 2, 'a step after the summary ends the compaction');
+  assert.equal(rows.get('ses_img_other').stats.prompts, 2, 'a new image is a new prompt');
+  assert.equal(rows.get('ses_img_other').digest.lastPromptTs, at['ses_img_other-u2']);
+  assert.equal(rows.get('ses_img_more').stats.prompts, 2, 'so is another image added');
+  assert.equal(rows.get('ses_img_same').stats.prompts, 1, 'the same image replayed is not');
   // The reader and the digest agree on every conversation in the fixture.
   for (const [sid, parsed] of rows) {
     const turns = await read(sid);

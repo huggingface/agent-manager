@@ -590,15 +590,26 @@ const NOT_SUMMARY = "(instr(data,'compaction') = 0 or (coalesce(json_extract(dat
 // every text part is opencode's own "carry on" note, and whether it is empty
 // (the turn an overflow cut off has no parts at all).
 function opencodeShape(pds) {
-  let compaction = null; let content = false; let notes = true; const said = [];
+  let compaction = null; let content = false; let notes = true; const said = []; const other = [];
   for (const pd of pds) {
     if (pd.type === 'compaction') compaction = pd;
     else if (pd.type === 'text' && pd.text?.trim()) {
       said.push(pd.text); content = true;
       if (!pd.metadata?.compaction_continue) notes = false;
     } else if (pd.type === 'tool' || (pd.type === 'reasoning' && (pd.text || pd.reasoning))) content = true;
+    else if (pd.type !== 'text' && pd.type !== 'step-start' && pd.type !== 'step-finish') {
+      // An attachment (file/image: mime, filename, url — a data URL carries
+      // the bytes) or any other part: kept whole, minus what names the record.
+      const { id, sessionID, messageID, time, ...rest } = pd;
+      other.push(rest);
+    }
   }
-  return { compaction, text: said.join('\n').trim(), continueNote: said.length > 0 && notes, empty: !compaction && !content };
+  return {
+    compaction, text: said.join('\n').trim(), continueNote: said.length > 0 && notes,
+    // Two prompts with the same words and different images are different prompts.
+    attachments: other.length ? JSON.stringify(other) : '',
+    empty: !compaction && !content,
+  };
 }
 
 // One pass over a conversation, message by message, saying what each one is:
@@ -610,7 +621,8 @@ function opencodeShape(pds) {
 //   'step'       anything else the assistant did
 // A resume only follows an AUTOMATIC compaction whose summary COMPLETED (finish
 // 'stop', text, no error), with nothing but empty messages since, and is the
-// last prompt replayed verbatim (full text, before any display cap) or
+// last prompt replayed verbatim (full text, before any display cap, and the
+// same attachments) or
 // opencode's flagged "carry on" note. After a manual /compact, or a summary
 // that failed, the next message is the operator's — even a repeat.
 //
@@ -637,10 +649,10 @@ function opencodeTurns() {
     if (sh.empty) return 'empty';
     if (md.role !== 'user') { pending = null; return 'step'; }
     const resumes = !!pending && pending.auto && pending.summarized
-      && (sh.continueNote || (lastPrompt !== null && sh.text === lastPrompt));
+      && (sh.continueNote || (lastPrompt !== null && sh.text === lastPrompt.text && sh.attachments === lastPrompt.attachments));
     pending = null;
     if (resumes) return 'resume';
-    lastPrompt = sh.text;
+    lastPrompt = { text: sh.text, attachments: sh.attachments };
     return 'prompt';
   };
   see.pending = () => !!pending;
