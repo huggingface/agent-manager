@@ -25,7 +25,8 @@ import { dispatchBlocks, type Dispatch } from '../../lib/dispatches';
 
 // The dispatched-sessions strip and step row are fetched the first time a turn
 // has any: most conversations dispatch nothing, and the reader ships in the
-// entry chunk, which has a size budget (test/lazyPanels.test.mjs).
+// entry chunk, which has a size budget (test/lazyPanels.test.mjs). The same
+// chunk draws an opened image step (TraceImage), for the same reason.
 const loadDispatchUi = () => import('./Dispatches');
 // Stands in while a turn has no dispatches, so the hook is called every render
 // without fetching anything.
@@ -100,6 +101,10 @@ function StepRow({ s, q }: { s: Step; q?: string }) {
   // body and all, so the hit is on screen and the ▲▼ nav can reach it.
   const hit = !!q && stepText(s).toLowerCase().includes(q);
   const open = selfOpen || hit;
+  // An image step fetches the chunk that draws it (its bytes wait until it is
+  // opened); anything else waits on nothing. `module` is only there once ready,
+  // and is read without a kind test, which the entry would pay for.
+  const img = (useLazyModule(s.kind === 'image' ? loadDispatchUi : noUi) as { module?: typeof import('./Dispatches') }).module;
   let label = '';
   let preview = '';
   let full = '';        // set for the kinds that expand in place
@@ -177,7 +182,7 @@ function StepRow({ s, q }: { s: Step; q?: string }) {
             ) : null
           ))}
           {s.kind === 'shell' && <pre className="cs-pre out"><Hi text={s.out} q={q} /></pre>}
-          {s.kind === 'image' && <img className="cs-img" src={s.src} alt="" />}
+          {img && <img.TraceImage s={s as Step & { kind: 'image' }} />}
         </div>
       )}
     </div>

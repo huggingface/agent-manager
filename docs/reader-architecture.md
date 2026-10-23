@@ -73,7 +73,10 @@ own two suites: `web/test/readerHistory.test.mjs` drives the store against a
 source that honours `bytes`/`min` (budgets, blocked and stalled cursors, warm
 return, release), and `web/test/readerFirstViewport.test.mjs` drives the real
 reader in a browser and measures viewport coverage and per-frame anchor
-displacement. `server/test/trace-index-history.test.mjs` covers the indexed
+displacement. `server/test/trace-images.test.mjs` and `web/test/traceImages.browser.test.mjs`
+cover images by reference: no data in any response, exact bytes from every
+image route, refusals, and lazy loading in the browser.
+`server/test/trace-index-history.test.mjs` covers the indexed
 first window and conversation isolation inside one database. Existing trace, Markdown,
 attachment, input-required, and terminal tests remain part of the contract.
 
@@ -96,6 +99,21 @@ needed: the store uses immutable snapshots and React's external-store adapter.
   seconds, and ends earlier on coverage, the start of the conversation, an
   unusable source or an exhausted fill. The composer is never part of the wait
   and a warm store is never hidden.
+- Images travel by reference. A conversation response names each embedded
+  image as `{type:'image', ref, mediaType, bytes, width?, height?}` and never
+  carries its data, so a window's retained size is its text: one Codex session
+  that viewed a dozen full-HD screenshots answered its tail with 6.0 MB before,
+  and 51 KB after. The ref is the record's byte offset plus a hash of the data;
+  `GET …/image/:ref` beside the route the conversation came from seeks to that
+  offset, reads that one record and serves the image only if the hash matches,
+  so it cannot reach a file, a record or bytes the transcript does not hold, and
+  can be cached as immutable. Each conversation route fills in `src` for its
+  own image route. The reader mounts an image when its step is opened, as
+  `loading="lazy"` with its box laid out from the known size; the code that
+  draws it (TraceImage) rides in the reader's on-demand Dispatches chunk, and
+  the Trace pane (a lazy panel) has its own copy, so the entry chunk does not
+  grow.
+  Share bundles are the native transcript and keep their images inline.
 - Whole-conversation search: 256 KiB scan pages, at most 40 pages, 12 MiB or
   four seconds per request, 50 matching messages per page, and a 200-character
   query. Longer conversations are more bounded requests, continued with a cursor

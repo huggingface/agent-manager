@@ -15,6 +15,9 @@ import { renderMarkdown } from '../../lib/markdown';
 import { fmtClock, fmtDur, fmtTok, oneLine } from './exchanges';
 import { openSession, type Dispatch, type DispatchResult } from '../../lib/dispatches';
 import { iconsOf, ordered, placeCard, viewport, within, type PeerIcon } from '../../lib/dispatchView';
+// Not a dispatch: the reader's other on-demand piece, kept in this chunk so it
+// costs the entry no import of its own (see loadDispatchUi in Exchange.tsx).
+export { default as TraceImage } from './TraceImage';
 
 const ENVELOPE = /^(?:\s*\[message from [^\]]*\]\s*)+/;
 const plainPrompt = (t: string) => oneLine(t.replace(ENVELOPE, '').replace(/^#+\s*/gm, '').replace(/\*\*|`/g, ''), 280);

@@ -286,7 +286,10 @@
   background: color-mix(in srgb, var(--danger, #c05353) 7%, var(--panel-2));
 }
 .cs-pre.think { color: color-mix(in srgb, #8b73c4 70%, var(--text)); }
-.cs-img { max-width: 100%; max-height: 18rem; border-radius: var(--r-sm); }
+.cs-img { --img-max-h: 18rem; display: block; max-width: 100%; max-height: var(--img-max-h); border-radius: var(--r-sm); }
+/* Laid out at its final size before the bytes arrive (TraceImage). */
+.cs-img[width], .tv-img[width] { background: var(--border); }
+.trace-img-missing { display: inline-block; max-height: none; padding: 4px 8px; border: 1px dashed var(--border); color: var(--muted); font-size: 0.8em; }
 
 /* ---------- the answer: the one thing written for the reader ---------- */
 .cx-answer { min-width: 0; }

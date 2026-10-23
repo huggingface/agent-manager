@@ -46,7 +46,8 @@ import {
 // frontend's framing is unchanged.
 const TERM_CTRL = '\x00\x00AM:';
 import { buildUsage } from './usage.js';
-import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, searchTrace, traceHarnessOf, subagentRoster, readSubagentTrace } from './traces.js';
+import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, searchTrace, traceHarnessOf, subagentRoster, readSubagentTrace,
+  traceImage, traceImageBundle, traceImageByPath, subagentTraceImage, withImageUrls } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isLocked, lockState, visibility, onVisibilityChange, lockError } from './visibility.js';
 import { kindOfName, kindOfFile, mimeOf, readTextHead, TEXT_MAX } from './preview.js';
@@ -1193,11 +1194,45 @@ api.get('/api/agents/:id/subagents', async (req, res) => {
   }
 });
 
+// One image a conversation response referred to by `ref` instead of carrying
+// it (server/src/trace-images.js). The bytes are what the trace holds, so they
+// are served the way the Files pane serves workspace files: the real type,
+// never sniffed, and a CSP sandbox so an SVG opened directly in a tab is an
+// inert document in an opaque origin. The ref names the bytes (offset + hash),
+// so the same URL can never mean different bytes and the browser may keep it.
+async function sendTraceImage(res, find) {
+  try {
+    const { body, type } = await find();
+    res.set({
+      'Content-Type': type,
+      'Content-Length': String(body.length),
+      'Content-Disposition': 'inline',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': 'sandbox',
+      'Cache-Control': 'private, max-age=31536000, immutable',
+    });
+    res.end(body);
+  } catch (e) {
+    if (e && e.code === 'not-an-image') return res.status(415).json({ error: e.message, code: e.code });
+    if (['no-image', 'no-trace', 'unsupported-harness'].includes(e && e.code)) {
+      return res.status(404).json({ error: e.message, code: e.code === 'no-image' ? 'no-image' : e.code });
+    }
+    throw e;
+  }
+}
+
+api.get('/api/agents/:id/subagents/:agentId/image/:ref', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  return sendTraceImage(res, () => subagentTraceImage(s, req.params.agentId, req.params.ref));
+});
+
 api.get('/api/agents/:id/subagents/:agentId', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   try {
-    res.json(await readSubagentTrace(s, req.params.agentId, traceOpts(req.query)));
+    res.json(withImageUrls(await readSubagentTrace(s, req.params.agentId, traceOpts(req.query)),
+      `/api/agents/${encodeURIComponent(s.id)}/subagents/${encodeURIComponent(req.params.agentId)}/image/`));
   } catch (e) {
     if (['no-trace', 'unsupported-harness', 'trace-not-user-conversation'].includes(e && e.code)) {
       return res.status(404).json({ error: e.message, code: e.code });
@@ -3035,13 +3070,22 @@ function traceOpts(q) {
   };
 }
 
+api.get('/api/files/:id/trace/image/:ref', async (req, res) => {
+  const s = store.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const f = resolveSafe(folderPathOf(s), req.query.path);
+  if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) return res.status(404).json({ error: 'not found' });
+  return sendTraceImage(res, () => traceImageByPath(f, req.params.ref));
+});
+
 api.get('/api/files/:id/trace', async (req, res) => {
   const s = store.get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const f = resolveSafe(folderPathOf(s), req.query.path);
   if (!f || !fs.existsSync(f) || !fs.statSync(f).isFile()) return res.status(404).json({ error: 'not found' });
   try {
-    res.json(await readTraceByPath(f, traceOpts(req.query)));
+    res.json(withImageUrls(await readTraceByPath(f, traceOpts(req.query)),
+      `/api/files/${encodeURIComponent(s.id)}/trace/image/`, `?path=${encodeURIComponent(req.query.path)}`));
   } catch (e) {
     // "not a transcript" is an ordinary answer here, not a failure: the pane
     // falls back to showing the file as text. A codex guardian rollout is the
@@ -3745,17 +3789,18 @@ api.get('/api/trace/:id', async (req, res) => {
 
   const source = pane.traceSource || { kind: 'session', ref: pane.id };
   const opts = traceOpts(req.query);
+  const images = `/api/trace/${encodeURIComponent(pane.id)}/image/`;
 
   try {
     if (source.kind === 'bundle') {
       const dir = bundleDir(source.ref);
       if (!dir) return res.status(400).json({ error: 'bad bundle ref' });
-      return res.json(await readTraceBundle(dir, opts));
+      return res.json(withImageUrls(await readTraceBundle(dir, opts), images));
     }
     const target = store.get(source.ref);
     if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
     const page = await readTrace(target, opts);
-    res.json(await sessionRuntime.trace(target, page, {interactive: pane.id === target.id && !opts.summary && !req.query.before}));
+    res.json(withImageUrls(await sessionRuntime.trace(target, page, {interactive: pane.id === target.id && !opts.summary && !req.query.before}), images));
   } catch (e) {
     // These are expected states, not failures: no transcript yet, an
     // unsupported CLI, or a codex guardian rollout. The pane renders the reason.
@@ -3772,6 +3817,22 @@ api.get('/api/trace/:id', async (req, res) => {
 //
 // Bounded per request and continued with `cursor`; the reader asks for this
 // explicitly, so nothing here runs on a keystroke or on mount.
+// An image in this pane's conversation, by the ref the conversation gave. The
+// pane resolves to its source exactly as GET /api/trace/:id does.
+api.get('/api/trace/:id/image/:ref', async (req, res) => {
+  const pane = store.get(req.params.id);
+  if (!pane) return res.status(404).json({ error: 'not found' });
+  const source = pane.traceSource || { kind: 'session', ref: pane.id };
+  if (source.kind === 'bundle') {
+    const dir = bundleDir(source.ref);
+    if (!dir) return res.status(400).json({ error: 'bad bundle ref' });
+    return sendTraceImage(res, () => traceImageBundle(dir, req.params.ref));
+  }
+  const target = store.get(source.ref);
+  if (!target) return res.status(404).json({ error: 'source session is gone', code: 'no-trace' });
+  return sendTraceImage(res, () => traceImage(target, req.params.ref));
+});
+
 api.get('/api/trace/:id/search', async (req, res) => {
   const pane = store.get(req.params.id);
   if (!pane) return res.status(404).json({ error: 'not found' });

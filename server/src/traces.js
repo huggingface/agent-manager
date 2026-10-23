@@ -4,7 +4,6 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { Worker } from 'node:worker_threads';
-import readline from 'node:readline';
 import * as store from './sessions.js';
 import { WORKSPACES_DIR, PASSIVE_CLIS, isRemote } from './config.js';
 import { remoteDigest } from './remote.js';
@@ -15,6 +14,7 @@ import { findTrace, HARNESS_LABEL } from './share.js';
 import { cachedTrace, traceRevision } from './trace-revision.js';
 import { outputHash } from './output-id.js';
 import { codeModeUses, codeModeResults, patchFiles, stripDataUrls } from './codex-code-mode.js';
+import { embeddedImage, imageBlock, readImageRef } from './trace-images.js';
 
 // Workspace-wide trace analytics: parse every Claude transcript and Codex
 // rollout on the Space into per-conversation stats (turns, tool calls, web
@@ -1561,7 +1561,8 @@ export async function traceLocation(s) {
 //   | { type:'tool_use',    id?, name, text, more? }    // text = serialized args
 //   | { type:'tool_result', id?, text, more?, failed? }
 //   | { type:'shell',       command, stdout?, stderr?, exitCode? }
-//   | { type:'image',       src, mediaType? }
+//   | { type:'image',       ref, mediaType, bytes, width?, height? }  // never the data:
+//                                         // GET …/image/:ref serves it (trace-images.js)
 //   | { type:'compaction',  text }
 //
 // `more` = number of characters dropped, so the UI can say "+412 KB more"
@@ -1601,19 +1602,24 @@ function makeStitcher() {
   const byId = new Map(); // toolCallId -> { msg, useBlock }
   return {
     register(useBlock, msg) { if (useBlock.id) byId.set(useBlock.id, { msg, useBlock }); },
-    /** true if filed next to its call; false if the call was never seen. */
-    file(id, resultBlock) {
+    /** true if filed next to its call; false if the call was never seen.
+     *  `after` (a result's images) goes right behind the result. */
+    file(id, resultBlock, after = []) {
       const hit = id ? byId.get(id) : null;
       if (!hit) return false;
       const at = hit.msg.blocks.indexOf(hit.useBlock);
-      if (at === -1) { hit.msg.blocks.push(resultBlock); return true; }
+      if (at === -1) { hit.msg.blocks.push(resultBlock, ...after); return true; }
       let i = at + 1;
-      while (i < hit.msg.blocks.length && hit.msg.blocks[i].type === 'tool_result') i++;
-      hit.msg.blocks.splice(i, 0, resultBlock);
+      while (i < hit.msg.blocks.length && (hit.msg.blocks[i].type === 'tool_result' || hit.msg.blocks[i].type === 'image')) i++;
+      hit.msg.blocks.splice(i, 0, resultBlock, ...after);
       return true;
     },
   };
 }
+
+// Where a record starts in its file, set on every record either reader below
+// yields. An image ref is this offset plus a hash (trace-images.js).
+const RECORD_AT = Symbol('record offset');
 
 // ---------- line-oriented harnesses ----------
 // `range` (optional) reads only a BYTE WINDOW of the file — see the window
@@ -1621,21 +1627,38 @@ function makeStitcher() {
 // index-mode readers and the summary pass still want.
 async function* jsonLines(file, range = null) {
   if (range) { yield* rangeJsonLines(file, range); return; }
-  const rl = readline.createInterface({
-    input: fs.createReadStream(file, { encoding: 'utf8' }),
-    crlfDelay: Infinity,
-  });
+  // Split on the BUFFER, as the window reader does, so every record knows the
+  // byte offset it starts at (RECORD_AT) — that is what an image ref points to.
+  // A line longer than a chunk is collected in pieces and joined once, so a
+  // multi-MB record costs one copy rather than one per chunk.
+  const pieces = [];
+  let base = 0;      // file offset of the first byte not yet consumed
   let n = 0;
-  try {
-    for await (const line of rl) {
-      if (!line.trim()) continue;
-      let j; try { j = JSON.parse(line); } catch { continue; }
+  const parse = (buf) => {
+    const line = buf.toString('utf8');
+    if (!line.trim()) return null;
+    try { return JSON.parse(line); } catch { return null; }
+  };
+  for await (const chunk of fs.createReadStream(file, { highWaterMark: 256 * 1024 })) {
+    let i = 0;
+    for (let nl = chunk.indexOf(0x0a); nl !== -1; nl = chunk.indexOf(0x0a, i)) {
+      const at = base;
+      const line = pieces.length ? Buffer.concat([...pieces.splice(0), chunk.subarray(i, nl)]) : chunk.subarray(i, nl);
+      base += line.length + 1;
+      i = nl + 1;
+      const j = parse(line);
+      if (!j || typeof j !== 'object') continue;
+      j[RECORD_AT] = at;
       yield j;
-      // readline is stream-driven so the loop already breathes, but a long run
-      // of tiny lines can still hog a tick.
+      // A long run of tiny lines can still hog a tick.
       if (++n % VIEW_YIELD_LINES === 0) await yieldLoop();
     }
-  } finally { rl.close(); }
+    if (i < chunk.length) pieces.push(chunk.subarray(i));
+  }
+  if (pieces.length) {
+    const j = parse(Buffer.concat(pieces));
+    if (j && typeof j === 'object') { j[RECORD_AT] = base; yield j; }
+  }
 }
 
 // Bytes [from, to) of a file, as one buffer. Callers bound the span themselves
@@ -1691,6 +1714,7 @@ async function* rangeJsonLines(file, range) {
     // agent halfway through writing one looks exactly the same until it does.
     if (!last || whole) range.end = range.from + i;
     if (!whole) continue;
+    if (j && typeof j === 'object') j[RECORD_AT] = range.recordOffset;
     yield j;
     if (++n % VIEW_YIELD_LINES === 0) await yieldLoop();
   }
@@ -1893,14 +1917,17 @@ async function normalizeClaude(file, out, range, allowSubagent = false) {
         msg.blocks.push(use);
         stitch.register(use, msg);
       } else if (c.type === 'tool_result') {
+        // A screenshot a tool returned is an image after its result, not
+        // base64 inside the result's text.
+        const { text, images } = splitToolContent(c.content, j[RECORD_AT]);
         const res = {
           type: 'tool_result', id: c.tool_use_id,
           failed: !!c.is_error,
-          ...capText(flattenToolContent(c.content)),
+          ...capText(text),
         };
-        if (!stitch.file(c.tool_use_id, res)) msg.blocks.push(res);
-      } else if (c.type === 'image' && c.source?.data) {
-        msg.blocks.push({ type: 'image', src: dataUrl(c.source.data, c.source.media_type), mediaType: c.source.media_type });
+        if (!stitch.file(c.tool_use_id, res, images)) msg.blocks.push(res, ...images);
+      } else if (embeddedImage(c)) {
+        msg.blocks.push(imageBlock(j[RECORD_AT], embeddedImage(c)));
       }
     }
 
@@ -2033,7 +2060,9 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
         // wraps environment blobs as role:'user' text starting with '<'.
         const isEnv = p.role === 'developer' || isHarnessText(text);
         cur = null;
-        out.push({ role: isEnv ? 'system' : 'user', ts, blocks: [textBlock('text', text)] });
+        // An image the operator attached travels in the same message.
+        const images = isEnv ? [] : p.content.map(embeddedImage).filter(Boolean).map((img) => imageBlock(j[RECORD_AT], img));
+        out.push({ role: isEnv ? 'system' : 'user', ts, blocks: [textBlock('text', text), ...images] });
       } else if (p.type === 'reasoning') {
         // One block per summary ENTRY, not the entries joined. The same texts
         // arrive as individual `agent_reasoning` events first, and a joined
@@ -2108,16 +2137,11 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
           let plan;
           try { plan = codeModeResults(p.output, script ? script.code : '', calls.length); } catch { plan = null; }
           if (!plan || !(plan.perCall || plan.script)) plan = { script: { text: '', images: [], failed: false }, wallMs: null };
-          const images = (r) => r.images.map(({ src }) => ({ type: 'image', src }));
+          // By reference, never by value: the bytes are served by the trace image route.
+          const images = (r) => r.images.map(({ src }) => embeddedImage({ type: 'input_image', image_url: src }))
+            .filter(Boolean).map((img) => imageBlock(j[RECORD_AT], img));
           // A result filed next to its call, and the blocks that follow it after it.
-          const place = (id, res, after) => {
-            if (!stitch.file(id, res)) { assistant(ts).blocks.push(res, ...after); return; }
-            if (!after.length) return;
-            for (let k = out.messages.length - 1; k >= 0; k--) {
-              const at = out.messages[k].blocks.indexOf(res);
-              if (at !== -1) { out.messages[k].blocks.splice(at + 1, 0, ...after); break; }
-            }
-          };
+          const place = (id, res, after) => { if (!stitch.file(id, res, after)) assistant(ts).blocks.push(res, ...after); };
           if (plan.perCall) {
             // The script said which output was whose: each call gets its own
             // output, failure and images. Images go as image blocks, never as
@@ -2149,8 +2173,11 @@ async function normalizeCodex(file, out, range, allowSubagent = false) {
           assistant(ts).blocks.push({ type: 'tool_result', id: `exec-${++execSeq}`, text: '' });
         }
       } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
-        const res = { type: 'tool_result', id: p.call_id, ...capText(flattenToolContent(p.output)) };
-        if (!stitch.file(res.id, res)) assistant(ts).blocks.push(res);
+        // A classic `view_image` answers with an input_image part: an image
+        // block after the result, never base64 in its text.
+        const { text, images } = splitToolContent(p.output, j[RECORD_AT]);
+        const res = { type: 'tool_result', id: p.call_id, ...capText(text) };
+        if (!stitch.file(res.id, res, images)) assistant(ts).blocks.push(res, ...images);
       }
       continue;
     }
@@ -2500,7 +2527,21 @@ function normalizeHermesDb(dbPath, sessionId, out) {
 }
 
 // ---------- shared helpers ----------
-const dataUrl = (b64, mediaType) => `data:${mediaType || 'image/png'};base64,${b64}`;
+// A tool's output with its embedded images taken out: the text, and an image
+// block (a ref, never the data) per image, in order.
+function splitToolContent(value, offset) {
+  if (!Array.isArray(value)) {
+    const img = embeddedImage(value);
+    return img ? { text: '', images: [imageBlock(offset, img)] } : { text: flattenToolContent(value), images: [] };
+  }
+  const images = [];
+  const rest = [];
+  for (const c of value) {
+    const img = embeddedImage(c);
+    if (img) images.push(imageBlock(offset, img)); else rest.push(c);
+  }
+  return { text: flattenToolContent(rest), images };
+}
 
 // "harness" is a bare string on an STS session line but an OBJECT
 // ({id,name,version}) in a bundle manifest. Both reach harnessLabel, which the
@@ -3192,6 +3233,10 @@ export async function subagentRoster(session) {
  * against the id shape rather than trusted.
  */
 export async function readSubagentTrace(session, agentId, opts = {}) {
+  return readTraceByPath(await subagentFile(session, agentId), opts, true);
+}
+
+async function subagentFile(session, agentId) {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(String(agentId || ''))) {
     const e = new Error('not a sub-agent id'); e.code = 'no-trace'; throw e;
   }
@@ -3203,7 +3248,7 @@ export async function readSubagentTrace(session, agentId, opts = {}) {
     const mine = agents.find((a) => a.agentId === agentId);
     if (!mine) { const e = new Error('not a sub-agent of this pane'); e.code = 'no-trace'; throw e; }
     for (const file of await codexFiles()) {
-      if (path.basename(file).includes(agentId)) return readTraceByPath(file, opts, true);
+      if (path.basename(file).includes(agentId)) return file;
     }
     const e = new Error('sub-agent rollout not found'); e.code = 'no-trace'; throw e;
   }
@@ -3211,8 +3256,7 @@ export async function readSubagentTrace(session, agentId, opts = {}) {
   if (!loc || session.cli !== 'claude' || loc.format !== 'jsonl') {
     const e = new Error('this session keeps no sub-agent transcripts'); e.code = 'unsupported-harness'; throw e;
   }
-  const file = path.join(loc.path.replace(/\.jsonl$/, ''), 'subagents', `agent-${agentId}.jsonl`);
-  return readTraceByPath(file, opts, true);
+  return path.join(loc.path.replace(/\.jsonl$/, ''), 'subagents', `agent-${agentId}.jsonl`);
 }
 
 /**
@@ -3252,10 +3296,14 @@ export async function readTraceByPath(file, opts = {}, allowSubagent = false) {
  * plus meta/. The harness is sniffed from the file, since a bundle carries
  * whatever format the sender's harness ships.
  */
-export async function readTraceBundle(dir, opts = {}) {
+async function bundleFile(dir) {
   const names = (await fsp.readdir(dir).catch(() => [])).filter((n) => n.endsWith('.jsonl'));
   if (!names.length) { const e = new Error('bundle has no trace file'); e.code = 'no-trace'; throw e; }
-  const file = path.join(dir, names[0]);
+  return path.join(dir, names[0]);
+}
+
+export async function readTraceBundle(dir, opts = {}) {
+  const file = await bundleFile(dir);
   const st = await statRetry(file);
   if (!st) { const e = new Error('bundle trace unreadable'); e.code = 'no-trace'; throw e; }
 
@@ -3300,6 +3348,54 @@ export async function readTraceBundle(dir, opts = {}) {
     size: st.size,
     decorate,
   }, opts);
+}
+
+/* ------------------------------------------------------------------ images --
+ *
+ * One embedded image, by the ref a conversation response gave for it (see
+ * trace-images.js). Each entry point resolves the transcript exactly as its
+ * reading counterpart above does, so a ref can only ever be looked up in the
+ * file that this session, sub-agent, workspace file or bundle reads — never in
+ * a path the client chose — and is served only if that file holds that image.
+ */
+/**
+ * `response` with each image block given `src`: the image route of the caller
+ * that returned it (`base` + ref + `suffix`), since only the route knows its own
+ * path. Copies the turns it touches; the parsed trace behind it is cached and
+ * shared, so it is never written to.
+ */
+export function withImageUrls(response, base, suffix = '') {
+  if (!response || !Array.isArray(response.turns)) return response;
+  const turns = response.turns.map((t) => (!t.blocks?.some((b) => b.type === 'image' && b.ref) ? t : {
+    ...t,
+    blocks: t.blocks.map((b) => (b.type === 'image' && b.ref ? { ...b, src: `${base}${encodeURIComponent(b.ref)}${suffix}` } : b)),
+  }));
+  return { ...response, turns };
+}
+
+async function imageIn(file, ref) {
+  const st = await statRetry(file);
+  if (!st) { const e = new Error('trace file unreadable'); e.code = 'no-trace'; throw e; }
+  return readImageRef(file, ref);
+}
+
+export async function traceImage(session, ref) {
+  const hit = await findTrace(session, store.list());
+  if (!hit) { const e = new Error('no trace found for this session'); e.code = 'no-trace'; throw e; }
+  return imageIn(hit.src, ref);
+}
+
+export async function subagentTraceImage(session, agentId, ref) {
+  return imageIn(await subagentFile(session, agentId), ref);
+}
+
+export async function traceImageByPath(file, ref) {
+  if (!await traceHarnessOf(file)) { const e = new Error('unrecognized trace format'); e.code = 'unsupported-harness'; throw e; }
+  return imageIn(file, ref);
+}
+
+export async function traceImageBundle(dir, ref) {
+  return imageIn(await bundleFile(dir), ref);
 }
 
 /* ------------------------------------------------------------------ search --

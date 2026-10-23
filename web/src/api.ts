@@ -777,7 +777,11 @@ export type TraceBlock =
   | { type: 'tool_use'; id?: string; name: string; text: string; more?: number }
   | { type: 'tool_result'; id?: string; text: string; more?: number; failed?: boolean; durationMs?: number }
   | { type: 'shell'; command: string; stdout?: string; stderr?: string; exitCode?: number }
-  | { type: 'image'; src: string; mediaType?: string }
+  /**
+   * `src` is the trace image route for `ref` (the server never sends the bytes
+   * inline any more); an inline data-URL `src` from an older server still works.
+   */
+  | { type: 'image'; src: string; ref?: string; mediaType?: string; bytes?: number; width?: number; height?: number }
   | { type: 'compaction'; text: string };
 
 export interface TraceTurn {
