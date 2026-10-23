@@ -601,68 +601,92 @@ function opencodeShape(pds) {
   return { compaction, text: said.join('\n').trim(), continueNote: said.length > 0 && notes, empty: !compaction && !content };
 }
 
-// Is this user message the one opencode writes ITSELF to resume a turn? Only
-// directly after an AUTOMATIC compaction's summary (empty messages aside), and
-// only the prompt replayed verbatim or opencode's flagged "carry on" note.
-// After a manual /compact the next prompt is the operator's, even a repeat.
-// `pending` is { auto, summarized } from the compaction record, or null.
-function opencodeResumes(pending, shape, lastPrompt) {
-  if (!pending || !pending.auto || !pending.summarized) return false;
-  return shape.continueNote || (lastPrompt !== null && shape.text === lastPrompt);
+// One pass over a conversation, message by message, saying what each one is:
+//   'compaction' a compaction record (a user message holding a compaction part)
+//   'summary'    the compaction agent's summary
+//   'empty'      no content (the turn an overflow cut off)
+//   'resume'     the user message opencode writes ITSELF to carry on the turn
+//   'prompt'     a user message the operator sent
+//   'step'       anything else the assistant did
+// A resume only follows an AUTOMATIC compaction whose summary COMPLETED (finish
+// 'stop', text, no error), with nothing but empty messages since, and is the
+// last prompt replayed verbatim (full text, before any display cap) or
+// opencode's flagged "carry on" note. After a manual /compact, or a summary
+// that failed, the next message is the operator's — even a repeat.
+//
+// The reader and the digest both drive this, so they agree on any chain of
+// compactions. `shape` is a function: the digest only reads an assistant
+// message's parts when the answer depends on them.
+function opencodeTurns() {
+  let pending = null;   // { auto, summarized } since a compaction record
+  let lastPrompt = null;
+  const see = (md, shape) => {
+    if (isOpencodeSummary(md)) {
+      if (pending) {
+        const sh = shape();
+        pending.summarized = md.finish === 'stop' && !md.error && sh.text !== '';
+      }
+      return 'summary';
+    }
+    if (md.role !== 'user' && !pending) return 'step';
+    const sh = shape();
+    if (md.role === 'user' && sh.compaction) {
+      pending = { auto: sh.compaction.auto === true, summarized: false };
+      return 'compaction';
+    }
+    if (sh.empty) return 'empty';
+    if (md.role !== 'user') { pending = null; return 'step'; }
+    const resumes = !!pending && pending.auto && pending.summarized
+      && (sh.continueNote || (lastPrompt !== null && sh.text === lastPrompt));
+    pending = null;
+    if (resumes) return 'resume';
+    lastPrompt = sh.text;
+    return 'prompt';
+  };
+  see.pending = () => !!pending;
+  return see;
 }
 
 const parseJson = (t) => { try { return JSON.parse(t || '{}') || {}; } catch { return {}; } };
 
-// User messages that are not prompts: compaction records and opencode's own
-// resume message after an automatic one. The digest cannot afford the reader's
-// whole-history walk on every refresh, so it looks only at the few messages
-// around each compaction summary, batches their parts in one query, and keeps
-// the answer per session until that session's messages or parts change.
-const ocNonPromptMemo = new Map(); // sessionId -> { key, skip }
-function opencodeNonPrompts(db, q, sessionId, dbPath) {
-  const k = q.shapeKey.get(sessionId, sessionId);
-  const key = `${dbPath}:${k.n}:${k.t}:${k.p}`;
-  const hit = ocNonPromptMemo.get(sessionId);
-  if (hit && hit.key === key) return hit.skip;
-  const skip = new Set();
-  const partsOf = (ids) => {
-    const by = new Map(ids.map((id) => [id, []]));
-    if (ids.length) for (const r of q.partsIn.all(JSON.stringify(ids))) by.get(r.message_id)?.push(parseJson(r.data));
-    return by;
-  };
-  for (const sm of q.summaries.all(sessionId)) {
-    const smd = parseJson(sm.data);
-    if (!isOpencodeSummary(smd)) continue;
-    // The record it summarises is its parent; the prompt before that record is
-    // the one a replay repeats; what follows the summary is the candidate.
-    const before = q.usersBefore.all(sessionId, Number(sm.time_created) || 0);
-    const after = q.after.all(sessionId, Number(sm.time_created) || 0);
-    const parts = partsOf([...before.map((m) => m.id), ...after.map((m) => m.id)]);
-    let pending = null;
-    let lastPrompt = null;
-    for (const m of before) {
-      const shape = opencodeShape(parts.get(m.id));
-      if (shape.compaction) {
-        skip.add(m.id);
-        if (!pending && (m.id === smd.parentID || !smd.parentID)) pending = { auto: shape.compaction.auto === true, summarized: true };
-        continue;
-      }
-      if (shape.empty || skip.has(m.id)) continue;
-      lastPrompt = shape.text;
-      break;
+// The digest's view of the same walk: which user messages are not prompts, and
+// the last one that is. It visits every user row and every row that mentions
+// a compaction — no lookback limit, so a chain of any length agrees with the
+// reader — reading their parts in one batched query. The assistant work in
+// between can only matter while a compaction is pending (an empty cut-off turn
+// must not end it, a real step must), so only those gaps are read, and they are
+// almost always empty. The answer is kept per session until the session row,
+// its message count/last time or its part count changes.
+const ocWalkMemo = new Map(); // sessionId -> { key, value }
+function opencodeWalk(db, q, s, dbPath) {
+  const k = q.key.get(s.id, s.id);
+  const key = `${dbPath}:${s.time_updated}:${k.n}:${k.t}:${k.p}`;
+  const hit = ocWalkMemo.get(s.id);
+  if (hit && hit.key === key) return hit.value;
+  const rows = q.rows.all(s.id);
+  const parts = new Map(rows.map((m) => [m.id, []]));
+  for (const r of q.partsIn.all(JSON.stringify(rows.map((m) => m.id)))) parts.get(r.message_id)?.push(parseJson(r.data));
+  // No compaction record at all (most sessions): every user message is a prompt.
+  const compacted = rows.some((m) => parts.get(m.id).some((pd) => pd.type === 'compaction'));
+  const mdOf = (m) => ({ role: m.role, mode: m.mode, summary: m.summary === 1 ? true : undefined, finish: m.finish, error: m.err ? true : undefined });
+  const partsOf = (id) => q.one.all(id).map((r) => parseJson(r.data));
+  const see = opencodeTurns();
+  const value = { users: 0, skipped: 0, last: null };
+  let prev = null;
+  for (const m of rows) {
+    if (compacted && prev !== null && see.pending()) {
+      for (const g of q.between.all(s.id, prev, m.time_created)) see(mdOf(g), () => opencodeShape(partsOf(g.id)));
     }
-    for (const m of after) {
-      const md = parseJson(m.data);
-      if (isOpencodeSummary(md)) continue;
-      const shape = opencodeShape(parts.get(m.id));
-      if (shape.empty) continue;
-      if (md.role === 'user' && !shape.compaction && opencodeResumes(pending, shape, lastPrompt)) skip.add(m.id);
-      break;
-    }
+    prev = m.time_created;
+    const kind = compacted ? see(mdOf(m), () => opencodeShape(parts.get(m.id))) : 'prompt';
+    if (m.role !== 'user') continue;
+    value.users++;
+    if (kind === 'compaction' || kind === 'resume') value.skipped++;
+    else value.last = { id: m.id, time_created: m.time_created };
   }
-  if (ocNonPromptMemo.size > 2000) ocNonPromptMemo.clear();
-  ocNonPromptMemo.set(sessionId, { key, skip });
-  return skip;
+  if (ocWalkMemo.size > 2000) ocWalkMemo.clear();
+  ocWalkMemo.set(s.id, { key, value });
+  return value;
 }
 
 // WAL mode appends to <db>-wal without touching the main file's mtime — the
@@ -697,14 +721,18 @@ function readOpencode() {
   const rows = [];
   try {
     const sessions = db.prepare('select * from session').all();
-    const qUsersDesc = db.prepare("select id, time_created from message where session_id = ? and json_extract(data,'$.role') = 'user' order by time_created desc limit 16");
-    const qShape = {
-      shapeKey: db.prepare('select count(*) n, max(time_created) t, (select count(*) from part where session_id = ?) p from message where session_id = ?'),
-      summaries: db.prepare("select id, time_created, data from message where session_id = ? and instr(data,'compaction') > 0 order by time_created"),
-      usersBefore: db.prepare("select id from message where session_id = ? and time_created < ? and json_extract(data,'$.role') = 'user' order by time_created desc limit 4"),
-      after: db.prepare('select id, data from message where session_id = ? and time_created > ? order by time_created limit 3'),
+    // Only a summary row needs more than its role, and every summary row
+    // mentions 'compaction': the rest skip the other JSON lookups.
+    const walkCols = `id, time_created, role, case when c then json_extract(data,'$.mode') end mode,
+      case when c then json_extract(data,'$.summary') end summary, case when c then json_extract(data,'$.finish') end finish,
+      case when c then json_extract(data,'$.error') is not null end err`;
+    const walkFrom = "select id, time_created, data, json_extract(data,'$.role') role, instr(data,'compaction') > 0 c from message where session_id = ?";
+    const qWalk = {
+      key: db.prepare('select count(*) n, max(time_created) t, (select count(*) from part where session_id = ?) p from message where session_id = ?'),
+      rows: db.prepare(`select ${walkCols} from (${walkFrom}) where role = 'user' or c order by time_created`),
+      between: db.prepare(`select ${walkCols} from (${walkFrom} and time_created > ? and time_created < ?) order by time_created`),
       partsIn: db.prepare('select message_id, data from part where message_id in (select value from json_each(?)) order by time_created'),
-      one: db.prepare('select data from part where message_id = ?'),
+      one: db.prepare('select data from part where message_id = ? order by time_created'),
     };
     const qPromptText = db.prepare("select json_extract(data,'$.text') t from part where message_id = ? and json_extract(data,'$.type') = 'text' order by time_created");
     const qCount = db.prepare(`select count(*) c from message where session_id = ? and time_created > ? and json_extract(data,'$.role') = ? and ${NOT_SUMMARY}`);
@@ -721,9 +749,9 @@ function readOpencode() {
       st.cacheRead = s.tokens_cache_read || 0;
       st.firstTs = Number(s.time_created) || 0;
       st.lastTs = Number(s.time_updated) || st.firstTs;
-      // Compaction records and the replayed prompt are not prompts: without
-      // this the turn the overflow interrupted counts — and reads — twice.
-      const nonPrompts = new Set(opencodeNonPrompts(db, qShape, s.id, p));
+      // Compaction records and opencode's resume messages are not prompts:
+      // without this the turn an overflow interrupted counts — and reads — twice.
+      const walk = opencodeWalk(db, qWalk, s, p);
       st.turns = qCount.get(s.id, 0, 'assistant').c;
       for (const t of qTools.all(s.id, 0)) {
         const name = t.tool || 'tool';
@@ -731,15 +759,8 @@ function readOpencode() {
         st.toolCalls += t.c;
         if (/web/i.test(name)) st.web += t.c;
       }
-      // A compaction still being written has no summary yet, so the cached set
-      // cannot know it; the newest user rows are checked directly.
-      let lastU = null;
-      for (const u of qUsersDesc.all(s.id)) {
-        if (nonPrompts.has(u.id)) continue;
-        if (opencodeShape(qShape.one.all(u.id).map((r) => parseJson(r.data))).compaction) { nonPrompts.add(u.id); continue; }
-        lastU = u; break;
-      }
-      st.prompts = qCount.get(s.id, 0, 'user').c - nonPrompts.size;
+      const lastU = walk.last;
+      st.prompts = walk.users - walk.skipped;
       const t0 = lastU ? Number(lastU.time_created) || 0 : 0;
       if (lastU) {
         const text = qPromptText.all(lastU.id).map((r) => r.t).filter(Boolean).join(' ');
@@ -2381,25 +2402,24 @@ function normalizeOpencodeDb(dbPath, sessionId, out) {
     // summary, then the same prompt asked again. It is one turn with a marker.
     let marker = null;   // the compaction just pushed, awaiting its summary
     let markerHead = '';
-    let pending = null;  // { auto, summarized } until something other than compaction records follows
-    let lastPrompt = null; // full text of the last real prompt
+    const see = opencodeTurns();
     for (const m of db.prepare('select * from message where session_id = ? order by time_created').all(sessionId)) {
       const md = parseJson(m.data);
       const ts = Number(m.time_created) || undefined;
       const rows = parts.all(m.id);
       const pds = rows.map((part) => parseJson(part.data));
       const shape = opencodeShape(pds);
-      if (md.role === 'user' && shape.compaction) {
+      const kind = see(md, () => shape);
+      if (kind === 'compaction') {
         const c = shape.compaction;
         const how = `${c.auto === false ? 'manual' : 'automatic'}${c.overflow ? ', context full' : ''}`;
         // 'partial' and no text block: markFinalTurns never takes it for an answer.
         markerHead = `Context compacted (${how})`;
         marker = { role: 'assistant', ts, kind: 'partial', blocks: [{ type: 'compaction', text: markerHead }] };
         out.push(marker);
-        pending = { auto: c.auto === true, summarized: false };
         continue;
       }
-      if (isOpencodeSummary(md)) {
+      if (kind === 'summary') {
         // The summary is the compaction's content, not an answer: it goes under
         // the marker (collapsed), never as a text block of its own.
         const summary = pds.filter((pd) => pd.type === 'text' && pd.text?.trim()).map((pd) => pd.text).join('\n\n');
@@ -2409,17 +2429,12 @@ function normalizeOpencodeDb(dbPath, sessionId, out) {
           out.push(marker);
         }
         marker.blocks = [{ type: 'compaction', ...capText(summary ? `${markerHead}\n\n${summary}` : markerHead) }];
-        if (pending) pending.summarized = true;
         continue;
       }
-      // An empty message (the turn the overflow cut off) is not a step, and
-      // does not end the compaction sequence either.
+      // An empty message (the turn the overflow cut off) is not a step.
       if (shape.empty) continue;
-      if (md.role !== 'assistant') {
-        // opencode's own resume message continues the turn above the marker.
-        if (opencodeResumes(pending, shape, lastPrompt)) { marker = null; pending = null; continue; }
-        lastPrompt = shape.text;
-      }
+      // opencode's own resume message continues the turn above the marker.
+      if (kind === 'resume') { marker = null; continue; }
       const msg = { role: md.role === 'assistant' ? 'assistant' : 'user', ts, blocks: [] };
       pds.forEach((pd, i) => {
         if (pd.type === 'text' && pd.text?.trim()) msg.blocks.push(textBlock('text', pd.text));
@@ -2431,7 +2446,7 @@ function normalizeOpencodeDb(dbPath, sessionId, out) {
           if (res != null) msg.blocks.push({ type: 'tool_result', id, ...capText(res) });
         }
       });
-      marker = null; pending = null;
+      marker = null;
       out.push(msg);
     }
   } finally { try { db.close(); } catch {} }

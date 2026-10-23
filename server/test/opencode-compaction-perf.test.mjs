@@ -57,7 +57,7 @@ function generate(name, compacted) {
       };
       if (k === 0) { prompt = `prompt ${i}`; msg({ role: 'user' }, { type: 'text', text: prompt }); }
       else if (compacted && k === 25) msg({ role: 'user' }, { type: 'compaction', auto: true, overflow: true });
-      else if (compacted && k === 26) msg({ role: 'assistant', mode: 'compaction', summary: true, parentID: `${sid}_${i - 1}` }, { type: 'text', text: '## Objective' });
+      else if (compacted && k === 26) msg({ role: 'assistant', mode: 'compaction', summary: true, finish: 'stop', parentID: `${sid}_${i - 1}` }, { type: 'text', text: '## Objective' });
       else if (compacted && k === 27) msg({ role: 'user' }, { type: 'text', text: prompt });
       else msg({ role: 'assistant', mode: 'build' }, { type: 'step-start' },
         { type: 'tool', tool: 'bash', state: { input: { command: 'ls' }, output } }, { type: 'step-finish', tokens: { total: 1 } });

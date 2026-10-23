@@ -104,6 +104,43 @@ message('ses_long', 'lc1', user(), [{ type: 'compaction', auto: true, overflow: 
 message('ses_long', 'ls1', summaryMsg, [{ type: 'text', text: '## Objective\n- long' }]);
 message('ses_long', 'lu2', user(), [{ type: 'text', text: `${LONG} second` }]);
 message('ses_long', 'la2', step('stop'), [{ type: 'text', text: 'Did the second.' }]);
+// 3. An automatic compaction whose summary ABORTED (error, no text, no finish),
+//    then the operator retries the same prompt: a retry, not a replay.
+addSession.run('ses_abort', '/w', 'Abort', '{"id":"deepseek"}', 1, 2);
+message('ses_abort', 'bu1', user(), [{ type: 'text', text: 'build it' }]);
+message('ses_abort', 'ba1', step(), [bash('ls', 'ok')]);
+message('ses_abort', 'bc1', user(), [{ type: 'compaction', auto: true, overflow: true }]);
+message('ses_abort', 'bs1', { role: 'assistant', mode: 'compaction', agent: 'compaction', summary: true,
+  error: { name: 'MessageAbortedError', data: { message: 'Aborted' } } }, [{ type: 'step-start' }]);
+message('ses_abort', 'bu2', user(), [{ type: 'text', text: 'build it' }]);
+message('ses_abort', 'ba2', step('stop'), [{ type: 'text', text: 'Built.' }]);
+// A real step between the summary and a matching prompt ends the compaction:
+// the prompt after it is the operator's. (The digest only reads such gaps.)
+addSession.run('ses_gap', '/w', 'Gap', '{"id":"deepseek"}', 1, 2);
+message('ses_gap', 'gu1', user(), [{ type: 'text', text: 'build it' }]);
+message('ses_gap', 'gc1', user(), [{ type: 'compaction', auto: true, overflow: true }]);
+message('ses_gap', 'gs1', summaryMsg, [{ type: 'text', text: '## Objective\n- build it' }]);
+message('ses_gap', 'ge1', { role: 'assistant', mode: 'build', agent: 'build' });
+message('ses_gap', 'ga1', step('stop'), [{ type: 'text', text: 'Carried on by itself.' }]);
+message('ses_gap', 'gu2', user(), [{ type: 'text', text: 'build it' }]);
+// 4. Ten automatic compactions in one turn, each followed by a replay, and ten
+//    each followed by opencode's "carry on" note. Any length of chain must
+//    read as one prompt, in the reader and the digest alike.
+for (const [sid, resume] of [
+  ['ses_chain_replay', () => [{ type: 'text', text: PROMPT }]],
+  ['ses_chain_note', () => [{ type: 'text', synthetic: true, metadata: { compaction_continue: true }, text: 'Carry on; media were removed.' }]],
+]) {
+  addSession.run(sid, '/w', 'Chain', '{"id":"deepseek"}', 1, 2);
+  message(sid, `${sid}-u`, user(), [{ type: 'text', text: PROMPT }]);
+  message(sid, `${sid}-a`, step(), [bash('ls', 'ok')]);
+  for (let i = 0; i < 10; i++) {
+    message(sid, `${sid}-e${i}`, { role: 'assistant', mode: 'build', agent: 'build' }); // cut off
+    message(sid, `${sid}-c${i}`, user(), [{ type: 'compaction', auto: true, overflow: true }]);
+    message(sid, `${sid}-s${i}`, summaryMsg, [{ type: 'text', text: `## Objective\n- round ${i}` }]);
+    message(sid, `${sid}-r${i}`, user(), resume());
+    message(sid, `${sid}-a${i}`, step(i === 9 ? 'stop' : 'tool-calls'), [i === 9 ? { type: 'text', text: 'Finished.' } : bash('ls', `ok ${i}`)]);
+  }
+}
 db.close();
 
 const texts = (t) => t.blocks.filter((b) => b.type === 'text').map((b) => b.text);
@@ -159,6 +196,20 @@ const read = async (sid) => (await readTrace({ id: sid, cli: 'opencode', path: '
   assert.equal(prompts.length, 2, 'prompts equal only up to the display cap are still two prompts');
 }
 
+{
+  const turns = await read('ses_abort');
+  assert.deepEqual(turns.filter((t) => t.role === 'user').map((t) => texts(t).join('')), ['build it', 'build it'],
+    'a failed summary does not turn the retry into a replay');
+  assert.ok(turns.some((t) => t.blocks.some((b) => b.type === 'compaction')), 'the compaction still shows');
+}
+
+for (const sid of ['ses_chain_replay', 'ses_chain_note']) {
+  const turns = await read(sid);
+  assert.deepEqual(turns.filter((t) => t.role === 'user').map((t) => texts(t).join('')), [PROMPT], `${sid}: one prompt`);
+  assert.equal(turns.filter((t) => t.blocks.some((b) => b.type === 'compaction')).length, 10, `${sid}: ten markers`);
+  assert.deepEqual(turns.filter((t) => t.kind === 'final').map((t) => texts(t).join('')), ['Finished.']);
+}
+
 // ---- the digest (Overview tile, unread, "since your prompt") ----
 {
   const rows = new Map(__readOpencodeForTest().map((r) => [r.sessionId, r.parsed]));
@@ -176,6 +227,23 @@ const read = async (sid) => (await readTrace({ id: sid, cli: 'opencode', path: '
   const long = rows.get('ses_long');
   assert.equal(long.stats.prompts, 2, 'the reader and the digest agree on long prompts');
   assert.equal(long.digest.lastPromptTs, at.lu2);
+
+  const abort = rows.get('ses_abort');
+  assert.equal(abort.stats.prompts, 2, 'the retry after a failed summary is counted');
+  assert.equal(abort.digest.lastPromptTs, at.bu2);
+  for (const sid of ['ses_chain_replay', 'ses_chain_note']) {
+    const chain = rows.get(sid);
+    assert.equal(chain.stats.prompts, 1, `${sid}: one prompt however long the chain`);
+    assert.equal(chain.digest.lastPromptTs, at[`${sid}-u`], `${sid}: the last prompt is the original`);
+    assert.equal(chain.digest.sinceTurns, 1 + 10 * 2, `${sid}: every step since it (cut-off ones included), no summaries`);
+    assert.equal(chain.digest.lastAssistantText, 'Finished.');
+  }
+  assert.equal(rows.get('ses_gap').stats.prompts, 2, 'a step after the summary ends the compaction');
+  // The reader and the digest agree on every conversation in the fixture.
+  for (const [sid, parsed] of rows) {
+    const turns = await read(sid);
+    assert.equal(parsed.stats.prompts, turns.filter((t) => t.role === 'user').length, `${sid}: reader and digest agree`);
+  }
 
   const manual = rows.get('ses_manual');
   assert.equal(manual.stats.prompts, 3);
