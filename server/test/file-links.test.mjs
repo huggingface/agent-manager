@@ -18,6 +18,9 @@ fs.writeFileSync(path.join(checkouts, 'README.md'), 'Checkout readme');
 fs.writeFileSync(path.join(tmp, 'private.txt'), 'not in an allowed root');
 fs.symlinkSync(path.join(tmp, 'private.txt'), path.join(workspace, 'team', 'escape.txt'));
 fs.symlinkSync(path.join(workspace, 'team', 'README.md'), path.join(workspace, 'team', 'safe.md'));
+fs.mkdirSync(path.join(tmp, 'outside'));
+fs.writeFileSync(path.join(tmp, 'outside', 'secret.txt'), 'outside the roots');
+fs.symlinkSync(path.join(tmp, 'outside'), path.join(workspace, 'team', 'outside-dir'));
 const roots = fileLinkRoots(workspace, JSON.stringify({ checkouts }));
 const sessions = new Map([
   ['a', { id: 'a', cli: 'claude', path: 'team' }],
@@ -57,7 +60,6 @@ try {
     { session: 'deleted', file: 'README.md' },
     { file: ['README.md', 'private.txt'] },
     { root: 'workspace', file: 'team\u0000/README.md' },
-    { root: 'workspace', file: 'team' },
   ]) assert.throws(() => resolve(query), undefined, JSON.stringify(query));
   for (const config of ['[]', 'null', '{"workspace":"/tmp"}', '{"all":"/"}', '{"local":"relative"}']) {
     assert.throws(() => fileLinkRoots(workspace, config));
@@ -81,6 +83,39 @@ try {
   assert.match(download.headers.get('content-disposition'), /attachment/);
   assert.equal((await fetch(`${base}/write?${new URLSearchParams(canonical)}`, { method: 'PUT', body: 'bad' })).status, 404);
   assert.equal(fs.readFileSync(path.join(workspace, 'team/README.md'), 'utf8'), '# Workspace readme');
+  // Folders resolve, with or without a trailing slash, and list read-only.
+  for (const query of [
+    { root: 'workspace', file: 'team' }, { root: 'workspace', file: 'team/' },
+    { session: 'shared', file: '.' }, { session: 'shared', file: './' }, { file: path.join(workspace, 'team') + '/' },
+  ]) assert.deepEqual({ ...resolve(query), real: undefined, stat: undefined },
+    { root: 'workspace', path: 'team', absolute: path.join(workspace, 'team'), dir: true, real: undefined, stat: undefined }, JSON.stringify(query));
+  assert.equal(resolve({ root: 'workspace', file: '.' }).path, '.', 'a root itself keeps a non-empty canonical path');
+  assert.deepEqual(await (await get('resolve', { root: 'workspace', file: 'team/docs/' })).json(),
+    { root: 'workspace', path: 'team/docs', absolute: path.join(workspace, 'team/docs'), dir: true });
+  const listing = await (await get('list', { session: 'b', file: '.' })).json();
+  assert.equal(listing.path, 'team/docs'); assert.equal(listing.root, 'workspace');
+  assert.deepEqual(listing.entries.map((e) => [e.name, e.dir, e.kind]), [['a #1%.md', false, 'markdown']]);
+  const team = await (await get('list', { root: 'workspace', file: 'team' })).json();
+  assert.deepEqual(team.entries.filter((e) => e.dir).map((e) => e.name), ['docs'], 'folders first, like the Files pane');
+  assert.equal((await (await get('list', { root: 'workspace', file: '.' })).json()).path, '');
+  // Bytes are only ever served for files; listings only for folders.
+  for (const action of ['preview', 'raw', 'download']) {
+    const response = await get(action, { root: 'workspace', file: 'team/docs' });
+    assert.equal(response.status, 400); assert.equal((await response.json()).code, 'is-directory');
+  }
+  assert.equal((await get('list', canonical)).status, 400);
+  // No listing outside the roots: not by `..`, not by an absolute path, not
+  // through a symlinked folder, and not from inside one.
+  for (const query of [
+    { root: 'workspace', file: '..' }, { root: 'workspace', file: 'team/../..' },
+    { file: tmp }, { file: path.join(tmp, 'outside') },
+    { root: 'workspace', file: 'team/outside-dir' }, { root: 'workspace', file: 'team/outside-dir/' },
+  ]) {
+    const response = await get('list', query);
+    assert.ok([403, 404].includes(response.status), `${JSON.stringify(query)} → ${response.status}`);
+    assert.doesNotMatch(await response.text(), /secret\.txt|private\.txt/);
+  }
+  assert.equal((await get('raw', { root: 'workspace', file: 'team/outside-dir/secret.txt' })).status, 403);
   console.log('file-links: session and canonical resolution, additional roots, bounded previews, sandboxing, and read-only access passed');
 } finally {
   await new Promise((resolve) => server.close(resolve));

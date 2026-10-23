@@ -21,3 +21,5 @@
   .file-link-tools { padding: 8px 12px; gap: 8px; }
   .file-link-tools .spacer { display: none; }
 }
+/* A linked folder is the Files pane's own browser, filling the preview body. */
+.file-link-page > .slot.files-linked { flex: 1; border: 0; border-radius: 0; box-shadow: none; }

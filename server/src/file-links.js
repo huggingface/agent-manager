@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
-import { kindOfFile, mimeOf, readTextHead } from './preview.js';
+import { kindOfFile, listDirectory, mimeOf, readTextHead } from './preview.js';
 
 export function fileLinkRoots(workspaces, extra = process.env.AM_FILE_LINK_ROOTS || '{}') {
   const configured = JSON.parse(extra);
@@ -38,8 +38,12 @@ function checkedFile(roots, name, relative) {
     if (error.status) throw error;
     throw fail('File not found. It may have moved or been deleted.');
   }
-  if (!stat.isFile()) throw fail('This reference points to a folder. Open it in Files.', 400);
-  return { root: name, path: path.relative(root, file), absolute: file, real, stat };
+  // A folder resolves too: the viewer shows it as a Files listing. Everything
+  // that reads bytes still asks for a file below.
+  const dir = stat.isDirectory();
+  if (!dir && !stat.isFile()) throw fail('This reference is not a regular file or folder.', 400);
+  // '.' rather than '' for a root itself, so the canonical link still names something.
+  return { root: name, path: path.relative(root, file) || '.', absolute: file, real, stat, dir };
 }
 
 export function resolveFileLink(roots, getSession, query) {
@@ -80,16 +84,24 @@ export function resolveFileLink(roots, getSession, query) {
 
 export function fileLinksRouter({ roots, getSession }) {
   const router = express.Router();
-  // Every request rechecks the real path, including requests for raw bytes.
-  // No write, delete, or agent-start operation is exposed through this router.
+  // Every request rechecks the real path, including requests for raw bytes and
+  // each folder listing. No write, delete, or agent-start operation is exposed
+  // through this router.
   router.get('/:action', (req, res, next) => {
-    if (!['resolve', 'preview', 'raw', 'download'].includes(req.params.action)) return next();
+    if (!['resolve', 'list', 'preview', 'raw', 'download'].includes(req.params.action)) return next();
     try {
       const target = resolveFileLink(roots, getSession, req.query);
-      const { root, path: relative, absolute, real, stat } = target;
-      const publicTarget = { root, path: relative, absolute };
+      const { root, path: relative, absolute, real, stat, dir } = target;
+      const publicTarget = { root, path: relative, absolute, ...(dir ? { dir: true } : {}) };
       res.setHeader('cache-control', 'no-store');
       if (req.params.action === 'resolve') return res.json(publicTarget);
+      if (req.params.action === 'list') {
+        if (!dir) throw fail('This reference is a file, not a folder.', 400);
+        // Same rows as the Files pane. Entries are names only: opening one is a
+        // new request, checked again, so a symlink inside cannot lead out.
+        return res.json({ path: relative === '.' ? '' : relative, root, entries: listDirectory(real) });
+      }
+      if (dir) return res.status(400).json({ error: 'This reference points to a folder.', code: 'is-directory' });
       const kind = kindOfFile(real);
       if (req.params.action === 'preview') {
         const meta = { path: relative, name: path.basename(absolute), size: stat.size, mtime: stat.mtimeMs, kind, mime: mimeOf(real, kind) };

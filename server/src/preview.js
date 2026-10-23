@@ -81,6 +81,29 @@ export function kindOfName(name) {
   return null;
 }
 
+// One folder's rows, as both the Files pane and folder file links show them.
+// One stat per entry (folders included) — the pane shows a Modified column.
+// `kind` comes from the NAME only: it just picks the row glyph, and sniffing
+// every extensionless file here would mean an extra open per row on a bucket.
+// The preview routes do the real detection for the one file being opened.
+export function listDirectory(dir) {
+  const entries = fs.readdirSync(dir, { withFileTypes: true }).map((e) => {
+    const full = path.join(dir, e.name);
+    const isDir = e.isDirectory();
+    let size = 0, mtime = 0;
+    try {
+      const st = fs.statSync(full);
+      mtime = st.mtimeMs;
+      if (!isDir) size = st.size;
+    } catch {}
+    return isDir
+      ? { name: e.name, dir: true, size: 0, mtime }
+      : { name: e.name, dir: false, size, mtime, kind: kindOfName(e.name) ?? undefined };
+  });
+  entries.sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : a.name.localeCompare(b.name)));
+  return entries;
+}
+
 // A NUL byte in the head is the classic "this is not text" tell — same heuristic
 // git uses. Also bail on a high share of other control bytes.
 function looksBinary(buf) {
