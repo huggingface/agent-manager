@@ -576,6 +576,47 @@ function opencodeDbPath() {
   return path.join(xdgData, 'opencode', 'opencode.db');
 }
 
+// The compaction agent's summary: `summary: true` on the assistant message, run
+// in mode/agent 'compaction'. It is context for the model, not a reply.
+// (A USER message's `summary` is an object of diffs — hence the role check.)
+const isOpencodeSummary = (md) => md.role === 'assistant' && (md.summary === true || md.mode === 'compaction');
+const NOT_SUMMARY = "coalesce(json_extract(data,'$.mode'),'') != 'compaction' and coalesce(json_extract(data,'$.summary'),0) != 1";
+
+// User messages that are not prompts: compaction records (a lone `compaction`
+// part), the prompt opencode replays verbatim right after an automatic one, and
+// its own synthetic "carry on" note (`metadata.compaction_continue`).
+// Mirrors normalizeOpencodeDb. Only a compacted session pays for the walk, and
+// only from the last prompt before its first compaction.
+function opencodeNonPrompts(db, sessionId) {
+  const skip = new Set();
+  // The MESSAGE's time: its part is stamped a little later, and starting there
+  // would make the compaction record itself the 'prompt before' it.
+  const first = db.prepare("select min(m.time_created) t from part p join message m on m.id = p.message_id where p.session_id = ? and json_extract(p.data,'$.type') = 'compaction'").get(sessionId)?.t;
+  if (first == null) return skip;
+  const from = db.prepare("select max(time_created) t from message where session_id = ? and time_created < ? and json_extract(data,'$.role') = 'user'").get(sessionId, first)?.t ?? first;
+  const qParts = db.prepare("select json_extract(data,'$.type') type, json_extract(data,'$.text') t, json_extract(data,'$.metadata.compaction_continue') cc from part where message_id = ? order by time_created");
+  let afterCompaction = false;
+  let lastPrompt = null;
+  for (const m of db.prepare('select id, data from message where session_id = ? and time_created >= ? order by time_created').all(sessionId, from)) {
+    let md = {}; try { md = JSON.parse(m.data || '{}'); } catch {}
+    if (isOpencodeSummary(md)) continue;
+    const ps = qParts.all(m.id);
+    if (md.role === 'user' && ps.some((p) => p.type === 'compaction')) { skip.add(m.id); afterCompaction = true; continue; }
+    // Empty (the turn the overflow cut off): not a step, and not the end of
+    // the compaction sequence.
+    if (!ps.some((p) => p.type !== 'text' || p.t?.trim())) continue;
+    if (md.role === 'user') {
+      const said = ps.filter((p) => p.type === 'text' && p.t?.trim());
+      const text = said.map((p) => p.t).join('\n').trim();
+      const continues = said.length && said.every((p) => p.cc);
+      if (continues || (afterCompaction && lastPrompt !== null && text === lastPrompt)) { skip.add(m.id); afterCompaction = false; continue; }
+      lastPrompt = text;
+    }
+    afterCompaction = false;
+  }
+  return skip;
+}
+
 // WAL mode appends to <db>-wal without touching the main file's mtime — the
 // change key and the hot-file check must look at both.
 function dbChangeKey(p) {
@@ -608,12 +649,12 @@ function readOpencode() {
   const rows = [];
   try {
     const sessions = db.prepare('select * from session').all();
-    const qLastUser = db.prepare("select id, time_created from message where session_id = ? and json_extract(data,'$.role') = 'user' order by time_created desc limit 1");
+    const qUsersDesc = db.prepare("select id, time_created from message where session_id = ? and json_extract(data,'$.role') = 'user' order by time_created desc");
     const qPromptText = db.prepare("select json_extract(data,'$.text') t from part where message_id = ? and json_extract(data,'$.type') = 'text' order by time_created");
-    const qCount = db.prepare("select count(*) c from message where session_id = ? and time_created > ? and json_extract(data,'$.role') = ?");
+    const qCount = db.prepare(`select count(*) c from message where session_id = ? and time_created > ? and json_extract(data,'$.role') = ? and ${NOT_SUMMARY}`);
     const qTools = db.prepare("select json_extract(data,'$.tool') tool, count(*) c from part where session_id = ? and time_created > ? and json_extract(data,'$.type') = 'tool' group by 1");
     const qSinceTok = db.prepare("select coalesce(sum(json_extract(data,'$.tokens.total')), 0) t from part where session_id = ? and time_created > ? and json_extract(data,'$.type') = 'step-finish'");
-    const qLastAssistant = db.prepare("select json_extract(p.data,'$.text') t, p.time_created ts from part p join message m on m.id = p.message_id where p.session_id = ? and p.time_created > ? and json_extract(p.data,'$.type') = 'text' and json_extract(m.data,'$.role') = 'assistant' order by p.time_created desc limit 1");
+    const qLastAssistant = db.prepare(`select json_extract(p.data,'$.text') t, p.time_created ts from part p join message m on m.id = p.message_id where p.session_id = ? and p.time_created > ? and json_extract(p.data,'$.type') = 'text' and trim(json_extract(p.data,'$.text'), ' '||char(9)||char(10)||char(13)) != '' and json_extract(m.data,'$.role') = 'assistant' and ${NOT_SUMMARY.replaceAll('(data,', '(m.data,')} order by p.time_created desc limit 1`);
     for (const s of sessions) {
       const st = emptyStats();
       const dg = emptyDigest();
@@ -624,7 +665,10 @@ function readOpencode() {
       st.cacheRead = s.tokens_cache_read || 0;
       st.firstTs = Number(s.time_created) || 0;
       st.lastTs = Number(s.time_updated) || st.firstTs;
-      st.prompts = qCount.get(s.id, 0, 'user').c;
+      // Compaction records and the replayed prompt are not prompts: without
+      // this the turn the overflow interrupted counts — and reads — twice.
+      const nonPrompts = opencodeNonPrompts(db, s.id);
+      st.prompts = qCount.get(s.id, 0, 'user').c - nonPrompts.size;
       st.turns = qCount.get(s.id, 0, 'assistant').c;
       for (const t of qTools.all(s.id, 0)) {
         const name = t.tool || 'tool';
@@ -632,7 +676,8 @@ function readOpencode() {
         st.toolCalls += t.c;
         if (/web/i.test(name)) st.web += t.c;
       }
-      const lastU = qLastUser.get(s.id);
+      let lastU = null;
+      for (const u of qUsersDesc.all(s.id)) if (!nonPrompts.has(u.id)) { lastU = u; break; }
       const t0 = lastU ? Number(lastU.time_created) || 0 : 0;
       if (lastU) {
         const text = qPromptText.all(lastU.id).map((r) => r.t).filter(Boolean).join(' ');
@@ -1305,6 +1350,7 @@ function memoized() {
 // hand-built digest object would exercise none of them.
 export const __parseClaudeForTest = parseClaude;
 export const __parseCodexForTest = parseCodex;
+export const __readOpencodeForTest = () => readOpencode();
 
 export async function buildTraces() {
   const { perSession, totals, sessions } = await memoized();
@@ -2266,21 +2312,71 @@ function normalizeOpencodeDb(dbPath, sessionId, out) {
     // is what belongs on the header chip.
     try { const mm = JSON.parse(s.model || 'null'); out.model = (mm && mm.id) || (typeof s.model === 'string' ? s.model : null); } catch { out.model = s.model || null; }
     const parts = db.prepare('select * from part where message_id = ? order by time_created');
+    // Compaction is three records written in the same second: a user message
+    // holding only a `compaction` part, the compaction agent's summary, and —
+    // after an automatic one — the interrupted prompt replayed verbatim as a
+    // plain user message. Read literally that is a prompt answered by the
+    // summary, then the same prompt asked again. It is one turn with a marker.
+    let marker = null;          // the compaction just pushed, awaiting its summary
+    let markerHead = '';
+    let afterCompaction = false; // nothing but compaction records since it
+    let lastPrompt = null;      // text of the last real prompt
     for (const m of db.prepare('select * from message where session_id = ? order by time_created').all(sessionId)) {
       let md = {}; try { md = JSON.parse(m.data || '{}'); } catch {}
-      const msg = { role: md.role === 'assistant' ? 'assistant' : 'user', ts: Number(m.time_created) || undefined, blocks: [] };
-      for (const part of parts.all(m.id)) {
-        let pd = {}; try { pd = JSON.parse(part.data || '{}'); } catch {}
-        if (pd.type === 'text' && pd.text) msg.blocks.push(textBlock('text', pd.text));
+      const ts = Number(m.time_created) || undefined;
+      const pds = parts.all(m.id).map((part) => { let pd = {}; try { pd = JSON.parse(part.data || '{}'); } catch {} return { pd, id: part.id }; });
+      const compaction = md.role === 'user' && pds.find(({ pd }) => pd.type === 'compaction')?.pd;
+      if (compaction) {
+        const how = `${compaction.auto === false ? 'manual' : 'automatic'}${compaction.overflow ? ', context full' : ''}`;
+        // 'partial' and no text block: markFinalTurns never takes it for an answer.
+        markerHead = `Context compacted (${how})`;
+        marker = { role: 'assistant', ts, kind: 'partial', blocks: [{ type: 'compaction', text: markerHead }] };
+        out.push(marker);
+        afterCompaction = true;
+        continue;
+      }
+      if (isOpencodeSummary(md)) {
+        // The summary is the compaction's content, not an answer: it goes under
+        // the marker (collapsed), never as a text block of its own.
+        const summary = pds.filter(({ pd }) => pd.type === 'text' && pd.text?.trim()).map(({ pd }) => pd.text).join('\n\n');
+        if (!marker) {
+          markerHead = 'Context compacted';
+          marker = { role: 'assistant', ts, kind: 'partial', blocks: [] };
+          out.push(marker);
+        }
+        marker.blocks = [{ type: 'compaction', ...capText(summary ? `${markerHead}\n\n${summary}` : markerHead) }];
+        continue;
+      }
+      const msg = { role: md.role === 'assistant' ? 'assistant' : 'user', ts, blocks: [] };
+      for (const { pd, id: partId } of pds) {
+        if (pd.type === 'text' && pd.text?.trim()) msg.blocks.push(textBlock('text', pd.text));
         else if (pd.type === 'reasoning' && (pd.text || pd.reasoning)) msg.blocks.push(textBlock('thinking', pd.text || pd.reasoning));
         else if (pd.type === 'tool') {
-          const id = part.id;
+          const id = partId;
           msg.blocks.push({ type: 'tool_use', id, name: pd.tool || 'tool', ...capText(pd.state?.input ?? pd.input) });
           const res = pd.state?.output ?? pd.output;
           if (res != null) msg.blocks.push({ type: 'tool_result', id, ...capText(res) });
         }
       }
-      if (msg.blocks.length) out.push(msg);
+      // An empty message (the turn the overflow cut off) is not a step, and
+      // does not end the compaction sequence either.
+      if (!msg.blocks.length) continue;
+      if (msg.role === 'user') {
+        const text = msg.blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+        // The replayed prompt continues the turn above the marker, as does
+        // opencode's synthetic "carry on" note (written instead of a replay when
+        // the overflow was media). A different prompt — or the same one sent
+        // again later — is a new turn.
+        const said = pds.filter(({ pd }) => pd.type === 'text' && pd.text?.trim());
+        const continues = said.length && said.every(({ pd }) => pd.metadata?.compaction_continue);
+        if (continues || (afterCompaction && lastPrompt !== null && text === lastPrompt)) {
+          marker = null; afterCompaction = false;
+          continue;
+        }
+        lastPrompt = text;
+      }
+      marker = null; afterCompaction = false;
+      out.push(msg);
     }
   } finally { try { db.close(); } catch {} }
 }
