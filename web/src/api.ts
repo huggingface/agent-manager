@@ -571,8 +571,10 @@ export const traceDownloadUrl = (id: string) => `/api/trace/${encodeURIComponent
 // 'trace' is content-detected, not name-detected: a transcript is a .jsonl like
 // any other until /preview reads a line of it (see the route).
 export type FileKind = 'text' | 'markdown' | 'html' | 'image' | 'pdf' | 'video' | 'audio' | 'binary' | 'trace';
-export interface FileEntry { name: string; dir: boolean; size: number; mtime: number; kind?: FileKind; }
-export interface FileListing { path: string; root: string; entries: FileEntry[]; }
+// symlink: a link a file-link listing did not follow (it leads out of the root), so nothing about its target is known.
+export interface FileEntry { name: string; dir: boolean; size: number; mtime: number; kind?: FileKind; symlink?: boolean; }
+// truncated: how many more entries the folder holds than the server listed.
+export interface FileListing { path: string; root: string; entries: FileEntry[]; truncated?: number; }
 export interface FilePreview {
   path: string; name: string; size: number; mtime: number; kind: FileKind; mime: string;
   /** Content tag a save is checked against — null for files too big to edit. */
