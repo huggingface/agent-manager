@@ -39,8 +39,9 @@ const addPart = db.prepare('INSERT INTO part VALUES (?,?,?,?,?)');
 // Parts are stamped after their message, as opencode's are: a reader that
 // anchors on a part's time lands one record late.
 let clock = 1_000;
+const at = {}; // message id -> its time
 function message(sid, id, data, parts = []) {
-  const t = (clock += 10);
+  const t = (at[id] = clock += 10);
   addMessage.run(id, sid, t, JSON.stringify(data));
   parts.forEach((p, i) => addPart.run(`${id}-p${i}`, id, sid, t + 1 + i, JSON.stringify(p)));
 }
@@ -83,6 +84,26 @@ message('ses_manual', 'ma2', step('stop'), [{ type: 'text', text: 'Blue now.' }]
 // The same prompt again, but not straight after a compaction: a new turn.
 message('ses_manual', 'mu3', user(), [{ type: 'text', text: 'now make it blue' }]);
 message('ses_manual', 'ma3', step('stop'), [{ type: 'text', text: 'Still blue.' }]);
+// ---- review regressions ----
+// 1. A manual /compact, then the operator sends the SAME prompt again. Only an
+//    automatic compaction is followed by a replay opencode writes itself.
+addSession.run('ses_repeat', '/w', 'Repeat', '{"id":"deepseek"}', 1, 2);
+message('ses_repeat', 'ru1', user(), [{ type: 'text', text: 'build it' }]);
+message('ses_repeat', 'ra1', step('stop'), [{ type: 'text', text: 'Built once.' }]);
+message('ses_repeat', 'rc1', user(), [{ type: 'compaction', auto: false }]);
+message('ses_repeat', 'rs1', summaryMsg, [{ type: 'text', text: '## Objective\n- build it' }]);
+message('ses_repeat', 'ru2', user(), [{ type: 'text', text: 'build it' }]);
+message('ses_repeat', 'ra2', step('stop'), [{ type: 'text', text: 'Built twice.' }]);
+// 2. Two prompts longer than the 20,000-character display cap that share it
+//    and differ after: the second is not a replay of the first.
+const LONG = 'x'.repeat(20_000);
+addSession.run('ses_long', '/w', 'Long', '{"id":"deepseek"}', 1, 2);
+message('ses_long', 'lu1', user(), [{ type: 'text', text: `${LONG} first` }]);
+message('ses_long', 'la1', step(), [bash('ls', 'ok')]);
+message('ses_long', 'lc1', user(), [{ type: 'compaction', auto: true, overflow: true }]);
+message('ses_long', 'ls1', summaryMsg, [{ type: 'text', text: '## Objective\n- long' }]);
+message('ses_long', 'lu2', user(), [{ type: 'text', text: `${LONG} second` }]);
+message('ses_long', 'la2', step('stop'), [{ type: 'text', text: 'Did the second.' }]);
 db.close();
 
 const texts = (t) => t.blocks.filter((b) => b.type === 'text').map((b) => b.text);
@@ -124,6 +145,20 @@ const read = async (sid) => (await readTrace({ id: sid, cli: 'opencode', path: '
   assert.match(marker.text, /^Context compacted \(manual\)/, 'a manual /compact shows the marker too');
 }
 
+{
+  const turns = await read('ses_repeat');
+  assert.deepEqual(turns.filter((t) => t.role === 'user').map((t) => texts(t).join('')), ['build it', 'build it'],
+    'after a MANUAL /compact a matching prompt is the operator\'s, and stays');
+  assert.deepEqual(turns.filter((t) => t.kind === 'final').map((t) => texts(t).join('')), ['Built once.', 'Built twice.'],
+    'two exchanges, not merged');
+}
+
+{
+  const turns = await read('ses_long');
+  const prompts = turns.filter((t) => t.role === 'user');
+  assert.equal(prompts.length, 2, 'prompts equal only up to the display cap are still two prompts');
+}
+
 // ---- the digest (Overview tile, unread, "since your prompt") ----
 {
   const rows = new Map(__readOpencodeForTest().map((r) => [r.sessionId, r.parsed]));
@@ -131,9 +166,16 @@ const read = async (sid) => (await readTrace({ id: sid, cli: 'opencode', path: '
   assert.ok(auto, 'the digest read the fixture');
   assert.equal(auto.stats.prompts, 2, 'two prompts, not four (no marker, no replay)');
   assert.equal(auto.digest.lastPromptText, PROMPT);
-  assert.equal(auto.digest.lastPromptTs, 1_030, 'the turn started at the ORIGINAL prompt (u2), not a replay');
+  assert.equal(auto.digest.lastPromptTs, at.u2, 'the turn started at the ORIGINAL prompt (u2), not a replay');
   assert.equal(auto.digest.lastAssistantText, 'Done: preview9.png glows green.');
   assert.equal(auto.stats.turns, 8, 'a1-a8: the summaries are not assistant turns');
+
+  const repeat = rows.get('ses_repeat');
+  assert.equal(repeat.stats.prompts, 2, 'a repeat after a manual compaction is counted');
+  assert.equal(repeat.digest.lastPromptTs, at.ru2, 'and the last prompt is the repeat, not the original');
+  const long = rows.get('ses_long');
+  assert.equal(long.stats.prompts, 2, 'the reader and the digest agree on long prompts');
+  assert.equal(long.digest.lastPromptTs, at.lu2);
 
   const manual = rows.get('ses_manual');
   assert.equal(manual.stats.prompts, 3);
