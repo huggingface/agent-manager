@@ -146,13 +146,13 @@ function useDir(sessionId: string, path: string, reloadKey: number, own?: Linked
   const inherited = useContext(LinkedFolderContext);
   const linked = own ?? inherited;
   const stamp = `${linked ? `link:${linked.root}` : sessionId}\u0000${path}\u0000${reloadKey}`;
-  const [state, setState] = useState<{ for: string | null; entries: FileEntry[] | null; err: boolean }>(
+  const [state, setState] = useState<{ for: string | null; entries: FileEntry[] | null; err: boolean; more?: number }>(
     { for: null, entries: null, err: false });
   useEffect(() => {
     let alive = true;
     setState({ for: null, entries: null, err: false });
     (linked ? listLinkedFolder(linked.root, path) : api.listFiles(sessionId, path))
-      .then((r) => { if (alive) setState({ for: stamp, entries: r.entries, err: false }); })
+      .then((r) => { if (alive) setState({ for: stamp, entries: r.entries, err: false, more: r.truncated || 0 }); })
       .catch(() => { if (alive) setState({ for: stamp, entries: null, err: true }); });
     return () => { alive = false; };
   }, [sessionId, path, reloadKey, linked]);
@@ -171,7 +171,7 @@ function useDir(sessionId: string, path: string, reloadKey: number, own?: Linked
   // asked to follow the renamed entry, that stale frame does not contain it, and
   // the repair below reasonably concludes the row is gone. A listing that is not
   // this read's is not a listing yet.
-  return state.for === stamp ? state : { entries: null, err: false };
+  return state.for === stamp ? state : { entries: null, err: false, more: 0 };
 }
 
 type RowProps = {
@@ -395,7 +395,7 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
             }}
             onDragEnd={() => setMoving(null)}
             onClick={() => onPreview(p)}
-            title={`${e.name} — ${kindNote}${fmtSize(e.size)} · ${fmtStamp(e.mtime)}`}
+            title={e.symlink ? `${e.name} — symbolic link outside this location` : `${e.name} — ${kindNote}${fmtSize(e.size)} · ${fmtStamp(e.mtime)}`}
           >
             <Rails prefix={prefix} isLast={isLast} />
             <KindGlyph name={e.name} kind={e.kind} className="tw-ico" />
@@ -406,8 +406,8 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
                 onCancel={() => { setRenaming(null); requestFocus(p); }}
               />
             ) : <span className="tw-name">{e.name}</span>}
-            <span className="tw-size">{fmtSize(e.size)}</span>
-            <span className="tw-time">{fmtWhen(e.mtime)}</span>
+            <span className="tw-size">{e.symlink ? 'link' : fmtSize(e.size)}</span>
+            <span className="tw-time">{e.symlink ? '' : fmtWhen(e.mtime)}</span>
             <span className="tw-acts">
               <button
                 className="tw-act" tabIndex={act} title="Download" aria-label={`Download ${e.name}`}
@@ -444,9 +444,12 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
   );
 }
 
+// A listing is capped on the server (LIST_MAX); say so rather than look complete.
+const moreNote = (n: number) => `${n.toLocaleString()} more not shown — this folder is too large to list in full`;
+
 // Lazily-loaded contents of one expanded directory.
 function DirContents({ path, sessionId, prefix, ...rest }: RowProps & { path: string }) {
-  const { entries, err } = useDir(sessionId, path, rest.reloadKey);
+  const { entries, err, more } = useDir(sessionId, path, rest.reloadKey);
   // Not rows: a folder that is loading, empty or unreadable has nothing to focus,
   // and offering an empty destination would be a keyboard dead end. They are
   // announced instead, so the state is readable rather than silent.
@@ -458,7 +461,10 @@ function DirContents({ path, sessionId, prefix, ...rest }: RowProps & { path: st
   // The visible ellipsis is the listing's own idiom; a reader gets a sentence.
   if (!entries) return msg('…', `Loading ${here}`);
   if (entries.length === 0) return msg('empty', `${here} is empty`);
-  return <DirRows entries={entries} path={path} sessionId={sessionId} prefix={prefix} {...rest} />;
+  return <>
+    <DirRows entries={entries} path={path} sessionId={sessionId} prefix={prefix} {...rest} />
+    {!!more && msg(moreNote(more))}
+  </>;
 }
 
 // A folder row: single click toggles inline expand, double click opens it as the
@@ -1828,6 +1834,7 @@ export function FilesBrowser({
               <>
                 <span className="fi-stat">{stats.folders} folder{stats.folders === 1 ? '' : 's'}</span>
                 <span className="fi-stat">{stats.files} file{stats.files === 1 ? '' : 's'}</span>
+                {!!dir.more && <span className="fi-stat">+{dir.more.toLocaleString()} not listed</span>}
                 <span className="fi-stat fi-extra">{fmtSize(stats.bytes)}</span>
                 <span className="fi-stat fi-extra" title={fmtStamp(stats.newest)}>updated {fmtWhen(stats.newest)}</span>
               </>
@@ -1957,7 +1964,7 @@ export function FilesBrowser({
           {dir.err && <div className="tree-msg" role="status">can't read folder</div>}
           {!dir.err && !dir.entries && <div className="tree-msg" role="status" aria-label="Loading files">…</div>}
           {dir.entries?.length === 0 && <div className="tree-msg" role="status">empty folder</div>}
-          {dir.entries && dir.entries.length > 0 && (
+          {dir.entries && dir.entries.length > 0 && <>
             <DirRows
               entries={dir.entries} path={root} sessionId={sid} prefix={[]} sort={sort}
               reloadKey={reloadKey} onOpen={openDir} onPreview={setViewing} selected={viewing}
@@ -1968,7 +1975,8 @@ export function FilesBrowser({
               open={expanded} setOpen={setOpenPath} focusPath={focusPath}
               onRowFocus={setFocusPath} requestFocus={requestFocus}
             />
-          )}
+            {!!dir.more && <div className="tree-msg" role="status">{moreNote(dir.more)}</div>}
+          </>}
         </div>
       </div>
 

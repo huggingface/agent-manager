@@ -2709,8 +2709,8 @@ api.get('/api/files/:id', (req, res) => {
   fs.mkdirSync(root, { recursive: true });
   const dir = resolveSafe(root, req.query.path);
   if (!dir || !fs.existsSync(dir)) return res.status(400).json({ error: 'bad path' });
-  const entries = listDirectory(dir);
-  res.json({ path: path.relative(root, dir), root: path.basename(root), entries });
+  const { entries, truncated } = listDirectory(dir);
+  res.json({ path: path.relative(root, dir), root: path.basename(root), entries, ...(truncated ? { truncated } : {}) });
 });
 
 // What the viewer needs to show one file: its kind, its stats, and — for the
