@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { FileView, FileWrapToggle, type LinkedFileSource, type ViewInfo } from './FilesPane';
+import { FilesBrowser, FileView, FileWrapToggle, linkedFileSource, type LinkedFolder, type ViewInfo } from './FilesPane';
 import { appUrl } from '../lib/appUrl';
-import { fileLinkUrl, fileResourceUrl, resolveFileLink, type FileLinkRequest, type FileLinkTarget } from '../lib/fileLinks';
-import { BackGlyph, CloseGlyph, DownloadGlyph, FileGlyph, RefreshGlyph } from './icons';
+import { fileLinkUrl, resolveFileLink, type FileLinkRequest, type FileLinkTarget, type LinkedFileSource } from '../lib/fileLinks';
+import { BackGlyph, CloseGlyph, DownloadGlyph, FileGlyph, FolderGlyph, RefreshGlyph } from './icons';
 import '../file-links.css';
 
 // Shared read-only surface: transient session preview, retained Files pane, or
@@ -47,7 +47,7 @@ export default function FileLinkPage({ request, embedded = false, onBack, onClos
       resolved.current.current = canonical;
       if (!embedded) {
         history.replaceState(null, '', fileLinkUrl(canonical));
-        document.title = next.path.split('/').pop() + ' · Agent Manager';
+        document.title = nameOf(next) + ' · Agent Manager';
       }
     }).catch((err) => {
       if (!alive) return;
@@ -56,34 +56,24 @@ export default function FileLinkPage({ request, embedded = false, onBack, onClos
     return () => { alive = false; clearTimeout(timer); controller.abort(); };
   }, [request, reload, embedded]);
 
-  const source = useMemo<LinkedFileSource | undefined>(() => {
-    if (!target) return undefined;
-    const file = { file: target.path, root: target.root };
-    return {
-      root: target.root,
-      preview: async () => {
-        const response = await fetch(fileResourceUrl('preview', file), { signal: AbortSignal.timeout(12_000) });
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.error || 'Could not read this file.');
-        return body;
-      },
-      rawUrl: fileResourceUrl('raw', file),
-      downloadUrl: fileResourceUrl('download', file),
-    };
-  }, [target]);
+  const source = useMemo<LinkedFileSource | undefined>(
+    () => target && !target.dir ? linkedFileSource(target.root, target.path) : undefined, [target]);
+  // A folder opens as the Files pane's own browser, rooted at it.
+  const folder = useMemo<LinkedFolder | undefined>(() => target?.dir
+    ? { root: target.root, base: target.path === '.' ? '' : target.path, label: nameOf(target) } : undefined, [target]);
 
   const copy = async (value: string, label: string) => {
     try { await navigator.clipboard.writeText(value); setCopied(label); }
     catch { setCopied('Copy unavailable in this browser'); }
   };
-  const kind = info.meta?.kind;
+  const kind = folder ? undefined : info.meta?.kind;
   return <section className={`file-link-page${embedded ? ' file-link-embedded' : ''}`} aria-label="File preview">
     <header className={`file-link-head${dragId ? ' draggable' : ''}`} draggable={!!dragId}
       onDragStart={dragId ? (event) => { event.dataTransfer.setData('text/plain', dragId); event.dataTransfer.effectAllowed = 'move'; onDragActive?.(true); } : undefined}
       onDragEnd={dragId ? () => onDragActive?.(false) : undefined}>
-      {onBack ? <button className="mini-btn" onClick={onBack} title="Back" aria-label="Back"><BackGlyph /></button> : <FileGlyph />}
+      {onBack ? <button className="mini-btn" onClick={onBack} title="Back" aria-label="Back"><BackGlyph /></button> : folder ? <FolderGlyph /> : <FileGlyph />}
       <div className="file-link-title">
-        <h1>{target?.path.split('/').pop() || 'File preview'}</h1>
+        <h1>{target ? nameOf(target) : 'File preview'}</h1>
         <div className="file-link-path" title={target?.absolute || request.file}>{target?.absolute || request.file}</div>
       </div>
       {onClose && <button className="mini-btn" onClick={onClose} title={closeLabel} aria-label={closeLabel}><CloseGlyph /></button>}
@@ -91,6 +81,7 @@ export default function FileLinkPage({ request, embedded = false, onBack, onClos
     </header>
     <div className="file-link-tools">
       {kind && <span className="mono">{kind} · read-only</span>}
+      {folder && <span className="mono">folder · read-only</span>}
       {info.extra.map((text) => <span className="mono" key={text}>{text}</span>)}
       {!!request.line && <span className="mono">line {request.line}{request.column ? `:${request.column}` : ''}</span>}
       <span className="spacer" />
@@ -102,19 +93,26 @@ export default function FileLinkPage({ request, embedded = false, onBack, onClos
       }}><FileGlyph /> {keeping ? 'Opening…' : 'Open in file viewer'}</button>}
       {(kind === 'markdown' || kind === 'html') && <button className="mini-btn" onClick={() => setRaw(!raw)}>{raw ? 'Preview' : 'Source'}</button>}
       {info.showWrap && info.edit && <FileWrapToggle wrap={info.edit.wrap} onChange={info.edit.setWrap} />}
-      <button className="mini-btn" onClick={() => setReload((n) => n + 1)} title="Reload file"><RefreshGlyph /></button>
+      {/* A folder's browser has its own refresh, next to its breadcrumb. */}
+      {!folder && <button className="mini-btn" onClick={() => setReload((n) => n + 1)} title="Reload file"><RefreshGlyph /></button>}
       {target && <>
         <button className="mini-btn" onClick={() => void copy(target.absolute, 'Path copied')}>Copy path</button>
         <button className="mini-btn" onClick={() => void copy(fileLinkUrl(resolved.current.current), 'Link copied')}>Copy link</button>
-        <a className="mini-btn" href={source?.downloadUrl} download><DownloadGlyph /> Download</a>
+        {source && <a className="mini-btn" href={source.downloadUrl} download><DownloadGlyph /> Download</a>}
       </>}
     </div>
     {copied && <div className="file-link-notice" role="status">{copied}</div>}
     {keepError && <div className="file-link-notice" role="alert">{keepError}</div>}
     {error ? <div className="fv-empty" role="alert">Could not open this file.<div className="fv-sub">{error}</div>
       <button className="mini-btn" onClick={() => setReload((n) => n + 1)}>Retry</button>
-    </div> : target && source ? <FileView key={`${target.root}:${target.path}:${reload}`} sessionId="file-link-preview"
+    </div> : folder ? <FilesBrowser key={`${folder.root}:${folder.base}:${reload}`} linked={folder} />
+      : target && source ? <FileView key={`${target.root}:${target.path}:${reload}`} sessionId="file-link-preview"
       path={target.path} source={source} zoom={100} raw={raw} scripts={false} line={raw || kind === 'text' ? request.line : undefined}
-      column={request.column} onInfo={setInfo} /> : <div className="fv-empty" role="status">Locating file…</div>}
+      column={request.column} onInfo={setInfo} onFolder={() => setReload((n) => n + 1)} /> : <div className="fv-empty" role="status">Locating file…</div>}
   </section>;
+}
+
+// '.' names a root itself; show the folder's own name instead.
+function nameOf(target: FileLinkTarget) {
+  return target.absolute.replace(/\/+$/, '').split('/').pop() || target.path;
 }

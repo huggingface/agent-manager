@@ -1,8 +1,16 @@
 import { appUrl } from './appUrl';
+import type { FilePreview } from '../api';
 
 export type FileLinkContext = { session?: string; root?: string; base?: string; unavailable?: boolean };
 export type FileLinkRequest = { file: string; session?: string; root?: string; line?: number; column?: number; unavailable?: boolean };
-export type FileLinkTarget = { root: string; path: string; absolute: string };
+export type FileLinkTarget = { root: string; path: string; absolute: string; dir?: boolean };
+/** Where a read-only viewer gets one file's preview and bytes from. */
+export type LinkedFileSource = {
+  root: string;
+  preview: () => Promise<FilePreview>;
+  rawUrl: string;
+  downloadUrl: string;
+};
 
 // Parse only file references, never reinterpret a network or executable URL.
 // Decode URL paths once; literal paths in code spans/terminals stay literal.
@@ -74,7 +82,7 @@ export function fileLinkUrl(request: FileLinkRequest): string {
   return appUrl(fileLinkHash(request));
 }
 
-export function fileResourceUrl(action: 'resolve' | 'preview' | 'raw' | 'download', request: FileLinkRequest): string {
+export function fileResourceUrl(action: 'resolve' | 'list' | 'preview' | 'raw' | 'download', request: FileLinkRequest): string {
   const params = new URLSearchParams({ file: request.file });
   if (request.root) params.set('root', request.root);
   if (request.session) params.set('session', request.session);

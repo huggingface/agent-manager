@@ -49,7 +49,7 @@ import { buildUsage } from './usage.js';
 import { buildTraces, traceDigests, digestFor, traceLocation, readTrace, readTraceBundle, readTraceByPath, searchTrace, traceHarnessOf, subagentRoster, readSubagentTrace } from './traces.js';
 import { initPush, publicKey, deviceCount, addSubscription, removeSubscription, sendToAll } from './push.js';
 import { startVisibilityWatch, isLocked, lockState, visibility, onVisibilityChange, lockError } from './visibility.js';
-import { kindOfName, kindOfFile, mimeOf, readTextHead, TEXT_MAX } from './preview.js';
+import { kindOfFile, listDirectory, mimeOf, readTextHead, TEXT_MAX } from './preview.js';
 import { startWatchdog, startStallProfiler } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
@@ -2709,24 +2709,7 @@ api.get('/api/files/:id', (req, res) => {
   fs.mkdirSync(root, { recursive: true });
   const dir = resolveSafe(root, req.query.path);
   if (!dir || !fs.existsSync(dir)) return res.status(400).json({ error: 'bad path' });
-  // One stat per entry (folders included) — the pane shows a Modified column.
-  // `kind` comes from the NAME only: it just picks the row glyph, and sniffing
-  // every extensionless file here would mean an extra open per row on a bucket.
-  // /preview does the real detection for the one file being opened.
-  const entries = fs.readdirSync(dir, { withFileTypes: true }).map((e) => {
-    const full = path.join(dir, e.name);
-    const isDir = e.isDirectory();
-    let size = 0, mtime = 0;
-    try {
-      const st = fs.statSync(full);
-      mtime = st.mtimeMs;
-      if (!isDir) size = st.size;
-    } catch {}
-    return isDir
-      ? { name: e.name, dir: true, size: 0, mtime }
-      : { name: e.name, dir: false, size, mtime, kind: kindOfName(e.name) ?? undefined };
-  });
-  entries.sort((a, b) => (a.dir !== b.dir ? (a.dir ? -1 : 1) : a.name.localeCompare(b.name)));
+  const entries = listDirectory(dir);
   res.json({ path: path.relative(root, dir), root: path.basename(root), entries });
 });
 
@@ -2740,7 +2723,9 @@ api.get('/api/files/:id/preview', async (req, res) => {
   const f = resolveSafe(root, req.query.path);
   if (!f || !fs.existsSync(f)) return res.status(404).json({ error: 'not found' });
   const st = fs.statSync(f);
-  if (!st.isFile()) return res.status(400).json({ error: 'not a file' });
+  // A folder is a different view, not a broken file: the code lets the viewer
+  // switch to the listing instead of showing an error.
+  if (!st.isFile()) return res.status(400).json({ error: 'not a file', ...(st.isDirectory() ? { code: 'is-directory' } : {}) });
   let kind = kindOfFile(f);
   // A transcript is a .jsonl like any other until you read a line of it, so the
   // sniff happens HERE and not in the listing: this route already opens the one

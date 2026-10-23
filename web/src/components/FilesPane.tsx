@@ -1,14 +1,14 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createContext, lazy, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { recall, remember, readWrap, writeWrap } from './filesMemory';
 import type { Session } from '../types';
 import * as api from '../api';
 import { Rails, railPad } from './Rails';
 import { keyIntent, keepInView, survivingFocus, type TreeRow } from '../lib/treeNav';
-import type { FileEntry, FileKind, FilePreview, WorkspaceFileCollision } from '../api';
+import type { FileEntry, FileKind, FileListing, FilePreview, WorkspaceFileCollision } from '../api';
 import Logo from './Logo';
 import { renderMarkdown } from '../lib/markdown';
 import FileLinkContent, { FileLinkScope, FilePreviewContext } from './FileLinkContent';
-import { fileRequest, fileResourceUrl } from '../lib/fileLinks';
+import { fileRequest, fileResourceUrl, type LinkedFileSource } from '../lib/fileLinks';
 import { useSaver } from '../lib/saveQueue';
 import CodeView from './CodeView';
 import FileWrapToggle from './FileWrapToggle';
@@ -103,20 +103,59 @@ const KIND_LABEL: Record<FileKind, string> = {
 // same tree, and one copy of six lines is better than two that drift.
 const padFor = railPad;
 
+// Read-only file-link reads. They live in this lazy chunk rather than in
+// lib/fileLinks.ts, which the entry chunk carries and has no room to grow.
+// An error keeps the server's code, so a viewer can tell "this is a folder"
+// from "this is missing".
+async function readJson<T>(url: string, fallback: string): Promise<T> {
+  const response = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw Object.assign(new Error(body.error || fallback), { code: body.code, status: response.status });
+  return body;
+}
+
+/** One file under a named root, read-only. `file` is relative to that root. */
+export function linkedFileSource(root: string, file: string): LinkedFileSource {
+  const request = { file, root };
+  return {
+    root,
+    preview: () => readJson<FilePreview>(fileResourceUrl('preview', request), 'Could not read this file.'),
+    rawUrl: fileResourceUrl('raw', request),
+    downloadUrl: fileResourceUrl('download', request),
+  };
+}
+
+/** One folder under a named root, in the Files pane's listing shape. '' = the root itself. */
+function listLinkedFolder(root: string, folder: string): Promise<FileListing> {
+  return readJson<FileListing>(fileResourceUrl('list', { file: folder || '.', root }), 'Could not read this folder.');
+}
+
+// A Files view of a folder reached through a file link: rooted at `base` (a
+// path under the named file-link root, '' for the root itself), and read-only —
+// every read goes through /api/file-links, which rechecks the roots, so nothing
+// here can list or open outside them. Rows drop rename, move and delete.
+export type LinkedFolder = { root: string; base: string; label: string };
+const LinkedFolderContext = createContext<LinkedFolder | null>(null);
+const downloadOf = (linked: LinkedFolder | null, sessionId: string, path: string) =>
+  linked ? fileResourceUrl('download', { file: path, root: linked.root }) : api.downloadUrl(sessionId, path);
+
 // One directory listing, fetched once. Used by the pane for the current folder
 // and by every expanded FolderNode, so each level is loaded exactly once.
-function useDir(sessionId: string, path: string, reloadKey: number) {
-  const stamp = `${sessionId}\u0000${path}\u0000${reloadKey}`;
+// `own` is for the browser itself, which provides the linked context rather than sits in it.
+function useDir(sessionId: string, path: string, reloadKey: number, own?: LinkedFolder) {
+  const inherited = useContext(LinkedFolderContext);
+  const linked = own ?? inherited;
+  const stamp = `${linked ? `link:${linked.root}` : sessionId}\u0000${path}\u0000${reloadKey}`;
   const [state, setState] = useState<{ for: string | null; entries: FileEntry[] | null; err: boolean }>(
     { for: null, entries: null, err: false });
   useEffect(() => {
     let alive = true;
     setState({ for: null, entries: null, err: false });
-    api.listFiles(sessionId, path)
+    (linked ? listLinkedFolder(linked.root, path) : api.listFiles(sessionId, path))
       .then((r) => { if (alive) setState({ for: stamp, entries: r.entries, err: false }); })
       .catch(() => { if (alive) setState({ for: stamp, entries: null, err: true }); });
     return () => { alive = false; };
-  }, [sessionId, path, reloadKey]);
+  }, [sessionId, path, reloadKey, linked]);
   // WHICH READ THESE ENTRIES CAME FROM — the folder AND the reload that asked
   // for them. The state update above lands in an effect, one render after its
   // inputs changed, so for that one render the previous answer would be drawn as
@@ -316,6 +355,7 @@ function ConfirmDelete({ name, dir, busy, onYes, onNo }: {
 function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, onPreview, selected, onDelete, onRename, renaming, setRenaming, onMove, moving, setMoving, target, setTarget, open, setOpen, focusPath, onRowFocus, requestFocus }: RowProps & {
   entries: FileEntry[]; path: string;
 }) {
+  const linked = useContext(LinkedFolderContext);
   const arr = sortEntries(entries, sort);
   return (
     <>
@@ -347,7 +387,7 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
             aria-selected={selected === p ? true : undefined}
             className={`tree-row file${selected === p ? ' selected' : ''}${moving?.path === p ? ' moving' : ''}`}
             style={padFor(prefix)}
-            draggable={renaming !== p}
+            draggable={!linked && renaming !== p}
             onDragStart={(ev) => {
               ev.dataTransfer.setData('text/plain', p);
               ev.dataTransfer.effectAllowed = 'move';
@@ -371,10 +411,11 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
             <span className="tw-acts">
               <button
                 className="tw-act" tabIndex={act} title="Download" aria-label={`Download ${e.name}`}
-                onClick={(ev) => { ev.stopPropagation(); triggerDownload(api.downloadUrl(sessionId, p), e.name); }}
+                onClick={(ev) => { ev.stopPropagation(); triggerDownload(downloadOf(linked, sessionId, p), e.name); }}
               >
                 <DownloadGlyph />
               </button>
+              {!linked && <>
               <button
                 className="tw-act" tabIndex={act} title={`Rename ${e.name}`} aria-label={`Rename ${e.name}`}
                 onClick={(ev) => { ev.stopPropagation(); setRenaming(p); }}
@@ -394,6 +435,7 @@ function DirRows({ entries, path, sessionId, prefix, sort, reloadKey, onOpen, on
               >
                 <TrashGlyph />
               </button>
+              </>}
             </span>
           </div>
         );
@@ -428,6 +470,7 @@ function FolderNode({ path, name, mtime, isLast, pos, setSize, ...rest }: RowPro
     prefix, onOpen, onDelete, onRename, renaming, setRenaming, onMove, moving, setMoving,
     target, setTarget, open: openSet, setOpen: setOpenPath, focusPath, onRowFocus, requestFocus,
   } = rest;
+  const linked = useContext(LinkedFolderContext);
   const open = openSet.has(path);
   const [over, setOver] = useState(false);
   const takes = !!moving && canMoveTo(moving, path);   // would a drop here do anything?
@@ -456,7 +499,7 @@ function FolderNode({ path, name, mtime, isLast, pos, setSize, ...rest }: RowPro
         aria-expanded={open}
         className={`tree-row folder${target === path ? ' target' : ''}${over && takes ? ' drop' : ''}${moving?.path === path ? ' moving' : ''}`}
         style={padFor(prefix)}
-        draggable={renaming !== path}
+        draggable={!linked && renaming !== path}
         onDragStart={(ev) => {
           ev.dataTransfer.setData('text/plain', path);
           ev.dataTransfer.effectAllowed = 'move';
@@ -489,6 +532,7 @@ function FolderNode({ path, name, mtime, isLast, pos, setSize, ...rest }: RowPro
           {/* no download for a folder — hold its slot so Rename, Move and Delete
               sit in the same place on every row */}
           <span className="tw-act ghost" aria-hidden />
+          {!linked && <>
           <button
             className="tw-act" tabIndex={act} title={`Rename ${name}`} aria-label={`Rename folder ${name}`}
             onClick={(ev) => { ev.stopPropagation(); setRenaming(path); }}
@@ -509,6 +553,7 @@ function FolderNode({ path, name, mtime, isLast, pos, setSize, ...rest }: RowPro
           >
             <TrashGlyph />
           </button>
+          </>}
         </span>
       </div>
       {open && <DirContents path={path} {...rest} prefix={[...prefix, !isLast]} />}
@@ -629,17 +674,14 @@ export type SaveState = {
 // The viewer for one file. Kinds it can't render fall back to an honest
 // "download it instead" card rather than an empty box. The view mode (`raw`,
 // `scripts`) belongs to the pane, which draws the toggles in its info strip.
-export type LinkedFileSource = {
-  root: string;
-  preview: () => Promise<FilePreview>;
-  rawUrl: string;
-  downloadUrl: string;
-};
+export type { LinkedFileSource };
 
-export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved, source: linkedSource, line, column }: {
+export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved, onFolder, source: linkedSource, line, column }: {
   sessionId: string; path: string; zoom: number; raw: boolean; scripts: boolean;
   onInfo: (info: ViewInfo) => void;
   onSaved?: () => void;
+  /** The path turned out to be a folder (e.g. a symlink to one): show it as a listing instead. */
+  onFolder?: () => void;
   /** Shared file links are read-only and never adopt a Files pane's draft. */
   source?: LinkedFileSource;
   line?: number;
@@ -657,6 +699,8 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved,
   const [traceQuery, setTraceQuery] = useState('');
   const traceNav = useRef<((dir: -1 | 1) => void) | null>(null);
   const theme = useTheme();
+  const onFolderRef = useRef(onFolder);
+  onFolderRef.current = onFolder;
 
   // Editing state. `draft` is null until the first keystroke: the editor is
   // always writable, but a file nobody touched has nothing to save.
@@ -711,7 +755,11 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved,
     setTraceHead(null); setTraceQuery('');
     (linkedSource ? linkedSource.preview() : api.previewFile(sessionId, path))
       .then((m) => { if (alive) { setMeta(m); if (!pending.current) baseRef.current = m.tag ?? null; } })
-      .catch((e) => { if (alive) setErr(String(e?.message || e)); });
+      .catch((e) => {
+        if (!alive) return;
+        if (e?.code === 'is-directory' && onFolderRef.current) onFolderRef.current();
+        else setErr(String(e?.message || e));
+      });
     return () => { alive = false; };
   }, [sessionId, path, linkedSource, readOnly]);
 
@@ -1114,21 +1162,30 @@ export function FileView({ sessionId, path, zoom, raw, scripts, onInfo, onSaved,
   );
 }
 
-function FilesBrowser({
-  session, focused, zoom = 100, dragId, onDragActive, onFocus, onClose,
-}: {
-  session: Session;
+type FilesBrowserProps = {
   focused?: boolean;
   zoom?: number;
   dragId?: string;
   onDragActive?: (dragging: boolean) => void;
   onFocus?: () => void;
-  onClose: () => void;
-}) {
+};
+
+// The Files pane's browser. With `linked` it is the same widget rooted at a
+// folder a file link pointed to: read-only, nothing remembered, and no way
+// above `linked.base` (the server would refuse anything outside its root anyway).
+export function FilesBrowser({
+  session, linked, focused, zoom = 100, dragId, onDragActive, onFocus, onClose,
+}: FilesBrowserProps & (
+  { session: Session; linked?: undefined; onClose: () => void }
+  | { session?: undefined; linked: LinkedFolder; onClose?: () => void }
+)) {
+  const sid = session?.id ?? 'file-link-preview';
   // Where this pane was when it last went off screen. Read once, at mount.
-  const kept = useMemo(() => recall(session.id), [session.id]);
+  const kept = useMemo(() => linked
+    ? { root: linked.base, viewing: null, target: null, sort: undefined }
+    : recall(sid), [sid, linked]);
   const [root, setRoot] = useState(kept.root);
-  const [rootLabel, setRootLabel] = useState('workspace');
+  const [rootLabel, setRootLabel] = useState(linked?.label ?? 'workspace');
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
@@ -1178,7 +1235,7 @@ function FilesBrowser({
   const claim = useRef(0);
   const drawn = useRef<string[]>([]);
 
-  const dir = useDir(session.id, root, reloadKey);
+  const dir = useDir(sid, root, reloadKey, linked);
 
   const rowEls = () => Array.from(bodyRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') || []);
   const rowEl = (path: string) => rowEls().find((el) => el.dataset.path === path) || null;
@@ -1207,10 +1264,14 @@ function FilesBrowser({
   // the workspace — the folder you were in, the file you were reading, and the
   // way you had it sorted.
   useEffect(() => {
-    remember(session.id, { root, viewing, target, sort });
-  }, [session.id, root, viewing, target, sort]);
+    if (!linked) remember(sid, { root, viewing, target, sort });
+  }, [sid, linked, root, viewing, target, sort]);
 
-  useEffect(() => { api.listFiles(session.id, '').then((r) => setRootLabel(r.root)).catch(() => {}); }, [session.id]);
+  useEffect(() => {
+    if (!linked) api.listFiles(sid, '').then((r) => setRootLabel(r.root)).catch(() => {});
+  }, [sid, linked]);
+  // A linked file's preview and bytes, through the same checked routes.
+  const viewSource = useMemo(() => linked && viewing ? linkedFileSource(linked.root, viewing) : undefined, [linked, viewing]);
   // Entering a preview focuses the pane, so Esc walks back out without a
   // window-wide key handler stealing keys from the other panes. Every file opens
   // in its default view — rendered, scripts off.
@@ -1276,7 +1337,7 @@ function FilesBrowser({
     workspaceControllers.current.set(item.key, controller);
     updateWorkspaceUpload(item.key, { status: 'uploading', loaded: 0, error: undefined, collision: undefined });
     try {
-      await api.uploadFile(session.id, item.folder, item.file, {
+      await api.uploadFile(sid, item.folder, item.file, {
         replaceToken,
         signal: controller.signal,
         onProgress: ({ loaded }) => updateWorkspaceUpload(item.key, { loaded }),
@@ -1416,7 +1477,7 @@ function FilesBrowser({
     if (!name || !creating) return;
     setActing(true); setActErr(null);
     try {
-      await (creating === 'folder' ? api.createFolder : api.createFile)(session.id, dest, name);
+      await (creating === 'folder' ? api.createFolder : api.createFile)(sid, dest, name);
       setCreating(null); setNewName('');
       setReloadKey((k) => k + 1);
     } catch (e: any) {
@@ -1432,7 +1493,7 @@ function FilesBrowser({
   const doMove = async (from: string, toDir: string) => {
     setMoving(null); setActErr(null); claimFocus();
     try {
-      const { path: next } = await api.moveEntry(session.id, from, toDir);
+      const { path: next } = await api.moveEntry(sid, from, toDir);
       requestFocus(next);          // follow the entry to where it went
       if (viewing === from) setViewing(next);
       else if (viewing && viewing.startsWith(`${from}/`)) setViewing(`${next}${viewing.slice(from.length)}`);
@@ -1445,7 +1506,7 @@ function FilesBrowser({
   const doRename = async (p: string, name: string) => {
     setRenaming(null); setActErr(null); claimFocus();
     try {
-      const { path: next } = await api.renameEntry(session.id, p, name);
+      const { path: next } = await api.renameEntry(sid, p, name);
       requestFocus(next);          // same row, new name
       // Keep the viewer pointed at the same bytes: renaming the open file, or a
       // folder above it, should not close what you were reading.
@@ -1461,7 +1522,7 @@ function FilesBrowser({
     if (!pendingDel) return;
     setActing(true); setActErr(null); claimFocus();
     try {
-      await api.deleteEntry(session.id, pendingDel.path);
+      await api.deleteEntry(sid, pendingDel.path);
       // If the open file was the one deleted, leave the viewer rather than
       // showing a preview of something that no longer exists.
       if (viewing && (viewing === pendingDel.path || viewing.startsWith(`${pendingDel.path}/`))) setViewing(null);
@@ -1523,9 +1584,12 @@ function FilesBrowser({
     if (intent.dir) { claimFocus(); openDir(intent.path); } else setViewing(intent.path);
   };
 
-  const up = () => setRoot(root.includes('/') ? root.slice(0, root.lastIndexOf('/')) : '');
+  // The top of this view: the workspace root, or the folder a link named.
+  const top = linked?.base ?? '';
+  const up = () => { if (root !== top) setRoot(root.includes('/') ? root.slice(0, root.lastIndexOf('/')) : ''); };
   const openDir = (p: string) => { setViewing(null); setRoot(p); };
-  const crumbs = ['', ...root.split('/').filter(Boolean).map((_, i, arr) => arr.slice(0, i + 1).join('/'))];
+  const below = top ? root.slice(top.length).replace(/^\//, '') : root;
+  const crumbs = [top, ...below.split('/').filter(Boolean).map((_, i, arr) => join(top, arr.slice(0, i + 1).join('/')))];
 
   // A confirmation that nobody's keyboard can reach is not a confirmation. It
   // opens on Cancel, never on Delete: the key that opened it is still going up,
@@ -1562,8 +1626,9 @@ function FilesBrowser({
   const name = viewing ? viewing.split('/').pop()! : '';
 
   return (
+    <LinkedFolderContext.Provider value={linked ?? null}>
     <div
-      className={`slot${focused ? ' focused' : ''}`} ref={paneRef} tabIndex={-1}
+      className={`slot${focused ? ' focused' : ''}${linked ? ' files-linked' : ''}`} ref={paneRef} tabIndex={-1}
       onMouseDown={onFocus}
       // …and the same for the keyboard: tabbing into the listing has to make
       // this the pane the app considers current, or the row you are standing on
@@ -1574,7 +1639,9 @@ function FilesBrowser({
       // pane, not on the viewer, so it still fires after a click on a toggle in
       // the info strip moved focus out of the body.
       onKeyDown={viewing ? (e) => {
-        if (e.key === 'Escape') { e.preventDefault(); leaveView(); }
+        // A linked view sits inside a file preview whose own Escape closes it;
+        // this one only goes back to the listing.
+        if (e.key === 'Escape') { e.preventDefault(); if (linked) e.stopPropagation(); leaveView(); }
         // Cmd/Ctrl-S works from anywhere in the pane, not just inside the editor.
         else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's' && edit?.can) {
           e.preventDefault();
@@ -1603,14 +1670,14 @@ function FilesBrowser({
             <span className="spacer" />
             <button
               className="mini-btn" title="Download" aria-label={`Download ${name}`}
-              onClick={() => triggerDownload(api.downloadUrl(session.id, viewing), name)}
+              onClick={() => triggerDownload(downloadOf(linked ?? null, sid, viewing), name)}
             >
               <DownloadGlyph />
             </button>
           </>
         ) : (
           <>
-            <button className="mini-btn" title="Up" aria-label="Up one folder" disabled={!root} onClick={up}><UpGlyph /></button>
+            <button className="mini-btn" title="Up" aria-label="Up one folder" disabled={root === top} onClick={up}><UpGlyph /></button>
             <div className="crumbs">
               {crumbs.map((c, i) => (
                 <span key={c || 'root'}>
@@ -1620,14 +1687,14 @@ function FilesBrowser({
               ))}
             </div>
             <span className="spacer" />
-            <button
+            {!linked && <button
               className="mini-btn" title="New folder here" aria-label={`New folder in ${dest || rootLabel}`}
               onClick={() => { setCreating('folder'); setNewName(''); setActErr(null); }}
-            ><FolderPlusGlyph /></button>
-            <button
+            ><FolderPlusGlyph /></button>}
+            {!linked && <button
               className="mini-btn" title="New empty file here" aria-label={`New file in ${dest || rootLabel}`}
               onClick={() => { setCreating('file'); setNewName(''); setActErr(null); }}
-            ><FilePlusGlyph /></button>
+            ><FilePlusGlyph /></button>}
             <button
               className="mini-btn" title="Refresh" aria-label="Refresh the listing"
               onClick={() => setReloadKey((k) => k + 1)}
@@ -1636,7 +1703,7 @@ function FilesBrowser({
                 nothing else: the input cannot be tabbed to (it is hidden) and a
                 label is not a control, so the picker had no keyboard at all.
                 Made a button in its own right, opening the same picker. */}
-            <label
+            {!linked && <label
               className={`mini-btn upload-btn${busy ? ' disabled' : ''}`}
               title={busy ? 'Current upload batch is still running' : 'Upload files'}
               role="button" tabIndex={0} aria-label="Upload files" aria-disabled={busy || undefined}
@@ -1648,13 +1715,13 @@ function FilesBrowser({
             >
               <UploadGlyph /> Upload
               <input type="file" multiple hidden disabled={busy} onChange={(e) => { if (e.target.files) upload(e.target.files); e.target.value = ''; }} />
-            </label>
+            </label>}
           </>
         )}
-        <button
+        {onClose && <button
           className="mini-btn ph-close" title="Close" aria-label="Close the files pane"
           onClick={(e) => { e.stopPropagation(); onClose(); }}
-        ><CloseGlyph /></button>
+        ><CloseGlyph /></button>}
       </div>
 
       {/* Info strip: where you are, or what you're looking at. */}
@@ -1755,7 +1822,7 @@ function FilesBrowser({
           </>
         ) : (
           <>
-            <span className="fi-where" title={root || rootLabel}>{root ? `${rootLabel}/${root}` : rootLabel}</span>
+            <span className="fi-where" title={root || rootLabel}>{below ? `${rootLabel}/${below}` : rootLabel}</span>
             <span className="spacer" />
             {dir.entries && (
               <>
@@ -1878,21 +1945,21 @@ function FilesBrowser({
           ref={bodyRef}
           className={`files-body tree${dragOver ? ' drag' : ''}`}
           role="tree"
-          aria-label={`Files in ${root ? `${rootLabel}/${root}` : rootLabel}`}
+          aria-label={`Files in ${below ? `${rootLabel}/${below}` : rootLabel}`}
           // With rows on screen the tab stop is one of them; with none — loading,
           // empty, unreadable — it is the box itself, so Tab still finds the
           // listing and lands on something that says what it is.
           tabIndex={dir.entries?.length ? -1 : 0}
-          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files.length) void upload(e.dataTransfer.files); }}
+          onDragOver={linked ? undefined : (e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={linked ? undefined : () => setDragOver(false)}
+          onDrop={linked ? undefined : (e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files.length) void upload(e.dataTransfer.files); }}
         >
           {dir.err && <div className="tree-msg" role="status">can't read folder</div>}
           {!dir.err && !dir.entries && <div className="tree-msg" role="status" aria-label="Loading files">…</div>}
           {dir.entries?.length === 0 && <div className="tree-msg" role="status">empty folder</div>}
           {dir.entries && dir.entries.length > 0 && (
             <DirRows
-              entries={dir.entries} path={root} sessionId={session.id} prefix={[]} sort={sort}
+              entries={dir.entries} path={root} sessionId={sid} prefix={[]} sort={sort}
               reloadKey={reloadKey} onOpen={openDir} onPreview={setViewing} selected={viewing}
               onDelete={(p, name, isDir) => { setCreating(null); setActErr(null); setPendingDel({ path: p, name, dir: isDir }); }}
               onRename={doRename} renaming={renaming} setRenaming={(p) => { setActErr(null); setRenaming(p); }}
@@ -1924,14 +1991,16 @@ function FilesBrowser({
       {viewing && (
         <div className="files-view">
           <FileView
-            sessionId={session.id} path={viewing} zoom={zoom} raw={raw} scripts={scripts}
-            onInfo={setInfo} onSaved={() => setReloadKey((k) => k + 1)}
+            sessionId={sid} path={viewing} zoom={zoom} raw={raw} scripts={scripts} source={viewSource}
+            onInfo={setInfo} onSaved={() => setReloadKey((k) => k + 1)} onFolder={() => openDir(viewing)}
           />
         </div>
       )}
 
       <div className="files-hint">
-        {!viewing
+        {!viewing && linked
+          ? 'Read-only · click a file to preview · double-click a folder to open it · ↑↓ move, → expand, ← collapse, Enter opens'
+          : !viewing
           ? 'Click a file to preview · double-click a folder to open it · ↑↓ move, → expand, ← collapse, Enter opens, Tab reaches the row\u2019s actions'
           : edit?.status === 'dirty'
               ? 'Unsaved changes — ⌘S or Save'
@@ -1940,12 +2009,13 @@ function FilesBrowser({
                 : 'Esc goes back to the files'}
       </div>
     </div>
+    </LinkedFolderContext.Provider>
   );
 }
 
 const LinkedFileView = lazy(() => import('./FileLinkPage'));
 
-export default function FilesPane(props: Parameters<typeof FilesBrowser>[0]) {
+export default function FilesPane(props: FilesBrowserProps & { session: Session; onClose: () => void }) {
   const linkedPane = useRef<HTMLDivElement>(null);
   const [trail, setTrail] = useState(() => {
     const request = recall(props.session.id).linkedFile;
