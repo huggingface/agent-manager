@@ -13,7 +13,7 @@ import type { Cli, Session } from '../types';
 import { STATE_LABEL, isRemote } from '../types';
 import StateLogo from './StateLogo';
 import TraceInfo from './TraceInfo';
-import ConversationView from './conversation/ConversationView';
+import ConversationView, { prewarmConversation } from './conversation/ConversationView';
 import type { ConversationSeen } from './conversation/ConversationView';
 import { isPassive } from '../types';
 import type { PaneMode } from '../lib/paneMode';
@@ -199,10 +199,20 @@ if (typeof window !== 'undefined') {
   }, true);
 }
 
+// Long enough for the terminal's own attach to go first; short enough to land
+// before a person reaches for the toggle.
+const READER_PREWARM_MS = 500;
+// Output a terminal under the reader holds back before it detaches instead.
+const HIDDEN_HOLD_BYTES = 64 * 1024;
+
+// `inert` keeps a hidden surface out of focus, find-in-page and the tab order.
+// React 18 does not know the attribute, so it is passed through as a string.
+const INERT = { inert: '' } as unknown as Record<string, never>;
+
 export default function TerminalPane({
   session, cli, theme, focused, visible, active, zoom = 100, mode = 'terminal',
   dragId, isMobile, groupName, onBack, onDragActive, onFocus, onRename, onClose,
-  onShare, seen,
+  onShare, seen, warm = false,
 }: {
   session: Session;
   cli?: Cli;
@@ -217,6 +227,11 @@ export default function TerminalPane({
   active?: boolean;
   zoom?: number;
   mode?: PaneMode;          // app-wide reading mode, from the bottom bar
+  // Keep BOTH views once built: the terminal attached under the reader and the
+  // reader mounted (paused) under the terminal, so the toggle is a visibility
+  // change. The app grants this to the visible and a few recent panes only;
+  // without it a pane keeps just the view it is showing.
+  warm?: boolean;
   onShare?: () => void;      // reader info panel: publish this session
   dragId?: string;          // set when the pane can be rearranged (group view)
   isMobile?: boolean;       // show the on-screen control-key bar
@@ -247,6 +262,8 @@ export default function TerminalPane({
   // terminal's scrollback when the reader covers it.
   const stopGlideRef = useRef<() => void>(() => {});
   const reconnectRef = useRef<(restart?: boolean) => void>(() => {});
+  // Shows the terminal's held output, or reattaches it (see `hold`).
+  const revealRef = useRef<() => void>(() => {});
   const controllerRef = useRef(false);
   const previousZoomRef = useRef(zoom);
   const [preview] = useState<TerminalPreview | null>(() => loadTerminalPreview(session.id));
@@ -257,6 +274,20 @@ export default function TerminalPane({
   const canRender = session.cli !== 'shell' && !isPassive(session.cli);
   const reading = mode === 'reader' && canRender;
   modeRef.current = reading ? 'reader' : 'terminal';
+  // Each surface is built the first time it is shown and then KEPT: switching
+  // between them is a visibility change, not a teardown and a reload. The
+  // terminal keeps its socket and buffer under the reader (it never attaches,
+  // claims or resizes while reading — see requestSize/claimControl), and the
+  // reader keeps its rows and scroll position under the terminal. A pane first
+  // opened in reader mode still never attaches until the terminal is asked for.
+  // Outside the app's warm set the view not being shown is released again.
+  const [terminalBuilt, setTerminalBuilt] = useState(!reading);
+  if (!reading && !terminalBuilt) setTerminalBuilt(true);
+  if (reading && terminalBuilt && !warm) setTerminalBuilt(false);
+  const readerShown = reading && visible !== false;
+  const [readerBuilt, setReaderBuilt] = useState(readerShown);
+  if (readerShown && !readerBuilt) setReaderBuilt(true);
+  if (!readerShown && readerBuilt && !warm) setReaderBuilt(false);
   // Send a raw byte string to the PTY (for the mobile key-bar: arrows, Esc…).
   const sendKeyRef = useRef<(d: string) => void>(() => {});
   const [conn, setConn] = useState<ConnState>('connecting');
@@ -516,8 +547,9 @@ export default function TerminalPane({
 
   useEffect(() => {
     // Reading must never attach, start or resize a PTY. The transcript and
-    // composer have their own APIs; reconnect only when showing the terminal.
-    if (reading) return;
+    // composer have their own APIs; attach only once the terminal is shown.
+    // After that the terminal stays attached under the reader.
+    if (!terminalBuilt) return;
     const term = new Terminal({
       fontFamily: "'Geist Mono', ui-monospace, 'SF Mono', Menlo, 'Cascadia Code', monospace",
       // Start at the requested zoom so attachment does not briefly create a
@@ -622,7 +654,7 @@ export default function TerminalPane({
       if (text) copyText(text);
     };
     const onCopy = (e: ClipboardEvent) => {
-      if (!term.hasSelection()) return;
+      if (modeRef.current === 'reader' || !term.hasSelection()) return;
       const text = selectionText(term);
       if (!text || !e.clipboardData) return;
       e.clipboardData.setData('text/plain', text);
@@ -635,7 +667,7 @@ export default function TerminalPane({
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o));
     };
     const claimControl = () => {
-      if (controllerRef.current) return;
+      if (controllerRef.current || modeRef.current === 'reader') return;
       // Activation can precede WebSocket.open when a pane is first mounted.
       // Do not consume that claim locally: onopen will retry it once it can
       // actually reach the server.
@@ -794,8 +826,23 @@ export default function TerminalPane({
         if (isMobile && !document.hidden) claimControl();
         requestSize();
       };
+      const sock = ws;
       ws.onmessage = (e) => {
+        if (sock !== ws) return;
         const d = typeof e.data === 'string' ? e.data : new Uint8Array(e.data as ArrayBuffer);
+        // Under the reader nothing is parsed: frames wait, in order, for the
+        // terminal to be shown (see `hold`).
+        if (modeRef.current === 'reader') { hold(d); return; }
+        if (held.length) flushHeld();
+        handle(d);
+      };
+      ws.onclose = (e) => {
+        if (sock !== ws) return;
+        onClose(e);
+      };
+      ws.onerror = () => { try { sock.close(); } catch { /* ignore */ } };
+    };
+    const handle = (d: string | Uint8Array) => {
         // Control frame: a leading NUL sentinel that raw pty output never
         // produces — handle it instead of writing to the term.
         if (typeof d === 'string' && d.startsWith(MODE_CTRL)) {
@@ -868,8 +915,8 @@ export default function TerminalPane({
           if (canonical && screenHasContent(true)) restored = true;
           if (bootLive && screenHasContent()) endBoot();
         });
-      };
-      ws.onclose = (e) => {
+    };
+    const onClose = (e: CloseEvent) => {
         // A real process exit requires relaunch. Other closes get a bounded
         // reconnect budget: browsers cannot distinguish admission refusal
         // from a transient drop, so prolonged outages also need manual retry.
@@ -883,6 +930,8 @@ export default function TerminalPane({
         }
         setConn('closed');
         if (closedByUs) return;
+        // Nobody is looking: reconnect when the terminal is shown instead.
+        if (modeRef.current === 'reader') { parked = true; held = []; heldBytes = 0; return; }
         if (e.code === 1008) { waiting = 'paused'; setConn('paused'); return; }
         // Ask the origin before charging the failure: only a server that
         // answers can have refused this socket. One that does not is
@@ -894,12 +943,44 @@ export default function TerminalPane({
             serverReach.reportOutage();
             return;
           }
+          // The reader may have been shown while the server was asked.
+          if (modeRef.current === 'reader') { parked = true; held = []; heldBytes = 0; return; }
           const retryDelay = terminalRetryDelay(++connectionFailures, e.code);
           if (retryDelay === null) { waiting = 'paused'; setConn('paused'); return; }
           retry = setTimeout(connect, retryDelay);
         });
-      };
-      ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
+    };
+
+    // A terminal kept under the reader must not spend the reader's CPU on an
+    // agent's output. Its frames are held, unparsed, and replayed in order when
+    // it is shown — a quiet agent's few lines cost nothing either way. Past
+    // HIDDEN_HOLD_BYTES the agent is busy enough that a fresh canonical
+    // snapshot is cheaper than the backlog, so the socket is closed (no more
+    // bandwidth either) and the terminal reattaches when shown. The last screen
+    // stays painted until that snapshot replaces it, so the switch is still
+    // instant; it is just a few frames stale for one round trip.
+    let held: (string | Uint8Array)[] = [];
+    let heldBytes = 0;
+    let parked = false;
+    const flushHeld = () => {
+      const backlog = held;
+      held = []; heldBytes = 0;
+      for (const d of backlog) handle(d);
+    };
+    const hold = (d: string | Uint8Array) => {
+      held.push(d);
+      heldBytes += typeof d === 'string' ? d.length : d.byteLength;
+      if (heldBytes <= HIDDEN_HOLD_BYTES) return;
+      held = []; heldBytes = 0; parked = true;
+      const sock = ws;
+      ws = null;
+      controllerRef.current = false;
+      setHasInputControl(false);
+      try { sock?.close(); } catch { /* ignore */ }
+    };
+    revealRef.current = () => {
+      if (parked) { parked = false; connectionFailures = 0; waiting = null; connect(); }
+      else if (held.length) flushHeld();
     };
     // Manual restart: clear the dead run's screen so the content probe watches
     // the new process paint, not leftovers.
@@ -928,6 +1009,9 @@ export default function TerminalPane({
     let resyncTimer: ReturnType<typeof setTimeout> | null = null;
     const requestSize = () => {
       const box = hostRef.current;
+      // A terminal kept under the reader is not what anyone is looking at; its
+      // size request is made when it is shown again (the active effect below).
+      if (modeRef.current === 'reader') return;
       if (!box || box.clientWidth < 40 || box.clientHeight < 40) return;
       try {
         const d = fit.proposeDimensions();
@@ -1303,12 +1387,13 @@ export default function TerminalPane({
       term.dispose();
       termRef.current = null;
       resyncRef.current = () => {};
+      revealRef.current = () => {};
       reconcileScrollRef.current = () => {};
       claimRef.current = () => {};
       uploadImagesRef.current = () => {};
       if (imageStatusTimerRef.current) window.clearTimeout(imageStatusTimerRef.current);
     };
-  }, [session.id, reading]);
+  }, [session.id, terminalBuilt]);
 
   // Switch theme live without tearing down the terminal / connection.
   useEffect(() => {
@@ -1334,11 +1419,17 @@ export default function TerminalPane({
 
   // A retained pane can receive output while display:none. Reconcile xterm's
   // logical and DOM scroll positions as soon as any cached tile becomes visible,
-  // including non-focused panes in a group.
+  // including non-focused panes in a group. Coming out from under the reader
+  // also re-reports its size: requests are held while reading, and the window
+  // may have changed meanwhile (the server ignores a non-controller's report).
   useLayoutEffect(() => {
-    if (!visible) return;
+    if (!reading) revealRef.current();
+  }, [reading]);
+  useLayoutEffect(() => {
+    if (!visible || reading) return;
     reconcileScrollRef.current();
-  }, [visible]);
+    resyncRef.current();
+  }, [visible, reading]);
 
   // Move keyboard focus into the terminal whenever this pane becomes the active
   // one (e.g. selected from the sidebar, or newly created).
@@ -1354,6 +1445,16 @@ export default function TerminalPane({
     }, 0);
     return () => clearTimeout(t);
   }, [active, reading]);
+
+  // The first switch to the reader should paint text, not wait for the network.
+  // Once the terminal is up, read the reader's first window into its store —
+  // only for an agent pane that is being looked at, and only once (the store
+  // keeps it): one bounded tail read, no polling and no history fill.
+  useEffect(() => {
+    if (!active || reading || readerBuilt || !canRender || isRemote(session.cli)) return;
+    const timer = setTimeout(() => prewarmConversation(session.id), READER_PREWARM_MS);
+    return () => clearTimeout(timer);
+  }, [active, reading, readerBuilt, canRender, session.id, session.cli]);
 
   // Cancel terminal-only interactions on a surface switch.
   useEffect(() => {
@@ -1554,26 +1655,38 @@ export default function TerminalPane({
           `none` so the drag handler above owns terminal panning, and that also
           forbids the browser from panning anything nested inside — including
           the reader's own scroller. */}
+      {/* Both surfaces share one grid cell. Whichever is not being read stays
+          laid out at full size but invisible and inert, so switching keeps the
+          terminal's grid and both scroll positions exactly as they were — no
+          refit, no reattach, no refetch (.surface-off in styles.css). */}
       <div className={`term-host${reading ? ' reading' : ''}${imageDrop && !reading ? ' image-drop' : ''}`} ref={frameRef}>
-        {!reading && <div className="term-fill" ref={hostRef} />}
-        {reading && visible !== false && (
+        {terminalBuilt && (
+          <div className={`term-fill${reading ? ' surface-off' : ''}`} ref={hostRef}
+            aria-hidden={reading || undefined} {...(reading ? INERT : {})} />
+        )}
+        {readerBuilt && (
           // The zoom is one number for both modes: the terminal spends it on its
           // font size, the reader on --cx-base — the size every type size in the
           // conversation grammar is expressed against (conversation.css). Same
           // 13px at 100%, so the two forms of the same session read alike.
           <div
-            className="pane-reader"
+            className={`pane-reader${readerShown ? '' : ' surface-off'}`}
             style={{ '--cx-base': `${(13 * zoom) / 100}px`, flexDirection: 'column' } as CSSProperties}
+            aria-hidden={!readerShown || undefined}
+            {...(readerShown ? {} : INERT)}
             onMouseDown={(e) => e.stopPropagation()}
           >
             <ConversationView
               session={session}
+              // A kept reader under the terminal does no work: no polling, no
+              // history fill, and it cannot acknowledge a reply nobody can see.
+              paused={!readerShown}
               isMobile={isMobile}
               searchOpen={searchOpen}
               onCloseSearch={() => setSearchOpen(false)}
               onAttachPicker={setReaderAttach}
               onHead={(head) => { setReaderFacts(head); setReaderLoaded(head?.loaded); }}
-              seen={seen}
+              seen={readerShown ? seen : undefined}
             />
           </div>
         )}

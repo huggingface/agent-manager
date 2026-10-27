@@ -121,7 +121,7 @@ await build({
       session={{id,cli:'claude',name:'Switch fixture',state:config.state||'waiting',
         running:config.running!==false,everStarted:config.everStarted!==false,path:null,createdAt:new Date().toISOString()}}
       cli={{id:'claude',label:'Fixture',color:'#777'}} mode={config.mode||'reader'} theme="light" zoom={config.zoom||100}
-      isMobile={!!config.mobile} focused active visible onClose={()=>{}} /></div>; }
+      isMobile={!!config.mobile} focused active visible warm={config.warm!==false} onClose={()=>{}} /></div>; }
     function App(){ return <>
       <Pane id={config.id||'switch'} />
       {config.second && <Pane id={config.second === 'same' ? (config.id||'switch') : 'second'} />}
@@ -585,22 +585,45 @@ try {
   await toTerminal();
   await toReader();
   const idle = await p.evaluate(() => ({ live: window.live, total: window.sockets.length }));
-  check('leaving the terminal closes its transport and keeps none open', () => {
-    assert.equal(idle.live, 0, JSON.stringify(idle));
+  check('leaving the terminal keeps its one transport, not a second', () => {
+    assert.equal(idle.live, 1, JSON.stringify(idle));
     assert.equal(idle.total, 1);
   });
-  const bleed = await p.evaluate(() => ({ fill: document.querySelectorAll('.term-fill').length,
-    xterm: document.querySelectorAll('.xterm').length, cover: document.querySelectorAll('.term-preview, .term-boot').length }));
-  check('nothing of the terminal is left rendered under the reader', () => {
-    assert.deepEqual(bleed, { fill: 0, xterm: 0, cover: 0 });
+  const under = await p.evaluate(() => {
+    const fill = document.querySelector('.term-fill');
+    const rows = document.querySelector('.xterm-rows');
+    return { fills: document.querySelectorAll('.term-fill').length, off: fill?.classList.contains('surface-off'),
+      inert: fill?.hasAttribute('inert'), hidden: fill?.getAttribute('aria-hidden'),
+      seen: rows ? getComputedStyle(rows).visibility : null,
+      cover: document.querySelectorAll('.term-preview, .term-boot').length,
+      readerOn: getComputedStyle(document.querySelector('.cxv-body')).visibility };
   });
+  check('the terminal under the reader is invisible, inert and uncovered', () => {
+    assert.deepEqual(under, { fills: 1, off: true, inert: true, hidden: 'true', seen: 'hidden', cover: 0, readerOn: 'visible' });
+  });
+  // Held while reading: a window resize, a paste, a pointer press. None of them
+  // may claim the PTY or report a size for a terminal nobody is looking at.
+  const heldFrom = await p.evaluate(() => window.wsSends.length);
+  await p.setViewportSize({ width: 900, height: 640 });
+  await p.evaluate(() => {
+    const fill = document.querySelector('.term-fill');
+    fill.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'mouse' }));
+    window.dispatchEvent(new Event('focus'));
+  });
+  await p.waitForTimeout(300);
+  const held = await p.evaluate((from) => window.wsSends.slice(from).map((d) => JSON.parse(d).t), heldFrom);
+  check('while reading it neither claims nor resizes the PTY', () => assert.deepEqual(held, []));
+  await toTerminal();
+  const resent = await p.waitForFunction((from) => window.wsSends.slice(from).map((d) => JSON.parse(d)).find((m) => m.t === 'r') || null,
+    heldFrom, { timeout: 3000 }).then((h) => h.jsonValue()).catch(() => null);
+  check('and reports its size again once it is shown', () => assert.ok(resent, 'no size request after the reader'));
+  await p.setViewportSize({ width: 1000, height: 700 });
+  await toReader();
   for (let i = 0; i < 6; i++) { await toTerminal(); await toReader(); }
   const churn = await p.evaluate(() => ({ live: window.live, total: window.sockets.length,
     emulators: document.querySelectorAll('.xterm').length }));
-  check('six more round trips open one transport each and leak none', () => {
-    assert.equal(churn.live, 0, JSON.stringify(churn));
-    assert.equal(churn.total, 7, JSON.stringify(churn));
-    assert.equal(churn.emulators, 0);
+  check('six more round trips reuse the same transport and emulator', () => {
+    assert.deepEqual(churn, { live: 1, total: 1, emulators: 1 });
   });
   await toTerminal();
   const duplication = await p.evaluate(() => {
@@ -609,6 +632,126 @@ try {
   });
   check('the restored screen is not replayed twice', () => {
     assert.equal(duplication.prompts, 2, JSON.stringify(duplication));
+  });
+
+  console.log('\nswitching is a visibility change');
+  // The operator's ask: instant, with no visible reload. Pinned as mechanism,
+  // not wall-clock: once both surfaces exist, the toggle shows the other one in
+  // the same task (flushSync, then read the DOM — no await in between), opens
+  // no transport, re-reads no transcript window, rebuilds no emulator, and
+  // remounts no reader. The only request is the store's incremental `after`
+  // poll, which catches up on whatever was written while the reader was away.
+  await open({ id: 'instant', payload: [bigScreen], count: 160 });
+  await settleReader();
+  await toTerminal();
+  await p.waitForTimeout(300);
+  const flips = await p.evaluate(() => {
+    const before = { sockets: window.sockets.length, xterm: document.querySelector('.xterm'), body: document.querySelector('.cxv-body') };
+    window.fixture.reset();
+    const seen = (sel) => { const el = document.querySelector(sel); return !!el && getComputedStyle(el).visibility === 'visible'
+      && el.getBoundingClientRect().height > 0; };
+    const out = [];
+    for (let i = 0; i < 4; i++) {
+      window.fixture.change({ mode: 'reader' });
+      out.push({ to: 'reader', reader: seen('.cxv-body'), rows: document.querySelectorAll('.cxv-body [data-x]').length,
+        terminal: seen('.xterm-rows') });
+      window.fixture.change({ mode: 'terminal' });
+      out.push({ to: 'terminal', terminal: seen('.xterm-rows'), text: (document.querySelector('.xterm-rows')?.textContent || '').includes('retained scrollback'),
+        reader: seen('.cxv-body'), cover: !!document.querySelector('.term-preview, .term-boot') });
+    }
+    return { out, sockets: window.sockets.length - before.sockets,
+      sameXterm: document.querySelector('.xterm') === before.xterm, sameReader: document.querySelector('.cxv-body') === before.body };
+  });
+  await p.waitForTimeout(500);
+  const reads = await p.evaluate(() => window.marks.filter((m) => m.name.startsWith('trace.')).map((m) => m.name));
+  check('each toggle shows the other surface synchronously, with content and no cover', () => {
+    for (const f of flips.out) {
+      if (f.to === 'reader') assert.ok(f.reader && f.rows > 0 && !f.terminal, JSON.stringify(f));
+      else assert.ok(f.terminal && f.text && !f.reader && !f.cover, JSON.stringify(f));
+    }
+  });
+  check('no transport, emulator or reader is rebuilt', () => {
+    assert.equal(flips.sockets, 0);
+    assert.equal(flips.sameXterm, true, 'the xterm element was replaced');
+    assert.equal(flips.sameReader, true, 'the reader was remounted');
+  });
+  check(`no transcript window is re-read (${JSON.stringify(reads)})`, () => {
+    assert.deepEqual(reads.filter((r) => r !== 'trace.after'), []);
+  });
+  console.log('\nthe first switch to the reader does not wait for the network');
+  // A pane shown in terminal mode reads the reader's first window ahead of the
+  // toggle: one tail read, no history pages, no polling. The first switch then
+  // paints text in the same task, from the warm store, with a fresh browser.
+  await p.evaluate(() => { try { localStorage.clear(); } catch {} });
+  await p.evaluate((screen) => window.fixture.mount({ mode: 'terminal', id: 'prewarm', payload: [screen], slowTrace: 0 }), shellScreen);
+  await p.evaluate(() => window.fixture.reset());
+  await p.waitForSelector('.xterm');
+  await p.waitForTimeout(1500);
+  const ahead = await p.evaluate(() => window.marks.filter((m) => m.name.startsWith('trace.')).map((m) => m.name));
+  const firstOpen = await p.evaluate(() => {
+    window.fixture.change({ mode: 'reader' });
+    return document.querySelectorAll('.cxv-body [data-x]').length;
+  });
+  check(`one tail read ahead of the toggle (${JSON.stringify(ahead)}), and the first switch paints at once`, () => {
+    assert.deepEqual(ahead, ['trace.tail']);
+    assert.ok(firstOpen > 0, 'the first reader open waited for the network');
+  });
+
+  console.log('\nunder the reader the terminal does no work');
+  // The review of #205: a terminal kept under the reader still parsed every
+  // frame an agent printed. Frames are now held unparsed and replayed in order
+  // when it is shown; past 64 KiB the socket is closed and it reattaches.
+  await open({ id: 'quiet', payload: [shellScreen] });
+  await p.evaluate(() => { window.sockets.length = 0; });
+  await toTerminal();
+  await toReader();
+  const emit = (data) => p.evaluate((d) => { for (const s of window.sockets) if (s.readyState === 1) s.onmessage?.({ data: d }); }, data);
+  const screenText = () => p.evaluate(() => document.querySelector('.xterm-rows')?.textContent || '');
+  await emit('quiet line one\r\n'); await emit('quiet line two\r\n');
+  await p.waitForTimeout(200);
+  const whileHidden = await screenText();
+  await p.evaluate(() => window.fixture.change({ mode: 'terminal' }));
+  await p.waitForFunction(() => (document.querySelector('.xterm-rows')?.textContent || '').includes('quiet line two'), null, { timeout: 3000 }).catch(() => {});
+  const afterShow = await screenText();
+  const quietSockets = await p.evaluate(() => ({ live: window.fixture.live(), total: window.sockets.length }));
+  check('a quiet agent\'s output is held while reading and shown, in order, on return', () => {
+    assert.ok(!whileHidden.includes('quiet line'), 'the hidden terminal parsed output nobody could see');
+    assert.ok(afterShow.indexOf('quiet line one') >= 0 && afterShow.indexOf('quiet line one') < afterShow.indexOf('quiet line two'), afterShow.slice(-200));
+    assert.deepEqual(quietSockets, { live: 1, total: 1 }, 'and on the same socket');
+  });
+  await open({ id: 'chatty', payload: [shellScreen] });
+  await p.evaluate(() => { window.sockets.length = 0; });
+  await toTerminal();
+  await toReader();
+  const chunk = Array.from({ length: 400 }, (_, i) => `busy output line ${i} with some padding to fill the frame`).join('\r\n') + '\r\n';
+  for (let i = 0; i < 8; i++) await emit(chunk);
+  const chatty = await p.evaluate(() => ({ live: window.fixture.live(), total: window.sockets.length,
+    parsed: (document.querySelector('.xterm-rows')?.textContent || '').includes('busy output') }));
+  check(`a busy agent past 64 KiB detaches instead of buffering (${JSON.stringify(chatty)})`, () => {
+    assert.deepEqual(chatty, { live: 0, total: 1, parsed: false });
+  });
+  const reattach = await p.evaluate(async () => {
+    const t0 = performance.now();
+    window.fixture.change({ mode: 'terminal' });
+    const stale = (document.querySelector('.xterm-rows')?.textContent || '').includes('you/workspaces $');
+    while (performance.now() - t0 < 5000 && window.fixture.live() !== 1) await new Promise((r) => setTimeout(r, 10));
+    return { stale, live: window.fixture.live(), total: window.sockets.length,
+      cover: !!document.querySelector('.term-preview, .term-boot') };
+  });
+  check('shown again, it paints the last screen at once and reattaches behind it', () => {
+    assert.deepEqual(reattach, { stale: true, live: 1, total: 2, cover: false });
+  });
+
+  // Outside the app's warm set a pane keeps only the view it shows, as before.
+  await open({ id: 'released', payload: [shellScreen], warm: false });
+  await settleReader();
+  await toTerminal();
+  const releasedReader = await p.evaluate(() => document.querySelectorAll('.pane-reader').length);
+  await toReader();
+  const releasedTerminal = await p.evaluate(() => ({ live: window.fixture.live(), xterm: document.querySelectorAll('.xterm').length }));
+  check('a pane outside the warm set lets the hidden view go', () => {
+    assert.equal(releasedReader, 0, 'the reader stayed mounted under the terminal');
+    assert.deepEqual(releasedTerminal, { live: 0, xterm: 0 }, 'the terminal stayed attached under the reader');
   });
 
   console.log('\ntwo panes stay independent');
