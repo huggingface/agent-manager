@@ -716,7 +716,7 @@ try {
     const log = f.hfLog();
     check('API: the restore succeeds over the bucket API', res.code === 0 && f.restored(), res.out.slice(-800));
     check('API: every adapter is planned and applied over the API',
-      (log.match(/ --plan /g) || []).length === 7 && (log.match(/ --apply /g) || []).length === 7, log);
+      (log.match(/ --plan /g) || []).length === 8 && (log.match(/ --apply /g) || []).length === 8, log);
     check('API: nothing is read from the mount directly', rsyncTrace(f.trace, 'mount').runs === 0, JSON.stringify(rsyncTrace(f.trace, 'mount')));
     check('API: copies from the local mirror still run in parallel', rsyncTrace(f.trace, 'other').most > 1, JSON.stringify(rsyncTrace(f.trace, 'other')));
     check('API: exactly the newest five Claude backups come back', f.backups());
@@ -742,8 +742,8 @@ try {
     check('no token: restores from the mount, with a hint to add HF_TOKEN',
       res.code === 0 && f.restored() && f.backups() && f.hfLog() === ''
         && /bucket API not usable \(HF_TOKEN is not set; add an HF_TOKEN that can read the bucket/.test(text), text.slice(-800));
-    check('mount reads run strictly one at a time across all seven adapters',
-      mount.runs >= 7 && mount.most === 1, JSON.stringify(mount));
+    check('mount reads run strictly one at a time across all eight adapters',
+      mount.runs >= 8 && mount.most === 1, JSON.stringify(mount));
     fs.rmSync(f.r, { recursive: true, force: true });
   }
 
