@@ -74,7 +74,7 @@ export default function LaunchPicker({ cli, value, onChange, disabled }: {
         <select aria-label="Model" title={title} value={value.model || ''} disabled={disabled} onChange={(e) => setModel(e.target.value)}>
           <option value="">Model: CLI default</option>
           {entry.models.map((m) => (
-            <option key={m.id} value={m.id}>{m.label && m.label !== m.id ? `${m.label} · ${m.id}` : m.id}</option>
+            <option key={m.id} value={m.id}>{m.label || m.id}</option>
           ))}
         </select>
       )}
