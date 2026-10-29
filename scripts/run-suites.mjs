@@ -139,7 +139,9 @@ function runTask(task, { stream, env }) {
   return new Promise((resolve) => {
     const t0 = performance.now();
     const child = spawn(task.cmd[0], task.cmd.slice(1), {
-      cwd: task.cwd, env: { ...process.env, ...env }, detached: true,
+      // A test server must never open the signed-in Claude Code on the real
+      // HOME to read its model picker (server/src/model-catalog.js).
+      cwd: task.cwd, env: { AM_CLAUDE_MODEL_PROBE: '0', ...process.env, ...env }, detached: true,
       stdio: ['ignore', stream ? 'inherit' : 'pipe', stream ? 'inherit' : 'pipe'],
     });
     const chunks = [];

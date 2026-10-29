@@ -89,6 +89,13 @@ const SOURCES = {
     const version = /\d+\.\d+\.\d+/.exec(await runList('claude --version'))?.[0] || null;
     if (!force && version && previous?.version === version && previous.picker && previous.models?.length) return previous;
     const aliases = CLAUDE_ALIASES.map((id) => ({ id, label: `${id} (latest)` }));
+    // Without a credential the picker never opens (sign-in screens instead),
+    // so don't start Claude at all.
+    if (!cliCatalog().find((c) => c.id === 'claude')?.ready) {
+      return { models: aliases, source: 'aliases (Claude Code is not signed in)', version };
+    }
+    // Off for test servers (scripts/run-suites.mjs), which run on the real HOME.
+    if (process.env.AM_CLAUDE_MODEL_PROBE === '0') return { models: aliases, source: 'aliases (picker probe disabled)', version };
     try {
       const known = claudeIdsIn(await runList(`grep -aoE 'claude-[a-z]+-[0-9][0-9a-z-]{0,12}' "$(readlink -f "$(command -v claude)")"`));
       const probe = path.join(STATE_DIR, 'claude-model-probe');

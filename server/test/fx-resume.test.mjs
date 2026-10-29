@@ -39,7 +39,7 @@ console.log('the catalog entry');
 const fx = cliById('fx');
 check('fx is registered', !!fx, true);
 check('binary is fx', fx.bin, 'fx');
-check('a fresh launch is bare fx', fx.run, 'fx');
+check('a fresh launch is bare fx', fx.run(''), 'fx');
 check('resume is by exact id', fx.resume(ID), `fx --resume ${ID}`);
 // `fx ask` runs ONE request and exits, which would close the pane instead of
 // opening it, so fx deliberately has no seeded-launch form.

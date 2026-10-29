@@ -52,7 +52,7 @@ export function get(id) {
   return sessions.find((s) => s.id === id) || null;
 }
 
-export function create({ name, cli, path }) {
+export function create({ name, cli, path, model, effort }) {
   const cleanName = (name || '').trim() || 'session';
   const id = `${slugify(cleanName)}-${crypto.randomBytes(3).toString('hex')}`;
   // `path` is the workspace-relative folder the agent runs in, chosen at
@@ -71,6 +71,10 @@ export function create({ name, cli, path }) {
     sessionUuid: crypto.randomUUID(),
     createdAt: new Date().toISOString(),
     everStarted: false,
+    // The model / reasoning effort chosen at creation, passed as flags on
+    // every launch (config.js launchFlags). Absent = the CLI's default.
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
   };
   sessions.push(session);
   persist();
