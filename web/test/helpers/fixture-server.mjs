@@ -25,8 +25,12 @@ const assertPortFree = (port) => new Promise((resolve, reject) => {
   probe.listen(port, '127.0.0.1', () => probe.close(() => resolve()));
 });
 
-/** `port` defaults to a free one, so suites using this can run side by side. */
-export async function startFixtureServer({ port, publicDir, tag = 'am-fixture-' }) {
+/**
+ * `port` defaults to a free one, so suites using this can run side by side.
+ * `seed({ dataDir, binDir })` runs before the server starts, for state the API
+ * can no longer create (a session of a deprecated CLI, say).
+ */
+export async function startFixtureServer({ port, publicDir, tag = 'am-fixture-', seed = null }) {
   port ??= await freePort();
   // Never seed a listener this helper did not start: with the port taken, the
   // child dies of EADDRINUSE while /api/health from the OTHER server answers
@@ -40,6 +44,7 @@ export async function startFixtureServer({ port, publicDir, tag = 'am-fixture-' 
   // `--version` fails at once, as the old stub's 30s timeout did in effect,
   // without leaving a `sleep 3600` behind for every server this starts.
   fs.writeFileSync(path.join(binDir, 'claude'), '#!/bin/sh\n[ "$1" = --version ] && exit 1\necho "fixture claude stub — nothing to see"; sleep 3600\n', { mode: 0o755 });
+  if (seed) await seed({ dataDir, binDir });
 
   // No skill publishing from a test server (SPACE_ID would fan this checkout's
   // templates into every live agent's skills dir), no production hostname.
