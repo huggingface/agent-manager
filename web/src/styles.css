@@ -2370,5 +2370,8 @@ a.btn-ghost { text-decoration: none; }
 
 /* A deprecated CLI's existing session (DeprecatedNotice.tsx): a quiet tag on
    rows and cards, a slim line under the pane header. */
-.deprecated-tag { flex: none; font-size: 10px; line-height: 1; padding: 2px 5px; border-radius: 4px; color: var(--warn, #c9972f); border: 1px solid color-mix(in srgb, var(--warn, #c9972f) 45%, var(--border)); white-space: nowrap; }
-.deprecated-banner { flex: none; padding: 5px 11px; font-size: 12px; line-height: 1.4; background: color-mix(in srgb, var(--warn, #c9972f) 10%, var(--panel)); border-bottom: 1px solid color-mix(in srgb, var(--warn, #c9972f) 35%, var(--border)); }
+.deprecated-tag { flex: none; font-size: 10px; line-height: 1; padding: 2px 5px; border-radius: 4px; color: var(--warn, #c9972f); border: 1px solid color-mix(in srgb, var(--warn, #c9972f) 45%, var(--border)); white-space: nowrap; transition: opacity 0.12s ease-out; }
+/* the row's hover actions sit on top of it, as they do on .age */
+.row:hover .deprecated-tag { opacity: 0; }
+/* above the terminal's boot/exit overlays, which start right under the header */
+.deprecated-banner { position: relative; z-index: 6; flex: none; padding: 5px 11px; font-size: 12px; line-height: 1.4; background: color-mix(in srgb, var(--warn, #c9972f) 10%, var(--panel)); border-bottom: 1px solid color-mix(in srgb, var(--warn, #c9972f) 35%, var(--border)); }
