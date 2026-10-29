@@ -10,6 +10,7 @@ import {
 } from '../lib/settingsSaves';
 import { SunGlyph, MoonGlyph, RefreshGlyph, RefreshOffGlyph, InfoGlyph } from './icons';
 import Logo from './Logo';
+import { DeprecatedTag, deprecationNote } from './DeprecatedNotice';
 import LazyPanel from './LazyPanel';
 import type { SettingsPage as Page } from './SettingsShell';
 
@@ -514,6 +515,7 @@ export default function SettingsView({
                       />
                       <Logo cli={c.id} size={14} tint={c.color} />
                       <span className="ar-name">{c.label}</span>
+                      <DeprecatedTag note={deprecationNote(c)} />
                       <span className="spacer" />
                       {c.available && c.version && <span className="ar-ver mono">v{c.version}</span>}
                       <span className={`ar-state${ready ? ' ok' : ''}`}>{!c.available ? 'unavailable' : ready ? 'ready' : 'needs setup'}</span>

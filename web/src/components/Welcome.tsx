@@ -26,7 +26,7 @@ const ITEMS: { icon: ReactNode; title: string; body: ReactNode }[] = [
   {
     icon: <PlusGlyph />,
     title: 'Use any agent or harness in one click',
-    body: <>Claude Code, Codex, Gemini, opencode, Hermes, OpenClaw, fx and more, side by side. Hit <b>+</b>, pick one, and it walks you through login on first launch.</>,
+    body: <>Claude Code, Codex, opencode, Hermes, OpenClaw, fx and more, side by side. Hit <b>+</b>, pick one, and it walks you through login on first launch.</>,
   },
   {
     icon: <KeyGlyph />,

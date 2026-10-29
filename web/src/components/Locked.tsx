@@ -42,7 +42,7 @@ const MOCK: MockItem[] = [
     { name: 'reviewer', cli: 'codex', tint: '#5eb6a6', state: 'waiting' },
   ] },
   { name: 'refactor-bot', cli: 'claude', tint: '#d97757', state: 'idle' },
-  { name: 'gemini-cli-1', cli: 'gemini', tint: '#4796e3', state: 'stopped' },
+  { name: 'opencode-1', cli: 'opencode', tint: '#8a93a0', state: 'stopped' },
   { name: 'shell-1', cli: 'shell', tint: '#8aa0ad', state: 'stopped' },
 ];
 
@@ -260,7 +260,7 @@ api.duplicate_repo(
           <div>
             <Title>Set up the Agent Manager in two steps</Title>
             <p className="locked-lead">
-              A private cloud workspace for Claude Code, Codex, Gemini CLI and friends —
+              A private cloud workspace for Claude Code, Codex, opencode and friends —
               dispatch agents from anywhere, they keep working when you close the tab.
             </p>
           </div>

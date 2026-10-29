@@ -61,6 +61,11 @@ export interface Cli {
   // Present when opening a session shows a sign-in that completes from a Space;
   // `note` is the one thing the pane does not make obvious. null = unconfirmed.
   signIn?: { note: string | null } | null;
+  // Existing sessions keep working; nothing new may be created with it.
+  // `replacement` is the CLI id to use instead; `deprecationNote` the notice.
+  deprecated?: boolean;
+  replacement?: string;
+  deprecationNote?: string;
 }
 
 // Pane arrangement for a group's tiles. Absent/null = auto (grow with agents).
@@ -100,6 +105,9 @@ export const STATE_LABEL: Record<SessionState, string> = {
 // no trace clock, no Overview card, and never count as a group's agents.
 export const PASSIVE_CLIS = ['files', 'trace'];
 export const isPassive = (cli: string) => PASSIVE_CLIS.includes(cli);
+
+// The CLIs a picker may offer for a NEW session: everything but the deprecated.
+export const creatable = (clis: Cli[]) => clis.filter((c) => !c.deprecated);
 
 // A remote agent: a conversation with an agent running on another machine. It is
 // an agent (card, digest, light) but has no process here, so it is NOT passive

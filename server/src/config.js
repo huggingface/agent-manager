@@ -214,6 +214,9 @@ const CODEX_CONFIRM = { pasted: /\[PastedContent\d+chars\]/, busy: /esc to inter
   elapsed: /(Working \()(?:\d+h )?(?:\d+m )?\d+s( \u2022 esc to interrupt\))/g };
 const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
 
+const GEMINI_DEPRECATED = 'Gemini CLI is deprecated: Google replaced it with Antigravity CLI. '
+  + 'This session still works; start new ones with Antigravity.';
+
 export const CLIS = [
   { id: 'shell',    label: 'Shell',       bin: 'bash',     color: '#8aa0ad', run: 'exec bash -il',  cont: null },
   { id: 'files',    label: 'Files',       bin: null,       color: '#d99a2b', run: null,             cont: null },
@@ -239,7 +242,16 @@ export const CLIS = [
     // -i because Codex's variadic flag would otherwise consume the prompt.
     withPrompt: (q, images = []) => `${codexCommand()}${images.length ? ` ${images.map((image) => `-i ${image}`).join(' ')}` : ''} ${q}`,
     secrets: ['OPENAI_API_KEY'], setup: setupHint('OPENAI_API_KEY') },
+  // Deprecated: Google replaced Gemini CLI with Antigravity CLI. New sessions
+  // are refused (index.js assertCreatable); existing ones launch as before.
+  // The install, hooks and state handling go one release later.
   { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', run: 'gemini',         cont: null, resizeMode: 'repaint',
+    deprecated: {
+      replacement: 'antigravity',
+      note: GEMINI_DEPRECATED,
+      refusal: 'Gemini CLI is deprecated: Google replaced it with Antigravity CLI, so new Gemini sessions '
+        + 'can no longer be created. Existing ones keep working; start new ones with Antigravity CLI.',
+    },
     npm: '@google/gemini-cli',
     withPrompt: (q) => `gemini -i ${q}`, // -i = interactive session seeded with the prompt
     secrets: ['GEMINI_API_KEY'], setup: setupHint('GEMINI_API_KEY') },
@@ -350,6 +362,11 @@ export function cliCatalog() {
     // Space, and anything the operator must know to use it. null = we did not
     // confirm one, so the UI must not invent instructions.
     signIn: IN_SESSION_SIGN_IN[c.id] || null,
+    // A deprecated CLI stays in the catalog so its existing sessions keep a
+    // label and colour, but the UI offers it for nothing new. `replacement` is
+    // the id to point people at; `note` is the one sentence every notice shows.
+    deprecated: !!c.deprecated,
+    ...(c.deprecated ? { replacement: c.deprecated.replacement, deprecationNote: c.deprecated.note } : {}),
   }));
 }
 

@@ -87,7 +87,6 @@ const compactWhen = (iso: string, zone: string) => {
 };
 
 export default function CronSettings({ clis }: { clis: Cli[] }) {
-  const agents = useMemo(() => clis.filter((cli) => !EXCLUDED_CLIS.has(cli.id)), [clis]);
   const [jobs, setJobs] = useState<api.CronJob[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
@@ -106,6 +105,10 @@ export default function CronSettings({ clis }: { clis: Cli[] }) {
   const [custom, setCustom] = useState('0 9 * * *');
   const [tz, setTz] = useState(browserZone);
   const [runOnRestart, setRunOnRestart] = useState(true);
+  // A deprecated CLI is not offered for new jobs, but a job that already names
+  // one keeps it while edited instead of being switched to something else.
+  const editingCli = jobs.find((job) => job.id === editingId)?.agent.cli;
+  const agents = useMemo(() => clis.filter((cli) => !EXCLUDED_CLIS.has(cli.id) && (!cli.deprecated || cli.id === editingCli)), [clis, editingCli]);
 
   const load = async () => {
     try {

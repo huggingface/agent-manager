@@ -2367,3 +2367,8 @@ a.btn-ghost { text-decoration: none; }
   .bucket-foot { flex-direction: column-reverse; align-items: stretch; }
   .bucket-foot .btn-primary { width: 100%; }
 }
+
+/* A deprecated CLI's existing session (DeprecatedNotice.tsx): a quiet tag on
+   rows and cards, a slim line under the pane header. */
+.deprecated-tag { flex: none; font-size: 10px; line-height: 1; padding: 2px 5px; border-radius: 4px; color: var(--warn, #c9972f); border: 1px solid color-mix(in srgb, var(--warn, #c9972f) 45%, var(--border)); white-space: nowrap; }
+.deprecated-banner { flex: none; padding: 5px 11px; font-size: 12px; line-height: 1.4; background: color-mix(in srgb, var(--warn, #c9972f) 10%, var(--panel)); border-bottom: 1px solid color-mix(in srgb, var(--warn, #c9972f) 35%, var(--border)); }

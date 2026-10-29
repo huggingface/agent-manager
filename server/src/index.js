@@ -1139,8 +1139,9 @@ api.get('/api/agents', async (req, res) => {
     // Which CLIs a spawn can ask for. `ready` = a credential was found.
     // Remote agents are absent from the spawn list on purpose: creating one
     // produces a pane waiting for a human to paste its prompt onto another
-    // machine, which an agent in here cannot do.
-    clis: cliCatalog().filter((c) => isAgentCli(c.id) && c.available && !isRemote(c.id))
+    // machine, which an agent in here cannot do. A deprecated CLI is absent
+    // too: spawn refuses it (assertCreatable).
+    clis: cliCatalog().filter((c) => isAgentCli(c.id) && c.available && !isRemote(c.id) && !c.deprecated)
       .map((c) => ({ id: c.id, label: c.label, ready: c.ready })),
     generatedAt: new Date().toISOString(),
   });
@@ -1357,6 +1358,7 @@ api.post('/api/agents', promptBody, async (req, res) => {
   const cli = String(q.cli || '').trim();
   const def = cliById(cli);
   if (!def || !promptable({ cli })) return res.status(400).json({ error: `unknown agent cli '${cli}' — see clis[] in GET /api/agents` });
+  assertCreatable(cli);
   if (isRemote(cli)) return res.status(400).json({ error: 'a remote agent has to be created by the operator — it needs its prompt pasted onto another machine. Message an existing one instead.' });
   const cat = cliCatalog().find((c) => c.id === cli);
   if (!cat.available) return res.status(400).json({ error: `${def.label} is not installed here` });
@@ -2189,8 +2191,8 @@ description: "READ THIS BEFORE STARTING ANY WORK. How this workspace actually be
 
 You are running as a terminal session inside **Agent Manager**, a private cloud
 workspace (a Hugging Face Space) operated by a single user. Several AI coding
-CLIs run here side by side — Claude Code, Codex, Gemini CLI, opencode, and
-Hermes — alongside plain shells and a file browser.
+CLIs run here side by side — Claude Code, Codex, opencode, and Hermes —
+alongside plain shells and a file browser.
 
 ## Where you are
 - Your working directory is a **workspace folder** under \`/data/workspaces/\`. Everything you create here is saved.
@@ -3191,6 +3193,16 @@ api.post('/api/overview/hidden', (req, res) => {
 // Backwards-compatible flat list (used by probes/tests).
 api.get('/api/sessions', (_req, res) => res.json(sessionsWithState()));
 
+// A deprecated CLI keeps every existing session working (launch, revive,
+// prompts) but takes no new ones. Every creation path goes through
+// createSession, so this one check covers the UI, spawn and cron fires.
+function assertCreatable(cli) {
+  const def = cliById(cli);
+  if (def?.deprecated) {
+    throw new ApiError(400, 'cli-deprecated', def.deprecated.refusal);
+  }
+}
+
 // Default name for a new agent: "<cli-label-slug>-<n>", e.g. claude-code-1.
 function nextName(cli) {
   const base = slugify(cliById(cli).label) || cli;
@@ -3225,6 +3237,7 @@ api.get('/api/next-name', (req, res) => {
 // quickstart behaves identically whoever asked. Returns null for a bad path.
 function createSession({ name, cli, groupId, path: reqPath, prompt }) {
   assertLegacyCodexCreationAllowed(cli);
+  assertCreatable(cli);
   const finalName = name && name.trim() ? name.trim() : nextName(cli);
   // A remote agent's slug IS its folder and its API address, so it is minted
   // here, from the name, and never changes afterwards — the display name stays
@@ -3362,6 +3375,7 @@ function beginCronFire(job, trigger, { signal = null } = {}) {
     if (!session) {
       const invalid = cronCliError(job.agent.cli);
       if (invalid) throw new ApiError(409, 'cron-unavailable', invalid);
+      assertCreatable(job.agent.cli);
       const catalog = cliCatalog().find((candidate) => candidate.id === job.agent.cli);
       if (!catalog?.available) throw new ApiError(409, 'cron-unavailable', `${cliById(job.agent.cli).label} is not installed on this Space`);
       session = createSession({
@@ -3405,6 +3419,7 @@ api.get('/api/crons', (_req, res) => res.json({ crons: crons.list() }));
 api.post('/api/crons', (req, res) => {
   const cliError = validateCronCli(req.body);
   if (cliError) return res.status(400).json({ error: cliError });
+  assertCreatable(req.body?.agent?.cli?.trim?.());
   try {
     const job = crons.create(req.body || {});
     return res.status(201).json(job);
@@ -3417,6 +3432,10 @@ api.put('/api/crons/:id', (req, res) => {
   if (!crons.get(req.params.id)) return res.status(404).json({ error: 'not found' });
   const cliError = validateCronCli(req.body);
   if (cliError) return res.status(400).json({ error: cliError });
+  // A job that already names a deprecated CLI may still be edited, stopped or
+  // started; it only may not be switched TO one.
+  const nextCli = req.body?.agent?.cli?.trim?.();
+  if (nextCli && nextCli !== crons.get(req.params.id).agent.cli) assertCreatable(nextCli);
   try {
     return res.json(crons.update(req.params.id, req.body || {}));
   } catch (e) {
