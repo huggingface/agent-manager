@@ -14,10 +14,10 @@ One page per CLI:
 | Codex | [codex.md](codex.md) | codex-cli 0.165.0 |
 | Gemini CLI | [gemini.md](gemini.md) | 0.66.0 |
 | OpenCode | [opencode.md](opencode.md) | 1.19.5 |
-| Hermes | [hermes.md](hermes.md) | see page |
+| Hermes | [hermes.md](hermes.md) | v0.22.5 (git tag; `hermes --version` fails on this Space) |
 | OpenClaw | [openclaw.md](openclaw.md) | 2026.10.8 |
 | fx | [fx.md](fx.md) | 0.0.5 |
-| Antigravity `agy` | [agy.md](agy.md) | in flight, PR #227 |
+| Antigravity `agy` | [agy.md](agy.md) | branch `feat/antigravity-cli@8c287ea` (PR #227), not installed |
 
 Related: [reader-architecture.md](../reader-architecture.md) (reader transport
 contracts), [conversation-adapter.md](../conversation-adapter.md),
@@ -33,12 +33,12 @@ state directories), the `codex-*.md` pages (shared Codex).
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | claude | JSONL | yes, plus `subagents/` | `parseClaude` | `normalizeClaude` | `sessionUuid` | no | yes | Notification hook → marker |
 | codex | JSONL rollout | yes, plus subagent rollouts | `parseCodex` | `normalizeCodex` | `codexSessionId` / `codexRollout`, or a shared binding | yes (`task_started` → `task_complete`) | yes | OSC 9; shared: app-server status |
-| gemini | JSON/JSONL chat files | yes | **none** | **none** | **none** | no | no | Notification hook → marker; OSC 9 |
-| opencode | SQLite (WAL), shared | no, one DB for all | `readOpencode` | `normalizeOpencodeDb` | `opencodeSessionId` | see page | no | plugin events → marker |
+| gemini | JSONL, append-only, last record per id wins | yes, but a new file per launch | **none** | **none** | **none** | no | no | Notification hook → marker; OSC 9 |
+| opencode | SQLite (WAL), shared | no, one DB for all | `readOpencode` | `normalizeOpencodeDb` | `opencodeSessionId` | no | no | plugin events → marker |
 | hermes | SQLite, shared | no, one DB for all | `readHermes` | `normalizeHermesDb` | none (cwd only) | no | no | none |
 | openclaw | JSONL | yes, but one agent shared by every pane | `parseOpenClaw` | `normalizeOpenClaw` | none (single-pane only) | no | no | none |
 | fx | JSONL `events.jsonl` | yes | `parseFx` | `normalizeFx` | `fxSessionId` | yes | no | none |
-| agy | SQLite + protobuf | yes | PR #227 | PR #227 | PR #227 | — | — | — |
+| agy | SQLite `steps` with protobuf payloads; also a JSONL `transcript.jsonl` | yes | none (PR #227 adds launch only) | none | none (`agy -c` per folder) | no | no | none |
 
 All parsers and normalizers live in `server/src/traces.js`. The CLI-specific
 pages give exact lines. Locating a pane's trace for the reader, sharing and
@@ -193,4 +193,85 @@ their own signal, and nothing reconciles them.
 Ranked by how often they produce a wrong state for the operator or a
 coordinating agent. CLI-specific gaps are on each page.
 
-<!-- GAPS -->
+1. **No turn-state model; six consumers re-derive it.** The sidebar, `/wait`,
+   Overview, reader, delegations and input-required each combine different
+   signals (table above), so they disagree in normal operation. Suggestion: a
+   per-CLI turn adapter in the server that emits `{turnOpen, turnEndedAt,
+   endReason, source}` from native evidence (trace records, hooks, app-server
+   status), gated on the PTY launch being alive. Every consumer reads that.
+   Screen diff stays as the fallback, and the API says which source answered.
+2. **`working` is "the visible text changed within 4 s".** False `working`:
+   ticking footers after a turn (Claude background sub-agents), status-line
+   counters, operator typing, resize repaints (Gemini shows ~4 s of
+   `working`). False `waiting`: a static screen during a long tool call, or an
+   overlay covering the busy row (Codex Ctrl+T). Suggestion: use the busy
+   markers AM already has (`CLAUDE_CONFIRM.busy`, `CODEX_CONFIRM.busy`,
+   `server/src/config.js:210-215`) as a positive signal instead of any change,
+   and native turn-end events as the negative one.
+3. **Exact turn-end events are received and thrown away.** Claude's `Stop`
+   hook, Gemini's `AfterAgent` hook and its "session complete" OSC 9, and the
+   OpenCode plugin all reach AM, but are only used to clear input-required
+   (`server/src/runner.js:1383`, `scripts/am-input-required-hook.sh`,
+   `server/src/input-required.js:123`). Claude also writes
+   `system/turn_duration` once per finished turn, with
+   `pendingBackgroundAgentCount`. Suggestion: record a per-launch
+   `turnEndedAt` from these; cheapest fix with the largest effect.
+4. **`digest.running` sticks.** Codex `turn_aborted` (every Esc) does not clear
+   it (`server/src/traces.js:343-359`); a crash mid-turn never writes
+   `task_complete`; fx `recovery_checkpoint_set` has the same shape. The
+   Overview only hides it once the pane is `stopped`. Suggestion: handle
+   `turn_aborted`, and treat a `running` older than the current PTY launch as
+   closed.
+5. **Input-required is fragile at the edges.** A focus-in report (`ESC [ I`)
+   from clicking into a pane is not matched by `isTerminalReply`
+   (`server/src/runstate.js:93`) and so counts as operator input, clearing an
+   unpaired signal while the dialog is still open. Input-required never
+   changes `state` and is invisible to `/wait`, so a blocked agent matches
+   `waiting`. Codex OSC 9 has no close event (30 min expiry). Hermes, OpenClaw,
+   fx and agy have no signal. Suggestion: exclude focus and mouse reports from
+   `observeInput`; add `input-required` as a `/wait` state.
+6. **Coverage holes.** Gemini has no parser, reader, digest or pin at all, and
+   every restart starts a new conversation (`gemini --session-id` exists).
+   agy (PR #227) has none either. Hermes and OpenClaw have no pin: Hermes
+   merges every conversation in a folder and `hermes -c` can resume another
+   folder's conversation; a second OpenClaw pane anywhere blanks the first.
+   OpenClaw's reader maps tool results to operator prompts
+   (`server/src/traces.js:2260`).
+7. **Three attribution paths disagree.** `buildImpl` (bulk digest),
+   `digestFor`/`traceLocation` (targeted) and `findTrace` (reader, share,
+   dispatches) use different matching: exact uuid vs `includes` vs
+   `startsWith` + cwd for Claude, cwd fallback even for pinned Codex panes
+   (nested `codex exec` runs take over the card), different rules and
+   directories for OpenClaw. Suggestion: one resolver, pin-only for pinned
+   panes, used by all three.
+8. **Compaction is not modelled.** Claude's `isCompactSummary` record becomes
+   `lastPrompt` and resets the `since*` counters; Codex `compacted` is
+   ignored; the OpenCode share exporter counts replays as prompts.
+9. **Hot-database guards freeze digests during work.** OpenCode (8 s, shared
+   by all panes), Hermes (8 s) and OpenClaw (10 s) serve the previous read
+   while the store is being written. They were added for the FUSE mount; the
+   live state is on local disk now ([agent-state-checkpoints.md](../agent-state-checkpoints.md)).
+10. **Format drift is silent.** Codex stopped writing `agent_message` /
+    `user_message` / `web_search_end` in 0.147 (web searches are now
+    invisible); Claude added a dozen record types; OpenCode 1.19 added new
+    tables. Parsers ignore unknown records without a trace. Suggestion: an
+    anonymized fixture per CLI version under `server/test/`, and a counter of
+    unknown record types in a debug endpoint.
+
+## Decisions for the maintainer
+
+- Should `state` become evidence-driven (gap 1–3), with screen diff only as a
+  fallback and a `stateSource` field? This changes what `/wait` means for
+  every coordinating agent.
+- Is "turn done, background agents still running" (Claude) a state of its own,
+  or `waiting`?
+- Pin Gemini (`--session-id`), Hermes (captured id + `--resume`) and OpenClaw
+  (session key / new file after launch)?
+- Can the hot-database guards go now that the stores are on local disk?
+- For agy: read `brain/<uuid>/.system_generated/logs/transcript.jsonl` or
+  decode the protobuf `steps`? Coordinate with the agy reader work.
+
+Not verified on this Space: fx (no session, needs a gateway key), Gemini
+(no chats on disk; schema from the 0.66.0 source), Claude API-error records
+(none on disk). `hermes --version` fails with a "run `hermes pm repair`"
+error, which may need a separate look.
