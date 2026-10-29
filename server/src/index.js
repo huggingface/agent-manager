@@ -37,7 +37,7 @@ import * as crons from './crons.js';
 import { ensureClaudeDialogDefaults, trustWorkspacesRoot } from './first-run.js';
 import {
   attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning,
-  waitForInputReady, capturePane, ghosttyReady, ghosttyError, startedAt, restart as restartSession,
+  waitForInputReady, runIdOf, capturePane, ghosttyReady, ghosttyError, startedAt, restart as restartSession,
   installClaudeRepinHook, installOpencodeRepinPlugin,
 } from './runner.js';
 
@@ -800,7 +800,7 @@ const operatorName = () => process.env.SPACE_AUTHOR_NAME || process.env.AM_USER 
  * agent-to-agent API) go through here, which is what makes remote agents
  * reachable from everywhere the local ones are without duplicating either path.
  */
-async function deliver(session, { text, attachments = [] }, from, { signal = null, agentSourceId = null, requestId = null } = {}) {
+async function deliver(session, { text, attachments = [] }, from, { signal = null, agentSourceId = null, requestId = null, runId = null } = {}) {
   // The privacy lock cancels admitted-but-uncommitted work: every effect below
   // is preceded by this check, so a prompt that was still waiting for its agent
   // to become ready is dropped when the lock lands — not typed a moment later
@@ -810,13 +810,15 @@ async function deliver(session, { text, attachments = [] }, from, { signal = nul
   const scope = lockScope();
   const cancelled = () => { if (scope.signal.aborted || signal?.aborted) throw lockedError(); };
   try {
-    return await deliverInner(session, { text, attachments }, from, { cancelled, signal: scope.signal, agentSourceId, requestId });
+    return await deliverInner(session, { text, attachments }, from, { cancelled, signal: scope.signal, agentSourceId, requestId, runId });
   } finally {
     scope.release();
   }
 }
 
-async function deliverInner(session, { text, attachments }, from, { cancelled, signal, agentSourceId, requestId }) {
+// `runId` pins the delivery to one launch of the pane (boot revival's
+// message): it never starts the pane, and a replacement does not receive it.
+async function deliverInner(session, { text, attachments }, from, { cancelled, signal, agentSourceId, requestId, runId }) {
   cancelled();
   assertCodexLaunchAllowed(session);
   if (sessionRuntime.shared(session)) {
@@ -849,7 +851,8 @@ async function deliverInner(session, { text, attachments }, from, { cancelled, s
     });
     return ensureRunning(store.get(session.id) || session);
   }
-  const started = ensureRunning(session);
+  if (runId && runIdOf(session.id) !== runId) throw new ApiError(409, 'input-not-ready', 'session was stopped or restarted before this could be delivered');
+  const started = runId ? false : ensureRunning(session);
   if (started) {
     // Stop waiting the moment the lock lands rather than at readiness.
     const ready = await Promise.race([
@@ -865,7 +868,7 @@ async function deliverInner(session, { text, attachments }, from, { cancelled, s
     await sleep(500);
   }
   cancelled();
-  await sendInput(session.id, prompt, { confirmEcho: started && session.cli === 'opencode' });
+  await sendInput(session.id, prompt, { confirmEcho: started && session.cli === 'opencode', runId });
   return started;
 }
 
@@ -4127,7 +4130,8 @@ setTimeout(() => {
       : runstate.reviveOnBoot({
         ...loadAmConfig().revive,
         // The Overview reply box's path: privacy-lock aware, submit confirmed.
-        send: (s, text) => deliver(s, { text }, 'Agent Manager'),
+        send: (s, text, { runId, signal }) => deliver(s, { text }, 'Agent Manager', { signal, runId }),
+        scope: lockScope,
       }).catch((e) => console.error('[revive]', e && e.message));
     done.then(() => runstate.startRunstateWatch());
   });

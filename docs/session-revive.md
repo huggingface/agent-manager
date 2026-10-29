@@ -32,13 +32,38 @@ sends it one message:
   has lost its listeners too, and the text tells one that had finished that there
   is nothing to pick up. That avoids depending on a screen heuristic, which would
   be wrong for the turns that start or end within the 30 s between snapshots.
-- It uses the Overview reply box's delivery path (`deliver()` in `index.js`),
-  so the privacy lock and the submit confirmation apply.
-- It is sent once per boot and only to a pane that boot started. It waits up to
-  120 s for the CLI to be ready for input. A pane stopped in the meantime is not
-  started again and gets nothing.
-- It is never sent to shells (their command is simply gone), Files, Trace or
-  remote panes.
+- **Only into an empty prompt** (`runner.promptReady`). Output must have settled,
+  the CLI must not be reporting an open dialog (input-required), and a composer
+  must be positively identified and empty: a ruled box with the cursor in it, the
+  bottom-most prompt marker with no menu or dialog hint below it, or OpenCode's
+  `┃ … ╹` box. A quiet screen alone is not enough, because a trust, login or update
+  dialog is quiet too. Checked against panes captured from the real CLIs
+  (`server/test/fixtures/input-lines.json`). Claude Code, Codex, OpenCode and Hermes
+  empty composers are recognised. The Gemini, OpenClaw and fx captures are startup
+  dialogs (OAuth prompt, `[Y/n]`, sign-in menu) and are correctly refused. Their
+  normal composers have not been captured, so if one is not recognised the message
+  is skipped after 120 s with a `[revive] … no empty prompt` log line, and nothing
+  is typed.
+- **Bound to the revived process.** The pane's launch id (`AM_RUN_ID`) is taken when
+  revive starts it and is checked while waiting, again in `deliver()`, and once more
+  in `sendInput` just before the keystrokes. A stop, restart or archive ends the
+  wait, and a replacement process never inherits the message. Delivery never
+  starts a pane.
+- **The stagger leaves alone what the operator touched.** A slot skips a session
+  that was archived, or launched by anyone since boot, including one opened and
+  stopped again before its turn.
+- **Privacy lock.** Each message holds a lock scope from when it is scheduled (at
+  boot, before its slot) until it is delivered or dropped. A lock landing at any
+  point drops it for good, even if the Space unlocks before the pane is ready.
+- **OpenCode** can paint a stable first screen before its input handler works.
+  The first send to each OpenCode launch now always waits for the text to be
+  echoed back before pressing Enter, whoever started the pane.
+- The message uses the Overview reply box's delivery path (`deliver()` in
+  `index.js`), so submit confirmation applies. It is sent once per boot, only to
+  panes that boot started, and never to shells (their command is simply gone),
+  Files, Trace or remote panes. A failed delivery is logged and not retried.
+- "Stopped before the restart" means stopped as of the last snapshot. A session
+  stopped less than 30 s before the shutdown can still be revived and told.
 
 Turn it off with the **Tell restarted agents to continue** switch, or
 `"revive": {"continue": false}` in `am-config.json`. Revived agents then wait
@@ -46,5 +71,11 @@ for you, as before.
 
 Tests: `server/test/revive.test.mjs` (selection rules, who is told),
 `server/test/revive-continue.test.mjs` (two real boots with a fake TUI: each
-revived agent receives the message exactly once, a shell and a session stopped
-before the restart receive nothing, and nothing is sent with the setting off).
+revived agent receives the message exactly once, by `AM_ID`; a shell and a
+session stopped before the restart receive nothing; nothing is sent with the
+setting off), `server/test/revive-safety.test.mjs` (real runner PTYs with fake
+CLIs: dialogs with and without an input-required signal, captured real screens,
+OpenCode's late input handler, restart/stop/archive while waiting, the stagger
+skipping touched sessions, lock cancellation), and `server/test/revive-lock.test.mjs`
+(a real server and a fake Hub: a lock and unlock while the pane loads drops
+the message).

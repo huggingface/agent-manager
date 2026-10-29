@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR, PASSIVE_CLIS, isRemote } from './config.js';
 import { list as listSessions, get as getSession } from './sessions.js';
-import { isRunning, paneRootPid, ensureRunning, ghosttyReady, waitForInputReady } from './runner.js';
+import { isRunning, paneRootPid, ensureRunning, ghosttyReady, promptReady, runIdOf, launchedThisBoot } from './runner.js';
 import { traceDigests } from './traces.js';
 
 // The server owns every PTY, so a Space sleep, a reboot, or a factory reset ends
@@ -204,31 +204,54 @@ export function selectRevivable({ snapshot: snap, sessions, digests, alive, days
 }
 
 /**
- * Tell a just-revived agent that its work was cut off. Once its CLI can take
- * input, and only if it is still running — a pane the operator stopped in the
- * meantime stays stopped, which is why this waits itself instead of handing a
- * stopped pane to a delivery path that would start it again.
+ * Tell a just-revived agent that its work was cut off, once its CLI is
+ * positively at an empty prompt (runner.promptReady: never into a dialog, and
+ * never while the CLI reports one open).
+ *
+ * Bound to one launch, `runId`: the message is about THAT process's lost
+ * work. A stop, restart or archive while it waits ends the wait, and a
+ * replacement process does not inherit it — the check is repeated right up to
+ * the keystrokes (sendInput's runId). `signal` is the privacy-lock scope the
+ * message was scheduled under; a lock landing at any point drops it for good,
+ * even if the Space is unlocked again before the pane is ready.
+ * Resolves true when delivered, false when it was not (and says why if that is
+ * not simply the operator having stopped the pane).
  */
-export async function tellRevived(id, send, { readyMs = CONTINUE_READY_MS } = {}) {
-  // waitForInputReady throws when the pane goes away under it: stopped on
-  // purpose, which is an answer, not an error.
-  const ready = await waitForInputReady(id, readyMs).catch(() => false);
-  if (!ready) {
-    if (isRunning(id)) console.warn(`[revive] ${id}: not ready for input after ${Math.round(readyMs / 1000)}s — not telling it to continue`);
-    return false;
+export async function tellRevived(id, send, { runId = runIdOf(id), signal = null, readyMs = CONTINUE_READY_MS, pollMs = 200 } = {}) {
+  const deadline = Date.now() + readyMs;
+  const ended = () => {
+    if (signal?.aborted) return 'locked';
+    const s = getSession(id);
+    if (!s || s.archivedAt) return 'archived';
+    if (!runId || runIdOf(id) !== runId) return 'stopped';
+    return null;
+  };
+  for (;;) {
+    const why = ended();
+    if (why) {
+      if (why === 'locked') console.warn(`[revive] ${id}: the manager locked itself — not telling it to continue`);
+      return false;
+    }
+    if (promptReady(id)) break;
+    if (Date.now() >= deadline) {
+      console.warn(`[revive] ${id}: no empty prompt within ${Math.round(readyMs / 1000)}s (still loading, or showing a dialog) — not telling it to continue`);
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
   }
-  const s = getSession(id);
-  if (!s || !isRunning(id)) return false;
-  await send(s, CONTINUE_TEXT);
+  await send(getSession(id), CONTINUE_TEXT, { runId, signal });
   return true;
 }
 
 /**
  * Start the sessions that were running when this Space last went down.
- * `send(session, text)` delivers the continue message (index.js passes its
- * prompt-delivery path); `continue: false`, or no `send`, starts them silently.
+ * `send(session, text, { runId, signal })` delivers the continue message
+ * (index.js passes its prompt-delivery path); `continue: false`, or no `send`,
+ * starts them silently. `scope()` opens a privacy-lock scope ({ signal,
+ * release }); each message holds one from the moment it is scheduled until it
+ * is delivered or dropped.
  */
-export async function reviveOnBoot({ enabled = true, days = 3, continue: carryOn = true, send = null } = {}) {
+export async function reviveOnBoot({ enabled = true, days = 3, continue: carryOn = true, send = null, scope = null } = {}) {
   if (!enabled) return [];
   if (!previous || !previous.sessions) return [];
   // No terminal engine means ensureRunning throws for every session; say it once
@@ -274,22 +297,28 @@ export async function reviveOnBoot({ enabled = true, days = 3, continue: carryOn
 
   settleAt = Date.now() + start.length * REVIVE_GAP_MS + 5000;
   start.forEach((p, i) => {
+    // Opened now, not at the slot: a lock that lands while this one waits its
+    // turn must cancel its message too.
+    const lock = carryOn && send && p.tell && scope ? scope() : null;
+    const release = () => { try { lock?.release(); } catch {} };
     const t = setTimeout(() => {
       const s = getSession(p.id);
-      if (!s) return; // deleted between the plan and its turn
+      // Deleted or archived between the plan and its turn; or opened by
+      // someone since boot — still running, or stopped again on purpose.
+      // Either way it is theirs now, and the slot must not start it.
+      if (!s || s.archivedAt || launchedThisBoot(p.id)) { release(); return; }
       let started = false;
       try {
         started = ensureRunning(s);
         console.log(`[revive] ${p.name} (${p.cli}) — ${p.why}`);
       } catch (e) { console.error(`[revive] ${p.name}:`, e && e.message); }
       // Off the stagger: the next revival must not wait for this one's CLI.
-      // Only a pane this boot actually started — one the operator had already
-      // opened is theirs, and they know it was restarted.
       if (started && carryOn && send && p.tell) {
-        tellRevived(p.id, send)
+        tellRevived(p.id, send, { runId: runIdOf(p.id), signal: lock?.signal || null })
           .then((told) => { if (told) console.log(`[revive] ${p.name}: told to continue`); })
-          .catch((e) => console.error(`[revive] ${p.name}: continue message not delivered:`, e && e.message));
-      }
+          .catch((e) => console.error(`[revive] ${p.name}: continue message not delivered:`, e && e.message))
+          .finally(release);
+      } else release();
     }, i * REVIVE_GAP_MS);
     if (t.unref) t.unref();
   });

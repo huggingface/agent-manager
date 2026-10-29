@@ -38,7 +38,9 @@ const PUBLIC_DIR = path.join(root, 'public'); fs.mkdirSync(PUBLIC_DIR);
 fs.writeFileSync(path.join(PUBLIC_DIR, 'index.html'), '<html>fixture</html>');
 const FAKE_DIR = path.join(root, 'fake'); fs.mkdirSync(FAKE_DIR);
 const home = path.join(root, 'home'); fs.mkdirSync(home);
-const submitted = () => { try { return fs.readFileSync(path.join(FAKE_DIR, 'submitted'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+const submitted = () => { try { return fs.readFileSync(path.join(FAKE_DIR, 'submitted-by'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+// How many times each pane received the message, by AM_ID.
+const perPane = () => submitted().reduce((n, m) => ({ ...n, [m.id]: (n[m.id] || 0) + (m.text === CONTINUE_TEXT ? 1 : 0) }), {});
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const until = async (fn, ms) => {
   const end = Date.now() + ms;
@@ -82,7 +84,7 @@ function wentDown(ids, { stopped = [] } = {}) {
   const sessions = Object.fromEntries(ids.map((id) => [id, { running: true, work: false }]));
   for (const id of stopped) sessions[id] = { running: false };
   fs.writeFileSync(path.join(DATA_DIR, 'runstate.json'), JSON.stringify({ at: new Date().toISOString(), sessions }));
-  fs.rmSync(path.join(FAKE_DIR, 'submitted'), { force: true });
+  fs.rmSync(path.join(FAKE_DIR, 'submitted-by'), { force: true });
 }
 const told = (logs) => (logs.match(/told to continue/g) || []).length;
 
@@ -104,10 +106,10 @@ try {
   const got = await until(() => submitted().length >= 2, 60_000);
   await sleep(6000); // long enough for a duplicate to show up
   const lines = submitted();
-  check('each revived agent receives the continue message', () => {
+  check('each revived agent receives the continue message exactly once, and nothing else', () => {
     assert.ok(got, `only ${lines.length} delivered\n${srv.logs.slice(-1500)}`);
-    assert.equal(lines.length, 2, lines.join('\n'));
-    for (const l of lines) assert.equal(l, CONTINUE_TEXT);
+    assert.deepEqual(perPane(), { [agentA]: 1, [agentB]: 1 }, JSON.stringify(lines));
+    assert.equal(lines.length, 2, JSON.stringify(lines));
   });
   check('once per agent, not repeated', () => assert.equal(told(srv.logs), 2, srv.logs.slice(-1500)));
   const state = await (await fetch(`${srv.api}/api/sessions`)).json();
