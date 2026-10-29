@@ -171,8 +171,8 @@ export function readAgySteps(dbPath) {
   } finally { try { db.close(); } catch {} }
 }
 
-// The folder a conversation runs in, from its first user input. It never
-// changes, so it is remembered per file once found.
+// The folder a print-mode conversation runs in, from its first user input. It
+// never changes, so it is remembered per file once found.
 // A conversation with no prompt yet is looked at again only once it changes.
 const cwdMemo = new Map(); // dbPath -> { cwd } | { none: activeMs }
 function conversationCwd(dbPath, activeMs) {
@@ -199,18 +199,32 @@ export function agyActivityMs(dbPath) {
   return m;
 }
 
-/** Every conversation database, with the folder it runs in (null until its
- *  first prompt). */
+// agy's own record of the newest conversation per folder (what `agy -c`
+// resumes): { "<cwd>": "<id>" }. An interactive conversation names its folder
+// nowhere else — only print mode writes it into the prompt step — so this is
+// how a pane's conversation is found, and older ones in the same folder lose
+// their folder once a newer one starts there.
+function lastConversations() {
+  let j;
+  try { j = JSON.parse(fs.readFileSync(path.join(agyHome(), 'cache', 'last_conversations.json'), 'utf8')); } catch { return new Map(); }
+  const byId = new Map();
+  if (j && typeof j === 'object') for (const [cwd, id] of Object.entries(j)) if (typeof id === 'string') byId.set(id, cwd);
+  return byId;
+}
+
+/** Every conversation database, with the folder it runs in (null when agy
+ *  recorded none). */
 export function listAgyConversations() {
   let names = [];
   try { names = fs.readdirSync(agyConversationsDir()); } catch { return []; }
+  const latest = lastConversations();
   const out = [];
   for (const n of names) {
     const m = n.match(/^(.+)\.db$/);
     if (!m || !AGY_ID.test(m[1])) continue;
     const p = path.join(agyConversationsDir(), n);
     const activeMs = agyActivityMs(p);
-    out.push({ id: m[1], path: p, cwd: conversationCwd(p, activeMs), activeMs });
+    out.push({ id: m[1], path: p, cwd: latest.get(m[1]) || conversationCwd(p, activeMs), activeMs });
   }
   return out;
 }
@@ -219,9 +233,8 @@ export function listAgyConversations() {
  * The conversation an agy pane in `directory` is using: the most recently
  * written one rooted there, written at/after `sinceMs`, not claimed by another
  * pane. Activity rather than creation time, because `agy -c` continues an
- * older conversation and a fresh one only gets its first step (and so its
- * folder) when the first prompt is sent. Only used for a pane that holds its
- * folder alone; same-folder panes cannot be told apart this way.
+ * older conversation. Only used for a pane that holds its folder alone;
+ * same-folder panes cannot be told apart this way.
  */
 export function captureAgyConversation(directory, sinceMs, claimed) {
   const want = path.resolve(directory);

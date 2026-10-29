@@ -144,7 +144,8 @@ export const proseOf = (s: Step): string =>
   (s.kind === 'think' || s.kind === 'note' || s.kind === 'compact' ? s.text : '');
 
 // The one field of a tool call worth a line: what it acted on.
-const ARG_KEYS = ['file_path', 'path', 'notebook_path', 'command', 'cmd', 'pattern', 'glob', 'url', 'query', 'prompt', 'description', 'subagent_type'];
+const ARG_KEYS = ['file_path', 'path', 'notebook_path', 'command', 'cmd', 'pattern', 'glob', 'url', 'query', 'prompt', 'description', 'subagent_type',
+  'TargetFile', 'Path', 'Query', 'Url']; // Antigravity CLI's names
 const shortPath = (p: string) => {
   const parts = p.split('/').filter(Boolean);
   return parts.length > 2 ? `…/${parts.slice(-2).join('/')}` : p;
@@ -184,7 +185,7 @@ export function argSummary(text: string): string {
   for (const k of ARG_KEYS) {
     const raw = o[k];
     if (typeof raw !== 'string' || !raw.trim()) continue;
-    return oneLine(k.includes('path') ? shortPath(raw) : raw, 70);
+    return oneLine(/path|file/i.test(k) ? shortPath(raw) : raw, 70);
   }
   return oneLine(Object.keys(o).join(', '), 70);
 }

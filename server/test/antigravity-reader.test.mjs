@@ -95,10 +95,32 @@ fs.writeFileSync(path.join(process.env.DATA_DIR, 'sessions.json'), JSON.stringif
   { id: 'am-d1', name: 'd1', cli: 'antigravity', path: 'delta' },
   { id: 'am-d2', name: 'd2', cli: 'antigravity', path: 'delta' },
   { id: 'am-gone', name: 'gone', cli: 'antigravity', path: 'work', antigravityConversationId: 'ffffffff-ffff-4fff-8fff-ffffffffffff' },
+  { id: 'am-i', name: 'i', cli: 'antigravity', path: 'inter' },
 ]));
 const store = await import('../src/sessions.js');
 store.init();
 const traces = await import('../src/traces.js');
+
+console.log('\nan interactive conversation, which records its folder only in agy\'s cache');
+// The pane's agy writes no folder into its prompt step; cache/last_conversations.json
+// ({ cwd: id }, what `agy -c` resumes) is the only record. Thinking is kept.
+const IID = '1a1a1a1a-0000-4000-8000-000000000002';
+{
+  const w = writer(IID);
+  const T0 = 1793294017;
+  const st = (idx, type, body, md = []) => w.put({ idx, step_type: type, status: 3, payload: [[1, type], [4, 3], [5, [[1, [[1, T0 + idx], [2, 0]]], ...md]], ...body] }, WORKSPACES);
+  st(0, 14, [[19, [[2, 'what is in hello.txt?']]]]);
+  st(1, 15, [[20, [[3, '**Reading the file**\n\nI will read it.'], [7, [[1, 'call_1'], [2, 'read_file'], [3, `{"Path":"${ws('inter')}/hello.txt"}`]]]]]]);
+  st(2, 132, [[140, [[2, [[1, 'PELICAN-42']]]]]], [[4, [[1, 'call_1'], [2, 'read_file'], [3, '{}']]]]);
+  st(3, 15, [[20, [[1, 'It says PELICAN-42.']]]]);
+  w.db.close();
+  fs.mkdirSync(path.join(CONV, '..', 'cache'), { recursive: true });
+  fs.writeFileSync(path.join(CONV, '..', 'cache', 'last_conversations.json'), JSON.stringify({ [ws('inter')]: IID }));
+  fs.mkdirSync(ws('inter'), { recursive: true });
+}
+check('the cache names the folder', agy.listAgyConversations().find((c) => c.id === IID)?.cwd, ws('inter'));
+check('so the pane\'s conversation is found', agy.captureAgyConversation(ws('inter'), 0, null)?.id, IID);
+check('thinking is decoded', agy.readAgySteps(path.join(CONV, `${IID}.db`))[1].thinking.startsWith('**Reading the file**'), true);
 
 console.log('\nthe Overview digest');
 const digests = await traces.traceDigests();
@@ -113,6 +135,8 @@ check('the previous answer is not this turn\'s', A?.turnsLog.length, 0);
 check('an unpinned pane alone in its folder is matched by folder', digests.get('am-b')?.lastAssistantText, '391');
 check('panes sharing a folder get nothing rather than a guess', digests.get('am-d1') || digests.get('am-d2') || null, null);
 check('a pin to a deleted conversation shows nothing', digests.get('am-gone') || null, null);
+check('an interactive conversation is matched through the cache', digests.get('am-i')?.lastAssistantText, 'It says PELICAN-42.');
+check('the file it read is listed', digests.get('am-i')?.sinceFiles.join(), ws('inter') + '/hello.txt');
 check('the targeted digest agrees', (await traces.digestFor(store.get('am-a')))?.lastPromptText, A?.lastPromptText);
 const usage = (await traces.buildTraces()).sessions.find((s) => s.id === 'am-a');
 check('session totals: prompts', usage.prompts, 2);
@@ -127,12 +151,19 @@ const first = t.turns[1].blocks;
 check('each result sits right after its call', first.map((b) => b.type).join(), 'tool_use,tool_result,tool_use,tool_result');
 check('the call carries its arguments', JSON.parse(first[0].text).Path, ws('work') + '/notes.txt');
 check('a refused call reads as failed', first[3].failed, true);
+const sh = t.turns[3].blocks[0];
+check('a finished command reads as a shell block', sh.type, 'shell');
+check('with its command line', sh.command, 'ls -la');
+check('its exit code', sh.exitCode, 0);
+check('and its output, without agy\'s preamble', sh.stdout.startsWith('total 1\n'), true);
 check('agy\'s notices to the model are not shown', t.turns.some((m) => m.blocks.some((b) => /subagents and background tasks/.test(b.text || ''))), false);
 check('the answer is marked final', t.turns[4].kind, 'final');
 check('the folder is reported', t.cwd, ws('work'));
 check('idle after a finished turn', t.activity, 'waiting');
 check('trace location is the conversation database', (await traces.traceLocation(store.get('am-a')))?.path, path.join(CONV, `${IDS.a}.db`));
 check('no location for a deleted conversation', await traces.traceLocation(store.get('am-gone')), null);
+const ti = await traces.readTrace(store.get('am-i'), { offset: 0, limit: 100 });
+check('thinking is shown before the call', ti.turns[1].blocks.map((b) => b.type).join(), 'thinking,tool_use,tool_result');
 let err = null;
 try { await traces.readTrace(store.get('am-d1'), {}); } catch (e) { err = e.code; }
 check('a shared folder has no trace to guess at', err, 'no-trace');

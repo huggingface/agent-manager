@@ -955,9 +955,22 @@ function readAgy() {
   for (const c of listAgyConversations()) {
     const steps = agyStepsFor(c.path);
     if (!steps) continue;
-    rows.push({ id: c.id, parsed: parseAgy(steps) });
+    rows.push({ id: c.id, cwd: c.cwd, parsed: parseAgy(steps) });
   }
   return rows;
+}
+
+// A finished run_command as the reader's shell block: its command line, what
+// it printed and its exit code, from agy's own "Command exited with code N."
+// preamble. Anything else (a refusal, a command moved to the background) stays
+// an ordinary call and result.
+function agyShell(args, output) {
+  let a;
+  try { a = JSON.parse(args || '{}'); } catch { return null; }
+  const m = /^Command exited with code (-?\d+)\.\s*(?:Command output:\n)?([\s\S]*)$/.exec(output || '');
+  if (!m || typeof a?.CommandLine !== 'string') return null;
+  const out = capText(m[2].replace(/\r\n/g, '\n'));
+  return { type: 'shell', command: a.CommandLine, stdout: out.text, ...(out.more ? { more: out.more } : {}), exitCode: Number(m[1]) };
 }
 
 // One conversation in reader blocks. Results are filed beside their call: a
@@ -965,6 +978,7 @@ function readAgy() {
 function normalizeAgyDb(dbPath, out) {
   const steps = readAgySteps(dbPath);
   const stitch = makeStitcher();
+  const calls = new Map(); // call id -> { msg, block }: a finished command replaces its call
   for (const s of steps) {
     const ts = s.ts || undefined;
     if (s.type === STEP.USER_INPUT) {
@@ -984,6 +998,7 @@ function normalizeAgyDb(dbPath, out) {
         const use = { type: 'tool_use', id: c.id, name: c.name, ...capText(c.args) };
         msg.blocks.push(use);
         stitch.register(use, msg);
+        calls.set(c.id, { msg, block: use });
       }
       if (s.status === STATUS.ERROR && s.error) {
         msg.error = s.error;
@@ -999,6 +1014,9 @@ function normalizeAgyDb(dbPath, out) {
     }
     if (s.call) {
       const failed = s.status === STATUS.ERROR;
+      const shell = !failed && s.call.name === 'run_command' && agyShell(s.call.args, s.output);
+      const use = calls.get(s.call.id);
+      if (shell && use) { use.msg.blocks[use.msg.blocks.indexOf(use.block)] = shell; continue; }
       const res = { type: 'tool_result', id: s.call.id, ...capText(s.output || s.error || ''), ...(failed ? { failed: true } : {}) };
       if (!stitch.file(s.call.id, res)) {
         out.push({ role: 'assistant', ts, blocks: [{ type: 'tool_use', id: s.call.id, name: s.call.name, ...capText(s.call.args) }, res] });
@@ -1552,10 +1570,10 @@ async function buildImpl() {
     const key = path.resolve(WORKSPACES_DIR, s.path ?? s.id);
     byAgyCwd.set(key, byAgyCwd.has(key) ? 'ambiguous' : s);
   }
-  for (const { id, parsed } of readAgy()) {
+  for (const { id, cwd, parsed } of readAgy()) {
     let session = byAgyId.get(id) || null;
-    if (!session && parsed.stats.cwd) {
-      const hit = byAgyCwd.get(path.resolve(parsed.stats.cwd));
+    if (!session && cwd) {
+      const hit = byAgyCwd.get(path.resolve(cwd));
       if (hit && hit !== 'ambiguous') session = hit;
     }
     attribute(session, parsed);
