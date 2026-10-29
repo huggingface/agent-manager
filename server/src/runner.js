@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { remoteState, setPaused } from './remote.js';
 import { fxSessionForPid } from './fx-process.js';
-import { cliById, cliVersion, isRemote, INTERNAL_HOST, PORT, STATE_DIR, WORKSPACES_DIR } from './config.js';
+import { cliById, cliVersion, isRemote, launchFlags, INTERNAL_HOST, PORT, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
 import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace,
   captureFxSession } from './traces.js';
@@ -1854,7 +1854,12 @@ export function commandFor(session) {
   const q0 = !session.everStarted && session.pendingPrompt ? shq(session.pendingPrompt) : '';
   const q0Images = !session.everStarted && Array.isArray(session.pendingImagePaths)
     ? session.pendingImagePaths.map((image) => shq(String(image))) : [];
-  const firstCommand = () => cli.withPrompt(q0, q0Images);
+  // The session's model / effort flags ride every branch below: each registry
+  // command takes them, so none of these launches can come up on the CLI's
+  // shared default instead (see config.js launchFlags).
+  const f = launchFlags(session);
+  const run = cli.run?.(f);
+  const firstCommand = () => cli.withPrompt(q0, q0Images, f);
 
   // Claude keys conversations by working directory, so grouped sessions sharing
   // a folder would all `--continue` onto the SAME most-recent conversation. Pin
@@ -1865,11 +1870,11 @@ export function commandFor(session) {
   // as a fresh conversation and eating the pane's "done" signal). The fresh
   // branch keeps `|| exec claude` as a last resort for an unsupported flag.
   if (cli.id === 'claude' && session.sessionUuid) {
-    const fresh = `claude --session-id ${session.sessionUuid}${q0 ? ` ${q0}` : ''} || exec claude`;
+    const fresh = `${run} --session-id ${session.sessionUuid}${q0 ? ` ${q0}` : ''} || exec ${run}`;
     if (!session.everStarted) return fresh;
     const projects = '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"';
     const hasTranscript = `[ -n "$(find ${projects} -name '${session.sessionUuid}*' -print -quit 2>/dev/null)" ]`;
-    return `if ${hasTranscript}; then exec claude --resume ${session.sessionUuid}; else ${fresh}; fi`;
+    return `if ${hasTranscript}; then exec ${cli.resume(session.sessionUuid, f)}; else ${fresh}; fi`;
   }
 
   // OpenClaw: first run needs its onboarding wizard (keys, workspace); once the
@@ -1880,8 +1885,8 @@ export function commandFor(session) {
     // state can't live on the FUSE bucket and it rejects symlinked paths.
     // Locally (no OPENCLAW_HOME) the real HOME is used unchanged.
     return 'HOME="${OPENCLAW_HOME:-$HOME}"; export HOME; '
-      + 'if [ -s "$HOME/.openclaw/openclaw.json" ]; then exec openclaw chat; '
-      + 'else openclaw onboard && exec openclaw chat; fi';
+      + `if [ -s "$HOME/.openclaw/openclaw.json" ]; then exec ${run}; `
+      + `else openclaw onboard && exec ${run}; fi`;
   }
 
   // Codex: resume this agent's pinned conversation (captured from its rollout
@@ -1890,7 +1895,7 @@ export function commandFor(session) {
   // pane instead of respawning. Unpinned sessions fall through to the generic
   // `resume --last` below (correct while the agent has its folder to itself).
   if (cli.id === 'codex' && session.codexSessionId && session.codexRollout) {
-    return `if [ -f '${session.codexRollout}' ]; then exec ${cli.resume(session.codexSessionId)}; else exec ${cli.run}; fi`;
+    return `if [ -f '${session.codexRollout}' ]; then exec ${cli.resume(session.codexSessionId, f)}; else exec ${run}; fi`;
   }
 
   // opencode (seen on 1.17.13): at startup it creates a DIRECTORY named
@@ -1913,7 +1918,7 @@ export function commandFor(session) {
     // per-conversation path to test) and a missing row is fatal, not a fallback.
     const pin = session.opencodeSessionId;
     if (session.everStarted && pin && SES_ID.test(pin) && opencodeSessionExists(pin)) {
-      return `${guard}exec opencode --session ${pin}`;
+      return `${guard}exec ${cli.resume(pin, f)}`;
     }
     // Unpinned (or the conversation is gone): `--continue` resumes the
     // most-recent conversation in the CWD, so two opencode agents sharing a
@@ -1924,8 +1929,8 @@ export function commandFor(session) {
     const folder = session.path ?? session.id;
     const shared = list().some((o) => o.id !== session.id && o.cli === 'opencode' && (o.path ?? o.id) === folder);
     const base = session.everStarted && cli.cont && !shared
-      ? `${cli.cont} || exec ${cli.run}`
-      : `exec ${q0 && cli.withPrompt ? firstCommand() : cli.run}`;
+      ? `${cli.cont(f)} || exec ${run}`
+      : `exec ${q0 && cli.withPrompt ? firstCommand() : run}`;
     return `${guard}${base}`;
   }
 
@@ -1937,7 +1942,7 @@ export function commandFor(session) {
   // not found." and killing the pane.
   if (cli.id === 'fx' && session.everStarted && session.fxSessionId && FX_ID.test(session.fxSessionId)) {
     const events = `"$HOME/.fx/sessions/${session.fxSessionId}/events.jsonl"`;
-    return `if [ -f ${events} ]; then exec ${cli.resume(session.fxSessionId)}; else exec ${cli.run}; fi`;
+    return `if [ -f ${events} ]; then exec ${cli.resume(session.fxSessionId, f)}; else exec ${run}; fi`;
   }
   // Unpinned fx (first launch, or the pin is gone): remember that this pane has
   // shared its folder. If the sibling is later deleted, its conversation is
@@ -1948,7 +1953,7 @@ export function commandFor(session) {
     const shared = list().some((o) => o.id !== session.id && o.cli === 'fx' && (o.path ?? o.id) === folder);
     if (shared || session.fxCaptureSince) {
       update(session.id, { fxCaptureSince: Date.now() });
-      if (session.everStarted) return `exec ${cli.run}`;
+      if (session.everStarted) return `exec ${run}`;
     }
   }
 
@@ -1959,15 +1964,15 @@ export function commandFor(session) {
   if (cli.id === 'codex' && session.everStarted) {
     const folder = session.path ?? session.id;
     const shared = list().some((o) => o.id !== session.id && o.cli === 'codex' && (o.path ?? o.id) === folder);
-    if (shared) return `exec ${cli.run}`;
+    if (shared) return `exec ${run}`;
   }
 
   // Other agents: resume when one likely exists, else a fresh launch. `exec` so
   // the agent is the PTY's foreground process; when it exits the session ends —
   // a clear "done" signal — and the fallback preserves that.
-  if (session.everStarted && cli.cont) return `${cli.cont} || exec ${cli.run}`;
+  if (session.everStarted && cli.cont) return `${cli.cont(f)} || exec ${run}`;
   if (q0 && cli.withPrompt) return `exec ${firstCommand()}`;
-  return `exec ${cli.run}`;
+  return `exec ${run}`;
 }
 
 /**
