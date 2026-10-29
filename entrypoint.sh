@@ -221,7 +221,11 @@ boot "starting the app — boot took $(boot_elapsed "$BOOT_T0")"
 # state checkpoint. The timer bounds loss on an ungraceful stop; the child is
 # stopped before the final checkpoint so SQLite and transcript state is quiet.
 AGENT_STATE_CHECKPOINT_SECONDS="${AGENT_STATE_CHECKPOINT_SECONDS:-15}"
-node /app/server/src/index.js &
+# AM_CLAUDE_MODEL_PROBE=1: this server may start the signed-in Claude Code
+# (safe mode, nothing sent) to read its /model picker for the create form's
+# model list. Only this server: sessions don't inherit it. A Space variable
+# AM_CLAUDE_MODEL_PROBE=0 turns it off (the form then offers the aliases).
+AM_CLAUDE_MODEL_PROBE="${AM_CLAUDE_MODEL_PROBE:-1}" node /app/server/src/index.js &
 APP_PID=$!
 
 checkpoint_loop() {

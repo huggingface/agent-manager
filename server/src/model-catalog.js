@@ -10,43 +10,84 @@
 // `bash -lc`, in the server's environment, with a timeout):
 //  - claude  : its own `/model` picker, read off the screen (claude-models.js),
 //              each name checked against the ids in the installed binary.
-//              Redone only when the Claude version changes or on refresh. If
-//              the picker cannot be read (not signed in), the aliases.
+//              Redone only when the Claude version changes or on refresh,
+//              whether it worked or not. If the picker cannot be read (not
+//              signed in), the aliases. Only a server started with
+//              AM_CLAUDE_MODEL_PROBE=1 reads it (the Docker entrypoint does):
+//              it starts the operator's signed-in Claude, which a test or dev
+//              server must not do. Sessions never inherit the variable.
 //  - codex   : `codex debug models` — JSON with each model's effort levels
-//  - gemini  : the names bundled in gemini-cli (it has no list command)
+//  - gemini  : the VALID_GEMINI_MODELS registry in the installed gemini-cli
+//              bundle (it has no list command)
 //  - opencode: `opencode models` — only providers that have credentials
 //  - hermes  : its own provider model cache (~/.hermes/provider_models_cache.json)
 // openclaw and fx take no model at launch, so they get no list.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { CLIS, cliById, STATE_DIR, WORKSPACES_DIR, LAUNCH_MODEL, LAUNCH_EFFORT, cliCatalog } from './config.js';
 import { ApiError } from './api-errors.js';
-import { scrapeClaudePicker } from './claude-models.js';
+import { scrapeClaudePicker, killGroup, CLAUDE_FAMILIES } from './claude-models.js';
 
 const FILE = path.join(STATE_DIR, 'cli-models.json');
 const TIMEOUT_MS = 30_000;
 
-// Claude Code takes these as --model and resolves them to the newest model of
-// the family, so they lead the list.
-const CLAUDE_ALIASES = ['fable', 'opus', 'sonnet', 'haiku'];
-// gemini-cli 0.66 VALID_GEMINI_MODELS, plus its two "auto" routers.
-const GEMINI_MODELS = [
-  'auto-gemini-3', 'auto-gemini-2.5',
-  'gemini-3.1-pro-preview', 'gemini-3-pro-preview', 'gemini-3.8-flash', 'gemini-3.5-flash',
-  'gemini-3-flash-preview', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite',
-  'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
-];
+const MAX_OUTPUT = 64 * 1024 * 1024;
 
-/** Run a CLI's list command the way a session runs it. Resolves stdout. */
+/** Whether this server may start Claude Code to read its picker. */
+export const claudeProbeEnabled = (env = process.env) => env.AM_CLAUDE_MODEL_PROBE === '1';
+
+/**
+ * Run a CLI's list command the way a session runs it. Resolves stdout. It runs
+ * in its own process group, and the whole group is killed once the command
+ * exits or times out, so nothing it started outlives the call.
+ */
 export function runList(command, { timeout = TIMEOUT_MS, env = process.env } = {}) {
   return new Promise((resolve, reject) => {
-    execFile('bash', ['-lc', `exec ${command}`], {
+    const child = spawn('bash', ['-lc', `exec ${command}`], {
       cwd: WORKSPACES_DIR, env: { ...env, TERM: 'dumb', NO_COLOR: '1' },
-      timeout, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024,
-    }, (err, stdout) => (err ? reject(new Error(err.killed ? `timed out after ${timeout / 1000}s` : (err.message || 'failed').split('\n')[0])) : resolve(String(stdout))));
+      detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const out = [];
+    let size = 0, failure = null, status = null;
+    const sweep = () => { killGroup(child.pid, { graceMs: 0 }).catch(() => {}); };
+    const timer = setTimeout(() => { failure ??= `timed out after ${timeout / 1000}s`; sweep(); }, timeout);
+    child.stdout.on('data', (d) => {
+      size += d.length;
+      if (size > MAX_OUTPUT) { failure ??= 'too much output'; sweep(); } else out.push(d);
+    });
+    child.stderr.resume();
+    child.on('error', (e) => { failure ??= e.message; });
+    // Whatever it left behind (still holding the pipes, or not) goes with it.
+    child.on('exit', (code, signal) => { status = { code, signal }; setTimeout(sweep, 100); });
+    child.on('close', async () => {
+      clearTimeout(timer);
+      await killGroup(child.pid, { graceMs: 0 });
+      if (!failure && status?.code !== 0) failure = `exited with ${status?.signal || status?.code}`;
+      if (failure) reject(new Error(failure)); else resolve(Buffer.concat(out).toString('utf8'));
+    });
   });
+}
+
+/**
+ * gemini-cli's VALID_GEMINI_MODELS set, from its bundled source: each name in
+ * the set is a `var NAME = "id"` (or an alias of another one) in the same file.
+ * Also its two "auto" routers, which `-m` takes as well.
+ */
+export function parseGeminiRegistry(text) {
+  const set = /VALID_GEMINI_MODELS\s*=\s*(?:\/\*[^*]*\*\/\s*)?new Set\(\[([^\]]*)\]\)/.exec(text);
+  if (!set) return [];
+  const resolve = (expr, depth = 0) => {
+    const e = expr.trim();
+    const lit = /^["'`]([^"'`]+)["'`]$/.exec(e);
+    if (lit) return lit[1];
+    if (depth > 5 || !/^[A-Za-z_$][\w$]*$/.test(e)) return null;
+    const def = new RegExp(`(?:var|let|const)\\s+${e.replace(/\$/g, '\\$')}\\s*=\\s*([^;\\n]+)`).exec(text);
+    return def ? resolve(def[1], depth + 1) : null;
+  };
+  const names = [...set[1].split(','), 'PREVIEW_GEMINI_MODEL_AUTO', 'DEFAULT_GEMINI_MODEL_AUTO'];
+  return [...new Set(names.map((n) => resolve(n)).filter((id) => id && /^(?:gemini|gemma|auto)-[a-z0-9.-]+$/.test(id)))];
 }
 
 /** Every `claude-<family>-<major>[-<minor>]` id in some text (the binary). */
@@ -84,32 +125,50 @@ export function parseHermesCache(json) {
   return out;
 }
 
-const SOURCES = {
-  claude: async ({ force, previous }) => {
-    const version = /\d+\.\d+\.\d+/.exec(await runList('claude --version'))?.[0] || null;
-    if (!force && version && previous?.version === version && previous.picker && previous.models?.length) return previous;
-    const aliases = CLAUDE_ALIASES.map((id) => ({ id, label: `${id} (latest)` }));
+/**
+ * The Claude list source. Its moving parts are injectable so a test can count
+ * how often the picker would be started.
+ */
+export function claudeSource({
+  version = async () => /\d+\.\d+\.\d+/.exec(await runList('claude --version'))?.[0] || null,
+  ready = () => !!cliCatalog().find((c) => c.id === 'claude')?.ready,
+  probeEnabled = () => claudeProbeEnabled(),
+  known = async () => claudeIdsIn(await runList(`grep -aoE 'claude-[a-z]+-[0-9][0-9a-z-]{0,12}' "$(readlink -f "$(command -v claude)")"`)),
+  scrape = (opts) => {
+    const cwd = path.join(STATE_DIR, 'claude-model-probe');
+    fs.mkdirSync(cwd, { recursive: true });
+    return scrapeClaudePicker({ ...opts, cwd });
+  },
+} = {}) {
+  return async ({ force, previous }) => {
+    const v = await version();
+    // Once per version: a probe that failed is not retried on every boot, only
+    // when Claude Code changes or on an explicit refresh.
+    if (!force && v && previous?.version === v && previous.probed && previous.models?.length) return previous;
+    const aliases = CLAUDE_FAMILIES.map((id) => ({ id, label: `${id} (latest)` }));
     // Without a credential the picker never opens (sign-in screens instead),
-    // so don't start Claude at all.
-    if (!cliCatalog().find((c) => c.id === 'claude')?.ready) {
-      return { models: aliases, source: 'aliases (Claude Code is not signed in)', version };
-    }
-    // Off for test servers (scripts/run-suites.mjs), which run on the real HOME.
-    if (process.env.AM_CLAUDE_MODEL_PROBE === '0') return { models: aliases, source: 'aliases (picker probe disabled)', version };
+    // so don't start Claude at all. Not `probed`: a sign-in later is tried.
+    if (!ready()) return { models: aliases, source: 'aliases (Claude Code is not signed in)', version: v };
+    if (!probeEnabled()) return { models: aliases, source: 'aliases (picker probe off: AM_CLAUDE_MODEL_PROBE is not 1)', version: v };
     try {
-      const known = claudeIdsIn(await runList(`grep -aoE 'claude-[a-z]+-[0-9][0-9a-z-]{0,12}' "$(readlink -f "$(command -v claude)")"`));
-      const probe = path.join(STATE_DIR, 'claude-model-probe');
-      fs.mkdirSync(probe, { recursive: true });
-      const models = await scrapeClaudePicker({ cwd: probe, known });
+      const models = await scrape({ known: await known() });
       if (!models.length) throw new Error('the picker listed no model this Claude Code knows');
-      return { models, source: 'claude /model picker', version, picker: true };
+      return { models, source: 'claude /model picker', version: v, picker: true, probed: true };
     } catch (e) {
       console.warn(`[model-catalog] claude picker: ${e && e.message}`);
-      return { models: aliases, source: `aliases (picker unavailable: ${String(e && e.message || e).slice(0, 120)})`, version };
+      return { models: aliases, source: `aliases (picker unavailable: ${String(e && e.message || e).slice(0, 120)})`, version: v, probed: true };
     }
-  },
+  };
+}
+
+const SOURCES = {
+  claude: claudeSource(),
   codex: async () => ({ models: parseCodexModels(await runList('codex debug models')), source: 'codex debug models' }),
-  gemini: async () => ({ models: GEMINI_MODELS.map((id) => ({ id })), source: 'gemini-cli bundle' }),
+  gemini: async () => {
+    const file = (await runList(`grep -l 'VALID_GEMINI_MODELS *=' "$(dirname "$(readlink -f "$(command -v gemini)")")"/*.js`)).split('\n')[0].trim();
+    const models = parseGeminiRegistry(await fs.promises.readFile(file, 'utf8')).map((id) => ({ id }));
+    return { models, source: `gemini-cli bundle (${path.basename(file)})` };
+  },
   opencode: async () => ({ models: parseOpencodeModels(await runList('opencode models')), source: 'opencode models' }),
   hermes: async () => {
     const file = path.join(process.env.HOME || os.homedir(), '.hermes', 'provider_models_cache.json');

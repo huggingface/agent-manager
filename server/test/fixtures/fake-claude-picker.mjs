@@ -6,11 +6,28 @@
 // never Enter or `s` while the picker is open).
 //   FAKE_PICKER_TRUST=1  start on the trust dialog
 //   FAKE_PICKER_LOGIN=1  start on a sign-in screen and never leave it
+//   FAKE_PICKER_FAMILIES=1  the 2.1.312 layout as an API-key account sees it:
+//                        `2. Opus   Opus 5.5 · …` rows, and a prompt with no
+//                        "? for shortcuts" under it
+//   FAKE_PICKER_CHILD=<file>  start a child that ignores SIGHUP (as a hook or
+//                        an MCP server might) and write its pid to <file>
 import fs from 'node:fs';
+import { spawn } from 'node:child_process';
+
+if (process.env.FAKE_PICKER_CHILD) {
+  const child = spawn(process.execPath, ['-e', "process.on('SIGHUP', () => {}); setInterval(() => {}, 1000)"], { stdio: 'ignore' });
+  fs.writeFileSync(process.env.FAKE_PICKER_CHILD, String(child.pid));
+}
 
 const log = (what) => { if (process.env.FAKE_PICKER_LOG) fs.appendFileSync(process.env.FAKE_PICKER_LOG, `${what}\n`); };
 const MODELS = ['Default (recommended) ✔ Opus 5.5 · Most capable for complex work', 'Opus 5.5', 'Fable 5.1', 'Sonnet 5.5',
   'Haiku 5.5', 'Opus 5', 'Sonnet 5', 'Opus 4.8', 'Opus 4.7', 'Sonnet 4.6', 'Haiku 4.5', 'Opus 4.1', 'Sonnet 4.5', 'Mythos 5.1'];
+const FAMILIES = !!process.env.FAKE_PICKER_FAMILIES;
+if (FAMILIES) {
+  MODELS.splice(0, MODELS.length, 'Default (recommended) ✔  Use the default model (currently Opus 5.5) · $4/$20 per Mtok',
+    'Opus                     Opus 5.5 · Best for everyday, complex tasks', 'Fable                    Fable 5.1 · Most capable',
+    'Sonnet                   Sonnet 5.5 · Efficient for routine tasks', 'Haiku                    Haiku 5.5 · Fastest for quick answers');
+}
 const WINDOW = 10;
 let state = process.env.FAKE_PICKER_LOGIN ? 'login' : process.env.FAKE_PICKER_TRUST ? 'trust' : 'prompt';
 let trustCursor = 0, input = '', cursor = 0, top = 0;
@@ -26,9 +43,12 @@ const draw = () => {
     if (top + WINDOW < MODELS.length) out += `   ↓ … +${MODELS.length - top - WINDOW} models\r\n`;
     out += '\r\n Effort ◐ medium  ←/→ to adjust · Enter to confirm · Esc to exit\r\n';
   } else {
-    out += ' ╭──────────────────────────────╮\r\n';
-    out += ` │ > ${input.padEnd(27)}│\r\n`;
-    out += ' ╰──────────────────────────────╯\r\n   ? for shortcuts\r\n';
+    if (FAMILIES) out += ` ${'─'.repeat(40)}\r\n ❯ ${input}\r\n ${'─'.repeat(40)}\r\n  ⏵⏵ auto mode on (shift+tab to cycle)\r\n`;
+    else {
+      out += ' ╭──────────────────────────────╮\r\n';
+      out += ` │ > ${input.padEnd(27)}│\r\n`;
+      out += ' ╰──────────────────────────────╯\r\n   ? for shortcuts\r\n';
+    }
   }
   process.stdout.write(out);
 };

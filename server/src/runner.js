@@ -37,8 +37,12 @@ try {
   console.error('[runner] libghostty-vt unavailable:', ghosttyError);
 }
 
-const TERM_ENV = {
-  ...process.env,
+// AM_CLAUDE_MODEL_PROBE lets this server start the signed-in Claude Code to
+// read its model picker (model-catalog.js). A session must not pass that on
+// to a test or dev server it starts, so it is not part of a session's env.
+const { AM_CLAUDE_MODEL_PROBE: _probe, ...SERVER_ENV } = process.env;
+export const TERM_ENV = {
+  ...SERVER_ENV,
   TERM: 'xterm-256color',
   COLORTERM: 'truecolor',
   LANG: process.env.LANG || 'C.UTF-8',

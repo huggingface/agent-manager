@@ -50,8 +50,9 @@ and counts it as failed.
 
 Every suite runs with `AM_CLAUDE_MODEL_PROBE=0`, so a test server never opens
 the signed-in Claude Code to read its model picker (see
-[launch-model-effort.md](launch-model-effort.md)). Set it too when you run a
-suite that boots the server directly.
+[launch-model-effort.md](launch-model-effort.md)). The probe is off anyway
+unless the variable is `1`, which only the Docker entrypoint sets, and only
+for the server, not its sessions.
 
 ## Run one suite
 

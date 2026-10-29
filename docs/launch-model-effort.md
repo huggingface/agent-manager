@@ -14,7 +14,7 @@ CLI's shared default cannot move it. See `launch` in `server/src/config.js`.
 |---|---|---|---|
 | claude | `--model` | `--effort` low…max | its own `/model` picker (below); aliases if that fails |
 | codex | `-m` | `-c model_reasoning_effort=` per model | `codex debug models` |
-| gemini | `-m` | — (settings file only) | names bundled in gemini-cli 0.66 |
+| gemini | `-m` | — (settings file only) | `VALID_GEMINI_MODELS` in the installed gemini-cli bundle |
 | opencode | `-m provider/model` | — (TUI ignores a config variant) | `opencode models` |
 | hermes | `--provider` + `-m` | `--reasoning` | `~/.hermes/provider_models_cache.json` |
 | openclaw | — (`chat` has no `--model`) | `--thinking` | — |
@@ -30,10 +30,19 @@ model at all — the server only accepts an id that is on the current list.
 Claude Code has no list command, so `server/src/claude-models.js` starts
 `claude` in a PTY (in `STATE_DIR/claude-model-probe`), opens `/model`, scrolls
 the picker with Down and leaves with Esc. It never presses Enter or `s` in the
-picker (that would change the default model for every session). It runs only
-when Claude Code has a credential, and again only when its version changes or
-on refresh. No prompt is sent.
+picker (that would change the default model for every session). No prompt is
+sent.
 
-The test runner sets `AM_CLAUDE_MODEL_PROBE=0`, because test servers run on the
-real HOME. Set it yourself when you boot a server by hand on a signed-in HOME
-and don't want the probe.
+- It starts Claude with `--safe-mode` (no hooks, plugins, MCP servers,
+  CLAUDE.md or skills; the sign-in still works), plus
+  `--settings '{"disableAllHooks":true}' --strict-mcp-config --no-chrome`.
+  `--bare` is not used: it never reads the OAuth sign-in.
+- It runs in its own process group, killed as a whole when the probe ends.
+  The list commands of the other CLIs run the same way.
+- It runs only when Claude Code has a credential, and once per Claude Code
+  version, whether it worked or not; the ↻ refresh tries again.
+- **It is off unless the server runs with `AM_CLAUDE_MODEL_PROBE=1`.** The
+  Docker entrypoint sets that for the server (a Space variable
+  `AM_CLAUDE_MODEL_PROBE=0` turns it off). A server you start by hand, a local
+  install or a test server does not probe, and offers the aliases. Sessions
+  never inherit the variable, and the test runner forces it to `0`.

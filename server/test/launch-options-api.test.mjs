@@ -29,6 +29,8 @@ write('codex', `[ "$1 $2" = "debug models" ] && { cat <<'EOF'\n${CODEX_MODELS}\n
 write('claude', `[ "$1" = --version ] && echo '2.1.312 (Claude Code)'; exit 0`);
 write('opencode', `[ "$1" = models ] && { echo anthropic/claude-fable-5; echo openrouter/qwen/qwen3; exit 0; }; exit 0`);
 write('gemini', 'exit 0');
+// gemini-cli has no list command: its registry is read from the bundle next to it.
+fs.writeFileSync(path.join(BIN, 'chunk-test.js'), 'var DEFAULT_GEMINI_MODEL = "gemini-2.5-pro";\nvar VALID_GEMINI_MODELS = new Set([DEFAULT_GEMINI_MODEL, "gemma-4-31b-it"]);\n');
 write('fx', 'exit 0');
 
 const PORT = await freePort();
@@ -66,7 +68,7 @@ test('refresh builds the lists from the CLIs and saves them', async () => {
   assert.deepEqual(by.codex.models[0].efforts, ['low', 'medium', 'high', 'xhigh']);
   assert.deepEqual(by.opencode.models.map((m) => m.id), ['anthropic/claude-fable-5', 'openrouter/qwen/qwen3']);
   assert.deepEqual(by.claude.models.map((m) => m.id), ['fable', 'opus', 'sonnet', 'haiku'], 'no credential: the aliases');
-  assert.ok(by.gemini.models.some((m) => m.id === 'gemini-2.5-pro'));
+  assert.deepEqual(by.gemini.models.map((m) => m.id), ['gemini-2.5-pro', 'gemma-4-31b-it']);
   const saved = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'state', 'cli-models.json'), 'utf8'));
   assert.equal(saved.clis.codex.source, 'codex debug models');
 });
