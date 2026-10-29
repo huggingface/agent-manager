@@ -1,0 +1,1 @@
+{"error":"Gemini CLI is deprecated: Google replaced it with Antigravity CLI, so new Gemini sessions can no longer be created. Existing ones keep working; start new ones with Antigravity CLI.","code":"cli-deprecated"} HTTP 400
