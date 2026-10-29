@@ -19,7 +19,7 @@ import type { PendingAttachment, PendingPrompt } from '../lib/attachments';
 import Attachments from './Attachments';
 import Logo from './Logo';
 import StateLogo from './StateLogo';
-import { DeprecatedTag, deprecationNote } from './DeprecatedNotice';
+import DeprecatedNotice, { deprecationNote } from './DeprecatedNotice';
 import Composer from './conversation/Composer';
 import InputRequiredNotice from './conversation/InputRequiredNotice';
 import ExchangeView, { PendingExchange } from './conversation/Exchange';
@@ -348,7 +348,7 @@ export function Card({ s, color, deprecated, group, pending, isMobile, onOpen, o
         <StateLogo cli={s.cli} state={s.state} size={12} tint={color} title={stateTitle(s)} />
         {group && <span className="ov-gtag mono">[{group}]</span>}
         <span className="ov-name mono">{s.name}</span>
-        <DeprecatedTag note={deprecated} />
+        <DeprecatedNotice note={deprecated} />
         {ago && <span className="ov-ago">· {ago}</span>}
         <span className="spacer" />
         <span className="ov-go">open ↗</span>
@@ -558,7 +558,7 @@ export function Tile({ s, color, deprecated, group, dim, pending, onOpen }: { s:
         <StateLogo cli={s.cli} state={s.state} size={12} tint={color} title={stateTitle(s)} />
         {group && groupFits.show && <span className="ovt-gtag mono" ref={groupFits.probe}>{group}</span>}
         <span className="ovt-name mono">{s.name}</span>
-        <DeprecatedTag note={deprecated} />
+        <DeprecatedNotice note={deprecated} />
         <span className="ovt-ago">{pending ? '' : fmtAgo(last)}</span>
       </div>
       {pending ? (
@@ -651,7 +651,7 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
   }, [openId]);
 
   const colorOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c.color])), [clis]);
-  const deprecatedOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, deprecationNote(c)])), [clis]);
+  const deprecatedOf = (cli: string) => deprecationNote(clis.find((c) => c.id === cli));
   const sessById = useMemo(() => Object.fromEntries(tree.sessions.map((s) => [s.id, s])), [tree.sessions]);
   const groupById = useMemo(() => Object.fromEntries(tree.groups.map((g) => [g.id, g])), [tree.groups]);
   const dataFor = (s: Session): MetaSession => meta[s.id] ?? { ...s, digest: null };
@@ -759,7 +759,7 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
     if (!visible(m)) return null;
     return (
       <div key={s.id} className="ov-panel">
-        <Card s={m} color={colorOf[s.cli]} deprecated={deprecatedOf[s.cli]} pending={pending(s.id)} isMobile={isMobile} onOpen={onOpen} />
+        <Card s={m} color={colorOf[s.cli]} deprecated={deprecatedOf(s.cli)} pending={pending(s.id)} isMobile={isMobile} onOpen={onOpen} />
       </div>
     );
   };
@@ -770,7 +770,7 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
     if (!visible(m)) return null;
     // Revealed-but-hidden reads the same as archived: present, and visibly not
     // part of what you normally look at.
-    return <Tile key={s.id} s={m} color={colorOf[s.cli]} deprecated={deprecatedOf[s.cli]} dim={archived.has(s.id) || hiddenIds.has(s.id)} pending={pending(s.id)} onOpen={() => setOpenId(s.id)} />;
+    return <Tile key={s.id} s={m} color={colorOf[s.cli]} deprecated={deprecatedOf(s.cli)} dim={archived.has(s.id) || hiddenIds.has(s.id)} pending={pending(s.id)} onOpen={() => setOpenId(s.id)} />;
   };
   const tileBlocks: ReactNode[] = [];
   let looseTiles: ReactNode[] = [];
@@ -859,10 +859,10 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
       );
       for (const { m } of b.rows as Row[]) {
         out.push(view === 'tiles'
-          ? <Tile key={m.id} s={m} color={colorOf[m.cli]} deprecated={deprecatedOf[m.cli]} group={groupNameOf[m.id]} dim={archived.has(m.id) || hiddenIds.has(m.id)}
+          ? <Tile key={m.id} s={m} color={colorOf[m.cli]} deprecated={deprecatedOf(m.cli)} group={groupNameOf[m.id]} dim={archived.has(m.id) || hiddenIds.has(m.id)}
               pending={pending(m.id)} onOpen={() => setOpenId(m.id)} />
           : <div key={m.id} className="ov-panel">
-              <Card s={m} color={colorOf[m.cli]} deprecated={deprecatedOf[m.cli]} group={groupNameOf[m.id]} pending={pending(m.id)} isMobile={isMobile} onOpen={onOpen} />
+              <Card s={m} color={colorOf[m.cli]} deprecated={deprecatedOf(m.cli)} group={groupNameOf[m.id]} pending={pending(m.id)} isMobile={isMobile} onOpen={onOpen} />
             </div>);
       }
     }
@@ -876,7 +876,7 @@ export default function Overview({ clis, tree, chip, sort, query, view, archived
       <div className="ovw-win" onClick={(e) => e.stopPropagation()}>
         {/* The window shows ONE agent on its own — no capsule around it, sorted
             or not — so it names its group the way a pane header does. */}
-        <Card s={dataFor(openSess)} color={colorOf[openSess.cli]} deprecated={deprecatedOf[openSess.cli]} group={groupNameOf[openSess.id]}
+        <Card s={dataFor(openSess)} color={colorOf[openSess.cli]} deprecated={deprecatedOf(openSess.cli)} group={groupNameOf[openSess.id]}
           pending={pending(openSess.id)} isMobile={isMobile} onOpen={onOpen} onClose={() => setOpenId(null)}
           onSeen={onSeen} />
       </div>

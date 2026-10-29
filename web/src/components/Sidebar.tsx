@@ -4,7 +4,7 @@ import { STATE_LABEL, REMOTE_STATE_LABEL, creatable, isPassive, isRemote } from 
 import * as api from '../api';
 import Logo from './Logo';
 import StateLogo from './StateLogo';
-import { DeprecatedTag, deprecationNote } from './DeprecatedNotice';
+import DeprecatedNotice, { deprecationNote } from './DeprecatedNotice';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
 import Attachments from './Attachments';
@@ -146,7 +146,7 @@ export default function Sidebar({
     [tree.order, tree.sessions, tree.groups],
   );
   const colorOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c.color])), [clis]);
-  const deprecatedOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, deprecationNote(c)])), [clis]);
+  const deprecatedOf = (cli: string) => deprecationNote(clis.find((c) => c.id === cli));
   const quickFilesBlocked = quickImages.some((image) => !image.attachment);
 
   useEffect(() => { quickImagesRef.current = quickImages; }, [quickImages]);
@@ -599,7 +599,7 @@ export default function Sidebar({
         ) : (
           <span className="name">{s.name}</span>
         )}
-        <DeprecatedTag note={deprecatedOf[s.cli]} />
+        <DeprecatedNotice note={deprecatedOf(s.cli)} />
         <span className="age">{fmtAgo(ages?.[s.id])}</span>
         {/* One button on a live row, and it files the agent away. Start was the
             row's own onClick spelled twice; stop went because an idle CLI costs

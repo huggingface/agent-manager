@@ -2374,4 +2374,4 @@ a.btn-ghost { text-decoration: none; }
 /* the row's hover actions sit on top of it, as they do on .age */
 .row:hover .deprecated-tag { opacity: 0; }
 /* above the terminal's boot/exit overlays, which start right under the header */
-.deprecated-banner { position: relative; z-index: 6; flex: none; padding: 5px 11px; font-size: 12px; line-height: 1.4; background: color-mix(in srgb, var(--warn, #c9972f) 10%, var(--panel)); border-bottom: 1px solid color-mix(in srgb, var(--warn, #c9972f) 35%, var(--border)); }
+.deprecated-banner { display: block; position: relative; z-index: 6; flex: none; padding: 5px 11px; font-size: 12px; line-height: 1.4; background: color-mix(in srgb, var(--warn, #c9972f) 10%, var(--panel)); border-bottom: 1px solid color-mix(in srgb, var(--warn, #c9972f) 35%, var(--border)); }

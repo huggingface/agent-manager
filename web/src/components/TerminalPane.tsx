@@ -13,7 +13,7 @@ import type { Cli, Session } from '../types';
 import { STATE_LABEL, isRemote } from '../types';
 import StateLogo from './StateLogo';
 import TraceInfo from './TraceInfo';
-import { DeprecatedBanner, deprecationNote } from './DeprecatedNotice';
+import DeprecatedNotice, { deprecationNote } from './DeprecatedNotice';
 import ConversationView from './conversation/ConversationView';
 import type { ConversationSeen } from './conversation/ConversationView';
 import { isPassive } from '../types';
@@ -1549,7 +1549,7 @@ export default function TerminalPane({
           <button className="ph-btn ph-close" title={sharedTask ? "Close view — work continues" : "Close"} aria-label={sharedTask ? "Close view" : "Close"} onClick={(e) => { e.stopPropagation(); onClose(); }}><CloseGlyph /></button>
         </div>
       </div>
-      <DeprecatedBanner note={deprecationNote(cli)} />
+      <DeprecatedNotice banner note={deprecationNote(cli)} />
       {interruptError && <div className="cxv-note" role="alert">{interruptError}</div>}
       {interruptedTurn && interruptedTurn === session.interruptTurnId && <div className="cxv-note" role="status">Interruption requested…</div>}
       {/* `reading` releases the frame's touch-action: the phone rule pins it to
