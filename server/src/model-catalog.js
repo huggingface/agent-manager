@@ -178,6 +178,9 @@ const SOURCES = {
 
 let lists = {};
 let refreshing = null;
+// Until the first scan since boot ends, the lists may be missing or stale: the
+// form keeps asking (launchOptions().refreshing) until then.
+let scanned = false;
 
 function load() {
   try {
@@ -224,7 +227,7 @@ export function refreshModelLists({ sources = SOURCES, force = false } = {}) {
       }
     }
     persist();
-  })().finally(() => { refreshing = null; });
+  })().finally(() => { refreshing = null; scanned = true; });
   return refreshing;
 }
 
@@ -243,7 +246,7 @@ const modelsOf = (id) => (Array.isArray(lists[id]?.models) ? lists[id].models : 
 /** What the create form can offer, per CLI that takes any launch choice. */
 export function launchOptions() {
   return {
-    refreshing: !!refreshing,
+    refreshing: !!refreshing || !scanned,
     clis: CLIS.filter((c) => c.launch).map((c) => {
       const entry = lists[c.id] || {};
       const models = c.launch.model ? modelsOf(c.id) : [];

@@ -885,12 +885,13 @@ export default function Sidebar({
                   value={quickLoc}
                   onChange={(value) => { resetQuickTarget(); setQuickLoc(value); }}
                 />
-                {/* Locked once files went to a session created without it. */}
+                {/* Like the name and folder: a change starts a fresh target, so a
+                    session prepared for attachments is not reused with the old choice. */}
                 <LaunchField
                   cli={quickCli ? clis.find((c) => c.id === quickCli) : undefined}
                   value={quickLaunch}
-                  onChange={setQuickLaunch}
-                  disabled={quickSending || quickImages.length > 0}
+                  onChange={(next) => { resetQuickTarget(); setQuickLaunch(next); }}
+                  disabled={quickSending}
                 />
                 <textarea
                   autoFocus

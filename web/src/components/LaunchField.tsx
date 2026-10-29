@@ -15,6 +15,6 @@ export default function LaunchField({ cli, value, onChange, disabled }: {
   if (!cli?.launch?.model && !cli?.launch?.effort) return null;
   return (
     <LazyPanel load={loadPicker} what="model options"
-      render={(m) => <m.default cli={cli.id} value={value} onChange={onChange} disabled={disabled} />} />
+      render={(m) => <m.default cli={cli.id} canModel={!!cli.launch?.model} value={value} onChange={onChange} disabled={disabled} />} />
   );
 }

@@ -25,6 +25,16 @@ memory and in `STATE_DIR/cli-models.json`; `POST /api/launch-options/refresh`
 (the ↻ in the form) asks again. A CLI whose list could not be built offers no
 model at all — the server only accepts an id that is on the current list.
 
+In the form (`web/src/components/LaunchPicker.tsx`), every open panel shares
+one catalog. It is asked again each time a panel opens, and every 3 s while
+the server says it is still building the lists (`refreshing`, true until the
+first scan after boot ends). A CLI that takes a model but has no list yet shows
+a disabled "Model: listing…" select next to the ↻. When the catalog changes,
+a model or effort it no longer offers is cleared, so the form never submits a
+choice it does not show. In the quick panel, changing the choice starts a new
+target, like changing the name or folder: a session already created for
+attachments is not reused with the old choice.
+
 ## Claude's picker probe
 
 Claude Code has no list command, so `server/src/claude-models.js` starts
