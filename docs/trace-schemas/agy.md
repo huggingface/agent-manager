@@ -8,7 +8,23 @@
 > and `main` has no `antigravity` code at all. The branch pins `agy` 1.4.10
 > (`feat/antigravity-cli@8c287ea:Dockerfile:93`).
 
-**Summary.** The branch adds launch, credentials and durable state for `agy`.
+> **Update, `feat/antigravity-cli@5004047`** ("Antigravity: conversation
+> reader, digest and pin", pushed after the rest of this page was written).
+> The branch now reads the SQLite `steps`, not `transcript.jsonl`
+> (`server/src/antigravity.js` on the branch): step types `USER_INPUT` 14,
+> `PLANNER_RESPONSE` 15, `ERROR_MESSAGE` 17, `SYSTEM_MESSAGE` 101, `GENERIC`
+> 132 (tool result); status `DONE` 3, `ERROR` 7, `WAITING` 9 (tool awaiting
+> permission), and 1/2/8/11 (pending/running/generating/queued) treated as
+> in flight. It adds `parseAgy` (digest, `running` = last step in flight),
+> `normalizeAgyDb` (reader blocks, `activity` from the last step), bulk
+> attribution by the pinned `antigravityConversationId` then by cwd for an
+> unpinned pane alone in its folder, a `findTrace` case, and a pin captured
+> after launch (`scheduleAgyCapture`) with resume by id. Still absent:
+> input-required (status 9 is decoded but not wired to the badge), and the
+> branch is unmerged. The sections below describe `8c287ea` and are kept for
+> the storage details; read them with this note in mind.
+
+**Summary (at `8c287ea`).** The branch adds launch, credentials and durable state for `agy`.
 It adds **no trace reader, no digest, no pinning and no input-required
 signal**. `traces.js`, `share.js` and `input-required.js` have no change on the
 branch. The PR body lists "conversation pinning by id, the reader / trace

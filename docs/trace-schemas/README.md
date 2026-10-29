@@ -17,7 +17,7 @@ One page per CLI:
 | Hermes | [hermes.md](hermes.md) | v0.22.5 (git tag; `hermes --version` fails on this Space) |
 | OpenClaw | [openclaw.md](openclaw.md) | 2026.10.8 |
 | fx | [fx.md](fx.md) | 0.0.5 |
-| Antigravity `agy` | [agy.md](agy.md) | branch `feat/antigravity-cli@8c287ea` (PR #227), not installed |
+| Antigravity `agy` | [agy.md](agy.md) | branch `feat/antigravity-cli` (PR #227) at `8c287ea`, reader at `5004047`; not installed |
 
 Related: [reader-architecture.md](../reader-architecture.md) (reader transport
 contracts), [conversation-adapter.md](../conversation-adapter.md),
@@ -38,7 +38,7 @@ state directories), the `codex-*.md` pages (shared Codex).
 | hermes | SQLite, shared | no, one DB for all | `readHermes` | `normalizeHermesDb` | none (cwd only) | no | no | none |
 | openclaw | JSONL | yes, but one agent shared by every pane | `parseOpenClaw` | `normalizeOpenClaw` | none (single-pane only) | no | no | none |
 | fx | JSONL `events.jsonl` | yes | `parseFx` | `normalizeFx` | `fxSessionId` | yes | no | none |
-| agy | SQLite `steps` with protobuf payloads; also a JSONL `transcript.jsonl` | yes | none (PR #227 adds launch only) | none | none (`agy -c` per folder) | no | no | none |
+| agy | SQLite `steps` with protobuf payloads; also a JSONL `transcript.jsonl` | yes, one DB per conversation | `parseAgy` (PR #227, `5004047`) | `normalizeAgyDb` (PR #227) | `antigravityConversationId` (PR #227) | yes, last step in flight (PR #227) | yes (PR #227) | none (status 9 decoded, not wired) |
 
 All parsers and normalizers live in `server/src/traces.js`. The CLI-specific
 pages give exact lines. Locating a pane's trace for the reader, sharing and
@@ -232,7 +232,7 @@ coordinating agent. CLI-specific gaps are on each page.
    `observeInput`; add `input-required` as a `/wait` state.
 6. **Coverage holes.** Gemini has no parser, reader, digest or pin at all, and
    every restart starts a new conversation (`gemini --session-id` exists).
-   agy (PR #227) has none either. Hermes and OpenClaw have no pin: Hermes
+   agy has a reader only on the unmerged PR #227 branch, and no input-required signal. Hermes and OpenClaw have no pin: Hermes
    merges every conversation in a folder and `hermes -c` can resume another
    folder's conversation; a second OpenClaw pane anywhere blanks the first.
    OpenClaw's reader maps tool results to operator prompts
