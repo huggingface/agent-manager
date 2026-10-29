@@ -9,7 +9,11 @@ rollout open for an entire resumed session: an unclean process/container stop
 can discard every append since the previous open epoch closed. fx is the same
 shape — one `events.jsonl` per conversation, appended to through a handle it
 keeps open — and it has no config-dir override at all, so `$HOME/.fx` is a
-symlink to local disk rather than an env var pointed there.
+symlink to local disk rather than an env var pointed there. Antigravity CLI
+(`agy`) is the same: no config-dir override (it ignores `GEMINI_CLI_HOME`), so
+its two folders under `~/.gemini` are symlinks into local disk. It keeps one
+WAL-mode SQLite database per conversation, so each changed database is copied
+with SQLite's online backup, never as a raw file.
 
 The old layout also copied opencode and Hermes SQLite databases, WALs, and SHMs
 with `rsync`. Those files can be observed at different transaction boundaries;
@@ -40,6 +44,7 @@ having all three files is not proof that the copy is a consistent database.
 | opencode | `$AM_LOCAL/opencode-share` | `/data/state/opencode` | file tree plus online `opencode.db` backup |
 | Hermes | `$AM_LOCAL/hermes` | `/data/state/hermes` | file tree plus online `state.db` backup |
 | fx | `$AM_LOCAL/fx-home` | `/data/state/fx` | file tree; locks and `index.pending` excluded |
+| Antigravity CLI | `$AM_LOCAL/antigravity-home` (`~/.gemini/antigravity-cli` and `~/.gemini/config` link here) | `/data/state/antigravity` | file tree plus an online backup of every changed `*.db`; WAL/SHM, locks, `bin/`, `log/`, `crashes/`, `updater/`, `presence/` excluded |
 
 Remote agents already use a good object-store pattern: one closed, immutable
 Markdown file per message. Shell sessions have no model transcript; workspace

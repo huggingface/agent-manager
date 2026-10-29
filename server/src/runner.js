@@ -1955,10 +1955,11 @@ export function commandFor(session) {
   // codex without a pinned conversation: `resume --last` scopes to the cwd,
   // so in a SHARED folder it can resume a SIBLING's conversation (cross-talk).
   // Only resume when this session has the folder to itself; otherwise start
-  // fresh — capture pins the new conversation right away.
-  if (cli.id === 'codex' && session.everStarted) {
+  // fresh — capture pins the new conversation right away. Antigravity's `-c`
+  // is scoped to the cwd the same way, and nothing pins its conversations yet.
+  if ((cli.id === 'codex' || cli.id === 'antigravity') && session.everStarted) {
     const folder = session.path ?? session.id;
-    const shared = list().some((o) => o.id !== session.id && o.cli === 'codex' && (o.path ?? o.id) === folder);
+    const shared = list().some((o) => o.id !== session.id && o.cli === cli.id && (o.path ?? o.id) === folder);
     if (shared) return `exec ${cli.run}`;
   }
 

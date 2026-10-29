@@ -50,6 +50,14 @@ HERMES_DURABLE="${HERMES_DURABLE:-$DATA_DIR/state/hermes}"
 # they existed cannot hand a stale lock back on restore.
 FX_LIVE="${FX_LIVE:-$AM_LOCAL/fx-home}"
 FX_DURABLE="${FX_DURABLE:-$DATA_DIR/state/fx}"
+# Antigravity CLI keeps everything under ~/.gemini/{antigravity-cli,config},
+# which entrypoint.sh links into this one local tree. Every conversation is its
+# own SQLite database in WAL mode, so a plain copy can miss committed rows still
+# in the WAL: databases are checkpointed with `.backup` (checkpoint_antigravity)
+# and never carry a -wal/-shm. Locks, logs, crash dumps, the updater's state and
+# the encoder binary it unpacks into bin/ are regenerated and stay local.
+ANTIGRAVITY_LIVE="${ANTIGRAVITY_LIVE:-$AM_LOCAL/antigravity-home}"
+ANTIGRAVITY_DURABLE="${ANTIGRAVITY_DURABLE:-$DATA_DIR/state/antigravity}"
 
 # rsyncs one big tree may run at once when it is copied from the local API
 # mirror. Claude and Codex each get a pool, the five small adapters one rsync
@@ -219,6 +227,13 @@ rsync_adapter() {
       if [ "$_dir" = restore ]; then rsync_tree --exclude '/backups/***' "$@"; else rsync_tree "$@"; fi ;;
     fx)
       rsync_tree --exclude '*.lock' --exclude 'index.pending' "$@" ;;
+    antigravity)
+      # Databases go through checkpoint_antigravity, never a raw copy.
+      if [ "$_dir" = checkpoint ]; then set -- --exclude '*.db' "$@"; fi
+      rsync_tree --exclude '*-wal' --exclude '*-shm' --exclude '*.lock' \
+        --exclude '/antigravity-cli/bin/***' --exclude '/antigravity-cli/log/***' \
+        --exclude '/antigravity-cli/crashes/***' --exclude '/antigravity-cli/updater/***' \
+        --exclude '/antigravity-cli/presence/***' "$@" ;;
     *-files)
       rsync_tree --exclude 'checkpoints' --exclude '*.db' --exclude '*.db-*' \
         --exclude '*.sqlite*' --exclude '*-wal' --exclude '*-shm' "$@" ;;
@@ -510,6 +525,43 @@ checkpoint_sqlite_tree() {
   mv "$sqlite_next" "$sqlite_stamp"
 }
 
+# Antigravity: the file tree as usual (databases excluded), then a consistent
+# `.backup` of every database whose file or WAL changed since the last pass.
+# Each database lands at its own path in the durable tree, so a restore is a
+# plain tree copy. A failed backup keeps the stamp, so the next pass retries it.
+checkpoint_antigravity() {
+  live="$1" durable="$2"
+  [ -d "$live" ] || return 0
+  checkpoint_tree antigravity "$live" "$durable" || return 1
+  db_stamp="$AM_LOCAL/agent-state-stamps/antigravity-db"
+  [ -e "$db_stamp" ] || touch -t 197001010000 "$db_stamp"
+  db_next="$db_stamp.next.$$"
+  db_list="$db_stamp.files.$$"
+  mark_checkpoint_floor "$db_next"
+  (cd "$live" && find . -type f \( -name '*.db' -o -name '*.db-wal' \) -newer "$db_stamp" -print) \
+    | sed 's/-wal$//' | sort -u > "$db_list"
+  stage_dir="$AM_LOCAL/agent-state-snapshots"
+  mkdir -p "$stage_dir"
+  staged="$stage_dir/antigravity.$$.tmp"
+  escaped=$(printf '%s' "$staged" | sed "s/'/''/g")
+  db_failed=0
+  while IFS= read -r rel; do
+    rel="${rel#./}"
+    [ -s "$live/$rel" ] || continue
+    rm -f "$staged"
+    if ! sqlite3 "$live/$rel" ".timeout 5000" ".backup '$escaped'" \
+      || [ "$(sqlite3 "$staged" 'PRAGMA quick_check;' 2>/dev/null)" != ok ]; then
+      echo "agent-state: could not take a consistent copy of $live/$rel" >&2
+      db_failed=1; continue
+    fi
+    mkdir -p "$(dirname "$durable/$rel")"
+    rsync -a --delay-updates "$staged" "$durable/$rel" || db_failed=1
+  done < "$db_list"
+  rm -f "$staged" "$db_list"
+  if [ "$db_failed" -ne 0 ]; then rm -f "$db_next"; return 1; fi
+  mv "$db_next" "$db_stamp"
+}
+
 # ---------- restore source: the bucket API, not the mount ----------
 #
 # Every restore read used to go through hf-mount. On 2026-10-19 that mount
@@ -592,6 +644,9 @@ mirror_filters() {
         '- *.sqlite*' '- *.db' '- *.db-*' '- *-wal' '- *-shm' ;;
     fx)
       printf '%s\n' '- *.lock' '- index.pending' '- */index.pending' ;;
+    antigravity)
+      printf '%s\n' '- *-wal' '- *-shm' '- *.lock' '- antigravity-cli/bin/*' '- antigravity-cli/log/*' \
+        '- antigravity-cli/crashes/*' '- antigravity-cli/updater/*' '- antigravity-cli/presence/*' ;;
     claude)
       # Only the newest few config backups are restored (restore_claude_backups);
       # fetch just those rather than all ~2,400 — which needs a listing we can
@@ -718,20 +773,21 @@ restore_openclaw() { restore_tree openclaw "$1" "$OPENCLAW_STATE_DIR"; }
 restore_opencode() { restore_sqlite_tree "$1" "$OPENCODE_LIVE" opencode.db opencode.db; }
 restore_hermes() { restore_sqlite_tree "$1" "$HERMES_LIVE" state.db state.db; }
 restore_fx() { restore_tree fx "$1" "$FX_LIVE"; }
+restore_antigravity() { restore_tree antigravity "$1" "$ANTIGRAVITY_LIVE"; }
 
-ADAPTERS="codex claude gemini openclaw opencode hermes fx"
+ADAPTERS="codex claude gemini openclaw opencode hermes fx antigravity"
 live_of() {
   case "$1" in
     codex) echo "$CODEX_HOME" ;; claude) echo "$CLAUDE_CONFIG_DIR" ;; gemini) echo "$GEMINI_LIVE" ;;
     openclaw) echo "$OPENCLAW_STATE_DIR" ;; opencode) echo "$OPENCODE_LIVE" ;; hermes) echo "$HERMES_LIVE" ;;
-    fx) echo "$FX_LIVE" ;;
+    fx) echo "$FX_LIVE" ;; antigravity) echo "$ANTIGRAVITY_LIVE" ;;
   esac
 }
 durable_of() {
   case "$1" in
     codex) echo "$CODEX_DURABLE" ;; claude) echo "$CLAUDE_DURABLE" ;; gemini) echo "$GEMINI_DURABLE" ;;
     openclaw) echo "$OPENCLAW_DURABLE" ;; opencode) echo "$OPENCODE_DURABLE" ;; hermes) echo "$HERMES_DURABLE" ;;
-    fx) echo "$FX_DURABLE" ;;
+    fx) echo "$FX_DURABLE" ;; antigravity) echo "$ANTIGRAVITY_DURABLE" ;;
   esac
 }
 
@@ -1047,6 +1103,7 @@ else
   checkpoint_sqlite_tree "$OPENCODE_LIVE" "$OPENCODE_DURABLE" opencode.db opencode.db || failures=$((failures + 1))
   checkpoint_sqlite_tree "$HERMES_LIVE" "$HERMES_DURABLE" state.db state.db || failures=$((failures + 1))
   checkpoint_tree fx "$FX_LIVE" "$FX_DURABLE" || failures=$((failures + 1))
+  checkpoint_antigravity "$ANTIGRAVITY_LIVE" "$ANTIGRAVITY_DURABLE" || failures=$((failures + 1))
 fi
 
 [ "$failures" -eq 0 ] || {
