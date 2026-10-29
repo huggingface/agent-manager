@@ -193,8 +193,9 @@ A session is a *query*, not a file.
   messages (notices agy writes for the model) and bookkeeping steps are skipped. Statuses
   PENDING/RUNNING/GENERATING/QUEUED are work in flight. A finished `run_command` is shown as
   a shell block.
-- An interactive conversation records its folder only in `cache/last_conversations.json`
-  (`{cwd: id}`, what `agy -c` resumes); print mode also writes it into the prompt step.
+- A conversation's folder comes from `cache/last_conversations.json` (`{cwd: id}`, what
+  `agy -c` resumes), else from the first prompt step that records it. Prompt steps record it
+  in print and interactive runs, but not a prompt seeded at launch with `agy -i`.
 - The runner pins `antigravityConversationId` (the conversation written in the pane's folder
   since launch, for a pane that holds its folder alone) and resumes it with
   `--conversation <id>`, existence-checked in the shell. Unpinned panes fall back to the

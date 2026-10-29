@@ -101,9 +101,10 @@ const store = await import('../src/sessions.js');
 store.init();
 const traces = await import('../src/traces.js');
 
-console.log('\nan interactive conversation, which records its folder only in agy\'s cache');
-// The pane's agy writes no folder into its prompt step; cache/last_conversations.json
-// ({ cwd: id }, what `agy -c` resumes) is the only record. Thinking is kept.
+console.log('\na conversation whose folder is only in agy\'s cache');
+// A prompt seeded at launch (`agy -i`) carries no folder in its step, so
+// cache/last_conversations.json ({ cwd: id }, what `agy -c` resumes) is the
+// only record until a later prompt. Thinking is kept.
 const IID = '1a1a1a1a-0000-4000-8000-000000000002';
 {
   const w = writer(IID);

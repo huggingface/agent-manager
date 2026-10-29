@@ -14,7 +14,7 @@ import { cliById, cliVersion, isRemote, INTERNAL_HOST, PORT, STATE_DIR, WORKSPAC
 import { update, list } from './sessions.js';
 import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace,
   captureFxSession } from './traces.js';
-import { AGY_ID, captureAgyConversation } from './antigravity.js';
+import { AGY_ID, agyWaitingStep, captureAgyConversation } from './antigravity.js';
 import {
   buildPaletteIndex, snapshotToRestoreAnsi, styledSnapshotLines, textColumns,
 } from './snapshot.js';
@@ -1785,6 +1785,16 @@ const agyCapturing = new Map();
 // the pane starts another one. A shared folder pins nothing (two panes there
 // can't be told apart), and advances the floor like fx so a rival's
 // conversation is never adopted once the folder clears.
+// A tool in this pane's pinned conversation is waiting for the operator's
+// permission. Only the pinned conversation counts: a pane that holds no pin
+// (shared folder, nothing captured yet) shows nothing rather than a guess, and
+// a new pin is a new token, so the old one's dialog never carries over.
+function agyPermissionPending(id) {
+  const pin = list().find((s) => s.id === id)?.antigravityConversationId;
+  const step = pin ? agyWaitingStep(pin) : null;
+  return step ? { kind: 'permission', source: 'antigravity-step', token: `${pin}:${step.idx}` } : null;
+}
+
 function scheduleAgyCapture(session, workdir) {
   const prev = agyCapturing.get(session.id);
   if (prev) clearTimeout(prev);
@@ -2151,7 +2161,10 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     screenChangedAt: Date.now(),
     bells: 0,
   };
-  host.inputRequired = createInputRequiredTracker({ id: session.id, runId, cli: session.cli });
+  host.inputRequired = createInputRequiredTracker({
+    id: session.id, runId, cli: session.cli,
+    native: session.cli === 'antigravity' ? () => agyPermissionPending(session.id) : null,
+  });
   host.historyCheckpoint = createTerminalHistoryCheckpoint({
     directory: HISTORY_DIR,
     id: host.id,

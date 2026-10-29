@@ -191,8 +191,8 @@ export function readAgySteps(dbPath, prev = null) {
   } finally { try { db.close(); } catch {} }
 }
 
-// The folder a print-mode conversation runs in, from its first user input. It
-// never changes, so it is remembered per file once found.
+// The folder a conversation runs in, from the first prompt step that names it.
+// It never changes, so it is remembered per file once found.
 // A conversation with no prompt yet is looked at again only once it changes.
 const cwdMemo = new Map(); // dbPath -> { cwd } | { none: activeMs }
 function conversationCwd(dbPath, activeMs) {
@@ -202,8 +202,11 @@ function conversationCwd(dbPath, activeMs) {
   let db;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
-    const row = db.prepare('select idx, step_type, status, step_payload from steps where step_type = ? order by idx limit 1').get(STEP.USER_INPUT);
-    const cwd = row ? decodeStep(row)?.cwd || null : null;
+    let cwd = null;
+    for (const row of db.prepare('select idx, step_type, status, step_payload from steps where step_type = ? order by idx limit 8').all(STEP.USER_INPUT)) {
+      cwd = decodeStep(row)?.cwd || null;
+      if (cwd) break;
+    }
     if (cwdMemo.size > 2000) cwdMemo.clear();
     cwdMemo.set(dbPath, cwd ? { cwd } : { none: activeMs });
     return cwd;
@@ -220,10 +223,10 @@ export function agyActivityMs(dbPath) {
 }
 
 // agy's own record of the newest conversation per folder (what `agy -c`
-// resumes): { "<cwd>": "<id>" }. An interactive conversation names its folder
-// nowhere else — only print mode writes it into the prompt step — so this is
-// how a pane's conversation is found, and older ones in the same folder lose
-// their folder once a newer one starts there.
+// resumes): { "<cwd>": "<id>" }. It is read first. Prompt steps carry the
+// folder too, in print and interactive runs, except a prompt seeded at launch
+// (`agy -i`), which carries none; they cover conversations that lost their
+// cache entry to a newer one in the same folder.
 function lastConversations() {
   let j;
   try { j = JSON.parse(fs.readFileSync(path.join(agyHome(), 'cache', 'last_conversations.json'), 'utf8')); } catch { return new Map(); }
@@ -265,6 +268,38 @@ export function captureAgyConversation(directory, sinceMs, claimed) {
     if (!best || c.activeMs > best.activeMs) best = c;
   }
   return best ? { id: best.id } : null;
+}
+
+// The step a conversation is held on for the operator (a tool waiting for
+// permission): the newest WAITING step with no prompt after it, so one left
+// WAITING by a killed run doesn't outlive the next turn. Read from the status
+// column alone, so a payload agy changed can't hide a pending approval.
+// Remembered per database until it changes.
+const waitingMemo = new Map(); // dbPath -> { key, value }
+export function agyWaitingStep(id) {
+  if (!DatabaseSync || !AGY_ID.test(id || '')) return null;
+  const p = agyConversationPath(id);
+  let key;
+  try {
+    const m = fs.statSync(p);
+    let w = null;
+    try { w = fs.statSync(`${p}-wal`); } catch {}
+    key = `${m.mtimeMs}:${m.size}:${w?.mtimeMs || 0}:${w?.size || 0}`;
+  } catch { waitingMemo.delete(p); return null; }
+  const hit = waitingMemo.get(p);
+  if (hit && hit.key === key) return hit.value;
+  let db;
+  let value = null;
+  try {
+    db = new DatabaseSync(p, { readOnly: true });
+    const row = db.prepare(`select idx from steps s where status = ?
+      and not exists (select 1 from steps u where u.step_type = ? and u.idx > s.idx)
+      order by idx desc limit 1`).get(STATUS.WAITING, STEP.USER_INPUT);
+    value = row ? { idx: Number(row.idx) } : null;
+  } catch { return hit ? hit.value : null; } finally { try { db?.close(); } catch {} }
+  if (waitingMemo.size > 2000) waitingMemo.clear();
+  waitingMemo.set(p, { key, value });
+  return value;
 }
 
 export function agyConversationExists(id) {
