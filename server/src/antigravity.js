@@ -156,14 +156,34 @@ function fileUriPath(u) {
 
 export const stepInFlight = (st) => IN_FLIGHT.has(st.status);
 
-/** Every decodable step of one conversation, in order. Throws when the database
- *  cannot be opened or read; the caller keeps what it had. */
-export function readAgySteps(dbPath) {
+// A step agy may still rewrite: in flight, or waiting on the operator.
+const settled = (st) => !IN_FLIGHT.has(st.status) && st.status !== STATUS.WAITING;
+// Steps re-read on every refresh even when settled, as a margin against a
+// late rewrite near the end.
+const REREAD_TAIL = 32;
+
+/** Every decodable step of one conversation, in order. With `prev` (this
+ *  database's last read) only the tail is read again: settled steps before it
+ *  are kept, and everything from the first unsettled step on is replaced. A
+ *  conversation that lost rows is read whole. Throws when the database cannot
+ *  be opened or read; the caller keeps what it had. */
+export function readAgySteps(dbPath, prev = null) {
   if (!DatabaseSync) { const e = new Error('node:sqlite unavailable'); e.code = 'unsupported-harness'; throw e; }
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
-    const out = [];
-    for (const row of db.prepare('select idx, step_type, status, step_payload from steps order by idx').all()) {
+    let keep = [];
+    if (prev && prev.length) {
+      const { n } = db.prepare('select count(*) n from steps').get();
+      if (n >= prev.length) {
+        let cut = Math.max(0, prev.length - REREAD_TAIL);
+        const open = prev.findIndex((st) => !settled(st));
+        if (open >= 0 && open < cut) cut = open;
+        keep = prev.slice(0, cut);
+      }
+    }
+    const from = keep.length ? keep[keep.length - 1].idx + 1 : -1;
+    const out = keep.slice();
+    for (const row of db.prepare('select idx, step_type, status, step_payload from steps where idx >= ? order by idx').all(from)) {
       const st = decodeStep(row);
       if (st) out.push(st);
     }

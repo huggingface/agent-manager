@@ -185,7 +185,31 @@ step(10, 15, 3, [[20, [[1, 'Half an answer, finished.']]]]);
 const done = await traces.digestFor(store.get('am-a'));
 check('the finished step replaces the partial one', done?.lastAssistantText, 'Half an answer, finished.');
 check('and the turn is over', done?.running, false);
+const full = agy.readAgySteps(path.join(CONV, `${IDS.a}.db`));
+const before = full.slice(0, 6);
+check('a refresh from an earlier read equals a full read', JSON.stringify(agy.readAgySteps(path.join(CONV, `${IDS.a}.db`), before)), JSON.stringify(full));
+live.prepare('delete from steps where idx >= 9').run();
+check('a conversation that lost rows is read whole', agy.readAgySteps(path.join(CONV, `${IDS.a}.db`), full).length, TOOLS.steps.length);
 live.close();
+
+console.log('\na long conversation is re-read from its tail');
+{
+  const LID = '2b2b2b2b-0000-4000-8000-000000000003';
+  const w = writer(LID);
+  const st = (idx, status, text) => w.put({ idx, step_type: 15, status, payload: [[1, 15], [4, status], [5, [[1, [[1, 1793290000 + idx], [2, 0]]]]], [20, [[1, text]]]] }, WORKSPACES);
+  for (let i = 0; i < 50; i++) st(i, 3, `step ${i}`);
+  st(50, 2, 'still going');
+  const p = path.join(CONV, `${LID}.db`);
+  const prev = agy.readAgySteps(p);
+  st(50, 3, 'done now'); st(51, 3, 'and one more');
+  const next = agy.readAgySteps(p, prev);
+  check('the settled head is kept as it was', next[0] === prev[0] && next[18] === prev[18], true);
+  check('the margin before the tail is read again', next[19] === prev[19], false);
+  check('the in-flight step is replaced', next[50].text, 'done now');
+  check('new steps are appended', next.length, 52);
+  check('and the result equals a full read', JSON.stringify(next), JSON.stringify(agy.readAgySteps(p)));
+  w.db.close();
+}
 
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

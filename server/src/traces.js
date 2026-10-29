@@ -892,7 +892,8 @@ export function fxSessionExists(id) {
 
 // ---------- Antigravity CLI (SQLite: one db per conversation, see antigravity.js) ----------
 // The decoded steps of a conversation are the one source for both the digest
-// and the reader, read per database and kept until the db or its WAL changes.
+// and the reader, read per database and kept until the db or its WAL changes;
+// a change re-reads only the tail (readAgySteps).
 const agyStepsMemo = new Map(); // dbPath -> { key, steps }
 function agyStepsFor(p) {
   const ck = dbChangeKey(p);
@@ -901,7 +902,7 @@ function agyStepsFor(p) {
   if (hit && hit.key === ck.key) return hit.steps;
   let steps;
   // A torn read of a db being written: keep the previous read, try next poll.
-  try { steps = readAgySteps(p); } catch { return hit ? hit.steps : null; }
+  try { steps = readAgySteps(p, hit && hit.steps); } catch { return hit ? hit.steps : null; }
   if (agyStepsMemo.size > 500) agyStepsMemo.clear();
   agyStepsMemo.set(p, { key: ck.key, steps });
   return steps;
@@ -976,7 +977,7 @@ function agyShell(args, output) {
 // One conversation in reader blocks. Results are filed beside their call: a
 // planner step names its calls, and each tool step answers one by call id.
 function normalizeAgyDb(dbPath, out) {
-  const steps = readAgySteps(dbPath);
+  const steps = agyStepsFor(dbPath) || readAgySteps(dbPath);
   const stitch = makeStitcher();
   const calls = new Map(); // call id -> { msg, block }: a finished command replaces its call
   for (const s of steps) {

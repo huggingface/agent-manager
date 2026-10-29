@@ -184,6 +184,22 @@ A session is a *query*, not a file.
   specifically for the HF viewer, and `--redact` exists. We chose direct SQLite reads for one
   code path with opencode; either is defensible.
 
+### Antigravity CLI — **SQLite per conversation**, `~/.gemini/antigravity-cli/conversations/<uuid>.db`
+- `steps(idx, step_type, status, step_payload, …)`: one row per trajectory step, the step a
+  protobuf (`exa.cortex_pb.CortexStep`) with no published schema. The field numbers in
+  `server/src/antigravity.js` come from the descriptors embedded in the `agy` 1.4.10 binary.
+- Step types read: 14 user input (the prompt), 15 planner response (answer text, thinking,
+  tool calls), 132 generic (every tool's result, answering a call by id), 17 error. 101 system
+  messages (notices agy writes for the model) and bookkeeping steps are skipped. Statuses
+  PENDING/RUNNING/GENERATING/QUEUED are work in flight. A finished `run_command` is shown as
+  a shell block.
+- An interactive conversation records its folder only in `cache/last_conversations.json`
+  (`{cwd: id}`, what `agy -c` resumes); print mode also writes it into the prompt step.
+- The runner pins `antigravityConversationId` (the conversation written in the pane's folder
+  since launch, for a pane that holds its folder alone) and resumes it with
+  `--conversation <id>`, existence-checked in the shell. Unpinned panes fall back to the
+  folder. Read-only; the db is never copied. Sharing is not offered (no exporter).
+
 ## 7. What the Hub's viewer does, for reference
 
 Verified live. A dataset containing raw session `.jsonl` files gets auto-tagged
