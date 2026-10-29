@@ -1452,6 +1452,11 @@ export default function TerminalPane({
               moving it did not create room — where the `i` panel carries it
               instead (see TraceInfo's Folder line). */}
           <span className="ph-path" title={pathLabel}>{pathLabel}</span>
+          {(session.model || session.effort) && (
+            <span className="ph-model" title="Model and effort chosen when this agent was created">
+              {[session.model, session.effort].filter(Boolean).join(' · ')}
+            </span>
+          )}
         </div>
         {editing ? (
           <input
