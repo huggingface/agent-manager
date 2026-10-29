@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR, PASSIVE_CLIS, isRemote } from './config.js';
 import { list as listSessions, get as getSession } from './sessions.js';
-import { isRunning, paneRootPid, ensureRunning, ghosttyReady } from './runner.js';
+import { isRunning, paneRootPid, ensureRunning, ghosttyReady, waitForInputReady } from './runner.js';
 import { traceDigests } from './traces.js';
 
 // The server owns every PTY, so a Space sleep, a reboot, or a factory reset ends
@@ -38,6 +38,19 @@ const MAX_REVIVE = 12;
 // recency rule bounds itself; this is the backstop for the work-in-flight one,
 // whose whole point is that it carries no clock.
 const STALE_SNAPSHOT_DAYS = 30;
+// Resuming a conversation brings back the transcript, not the turn: whatever
+// the agent was doing — a tool call, a sub-agent, the background listener it
+// keeps for peer messages — died with the old process, and the resumed CLI just
+// sits at its prompt. So each revived agent is told once, as soon as it can
+// take input. Addressed to every revived agent rather than only those caught
+// mid-turn: an idle one has lost its listeners too, and the text itself tells
+// one that had finished that there is nothing to pick up.
+export const CONTINUE_TEXT = '[Agent Manager:] Agent Manager was restarted, which interrupted this session: '
+  + 'running tool calls and background listeners were stopped. If your turn was not finished, continue where '
+  + 'you left off and restart any listeners you need. If it was, there is nothing to do.';
+// A resumed TUI replays its conversation before it can take input; a long one
+// on a busy boot (a dozen CLIs starting 4 s apart) takes a while.
+const CONTINUE_READY_MS = 120_000;
 
 // The snapshot as it was when this process started — read once, before the
 // watch below starts overwriting it.
@@ -178,13 +191,41 @@ export function selectRevivable({ snapshot: snap, sessions, digests, alive, days
     // can't revive an agent on a signal that was never valid for it.
     const busy = !!rec.work && s.cli === 'shell';
     if (!recent && !busy) continue;
-    plan.push({ id, name: s.name, cli: s.cli, at: lastPrompt, why: recent ? 'prompted recently' : 'work in flight' });
+    plan.push({
+      id, name: s.name, cli: s.cli, at: lastPrompt, why: recent ? 'prompted recently' : 'work in flight',
+      // Only an agent has a turn to continue; a shell's job is simply gone.
+      tell: s.cli !== 'shell',
+    });
   }
   return plan.sort((a, b) => b.at - a.at);
 }
 
-/** Start the sessions that were running when this Space last went down. */
-export async function reviveOnBoot({ enabled = true, days = 3 } = {}) {
+/**
+ * Tell a just-revived agent that its work was cut off. Once its CLI can take
+ * input, and only if it is still running — a pane the operator stopped in the
+ * meantime stays stopped, which is why this waits itself instead of handing a
+ * stopped pane to a delivery path that would start it again.
+ */
+export async function tellRevived(id, send, { readyMs = CONTINUE_READY_MS } = {}) {
+  // waitForInputReady throws when the pane goes away under it: stopped on
+  // purpose, which is an answer, not an error.
+  const ready = await waitForInputReady(id, readyMs).catch(() => false);
+  if (!ready) {
+    if (isRunning(id)) console.warn(`[revive] ${id}: not ready for input after ${Math.round(readyMs / 1000)}s — not telling it to continue`);
+    return false;
+  }
+  const s = getSession(id);
+  if (!s || !isRunning(id)) return false;
+  await send(s, CONTINUE_TEXT);
+  return true;
+}
+
+/**
+ * Start the sessions that were running when this Space last went down.
+ * `send(session, text)` delivers the continue message (index.js passes its
+ * prompt-delivery path); `continue: false`, or no `send`, starts them silently.
+ */
+export async function reviveOnBoot({ enabled = true, days = 3, continue: carryOn = true, send = null } = {}) {
   if (!enabled) return [];
   if (!previous || !previous.sessions) return [];
   // No terminal engine means ensureRunning throws for every session; say it once
@@ -233,10 +274,19 @@ export async function reviveOnBoot({ enabled = true, days = 3 } = {}) {
     const t = setTimeout(() => {
       const s = getSession(p.id);
       if (!s) return; // deleted between the plan and its turn
+      let started = false;
       try {
-        ensureRunning(s);
+        started = ensureRunning(s);
         console.log(`[revive] ${p.name} (${p.cli}) — ${p.why}`);
       } catch (e) { console.error(`[revive] ${p.name}:`, e && e.message); }
+      // Off the stagger: the next revival must not wait for this one's CLI.
+      // Only a pane this boot actually started — one the operator had already
+      // opened is theirs, and they know it was restarted.
+      if (started && carryOn && send && p.tell) {
+        tellRevived(p.id, send)
+          .then((told) => { if (told) console.log(`[revive] ${p.name}: told to continue`); })
+          .catch((e) => console.error(`[revive] ${p.name}: continue message not delivered:`, e && e.message));
+      }
     }, i * REVIVE_GAP_MS);
     if (t.unref) t.unref();
   });

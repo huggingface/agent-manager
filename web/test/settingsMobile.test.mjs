@@ -43,7 +43,7 @@ const cfg = {
   artifacts: { enabled: true, space: 'me/artifacts', visibility: 'public' },
   jobs: { askAboveUsd: 5 },
   archive: { after: 'month' },
-  revive: { enabled: true, days: 3 },
+  revive: { enabled: true, days: 3, continue: true },
   backup: { every: '1h', dataset: 'me/backup', exclude: ['node_modules', '.venv', '__pycache__', 'dist'] },
 };
 const bk = {

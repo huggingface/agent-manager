@@ -1928,10 +1928,12 @@ function normalizeAmConfig(saved) {
     },
     // After a restart, start the sessions that were running again — the ones you
     // prompted within `days`, plus any that still had work in flight (see
-    // runstate.js). `days` is only read when enabled.
+    // runstate.js). `days` is only read when enabled. `continue` tells each
+    // revived agent its work was interrupted, so it carries on by itself.
     revive: {
       enabled: saved.revive?.enabled !== false,
       days: [1, 3, 7].includes(saved.revive?.days) ? saved.revive.days : 3,
+      continue: saved.revive?.continue !== false,
     },
     // How often the bucket is copied to private Hub storage. Off by default: it
     // copies this machine's contents — saved logins included — into another Hub
@@ -1979,6 +1981,7 @@ api.put('/api/config', async (req, res) => {
     revive: {
       enabled: !!(b.revive?.enabled ?? true),
       days: [1, 3, 7].includes(b.revive?.days) ? b.revive.days : 3,
+      continue: !!(b.revive?.continue ?? true),
     },
     backup: {
       every: backup.INTERVALS.includes(b.backup?.every) ? b.backup.every : 'never',
@@ -4121,7 +4124,11 @@ setTimeout(() => {
   firstVerdict.then(() => {
     const done = isLocked()
       ? Promise.resolve([])
-      : runstate.reviveOnBoot(loadAmConfig().revive).catch((e) => console.error('[revive]', e && e.message));
+      : runstate.reviveOnBoot({
+        ...loadAmConfig().revive,
+        // The Overview reply box's path: privacy-lock aware, submit confirmed.
+        send: (s, text) => deliver(s, { text }, 'Agent Manager'),
+      }).catch((e) => console.error('[revive]', e && e.message));
     done.then(() => runstate.startRunstateWatch());
   });
 }, 8000);

@@ -58,7 +58,7 @@ const baseConfig = {
   artifacts: { enabled: true, space: 'me/artifacts', visibility: 'private' },
   jobs: { askAboveUsd: 5 },
   archive: { after: 'month' },
-  revive: { enabled: true, days: 3 },
+  revive: { enabled: true, days: 3, continue: true },
   backup: { every: 'never', dataset: '', exclude: [] },
   defaultArtifactsSpace: 'me/agent-artifacts',
 };
@@ -593,7 +593,7 @@ try {
   await waitFor((n) => window.__net.configs.length === n + 1, c1, 600);
   await settle('configs', c1, {
     conflict: true, rev: 'rev-elsewhere',
-    value: { artifacts: { enabled: true, space: 'them/theirs', visibility: 'private' }, jobs: { askAboveUsd: 3 }, archive: { after: 'month' }, revive: { enabled: true, days: 3 }, backup: { every: 'never', dataset: '', exclude: [] } },
+    value: { artifacts: { enabled: true, space: 'them/theirs', visibility: 'private' }, jobs: { askAboveUsd: 3 }, archive: { after: 'month' }, revive: { enabled: true, days: 3, continue: true }, backup: { every: 'never', dataset: '', exclude: [] } },
   });
   await page.waitForTimeout(150);
   const conflictFlag = await flagOf('Agent output');
@@ -619,7 +619,7 @@ try {
   await waitFor((n) => window.__net.configs.length === n + 1, c2, 600);
   await settle('configs', c2, {
     conflict: true, rev: 'rev-theirs',
-    value: { artifacts: { enabled: true, space: 'them/theirs', visibility: 'private' }, jobs: { askAboveUsd: 3 }, archive: { after: 'month' }, revive: { enabled: true, days: 3 }, backup: { every: 'never', dataset: '', exclude: [] } },
+    value: { artifacts: { enabled: true, space: 'them/theirs', visibility: 'private' }, jobs: { askAboveUsd: 3 }, archive: { after: 'month' }, revive: { enabled: true, days: 3, continue: true }, backup: { every: 'never', dataset: '', exclude: [] } },
   });
   await page.waitForTimeout(150);
   await page.getByRole('button', { name: 'Use theirs', exact: true }).click();
