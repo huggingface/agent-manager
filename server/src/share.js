@@ -32,6 +32,7 @@ import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { WORKSPACES_DIR, DATA_DIR } from './config.js';
 import { sharedCodexRollout } from './codex-reader.js';
+import { agyConversationExists, agyConversationPath, captureAgyConversation } from './antigravity.js';
 
 const HF = 'https://huggingface.co';
 const hfToken = () =>
@@ -383,6 +384,22 @@ async function queryNewest(dbPath, sql, arg) {
   } catch { return null; } finally { try { db?.close(); } catch {} }
 }
 
+/**
+ * Antigravity keeps one database per conversation, named by its id. The pin
+ * (antigravityConversationId, captured by runner.js) is authoritative; an
+ * unpinned pane that holds its folder alone falls back to the conversation most
+ * recently written there.
+ */
+function findAgyConversation(session, allSessions) {
+  if (session.antigravityConversationId) {
+    return agyConversationExists(session.antigravityConversationId) ? agyConversationPath(session.antigravityConversationId) : null;
+  }
+  const folder = session.path ?? session.id;
+  if (allSessions.some((o) => o.id !== session.id && o.cli === 'antigravity' && (o.path ?? o.id) === folder)) return null;
+  const hit = captureAgyConversation(path.join(WORKSPACES_DIR, folder), 0, null);
+  return hit ? agyConversationPath(hit.id) : null;
+}
+
 /** OpenClaw writes one JSONL per session under agents/<agent>/sessions/. */
 async function findOpenClaw(session, allSessions) {
   const folder = session.path ?? session.id;
@@ -416,6 +433,10 @@ export async function findTrace(session, allSessions = []) {
     case 'codex': { const p = await findRollout(session, allSessions); return p && { src: p }; }
     case 'openclaw': { const p = await findOpenClaw(session, allSessions); return p && { src: p }; }
     case 'fx': { const p = await findFxEvents(session, allSessions); return p && { src: p }; }
+    case 'antigravity': {
+      const p = findAgyConversation(session, allSessions);
+      return p && { src: p, sessionId: path.basename(p, '.db') };
+    }
     case 'opencode':
     case 'hermes': {
       const hit = await findDbSession(session, allSessions);
@@ -431,7 +452,7 @@ export async function findTrace(session, allSessions = []) {
 // resolves through findTrace() for the reader.
 export const SHAREABLE_CLIS = ['claude', 'codex', 'hermes', 'opencode', 'openclaw'];
 export const HARNESS_LABEL = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes',
-                               opencode: 'opencode', openclaw: 'OpenClaw', fx: 'fx' };
+                               opencode: 'opencode', openclaw: 'OpenClaw', fx: 'fx', antigravity: 'Antigravity CLI' };
 
 /** Dataset card. `configs` pins the data file so meta/ can't collide on schema (§4). */
 function datasetCard({ title, visibility, traceName, stats, redaction, harnessLabel }) {

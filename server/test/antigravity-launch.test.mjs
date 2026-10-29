@@ -4,7 +4,9 @@
 // for a Google sign-in, so the launch line passes that setting, but only while
 // the key is set when the shell runs it. `agy -c` resumes the newest
 // conversation in the cwd, so like codex `resume --last` it must not run in a
-// folder another Antigravity pane shares. Run with: node test/antigravity-launch.test.mjs
+// folder another Antigravity pane shares. Once the runner has pinned the
+// pane's conversation, a restart resumes it by id instead, existence-checked.
+// Run with: node test/antigravity-launch.test.mjs
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -70,6 +72,22 @@ check('no -c in a shared folder', / -c( |$)/.test(shared), false);
 check('a fresh launch instead', shared, `exec ${agy.run}`);
 sessions.update(other.id, { path: 'proj-b' });
 has('once the sibling moves away, it continues again', runner.commandFor(sessions.get(s.id)), agy.cont);
+
+console.log('\na pinned pane resumes its own conversation by id');
+const ID = '79cd3d9b-b387-44da-91c0-2df98a2ae37e';
+check('resume keeps the provider', argvOf(agy.resume(ID), 'k'), `[--settings][{"modelProvider":"gemini"}][--conversation][${ID}]`);
+sessions.update(other.id, { path: 'proj-a' });
+sessions.update(s.id, { antigravityConversationId: ID });
+const pinned = runner.commandFor(sessions.get(s.id));
+has('resumes by id, even in a shared folder', pinned, `exec ${agy.resume(ID)}`);
+const conv = path.join(process.env.HOME, '.gemini', 'antigravity-cli', 'conversations');
+const run = (line) => argvOf(line.replaceAll('$HOME', process.env.HOME), 'k');
+check('a missing conversation starts fresh', run(pinned), '[--settings][{"modelProvider":"gemini"}]');
+fs.mkdirSync(conv, { recursive: true });
+fs.writeFileSync(path.join(conv, `${ID}.db`), '');
+check('an existing one is resumed', run(pinned), `[--settings][{"modelProvider":"gemini"}][--conversation][${ID}]`);
+sessions.update(s.id, { antigravityConversationId: 'x; touch /tmp/owned' });
+check('only a uuid reaches the launch line', runner.commandFor(sessions.get(s.id)).includes('owned'), false);
 
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);

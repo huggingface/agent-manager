@@ -15,6 +15,7 @@ import { findTrace, HARNESS_LABEL } from './share.js';
 import { cachedTrace, traceRevision } from './trace-revision.js';
 import { outputHash } from './output-id.js';
 import { codeModeUses, codeModeResults, patchFiles, stripDataUrls } from './codex-code-mode.js';
+import { STEP, STATUS, readAgySteps, listAgyConversations, agyConversationPath, agyConversationExists, stepInFlight } from './antigravity.js';
 
 // Workspace-wide trace analytics: parse every Claude transcript and Codex
 // rollout on the Space into per-conversation stats (turns, tool calls, web
@@ -889,6 +890,127 @@ export function fxSessionExists(id) {
   try { return fs.existsSync(fxEventsPath(id)); } catch { return false; }
 }
 
+// ---------- Antigravity CLI (SQLite: one db per conversation, see antigravity.js) ----------
+// The decoded steps of a conversation are the one source for both the digest
+// and the reader, read per database and kept until the db or its WAL changes.
+const agyStepsMemo = new Map(); // dbPath -> { key, steps }
+function agyStepsFor(p) {
+  const ck = dbChangeKey(p);
+  if (!ck) return null;
+  const hit = agyStepsMemo.get(p);
+  if (hit && hit.key === ck.key) return hit.steps;
+  let steps;
+  // A torn read of a db being written: keep the previous read, try next poll.
+  try { steps = readAgySteps(p); } catch { return hit ? hit.steps : null; }
+  if (agyStepsMemo.size > 500) agyStepsMemo.clear();
+  agyStepsMemo.set(p, { key: ck.key, steps });
+  return steps;
+}
+
+// Files a tool call names, for the card's "touched" list.
+const AGY_FILE_ARGS = ['TargetFile', 'AbsolutePath', 'Path', 'File', 'FilePath'];
+function agyToolFile(args) {
+  let a;
+  try { a = JSON.parse(args || '{}'); } catch { return null; }
+  for (const k of AGY_FILE_ARGS) if (a && typeof a[k] === 'string' && a[k]) return a[k];
+  return null;
+}
+
+function parseAgy(steps) {
+  const st = emptyStats();
+  const dg = emptyDigest();
+  st.files = 1;
+  const iso = (ms) => (ms ? new Date(ms).toISOString() : '');
+  for (const s of steps) {
+    if (s.ts) addTs(st, iso(s.ts));
+    if (s.type === STEP.USER_INPUT) {
+      if (s.cwd) st.cwd = s.cwd;
+      if (!s.text?.trim()) continue;
+      st.prompts++;
+      digestPrompt(dg, s.text, iso(s.ts));
+    } else if (s.type === STEP.PLANNER_RESPONSE) {
+      st.turns++;
+      dg.sinceTurns++;
+      if (s.usage) {
+        st.tokensIn += s.usage.in; st.tokensOut += s.usage.out; st.cacheRead += s.usage.cacheRead;
+        dg.sinceTokens += s.usage.in + s.usage.out;
+      }
+      for (const c of s.calls) {
+        st.toolCalls++;
+        st.tools[c.name] = (st.tools[c.name] || 0) + 1;
+        if (/^(search_web|read_url_content)$/.test(c.name)) st.web++;
+        digestTool(dg, c.name, agyToolFile(c.args));
+      }
+      // The step index names the reply: a streaming answer that grows keeps it.
+      if (s.text?.trim()) digestAssistant(dg, s.text, iso(s.ts), `agy:${s.idx}`);
+    }
+  }
+  const last = steps[steps.length - 1];
+  dg.running = !!last && stepInFlight(last);
+  return { stats: st, digest: dg };
+}
+
+function readAgy() {
+  const rows = [];
+  for (const c of listAgyConversations()) {
+    const steps = agyStepsFor(c.path);
+    if (!steps) continue;
+    rows.push({ id: c.id, parsed: parseAgy(steps) });
+  }
+  return rows;
+}
+
+// One conversation in reader blocks. Results are filed beside their call: a
+// planner step names its calls, and each tool step answers one by call id.
+function normalizeAgyDb(dbPath, out) {
+  const steps = readAgySteps(dbPath);
+  const stitch = makeStitcher();
+  for (const s of steps) {
+    const ts = s.ts || undefined;
+    if (s.type === STEP.USER_INPUT) {
+      if (s.cwd) out.cwd = s.cwd;
+      const blocks = [];
+      if (s.text?.trim()) blocks.push(textBlock('text', s.text));
+      for (const im of s.images) blocks.push({ type: 'image', src: dataUrl(im.data.toString('base64'), im.mediaType), mediaType: im.mediaType });
+      if (blocks.length) out.push({ role: 'user', ts, blocks });
+      continue;
+    }
+    if (s.type === STEP.PLANNER_RESPONSE) {
+      const msg = { role: 'assistant', ts, blocks: [] };
+      if (s.usage) msg.usage = { ...s.usage };
+      if (s.thinking?.trim()) msg.blocks.push(textBlock('thinking', s.thinking));
+      if (s.text?.trim()) msg.blocks.push(textBlock('text', s.text));
+      for (const c of s.calls) {
+        const use = { type: 'tool_use', id: c.id, name: c.name, ...capText(c.args) };
+        msg.blocks.push(use);
+        stitch.register(use, msg);
+      }
+      if (s.status === STATUS.ERROR && s.error) {
+        msg.error = s.error;
+        msg.kind = 'partial';
+        msg.blocks.push(textBlock('text', s.error));
+      }
+      if (msg.blocks.length) out.push(msg);
+      continue;
+    }
+    if (s.type === STEP.ERROR_MESSAGE) {
+      out.push({ role: 'assistant', ts, kind: 'partial', error: s.error, blocks: [textBlock('text', s.error)] });
+      continue;
+    }
+    if (s.call) {
+      const failed = s.status === STATUS.ERROR;
+      const res = { type: 'tool_result', id: s.call.id, ...capText(s.output || s.error || ''), ...(failed ? { failed: true } : {}) };
+      if (!stitch.file(s.call.id, res)) {
+        out.push({ role: 'assistant', ts, blocks: [{ type: 'tool_use', id: s.call.id, name: s.call.name, ...capText(s.call.args) }, res] });
+      }
+    }
+    // System messages (notices agy writes for the model), checkpoints and
+    // other bookkeeping steps are not conversation.
+  }
+  const last = steps[steps.length - 1];
+  if (last) out.activity = stepInFlight(last) ? 'working' : 'waiting';
+}
+
 // ---------- Hermes (SQLite: ~/.hermes/state.db, WAL) ----------
 // sessions carry cwd + token totals; messages carry role/content/tool_name.
 // Timestamps are float SECONDS — converted to ms for digest fields.
@@ -1420,6 +1542,26 @@ async function buildImpl() {
     attribute(hit && hit !== 'ambiguous' ? hit : null, parsed);
   }
 
+  // Antigravity: one database per conversation, named by its id. The pin
+  // (antigravityConversationId, captured by the runner — see
+  // scheduleAgyCapture) places it; otherwise the folder it runs in, for an
+  // unpinned pane that holds that folder alone (same rules as fx).
+  const byAgyId = new Map(sessions.filter((s) => s.cli === 'antigravity' && s.antigravityConversationId).map((s) => [s.antigravityConversationId, s]));
+  const byAgyCwd = new Map();
+  for (const s of sessions.filter((x) => x.cli === 'antigravity' && !x.antigravityConversationId)) {
+    const key = path.resolve(WORKSPACES_DIR, s.path ?? s.id);
+    byAgyCwd.set(key, byAgyCwd.has(key) ? 'ambiguous' : s);
+  }
+  for (const { id, parsed } of readAgy()) {
+    let session = byAgyId.get(id) || null;
+    if (!session && parsed.stats.cwd) {
+      const hit = byAgyCwd.get(path.resolve(parsed.stats.cwd));
+      if (hit && hit !== 'ambiguous') session = hit;
+    }
+    attribute(session, parsed);
+    await yieldLoop();
+  }
+
   return { perSession, digests, other, totals, sessions };
 }
 
@@ -1501,6 +1643,10 @@ export async function digestFor(s) {
         if (parsed) return parsed.digest;
       }
     }
+    if (s.cli === 'antigravity' && agyConversationExists(s.antigravityConversationId)) {
+      const steps = agyStepsFor(agyConversationPath(s.antigravityConversationId));
+      if (steps) return parseAgy(steps).digest;
+    }
   } catch { /* fall through to the bulk pass */ }
   return null;
 }
@@ -1528,6 +1674,9 @@ export async function traceLocation(s) {
     if (s.cli === 'fx' && s.fxSessionId) {
       const p = fxEventsPath(s.fxSessionId);
       if (fs.existsSync(p)) return { format: 'jsonl', path: p };
+    }
+    if (s.cli === 'antigravity' && agyConversationExists(s.antigravityConversationId)) {
+      return { format: 'sqlite', path: agyConversationPath(s.antigravityConversationId) };
     }
   } catch {}
   return null;
@@ -2618,6 +2767,7 @@ async function parseTraceFile(harness, file, sessionId, range = null, allowSubag
     case 'sts': await normalizeSts(file, out, range); break;
     case 'opencode': normalizeOpencodeDb(file, sessionId, out); break;
     case 'hermes': normalizeHermesDb(file, sessionId, out); break;
+    case 'antigravity': normalizeAgyDb(file, out); break;
     default: { const e = new Error(`no trace reader for '${harness}'`); e.code = 'unsupported-harness'; throw e; }
   }
   // A harness that reports its own session total (codex's cumulative

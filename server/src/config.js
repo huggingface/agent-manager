@@ -254,6 +254,7 @@ export const CLIS = [
   { id: 'antigravity', label: 'Antigravity CLI', bin: 'agy', color: '#3186ff', run: agyCommand(), cont: agyCommand('-c'), resizeMode: 'repaint',
     noUpdate: 'a pinned prebuilt binary from antigravity.google, not an npm package',
     withPrompt: (q) => agyCommand(`-i ${q}`), // -i = interactive session seeded with the prompt
+    resume: (id) => agyCommand(`--conversation ${id}`), // id: a uuid, checked by runner.js
     secrets: ['GEMINI_API_KEY'], setup: setupHint('GEMINI_API_KEY') },
   { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: 'opencode --continue', resizeMode: 'repaint',
     npm: 'opencode-ai',

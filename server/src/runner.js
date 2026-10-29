@@ -14,6 +14,7 @@ import { cliById, cliVersion, isRemote, INTERNAL_HOST, PORT, STATE_DIR, WORKSPAC
 import { update, list } from './sessions.js';
 import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace,
   captureFxSession } from './traces.js';
+import { AGY_ID, captureAgyConversation } from './antigravity.js';
 import {
   buildPaletteIndex, snapshotToRestoreAnsi, styledSnapshotLines, textColumns,
 } from './snapshot.js';
@@ -1776,6 +1777,47 @@ function scheduleOpencodeCapture(session, workdir) {
   opencodeCapturing.set(session.id, t0);
 }
 
+const agyCapturing = new Map();
+
+// Antigravity names each conversation database by its id and records the
+// folder in its first prompt, so the opencode story applies: pin the
+// conversation written in this pane's folder since launch, and follow it when
+// the pane starts another one. A shared folder pins nothing (two panes there
+// can't be told apart), and advances the floor like fx so a rival's
+// conversation is never adopted once the folder clears.
+function scheduleAgyCapture(session, workdir) {
+  const prev = agyCapturing.get(session.id);
+  if (prev) clearTimeout(prev);
+  let since = Date.now() - 2000;
+  let warnedShared = false;
+
+  const tick = () => {
+    if (!isRunning(session.id)) { agyCapturing.delete(session.id); return; }
+    if (folderIsShared(session.id, workdir, 'antigravity')) {
+      if (!warnedShared) {
+        warnedShared = true;
+        console.warn(`[antigravity] ${session.id}: folder shared with another live session — not following new conversations here`);
+      }
+      since = Date.now();
+    } else {
+      const claimed = new Set(list().filter((s) => s.id !== session.id && s.antigravityConversationId).map((s) => s.antigravityConversationId));
+      const pinned = (list().find((s) => s.id === session.id) || session).antigravityConversationId;
+      const hit = captureAgyConversation(workdir, since, claimed);
+      if (hit && hit.id !== pinned) {
+        if (pinned) console.warn(`[antigravity] re-pinning ${session.id}: ${pinned} -> ${hit.id} (conversation was replaced)`);
+        update(session.id, { antigravityConversationId: hit.id });
+      }
+    }
+    const t = setTimeout(tick, REPIN_MS);
+    if (t.unref) t.unref();
+    agyCapturing.set(session.id, t);
+  };
+
+  const t0 = setTimeout(tick, 3000);
+  if (t0.unref) t0.unref();
+  agyCapturing.set(session.id, t0);
+}
+
 const fxCapturing = new Map();
 
 // fx names its session directory with the conversation id and records the
@@ -1952,11 +1994,19 @@ export function commandFor(session) {
     }
   }
 
+  // Antigravity: resume the PINNED conversation by id (captured after launch —
+  // see scheduleAgyCapture), existence-checked in the shell like fx, so a
+  // deleted conversation starts fresh rather than failing the launch.
+  if (cli.id === 'antigravity' && session.everStarted && AGY_ID.test(session.antigravityConversationId || '')) {
+    const db = `"$HOME/.gemini/antigravity-cli/conversations/${session.antigravityConversationId}.db"`;
+    return `if [ -f ${db} ]; then exec ${cli.resume(session.antigravityConversationId)}; else exec ${cli.run}; fi`;
+  }
+
   // codex without a pinned conversation: `resume --last` scopes to the cwd,
   // so in a SHARED folder it can resume a SIBLING's conversation (cross-talk).
   // Only resume when this session has the folder to itself; otherwise start
   // fresh — capture pins the new conversation right away. Antigravity's `-c`
-  // is scoped to the cwd the same way, and nothing pins its conversations yet.
+  // (an unpinned pane) is scoped to the cwd the same way.
   if ((cli.id === 'codex' || cli.id === 'antigravity') && session.everStarted) {
     const folder = session.path ?? session.id;
     const shared = list().some((o) => o.id !== session.id && o.cli === cli.id && (o.path ?? o.id) === folder);
@@ -2201,6 +2251,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   if (session.cli === 'codex' && !boundOrUnknown(session)) scheduleCodexCapture(session, workdir);
   if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
   if (session.cli === 'fx') scheduleFxCapture(session, workdir);
+  if (session.cli === 'antigravity') scheduleAgyCapture(session, workdir);
   if (session.cli === 'claude') scheduleClaudeCapture(session, workdir);
   return true;
 }
