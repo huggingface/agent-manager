@@ -32,8 +32,11 @@ const SNAPSHOT_MS = 30_000;
 const REVIVE_GAP_MS = 4000;
 // Reviving is meant to bring your workbench back, not to recreate a fleet.
 // Beyond this we start the most recently active ones and SAY so in the logs
-// rather than quietly pretending the rest weren't running.
-const MAX_REVIVE = 12;
+// rather than quietly pretending the rest weren't running. It was 12 while slow
+// restarts were blamed on reviving; the slowness turned out to be the bucket
+// loading, and the stagger above already spreads the CLIs out, so a working set
+// of a few dozen agents comes back whole (32 × 4 s ≈ 2 minutes).
+const MAX_REVIVE = 32;
 // A Space that has been down for a season shouldn't wake up mid-thought. The
 // recency rule bounds itself; this is the backstop for the work-in-flight one,
 // whose whole point is that it carries no clock.
@@ -49,7 +52,7 @@ export const CONTINUE_TEXT = '[Agent Manager:] Agent Manager was restarted, whic
   + 'running tool calls and background listeners were stopped. If your turn was not finished, continue where '
   + 'you left off and restart any listeners you need. If it was, there is nothing to do.';
 // A resumed TUI replays its conversation before it can take input; a long one
-// on a busy boot (a dozen CLIs starting 4 s apart) takes a while.
+// on a busy boot (dozens of CLIs starting 4 s apart) takes a while.
 const CONTINUE_READY_MS = 120_000;
 
 // The snapshot as it was when this process started — read once, before the

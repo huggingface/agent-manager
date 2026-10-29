@@ -9,7 +9,8 @@ Every 30 s `server/src/runstate.js` writes `DATA_DIR/runstate.json`: which
 sessions were running, and for a shell, whether a command was still running in
 it. On the next boot a session is started again when it was running at the last
 snapshot and either you prompted it within `days` (1, 3 or 7) or it is a shell
-with a job in flight. Sessions start at most 12, 4 s apart, newest first. Files,
+with a job in flight. Sessions start at most 32, 4 s apart, newest first (beyond that the
+most recently used are started and the rest are named in the log). Files,
 Trace and remote panes, sessions stopped before the restart, and Codex sessions
 that belong to the shared Codex server are never started. Each agent resumes its
 own pinned conversation (`runner.commandFor`).
