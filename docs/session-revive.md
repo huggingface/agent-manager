@@ -37,13 +37,27 @@ sends it one message:
   must be positively identified and empty: a ruled box with the cursor in it, the
   bottom-most prompt marker with no menu or dialog hint below it, or OpenCode's
   `┃ … ╹` box. A quiet screen alone is not enough, because a trust, login or update
-  dialog is quiet too. Checked against panes captured from the real CLIs
-  (`server/test/fixtures/input-lines.json`). Claude Code, Codex, OpenCode and Hermes
-  empty composers are recognised. The Gemini, OpenClaw and fx captures are startup
-  dialogs (OAuth prompt, `[Y/n]`, sign-in menu) and are correctly refused. Their
-  normal composers have not been captured, so if one is not recognised the message
-  is skipped after 120 s with a `[revive] … no empty prompt` log line, and nothing
-  is typed.
+  dialog is quiet too.
+- **Only for CLIs with a prompt detector** (`promptDetector: true` in `config.js`),
+  meaning ones whose empty composer has been checked on a pane captured from the real CLI
+  (`server/test/fixtures/input-lines.json`). For any other CLI the message is
+  skipped immediately with `[revive] <name>: no prompt detector for <cli>, not
+  sent`, and the session is still revived.
+
+  | CLI | Gets the message | Why |
+  | --- | --- | --- |
+  | Claude Code | yes | ruled `❯` composer box, captured |
+  | Codex | yes | bottom-most `›` composer, captured |
+  | OpenCode | yes | its `┃ … ╹` box, captured (own rule) |
+  | Hermes | yes | `>` composer, captured |
+  | Gemini CLI | no | the only capture is the OAuth code prompt; no empty composer captured |
+  | OpenClaw | no | the only capture is a `[Y/n]` doctor dialog |
+  | fx | no | the only capture is the sign-in menu |
+  | Antigravity (`agy`, PR #227) | no | not merged; no captured screens |
+
+  To add one, capture its empty and typed composer into `input-lines.json`, set
+  the flag, and extend `revive-safety.test.mjs` (it pins the list).
+
 - **Bound to the revived process.** The pane's launch id (`AM_RUN_ID`) is taken when
   revive starts it and is checked while waiting, again in `deliver()`, and once more
   in `sendInput` just before the keystrokes. A stop, restart or archive ends the

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR, PASSIVE_CLIS, isRemote } from './config.js';
 import { list as listSessions, get as getSession } from './sessions.js';
-import { isRunning, paneRootPid, ensureRunning, ghosttyReady, promptReady, runIdOf, launchedThisBoot } from './runner.js';
+import { isRunning, paneRootPid, ensureRunning, ghosttyReady, promptReady, hasPromptDetector, runIdOf, launchedThisBoot } from './runner.js';
 import { traceDigests } from './traces.js';
 
 // The server owns every PTY, so a Space sleep, a reboot, or a factory reset ends
@@ -218,6 +218,13 @@ export function selectRevivable({ snapshot: snap, sessions, digests, alive, days
  * not simply the operator having stopped the pane).
  */
 export async function tellRevived(id, send, { runId = runIdOf(id), signal = null, readyMs = CONTINUE_READY_MS, pollMs = 200 } = {}) {
+  // A CLI whose empty composer cannot be recognised would only ever time out;
+  // say so now, by name, rather than after two silent minutes.
+  const cli = getSession(id)?.cli;
+  if (!hasPromptDetector(cli)) {
+    console.log(`[revive] ${getSession(id)?.name || id}: no prompt detector for ${cli}, not sent`);
+    return false;
+  }
   const deadline = Date.now() + readyMs;
   const ended = () => {
     if (signal?.aborted) return 'locked';
@@ -229,12 +236,12 @@ export async function tellRevived(id, send, { runId = runIdOf(id), signal = null
   for (;;) {
     const why = ended();
     if (why) {
-      if (why === 'locked') console.warn(`[revive] ${id}: the manager locked itself — not telling it to continue`);
+      if (why === 'locked') console.warn(`[revive] ${getSession(id)?.name || id}: the manager locked itself — not telling it to continue`);
       return false;
     }
     if (promptReady(id)) break;
     if (Date.now() >= deadline) {
-      console.warn(`[revive] ${id}: no empty prompt within ${Math.round(readyMs / 1000)}s (still loading, or showing a dialog) — not telling it to continue`);
+      console.warn(`[revive] ${getSession(id)?.name || id}: no empty prompt within ${Math.round(readyMs / 1000)}s (still loading, or showing a dialog) — not telling it to continue`);
       return false;
     }
     await new Promise((r) => setTimeout(r, pollMs));

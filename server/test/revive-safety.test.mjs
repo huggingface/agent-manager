@@ -39,9 +39,10 @@ const runstate = await import('../src/runstate.js');
 const { CONTINUE_TEXT, tellRevived } = runstate;
 
 let failed = 0;
+const say = console.log.bind(console);  // case 1b listens to console.log
 const check = async (what, fn) => {
-  try { await fn(); console.log(`  ok  ${what}`); } catch (e) {
-    failed++; console.log(`  FAIL ${what}\n       ${String(e.message).split('\n')[0]}`);
+  try { await fn(); say(`  ok  ${what}`); } catch (e) {
+    failed++; say(`  FAIL ${what}\n       ${String(e.message).split('\n')[0]}`);
   }
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -58,7 +59,7 @@ process.stdin.setRawMode(true);
 const acceptAt = Date.now() + (mode === 'late' ? 3000 : 0);
 if (mode === 'dialog-signal') process.stdout.write('\\x1b]9;Gemini CLI needs your attention: Answer requested by agent\\x07Login confirmation: press Enter to continue\\r\\n');
 else if (mode === 'dialog') process.stdout.write('Trust this folder?\\r\\n  1. Yes\\r\\n  2. No\\r\\n');
-else if (mode === 'late') process.stdout.write('\\r\\n             \\u2503  \\r\\n             \\u2503\\r\\n             \\u2579\\u2580\\u2580\\u2580\\u2580\\u2580\\x1b[2A\\r\\x1b[16C');
+else if (mode === 'late' || mode === 'oc') process.stdout.write('\\r\\n             \\u2503  \\r\\n             \\u2503\\r\\n             \\u2579\\u2580\\u2580\\u2580\\u2580\\u2580\\x1b[2A\\r\\x1b[16C');
 else process.stdout.write('Agent composer ready\\r\\n> ');
 process.stdin.on('data', (d) => {
   const accepted = Date.now() >= acceptAt;
@@ -70,10 +71,12 @@ setInterval(() => {}, 1000);
 `);
 const input = () => { try { return fs.readFileSync(received, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
 const typed = (id) => input().filter((r) => r.id === id).map((r) => r.data).join('');
-const gemini = config.cliById('gemini');
+// Hermes stands in for "an agent CLI with a prompt detector": the fake draws a
+// `> ` composer, which is the generic rule's shape.
+const agent = config.cliById('hermes');
 const opencode = config.cliById('opencode');
 const as = (cli, mode) => { cli.run = `${process.execPath} ${fixture} ${mode}`; cli.cont = null; };
-const make = (name, cli = 'gemini') => {
+const make = (name, cli = 'hermes') => {
   const s = sessions.create({ name, cli, path: name });
   return sessions.update(s.id, { everStarted: true, lastInputAt: Date.now() });
 };
@@ -104,30 +107,61 @@ try {
   });
 
   console.log('\n# 1. a quiet dialog is not a prompt');
-  as(gemini, 'dialog-signal');
-  const signalled = make('dialog-signal');
+  // OpenCode's composer on screen, empty — and its plugin reporting a
+  // permission dialog open (the marker file its plugin writes).
+  as(opencode, 'oc');
+  const signalled = make('dialog-signal', 'opencode');
   runner.ensureRunning(signalled);
+  fs.mkdirSync(process.env.AM_INPUT_REQUIRED_DIR, { recursive: true });
+  fs.writeFileSync(path.join(process.env.AM_INPUT_REQUIRED_DIR, `${signalled.id}.json`), JSON.stringify({
+    amId: signalled.id, runId: runner.runIdOf(signalled.id), cli: 'opencode', kind: 'permission', source: 'opencode-event', at: Date.now() }));
   await until(() => runner.agentInfo().get(signalled.id)?.inputRequired, 3000);
-  await check('the CLI reports a dialog open, and nothing is typed into it', async () => {
-    assert.equal(runner.agentInfo().get(signalled.id).inputRequired?.kind, 'question');
+  await check('the CLI reports a dialog open, and nothing is typed into it — composer or not', async () => {
+    assert.equal(runner.agentInfo().get(signalled.id).inputRequired?.kind, 'permission');
     assert.equal(await tellRevived(signalled.id, send, { readyMs: 2500 }), false);
     assert.equal(typed(signalled.id), '');
     assert.ok(runner.agentInfo().get(signalled.id).inputRequired, 'the dialog signal was cleared');
   });
-  as(gemini, 'dialog');
+  as(agent, 'dialog');
   const menu = make('dialog-quiet');
   runner.ensureRunning(menu);
   await check('a menu with no signal at all, quiet for longer than "ready" used to need, gets nothing', async () => {
     assert.equal(await tellRevived(menu.id, send, { readyMs: 2500 }), false);
     assert.equal(typed(menu.id), '');
   });
-  as(gemini, 'composer');
+  as(agent, 'composer');
   const ready = make('composer');
   runner.ensureRunning(ready);
   await check('an empty prompt gets the message, once, and Enter', async () => {
     assert.equal(await tellRevived(ready.id, send, { readyMs: 5000 }), true);
     await sleep(500);
     assert.equal(typed(ready.id), `${CONTINUE_TEXT}\r`);
+  });
+  await runner.stopAll();
+
+  console.log('\n# 1b. a CLI with no prompt detector is skipped at once, and says so');
+  const logged = [];
+  const log0 = console.log;
+  console.log = (...a) => { logged.push(a.join(' ')); };
+  try {
+    for (const cli of ['gemini', 'openclaw', 'fx']) {
+      config.cliById(cli).run = `${process.execPath} ${fixture} composer`;
+      config.cliById(cli).cont = null;
+      const s = make(`nodetect-${cli}`, cli);
+      runner.ensureRunning(s);
+      await sleep(1000);  // a `> ` prompt on screen, quiet: it would pass the screen rule
+      const t0 = Date.now();
+      await check(`${cli}: not sent, without waiting out the timeout`, async () => {
+        assert.equal(await tellRevived(s.id, send, { readyMs: 60_000 }), false);
+        assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`);
+        assert.equal(typed(s.id), '');
+        assert.ok(logged.includes(`[revive] nodetect-${cli}: no prompt detector for ${cli}, not sent`), logged.join(' | '));
+      });
+    }
+  } finally { console.log = log0; }
+  await check('the detector list is exactly the CLIs checked on real captured screens', () => {
+    assert.deepEqual(config.CLIS.filter((c) => c.promptDetector && !c.id.startsWith('test-')).map((c) => c.id).sort(),
+      ['claude', 'codex', 'hermes', 'opencode']);
   });
   await runner.stopAll();
 
@@ -147,13 +181,13 @@ try {
   await runner.stopAll();
 
   console.log('\n# 3. bound to the process it is about');
-  as(gemini, 'dialog');  // stays not-ready, so the message is still waiting
+  as(agent, 'dialog');  // stays not-ready, so the message is still waiting
   const replaced = make('replaced');
   runner.ensureRunning(replaced);
   const firstRun = runner.runIdOf(replaced.id);
   const waiting = tellRevived(replaced.id, send, { runId: firstRun, readyMs: 8000 });
   await sleep(300);
-  as(gemini, 'composer');  // the replacement is immediately ready
+  as(agent, 'composer');  // the replacement is immediately ready
   await runner.restart(sessions.get(replaced.id));
   await check('an operator restart ends the wait; the replacement process gets nothing', async () => {
     assert.notEqual(runner.runIdOf(replaced.id), firstRun);
@@ -166,7 +200,7 @@ try {
     assert.equal(typed(replaced.id), '');
   });
 
-  as(gemini, 'dialog');
+  as(agent, 'dialog');
   const stopped = make('stopped');
   runner.ensureRunning(stopped);
   const pending = tellRevived(stopped.id, send, { readyMs: 8000 });
@@ -178,7 +212,7 @@ try {
     assert.equal(runner.isRunning(stopped.id), false);
   });
 
-  as(gemini, 'dialog');
+  as(agent, 'dialog');
   const archived = make('archived');
   runner.ensureRunning(archived);
   const shelved = tellRevived(archived.id, send, { readyMs: 8000 });
@@ -188,7 +222,7 @@ try {
   await runner.stopAll();
 
   console.log('\n# 3b. the stagger leaves alone what the operator touched');
-  as(gemini, 'composer');
+  as(agent, 'composer');
   const first = make('slot-first');
   const opened = make('slot-opened');
   const shelf = make('slot-archived');
@@ -215,19 +249,19 @@ try {
   await runner.stopAll();
 
   console.log('\n# 4. a privacy lock drops a waiting message for good');
-  as(gemini, 'dialog');
+  as(agent, 'dialog');
   const locked = make('locked');
   runner.ensureRunning(locked);
   const lock = new AbortController();
   const held = tellRevived(locked.id, send, { signal: lock.signal, readyMs: 8000 });
   await sleep(300);
   lock.abort();  // the lock lands while the CLI is still not ready…
-  as(gemini, 'composer');
+  as(agent, 'composer');
   await check('it is not delivered, even if the pane becomes ready (or the lock clears) later', async () => {
     assert.equal(await held, false);
     assert.equal(typed(locked.id), '');
   });
-  as(gemini, 'composer');
+  as(agent, 'composer');
   const scheduled = make('locked-before-slot');
   fs.writeFileSync(path.join(process.env.DATA_DIR, 'runstate.json'), JSON.stringify({ at: new Date().toISOString(),
     sessions: { [scheduled.id]: { running: true } } }));

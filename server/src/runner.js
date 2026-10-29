@@ -2888,7 +2888,7 @@ function settledForInput(host) {
  */
 export function promptReady(id) {
   const host = hosts.get(id);
-  if (!host || stopping.has(id) || !settledForInput(host)) return false;
+  if (!host || stopping.has(id) || !hasPromptDetector(host.cli) || !settledForInput(host)) return false;
   if (host.inputRequired.get()) return false;
   let snap, screen = '';
   try { snap = host.vt.snapshot({ includeCells: false }); screen = host.vt.getVisibleText(); } catch { return false; }
@@ -2908,6 +2908,10 @@ function emptyOpencodeComposer(snapshot) {
   while (i < lines.length && /^\s*\u2503/.test(lines[i].text)) i++;
   if (i >= lines.length || !/^\s*\u2579/.test(lines[i].text)) return false;
   return !lines.slice(i + 1).some((l) => MENU_ROW.test(l.text) || DIALOG_HINT.test(l.text));
+}
+/** Can promptReady ever answer yes for this CLI? (config.js promptDetector) */
+export function hasPromptDetector(cli) {
+  return !!cliById(cli)?.promptDetector;
 }
 /** The screen half of promptReady, pure so captured screens can test it. */
 export function emptyPrompt(snapshot, screen, cli) {

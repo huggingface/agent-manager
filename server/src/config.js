@@ -214,6 +214,16 @@ const CODEX_CONFIRM = { pasted: /\[PastedContent\d+chars\]/, busy: /esc to inter
   elapsed: /(Working \()(?:\d+h )?(?:\d+m )?\d+s( \u2022 esc to interrupt\))/g };
 const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
 
+/**
+ * `promptDetector`: runner.promptReady can positively tell this CLI's empty
+ * composer from everything else on its screen — checked on a pane captured
+ * from the real CLI (test/fixtures/input-lines.json). Automatic input nobody
+ * is watching (boot revival's continue message) goes only to these; for the
+ * rest the sender skips and says so instead of guessing. Gemini, OpenClaw and
+ * fx are absent because their only captures are startup dialogs, not a
+ * composer; add the flag with a captured empty composer and a test.
+ */
+
 export const CLIS = [
   { id: 'shell',    label: 'Shell',       bin: 'bash',     color: '#8aa0ad', run: 'exec bash -il',  cont: null },
   { id: 'files',    label: 'Files',       bin: null,       color: '#d99a2b', run: null,             cont: null },
@@ -227,12 +237,12 @@ export const CLIS = [
   // confirmSubmit: delivered prompts have been left unsubmitted in the
   // composer; sends read it back to confirm the submit (runner.js).
   { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue', resizeMode: 'repaint',
-    confirmSubmit: CLAUDE_CONFIRM,
+    confirmSubmit: CLAUDE_CONFIRM, promptDetector: true,
     npm: '@anthropic-ai/claude-code',
     withPrompt: (q) => `claude ${q}`,
     secrets: ['ANTHROPIC_API_KEY'], setup: setupHint('ANTHROPIC_API_KEY') },
   { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: codexCommand(),   cont: codexCommand('resume --last'), resizeMode: 'repaint',
-    confirmSubmit: CODEX_CONFIRM,
+    confirmSubmit: CODEX_CONFIRM, promptDetector: true,
     npm: '@openai/codex',
     resume: (id) => codexCommand(`resume ${id}`),
     // `q` and image paths arrive shell-quoted from runner.commandFor(). Repeat
@@ -243,11 +253,11 @@ export const CLIS = [
     npm: '@google/gemini-cli',
     withPrompt: (q) => `gemini -i ${q}`, // -i = interactive session seeded with the prompt
     secrets: ['GEMINI_API_KEY'], setup: setupHint('GEMINI_API_KEY') },
-  { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: 'opencode --continue', resizeMode: 'repaint',
+  { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: 'opencode --continue', resizeMode: 'repaint', promptDetector: true,
     npm: 'opencode-ai',
     withPrompt: (q) => `opencode --prompt ${q}`,
     secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'], setup: setupHint('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY') },
-  { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', run: 'hermes',         cont: 'hermes -c', resizeMode: 'repaint',
+  { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', run: 'hermes',         cont: 'hermes -c', resizeMode: 'repaint', promptDetector: true,
     noUpdate: 'installed by the vendor script from hermes-agent.nousresearch.com, onto its own Python venv',
     secrets: ['HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY'], setup: setupHint('HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY') },
   // `chat` = TUI in --local mode: embedded agent, no gateway/daemon needed.
@@ -266,11 +276,11 @@ export const CLIS = [
     secrets: ['AI_GATEWAY_API_KEY'], setup: setupHint('AI_GATEWAY_API_KEY') },
   // Test-only primary-screen repaint fixture. Absent from every normal runtime.
   ...(process.env.AM_TEST_REPAINT_CMD
-    ? [{ id: 'test-repaint', label: 'Repaint fixture', bin: 'bash', color: '#8aa0ad', run: process.env.AM_TEST_REPAINT_CMD, cont: null, resizeMode: 'repaint' }]
+    ? [{ id: 'test-repaint', label: 'Repaint fixture', bin: 'bash', color: '#8aa0ad', run: process.env.AM_TEST_REPAINT_CMD, cont: null, resizeMode: 'repaint', promptDetector: true }]
     : []),
   // A fake TUI for the submit-confirmation tests, read like Codex.
   ...(process.env.AM_TEST_SUBMIT_CMD
-    ? [{ id: 'test-submit', label: 'Submit fixture', bin: 'node', color: '#8aa0ad', run: process.env.AM_TEST_SUBMIT_CMD, cont: null,
+    ? [{ id: 'test-submit', label: 'Submit fixture', bin: 'node', color: '#8aa0ad', run: process.env.AM_TEST_SUBMIT_CMD, cont: null, promptDetector: true,
       confirmSubmit: CODEX_CONFIRM }]
     : []),
 ];
