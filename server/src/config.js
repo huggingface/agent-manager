@@ -212,6 +212,9 @@ const CODEX_CONFIRM = { pasted: /\[PastedContent\d+chars\]/, busy: /esc to inter
   // The elapsed time in Codex's busy row, the one part of it that changes on
   // its own (runner.js stillScreen): `Working (1m 05s • esc to interrupt)`.
   elapsed: /(Working \()(?:\d+h )?(?:\d+m )?\d+s( \u2022 esc to interrupt\))/g };
+// Expanded by the launching shell, so it follows the key present at launch.
+const AGY_KEY_PROVIDER = `\${GEMINI_API_KEY:+--settings '{"modelProvider":"gemini"}'}`;
+const agyCommand = (tail = '') => `agy ${AGY_KEY_PROVIDER}${tail ? ` ${tail}` : ''}`;
 const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
 
 /**
@@ -252,6 +255,16 @@ export const CLIS = [
   { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', run: 'gemini',         cont: null, resizeMode: 'repaint',
     npm: '@google/gemini-cli',
     withPrompt: (q) => `gemini -i ${q}`, // -i = interactive session seeded with the prompt
+    secrets: ['GEMINI_API_KEY'], setup: setupHint('GEMINI_API_KEY') },
+  // Antigravity CLI (`agy`) is Google's successor to Gemini CLI and the one
+  // Google recommends for Gemini 4 Argon. It ignores GEMINI_API_KEY unless its
+  // provider is set to "gemini", and otherwise asks for a Google sign-in, so
+  // that setting is passed per launch while the key is present. --settings is
+  // never saved, so a later Google sign-in still works once the key is gone.
+  { id: 'antigravity', label: 'Antigravity CLI', bin: 'agy', color: '#3186ff', run: agyCommand(), cont: agyCommand('-c'), resizeMode: 'repaint',
+    noUpdate: 'a pinned prebuilt binary from antigravity.google, not an npm package',
+    withPrompt: (q) => agyCommand(`-i ${q}`), // -i = interactive session seeded with the prompt
+    resume: (id) => agyCommand(`--conversation ${id}`), // id: a uuid, checked by runner.js
     secrets: ['GEMINI_API_KEY'], setup: setupHint('GEMINI_API_KEY') },
   { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: 'opencode --continue', resizeMode: 'repaint', promptDetector: true,
     npm: 'opencode-ai',
@@ -306,6 +319,10 @@ function isConfigured(id) {
     case 'gemini':
       return hasEnv('GEMINI_API_KEY', 'GOOGLE_API_KEY')
         || fileOk(path.join(env.GEMINI_CLI_HOME || home, '.gemini', 'oauth_creds.json'));
+    case 'antigravity':
+      // Only the key is detected. A Google sign-in made inside the pane is not
+      // (its credential location is unconfirmed), so it may still show "set up".
+      return hasEnv('GEMINI_API_KEY');
     case 'opencode': {
       const xdgConfig = env.XDG_CONFIG_HOME || path.join(home, '.config');
       return hasEnv('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY')

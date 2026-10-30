@@ -39,6 +39,8 @@ const env = {
   HERMES_DURABLE: path.join(data, 'state/hermes'),
   FX_LIVE: path.join(local, 'fx-home'),
   FX_DURABLE: path.join(data, 'state/fx'),
+  ANTIGRAVITY_LIVE: path.join(local, 'antigravity-home'),
+  ANTIGRAVITY_DURABLE: path.join(data, 'state/antigravity'),
 };
 
 let failures = 0;
@@ -156,6 +158,61 @@ try {
       && !fs.existsSync(path.join(env.FX_DURABLE, 'sessions/s1/subagent/subagent-control.lock')));
   check('fx pending index stays out of the bucket',
     !fs.existsSync(path.join(env.FX_DURABLE, 'sessions/index.pending')));
+
+  // Antigravity: every conversation is its own WAL-mode SQLite database. With
+  // a writer still holding it open, the committed row lives only in the WAL,
+  // so only a `.backup` (not a raw copy of the .db) carries it to the bucket.
+  // Settings and onboarding state go as files; locks, logs, the updater and
+  // the unpacked encoder binary stay local.
+  const agy = path.join(env.ANTIGRAVITY_LIVE, 'antigravity-cli');
+  const agyDurable = path.join(env.ANTIGRAVITY_DURABLE, 'antigravity-cli');
+  const agyConvRel = 'conversations/2f0c1a2e-0000-4000-8000-000000000001.db';
+  put(path.join(agy, 'settings.json'), '{"trustedWorkspaces":["/data/workspaces/x"]}\n');
+  put(path.join(agy, 'cache/onboarding.json'), '{"onboardingComplete":true}\n');
+  put(path.join(env.ANTIGRAVITY_LIVE, 'config/projects/default-cli-project.json'), '{"id":"default-cli-project"}\n');
+  const agyLocal = ['presence/2f0c1a2e.lock', 'updater/update.lock', 'updater/update_status.json',
+    'log/cli.log', 'crashes/crash_1.log', 'bin/webm_encoder'];
+  for (const rel of agyLocal) put(path.join(agy, rel), 'local only');
+  fs.mkdirSync(path.join(agy, 'conversations'), { recursive: true });
+  const agyWriter = spawn('sqlite3', [path.join(agy, agyConvRel)], { stdio: ['pipe', 'pipe', 'pipe'] });
+  agyWriter.stdin.write('PRAGMA journal_mode=WAL;\n');
+  agyWriter.stdin.write('PRAGMA wal_autocheckpoint=0;\n');
+  agyWriter.stdin.write('CREATE TABLE steps(id INTEGER PRIMARY KEY, body TEXT);\n');
+  agyWriter.stdin.write("INSERT INTO steps(body) VALUES ('argon said hi');\n");
+  agyWriter.stdin.write('.print agy-ready\n');
+  await waitFor(agyWriter, 'agy-ready');
+  check('Antigravity fixture keeps the committed row in the WAL',
+    fs.existsSync(path.join(agy, `${agyConvRel}-wal`)) && fs.statSync(path.join(agy, `${agyConvRel}-wal`)).size > 0);
+  run('checkpoint');
+  const agyCheckpoint = path.join(agyDurable, agyConvRel);
+  check('Antigravity conversation checkpoints as a valid database',
+    fs.existsSync(agyCheckpoint) && sql(agyCheckpoint, 'PRAGMA quick_check;') === 'ok');
+  check('Antigravity checkpoint includes the row still in the WAL',
+    sql(agyCheckpoint, 'SELECT body FROM steps;') === 'argon said hi');
+  check('Antigravity checkpoint publishes no WAL/SHM companions',
+    !fs.existsSync(`${agyCheckpoint}-wal`) && !fs.existsSync(`${agyCheckpoint}-shm`));
+  check('Antigravity settings, onboarding and project config checkpoint',
+    fs.readFileSync(path.join(agyDurable, 'settings.json'), 'utf8').includes('trustedWorkspaces')
+      && fs.existsSync(path.join(agyDurable, 'cache/onboarding.json'))
+      && fs.existsSync(path.join(env.ANTIGRAVITY_DURABLE, 'config/projects/default-cli-project.json')));
+  check('Antigravity locks, logs, updater state and binaries stay local',
+    agyLocal.every((rel) => !fs.existsSync(path.join(agyDurable, rel))));
+  // A later commit that only grows the WAL (the .db file itself unchanged)
+  // must still be picked up by the next pass.
+  agyWriter.stdin.write("INSERT INTO steps(body) VALUES ('second turn');\n");
+  agyWriter.stdin.write('.print agy-second\n');
+  await waitFor(agyWriter, 'agy-second');
+  const later = new Date(Date.now() + 5000);
+  fs.utimesSync(path.join(agy, `${agyConvRel}-wal`), later, later);
+  run('checkpoint');
+  check('Antigravity WAL-only change reaches the next checkpoint',
+    sql(agyCheckpoint, 'SELECT count(*) FROM steps;') === '2');
+  agyWriter.kill('SIGKILL');
+  fs.rmSync(env.ANTIGRAVITY_LIVE, { recursive: true, force: true });
+  run('restore');
+  check('Antigravity conversation restores from its checkpoint after a fresh container',
+    sql(path.join(agy, agyConvRel), 'SELECT count(*) FROM steps;') === '2'
+      && fs.existsSync(path.join(agy, 'cache/onboarding.json')));
 
   // --files-from supplies descendants explicitly: a directory-only exclusion
   // does not protect the mounted bucket from Codex's temporary plugin files.
@@ -659,7 +716,7 @@ try {
     const log = f.hfLog();
     check('API: the restore succeeds over the bucket API', res.code === 0 && f.restored(), res.out.slice(-800));
     check('API: every adapter is planned and applied over the API',
-      (log.match(/ --plan /g) || []).length === 7 && (log.match(/ --apply /g) || []).length === 7, log);
+      (log.match(/ --plan /g) || []).length === 8 && (log.match(/ --apply /g) || []).length === 8, log);
     check('API: nothing is read from the mount directly', rsyncTrace(f.trace, 'mount').runs === 0, JSON.stringify(rsyncTrace(f.trace, 'mount')));
     check('API: copies from the local mirror still run in parallel', rsyncTrace(f.trace, 'other').most > 1, JSON.stringify(rsyncTrace(f.trace, 'other')));
     check('API: exactly the newest five Claude backups come back', f.backups());
@@ -685,8 +742,8 @@ try {
     check('no token: restores from the mount, with a hint to add HF_TOKEN',
       res.code === 0 && f.restored() && f.backups() && f.hfLog() === ''
         && /bucket API not usable \(HF_TOKEN is not set; add an HF_TOKEN that can read the bucket/.test(text), text.slice(-800));
-    check('mount reads run strictly one at a time across all seven adapters',
-      mount.runs >= 7 && mount.most === 1, JSON.stringify(mount));
+    check('mount reads run strictly one at a time across all eight adapters',
+      mount.runs >= 8 && mount.most === 1, JSON.stringify(mount));
     fs.rmSync(f.r, { recursive: true, force: true });
   }
 

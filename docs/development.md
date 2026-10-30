@@ -128,7 +128,7 @@ sets the window (1 / 3 / 7 days, or off).
 | `AM_FRAME_ANCESTORS` | — | Extra origins allowed to embed the app in a frame (comma-separated exact origins) |
 | `ANTHROPIC_API_KEY` | — | Claude Code / opencode / Hermes (Space **secret**) |
 | `OPENAI_API_KEY` / `CODEX_API_KEY` | — | Codex (Space secret) |
-| `GEMINI_API_KEY` | — | Gemini CLI (Space secret) |
+| `GEMINI_API_KEY` | — | Gemini CLI and Antigravity CLI (Space secret) |
 | `AI_GATEWAY_API_KEY` | — | fx (Space secret) |
 | `HF_TOKEN` | — | Hub operations and mounted-bucket discovery; access requirements depend on the operation |
 

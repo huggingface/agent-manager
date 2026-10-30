@@ -15,9 +15,10 @@ short_description: Private cloud manager for AI coding CLI sessions
 
 **Your coding agents, together in one private workspace.**
 
-Run Claude Code, Codex, Gemini CLI, opencode, Hermes, OpenClaw and fx from your
-browser. Follow several tasks side by side, read the conversation or open the
-terminal, and pick up from another device while your Space stays running.
+Run Claude Code, Codex, Gemini CLI, Antigravity CLI, opencode, Hermes, OpenClaw
+and fx from your browser. Follow several tasks side by side, read the
+conversation or open the terminal, and pick up from another device while your
+Space stays running.
 
 [![Open in Hugging Face Spaces](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg)](https://huggingface.co/spaces/lvwerra/agent-manager-template)
 
