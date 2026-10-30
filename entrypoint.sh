@@ -73,11 +73,17 @@ export HERMES_DURABLE="$DATA_DIR/state/hermes"
 # closed checkpoints carry their durable state to the bucket.
 export FX_LIVE="$AM_LOCAL/fx-home"
 export FX_DURABLE="$DATA_DIR/state/fx"
+# Antigravity CLI has no config-dir override either (it ignores GEMINI_CLI_HOME)
+# and writes ~/.gemini/antigravity-cli and ~/.gemini/config, SQLite included.
+# Both are linked into one local tree that agent-state.sh checkpoints.
+export ANTIGRAVITY_LIVE="$AM_LOCAL/antigravity-home"
+export ANTIGRAVITY_DURABLE="$DATA_DIR/state/antigravity"
 
 mkdir -p "$CODEX_HOME" "$CODEX_DURABLE/sessions" "$CODEX_DURABLE/db-backups" \
   "$CLAUDE_CONFIG_DIR" "$CLAUDE_DURABLE" "$GEMINI_LIVE" "$GEMINI_DURABLE" \
   "$OPENCLAW_STATE_DIR" "$OPENCLAW_DURABLE" "$OPENCODE_LIVE" \
-  "$OPENCODE_DURABLE" "$HERMES_LIVE" "$HERMES_DURABLE" "$FX_LIVE" "$FX_DURABLE"
+  "$OPENCODE_DURABLE" "$HERMES_LIVE" "$HERMES_DURABLE" "$FX_LIVE" "$FX_DURABLE" \
+  "$ANTIGRAVITY_LIVE/antigravity-cli" "$ANTIGRAVITY_LIVE/config" "$ANTIGRAVITY_DURABLE"
 
 # Heal the old Codex layout on hot/dev restarts. Only unlink the known local
 # sessions symlink; never recursively remove its durable target.
@@ -93,8 +99,10 @@ done
 
 # Preserve existing Gemini state while moving it out of durable HOME. The
 # legacy directory remains in place as a rollback copy.
+# Antigravity's two folders inside it are its own (linked below), not Gemini's.
 if [ -d "$HOME/.gemini" ] && [ ! -L "$HOME/.gemini" ]; then
-  if ! rsync -a --update "$HOME/.gemini/" "$GEMINI_DURABLE/"; then
+  if ! rsync -a --update --exclude '/antigravity-cli' --exclude '/config' \
+    "$HOME/.gemini/" "$GEMINI_DURABLE/"; then
     echo "ERROR: could not migrate Gemini state; refusing to start with an empty live home" >&2
     exit 1
   fi
@@ -112,18 +120,31 @@ for legacy in "$HOME/.openclaw.pre-symlink" "$HOME/.openclaw"; do
   fi
 done
 
-# opencode, Hermes and fx expect their state at paths under HOME. The live
+# opencode, Hermes, fx and Antigravity expect their state at paths under HOME. The live
 # targets are local; legacy real directories are retained as rollback copies
-# instead of being deleted during migration.
+# instead of being deleted during migration. agy's databases are not raw-copied:
+# agent-state.sh moves them through SQLite's backup (rows still in a WAL come
+# along) and leaves its locks, logs and binaries behind.
+AGENT_STATE_SCRIPT="${AGENT_STATE_SCRIPT:-/app/scripts/agent-state.sh}"
+export AGENT_STATE_SCRIPT
 OPENCODE_LINK="$HOME/.local/share/opencode"
 HERMES_LINK="$HOME/.hermes"
 FX_LINK="$HOME/.fx"
-mkdir -p "$(dirname "$OPENCODE_LINK")"
+AGY_LINK="$HOME/.gemini/antigravity-cli"
+AGY_CONFIG_LINK="$HOME/.gemini/config"
+migrate_tree() {
+  case "$1" in
+    "$AGY_LINK"|"$AGY_CONFIG_LINK") sh "$AGENT_STATE_SCRIPT" migrate-antigravity "$1" ;;
+    *) rsync -a --update "$1/" "$2/" ;;
+  esac
+}
+mkdir -p "$(dirname "$OPENCODE_LINK")" "$HOME/.gemini"
 for pair in "$OPENCODE_LINK|$OPENCODE_DURABLE" "$HERMES_LINK|$HERMES_DURABLE" \
-  "$FX_LINK|$FX_DURABLE"; do
+  "$FX_LINK|$FX_DURABLE" "$AGY_LINK|$ANTIGRAVITY_DURABLE/antigravity-cli" \
+  "$AGY_CONFIG_LINK|$ANTIGRAVITY_DURABLE/config"; do
   lnk="${pair%%|*}"; dur="${pair##*|}"
   if [ -e "$lnk" ] && [ ! -L "$lnk" ]; then
-    if ! rsync -a --update "$lnk/" "$dur/"; then
+    if ! migrate_tree "$lnk" "$dur"; then
       echo "ERROR: could not migrate agent state from $lnk" >&2
       exit 1
     fi
@@ -140,13 +161,13 @@ done
 ln -sfn "$OPENCODE_LIVE" "$OPENCODE_LINK"
 ln -sfn "$HERMES_LIVE" "$HERMES_LINK"
 ln -sfn "$FX_LIVE" "$FX_LINK"
+ln -sfn "$ANTIGRAVITY_LIVE/antigravity-cli" "$AGY_LINK"
+ln -sfn "$ANTIGRAVITY_LIVE/config" "$AGY_CONFIG_LINK"
 
 boot "migrations done in $(boot_elapsed "$PHASE_T0")"
 
 # Restore after all one-time migrations have populated the durable side. On a
 # hot/dev restart, --update preserves newer local state.
-AGENT_STATE_SCRIPT="${AGENT_STATE_SCRIPT:-/app/scripts/agent-state.sh}"
-export AGENT_STATE_SCRIPT
 PHASE_T0=$(date +%s)
 boot "restoring agent state from $DATA_DIR/state…"
 if ! AGENT_STATE_FROM_ENTRYPOINT=1 sh "$AGENT_STATE_SCRIPT" restore; then
@@ -221,7 +242,11 @@ boot "starting the app — boot took $(boot_elapsed "$BOOT_T0")"
 # state checkpoint. The timer bounds loss on an ungraceful stop; the child is
 # stopped before the final checkpoint so SQLite and transcript state is quiet.
 AGENT_STATE_CHECKPOINT_SECONDS="${AGENT_STATE_CHECKPOINT_SECONDS:-15}"
-node /app/server/src/index.js &
+# AM_CLAUDE_MODEL_PROBE=1: this server may start the signed-in Claude Code
+# (safe mode, nothing sent) to read its /model picker for the create form's
+# model list. Only this server: sessions don't inherit it. A Space variable
+# AM_CLAUDE_MODEL_PROBE=0 turns it off (the form then offers the aliases).
+AM_CLAUDE_MODEL_PROBE="${AM_CLAUDE_MODEL_PROBE:-1}" node /app/server/src/index.js &
 APP_PID=$!
 
 checkpoint_loop() {

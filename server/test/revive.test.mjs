@@ -14,7 +14,7 @@ const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'revive-'));
 process.env.DATA_DIR = path.join(TMP, 'data');
 fs.mkdirSync(process.env.DATA_DIR, { recursive: true });
 
-const { selectRevivable, isTerminalReply } = await import('../src/runstate.js');
+const { selectRevivable, isTerminalReply, tellRevived, CONTINUE_TEXT } = await import('../src/runstate.js');
 
 let pass = 0, fail = 0;
 const check = (name, got, want) => {
@@ -80,6 +80,18 @@ check('recency says so too', plan.find((p) => p.id === 'typed-today')?.why, 'pro
 check('an idle shell nobody touched stays down', ids(7).includes('idle-shell'), false);
 check('but only for a shell — an agent\'s "work" flag is not a reason',
   ids(7).includes('stale-work'), false);
+
+console.log('\nevery revived agent is told its work was cut off; a shell is not');
+check('agents are told, the shell is not', plan.map((p) => [p.id, p.tell]),
+  [['typed-today', true], ['digest-2d', true], ['busy-shell', false]]);
+check('the message says who it is from and what to do', [
+  CONTINUE_TEXT.startsWith('[Agent Manager:]'), /restarted/.test(CONTINUE_TEXT),
+  /listeners/.test(CONTINUE_TEXT), /not finished, continue/.test(CONTINUE_TEXT),
+], [true, true, true, true]);
+let sent = 0;
+check('a pane that is not running (stopped meanwhile) is not told — or started', [
+  await tellRevived('no-such-pane', () => { sent++; }, { readyMs: 200 }), sent,
+], [false, 0]);
 
 console.log('\nwhat is never started');
 check('a session stopped before the reboot', ids(7).includes('was-stopped'), false);

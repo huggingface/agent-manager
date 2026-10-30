@@ -51,7 +51,7 @@ const runner = await import('../src/runner.js');
 const { traceLocation } = await import('../src/traces.js');
 config.ensureDirs(); sessions.init();
 const cli = config.cliById('fx');
-cli.run = command;
+cli.run = () => command;
 cli.resume = id => `${command} --resume ${id}`;
 const first = sessions.create({ name: 'fx-first', cli: 'fx', path: 'shared' });
 const second = sessions.create({ name: 'fx-second', cli: 'fx', path: 'shared' });

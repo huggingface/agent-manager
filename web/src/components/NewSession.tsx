@@ -1,8 +1,9 @@
 import { useState } from 'react';
-import type { Cli, Session } from '../types';
+import type { Cli, LaunchChoice, Session } from '../types';
 import { creatable } from '../types';
 import Logo from './Logo';
 import FolderPicker from './FolderPicker';
+import LaunchField from './LaunchField';
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
@@ -28,7 +29,7 @@ export default function NewSession({
   clis: Cli[];
   sessions: Session[];
   defaultPath?: string;
-  onCreate: (name: string, cli: string, path: string) => void;
+  onCreate: (name: string, cli: string, path: string, launch?: LaunchChoice) => void;
   onCancel?: () => void;
 }) {
   // 'trace' is excluded like shell/files: a trace pane is opened FROM a session
@@ -40,13 +41,15 @@ export default function NewSession({
   // Prepopulated values follow the selected agent until the user types.
   const [nameDirty, setNameDirty] = useState(false);
   const [loc, setLoc] = useState(defaultPath || '.');
+  const [launch, setLaunch] = useState<LaunchChoice>({});
   const sel = agents.find((c) => c.id === cli) || agents[0];
 
   const pick = (c: Cli) => {
+    if (c.id !== cli) setLaunch({});
     setCli(c.id);
     if (!nameDirty) setName(defaultName(c, sessions));
   };
-  const submit = () => { if (sel) onCreate(name.trim() || sel.label, sel.id, loc || '.'); };
+  const submit = () => { if (sel) onCreate(name.trim() || sel.label, sel.id, loc || '.', launch); };
 
   return (
     <div className="widget">
@@ -79,6 +82,12 @@ export default function NewSession({
         <span className="w-label">Folder</span>
         <FolderPicker value={loc} onChange={setLoc} />
       </div>
+      {sel?.launch && (sel.launch.model || sel.launch.effort) && (
+        <div className="w-field">
+          <span className="w-label">Model</span>
+          <LaunchField cli={sel} value={launch} onChange={setLaunch} />
+        </div>
+      )}
       <div className="widget-actions">
         <button className="btn-primary" onClick={submit} disabled={!sel}>Create</button>
       </div>

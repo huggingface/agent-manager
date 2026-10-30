@@ -137,7 +137,16 @@ try {
     // It cannot be lazy: it is shown exactly when HF's edge refuses every
     // request this tab makes, a chunk fetch included. Raised to 792, keeping
     // ~0.6 kB of headroom, as tight as main had.
-    assert.ok(entry.length <= 792 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 792 kB budget`);
+    //
+    // Model / effort at creation (2026-10-29): main 810,967 here, this branch
+    // 811,927 (+960). The selects, their option lists and the fetches are in
+    // the LaunchPicker chunk; what the entry gains is the wiring only — the
+    // lazy boundary (LaunchField), the choice's state in both create panels and
+    // App's create calls, and the model label in the pane header. Raised to
+    // 793, ~0.1 kB over this branch's needs, as tight as the raise above.
+    // After merging #227 (2026-10-30): main 811,065, this branch 812,081
+    // (+1,016, unchanged), 49 over 793. Raised to 794.
+    assert.ok(entry.length <= 794 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 794 kB budget`);
     // One literal only that panel's module contains — a dynamic import that
     // merely wraps an unchanged graph would leave these in the entry.
     for (const [panel, marker] of [

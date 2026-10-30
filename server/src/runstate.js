@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR, PASSIVE_CLIS, isRemote } from './config.js';
 import { list as listSessions, get as getSession } from './sessions.js';
-import { isRunning, paneRootPid, ensureRunning, ghosttyReady } from './runner.js';
+import { isRunning, paneRootPid, ensureRunning, ghosttyReady, promptReady, hasPromptDetector, runIdOf, launchedThisBoot } from './runner.js';
 import { traceDigests } from './traces.js';
 
 // The server owns every PTY, so a Space sleep, a reboot, or a factory reset ends
@@ -32,12 +32,28 @@ const SNAPSHOT_MS = 30_000;
 const REVIVE_GAP_MS = 4000;
 // Reviving is meant to bring your workbench back, not to recreate a fleet.
 // Beyond this we start the most recently active ones and SAY so in the logs
-// rather than quietly pretending the rest weren't running.
-const MAX_REVIVE = 12;
+// rather than quietly pretending the rest weren't running. It was 12 while slow
+// restarts were blamed on reviving; the slowness turned out to be the bucket
+// loading, and the stagger above already spreads the CLIs out, so a working set
+// of a few dozen agents comes back whole (32 × 4 s ≈ 2 minutes).
+const MAX_REVIVE = 32;
 // A Space that has been down for a season shouldn't wake up mid-thought. The
 // recency rule bounds itself; this is the backstop for the work-in-flight one,
 // whose whole point is that it carries no clock.
 const STALE_SNAPSHOT_DAYS = 30;
+// Resuming a conversation brings back the transcript, not the turn: whatever
+// the agent was doing — a tool call, a sub-agent, the background listener it
+// keeps for peer messages — died with the old process, and the resumed CLI just
+// sits at its prompt. So each revived agent is told once, as soon as it can
+// take input. Addressed to every revived agent rather than only those caught
+// mid-turn: an idle one has lost its listeners too, and the text itself tells
+// one that had finished that there is nothing to pick up.
+export const CONTINUE_TEXT = '[Agent Manager:] Agent Manager was restarted, which interrupted this session: '
+  + 'running tool calls and background listeners were stopped. If your turn was not finished, continue where '
+  + 'you left off and restart any listeners you need. If it was, there is nothing to do.';
+// A resumed TUI replays its conversation before it can take input; a long one
+// on a busy boot (dozens of CLIs starting 4 s apart) takes a while.
+const CONTINUE_READY_MS = 120_000;
 
 // The snapshot as it was when this process started — read once, before the
 // watch below starts overwriting it.
@@ -178,13 +194,71 @@ export function selectRevivable({ snapshot: snap, sessions, digests, alive, days
     // can't revive an agent on a signal that was never valid for it.
     const busy = !!rec.work && s.cli === 'shell';
     if (!recent && !busy) continue;
-    plan.push({ id, name: s.name, cli: s.cli, at: lastPrompt, why: recent ? 'prompted recently' : 'work in flight' });
+    plan.push({
+      id, name: s.name, cli: s.cli, at: lastPrompt, why: recent ? 'prompted recently' : 'work in flight',
+      // Only an agent has a turn to continue; a shell's job is simply gone.
+      tell: s.cli !== 'shell',
+    });
   }
   return plan.sort((a, b) => b.at - a.at);
 }
 
-/** Start the sessions that were running when this Space last went down. */
-export async function reviveOnBoot({ enabled = true, days = 3 } = {}) {
+/**
+ * Tell a just-revived agent that its work was cut off, once its CLI is
+ * positively at an empty prompt (runner.promptReady: never into a dialog, and
+ * never while the CLI reports one open).
+ *
+ * Bound to one launch, `runId`: the message is about THAT process's lost
+ * work. A stop, restart or archive while it waits ends the wait, and a
+ * replacement process does not inherit it — the check is repeated right up to
+ * the keystrokes (sendInput's runId). `signal` is the privacy-lock scope the
+ * message was scheduled under; a lock landing at any point drops it for good,
+ * even if the Space is unlocked again before the pane is ready.
+ * Resolves true when delivered, false when it was not (and says why if that is
+ * not simply the operator having stopped the pane).
+ */
+export async function tellRevived(id, send, { runId = runIdOf(id), signal = null, readyMs = CONTINUE_READY_MS, pollMs = 200 } = {}) {
+  // A CLI whose empty composer cannot be recognised would only ever time out;
+  // say so now, by name, rather than after two silent minutes.
+  const cli = getSession(id)?.cli;
+  if (!hasPromptDetector(cli)) {
+    console.log(`[revive] ${getSession(id)?.name || id}: no prompt detector for ${cli}, not sent`);
+    return false;
+  }
+  const deadline = Date.now() + readyMs;
+  const ended = () => {
+    if (signal?.aborted) return 'locked';
+    const s = getSession(id);
+    if (!s || s.archivedAt) return 'archived';
+    if (!runId || runIdOf(id) !== runId) return 'stopped';
+    return null;
+  };
+  for (;;) {
+    const why = ended();
+    if (why) {
+      if (why === 'locked') console.warn(`[revive] ${getSession(id)?.name || id}: the manager locked itself — not telling it to continue`);
+      return false;
+    }
+    if (promptReady(id)) break;
+    if (Date.now() >= deadline) {
+      console.warn(`[revive] ${getSession(id)?.name || id}: no empty prompt within ${Math.round(readyMs / 1000)}s (still loading, or showing a dialog) — not telling it to continue`);
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  await send(getSession(id), CONTINUE_TEXT, { runId, signal });
+  return true;
+}
+
+/**
+ * Start the sessions that were running when this Space last went down.
+ * `send(session, text, { runId, signal })` delivers the continue message
+ * (index.js passes its prompt-delivery path); `continue: false`, or no `send`,
+ * starts them silently. `scope()` opens a privacy-lock scope ({ signal,
+ * release }); each message holds one from the moment it is scheduled until it
+ * is delivered or dropped.
+ */
+export async function reviveOnBoot({ enabled = true, days = 3, continue: carryOn = true, send = null, scope = null } = {}) {
   if (!enabled) return [];
   if (!previous || !previous.sessions) return [];
   // No terminal engine means ensureRunning throws for every session; say it once
@@ -230,13 +304,28 @@ export async function reviveOnBoot({ enabled = true, days = 3 } = {}) {
 
   settleAt = Date.now() + start.length * REVIVE_GAP_MS + 5000;
   start.forEach((p, i) => {
+    // Opened now, not at the slot: a lock that lands while this one waits its
+    // turn must cancel its message too.
+    const lock = carryOn && send && p.tell && scope ? scope() : null;
+    const release = () => { try { lock?.release(); } catch {} };
     const t = setTimeout(() => {
       const s = getSession(p.id);
-      if (!s) return; // deleted between the plan and its turn
+      // Deleted or archived between the plan and its turn; or opened by
+      // someone since boot — still running, or stopped again on purpose.
+      // Either way it is theirs now, and the slot must not start it.
+      if (!s || s.archivedAt || launchedThisBoot(p.id)) { release(); return; }
+      let started = false;
       try {
-        ensureRunning(s);
+        started = ensureRunning(s);
         console.log(`[revive] ${p.name} (${p.cli}) — ${p.why}`);
       } catch (e) { console.error(`[revive] ${p.name}:`, e && e.message); }
+      // Off the stagger: the next revival must not wait for this one's CLI.
+      if (started && carryOn && send && p.tell) {
+        tellRevived(p.id, send, { runId: runIdOf(p.id), signal: lock?.signal || null })
+          .then((told) => { if (told) console.log(`[revive] ${p.name}: told to continue`); })
+          .catch((e) => console.error(`[revive] ${p.name}: continue message not delivered:`, e && e.message))
+          .finally(release);
+      } else release();
     }, i * REVIVE_GAP_MS);
     if (t.unref) t.unref();
   });

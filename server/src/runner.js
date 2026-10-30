@@ -10,10 +10,11 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { remoteState, setPaused } from './remote.js';
 import { fxSessionForPid } from './fx-process.js';
-import { cliById, cliVersion, isRemote, INTERNAL_HOST, PORT, STATE_DIR, WORKSPACES_DIR } from './config.js';
+import { cliById, cliVersion, isRemote, launchFlags, INTERNAL_HOST, PORT, STATE_DIR, WORKSPACES_DIR } from './config.js';
 import { update, list } from './sessions.js';
 import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace,
   captureFxSession } from './traces.js';
+import { AGY_ID, agyConversationForPid, agyWaitingStep, captureAgyConversation } from './antigravity.js';
 import {
   buildPaletteIndex, snapshotToRestoreAnsi, styledSnapshotLines, textColumns,
 } from './snapshot.js';
@@ -37,8 +38,12 @@ try {
   console.error('[runner] libghostty-vt unavailable:', ghosttyError);
 }
 
-const TERM_ENV = {
-  ...process.env,
+// AM_CLAUDE_MODEL_PROBE lets this server start the signed-in Claude Code to
+// read its model picker (model-catalog.js). A session must not pass that on
+// to a test or dev server it starts, so it is not part of a session's env.
+const { AM_CLAUDE_MODEL_PROBE: _probe, ...SERVER_ENV } = process.env;
+export const TERM_ENV = {
+  ...SERVER_ENV,
   TERM: 'xterm-256color',
   COLORTERM: 'truecolor',
   LANG: process.env.LANG || 'C.UTF-8',
@@ -156,6 +161,21 @@ function djb2(s) {
 
 export function isRunning(id) {
   return hosts.has(id) && !stopping.has(id);
+}
+
+// Every pane this process has launched, by anyone, including ones that have
+// since exited. Boot revival starts sessions on a stagger; one the operator
+// opened (and perhaps stopped again) before its slot is theirs, and the slot
+// must not start it behind their back.
+const launched = new Set();
+export function launchedThisBoot(id) {
+  return launched.has(id);
+}
+
+/** This pane's launch identity (AM_RUN_ID), or null when nothing is running. */
+export function runIdOf(id) {
+  const host = hosts.get(id);
+  return host && !stopping.has(id) ? host.runId : null;
 }
 
 export function ghosttyReady() {
@@ -1776,6 +1796,67 @@ function scheduleOpencodeCapture(session, workdir) {
   opencodeCapturing.set(session.id, t0);
 }
 
+const agyCapturing = new Map();
+
+// A tool in this pane's pinned conversation is waiting for the operator's
+// permission. Only the pinned conversation counts: a pane that holds no pin
+// (shared folder, nothing captured yet) shows nothing rather than a guess, and
+// a new pin is a new token, so the old one's dialog never carries over.
+function agyPermissionPending(id) {
+  const pin = list().find((s) => s.id === id)?.antigravityConversationId;
+  const step = pin ? agyWaitingStep(pin) : null;
+  return step ? { kind: 'permission', source: 'antigravity-step', token: `${pin}:${step.idx}` } : null;
+}
+
+// Antigravity names each conversation database by its id, and the running agy
+// holds `presence/<id>.lock` open for the conversation it is on, so the pane's
+// own process names its conversation exactly (agyConversationForPid), in a
+// shared folder too, and follows `/new`. Once agy can be read, nothing else
+// moves the pin: a conversation another agy writes in this folder (the
+// operator's shell, a tool of another agent) is not this pane's.
+// Only when no agy process can be read does the folder story apply, like
+// opencode: the conversation written here since launch, adopted while the pane
+// holds no pin. A shared folder adopts nothing that way, and remembers it
+// (antigravityCaptureSince, like fx) so a rival's conversation is never adopted
+// once the folder clears, after a restart included.
+function scheduleAgyCapture(session, workdir) {
+  const prev = agyCapturing.get(session.id);
+  if (prev) clearTimeout(prev);
+  let since = (list().find((s) => s.id === session.id) || session).antigravityCaptureSince || Date.now() - 2000;
+  let warnedShared = false;
+
+  const tick = () => {
+    if (!isRunning(session.id)) { agyCapturing.delete(session.id); return; }
+    const current = list().find((s) => s.id === session.id) || session;
+    const claimed = new Set(list().filter((s) => s.id !== session.id && s.antigravityConversationId).map((s) => s.antigravityConversationId));
+    const pinned = current.antigravityConversationId;
+    const owned = agyConversationForPid(paneRootPid(session.id));
+    if (owned) {
+      if (owned.id && !claimed.has(owned.id) && (owned.id !== pinned || current.antigravityCaptureSince)) {
+        if (pinned && owned.id !== pinned) console.warn(`[antigravity] re-pinning ${session.id}: ${pinned} -> ${owned.id} (agy moved to it)`);
+        update(session.id, { antigravityConversationId: owned.id, antigravityCaptureSince: undefined });
+      }
+    } else if (folderIsShared(session.id, workdir, 'antigravity')) {
+      if (!warnedShared) {
+        warnedShared = true;
+        console.warn(`[antigravity] ${session.id}: folder shared with another live session — not following new conversations here`);
+      }
+      since = Date.now();
+      if (!current.antigravityCaptureSince) update(session.id, { antigravityCaptureSince: since });
+    } else if (!pinned) {
+      const hit = captureAgyConversation(workdir, since, claimed);
+      if (hit) update(session.id, { antigravityConversationId: hit.id, antigravityCaptureSince: undefined });
+    }
+    const t = setTimeout(tick, REPIN_MS);
+    if (t.unref) t.unref();
+    agyCapturing.set(session.id, t);
+  };
+
+  const t0 = setTimeout(tick, 3000);
+  if (t0.unref) t0.unref();
+  agyCapturing.set(session.id, t0);
+}
+
 const fxCapturing = new Map();
 
 // fx names its session directory with the conversation id and records the
@@ -1854,7 +1935,12 @@ export function commandFor(session) {
   const q0 = !session.everStarted && session.pendingPrompt ? shq(session.pendingPrompt) : '';
   const q0Images = !session.everStarted && Array.isArray(session.pendingImagePaths)
     ? session.pendingImagePaths.map((image) => shq(String(image))) : [];
-  const firstCommand = () => cli.withPrompt(q0, q0Images);
+  // The session's model / effort flags ride every branch below: each registry
+  // command takes them, so none of these launches can come up on the CLI's
+  // shared default instead (see config.js launchFlags).
+  const f = launchFlags(session);
+  const run = cli.run?.(f);
+  const firstCommand = () => cli.withPrompt(q0, q0Images, f);
 
   // Claude keys conversations by working directory, so grouped sessions sharing
   // a folder would all `--continue` onto the SAME most-recent conversation. Pin
@@ -1865,11 +1951,11 @@ export function commandFor(session) {
   // as a fresh conversation and eating the pane's "done" signal). The fresh
   // branch keeps `|| exec claude` as a last resort for an unsupported flag.
   if (cli.id === 'claude' && session.sessionUuid) {
-    const fresh = `claude --session-id ${session.sessionUuid}${q0 ? ` ${q0}` : ''} || exec claude`;
+    const fresh = `${run} --session-id ${session.sessionUuid}${q0 ? ` ${q0}` : ''} || exec ${run}`;
     if (!session.everStarted) return fresh;
     const projects = '"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"';
     const hasTranscript = `[ -n "$(find ${projects} -name '${session.sessionUuid}*' -print -quit 2>/dev/null)" ]`;
-    return `if ${hasTranscript}; then exec claude --resume ${session.sessionUuid}; else ${fresh}; fi`;
+    return `if ${hasTranscript}; then exec ${cli.resume(session.sessionUuid, f)}; else ${fresh}; fi`;
   }
 
   // OpenClaw: first run needs its onboarding wizard (keys, workspace); once the
@@ -1880,8 +1966,8 @@ export function commandFor(session) {
     // state can't live on the FUSE bucket and it rejects symlinked paths.
     // Locally (no OPENCLAW_HOME) the real HOME is used unchanged.
     return 'HOME="${OPENCLAW_HOME:-$HOME}"; export HOME; '
-      + 'if [ -s "$HOME/.openclaw/openclaw.json" ]; then exec openclaw chat; '
-      + 'else openclaw onboard && exec openclaw chat; fi';
+      + `if [ -s "$HOME/.openclaw/openclaw.json" ]; then exec ${run}; `
+      + `else openclaw onboard && exec ${run}; fi`;
   }
 
   // Codex: resume this agent's pinned conversation (captured from its rollout
@@ -1890,7 +1976,7 @@ export function commandFor(session) {
   // pane instead of respawning. Unpinned sessions fall through to the generic
   // `resume --last` below (correct while the agent has its folder to itself).
   if (cli.id === 'codex' && session.codexSessionId && session.codexRollout) {
-    return `if [ -f '${session.codexRollout}' ]; then exec ${cli.resume(session.codexSessionId)}; else exec ${cli.run}; fi`;
+    return `if [ -f '${session.codexRollout}' ]; then exec ${cli.resume(session.codexSessionId, f)}; else exec ${run}; fi`;
   }
 
   // opencode (seen on 1.17.13): at startup it creates a DIRECTORY named
@@ -1913,7 +1999,7 @@ export function commandFor(session) {
     // per-conversation path to test) and a missing row is fatal, not a fallback.
     const pin = session.opencodeSessionId;
     if (session.everStarted && pin && SES_ID.test(pin) && opencodeSessionExists(pin)) {
-      return `${guard}exec opencode --session ${pin}`;
+      return `${guard}exec ${cli.resume(pin, f)}`;
     }
     // Unpinned (or the conversation is gone): `--continue` resumes the
     // most-recent conversation in the CWD, so two opencode agents sharing a
@@ -1924,8 +2010,8 @@ export function commandFor(session) {
     const folder = session.path ?? session.id;
     const shared = list().some((o) => o.id !== session.id && o.cli === 'opencode' && (o.path ?? o.id) === folder);
     const base = session.everStarted && cli.cont && !shared
-      ? `${cli.cont} || exec ${cli.run}`
-      : `exec ${q0 && cli.withPrompt ? firstCommand() : cli.run}`;
+      ? `${cli.cont(f)} || exec ${run}`
+      : `exec ${q0 && cli.withPrompt ? firstCommand() : run}`;
     return `${guard}${base}`;
   }
 
@@ -1937,7 +2023,7 @@ export function commandFor(session) {
   // not found." and killing the pane.
   if (cli.id === 'fx' && session.everStarted && session.fxSessionId && FX_ID.test(session.fxSessionId)) {
     const events = `"$HOME/.fx/sessions/${session.fxSessionId}/events.jsonl"`;
-    return `if [ -f ${events} ]; then exec ${cli.resume(session.fxSessionId)}; else exec ${cli.run}; fi`;
+    return `if [ -f ${events} ]; then exec ${cli.resume(session.fxSessionId, f)}; else exec ${run}; fi`;
   }
   // Unpinned fx (first launch, or the pin is gone): remember that this pane has
   // shared its folder. If the sibling is later deleted, its conversation is
@@ -1948,7 +2034,27 @@ export function commandFor(session) {
     const shared = list().some((o) => o.id !== session.id && o.cli === 'fx' && (o.path ?? o.id) === folder);
     if (shared || session.fxCaptureSince) {
       update(session.id, { fxCaptureSince: Date.now() });
-      if (session.everStarted) return `exec ${cli.run}`;
+      if (session.everStarted) return `exec ${run}`;
+    }
+  }
+
+  // Antigravity: resume the PINNED conversation by id (captured after launch —
+  // see scheduleAgyCapture), existence-checked in the shell like fx, so a
+  // deleted conversation starts fresh rather than failing the launch.
+  if (cli.id === 'antigravity' && session.everStarted && AGY_ID.test(session.antigravityConversationId || '')) {
+    const db = `"$HOME/.gemini/antigravity-cli/conversations/${session.antigravityConversationId}.db"`;
+    return `if [ -f ${db} ]; then exec ${cli.resume(session.antigravityConversationId, f)}; else exec ${run}; fi`;
+  }
+
+  // Unpinned Antigravity: `-c` continues the newest conversation in the folder,
+  // so a pane that ever shared its folder keeps starting fresh until it holds a
+  // pin, exactly like fx above: the sibling's conversation outlives the sibling.
+  if (cli.id === 'antigravity' && !session.antigravityConversationId) {
+    const folder = session.path ?? session.id;
+    const shared = list().some((o) => o.id !== session.id && o.cli === 'antigravity' && (o.path ?? o.id) === folder);
+    if (shared || session.antigravityCaptureSince) {
+      update(session.id, { antigravityCaptureSince: Date.now() });
+      if (session.everStarted) return `exec ${run}`;
     }
   }
 
@@ -1959,15 +2065,15 @@ export function commandFor(session) {
   if (cli.id === 'codex' && session.everStarted) {
     const folder = session.path ?? session.id;
     const shared = list().some((o) => o.id !== session.id && o.cli === 'codex' && (o.path ?? o.id) === folder);
-    if (shared) return `exec ${cli.run}`;
+    if (shared) return `exec ${run}`;
   }
 
   // Other agents: resume when one likely exists, else a fresh launch. `exec` so
   // the agent is the PTY's foreground process; when it exits the session ends —
   // a clear "done" signal — and the fallback preserves that.
-  if (session.everStarted && cli.cont) return `${cli.cont} || exec ${cli.run}`;
+  if (session.everStarted && cli.cont) return `${cli.cont(f)} || exec ${run}`;
   if (q0 && cli.withPrompt) return `exec ${firstCommand()}`;
-  return `exec ${cli.run}`;
+  return `exec ${run}`;
 }
 
 /**
@@ -2100,7 +2206,10 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     screenChangedAt: Date.now(),
     bells: 0,
   };
-  host.inputRequired = createInputRequiredTracker({ id: session.id, runId, cli: session.cli });
+  host.inputRequired = createInputRequiredTracker({
+    id: session.id, runId, cli: session.cli,
+    native: session.cli === 'antigravity' ? () => agyPermissionPending(session.id) : null,
+  });
   host.historyCheckpoint = createTerminalHistoryCheckpoint({
     directory: HISTORY_DIR,
     id: host.id,
@@ -2191,6 +2300,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   });
 
   hosts.set(session.id, host);
+  launched.add(session.id);
   stopping.delete(session.id);
   if (!persistedHistory && captureResize) hydrateTraceHistory(session, host);
   if (!session.everStarted) update(session.id, {
@@ -2200,6 +2310,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   if (session.cli === 'codex' && !boundOrUnknown(session)) scheduleCodexCapture(session, workdir);
   if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
   if (session.cli === 'fx') scheduleFxCapture(session, workdir);
+  if (session.cli === 'antigravity') scheduleAgyCapture(session, workdir);
   if (session.cli === 'claude') scheduleClaudeCapture(session, workdir);
   return true;
 }
@@ -2610,12 +2721,17 @@ export function unsubmittedInput(id) {
 export async function sendInput(id, text, opts = {}) {
   const host = hosts.get(id);
   if (!host || stopping.has(id)) throw new ApiError(409, 'input-not-ready', 'session is not running');
+  // `runId`: this text was meant for one launch of the pane, and a replacement
+  // process (a restart, a stop and reopen) must not inherit it.
+  const ours = () => !opts.runId || (hosts.get(id) === host && host.runId === opts.runId && !stopping.has(id));
+  if (!ours()) throw new ApiError(409, 'input-not-ready', 'session was restarted since this input was meant for it');
   // Sends are serialised per pane: two at once would interleave their text on
   // one line as surely as a keystroke would.
   const previous = host.sendChain || Promise.resolve();
   let done;
   host.sendChain = new Promise((resolve) => { done = resolve; });
   try { await previous; } catch {}
+  if (!ours()) { done(); throw new ApiError(409, 'input-not-ready', 'session was restarted since this input was meant for it'); }
   host.sending = true;
   host.heldInput = [];
   try {
@@ -2652,6 +2768,11 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
   }
   host.inputRequired.observeInput();
   const confirm = cliById(host.cli)?.confirmSubmit;
+  // OpenCode can paint a stable first screen before its input handler works
+  // (below). Until one send to THIS launch has been echoed back, every send
+  // checks — whoever started the pane. Deriving it from "did this call start
+  // it" missed panes started by someone else a moment earlier: boot revival.
+  if (host.cli === 'opencode' && !host.inputEchoed) confirmEcho = true;
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
   // the inner newlines as soft line breaks instead of submitting early. So do
   // long single lines to a CLI whose composer is read back: typed in one burst,
@@ -2698,6 +2819,7 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
       }
     }
     if (!echoed) throw new ApiError(409, 'input-not-ready', 'session did not acknowledge the input before the timeout — prompt was not submitted');
+    host.inputEchoed = true;
   } else {
     host.pty.write(payload);
   }
@@ -2836,12 +2958,66 @@ export async function waitForInputReady(id, timeoutMs = INPUT_READY_TIMEOUT_MS) 
   while (Date.now() < deadline) {
     const host = hosts.get(id);
     if (!host) throw new ApiError(409, 'input-not-ready', 'session stopped while waiting for input readiness');
-    const lastActivity = Math.max(host.startedAt || 0, host.lastOutputAt || 0, host.screenChangedAt || 0);
-    if (!host.startupHistory && !host.resizeCapture
-      && Date.now() - lastActivity >= INPUT_READY_QUIET_MS) return true;
+    if (settledForInput(host)) return true;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return false;
+}
+function settledForInput(host) {
+  const lastActivity = Math.max(host.startedAt || 0, host.lastOutputAt || 0, host.screenChangedAt || 0);
+  return !host.startupHistory && !host.resizeCapture && Date.now() - lastActivity >= INPUT_READY_QUIET_MS;
+}
+
+/**
+ * Is this pane positively sitting at an empty prompt — safe for input nobody
+ * is watching arrive? Stricter than waitForInputReady, whose quiet screen is
+ * also what a trust, login or update dialog looks like, and an operator's
+ * prompt at least has the operator behind it. Here:
+ *  - output has settled (waitForInputReady's rule);
+ *  - the CLI has not reported an open dialog (input-required);
+ *  - a composer is identified the way the submit check finds one (a ruled box
+ *    with the cursor in it, or the bottom-most prompt marker with no menu or
+ *    dialog hint below), and it is empty;
+ *  - and the CLI is not showing a startup notice during which Enter is lost.
+ * Anything not recognised is "not ready", never "probably fine".
+ */
+export function promptReady(id) {
+  const host = hosts.get(id);
+  if (!host || stopping.has(id) || !hasPromptDetector(host.cli) || !settledForInput(host)) return false;
+  if (host.inputRequired.get()) return false;
+  let snap, screen = '';
+  try { snap = host.vt.snapshot({ includeCells: false }); screen = host.vt.getVisibleText(); } catch { return false; }
+  return emptyPrompt(snap, screen, host.cli);
+}
+// OpenCode's composer is a `┃` bar that runs on below the cursor (the line
+// under the input, then the agent/model row) and closes with `╹▀▀▀…`, so the
+// generic "bottom-most marker row" rule never finds it. Its own shape: the
+// cursor on a `┃` row with nothing typed in front of it, `┃` rows below it,
+// then the closing `╹`. Captured from opencode 1.18.31.
+function emptyOpencodeComposer(snapshot) {
+  const lines = snapshot?.visibleLines || [];
+  const at = lines.findIndex((l) => l.row === snapshot.cursorRow);
+  if (at < 0 || !/^\s*\u2503/.test(lines[at].text)) return false;
+  if (flatten(lines[at].text.slice(0, snapshot.cursorCol)).replace(/^\u2503/, '').trim()) return false;
+  let i = at + 1;
+  while (i < lines.length && /^\s*\u2503/.test(lines[i].text)) i++;
+  if (i >= lines.length || !/^\s*\u2579/.test(lines[i].text)) return false;
+  return !lines.slice(i + 1).some((l) => MENU_ROW.test(l.text) || DIALOG_HINT.test(l.text));
+}
+/** Can promptReady ever answer yes for this CLI? (config.js promptDetector) */
+export function hasPromptDetector(cli) {
+  return !!cliById(cli)?.promptDetector;
+}
+/** The screen half of promptReady, pure so captured screens can test it. */
+export function emptyPrompt(snapshot, screen, cli) {
+  const confirm = cliById(cli)?.confirmSubmit;
+  if (confirm?.starting?.test(String(screen || ''))) return false;
+  if (cli === 'opencode') return emptyOpencodeComposer(snapshot);
+  const shape = liveComposer(snapshot, { notice: confirm?.notice });
+  if (!shape || !(shape.located ? shape.cursorInside : shape.marked)) return false;
+  if (composerBody(shape) !== '') return false;
+  const idle = cliById(cli)?.promptDetector?.idle;
+  return !idle || (snapshot?.visibleLines || []).some((l) => l.row > snapshot.cursorRow && idle.test(l.text));
 }
 
 /**

@@ -15,8 +15,9 @@ short_description: Private cloud manager for AI coding CLI sessions
 
 **Your coding agents, together in one private workspace.**
 
-Run Claude Code, Codex, opencode, Hermes, OpenClaw and fx from your browser. Follow several tasks side by side, read the conversation or open the
-terminal, and pick up from another device while your Space stays running.
+Run Claude Code, Codex, Antigravity CLI, opencode, Hermes, OpenClaw and fx from
+your browser. Follow several tasks side by side, read the conversation or open
+the terminal, and pick up from another device while your Space stays running.
 
 [![Open in Hugging Face Spaces](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg)](https://huggingface.co/spaces/lvwerra/agent-manager-template)
 
@@ -131,8 +132,10 @@ in the Space's backend as long as the Space stays awake.
 A Space sleep, restart, or rebuild ends running processes. With the bucket
 mounted, saved workspace files and checkpointed CLI state survive. Agent Manager
 can restart eligible sessions and resume conversations where the CLI supports it;
-it cannot preserve a running shell command through a reboot. Configure this in
-**Settings → General → Restart sessions after a reboot**.
+it cannot preserve a running shell command through a reboot. Each restarted agent
+is then told that its tool calls and background listeners were interrupted, so an
+unfinished turn picks up by itself. Configure both in **Settings → General →
+Restart sessions after a reboot** ([details](docs/session-revive.md)).
 
 Without a bucket, local files and logins are temporary. For details on what is
 saved, see [state checkpoints](docs/agent-state-checkpoints.md) and

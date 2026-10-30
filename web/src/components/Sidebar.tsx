@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Cli, MoveTarget, Group, Session, Tree } from '../types';
+import type { Cli, LaunchChoice, MoveTarget, Group, Session, Tree } from '../types';
 import { STATE_LABEL, REMOTE_STATE_LABEL, creatable, isPassive, isRemote } from '../types';
 import * as api from '../api';
 import Logo from './Logo';
@@ -7,6 +7,7 @@ import StateLogo from './StateLogo';
 import DeprecatedNotice, { deprecationNote } from './DeprecatedNotice';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
+import LaunchField from './LaunchField';
 import Attachments from './Attachments';
 import {
   attachmentFileError, discardPendingAttachment, discardPendingAttachments, filesFromTransfer,
@@ -55,7 +56,7 @@ export default function Sidebar({
   onActivate: (ref: string) => void;
   onOpenSession: (sessionId: string, groupId?: string) => void;
   onOpenSettings: () => void;
-  onNewSession: (name: string, cli: string, path: string, groupId?: string) => void;
+  onNewSession: (name: string, cli: string, path: string, groupId?: string, launch?: LaunchChoice) => void;
   onNewGroup: (name: string, cart?: { cli: string; count: number }[], path?: string) => void | Promise<void>;
   onRenameGroup: (id: string, name: string) => void;
   onRenameSession: (id: string, name: string) => void;
@@ -76,11 +77,11 @@ export default function Sidebar({
   onDragState?: (ref: string | null) => void; // lets the stage offer per-tile drop targets
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
-  onQuickStart: (cli: string, prompt: string, name?: string, path?: string, attachmentOptions?: QuickStartAttachmentOptions) => Promise<void>;
+  onQuickStart: (cli: string, prompt: string, name?: string, path?: string, attachmentOptions?: QuickStartAttachmentOptions, launch?: LaunchChoice) => Promise<void>;
   // Creating a session up front so an attachment has somewhere to go (#76).
   // Nothing to do with the row's controls, which is why both survive the same
   // resolution.
-  onPrepareQuickStart: (cli: string, name?: string, path?: string) => Promise<Session>;
+  onPrepareQuickStart: (cli: string, name?: string, path?: string, launch?: LaunchChoice) => Promise<Session>;
   onAbandonQuickStart: (id: string) => Promise<void>;
   // Everything kept out of the working list, by either road…
   archived: Set<string>;
@@ -103,6 +104,9 @@ export default function Sidebar({
   const [quickPrompt, setQuickPrompt] = useState('');
   const [quickName, setQuickName] = useState('');
   const [quickLoc, setQuickLoc] = useState('.');
+  // Model / effort for the agent about to be created; reset with the CLI.
+  const [quickLaunch, setQuickLaunch] = useState<LaunchChoice>({});
+  useEffect(() => { setQuickLaunch({}); }, [quickCli]);
   const [quickError, setQuickError] = useState<string | null>(null);
   const [quickImages, setQuickImages] = useState<PendingAttachment[]>([]);
   const quickImagesRef = useRef<PendingAttachment[]>([]);
@@ -189,7 +193,7 @@ export default function Sidebar({
     if (!quickCli || isRemote(quickCli)) throw new Error('Choose a local agent before attaching files.');
     if (!quickPrepareRef.current) {
       quickPrepareRef.current = onPrepareQuickStart(
-        quickCli, quickName.trim(), quickLoc,
+        quickCli, quickName.trim(), quickLoc, quickLaunch,
       );
     }
     const preparing = quickPrepareRef.current;
@@ -333,6 +337,7 @@ export default function Sidebar({
   const blurbs: Record<string, string> = {
     claude: "Anthropic's coding agent",
     codex: "OpenAI's coding agent",
+    antigravity: "Google's newer coding agent, for Gemini 4 Argon",
     opencode: 'open-source agent, your choice of model',
     hermes: "Nous Research's agent",
     openclaw: 'open-source Claude Code fork',
@@ -442,6 +447,7 @@ export default function Sidebar({
           attachments: quickImages,
           onSessionCreated: rememberQuickSession,
         } : undefined,
+        quickLaunch,
       );
       setQuickPrompt('');
       setQuickName('');
@@ -884,6 +890,14 @@ export default function Sidebar({
                   value={quickLoc}
                   onChange={(value) => { resetQuickTarget(); setQuickLoc(value); }}
                 />
+                {/* Like the name and folder: a change starts a fresh target, so a
+                    session prepared for attachments is not reused with the old choice. */}
+                <LaunchField
+                  cli={quickCli ? clis.find((c) => c.id === quickCli) : undefined}
+                  value={quickLaunch}
+                  onChange={(next) => { resetQuickTarget(); setQuickLaunch(next); }}
+                  disabled={quickSending}
+                />
                 <textarea
                   autoFocus
                   rows={1}
@@ -966,7 +980,7 @@ export default function Sidebar({
             clis={clis}
             sessions={tree.sessions}
             defaultPath={defaultPath}
-            onCreate={(n, c, p) => { onNewSession(n, c, p, createTarget ?? undefined); closePanel(); }}
+            onCreate={(n, c, p, l) => { onNewSession(n, c, p, createTarget ?? undefined, l); closePanel(); }}
             onCancel={closePanel}
           />
         </div>

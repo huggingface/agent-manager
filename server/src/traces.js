@@ -15,6 +15,7 @@ import { findTrace, HARNESS_LABEL } from './share.js';
 import { cachedTrace, traceRevision } from './trace-revision.js';
 import { outputHash } from './output-id.js';
 import { codeModeUses, codeModeResults, patchFiles, stripDataUrls } from './codex-code-mode.js';
+import { STEP, STATUS, readAgySteps, listAgyConversations, agyConversationPath, agyConversationExists, agyChangeKey, stepInFlight } from './antigravity.js';
 
 // Workspace-wide trace analytics: parse every Claude transcript and Codex
 // rollout on the Space into per-conversation stats (turns, tool calls, web
@@ -889,6 +890,201 @@ export function fxSessionExists(id) {
   try { return fs.existsSync(fxEventsPath(id)); } catch { return false; }
 }
 
+// ---------- Antigravity CLI (SQLite: one db per conversation, see antigravity.js) ----------
+// The decoded steps of a conversation are the one source for both the digest
+// and the reader. They are kept, until the db or its WAL changes, only for the
+// few conversations in use (a pane's pin, an open Reader): a change to one of
+// those re-reads just its tail (readAgySteps). The bulk pass over every other
+// conversation keeps only what it computed (stats and digest), so a long
+// history no pane shows costs no memory once it is counted.
+const AGY_STEPS_KEEP = 8;
+const AGY_STEPS_BYTES = 64 * 1024 * 1024;
+const agySteps = new Map(); // dbPath -> { key, steps, bytes }, least recently used first
+const agyStepBytes = (st) => 200 + 2 * ((st.text?.length || 0) + (st.thinking?.length || 0)
+  + (st.output?.length || 0) + (st.call?.args.length || 0) + (st.calls || []).reduce((n, c) => n + c.args.length, 0))
+  + (st.images || []).reduce((n, im) => n + im.data.length, 0);
+function agyStepsFor(p) {
+  const key = agyChangeKey(p);
+  if (!key) return null;
+  const hit = agySteps.get(p);
+  if (hit && hit.key === key) { agySteps.delete(p); agySteps.set(p, hit); return hit.steps; }
+  let steps;
+  // A torn read of a db being written: keep the previous read, try next poll.
+  try { steps = readAgySteps(p, hit && hit.steps); } catch { return hit ? hit.steps : null; }
+  agySteps.delete(p);
+  const bytes = steps.reduce((n, st) => n + agyStepBytes(st), 0);
+  if (bytes <= AGY_STEPS_BYTES) agySteps.set(p, { key, steps, bytes });
+  let total = 0;
+  for (const v of agySteps.values()) total += v.bytes;
+  for (const [k, v] of agySteps) {
+    if (agySteps.size <= AGY_STEPS_KEEP && total <= AGY_STEPS_BYTES) break;
+    agySteps.delete(k); total -= v.bytes;
+  }
+  return steps;
+}
+// Exported for the tests: what the steps cache holds.
+export const agyStepsCached = () => [...agySteps].map(([p, v]) => ({ path: p, bytes: v.bytes, steps: v.steps.length }));
+
+// Stats and digest per conversation, until it changes, for the bulk pass and
+// the Overview: `keep` (a pinned conversation) goes through the steps cache;
+// any other is read whole when it changed, counted, and let go. A pinned one
+// too big for the steps cache is then read whole once per change, not per poll.
+const agyParsed = new Map(); // dbPath -> { key, parsed }
+function agyParsedFor(p, keep) {
+  const key = agyChangeKey(p);
+  if (!key) return null;
+  const hit = agyParsed.get(p);
+  if (hit && hit.key === key) return hit.parsed;
+  let steps;
+  if (keep || agySteps.has(p)) steps = agyStepsFor(p);
+  else { try { steps = readAgySteps(p); } catch { steps = null; } }
+  if (!steps) return hit ? hit.parsed : null;
+  const parsed = parseAgy(steps);
+  if (agyParsed.size > 2000) agyParsed.clear();
+  agyParsed.set(p, { key, parsed });
+  return parsed;
+}
+
+// Files a tool call names, for the card's "touched" list. Large arguments are
+// kept clipped (TEXT_KEEP), which no longer parse: the name is then read from
+// the text, where it comes before the content.
+const AGY_FILE_ARGS = ['TargetFile', 'AbsolutePath', 'Path', 'File', 'FilePath'];
+function agyToolFile(args) {
+  let a;
+  try { a = JSON.parse(args || '{}'); } catch {
+    for (const k of AGY_FILE_ARGS) {
+      const m = new RegExp(`"${k}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)+)"`).exec(args || '');
+      if (m) { try { return JSON.parse(`"${m[1]}"`); } catch {} }
+    }
+    return null;
+  }
+  for (const k of AGY_FILE_ARGS) if (a && typeof a[k] === 'string' && a[k]) return a[k];
+  return null;
+}
+// A clipped text as a reader block's text, counting what was cut.
+function agyText(text, fullLength) {
+  const c = capText(text || '');
+  return fullLength > (text || '').length ? { text: c.text, more: fullLength - c.text.length } : c;
+}
+
+function parseAgy(steps) {
+  const st = emptyStats();
+  const dg = emptyDigest();
+  st.files = 1;
+  const iso = (ms) => (ms ? new Date(ms).toISOString() : '');
+  for (const s of steps) {
+    if (s.unreadable) continue;
+    if (s.ts) addTs(st, iso(s.ts));
+    if (s.type === STEP.USER_INPUT) {
+      if (s.cwd) st.cwd = s.cwd;
+      if (!s.text?.trim()) continue;
+      st.prompts++;
+      digestPrompt(dg, s.text, iso(s.ts));
+    } else if (s.type === STEP.PLANNER_RESPONSE) {
+      st.turns++;
+      dg.sinceTurns++;
+      if (s.usage) {
+        st.tokensIn += s.usage.in; st.tokensOut += s.usage.out; st.cacheRead += s.usage.cacheRead;
+        dg.sinceTokens += s.usage.in + s.usage.out;
+      }
+      for (const c of s.calls) {
+        st.toolCalls++;
+        st.tools[c.name] = (st.tools[c.name] || 0) + 1;
+        if (/^(search_web|read_url_content)$/.test(c.name)) st.web++;
+        digestTool(dg, c.name, agyToolFile(c.args));
+      }
+      // The step index names the reply: a streaming answer that grows keeps it.
+      if (s.text?.trim()) digestAssistant(dg, s.text, iso(s.ts), `agy:${s.idx}`);
+    }
+  }
+  const last = steps[steps.length - 1];
+  dg.running = !!last && stepInFlight(last);
+  return { stats: st, digest: dg };
+}
+
+// One conversation at a time, so the bulk pass yields between them.
+function* readAgy(pinned) {
+  for (const c of listAgyConversations()) {
+    const parsed = agyParsedFor(c.path, pinned.has(c.id));
+    if (parsed) yield { id: c.id, cwd: c.cwd, activeMs: c.activeMs, parsed };
+  }
+}
+
+// A finished run_command as the reader's shell block: its command line, what
+// it printed and its exit code, from agy's own "Command exited with code N."
+// preamble. Anything else (a refusal, a command moved to the background) stays
+// an ordinary call and result.
+function agyShell(args, output, outputLength) {
+  let a;
+  try { a = JSON.parse(args || '{}'); } catch { return null; }
+  const m = /^Command exited with code (-?\d+)\.\s*(?:Command output:\n)?([\s\S]*)$/.exec(output || '');
+  if (!m || typeof a?.CommandLine !== 'string') return null;
+  const out = capText(m[2].replace(/\r\n/g, '\n'));
+  if (outputLength > output.length) out.more = (out.more || 0) + outputLength - output.length;
+  return { type: 'shell', command: a.CommandLine, stdout: out.text, ...(out.more ? { more: out.more } : {}), exitCode: Number(m[1]) };
+}
+
+// One conversation in reader blocks. Results are filed beside their call: a
+// planner step names its calls, and each tool step answers one by call id.
+function normalizeAgyDb(dbPath, out) {
+  const steps = agyStepsFor(dbPath) || readAgySteps(dbPath);
+  const stitch = makeStitcher();
+  const calls = new Map(); // call id -> { msg, block }: a finished command replaces its call
+  for (const s of steps) {
+    const ts = s.ts || undefined;
+    // A step whose payload couldn't be decoded: a marker in its place.
+    if (s.unreadable) {
+      out.push({ role: 'assistant', ts, kind: 'partial', blocks: [textBlock('text', `[Antigravity step ${s.idx} could not be read]`)] });
+      continue;
+    }
+    if (s.type === STEP.USER_INPUT) {
+      if (s.cwd) out.cwd = s.cwd;
+      const blocks = [];
+      if (s.text?.trim()) blocks.push(textBlock('text', s.text));
+      for (const im of s.images) blocks.push({ type: 'image', src: dataUrl(im.data.toString('base64'), im.mediaType), mediaType: im.mediaType });
+      if (blocks.length) out.push({ role: 'user', ts, blocks });
+      continue;
+    }
+    if (s.type === STEP.PLANNER_RESPONSE) {
+      const msg = { role: 'assistant', ts, blocks: [] };
+      if (s.usage) msg.usage = { ...s.usage };
+      if (s.thinking?.trim()) msg.blocks.push(textBlock('thinking', s.thinking));
+      if (s.text?.trim()) msg.blocks.push(textBlock('text', s.text));
+      for (const c of s.calls) {
+        const use = { type: 'tool_use', id: c.id, name: c.name, ...agyText(c.args, c.argsLength) };
+        msg.blocks.push(use);
+        stitch.register(use, msg);
+        calls.set(c.id, { msg, block: use });
+      }
+      if (s.status === STATUS.ERROR && s.error) {
+        msg.error = s.error;
+        msg.kind = 'partial';
+        msg.blocks.push(textBlock('text', s.error));
+      }
+      if (msg.blocks.length) out.push(msg);
+      continue;
+    }
+    if (s.type === STEP.ERROR_MESSAGE) {
+      out.push({ role: 'assistant', ts, kind: 'partial', error: s.error, blocks: [textBlock('text', s.error)] });
+      continue;
+    }
+    if (s.call) {
+      const failed = s.status === STATUS.ERROR;
+      const shell = !failed && s.call.name === 'run_command' && agyShell(s.call.args, s.output, s.outputLength);
+      const use = calls.get(s.call.id);
+      if (shell && use) { use.msg.blocks[use.msg.blocks.indexOf(use.block)] = shell; continue; }
+      const res = { type: 'tool_result', id: s.call.id, ...(s.output ? agyText(s.output, s.outputLength) : capText(s.error || '')), ...(failed ? { failed: true } : {}) };
+      if (!stitch.file(s.call.id, res)) {
+        out.push({ role: 'assistant', ts, blocks: [{ type: 'tool_use', id: s.call.id, name: s.call.name, ...agyText(s.call.args, s.call.argsLength) }, res] });
+      }
+    }
+    // System messages (notices agy writes for the model), checkpoints and
+    // other bookkeeping steps are not conversation.
+  }
+  const last = steps[steps.length - 1];
+  if (last) out.activity = stepInFlight(last) ? 'working' : 'waiting';
+}
+
 // ---------- Hermes (SQLite: ~/.hermes/state.db, WAL) ----------
 // sessions carry cwd + token totals; messages carry role/content/tool_name.
 // Timestamps are float SECONDS — converted to ms for digest fields.
@@ -1420,6 +1616,28 @@ async function buildImpl() {
     attribute(hit && hit !== 'ambiguous' ? hit : null, parsed);
   }
 
+  // Antigravity: one database per conversation, named by its id. The pin
+  // (antigravityConversationId, captured by the runner — see
+  // scheduleAgyCapture) places it; otherwise the folder it runs in, for an
+  // unpinned pane that holds that folder alone (same rules as fx).
+  const byAgyId = new Map(sessions.filter((s) => s.cli === 'antigravity' && s.antigravityConversationId).map((s) => [s.antigravityConversationId, s]));
+  // A pane that once shared its folder (antigravityCaptureSince) is given
+  // nothing older than that: the conversations there may be the sibling's.
+  const byAgyCwd = new Map();
+  for (const s of sessions.filter((x) => x.cli === 'antigravity' && !x.antigravityConversationId)) {
+    const key = path.resolve(WORKSPACES_DIR, s.path ?? s.id);
+    byAgyCwd.set(key, byAgyCwd.has(key) ? 'ambiguous' : s);
+  }
+  for (const { id, cwd, activeMs, parsed } of readAgy(byAgyId)) {
+    let session = byAgyId.get(id) || null;
+    if (!session && cwd) {
+      const hit = byAgyCwd.get(path.resolve(cwd));
+      if (hit && hit !== 'ambiguous' && activeMs >= (hit.antigravityCaptureSince || 0)) session = hit;
+    }
+    attribute(session, parsed);
+    await yieldLoop();
+  }
+
   return { perSession, digests, other, totals, sessions };
 }
 
@@ -1501,6 +1719,10 @@ export async function digestFor(s) {
         if (parsed) return parsed.digest;
       }
     }
+    if (s.cli === 'antigravity' && agyConversationExists(s.antigravityConversationId)) {
+      const parsed = agyParsedFor(agyConversationPath(s.antigravityConversationId), true);
+      if (parsed) return parsed.digest;
+    }
   } catch { /* fall through to the bulk pass */ }
   return null;
 }
@@ -1528,6 +1750,9 @@ export async function traceLocation(s) {
     if (s.cli === 'fx' && s.fxSessionId) {
       const p = fxEventsPath(s.fxSessionId);
       if (fs.existsSync(p)) return { format: 'jsonl', path: p };
+    }
+    if (s.cli === 'antigravity' && agyConversationExists(s.antigravityConversationId)) {
+      return { format: 'sqlite', path: agyConversationPath(s.antigravityConversationId) };
     }
   } catch {}
   return null;
@@ -2618,6 +2843,7 @@ async function parseTraceFile(harness, file, sessionId, range = null, allowSubag
     case 'sts': await normalizeSts(file, out, range); break;
     case 'opencode': normalizeOpencodeDb(file, sessionId, out); break;
     case 'hermes': normalizeHermesDb(file, sessionId, out); break;
+    case 'antigravity': normalizeAgyDb(file, out); break;
     default: { const e = new Error(`no trace reader for '${harness}'`); e.code = 'unsupported-harness'; throw e; }
   }
   // A harness that reports its own session total (codex's cumulative

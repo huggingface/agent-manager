@@ -333,7 +333,7 @@ try {
       }
       if (url === '/api/info') return Promise.resolve(response({ locked: false, welcomeSeen: true, demoMode: false, spaceId: 'test/space', backup: null }));
       if (url === '/api/clis') return Promise.resolve(response([{ id: 'claude', label: 'Claude Code', color: '#d97757', available: true, ready: true }]));
-      if (url === '/api/config') return Promise.resolve(response({ archive: { after: 'never' }, artifacts: { enabled: false, space: '', visibility: 'private' }, jobs: { askAboveUsd: 1 }, revive: { enabled: true, days: 3 }, backup: { every: 'never', dataset: '', exclude: [] } }));
+      if (url === '/api/config') return Promise.resolve(response({ archive: { after: 'never' }, artifacts: { enabled: false, space: '', visibility: 'private' }, jobs: { askAboveUsd: 1 }, revive: { enabled: true, days: 3, continue: true }, backup: { every: 'never', dataset: '', exclude: [] } }));
       if (url === '/api/groups/g1' && init.method === 'PUT') {
         state.groupName = JSON.parse(init.body).name;
         return Promise.resolve(response({ ok: true }));
