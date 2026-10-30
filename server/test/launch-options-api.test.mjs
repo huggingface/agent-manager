@@ -106,7 +106,7 @@ test('POST /api/sessions refuses anything not on the list, and creates nothing',
     { cli: 'claude', model: 'claude-opus-99' },
     { cli: 'claude', effort: 'ultra' },
     { cli: 'codex', model: 'gpt-5.5', effort: 'ultra' },
-    { cli: 'gemini', effort: 'high' },
+    { cli: 'opencode', effort: 'high' }, // model only, like gemini (which is deprecated: below)
     { cli: 'fx', model: 'anything' },
     { cli: 'claude', model: { $ne: 1 } },
   ]) {
@@ -114,6 +114,10 @@ test('POST /api/sessions refuses anything not on the list, and creates nothing',
     assert.equal(r.status, 400, JSON.stringify(body));
     assert.equal(r.body.code, 'invalid-launch-option', JSON.stringify(r.body));
   }
+  // A deprecated CLI is refused for being deprecated, whatever it was asked to take.
+  const gemini = await api('/api/sessions', { name: 'refused', path: 'w', cli: 'gemini', effort: 'high' });
+  assert.equal(gemini.status, 400, JSON.stringify(gemini.body));
+  assert.equal(gemini.body.code, 'cli-deprecated', JSON.stringify(gemini.body));
   assert.equal((await api('/api/sessions')).body.length, before);
 });
 
