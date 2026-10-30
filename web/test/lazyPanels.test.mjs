@@ -144,7 +144,9 @@ try {
     // lazy boundary (LaunchField), the choice's state in both create panels and
     // App's create calls, and the model label in the pane header. Raised to
     // 793, ~0.1 kB over this branch's needs, as tight as the raise above.
-    assert.ok(entry.length <= 793 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 793 kB budget`);
+    // After merging #227 (2026-10-30): main 811,065, this branch 812,081
+    // (+1,016, unchanged), 49 over 793. Raised to 794.
+    assert.ok(entry.length <= 794 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 794 kB budget`);
     // One literal only that panel's module contains — a dynamic import that
     // merely wraps an unchanged graph would leave these in the entry.
     for (const [panel, marker] of [
