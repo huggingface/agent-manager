@@ -68,9 +68,15 @@ function publicState(current) {
  * print any prompt-looking text, and an event-loop TUI polls stdin while both
  * thinking and waiting. Only CLI lifecycle events enter this tracker.
  */
-export function createInputRequiredTracker({ id, runId, cli, now = () => Date.now() }) {
+export function createInputRequiredTracker({ id, runId, cli, now = () => Date.now(), native = null }) {
   let current = null;
   let osc = '';
+  // `native` polls a CLI's own record of a pending dialog (Antigravity: a
+  // WAITING step in its conversation database): { kind, source, token } or
+  // null. It holds while the same token is reported, so it clears as soon as
+  // the record moves on. A key the operator presses dismisses that token, as it
+  // does the one-shot signals; a new token shows again.
+  let dismissed = '';
 
   const set = (kind, source, at, transport, token = '') => {
     current = { kind, source, at, transport, token, cli };
@@ -91,6 +97,17 @@ export function createInputRequiredTracker({ id, runId, cli, now = () => Date.no
       }
     } else if (current?.transport === 'marker') {
       current = null;
+    }
+
+    if (native) {
+      let hit = null;
+      try { hit = native(); } catch {}
+      if (!hit) {
+        dismissed = '';
+        if (current?.transport === 'native') current = null;
+      } else if (hit.token !== dismissed && (current?.transport !== 'native' || current.token !== hit.token)) {
+        set(hit.kind, hit.source, time, 'native', hit.token);
+      }
     }
 
     if (current?.transport === 'terminal' && time - current.at > ONE_SHOT_MAX_AGE_MS) current = null;
@@ -138,12 +155,16 @@ export function createInputRequiredTracker({ id, runId, cli, now = () => Date.no
     const marker = readMarker(id, runId, cli, now());
     if (current?.source === 'opencode-event' || marker?.source === 'opencode-event') return;
     if (marker) removeMarker(marker);
+    if (native) {
+      try { dismissed = native()?.token || ''; } catch {}
+    }
     current = null;
   };
 
   const close = () => {
     removeMatchingMarker(id, runId, cli);
     current = null;
+    native = null;
     osc = '';
   };
 

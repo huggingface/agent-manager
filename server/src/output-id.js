@@ -43,6 +43,7 @@ export function sourceKey(session) {
     session.sessionUuid || '',
     session.codexRollout || '',
     session.opencodeSessionId || '',
+    session.antigravityConversationId || '',
   ].filter(Boolean);
   return parts.length ? outputHash(parts.join('|')) : '';
 }

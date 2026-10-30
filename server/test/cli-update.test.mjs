@@ -58,7 +58,7 @@ assert.equal(
   'every agent CLI is either updatable or explicitly excluded — a new one cannot land in neither and be skipped in silence',
 );
 assert.deepEqual(plan.targets.map((t) => t.id), ['claude', 'codex', 'gemini', 'opencode', 'openclaw']);
-assert.deepEqual(plan.excluded.map((e) => e.id), ['hermes', 'fx'], 'the two non-npm CLIs are named, not dropped');
+assert.deepEqual(plan.excluded.map((e) => e.id), ['antigravity', 'hermes', 'fx'], 'the three non-npm CLIs are named, not dropped');
 for (const e of plan.excluded) assert.ok(e.reason.length > 10, `${e.id} says why it cannot be updated here`);
 for (const t of plan.targets) assert.ok(persistSnippet().includes(`${t.npm}@latest`), `${t.id} is in the durable snippet`);
 
@@ -253,7 +253,7 @@ try {
   const body = await res.json();
   assert.equal(body.runningId, null, 'neither the refused POST nor reading the plan started a run');
   assert.deepEqual(body.items.map((i) => i.id), plan.targets.map((t) => t.id));
-  assert.deepEqual(body.excluded.map((e) => e.id), ['hermes', 'fx']);
+  assert.deepEqual(body.excluded.map((e) => e.id), ['antigravity', 'hermes', 'fx']);
   assert.deepEqual(body.stale, []);
   assert.ok(body.items.every((i) => i.state === 'idle' && Array.isArray(i.willRestart)));
   assert.ok(body.installScript.endsWith('/install.sh'), 'the durable file is named, not implied');
