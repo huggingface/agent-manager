@@ -184,6 +184,31 @@ A session is a *query*, not a file.
   specifically for the HF viewer, and `--redact` exists. We chose direct SQLite reads for one
   code path with opencode; either is defensible.
 
+### Antigravity CLI — **SQLite per conversation**, `~/.gemini/antigravity-cli/conversations/<uuid>.db`
+- `steps(idx, step_type, status, step_payload, …)`: one row per trajectory step, the step a
+  protobuf (`exa.cortex_pb.CortexStep`) with no published schema. The field numbers in
+  `server/src/antigravity.js` come from the descriptors embedded in the `agy` 1.4.10 binary.
+- Step types read: 14 user input (the prompt), 15 planner response (answer text, thinking,
+  tool calls), 132 generic (every tool's result, answering a call by id), 17 error. 101 system
+  messages (notices agy writes for the model) and bookkeeping steps are skipped. Statuses
+  PENDING/RUNNING/GENERATING/QUEUED are work in flight. A finished `run_command` is shown as
+  a shell block.
+- A conversation's folder comes from `cache/last_conversations.json` (`{cwd: id}`, what
+  `agy -c` resumes), else from the first prompt step that records it. Prompt steps record it
+  in print and interactive runs, but not a prompt seeded at launch with `agy -i`.
+- The runner pins `antigravityConversationId` from the pane's own agy: it holds
+  `presence/<id>.lock` open for its current conversation (from the first prompt, and it moves
+  on `/new`), which names it exactly, in a shared folder too. Only when no agy process can be
+  read does the folder fallback pin (the conversation written there since launch, while the
+  pane has no pin and holds its folder alone). A pane that shared its folder remembers it
+  (`antigravityCaptureSince`) and gets nothing older. A pinned pane resumes with
+  `--conversation <id>`, existence-checked in the shell.
+- Read-only, and nothing is created beside agy's files: a database agy has closed (no
+  `-wal`/`-shm`) is opened immutable. A step whose payload can't be decoded is a marker; a bad
+  nested field reads as empty. Full steps are kept for at most 8 conversations in use (64 MiB);
+  the bulk pass keeps stats and digests only. Tool arguments and output are kept clipped
+  (32,000 chars) with their full length. Sharing is not offered (no exporter).
+
 ## 7. What the Hub's viewer does, for reference
 
 Verified live. A dataset containing raw session `.jsonl` files gets auto-tagged

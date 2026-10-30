@@ -14,6 +14,7 @@ import { cliById, cliVersion, isRemote, launchFlags, INTERNAL_HOST, PORT, STATE_
 import { update, list } from './sessions.js';
 import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace,
   captureFxSession } from './traces.js';
+import { AGY_ID, agyConversationForPid, agyWaitingStep, captureAgyConversation } from './antigravity.js';
 import {
   buildPaletteIndex, snapshotToRestoreAnsi, styledSnapshotLines, textColumns,
 } from './snapshot.js';
@@ -1780,6 +1781,67 @@ function scheduleOpencodeCapture(session, workdir) {
   opencodeCapturing.set(session.id, t0);
 }
 
+const agyCapturing = new Map();
+
+// A tool in this pane's pinned conversation is waiting for the operator's
+// permission. Only the pinned conversation counts: a pane that holds no pin
+// (shared folder, nothing captured yet) shows nothing rather than a guess, and
+// a new pin is a new token, so the old one's dialog never carries over.
+function agyPermissionPending(id) {
+  const pin = list().find((s) => s.id === id)?.antigravityConversationId;
+  const step = pin ? agyWaitingStep(pin) : null;
+  return step ? { kind: 'permission', source: 'antigravity-step', token: `${pin}:${step.idx}` } : null;
+}
+
+// Antigravity names each conversation database by its id, and the running agy
+// holds `presence/<id>.lock` open for the conversation it is on, so the pane's
+// own process names its conversation exactly (agyConversationForPid), in a
+// shared folder too, and follows `/new`. Once agy can be read, nothing else
+// moves the pin: a conversation another agy writes in this folder (the
+// operator's shell, a tool of another agent) is not this pane's.
+// Only when no agy process can be read does the folder story apply, like
+// opencode: the conversation written here since launch, adopted while the pane
+// holds no pin. A shared folder adopts nothing that way, and remembers it
+// (antigravityCaptureSince, like fx) so a rival's conversation is never adopted
+// once the folder clears, after a restart included.
+function scheduleAgyCapture(session, workdir) {
+  const prev = agyCapturing.get(session.id);
+  if (prev) clearTimeout(prev);
+  let since = (list().find((s) => s.id === session.id) || session).antigravityCaptureSince || Date.now() - 2000;
+  let warnedShared = false;
+
+  const tick = () => {
+    if (!isRunning(session.id)) { agyCapturing.delete(session.id); return; }
+    const current = list().find((s) => s.id === session.id) || session;
+    const claimed = new Set(list().filter((s) => s.id !== session.id && s.antigravityConversationId).map((s) => s.antigravityConversationId));
+    const pinned = current.antigravityConversationId;
+    const owned = agyConversationForPid(paneRootPid(session.id));
+    if (owned) {
+      if (owned.id && !claimed.has(owned.id) && (owned.id !== pinned || current.antigravityCaptureSince)) {
+        if (pinned && owned.id !== pinned) console.warn(`[antigravity] re-pinning ${session.id}: ${pinned} -> ${owned.id} (agy moved to it)`);
+        update(session.id, { antigravityConversationId: owned.id, antigravityCaptureSince: undefined });
+      }
+    } else if (folderIsShared(session.id, workdir, 'antigravity')) {
+      if (!warnedShared) {
+        warnedShared = true;
+        console.warn(`[antigravity] ${session.id}: folder shared with another live session — not following new conversations here`);
+      }
+      since = Date.now();
+      if (!current.antigravityCaptureSince) update(session.id, { antigravityCaptureSince: since });
+    } else if (!pinned) {
+      const hit = captureAgyConversation(workdir, since, claimed);
+      if (hit) update(session.id, { antigravityConversationId: hit.id, antigravityCaptureSince: undefined });
+    }
+    const t = setTimeout(tick, REPIN_MS);
+    if (t.unref) t.unref();
+    agyCapturing.set(session.id, t);
+  };
+
+  const t0 = setTimeout(tick, 3000);
+  if (t0.unref) t0.unref();
+  agyCapturing.set(session.id, t0);
+}
+
 const fxCapturing = new Map();
 
 // fx names its session directory with the conversation id and records the
@@ -1961,6 +2023,26 @@ export function commandFor(session) {
     }
   }
 
+  // Antigravity: resume the PINNED conversation by id (captured after launch —
+  // see scheduleAgyCapture), existence-checked in the shell like fx, so a
+  // deleted conversation starts fresh rather than failing the launch.
+  if (cli.id === 'antigravity' && session.everStarted && AGY_ID.test(session.antigravityConversationId || '')) {
+    const db = `"$HOME/.gemini/antigravity-cli/conversations/${session.antigravityConversationId}.db"`;
+    return `if [ -f ${db} ]; then exec ${cli.resume(session.antigravityConversationId, f)}; else exec ${run}; fi`;
+  }
+
+  // Unpinned Antigravity: `-c` continues the newest conversation in the folder,
+  // so a pane that ever shared its folder keeps starting fresh until it holds a
+  // pin, exactly like fx above: the sibling's conversation outlives the sibling.
+  if (cli.id === 'antigravity' && !session.antigravityConversationId) {
+    const folder = session.path ?? session.id;
+    const shared = list().some((o) => o.id !== session.id && o.cli === 'antigravity' && (o.path ?? o.id) === folder);
+    if (shared || session.antigravityCaptureSince) {
+      update(session.id, { antigravityCaptureSince: Date.now() });
+      if (session.everStarted) return `exec ${run}`;
+    }
+  }
+
   // codex without a pinned conversation: `resume --last` scopes to the cwd,
   // so in a SHARED folder it can resume a SIBLING's conversation (cross-talk).
   // Only resume when this session has the folder to itself; otherwise start
@@ -2109,7 +2191,10 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     screenChangedAt: Date.now(),
     bells: 0,
   };
-  host.inputRequired = createInputRequiredTracker({ id: session.id, runId, cli: session.cli });
+  host.inputRequired = createInputRequiredTracker({
+    id: session.id, runId, cli: session.cli,
+    native: session.cli === 'antigravity' ? () => agyPermissionPending(session.id) : null,
+  });
   host.historyCheckpoint = createTerminalHistoryCheckpoint({
     directory: HISTORY_DIR,
     id: host.id,
@@ -2209,6 +2294,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   if (session.cli === 'codex' && !boundOrUnknown(session)) scheduleCodexCapture(session, workdir);
   if (session.cli === 'opencode') scheduleOpencodeCapture(session, workdir);
   if (session.cli === 'fx') scheduleFxCapture(session, workdir);
+  if (session.cli === 'antigravity') scheduleAgyCapture(session, workdir);
   if (session.cli === 'claude') scheduleClaudeCapture(session, workdir);
   return true;
 }

@@ -84,6 +84,20 @@ RUN (curl -fsSL https://releases.fx.sh/v0.0.5/fx-linux-x86_64.tar.gz -o /tmp/fx.
       && install -D -m 0644 -t /usr/local/share/doc/fx /tmp/LICENSE /tmp/THIRD_PARTY_NOTICES.md \
       && fx --version) || echo "fx install failed"
 RUN rm -f /tmp/fx.tar.gz /tmp/fx /tmp/LICENSE /tmp/THIRD_PARTY_NOTICES.md
+# Antigravity CLI (`agy`, Google) is also one native binary. Same reasoning as
+# fx: fetch a PINNED build and check it against the SHA-512 Google's installer
+# manifest publishes for it, rather than running install.sh, which resolves the
+# newest build and then runs `agy install` to edit shell rc files. The binary is
+# root-owned, so don't count on its background self-update replacing it: to
+# upgrade, bump these two args (from .../manifests/linux_amd64.json).
+ARG AGY_URL=https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.10-5501573669978112/linux-x64/cli_linux_x64.tar.gz
+ARG AGY_SHA512=3a14c21697e86349ce8402e0b1889cbd1d3a5f4e2cb4dc43aae1c48c404240c2ccff9f775eec277e1f759234a33ec026645c63ed22ab6f6ebede561eda7c38b6
+RUN (curl -fsSL "$AGY_URL" -o /tmp/agy.tar.gz \
+      && echo "$AGY_SHA512  /tmp/agy.tar.gz" | sha512sum -c - \
+      && tar -xzf /tmp/agy.tar.gz -C /tmp antigravity \
+      && install -D -m 0755 /tmp/antigravity /usr/local/bin/agy \
+      && HOME=/tmp/agy-home agy --version) || echo "agy install failed"
+RUN rm -rf /tmp/agy.tar.gz /tmp/antigravity /tmp/agy-home
 # ccusage powers the Usage page (token/cost aggregation across agents). Its
 # platform binary ships without an execute bit and the package tries to chmod
 # itself on first run — which fails with EPERM at runtime as the non-root user.
@@ -191,7 +205,7 @@ RUN set +e; \
     printf '  %-10s %s\n' python3 "$(python3 --version 2>&1)"; \
     echo "  ----------------------------------------------------------"; \
     missing=""; \
-    for c in claude codex gemini opencode openclaw hermes fx ccusage uv hf; do \
+    for c in claude codex gemini agy opencode openclaw hermes fx ccusage uv hf; do \
       path="$(command -v "$c" 2>/dev/null)"; \
       if [ -n "$path" ]; then \
         ver="$(timeout 30 "$c" --version 2>&1 | head -1 | tr -d '\r')"; \
