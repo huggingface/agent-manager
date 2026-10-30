@@ -4,12 +4,13 @@ import { AmMark } from './icons';
 // your devices. Theme-aware via the app's CSS tokens; hidden on narrow screens
 // (see .welcome-diagram media query) where the labels would be too small.
 const HARNESSES: [name: string, logo: string, color: string, y: number, inv: string][] = [
-  ['Claude Code', 'claude.png', '#d97757', 36, ''],
-  ['Codex', 'codex.png', '#5eb6a6', 68, ''],
-  ['opencode', 'opencode.png', '#b9c2cc', 100, 'wd-inv-dark'],
-  ['Hermes', 'hermes.png', '#a78bfa', 132, 'wd-inv-light'],
-  ['OpenClaw', 'openclaw.png', '#e05a4e', 164, ''],
-  ['fx', 'fx.png', '#626262', 196, 'wd-inv-dark'],
+  ['Claude Code', 'claude.png', '#d97757', 20, ''],
+  ['Codex', 'codex.png', '#5eb6a6', 52, ''],
+  ['Antigravity', 'antigravity.png', '#3186ff', 84, ''],
+  ['opencode', 'opencode.png', '#b9c2cc', 116, 'wd-inv-dark'],
+  ['Hermes', 'hermes.png', '#a78bfa', 148, 'wd-inv-light'],
+  ['OpenClaw', 'openclaw.png', '#e05a4e', 180, ''],
+  ['fx', 'fx.png', '#626262', 212, 'wd-inv-dark'],
 ];
 
 export default function WelcomeDiagram() {
@@ -21,14 +22,15 @@ export default function WelcomeDiagram() {
         <text className="wd-zone" x="568" y="12" textAnchor="middle">You</text>
 
         {/* nested rounded routing, outer wires innermost so nothing crosses.
-            The harnesses sit symmetrically around the hub's centre line, so
-            the elbows pair up above and below it. */}
-        <path className="wd-link" d="M172 48 H238 Q244 48 244 54 V104 Q244 110 250 110 H268" />
-        <path className="wd-link" d="M172 80 H230 Q236 80 236 86 V111 Q236 117 242 117 H268" />
-        <path className="wd-link" d="M172 112 H222 Q228 112 228 118 V118 Q228 124 234 124 H268" />
-        <path className="wd-link" d="M172 144 H222 Q228 144 228 138 V138 Q228 132 234 132 H268" />
-        <path className="wd-link" d="M172 176 H230 Q236 176 236 170 V145 Q236 139 242 139 H268" />
-        <path className="wd-link" d="M172 208 H238 Q244 208 244 202 V152 Q244 146 250 146 H268" />
+            An odd number of harnesses puts one of them level with the hub, so
+            that wire is a straight line and the elbows pair up around it. */}
+        <path className="wd-link" d="M172 32  H238 Q244 32 244 38  V101 Q244 107 250 107 H268" />
+        <path className="wd-link" d="M172 64  H230 Q236 64 236 70  V108 Q236 114 242 114 H268" />
+        <path className="wd-link" d="M172 96  H222 Q228 96 228 102 V115 Q228 121 234 121 H268" />
+        <path className="wd-link" d="M172 128 H268" />
+        <path className="wd-link" d="M172 160 H222 Q228 160 228 154 V141 Q228 135 234 135 H268" />
+        <path className="wd-link" d="M172 192 H230 Q236 192 236 186 V148 Q236 142 242 142 H268" />
+        <path className="wd-link" d="M172 224 H238 Q244 224 244 218 V155 Q244 149 250 149 H268" />
         <path className="wd-link" d="M372 128 H428" />
         <path className="wd-link" d="M514 128 H528 Q534 128 534 120 V84 Q534 76 540 76 H542" />
         <path className="wd-link" d="M514 128 H528 Q534 128 534 136 V185 Q534 191 540 191 H554" />
