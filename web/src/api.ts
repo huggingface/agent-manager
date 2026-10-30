@@ -1,6 +1,6 @@
 import { withDurableIntent } from './lib/durableIntent';
 import {withCreationIntent} from './lib/creationIntent';
-import type { Cli, Group, MoveTarget, RemoteInfo, RemoteMessage, Session, SessionState, Tree } from './types';
+import type { Cli, Group, LaunchChoice, MoveTarget, RemoteInfo, RemoteMessage, Session, SessionState, Tree } from './types';
 import { ApiError, connectionError, decodeJsonText, decodeResponse } from './apiResponse';
 export { ApiError } from './apiResponse';
 import { requestHeaders } from './requestIntent';
@@ -42,8 +42,8 @@ export const setOverviewHidden = (ref: string, hidden: boolean): Promise<{ hidde
 const normalizePath = (path?: string) => (path && path.trim() ? path : '.');
 // Quickstart: create at the workspaces root, boot the CLI, and type the prompt
 // as soon as it's up — all server-side, no waiting in the UI.
-export const quickStart = (cli: string, prompt: string, name = '', path = '.'): Promise<Session> =>
-  createRequest({ cli, name: name || undefined, path: path || '.', prompt: prompt || undefined });
+export const quickStart = (cli: string, prompt: string, name = '', path = '.', launch: LaunchChoice = {}): Promise<Session> =>
+  createRequest({ cli, name: name || undefined, path: path || '.', prompt: prompt || undefined, ...launch });
 
 // The name this cli would get if created now. Used to prefill the create
 // panel; the panel only SENDS a name when the operator edits it, so the server
@@ -51,13 +51,13 @@ export const quickStart = (cli: string, prompt: string, name = '', path = '.'): 
 export const nextName = (cli: string): Promise<{ cli: string; name: string }> =>
   fetch(`/api/next-name?cli=${encodeURIComponent(cli)}`).then(json);
 
-const createRequest = (payload: {cli: string; name?: string; groupId?: string; path: string; prompt?: string}): Promise<Session> => {
+const createRequest = (payload: {cli: string; name?: string; groupId?: string; path: string; prompt?: string} & LaunchChoice): Promise<Session> => {
   const send = (requestId?: string) => fetch('/api/sessions', {method:'POST',headers:HEADERS,body:JSON.stringify({...payload,...(requestId?{requestId}:{})})}).then(json);
   return payload.cli==='codex' ? withCreationIntent(payload,send) : send();
 };
 
-export const createSession = (name: string, cli: string, groupId?: string, path?: string): Promise<Session> =>
-  createRequest({ name, cli, groupId, path: normalizePath(path) });
+export const createSession = (name: string, cli: string, groupId?: string, path?: string, launch: LaunchChoice = {}): Promise<Session> =>
+  createRequest({ name, cli, groupId, path: normalizePath(path), ...launch });
 
 export const listFolders = (p = ''): Promise<{ path: string; folders: string[] }> =>
   fetch(`/api/folders?path=${encodeURIComponent(p)}`).then(json);

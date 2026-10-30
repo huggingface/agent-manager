@@ -134,12 +134,19 @@ const defaultJobs = (() => {
   return { n, why: `${cores} cores, load ${busy.toFixed(1)}` };
 })();
 
+/**
+ * A suite's environment. A test server must never open the signed-in Claude
+ * Code on the real HOME to read its model picker (server/src/model-catalog.js),
+ * so the probe is forced off last, whatever the caller's shell has.
+ */
+export const suiteEnv = (env = {}, base = process.env) => ({ ...base, ...env, AM_CLAUDE_MODEL_PROBE: '0' });
+
 /** Runs one command; resolves { code, signal, output, secs, timedOut }. */
 function runTask(task, { stream, env }) {
   return new Promise((resolve) => {
     const t0 = performance.now();
     const child = spawn(task.cmd[0], task.cmd.slice(1), {
-      cwd: task.cwd, env: { ...process.env, ...env }, detached: true,
+      cwd: task.cwd, env: suiteEnv(env), detached: true,
       stdio: ['ignore', stream ? 'inherit' : 'pipe', stream ? 'inherit' : 'pipe'],
     });
     const chunks = [];

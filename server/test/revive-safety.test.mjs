@@ -75,7 +75,7 @@ const typed = (id) => input().filter((r) => r.id === id).map((r) => r.data).join
 // `> ` composer, which is the generic rule's shape.
 const agent = config.cliById('hermes');
 const opencode = config.cliById('opencode');
-const as = (cli, mode) => { cli.run = `${process.execPath} ${fixture} ${mode}`; cli.cont = null; };
+const as = (cli, mode) => { cli.run = () => `${process.execPath} ${fixture} ${mode}`; cli.cont = null; };
 const make = (name, cli = 'hermes') => {
   const s = sessions.create({ name, cli, path: name });
   return sessions.update(s.id, { everStarted: true, lastInputAt: Date.now() });
@@ -164,7 +164,7 @@ try {
   console.log = (...a) => { logged.push(a.join(' ')); };
   try {
     for (const cli of ['gemini', 'openclaw', 'fx']) {
-      config.cliById(cli).run = `${process.execPath} ${fixture} composer`;
+      config.cliById(cli).run = () => `${process.execPath} ${fixture} composer`;
       config.cliById(cli).cont = null;
       const s = make(`nodetect-${cli}`, cli);
       runner.ensureRunning(s);

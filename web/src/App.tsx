@@ -28,7 +28,7 @@ import { quietSessionIds } from './lib/idleWindow';
 import { applyAck, furtherMark, retireLocal, type ReadMark } from './lib/unread';
 // Matches the server's per-request cap; the client splits rather than being cut.
 const ACK_CHUNK = 100;
-import type { Cli, GridSpec, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
+import type { Cli, GridSpec, LaunchChoice, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
 import { onPaneMode, readPaneMode, writePaneMode } from './lib/paneMode';
 import { OPEN_SESSION_EVENT } from './lib/openSession';
 import { hiddenSessionIds } from './lib/overviewHidden';
@@ -862,9 +862,9 @@ export default function App() {
   }, [visibleIds, focusedId]);
 
   // actions
-  const createSession = async (name: string, cli: string, path: string, groupId?: string) => {
+  const createSession = async (name: string, cli: string, path: string, groupId?: string, launch?: LaunchChoice) => {
     try {
-      const s = await api.createSession(name, cli, groupId, path);
+      const s = await api.createSession(name, cli, groupId, path, launch);
       rememberPath(s.path);
       await refresh();
       if (groupId) { setActiveRef(`g:${groupId}`); setFocusedId(s.id); }
@@ -873,8 +873,8 @@ export default function App() {
   };
   // Quickstart: server boots the agent and types the prompt; we jump straight
   // to the new pane so you watch it happen.
-  const prepareQuickStart = async (cli: string, name = '', path = '.') => {
-    const created = await api.createSession(name, cli, undefined, path);
+  const prepareQuickStart = async (cli: string, name = '', path = '.', launch?: LaunchChoice) => {
+    const created = await api.createSession(name, cli, undefined, path, launch);
     rememberPath(created.path);
     await refresh();
     return created;
@@ -895,7 +895,7 @@ export default function App() {
       await refresh();
     }
   };
-  const quickStart = async (cli: string, prompt: string, name = '', path = '.', attachmentOptions?: QuickStartAttachmentOptions) => {
+  const quickStart = async (cli: string, prompt: string, name = '', path = '.', attachmentOptions?: QuickStartAttachmentOptions, launch?: LaunchChoice) => {
     try {
       let sessionId: string;
       let sessionPath: string | null = path;
@@ -905,7 +905,7 @@ export default function App() {
         } else {
           // Defensive fallback for a submit racing the target-creation render.
           // Normal attachment uploads create this stopped target immediately.
-          const created = await prepareQuickStart(cli, name, path);
+          const created = await prepareQuickStart(cli, name, path, launch);
           sessionId = created.id;
           sessionPath = created.path;
           attachmentOptions.onSessionCreated(created.id);
@@ -916,7 +916,7 @@ export default function App() {
         await api.sendInput(sessionId, prompt,
           attachmentOptions.attachments.map((attachment) => attachment.attachment!.id));
       } else {
-        const created = await api.quickStart(cli, prompt, name, path);
+        const created = await api.quickStart(cli, prompt, name, path, launch);
         sessionId = created.id;
         sessionPath = created.path;
       }
@@ -933,8 +933,8 @@ export default function App() {
   };
   // Creations land in an explicitly targeted group (the group's + button),
   // else the group you're currently looking at; loose otherwise.
-  const newSession = (name: string, cli: string, path: string, groupId?: string) =>
-    createSession(name, cli, path, groupId ?? activeGroup?.id);
+  const newSession = (name: string, cli: string, path: string, groupId?: string, launch?: LaunchChoice) =>
+    createSession(name, cli, path, groupId ?? activeGroup?.id, launch);
   const newGroup = async (name: string, cart?: { cli: string; count: number }[], path = ROOT_PATH) => {
     let created: string | null = null;
     try {
@@ -1488,7 +1488,7 @@ export default function App() {
               >
                 <div className="empty-card">
                   <EmptyPrompt path={activeGroup.name} hints={['create an agent here, or drag one in from the sidebar']} />
-                  <NewSession clis={clis} sessions={tree.sessions} defaultPath={lastPath} onCreate={newSession} />
+                  <NewSession clis={clis} sessions={tree.sessions} defaultPath={lastPath} onCreate={(n, c, p, l) => newSession(n, c, p, undefined, l)} />
                   <div className="dropline">drop an agent here to add it to this group</div>
                 </div>
               </div>

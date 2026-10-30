@@ -27,10 +27,18 @@ export function tuiSpec(target, env = process.env) {
       || ![target.socket, target.codexHome, target.workdir].every((p) => typeof p === 'string' && path.isAbsolute(p) && !/[\x00-\x1f]/.test(p))) {
     throw new Error('Invalid shared client target.');
   }
+  // The AM session's chosen model / effort (server/src/config.js). Spawned
+  // without a shell, but checked to the same shapes the server stores.
+  const model = target.model ?? '', effort = target.effort ?? '';
+  if (typeof model !== 'string' || typeof effort !== 'string'
+      || (model && !/^[A-Za-z0-9._/:@[\]-]{1,120}$/.test(model)) || (effort && !/^[a-z]{1,16}$/.test(effort))) {
+    throw new Error('Invalid shared client target.');
+  }
+  const flags = [...(model ? ['-m', model] : []), ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : [])];
   const clean = { ...env, CODEX_HOME: target.codexHome };
   // Inherited parent identity must not impersonate this thread in hooks/tools.
   for (const k of Object.keys(clean)) if (k.startsWith('AM_') || k === 'CODEX_THREAD_ID') delete clean[k];
-  return { command: 'codex', args: ['--remote', `unix://${target.socket}`, 'resume', target.threadId],
+  return { command: 'codex', args: ['--remote', `unix://${target.socket}`, 'resume', ...flags, target.threadId],
     options: { cwd: target.workdir, env: clean, stdio: 'inherit' } };
 }
 export async function run(args, { env = process.env, fetchImpl = fetch, print = console.log, launch = spawn } = {}) {

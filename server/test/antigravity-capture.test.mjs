@@ -49,7 +49,7 @@ const runner = await import('../src/runner.js');
 const agy = await import('../src/antigravity.js');
 config.ensureDirs(); sessions.init();
 const cli = config.cliById('antigravity');
-cli.run = cli.cont = FAKE;
+cli.run = cli.cont = () => FAKE;
 cli.resume = () => FAKE;
 
 let pass = 0, fail = 0;

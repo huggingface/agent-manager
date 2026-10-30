@@ -139,8 +139,9 @@ export function cliUpdatePlan() {
 /**
  * CLI catalog.
  *  - `bin`  : binary checked on PATH to report availability
- *  - `run`  : command run inside the session shell on first launch
- *  - `cont` : command used to resume a prior conversation (null = no resume)
+ *  - `run(f)`  : command run inside the session shell on first launch
+ *  - `cont(f)` : command used to resume a prior conversation (null = no resume)
+ *  - `f` is the session's launch flags (see `launch` below), '' for none
  *  - `resizeMode: 'repaint'`: primary-screen TUI redraws its frame on SIGWINCH
  */
 // One setup story for every agent; only the accepted secret names differ.
@@ -197,6 +198,31 @@ const CODEX_INPUT_SIGNALS = '-c \'tui.notifications=["approval-requested","plan-
 // answer has to be in the file (see trustCodexWorkspace in first-run.js).
 const codexCommand = (tail = '') => `codex ${CODEX_INPUT_SIGNALS}${tail ? ` ${tail}` : ''}`;
 
+// A session's chosen model / reasoning effort, as launch flags. They are
+// rebuilt from the stored session on EVERY launch (fresh, resume, continue,
+// seeded prompt, fallback), so a restart keeps the choice, and an in-session
+// `/model` that rewrote the CLI's shared default cannot move this session.
+//
+// Each agent entry's run / cont / resume / withPrompt takes the flag string `f`
+// (already shell-quoted, '' when nothing was chosen) and decides where it goes,
+// so no launch branch in runner.commandFor() can leave it out. An entry with a
+// `launch` block says what it supports:
+//  - `model`   : true when a model can be chosen at launch
+//  - `efforts` : the CLI-wide effort values, or 'per-model' when the model list
+//                carries them (codex). Absent = no effort control.
+//  - `flags({model, effort})` : the flag string for a validated choice
+// The model LIST comes from model-catalog.js; a value is accepted only if it
+// is in that list (index.js), and re-checked against these shapes at launch.
+export const LAUNCH_MODEL = /^[A-Za-z0-9._/:@[\]-]{1,120}$/;
+export const LAUNCH_EFFORT = /^[a-z]{1,16}$/;
+const shq = (t) => `'${String(t).replace(/'/g, `'\\''`)}'`;
+const join = (...parts) => parts.filter(Boolean).join(' ');
+const withFlags = (base, f = '') => (f ? `${base} ${f}` : base);
+const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const AGY_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']; // `agy --help`, 1.4.10
+const HERMES_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+const OPENCLAW_THINKING = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'adaptive', 'max'];
+
 
 /**
  * What confirms a delivered prompt was submitted (runner.js submitConfirmed),
@@ -214,7 +240,7 @@ const CODEX_CONFIRM = { pasted: /\[PastedContent\d+chars\]/, busy: /esc to inter
   elapsed: /(Working \()(?:\d+h )?(?:\d+m )?\d+s( \u2022 esc to interrupt\))/g };
 // Expanded by the launching shell, so it follows the key present at launch.
 const AGY_KEY_PROVIDER = `\${GEMINI_API_KEY:+--settings '{"modelProvider":"gemini"}'}`;
-const agyCommand = (tail = '') => `agy ${AGY_KEY_PROVIDER}${tail ? ` ${tail}` : ''}`;
+export const agyCommand = (tail = '') => `agy ${AGY_KEY_PROVIDER}${tail ? ` ${tail}` : ''}`;
 const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
 
 /**
@@ -230,7 +256,7 @@ const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
  */
 
 export const CLIS = [
-  { id: 'shell',    label: 'Shell',       bin: 'bash',     color: '#8aa0ad', run: 'exec bash -il',  cont: null },
+  { id: 'shell',    label: 'Shell',       bin: 'bash',     color: '#8aa0ad', run: () => 'exec bash -il', cont: null },
   { id: 'files',    label: 'Files',       bin: null,       color: '#d99a2b', run: null,             cont: null },
   // A received trace, rendered read-only. Like 'files' it is a passive panel
   // rather than a process, so it has no binary and never launches anything.
@@ -241,52 +267,98 @@ export const CLIS = [
   { id: 'remote',   label: 'Remote agent', bin: null,      color: '#5ec2e0', run: null,             cont: null },
   // confirmSubmit: delivered prompts have been left unsubmitted in the
   // composer; sends read it back to confirm the submit (runner.js).
-  { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', run: 'claude',         cont: 'claude --continue', resizeMode: 'repaint',
+  { id: 'claude',   label: 'Claude Code', bin: 'claude',   color: '#d97757', resizeMode: 'repaint',
+    run: (f) => withFlags('claude', f),
+    cont: (f) => withFlags('claude --continue', f),
+    resume: (id, f) => withFlags(`claude --resume ${id}`, f),
+    withPrompt: (q, _images, f) => `${withFlags('claude', f)} ${q}`,
+    launch: { model: true, efforts: CLAUDE_EFFORTS,
+      flags: ({ model, effort }) => join(model && `--model ${shq(model)}`, effort && `--effort ${shq(effort)}`) },
     confirmSubmit: CLAUDE_CONFIRM, promptDetector: true,
     npm: '@anthropic-ai/claude-code',
-    withPrompt: (q) => `claude ${q}`,
     secrets: ['ANTHROPIC_API_KEY'], setup: setupHint('ANTHROPIC_API_KEY') },
-  { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', run: codexCommand(),   cont: codexCommand('resume --last'), resizeMode: 'repaint',
-    confirmSubmit: CODEX_CONFIRM, promptDetector: true,
-    npm: '@openai/codex',
-    resume: (id) => codexCommand(`resume ${id}`),
+  // The flags go after a subcommand (`resume -m … <id>`): `codex resume`
+  // takes its own -m / -c.
+  { id: 'codex',    label: 'Codex',       bin: 'codex',    color: '#5eb6a6', resizeMode: 'repaint',
+    run: (f) => codexCommand(f),
+    cont: (f) => codexCommand(withFlags('resume --last', f)),
+    resume: (id, f) => codexCommand(`${withFlags('resume', f)} ${id}`),
     // `q` and image paths arrive shell-quoted from runner.commandFor(). Repeat
     // -i because Codex's variadic flag would otherwise consume the prompt.
-    withPrompt: (q, images = []) => `${codexCommand()}${images.length ? ` ${images.map((image) => `-i ${image}`).join(' ')}` : ''} ${q}`,
+    withPrompt: (q, images = [], f) => `${codexCommand(f)}${images.length ? ` ${images.map((image) => `-i ${image}`).join(' ')}` : ''} ${q}`,
+    launch: { model: true, efforts: 'per-model',
+      flags: ({ model, effort }) => join(model && `-m ${shq(model)}`, effort && `-c ${shq(`model_reasoning_effort="${effort}"`)}`) },
+    confirmSubmit: CODEX_CONFIRM, promptDetector: true,
+    npm: '@openai/codex',
     secrets: ['OPENAI_API_KEY'], setup: setupHint('OPENAI_API_KEY') },
-  { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', run: 'gemini',         cont: null, resizeMode: 'repaint',
+  // Thinking is not a launch flag: only a settings file sets it. Model only.
+  { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', cont: null, resizeMode: 'repaint',
+    run: (f) => withFlags('gemini', f),
+    withPrompt: (q, _images, f) => `${withFlags('gemini', f)} -i ${q}`, // -i = interactive session seeded with the prompt
+    launch: { model: true, flags: ({ model }) => join(model && `-m ${shq(model)}`) },
     npm: '@google/gemini-cli',
-    withPrompt: (q) => `gemini -i ${q}`, // -i = interactive session seeded with the prompt
     secrets: ['GEMINI_API_KEY'], setup: setupHint('GEMINI_API_KEY') },
   // Antigravity CLI (`agy`) is Google's successor to Gemini CLI and the one
   // Google recommends for Gemini 4 Argon. It ignores GEMINI_API_KEY unless its
   // provider is set to "gemini", and otherwise asks for a Google sign-in, so
   // that setting is passed per launch while the key is present. --settings is
   // never saved, so a later Google sign-in still works once the key is gone.
-  { id: 'antigravity', label: 'Antigravity CLI', bin: 'agy', color: '#3186ff', run: agyCommand(), cont: agyCommand('-c'), resizeMode: 'repaint',
+  // Model ids carry their own tier (gemini-4-argon-high), and --effort sets the
+  // reasoning level on top of it.
+  { id: 'antigravity', label: 'Antigravity CLI', bin: 'agy', color: '#3186ff', resizeMode: 'repaint',
     // An empty `>` between two rules, idle or mid-turn alike; only the row
     // under it tells them apart: `? for shortcuts`, or `esc to cancel` while
     // it works (captured from agy 1.4.10).
     promptDetector: { idle: /^\? for shortcuts\b/ },
+    run: (f) => agyCommand(f),
+    cont: (f) => agyCommand(join(f, '-c')),
+    withPrompt: (q, _images, f) => agyCommand(join(f, `-i ${q}`)), // -i = interactive session seeded with the prompt
+    resume: (id, f) => agyCommand(join(f, `--conversation ${id}`)), // id: a uuid, checked by runner.js
+    launch: { model: true, efforts: AGY_EFFORTS,
+      flags: ({ model, effort }) => join(model && `--model ${shq(model)}`, effort && `--effort ${shq(effort)}`) },
     noUpdate: 'a pinned prebuilt binary from antigravity.google, not an npm package',
-    withPrompt: (q) => agyCommand(`-i ${q}`), // -i = interactive session seeded with the prompt
-    resume: (id) => agyCommand(`--conversation ${id}`), // id: a uuid, checked by runner.js
     secrets: ['GEMINI_API_KEY'], setup: setupHint('GEMINI_API_KEY') },
-  { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', run: 'opencode',       cont: 'opencode --continue', resizeMode: 'repaint', promptDetector: true,
+  // Model only. `--variant` exists on `opencode run` but not on the TUI, and
+  // the TUI ignores `agent.build.variant` from OPENCODE_CONFIG_CONTENT (checked
+  // on 1.19.5 with a fresh HOME): it keeps its own saved per-model variant.
+  { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', resizeMode: 'repaint', promptDetector: true,
+    run: (f) => withFlags('opencode', f),
+    cont: (f) => withFlags('opencode --continue', f),
+    resume: (id, f) => withFlags(`opencode --session ${id}`, f),
+    withPrompt: (q, _images, f) => `${withFlags('opencode', f)} --prompt ${q}`,
+    launch: { model: true, flags: ({ model }) => join(model && `-m ${shq(model)}`) },
     npm: 'opencode-ai',
-    withPrompt: (q) => `opencode --prompt ${q}`,
     secrets: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY'], setup: setupHint('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY') },
-  { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', run: 'hermes',         cont: 'hermes -c', resizeMode: 'repaint', promptDetector: true,
+  // Model ids are `<provider>/<model>` as listed from Hermes' own cache, and
+  // the model part may hold a slash itself (huggingface/moonshotai/Kimi-K2.5),
+  // so they are passed as --provider and -m separately. Flags go BEFORE -c,
+  // whose value is optional.
+  { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', resizeMode: 'repaint', promptDetector: true,
+    run: (f) => withFlags('hermes', f),
+    cont: (f) => `${withFlags('hermes', f)} -c`,
+    launch: { model: true, efforts: HERMES_EFFORTS,
+      flags: ({ model, effort }) => {
+        const slash = model ? model.indexOf('/') : -1;
+        const m = !model ? '' : slash > 0
+          ? `--provider ${shq(model.slice(0, slash))} -m ${shq(model.slice(slash + 1))}` : `-m ${shq(model)}`;
+        return join(m, effort && `--reasoning ${shq(effort)}`);
+      } },
     noUpdate: 'installed by the vendor script from hermes-agent.nousresearch.com, onto its own Python venv',
     secrets: ['HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY'], setup: setupHint('HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY') },
   // `chat` = TUI in --local mode: embedded agent, no gateway/daemon needed.
-  { id: 'openclaw', label: 'OpenClaw',    bin: 'openclaw', color: '#c83636', run: 'openclaw chat',  cont: null, resizeMode: 'repaint',
+  // `chat` has no --model (the model is the agent default), only --thinking.
+  { id: 'openclaw', label: 'OpenClaw',    bin: 'openclaw', color: '#c83636', cont: null, resizeMode: 'repaint',
+    run: (f) => withFlags('openclaw chat', f),
+    launch: { model: false, efforts: OPENCLAW_THINKING, flags: ({ effort }) => join(effort && `--thinking ${shq(effort)}`) },
     npm: 'openclaw',
     secrets: ['ANTHROPIC_API_KEY'], setup: setupHint('ANTHROPIC_API_KEY') },
   // fx has no config-dir override: its state (auth, settings, sessions) is
   // hardcoded to ~/.fx, which entrypoint.sh points at local disk and
   // checkpoints — the same treatment opencode and Hermes get.
-  { id: 'fx',       label: 'fx',          bin: 'fx',       color: '#626262', run: 'fx',             cont: 'fx --continue', resizeMode: 'repaint',
+  // No launch flag or env var sets fx's model or effort, so no `launch`.
+  { id: 'fx',       label: 'fx',          bin: 'fx',       color: '#626262', resizeMode: 'repaint',
+    run: () => 'fx',
+    cont: () => 'fx --continue',
     noUpdate: 'a prebuilt binary from releases.fx.sh, not an npm package',
     resume: (id) => `fx --resume ${id}`,
     // fx has no "start interactive, seeded with this prompt" form: `fx ask` runs
@@ -295,14 +367,32 @@ export const CLIS = [
     secrets: ['AI_GATEWAY_API_KEY'], setup: setupHint('AI_GATEWAY_API_KEY') },
   // Test-only primary-screen repaint fixture. Absent from every normal runtime.
   ...(process.env.AM_TEST_REPAINT_CMD
-    ? [{ id: 'test-repaint', label: 'Repaint fixture', bin: 'bash', color: '#8aa0ad', run: process.env.AM_TEST_REPAINT_CMD, cont: null, resizeMode: 'repaint', promptDetector: true }]
+    ? [{ id: 'test-repaint', label: 'Repaint fixture', bin: 'bash', color: '#8aa0ad', run: () => process.env.AM_TEST_REPAINT_CMD, cont: null, resizeMode: 'repaint', promptDetector: true }]
     : []),
   // A fake TUI for the submit-confirmation tests, read like Codex.
   ...(process.env.AM_TEST_SUBMIT_CMD
-    ? [{ id: 'test-submit', label: 'Submit fixture', bin: 'node', color: '#8aa0ad', run: process.env.AM_TEST_SUBMIT_CMD, cont: null, promptDetector: true,
+    ? [{ id: 'test-submit', label: 'Submit fixture', bin: 'node', color: '#8aa0ad', run: () => process.env.AM_TEST_SUBMIT_CMD, cont: null, promptDetector: true,
       confirmSubmit: CODEX_CONFIRM }]
     : []),
 ];
+
+/**
+ * The flag string for a session's stored model / effort, '' when none. Values
+ * were checked against the model list when the session was created; here they
+ * are re-checked against the safe shapes (a hand-edited sessions.json must not
+ * reach a shell), and a value the CLI cannot take is dropped.
+ */
+export function launchChoice(session) {
+  const spec = cliById(session?.cli)?.launch;
+  if (!spec) return { model: '', effort: '' };
+  const model = spec.model && typeof session.model === 'string' && LAUNCH_MODEL.test(session.model) ? session.model : '';
+  const effort = spec.efforts && typeof session.effort === 'string' && LAUNCH_EFFORT.test(session.effort) ? session.effort : '';
+  return { model, effort };
+}
+export function launchFlags(session) {
+  const spec = cliById(session?.cli)?.launch;
+  return spec ? spec.flags(launchChoice(session)) : '';
+}
 
 export function cliById(id) {
   return CLIS.find((c) => c.id === id) || null;

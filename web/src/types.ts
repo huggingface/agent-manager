@@ -44,6 +44,10 @@ export interface Session {
   // Only on `cli: 'remote'` panes: the slug that is both the folder and the API
   // address, plus the off switch and whatever the agent said about itself.
   remote?: { name: string; paused?: boolean; peer?: RemotePeer | null } | null;
+  // The model / reasoning effort chosen at creation, passed on every launch.
+  // Absent = the CLI's own default.
+  model?: string;
+  effort?: string;
 }
 
 export interface Cli {
@@ -61,6 +65,28 @@ export interface Cli {
   // Present when opening a session shows a sign-in that completes from a Space;
   // `note` is the one thing the pane does not make obvious. null = unconfirmed.
   signIn?: { note: string | null } | null;
+  // What the create form may offer: a model select (only once the server has
+  // this CLI's model list) and an effort select. Lists: GET /api/launch-options.
+  launch?: { model: boolean; effort: boolean };
+}
+
+/** A model / effort for a new session; empty = the CLI's default. */
+export interface LaunchChoice { model?: string; effort?: string }
+
+export interface LaunchModel { id: string; label?: string; efforts?: string[]; defaultEffort?: string }
+export interface LaunchOptions {
+  refreshing: boolean;
+  clis: {
+    id: string;
+    model: boolean;
+    models: LaunchModel[];
+    /** CLI-wide effort values; null when they follow the model (perModelEfforts). */
+    efforts: string[] | null;
+    perModelEfforts: boolean;
+    source: string | null;
+    at: string | null;
+    error: string | null;
+  }[];
 }
 
 // Pane arrangement for a group's tiles. Absent/null = auto (grow with agents).

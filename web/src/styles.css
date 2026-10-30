@@ -228,6 +228,14 @@ body {
    own box, rather than going grey and leaving you to guess. */
 .fp-current .fp-why { color: var(--muted); font-style: italic; }
 .controls .quick-prompt:disabled, .controls .quick-name:disabled { background: var(--panel-2); }
+/* Model / effort for a new agent (LaunchPicker.tsx): two selects and a refresh. */
+.launch-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.controls .widget .launch-pick select { flex: 1 1 0; min-width: 0; width: auto; }
+.controls .widget .launch-pick select[aria-label="Model"] { flex-grow: 2; }
+.launch-pick .launch-refresh { flex: none; }
+.launch-pick .spin { animation: launch-spin 0.9s linear infinite; }
+@keyframes launch-spin { to { transform: rotate(360deg); } }
+.launch-pick-err { flex-basis: 100%; color: var(--danger); font-size: 11px; }
 .controls .quick-prompt:disabled::placeholder { font-style: italic; }
 /* the group tile leads the second picker row — the things that are not agents */
 .quick-grp { color: var(--muted); }
@@ -948,6 +956,7 @@ body {
    server/reader-info.test.mjs — all four, in both views. */
 .pane-head .ph-btn::before { content: ''; position: absolute; inset: -4px -4px; }
 .pane-head .ph-path { min-width: 0; max-width: min(24vw, 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
+.pane-head .ph-model { flex: none; max-width: min(16vw, 160px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--font-mono); font-size: 10.5px; padding: 0 5px; border: 1px solid var(--border); border-radius: var(--r-sm); }
 .pane-head .ph-title-input { width: 100%; text-align: center; font: inherit; font-family: var(--font-mono); font-weight: 600; padding: 1px 6px; border: 1px solid var(--accent); border-radius: var(--r-sm); background: var(--panel-2); color: var(--text); min-width: 0; }
 .pane-head .ph-close { justify-self: end; }
 /* The conversation's facts, behind one `i` in the pane header — the same place
@@ -1013,7 +1022,7 @@ body {
 }
 .pane-head .ph-back svg { width: 15px; height: 15px; }
 @container (max-width: 520px) {
-  .pane-head .ph-path { display: none; }
+  .pane-head .ph-path, .pane-head .ph-model { display: none; }
 }
 /* Narrower than this the prefix could only ever be a stub, and a header that
    reads "[A… name" is worse than one that just reads "name". */
