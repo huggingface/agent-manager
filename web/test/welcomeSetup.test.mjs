@@ -117,6 +117,17 @@ try {
   await check('opening a session asks for that agent', async () =>
     assert.deepEqual(await page.evaluate(() => window.started), ['claude']));
 
+  console.log('\na deprecated agent');
+  // A deprecated CLI takes no new sessions (server/src/config.js), so setup
+  // must not walk a new operator through connecting it.
+  await mount({ clis: CATALOG([]).map((c) => c.id === 'gemini' ? { ...c, deprecated: true, deprecationNote: 'gone' } : c) });
+  const without = await text();
+  await check('is not offered, and the count drops to the others', () => {
+    assert.ok(!/Gemini CLI/.test(without), 'offered a deprecated agent');
+    assert.ok(!/GEMINI_API_KEY/.test(without), 'asked for a deprecated agent\'s key');
+    assert.equal((without.match(/needs setup/g) || []).length, 2);
+  });
+
   console.log('\npartly configured');
   await mount({ clis: CATALOG(['claude']), secrets: ['OPENAI_API_KEY'] });
   await page.locator('.welcome-foot .btn-ghost').click();   // one agent works, so it opened on the tour
