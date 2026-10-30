@@ -925,9 +925,10 @@ function agyStepsFor(p) {
 // Exported for the tests: what the steps cache holds.
 export const agyStepsCached = () => [...agySteps].map(([p, v]) => ({ path: p, bytes: v.bytes, steps: v.steps.length }));
 
-// Stats and digest per conversation, for the bulk pass: `keep` (a pinned
-// conversation) goes through the steps cache; any other is read whole when it
-// changed, counted, and let go.
+// Stats and digest per conversation, until it changes, for the bulk pass and
+// the Overview: `keep` (a pinned conversation) goes through the steps cache;
+// any other is read whole when it changed, counted, and let go. A pinned one
+// too big for the steps cache is then read whole once per change, not per poll.
 const agyParsed = new Map(); // dbPath -> { key, parsed }
 function agyParsedFor(p, keep) {
   const key = agyChangeKey(p);
@@ -1719,8 +1720,8 @@ export async function digestFor(s) {
       }
     }
     if (s.cli === 'antigravity' && agyConversationExists(s.antigravityConversationId)) {
-      const steps = agyStepsFor(agyConversationPath(s.antigravityConversationId));
-      if (steps) return parseAgy(steps).digest;
+      const parsed = agyParsedFor(agyConversationPath(s.antigravityConversationId), true);
+      if (parsed) return parsed.digest;
     }
   } catch { /* fall through to the bulk pass */ }
   return null;
