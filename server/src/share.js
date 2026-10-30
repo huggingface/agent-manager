@@ -388,7 +388,8 @@ async function queryNewest(dbPath, sql, arg) {
  * Antigravity keeps one database per conversation, named by its id. The pin
  * (antigravityConversationId, captured by runner.js) is authoritative; an
  * unpinned pane that holds its folder alone falls back to the conversation most
- * recently written there.
+ * recently written there that no other pane is pinned to, and not one older
+ * than the moment it last shared the folder (antigravityCaptureSince).
  */
 function findAgyConversation(session, allSessions) {
   if (session.antigravityConversationId) {
@@ -396,7 +397,8 @@ function findAgyConversation(session, allSessions) {
   }
   const folder = session.path ?? session.id;
   if (allSessions.some((o) => o.id !== session.id && o.cli === 'antigravity' && (o.path ?? o.id) === folder)) return null;
-  const hit = captureAgyConversation(path.join(WORKSPACES_DIR, folder), 0, null);
+  const claimed = new Set(allSessions.filter((o) => o.id !== session.id && o.antigravityConversationId).map((o) => o.antigravityConversationId));
+  const hit = captureAgyConversation(path.join(WORKSPACES_DIR, folder), session.antigravityCaptureSince || 0, claimed);
   return hit ? agyConversationPath(hit.id) : null;
 }
 

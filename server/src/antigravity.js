@@ -25,8 +25,11 @@
 // Anything else (checkpoints, ephemeral messages, history) is not conversation.
 //
 // Read-only, never copied: the database may be mid-write (WAL), and a torn read
-// is simply skipped and retried on the next poll.
+// is simply skipped and retried on the next poll. Reading leaves agy's folder
+// as it was: a database agy has closed (no -wal, no -shm) is opened immutable,
+// because a plain read-only open would create both sidecars beside it.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -51,7 +54,8 @@ export const AGY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 // ---------- protobuf wire format, just enough to read a step ----------
 // A message decodes to Map<field, value[]>: varints as Numbers, length-delimited
 // fields as Buffers (a nested message is decoded on demand). Fixed-width fields
-// are skipped. A malformed buffer throws, and the caller drops that step.
+// are skipped. A malformed buffer throws; a malformed NESTED field reads as
+// empty, so one bad field costs that field, not the step.
 function varint(b, i) {
   let r = 0; let mul = 1;
   for (;;) {
@@ -83,27 +87,51 @@ export function pbDecode(b) {
 }
 const EMPTY = new Map();
 const one = (m, f) => (m.get(f) || [])[0];
-const sub = (m, f) => { const v = one(m, f); return Buffer.isBuffer(v) ? pbDecode(v) : EMPTY; };
-const subs = (m, f) => (m.get(f) || []).filter(Buffer.isBuffer).map(pbDecode);
+const tryDecode = (b) => { try { return pbDecode(b); } catch { return EMPTY; } };
+const sub = (m, f) => { const v = one(m, f); return Buffer.isBuffer(v) ? tryDecode(v) : EMPTY; };
+const subs = (m, f) => (m.get(f) || []).filter(Buffer.isBuffer).map(tryDecode).filter((x) => x.size);
 const str = (m, f) => { const v = one(m, f); return Buffer.isBuffer(v) ? v.toString('utf8') : ''; };
 const num = (m, f) => { const v = one(m, f); return typeof v === 'number' ? v : 0; };
-const tsMs = (m) => (m.size ? Math.round(num(m, 1) * 1000 + num(m, 2) / 1e6) : 0);
+// A Timestamp, as ms. Anything outside 1970..9999 reads as none: a garbled one
+// would otherwise throw out of toISOString() downstream.
+const tsMs = (m) => {
+  if (!m.size) return 0;
+  const ms = Math.round(num(m, 1) * 1000 + num(m, 2) / 1e6);
+  return ms > 0 && ms < 253402300800000 ? ms : 0;
+};
+// Tool arguments and output are kept clipped, with their full length, so a
+// conversation of large tool results doesn't sit whole in the server's memory.
+// Well above what the Reader shows of one block.
+export const TEXT_KEEP = 32_000;
+function clipped(step, key, text) {
+  if (text.length <= TEXT_KEEP) { step[key] = text; return; }
+  step[key] = text.slice(0, TEXT_KEEP);
+  step[`${key}Length`] = text.length;
+}
 
 function toolCall(m) {
   if (!m.size) return null;
   const name = str(m, 2);
   if (!name) return null;
-  return { id: str(m, 1), name, args: str(m, 3) };
+  const call = { id: str(m, 1), name };
+  clipped(call, 'args', str(m, 3));
+  return call;
 }
 function errorText(m) {
   if (!m.size) return '';
   return str(m, 1) || str(m, 2) || str(m, 3) || str(m, 9);
 }
 
-/** One step, decoded to what a reader needs. Null for an unreadable payload. */
+/** One step, decoded to what a reader needs. A payload that can't be read at
+ *  all is still a step: its row's type and status, marked `unreadable`, so the
+ *  steps after it and the conversation's state stay right. */
 export function decodeStep(row) {
-  let s;
-  try { s = pbDecode(Buffer.from(row.step_payload || [])); } catch { return null; }
+  try { return decodeStepPayload(row); } catch {
+    return { idx: Number(row.idx), type: Number(row.step_type) || 0, status: Number(row.status) || 0, ts: 0, unreadable: true };
+  }
+}
+function decodeStepPayload(row) {
+  const s = pbDecode(Buffer.from(row.step_payload || []));
   const type = Number(row.step_type) || num(s, 1);
   const status = Number(row.status) || num(s, 4);
   const md = sub(s, 5);
@@ -119,9 +147,11 @@ export function decodeStep(row) {
       step.text = str(u, 2) || items || str(u, 1);
       const cwd = sub(u, 12).get(12)?.find(Buffer.isBuffer);
       if (cwd) step.cwd = fileUriPath(cwd.toString('utf8'));
+      // Copied out, so an image doesn't keep its whole step payload alive.
       step.images = [...subs(u, 9), ...subs(u, 5)]
         .map((im) => ({ mediaType: str(im, 1), data: one(im, 2) }))
-        .filter((im) => im.mediaType.startsWith('image/') && Buffer.isBuffer(im.data) && im.data.length);
+        .filter((im) => im.mediaType.startsWith('image/') && Buffer.isBuffer(im.data) && im.data.length)
+        .map((im) => ({ mediaType: im.mediaType, data: Buffer.from(im.data) }));
       break;
     }
     case STEP.PLANNER_RESPONSE: {
@@ -143,7 +173,7 @@ export function decodeStep(row) {
       const call = toolCall(sub(md, 4));
       if (!call) break;
       step.call = call;
-      step.output = str(sub(sub(s, 140), 2), 1);
+      clipped(step, 'output', str(sub(sub(s, 140), 2), 1));
     }
   }
   return step;
@@ -156,37 +186,86 @@ function fileUriPath(u) {
 
 export const stepInFlight = (st) => IN_FLIGHT.has(st.status);
 
+// A WAL that holds no frame (a header at most) is no write. SQLite leaves an
+// empty one behind a read-only connection, so it must not count as activity.
+const WAL_HEADER = 32;
+function walStat(p) {
+  try { const w = fs.statSync(`${p}-wal`); return w.size > WAL_HEADER ? w : null; } catch { return null; }
+}
+/** What changes when a conversation database is written: the file, or its WAL. */
+export function agyChangeKey(p) {
+  let m;
+  try { m = fs.statSync(p); } catch { return null; }
+  const w = walStat(p);
+  return `${m.mtimeMs}:${m.size}:${w?.mtimeMs || 0}:${w?.size || 0}`;
+}
+
+// Open a conversation database to read it. While agy has it open, a -wal and
+// a -shm sit beside it and a read-only connection shares them. Once agy has
+// closed it, both are gone and everything committed is in the main file; a
+// read-only open would create them again (and that fresh -wal looked like agy
+// writing), so it is opened immutable instead: no sidecar, no lock. Should agy
+// checkpoint into the main file during that read, `stable()` turns false and
+// the read is thrown away.
+function openAgy(p) {
+  if (fs.existsSync(`${p}-wal`) || fs.existsSync(`${p}-shm`)) {
+    return { db: new DatabaseSync(p, { readOnly: true }), stable: () => true };
+  }
+  const st = (s = fs.statSync(p)) => `${s.mtimeMs}:${s.size}:${s.ino}`;
+  const before = st();
+  const uri = `file:${p.split('/').map(encodeURIComponent).join('/')}?immutable=1`;
+  const db = new DatabaseSync(uri, { readOnly: true });
+  return { db, stable: () => { try { return st() === before; } catch { return false; } } };
+}
+const payloadHash = (b) => crypto.createHash('sha1').update(b || '').digest('base64').slice(0, 16);
+function changedDuringRead() { return new Error('conversation database changed during the read'); }
+
 // A step agy may still rewrite: in flight, or waiting on the operator.
 const settled = (st) => !IN_FLIGHT.has(st.status) && st.status !== STATUS.WAITING;
 // Steps re-read on every refresh even when settled, as a margin against a
 // late rewrite near the end.
 const REREAD_TAIL = 32;
 
-/** Every decodable step of one conversation, in order. With `prev` (this
- *  database's last read) only the tail is read again: settled steps before it
- *  are kept, and everything from the first unsettled step on is replaced. A
- *  conversation that lost rows is read whole. Throws when the database cannot
- *  be opened or read; the caller keeps what it had. */
+/** Every step of one conversation, in order. With `prev` (this database's last
+ *  read) only the tail is read again: settled steps before it are kept, and
+ *  everything from the first unsettled step on is replaced. A step left
+ *  unsettled by a turn the operator has since moved on from (a WAITING tool of
+ *  a killed run, then a new prompt) no longer holds the tail open. The kept
+ *  steps must still be what the database holds below the tail: as many rows,
+ *  as many payload bytes, and the last of them unchanged (each payload carries
+ *  its own timestamp, so a rewritten row differs). A conversation that lost or
+ *  rewrote rows there is read whole. Throws when the database cannot be opened or read; the caller
+ *  keeps what it had. */
 export function readAgySteps(dbPath, prev = null) {
   if (!DatabaseSync) { const e = new Error('node:sqlite unavailable'); e.code = 'unsupported-harness'; throw e; }
-  const db = new DatabaseSync(dbPath, { readOnly: true });
+  const { db, stable } = openAgy(dbPath);
   try {
     let keep = [];
     if (prev && prev.length) {
-      const { n } = db.prepare('select count(*) n from steps').get();
-      if (n >= prev.length) {
-        let cut = Math.max(0, prev.length - REREAD_TAIL);
-        const open = prev.findIndex((st) => !settled(st));
-        if (open >= 0 && open < cut) cut = open;
-        keep = prev.slice(0, cut);
+      let cut = Math.max(0, prev.length - REREAD_TAIL);
+      let lastPrompt = -1;
+      for (let i = prev.length - 1; i >= 0; i--) if (prev[i].type === STEP.USER_INPUT) { lastPrompt = i; break; }
+      const open = prev.findIndex((st, i) => i >= lastPrompt && !settled(st));
+      if (open >= 0 && open < cut) cut = open;
+      if (cut > 0) {
+        const head = db.prepare('select count(*) n, coalesce(sum(length(step_payload)), 0) b from steps where idx < ?').get(prev[cut].idx);
+        let bytes = 0;
+        for (let i = 0; i < cut; i++) bytes += prev[i].bytes || 0;
+        const last = db.prepare('select step_payload from steps where idx = ?').get(prev[cut - 1].idx);
+        if (Number(head.n) === cut && Number(head.b) === bytes && last && payloadHash(last.step_payload) === prev[cut - 1].hash) {
+          keep = prev.slice(0, cut);
+        }
       }
     }
     const from = keep.length ? keep[keep.length - 1].idx + 1 : -1;
     const out = keep.slice();
-    for (const row of db.prepare('select idx, step_type, status, step_payload from steps where idx >= ? order by idx').all(from)) {
+    for (const row of db.prepare('select idx, step_type, status, step_payload from steps where idx >= ? order by idx').iterate(from)) {
       const st = decodeStep(row);
-      if (st) out.push(st);
+      st.bytes = row.step_payload ? row.step_payload.length : 0;
+      st.hash = payloadHash(row.step_payload);
+      out.push(st);
     }
+    if (!stable()) throw changedDuringRead();
     return out;
   } finally { try { db.close(); } catch {} }
 }
@@ -201,12 +280,14 @@ function conversationCwd(dbPath, activeMs) {
   if (!DatabaseSync) return null;
   let db;
   try {
-    db = new DatabaseSync(dbPath, { readOnly: true });
+    let stable;
+    ({ db, stable } = openAgy(dbPath));
     let cwd = null;
     for (const row of db.prepare('select idx, step_type, status, step_payload from steps where step_type = ? order by idx limit 8').all(STEP.USER_INPUT)) {
-      cwd = decodeStep(row)?.cwd || null;
+      cwd = decodeStep(row).cwd || null;
       if (cwd) break;
     }
+    if (!stable()) return null;
     if (cwdMemo.size > 2000) cwdMemo.clear();
     cwdMemo.set(dbPath, cwd ? { cwd } : { none: activeMs });
     return cwd;
@@ -214,12 +295,13 @@ function conversationCwd(dbPath, activeMs) {
 }
 
 /** Newest activity of a conversation database: WAL writes leave the main
- *  file's mtime alone, so both are read. */
+ *  file's mtime alone, so both are read. A WAL with no frame in it is no
+ *  write (see walStat). */
 export function agyActivityMs(dbPath) {
   let m = 0;
   try { m = fs.statSync(dbPath).mtimeMs; } catch { return 0; }
-  try { m = Math.max(m, fs.statSync(`${dbPath}-wal`).mtimeMs); } catch {}
-  return m;
+  const w = walStat(dbPath);
+  return w ? Math.max(m, w.mtimeMs) : m;
 }
 
 // agy's own record of the newest conversation per folder (what `agy -c`
@@ -279,23 +361,20 @@ const waitingMemo = new Map(); // dbPath -> { key, value }
 export function agyWaitingStep(id) {
   if (!DatabaseSync || !AGY_ID.test(id || '')) return null;
   const p = agyConversationPath(id);
-  let key;
-  try {
-    const m = fs.statSync(p);
-    let w = null;
-    try { w = fs.statSync(`${p}-wal`); } catch {}
-    key = `${m.mtimeMs}:${m.size}:${w?.mtimeMs || 0}:${w?.size || 0}`;
-  } catch { waitingMemo.delete(p); return null; }
+  const key = agyChangeKey(p);
+  if (!key) { waitingMemo.delete(p); return null; }
   const hit = waitingMemo.get(p);
   if (hit && hit.key === key) return hit.value;
   let db;
   let value = null;
   try {
-    db = new DatabaseSync(p, { readOnly: true });
+    let stable;
+    ({ db, stable } = openAgy(p));
     const row = db.prepare(`select idx from steps s where status = ?
       and not exists (select 1 from steps u where u.step_type = ? and u.idx > s.idx)
       order by idx desc limit 1`).get(STATUS.WAITING, STEP.USER_INPUT);
     value = row ? { idx: Number(row.idx) } : null;
+    if (!stable()) throw changedDuringRead();
   } catch { return hit ? hit.value : null; } finally { try { db?.close(); } catch {} }
   if (waitingMemo.size > 2000) waitingMemo.clear();
   waitingMemo.set(p, { key, value });
@@ -304,4 +383,43 @@ export function agyWaitingStep(id) {
 
 export function agyConversationExists(id) {
   return !!id && AGY_ID.test(id) && fs.existsSync(agyConversationPath(id));
+}
+
+// The conversation a running agy is on, from the process itself: agy holds
+// `presence/<uuid>.lock` open for its current conversation, from its first
+// prompt on, and moves it to the new id on `/new`. That names this pane's
+// conversation exactly, whoever else writes conversations in the same folder.
+// `pid` is the pane's root: agy itself, or the shell of a `-c || exec` launch
+// with agy as its direct child (never a deeper descendant: an agy started by a
+// tool is not the pane's).
+//   { id }        agy is on this conversation
+//   { id: null }  agy is running and holds no conversation yet
+//   null          no agy process to read (not started, gone, or /proc unreadable)
+export function agyConversationForPid(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  const comm = (p) => { try { return fs.readFileSync(`/proc/${p}/comm`, 'utf8').trim(); } catch { return ''; } };
+  let agy = null;
+  if (comm(pid) === 'agy') agy = pid;
+  else if (['bash', 'sh', 'dash'].includes(comm(pid))) {
+    let children = [];
+    try { children = fs.readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim().split(/\s+/).filter(Boolean); } catch {}
+    const found = children.filter((c) => comm(c) === 'agy');
+    if (found.length === 1) agy = Number(found[0]);
+  }
+  if (!agy) return null;
+  let fds;
+  try { fds = fs.readdirSync(`/proc/${agy}/fd`); } catch { return null; }
+  let presence = null;
+  try { presence = fs.realpathSync(path.join(agyHome(), 'presence')); } catch {}
+  const ids = new Set();
+  if (presence) {
+    for (const fd of fds.slice(0, 1024)) {
+      let target;
+      try { target = fs.readlinkSync(`/proc/${agy}/fd/${fd}`); } catch { continue; }
+      if (path.dirname(target) !== presence) continue;
+      const m = /^(.+)\.lock$/.exec(path.basename(target));
+      if (m && AGY_ID.test(m[1])) ids.add(m[1]);
+    }
+  }
+  return { id: ids.size === 1 ? [...ids][0] : null };
 }

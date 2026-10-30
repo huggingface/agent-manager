@@ -4,8 +4,10 @@
 // for a Google sign-in, so the launch line passes that setting, but only while
 // the key is set when the shell runs it. `agy -c` resumes the newest
 // conversation in the cwd, so like codex `resume --last` it must not run in a
-// folder another Antigravity pane shares. Once the runner has pinned the
-// pane's conversation, a restart resumes it by id instead, existence-checked.
+// folder another Antigravity pane shares, nor, like fx, in one it ever shared
+// until it holds a pin: the sibling's conversation outlives the sibling. Once
+// the runner has pinned the pane's conversation, a restart resumes it by id
+// instead, existence-checked.
 // Run with: node test/antigravity-launch.test.mjs
 import fs from 'node:fs';
 import path from 'node:path';
@@ -70,8 +72,14 @@ const other = sessions.create({ name: 'agy-2', cli: 'antigravity', path: 'proj-a
 const shared = runner.commandFor(sessions.get(s.id));
 check('no -c in a shared folder', / -c( |$)/.test(shared), false);
 check('a fresh launch instead', shared, `exec ${agy.run}`);
+check('the pane remembers it shared the folder', typeof sessions.get(s.id).antigravityCaptureSince, 'number');
 sessions.update(other.id, { path: 'proj-b' });
-has('once the sibling moves away, it continues again', runner.commandFor(sessions.get(s.id)), agy.cont);
+check('once the sibling moves away, it still starts fresh', runner.commandFor(sessions.get(s.id)), `exec ${agy.run}`);
+const saved = JSON.parse(fs.readFileSync(path.join(DATA, 'sessions.json'), 'utf8')).find((x) => x.id === s.id);
+check('across a server restart too: the mark is saved', typeof saved?.antigravityCaptureSince, 'number');
+const lone = sessions.create({ name: 'agy-lone', cli: 'antigravity', path: 'proj-c' });
+sessions.update(lone.id, { everStarted: true });
+has('a pane that never shared its folder still continues', runner.commandFor(sessions.get(lone.id)), `${agy.cont} || exec ${agy.run}`);
 
 console.log('\na pinned pane resumes its own conversation by id');
 const ID = '79cd3d9b-b387-44da-91c0-2df98a2ae37e';
