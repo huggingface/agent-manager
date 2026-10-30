@@ -80,6 +80,9 @@ function normalizeInput(input, existing = null) {
     agent: {
       name: cleanText(agent.name, 'agent.name'),
       cli: cleanText(agent.cli, 'agent.cli', 64),
+      // Used only when the cron creates the agent; checked in index.js.
+      ...(agent.model ? { model: cleanText(agent.model, 'agent.model', 120) } : {}),
+      ...(agent.effort ? { effort: cleanText(agent.effort, 'agent.effort', 16) } : {}),
     },
     prompt: cleanText(merged.prompt, 'prompt', 100_000),
     schedule: validateSchedule(merged.schedule, id),

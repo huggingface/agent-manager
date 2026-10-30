@@ -23,7 +23,7 @@ const sessions = await import('../src/sessions.js');
 const runner = await import('../src/runner.js');
 config.ensureDirs(); sessions.init();
 const agy = config.cliById('antigravity');
-agy.run = agy.cont = 'sleep 120';
+agy.run = agy.cont = () => 'sleep 120';
 agy.resume = () => 'sleep 120';
 
 let pass = 0, fail = 0;

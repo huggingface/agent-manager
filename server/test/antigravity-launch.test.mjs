@@ -53,11 +53,11 @@ check('binary is agy', agy.bin, 'agy');
 check('not updated through npm', !!agy.noUpdate && !agy.npm, true);
 
 console.log('\nthe key decides the provider, at launch time');
-check('with a key, the provider is gemini', argvOf(agy.run, 'k'), '[--settings][{"modelProvider":"gemini"}]');
-check('without one, agy is left to its own sign-in', argvOf(agy.run, ''), '');
+check('with a key, the provider is gemini', argvOf(agy.run(), 'k'), '[--settings][{"modelProvider":"gemini"}]');
+check('without one, agy is left to its own sign-in', argvOf(agy.run(), ''), '');
 check('a seeded prompt stays one argument', argvOf(agy.withPrompt("'say hi; now'"), 'k'),
   '[--settings][{"modelProvider":"gemini"}][-i][say hi; now]');
-check('continue keeps the provider', argvOf(agy.cont, 'k'), '[--settings][{"modelProvider":"gemini"}][-c]');
+check('continue keeps the provider', argvOf(agy.cont(), 'k'), '[--settings][{"modelProvider":"gemini"}][-c]');
 
 console.log('\nfirst launch and restart');
 const s = sessions.create({ name: 'agy', cli: 'antigravity', path: 'proj-a' });
@@ -65,21 +65,21 @@ sessions.update(s.id, { pendingPrompt: 'hello there' });
 has('a queued prompt rides the first launch', runner.commandFor(sessions.get(s.id)), "-i 'hello there'");
 sessions.update(s.id, { everStarted: true, pendingPrompt: null });
 const alone = runner.commandFor(sessions.get(s.id));
-has('alone in its folder, a restart continues', alone, `${agy.cont} || exec ${agy.run}`);
+has('alone in its folder, a restart continues', alone, `${agy.cont()} || exec ${agy.run()}`);
 
 console.log('\npanes sharing a folder start fresh rather than collide');
 const other = sessions.create({ name: 'agy-2', cli: 'antigravity', path: 'proj-a' });
 const shared = runner.commandFor(sessions.get(s.id));
 check('no -c in a shared folder', / -c( |$)/.test(shared), false);
-check('a fresh launch instead', shared, `exec ${agy.run}`);
+check('a fresh launch instead', shared, `exec ${agy.run()}`);
 check('the pane remembers it shared the folder', typeof sessions.get(s.id).antigravityCaptureSince, 'number');
 sessions.update(other.id, { path: 'proj-b' });
-check('once the sibling moves away, it still starts fresh', runner.commandFor(sessions.get(s.id)), `exec ${agy.run}`);
+check('once the sibling moves away, it still starts fresh', runner.commandFor(sessions.get(s.id)), `exec ${agy.run()}`);
 const saved = JSON.parse(fs.readFileSync(path.join(DATA, 'sessions.json'), 'utf8')).find((x) => x.id === s.id);
 check('across a server restart too: the mark is saved', typeof saved?.antigravityCaptureSince, 'number');
 const lone = sessions.create({ name: 'agy-lone', cli: 'antigravity', path: 'proj-c' });
 sessions.update(lone.id, { everStarted: true });
-has('a pane that never shared its folder still continues', runner.commandFor(sessions.get(lone.id)), `${agy.cont} || exec ${agy.run}`);
+has('a pane that never shared its folder still continues', runner.commandFor(sessions.get(lone.id)), `${agy.cont()} || exec ${agy.run()}`);
 
 console.log('\na pinned pane resumes its own conversation by id');
 const ID = '79cd3d9b-b387-44da-91c0-2df98a2ae37e';
