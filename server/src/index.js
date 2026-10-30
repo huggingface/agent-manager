@@ -38,7 +38,7 @@ import * as crons from './crons.js';
 import { ensureClaudeDialogDefaults, trustWorkspacesRoot } from './first-run.js';
 import {
   attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning,
-  waitForInputReady, capturePane, ghosttyReady, ghosttyError, startedAt, restart as restartSession,
+  waitForInputReady, runIdOf, capturePane, ghosttyReady, ghosttyError, startedAt, restart as restartSession,
   installClaudeRepinHook, installOpencodeRepinPlugin,
 } from './runner.js';
 
@@ -823,7 +823,7 @@ const operatorName = () => process.env.SPACE_AUTHOR_NAME || process.env.AM_USER 
  * agent-to-agent API) go through here, which is what makes remote agents
  * reachable from everywhere the local ones are without duplicating either path.
  */
-async function deliver(session, { text, attachments = [] }, from, { signal = null, agentSourceId = null, requestId = null } = {}) {
+async function deliver(session, { text, attachments = [] }, from, { signal = null, agentSourceId = null, requestId = null, runId = null } = {}) {
   // The privacy lock cancels admitted-but-uncommitted work: every effect below
   // is preceded by this check, so a prompt that was still waiting for its agent
   // to become ready is dropped when the lock lands — not typed a moment later
@@ -833,13 +833,15 @@ async function deliver(session, { text, attachments = [] }, from, { signal = nul
   const scope = lockScope();
   const cancelled = () => { if (scope.signal.aborted || signal?.aborted) throw lockedError(); };
   try {
-    return await deliverInner(session, { text, attachments }, from, { cancelled, signal: scope.signal, agentSourceId, requestId });
+    return await deliverInner(session, { text, attachments }, from, { cancelled, signal: scope.signal, agentSourceId, requestId, runId });
   } finally {
     scope.release();
   }
 }
 
-async function deliverInner(session, { text, attachments }, from, { cancelled, signal, agentSourceId, requestId }) {
+// `runId` pins the delivery to one launch of the pane (boot revival's
+// message): it never starts the pane, and a replacement does not receive it.
+async function deliverInner(session, { text, attachments }, from, { cancelled, signal, agentSourceId, requestId, runId }) {
   cancelled();
   assertCodexLaunchAllowed(session);
   if (sessionRuntime.shared(session)) {
@@ -872,7 +874,8 @@ async function deliverInner(session, { text, attachments }, from, { cancelled, s
     });
     return ensureRunning(store.get(session.id) || session);
   }
-  const started = ensureRunning(session);
+  if (runId && runIdOf(session.id) !== runId) throw new ApiError(409, 'input-not-ready', 'session was stopped or restarted before this could be delivered');
+  const started = runId ? false : ensureRunning(session);
   if (started) {
     // Stop waiting the moment the lock lands rather than at readiness.
     const ready = await Promise.race([
@@ -888,7 +891,7 @@ async function deliverInner(session, { text, attachments }, from, { cancelled, s
     await sleep(500);
   }
   cancelled();
-  await sendInput(session.id, prompt, { confirmEcho: started && session.cli === 'opencode' });
+  await sendInput(session.id, prompt, { confirmEcho: started && session.cli === 'opencode', runId });
   return started;
 }
 
@@ -1957,10 +1960,12 @@ function normalizeAmConfig(saved) {
     },
     // After a restart, start the sessions that were running again — the ones you
     // prompted within `days`, plus any that still had work in flight (see
-    // runstate.js). `days` is only read when enabled.
+    // runstate.js). `days` is only read when enabled. `continue` tells each
+    // revived agent its work was interrupted, so it carries on by itself.
     revive: {
       enabled: saved.revive?.enabled !== false,
       days: [1, 3, 7].includes(saved.revive?.days) ? saved.revive.days : 3,
+      continue: saved.revive?.continue !== false,
     },
     // How often the bucket is copied to private Hub storage. Off by default: it
     // copies this machine's contents — saved logins included — into another Hub
@@ -2008,6 +2013,7 @@ api.put('/api/config', async (req, res) => {
     revive: {
       enabled: !!(b.revive?.enabled ?? true),
       days: [1, 3, 7].includes(b.revive?.days) ? b.revive.days : 3,
+      continue: !!(b.revive?.continue ?? true),
     },
     backup: {
       every: backup.INTERVALS.includes(b.backup?.every) ? b.backup.every : 'never',
@@ -4164,7 +4170,12 @@ setTimeout(() => {
   firstVerdict.then(() => {
     const done = isLocked()
       ? Promise.resolve([])
-      : runstate.reviveOnBoot(loadAmConfig().revive).catch((e) => console.error('[revive]', e && e.message));
+      : runstate.reviveOnBoot({
+        ...loadAmConfig().revive,
+        // The Overview reply box's path: privacy-lock aware, submit confirmed.
+        send: (s, text, { runId, signal }) => deliver(s, { text }, 'Agent Manager', { signal, runId }),
+        scope: lockScope,
+      }).catch((e) => console.error('[revive]', e && e.message));
     done.then(() => runstate.startRunstateWatch());
   });
 }, 8000);

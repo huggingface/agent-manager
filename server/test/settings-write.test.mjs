@@ -76,7 +76,7 @@ const CONFIG_A = {
   artifacts: { enabled: true, space: '  someone/pages  ', visibility: 'public' },
   jobs: { askAboveUsd: 12 },
   archive: { after: 'week' },
-  revive: { enabled: false, days: 7 },
+  revive: { enabled: false, days: 7, continue: false },
   backup: { every: 'never', dataset: '', exclude: [] },
 };
 
@@ -95,7 +95,7 @@ try {
   check('and answers with the revision it committed', typeof first.body?.rev === 'string' && first.body.rev.length > 0);
   const read = await api('/api/config');
   check('reading it back agrees, revision included', read.body?.archive?.after === 'week'
-    && read.body?.artifacts?.visibility === 'public' && read.body?.revive?.enabled === false
+    && read.body?.artifacts?.visibility === 'public' && read.body?.revive?.enabled === false && read.body?.revive?.continue === false
     && read.body?.rev === first.body.rev,
     JSON.stringify({ rev: read.body?.rev }));
   check('the file it was written to is whole JSON, not a fragment',

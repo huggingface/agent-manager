@@ -243,6 +243,18 @@ const AGY_KEY_PROVIDER = `\${GEMINI_API_KEY:+--settings '{"modelProvider":"gemin
 export const agyCommand = (tail = '') => `agy ${AGY_KEY_PROVIDER}${tail ? ` ${tail}` : ''}`;
 const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
 
+/**
+ * `promptDetector`: runner.promptReady can positively tell this CLI's empty
+ * composer from everything else on its screen — checked on a pane captured
+ * from the real CLI (test/fixtures/input-lines.json). Automatic input nobody
+ * is watching (boot revival's continue message) goes only to these; for the
+ * rest the sender skips and says so instead of guessing. Gemini, OpenClaw and
+ * fx are absent because their only captures are startup dialogs, not a
+ * composer; add the flag with a captured empty composer and a test.
+ * `{ idle: RegExp }` instead of `true` also requires that line below the
+ * composer, for a CLI that keeps an empty composer on screen mid-turn.
+ */
+
 export const CLIS = [
   { id: 'shell',    label: 'Shell',       bin: 'bash',     color: '#8aa0ad', run: () => 'exec bash -il', cont: null },
   { id: 'files',    label: 'Files',       bin: null,       color: '#d99a2b', run: null,             cont: null },
@@ -262,7 +274,7 @@ export const CLIS = [
     withPrompt: (q, _images, f) => `${withFlags('claude', f)} ${q}`,
     launch: { model: true, efforts: CLAUDE_EFFORTS,
       flags: ({ model, effort }) => join(model && `--model ${shq(model)}`, effort && `--effort ${shq(effort)}`) },
-    confirmSubmit: CLAUDE_CONFIRM,
+    confirmSubmit: CLAUDE_CONFIRM, promptDetector: true,
     npm: '@anthropic-ai/claude-code',
     secrets: ['ANTHROPIC_API_KEY'], setup: setupHint('ANTHROPIC_API_KEY') },
   // The flags go after a subcommand (`resume -m … <id>`): `codex resume`
@@ -276,7 +288,7 @@ export const CLIS = [
     withPrompt: (q, images = [], f) => `${codexCommand(f)}${images.length ? ` ${images.map((image) => `-i ${image}`).join(' ')}` : ''} ${q}`,
     launch: { model: true, efforts: 'per-model',
       flags: ({ model, effort }) => join(model && `-m ${shq(model)}`, effort && `-c ${shq(`model_reasoning_effort="${effort}"`)}`) },
-    confirmSubmit: CODEX_CONFIRM,
+    confirmSubmit: CODEX_CONFIRM, promptDetector: true,
     npm: '@openai/codex',
     secrets: ['OPENAI_API_KEY'], setup: setupHint('OPENAI_API_KEY') },
   // Thinking is not a launch flag: only a settings file sets it. Model only.
@@ -294,6 +306,10 @@ export const CLIS = [
   // Model ids carry their own tier (gemini-4-argon-high), and --effort sets the
   // reasoning level on top of it.
   { id: 'antigravity', label: 'Antigravity CLI', bin: 'agy', color: '#3186ff', resizeMode: 'repaint',
+    // An empty `>` between two rules, idle or mid-turn alike; only the row
+    // under it tells them apart: `? for shortcuts`, or `esc to cancel` while
+    // it works (captured from agy 1.4.10).
+    promptDetector: { idle: /^\? for shortcuts\b/ },
     run: (f) => agyCommand(f),
     cont: (f) => agyCommand(join(f, '-c')),
     withPrompt: (q, _images, f) => agyCommand(join(f, `-i ${q}`)), // -i = interactive session seeded with the prompt
@@ -305,7 +321,7 @@ export const CLIS = [
   // Model only. `--variant` exists on `opencode run` but not on the TUI, and
   // the TUI ignores `agent.build.variant` from OPENCODE_CONFIG_CONTENT (checked
   // on 1.19.5 with a fresh HOME): it keeps its own saved per-model variant.
-  { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', resizeMode: 'repaint',
+  { id: 'opencode', label: 'opencode',    bin: 'opencode', color: '#8a93a0', resizeMode: 'repaint', promptDetector: true,
     run: (f) => withFlags('opencode', f),
     cont: (f) => withFlags('opencode --continue', f),
     resume: (id, f) => withFlags(`opencode --session ${id}`, f),
@@ -317,7 +333,7 @@ export const CLIS = [
   // the model part may hold a slash itself (huggingface/moonshotai/Kimi-K2.5),
   // so they are passed as --provider and -m separately. Flags go BEFORE -c,
   // whose value is optional.
-  { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', resizeMode: 'repaint',
+  { id: 'hermes',   label: 'Hermes',      bin: 'hermes',   color: '#a78bfa', resizeMode: 'repaint', promptDetector: true,
     run: (f) => withFlags('hermes', f),
     cont: (f) => `${withFlags('hermes', f)} -c`,
     launch: { model: true, efforts: HERMES_EFFORTS,
@@ -351,11 +367,11 @@ export const CLIS = [
     secrets: ['AI_GATEWAY_API_KEY'], setup: setupHint('AI_GATEWAY_API_KEY') },
   // Test-only primary-screen repaint fixture. Absent from every normal runtime.
   ...(process.env.AM_TEST_REPAINT_CMD
-    ? [{ id: 'test-repaint', label: 'Repaint fixture', bin: 'bash', color: '#8aa0ad', run: () => process.env.AM_TEST_REPAINT_CMD, cont: null, resizeMode: 'repaint' }]
+    ? [{ id: 'test-repaint', label: 'Repaint fixture', bin: 'bash', color: '#8aa0ad', run: () => process.env.AM_TEST_REPAINT_CMD, cont: null, resizeMode: 'repaint', promptDetector: true }]
     : []),
   // A fake TUI for the submit-confirmation tests, read like Codex.
   ...(process.env.AM_TEST_SUBMIT_CMD
-    ? [{ id: 'test-submit', label: 'Submit fixture', bin: 'node', color: '#8aa0ad', run: () => process.env.AM_TEST_SUBMIT_CMD, cont: null,
+    ? [{ id: 'test-submit', label: 'Submit fixture', bin: 'node', color: '#8aa0ad', run: () => process.env.AM_TEST_SUBMIT_CMD, cont: null, promptDetector: true,
       confirmSubmit: CODEX_CONFIRM }]
     : []),
 ];

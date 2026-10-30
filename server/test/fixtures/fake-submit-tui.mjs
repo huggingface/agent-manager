@@ -26,7 +26,7 @@
 //              rows, the prompt still selected — and nothing else moves.
 //   stepTail — text after the step counter, e.g. " (esc to interrupt)".
 // Every Enter received is appended to $FAKE_DIR/enters, every submit to
-// $FAKE_DIR/submitted.
+// $FAKE_DIR/submitted (and, with the pane's AM_ID, to $FAKE_DIR/submitted-by).
 import fs from 'node:fs';
 import path from 'node:path';
 const dir = process.env.FAKE_DIR;
@@ -89,6 +89,7 @@ process.stdin.on('data', (chunk) => {
         continue;
       }
       log('submitted', JSON.stringify(line));
+      log('submitted-by', JSON.stringify({ id: process.env.AM_ID || null, text: line }));
       const said = line.startsWith('[Pasted Content') ? pasted : line;
       process.stdout.write(`\r${drawnRows > 1 ? `\x1b[${drawnRows - 1}A` : ''}\x1b[J› ${said.replace(/\n/g, '\r\n  ')}\r\n• Worked for 0s\r\n`);
       line = ''; drawnRows = 1; draw();

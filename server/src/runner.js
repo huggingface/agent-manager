@@ -163,6 +163,21 @@ export function isRunning(id) {
   return hosts.has(id) && !stopping.has(id);
 }
 
+// Every pane this process has launched, by anyone, including ones that have
+// since exited. Boot revival starts sessions on a stagger; one the operator
+// opened (and perhaps stopped again) before its slot is theirs, and the slot
+// must not start it behind their back.
+const launched = new Set();
+export function launchedThisBoot(id) {
+  return launched.has(id);
+}
+
+/** This pane's launch identity (AM_RUN_ID), or null when nothing is running. */
+export function runIdOf(id) {
+  const host = hosts.get(id);
+  return host && !stopping.has(id) ? host.runId : null;
+}
+
 export function ghosttyReady() {
   return !!ghostty;
 }
@@ -2285,6 +2300,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
   });
 
   hosts.set(session.id, host);
+  launched.add(session.id);
   stopping.delete(session.id);
   if (!persistedHistory && captureResize) hydrateTraceHistory(session, host);
   if (!session.everStarted) update(session.id, {
@@ -2705,12 +2721,17 @@ export function unsubmittedInput(id) {
 export async function sendInput(id, text, opts = {}) {
   const host = hosts.get(id);
   if (!host || stopping.has(id)) throw new ApiError(409, 'input-not-ready', 'session is not running');
+  // `runId`: this text was meant for one launch of the pane, and a replacement
+  // process (a restart, a stop and reopen) must not inherit it.
+  const ours = () => !opts.runId || (hosts.get(id) === host && host.runId === opts.runId && !stopping.has(id));
+  if (!ours()) throw new ApiError(409, 'input-not-ready', 'session was restarted since this input was meant for it');
   // Sends are serialised per pane: two at once would interleave their text on
   // one line as surely as a keystroke would.
   const previous = host.sendChain || Promise.resolve();
   let done;
   host.sendChain = new Promise((resolve) => { done = resolve; });
   try { await previous; } catch {}
+  if (!ours()) { done(); throw new ApiError(409, 'input-not-ready', 'session was restarted since this input was meant for it'); }
   host.sending = true;
   host.heldInput = [];
   try {
@@ -2747,6 +2768,11 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
   }
   host.inputRequired.observeInput();
   const confirm = cliById(host.cli)?.confirmSubmit;
+  // OpenCode can paint a stable first screen before its input handler works
+  // (below). Until one send to THIS launch has been echoed back, every send
+  // checks — whoever started the pane. Deriving it from "did this call start
+  // it" missed panes started by someone else a moment earlier: boot revival.
+  if (host.cli === 'opencode' && !host.inputEchoed) confirmEcho = true;
   // Multi-line prompts go in as a bracketed paste so the CLI's composer treats
   // the inner newlines as soft line breaks instead of submitting early. So do
   // long single lines to a CLI whose composer is read back: typed in one burst,
@@ -2793,6 +2819,7 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
       }
     }
     if (!echoed) throw new ApiError(409, 'input-not-ready', 'session did not acknowledge the input before the timeout — prompt was not submitted');
+    host.inputEchoed = true;
   } else {
     host.pty.write(payload);
   }
@@ -2931,12 +2958,66 @@ export async function waitForInputReady(id, timeoutMs = INPUT_READY_TIMEOUT_MS) 
   while (Date.now() < deadline) {
     const host = hosts.get(id);
     if (!host) throw new ApiError(409, 'input-not-ready', 'session stopped while waiting for input readiness');
-    const lastActivity = Math.max(host.startedAt || 0, host.lastOutputAt || 0, host.screenChangedAt || 0);
-    if (!host.startupHistory && !host.resizeCapture
-      && Date.now() - lastActivity >= INPUT_READY_QUIET_MS) return true;
+    if (settledForInput(host)) return true;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return false;
+}
+function settledForInput(host) {
+  const lastActivity = Math.max(host.startedAt || 0, host.lastOutputAt || 0, host.screenChangedAt || 0);
+  return !host.startupHistory && !host.resizeCapture && Date.now() - lastActivity >= INPUT_READY_QUIET_MS;
+}
+
+/**
+ * Is this pane positively sitting at an empty prompt — safe for input nobody
+ * is watching arrive? Stricter than waitForInputReady, whose quiet screen is
+ * also what a trust, login or update dialog looks like, and an operator's
+ * prompt at least has the operator behind it. Here:
+ *  - output has settled (waitForInputReady's rule);
+ *  - the CLI has not reported an open dialog (input-required);
+ *  - a composer is identified the way the submit check finds one (a ruled box
+ *    with the cursor in it, or the bottom-most prompt marker with no menu or
+ *    dialog hint below), and it is empty;
+ *  - and the CLI is not showing a startup notice during which Enter is lost.
+ * Anything not recognised is "not ready", never "probably fine".
+ */
+export function promptReady(id) {
+  const host = hosts.get(id);
+  if (!host || stopping.has(id) || !hasPromptDetector(host.cli) || !settledForInput(host)) return false;
+  if (host.inputRequired.get()) return false;
+  let snap, screen = '';
+  try { snap = host.vt.snapshot({ includeCells: false }); screen = host.vt.getVisibleText(); } catch { return false; }
+  return emptyPrompt(snap, screen, host.cli);
+}
+// OpenCode's composer is a `┃` bar that runs on below the cursor (the line
+// under the input, then the agent/model row) and closes with `╹▀▀▀…`, so the
+// generic "bottom-most marker row" rule never finds it. Its own shape: the
+// cursor on a `┃` row with nothing typed in front of it, `┃` rows below it,
+// then the closing `╹`. Captured from opencode 1.18.31.
+function emptyOpencodeComposer(snapshot) {
+  const lines = snapshot?.visibleLines || [];
+  const at = lines.findIndex((l) => l.row === snapshot.cursorRow);
+  if (at < 0 || !/^\s*\u2503/.test(lines[at].text)) return false;
+  if (flatten(lines[at].text.slice(0, snapshot.cursorCol)).replace(/^\u2503/, '').trim()) return false;
+  let i = at + 1;
+  while (i < lines.length && /^\s*\u2503/.test(lines[i].text)) i++;
+  if (i >= lines.length || !/^\s*\u2579/.test(lines[i].text)) return false;
+  return !lines.slice(i + 1).some((l) => MENU_ROW.test(l.text) || DIALOG_HINT.test(l.text));
+}
+/** Can promptReady ever answer yes for this CLI? (config.js promptDetector) */
+export function hasPromptDetector(cli) {
+  return !!cliById(cli)?.promptDetector;
+}
+/** The screen half of promptReady, pure so captured screens can test it. */
+export function emptyPrompt(snapshot, screen, cli) {
+  const confirm = cliById(cli)?.confirmSubmit;
+  if (confirm?.starting?.test(String(screen || ''))) return false;
+  if (cli === 'opencode') return emptyOpencodeComposer(snapshot);
+  const shape = liveComposer(snapshot, { notice: confirm?.notice });
+  if (!shape || !(shape.located ? shape.cursorInside : shape.marked)) return false;
+  if (composerBody(shape) !== '') return false;
+  const idle = cliById(cli)?.promptDetector?.idle;
+  return !idle || (snapshot?.visibleLines || []).some((l) => l.row > snapshot.cursorRow && idle.test(l.text));
 }
 
 /**

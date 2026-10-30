@@ -133,8 +133,10 @@ in the Space's backend as long as the Space stays awake.
 A Space sleep, restart, or rebuild ends running processes. With the bucket
 mounted, saved workspace files and checkpointed CLI state survive. Agent Manager
 can restart eligible sessions and resume conversations where the CLI supports it;
-it cannot preserve a running shell command through a reboot. Configure this in
-**Settings → General → Restart sessions after a reboot**.
+it cannot preserve a running shell command through a reboot. Each restarted agent
+is then told that its tool calls and background listeners were interrupted, so an
+unfinished turn picks up by itself. Configure both in **Settings → General →
+Restart sessions after a reboot** ([details](docs/session-revive.md)).
 
 Without a bucket, local files and logins are temporary. For details on what is
 saved, see [state checkpoints](docs/agent-state-checkpoints.md) and

@@ -213,7 +213,7 @@ export interface AmConfig {
   archive: { after: 'week' | 'month' | 'never' };
   // After a restart, sessions that were running come back if you prompted them
   // within `days` (or had work still in flight).
-  revive: { enabled: boolean; days: 1 | 3 | 7 };
+  revive: { enabled: boolean; days: 1 | 3 | 7; continue: boolean };
   backup: { every: BackupEvery; dataset: string; exclude: string[] };
   defaultArtifactsSpace?: string;
   /** Revision of the committed bytes. Send it back to replace them. */

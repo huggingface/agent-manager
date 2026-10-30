@@ -942,7 +942,7 @@ export default function SettingsView({
                     <div className="s-help">
                       When the Space wakes or reboots, sessions that were running come back on their own: the ones
                       you sent something to within this window, plus any that still had a command or background
-                      job running. Agents resume their own conversation and wait for you; nothing is re-sent.
+                      job running. Agents resume their own conversation; nothing you sent is re-sent.
                     </div>
                   </div>
                   <span className="cfg-ctl">
@@ -951,7 +951,7 @@ export default function SettingsView({
                         <button
                           key={d}
                           className={cfg.revive.enabled && cfg.revive.days === d ? 'on' : ''}
-                          onClick={() => setCfg({ ...cfg, revive: { enabled: true, days: d } })}
+                          onClick={() => setCfg({ ...cfg, revive: { ...cfg.revive, enabled: true, days: d } })}
                         >{d === 1 ? '1 day' : `${d} days`}</button>
                       ))}
                       <button
@@ -961,6 +961,29 @@ export default function SettingsView({
                     </div>
                   </span>
                 </div>
+                {cfg.revive.enabled && (
+                  <div className="setting-row">
+                    <div>
+                      <div className="s-label">Tell restarted agents to continue</div>
+                      <div className="s-help">
+                        A restart stops whatever an agent was doing — tool calls, background listeners. Once each
+                        restarted agent is ready, Agent Manager sends it one message saying so, and it picks up an
+                        unfinished turn by itself. Off: they wait for you.
+                      </div>
+                    </div>
+                    <span className="cfg-ctl">
+                      <div className="seg cfg-seg">
+                        {([true, false] as const).map((on) => (
+                          <button
+                            key={String(on)}
+                            className={(cfg.revive.continue !== false) === on ? 'on' : ''}
+                            onClick={() => setCfg({ ...cfg, revive: { ...cfg.revive, continue: on } })}
+                          >{on ? 'on' : 'off'}</button>
+                        ))}
+                      </div>
+                    </span>
+                  </div>
+                )}
 
                 <div className="setting-row">
                   <div>
