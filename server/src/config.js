@@ -219,6 +219,7 @@ const shq = (t) => `'${String(t).replace(/'/g, `'\\''`)}'`;
 const join = (...parts) => parts.filter(Boolean).join(' ');
 const withFlags = (base, f = '') => (f ? `${base} ${f}` : base);
 const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const AGY_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']; // `agy --help`, 1.4.10
 const HERMES_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const OPENCLAW_THINKING = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'adaptive', 'max'];
 
@@ -239,7 +240,7 @@ const CODEX_CONFIRM = { pasted: /\[PastedContent\d+chars\]/, busy: /esc to inter
   elapsed: /(Working \()(?:\d+h )?(?:\d+m )?\d+s( \u2022 esc to interrupt\))/g };
 // Expanded by the launching shell, so it follows the key present at launch.
 const AGY_KEY_PROVIDER = `\${GEMINI_API_KEY:+--settings '{"modelProvider":"gemini"}'}`;
-const agyCommand = (tail = '') => `agy ${AGY_KEY_PROVIDER}${tail ? ` ${tail}` : ''}`;
+export const agyCommand = (tail = '') => `agy ${AGY_KEY_PROVIDER}${tail ? ` ${tail}` : ''}`;
 const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
 
 export const CLIS = [
@@ -290,11 +291,15 @@ export const CLIS = [
   // provider is set to "gemini", and otherwise asks for a Google sign-in, so
   // that setting is passed per launch while the key is present. --settings is
   // never saved, so a later Google sign-in still works once the key is gone.
+  // Model ids carry their own tier (gemini-4-argon-high), and --effort sets the
+  // reasoning level on top of it.
   { id: 'antigravity', label: 'Antigravity CLI', bin: 'agy', color: '#3186ff', resizeMode: 'repaint',
     run: (f) => agyCommand(f),
     cont: (f) => agyCommand(join(f, '-c')),
     withPrompt: (q, _images, f) => agyCommand(join(f, `-i ${q}`)), // -i = interactive session seeded with the prompt
     resume: (id, f) => agyCommand(join(f, `--conversation ${id}`)), // id: a uuid, checked by runner.js
+    launch: { model: true, efforts: AGY_EFFORTS,
+      flags: ({ model, effort }) => join(model && `--model ${shq(model)}`, effort && `--effort ${shq(effort)}`) },
     noUpdate: 'a pinned prebuilt binary from antigravity.google, not an npm package',
     secrets: ['GEMINI_API_KEY'], setup: setupHint('GEMINI_API_KEY') },
   // Model only. `--variant` exists on `opencode run` but not on the TUI, and

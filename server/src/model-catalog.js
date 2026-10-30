@@ -20,13 +20,15 @@
 //  - gemini  : the VALID_GEMINI_MODELS registry in the installed gemini-cli
 //              bundle (it has no list command)
 //  - opencode: `opencode models` — only providers that have credentials
+//  - antigravity: `agy models` — TSV `id<TAB>label`, asked over the network,
+//              with the same key provider as a launch
 //  - hermes  : its own provider model cache (~/.hermes/provider_models_cache.json)
 // openclaw and fx take no model at launch, so they get no list.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { CLIS, cliById, STATE_DIR, WORKSPACES_DIR, LAUNCH_MODEL, LAUNCH_EFFORT, cliCatalog } from './config.js';
+import { CLIS, cliById, STATE_DIR, WORKSPACES_DIR, LAUNCH_MODEL, LAUNCH_EFFORT, cliCatalog, agyCommand } from './config.js';
 import { ApiError } from './api-errors.js';
 import { scrapeClaudePicker, killGroup, CLAUDE_FAMILIES } from './claude-models.js';
 
@@ -112,6 +114,13 @@ export function parseOpencodeModels(stdout) {
   return String(stdout).split('\n').map((l) => l.trim()).filter((l) => /^[^\s/]+\/\S+$/.test(l)).map((id) => ({ id }));
 }
 
+/** `agy models`: `id<TAB>label` per line, after a "Fetching…" line on stderr. */
+export function parseAgyModels(stdout) {
+  return String(stdout).split('\n').map((l) => l.replace(/\r$/, '').split('\t'))
+    .filter(([id, label]) => label !== undefined && LAUNCH_MODEL.test(id.trim()))
+    .map(([id, label]) => ({ id: id.trim(), label: label.trim() || undefined }));
+}
+
 /** Hermes' cache: { <provider>: { models: [id | {id}] } } → `<provider>/<id>`. */
 export function parseHermesCache(json) {
   const out = [];
@@ -170,6 +179,7 @@ const SOURCES = {
     return { models, source: `gemini-cli bundle (${path.basename(file)})` };
   },
   opencode: async () => ({ models: parseOpencodeModels(await runList('opencode models')), source: 'opencode models' }),
+  antigravity: async () => ({ models: parseAgyModels(await runList(agyCommand('models'))), source: 'agy models' }),
   hermes: async () => {
     const file = path.join(process.env.HOME || os.homedir(), '.hermes', 'provider_models_cache.json');
     return { models: parseHermesCache(JSON.parse(fs.readFileSync(file, 'utf8'))), source: '~/.hermes/provider_models_cache.json' };

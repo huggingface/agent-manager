@@ -34,6 +34,18 @@ test('opencode models and the Hermes cache', () => {
     [{ id: 'huggingface/moonshotai/Kimi-K2.5' }, { id: 'huggingface/b' }]);
 });
 
+test('agy models: id<TAB>label rows, from real 1.4.10 output', () => {
+  // stdout of `agy --settings '{"modelProvider":"gemini"}' models` on 1.4.10 ("Fetching available models..." goes to stderr).
+  const out = fs.readFileSync(fileURLToPath(new URL('./fixtures/agy-models-1.4.10.tsv', import.meta.url)), 'utf8');
+  const models = catalog.parseAgyModels(out);
+  assert.equal(models.length, 14);
+  assert.deepEqual(models[0], { id: 'gemini-4-argon-high', label: 'Gemini 4 Argon (High)' });
+  assert.deepEqual(models.at(-1), { id: 'gemini-3.1-pro-low', label: 'Gemini 3.1 Pro (Low)' });
+  assert.ok(models.every((m) => config.LAUNCH_MODEL.test(m.id) && m.label), 'every row has an id and a label');
+  assert.deepEqual(catalog.parseAgyModels('Fetching available models...\r\nx y\tbad id\ngemini-4-argon-low\tGemini 4 Argon (Low)\r\n\n'),
+    [{ id: 'gemini-4-argon-low', label: 'Gemini 4 Argon (Low)' }], 'only TSV rows with a valid id; CRs dropped');
+});
+
 test('claude ids in a binary', () => {
   const ids = catalog.claudeIdsIn('"claude-opus-5-5" xx claude-haiku-4-5-20251001 "claude-mythos-5-1" claude-fable-5');
   assert.deepEqual([...ids].sort(), ['claude-fable-5', 'claude-mythos-5-1', 'claude-opus-5-5']);
@@ -200,6 +212,7 @@ const LISTS = {
   claude: { models: [{ id: 'opus' }, { id: 'claude-opus-5-5' }] },
   codex: { models: [{ id: 'gpt-5.5', efforts: ['low', 'medium', 'high', 'xhigh'] }, { id: 'gpt-6-astra', efforts: ['low', 'ultra'] }] },
   gemini: { models: [{ id: 'gemini-2.5-pro' }] },
+  antigravity: { models: [{ id: 'gemini-4-argon-high', label: 'Gemini 4 Argon (High)' }] },
 };
 
 test('a choice must come from the current list', () => {
@@ -219,6 +232,9 @@ test('a choice must come from the current list', () => {
   refused('claude', { effort: 'ultra' }, /not an effort/);
   refused('codex', { model: 'gpt-5.5', effort: 'ultra' }, /not an effort gpt-5.5 supports/);
   refused('gemini', { effort: 'high' }, /no reasoning effort/);
+  assert.deepEqual(ok('antigravity', { model: 'gemini-4-argon-high', effort: 'max' }), { model: 'gemini-4-argon-high', effort: 'max' });
+  refused('antigravity', { model: 'gemini-4-argon' }, /not a model/);
+  refused('antigravity', { effort: 'ultra' }, /not an effort/);
   refused('openclaw', { model: 'x' }, /no model at launch/);
   refused('fx', { model: 'x' }, /no model or effort/);
   refused('shell', { effort: 'high' }, /no model or effort/);
@@ -235,6 +251,8 @@ test('launch options: a CLI without a list offers no model', () => {
   assert.equal(by.opencode.model, false);
   assert.equal(by.openclaw.model, false);
   assert.ok(by.openclaw.efforts.includes('adaptive'));
+  assert.equal(by.antigravity.model, true);
+  assert.deepEqual(by.antigravity.efforts, ['low', 'medium', 'high', 'xhigh', 'max']);
   assert.equal(by.fx, undefined);
 });
 

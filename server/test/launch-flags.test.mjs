@@ -42,7 +42,7 @@ const stub = `#!/bin/sh
 for a in "$@"; do [ -n "$STUB_FAIL" ] && [ "$a" = "$STUB_FAIL" ] && exit 3; done
 exit 0
 `;
-for (const name of ['claude', 'codex', 'gemini', 'opencode', 'hermes', 'openclaw', 'fx']) {
+for (const name of ['claude', 'codex', 'gemini', 'opencode', 'hermes', 'openclaw', 'fx', 'agy']) {
   fs.writeFileSync(path.join(BIN, name), stub, { mode: 0o755 });
 }
 
@@ -91,6 +91,7 @@ test('a stored value with a bad shape never reaches the line', () => {
   assert.equal(config.launchFlags({ cli: 'fx', model: 'opus', effort: 'high' }), '', 'fx takes neither');
   assert.equal(config.launchFlags({ cli: 'gemini', model: 'gemini-2.5-pro', effort: 'high' }), "-m 'gemini-2.5-pro'", 'gemini: model only');
   assert.equal(config.launchFlags({ cli: 'openclaw', model: 'x', effort: 'high' }), "--thinking 'high'", 'openclaw: effort only');
+  assert.equal(config.launchFlags({ cli: 'antigravity', model: 'gemini-4-argon-high', effort: 'max' }), "--model 'gemini-4-argon-high' --effort 'max'");
   assert.equal(config.launchFlags({ cli: 'shell', model: 'x' }), '');
 });
 
@@ -197,6 +198,33 @@ test('hermes: provider and model split, flags before -c', () => {
   const again = make('hermes', { ...choice, everStarted: true });
   assert.deepEqual(launch(runner.commandFor(again)).calls, [['hermes', ...f, '-c']]);
   assert.deepEqual(launch(runner.commandFor(again), { STUB_FAIL: '-c' }).calls, [['hermes', ...f, '-c'], ['hermes', ...f]]);
+});
+
+test('antigravity: flags on fresh, seeded, continue, pinned resume and shared folder; key provider kept', () => {
+  const choice = { model: 'gemini-4-argon-high', effort: 'xhigh' };
+  const f = ['--model', 'gemini-4-argon-high', '--effort', 'xhigh'];
+  const key = { GEMINI_API_KEY: 'k' };
+  const provider = ['--settings', '{"modelProvider":"gemini"}'];
+  assert.deepEqual(launch(runner.commandFor(make('antigravity', choice)), key).calls, [['agy', ...provider, ...f]]);
+  assert.deepEqual(launch(runner.commandFor(make('antigravity', choice))).calls, [['agy', ...f]], 'no key: no provider, flags kept');
+  const q = "fix it; don't $(break)";
+  assert.deepEqual(launch(runner.commandFor(make('antigravity', { ...choice, pendingPrompt: q })), key).calls,
+    [['agy', ...provider, ...f, '-i', q]]);
+  const alone = make('antigravity', { ...choice, everStarted: true });
+  assert.deepEqual(launch(runner.commandFor(alone), key).calls, [['agy', ...provider, ...f, '-c']]);
+  assert.deepEqual(launch(runner.commandFor(alone), { ...key, STUB_FAIL: '-c' }).calls,
+    [['agy', ...provider, ...f, '-c'], ['agy', ...provider, ...f]]);
+  const ID = '79cd3d9b-b387-44da-91c0-2df98a2ae37e';
+  const pinned = make('antigravity', { ...choice, everStarted: true, antigravityConversationId: ID });
+  assert.deepEqual(launch(runner.commandFor(pinned), key).calls, [['agy', ...provider, ...f]], 'conversation gone: fresh, flags kept');
+  const conv = path.join(HOME, '.gemini', 'antigravity-cli', 'conversations');
+  fs.mkdirSync(conv, { recursive: true });
+  fs.writeFileSync(path.join(conv, `${ID}.db`), '');
+  assert.deepEqual(launch(runner.commandFor(pinned), key).calls, [['agy', ...provider, ...f, '--conversation', ID]]);
+  const a = make('antigravity', { ...choice, everStarted: true, path: 'shared-agy' });
+  make('antigravity', { everStarted: true, path: 'shared-agy' });
+  assert.deepEqual(launch(runner.commandFor(a), key).calls, [['agy', ...provider, ...f]], 'shared folder: fresh, flags kept');
+  assert.deepEqual(launch(runner.commandFor(make('antigravity', { everStarted: true })), key).calls, [['agy', ...provider, '-c']], 'no choice: as before');
 });
 
 test('openclaw: --thinking on both the onboarding and the ready path; no model', () => {

@@ -16,6 +16,7 @@ CLI's shared default cannot move it. See `launch` in `server/src/config.js`.
 | codex | `-m` | `-c model_reasoning_effort=` per model | `codex debug models` |
 | gemini | `-m` | — (settings file only) | `VALID_GEMINI_MODELS` in the installed gemini-cli bundle |
 | opencode | `-m provider/model` | — (TUI ignores a config variant) | `opencode models` |
+| antigravity | `--model` (ids carry a tier, e.g. `gemini-4-argon-high`) | `--effort` low…max | `agy models` (network; the `modelProvider: gemini` setting when only `GEMINI_API_KEY` is set) |
 | hermes | `--provider` + `-m` | `--reasoning` | `~/.hermes/provider_models_cache.json` |
 | openclaw | — (`chat` has no `--model`) | `--thinking` | — |
 | fx | — | — | — |
