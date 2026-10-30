@@ -17,9 +17,9 @@ import StateLogo from './StateLogo';
 // what opening its session actually requires, which for the two that work is
 // nothing, or one choice.
 
-/** Which agents are worth offering: real CLIs, present in this image. */
+/** Which agents are worth offering: real CLIs, present in this image, not deprecated. */
 export const setupCandidates = (clis: Cli[]) =>
-  clis.filter((c) => c.available && (c.secrets?.length || c.signIn));
+  clis.filter((c) => c.available && !c.deprecated && (c.secrets?.length || c.signIn));
 
 export const configuredCount = (clis: Cli[]) => setupCandidates(clis).filter((c) => c.ready).length;
 

@@ -6,7 +6,7 @@ import { AmMark } from './icons';
 const HARNESSES: [name: string, logo: string, color: string, y: number, inv: string][] = [
   ['Claude Code', 'claude.png', '#d97757', 20, ''],
   ['Codex', 'codex.png', '#5eb6a6', 52, ''],
-  ['Gemini', 'gemini.png', '#4796e3', 84, ''],
+  ['Antigravity', 'antigravity.png', '#3186ff', 84, ''],
   ['opencode', 'opencode.png', '#b9c2cc', 116, 'wd-inv-dark'],
   ['Hermes', 'hermes.png', '#a78bfa', 148, 'wd-inv-light'],
   ['OpenClaw', 'openclaw.png', '#e05a4e', 180, ''],

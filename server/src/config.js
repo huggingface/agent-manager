@@ -243,6 +243,9 @@ const AGY_KEY_PROVIDER = `\${GEMINI_API_KEY:+--settings '{"modelProvider":"gemin
 export const agyCommand = (tail = '') => `agy ${AGY_KEY_PROVIDER}${tail ? ` ${tail}` : ''}`;
 const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
 
+const GEMINI_DEPRECATED = 'Gemini CLI is deprecated: Google replaced it with Antigravity CLI. '
+  + 'This session still works; start new ones with Antigravity.';
+
 /**
  * `promptDetector`: runner.promptReady can positively tell this CLI's empty
  * composer from everything else on its screen — checked on a pane captured
@@ -292,10 +295,19 @@ export const CLIS = [
     npm: '@openai/codex',
     secrets: ['OPENAI_API_KEY'], setup: setupHint('OPENAI_API_KEY') },
   // Thinking is not a launch flag: only a settings file sets it. Model only.
+  // Deprecated: Google replaced Gemini CLI with Antigravity CLI. New sessions
+  // are refused (index.js assertCreatable); existing ones launch as before.
+  // The install, hooks and state handling go one release later.
   { id: 'gemini',   label: 'Gemini CLI',  bin: 'gemini',   color: '#4796e3', cont: null, resizeMode: 'repaint',
     run: (f) => withFlags('gemini', f),
     withPrompt: (q, _images, f) => `${withFlags('gemini', f)} -i ${q}`, // -i = interactive session seeded with the prompt
     launch: { model: true, flags: ({ model }) => join(model && `-m ${shq(model)}`) },
+    deprecated: {
+      replacement: 'antigravity',
+      note: GEMINI_DEPRECATED,
+      refusal: 'Gemini CLI is deprecated: Google replaced it with Antigravity CLI, so new Gemini sessions '
+        + 'can no longer be created. Existing ones keep working; start new ones with Antigravity CLI.',
+    },
     npm: '@google/gemini-cli',
     secrets: ['GEMINI_API_KEY'], setup: setupHint('GEMINI_API_KEY') },
   // Antigravity CLI (`agy`) is Google's successor to Gemini CLI and the one
@@ -473,6 +485,11 @@ export function cliCatalog() {
     // Space, and anything the operator must know to use it. null = we did not
     // confirm one, so the UI must not invent instructions.
     signIn: IN_SESSION_SIGN_IN[c.id] || null,
+    // A deprecated CLI stays in the catalog so its existing sessions keep a
+    // label and colour, but the UI offers it for nothing new. `replacement` is
+    // the id to point people at; `note` is the one sentence every notice shows.
+    deprecated: !!c.deprecated,
+    ...(c.deprecated ? { replacement: c.deprecated.replacement, deprecationNote: c.deprecated.note } : {}),
   }));
 }
 

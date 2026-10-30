@@ -28,8 +28,8 @@ explicitly:
 ```
 
 That installs into `${NPM_CONFIG_PREFIX:-$HOME/.local}`. Claude and Codex are
-required and a failure stops the run; Gemini, opencode and OpenClaw are
-best-effort, exactly as in the container image, and anything that does not
+required and a failure stops the run; Gemini (deprecated), opencode and
+OpenClaw are best-effort, exactly as in the container image, and anything that does not
 install is listed at the end and shown as unavailable in the app. Put that
 prefix's `bin` on the server's `PATH` and restart — availability is read once at
 startup. With no CLIs installed the app's first-run window shows this same
@@ -116,6 +116,26 @@ scrollback comes back from the terminal history checkpoint, so a reopened pane
 reads as you left it. Settings → General → *Restart sessions after a reboot*
 sets the window (1 / 3 / 7 days, or off).
 
+### Deprecated CLIs
+
+A CLI can be marked `deprecated` in `server/src/config.js`. It stays in the
+catalog, and `GET /api/clis` reports `deprecated: true`, a `replacement` id and a
+`deprecationNote`. The UI keys off those fields: the CLI is hidden from every
+new-session picker, and each existing session shows the note in its pane and a
+tag on its sidebar row and Overview card. Creating a new session with it through
+`POST /api/sessions`, spawn (`POST /api/agents`) or a cron is refused with
+`code: 'cli-deprecated'`. Existing sessions open, restart, revive, resume and
+take prompts as before.
+
+**Gemini CLI** is deprecated this way: Google replaced it with Antigravity CLI.
+This is step 1. Step 2, one release later, removes what is still there for the
+existing sessions: the `@google/gemini-cli` install in the Dockerfile and
+`scripts/install-local-clis.sh`, the Gemini setup in `entrypoint.sh` and
+`gemini-system-defaults.json`, its hooks in `scripts/am-input-required-hook.sh`,
+its state handling in `scripts/agent-state.sh` (`GEMINI_CLI_HOME`,
+`GEMINI_LIVE`, `GEMINI_DURABLE`), its usage data, and the `gemini` entry in
+`CLIS` with the code that branches on it.
+
 ## Configuration
 
 | Var | Default | Purpose |
@@ -128,7 +148,7 @@ sets the window (1 / 3 / 7 days, or off).
 | `AM_FRAME_ANCESTORS` | — | Extra origins allowed to embed the app in a frame (comma-separated exact origins) |
 | `ANTHROPIC_API_KEY` | — | Claude Code / opencode / Hermes (Space **secret**) |
 | `OPENAI_API_KEY` / `CODEX_API_KEY` | — | Codex (Space secret) |
-| `GEMINI_API_KEY` | — | Gemini CLI and Antigravity CLI (Space secret) |
+| `GEMINI_API_KEY` | — | Antigravity CLI, and Gemini CLI (deprecated) (Space secret) |
 | `AI_GATEWAY_API_KEY` | — | fx (Space secret) |
 | `HF_TOKEN` | — | Hub operations and mounted-bucket discovery; access requirements depend on the operation |
 

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Cli, LaunchChoice, MoveTarget, Group, Session, Tree } from '../types';
-import { STATE_LABEL, REMOTE_STATE_LABEL, isPassive, isRemote } from '../types';
+import { STATE_LABEL, REMOTE_STATE_LABEL, creatable, isPassive, isRemote } from '../types';
 import * as api from '../api';
 import Logo from './Logo';
 import StateLogo from './StateLogo';
+import DeprecatedNotice, { deprecationNote } from './DeprecatedNotice';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
 import LaunchField from './LaunchField';
@@ -149,6 +150,7 @@ export default function Sidebar({
     [tree.order, tree.sessions, tree.groups],
   );
   const colorOf = useMemo(() => Object.fromEntries(clis.map((c) => [c.id, c.color])), [clis]);
+  const deprecatedOf = (cli: string) => deprecationNote(clis.find((c) => c.id === cli));
   const quickFilesBlocked = quickImages.some((image) => !image.attachment);
 
   useEffect(() => { quickImagesRef.current = quickImages; }, [quickImages]);
@@ -313,7 +315,9 @@ export default function Sidebar({
   // make from here. Shell and Files used to be buttons of their own below the
   // tree — they are session types like any other, so they belong in the picker
   // rather than in a second place that does the same job.
-  const quickable = clis.filter((c) => c.id !== 'shell' && !isPassive(c.id) && !isRemote(c.id));
+  // A deprecated CLI is never offered for a new session; its existing ones
+  // stay in the tree with a notice (DeprecatedNotice).
+  const quickable = creatable(clis).filter((c) => c.id !== 'shell' && !isPassive(c.id) && !isRemote(c.id));
   // The picker is a 6-column grid. A seventh CLI used to wrap onto a third row
   // by itself; instead the overflow joins the second row, ahead of the session
   // types and separated from them by a real empty cell. Slicing by the column
@@ -333,7 +337,6 @@ export default function Sidebar({
   const blurbs: Record<string, string> = {
     claude: "Anthropic's coding agent",
     codex: "OpenAI's coding agent",
-    gemini: "Google's coding agent",
     antigravity: "Google's newer coding agent, for Gemini 4 Argon",
     opencode: 'open-source agent, your choice of model',
     hermes: "Nous Research's agent",
@@ -602,6 +605,7 @@ export default function Sidebar({
         ) : (
           <span className="name">{s.name}</span>
         )}
+        <DeprecatedNotice note={deprecatedOf(s.cli)} />
         <span className="age">{fmtAgo(ages?.[s.id])}</span>
         {/* One button on a live row, and it files the agent away. Start was the
             row's own onClick spelled twice; stop went because an idle CLI costs
@@ -940,7 +944,7 @@ export default function Sidebar({
                   {/* Shell and Files stay on offer — a group may legitimately want
                       one. Trace does not: a trace pane with no source shows nothing,
                       so it's only ever created from a session's Trace button. */}
-                  {clis.filter((c) => (c.available || (c.id !== 'shell' && c.id !== 'files')) && c.id !== 'trace').map((c) => {
+                  {creatable(clis).filter((c) => (c.available || (c.id !== 'shell' && c.id !== 'files')) && c.id !== 'trace').map((c) => {
                     const n = cart[c.id] || 0;
                     return (
                       <div key={c.id} className={`cart-row${n > 0 ? ' has' : ''}${c.available ? '' : ' off'}`} title={c.available ? c.label : `${c.label} (not installed)`}>

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { Cli, LaunchChoice, Session } from '../types';
+import { creatable } from '../types';
 import Logo from './Logo';
 import FolderPicker from './FolderPicker';
 import LaunchField from './LaunchField';
@@ -34,7 +35,7 @@ export default function NewSession({
   // 'trace' is excluded like shell/files: a trace pane is opened FROM a session
   // (the Trace button on its row), never created blank — one with no source
   // would have nothing to show.
-  const agents = clis.filter((c) => c.available && c.id !== 'shell' && c.id !== 'files' && c.id !== 'trace');
+  const agents = creatable(clis).filter((c) => c.available && c.id !== 'shell' && c.id !== 'files' && c.id !== 'trace');
   const [cli, setCli] = useState(agents[0]?.id || '');
   const [name, setName] = useState(() => (agents[0] ? defaultName(agents[0], sessions) : ''));
   // Prepopulated values follow the selected agent until the user types.
