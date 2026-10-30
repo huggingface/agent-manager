@@ -87,8 +87,8 @@ try {
   console.log('\n# 0. the screen rule, on panes captured from the real CLIs');
   const SCREENS = JSON.parse(fs.readFileSync(path.join(HERE, 'fixtures/input-lines.json'), 'utf8'));
   const text = (snap) => snap.visibleLines.map((l) => l.text).join('\n');
-  await check('an empty composer is ready: Claude Code, Codex, OpenCode, Hermes', () => {
-    for (const cli of ['claude', 'codex', 'opencode', 'hermes']) {
+  await check('an empty composer is ready: Claude Code, Codex, OpenCode, Hermes, Antigravity', () => {
+    for (const cli of ['claude', 'codex', 'opencode', 'hermes', 'antigravity']) {
       assert.equal(runner.emptyPrompt(SCREENS[cli].empty, text(SCREENS[cli].empty), cli), true, cli);
     }
   });
@@ -100,6 +100,25 @@ try {
   await check('nor a startup dialog: Gemini\'s OAuth code prompt, OpenClaw\'s [Y/n], fx\'s sign-in menu', () => {
     for (const cli of ['gemini', 'openclaw', 'fx']) {
       assert.equal(runner.emptyPrompt(SCREENS[cli].empty, text(SCREENS[cli].empty), cli), false, cli);
+    }
+  });
+  // Antigravity (agy 1.4.10) beyond the empty/typed pair: its `>` composer
+  // between two rules stays on screen empty mid-turn and under its dialogs.
+  const AGY = JSON.parse(fs.readFileSync(path.join(HERE, 'fixtures/agy-screens.json'), 'utf8'));
+  await check('antigravity: the composer after a finished turn is ready', () => {
+    assert.equal(runner.emptyPrompt(AGY.after_turn, text(AGY.after_turn), 'antigravity'), true);
+  });
+  await check('antigravity: its permission dialog ("Requesting permission for: … Run this command?") is not', () => {
+    assert.match(text(AGY.permission), /Requesting permission for:[\s\S]*Run this command\?/);
+    assert.equal(runner.emptyPrompt(AGY.permission, text(AGY.permission), 'antigravity'), false);
+  });
+  await check('antigravity: nor its empty composer mid-turn ("esc to cancel" where "? for shortcuts" was)', () => {
+    assert.match(text(AGY.working), /esc to cancel/);
+    assert.equal(runner.emptyPrompt(AGY.working, text(AGY.working), 'antigravity'), false);
+  });
+  await check('antigravity: nor its startup dialogs: color scheme, terms, folder trust', () => {
+    for (const k of ['onboarding', 'terms', 'trust']) {
+      assert.equal(runner.emptyPrompt(AGY[k], text(AGY[k]), 'antigravity'), false, k);
     }
   });
   await check('nor a shell prompt, which is not an agent\'s composer', () => {
@@ -161,7 +180,7 @@ try {
   } finally { console.log = log0; }
   await check('the detector list is exactly the CLIs checked on real captured screens', () => {
     assert.deepEqual(config.CLIS.filter((c) => c.promptDetector && !c.id.startsWith('test-')).map((c) => c.id).sort(),
-      ['claude', 'codex', 'hermes', 'opencode']);
+      ['antigravity', 'claude', 'codex', 'hermes', 'opencode']);
   });
   await runner.stopAll();
 

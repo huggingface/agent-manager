@@ -225,6 +225,8 @@ const CLAUDE_CONFIRM = { pasted: /\[Pastedtext#\d+/, busy: /esc to interrupt/ };
  * rest the sender skips and says so instead of guessing. Gemini, OpenClaw and
  * fx are absent because their only captures are startup dialogs, not a
  * composer; add the flag with a captured empty composer and a test.
+ * `{ idle: RegExp }` instead of `true` also requires that line below the
+ * composer, for a CLI that keeps an empty composer on screen mid-turn.
  */
 
 export const CLIS = [
@@ -262,6 +264,10 @@ export const CLIS = [
   // that setting is passed per launch while the key is present. --settings is
   // never saved, so a later Google sign-in still works once the key is gone.
   { id: 'antigravity', label: 'Antigravity CLI', bin: 'agy', color: '#3186ff', run: agyCommand(), cont: agyCommand('-c'), resizeMode: 'repaint',
+    // An empty `>` between two rules, idle or mid-turn alike; only the row
+    // under it tells them apart: `? for shortcuts`, or `esc to cancel` while
+    // it works (captured from agy 1.4.10).
+    promptDetector: { idle: /^\? for shortcuts\b/ },
     noUpdate: 'a pinned prebuilt binary from antigravity.google, not an npm package',
     withPrompt: (q) => agyCommand(`-i ${q}`), // -i = interactive session seeded with the prompt
     resume: (id) => agyCommand(`--conversation ${id}`), // id: a uuid, checked by runner.js

@@ -1,0 +1,855 @@
+{
+ "_about": "agy 1.4.10 screens beyond input-lines.json (120x34, captured through libghostty-vt like runner.js): the composer after a finished turn, mid-turn, the permission dialog, and the startup dialogs.",
+ "after_turn": {
+  "cursorRow": 30,
+  "cursorCol": 2,
+  "visibleLines": [
+   {
+    "row": 0,
+    "text": "  A silent prompt that hungers for a word,"
+   },
+   {
+    "row": 1,
+    "text": "  To cross the vast, uncharted silicon seas,"
+   },
+   {
+    "row": 2,
+    "text": "  Where unseen daemons make their voices heard."
+   },
+   {
+    "row": 3,
+    "text": ""
+   },
+   {
+    "row": 4,
+    "text": "  With every bash or zsh or simple sh,"
+   },
+   {
+    "row": 5,
+    "text": "  The user builds a castle in the air,"
+   },
+   {
+    "row": 6,
+    "text": "  Or tears it down with one swift, sharp request,"
+   },
+   {
+    "row": 7,
+    "text": "  A quiet power, formidable and rare."
+   },
+   {
+    "row": 8,
+    "text": ""
+   },
+   {
+    "row": 9,
+    "text": "  We string together pipes and find and grep,"
+   },
+   {
+    "row": 10,
+    "text": "  We weave a tapestry of standard out,"
+   },
+   {
+    "row": 11,
+    "text": "  With careful thought in every single step,"
+   },
+   {
+    "row": 12,
+    "text": "  We banish errors and we conquer doubt."
+   },
+   {
+    "row": 13,
+    "text": ""
+   },
+   {
+    "row": 14,
+    "text": "  The terminal, a canvas black as night,"
+   },
+   {
+    "row": 15,
+    "text": "  Where hackers dream and sysadmins scheme,"
+   },
+   {
+    "row": 16,
+    "text": "  Bathed in the monitor's unyielding light,"
+   },
+   {
+    "row": 17,
+    "text": "  We navigate the data's rushing stream."
+   },
+   {
+    "row": 18,
+    "text": ""
+   },
+   {
+    "row": 19,
+    "text": "  From humble roots in teletypes of old,"
+   },
+   {
+    "row": 20,
+    "text": "  To virtual environments today,"
+   },
+   {
+    "row": 21,
+    "text": "  The stories of the terminal are told,"
+   },
+   {
+    "row": 22,
+    "text": "  In lines of code that never fade away."
+   },
+   {
+    "row": 23,
+    "text": ""
+   },
+   {
+    "row": 24,
+    "text": "  A timeless interface, both raw and pure,"
+   },
+   {
+    "row": 25,
+    "text": "  In the heart of the machine, it will endure."
+   },
+   {
+    "row": 26,
+    "text": ""
+   },
+   {
+    "row": 27,
+    "text": "  done."
+   },
+   {
+    "row": 28,
+    "text": ""
+   },
+   {
+    "row": 29,
+    "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+   },
+   {
+    "row": 30,
+    "text": ">"
+   },
+   {
+    "row": 31,
+    "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+   },
+   {
+    "row": 32,
+    "text": "? for shortcuts                                                                                     Gemini 3.1 Pro \u00b7 low"
+   },
+   {
+    "row": 33,
+    "text": ""
+   }
+  ]
+ },
+ "working": {
+  "cursorRow": 16,
+  "cursorCol": 2,
+  "visibleLines": [
+   {
+    "row": 0,
+    "text": ""
+   },
+   {
+    "row": 1,
+    "text": "      \u2584\u2580\u2580\u2584"
+   },
+   {
+    "row": 2,
+    "text": "     \u2580\u2580\u2580\u2580\u2580\u2580"
+   },
+   {
+    "row": 3,
+    "text": "    \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580"
+   },
+   {
+    "row": 4,
+    "text": "   \u2584\u2580\u2580    \u2580\u2580\u2584"
+   },
+   {
+    "row": 5,
+    "text": "  \u2584\u2580\u2580      \u2580\u2580\u2584"
+   },
+   {
+    "row": 6,
+    "text": ""
+   },
+   {
+    "row": 7,
+    "text": "  Antigravity CLI 1.4.10"
+   },
+   {
+    "row": 8,
+    "text": "  Gemini API key"
+   },
+   {
+    "row": 9,
+    "text": "  Gemini 3.1 Pro (Low)"
+   },
+   {
+    "row": 10,
+    "text": "  /data/workspaces/agy-fixture"
+   },
+   {
+    "row": 11,
+    "text": ""
+   },
+   {
+    "row": 12,
+    "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+   },
+   {
+    "row": 13,
+    "text": "> Write a 30 line poem about terminals, then say done."
+   },
+   {
+    "row": 14,
+    "text": "\u28f7  Generating..."
+   },
+   {
+    "row": 15,
+    "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+   },
+   {
+    "row": 16,
+    "text": ">"
+   },
+   {
+    "row": 17,
+    "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+   },
+   {
+    "row": 18,
+    "text": "esc to cancel                                                                                       Gemini 3.1 Pro \u00b7 low"
+   },
+   {
+    "row": 19,
+    "text": ""
+   },
+   {
+    "row": 20,
+    "text": ""
+   },
+   {
+    "row": 21,
+    "text": ""
+   },
+   {
+    "row": 22,
+    "text": ""
+   },
+   {
+    "row": 23,
+    "text": ""
+   },
+   {
+    "row": 24,
+    "text": ""
+   },
+   {
+    "row": 25,
+    "text": ""
+   },
+   {
+    "row": 26,
+    "text": ""
+   },
+   {
+    "row": 27,
+    "text": ""
+   },
+   {
+    "row": 28,
+    "text": ""
+   },
+   {
+    "row": 29,
+    "text": ""
+   },
+   {
+    "row": 30,
+    "text": ""
+   },
+   {
+    "row": 31,
+    "text": ""
+   },
+   {
+    "row": 32,
+    "text": ""
+   },
+   {
+    "row": 33,
+    "text": ""
+   }
+  ]
+ },
+ "permission": {
+  "cursorRow": 30,
+  "cursorCol": 0,
+  "visibleLines": [
+   {
+    "row": 0,
+    "text": ""
+   },
+   {
+    "row": 1,
+    "text": "      \u2584\u2580\u2580\u2584"
+   },
+   {
+    "row": 2,
+    "text": "     \u2580\u2580\u2580\u2580\u2580\u2580"
+   },
+   {
+    "row": 3,
+    "text": "    \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580"
+   },
+   {
+    "row": 4,
+    "text": "   \u2584\u2580\u2580    \u2580\u2580\u2584"
+   },
+   {
+    "row": 5,
+    "text": "  \u2584\u2580\u2580      \u2580\u2580\u2584"
+   },
+   {
+    "row": 6,
+    "text": ""
+   },
+   {
+    "row": 7,
+    "text": "  Antigravity CLI 1.4.10"
+   },
+   {
+    "row": 8,
+    "text": "  Gemini API key"
+   },
+   {
+    "row": 9,
+    "text": "  Gemini 3.1 Pro (Low)"
+   },
+   {
+    "row": 10,
+    "text": "  /data/workspaces/agy-fixture"
+   },
+   {
+    "row": 11,
+    "text": ""
+   },
+   {
+    "row": 12,
+    "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+   },
+   {
+    "row": 13,
+    "text": "> Run the shell command: ls -la"
+   },
+   {
+    "row": 14,
+    "text": ""
+   },
+   {
+    "row": 15,
+    "text": "\u25cf Ran (ls -la) (ctrl+o to expand)"
+   },
+   {
+    "row": 16,
+    "text": ""
+   },
+   {
+    "row": 17,
+    "text": "Command"
+   },
+   {
+    "row": 18,
+    "text": "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+   },
+   {
+    "row": 19,
+    "text": ""
+   },
+   {
+    "row": 20,
+    "text": "Requesting permission for:"
+   },
+   {
+    "row": 21,
+    "text": "   ls -la"
+   },
+   {
+    "row": 22,
+    "text": ""
+   },
+   {
+    "row": 23,
+    "text": "Run this command?"
+   },
+   {
+    "row": 24,
+    "text": "> 1. Yes, run command"
+   },
+   {
+    "row": 25,
+    "text": "  2. Yes, and always allow in this conversation for commands that start with 'ls'"
+   },
+   {
+    "row": 26,
+    "text": "  3. Yes, and always allow for commands that start with 'ls' (Persist to settings.json)"
+   },
+   {
+    "row": 27,
+    "text": "  4. No, cancel"
+   },
+   {
+    "row": 28,
+    "text": ""
+   },
+   {
+    "row": 29,
+    "text": "  \u2191/\u2193 Navigate \u00b7 tab Amend \u00b7 ctrl+g edit/expand command"
+   },
+   {
+    "row": 30,
+    "text": "esc to cancel                                                                                       Gemini 3.1 Pro \u00b7 low"
+   },
+   {
+    "row": 31,
+    "text": ""
+   },
+   {
+    "row": 32,
+    "text": ""
+   },
+   {
+    "row": 33,
+    "text": ""
+   }
+  ]
+ },
+ "trust": {
+  "cursorRow": 9,
+  "cursorCol": 10,
+  "visibleLines": [
+   {
+    "row": 0,
+    "text": "Accessing workspace:"
+   },
+   {
+    "row": 1,
+    "text": ""
+   },
+   {
+    "row": 2,
+    "text": "/data/workspaces/agy-fixture"
+   },
+   {
+    "row": 3,
+    "text": ""
+   },
+   {
+    "row": 4,
+    "text": "Do you trust the contents of this project?"
+   },
+   {
+    "row": 5,
+    "text": ""
+   },
+   {
+    "row": 6,
+    "text": "Antigravity CLI requires permission to read, edit, and execute files here."
+   },
+   {
+    "row": 7,
+    "text": ""
+   },
+   {
+    "row": 8,
+    "text": "> Yes, I trust this folder"
+   },
+   {
+    "row": 9,
+    "text": "  No, exit"
+   },
+   {
+    "row": 10,
+    "text": ""
+   },
+   {
+    "row": 11,
+    "text": "  \u2191/\u2193 Navigate \u00b7 enter Confirm"
+   },
+   {
+    "row": 12,
+    "text": "                                                                                                    Gemini 3.1 Pro \u00b7 low"
+   },
+   {
+    "row": 13,
+    "text": ""
+   },
+   {
+    "row": 14,
+    "text": ""
+   },
+   {
+    "row": 15,
+    "text": ""
+   },
+   {
+    "row": 16,
+    "text": ""
+   },
+   {
+    "row": 17,
+    "text": ""
+   },
+   {
+    "row": 18,
+    "text": ""
+   },
+   {
+    "row": 19,
+    "text": ""
+   },
+   {
+    "row": 20,
+    "text": ""
+   },
+   {
+    "row": 21,
+    "text": ""
+   },
+   {
+    "row": 22,
+    "text": ""
+   },
+   {
+    "row": 23,
+    "text": ""
+   },
+   {
+    "row": 24,
+    "text": ""
+   },
+   {
+    "row": 25,
+    "text": ""
+   },
+   {
+    "row": 26,
+    "text": ""
+   },
+   {
+    "row": 27,
+    "text": ""
+   },
+   {
+    "row": 28,
+    "text": ""
+   },
+   {
+    "row": 29,
+    "text": ""
+   },
+   {
+    "row": 30,
+    "text": ""
+   },
+   {
+    "row": 31,
+    "text": ""
+   },
+   {
+    "row": 32,
+    "text": ""
+   },
+   {
+    "row": 33,
+    "text": ""
+   }
+  ]
+ },
+ "onboarding": {
+  "cursorRow": 28,
+  "cursorCol": 119,
+  "visibleLines": [
+   {
+    "row": 0,
+    "text": "Welcome to Antigravity CLI!"
+   },
+   {
+    "row": 1,
+    "text": ""
+   },
+   {
+    "row": 2,
+    "text": "Choose your color scheme:        \u256d\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256e"
+   },
+   {
+    "row": 3,
+    "text": "                                 \u2502 > you: add a greeting function                              \u2502"
+   },
+   {
+    "row": 4,
+    "text": "  > terminal                     \u2502                                                             \u2502"
+   },
+   {
+    "row": 5,
+    "text": "    light                        \u2502   Here's the change:                                        \u2502"
+   },
+   {
+    "row": 6,
+    "text": "    solarized light              \u2502                                                             \u2502"
+   },
+   {
+    "row": 7,
+    "text": "    colorblind-friendly light    \u2502   3     import \"fmt\"                                        \u2502"
+   },
+   {
+    "row": 8,
+    "text": "    dark                         \u2502   4                                                         \u2502"
+   },
+   {
+    "row": 9,
+    "text": "    solarized dark               \u2502   5  -  func main() {                                       \u2502"
+   },
+   {
+    "row": 10,
+    "text": "    colorblind-friendly dark     \u2502   5  +  func greet(name string) {                           \u2502"
+   },
+   {
+    "row": 11,
+    "text": "    tokyo night                  \u2502   6  +      fmt.Printf(\"Hello, %s!\\n\", name)                \u2502"
+   },
+   {
+    "row": 12,
+    "text": "                                 \u2502   7     }                                                   \u2502"
+   },
+   {
+    "row": 13,
+    "text": "                                 \u2502                                                             \u2502"
+   },
+   {
+    "row": 14,
+    "text": "                                 \u2502   \u25be Thought Process                                         \u2502"
+   },
+   {
+    "row": 15,
+    "text": "                                 \u2502     I need to add a greeting function. I'll use fmt.Printf. \u2502"
+   },
+   {
+    "row": 16,
+    "text": "                                 \u2502   \u2699 tool: write_file main.go                                \u2502"
+   },
+   {
+    "row": 17,
+    "text": "                                 \u2502   \u25c9 task: Implementing greeting                             \u2502"
+   },
+   {
+    "row": 18,
+    "text": "                                 \u2502   \u2717 error: compilation failed                               \u2502"
+   },
+   {
+    "row": 19,
+    "text": "                                 \u2502   \u26a0 warning: deprecation warning                            \u2502"
+   },
+   {
+    "row": 20,
+    "text": "                                 \u2502   \u2192 link: file:///path/to/main.go                           \u2502"
+   },
+   {
+    "row": 21,
+    "text": "                                 \u2502   \u2605 accent: highlighted text                                \u2502"
+   },
+   {
+    "row": 22,
+    "text": "                                 \u2502   \u00b7 dim: press Enter to continue                            \u2502"
+   },
+   {
+    "row": 23,
+    "text": "                                 \u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f"
+   },
+   {
+    "row": 24,
+    "text": ""
+   },
+   {
+    "row": 25,
+    "text": "    [Next]"
+   },
+   {
+    "row": 26,
+    "text": ""
+   },
+   {
+    "row": 27,
+    "text": "  \u2191/\u2193 Navigate \u00b7 enter Confirm"
+   },
+   {
+    "row": 28,
+    "text": "                                                                                                    Gemini 3.1 Pro \u00b7 low"
+   },
+   {
+    "row": 29,
+    "text": ""
+   },
+   {
+    "row": 30,
+    "text": ""
+   },
+   {
+    "row": 31,
+    "text": ""
+   },
+   {
+    "row": 32,
+    "text": ""
+   },
+   {
+    "row": 33,
+    "text": ""
+   }
+  ]
+ },
+ "terms": {
+  "cursorRow": 28,
+  "cursorCol": 29,
+  "visibleLines": [
+   {
+    "row": 0,
+    "text": ""
+   },
+   {
+    "row": 1,
+    "text": "    \u2584\u2580\u2580\u2584"
+   },
+   {
+    "row": 2,
+    "text": "   \u2580\u2580\u2580\u2580\u2580\u2580"
+   },
+   {
+    "row": 3,
+    "text": "  \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580"
+   },
+   {
+    "row": 4,
+    "text": " \u2584\u2580\u2580    \u2580\u2580\u2584"
+   },
+   {
+    "row": 5,
+    "text": "\u2584\u2580\u2580      \u2580\u2580\u2584"
+   },
+   {
+    "row": 6,
+    "text": ""
+   },
+   {
+    "row": 7,
+    "text": "Terms of Service & Data Use"
+   },
+   {
+    "row": 8,
+    "text": ""
+   },
+   {
+    "row": 9,
+    "text": "AI coding agents are known to have certain security risks, including autonomous code execution, data exfiltration,"
+   },
+   {
+    "row": 10,
+    "text": "prompt injection and supply chain risks. Ensure that you monitor and verify all actions taken by the agent."
+   },
+   {
+    "row": 11,
+    "text": ""
+   },
+   {
+    "row": 12,
+    "text": "------------------------------------------------------------------------------------------------------------------------"
+   },
+   {
+    "row": 13,
+    "text": ""
+   },
+   {
+    "row": 14,
+    "text": "  > [x] Yes, I agree to help improve Antigravity CLI by allowing"
+   },
+   {
+    "row": 15,
+    "text": "      Google to collect and use my Interactions data,"
+   },
+   {
+    "row": 16,
+    "text": "      subject to the Google Antigravity CLI Terms of Service"
+   },
+   {
+    "row": 17,
+    "text": "      and Google Privacy Policy. I understand I can"
+   },
+   {
+    "row": 18,
+    "text": "      choose to opt out later whenever I want via my"
+   },
+   {
+    "row": 19,
+    "text": "      settings."
+   },
+   {
+    "row": 20,
+    "text": ""
+   },
+   {
+    "row": 21,
+    "text": "      Links:"
+   },
+   {
+    "row": 22,
+    "text": "      - Terms of Service: https://antigravity.google/terms"
+   },
+   {
+    "row": 23,
+    "text": "      - Privacy Policy: https://policies.google.com/privacy"
+   },
+   {
+    "row": 24,
+    "text": ""
+   },
+   {
+    "row": 25,
+    "text": "    [Previous]      [Done]"
+   },
+   {
+    "row": 26,
+    "text": ""
+   },
+   {
+    "row": 27,
+    "text": ""
+   },
+   {
+    "row": 28,
+    "text": "  \u2191/\u2193 Navigate \u00b7 enter Toggle"
+   },
+   {
+    "row": 29,
+    "text": "                                                                                                    Gemini 3.1 Pro \u00b7 low"
+   },
+   {
+    "row": 30,
+    "text": ""
+   },
+   {
+    "row": 31,
+    "text": ""
+   },
+   {
+    "row": 32,
+    "text": ""
+   },
+   {
+    "row": 33,
+    "text": ""
+   }
+  ]
+ }
+}

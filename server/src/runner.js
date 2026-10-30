@@ -3006,7 +3006,9 @@ export function emptyPrompt(snapshot, screen, cli) {
   if (cli === 'opencode') return emptyOpencodeComposer(snapshot);
   const shape = liveComposer(snapshot, { notice: confirm?.notice });
   if (!shape || !(shape.located ? shape.cursorInside : shape.marked)) return false;
-  return composerBody(shape) === '';
+  if (composerBody(shape) !== '') return false;
+  const idle = cliById(cli)?.promptDetector?.idle;
+  return !idle || (snapshot?.visibleLines || []).some((l) => l.row > snapshot.cursorRow && idle.test(l.text));
 }
 
 /**
