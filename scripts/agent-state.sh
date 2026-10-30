@@ -19,8 +19,8 @@ set -u
 
 MODE="${1:-}"
 case "$MODE" in
-  restore|checkpoint|checkpoint-final|prune|stop-prune|_part|_adapter) ;;
-  *) echo "usage: $0 restore|checkpoint|checkpoint-final|prune|stop-prune" >&2; exit 2 ;;
+  restore|checkpoint|checkpoint-final|prune|stop-prune|migrate-antigravity|_part|_adapter) ;;
+  *) echo "usage: $0 restore|checkpoint|checkpoint-final|prune|stop-prune|migrate-antigravity <dir>" >&2; exit 2 ;;
 esac
 SELF="$0"
 START=$(date +%s)
@@ -117,7 +117,8 @@ else
       echo "agent-state: restore: out of time — a checkpoint still held the lock after ${BUDGET}s (AGENT_STATE_BUDGET)" >&2
       exit 1
     }
-  elif [ "$MODE" = checkpoint-final ]; then
+  elif [ "$MODE" = checkpoint-final ] || [ "$MODE" = migrate-antigravity ]; then
+    # The migration must run: the entrypoint moves the legacy tree aside after it.
     flock 9
   else
     # Timer and shutdown checkpoints can race; the one already holding the lock
@@ -228,8 +229,11 @@ rsync_adapter() {
     fx)
       rsync_tree --exclude '*.lock' --exclude 'index.pending' "$@" ;;
     antigravity)
-      # Databases go through checkpoint_antigravity, never a raw copy.
+      # Databases go through checkpoint_antigravity, never a raw copy. On a
+      # restore, the valid live databases restore_antigravity listed stay as
+      # they are.
       if [ "$_dir" = checkpoint ]; then set -- --exclude '*.db' "$@"; fi
+      if [ "$_dir" = restore ] && [ -s "${AGY_RESTORE_KEEP:-}" ]; then set -- --exclude-from="$AGY_RESTORE_KEEP" "$@"; fi
       rsync_tree --exclude '*-wal' --exclude '*-shm' --exclude '*.lock' \
         --exclude '/antigravity-cli/bin/***' --exclude '/antigravity-cli/log/***' \
         --exclude '/antigravity-cli/crashes/***' --exclude '/antigravity-cli/updater/***' \
@@ -525,41 +529,118 @@ checkpoint_sqlite_tree() {
   mv "$sqlite_next" "$sqlite_stamp"
 }
 
+# Antigravity's databases, as `find` lists them under a tree with
+# antigravity-cli/ and config/ at its top ($1; from $3, when given, down): every
+# `*.db`, and every database whose WAL holds frames (newer than $2, when
+# given), outside the folders the adapter keeps local.
+agy_databases() {
+  (cd "$1" && find "${3:-.}" \( -path ./antigravity-cli/bin -o -path ./antigravity-cli/log \
+      -o -path ./antigravity-cli/crashes -o -path ./antigravity-cli/updater \
+      -o -path ./antigravity-cli/presence \) -prune \
+    -o -type f \( -name '*.db' -o \( -name '*.db-wal' -size +32c \) \) ${2:+-newer "$2"} -print) \
+    | sed 's/-wal$//; s|^\./||'
+}
+
+# A path as a SQLite URI filename (only %, ? and # need escaping in a path).
+sqlite_uri() { printf 'file:%s' "$1" | sed 's/%/%25/g; s/?/%3f/g; s/#/%23/g'; }
+
+# A consistent copy of one Antigravity database, validated, to $2. agy's files
+# are only read: while agy has the database open (a -wal or -shm beside it) a
+# read-only connection shares them; once it has closed it, everything is in
+# the main file, which is read immutable so no sidecar is created, and the copy
+# is refused if the file changed meanwhile.
+agy_backup() {
+  _src="$1" _dst="$2"
+  rm -f "$_dst"
+  _esc=$(printf '%s' "$_dst" | sed "s/'/''/g")
+  if [ -e "$_src-wal" ] || [ -e "$_src-shm" ]; then
+    sqlite3 "$(sqlite_uri "$_src")?mode=ro" ".timeout 5000" ".backup '$_esc'" || return 1
+  else
+    _before=$(stat -c '%s|%Y|%i' "$_src") || return 1
+    sqlite3 "$(sqlite_uri "$_src")?immutable=1" ".backup '$_esc'" || return 1
+    [ "$(stat -c '%s|%Y|%i' "$_src" 2>/dev/null)" = "$_before" ] || return 1
+  fi
+  [ "$(sqlite3 "$_dst" 'PRAGMA quick_check;' 2>/dev/null)" = ok ]
+}
+
 # Antigravity: the file tree as usual (databases excluded), then a consistent
 # `.backup` of every database whose file or WAL changed since the last pass.
 # Each database lands at its own path in the durable tree, so a restore is a
-# plain tree copy. A failed backup keeps the stamp, so the next pass retries it.
+# plain tree copy. Failures are per database: the stamp moves on, and one that
+# could not be copied is tried again on the next passes (antigravity-db.retry,
+# "<tries> <path>"). After AGY_DB_TRIES failed passes in a row it is logged
+# once and left until it changes again, so one corrupt file neither fails
+# every checkpoint nor brings every other database along with it.
+AGY_DB_TRIES=3
 checkpoint_antigravity() {
   live="$1" durable="$2"
   [ -d "$live" ] || return 0
   checkpoint_tree antigravity "$live" "$durable" || return 1
   db_stamp="$AM_LOCAL/agent-state-stamps/antigravity-db"
+  db_retry="$db_stamp.retry"
   [ -e "$db_stamp" ] || touch -t 197001010000 "$db_stamp"
   db_next="$db_stamp.next.$$"
   db_list="$db_stamp.files.$$"
+  retry_next="$db_retry.next.$$"
   mark_checkpoint_floor "$db_next"
-  (cd "$live" && find . -type f \( -name '*.db' -o -name '*.db-wal' \) -newer "$db_stamp" -print) \
-    | sed 's/-wal$//' | sort -u > "$db_list"
+  { agy_databases "$live" "$db_stamp"; [ -f "$db_retry" ] && cut -d' ' -f2- "$db_retry"; } | sort -u > "$db_list"
+  : > "$retry_next"
   stage_dir="$AM_LOCAL/agent-state-snapshots"
   mkdir -p "$stage_dir"
   staged="$stage_dir/antigravity.$$.tmp"
-  escaped=$(printf '%s' "$staged" | sed "s/'/''/g")
   db_failed=0
   while IFS= read -r rel; do
-    rel="${rel#./}"
     [ -s "$live/$rel" ] || continue
-    rm -f "$staged"
-    if ! sqlite3 "$live/$rel" ".timeout 5000" ".backup '$escaped'" \
-      || [ "$(sqlite3 "$staged" 'PRAGMA quick_check;' 2>/dev/null)" != ok ]; then
-      echo "agent-state: could not take a consistent copy of $live/$rel" >&2
-      db_failed=1; continue
+    if agy_backup "$live/$rel" "$staged"; then
+      mkdir -p "$(dirname "$durable/$rel")"
+      rsync -a --delay-updates "$staged" "$durable/$rel" && continue
     fi
-    mkdir -p "$(dirname "$durable/$rel")"
-    rsync -a --delay-updates "$staged" "$durable/$rel" || db_failed=1
+    tries=$(awk -v r="$rel" '{ n = $1; sub(/^[0-9]+ /, "") } $0 == r { print n; exit }' "$db_retry" 2>/dev/null)
+    tries=$(( ${tries:-0} + 1 ))
+    if [ "$tries" -ge "$AGY_DB_TRIES" ]; then
+      echo "agent-state: could not take a consistent copy of $live/$rel after $tries passes; leaving it until it changes" >&2
+    else
+      echo "agent-state: could not take a consistent copy of $live/$rel; retrying next pass" >&2
+      printf '%s %s\n' "$tries" "$rel" >> "$retry_next"
+      db_failed=1
+    fi
   done < "$db_list"
   rm -f "$staged" "$db_list"
-  if [ "$db_failed" -ne 0 ]; then rm -f "$db_next"; return 1; fi
+  mv "$retry_next" "$db_retry"
   mv "$db_next" "$db_stamp"
+  [ "$db_failed" -eq 0 ]
+}
+
+# A live database that is valid is the restore authority on a hot restart: it
+# can hold committed rows newer than its last checkpoint, some still in its
+# WAL, so a newer `.backup` must not replace it (the opencode/Hermes rule, per
+# database). The valid ones are kept out of the restore; an invalid one is moved
+# aside for diagnosis so its checkpoint comes back in its place.
+restore_antigravity() {
+  durable="$1"
+  mkdir -p "$ANTIGRAVITY_LIVE"
+  AGY_RESTORE_KEEP=""
+  if [ -z "$DRY_RUN" ]; then
+    AGY_RESTORE_KEEP="$WORK/antigravity-keep"
+    : > "$AGY_RESTORE_KEEP"
+    step "checking the live Antigravity databases"
+    agy_databases "$ANTIGRAVITY_LIVE" | while IFS= read -r rel; do
+      db="$ANTIGRAVITY_LIVE/$rel"
+      if [ -s "$db" ] && [ "$(sqlite3 "$(sqlite_uri "$db")?mode=ro" 'PRAGMA quick_check;' 2>/dev/null)" = ok ]; then
+        # An rsync pattern: anchored, wildcards escaped.
+        printf '/%s\n' "$rel" | sed 's/[][*?\\]/\\&/g' >> "$AGY_RESTORE_KEEP"
+      else
+        aside="$AM_LOCAL/agent-state-invalid/antigravity.$(date -u +%Y%m%dT%H%M%SZ).$$/$rel"
+        mkdir -p "$(dirname "$aside")"
+        for f in "$db" "$db-wal" "$db-shm"; do [ -e "$f" ] && mv "$f" "$aside${f#"$db"}"; done
+        echo "agent-state: invalid live Antigravity database moved to $aside" >&2
+      fi
+    done
+  fi
+  export AGY_RESTORE_KEEP
+  restore_tree antigravity "$durable" "$ANTIGRAVITY_LIVE"; _rc=$?
+  unset AGY_RESTORE_KEEP
+  return "$_rc"
 }
 
 # ---------- restore source: the bucket API, not the mount ----------
@@ -773,7 +854,6 @@ restore_openclaw() { restore_tree openclaw "$1" "$OPENCLAW_STATE_DIR"; }
 restore_opencode() { restore_sqlite_tree "$1" "$OPENCODE_LIVE" opencode.db opencode.db; }
 restore_hermes() { restore_sqlite_tree "$1" "$HERMES_LIVE" state.db state.db; }
 restore_fx() { restore_tree fx "$1" "$FX_LIVE"; }
-restore_antigravity() { restore_tree antigravity "$1" "$ANTIGRAVITY_LIVE"; }
 
 ADAPTERS="codex claude gemini openclaw opencode hermes fx antigravity"
 live_of() {
@@ -898,6 +978,47 @@ if [ "$MODE" = _adapter ]; then
   exit $?
 fi
 
+# ---------- migrate-antigravity: a legacy ~/.gemini/{antigravity-cli,config} ----------
+# The entrypoint's one-time move of a real directory that an agy run before the
+# links existed left in HOME. Its files go to the durable tree with the
+# adapter's filters (no WAL/SHM, locks, logs, crash dumps, updater, binaries),
+# and each database through agy_backup, so committed rows still in a WAL come
+# along and the durable copy is one valid database. A database that cannot be
+# copied is named and stays in the rollback copy the entrypoint keeps; it does
+# not stop the boot.
+if [ "$MODE" = migrate-antigravity ]; then
+  legacy="${2:-}"; legacy="${legacy%/}"
+  name="${legacy##*/}" parent="${legacy%/*}"
+  case "$name" in
+    antigravity-cli|config) ;;
+    *) echo "usage: $0 migrate-antigravity <dir named antigravity-cli or config>" >&2; exit 2 ;;
+  esac
+  mkdir -p "$ANTIGRAVITY_DURABLE"
+  if ! rsync_adapter checkpoint antigravity -a --update "$legacy" "$ANTIGRAVITY_DURABLE/"; then
+    echo "agent-state: could not migrate $legacy" >&2; exit 1
+  fi
+  stage_dir="$AM_LOCAL/agent-state-snapshots"
+  mkdir -p "$stage_dir"
+  staged="$stage_dir/antigravity-migrate.$$.tmp"
+  moved=0 skipped=0
+  list="$stage_dir/antigravity-migrate.$$.list"
+  agy_databases "$parent" "" "./$name" > "$list"
+  while IFS= read -r rel; do
+    src="$parent/$rel" dst="$ANTIGRAVITY_DURABLE/$rel"
+    # --update, as for every other file: a newer durable copy stays.
+    if [ -e "$dst" ] && [ "$dst" -nt "$src" ] && { [ ! -e "$src-wal" ] || [ "$dst" -nt "$src-wal" ]; }; then continue; fi
+    if agy_backup "$src" "$staged" && mkdir -p "$(dirname "$dst")" && rsync -a "$staged" "$dst"; then
+      moved=$((moved + 1))
+    else
+      echo "agent-state: could not take a consistent copy of $src; it stays in the rollback copy" >&2
+      skipped=$((skipped + 1))
+    fi
+  done < "$list"
+  rm -f "$staged" "$list"
+  log "migrate: $legacy: $moved database(s) copied through SQLite's backup, $skipped left in the rollback copy"
+  exit 0
+fi
+
 if [ "$MODE" = prune ]; then
   # Junk the excludes above keep out of every restore and checkpoint, but that
   # an older version had already written to the bucket — 10k+ files of it,
@@ -977,7 +1098,7 @@ fi
 # (whose environment exports these very paths) orphaned six open Codex
 # rollouts. At boot no agent runs yet, so the check costs nothing there.
 open_in_live_roots() {
-  ls -l /proc/[0-9]*/fd 2>/dev/null | awk -v roots="$CODEX_HOME|$CLAUDE_CONFIG_DIR|$GEMINI_LIVE|$OPENCLAW_STATE_DIR|$OPENCODE_LIVE|$HERMES_LIVE|$FX_LIVE" '
+  ls -l /proc/[0-9]*/fd 2>/dev/null | awk -v roots="$CODEX_HOME|$CLAUDE_CONFIG_DIR|$GEMINI_LIVE|$OPENCLAW_STATE_DIR|$OPENCODE_LIVE|$HERMES_LIVE|$FX_LIVE|$ANTIGRAVITY_LIVE" '
     BEGIN { n = split(roots, r, "|") }
     /^\/proc\/[0-9]+\/fd:$/ { pid = $0; sub(/^\/proc\//, "", pid); sub(/\/fd:$/, "", pid); next }
     / -> / { t = $0; sub(/^.* -> /, "", t)

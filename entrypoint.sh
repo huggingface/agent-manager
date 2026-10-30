@@ -122,19 +122,29 @@ done
 
 # opencode, Hermes, fx and Antigravity expect their state at paths under HOME. The live
 # targets are local; legacy real directories are retained as rollback copies
-# instead of being deleted during migration.
+# instead of being deleted during migration. agy's databases are not raw-copied:
+# agent-state.sh moves them through SQLite's backup (rows still in a WAL come
+# along) and leaves its locks, logs and binaries behind.
+AGENT_STATE_SCRIPT="${AGENT_STATE_SCRIPT:-/app/scripts/agent-state.sh}"
+export AGENT_STATE_SCRIPT
 OPENCODE_LINK="$HOME/.local/share/opencode"
 HERMES_LINK="$HOME/.hermes"
 FX_LINK="$HOME/.fx"
 AGY_LINK="$HOME/.gemini/antigravity-cli"
 AGY_CONFIG_LINK="$HOME/.gemini/config"
+migrate_tree() {
+  case "$1" in
+    "$AGY_LINK"|"$AGY_CONFIG_LINK") sh "$AGENT_STATE_SCRIPT" migrate-antigravity "$1" ;;
+    *) rsync -a --update "$1/" "$2/" ;;
+  esac
+}
 mkdir -p "$(dirname "$OPENCODE_LINK")" "$HOME/.gemini"
 for pair in "$OPENCODE_LINK|$OPENCODE_DURABLE" "$HERMES_LINK|$HERMES_DURABLE" \
   "$FX_LINK|$FX_DURABLE" "$AGY_LINK|$ANTIGRAVITY_DURABLE/antigravity-cli" \
   "$AGY_CONFIG_LINK|$ANTIGRAVITY_DURABLE/config"; do
   lnk="${pair%%|*}"; dur="${pair##*|}"
   if [ -e "$lnk" ] && [ ! -L "$lnk" ]; then
-    if ! rsync -a --update "$lnk/" "$dur/"; then
+    if ! migrate_tree "$lnk" "$dur"; then
       echo "ERROR: could not migrate agent state from $lnk" >&2
       exit 1
     fi
@@ -158,8 +168,6 @@ boot "migrations done in $(boot_elapsed "$PHASE_T0")"
 
 # Restore after all one-time migrations have populated the durable side. On a
 # hot/dev restart, --update preserves newer local state.
-AGENT_STATE_SCRIPT="${AGENT_STATE_SCRIPT:-/app/scripts/agent-state.sh}"
-export AGENT_STATE_SCRIPT
 PHASE_T0=$(date +%s)
 boot "restoring agent state from $DATA_DIR/state…"
 if ! AGENT_STATE_FROM_ENTRYPOINT=1 sh "$AGENT_STATE_SCRIPT" restore; then

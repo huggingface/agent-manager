@@ -13,7 +13,13 @@ symlink to local disk rather than an env var pointed there. Antigravity CLI
 (`agy`) is the same: no config-dir override (it ignores `GEMINI_CLI_HOME`), so
 its two folders under `~/.gemini` are symlinks into local disk. It keeps one
 WAL-mode SQLite database per conversation, so each changed database is copied
-with SQLite's online backup, never as a raw file.
+with SQLite's online backup, never as a raw file, and only read: a read-only
+connection while agy has it open, an immutable read once agy has closed it. A
+database that can't be copied is retried for three passes, then left until it
+changes; the others are not held back by it. On a hot restart a valid live
+database is kept, as for opencode and Hermes. A real `~/.gemini/antigravity-cli`
+an earlier agy left in HOME is migrated the same way (`agent-state.sh
+migrate-antigravity`), and kept as a rollback copy.
 
 The old layout also copied opencode and Hermes SQLite databases, WALs, and SHMs
 with `rsync`. Those files can be observed at different transaction boundaries;

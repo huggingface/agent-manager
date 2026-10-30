@@ -196,10 +196,18 @@ A session is a *query*, not a file.
 - A conversation's folder comes from `cache/last_conversations.json` (`{cwd: id}`, what
   `agy -c` resumes), else from the first prompt step that records it. Prompt steps record it
   in print and interactive runs, but not a prompt seeded at launch with `agy -i`.
-- The runner pins `antigravityConversationId` (the conversation written in the pane's folder
-  since launch, for a pane that holds its folder alone) and resumes it with
-  `--conversation <id>`, existence-checked in the shell. Unpinned panes fall back to the
-  folder. Read-only; the db is never copied. Sharing is not offered (no exporter).
+- The runner pins `antigravityConversationId` from the pane's own agy: it holds
+  `presence/<id>.lock` open for its current conversation (from the first prompt, and it moves
+  on `/new`), which names it exactly, in a shared folder too. Only when no agy process can be
+  read does the folder fallback pin (the conversation written there since launch, while the
+  pane has no pin and holds its folder alone). A pane that shared its folder remembers it
+  (`antigravityCaptureSince`) and gets nothing older. A pinned pane resumes with
+  `--conversation <id>`, existence-checked in the shell.
+- Read-only, and nothing is created beside agy's files: a database agy has closed (no
+  `-wal`/`-shm`) is opened immutable. A step whose payload can't be decoded is a marker; a bad
+  nested field reads as empty. Full steps are kept for at most 8 conversations in use (64 MiB);
+  the bulk pass keeps stats and digests only. Tool arguments and output are kept clipped
+  (32,000 chars) with their full length. Sharing is not offered (no exporter).
 
 ## 7. What the Hub's viewer does, for reference
 
