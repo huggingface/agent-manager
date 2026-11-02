@@ -39,8 +39,9 @@ import { ensureClaudeDialogDefaults, trustWorkspacesRoot } from './first-run.js'
 import {
   attach, agentInfo, deriveState, stop, stopAll, ensureRunning, sendInput, pasteInput, isRunning,
   waitForInputReady, runIdOf, capturePane, ghosttyReady, ghosttyError, startedAt, restart as restartSession,
-  installClaudeRepinHook, installOpencodeRepinPlugin,
+  installClaudeRepinHook, installOpencodeRepinPlugin, setLaunchEnv,
 } from './runner.js';
+import { createSafeAgents } from './safeagents.js';
 
 // Control frames ride the terminal socket behind a leading NUL pair, which real
 // PTY output never begins with. Same sentinel the old copy-mode hint used, so the
@@ -110,6 +111,23 @@ ensureClaudeDialogDefaults();
 // OpenCode's global plugin reports the root session chosen by /new (/clear),
 // and the next prompt after switching to an existing session.
 installOpencodeRepinPlugin();
+
+// The tool-call guard (safeagents.js): a proxy in front of Claude Code's model
+// server, off unless the operator turns it on. Its setting lives in its own
+// file so turning it on is not a rewrite of every other setting. Boot revival
+// waits for its first start, or revived sessions would launch around it.
+const SAFEAGENTS_FILE = path.join(DATA_DIR, 'safeagents.json');
+const normalizeSafeAgents = (saved = {}) => ({
+  mode: ['off', 'log-only', 'block'].includes(saved.mode) ? saved.mode : 'off',
+  allowHosts: Array.isArray(saved.allowHosts)
+    ? [...new Set(saved.allowHosts.map((h) => String(h).trim().toLowerCase()).filter(Boolean))]
+    : [],
+});
+const safeagents = createSafeAgents({
+  dataDir: DATA_DIR,
+  isRunning: (id, runId) => isRunning(id) && runIdOf(id) === runId,
+});
+setLaunchEnv((session, runId) => safeagents.envFor(session, runId));
 
 // One-time migration to the explicit-path model: sessions used to own a folder
 // named after them (renamed along with them), or inherit their group's shared
@@ -238,6 +256,7 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
     if (shutdownStarted) return;
     shutdownStarted = true;
     try { await stopAll(); } catch {}
+    try { await safeagents.shutdown(); } catch {}
     process.exit(0);
   });
 }
@@ -668,6 +687,47 @@ api.get('/api/usage', async (req, res) => res.json(await buildUsage(req.query.de
 api.get('/api/operations', (req, res) => {
   const before = typeof req.query.before === 'string' && req.query.before ? req.query.before : null;
   res.json({ operations: readOperations(req.query.limit, before), generatedAt: new Date().toISOString() });
+});
+
+// ---------- tool-call guard (safeagents.js) ----------
+// One read for the Safety page: the setting, the proxy's state, the live lines
+// (every call, this boot only) and the journal (flagged calls, kept on the
+// bucket with their full arguments — which is why it is never sent anywhere
+// else and the page asks before showing one in full).
+api.get('/api/safeagents', (req, res) => {
+  const stored = readSettingsFile(SAFEAGENTS_FILE);
+  const limit = Number(req.query.limit) || 300;
+  let journal = [];
+  let journalError = null;
+  try { journal = safeagents.journal(limit); } catch (e) { journalError = String((e && e.message) || e); }
+  res.json({
+    config: normalizeSafeAgents(stored.unreadable ? {} : stored.value),
+    rev: stored.rev || null,
+    readError: stored.unreadable || null,
+    status: safeagents.status(),
+    calls: safeagents.recentCalls(limit),
+    log: safeagents.recentLog(limit),
+    journal,
+    journalError,
+  });
+});
+api.put('/api/safeagents/config', async (req, res) => {
+  const cfg = normalizeSafeAgents(req.body || {});
+  let commit;
+  try {
+    commit = commitSettings(SAFEAGENTS_FILE, cfg, baseOf(req));
+  } catch {
+    return res.status(500).json(settingsWriteFailure(SAFEAGENTS_FILE));
+  }
+  if (commit.refused) {
+    const body = commit.refused.body;
+    if (body.value) body.value = normalizeSafeAgents(body.value);
+    return res.status(commit.refused.status).json(body);
+  }
+  // Answered once the proxy has (re)started or failed to, so the page shows
+  // the outcome of the change rather than "starting…".
+  await safeagents.configure(cfg);
+  res.json({ ok: true, config: cfg, rev: commit.rev, status: safeagents.status() });
 });
 
 api.get('/api/traces', async (_req, res) => res.json(await buildTraces()));
@@ -4181,12 +4241,18 @@ startStallProfiler();
 // happens here, synchronously; the decision itself waits for the trace digests
 // it judges "recent" with.
 runstate.init();
+// Down here rather than beside the guard itself: reading a settings file needs
+// the helpers defined above.
+const safeagentsBoot = (() => {
+  const stored = readSettingsFile(SAFEAGENTS_FILE);
+  return safeagents.configure(normalizeSafeAgents(stored.unreadable ? {} : stored.value));
+})();
 setTimeout(() => {
   // A locked Space serves no terminals, so it starts nothing — but it still
   // records what's running, so the snapshot stays true for the next boot. The
   // decision waits for the first (bounded) privacy verdict rather than reading
   // the fail-closed `checking` state as a reason not to revive.
-  firstVerdict.then(() => {
+  Promise.all([firstVerdict, safeagentsBoot]).then(() => {
     const done = isLocked()
       ? Promise.resolve([])
       : runstate.reviveOnBoot({

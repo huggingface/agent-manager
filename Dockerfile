@@ -115,6 +115,15 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 RUN env UV_TOOL_BIN_DIR=/usr/local/bin UV_TOOL_DIR=/opt/uv-tools \
       uv tool install --python /usr/bin/python3 "huggingface_hub[cli]" \
       || echo "hf cli install failed"
+# safeagents: the tool-call guard behind Settings → Safety (server/src/
+# safeagents.js). Not on PyPI, so it is installed from a PINNED commit, for the
+# same reproducibility reason as fx and agy above. Off until the operator turns
+# it on; a missing binary only shows the page as "not installed".
+ARG SAFEAGENTS_REV=9caa9e613dd2684eddf887835b0c170a3a7ecbfb
+RUN env UV_TOOL_BIN_DIR=/usr/local/bin UV_TOOL_DIR=/opt/uv-tools \
+      uv tool install --python /usr/bin/python3 \
+        "safeagents @ git+https://github.com/huggingface/safeagents@${SAFEAGENTS_REV}" \
+      || echo "safeagents install failed"
 
 # Headless Chromium for Playwright, shared by every agent and both language
 # bindings via PLAYWRIGHT_BROWSERS_PATH (world-writable so a binding pinned to
@@ -205,7 +214,7 @@ RUN set +e; \
     printf '  %-10s %s\n' python3 "$(python3 --version 2>&1)"; \
     echo "  ----------------------------------------------------------"; \
     missing=""; \
-    for c in claude codex gemini agy opencode openclaw hermes fx ccusage uv hf; do \
+    for c in claude codex gemini agy opencode openclaw hermes fx ccusage uv hf safeagents; do \
       path="$(command -v "$c" 2>/dev/null)"; \
       if [ -n "$path" ]; then \
         ver="$(timeout 30 "$c" --version 2>&1 | head -1 | tr -d '\r')"; \

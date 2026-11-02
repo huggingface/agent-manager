@@ -1123,3 +1123,43 @@ export interface SessionRequest {
 export interface SessionInteraction {canSend: boolean; requests: SessionRequest[]; error: string | null;}
 export const answerSessionRequest = (id: string, key: string, response: {decision?: string; answers?: Record<string, string>}): Promise<{ok: boolean}> =>
   fetch(`/api/sessions/${encodeURIComponent(id)}/answer`, { method: 'POST', headers: HEADERS, body: JSON.stringify({key, ...response}) }).then(json);
+
+// The tool-call guard: a safeagents proxy in front of Claude Code's model server
+// (server/src/safeagents.js). `calls` is every reviewed call since the proxy
+// started; `journal` is the flagged ones, kept on the bucket with full arguments.
+export type SafeAgentsMode = 'off' | 'log-only' | 'block';
+export type SafeAgentsVerdict = 'passed' | 'suspicious' | 'flagged' | 'blocked';
+export type SafeAgentsConfig = { mode: SafeAgentsMode; allowHosts: string[] };
+export type SafeAgentsStatus = {
+  mode: SafeAgentsMode;
+  state: 'off' | 'starting' | 'ready' | 'draining' | 'failed' | 'unavailable';
+  error: string | null;
+  upstream: string;
+  listen: string;
+  runningMode: 'log-only' | 'block' | null;
+  startedAt: number | null;
+  pid: number | null;
+  counts: Record<SafeAgentsVerdict, number>;
+  guarded: string[];
+};
+export type SafeAgentsCall = {
+  at: number; time: string; journalId: number | null;
+  verdict: SafeAgentsVerdict; tool: string; what: string; why: string;
+};
+export type SafeAgentsJournalEntry = {
+  id: number; time: number; verdict: SafeAgentsVerdict; tool: string; arguments: string;
+  reason: string | null; signals: { id: string; severity: string; title: string }[];
+  judge: string | null; model: string; task: string;
+};
+export type SafeAgentsView = {
+  config: SafeAgentsConfig; rev: string | null; readError: string | null;
+  status: SafeAgentsStatus; calls: SafeAgentsCall[]; log: { at: number; text: string }[];
+  journal: SafeAgentsJournalEntry[]; journalError: string | null;
+};
+export const getSafeAgents = (limit = 300): Promise<SafeAgentsView> =>
+  fetch(`/api/safeagents?limit=${limit}`).then(json);
+export const setSafeAgentsConfig = (config: SafeAgentsConfig, rev: string | null):
+  Promise<{ ok: true; config: SafeAgentsConfig; rev: string; status: SafeAgentsStatus }> =>
+  fetch(`/api/safeagents/config${rev ? `?base=${encodeURIComponent(rev)}` : ''}`, {
+    method: 'PUT', headers: HEADERS, body: JSON.stringify(config),
+  }).then(json);

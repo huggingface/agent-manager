@@ -62,7 +62,7 @@ export function createValidator({ cliExists, sessionExists, groupExists }) {
       if (!/^\d+$/.test(q[key])) throw invalid(key, 'must be an integer');
       number(Number(q[key]), key, min, max);
     };
-    if (route === '/api/operations') queryNumber('limit', 1, 1000);
+    if (route === '/api/operations' || route === '/api/safeagents') queryNumber('limit', 1, 1000);
     if (route.endsWith('/dispatches')) queryNumber('since', 0);
     if (route === '/api/usage') {
       optional(q, 'provider', oneOf, ['', 'claude', 'codex', 'opencode', 'hermes', 'openclaw', 'gemini']);
@@ -132,6 +132,12 @@ export function createValidator({ cliExists, sessionExists, groupExists }) {
       if (b.archive) optional(b.archive, 'after', oneOf, ['week', 'month', 'never']);
       if (b.revive) { optional(b.revive, 'enabled', boolean); optional(b.revive, 'days', oneOf, [1, 3, 7]); }
       if (b.backup) { optional(b.backup, 'every', oneOf, ['never', '1h', '3h', '24h']); optional(b.backup, 'dataset', text, { empty: true }); optional(b.backup, 'exclude', strings); }
+    } else if (route === '/api/safeagents/config') {
+      optional(b, 'mode', oneOf, ['off', 'log-only', 'block']);
+      optional(b, 'allowHosts', strings);
+      for (const host of b.allowHosts || []) {
+        if (!/^[a-z0-9.-]+$/i.test(host.trim())) throw invalid('allowHosts', 'must be host names');
+      }
     } else if (route === '/api/secrets') {
       optional(b, 'notes', object);
       for (const value of Object.values(b.notes || {})) text(value, 'notes entry', { empty: true });

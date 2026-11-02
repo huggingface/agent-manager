@@ -163,6 +163,15 @@ export function isRunning(id) {
   return hosts.has(id) && !stopping.has(id);
 }
 
+// Env a launch adds on top of the server's own, decided at the moment of the
+// launch — the tool-call guard uses it to route a session through its proxy
+// (safeagents.js). Injected rather than imported so this module stays the one
+// that owns spawning and knows nothing about what is layered on it.
+let launchEnv = () => ({});
+export function setLaunchEnv(fn) {
+  launchEnv = typeof fn === 'function' ? fn : () => ({});
+}
+
 // Every pane this process has launched, by anyone, including ones that have
 // since exited. Boot revival starts sessions on a stagger; one the operator
 // opened (and perhaps stopped again) before its slot is theirs, and the slot
@@ -2155,6 +2164,11 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     // names one interface the manager stops answering on localhost.
     AM_HOST: INTERNAL_HOST,
   };
+  try {
+    Object.assign(env, launchEnv(session, runId));
+  } catch (error) {
+    console.error('[runner] launch env', error && error.message);
+  }
   const term = pty.spawn('bash', ['-lc', full], {
     name: 'xterm-256color', cols, rows, cwd: workdir, env,
   });

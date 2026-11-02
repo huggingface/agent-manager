@@ -2384,3 +2384,27 @@ a.btn-ghost { text-decoration: none; }
 .row:hover .deprecated-tag { opacity: 0; }
 /* above the terminal's boot/exit overlays, which start right under the header */
 .deprecated-banner { display: block; position: relative; z-index: 6; flex: none; padding: 5px 11px; font-size: 12px; line-height: 1.4; background: color-mix(in srgb, var(--warn, #c9972f) 10%, var(--panel)); border-bottom: 1px solid color-mix(in srgb, var(--warn, #c9972f) 35%, var(--border)); }
+
+/* ---- settings: Safety (SafetyPanel.tsx) — reuses the API log's table ---- */
+.sg .setting-row { align-items: flex-start; }
+.sg .seg { flex: none; }
+.sg .seg button { white-space: nowrap; }
+.sg .al-head { flex-wrap: wrap; }
+.sg-status { display: flex; flex-wrap: wrap; gap: 6px 16px; font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
+.sg-status b { font-weight: 600; color: var(--text); }
+.sg-status b.sg-ok { color: var(--go); }
+.sg-status b.sg-bad { color: var(--danger); }
+.sg-hosts { min-width: 220px; padding: 5px 8px; font-size: 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); color: var(--text); }
+.sg-row { cursor: pointer; }
+.sg-detail td { white-space: normal; background: var(--panel-2); }
+.sg-detail td:hover { background: var(--panel-2); }
+.sg-card { padding: 8px 2px; font-family: var(--font-sans, inherit); font-size: 12px; }
+.sg-card dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0 0 10px; }
+.sg-card dt { color: var(--muted); }
+.sg-card dd { margin: 0; overflow-wrap: anywhere; }
+.sg-task { white-space: pre-wrap; max-height: 160px; overflow: auto; }
+.sg-args, .sg-log { margin: 4px 0 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--panel); font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; }
+@media (max-width: 640px) {
+  .sg .setting-row { flex-direction: column; gap: 8px; }
+  .sg-hosts { min-width: 0; width: 100%; }
+}
