@@ -20,6 +20,7 @@ const loadUsage = () => import('./UsagePanel');
 const loadApiLog = () => import('./ApiLog');
 const loadSkills = () => import('./SkillsEditor');
 const loadCron = () => import('./CronSettings');
+const loadSafety = () => import('./SafetyPanel');
 
 // 'already the latest' and 'updated' must not read the same: a run where
 // nothing moved looking like one where something did is the failure mode this
@@ -1101,6 +1102,20 @@ export default function SettingsView({
               deleting the source does not delete its audit copy, and older entries were not rewritten.
             </p>
             <LazyPanel load={loadApiLog} what="the API log" render={(m) => <m.default />} />
+          </div>
+        )}
+
+        {page === 'safety' && (
+          <div className="settings-page wide">
+            <h2>Safety</h2>
+            <p className="s-help">
+              Checks every tool call the model makes before Claude Code runs it, with{' '}
+              <a href="https://github.com/huggingface/safeagents" target="_blank" rel="noreferrer">safeagents</a>:
+              tools the request never declared, hosts the conversation never mentioned, and atif-scan's findings
+              (credential reads, sandbox escapes, …). Flagged calls are kept with their full arguments
+              in <span className="mono">/data/safeagents/calls.jsonl</span>, which can hold secrets.
+            </p>
+            <LazyPanel load={loadSafety} what="the safety page" render={(m) => <m.default />} />
           </div>
         )}
 
