@@ -146,7 +146,11 @@ try {
     // 793, ~0.1 kB over this branch's needs, as tight as the raise above.
     // After merging #227 (2026-10-30): main 811,065, this branch 812,081
     // (+1,016, unchanged), 49 over 793. Raised to 794.
-    assert.ok(entry.length <= 794 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 794 kB budget`);
+    //
+    // Terminal shortcuts (2026-11-03): +1,063 for the key rules in
+    // lib/terminalKeys.ts, which the terminal's key handler needs on first
+    // paint. Raised to 795.
+    assert.ok(entry.length <= 795 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 795 kB budget`);
     // One literal only that panel's module contains — a dynamic import that
     // merely wraps an unchanged graph would leave these in the entry.
     for (const [panel, marker] of [
