@@ -66,7 +66,11 @@ await build({
           const call = [
             // 'say': a line of narration per step, so opened work is many rows
             // rather than one grouped "Bash ×N".
-            ...(turn.say ? [{type:'text', text:'Checking service '+k+' before the next log.'}] : []),
+            // 'long': narration that only differs after a shared opening of
+            // more than 48 characters, at the same length every step.
+            ...(turn.say ? [{type:'text', text: turn.say === 'long'
+              ? 'Checking service state before scheduling the next background verification. Service '+String(k).padStart(3,'0')+'. '+'x'.repeat(200)
+              : 'Checking service '+k+' before the next log.'}] : []),
             {type:'tool_use', id:'hc'+k, name:'Bash', text:'{"command":"step '+k+'"}'}];
           const result = {type:'tool_result', id:'hc'+k, text:'output of step '+k};
           // 'split': the call and its result as two records, the way Claude
@@ -584,6 +588,27 @@ try {
     return { openedStep: opened };
   });
   assert.deepEqual(growing.openSteps, [growing.openedStep], `the step the operator opened is the one still open (${JSON.stringify(growing.openSteps)})`);
+
+  // 13. An opened NOTE stays the one open while earlier notes land above it,
+  // when every note opens with the same sentence and has the same length.
+  await p.evaluate(() => window.fixture.mount({ count: 20, turn: { count: 190, bytes: 160 * 1024, say: 'long' }, beforeDelay: 900 }));
+  await p.waitForFunction(() => document.querySelector('.cx-fold')
+    && window.reads.filter((x) => x.at === 'before').length >= 3, null, { timeout: 30_000 });
+  await p.locator('.cx-fold').last().click();
+  await p.waitForSelector('.cx-steps .cs.note', { timeout: 10_000 });
+  const noteBefore = await p.evaluate(() => {
+    const row = [...document.querySelectorAll('.cx-steps .cs.note')].at(-2);
+    row.querySelector('.cs-head').click();
+    return window.reads.filter((x) => x.at === 'before').length;
+  });
+  await p.waitForSelector('.cx-steps .cs.note.open .cs-body');
+  const openedNote = (await p.locator('.cx-steps .cs.note.open .cs-body').textContent()).trim();
+  await p.waitForFunction((n) => window.reads.filter((x) => x.at === 'before').length >= n + 2, noteBefore, { timeout: 30_000 });
+  await p.waitForTimeout(300);
+  const openNotes = await p.evaluate(() => [...document.querySelectorAll('.cx-steps .cs.note.open .cs-body')].map((e) => e.textContent.trim()));
+  assert.deepEqual(openNotes.map((t) => t.slice(0, 92)), [openedNote.slice(0, 92)],
+    'the note the operator opened is the one still open after earlier notes land');
+  results.push({ case: 'opened note during the hunt', open: openedNote.slice(84, 92) });
 
   assert.deepEqual(errors, [], 'no page errors');
 } finally {

@@ -316,6 +316,26 @@ assert.equal(fmtTok(1_400_000_000), '1.4B');
   const [one] = stepKeys(stepsOf([bash(2), bash(3)]), groupMemo);
   const [grown] = stepKeys(stepsOf([bash(1), bash(2), bash(3)]), groupMemo);
   assert.equal(grown, one, 'Bash ×2 that becomes Bash ×3 from above is the same row');
+  // Text steps are not keyed by a prefix: two equal-length notes that share
+  // their first sentence, and an identical note from an earlier record, each
+  // land above a note without taking its key.
+  const lead = 'Checking service state before scheduling the next background verification. Service ';
+  const note = (id, n) => ({ id, role: 'assistant', blocks: [{ type: 'text', text: `${lead}${n}. ${'x'.repeat(200)}` }] });
+  for (const [label, earlier] of [['a different note', note('n176', 176)], ['the same note, earlier', note('n100', 182)]]) {
+    const textMemo = new Map();
+    const [held] = stepKeys(stepsOf([note('n182', 182)]), textMemo);
+    const after = stepKeys(stepsOf([earlier, note('n182', 182)]), textMemo);
+    assert.equal(after[1], held, `${label} prepended: the note that was there keeps its key (${JSON.stringify(after)})`);
+    assert.notEqual(after[0], held, `${label} prepended: and the new one gets its own`);
+  }
+  // A shell step and a thinking step the same way.
+  const sh = (id, n) => ({ id, role: 'assistant', blocks: [{ type: 'shell', command: `${lead}cmd`, stdout: `${lead}${n} ${'y'.repeat(80)}` }] });
+  const think = (id, n) => ({ id, role: 'assistant', blocks: [{ type: 'thinking', text: `${lead}${n} ${'z'.repeat(80)}` }] });
+  for (const make of [sh, think]) {
+    const m = new Map();
+    const [held] = stepKeys(stepsOf([make('b', 2)]), m);
+    assert.equal(stepKeys(stepsOf([make('a', 1), make('b', 2)]), m)[1], held, `${make.name}: keeps its key`);
+  }
 }
 
 fs.rmSync(path.dirname(out), { recursive: true, force: true });
