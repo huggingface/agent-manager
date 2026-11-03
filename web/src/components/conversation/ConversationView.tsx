@@ -36,7 +36,7 @@ import {
 import type { PendingAttachment, PendingPrompt } from '../../lib/attachments';
 import { recallReading, rememberReading } from './readingPosition';
 import { useDraft } from './useDraft';
-import { splitExchanges } from './exchanges';
+import { keepLeadKey, splitExchanges, type LeadKey } from './exchanges';
 import { searchIndex } from './readerSearch';
 import { useVirtualRows } from './useVirtualRows';
 import { cachedRoster, loadRoster } from '../../lib/subagentRoster';
@@ -144,18 +144,26 @@ export default function ConversationView({
   const onReset = useCallback(() => { following.current = true; setAtLatest(true); }, []);
   // The main reader asks for a useful amount of recent conversation up front.
   // Child transcripts and previews deliberately do not (see the hook).
-  const reader = useTraceWindows(src, `session:${session.id}`, { paused, onReset, history: HISTORY_TARGET_EXCHANGES });
+  // Set once the virtual rows exist (below); a prepend is announced before the
+  // render that shows it, which is when the first row's anchor must switch.
+  const beforePrepend = useRef<() => void>();
+  const onPrepend = useCallback(() => beforePrepend.current?.(), []);
+  const reader = useTraceWindows(src, `session:${session.id}`, { paused, onReset, onPrepend, history: HISTORY_TARGET_EXCHANGES });
   const { head, error, phase, loading, notice, version, atStart, blocked, loadOlder, loadNewer, reload } = reader;
   // The automatic recent-history fill is loading too, and the row that says
   // so is the same row.
   const fillingHistory = reader.fill === 'filling';
   const loadingEarlier = loading === 'tail' || loading === 'before';
   const turns = reader.turns.current;
-  const exchanges = useMemo(() => splitExchanges(turns), [turns]);
+  // A cold reader can open mid-turn; that exchange keeps its key while the
+  // pages above it, and finally its prompt, arrive (see keepLeadKey).
+  const leadKey = useRef<LeadKey>(null);
+  const exchanges = useMemo(() => keepLeadKey(splitExchanges(turns), leadKey), [turns]);
   const index = useMemo(() => searchIndex(exchanges), [exchanges]);
   const shown = useMemo(() => exchanges.map((x, n) => ({ x, n })).filter(({ n }) => !q || index[n].includes(q)), [exchanges, index, q]);
   const keys = useMemo(() => shown.map(({ x }) => x.key), [shown]);
   const virtual = useVirtualRows(keys, scroller, following);
+  beforePrepend.current = virtual.pinFirstRowBottom;
   const keysRef = useRef(keys); keysRef.current = keys;
   /**
    * A cold reader holds the first transcript back until it is worth showing.

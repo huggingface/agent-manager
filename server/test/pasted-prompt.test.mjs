@@ -213,6 +213,18 @@ console.log('\n# the digest behind the Overview card');
   });
 }
 
+{
+  // Claude's continuation summary after a compaction is a `user` record flagged
+  // isCompactSummary. Nobody typed it, so the card keeps the real prompt.
+  const summary = { ...user('This session is being continued from a previous conversation that ran out of context.'),
+    isCompactSummary: true, isVisibleInTranscriptOnly: true };
+  const { digest } = parseClaude([user('the real prompt'), asst('working', 'm1'), summary, asst('continuing', 'm2')]
+    .map((r) => JSON.stringify(r)).join('\n'));
+  check('a compaction summary is not the last prompt', () => {
+    assert.equal(String(digest.lastPromptText || digest.lastPrompt || ''), 'the real prompt');
+  });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 if (failed) { console.log(`\npasted-prompt: ${failed} failed`); process.exit(1); }
 console.log('\npasted-prompt: the operator\'s pasted text is unwrapped, kept, and shown once');

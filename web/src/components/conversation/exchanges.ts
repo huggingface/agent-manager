@@ -132,6 +132,41 @@ export type Step =
   | { kind: 'compact'; text: string };
 
 /**
+ * Keeps the key of an exchange that opened WITHOUT its prompt.
+ *
+ * A reader that opens in the middle of a long turn keys that leading exchange
+ * by its first loaded record, and every backward page inside the same turn
+ * changes that record, and the prompt arriving changes it again. A new key is a
+ * new row: React remounted it, the operator's opened work closed, and the
+ * reading anchor lost its row while history was still loading above it.
+ *
+ * `held` remembers the first key such an exchange was shown under and one of
+ * its records. Whichever exchange later holds that record keeps the key, for as
+ * long as the record is loaded. Keys stay unique: the held key is the id of a
+ * record inside that same exchange. Exchanges are not mutated; a renamed one
+ * is a copy.
+ */
+export type LeadKey = { key: string; member: string } | null;
+export function keepLeadKey(xs: Exchange[], held: { current: LeadKey }): Exchange[] {
+  const lead = held.current;
+  if (lead) {
+    const has = (t: TraceTurn | null) => t?.id === lead.member;
+    const i = xs.findIndex((x) => has(x.prompt) || x.steps.some(has) || x.answer.some(has));
+    if (i >= 0) {
+      if (xs[i].key === lead.key) return xs;
+      const out = xs.slice();
+      out[i] = { ...xs[i], key: lead.key };
+      return out;
+    }
+    held.current = null;   // the record is gone (a reset): start over
+  }
+  const first = xs[0];
+  const member = first && !first.prompt ? (first.steps[0] || first.answer[0])?.id : undefined;
+  if (member) held.current = { key: first.key, member };
+  return xs;
+}
+
+/**
  * The prose a step carries, or '' when it carries none.
  *
  * These three kinds are the agent writing for a reader — an aside, thinking out

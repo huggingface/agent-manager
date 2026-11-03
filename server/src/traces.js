@@ -226,9 +226,10 @@ function parseClaude(txt, dg = emptyDigest()) {
           }
         }
       }
-    } else if (j.type === 'user' && !j.toolUseResult && !j.isMeta && !j.sourceToolUseID) {
+    } else if (j.type === 'user' && !j.toolUseResult && !j.isMeta && !j.sourceToolUseID && !j.isCompactSummary) {
       // isMeta/sourceToolUseID mark harness-injected "user" lines (skill
-      // payloads, attached context) — not something the operator typed.
+      // payloads, attached context) — not something the operator typed. Nor is
+      // isCompactSummary, the continuation summary written after a compaction.
       st.prompts++;
       const mc = j.message && j.message.content;
       const text = typeof mc === 'string' ? mc
@@ -2060,6 +2061,22 @@ async function normalizeClaude(file, out, range, allowSubagent = false) {
     if (!m) continue;
     const ts = j.timestamp ? Date.parse(j.timestamp) || undefined : undefined;
     if (!out.cwd && j.cwd) out.cwd = j.cwd;
+
+    // The continuation summary Claude writes after a compaction: a `user`
+    // record flagged `isCompactSummary` (and `isVisibleInTranscriptOnly`), with
+    // no `isMeta`. Nobody typed it. Read as a prompt it opened an exchange of
+    // its own and satisfied the reader's "latest prompt is loaded" check while
+    // the real prompt was still out of the window. It is the compaction's
+    // content, so it reads like the opencode and codex markers: a collapsed
+    // compaction step, 'partial' so it is never taken for an answer.
+    if (j.type === 'user' && j.isCompactSummary) {
+      const c = m.content;
+      const summary = (typeof c === 'string' ? c : Array.isArray(c)
+        ? c.filter((v) => v && v.type === 'text').map((v) => String(v.text || '')).join('\n\n') : '').trim();
+      out.push({ role: 'assistant', ts, kind: 'partial',
+        blocks: [{ type: 'compaction', ...capText(summary ? `Context compacted\n\n${summary}` : 'Context compacted') }] });
+      continue;
+    }
 
     const id = j.type === 'assistant' ? m.id || j.uuid : null;
     let msg = id ? byMsgId.get(id) : undefined;

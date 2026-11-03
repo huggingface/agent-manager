@@ -110,7 +110,7 @@ export const FILL_MAX_REQUESTS = 6;
 export const FILL_FLOOR_MAX_REQUESTS = 16;
 /**
  * Transcript one fill may ADD to what the reader retains, in bytes (indexed
- * rows charged at an assumed size).
+ * rows charged at their estimated in-memory size, `turnSize`).
  *
  * Retained, not read: a page's size is not knowable before fetching it, so the
  * request that crosses this is the last one — the ceiling is this plus one
@@ -170,11 +170,20 @@ export const FILL_PROMPT_MAX_MS = 90_000;
 /** A byte page while hunting for the prompt. Larger than WINDOW_BYTES so a
  * 32 MiB turn is ~32 requests rather than ~85; `FILL_MIN_TURNS` still stops
  * the server growing it past a single oversized record. Indexed sources keep
- * their ordinary page, which the request cap above already sizes for 4,800
- * rows. */
+ * their ordinary 100-row page: at most 4,800 rows by the request cap, and
+ * fewer when the rows are large, because they are charged by size. */
 export const FILL_PROMPT_WINDOW_BYTES = 1024 * 1024;
-/** Assumed cost of one indexed row, so both source kinds share one byte budget. */
-const INDEX_ROW_COST = 4 * 1024;
+/**
+ * Estimated in-memory size of one record: UTF-16 text and image data plus a
+ * fixed overhead per record and per block. The one estimate both the cache
+ * pruning (`retainedSize`) and the fill's charge for an indexed page use.
+ *
+ * An indexed source has no byte offsets to charge, and a flat per-row price
+ * undercharged it badly: rows of 20,000-character blocks were charged 4 KiB
+ * each, so a fill "within 32 MiB" retained an estimated 186 MiB.
+ */
+const turnSize = (t: TraceTurn) => 128 + 2 * (t.event?.text.length || 0)
+  + t.blocks.reduce((b, v) => b + 128 + 2 * ('text' in v ? v.text.length : 'src' in v ? v.src.length : 100), 0);
 
 const sameFields = (a: object, b: object) => {
   const keys = Object.keys(a);
@@ -261,15 +270,14 @@ export class ReaderStore {
   private fillTimer: ReturnType<typeof setTimeout> | null = null;
   private spent = { requests: 0, bytes: 0, since: 0 };
   /** A speculative page in flight, and where the cursor was before it. */
-  private step: { from: number; held: number; hunting: boolean } | null = null;
+  private step: { from: number; added: number; hunting: boolean } | null = null;
   private stalled = false;
   constructor(private source: TraceSource) {}
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   observe = (listener: (change: ReaderChange) => void) => { this.observers.add(listener); return () => { this.observers.delete(listener); }; };
   setSource(source: TraceSource) { this.source = source; }
-  get retainedSize() { return this.raw.reduce((n, t) => n + 128 + 2 * (t.event?.text.length || 0)
-    + t.blocks.reduce((b, v) => b + 128 + 2 * ('text' in v ? v.text.length : 'src' in v ? v.src.length : 100), 0), 0); }
+  get retainedSize() { return this.raw.reduce((n, t) => n + turnSize(t), 0); }
   get active() { return this.consumers > 0; }
 
   private publish(patch: Partial<ReaderSnapshot>, change?: ReaderChange) {
@@ -393,15 +401,15 @@ export class ReaderStore {
     this.step = null;
     const cursor = this.state.cursor;
     if (!cursor) return;
-    // An index source has no byte offsets, so its rows are charged at an assumed
-    // size: one budget both kinds of source can exhaust, not an exact count.
-    const advance = cursor.mode === 'index'
-      ? Math.max(0, this.state.turns.length - step.held) * INDEX_ROW_COST
-      : Math.max(0, step.from - cursor.start);
-    this.spent.bytes += advance;
+    // Progress is the cursor moving: bytes for a byte source, rows for an
+    // indexed one. A byte source is charged what it moved over; an indexed one
+    // has no byte offsets, so it is charged the estimated size of the rows the
+    // page added (`turnSize`). One budget both kinds of source can exhaust.
+    const moved = Math.max(0, step.from - cursor.start);
+    this.spent.bytes += cursor.mode === 'index' ? step.added : moved;
     // A page that moved nothing cannot be retried into progress: an oversized
     // record is in the way, or the source has nothing more to give.
-    if (!advance) this.stalled = true;
+    if (!moved) this.stalled = true;
   }
   private planFill() {
     this.settleStep();
@@ -441,7 +449,7 @@ export class ReaderStore {
       this.fillTimer = null;
       const from = this.state.cursor;
       if (!this.want || !this.active || this.state.loading || !from) return this.planFill();
-      this.step = { from: from.start, held: this.state.turns.length, hunting: !holdsPrompt(this.state.turns) };
+      this.step = { from: from.start, added: 0, hunting: !holdsPrompt(this.state.turns) };
       this.spent.requests++;
       void this.read('before', true);
     }, FILL_STEP_MS);
@@ -494,6 +502,7 @@ export class ReaderStore {
         let nextCursor: TraceCursor;
         if (reset) { this.raw = got; this.meta = metadata; this.summary = null; nextCursor = win; }
         else if (direction === 'before') {
+          if (speculative && this.step) this.step.added = got.reduce((n, t) => n + turnSize(t), 0);
           this.raw = [...got, ...this.raw]; this.meta = mergeMeta(this.meta, { ...metadata,
             live: this.meta?.live, interaction: this.meta?.interaction, activity: this.meta?.activity, model: this.meta?.model, revision: this.meta?.revision });
           nextCursor = { ...cursor, start: win.start, atStart: win.atStart, blocked: win.blocked };
@@ -543,7 +552,13 @@ export class ReaderStore {
         if (token !== this.sequence) return;
         this.request = null; this.publish({ loading: null });
         const catchup = direction !== 'before' && this.state.cursor && !this.state.cursor.atEnd && !this.failures && !this.state.error;
-        this.schedule(catchup ? 50 : undefined);
+        // A backward page says nothing about new output, so it must not restart
+        // the forward poll's clock. Rescheduling here pushed the poll back on
+        // every page, and a fill whose pages come faster than the cadence held
+        // off live output for its whole run (up to FILL_PROMPT_MAX_MS). An
+        // already-pending poll keeps its deadline; one is only started if none
+        // is pending (the first read, or after a failure cleared it).
+        if (direction !== 'before' || !this.poll) this.schedule(catchup ? 50 : undefined);
         // After the slot is free, so a fill step never races the read that
         // produced it. Every accepted read re-decides: a fill that a user page
         // or a live append interrupted just continues from where the store is.

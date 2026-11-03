@@ -58,6 +58,9 @@ await build({
       if (turn) {
         put({id:'last', role:'user', ts:200000, blocks:[{type:'text', text:'The last prompt'}]}, promptBytes);
         for (let k = 0; k < turn.count; k++) put({id:'h'+k, role:'assistant', ts:200001+k, blocks:[
+          // 'say': a line of narration per step, so opened work is many rows
+          // rather than one grouped "Bash ×N".
+          ...(turn.say ? [{type:'text', text:'Checking service '+k+' before the next log.'}] : []),
           {type:'tool_use', id:'hc'+k, name:'Bash', text:'{"command":"step '+k+'"}'},
           {type:'tool_result', id:'hc'+k, text:'output of step '+k}]}, turn.bytes);
       }
@@ -459,6 +462,77 @@ try {
   assert.equal(await p.locator('.cxv-top').getAttribute('disabled'), null, 'Load earlier stays usable');
   assert.ok(await p.evaluate(() => window.probe.atBottom()), 'and the view is still at the latest step');
   results.push({ case: 'huge turn past the cap', top: capped });
+
+  // ---------- 12. opened work survives the pages landing above it ----------
+  // Opened mid-turn, the leading exchange used to be keyed by its first loaded
+  // record, so every backward page inside the same turn (and the prompt
+  // arriving) made it a new row: the opened work collapsed and the place the
+  // operator was reading was lost. Slow pages, so the operator really does open
+  // the work and scroll up into it while the hunt is running.
+  // ~6 records a page, ~30 MiB: enough steps to scroll within after a few
+  // pages, and the prompt still reachable.
+  await p.evaluate(() => window.fixture.mount({ count: 20, turn: { count: 190, bytes: 160 * 1024, say: true }, beforeDelay: 500 }));
+  await p.waitForFunction(() => window.probe.shown() && document.querySelector('.cx-fold')
+    && window.reads.filter((x) => x.at === 'before').length >= 3, null, { timeout: 30_000 });
+  await p.locator('.cx-fold').last().click();
+  try {
+    await p.waitForFunction(() => document.querySelector('.cx-fold.on') && document.querySelector('.cx-steps')
+      && (() => { const el = document.querySelector('.cxv-body'); return el.scrollHeight - el.clientHeight > 400; })(),
+      null, { timeout: 10_000 });
+  } catch {
+    assert.fail(`opened work stays open while pages land: ${JSON.stringify(await p.evaluate(() => ({
+      open: !!document.querySelector('.cx-fold.on'), key: document.querySelector('[data-x]')?.dataset.x,
+      pages: window.reads.filter((x) => x.at === 'before').length })))}`);
+  }
+  // Read away from the bottom, the way a person does: a wheel, not scrollTop.
+  const box = await p.locator('.cxv-body').boundingBox();
+  await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await p.mouse.wheel(0, -300);
+  await p.waitForTimeout(300);
+  const opened = await p.evaluate(() => {
+    const el = document.querySelector('.cxv-body');
+    const r = el.getBoundingClientRect();
+    // The element the operator is looking at: the middle of the reader.
+    // Found again by its text afterwards: steps are keyed by position, so a
+    // DOM node may legitimately be reused for another step.
+    let at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    while (at && at.children.length) at = at.children[0];
+    window.__text = at?.textContent || '';
+    window.__find = () => [...document.querySelectorAll('.cx-steps *')]
+      .find((e) => !e.children.length && e.textContent === window.__text);
+    return { key: document.querySelector('.cx-fold.on')?.closest('[data-x]')?.dataset.x,
+      before: window.reads.filter((x) => x.at === 'before').length,
+      text: window.__text.slice(0, 60),
+      top: Math.round(window.__find().getBoundingClientRect().top * 100) / 100,
+      atBottom: window.probe.atBottom() };
+  });
+  // Every frame, not only the end: the text must not jump and come back.
+  await p.evaluate(() => { window.__tops = []; const step = () => { const e = window.__find();
+    window.__tops.push(e ? Math.round(e.getBoundingClientRect().top * 100) / 100 : null); window.__rq = requestAnimationFrame(step); }; step(); });
+  assert.ok(opened.key, 'the work is open');
+  assert.equal(opened.atBottom, false, 'and the operator has scrolled up into it');
+  // More pages land above, and then the prompt.
+  await p.waitForFunction((n) => window.reads.filter((x) => x.at === 'before').length >= n + 2, opened.before, { timeout: 30_000 });
+  await p.waitForFunction(() => !document.querySelector('.cxv-top-busy'), null, { timeout: 90_000, polling: 250 });
+  const later = await p.evaluate(() => ({
+    key: document.querySelector('.cx-fold.on')?.closest('[data-x]')?.dataset.x,
+    open: !!document.querySelector('.cx-fold.on'),
+    steps: document.querySelectorAll('.cx-steps').length,
+    top: window.__find() ? Math.round(window.__find().getBoundingClientRect().top * 100) / 100 : null,
+    prompt: [...document.querySelectorAll('[data-x]')].some((r) => r.textContent.includes('The last prompt')),
+    pages: window.reads.filter((x) => x.at === 'before').length,
+  }));
+  const tops = await p.evaluate(() => { cancelAnimationFrame(window.__rq); return window.__tops; });
+  assert.ok(later.pages > opened.before, `pages did land meanwhile (${opened.before} -> ${later.pages})`);
+  assert.ok(later.prompt, 'the prompt arrived too');
+  assert.ok(later.open && later.steps > 0, `the opened work is still open (${JSON.stringify(later)})`);
+  assert.equal(later.key, opened.key, 'under the same row');
+  assert.ok(opened.text && later.top !== null, `what the operator was reading (${opened.text}) is still there`);
+  assert.ok(tops.length > 8 && tops.every((v) => v !== null), `it was on screen in every sampled frame (${tops.length} frames)`);
+  const readDrift = Math.max(...tops) - Math.min(...tops);
+  assert.ok(readDrift <= 2, `and did not move while the turn loaded above it (max ${readDrift}px over ${tops.length} frames)`);
+  results.push({ case: 'open work during the hunt', key: later.key, driftPx: readDrift, frames: tops.length,
+    pages: later.pages - opened.before });
 
   assert.deepEqual(errors, [], 'no page errors');
 } finally {

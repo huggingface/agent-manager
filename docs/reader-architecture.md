@@ -84,8 +84,8 @@ needed: the store uses immutable snapshots and React's external-store adapter.
 
 - Initial history: about 20 recent exchanges, or all of a shorter conversation,
   paged in after the first response at one backward page per 50 ms. Bounded by
-  six backward requests, ~3 MiB RETAINED (indexed rows charged at an assumed
-  4 KiB each) and 20 seconds per continuous run, whichever comes first. Retained
+  six backward requests, ~3 MiB RETAINED (indexed rows charged at their
+  estimated in-memory size, the same estimate the inactive-store pruning uses) and 20 seconds per continuous run, whichever comes first. Retained
   rather than read: a page's size is not knowable before fetching it, so the
   request that crosses the budget is the last one. What bounds a single read is
   the message floor a speculative page asks for — one, the smallest that still
@@ -100,7 +100,11 @@ needed: the store uses immutable snapshots and React's external-store adapter.
   window holds no operator prompt (`holdsPrompt`; a still-queued prompt does
   not count) the fill uses its own allowance: 48 backward requests, 32 MiB
   retained and 90 seconds, with 1 MiB byte pages (indexed sources keep their
-  100-row pages, so up to 4,800 rows). Measured on 94 Claude traces on this
+  100-row pages: up to 4,800 short rows, far fewer large ones, because a page
+  is charged the estimated size of what it adds; 20,000-character rows stop
+  near 940). A Claude compaction summary (`isCompactSummary`) is not a prompt:
+  the server reads it as a collapsed compaction step, so the hunt goes on past
+  it to the prompt. Measured on 94 Claude traces on this
   Space, the last turn was 0.4 MiB at the median, 3.5 MiB at p95 and 9.8 MiB at
   most. The spend is cumulative, so once the prompt is loaded the ordinary caps
   apply to what has already been spent. It stops without the prompt only at
@@ -109,7 +113,12 @@ needed: the store uses immutable snapshots and React's external-store adapter.
   reads "Load earlier turns · the start of this turn is not loaded". Child
   readers and previews (`want = 0`) do not take part: a child opens on its own
   2 MiB tail and already says the task may be earlier, and an automatic 32 MiB
-  read per expanded row is not worth it there.
+  read per expanded row is not worth it there. While it runs: a backward page
+  never restarts the forward poll's clock, so live output still arrives on
+  cadence; the exchange the reader opened in keeps its key as pages, and then
+  its prompt, arrive inside it (`keepLeadKey`), so opened work stays open; and
+  a page that grows the first row holds it by its bottom edge
+  (`pinFirstRowBottom`), so text being read above the latest step stays put.
   Server limits: a single record over the 8 MiB window ceiling blocks backward
   paging (shown as such), and a non-windowable source parses at most 20,000
   messages from its start, so in a longer one the newest turns are not served.

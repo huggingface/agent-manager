@@ -86,7 +86,7 @@ function source(n, opts = {}) {
     state.spans.push(Math.max(0, to - from));
     return {
       harness: 'claude', harnessLabel: 'Fixture', sessionId: 's', title: '', model: null, cwd: null,
-      firstTs: 0, lastTs: 0, usage: null, source: null, sharedBy: null, note: null, truncated: false,
+      firstTs: 0, lastTs: opts.lastTs || 0, usage: null, source: null, sharedBy: null, note: null, truncated: false,
       total: null, userTurns: null, activity: 'waiting', generation: 'g1', revision: 'r1',
       turns: got.map((r) => r.turn),
       window: { mode: 'bytes', start, end, atStart: start <= 0, atEnd: to >= size, generation: 'g1', revision: 'r1' },
@@ -586,19 +586,12 @@ const backwardOf = (src) => src.state.calls.filter((c) => c.at === 'before').len
 
 // ---- an indexed source (opencode / agy DB readers) also reaches the prompt ----
 // Pages by message count, `min` read as an exact page size the way
-// server/src/traces.js windowIndex does; 3,000 rows of one turn is past the
-// floor's 16 pages of 100.
-{
+// server/src/traces.js windowIndex does.
+function indexedSource(rows) {
   const INDEX_WINDOW_TURNS = 100, INDEX_TAIL_MIN_TURNS = 40;
-  const rows = [];
-  for (let i = 0; i < 20; i++) {
-    rows.push({ role: 'user', ts: i, blocks: [{ type: 'text', text: `prompt ${i}` }] });
-    rows.push({ role: 'assistant', ts: i, blocks: [{ type: 'text', text: `answer ${i}` }] });
-  }
-  rows.push({ role: 'user', ts: 100, blocks: [{ type: 'text', text: 'the last prompt' }], last: true });
-  for (let k = 0; k < 3000; k++) rows.push({ role: 'assistant', ts: 101 + k, blocks: [{ type: 'text', text: `step ${k}` }] });
   const calls = [];
-  const indexed = {
+  return {
+    calls,
     async window(req, bytes, min) {
       calls.push(req.at);
       await tick(0);
@@ -617,14 +610,131 @@ const backwardOf = (src) => src.state.calls.filter((c) => c.at === 'before').len
     },
     async summary() { await tick(0); return { total: rows.length, userTurns: [], revision: 'r1' }; },
   };
+}
+const indexedTurn = (steps, block) => {
+  const rows = [];
+  for (let i = 0; i < 20; i++) {
+    rows.push({ role: 'user', ts: i, blocks: [{ type: 'text', text: `prompt ${i}` }] });
+    rows.push({ role: 'assistant', ts: i, blocks: [{ type: 'text', text: `answer ${i}` }] });
+  }
+  rows.push({ role: 'user', ts: 100, blocks: [{ type: 'text', text: 'the last prompt' }] });
+  for (let k = 0; k < steps; k++) rows.push({ role: 'assistant', ts: 101 + k, blocks: [block(k)] });
+  return rows;
+};
+// 3,000 short rows of one turn is past the floor's 16 pages of 100.
+{
+  const indexed = indexedSource(indexedTurn(3000, (k) => ({ type: 'text', text: `step ${k}` })));
   const store = new ReaderStore(indexed);
   const release = store.retain();
   store.wantHistory(HISTORY_TARGET_EXCHANGES);
   const state = await settle(store, PROMPT_BUDGET);
-  const back = calls.filter((c) => c === 'before').length;
+  const back = indexed.calls.filter((c) => c === 'before').length;
   console.log(`  [indexed] ${state.turns.length} rows after ${back} backward pages, prompt ${holdsPrompt(state.turns) ? 'loaded' : 'MISSING'}`);
   assert.ok(holdsPrompt(state.turns), `an indexed source reaches the last prompt too (${state.turns.length} rows, ${back} pages)`);
   assert.ok(back <= FILL_PROMPT_MAX_REQUESTS, 'inside the request cap');
+  release();
+}
+
+// ---- an indexed source is charged what it adds, not a flat price per row ----
+// Full-size rows: the server caps a text block at 20,000 characters, and an
+// image is its whole data URL. A flat 4 KiB per row let the prompt hunt retain
+// an estimated 186 MiB "within" a 32 MiB budget.
+for (const [label, block] of [
+  ['20,000-character text blocks', () => ({ type: 'text', text: 'x'.repeat(20_000) })],
+  ['200 KB images', () => ({ type: 'image', src: `data:image/png;base64,${'A'.repeat(200_000)}`, mediaType: 'image/png' })],
+]) {
+  const indexed = indexedSource(indexedTurn(6000, block));
+  const store = new ReaderStore(indexed);
+  const release = store.retain();
+  store.wantHistory(HISTORY_TARGET_EXCHANGES);
+  await tick(5);
+  const first = store.retainedSize;   // the first window: not the fill's to pay for
+  assert.equal(store.getSnapshot().cursor?.mode, 'index', `${label}: the first window has landed`);
+  const state = await settle(store, PROMPT_BUDGET);
+  const retained = store.retainedSize - first;
+  // One page of 100 such rows: what the request that crosses the budget adds.
+  const page = 100 * (256 + 2 * (block(0).text || block(0).src).length);
+  console.log(`  [indexed, ${label}] ${state.turns.length} rows, fill added ~${(retained / MiB).toFixed(1)} MiB, fill ${state.fill}`);
+  assert.equal(state.fill, 'limited', `${label}: the budget stops the hunt`);
+  assert.ok(retained <= FILL_PROMPT_MAX_RETAINED_BYTES + page,
+    `${label}: what the fill adds stays inside the budget plus the page that crossed it `
+    + `(${(retained / MiB).toFixed(1)} MiB for ${FILL_PROMPT_MAX_RETAINED_BYTES / MiB} MiB + ${(page / MiB).toFixed(1)} MiB)`);
+  assert.ok(!state.cursor.atStart && !state.cursor.blocked, `${label}: and Load earlier still works from there`);
+  release();
+}
+
+// ---- Claude's compaction summary is not the prompt (real normalizer) ----
+// After a compaction Claude writes the continuation summary as a `user` record
+// flagged isCompactSummary. Read as a prompt it satisfied the hunt while the
+// real prompt was still 12 MiB back, past the floor's budget.
+{
+  const { readTraceByPath } = await import('../../server/src/traces.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reader-compaction-'));
+  const file = path.join(dir, 'session.jsonl');
+  let n = 0;
+  const record = (type, content, extra = {}) => JSON.stringify({ type, uuid: `u${n++}`, sessionId: 's',
+    timestamp: new Date(Date.UTC(2026, 10, 3, 9, 0, n)).toISOString(), message: { role: type, content }, ...extra }) + '\n';
+  const lines = [record('user', 'THE ACTUAL OPERATOR PROMPT')];
+  for (let i = 0; i < 24; i++) lines.push(record('assistant',
+    [{ type: 'tool_use', id: `t${i}`, name: 'Bash', input: { command: 'x'.repeat(512 * 1024) } }]));
+  lines.push(record('user', 'This session is being continued from a previous conversation that ran out of context.\nSummary: work in progress.',
+    { isCompactSummary: true, isVisibleInTranscriptOnly: true }));
+  lines.push(record('assistant', [{ type: 'text', text: 'Continuing the work.' }]));
+  fs.writeFileSync(file, lines.join(''));
+  const calls = [];
+  const claude = {
+    window: (req, bytes, min) => { calls.push(req.at); return readTraceByPath(file, { window: { version: 2, ...req, bytes, min } }); },
+    summary: async () => ({}),
+  };
+  // What the top row decides from: the tail alone, nothing paged.
+  const tailOnly = new ReaderStore(claude);
+  const stop = tailOnly.retain();
+  await settle(tailOnly, 4);
+  const tail = tailOnly.getSnapshot().turns;
+  stop();
+  const summary = tail.find((t) => t.blocks.some((b) => (b.text || '').includes('being continued')));
+  assert.ok(summary, 'the summary is in the tail window');
+  assert.notEqual(summary.role, 'user', 'and it is not a user turn');
+  assert.equal(summary.blocks[0].type, 'compaction', 'it is a compaction marker, content kept');
+  assert.equal(holdsPrompt(tail), false,
+    'so a window holding only the summary does not count as holding the prompt — the top row warns');
+
+  calls.length = 0;
+  const store = new ReaderStore(claude);
+  const release = store.retain();
+  store.wantHistory(HISTORY_TARGET_EXCHANGES);
+  const state = await settle(store, PROMPT_BUDGET);
+  const back = calls.filter((c) => c === 'before').length;
+  assert.ok(state.turns.some((t) => t.role === 'user' && t.blocks.some((b) => b.text === 'THE ACTUAL OPERATOR PROMPT')),
+    `the real prompt is loaded, past the summary (fill ${state.fill}, ${back} backward pages, cursor ${state.cursor.start})`);
+  release();
+}
+
+// ---- live output is not held back by the hunt ----
+// Real timers, no explicit loadNewer: the reader's own poll must bring new
+// output in while backward pages are still arriving faster than its cadence.
+{
+  // ~45 MiB of 1 MiB records behind a slow source: the hunt runs to its cap,
+  // several seconds, longer than one 3 s poll interval.
+  const src = source(2, { turn: { count: 45, bytes: 1024 * 1024 }, hold: 150, lastTs: Date.now() });
+  const store = new ReaderStore(src);
+  const release = store.retain();
+  store.wantHistory(HISTORY_TARGET_EXCHANGES);
+  const t0 = Date.now();
+  await tick(300);
+  src.append(4 * 1024);
+  let seenAt = null; let fillEnded = null;
+  for (let i = 0; i < 1200 && (seenAt === null || fillEnded === null); i++) {
+    await tick(25);
+    const snap = store.getSnapshot();
+    if (seenAt === null && snap.turns.some((t) => t.id === 'live0')) seenAt = Date.now() - t0;
+    if (fillEnded === null && snap.fill !== 'filling' && snap.fill !== 'idle') fillEnded = Date.now() - t0;
+  }
+  const forward = src.state.calls.filter((c) => c.at === 'after').length;
+  console.log(`  [live poll] new output shown at ${seenAt} ms, hunt ended at ${fillEnded} ms, ${forward} forward reads`);
+  assert.ok(fillEnded > 4000, `the hunt is long enough to matter (${fillEnded} ms)`);
+  assert.ok(seenAt !== null && seenAt < fillEnded,
+    `output written during the hunt appears before it ends (shown at ${seenAt} ms, hunt ended at ${fillEnded} ms)`);
   release();
 }
 
