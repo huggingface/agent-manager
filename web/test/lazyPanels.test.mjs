@@ -153,7 +153,12 @@ try {
     // the poll guard). All of it is the main reader's store, model and scroll
     // anchoring, which the entry carries. 795 is 247 short; raised to 796,
     // ~0.8 kB of headroom.
-    assert.ok(entry.length <= 796 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 796 kB budget`);
+    // The re-review's fixes (1a2b919) add 1,447 more: 815,774. Identity keys
+    // for steps (stepKeys) and the lead exchange (keepLeadKey on tool and
+    // message ids), the exhaustive block-size switch and the pin's geometry
+    // check; the same eager reader code. 670 over 796; raised to 797, 354 of
+    // headroom.
+    assert.ok(entry.length <= 797 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 797 kB budget`);
     // One literal only that panel's module contains — a dynamic import that
     // merely wraps an unchanged graph would leave these in the entry.
     for (const [panel, marker] of [
