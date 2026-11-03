@@ -15,7 +15,7 @@ export interface ConversationSeen {
   version: (OutputVersion & { id: string }) | null;
   onSeen: (marks: (OutputVersion & { id: string })[]) => Promise<boolean> | void;
 }
-import { reconcileTrace } from '../../lib/readerModel';
+import { holdsPrompt, reconcileTrace } from '../../lib/readerModel';
 import {
   HISTORY_MAX_EXCHANGES, HISTORY_TARGET_EXCHANGES, useTraceWindows,
   type TraceHeadInfo, type TraceSource,
@@ -626,13 +626,17 @@ export default function ConversationView({
           // no more" never reads as "click me and nothing happens".
           const done = atStart || blocked;
           const busy = loadingEarlier || fillingHistory;
+          // The fill always tries to reach the latest prompt; when a cap or the
+          // source stopped it first, the turn shown has no start above it, and
+          // the row says so rather than looking like an ordinary partial view.
+          const headless = !done && !busy && turns.length > 0 && !holdsPrompt(turns);
           return <button className={`cxv-msg mono cxv-top${done ? ' cxv-top-done' : ''}${busy ? ' cxv-top-busy' : ''}`}
             disabled={done || busy} onClick={() => { following.current = false; void loadOlder(); }}>
             {busy && <span className="cxv-top-spin" aria-hidden="true" />}
             {blocked ? 'Earlier history contains a record too large to display'
               : atStart ? 'Full history loaded'
               : busy ? 'Loading earlier turns…'
-              : <><span className="cxv-top-arrow" aria-hidden="true">↑</span>Load earlier turns</>}
+              : <><span className="cxv-top-arrow" aria-hidden="true">↑</span>Load earlier turns{headless ? ' · the start of this turn is not loaded' : ''}</>}
           </button>;
         })()}
         {head?.note && <div className="cxv-msg mono">{head.note}</div>}
