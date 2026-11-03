@@ -43,7 +43,9 @@ Workarounds:
 - Install the Space as an app (Chrome: "Install" / "Create shortcut" with "Open
   as window"). In an app window Chrome lets pages receive Ctrl+W/T/N, and they
   are forwarded as above.
-- Use alternates: Ctrl+D or `/exit` instead of closing a tab; the Up and Down arrows instead of Ctrl+P / Ctrl+N for history.
+- Use alternates: Alt+Backspace (Option+Backspace on macOS) instead of Ctrl+W to
+  delete the previous word, and the Down arrow instead of Ctrl+N for history.
+  Ctrl+T has no alternate binding in a plain browser tab.
 - On a phone, the on-screen key bar sends Esc, Tab, arrows, Enter and Ctrl+C.
 
 Esc Esc works because each Esc is forwarded; browsers do not reserve it, except
