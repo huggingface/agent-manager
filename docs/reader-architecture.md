@@ -92,6 +92,27 @@ needed: the store uses immutable snapshots and React's external-store adapter.
   guarantees progress — which stops the server growing a response beyond a
   single oversized record. Left to the server's own default of twelve, one page
   of 900 KiB answers grew to six megabytes.
+- The last prompt: on top of the exchange counts, a cold main reader always
+  reaches back to the operator prompt that opened the most recent turn, so it
+  never opens on half a turn with nothing above it. The counts cannot promise
+  this, because agent output with no prompt above it counts as one exchange and
+  one long tool-heavy turn could outlast the whole floor budget. While the
+  window holds no operator prompt (`holdsPrompt`; a still-queued prompt does
+  not count) the fill uses its own allowance: 48 backward requests, 32 MiB
+  retained and 90 seconds, with 1 MiB byte pages (indexed sources keep their
+  100-row pages, so up to 4,800 rows). Measured on 94 Claude traces on this
+  Space, the last turn was 0.4 MiB at the median, 3.5 MiB at p95 and 9.8 MiB at
+  most. The spend is cumulative, so once the prompt is loaded the ordinary caps
+  apply to what has already been spent. It stops without the prompt only at
+  the start of a conversation that has none, on a blocked record, a failed
+  read, a cursor that stops advancing, or the cap; in the last case the top row
+  reads "Load earlier turns · the start of this turn is not loaded". Child
+  readers and previews (`want = 0`) do not take part: a child opens on its own
+  2 MiB tail and already says the task may be earlier, and an automatic 32 MiB
+  read per expanded row is not worth it there.
+  Server limits: a single record over the 8 MiB window ceiling blocks backward
+  paging (shown as such), and a non-windowable source parses at most 20,000
+  messages from its start, so in a longer one the newest turns are not served.
 - First paint holds until the transcript is worth showing, for at most two
   seconds, and ends earlier on coverage, the start of the conversation, an
   unusable source or an exhausted fill. The composer is never part of the wait

@@ -40,7 +40,7 @@ await build({
     const WINDOW_MIN_TURNS = 12, WINDOW_MAX_BYTES = 8*1024*1024;
     let cfg = {}, records = [], size = 0, root;
     function lay(options){
-      const {count, promptBytes, toolBytes, answerLines, lastAnswerLines} = options;
+      const {count, promptBytes, toolBytes, answerLines, lastAnswerLines, turn} = options;
       records = []; let at = 0;
       const put = (turn, bytes) => { records.push({at, size: bytes, turn}); at += bytes; };
       for (let i = 0; i < count; i++) {
@@ -52,6 +52,14 @@ await build({
         put({id:'a'+i, role:'assistant', ts:100002+i*10, kind:'final', blocks:[{type:'text',
           text:'Answer '+i+'.'+(lines>1 ? '\\n\\n'+Array.from({length:lines-1},(_,k)=>'body line '+k+' of answer '+i).join('\\n') : '')}]},
           Math.max(400, lines*60));
+      }
+      // One long agent turn after a last prompt, still running: many large
+      // tool records, more than the floor budget reaches.
+      if (turn) {
+        put({id:'last', role:'user', ts:200000, blocks:[{type:'text', text:'The last prompt'}]}, promptBytes);
+        for (let k = 0; k < turn.count; k++) put({id:'h'+k, role:'assistant', ts:200001+k, blocks:[
+          {type:'tool_use', id:'hc'+k, name:'Bash', text:'{"command":"step '+k+'"}'},
+          {type:'tool_result', id:'hc'+k, text:'output of step '+k}]}, turn.bytes);
       }
       size = at;
     }
@@ -179,6 +187,22 @@ await build({
         step();
       },
       stop(){ cancelAnimationFrame(window._raf); return window.samples || []; },
+      // The bottom edge of the newest row, every frame. Inside one huge turn
+      // there is no stable row text to follow: the whole turn is one exchange,
+      // and it gains its prompt (and its key) while history lands above it.
+      trackBottom(){
+        window.bottoms = []; window.atLatest = [];
+        const step = () => {
+          const rows = [...document.querySelectorAll('[data-x]')];
+          if (rows.length && window.probe.shown()) {
+            window.bottoms.push(Math.round(rows[rows.length-1].getBoundingClientRect().bottom * 100) / 100);
+            window.atLatest.push(window.probe.atBottom());
+          }
+          window._rb = requestAnimationFrame(step);
+        };
+        step();
+      },
+      stopBottom(){ cancelAnimationFrame(window._rb); return {bottoms: window.bottoms, atLatest: window.atLatest}; },
     };
   ` }, bundle: true, outfile: bundle, format: 'iife', platform: 'browser',
   define: { 'process.env.NODE_ENV': '"production"' }, logLevel: 'silent',
@@ -399,6 +423,42 @@ try {
   assert.ok(parentReads <= 12, `the whole cold open is a bounded number of requests (${parentReads})`);
   assert.ok(await p.locator('[data-x]').count() < 40, 'and the rendered window stays virtualized');
   results.push({ case: 'requests for a cold open', reads: parentReads });
+
+  // ---------- 10. one huge turn: the prompt that started it is loaded ----------
+  // 40 x 512 KiB of tool output after one prompt: past every budget the
+  // exchange targets have. The prompt must arrive, and the view must stay at
+  // the latest step while the big backward pages land above it.
+  await p.evaluate(() => window.fixture.mount({ count: 20, turn: { count: 40, bytes: 512 * 1024 }, beforeDelay: 60 }));
+  await p.waitForFunction(() => window.probe.shown(), null, { timeout: 20_000 });
+  await p.evaluate(() => window.probe.trackBottom());
+  // Settled: nothing loading, and no backward read for a second.
+  await p.waitForFunction(() => {
+    const n = window.reads.filter((r) => r.at === 'before').length;
+    const quiet = n > 0 && n === window.__n && !document.querySelector('.cxv-top-busy');
+    window.__n = n; return quiet;
+  }, null, { timeout: 60_000, polling: 1000 });
+  await p.evaluate(() => { delete window.__n; });
+  const huge = await p.evaluate(() => window.probe.stopBottom());
+  const hugeDrift = Math.max(...huge.bottoms) - Math.min(...huge.bottoms);
+  const top = await p.locator('.cxv-top').textContent();
+  assert.ok(huge.bottoms.length > 8, `the newest row was sampled across frames (${huge.bottoms.length})`);
+  assert.ok(await p.getByText('The last prompt', { exact: true }).count() > 0,
+    'the prompt that started the huge turn is in the reader');
+  assert.ok(!top.includes('not loaded'), `and the top row does not warn about it (${top})`);
+  assert.ok(hugeDrift <= 2, `the latest content stays put while the turn loads above it (max ${hugeDrift}px)`);
+  assert.ok(huge.atLatest.every(Boolean), 'and the reader stays at the latest content throughout');
+  results.push({ case: 'huge single turn', driftPx: hugeDrift, frames: huge.bottoms.length,
+    backwardReads: await p.evaluate(() => window.reads.filter((r) => r.at === 'before').length) });
+
+  // ---------- 11. past the hard cap the top row says the start is missing ----------
+  await p.evaluate(() => window.fixture.mount({ count: 2, turn: { count: 70, bytes: 768 * 1024 } }));
+  await p.waitForFunction(() => window.probe.shown(), null, { timeout: 20_000 });
+  await p.waitForFunction(() => /not loaded/.test(document.querySelector('.cxv-top')?.textContent || ''),
+    null, { timeout: 120_000, polling: 250 });
+  const capped = await p.locator('.cxv-top').textContent();
+  assert.equal(await p.locator('.cxv-top').getAttribute('disabled'), null, 'Load earlier stays usable');
+  assert.ok(await p.evaluate(() => window.probe.atBottom()), 'and the view is still at the latest step');
+  results.push({ case: 'huge turn past the cap', top: capped });
 
   assert.deepEqual(errors, [], 'no page errors');
 } finally {
