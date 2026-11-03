@@ -101,7 +101,8 @@ needed: the store uses immutable snapshots and React's external-store adapter.
   not count) the fill uses its own allowance: 48 backward requests, 32 MiB
   retained and 90 seconds, with 1 MiB byte pages (indexed sources keep their
   100-row pages: up to 4,800 short rows, far fewer large ones, because a page
-  is charged the estimated size of what it adds; 20,000-character rows stop
+  is charged the estimated size of what it adds, every string of every block
+  type including agy's shell command and output; 20,000-character rows stop
   near 940). A Claude compaction summary (`isCompactSummary`) is not a prompt:
   the server reads it as a collapsed compaction step, so the hunt goes on past
   it to the prompt. Measured on 94 Claude traces on this
@@ -116,9 +117,13 @@ needed: the store uses immutable snapshots and React's external-store adapter.
   read per expanded row is not worth it there. While it runs: a backward page
   never restarts the forward poll's clock, so live output still arrives on
   cadence; the exchange the reader opened in keeps its key as pages, and then
-  its prompt, arrive inside it (`keepLeadKey`), so opened work stays open; and
+  its prompt, arrive inside it (`keepLeadKey`, matched on record, native
+  message and tool call ids, so reconciliation joining a record into an earlier
+  one is not mistaken for a reset), so opened work stays open; its steps are
+  keyed by identity (`stepKeys`), so an opened step stays the one opened; and
   a page that grows the first row holds it by its bottom edge
-  (`pinFirstRowBottom`), so text being read above the latest step stays put.
+  (`pinFirstRowBottom`, re-measured whenever the row changed since the last
+  pin), so text being read above the latest step stays put.
   Server limits: a single record over the 8 MiB window ceiling blocks backward
   paging (shown as such), and a non-windowable source parses at most 20,000
   messages from its start, so in a longer one the newest turns are not served.

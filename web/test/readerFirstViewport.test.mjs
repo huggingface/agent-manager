@@ -28,6 +28,11 @@ const bundle = path.join(tmp, 'fixture.js');
 await build({
   stdin: { resolveDir: web, loader: 'tsx', contents: `
     import React from 'react'; import {createRoot} from 'react-dom/client'; import {flushSync} from 'react-dom';
+    // The mounted reader's store, so a case can ask for new output at once
+    // instead of waiting out the poll's cadence.
+    import {ReaderStore} from './src/lib/readerStore';
+    const retain = ReaderStore.prototype.retain;
+    ReaderStore.prototype.retain = function(){ window.liveStore = this; return retain.call(this); };
     import ConversationView from './src/components/conversation/ConversationView';
     import {HISTORY_TARGET_EXCHANGES, HISTORY_MAX_EXCHANGES, FILL_MAX_REQUESTS} from './src/lib/traceWindows';
     window.HISTORY_TARGET_EXCHANGES = HISTORY_TARGET_EXCHANGES;
@@ -57,12 +62,21 @@ await build({
       // tool records, more than the floor budget reaches.
       if (turn) {
         put({id:'last', role:'user', ts:200000, blocks:[{type:'text', text:'The last prompt'}]}, promptBytes);
-        for (let k = 0; k < turn.count; k++) put({id:'h'+k, role:'assistant', ts:200001+k, blocks:[
-          // 'say': a line of narration per step, so opened work is many rows
-          // rather than one grouped "Bash ×N".
-          ...(turn.say ? [{type:'text', text:'Checking service '+k+' before the next log.'}] : []),
-          {type:'tool_use', id:'hc'+k, name:'Bash', text:'{"command":"step '+k+'"}'},
-          {type:'tool_result', id:'hc'+k, text:'output of step '+k}]}, turn.bytes);
+        for (let k = 0; k < turn.count; k++) {
+          const call = [
+            // 'say': a line of narration per step, so opened work is many rows
+            // rather than one grouped "Bash ×N".
+            ...(turn.say ? [{type:'text', text:'Checking service '+k+' before the next log.'}] : []),
+            {type:'tool_use', id:'hc'+k, name:'Bash', text:'{"command":"step '+k+'"}'}];
+          const result = {type:'tool_result', id:'hc'+k, text:'output of step '+k};
+          // 'split': the call and its result as two records, the way Claude
+          // writes them, so a window can start on a result whose call is
+          // still on the page before it.
+          if (turn.split) {
+            put({id:'h'+k, role:'assistant', ts:200001+k, blocks:call}, turn.bytes);
+            put({id:'r'+k, role:'user', ts:200001+k, blocks:[result]}, 10 * 1024);
+          } else put({id:'h'+k, role:'assistant', ts:200001+k, blocks:[...call, result]}, turn.bytes);
+        }
       }
       size = at;
     }
@@ -116,6 +130,13 @@ await build({
         flushSync(()=>root.render(<App/>));
       },
       set(options){ Object.assign(cfg, options); },
+      // Live output inside the running turn: a long answer, fetched at once.
+      appendLive(){
+        records.push({at:size, size:500, turn:{id:'live-answer', role:'assistant', ts:300000, blocks:[{type:'text',
+          text:Array.from({length:30}, (_, i) => 'Live answer paragraph '+i).join('\\n\\n')}]}});
+        size += 500;
+        return window.liveStore.loadNewer();
+      },
       // Append a genuinely new exchange, the way a live agent would.
       append(){
         const i = cfg.count;
@@ -468,71 +489,101 @@ try {
   // record, so every backward page inside the same turn (and the prompt
   // arriving) made it a new row: the opened work collapsed and the place the
   // operator was reading was lost. Slow pages, so the operator really does open
-  // the work and scroll up into it while the hunt is running.
-  // ~6 records a page, ~30 MiB: enough steps to scroll within after a few
-  // pages, and the prompt still reachable.
-  await p.evaluate(() => window.fixture.mount({ count: 20, turn: { count: 190, bytes: 160 * 1024, say: true }, beforeDelay: 500 }));
-  await p.waitForFunction(() => window.probe.shown() && document.querySelector('.cx-fold')
-    && window.reads.filter((x) => x.at === 'before').length >= 3, null, { timeout: 30_000 });
-  await p.locator('.cx-fold').last().click();
-  try {
-    await p.waitForFunction(() => document.querySelector('.cx-fold.on') && document.querySelector('.cx-steps')
-      && (() => { const el = document.querySelector('.cxv-body'); return el.scrollHeight - el.clientHeight > 400; })(),
-      null, { timeout: 10_000 });
-  } catch {
-    assert.fail(`opened work stays open while pages land: ${JSON.stringify(await p.evaluate(() => ({
-      open: !!document.querySelector('.cx-fold.on'), key: document.querySelector('[data-x]')?.dataset.x,
-      pages: window.reads.filter((x) => x.at === 'before').length })))}`);
-  }
-  // Read away from the bottom, the way a person does: a wheel, not scrollTop.
-  const box = await p.locator('.cxv-body').boundingBox();
-  await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await p.mouse.wheel(0, -300);
-  await p.waitForTimeout(300);
-  const opened = await p.evaluate(() => {
-    const el = document.querySelector('.cxv-body');
-    const r = el.getBoundingClientRect();
-    // The element the operator is looking at: the middle of the reader.
-    // Found again by its text afterwards: steps are keyed by position, so a
-    // DOM node may legitimately be reused for another step.
-    let at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-    while (at && at.children.length) at = at.children[0];
-    window.__text = at?.textContent || '';
-    window.__find = () => [...document.querySelectorAll('.cx-steps *')]
-      .find((e) => !e.children.length && e.textContent === window.__text);
-    return { key: document.querySelector('.cx-fold.on')?.closest('[data-x]')?.dataset.x,
-      before: window.reads.filter((x) => x.at === 'before').length,
-      text: window.__text.slice(0, 60),
-      top: Math.round(window.__find().getBoundingClientRect().top * 100) / 100,
-      atBottom: window.probe.atBottom() };
+  // the work and scroll up into it while the hunt is running. Three shapes:
+  //   plain  — each step one record;
+  //   split  — call and result as separate records, so pages land on the seam
+  //            where an earlier call absorbs an already-loaded result;
+  //   live   — between pages, live output grows the same row below the reader,
+  //            and the operator opens a step below what they are reading.
+  const readWhileHunting = async (label, turn, between) => {
+    // ~6 records a page, ~30 MiB: enough steps to scroll within after a few
+    // pages, and the prompt still reachable.
+    await p.evaluate((t) => window.fixture.mount({ count: 20, turn: t, beforeDelay: 500 }), turn);
+    await p.waitForFunction(() => window.probe.shown() && document.querySelector('.cx-fold')
+      && window.reads.filter((x) => x.at === 'before').length >= 3, null, { timeout: 30_000 });
+    await p.locator('.cx-fold').last().click();
+    try {
+      await p.waitForFunction(() => document.querySelector('.cx-fold.on') && document.querySelector('.cx-steps')
+        && (() => { const el = document.querySelector('.cxv-body'); return el.scrollHeight - el.clientHeight > 400; })(),
+        null, { timeout: 10_000 });
+    } catch {
+      assert.fail(`${label}: opened work stays open while pages land: ${JSON.stringify(await p.evaluate(() => ({
+        open: !!document.querySelector('.cx-fold.on'), key: document.querySelector('[data-x]')?.dataset.x,
+        pages: window.reads.filter((x) => x.at === 'before').length })))}`);
+    }
+    // Read away from the bottom, the way a person does: a wheel, not scrollTop.
+    const box = await p.locator('.cxv-body').boundingBox();
+    await p.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await p.mouse.wheel(0, -300);
+    await p.waitForTimeout(300);
+    const opened = await p.evaluate(() => {
+      const el = document.querySelector('.cxv-body');
+      const r = el.getBoundingClientRect();
+      // The narration line nearest the middle of the reader: what is being
+      // read. Found again by its text: rows may legitimately reuse DOM nodes.
+      const lines = [...document.querySelectorAll('.cx-steps .cs-detail')].filter((e) => /^Checking service/.test(e.textContent));
+      const mid = r.top + r.height / 2;
+      const at = lines.sort((a, b) => Math.abs(a.getBoundingClientRect().top - mid) - Math.abs(b.getBoundingClientRect().top - mid))[0];
+      window.__text = at?.textContent || '';
+      window.__find = () => [...document.querySelectorAll('.cx-steps .cs-detail')].find((e) => e.textContent === window.__text);
+      return { key: document.querySelector('.cx-fold.on')?.closest('[data-x]')?.dataset.x,
+        before: window.reads.filter((x) => x.at === 'before').length,
+        text: window.__text.slice(0, 60),
+        top: window.__find()?.getBoundingClientRect().top,
+        atBottom: window.probe.atBottom() };
+    });
+    assert.ok(opened.key && opened.text, `${label}: the work is open and a line is being read`);
+    assert.equal(opened.atBottom, false, `${label}: and the operator has scrolled up into it`);
+    // Every frame, not only the end: the text must not jump and come back.
+    await p.evaluate(() => { window.__tops = []; const step = () => { const e = window.__find();
+      window.__tops.push(e ? Math.round(e.getBoundingClientRect().top * 100) / 100 : null); window.__rq = requestAnimationFrame(step); }; step(); });
+    await p.waitForFunction((n) => window.reads.filter((x) => x.at === 'before').length >= n + 2, opened.before, { timeout: 30_000 });
+    const extra = between ? await between() : {};
+    await p.waitForFunction(() => !document.querySelector('.cxv-top-busy'), null, { timeout: 90_000, polling: 250 });
+    const tops = await p.evaluate(() => { cancelAnimationFrame(window.__rq); return window.__tops; });
+    const later = await p.evaluate(() => ({
+      key: document.querySelector('.cx-fold.on')?.closest('[data-x]')?.dataset.x,
+      open: !!document.querySelector('.cx-fold.on'),
+      steps: document.querySelectorAll('.cx-steps').length,
+      prompt: [...document.querySelectorAll('[data-x]')].some((r) => r.textContent.includes('The last prompt')),
+      pages: window.reads.filter((x) => x.at === 'before').length,
+      openSteps: [...document.querySelectorAll('.cx-steps .cs.open .cs-detail')].map((e) => e.textContent),
+    }));
+    assert.ok(later.pages > opened.before + 2, `${label}: pages did land meanwhile (${opened.before} -> ${later.pages})`);
+    assert.ok(later.prompt, `${label}: the prompt arrived too`);
+    assert.ok(later.open && later.steps > 0, `${label}: the opened work is still open (${JSON.stringify(later)})`);
+    assert.equal(later.key, opened.key, `${label}: under the same row`);
+    assert.ok(tops.length > 8 && tops.every((v) => v !== null), `${label}: what was being read (${opened.text}) was on screen in every frame (${tops.length})`);
+    const readDrift = Math.max(...tops) - Math.min(...tops);
+    assert.ok(readDrift <= 2, `${label}: and did not move while the turn loaded above it (max ${readDrift}px over ${tops.length} frames)`);
+    results.push({ case: `open work during the hunt (${label})`, key: later.key, driftPx: readDrift, frames: tops.length,
+      pages: later.pages - opened.before });
+    return { ...later, ...extra };
+  };
+  await readWhileHunting('plain', { count: 190, bytes: 160 * 1024, say: true });
+  await readWhileHunting('split', { count: 190, bytes: 150 * 1024, say: true, split: true });
+  const growing = await readWhileHunting('live', { count: 190, bytes: 160 * 1024, say: true }, async () => {
+    // Live output grows the row below the reader…
+    await p.evaluate(() => window.fixture.appendLive());
+    await p.getByText('Live answer paragraph 29', { exact: false }).first().waitFor({ state: 'attached', timeout: 10_000 });
+    await p.waitForFunction((n) => window.reads.filter((x) => x.at === 'before').length >= n + 2,
+      await p.evaluate(() => window.reads.filter((x) => x.at === 'before').length), { timeout: 30_000 });
+    // …and the operator opens a step below what they are reading.
+    const opened = await p.evaluate(() => {
+      const read = window.__find().getBoundingClientRect().top;
+      const r = document.querySelector('.cxv-body').getBoundingClientRect();
+      const head = [...document.querySelectorAll('.cx-steps .cs.tools .cs-head')]
+        .find((h) => { const t = h.getBoundingClientRect().top; return t > read + 40 && t < r.bottom - 20; });
+      if (!head) return null;
+      head.click();
+      return head.querySelector('.cs-detail')?.textContent || '';
+    });
+    assert.ok(opened, 'there was a step below the reading line to open');
+    await p.waitForFunction((n) => window.reads.filter((x) => x.at === 'before').length >= n + 2,
+      await p.evaluate(() => window.reads.filter((x) => x.at === 'before').length), { timeout: 30_000 });
+    return { openedStep: opened };
   });
-  // Every frame, not only the end: the text must not jump and come back.
-  await p.evaluate(() => { window.__tops = []; const step = () => { const e = window.__find();
-    window.__tops.push(e ? Math.round(e.getBoundingClientRect().top * 100) / 100 : null); window.__rq = requestAnimationFrame(step); }; step(); });
-  assert.ok(opened.key, 'the work is open');
-  assert.equal(opened.atBottom, false, 'and the operator has scrolled up into it');
-  // More pages land above, and then the prompt.
-  await p.waitForFunction((n) => window.reads.filter((x) => x.at === 'before').length >= n + 2, opened.before, { timeout: 30_000 });
-  await p.waitForFunction(() => !document.querySelector('.cxv-top-busy'), null, { timeout: 90_000, polling: 250 });
-  const later = await p.evaluate(() => ({
-    key: document.querySelector('.cx-fold.on')?.closest('[data-x]')?.dataset.x,
-    open: !!document.querySelector('.cx-fold.on'),
-    steps: document.querySelectorAll('.cx-steps').length,
-    top: window.__find() ? Math.round(window.__find().getBoundingClientRect().top * 100) / 100 : null,
-    prompt: [...document.querySelectorAll('[data-x]')].some((r) => r.textContent.includes('The last prompt')),
-    pages: window.reads.filter((x) => x.at === 'before').length,
-  }));
-  const tops = await p.evaluate(() => { cancelAnimationFrame(window.__rq); return window.__tops; });
-  assert.ok(later.pages > opened.before, `pages did land meanwhile (${opened.before} -> ${later.pages})`);
-  assert.ok(later.prompt, 'the prompt arrived too');
-  assert.ok(later.open && later.steps > 0, `the opened work is still open (${JSON.stringify(later)})`);
-  assert.equal(later.key, opened.key, 'under the same row');
-  assert.ok(opened.text && later.top !== null, `what the operator was reading (${opened.text}) is still there`);
-  assert.ok(tops.length > 8 && tops.every((v) => v !== null), `it was on screen in every sampled frame (${tops.length} frames)`);
-  const readDrift = Math.max(...tops) - Math.min(...tops);
-  assert.ok(readDrift <= 2, `and did not move while the turn loaded above it (max ${readDrift}px over ${tops.length} frames)`);
-  results.push({ case: 'open work during the hunt', key: later.key, driftPx: readDrift, frames: tops.length,
-    pages: later.pages - opened.before });
+  assert.deepEqual(growing.openSteps, [growing.openedStep], `the step the operator opened is the one still open (${JSON.stringify(growing.openSteps)})`);
 
   assert.deepEqual(errors, [], 'no page errors');
 } finally {

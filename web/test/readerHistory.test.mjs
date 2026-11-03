@@ -642,18 +642,25 @@ const indexedTurn = (steps, block) => {
 for (const [label, block] of [
   ['20,000-character text blocks', () => ({ type: 'text', text: 'x'.repeat(20_000) })],
   ['200 KB images', () => ({ type: 'image', src: `data:image/png;base64,${'A'.repeat(200_000)}`, mediaType: 'image/png' })],
+  // agy's completed run_command, as server/src/traces.js emits it: no `text`.
+  ['20,000-character shell output', () => ({ type: 'shell', command: 'ls -la', stdout: 'x'.repeat(20_000), exitCode: 0 })],
 ]) {
   const indexed = indexedSource(indexedTurn(6000, block));
   const store = new ReaderStore(indexed);
   const release = store.retain();
   store.wantHistory(HISTORY_TARGET_EXCHANGES);
   await tick(5);
-  const first = store.retainedSize;   // the first window: not the fill's to pay for
+  // Measured here, not with the store's own estimate: that estimate is the
+  // thing under test, and it once charged agy's shell output nothing at all.
+  const strings = (v) => typeof v === 'string' ? 2 * v.length
+    : v && typeof v === 'object' ? Object.values(v).reduce((n, x) => n + strings(x), 0) : 0;
+  const first = strings(store.getSnapshot().turns);   // the first window: not the fill's to pay for
   assert.equal(store.getSnapshot().cursor?.mode, 'index', `${label}: the first window has landed`);
   const state = await settle(store, PROMPT_BUDGET);
-  const retained = store.retainedSize - first;
+  const retained = strings(state.turns) - first;
   // One page of 100 such rows: what the request that crosses the budget adds.
-  const page = 100 * (256 + 2 * (block(0).text || block(0).src).length);
+  const b0 = block(0);
+  const page = 100 * (256 + 2 * (b0.text || b0.src || b0.command + b0.stdout).length + 64);
   console.log(`  [indexed, ${label}] ${state.turns.length} rows, fill added ~${(retained / MiB).toFixed(1)} MiB, fill ${state.fill}`);
   assert.equal(state.fill, 'limited', `${label}: the budget stops the hunt`);
   assert.ok(retained <= FILL_PROMPT_MAX_RETAINED_BYTES + page,

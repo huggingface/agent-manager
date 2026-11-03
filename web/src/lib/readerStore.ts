@@ -1,4 +1,4 @@
-import type { TraceCursor, TraceReq, TraceSummary, TraceTurn, TraceWindow } from '../api';
+import type { TraceBlock, TraceCursor, TraceReq, TraceSummary, TraceTurn, TraceWindow } from '../api';
 import { countExchanges, holdsPrompt, reconcileTrace } from './readerModel';
 
 // Persisted order is authoritative. Replace a native turn at its existing
@@ -183,7 +183,20 @@ export const FILL_PROMPT_WINDOW_BYTES = 1024 * 1024;
  * each, so a fill "within 32 MiB" retained an estimated 186 MiB.
  */
 const turnSize = (t: TraceTurn) => 128 + 2 * (t.event?.text.length || 0)
-  + t.blocks.reduce((b, v) => b + 128 + 2 * ('text' in v ? v.text.length : 'src' in v ? v.src.length : 100), 0);
+  + t.blocks.reduce((b, v) => b + 128 + 2 * blockChars(v), 0);
+/** The characters a block retains. Exhaustive on purpose: a block type added
+ * to TraceBlock without a case here fails the typecheck instead of being
+ * charged nothing, which is how agy's shell output went uncounted. */
+function blockChars(b: TraceBlock): number {
+  switch (b.type) {
+    case 'text': case 'thinking': case 'compaction': return b.text.length;
+    case 'tool_use': return b.name.length + b.text.length;
+    case 'tool_result': return b.text.length;
+    case 'shell': return b.command.length + (b.stdout?.length || 0) + (b.stderr?.length || 0);
+    case 'image': return b.src.length + (b.mediaType?.length || 0);
+    default: { const unknown: never = b; return unknown; }
+  }
+}
 
 const sameFields = (a: object, b: object) => {
   const keys = Object.keys(a);

@@ -24,7 +24,7 @@ await build({
   entryPoints: [path.join(HERE, '../src/components/conversation/exchanges.ts')],
   outfile: out, format: 'esm', bundle: true, logLevel: 'error',
 });
-const { splitExchanges, stepsOf, stepSummary, fmtTok } = await import(pathToFileURL(out).href);
+const { splitExchanges, stepsOf, stepSummary, fmtTok, keepLeadKey, stepKeys } = await import(pathToFileURL(out).href);
 // The store decides how much history it still owes the reader by counting
 // exchanges, and it cannot import the grouping to do it. `countExchanges` is
 // therefore a second implementation of the same question, and the two agreeing
@@ -34,7 +34,7 @@ await build({
   entryPoints: [path.join(HERE, '../src/lib/readerModel.ts')],
   outfile: modelOut, format: 'esm', bundle: true, logLevel: 'error',
 });
-const { countExchanges } = await import(pathToFileURL(modelOut).href);
+const { countExchanges, reconcileTrace } = await import(pathToFileURL(modelOut).href);
 
 let ts = 1_700_000_000_000;
 const at = () => (ts += 30_000);
@@ -263,6 +263,60 @@ assert.equal(fmtTok(21_000), '21.0k');
 assert.equal(fmtTok(654_321), '654k', 'no decimal where it says nothing');
 assert.equal(fmtTok(2_200_000), '2.2M');
 assert.equal(fmtTok(1_400_000_000), '1.4B');
+
+// ---- keepLeadKey: the exchange a reader opened in keeps its key ----
+// It is keyed by its first loaded record, and an earlier page can reconcile
+// that record away without anything being reset: an earlier tool call absorbs
+// a loaded result record, or an earlier fragment of the same native message
+// absorbs the loaded one. The key must survive both, and the prompt arriving.
+{
+  const answer = { id: 'answer', role: 'assistant', kind: 'final', blocks: [{ type: 'text', text: 'answer' }] };
+  const prompt = { id: 'prompt', role: 'user', blocks: [{ type: 'text', text: 'the prompt' }] };
+  const seams = {
+    'a result joins its earlier call': [
+      { id: 'result-record', role: 'user', blocks: [{ type: 'tool_result', id: 'call-id', text: 'output' }] },
+      { id: 'call-record', role: 'assistant', blocks: [{ type: 'tool_use', id: 'call-id', name: 'Bash', text: 'run' }] }],
+    'a fragment joins its earlier native message': [
+      { id: 'tail-fragment', messageId: 'claude:m', role: 'assistant', blocks: [{ type: 'tool_use', id: 'c2', name: 'Bash', text: 'run' }] },
+      { id: 'earlier-fragment', messageId: 'claude:m', role: 'assistant', blocks: [{ type: 'thinking', text: 'earlier reasoning' }] }],
+  };
+  for (const [label, [first, prior]] of Object.entries(seams)) {
+    const held = { current: null };
+    const lead = (raw) => keepLeadKey(splitExchanges(reconcileTrace(raw)), held);
+    const before = lead([first, answer]);
+    const joined = lead([prior, first, answer]);
+    assert.equal(joined.length, 1, `${label}: still one exchange`);
+    assert.equal(joined[0].key, before[0].key, `${label}: keeps its key (${before[0].key} -> ${joined[0].key})`);
+    const prompted = lead([prompt, prior, first, answer]);
+    assert.equal(prompted.at(-1).key, before[0].key, `${label}: and keeps it when its prompt arrives`);
+  }
+  // A real reset (nothing of the old exchange is left) starts over.
+  const held = { current: null };
+  keepLeadKey(splitExchanges([{ id: 'a', role: 'assistant', blocks: [{ type: 'text', text: 'x' }] }]), held);
+  const fresh = keepLeadKey(splitExchanges([{ id: 'b', role: 'assistant', blocks: [{ type: 'text', text: 'y' }] }]), held);
+  assert.equal(fresh[0].key, 'b', 'a replaced transcript is not given the old key');
+}
+
+// ---- stepKeys: a step keeps its key when earlier steps are prepended ----
+{
+  const step = (k) => [
+    { id: `n${k}`, role: 'assistant', blocks: [{ type: 'text', text: `Checking service ${k}.` }] },
+    { id: `c${k}`, role: 'assistant', blocks: [{ type: 'tool_use', id: `t${k}`, name: k % 2 ? 'Bash' : 'Read', text: 'x' },
+      { type: 'tool_result', id: `t${k}`, text: 'ok' }] }];
+  const memo = new Map();
+  const later = stepsOf([4, 5, 6].flatMap(step));
+  const keys = stepKeys(later, memo);
+  const all = stepsOf([1, 2, 3, 4, 5, 6].flatMap(step));
+  const again = stepKeys(all, memo);
+  assert.deepEqual(again.slice(-keys.length), keys, 'the steps that were there keep their keys');
+  assert.equal(new Set(again).size, again.length, 'and every key is unique');
+  // A group that gains an earlier call of the same tool keeps its key.
+  const bash = (k) => ({ id: `b${k}`, role: 'assistant', blocks: [{ type: 'tool_use', id: `bt${k}`, name: 'Bash', text: 'x' }] });
+  const groupMemo = new Map();
+  const [one] = stepKeys(stepsOf([bash(2), bash(3)]), groupMemo);
+  const [grown] = stepKeys(stepsOf([bash(1), bash(2), bash(3)]), groupMemo);
+  assert.equal(grown, one, 'Bash ×2 that becomes Bash ×3 from above is the same row');
+}
 
 fs.rmSync(path.dirname(out), { recursive: true, force: true });
 console.log('exchanges: ok');

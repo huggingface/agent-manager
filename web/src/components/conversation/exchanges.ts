@@ -132,6 +132,50 @@ export type Step =
   | { kind: 'compact'; text: string };
 
 /**
+ * React keys for an exchange's steps, by identity rather than position.
+ *
+ * Steps used to be keyed by their index, which is stable while output is only
+ * appended. A reader that opens mid-turn also PREPENDS steps to that exchange
+ * as earlier pages arrive, and an index key then hands every step's state to
+ * whichever step now sits at that index: a step the operator opened closed and
+ * another, further up, opened in its place.
+ *
+ * Steps that carry tool calls are keyed by a call id. `memo` (one per
+ * exchange) remembers which key each call id was given, so a `Bash ×3` that
+ * gains an earlier call when a page lands keeps its key. Text-like steps are
+ * keyed by their content; an identical one is numbered by occurrence.
+ */
+export function stepKeys(steps: Step[], memo: Map<string, string>): string[] {
+  const used = new Set<string>();
+  const unique = (key: string) => {
+    let k = key;
+    for (let n = 2; used.has(k); n++) k = `${key}#${n}`;
+    used.add(k);
+    return k;
+  };
+  const head = (text: string) => `${text.length}:${text.slice(0, 48)}`;
+  return steps.map((st) => {
+    const ids = st.kind === 'agent' ? [st.toolUseId]
+      : st.kind === 'tools' || st.kind === 'dispatch'
+        ? st.blocks.flatMap((b) => ((b.type === 'tool_use' || b.type === 'tool_result') && b.id ? [b.id] : []))
+        : [];
+    if (ids.length) {
+      const known = ids.map((id) => memo.get(id)).find((k) => k && !used.has(k));
+      const key = known || unique(`c:${ids[0]}`);
+      if (known) used.add(known);
+      for (const id of ids) if (!memo.has(id)) memo.set(id, key);
+      return key;
+    }
+    switch (st.kind) {
+      case 'think': case 'note': case 'compact': return unique(`${st.kind}:${head(st.text)}`);
+      case 'shell': return unique(`shell:${head(st.command)}:${head(st.out)}`);
+      case 'image': return unique(`image:${head(st.src)}`);
+      default: return unique(`${st.kind}:`);
+    }
+  });
+}
+
+/**
  * Keeps the key of an exchange that opened WITHOUT its prompt.
  *
  * A reader that opens in the middle of a long turn keys that leading exchange
@@ -140,17 +184,28 @@ export type Step =
  * new row: React remounted it, the operator's opened work closed, and the
  * reading anchor lost its row while history was still loading above it.
  *
- * `held` remembers the first key such an exchange was shown under and one of
- * its records. Whichever exchange later holds that record keeps the key, for as
- * long as the record is loaded. Keys stay unique: the held key is the id of a
- * record inside that same exchange. Exchanges are not mutated; a renamed one
- * is a copy.
+ * `held` remembers the first key such an exchange was shown under and the
+ * identities of its first record: the record id, its native message id and its
+ * tool call ids. Reconciliation can make the record itself disappear without
+ * anything being reset (an earlier call absorbs a loaded result, an earlier
+ * fragment of the same message absorbs the loaded one), but those identities
+ * survive into whichever record absorbed it. The exchange holding any of them
+ * keeps the key; only when none is left (a reset) does it start over. Keys stay
+ * unique: the held key is the id of a record that was in that same exchange.
+ * Exchanges are not mutated; a renamed one is a copy.
  */
-export type LeadKey = { key: string; member: string } | null;
+export type LeadKey = { key: string; marks: Set<string> } | null;
+const marksOf = (t: TraceTurn) => {
+  const out: string[] = [];
+  if (t.id) out.push(`r:${t.id}`);
+  if (t.messageId) out.push(`m:${t.messageId}`);
+  for (const b of t.blocks) if ((b.type === 'tool_use' || b.type === 'tool_result') && b.id) out.push(`c:${b.id}`);
+  return out;
+};
 export function keepLeadKey(xs: Exchange[], held: { current: LeadKey }): Exchange[] {
   const lead = held.current;
   if (lead) {
-    const has = (t: TraceTurn | null) => t?.id === lead.member;
+    const has = (t: TraceTurn | null) => !!t && marksOf(t).some((m) => lead.marks.has(m));
     const i = xs.findIndex((x) => has(x.prompt) || x.steps.some(has) || x.answer.some(has));
     if (i >= 0) {
       if (xs[i].key === lead.key) return xs;
@@ -158,11 +213,11 @@ export function keepLeadKey(xs: Exchange[], held: { current: LeadKey }): Exchang
       out[i] = { ...xs[i], key: lead.key };
       return out;
     }
-    held.current = null;   // the record is gone (a reset): start over
+    held.current = null;   // nothing of it is left (a reset): start over
   }
   const first = xs[0];
-  const member = first && !first.prompt ? (first.steps[0] || first.answer[0])?.id : undefined;
-  if (member) held.current = { key: first.key, member };
+  const record = first && !first.prompt ? first.steps[0] || first.answer[0] : undefined;
+  if (record) held.current = { key: first.key, marks: new Set(marksOf(record)) };
   return xs;
 }
 

@@ -34,8 +34,9 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
    * any scroll event is delivered the position is already right.
    */
   const placedAt = useRef(-1);
-  /** The last bottom-edge pin applied, and where it left the scroller. */
-  const pinned = useRef<{ key: string; fromBottom: number; top: number } | null>(null);
+  /** The last bottom-edge pin applied: where it left the scroller, and how
+   * tall the row was then. */
+  const pinned = useRef<{ key: string; fromBottom: number; top: number; height: number } | null>(null);
   const [viewport, setViewport] = useState({ top: 0, height: 700 });
   const offsets = useMemo(() => {
     const out = [0];
@@ -99,8 +100,9 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
     if (!wanted) return;
     const bottomOf = wanted.fromBottom !== undefined && nodes.current.get(wanted.key);
     if (bottomOf) {
-      put(rowBox(bottomOf).bottom - wanted.fromBottom!);
-      pinned.current = { key: wanted.key, fromBottom: wanted.fromBottom!, top: el.scrollTop };
+      const box = rowBox(bottomOf);
+      put(box.bottom - wanted.fromBottom!);
+      pinned.current = { key: wanted.key, fromBottom: wanted.fromBottom!, top: el.scrollTop, height: box.bottom - box.top };
       return;
     }
     const { keys: list, offsets: positions } = current.current;
@@ -132,7 +134,7 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
     const box = rowBox(node);
     if (wanted.fromBottom === undefined) { el.scrollTop = box.top + wanted.offset; return; }
     el.scrollTop = box.bottom - wanted.fromBottom;
-    pinned.current = { key: wanted.key, fromBottom: wanted.fromBottom, top: el.scrollTop };
+    pinned.current = { key: wanted.key, fromBottom: wanted.fromBottom, top: el.scrollTop, height: box.bottom - box.top };
   }, [following, scroller]);
   /**
    * The next content change grows the FIRST row at its top, so hold it by its
@@ -153,11 +155,16 @@ export function useVirtualRows(keys: string[], scroller: RefObject<HTMLDivElemen
     if (following.current || !el || !a || !node || a.key !== keysRef.current[0]) return;
     // The browser rounds every scroll offset it is given, so measuring this
     // afresh on each page compounded that rounding: a pixel of drift per page.
-    // While the scroller is still where the last pin put it (the operator has
-    // not scrolled since), the exact distance from that pin still holds.
+    // The exact distance from the last pin still holds only while nothing else
+    // moved: the scroller is where that pin put it (the operator has not
+    // scrolled) AND the row is as tall as it was (no live output appended to
+    // it, no step opened or closed in it). Reusing it after the row grew below
+    // the reading point scrolled by that growth too: a 935 px jump.
     const last = pinned.current;
+    const box = rowBox(node);
     const fromBottom = last && last.key === a.key && Math.abs(el.scrollTop - last.top) < 1.5
-      ? last.fromBottom : rowBox(node).bottom - el.scrollTop;
+      && Math.abs(box.bottom - box.top - last.height) < 0.5
+      ? last.fromBottom : box.bottom - el.scrollTop;
     anchor.current = { ...a, fromBottom };
   }, [following, scroller]);
   useLayoutEffect(() => {
