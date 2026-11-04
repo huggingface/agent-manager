@@ -84,14 +84,49 @@ needed: the store uses immutable snapshots and React's external-store adapter.
 
 - Initial history: about 20 recent exchanges, or all of a shorter conversation,
   paged in after the first response at one backward page per 50 ms. Bounded by
-  six backward requests, ~3 MiB RETAINED (indexed rows charged at an assumed
-  4 KiB each) and 20 seconds per continuous run, whichever comes first. Retained
+  six backward requests, ~3 MiB RETAINED (indexed rows charged at their
+  estimated in-memory size, the same estimate the inactive-store pruning uses) and 20 seconds per continuous run, whichever comes first. Retained
   rather than read: a page's size is not knowable before fetching it, so the
   request that crosses the budget is the last one. What bounds a single read is
   the message floor a speculative page asks for — one, the smallest that still
   guarantees progress — which stops the server growing a response beyond a
   single oversized record. Left to the server's own default of twelve, one page
   of 900 KiB answers grew to six megabytes.
+- The last prompt: on top of the exchange counts, a cold main reader always
+  reaches back to the operator prompt that opened the most recent turn, so it
+  never opens on half a turn with nothing above it. The counts cannot promise
+  this, because agent output with no prompt above it counts as one exchange and
+  one long tool-heavy turn could outlast the whole floor budget. While the
+  window holds no operator prompt (`holdsPrompt`; a still-queued prompt does
+  not count) the fill uses its own allowance: 48 backward requests, 32 MiB
+  retained and 90 seconds, with 1 MiB byte pages (indexed sources keep their
+  100-row pages: up to 4,800 short rows, far fewer large ones, because a page
+  is charged the estimated size of what it adds, every string of every block
+  type including agy's shell command and output; 20,000-character rows stop
+  near 940). A Claude compaction summary (`isCompactSummary`) is not a prompt:
+  the server reads it as a collapsed compaction step, so the hunt goes on past
+  it to the prompt. Measured on 94 Claude traces on this
+  Space, the last turn was 0.4 MiB at the median, 3.5 MiB at p95 and 9.8 MiB at
+  most. The spend is cumulative, so once the prompt is loaded the ordinary caps
+  apply to what has already been spent. It stops without the prompt only at
+  the start of a conversation that has none, on a blocked record, a failed
+  read, a cursor that stops advancing, or the cap; in the last case the top row
+  reads "Load earlier turns · the start of this turn is not loaded". Child
+  readers and previews (`want = 0`) do not take part: a child opens on its own
+  2 MiB tail and already says the task may be earlier, and an automatic 32 MiB
+  read per expanded row is not worth it there. While it runs: a backward page
+  never restarts the forward poll's clock, so live output still arrives on
+  cadence; the exchange the reader opened in keeps its key as pages, and then
+  its prompt, arrive inside it (`keepLeadKey`, matched on record, native
+  message and tool call ids, so reconciliation joining a record into an earlier
+  one is not mistaken for a reset), so opened work stays open; its steps are
+  keyed by identity (`stepKeys`), so an opened step stays the one opened; and
+  a page that grows the first row holds it by its bottom edge
+  (`pinFirstRowBottom`, re-measured whenever the row changed since the last
+  pin), so text being read above the latest step stays put.
+  Server limits: a single record over the 8 MiB window ceiling blocks backward
+  paging (shown as such), and a non-windowable source parses at most 20,000
+  messages from its start, so in a longer one the newest turns are not served.
 - First paint holds until the transcript is worth showing, for at most two
   seconds, and ends earlier on coverage, the start of the conversation, an
   unusable source or an exhausted fill. The composer is never part of the wait

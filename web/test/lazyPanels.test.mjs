@@ -146,7 +146,19 @@ try {
     // 793, ~0.1 kB over this branch's needs, as tight as the raise above.
     // After merging #227 (2026-10-30): main 811,065, this branch 812,081
     // (+1,016, unchanged), 49 over 793. Raised to 794.
-    assert.ok(entry.length <= 794 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 794 kB budget`);
+    // Reader: always load back to the last prompt (#236, 2026-11-03): main
+    // 812,680 here, this branch 814,327 (+1,647): +308 for the fill itself
+    // (holdsPrompt, FILL_PROMPT_*, the top row's warning) and +1,339 for the
+    // review's fixes (keepLeadKey, pinFirstRowBottom, size-based charging,
+    // the poll guard). All of it is the main reader's store, model and scroll
+    // anchoring, which the entry carries. 795 is 247 short; raised to 796,
+    // ~0.8 kB of headroom.
+    // The re-review's fixes (1a2b919) add 1,447 more: 815,774. Identity keys
+    // for steps (stepKeys) and the lead exchange (keepLeadKey on tool and
+    // message ids), the exhaustive block-size switch and the pin's geometry
+    // check; the same eager reader code. 670 over 796; raised to 797, 354 of
+    // headroom.
+    assert.ok(entry.length <= 797 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 797 kB budget`);
     // One literal only that panel's module contains — a dynamic import that
     // merely wraps an unchanged graph would leave these in the entry.
     for (const [panel, marker] of [

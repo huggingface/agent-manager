@@ -108,7 +108,7 @@ export function splitExchanges(turns: TraceTurn[]): Exchange[] {
 // ---------- step lines ----------
 
 export type Step =
-  | { kind: 'think'; text: string; more?: number }
+  | { kind: 'think'; text: string; more?: number; src?: string }
   /**
    * A sub-agent spawn. Its own kind, and NOT a `tools` row, for two reasons:
    * consecutive calls to one tool collapse into `Read ×4`, and spawns arrive
@@ -126,10 +126,108 @@ export type Step =
    * `call` is the tool_use block, the key the reader's dispatch map uses.
    */
   | { kind: 'dispatch'; call: TraceBlock; failed: boolean; blocks: TraceBlock[] }
-  | { kind: 'note'; text: string; more?: number }
-  | { kind: 'shell'; command: string; out: string; failed: boolean }
-  | { kind: 'image'; src: string }
-  | { kind: 'compact'; text: string };
+  | { kind: 'note'; text: string; more?: number; src?: string }
+  | { kind: 'shell'; command: string; out: string; failed: boolean; src?: string }
+  | { kind: 'image'; src: string; from?: string }
+  | { kind: 'compact'; text: string; src?: string };
+
+/**
+ * React keys for an exchange's steps, by identity rather than position.
+ *
+ * Steps used to be keyed by their index, which is stable while output is only
+ * appended. A reader that opens mid-turn also PREPENDS steps to that exchange
+ * as earlier pages arrive, and an index key then hands every step's state to
+ * whichever step now sits at that index: a step the operator opened closed and
+ * another, further up, opened in its place.
+ *
+ * Steps that carry tool calls are keyed by a call id. `memo` (one per
+ * exchange) remembers which key each call id was given, so a `Bash ×3` that
+ * gains an earlier call when a page lands keeps its key. Text-like steps are
+ * keyed by the message or record they came from plus a hash of their WHOLE
+ * content: two notes that open with the same sentence are still two keys, and
+ * an identical note in an earlier message does not take this one's key. Only
+ * a repeat inside the same message is numbered by occurrence.
+ */
+export function stepKeys(steps: Step[], memo: Map<string, string>): string[] {
+  const used = new Set<string>();
+  const unique = (key: string) => {
+    let k = key;
+    for (let n = 2; used.has(k); n++) k = `${key}#${n}`;
+    used.add(k);
+    return k;
+  };
+  // FNV-1a over every character, with the length: cheap, and no prefix to share.
+  const hash = (text: string) => {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
+    return `${text.length}.${(h >>> 0).toString(36)}`;
+  };
+  return steps.map((st) => {
+    const ids = st.kind === 'agent' ? [st.toolUseId]
+      : st.kind === 'tools' || st.kind === 'dispatch'
+        ? st.blocks.flatMap((b) => ((b.type === 'tool_use' || b.type === 'tool_result') && b.id ? [b.id] : []))
+        : [];
+    if (ids.length) {
+      const known = ids.map((id) => memo.get(id)).find((k) => k && !used.has(k));
+      const key = known || unique(`c:${ids[0]}`);
+      if (known) used.add(known);
+      for (const id of ids) if (!memo.has(id)) memo.set(id, key);
+      return key;
+    }
+    switch (st.kind) {
+      case 'think': case 'note': case 'compact': return unique(`${st.kind}:${st.src || ''}:${hash(st.text)}`);
+      case 'shell': return unique(`shell:${st.src || ''}:${hash(st.command)}:${hash(st.out)}`);
+      case 'image': return unique(`image:${st.from || ''}:${hash(st.src)}`);
+      default: return unique(`${st.kind}:`);
+    }
+  });
+}
+
+/**
+ * Keeps the key of an exchange that opened WITHOUT its prompt.
+ *
+ * A reader that opens in the middle of a long turn keys that leading exchange
+ * by its first loaded record, and every backward page inside the same turn
+ * changes that record, and the prompt arriving changes it again. A new key is a
+ * new row: React remounted it, the operator's opened work closed, and the
+ * reading anchor lost its row while history was still loading above it.
+ *
+ * `held` remembers the first key such an exchange was shown under and the
+ * identities of its first record: the record id, its native message id and its
+ * tool call ids. Reconciliation can make the record itself disappear without
+ * anything being reset (an earlier call absorbs a loaded result, an earlier
+ * fragment of the same message absorbs the loaded one), but those identities
+ * survive into whichever record absorbed it. The exchange holding any of them
+ * keeps the key; only when none is left (a reset) does it start over. Keys stay
+ * unique: the held key is the id of a record that was in that same exchange.
+ * Exchanges are not mutated; a renamed one is a copy.
+ */
+export type LeadKey = { key: string; marks: Set<string> } | null;
+const marksOf = (t: TraceTurn) => {
+  const out: string[] = [];
+  if (t.id) out.push(`r:${t.id}`);
+  if (t.messageId) out.push(`m:${t.messageId}`);
+  for (const b of t.blocks) if ((b.type === 'tool_use' || b.type === 'tool_result') && b.id) out.push(`c:${b.id}`);
+  return out;
+};
+export function keepLeadKey(xs: Exchange[], held: { current: LeadKey }): Exchange[] {
+  const lead = held.current;
+  if (lead) {
+    const has = (t: TraceTurn | null) => !!t && marksOf(t).some((m) => lead.marks.has(m));
+    const i = xs.findIndex((x) => has(x.prompt) || x.steps.some(has) || x.answer.some(has));
+    if (i >= 0) {
+      if (xs[i].key === lead.key) return xs;
+      const out = xs.slice();
+      out[i] = { ...xs[i], key: lead.key };
+      return out;
+    }
+    held.current = null;   // nothing of it is left (a reset): start over
+  }
+  const first = xs[0];
+  const record = first && !first.prompt ? first.steps[0] || first.answer[0] : undefined;
+  if (record) held.current = { key: first.key, marks: new Set(marksOf(record)) };
+  return xs;
+}
 
 /**
  * The prose a step carries, or '' when it carries none.
@@ -226,6 +324,9 @@ export function stepsOf(turns: TraceTurn[], dispatched?: (call: TraceBlock) => b
 
   for (const t of turns) {
     const bs = t.blocks;
+    // Where a text-like step came from, for its key (see stepKeys). The
+    // message id first: it survives fragments of one message being merged.
+    const src = t.messageId || t.id;
     for (let i = 0; i < bs.length; i++) {
       const b = bs[i];
       if (b.type === 'tool_use') {
@@ -258,15 +359,15 @@ export function stepsOf(turns: TraceTurn[], dispatched?: (call: TraceBlock) => b
       } else if (b.type === 'tool_result') {
         pushTool('result', oneLine(b.text, 60), [b], !!b.failed);
       } else if (b.type === 'thinking') {
-        out.push({ kind: 'think', text: b.text, more: b.more });
+        out.push({ kind: 'think', text: b.text, more: b.more, src });
       } else if (b.type === 'shell') {
-        out.push({ kind: 'shell', command: b.command, out: `${b.stdout || ''}${b.stderr || ''}`, failed: !!b.exitCode });
+        out.push({ kind: 'shell', command: b.command, out: `${b.stdout || ''}${b.stderr || ''}`, failed: !!b.exitCode, src });
       } else if (b.type === 'compaction') {
-        out.push({ kind: 'compact', text: b.text });
+        out.push({ kind: 'compact', text: b.text, src });
       } else if (b.type === 'image') {
-        out.push({ kind: 'image', src: b.src });
+        out.push({ kind: 'image', src: b.src, from: src });
       } else if (b.type === 'text' && b.text.trim()) {
-        out.push({ kind: 'note', text: b.text, more: b.more });
+        out.push({ kind: 'note', text: b.text, more: b.more, src });
       }
     }
   }

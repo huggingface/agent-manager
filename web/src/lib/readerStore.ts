@@ -1,5 +1,5 @@
-import type { TraceCursor, TraceReq, TraceSummary, TraceTurn, TraceWindow } from '../api';
-import { countExchanges, reconcileTrace } from './readerModel';
+import type { TraceBlock, TraceCursor, TraceReq, TraceSummary, TraceTurn, TraceWindow } from '../api';
+import { countExchanges, holdsPrompt, reconcileTrace } from './readerModel';
 
 // Persisted order is authoritative. Replace a native turn at its existing
 // position, never move it to the tail merely because it still has live data.
@@ -110,7 +110,7 @@ export const FILL_MAX_REQUESTS = 6;
 export const FILL_FLOOR_MAX_REQUESTS = 16;
 /**
  * Transcript one fill may ADD to what the reader retains, in bytes (indexed
- * rows charged at an assumed size).
+ * rows charged at their estimated in-memory size, `turnSize`).
  *
  * Retained, not read: a page's size is not knowable before fetching it, so the
  * request that crosses this is the last one — the ceiling is this plus one
@@ -140,8 +140,63 @@ export const FILL_STEP_MS = 50;
  * traces the first 384 KiB span satisfies it immediately and nothing changes.
  */
 export const FILL_MIN_TURNS = 1;
-/** Assumed cost of one indexed row, so both source kinds share one byte budget. */
-const INDEX_ROW_COST = 4 * 1024;
+/**
+ * The last prompt: a cold reader reaches back at least to the operator prompt
+ * that opened the most recent turn, so it never opens on half a turn with
+ * nothing above it to say what was asked.
+ *
+ * The exchange targets above cannot promise that. A trace counts the agent
+ * output in front of its first loaded prompt as one exchange, and one long
+ * tool-heavy turn is just that: one "exchange" that can be larger than the
+ * floor's whole budget, so the fill used to stop inside it.
+ *
+ * So while the window holds no operator prompt (`holdsPrompt`) and the cursor
+ * is not at the start, the fill runs on this larger allowance instead. Measured
+ * on the 94 Claude traces over 200 KiB on the Space this was written on, the
+ * stretch from the last prompt to the end of the file was 0.4 MiB at the
+ * median, 3.5 MiB at p95 and 9.8 MiB at most; the floor's 8 MiB stopped short of
+ * that last one. 32 MiB of retained transcript covers it three times over.
+ *
+ * Still a cap and never a loop: a turn longer than this, a record no window can
+ * read past (`blocked`), a failing read or a cursor that stops advancing all
+ * end the fill at `limited`, and the reader then says that the prompt of the
+ * turn it shows is not loaded (ConversationView's top row). The spend is the
+ * same cumulative spend as the floor's, so having bought the prompt it buys
+ * nothing more: the next step is checked against the smaller caps.
+ */
+export const FILL_PROMPT_MAX_REQUESTS = 48;
+export const FILL_PROMPT_MAX_RETAINED_BYTES = 32 * 1024 * 1024;
+export const FILL_PROMPT_MAX_MS = 90_000;
+/** A byte page while hunting for the prompt. Larger than WINDOW_BYTES so a
+ * 32 MiB turn is ~32 requests rather than ~85; `FILL_MIN_TURNS` still stops
+ * the server growing it past a single oversized record. Indexed sources keep
+ * their ordinary 100-row page: at most 4,800 rows by the request cap, and
+ * fewer when the rows are large, because they are charged by size. */
+export const FILL_PROMPT_WINDOW_BYTES = 1024 * 1024;
+/**
+ * Estimated in-memory size of one record: UTF-16 text and image data plus a
+ * fixed overhead per record and per block. The one estimate both the cache
+ * pruning (`retainedSize`) and the fill's charge for an indexed page use.
+ *
+ * An indexed source has no byte offsets to charge, and a flat per-row price
+ * undercharged it badly: rows of 20,000-character blocks were charged 4 KiB
+ * each, so a fill "within 32 MiB" retained an estimated 186 MiB.
+ */
+const turnSize = (t: TraceTurn) => 128 + 2 * (t.event?.text.length || 0)
+  + t.blocks.reduce((b, v) => b + 128 + 2 * blockChars(v), 0);
+/** The characters a block retains. Exhaustive on purpose: a block type added
+ * to TraceBlock without a case here fails the typecheck instead of being
+ * charged nothing, which is how agy's shell output went uncounted. */
+function blockChars(b: TraceBlock): number {
+  switch (b.type) {
+    case 'text': case 'thinking': case 'compaction': return b.text.length;
+    case 'tool_use': return b.name.length + b.text.length;
+    case 'tool_result': return b.text.length;
+    case 'shell': return b.command.length + (b.stdout?.length || 0) + (b.stderr?.length || 0);
+    case 'image': return b.src.length + (b.mediaType?.length || 0);
+    default: { const unknown: never = b; return unknown; }
+  }
+}
 
 const sameFields = (a: object, b: object) => {
   const keys = Object.keys(a);
@@ -169,8 +224,9 @@ export interface ReaderSnapshot {
   activityConfirmed: boolean;
   version: number;
   /** Automatic recent-history fill: 'filling' while it pages backward, 'done'
-   * when the target is met, 'limited' when a budget or the source stopped it
-   * first (the reader keeps disclosing earlier history either way). */
+   * when the target is met and the latest prompt is loaded, 'limited' when a
+   * budget or the source stopped it first (the reader keeps disclosing earlier
+   * history either way). */
   fill: 'idle' | 'filling' | 'done' | 'limited';
 }
 
@@ -227,15 +283,14 @@ export class ReaderStore {
   private fillTimer: ReturnType<typeof setTimeout> | null = null;
   private spent = { requests: 0, bytes: 0, since: 0 };
   /** A speculative page in flight, and where the cursor was before it. */
-  private step: { from: number; held: number } | null = null;
+  private step: { from: number; added: number; hunting: boolean } | null = null;
   private stalled = false;
   constructor(private source: TraceSource) {}
   getSnapshot = () => this.state;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   observe = (listener: (change: ReaderChange) => void) => { this.observers.add(listener); return () => { this.observers.delete(listener); }; };
   setSource(source: TraceSource) { this.source = source; }
-  get retainedSize() { return this.raw.reduce((n, t) => n + 128 + 2 * (t.event?.text.length || 0)
-    + t.blocks.reduce((b, v) => b + 128 + 2 * ('text' in v ? v.text.length : 'src' in v ? v.src.length : 100), 0), 0); }
+  get retainedSize() { return this.raw.reduce((n, t) => n + turnSize(t), 0); }
   get active() { return this.consumers > 0; }
 
   private publish(patch: Partial<ReaderSnapshot>, change?: ReaderChange) {
@@ -359,15 +414,15 @@ export class ReaderStore {
     this.step = null;
     const cursor = this.state.cursor;
     if (!cursor) return;
-    // An index source has no byte offsets, so its rows are charged at an assumed
-    // size: one budget both kinds of source can exhaust, not an exact count.
-    const advance = cursor.mode === 'index'
-      ? Math.max(0, this.state.turns.length - step.held) * INDEX_ROW_COST
-      : Math.max(0, step.from - cursor.start);
-    this.spent.bytes += advance;
+    // Progress is the cursor moving: bytes for a byte source, rows for an
+    // indexed one. A byte source is charged what it moved over; an indexed one
+    // has no byte offsets, so it is charged the estimated size of the rows the
+    // page added (`turnSize`). One budget both kinds of source can exhaust.
+    const moved = Math.max(0, step.from - cursor.start);
+    this.spent.bytes += cursor.mode === 'index' ? step.added : moved;
     // A page that moved nothing cannot be retried into progress: an oversized
     // record is in the way, or the source has nothing more to give.
-    if (!advance) this.stalled = true;
+    if (!moved) this.stalled = true;
   }
   private planFill() {
     this.settleStep();
@@ -375,7 +430,10 @@ export class ReaderStore {
     const { cursor, turns } = this.state;
     if (!cursor || this.state.loading) return;             // wait for the read in flight
     const have = countExchanges(turns);
-    if (have >= this.want) { if (this.state.fill !== 'done') this.publish({ fill: 'done' }); return; }
+    // The prompt of the latest turn is owed on top of the count: a window of
+    // agent output with no prompt above it is not done, however it counts.
+    const prompt = holdsPrompt(turns);
+    if (have >= this.want && prompt) { if (this.state.fill !== 'done') this.publish({ fill: 'done' }); return; }
     // Nothing more to fetch, or nothing we can fetch: an honest partial view.
     if (cursor.atStart || cursor.blocked || this.state.error || this.stalled) return this.limited();
     if (!this.spent.since) this.spent.since = Date.now();
@@ -388,11 +446,15 @@ export class ReaderStore {
     // lowers the cap rather than granting a fresh budget, so a run that spent
     // more than the modest cap getting there stops at the floor. See
     // HISTORY_MIN_EXCHANGES.
+    //
+    // Without the latest prompt the reader is missing the start of what it is
+    // showing, and the largest allowance applies (FILL_PROMPT_*).
     const floor = Math.min(this.want, HISTORY_MIN_EXCHANGES);
+    const hunting = !prompt;
     const reaching = have < floor;
-    const maxRequests = reaching ? FILL_FLOOR_MAX_REQUESTS : FILL_MAX_REQUESTS;
-    const maxBytes = reaching ? FILL_FLOOR_MAX_RETAINED_BYTES : FILL_MAX_RETAINED_BYTES;
-    const maxMs = reaching ? FILL_FLOOR_MAX_MS : FILL_MAX_MS;
+    const maxRequests = hunting ? FILL_PROMPT_MAX_REQUESTS : reaching ? FILL_FLOOR_MAX_REQUESTS : FILL_MAX_REQUESTS;
+    const maxBytes = hunting ? FILL_PROMPT_MAX_RETAINED_BYTES : reaching ? FILL_FLOOR_MAX_RETAINED_BYTES : FILL_MAX_RETAINED_BYTES;
+    const maxMs = hunting ? FILL_PROMPT_MAX_MS : reaching ? FILL_FLOOR_MAX_MS : FILL_MAX_MS;
     if (this.spent.requests >= maxRequests || this.spent.bytes >= maxBytes
       || Date.now() - this.spent.since >= maxMs) return this.limited();
     if (this.state.fill !== 'filling') this.publish({ fill: 'filling' });
@@ -400,7 +462,7 @@ export class ReaderStore {
       this.fillTimer = null;
       const from = this.state.cursor;
       if (!this.want || !this.active || this.state.loading || !from) return this.planFill();
-      this.step = { from: from.start, held: this.state.turns.length };
+      this.step = { from: from.start, added: 0, hunting: !holdsPrompt(this.state.turns) };
       this.spent.requests++;
       void this.read('before', true);
     }, FILL_STEP_MS);
@@ -442,8 +504,9 @@ export class ReaderStore {
     // grow to, so it keeps the ordinary page.
     const floor = direction === 'tail' ? INITIAL_WINDOW_TURNS
       : speculative && cursor?.mode !== 'index' ? FILL_MIN_TURNS : undefined;
-    const promise = bounded((signal) => this.source.window(req,
-      direction === 'tail' ? INITIAL_WINDOW_BYTES : WINDOW_BYTES, floor, signal), abort)
+    const span = direction === 'tail' ? INITIAL_WINDOW_BYTES
+      : speculative && this.step?.hunting && cursor?.mode !== 'index' ? FILL_PROMPT_WINDOW_BYTES : WINDOW_BYTES;
+    const promise = bounded((signal) => this.source.window(req, span, floor, signal), abort)
       .then((response) => {
         if (token !== this.sequence) return 0;
         const { turns: got, window: win, ...metadata } = response;
@@ -452,6 +515,7 @@ export class ReaderStore {
         let nextCursor: TraceCursor;
         if (reset) { this.raw = got; this.meta = metadata; this.summary = null; nextCursor = win; }
         else if (direction === 'before') {
+          if (speculative && this.step) this.step.added = got.reduce((n, t) => n + turnSize(t), 0);
           this.raw = [...got, ...this.raw]; this.meta = mergeMeta(this.meta, { ...metadata,
             live: this.meta?.live, interaction: this.meta?.interaction, activity: this.meta?.activity, model: this.meta?.model, revision: this.meta?.revision });
           nextCursor = { ...cursor, start: win.start, atStart: win.atStart, blocked: win.blocked };
@@ -501,7 +565,13 @@ export class ReaderStore {
         if (token !== this.sequence) return;
         this.request = null; this.publish({ loading: null });
         const catchup = direction !== 'before' && this.state.cursor && !this.state.cursor.atEnd && !this.failures && !this.state.error;
-        this.schedule(catchup ? 50 : undefined);
+        // A backward page says nothing about new output, so it must not restart
+        // the forward poll's clock. Rescheduling here pushed the poll back on
+        // every page, and a fill whose pages come faster than the cadence held
+        // off live output for its whole run (up to FILL_PROMPT_MAX_MS). An
+        // already-pending poll keeps its deadline; one is only started if none
+        // is pending (the first read, or after a failure cleared it).
+        if (direction !== 'before' || !this.poll) this.schedule(catchup ? 50 : undefined);
         // After the slot is free, so a fill step never races the read that
         // produced it. Every accepted read re-decides: a fill that a user page
         // or a live append interrupted just continues from where the store is.
