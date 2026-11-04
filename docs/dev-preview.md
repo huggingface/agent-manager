@@ -13,7 +13,7 @@ or no value, is off:
 | --- | --- | --- |
 | `/api/dev-preview/*` | not registered (404) | registered |
 | `/api/info.devPreview` | absent | what runs, the last switch |
-| UI | nothing | "Preview:" row under the sidebar logo, Settings → Preview |
+| UI | nothing | "Preview:" row under the sidebar logo; a Dev preview section at the top of Settings → General |
 | boot | `node` started as before | supervisor loop, re-apply of the saved selection |
 
 Production and the template never set it.

@@ -693,7 +693,7 @@ export function createDevPreview({
     let now;
     try { now = await resolveWithGitHub(pinned.prs.map((p) => ({ number: p.number, sha: p.sha }))); } catch (e) {
       const why = e.message.replace(/; refresh and try again$/, '').replace(' since the list was loaded', ' since it was picked');
-      throw new Error(`not re-applying ${describe(pinned)}: ${why}. Staying on main; pick again in Settings → Preview`);
+      throw new Error(`not re-applying ${describe(pinned)}: ${why}. Staying on main; pick again from the Preview row or Settings → General`);
     }
     // main may have moved on; the accepted base must still be on it (checked
     // against the fetched main in fetchCommits).

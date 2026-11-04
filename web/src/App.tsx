@@ -1306,7 +1306,7 @@ export default function App() {
   return (
     <>
       {settingsOpen && (
-      <SettingsShell page={settingsPage} onPage={setSettingsPage} onClose={() => setSettingsOpen(false)} devPreview={!!info?.devPreview}>
+      <SettingsShell page={settingsPage} onPage={setSettingsPage} onClose={() => setSettingsOpen(false)}>
         <LazyPanel load={loadSettingsView} what="settings" onClose={() => setSettingsOpen(false)} render={(m) => (
           <m.default
             page={settingsPage}
@@ -1408,7 +1408,7 @@ export default function App() {
         onMove={doMove}
         onDragState={setSessionDrag}
         onOpenSettings={() => setSettingsOpen(true)}
-        previewBar={info?.devPreview ? <Suspense fallback={null}><DevPreviewBar summary={info.devPreview} onOpenSettings={() => { setSettingsPage('preview'); setSettingsOpen(true); }} /></Suspense> : null}
+        previewBar={info?.devPreview && <Suspense><DevPreviewBar summary={info.devPreview} onOpenSettings={() => { setSettingsPage('general'); setSettingsOpen(true); }} /></Suspense>}
         theme={theme}
         onToggleTheme={toggleTheme}
         onQuickStart={quickStart}

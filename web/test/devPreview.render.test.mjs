@@ -39,6 +39,13 @@ export const switchDevPreview = (prs) => {
   return Promise.resolve(status);
 };
 export const rollbackDevPreview = () => { window.__calls.push(['rollback']); return Promise.resolve(status); };
+// What Settings → General asks for on load; nothing here is about the preview.
+export const getConfig = () => Promise.resolve(null);
+export const getSecrets = () => Promise.resolve({ detected: [], notes: {} });
+export const backupStatus = () => Promise.resolve(null);
+export const checkUpdate = () => Promise.resolve({ ok: true });
+export const getCliUpdate = () => Promise.resolve(null);
+export const getPushKey = () => Promise.resolve({ publicKey: '', devices: 0 });
 `);
 
 await build({
@@ -49,6 +56,7 @@ await build({
       import DevPreviewBar from './src/components/DevPreviewBar.tsx';
       import DevPreviewPanel from './src/components/DevPreviewPanel.tsx';
       import SettingsShell from './src/components/SettingsShell.tsx';
+      import SettingsView from './src/components/SettingsView.tsx';
       const main = { kind: 'main', label: 'main', id: 'image', prs: [] };
       const stack = { kind: 'prs', label: '#190 bbbbbbb + #182 aaaaaaa', id: 'rel-2', base: '${M}', prs: [{ number: 190, sha: '${B}' }, { number: 182, sha: '${A}' }] };
       const sum = (running, job = null) => ({ repo: 'huggingface/agent-manager', supervised: true, restartPending: false, next: null, running, selected: { prs: [] }, job, crashed: null });
@@ -61,13 +69,18 @@ await build({
         if (which === 'main') r.render(bar(sum(main)));
         if (which === 'stack') r.render(bar(sum(stack, { kind: 'switch', state: 'running', step: 'build web' })));
         if (which === 'pending') r.render(bar({ ...sum(main), restartPending: true, next: { ...stack, label: '#190 bbbbbbb + #182 aaaaaaa' } }));
-        if (which === 'shell-off') r.render(<SettingsShell page="general" onPage={() => {}} onClose={() => {}}><div /></SettingsShell>);
-        if (which === 'shell-on') r.render(<SettingsShell page="preview" devPreview onPage={() => {}} onClose={() => {}}><DevPreviewPanel /></SettingsShell>);
+        const general = (info) => <SettingsShell page="general" onPage={() => {}} onClose={() => {}}>
+          <SettingsView page="general" onClose={() => {}} theme="light" onToggleTheme={() => {}} clis={[]} info={info} />
+        </SettingsShell>;
+        if (which === 'general-off') r.render(general({ dataDir: '/data' }));
+        if (which === 'general-on') r.render(general({ dataDir: '/data', devPreview: sum(main) }));
+        if (which === 'shell-on') r.render(<SettingsShell page="general" onPage={() => {}} onClose={() => {}}><DevPreviewPanel /></SettingsShell>);
       };
     `,
   },
   outfile: bundle, bundle: true, format: 'iife', platform: 'browser', logLevel: 'error',
-  plugins: [{ name: 'stub-api', setup(b) { b.onResolve({ filter: /(^|\/)\.\.?\/api$/ }, () => ({ path: stub })); } }],
+  // Both the shared api module and the lazy dev-preview calls resolve to the stub.
+  plugins: [{ name: 'stub-api', setup(b) { b.onResolve({ filter: /(^|\/)\.\.?\/(api|lib\/devPreviewApi)$/ }, () => ({ path: stub })); } }],
 });
 
 const css = fs.readFileSync(path.join(WEB, 'src/styles.css'), 'utf8');
@@ -136,11 +149,16 @@ try {
     assert.equal(await page.getByTestId('dev-preview-pick').inputValue(), 'main');
     assert.match(await page.getByTestId('dev-preview-note').innerText(), /restarting into #190 bbbbbbb \+ #182 aaaaaaa/);
   });
-  await check('Settings has no Preview tab unless the Space is a preview Space', async () => {
-    await render('shell-off');
-    assert.equal(await page.getByRole('button', { name: 'Preview', exact: true }).count(), 0);
-    await render('shell-on');
-    assert.equal(await page.getByRole('button', { name: 'Preview', exact: true }).count(), 1);
+  await check('Settings → General has the Dev preview section only on a preview Space, and no extra tab', async () => {
+    await render('general-off');
+    await page.getByRole('heading', { name: 'General' }).waitFor();
+    await page.waitForTimeout(300);
+    assert.equal(await page.getByTestId('dev-preview-section').count(), 0);
+    await render('general-on');
+    await page.getByTestId('dev-preview-section').waitFor();
+    // the panel arrives on demand inside it
+    await page.locator('[data-testid="dev-preview-section"] [data-testid="dev-preview-running"]').waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Preview', exact: true }).count(), 0, 'no separate tab');
   });
   await check('after the restart the last switch log is still offered', async () => {
     await page.evaluate(() => window.__setStatus({ job: null, log: ['[13:53:50] done in 11.6s'] }));

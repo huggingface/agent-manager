@@ -5,7 +5,7 @@
 // where they are, can pick a page and can leave.
 import type { ReactNode } from 'react';
 
-export type SettingsPage = 'general' | 'usage' | 'skills' | 'cron' | 'apilog' | 'preview';
+export type SettingsPage = 'general' | 'usage' | 'skills' | 'cron' | 'apilog';
 export const SETTINGS_PAGES: { id: SettingsPage; label: string }[] = [
   { id: 'general', label: 'General' },
   { id: 'usage', label: 'Usage' },
@@ -13,12 +13,9 @@ export const SETTINGS_PAGES: { id: SettingsPage; label: string }[] = [
   { id: 'cron', label: 'Cron' },
   { id: 'apilog', label: 'API log' },
 ];
-// Only on a dev-preview Space (the server sends /api/info.devPreview).
-const PREVIEW_PAGE = { id: 'preview' as const, label: 'Preview' };
 
-export default function SettingsShell({ page, onPage, onClose, children, devPreview = false }: {
+export default function SettingsShell({ page, onPage, onClose, children }: {
   page: SettingsPage;
-  devPreview?: boolean;
   onPage: (p: SettingsPage) => void;
   onClose: () => void;
   children: ReactNode;
@@ -31,7 +28,7 @@ export default function SettingsShell({ page, onPage, onClose, children, devPrev
           <h1 style={{ flex: 1, marginLeft: 4 }}>Settings</h1>
         </div>
         <div className="settings-nav">
-          {(devPreview ? [...SETTINGS_PAGES, PREVIEW_PAGE] : SETTINGS_PAGES).map((p) => (
+          {SETTINGS_PAGES.map((p) => (
             <button key={p.id} className={`settings-navitem${page === p.id ? ' active' : ''}`} onClick={() => onPage(p.id)}>
               {p.label}
             </button>

@@ -433,6 +433,21 @@ export default function SettingsView({
           <div className="settings-page">
             <h2>General</h2>
 
+            {/* Only on a dev-preview Space (/api/info.devPreview). Here rather than
+                in a tab of its own: this page is already a lazy chunk, and the
+                entry has no room for another tab. */}
+            {info?.devPreview && (
+              <section className="devpv-section" id="dev-preview" data-testid="dev-preview-section">
+                <h3>Dev preview</h3>
+                <p className="s-help">
+                  Run an open pull request of <span className="mono">{info.devPreview.repo}</span>, or a stack of them
+                  merged onto main in the order you pick, on this Space without a rebuild. Switching restarts the app
+                  server, which restarts every running agent. Only this dev Space has this section.
+                </p>
+                <LazyPanel load={loadPreview} what="the preview panel" render={(m) => <m.default />} />
+              </section>
+            )}
+
             <div className="setting-row">
               <div><div className="s-label">Theme</div><div className="s-help">Defaults to your system setting.</div></div>
               <button className="btn-ghost" onClick={onToggleTheme}>{theme === 'dark' ? <><MoonGlyph /> Dark</> : <><SunGlyph /> Light</>}</button>
@@ -1118,18 +1133,6 @@ export default function SettingsView({
             <h2>Cron</h2>
             <p className="s-help cron-intro">Send a prompt to an agent on a schedule. Jobs persist across Space restarts; if the named agent does not exist when a job fires, it is created first.</p>
             <LazyPanel load={loadCron} what="the cron page" render={(m) => <m.default clis={clis} />} />
-          </div>
-        )}
-
-        {page === 'preview' && info?.devPreview && (
-          <div className="settings-page wide">
-            <h2>Preview</h2>
-            <p className="s-help">
-              Run an open pull request of <span className="mono">{info.devPreview.repo}</span>, or a stack of them
-              merged onto main in the order you pick, on this Space without a rebuild. Switching restarts the app
-              server, which restarts every running agent. Only this dev Space has this page.
-            </p>
-            <LazyPanel load={loadPreview} what="the preview page" render={(m) => <m.default />} />
           </div>
         )}
     </>

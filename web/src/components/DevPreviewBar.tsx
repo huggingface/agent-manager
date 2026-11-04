@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import * as api from '../api';
+import * as api from '../lib/devPreviewApi';
 import type { DevPreviewSummary } from '../api';
 import { SlidersGlyph } from './icons';
 import { switchConfirmText } from '../lib/devPreview';
+
+// The panel (Settings → General) takes these through this module, so the row
+// and the panel share one chunk and the entry maps only that one.
+export * from '../lib/devPreviewApi';
+export { switchConfirmText } from '../lib/devPreview';
 
 // The build this tab's JavaScript came from. A switch replaces the server and
 // the web app; a tab opened before it keeps the old UI until reloaded, and
@@ -17,7 +22,7 @@ const clip = (text = '') => (text.length > TITLE_CHARS ? `${text.slice(0, TITLE_
  * Which code this dev Space runs, as one compact row under the sidebar logo:
  * "Preview: [#182 Security: keep e… ▾] [settings]". Picking an entry switches
  * to that one PR (or back to main); stacks and the full log live in
- * Settings → Preview. Renders nothing unless the server sent `devPreview`
+ * Settings → General (Dev preview). Renders nothing unless the server sent `devPreview`
  * (only when the Space sets AM_DEV_PREVIEW=1), so production never shows it.
  */
 export default function DevPreviewBar({ summary, onOpenSettings }: {

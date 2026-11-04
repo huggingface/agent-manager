@@ -189,14 +189,9 @@ export interface DevPreviewSummary {
   job: DevPreviewJob | null;
   crashed: { at: string; detail: string } | null;
 }
-export const getDevPreviewStatus = (): Promise<DevPreviewSummary & { log: string[] }> =>
-  fetch('/api/dev-preview/status').then(json);
-export const getDevPreviewPrs = (): Promise<{ ok: boolean; error?: string; repo?: string; main?: { sha: string | null }; prs?: DevPreviewPr[] }> =>
-  fetch('/api/dev-preview/prs').then(json);
-export const switchDevPreview = (prs: { number: number; sha?: string }[]): Promise<DevPreviewSummary> =>
-  fetch('/api/dev-preview/switch', { method: 'POST', headers: HEADERS, body: JSON.stringify({ prs }) }).then(json);
-export const rollbackDevPreview = (): Promise<DevPreviewSummary> =>
-  fetch('/api/dev-preview/rollback', { method: 'POST', headers: HEADERS, body: '{}' }).then(json);
+// The calls themselves live in lib/devPreviewApi.ts, a lazy chunk: only a
+// dev-preview Space ever makes them, and the entry has no room to spare.
+export { fetch as amFetch, json as amJson };
 
 export const relaunchSpace = (): Promise<{ ok: boolean; reason?: string }> =>
   fetch('/api/relaunch', { method: 'POST' }).then(json);

@@ -1,8 +1,8 @@
-// Settings → Preview, on a dev-preview Space only. Pick an open PR (or several,
+// The Dev preview section of Settings → General, on a dev-preview Space only. Pick an open PR (or several,
 // merged onto main in the order picked), switch, watch it build, roll back.
 import { useCallback, useEffect, useRef, useState } from 'react';
-import * as api from '../api';
-import { switchConfirmText } from '../lib/devPreview';
+import * as api from './DevPreviewBar';
+import { switchConfirmText } from './DevPreviewBar';
 
 type Status = Awaited<ReturnType<typeof api.getDevPreviewStatus>>;
 type Prs = Awaited<ReturnType<typeof api.getDevPreviewPrs>>;
