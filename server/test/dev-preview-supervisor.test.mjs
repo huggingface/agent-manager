@@ -34,7 +34,16 @@ function fixture(name, nodeScript) {
   for (const p of ['server', 'scripts', 'public', 'session.bashrc']) fs.symlinkSync(path.join('current', p), path.join(app, p));
   fs.mkdirSync(bin, { recursive: true });
   fs.mkdirSync(local, { recursive: true });
-  fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh\n${nodeScript.replaceAll('$APP', app)}\n`, { mode: 0o755 });
+  // The stub answers the image's launch check too: allowed, unless a test lists
+  // answers in $APP/check-answers (one line per call; "ok" or a refusal).
+  const checker = `case "$1" in *.image/server/src/dev-preview-check.js)
+    echo "$2" >> "$APP/checked"
+    n=$(wc -l < "$APP/checked")
+    ans=$(sed -n "\${n}p" "$APP/check-answers" 2>/dev/null)
+    [ -z "$ans" ] || [ "$ans" = ok ] && exit 0
+    echo "$ans"; exit 1 ;;
+esac`;
+  fs.writeFileSync(path.join(bin, 'node'), `#!/bin/sh\n${checker.replaceAll('$APP', app)}\n${nodeScript.replaceAll('$APP', app)}\n`, { mode: 0o755 });
   // The function exactly as shipped, with /app moved into the fixture.
   const src = fs.readFileSync(ENTRYPOINT, 'utf8');
   const from = src.indexOf('preview_health_watch() {');
@@ -126,6 +135,84 @@ test('a healthy previewed build is left running', async () => {
   assert.doesNotMatch(out, /stopping it|rolling back/);
   assert.equal(fs.readlinkSync(path.join(f.app, 'current')), path.join(f.app, 'rel'));
   assert.equal(fs.existsSync(path.join(f.local, 'dev-preview', 'crashed')), false);
+});
+
+test('every relaunch of a previewed build is re-checked by the image: write revoked → the image runs instead', async () => {
+  const f = fixture('revoked', `
+    n=$(cat "$APP/count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$APP/count"
+    readlink -f "$APP/server" >> "$APP/ran"
+    case "$n" in
+      1) ${SWITCH} ;;
+      2) exit 75 ;;
+      *) exit 0 ;;
+    esac`);
+  // first launch of the build: allowed; the relaunch after its exit 75: refused
+  fs.writeFileSync(path.join(f.app, 'check-answers'), 'ok\nPR #1 cannot be previewed: its author w has read permission\n');
+  const child = f.run(FAST);
+  let out = '';
+  child.stdout.on('data', (c) => { out += c; });
+  const [code] = await once(child, 'exit');
+  assert.equal(code, 0, out);
+  // checked twice, both times against the build, never against the image
+  assert.deepEqual(fs.readFileSync(path.join(f.app, 'checked'), 'utf8').trim().split('\n'), [path.join(f.app, 'rel'), path.join(f.app, 'rel')]);
+  // image, the build once, then the image again: the relaunch never ran it
+  assert.deepEqual(fs.readFileSync(path.join(f.app, 'ran'), 'utf8').trim().split('\n'),
+    [path.join(f.app, '.image', 'server'), path.join(f.app, 'rel', 'server'), path.join(f.app, '.image', 'server')]);
+  assert.match(out, /refused at launch: PR #1 cannot be previewed: its author w has read permission; not starting .*\/rel, rolling back to the image/);
+  assert.equal(fs.readlinkSync(path.join(f.app, 'current')), path.join(f.app, '.image'));
+  assert.match(fs.readFileSync(path.join(f.local, 'dev-preview', 'crashed'), 'utf8'), /^refused at launch: PR #1 cannot be previewed/);
+});
+
+test('a check that cannot run is a refusal, and a build refused at its first launch never runs', async () => {
+  const f = fixture('first-refused', `
+    n=$(cat "$APP/count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$APP/count"
+    readlink -f "$APP/server" >> "$APP/ran"
+    case "$n" in
+      1) ${SWITCH} ;;
+      *) exit 0 ;;
+    esac`);
+  // a refusal with no explanation at all, as when node itself cannot start
+  fs.writeFileSync(path.join(f.app, 'check-answers'), ' \n');
+  const child = f.run(FAST);
+  const [code] = await once(child, 'exit');
+  assert.equal(code, 0);
+  assert.deepEqual(fs.readFileSync(path.join(f.app, 'ran'), 'utf8').trim().split('\n'),
+    [path.join(f.app, '.image', 'server'), path.join(f.app, '.image', 'server')]);
+  assert.match(fs.readFileSync(path.join(f.local, 'dev-preview', 'crashed'), 'utf8'), /^refused at launch/);
+});
+
+test('a rollback that cannot repoint /app/current stops the supervisor instead of relaunching the build forever', async () => {
+  // the build crashes, and the rollback link cannot be written
+  const f = fixture('stuck', `
+    n=$(cat "$APP/../count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$APP/../count"
+    case "$n" in
+      1) ${SWITCH} ;;
+      2) chmod 555 "$APP"; exit 3 ;;
+      *) exit 0 ;;
+    esac`);
+  const child = f.run(FAST);
+  let err = '';
+  child.stderr.on('data', (c) => { err += c; });
+  const [code] = await once(child, 'exit');
+  fs.chmodSync(f.app, 0o755);
+  assert.equal(code, 3, 'the build\'s own exit code');
+  assert.match(err, /could not roll back to the image; exiting/);
+  assert.equal(fs.readFileSync(path.join(f.dir, 'count'), 'utf8').trim(), '2', 'not relaunched');
+  assert.equal(fs.readlinkSync(path.join(f.app, 'current')), path.join(f.app, 'rel'));
+
+  // refused at launch with the same unwritable /app: exit 1, nothing runs
+  const g = fixture('stuck-refused', `
+    n=$(cat "$APP/../count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$APP/../count"
+    case "$n" in
+      1) ${SWITCH.replace('exit 75', 'chmod 555 "$APP"; exit 75')} ;;
+      *) exit 0 ;;
+    esac`);
+  fs.writeFileSync(path.join(g.app, 'check-answers'), 'refused\n');
+  const child2 = g.run(FAST);
+  const [code2] = await once(child2, 'exit');
+  fs.chmodSync(g.app, 0o755);
+  assert.equal(code2, 1);
+  assert.equal(fs.readFileSync(path.join(g.dir, 'count'), 'utf8').trim(), '1', 'the refused build never started');
 });
 
 test('the image itself crashing is not "rolled back": the supervisor exits with its code', async () => {

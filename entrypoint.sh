@@ -290,6 +290,13 @@ preview_health_watch() {
     fi
   done
 }
+# Repoint /app/current at the image and leave the marker the image's server
+# reports on its next start. Returns non-zero if the link cannot be changed.
+preview_rollback() {  # $1 = why, $2 = the build being left
+  mkdir -p "$AM_LOCAL/dev-preview"
+  ln -sfn /app/.image /app/.current.rollback && mv -Tf /app/.current.rollback /app/current || return 1
+  echo "$1 from $2" > "$AM_LOCAL/dev-preview/crashed"
+}
 supervise_app() {
   child=""; watch=""
   trap 'kill "$watch" 2>/dev/null; kill -TERM "$child" 2>/dev/null; wait "$child"; exit $?' TERM INT HUP
@@ -297,6 +304,24 @@ supervise_app() {
     rm -f "$AM_LOCAL/dev-preview/health-failed"
     # /app/current is the one link a switch repoints (server/src/dev-preview.js).
     target="$(readlink /app/current 2>/dev/null || true)"
+    if [ -n "$target" ] && [ "$target" != /app/.image ]; then
+      # Before EVERY launch of a previewed build (first start, a relaunch after
+      # exit 75, after a crash elsewhere), ask GitHub again with the IMAGE's
+      # checker, not the build's own copy: still open, still on the repo, still
+      # the SHA it was built from, author still a writer. Anything unconfirmed,
+      # including the check itself failing, means the image runs instead.
+      why="$(timeout 90 node /app/.image/server/src/dev-preview-check.js "$target" 2>&1)"
+      ok=$?
+      if [ "$ok" -ne 0 ]; then
+        why="refused at launch: $(printf '%s' "${why:-the check could not run (exit $ok)}" | tr '\n' ' ' | cut -c1-400)"
+        echo "[dev-preview] $why; not starting $target, rolling back to the image"
+        if ! preview_rollback "$why" "$target"; then
+          echo "ERROR: [dev-preview] could not roll back to the image; stopping rather than run $target" >&2
+          exit 1
+        fi
+        continue
+      fi
+    fi
     AM_CLAUDE_MODEL_PROBE="${AM_CLAUDE_MODEL_PROBE:-1}" node /app/server/src/index.js &
     child=$!
     watch=""
@@ -315,9 +340,13 @@ supervise_app() {
       why="exit $code"
       [ -f "$AM_LOCAL/dev-preview/health-failed" ] && why="$(cat "$AM_LOCAL/dev-preview/health-failed")"
       echo "[dev-preview] previewed build stopped ($why); rolling back to the image"
-      ln -sfn /app/.image /app/.current.rollback && mv -Tf /app/.current.rollback /app/current
-      mkdir -p "$AM_LOCAL/dev-preview"
-      echo "$why from $target" > "$AM_LOCAL/dev-preview/crashed"
+      if ! preview_rollback "$why" "$target"; then
+        # Relaunching would start the same build again, forever. Stop instead:
+        # the container restarts from the image, where /app is the image.
+        echo "ERROR: [dev-preview] could not roll back to the image; exiting" >&2
+        [ "$code" -eq 0 ] && code=1
+        exit "$code"
+      fi
       continue
     fi
     exit "$code"

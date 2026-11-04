@@ -13,7 +13,7 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  createDevPreview, validateSelection, lockKey, REBUILD_FILES, SWAPPED, DEV_PREVIEW_REPO, describe, headRefusal, permissionAllows,
+  createDevPreview, validateSelection, lockKey, REBUILD_FILES, SWAPPED, DEV_PREVIEW_REPO, describe, headRefusal, permissionAllows, checkRelease,
 } from '../src/dev-preview.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -417,7 +417,7 @@ test('only open PRs, bound to the head SHA GitHub reports', async () => {
   assert.deepEqual(imageContent(i.appDir), IMAGE);
 });
 
-test('the author must have write, maintain or admin permission now, and the branch must be upstream or on their own fork', async () => {
+test('the author must have write, maintain or admin permission now, and the branch must be on the repo itself (no forks)', async () => {
   // GitHub's answer, field by field
   for (const role of ['write', 'maintain', 'admin']) assert.equal(permissionAllows({ role_name: role }), true, role);
   for (const role of ['read', 'triage', 'none', undefined]) assert.equal(permissionAllows({ role_name: role }), false, String(role));
@@ -425,8 +425,9 @@ test('the author must have write, maintain or admin permission now, and the bran
   assert.equal(permissionAllows({ role_name: 'custom-reader', permission: 'read' }), false);
   const pr = (head, login = 'alice') => ({ user: { login }, base: { repo: { full_name: DEV_PREVIEW_REPO } }, head: { repo: head } });
   assert.equal(headRefusal(pr({ full_name: DEV_PREVIEW_REPO, owner: { login: 'huggingface' } })), null, 'upstream branch');
-  assert.equal(headRefusal(pr({ full_name: 'Alice/agent-manager', owner: { login: 'Alice' } })), null, 'the author\'s own fork');
-  assert.match(headRefusal(pr({ full_name: 'mallory/agent-manager', owner: { login: 'mallory' } })), /fork not owned by its author alice/);
+  // A writer's own fork is refused too: anyone they let push to it could change what runs.
+  assert.match(headRefusal(pr({ full_name: 'Alice/agent-manager', owner: { login: 'Alice' } })), /on a fork \(Alice\/agent-manager\); only branches on huggingface\/agent-manager itself/);
+  assert.match(headRefusal(pr({ full_name: 'mallory/agent-manager', owner: { login: 'mallory' } })), /on a fork \(mallory\/agent-manager\)/);
   assert.match(headRefusal(pr(null)), /branch is gone/);
   assert.match(headRefusal({ ...pr({ full_name: DEV_PREVIEW_REPO }), base: { repo: { full_name: 'x/y' } } }), /not a PR on/);
 
@@ -442,9 +443,10 @@ test('the author must have write, maintain or admin permission now, and the bran
     assert.deepEqual([byNumber[1].allowed, byNumber[1].permission, byNumber[1].fork, byNumber[1].headRepo], [true, 'write', false, DEV_PREVIEW_REPO]);
     assert.deepEqual([byNumber[2].allowed, byNumber[2].permission], [false, 'read']);
     assert.match(byNumber[2].refusal, /its author reader has read permission on huggingface\/agent-manager, not write, maintain or admin/);
-    assert.deepEqual([byNumber[3].allowed, byNumber[3].fork, byNumber[3].headRepo], [true, true, 'collab/agent-manager'], 'a writer\'s own fork');
+    assert.deepEqual([byNumber[3].allowed, byNumber[3].fork, byNumber[3].headRepo, byNumber[3].permission], [false, true, 'collab/agent-manager', 'write'], 'a writer\'s own fork is listed, refused');
+    assert.match(byNumber[3].refusal, /on a fork \(collab\/agent-manager\)/);
     assert.equal(byNumber[9].allowed, false, 'even an admin\'s PR from someone else\'s fork');
-    assert.match(byNumber[9].refusal, /fork not owned by its author mallory/);
+    assert.match(byNumber[9].refusal, /on a fork \(other\/agent-manager\)/);
 
     // read → refused before anything is fetched
     i.dp.switchTo({ prs: [{ number: 2 }] });
@@ -471,12 +473,19 @@ test('the author must have write, maintain or admin permission now, and the bran
     assert.deepEqual(imageContent(i.appDir), IMAGE);
     assert.equal(i.restarts.length, 0);
 
-    // write → allowed; from the author's own fork as well
+    // A writer's PR from their own fork: refused before anything is fetched.
+    // (W's fork can take pushes from people with no right on the repo.)
     i.dp.switchTo({ prs: [{ number: 3 }] });
+    r = await settle(i);
+    assert.equal(r.job.state, 'failed');
+    assert.match(r.job.error, /PR #3 cannot be previewed: its branch is on a fork \(collab\/agent-manager\)/);
+    assert.deepEqual(r.job.steps.map((x) => x.name), ['resolve']);
+    // write, on a branch of the repo itself → allowed
+    i.dp.switchTo({ prs: [{ number: 1 }] });
     r = await settle(i);
     assert.equal(r.job.state, 'done', r.job.error);
     assert.deepEqual(r.next.prs.map(({ number, author, permission, headRepo }) => ({ number, author, permission, headRepo })),
-      [{ number: 3, author: 'collab', permission: 'write', headRepo: 'collab/agent-manager' }]);
+      [{ number: 1, author: 'member-dev', permission: 'write', headRepo: DEV_PREVIEW_REPO }]);
   } finally { as.clear(); perms.clear(); permFails.clear(); }
 });
 
@@ -636,6 +645,44 @@ test('a build that prints the parent\'s environment leaks a secret into no statu
 });
 
 // ------------------------------------------------------------ restart
+
+test('checkRelease: what the image\'s supervisor asks before every launch of a built release', async () => {
+  const api = fixtureApi();
+  const release = { prs: [{ number: 1, sha: prSha[1] }, { number: 2, sha: prSha[2] }] };
+  assert.deepEqual(await checkRelease(release, { fetchJson: api }), { ok: true });
+  perms.set('member-dev', 'read');
+  try {
+    const r = await checkRelease(release, { fetchJson: api });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /PR #1 cannot be previewed: its author member-dev has read permission/);
+  } finally { perms.clear(); }
+  permFails.add('member-dev');
+  try { assert.match((await checkRelease(release, { fetchJson: api })).reason, /could not check member-dev's permission.*never assumed/); } finally { permFails.clear(); }
+  closed.add(2);
+  try { assert.match((await checkRelease(release, { fetchJson: api })).reason, /PR #2 is closed/); } finally { closed.delete(2); }
+  as.set(2, { head: { repo: { full_name: 'member-dev/agent-manager', owner: { login: 'member-dev' } } } });
+  try { assert.match((await checkRelease(release, { fetchJson: api })).reason, /PR #2 cannot be previewed: its branch is on a fork/); } finally { as.clear(); }
+  assert.match((await checkRelease({ prs: [{ number: 1, sha: prSha[2] }] }, { fetchJson: api })).reason, /PR #1 moved to [0-9a-f]{7} since it was built/);
+  assert.match((await checkRelease({ prs: [{ number: 1, sha: prSha[1] }] }, { fetchJson: async () => { throw new Error('getaddrinfo ENOTFOUND'); } })).reason, /could not read main from GitHub/);
+  for (const bad of [null, {}, { prs: [] }, { prs: [{ number: '1', sha: prSha[1] }] }, { prs: [{ number: 1, sha: 'abc' }] }]) {
+    assert.deepEqual(await checkRelease(bad, { fetchJson: api }), { ok: false, reason: 'the release does not name its PRs and SHAs' });
+  }
+});
+
+test('dev-preview-check.js refuses what it cannot read, with the reason on stdout', () => {
+  const cli = path.join(HERE, '..', 'src', 'dev-preview-check.js');
+  const dir = fs.mkdtempSync(path.join(root, 'check-'));
+  // nothing that would reach GitHub: an unreadable and a malformed release
+  for (const [setup, why] of [
+    [() => {}, /no readable release\.json in /],
+    [() => write(path.join(dir, 'release.json'), '{"prs":[]}'), /does not name its PRs and SHAs/],
+  ]) {
+    setup();
+    const r = spawnSync(process.execPath, [cli, dir], { env: { PATH: process.env.PATH }, encoding: 'utf8' });
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, why);
+  }
+});
 
 test('after a container restart the saved selection is re-applied only if GitHub still allows exactly it', async () => {
   const stateFile = path.join(root, 'durable-selection.json');

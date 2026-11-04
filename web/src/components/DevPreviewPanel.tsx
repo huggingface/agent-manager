@@ -178,7 +178,7 @@ export default function DevPreviewPanel() {
                     <span className="devpv-dim">
                       {' '}{p.author} ({p.permission ?? 'permission unknown'})
                       {' · '}{p.fork
-                        ? <b className="devpv-fork">fork: <span className="mono">{p.headRepo || 'gone'}</span>{p.allowed ? ' (the author\'s own)' : ''}</b>
+                        ? <b className="devpv-fork">fork: <span className="mono">{p.headRepo || 'gone'}</span></b>
                         : <span className="mono">{p.headRepo}</span>}
                       {' · '}<span className="mono">{short(p.sha)}</span>{p.draft ? ' · draft' : ''}
                     </span>

@@ -28,8 +28,10 @@ saved selection is not re-applied. Listing open PRs works either way.
 1. Resolves each PR number through the GitHub API and refuses it unless:
    - it is **open** (GitHub keeps `refs/pull/N/head` after a PR closes, so the
      ref proves nothing on its own);
-   - its **head branch is on `huggingface/agent-manager` itself, or on a fork
-     owned by the PR's author** (a fork owned by anyone else is refused); and
+   - its **head branch is on `huggingface/agent-manager` itself**. Every fork
+     is refused, even a writer's own: whoever its owner lets push to it could
+     change what runs without any right on this repository, whereas pushing a
+     branch here already needs write access; and
    - its **author currently has `write`, `maintain` or `admin` permission** on
      `huggingface/agent-manager`, read from
      `GET /repos/huggingface/agent-manager/collaborators/{author}/permission`
@@ -42,9 +44,9 @@ saved selection is not re-applied. Listing open PRs works either way.
    `permissionAllows()` and `eligibility()` in `server/src/dev-preview.js`)
    and does not rely on the repository's PR-creation setting. The same rule
    marks PRs in the list (refused ones greyed out with the reason; the
-   author's permission and branch repository shown; forks flagged, with an
-   allowed fork marked as the author's own) and is checked again, fresh, on
-   every boot re-apply.
+   author's permission and branch repository shown; forks flagged) and is
+   checked again, fresh, on every boot re-apply and before every launch of a
+   built release (below).
    The switch is bound to the head SHA the API reports, and to main's SHA from
    the API. A SHA sent from the list that is no longer the head is refused
    ("moved; refresh").
@@ -106,9 +108,21 @@ image and says why in the sidebar row and panel; pick again to switch. The
 sidebar row says `main` until a re-apply has restarted into its build.
 
 The supervisor in `entrypoint.sh` is the image's code, not the previewed
-build's, so it does not depend on a PR's own copy of the switcher. While
-`/app/current` points at a previewed build, it rolls back to the image (repoints
-`/app/current`, leaves a marker, starts the image) when that build:
+build's, so it does not depend on a PR's own copy of the switcher.
+
+**Before every launch of a previewed build** (its first start, every relaunch
+after exit 75, any later restart of the server) the supervisor runs
+`node /app/.image/server/src/dev-preview-check.js <release>`: the **image's**
+copy of the checker, never the build's. It asks GitHub again whether every PR
+in the release is still open, still on the repository itself, still at the SHA
+it was built from, and whether its author still has write, maintain or admin
+permission. If not, or if the check cannot be completed (no token, GitHub down,
+rate limited, a timeout of 90 s), the build is not started: the supervisor
+rolls back to the image and starts that instead.
+
+While `/app/current` points at a previewed build, it also rolls back to the
+image (repoints `/app/current`, leaves a marker, starts the image) when that
+build:
 
 - exits for any reason other than "restart me" (75), at any time;
 - does not answer `/api/health` within `AM_DEV_PREVIEW_START_DEADLINE` seconds
@@ -118,6 +132,10 @@ build's, so it does not depend on a PR's own copy of the switcher. While
 
 The image then reports it in the sidebar row and panel, clears the saved
 selection (so the next boot does not rebuild the same thing) and logs it.
+
+If the rollback itself fails (`/app/current` cannot be repointed), the
+supervisor does not relaunch: it exits with the build's code (1 for a build
+refused at launch), the container stops, and its restart begins from the image.
 
 ### Out-of-band recovery
 
@@ -140,9 +158,10 @@ which PRs can be picked and who picks**, and it is enforced in code, not left to
 repository settings:
 
 - only open PRs whose author currently has write, maintain or admin
-  permission on `huggingface/agent-manager`, from a branch upstream or on the
-  author's own fork (step 1), checked with GitHub at every switch and again on
-  every boot; a permission GitHub does not confirm is a refusal;
+  permission on `huggingface/agent-manager`, from a branch on that repository
+  itself, never a fork (step 1); checked with GitHub at every switch, on every
+  boot, and by the image's own checker before every launch of a built release;
+  a permission GitHub does not confirm is a refusal;
 - the operator picks, behind the Space's HF auth, after one confirmation that
   names each PR's author, their permission and the branch repository, and says
   plainly that the code will run with this Space's secrets, bucket and agents;

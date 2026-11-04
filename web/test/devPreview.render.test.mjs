@@ -29,7 +29,8 @@ export const getDevPreviewPrs = () => Promise.resolve({ ok: true, repo: 'hugging
   { number: 190, title: 'Cron tweaks', author: 'bo', permission: 'write', headRepo: 'huggingface/agent-manager', fork: false, allowed: true, sha: '${B}', draft: true },
   { number: 191, title: 'Totally harmless', author: 'outsider', permission: 'read', headRepo: 'outsider/agent-manager', fork: true, allowed: false,
     refusal: 'its author outsider has read permission on huggingface/agent-manager, not write, maintain or admin', sha: '${'d'.repeat(40)}' },
-  { number: 192, title: 'From my fork', author: 'cy', permission: 'maintain', headRepo: 'cy/agent-manager', fork: true, allowed: true, sha: '${'e'.repeat(40)}' },
+  { number: 192, title: 'From my fork', author: 'cy', permission: 'maintain', headRepo: 'cy/agent-manager', fork: true, allowed: false,
+    refusal: 'its branch is on a fork (cy/agent-manager); only branches on huggingface/agent-manager itself can be previewed', sha: '${'e'.repeat(40)}' },
 ] });
 export const switchDevPreview = (prs) => {
   window.__calls.push(['switch', prs]);
@@ -109,7 +110,7 @@ try {
     assert.equal(await page.getByTestId('dev-preview-pick').inputValue(), 'main');
     const options = await page.locator('#devpv-pick option').allInnerTexts();
     // a long title is cut to its first letters; a refused PR is not offered at all
-    assert.deepEqual(options, ['main', '#182 Security: keep edge s…', '#190 Cron tweaks', '#192 From my fork']);
+    assert.deepEqual(options, ['main', '#182 Security: keep edge s…', '#190 Cron tweaks']);
     const [pick, btn] = await Promise.all([page.getByTestId('dev-preview-pick').boundingBox(), page.getByTitle(/Preview settings/).boundingBox()]);
     assert.equal(pick.height, btn.height, `dropdown ${pick.height}px vs settings button ${btn.height}px`);
     assert.equal(pick.y, btn.y, 'dropdown and button are aligned');
@@ -184,13 +185,14 @@ try {
     const fork = page.getByTestId('dev-preview-pr-191');
     assert.equal(await fork.locator('input').isDisabled(), true, 'a refused PR cannot be ticked');
     assert.match(await fork.innerText(), /outsider \(read\) · fork: outsider\/agent-manager/);
-    assert.doesNotMatch(await fork.innerText(), /the author's own/);
+
     assert.match(await fork.innerText(), /not allowed: its author outsider has read permission/);
     assert.match(await page.getByTestId('dev-preview-pr-182').innerText(), /ana \(admin\) · huggingface\/agent-manager/);
-    // a writer's own fork: allowed, and visibly a fork
+    // even a maintainer's own fork: listed, flagged, refused
     const own = page.getByTestId('dev-preview-pr-192');
-    assert.equal(await own.locator('input').isDisabled(), false);
-    assert.match(await own.innerText(), /cy \(maintain\) · fork: cy\/agent-manager \(the author's own\)/);
+    assert.equal(await own.locator('input').isDisabled(), true);
+    assert.match(await own.innerText(), /cy \(maintain\) · fork: cy\/agent-manager/);
+    assert.match(await own.innerText(), /not allowed: its branch is on a fork/);
     let said = '';
     page.once('dialog', (d) => { said = d.message(); d.accept(); });
     await page.getByTestId('dev-preview-switch').click();
