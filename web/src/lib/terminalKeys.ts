@@ -20,18 +20,29 @@ export interface TerminalKeyAction {
   preventDefault: boolean;
   // Let xterm encode and send the key as usual.
   passToXterm: boolean;
+  // Clear the local scrollback (Cmd+K, iTerm2's Clear Buffer).
+  clear?: boolean;
 }
 
 export const isMacPlatform = (nav: { platform?: string; userAgent?: string } = navigator) =>
   /Mac|iPhone|iPad/i.test(nav.platform || nav.userAgent || '');
 
 // Option+<key> combos the agent CLIs use as Meta shortcuts (word back/forward,
-// model switch, thinking toggle, kill-ring cycle, delete word, newline).
+// model switch, thinking toggle, kill-ring cycle, delete word, newline), plus
+// iTerm2's "Natural Text Editing" Option+arrows and Option+Forward Delete.
 // Keyed by the physical key (`code`), not `key`: with Option held macOS reports
 // the composed character (⌥B is "∫"), so `key` no longer says which key it was.
 const OPTION_AS_META: Record<string, string> = {
   KeyB: '\x1bb', KeyF: '\x1bf', KeyP: '\x1bp', KeyT: '\x1bt', KeyY: '\x1by', KeyD: '\x1bd',
   Backspace: '\x1b\x7f', Enter: '\x1b\r',
+  ArrowLeft: '\x1bb', ArrowRight: '\x1bf', Delete: '\x1bd',
+};
+
+// Cmd+<key> on macOS, from iTerm2's "Natural Text Editing" preset: line start,
+// line end, delete to line start. A terminal has no encoding for Cmd, so native
+// terminals translate these to readline control bytes; xterm.js drops them.
+const CMD_KEYS: Record<string, string> = {
+  ArrowLeft: '\x01', ArrowRight: '\x05', Backspace: '\x15',
 };
 
 // Ctrl+<letter> combos the TUIs bind and a browser may claim (reload/history,
@@ -46,8 +57,13 @@ export function terminalKeyAction(e: TerminalKeyEvent, mac: boolean): TerminalKe
   // Composition owns the key (Enter commits a candidate; keyCode 229 is the
   // browser's "IME is handling this"). Never rewrite it.
   if (e.isComposing || e.keyCode === 229) return PASS;
-  // Cmd (and the Windows key elsewhere) belongs to the browser or OS: Cmd+R,
-  // Cmd+T, Cmd+W, Cmd+L, Cmd+V all stay as they are.
+  if (mac && e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey) {
+    const send = CMD_KEYS[e.key];
+    if (send) return { send, preventDefault: true, passToXterm: false };
+    if (e.key.toLowerCase() === 'k') return { clear: true, preventDefault: true, passToXterm: false };
+  }
+  // Any other Cmd (and the Windows key elsewhere) belongs to the browser or OS:
+  // Cmd+R, Cmd+T, Cmd+W, Cmd+L, Cmd+V all stay as they are.
   if (e.metaKey) return PASS;
 
   // Shift/Ctrl+Enter inserts a newline. A bare \r would submit, and a terminal

@@ -52,7 +52,8 @@ const open = async (platform) => {
 };
 const inputs = (page) => page.evaluate(() => window.sent.filter((m) => m.t === 'i').map((m) => m.d));
 // xterm reads the legacy keyCode, which a synthetic event only has if given.
-const KEY_CODES = { Enter: 13, Tab: 9, KeyB: 66, KeyL: 76, KeyR: 82, KeyT: 84, KeyJ: 74 };
+const KEY_CODES = { Enter: 13, Tab: 9, KeyB: 66, KeyK: 75, KeyL: 76, KeyR: 82, KeyT: 84, KeyJ: 74,
+  ArrowLeft: 37, ArrowRight: 39, Backspace: 8, Delete: 46 };
 // Dispatch a keydown at the terminal; returns what it sent and whether the
 // browser default was cancelled.
 const press = async (page, init) => {
@@ -80,7 +81,20 @@ try {
   assert.deepEqual(await press(mac, { key: 'r', code: 'KeyR', ctrlKey: true }), { sent: ['\x12'], prevented: true });
   assert.deepEqual(await press(mac, { key: 'l', code: 'KeyL', ctrlKey: true }), { sent: ['\x0c'], prevented: true });
   assert.deepEqual(await press(mac, { key: 'Tab', code: 'Tab', shiftKey: true }), { sent: ['\x1b[Z'], prevented: true });
-  // Cmd combos are left alone: nothing sent, nothing cancelled.
+  // iTerm2 "Natural Text Editing": Cmd+arrows and Cmd+Backspace become readline
+  // bytes (xterm.js alone sends nothing for them), Option+Forward Delete is ESC d.
+  assert.deepEqual(await press(mac, { key: 'ArrowLeft', code: 'ArrowLeft', metaKey: true }), { sent: ['\x01'], prevented: true });
+  assert.deepEqual(await press(mac, { key: 'ArrowRight', code: 'ArrowRight', metaKey: true }), { sent: ['\x05'], prevented: true });
+  assert.deepEqual(await press(mac, { key: 'Backspace', code: 'Backspace', metaKey: true }), { sent: ['\x15'], prevented: true });
+  assert.deepEqual(await press(mac, { key: 'ArrowLeft', code: 'ArrowLeft', altKey: true }), { sent: ['\x1bb'], prevented: true });
+  assert.deepEqual(await press(mac, { key: 'Delete', code: 'Delete', altKey: true }), { sent: ['\x1bd'], prevented: true });
+  // Cmd+K clears the local scrollback and sends nothing.
+  await mac.evaluate(() => window.socket.onmessage({ data: '\r\n' + Array.from({ length: 30 }, (_, i) => `old-line-${i}`).join('\r\n') + '\r\nReady> ' }));
+  await mac.waitForFunction(() => document.querySelector('.xterm-rows').textContent.includes('old-line-29'));
+  assert.deepEqual(await press(mac, { key: 'k', code: 'KeyK', metaKey: true }), { sent: [], prevented: true });
+  const left = await mac.evaluate(() => document.querySelector('.xterm-rows').textContent);
+  assert.ok(!left.includes('old-line-29') && left.includes('Ready>'), left);
+  // Other Cmd combos are left alone: nothing sent, nothing cancelled.
   assert.deepEqual(await press(mac, { key: 'r', code: 'KeyR', metaKey: true }), { sent: [], prevented: false });
   assert.deepEqual(await press(mac, { key: 't', code: 'KeyT', metaKey: true }), { sent: [], prevented: false });
   await mac.close();
@@ -90,5 +104,5 @@ try {
   assert.deepEqual(await press(linux, { key: 'b', code: 'KeyB', altKey: true }), { sent: ['\x1bb'], prevented: true }, 'xterm\'s own Alt handling');
   assert.deepEqual(await press(linux, { key: 'j', code: 'KeyJ', ctrlKey: true }), { sent: ['\n'], prevented: true });
   await linux.close();
-  console.log('terminal-keys: Option-as-Meta, newline and reserved Ctrl combos reach the PTY, once');
+  console.log('terminal-keys: Option-as-Meta, iTerm2 Cmd keys, newline and reserved Ctrl combos reach the PTY, once');
 } finally { await browser.close(); }

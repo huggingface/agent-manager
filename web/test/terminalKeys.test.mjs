@@ -12,7 +12,8 @@ assert.equal(isMacPlatform({ platform: 'Linux x86_64' }), false);
 
 // Option as Meta on macOS: the key is "∫", the physical key says it was B.
 for (const [code, send] of [['KeyB', '\x1bb'], ['KeyF', '\x1bf'], ['KeyP', '\x1bp'], ['KeyT', '\x1bt'],
-  ['KeyY', '\x1by'], ['KeyD', '\x1bd'], ['Backspace', '\x1b\x7f'], ['Enter', '\x1b\r']]) {
+  ['KeyY', '\x1by'], ['KeyD', '\x1bd'], ['Backspace', '\x1b\x7f'], ['Enter', '\x1b\r'],
+  ['ArrowLeft', '\x1bb'], ['ArrowRight', '\x1bf'], ['Delete', '\x1bd']]) {
   assert.deepEqual(act({ altKey: true, key: '∫', code }, true), { send, preventDefault: true, passToXterm: false }, code);
 }
 // Everything else with Option is left for the layout: German @ [ { | ~ and friends.
@@ -51,8 +52,18 @@ untouched(act({ ctrlKey: true, shiftKey: true, key: 'V' }));
 untouched(act({ ctrlKey: true, shiftKey: true, key: 'T' }));
 untouched(act({ ctrlKey: true, altKey: true, key: 'r' }));
 
-// Cmd combos on macOS (and the Windows key) are the browser's.
-for (const k of ['r', 't', 'w', 'l', 'v', 'c', 'k']) untouched(act({ metaKey: true, key: k }, true));
+// iTerm2 "Natural Text Editing" Cmd keys on macOS: line start/end, delete to
+// line start; Cmd+K clears the buffer.
+for (const [key, send] of [['ArrowLeft', '\x01'], ['ArrowRight', '\x05'], ['Backspace', '\x15']]) {
+  assert.deepEqual(act({ metaKey: true, key, code: key }, true), { send, preventDefault: true, passToXterm: false }, key);
+  untouched(act({ metaKey: true, key, code: key }, false));
+  untouched(act({ metaKey: true, shiftKey: true, key, code: key }, true));
+}
+assert.deepEqual(act({ metaKey: true, key: 'k', code: 'KeyK' }, true), { clear: true, preventDefault: true, passToXterm: false });
+untouched(act({ metaKey: true, key: 'k', code: 'KeyK' }, false));
+// Other Cmd combos on macOS (and the Windows key) are the browser's.
+for (const k of ['r', 't', 'w', 'l', 'v', 'c', 'a']) untouched(act({ metaKey: true, key: k }, true));
+untouched(act({ metaKey: true, key: 'ArrowUp', code: 'ArrowUp' }, true));
 untouched(act({ metaKey: true, ctrlKey: true, key: 'r' }, true));
 untouched(act({ metaKey: true, altKey: true, key: '∫', code: 'KeyB' }, true));
 

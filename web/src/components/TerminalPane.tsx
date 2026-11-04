@@ -719,6 +719,8 @@ export default function TerminalPane({
       claimControl();
       // term.input goes through onData, the one path to the PTY.
       if (action.send) { term.input(action.send, true); endBoot(); }
+      // Local only: the server's scrollback is untouched and comes back on reattach.
+      if (action.clear) term.clear();
       return action.passToXterm;
     });
     // The only local fit: this terminal is still empty, so there is no buffer to

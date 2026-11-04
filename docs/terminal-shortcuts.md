@@ -12,10 +12,26 @@ in `TerminalPane.tsx`.
 | Option+Enter (macOS) | `ESC CR` | Same newline. |
 | Option+B / F / P / T / Y / D (macOS) | `ESC b/f/p/t/y/d` | Word back/forward, model switch, thinking toggle, kill-ring cycle, delete word forward. |
 | Option+Backspace (macOS) | `ESC DEL` | Delete word back. |
+| Option+Left / Right (macOS) | `ESC b` / `ESC f` | Word back/forward. |
+| Option+Forward Delete (macOS) | `ESC d` | Delete word forward. |
+| Cmd+Left / Right (macOS) | `Ctrl+A` / `Ctrl+E` | Start / end of line. |
+| Cmd+Backspace (macOS) | `Ctrl+U` | Delete to start of line. |
+| Cmd+K (macOS) | nothing | Clears the pane's local scrollback, like iTerm2's Clear Buffer. The server keeps its copy, so a reload or reconnect brings it back. |
 | Ctrl+R, L, K, U, Y, D, J, T, P, W, N | the control byte | The browser's own action is cancelled so the key reaches the TUI. |
 | Shift+Tab, Esc | usual sequences | The browser's own action is cancelled. |
 
 On Windows and Linux, Alt+key already arrives as Meta, so nothing extra is needed.
+
+## Cmd keys on macOS follow iTerm2
+
+A terminal has no encoding for Cmd, so Cmd+Left and friends only work in a
+native terminal because the terminal app translates them into readline bytes.
+xterm.js does not, so the Cmd and Option editing keys above are copied from
+iTerm2's "Natural Text Editing" key preset (`plists/PresetKeyMappings.plist` in
+the iTerm2 source), and Cmd+K from its Clear Buffer menu item. One preset entry
+is left out: it maps plain Forward Delete to `Ctrl+D`, which would end a Claude
+Code or Codex session at an empty prompt, so Forward Delete keeps sending
+`ESC [3~`.
 
 ## Option on macOS is not Meta everywhere
 
@@ -28,7 +44,7 @@ physical key, not the printed letter.
 
 ## Left to the browser
 
-- Anything with Cmd held on macOS (Cmd+R, T, W, L, ...), and Ctrl+Shift combos
+- Every other Cmd combo on macOS (Cmd+R, T, W, L, ...), and Ctrl+Shift combos
   such as Ctrl+Shift+T/N.
 - Copy and paste: Cmd/Ctrl+C with a selection copies (without one, Ctrl+C is
   SIGINT), Cmd+V and Ctrl+Shift+V paste.
