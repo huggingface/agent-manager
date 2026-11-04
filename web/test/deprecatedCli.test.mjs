@@ -32,9 +32,12 @@ const server = await startFixtureServer({
   seed: ({ dataDir, binDir }) => {
     fs.writeFileSync(path.join(binDir, 'gemini'), '#!/bin/sh\n[ "$1" = --version ] && echo 0.0.0 && exit 0\necho "fixture gemini stub"; sleep 3600\n', { mode: 0o755 });
     fs.mkdirSync(path.join(dataDir, 'workspaces', 'gem'), { recursive: true });
+    // Created now, not on a fixed date: the sidebar files a session quiet for
+    // more than 30 days under "archived" (lib/idleWindow.ts), so a fixed date
+    // hides this row once it is a month old.
     fs.writeFileSync(path.join(dataDir, 'sessions.json'), JSON.stringify([{
       id: GEMINI_ID, name: 'old-gemini', cli: 'gemini', path: 'gem',
-      sessionUuid: '00000000-0000-4000-8000-0000000ge001', createdAt: '2026-10-01T00:00:00.000Z', everStarted: true,
+      sessionUuid: '00000000-0000-4000-8000-0000000ge001', createdAt: new Date().toISOString(), everStarted: true,
     }]));
     // A cron saved on gemini before the deprecation: still editable, never re-typed.
     fs.writeFileSync(path.join(dataDir, 'crons.json'), JSON.stringify([{
