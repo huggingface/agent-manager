@@ -511,7 +511,9 @@ checkpoint_sqlite_tree() {
 
   # .backup observes the main DB and WAL through one consistent SQLite read
   # transaction. The staged file is ordinary local storage and is closed before
-  # rsync hands it to the bucket.
+  # rsync hands it to the bucket. -I: a fresh backup can match the last one in
+  # size and mtime (to the second) while its pages differ, and rsync's quick
+  # check would then skip it as unchanged.
   if ! sqlite3 "$source" ".timeout 5000" ".backup '$escaped'"; then
     rm -f "$staged" "$sqlite_next"
     return 1
@@ -521,7 +523,7 @@ checkpoint_sqlite_tree() {
     rm -f "$staged" "$sqlite_next"
     return 1
   fi
-  if ! rsync -a --delay-updates "$staged" "$durable/checkpoints/$checkpoint_name"; then
+  if ! rsync -a -I --delay-updates "$staged" "$durable/checkpoints/$checkpoint_name"; then
     rm -f "$staged" "$sqlite_next"
     return 1
   fi
@@ -570,35 +572,55 @@ agy_backup() {
 # could not be copied is tried again on the next passes (antigravity-db.retry,
 # "<tries> <path>"). After AGY_DB_TRIES failed passes in a row it is logged
 # once and left until it changes again, so one corrupt file neither fails
-# every checkpoint nor brings every other database along with it.
+# every checkpoint nor brings every other database along with it. "Changes" is
+# judged by the DB/WAL metadata (antigravity-db.left, "<sig> <path>"), not by
+# the stamp: the stamp keeps a 2 s overlap on purpose, so a file written just
+# before a pass is listed again by the next one without having changed. The
+# signature has nanosecond mtime and ctime, as in checkpoint_sqlite_tree:
+# SQLite rewrites pages in place, so size and inode alone miss a commit, and so
+# does a whole-second mtime. It is taken BEFORE the backup attempt, so a commit
+# landing after the failure changes it and is tried on the next pass.
 AGY_DB_TRIES=3
+agy_db_sig() { stat -c '%s|%.9Y|%.9Z|%i' "$1" "$1-wal" 2>/dev/null | paste -sd, -; }
 checkpoint_antigravity() {
   live="$1" durable="$2"
   [ -d "$live" ] || return 0
   checkpoint_tree antigravity "$live" "$durable" || return 1
   db_stamp="$AM_LOCAL/agent-state-stamps/antigravity-db"
   db_retry="$db_stamp.retry"
+  db_left="$db_stamp.left"
   [ -e "$db_stamp" ] || touch -t 197001010000 "$db_stamp"
   db_next="$db_stamp.next.$$"
   db_list="$db_stamp.files.$$"
   retry_next="$db_retry.next.$$"
+  left_next="$db_left.next.$$"
   mark_checkpoint_floor "$db_next"
   { agy_databases "$live" "$db_stamp"; [ -f "$db_retry" ] && cut -d' ' -f2- "$db_retry"; } | sort -u > "$db_list"
   : > "$retry_next"
+  # Left databases that have not changed stay left; any other entry is dropped.
+  [ -f "$db_left" ] && while IFS= read -r line; do
+    rel=${line#* }
+    [ -e "$live/$rel" ] && [ "$(agy_db_sig "$live/$rel")" = "${line%% *}" ] && printf '%s\n' "$line"
+  done < "$db_left" > "$left_next"
+  [ -f "$left_next" ] || : > "$left_next"
   stage_dir="$AM_LOCAL/agent-state-snapshots"
   mkdir -p "$stage_dir"
   staged="$stage_dir/antigravity.$$.tmp"
   db_failed=0
   while IFS= read -r rel; do
     [ -s "$live/$rel" ] || continue
+    awk -v r="$rel" '{ sub(/^[^ ]+ /, "") } $0 == r { found = 1; exit } END { exit !found }' "$left_next" && continue
+    sig=$(agy_db_sig "$live/$rel")
     if agy_backup "$live/$rel" "$staged"; then
       mkdir -p "$(dirname "$durable/$rel")"
-      rsync -a --delay-updates "$staged" "$durable/$rel" && continue
+      # -I, as in checkpoint_sqlite_tree: same size and second is not "unchanged".
+      rsync -a -I --delay-updates "$staged" "$durable/$rel" && continue
     fi
     tries=$(awk -v r="$rel" '{ n = $1; sub(/^[0-9]+ /, "") } $0 == r { print n; exit }' "$db_retry" 2>/dev/null)
     tries=$(( ${tries:-0} + 1 ))
     if [ "$tries" -ge "$AGY_DB_TRIES" ]; then
       echo "agent-state: could not take a consistent copy of $live/$rel after $tries passes; leaving it until it changes" >&2
+      printf '%s %s\n' "$sig" "$rel" >> "$left_next"
     else
       echo "agent-state: could not take a consistent copy of $live/$rel; retrying next pass" >&2
       printf '%s %s\n' "$tries" "$rel" >> "$retry_next"
@@ -607,6 +629,7 @@ checkpoint_antigravity() {
   done < "$db_list"
   rm -f "$staged" "$db_list"
   mv "$retry_next" "$db_retry"
+  mv "$left_next" "$db_left"
   mv "$db_next" "$db_stamp"
   [ "$db_failed" -eq 0 ]
 }
