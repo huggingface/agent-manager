@@ -18,10 +18,23 @@ or no value, is off:
 
 Production and the template never set it.
 
-The Space also needs a **GitHub token** as a secret (`GH_TOKEN` or
-`GITHUB_TOKEN`), any token that can read the repository. Without one GitHub
-does not answer the permission check below, so every switch is refused and a
-saved selection is not re-applied. Listing open PRs works either way.
+The Space also needs a **GitHub token**, any token that can read the
+repository. It is looked up, in this order, each time the switcher asks GitHub
+(the `gh` answer is reused for 10 s):
+
+1. the `GH_TOKEN` secret;
+2. the `GITHUB_TOKEN` secret;
+3. the `gh auth login` of the Space's user: `gh auth token --hostname
+   github.com`, which reads `/data/home/.config/gh/hosts.yml`. Run
+   `gh auth login` once in a terminal of the Space; no secret or restart is
+   needed, and a logout takes effect the same way.
+
+A fine-grained, read-only `GH_TOKEN` is the safer choice and `gh auth login`
+the convenient one (see [Security](#security)). Without any token GitHub does
+not answer the permission check below, so every switch is refused (the
+refusal says how to give it one) and a saved selection is not re-applied. If
+`gh` is missing, logged out, fails or takes more than 5 s, that is "no token".
+Listing open PRs works either way.
 
 ## What a switch does
 
@@ -169,6 +182,11 @@ repository settings:
 - a switch body is `{prs: [{number, sha?}]}` only: JSON integers, 40-hex SHAs,
   no duplicates, at most 6, no other keys; every subprocess is `execFile` with
   an argument array;
+- the GitHub token is read from `GH_TOKEN`, `GITHUB_TOKEN` or `gh auth token`
+  (run with `execFile`, an argument array, and only `PATH`, `HOME` and gh's
+  config locations in its environment); it is sent only to
+  `api.github.com`, never logged or shown, and what `gh` prints is never part
+  of an error;
 - every switch request is in the API log (`POST /api/dev-preview/switch`), and
   its outcome, boot re-applies and rollbacks are appended as `PREVIEW` records
   from origin `dev-preview`.
@@ -183,6 +201,17 @@ user) and encode or send what it finds. This container has no user namespaces
 (seccomp), no root, and `/data` is a FUSE mount readable by every uid, so the
 build cannot be sandboxed here; it would not matter much anyway, since a
 switched-in server is the manager.
+
+**Which GitHub token.** Whatever the switcher uses, previewed code can read
+it too. A token from `gh auth login` is the account's own OAuth token, with
+the `repo` scope over **every** repository that account can reach (plus
+`read:org` and `gist`), and it is stored in plain text at
+`/data/home/.config/gh/hosts.yml`, which a previewed build can read **whether
+or not the switcher uses it**: logging `gh` in on a dev Space hands it to
+every PR you preview. The safer choice is a **fine-grained `GH_TOKEN`**
+limited to `huggingface/agent-manager` with read-only access (metadata, pull
+requests), set as a Space secret, and no `gh` login on that Space. `gh auth
+login` is the convenient choice when the operator accepts that exposure.
 
 ## API
 

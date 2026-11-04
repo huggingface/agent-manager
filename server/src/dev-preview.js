@@ -164,7 +164,46 @@ export function describe(selection) {
 
 // ---------------------------------------------------------------- GitHub checks
 
-const defaultToken = () => process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '';
+// What `gh auth token` may print to count as a token: one run of printable
+// ASCII, no whitespace. Anything else (a prompt, an error, nothing) is no token.
+const GH_TOKEN_TEXT = /^[\x21-\x7e]{1,1024}$/;
+
+/**
+ * The token for GitHub API calls: GH_TOKEN, else GITHUB_TOKEN, else the
+ * `gh auth login` of this Space's user (`gh auth token --hostname github.com`,
+ * which reads $HOME/.config/gh/hosts.yml; entrypoint.sh exports HOME, so the
+ * server and dev-preview-check.js both find it). gh missing, logged out,
+ * failing or slow is "no token", exactly as without one: GitHub then refuses
+ * the permission check and every PR is refused. Permission is never assumed.
+ *
+ * gh's answer, token or not, is kept for `ttlMs` and shared by concurrent
+ * callers, so a listing (one request per author) runs gh once, while a
+ * `gh auth login` or logout takes effect within seconds, without a restart.
+ * gh gets only PATH, HOME and its config locations, not the server's
+ * environment, and nothing it prints is ever logged or shown.
+ *
+ * @returns {() => Promise<string>} the token, or '' for none
+ */
+export function githubTokenSource({ env = process.env, execFileImpl = execFile, ttlMs = 10_000, timeoutMs = 5_000, now = Date.now } = {}) {
+  let cached = null;        // { at, value: Promise<string> }
+  const fromGh = () => new Promise((resolve) => {
+    const ghEnv = { PATH: env.PATH || '/usr/local/bin:/usr/bin:/bin' };
+    for (const key of ['HOME', 'GH_CONFIG_DIR', 'XDG_CONFIG_HOME']) if (env[key]) ghEnv[key] = env[key];
+    try {
+      execFileImpl('gh', ['auth', 'token', '--hostname', 'github.com'], { env: ghEnv, timeout: timeoutMs, maxBuffer: 64 * 1024 }, (err, stdout) => {
+        const token = err ? '' : String(stdout || '').trim();
+        resolve(GH_TOKEN_TEXT.test(token) ? token : '');
+      });
+    } catch { resolve(''); }
+  });
+  return async () => {
+    const fixed = env.GH_TOKEN || env.GITHUB_TOKEN;
+    if (fixed) return fixed;
+    if (!cached || now() - cached.at >= ttlMs) cached = { at: now(), value: fromGh() };
+    return cached.value;
+  };
+}
+const defaultToken = githubTokenSource();
 
 /**
  * Everything that asks GitHub whether a PR may run here. One implementation
@@ -174,7 +213,7 @@ const defaultToken = () => process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '
  */
 export function gitHubChecks({ fetchJson = null, githubToken = defaultToken } = {}) {
   async function defaultFetchJson(url) {
-    const token = githubToken();
+    const token = await githubToken();
     const res = await fetch(url, {
       headers: {
         accept: 'application/vnd.github+json', 'user-agent': 'agent-manager-dev-preview',
@@ -183,7 +222,8 @@ export function gitHubChecks({ fetchJson = null, githubToken = defaultToken } = 
       signal: AbortSignal.timeout(15_000),
     });
     if (res.status === 404) throw Object.assign(new Error('not found'), { notFound: true });
-    if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
+    // Fixed text either way; without a token, say how to give it one.
+    if (!res.ok) throw new Error(`GitHub answered ${res.status}${token ? '' : ' with no token (set GH_TOKEN, or run `gh auth login` in a terminal)'}`);
     return res.json();
   }
   const getJson = (url) => (fetchJson || defaultFetchJson)(url);

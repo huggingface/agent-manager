@@ -10,10 +10,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   createDevPreview, validateSelection, lockKey, REBUILD_FILES, SWAPPED, DEV_PREVIEW_REPO, describe, headRefusal, permissionAllows, checkRelease,
+  githubTokenSource, gitHubChecks,
 } from '../src/dev-preview.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -682,6 +683,107 @@ test('dev-preview-check.js refuses what it cannot read, with the reason on stdou
     assert.equal(r.status, 1);
     assert.match(r.stdout, why);
   }
+});
+
+// ------------------------------------------------------------ GitHub token
+
+// A stand-in for child_process.execFile that records each call and answers
+// with `reply(call)` = [err, stdout].
+const fakeExecFile = (reply) => {
+  const calls = [];
+  const impl = (cmd, args, opts, cb) => {
+    const call = { cmd, args, opts };
+    calls.push(call);
+    const [err, stdout] = reply(call);
+    setImmediate(() => cb(err, stdout, ''));
+  };
+  return { calls, impl };
+};
+
+test('GitHub token: GH_TOKEN, then GITHUB_TOKEN, and gh is not asked while either is set', async () => {
+  const gh = fakeExecFile(() => [null, 'gho_fromgh\n']);
+  const src = (env) => githubTokenSource({ env, execFileImpl: gh.impl });
+  assert.equal(await src({ GH_TOKEN: 'env-a', GITHUB_TOKEN: 'env-b', HOME: root })(), 'env-a');
+  assert.equal(await src({ GH_TOKEN: '', GITHUB_TOKEN: 'env-b', HOME: root })(), 'env-b');
+  assert.equal(gh.calls.length, 0);
+});
+
+test('GitHub token: without env, `gh auth token` with an argument array, no shell and a minimal environment', async () => {
+  const gh = fakeExecFile(() => [null, '  gho_fromgh\n']);
+  const env = { PATH: '/usr/bin:/bin', HOME: '/data/home', GH_CONFIG_DIR: '/cfg/gh', HF_TOKEN: 'hf_secret', AM_SECRET: 'x' };
+  assert.equal(await githubTokenSource({ env, execFileImpl: gh.impl })(), 'gho_fromgh');
+  assert.equal(gh.calls.length, 1);
+  const [{ cmd, args, opts }] = gh.calls;
+  assert.equal(cmd, 'gh');
+  assert.deepEqual(args, ['auth', 'token', '--hostname', 'github.com']);
+  assert.equal(opts.shell, undefined);
+  assert.deepEqual(opts.env, { PATH: '/usr/bin:/bin', HOME: '/data/home', GH_CONFIG_DIR: '/cfg/gh' });
+  assert.ok(opts.timeout > 0 && opts.timeout <= 5_000);
+  // and the module itself never reaches for a shell
+  const src = read(MODULE);
+  assert.doesNotMatch(src, /\bexecSync\b|\bexec\(|shell\s*:\s*true|from 'node:child_process'.*\bspawn\b/);
+});
+
+test('GitHub token: gh failing, timing out, missing or printing a non-token is no token', async () => {
+  const replies = [
+    [Object.assign(new Error('exit 1'), { code: 1 }), 'gho_ignored\n'],   // logged out: gh exits 1
+    [Object.assign(new Error('killed'), { killed: true, signal: 'SIGTERM' }), ''], // timed out
+    [Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' }), ''],     // not installed
+    [null, ''], [null, '  \n'], [null, 'two words\n'], [null, 'gho_a\ngho_b\n'],
+  ];
+  for (const reply of replies) {
+    const gh = fakeExecFile(() => reply);
+    assert.equal(await githubTokenSource({ env: { HOME: root }, execFileImpl: gh.impl })(), '', JSON.stringify(reply[1]));
+  }
+  const throwing = () => { throw new Error('spawn failed'); };
+  assert.equal(await githubTokenSource({ env: { HOME: root }, execFileImpl: throwing })(), '');
+});
+
+test('GitHub token: one gh run is shared for a few seconds, then read again (a login applies without a restart)', async () => {
+  let answer = '';
+  const gh = fakeExecFile(() => [null, answer]);
+  let t = 1_000_000;
+  const token = githubTokenSource({ env: { HOME: root }, execFileImpl: gh.impl, ttlMs: 10_000, now: () => t });
+  assert.deepEqual(await Promise.all([token(), token(), token()]), ['', '', '']);
+  assert.equal(gh.calls.length, 1);
+  answer = 'gho_loggedin\n';             // `gh auth login` in a terminal
+  t += 5_000;
+  assert.equal(await token(), '');
+  assert.equal(gh.calls.length, 1);
+  t += 5_000;
+  assert.equal(await token(), 'gho_loggedin');
+  assert.equal(gh.calls.length, 2);
+});
+
+test('GitHub token: a real gh on PATH is run without a shell and without the server\'s secrets', async () => {
+  const bin = fs.mkdtempSync(path.join(root, 'gh-bin-'));
+  const seen = path.join(bin, 'seen');
+  write(path.join(bin, 'gh'), `#!/bin/sh\nprintf '%s|' "$@" > '${seen}'\nenv | sort >> '${seen}'\n[ "$GH_FAKE_MODE" = slow ] && sleep 5\necho gho_real\n`);
+  fs.chmodSync(path.join(bin, 'gh'), 0o755);
+  const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: root, SPACE_SECRET: 'must-not-reach-gh' };
+  assert.equal(await githubTokenSource({ env })(), 'gho_real');
+  const got = read(seen);
+  assert.match(got, /^auth\|token\|--hostname\|github\.com\|/);
+  assert.doesNotMatch(got, /must-not-reach-gh/);
+  // missing gh, and a gh slower than the timeout
+  assert.equal(await githubTokenSource({ env: { PATH: '/nonexistent', HOME: root } })(), '');
+  assert.equal(await githubTokenSource({ env: { ...env, XDG_CONFIG_HOME: root }, timeoutMs: 200, execFileImpl: (c, a, o, cb) => execFile(c, a, { ...o, env: { ...o.env, GH_FAKE_MODE: 'slow' } }, cb) })(), '');
+});
+
+test('GitHub checks send the resolved token, and without one say how to give it', async () => {
+  const realFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url, init) => {
+    seen.push(init.headers.authorization);
+    return { ok: false, status: 401, json: async () => ({}) };
+  };
+  try {
+    const ok = gitHubChecks({ githubToken: async () => 'gho_tok' });
+    await assert.rejects(ok.getJson(`${API}/branches/main`), (e) => e.message === 'GitHub answered 401');
+    const none = gitHubChecks({ githubToken: async () => '' });
+    await assert.rejects(none.getJson(`${API}/branches/main`), /GitHub answered 401 with no token \(set GH_TOKEN, or run `gh auth login`/);
+    assert.deepEqual(seen, ['Bearer gho_tok', undefined]);
+  } finally { globalThis.fetch = realFetch; }
 });
 
 test('after a container restart the saved selection is re-applied only if GitHub still allows exactly it', async () => {
