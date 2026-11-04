@@ -573,11 +573,15 @@ agy_backup() {
 # "<tries> <path>"). After AGY_DB_TRIES failed passes in a row it is logged
 # once and left until it changes again, so one corrupt file neither fails
 # every checkpoint nor brings every other database along with it. "Changes" is
-# judged by its own size, mtime and inode (antigravity-db.left, "<sig> <path>"),
-# not by the stamp: the stamp keeps a 2 s overlap on purpose, so a file written
-# just before a pass is listed again by the next one without having changed.
+# judged by the DB/WAL metadata (antigravity-db.left, "<sig> <path>"), not by
+# the stamp: the stamp keeps a 2 s overlap on purpose, so a file written just
+# before a pass is listed again by the next one without having changed. The
+# signature has nanosecond mtime and ctime, as in checkpoint_sqlite_tree:
+# SQLite rewrites pages in place, so size and inode alone miss a commit, and so
+# does a whole-second mtime. It is taken BEFORE the backup attempt, so a commit
+# landing after the failure changes it and is tried on the next pass.
 AGY_DB_TRIES=3
-agy_db_sig() { stat -c '%s|%Y|%i' "$1" "$1-wal" 2>/dev/null | paste -sd, -; }
+agy_db_sig() { stat -c '%s|%.9Y|%.9Z|%i' "$1" "$1-wal" 2>/dev/null | paste -sd, -; }
 checkpoint_antigravity() {
   live="$1" durable="$2"
   [ -d "$live" ] || return 0
@@ -606,6 +610,7 @@ checkpoint_antigravity() {
   while IFS= read -r rel; do
     [ -s "$live/$rel" ] || continue
     awk -v r="$rel" '{ sub(/^[^ ]+ /, "") } $0 == r { found = 1; exit } END { exit !found }' "$left_next" && continue
+    sig=$(agy_db_sig "$live/$rel")
     if agy_backup "$live/$rel" "$staged"; then
       mkdir -p "$(dirname "$durable/$rel")"
       # -I, as in checkpoint_sqlite_tree: same size and second is not "unchanged".
@@ -615,7 +620,7 @@ checkpoint_antigravity() {
     tries=$(( ${tries:-0} + 1 ))
     if [ "$tries" -ge "$AGY_DB_TRIES" ]; then
       echo "agent-state: could not take a consistent copy of $live/$rel after $tries passes; leaving it until it changes" >&2
-      printf '%s %s\n' "$(agy_db_sig "$live/$rel")" "$rel" >> "$left_next"
+      printf '%s %s\n' "$sig" "$rel" >> "$left_next"
     else
       echo "agent-state: could not take a consistent copy of $live/$rel; retrying next pass" >&2
       printf '%s %s\n' "$tries" "$rel" >> "$retry_next"
