@@ -9,7 +9,9 @@
 // at the SHA it was built from, and its author still has write, maintain or
 // admin permission. Otherwise exit 1 with the reason on stdout. A check that
 // cannot be completed (no token, GitHub down, rate limited, unreadable
-// release) is a refusal.
+// release) is a refusal. The GitHub token is the server's (githubTokenSource()
+// in dev-preview.js): GH_TOKEN, GITHUB_TOKEN, or the `gh auth login` under the
+// HOME that entrypoint.sh exports and this process inherits.
 import fs from 'node:fs';
 import path from 'node:path';
 import { checkRelease } from './dev-preview.js';
