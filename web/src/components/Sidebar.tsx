@@ -40,8 +40,11 @@ const fmtAgo = (ts?: number) => {
   return `${Math.round(m / 1440)}d`;
 };
 
+// No read marks known: nothing shows "done".
+const NO_UNREAD: ReadonlySet<string> = new Set();
+
 export default function Sidebar({
-  clis, tree, activeRef, focusedId, defaultPath, ages,
+  clis, tree, activeRef, focusedId, defaultPath, ages, unread = NO_UNREAD,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
   onArchiveSession, onUnarchiveSession, onSetRemotePaused, onDeleteSession, onTraceHandover, handoverFor, onHandoverHandled, onMove, onDragState, onOpenSettings, previewBar, theme, onToggleTheme, onQuickStart,
   onPrepareQuickStart,
@@ -55,6 +58,9 @@ export default function Sidebar({
   focusedId: string | null;
   defaultPath: string;
   ages?: Record<string, number>; // session id -> last activity ts (ms)
+  // Sessions with a reply the operator has not read (lib/unread.ts unreadIds):
+  // the status column's "done". Absent = none known.
+  unread?: ReadonlySet<string>;
   onActivate: (ref: string) => void;
   onOpenSession: (sessionId: string, groupId?: string) => void;
   onOpenSettings: () => void;
@@ -583,7 +589,9 @@ export default function Sidebar({
     const active = !nested && activeRef === ref;
     // The status column (#242): one mark at the far left, before the logo.
     // Stopped has no mark and dims the row; blocked and done brighten the name.
-    const status = rowStatus(s);
+    // "Done" is an unread reply; it clears only through the reader / Overview
+    // read tracking, never by opening the terminal.
+    const status = rowStatus(s, unread.has(s.id));
     return (
       <div
         key={s.id}
