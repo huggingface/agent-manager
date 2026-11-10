@@ -85,7 +85,7 @@ await build({
       const noop = () => {};
       const promise = () => Promise.resolve();
       const root = createRoot(document.getElementById('root'));
-      window.mount = (tree, unread) => root.render(
+      window.mount = (tree, unread, archived = []) => root.render(
         <Sidebar
           clis={${JSON.stringify(CLIS)}}
           tree={tree}
@@ -101,8 +101,8 @@ await build({
           onMove={noop} onDragState={noop}
           theme="dark" onToggleTheme={noop}
           onQuickStart={promise} onPrepareQuickStart={promise} onAbandonQuickStart={promise}
-          archived={new Set()} retired={new Set()}
-          showArchived={false} onToggleArchived={noop}
+          archived={new Set(archived)} retired={new Set()}
+          showArchived={archived.length > 0} onToggleArchived={noop}
           overviewHidden={new Set()} onToggleOverviewHidden={noop}
           onPinSession={noop} onPinGroup={noop}
         />,
@@ -146,6 +146,7 @@ const rowsOf = (page) => page.$$eval('.row.session[data-ref]', (rows) => rows.ma
     name: name?.textContent ?? null,
     nameColor: name ? getComputedStyle(name).color : null,
     nameOpacity: name ? getComputedStyle(name).opacity : null,
+    logoOpacity: row.querySelector(':scope > .cli-logo') ? getComputedStyle(row.querySelector(':scope > .cli-logo')).opacity : null,
     stateLogos: row.querySelectorAll('.state-logo').length,
     logos: row.querySelectorAll('.cli-logo').length,
   };
@@ -313,21 +314,40 @@ try {
   }
 
   // The phone layout (≤720px) changes row and group padding, so the column has
-  // to survive that too.
-  {
-    const page = await browser.newPage({ viewport: { width: 390, height: 1100 } });
-    await page.setContent(`<style>${css}
-      html, body { margin: 0; background: var(--bg); } .sidebar { width: 100%; }
-    </style><div id="root" data-theme="dark"></div>`);
-    await page.addScriptTag({ path: bundle });
-    await page.evaluate((tree) => window.mount(tree), TREE);
-    await page.waitForSelector('[data-ref="s:work"] .row-status');
-    const rows = await rowsOf(page);
-    check('phone layout: every mark sits on the same left edge, nested rows included', () => {
-      const lefts = new Set(rows.map((r) => Math.round(r.left * 100) / 100));
-      assert.equal(lefts.size, 1, `marks start at ${[...lefts].join(', ')}`);
-    });
-    await page.close();
+  // to survive that too. It also forces every row logo to full opacity (touch
+  // has no hover to reveal it); stopped and archived rows must stay dimmed
+  // anyway, since for a stopped row the dimming is the only sign of its state.
+  for (const width of [720, 390]) {
+    for (const theme of ['dark', 'light']) {
+      const page = await browser.newPage({ viewport: { width, height: 1100 } });
+      await page.setContent(`<style>${css}
+        html, body { margin: 0; background: var(--bg); } .sidebar { width: 100%; }
+      </style><div id="root" data-theme="${theme}"></div>`);
+      await page.addScriptTag({ path: bundle });
+      // `idle` archived but alive: the archived dimming on its own, not via stopped.
+      await page.evaluate((tree) => window.mount(tree, [], ['idle']), TREE);
+      await page.waitForSelector('[data-ref="s:work"] .row-status');
+      const rows = await rowsOf(page);
+      const by = Object.fromEntries(rows.map((r) => [r.ref.slice(2), r]));
+      const t = `phone ${width}px ${theme}:`;
+      check(`${t} every mark sits on the same left edge, nested rows included`, () => {
+        const lefts = new Set(rows.map((r) => Math.round(r.left * 100) / 100));
+        assert.equal(lefts.size, 1, `marks start at ${[...lefts].join(', ')}`);
+      });
+      check(`${t} stopped and archived rows keep a dimmed logo`, () => {
+        assert.equal(Number(by.old.logoOpacity), 0.45, 'stopped row logo');
+        assert.equal(Number(by.faroff.logoOpacity), 0.45, 'stopped remote row logo');
+        assert.equal(Number(by.idle.logoOpacity), 0.45, 'archived row logo');
+        assert.equal(Number(by.old.nameOpacity), 0.45, 'stopped row name');
+        assert.equal(Number(by.idle.nameOpacity), 0.45, 'archived row name');
+      });
+      check(`${t} other rows keep their logo at full opacity`, () => {
+        for (const id of ['work', 'ask', 'done', 'sh', 'far', 'files', 'g1']) {
+          assert.equal(Number(by[id].logoOpacity), 1, `${id} logo`);
+        }
+      });
+      await page.close();
+    }
   }
 
   check('light and dark colours are distinct for every mark', () => {

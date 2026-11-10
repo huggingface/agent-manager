@@ -2126,6 +2126,10 @@ a.btn-ghost { text-decoration: none; }
      something is hidden, so the extra row is never in the way otherwise. */
   .zbtn.ov-hidebtn { flex: 0 0 100%; justify-content: center; }
   .row .cli-logo, .row .count { opacity: 1 !important; }
+  /* …except where the dimming is the state itself: a stopped row has no mark
+     to say so (#242), and an archived one is parked. Higher specificity, so
+     it wins over the !important above without changing it for other rows. */
+  .row.archived > .cli-logo, .row.row-stopped > .cli-logo { opacity: 0.45 !important; }
   .row .age { display: none; } /* actions are always visible on touch — no room */
   .g-add { opacity: 1; }
   .caret { width: 22px; font-size: 15px; }
