@@ -33,15 +33,16 @@ const session = (id, extra = {}) => ({
 });
 const ask = { kind: 'permission', cli: 'codex', confidence: 'high', detectedAt: new Date().toISOString() };
 // Each session's name is the mark it should get.
+// A mix of CLIs, so the screenshot shows each keeps its own logo inside the frame.
 const SESSIONS = [
-  session('working', { state: 'working' }),
+  session('working', { cli: 'claude', state: 'working' }),
   session('blocked', { state: 'waiting', inputRequired: ask }),
-  session('unread', { state: 'waiting' }),
+  session('unread', { cli: 'claude', state: 'waiting' }),
   session('read', { state: 'idle' }),
-  session('off', { state: 'stopped', running: false }),
+  session('off', { cli: 'claude', state: 'stopped', running: false }),
   // Busy masks unread; a dialog outranks the spinner.
   session('working-unread', { state: 'working' }),
-  session('blocked-working', { state: 'working', inputRequired: ask }),
+  session('blocked-working', { cli: 'claude', state: 'working', inputRequired: ask }),
 ];
 const UNREAD = ['unread', 'working-unread', 'blocked-working'];
 const EXPECT = { 'working-unread': 'working', 'blocked-working': 'blocked' };
@@ -59,7 +60,10 @@ await build({
       const promise = () => Promise.resolve();
       createRoot(document.getElementById('root')).render(
         <Sidebar
-          clis={[{ id: 'codex', label: 'Codex', color: '#5eb6a6', available: true }]}
+          clis={[
+            { id: 'claude', label: 'Claude', color: '#d97757', available: true },
+            { id: 'codex', label: 'Codex', color: '#5eb6a6', available: true },
+          ]}
           tree={${JSON.stringify(TREE)}}
           unread={new Set(${JSON.stringify(UNREAD)})}
           activeRef={null} focusedId={null} defaultPath="" ages={{}}
@@ -92,10 +96,20 @@ const browser = await chromium.launch(chromiumLaunchOptions());
 
 try {
   for (const theme of ['light', 'dark']) {
-    const page = await browser.newPage({ viewport: { width: 282, height: 700 } });
-    await page.setContent(`<style>${css}</style><div id="root" data-theme="${theme}" style="height:100vh;display:flex"></div>`);
+    const page = await browser.newPage({ viewport: { width: 282, height: 420 }, deviceScaleFactor: 2 });
+    // Served from a fake origin so the rows' /logos/<cli>.png resolve to the real files.
+    await page.route('http://am.test/**', (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname.startsWith('/logos/')) {
+        return route.fulfill({ path: path.join(WEB, 'public', url.pathname) });
+      }
+      return route.fulfill({ contentType: 'text/html',
+        body: `<style>${css}</style><div id="root" data-theme="${theme}" style="height:100vh;display:flex"></div>` });
+    });
+    await page.goto('http://am.test/');
     await page.addScriptTag({ path: bundle });
     await page.waitForSelector('.row.session .state-logo');
+    await page.waitForFunction(() => [...document.querySelectorAll('.row.session img')].every((i) => i.complete && i.naturalWidth > 0));
 
     const read = () => page.evaluate(() => {
       const token = (name) => {
@@ -110,6 +124,7 @@ try {
         const rect = frame.querySelector('rect:last-child');
         return {
           name: row.querySelector('.name').textContent,
+          logo: row.querySelector('.cli-logo img')?.getAttribute('src'),
           mark: logo.classList[1], title: logo.title,
           frameShown: getComputedStyle(frame).display !== 'none',
           stroke: getComputedStyle(rect).strokeWidth, color: getComputedStyle(logo).color,
@@ -125,6 +140,8 @@ try {
     const by = Object.fromEntries(r.rows.map((x) => [x.name, x]));
 
     for (const row of r.rows) assert.equal(row.mark, EXPECT[row.name] ?? row.name, `${theme}: ${row.name} gets its mark`);
+    // The frame wraps the CLI's own logo; it never replaces it.
+    for (const s of SESSIONS) assert.equal(by[s.id].logo, `/logos/${s.cli}.png`, `${theme}: ${s.id} keeps the ${s.cli} logo`);
     for (const name of ['working', 'blocked', 'unread']) {
       assert.ok(by[name].frameShown, `${theme}: ${name} draws a frame`);
       assert.equal(by[name].stroke, '2px', `${theme}: ${name} frame is 2px`);
