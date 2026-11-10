@@ -97,9 +97,11 @@ export function fileLinksRouter({ roots, getSession }) {
       if (req.params.action === 'resolve') return res.json(publicTarget);
       if (req.params.action === 'list') {
         if (!dir) throw fail('This reference is a file, not a folder.', 400);
-        // Same rows as the Files pane. Entries are names only: opening one is a
-        // new request, checked again, so a symlink inside cannot lead out.
-        return res.json({ path: relative === '.' ? '' : relative, root, entries: listDirectory(real) });
+        // Same rows as the Files pane, except that a symlink leading out of the
+        // root is never followed (see listDirectory). Opening any entry is a
+        // new request, checked again.
+        const { entries, truncated } = listDirectory(real, { confine: fs.realpathSync(roots.get(root)) });
+        return res.json({ path: relative === '.' ? '' : relative, root, entries, ...(truncated ? { truncated } : {}) });
       }
       if (dir) return res.status(400).json({ error: 'This reference points to a folder.', code: 'is-directory' });
       const kind = kindOfFile(real);

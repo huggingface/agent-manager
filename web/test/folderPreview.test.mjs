@@ -44,6 +44,9 @@ fs.writeFileSync(path.join(cwd, 'docs', 'pixel.svg'), '<svg xmlns="http://www.w3
 fs.writeFileSync(path.join(cwd, 'docs', 'sub', 'beta.md'), '# Beta document\n');
 fs.writeFileSync(path.join(outside, 'secret.txt'), 'outside the roots');
 fs.symlinkSync(outside, path.join(cwd, 'docs', 'escape'));
+// A folder past the listing cap.
+fs.mkdirSync(path.join(cwd, 'big'));
+for (let i = 0; i < 2005; i++) fs.writeFileSync(path.join(cwd, 'big', `item-${String(i).padStart(4, '0')}.txt`), 'x');
 // A symlink to a folder INSIDE the workspace, for the Files pane case.
 fs.symlinkSync(path.join(cwd, 'docs'), path.join(ws, 'notes', 'docs-link'));
 // The conversation links the folder, the way an agent would mention it.
@@ -172,10 +175,15 @@ try {
       assert.equal(await page.getByRole('tree').count(), 0, `${hash} shows a listing`);
       await ctx.close();
     }
-    // Inside a folder view, the escaping entry is listed by name (as in Files)
-    // but opening it is refused.
+    // Inside a folder view, the escaping entry is listed by name only — marked
+    // as a link, with nothing of its target (no size, no date) — and opening it
+    // is refused.
     const { ctx, page } = await open('#file=cadence%2Fdocs&root=workspace');
-    await row(page, 'escape').click();
+    const escape = row(page, 'escape');
+    assert.equal(await escape.locator('.tw-size').textContent(), 'link');
+    assert.equal(await escape.locator('.tw-time').textContent(), '');
+    assert.match(await escape.getAttribute('title'), /symbolic link outside this location/);
+    await escape.click();
     await page.getByText(/leaves its available file location/).waitFor();
     assert.equal(await page.getByText('secret.txt').count(), 0);
     await ctx.close();
@@ -191,6 +199,22 @@ try {
     }
     assert.equal((await get('raw', { root: 'workspace', file: 'cadence/docs/escape/secret.txt' })).status, 403);
   });
+  await check('a folder past the listing cap says how much is not shown, in a folder preview and in Files', async () => {
+    const { ctx, page, errors } = await open('#file=cadence%2Fbig&root=workspace');
+    await tree(page, 'big').waitFor();
+    await page.getByRole('status').filter({ hasText: '5 more not shown' }).waitFor();
+    assert.equal(await page.getByRole('treeitem').count(), 2000);
+    await page.getByText('+5 not listed').waitFor();
+    // The Files pane uses the same listing, so the same cap and the same note.
+    await page.evaluate((id) => { localStorage.setItem('am-active-ref', `s:${id}`); localStorage.setItem('am-focused-id', id); }, server.ids.files);
+    await page.goto(server.origin + '/');
+    const pane = page.locator('.slot').filter({ has: page.getByRole('tree', { name: /^Files in / }) });
+    await row(pane, 'cadence').first().dblclick();
+    await row(pane, 'big').first().click();
+    await pane.getByRole('status').filter({ hasText: '5 more not shown' }).waitFor();
+    assert.deepEqual(errors, []);
+    await ctx.close();
+  });
 } finally {
   await browser.close();
   await server.stop();
@@ -198,4 +222,4 @@ try {
   if (!process.env.AM_TEST_DIST) fs.rmSync(dist, { recursive: true, force: true });
 }
 if (failed) { console.log(`folderPreview: ${failed} failed`); process.exit(1); }
-console.log('folderPreview: folder previews through every entry point, file previews inside them, and refused escapes passed');
+console.log('folderPreview: folder previews through every entry point, file previews inside them, refused escapes, unfollowed symlinks and capped listings passed');
