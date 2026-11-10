@@ -185,6 +185,8 @@ body {
 .state-logo.blocked { color: var(--danger); }
 .state-logo.unread { color: var(--accent); }
 .state-logo.read .state-logo-frame, .state-logo.off .state-logo-frame { display: none; }
+/* The legend's "idle" swatch: the faded tile of a row that is not running. */
+.legend .state-logo.off { border-radius: 4px; background: var(--muted); opacity: 0.45; }
 
 /* header */
 .brand { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 13px 14px; border-bottom: 1px solid var(--border); }

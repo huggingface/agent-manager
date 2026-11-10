@@ -159,8 +159,8 @@ try {
     assert.notEqual(by.read.nameColor, r.text, `${theme}: a read row keeps the muted name`);
     assert.equal(by.blocked.title, 'needs input: permission');
     assert.equal(by.unread.title, 'unread reply');
-    assert.equal(by.off.title, 'not running');
-    assert.deepEqual(r.legend, ['working', 'blocked', 'unread'], `${theme}: legend shows the three frames`);
+    assert.equal(by.off.title, 'idle: not running');
+    assert.deepEqual(r.legend, ['working', 'blocked', 'unread', 'off'], `${theme}: legend shows the three frames and idle`);
 
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await page.waitForTimeout(20);

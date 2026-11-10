@@ -29,5 +29,5 @@ export function rowMarkLabel(s: Pick<Session, 'cli' | 'state' | 'inputRequired'>
   if (mark === 'blocked') return `needs input: ${s.inputRequired?.kind ?? 'input'}`;
   if (mark === 'unread') return 'unread reply';
   if (isRemote(s.cli)) return REMOTE_STATE_LABEL[s.state];
-  return { working: 'working', read: 'running', off: 'not running' }[mark];
+  return { working: 'working', read: 'running', off: 'idle: not running' }[mark];
 }

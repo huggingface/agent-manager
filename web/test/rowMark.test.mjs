@@ -38,7 +38,7 @@ assert.equal(rowMarkLabel({ cli: 'claude', state: 'waiting', inputRequired: ask 
 assert.equal(rowMarkLabel({ cli: 'codex', state: 'idle' }, 'unread'), 'unread reply');
 assert.equal(rowMarkLabel({ cli: 'codex', state: 'working' }, 'working'), 'working');
 assert.equal(rowMarkLabel({ cli: 'codex', state: 'idle' }, 'read'), 'running');
-assert.equal(rowMarkLabel({ cli: 'codex', state: 'stopped' }, 'off'), 'not running');
+assert.equal(rowMarkLabel({ cli: 'codex', state: 'stopped' }, 'off'), 'idle: not running');
 // A remote agent keeps its connection wording.
 assert.equal(rowMarkLabel({ cli: 'remote', state: 'waiting' }, 'read'), 'listening');
 assert.equal(rowMarkLabel({ cli: 'remote', state: 'stopped' }, 'off'), 'not connected');
