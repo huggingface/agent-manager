@@ -3,7 +3,9 @@ import type { SessionState } from '../types';
 import { describeVerification, type LockStatus } from '../lib/lockStatus';
 import { reloadThroughHub } from '../lib/edgeRefusal';
 import { SlidersGlyph, SunGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
-import StateLogo from './StateLogo';
+import Logo from './Logo';
+import RowStatus, { StatusLegend } from './RowStatus';
+import { rowStatus, rowStatusClass } from '../lib/rowStatus';
 import HfHeaderIcon from './HfHeaderIcon';
 
 export const REPO_URL = 'https://github.com/huggingface/agent-manager';
@@ -34,22 +36,30 @@ const Title = ({ children }: { children: ReactNode }) => (
 
 // A frozen, slightly dimmed replica of the real sidebar so the install page
 // looks like the product it unlocks. Pure decoration: no handlers, no state.
-type MockSession = { name: string; cli: string; tint: string; state: SessionState };
+// Its rows run through the same rowStatus() as the real sidebar, so the mock
+// shows the real marks: working, needs input, done, idle, a quiet shell, stopped.
+type MockSession = {
+  name: string; cli: string; tint: string; state: SessionState;
+  input?: 'permission'; unread?: boolean;
+};
 type MockItem = MockSession | { group: string; members: MockSession[] };
 const MOCK: MockItem[] = [
   { group: 'research', members: [
     { name: 'writer', cli: 'claude', tint: '#d97757', state: 'working' },
-    { name: 'reviewer', cli: 'codex', tint: '#5eb6a6', state: 'waiting' },
+    { name: 'reviewer', cli: 'codex', tint: '#5eb6a6', state: 'waiting', input: 'permission' },
   ] },
-  { name: 'refactor-bot', cli: 'claude', tint: '#d97757', state: 'idle' },
-  { name: 'opencode-1', cli: 'opencode', tint: '#8a93a0', state: 'stopped' },
-  { name: 'shell-1', cli: 'shell', tint: '#8aa0ad', state: 'stopped' },
+  { name: 'refactor-bot', cli: 'claude', tint: '#d97757', state: 'waiting', unread: true },
+  { name: 'opencode-1', cli: 'opencode', tint: '#8a93a0', state: 'waiting' },
+  { name: 'shell-1', cli: 'shell', tint: '#8aa0ad', state: 'idle' },
+  { name: 'old-docs', cli: 'codex', tint: '#5eb6a6', state: 'stopped' },
 ];
 
 function MockRow({ s, nested }: { s: MockSession; nested?: boolean }) {
+  const status = rowStatus({ cli: s.cli, state: s.state, inputRequired: s.input ? { kind: s.input } : null }, !!s.unread);
   return (
-    <div className={`row session${nested ? ' nested' : ''}`}>
-      <StateLogo cli={s.cli} state={s.state} size={12} tint={s.tint} />
+    <div className={`row session${nested ? ' nested' : ''}${rowStatusClass(status)}`}>
+      <RowStatus status={status} />
+      <Logo cli={s.cli} size={12} tint={s.tint} />
       <span className="name">{s.name}</span>
     </div>
   );
@@ -86,12 +96,7 @@ function MockSidebar() {
           <MockRow key={item.name} s={item} />
         ))}
       </div>
-      <div className="legend">
-        <span><StateLogo frameOnly state="working" size={12} /> working</span>
-        <span><StateLogo frameOnly state="waiting" size={12} /> your turn</span>
-        <span><StateLogo frameOnly state="idle" size={12} /> idle</span>
-        <span><StateLogo frameOnly state="stopped" size={12} /> stopped</span>
-      </div>
+      <StatusLegend />
     </aside>
   );
 }

@@ -1,4 +1,9 @@
 // Browser proof for all four icon-frame states at the two production sizes.
+//
+// The sidebar no longer draws these (#242: its rows have a status column and a
+// plain logo, see sidebarStatus.render.test.mjs), so the 12px fixtures are the
+// Overview's: the card's identity tile, and the group header's frame-only peek
+// strip. The pane header keeps its 16px tile.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -27,20 +32,20 @@ await build({
         <StateLogo cli="codex" state="idle" size={size} tint="#5eb6a6" />
         <StateLogo cli="codex" state="stopped" size={size} tint="#5eb6a6" />
       </>;
-      const Legend = () => <div className="legend fixture-legend">
-        <span><StateLogo frameOnly state="working" size={12} /> working</span>
-        <span><StateLogo frameOnly state="waiting" size={12} /> your turn</span>
-        <span><StateLogo frameOnly state="idle" size={12} /> idle</span>
-        <span><StateLogo frameOnly state="stopped" size={12} /> stopped</span>
-      </div>;
+      const Strip = () => <button className="ov-sechead fixture-strip"><span className="ov-peek">
+        <StateLogo frameOnly state="working" size={12} />
+        <StateLogo frameOnly state="waiting" size={12} />
+        <StateLogo frameOnly state="idle" size={12} />
+        <StateLogo frameOnly state="stopped" size={12} />
+      </span></button>;
       createRoot(document.getElementById('root')).render(<>
-        <div className="row session fixture-sidebar"><States size={12} /><span className="name">codex-1</span></div>
+        <div className="ov-card"><div className="ov-id fixture-overview"><States size={12} /><span className="ov-name mono">codex-1</span></div></div>
         <div className="pane-head fixture-header">
           <div className="ph-left"><States size={16} /></div>
           <span className="ph-title"><span className="ph-name">codex-1</span></span>
           <div className="ph-right" />
         </div>
-        <Legend />
+        <Strip />
       </>);
     `,
   },
@@ -74,14 +79,14 @@ try {
         };
       });
       return {
-        sidebar: inspect('.fixture-sidebar'),
+        overview: inspect('.fixture-overview'),
         header: inspect('.fixture-header'),
-        legend: inspect('.fixture-legend'),
+        strip: inspect('.fixture-strip'),
       };
     });
     const result = await inspect();
 
-    for (const [surface, size] of [['sidebar', 18], ['header', 22], ['legend', 12]]) {
+    for (const [surface, size] of [['overview', 18], ['header', 22], ['strip', 12]]) {
       const states = result[surface];
       assert.equal(states.length, 4);
       for (const mark of states) {
@@ -108,8 +113,8 @@ try {
       const signatures = states.map((mark) => `${mark.dash}|${mark.animation}|${mark.color}`);
       assert.equal(new Set(signatures).size, 4, `${theme} ${surface} has four distinct treatments`);
       for (const mark of states) {
-        assert.equal(mark.logos, surface === 'legend' ? 0 : 1,
-          `${theme} ${surface} ${mark.state} ${surface === 'legend' ? 'is frame-only' : 'keeps its CLI logo'}`);
+        assert.equal(mark.logos, surface === 'strip' ? 0 : 1,
+          `${theme} ${surface} ${mark.state} ${surface === 'strip' ? 'is frame-only' : 'keeps its CLI logo'}`);
       }
     }
 
@@ -119,7 +124,7 @@ try {
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await page.waitForTimeout(20);
     const reduced = await inspect();
-    for (const surface of ['sidebar', 'header', 'legend']) {
+    for (const surface of ['overview', 'header', 'strip']) {
       const states = reduced[surface];
       const byState = Object.fromEntries(states.map((mark) => [mark.state, mark]));
       assert.match(byState.working.dash, /20px,? 4px/);
@@ -140,4 +145,4 @@ try {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
-console.log('state-logo render: frame-only legend stays distinct while real tiles keep their logos');
+console.log('state-logo render: the frame-only strip stays distinct while real tiles keep their logos');

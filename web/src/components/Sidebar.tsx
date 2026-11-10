@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Cli, LaunchChoice, MoveTarget, Group, Session, Tree } from '../types';
-import { STATE_LABEL, REMOTE_STATE_LABEL, creatable, isPassive, isRemote } from '../types';
+import { creatable, isPassive, isRemote } from '../types';
 import * as api from '../api';
 import Logo from './Logo';
-import StateLogo from './StateLogo';
+import RowStatus, { StatusLegend } from './RowStatus';
+import { rowStatus, rowStatusClass } from '../lib/rowStatus';
 import DeprecatedNotice, { deprecationNote } from './DeprecatedNotice';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
@@ -580,23 +581,22 @@ export default function Sidebar({
     const editing = editRef === ref;
     // nested agents are highlighted as a whole group (see GroupBlock); loose ones individually
     const active = !nested && activeRef === ref;
+    // The status column (#242): one mark at the far left, before the logo.
+    // Stopped has no mark and dims the row; blocked and done brighten the name.
+    const status = rowStatus(s);
     return (
       <div
         key={s.id}
         data-ref={ref}
-        className={`row session${active ? ' active' : ''}${nested ? ' nested' : ''}${archived.has(s.id) ? ' archived' : ''}${dragRef === ref ? ' dragging' : ''}${dnd.className}`}
+        className={`row session${active ? ' active' : ''}${nested ? ' nested' : ''}${archived.has(s.id) ? ' archived' : ''}${rowStatusClass(status)}${dragRef === ref ? ' dragging' : ''}${dnd.className}`}
         draggable={dnd.draggable}
         onDragStart={dnd.onDragStart} onDragEnd={dnd.onDragEnd} onDragOver={dnd.onDragOver} onDrop={dnd.onDrop}
         onClick={() => onOpenSession(s.id, groupId)}
         onDoubleClick={(e) => { e.stopPropagation(); startEdit(ref, s.name); }}
         title={s.path ? `${s.name} · ${s.path}` : s.name}
       >
-        {/* State rides the CLI tile itself. For a remote agent it means
-            connection, not process: working / listening / not connected. */}
-        <StateLogo
-          cli={s.cli} state={s.state} size={12} tint={colorOf[s.cli]}
-          title={(isRemote(s.cli) ? REMOTE_STATE_LABEL : STATE_LABEL)[s.state]}
-        />
+        <RowStatus status={status} />
+        <Logo cli={s.cli} size={12} tint={colorOf[s.cli]} />
         {editing ? (
           <input
             autoFocus className="rename" value={editName}
@@ -1027,14 +1027,8 @@ export default function Sidebar({
         )}
       </div>
 
-      {/* Quick-add utilities: created instantly with a default name (double-
-          click to rename afterwards). Both open at the workspaces root. */}
-      <div className="legend">
-        <span><StateLogo frameOnly state="working" size={12} /> working</span>
-        <span><StateLogo frameOnly state="waiting" size={12} /> your turn</span>
-        <span><StateLogo frameOnly state="idle" size={12} /> idle</span>
-        <span><StateLogo frameOnly state="stopped" size={12} /> stopped</span>
-              </div>
+      {/* What the status column's marks mean (shared with the locked mock). */}
+      <StatusLegend />
     </aside>
   );
 }

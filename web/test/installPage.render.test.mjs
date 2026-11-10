@@ -1,5 +1,6 @@
-// The locked pages a visitor sees (Locked.tsx): the GitHub link on each, and
-// on the public-space install guide the launch film above the two steps.
+// The locked pages a visitor sees (Locked.tsx): the GitHub link on each, on
+// the public-space install guide the launch film above the two steps, and the
+// mock sidebar behind them matching the real one's status column (#242).
 // Real component, server-rendered to markup; no browser needed.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -74,5 +75,29 @@ for (const [reason, html] of Object.entries(pages)) {
   assert.ok(hd, 'a 1080p link');
   assert.equal(hd.target, '_blank'); assert.equal(hd.rel, 'noreferrer');
   assert.match(html.slice(hd.at, html.indexOf('</a>', hd.at)), /Watch in 1080p ↗/);
+}
+// The mock sidebar: the real sidebar's status column, not the old state frames.
+// It runs through the same rowStatus() and StatusLegend, so this pins that the
+// mock still shows one row in each state and the shared legend.
+for (const [reason, html] of Object.entries(pages)) {
+  const side = html.slice(html.indexOf('mock-side'), html.indexOf('</aside>'));
+  assert.ok(side.length > 0, `${reason}: a mock sidebar`);
+  assert.ok(!side.includes('state-logo'), `${reason}: the mock still draws state frames`);
+  const rows = [...side.matchAll(/<div class="row session[^"]*">([^]*?)<\/div>/g)];
+  assert.equal(rows.length, 6, `${reason}: six mock rows`);
+  const kinds = rows.map(([, inner]) => {
+    const marks = [...inner.matchAll(/class="row-status rs-([a-z]+)"/g)];
+    assert.equal(marks.length, 1, `${reason}: one status mark per row`);
+    assert.ok(inner.trimStart().startsWith('<span class="row-status'), `${reason}: the mark comes first`);
+    assert.ok(inner.includes('class="cli-logo'), `${reason}: a plain logo`);
+    return marks[0][1];
+  });
+  assert.deepEqual(kinds, ['working', 'blocked', 'done', 'idle', 'shell', 'stopped'], `${reason}: one row per state`);
+  assert.ok(/<div class="row session[^"]*row-stopped[^"]*">/.test(side), `${reason}: the stopped row is dimmed`);
+  assert.equal([...side.matchAll(/row-attn/g)].length, 2, `${reason}: needs-input and done rows are bright`);
+  assert.ok(side.includes('aria-label="needs input: permission"'), `${reason}: the mark has its label`);
+  const legend = side.slice(side.indexOf('status-legend'));
+  assert.deepEqual([...legend.matchAll(/rs-([a-z]+)/g)].map((m) => m[1]),
+    ['working', 'blocked', 'done', 'idle', 'shell', 'stopped'], `${reason}: the shared legend`);
 }
 console.log('install page: all checks passed');

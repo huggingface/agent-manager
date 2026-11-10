@@ -89,6 +89,33 @@ check('every spinner consumes the shared type, weight and cell contract', () => 
   }
 });
 
+check("the sidebar's status column spinner is one of them (#242)", () => {
+  const rs = spinners.find((r) => r.selector === '.row-status.rs-working::before');
+  assert.ok(rs, 'no `.row-status.rs-working::before` rule runs ov-spin');
+  // The generic check above already holds it to the full contract; spell out
+  // the parts that make it the same spinner rather than a lookalike.
+  assert.match(rs.body, /content:\s*'⠋'/, 'its static frame is not the shared first frame');
+  assert.match(rs.body, /width\s*:\s*var\(--mark-w\)/);
+  assert.match(rs.body, /height\s*:\s*var\(--mark-h\)/);
+  assert.match(rs.body, /font-size\s*:\s*var\(--mark-size\)/);
+  assert.match(rs.body, /translateY\(var\(--mark-optical-y\)\)/);
+});
+check('its dots are centred on the same measured ink', () => {
+  const box = rules.find((r) => r.selector === '.row-status');
+  assert.ok(box, 'no `.row-status` rule');
+  assert.match(box.body, /--rs-cx\s*:\s*calc\(var\(--mark-ink-x\)\s*\+\s*var\(--mark-ink-w\)\s*\/\s*2\)/);
+  assert.match(box.body, /--rs-cy\s*:\s*calc\(var\(--mark-ink-y\)\s*\+\s*var\(--mark-ink-h\)\s*\/\s*2\)/);
+  const dots = rules.find((r) => r.selector.includes('.row-status.rs-idle::before') && /left\s*:/.test(r.body));
+  assert.ok(dots, 'no shared dot rule');
+  assert.match(dots.body, /left\s*:\s*var\(--rs-cx\)/);
+  assert.match(dots.body, /top\s*:\s*var\(--rs-cy\)/);
+});
+check('only the working mark of the status column animates', () => {
+  for (const r of rules.filter((x) => /\.rs-(?!working)/.test(x.selector))) {
+    assert.doesNotMatch(r.body, /animation:\s*(?!none)/, `${r.selector} animates`);
+  }
+});
+
 console.log('\nand so does every state that stands in for it');
 
 const STATES = ['working', 'waiting', 'idle', 'stopped'];
