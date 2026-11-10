@@ -11,7 +11,9 @@
  *   - selecting the row counts as reading it and clears the frame at once;
  *   - a newer reply brings it back, and the terminal view alone (the pane is
  *     already selected) does not clear it;
- *   - the reader showing the reply clears it.
+ *   - the reader showing the reply clears it;
+ *   - a turn ending goes straight from the working spinner to done, with no
+ *     bare-logo frame while /api/meta catches up with the tree.
  *
  * Set AM_TEST_DIST to a prebuilt web/dist to skip the build.
  * am-test: manual — Chromium and a full web build; `npm run test:ui`.
@@ -91,14 +93,16 @@ try {
   let current = reply(2, 'fixture answer');
   let readMark = null;
   const acks = [];
+  let treeState = 'waiting';
 
   browser = await chromium.launch(chromiumLaunchOptions());
   const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
 
-  // The agent is alive and waiting, so only unread decides its frame.
+  // The agent is alive and (until the last step) waiting, so only unread
+  // decides its frame.
   await page.route('**/api/tree', async (route) => {
     const tree = await (await route.fetch()).json();
-    for (const s of tree.sessions) if (s.id === id) { s.state = 'waiting'; s.inputRequired = null; }
+    for (const s of tree.sessions) if (s.id === id) { s.state = treeState; s.inputRequired = null; }
     return route.fulfill({ json: tree });
   });
   await page.route('**/api/meta', async (route) => {
@@ -162,6 +166,32 @@ try {
   await page.locator('button[title^="Reader mode"]').first().click();
   check('the reader showing the reply acknowledges it', await waitFor(() => acked(current.version), 15_000), JSON.stringify(acks));
   check('and the frame clears again', await waitFor(async () => / read/.test(await mark()), 5_000), await mark());
+
+  // A new turn. The tree and meta are polled separately (2.5s and 8s off the
+  // Overview), so the tree reports the turn over before meta has seen the
+  // reply; every painted frame from then on is recorded. Back in the terminal
+  // view (the init script), where nothing else fetches meta for this session.
+  await page.reload();
+  await waitFor(async () => / read/.test(await mark()), 15_000);
+  treeState = 'working';
+  check('a new turn shows the spinner', await waitFor(async () => / working/.test(await mark()), 10_000), await mark());
+  await page.evaluate((name) => {
+    window.__marks = [];
+    const tick = () => {
+      const el = document.querySelector(`.sidebar .tree .row.session[title^="${name}"] .state-logo`);
+      const m = el && / (working|blocked|unread|read|off)\b/.exec(el.getAttribute('class'));
+      const last = window.__marks[window.__marks.length - 1];
+      if (m && m[1] !== last) window.__marks.push(m[1]);
+      window.__marksRaf = requestAnimationFrame(tick);
+    };
+    tick();
+  }, NAME);
+  current = reply(4, 'the answer to the new turn');
+  treeState = 'waiting';
+  check('the finished turn shows done', await waitFor(async () => / unread/.test(await mark()), 15_000), await mark());
+  const seen = await page.evaluate(() => { cancelAnimationFrame(window.__marksRaf); return window.__marks; });
+  check('working goes straight to done, never through a bare logo',
+    JSON.stringify(seen) === JSON.stringify(['working', 'unread']), JSON.stringify(seen));
 } catch (error) {
   failures += 1;
   console.log(`FAIL  ${error.stack || error}`);

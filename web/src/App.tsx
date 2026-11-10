@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import type { QuickStartAttachmentOptions } from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
@@ -25,6 +25,7 @@ import { configuredCount, keepOffering } from './components/WelcomeSetup';
 import * as api from './api';
 import { pinnedSessionIds } from './lib/pinned';
 import { quietSessionIds } from './lib/idleWindow';
+import { leftWorking } from './lib/rowMark';
 import { applyAck, furtherMark, isUnread, retireLocal, unreadIds, type ReadMark } from './lib/unread';
 // Matches the server's per-request cap; the client splits rather than being cut.
 const ACK_CHUNK = 100;
@@ -695,6 +696,26 @@ export default function App() {
   // Cleared through the same read tracking as the Overview and the reader
   // (markSeen -> readLocal), and by selecting the row (openFromSidebar).
   const unread = useMemo(() => unreadIds(metaRead, metaReady), [metaRead, metaReady]);
+  // An agent the tree says has just finished, held on the spinner until meta
+  // has answered for it (rowMark's `settling`). Without this the frame drops to
+  // a bare logo for up to a meta poll (8s off the Overview) before turning
+  // done. A layout effect so the held frame is what paints first; the meta
+  // answer and the release land in one render, and a failed fetch still
+  // releases.
+  const [settling, setSettling] = useState<Set<string>>(() => new Set());
+  const lastStates = useRef<Map<string, Session['state']>>(new Map());
+  useLayoutEffect(() => {
+    const left = leftWorking(lastStates.current, tree.sessions);
+    lastStates.current = new Map(tree.sessions.map((s) => [s.id, s.state]));
+    if (!left.length) return;
+    setSettling((prev) => new Set([...prev, ...left]));
+    const release = () => setSettling((prev) => {
+      const next = new Set(prev);
+      for (const id of left) next.delete(id);
+      return next;
+    });
+    void refreshMeta().finally(release);
+  }, [tree.sessions, refreshMeta]);
   // Once the server's own copy has caught up, the local acknowledgement has
   // nothing left to add — and a local mark for a generation that is gone would
   // otherwise keep overriding the truth forever. Retiring them is what lets
@@ -1407,6 +1428,7 @@ export default function App() {
         defaultPath={lastPath}
         ages={ages}
         unread={unread}
+        settling={settling}
         onActivate={activate}
         onOpenSession={openFromSidebar}
         onNewSession={newSession}

@@ -42,7 +42,7 @@ const fmtAgo = (ts?: number) => {
 };
 
 export default function Sidebar({
-  clis, tree, activeRef, focusedId, defaultPath, ages, unread,
+  clis, tree, activeRef, focusedId, defaultPath, ages, unread, settling,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
   onArchiveSession, onUnarchiveSession, onSetRemotePaused, onDeleteSession, onTraceHandover, handoverFor, onHandoverHandled, onMove, onDragState, onOpenSettings, previewBar, theme, onToggleTheme, onQuickStart,
   onPrepareQuickStart,
@@ -58,6 +58,8 @@ export default function Sidebar({
   ages?: Record<string, number>; // session id -> last activity ts (ms)
   /** Sessions with a reply not yet read; drives the accent frame (#242). */
   unread?: Set<string>;
+  /** Just stopped working; meta not caught up yet (lib/rowMark.ts). */
+  settling?: Set<string>;
   onActivate: (ref: string) => void;
   onOpenSession: (sessionId: string, groupId?: string) => void;
   onOpenSettings: () => void;
@@ -584,7 +586,7 @@ export default function Sidebar({
     const editing = editRef === ref;
     // nested agents are highlighted as a whole group (see GroupBlock); loose ones individually
     const active = !nested && activeRef === ref;
-    const mark = rowMark(s, !!unread?.has(s.id));
+    const mark = rowMark(s, !!unread?.has(s.id), !!settling?.has(s.id));
     const attention = mark === 'blocked' || mark === 'unread';
     return (
       <div

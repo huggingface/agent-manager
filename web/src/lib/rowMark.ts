@@ -15,11 +15,30 @@ export type RowMark = 'working' | 'blocked' | 'unread' | 'read' | 'off';
  * Busy masks unread on purpose: a streaming answer changes its hash on every
  * poll, so an agent mid-turn would otherwise flicker between the two. Its
  * unread state is untouched and shows as soon as the turn ends.
+ *
+ * `settling` is an agent that just stopped working whose reply the read
+ * tracking has not caught up with yet (see `leftWorking`). It keeps the spinner
+ * for that moment so the frame goes straight from working to done (or to read)
+ * instead of dropping to a bare logo first.
  */
-export function rowMark(s: Pick<Session, 'state' | 'inputRequired'>, unread: boolean): RowMark {
+export function rowMark(s: Pick<Session, 'state' | 'inputRequired'>, unread: boolean, settling = false): RowMark {
   if (s.state === 'stopped') return 'off';
   if (s.inputRequired) return 'blocked';
-  if (s.state === 'working') return 'working';
+  if (s.state === 'working' || settling) return 'working';
   return unread ? 'unread' : 'read';
 }
 
+
+/**
+ * The sessions that were working in `prev` and are not any more.
+ *
+ * The tree (state) and /api/meta (read tracking) are polled separately, so the
+ * tree routinely says an agent has finished before meta has seen its reply.
+ * The caller holds these as settling and fetches meta at once.
+ */
+export function leftWorking(
+  prev: ReadonlyMap<string, Session['state']>,
+  sessions: Pick<Session, 'id' | 'state'>[],
+): string[] {
+  return sessions.filter((s) => prev.get(s.id) === 'working' && s.state !== 'working').map((s) => s.id);
+}

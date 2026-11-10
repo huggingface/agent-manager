@@ -13,7 +13,7 @@ await build({
   entryPoints: [path.join(HERE, '../src/lib/rowMark.ts')],
   outfile: out, format: 'esm', bundle: true, logLevel: 'error',
 });
-const { rowMark } = await import(pathToFileURL(out).href);
+const { rowMark, leftWorking } = await import(pathToFileURL(out).href);
 
 const ask = { kind: 'permission', cli: 'claude', confidence: 'high', detectedAt: '2026-11-10T00:00:00Z' };
 
@@ -33,3 +33,18 @@ assert.equal(rowMark({ state: 'working' }, true), 'working', 'busy masks unread 
 assert.equal(rowMark({ state: 'idle', inputRequired: null }, true), 'unread');
 
 console.log('row-mark: precedence off > blocked > working > unread > read');
+
+// Settling: just finished, read tracking not caught up. Holds the spinner so
+// working goes straight to done, but never hides a dialog or a stopped agent.
+assert.equal(rowMark({ state: 'waiting' }, false, true), 'working');
+assert.equal(rowMark({ state: 'idle' }, true, true), 'working');
+assert.equal(rowMark({ state: 'waiting', inputRequired: ask }, false, true), 'blocked');
+assert.equal(rowMark({ state: 'stopped' }, false, true), 'off');
+
+// leftWorking: only working -> not working counts; new sessions do not.
+const prev = new Map([['a', 'working'], ['b', 'working'], ['c', 'waiting'], ['d', 'working']]);
+assert.deepEqual(leftWorking(prev, [
+  { id: 'a', state: 'waiting' }, { id: 'b', state: 'working' }, { id: 'c', state: 'idle' },
+  { id: 'd', state: 'stopped' }, { id: 'e', state: 'waiting' },
+]), ['a', 'd']);
+assert.deepEqual(leftWorking(new Map(), [{ id: 'a', state: 'waiting' }]), []);
