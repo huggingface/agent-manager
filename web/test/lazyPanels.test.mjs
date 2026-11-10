@@ -152,7 +152,10 @@ try {
     // paint. Raised to 795.
     // iTerm2 Cmd/Option editing keys (2026-11-04): 814,078 -> 814,413 (+335),
     // and 814,078 was 2 bytes under 795. Raised to 796.
-    assert.ok(entry.length <= 796 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 796 kB budget`);
+    // Sidebar frame states (#242/#244, 2026-11-10): 814,413 -> 816,076 (+1,663)
+    // for the row marks, legend, unread wiring and the working -> done hold, all
+    // drawn by the sidebar on first paint. Raised to 797.
+    assert.ok(entry.length <= 797 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 797 kB budget`);
     // One literal only that panel's module contains — a dynamic import that
     // merely wraps an unchanged graph would leave these in the entry.
     for (const [panel, marker] of [
