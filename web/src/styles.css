@@ -178,6 +178,13 @@ body {
 .state-logo.idle { color: var(--muted); }
 .state-logo.stopped { color: color-mix(in srgb, var(--muted) 50%, transparent); }
 @keyframes state-logo-trace { to { stroke-dashoffset: -24; } }
+/* The sidebar's frame (lib/rowMark.ts): drawn heavier, and only when an agent is
+   busy or wants the operator. A running agent with nothing new is a bare logo;
+   one that is not running fades its row (.row.off below). */
+.sidebar .state-logo-frame rect { stroke-width: 2; }
+.state-logo.blocked { color: var(--danger); }
+.state-logo.unread { color: var(--accent); }
+.state-logo.read .state-logo-frame, .state-logo.off .state-logo-frame { display: none; }
 
 /* header */
 .brand { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 13px 14px; border-bottom: 1px solid var(--border); }
@@ -772,6 +779,9 @@ body {
 /* archived toggle: a quiet custom checkbox speaking the app's language */
 /* archived rows/tiles: present but visibly parked */
 .row.archived .name, .row.archived .state-logo, .row.archived > .cli-logo { opacity: 0.45; }
+.row.off .name, .row.off .state-logo, .row.off .age { opacity: 0.45; }
+.row.attention .name { color: var(--text); }
+.legend .legend-off { opacity: 0.7; font-style: italic; }
 .ovt-tile.archived .ovt-head { opacity: 0.55; }
 .arch-note { font-size: 10.5px; color: var(--muted); font-style: italic; text-align: center; padding: 14px 12px 4px; margin-top: auto; }
 /* It reads as a sentence until you point at it, then as the link it is. */
