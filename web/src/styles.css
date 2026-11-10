@@ -781,7 +781,6 @@ body {
 .row.archived .name, .row.archived .state-logo, .row.archived > .cli-logo { opacity: 0.45; }
 .row.off .name, .row.off .state-logo, .row.off .age { opacity: 0.45; }
 .row.attention .name { color: var(--text); }
-.legend .legend-off { opacity: 0.7; font-style: italic; }
 .ovt-tile.archived .ovt-head { opacity: 0.55; }
 .arch-note { font-size: 10.5px; color: var(--muted); font-style: italic; text-align: center; padding: 14px 12px 4px; margin-top: auto; }
 /* It reads as a sentence until you point at it, then as the link it is. */
