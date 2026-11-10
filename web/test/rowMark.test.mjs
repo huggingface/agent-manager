@@ -34,14 +34,14 @@ assert.equal(rowMark({ state: 'working' }, true), 'working', 'busy masks unread 
 assert.equal(rowMark({ state: 'idle', inputRequired: null }, true), 'unread');
 
 // Hover text.
-assert.equal(rowMarkLabel({ cli: 'claude', state: 'waiting', inputRequired: ask }, 'blocked'), 'needs input: permission');
-assert.equal(rowMarkLabel({ cli: 'codex', state: 'idle' }, 'unread'), 'unread reply');
+assert.equal(rowMarkLabel({ cli: 'claude', state: 'waiting', inputRequired: ask }, 'blocked'), 'blocked: needs permission');
+assert.equal(rowMarkLabel({ cli: 'codex', state: 'idle' }, 'unread'), 'done: reply not read yet');
 assert.equal(rowMarkLabel({ cli: 'codex', state: 'working' }, 'working'), 'working');
 assert.equal(rowMarkLabel({ cli: 'codex', state: 'idle' }, 'read'), 'running');
 assert.equal(rowMarkLabel({ cli: 'codex', state: 'stopped' }, 'off'), 'idle: not running');
 // A remote agent keeps its connection wording.
 assert.equal(rowMarkLabel({ cli: 'remote', state: 'waiting' }, 'read'), 'listening');
 assert.equal(rowMarkLabel({ cli: 'remote', state: 'stopped' }, 'off'), 'not connected');
-assert.equal(rowMarkLabel({ cli: 'remote', state: 'idle' }, 'unread'), 'unread reply');
+assert.equal(rowMarkLabel({ cli: 'remote', state: 'idle' }, 'unread'), 'done: reply not read yet');
 
 console.log('row-mark: precedence off > blocked > working > unread > read, with remote wording kept');

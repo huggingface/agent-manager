@@ -157,8 +157,8 @@ try {
     assert.equal(by.blocked.nameColor, r.text, `${theme}: needs input brightens the name`);
     assert.equal(by.unread.nameColor, r.text, `${theme}: unread brightens the name`);
     assert.notEqual(by.read.nameColor, r.text, `${theme}: a read row keeps the muted name`);
-    assert.equal(by.blocked.title, 'needs input: permission');
-    assert.equal(by.unread.title, 'unread reply');
+    assert.equal(by.blocked.title, 'blocked: needs permission');
+    assert.equal(by.unread.title, 'done: reply not read yet');
     assert.equal(by.off.title, 'idle: not running');
     assert.deepEqual(r.legend, ['working', 'blocked', 'unread', 'off'], `${theme}: legend shows the three frames and idle`);
 
