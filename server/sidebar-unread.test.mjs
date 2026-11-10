@@ -7,10 +7,11 @@
  * is App's own: reader shows the reply -> markSeen -> readLocal -> unreadIds ->
  * the row's frame.
  *
- *   - unread reply: the row has the accent frame;
- *   - the terminal view alone does not clear it (rendering a PTY is not reading);
- *   - the reader showing the reply clears it at once, without waiting for a poll;
- *   - a newer reply brings it back.
+ *   - unread reply: the row has the accent ("done") frame;
+ *   - selecting the row counts as reading it and clears the frame at once;
+ *   - a newer reply brings it back, and the terminal view alone (the pane is
+ *     already selected) does not clear it;
+ *   - the reader showing the reply clears it.
  *
  * Set AM_TEST_DIST to a prebuilt web/dist to skip the build.
  * am-test: manual — Chromium and a full web build; `npm run test:ui`.
@@ -145,23 +146,22 @@ try {
   check('and brightens its name', await row.evaluate((el) => el.classList.contains('attention')));
 
   await row.click();
-  await page.locator('.slot .pane-head').first().waitFor({ state: 'visible', timeout: 20_000 });
-  await sleep(2_500);
-  check('the terminal view alone does not clear it', / unread/.test(await mark()) && acks.length === 0,
-    JSON.stringify({ cls: await mark(), acks: acks.length }));
-
-  await page.locator('button[title^="Reader mode"]').first().click();
-  check('the reader showing the reply acknowledges it',
-    await waitFor(() => acks.some((m) => m.id === id && m.hash === current.version.hash), 15_000),
-    JSON.stringify(acks));
+  const acked = (v) => acks.some((m) => m.id === id && m.hash === v.hash);
+  check('selecting the row acknowledges the reply', await waitFor(() => acked(current.version), 10_000), JSON.stringify(acks));
   check('and the frame clears', await waitFor(async () => / read/.test(await mark()), 5_000), await mark());
   check('the name goes back to muted', !(await row.evaluate((el) => el.classList.contains('attention'))));
 
-  // A newer reply, seen first from the sidebar while the operator is elsewhere.
-  await page.locator('button[title^="The terminal itself"]').first().click();
+  // A newer reply while the pane is already open in the terminal view.
   current = reply(3, 'a newer answer');
   check('a newer reply brings the frame back',
     await waitFor(async () => / unread/.test(await mark()), 20_000), await mark());
+  await sleep(2_500);
+  check('the terminal view alone does not clear it', / unread/.test(await mark()) && !acked(current.version),
+    JSON.stringify({ cls: await mark(), acks: acks.length }));
+
+  await page.locator('button[title^="Reader mode"]').first().click();
+  check('the reader showing the reply acknowledges it', await waitFor(() => acked(current.version), 15_000), JSON.stringify(acks));
+  check('and the frame clears again', await waitFor(async () => / read/.test(await mark()), 5_000), await mark());
 } catch (error) {
   failures += 1;
   console.log(`FAIL  ${error.stack || error}`);
@@ -173,4 +173,4 @@ try {
   fs.rmSync(TMP, { recursive: true, force: true });
 }
 if (failures) { console.log(`\n${failures} FAILURE(S)`); process.exit(1); }
-console.log('\nsidebar unread: the frame clears when the reader shows the reply, and comes back for a newer one');
+console.log('\nsidebar unread: selecting the row or reading the reply clears the frame; a newer reply brings it back');

@@ -25,7 +25,7 @@ import { configuredCount, keepOffering } from './components/WelcomeSetup';
 import * as api from './api';
 import { pinnedSessionIds } from './lib/pinned';
 import { quietSessionIds } from './lib/idleWindow';
-import { applyAck, furtherMark, retireLocal, unreadIds, type ReadMark } from './lib/unread';
+import { applyAck, furtherMark, isUnread, retireLocal, unreadIds, type ReadMark } from './lib/unread';
 // Matches the server's per-request cap; the client splits rather than being cut.
 const ACK_CHUNK = 100;
 import type { Cli, GridSpec, LaunchChoice, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
@@ -691,9 +691,9 @@ export default function App() {
     }
     return out;
   }, [meta, readLocal]);
-  // Sessions with a reply not yet read: the sidebar's "unread" frame (#242).
+  // Sessions with a reply not yet read: the sidebar's "done" frame (#242).
   // Cleared through the same read tracking as the Overview and the reader
-  // (markSeen -> readLocal), never by merely viewing a terminal.
+  // (markSeen -> readLocal), and by selecting the row (openFromSidebar).
   const unread = useMemo(() => unreadIds(metaRead, metaReady), [metaRead, metaReady]);
   // Once the server's own copy has caught up, the local acknowledgement has
   // nothing left to add — and a local mark for a generation that is gone would
@@ -1043,6 +1043,17 @@ export default function App() {
       setPage(0);
     }
     if (isMobile) setMobileStage(true);
+  };
+
+  // Picking a "done" agent in the sidebar is the operator going to look at its
+  // reply, so it counts as reading it (#242), the same acknowledgement the
+  // reader and Overview send. A working agent is left alone: what it is saying
+  // is not finished, and its finished reply should still show as done.
+  const openFromSidebar = (sid: string, groupId?: string) => {
+    openSession(sid, groupId);
+    const m = metaRead[sid];
+    const s = tree.sessions.find((x) => x.id === sid);
+    if (m?.output && isUnread(m) && s?.state !== 'working') void markSeen([{ id: sid, ...m.output }]);
   };
 
   // A dispatched session's icon in the reader asks for its session this way,
@@ -1397,7 +1408,7 @@ export default function App() {
         ages={ages}
         unread={unread}
         onActivate={activate}
-        onOpenSession={openSession}
+        onOpenSession={openFromSidebar}
         onNewSession={newSession}
         onTraceHandover={api.getTraceLocation}
         handoverFor={handoverFor}

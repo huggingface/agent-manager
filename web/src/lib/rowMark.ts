@@ -6,7 +6,6 @@
 // a bare logo, and one that is not running fades its whole row. Elsewhere
 // (pane headers, Overview) the frame keeps the plain SessionState vocabulary.
 import type { Session } from '../types';
-import { isRemote, REMOTE_STATE_LABEL } from '../types';
 
 export type RowMark = 'working' | 'blocked' | 'unread' | 'read' | 'off';
 
@@ -24,10 +23,3 @@ export function rowMark(s: Pick<Session, 'state' | 'inputRequired'>, unread: boo
   return unread ? 'unread' : 'read';
 }
 
-/** Hover text for the frame. A remote agent keeps its connection wording. */
-export function rowMarkLabel(s: Pick<Session, 'cli' | 'state' | 'inputRequired'>, mark: RowMark): string {
-  if (mark === 'blocked') return `blocked: needs ${s.inputRequired?.kind ?? 'input'}`;
-  if (mark === 'unread') return 'done: reply not read yet';
-  if (isRemote(s.cli)) return REMOTE_STATE_LABEL[s.state];
-  return { working: 'working', read: 'running', off: 'idle: not running' }[mark];
-}

@@ -1,5 +1,4 @@
-// The sidebar's frame vocabulary (#242): which mark a session row gets, and the
-// hover text that goes with it. Rendering is covered by sidebarMark.render.test.mjs.
+// The sidebar's frame vocabulary (#242): which mark a session row gets. Rendering is covered by sidebarMark.render.test.mjs.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,7 +13,7 @@ await build({
   entryPoints: [path.join(HERE, '../src/lib/rowMark.ts')],
   outfile: out, format: 'esm', bundle: true, logLevel: 'error',
 });
-const { rowMark, rowMarkLabel } = await import(pathToFileURL(out).href);
+const { rowMark } = await import(pathToFileURL(out).href);
 
 const ask = { kind: 'permission', cli: 'claude', confidence: 'high', detectedAt: '2026-11-10T00:00:00Z' };
 
@@ -33,15 +32,4 @@ assert.equal(rowMark({ state: 'working', inputRequired: ask }, true), 'blocked',
 assert.equal(rowMark({ state: 'working' }, true), 'working', 'busy masks unread while the reply streams');
 assert.equal(rowMark({ state: 'idle', inputRequired: null }, true), 'unread');
 
-// Hover text.
-assert.equal(rowMarkLabel({ cli: 'claude', state: 'waiting', inputRequired: ask }, 'blocked'), 'blocked: needs permission');
-assert.equal(rowMarkLabel({ cli: 'codex', state: 'idle' }, 'unread'), 'done: reply not read yet');
-assert.equal(rowMarkLabel({ cli: 'codex', state: 'working' }, 'working'), 'working');
-assert.equal(rowMarkLabel({ cli: 'codex', state: 'idle' }, 'read'), 'running');
-assert.equal(rowMarkLabel({ cli: 'codex', state: 'stopped' }, 'off'), 'idle: not running');
-// A remote agent keeps its connection wording.
-assert.equal(rowMarkLabel({ cli: 'remote', state: 'waiting' }, 'read'), 'listening');
-assert.equal(rowMarkLabel({ cli: 'remote', state: 'stopped' }, 'off'), 'not connected');
-assert.equal(rowMarkLabel({ cli: 'remote', state: 'idle' }, 'unread'), 'done: reply not read yet');
-
-console.log('row-mark: precedence off > blocked > working > unread > read, with remote wording kept');
+console.log('row-mark: precedence off > blocked > working > unread > read');

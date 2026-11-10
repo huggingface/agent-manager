@@ -125,7 +125,7 @@ try {
         return {
           name: row.querySelector('.name').textContent,
           logo: row.querySelector('.cli-logo img')?.getAttribute('src'),
-          mark: logo.classList[1], title: logo.title,
+          mark: logo.classList[1], title: logo.getAttribute('title'),
           frameShown: getComputedStyle(frame).display !== 'none',
           stroke: getComputedStyle(rect).strokeWidth, color: getComputedStyle(logo).color,
           animations: logo.getAnimations({ subtree: true }).length,
@@ -157,9 +157,7 @@ try {
     assert.equal(by.blocked.nameColor, r.text, `${theme}: needs input brightens the name`);
     assert.equal(by.unread.nameColor, r.text, `${theme}: unread brightens the name`);
     assert.notEqual(by.read.nameColor, r.text, `${theme}: a read row keeps the muted name`);
-    assert.equal(by.blocked.title, 'blocked: needs permission');
-    assert.equal(by.unread.title, 'done: reply not read yet');
-    assert.equal(by.off.title, 'idle: not running');
+    for (const row of r.rows) assert.equal(row.title, null, `${theme}: ${row.name} frame has no hover text of its own`);
     assert.deepEqual(r.legend, ['working', 'blocked', 'unread', 'off'], `${theme}: legend shows the three frames and idle`);
 
     await page.emulateMedia({ reducedMotion: 'reduce' });

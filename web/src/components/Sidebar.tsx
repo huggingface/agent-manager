@@ -17,7 +17,7 @@ import {
 } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
 import { canPin, partitionByPin, pinAfterDrop } from '../lib/pinned';
-import { rowMark, rowMarkLabel } from '../lib/rowMark';
+import { rowMark } from '../lib/rowMark';
 import { PinGlyph, SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, UpGlyph, TrashGlyph, GridGlyph, PlusGlyph, AmMark, EyeGlyph, EyeOffGlyph } from './icons';
 
 import { dropZone, backgroundAnchor, isBackgroundTarget } from './sidebar-dnd';
@@ -600,10 +600,7 @@ export default function Sidebar({
         {/* State rides the CLI tile itself, and only draws when the agent is
             busy or wants the operator (lib/rowMark.ts). For a remote agent
             "not running" means not connected. */}
-        <StateLogo
-          cli={s.cli} state={mark} size={12} tint={colorOf[s.cli]}
-          title={rowMarkLabel(s, mark)}
-        />
+        <StateLogo cli={s.cli} state={mark} size={12} tint={colorOf[s.cli]} />
         {editing ? (
           <input
             autoFocus className="rename" value={editName}
