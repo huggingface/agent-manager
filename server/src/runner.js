@@ -90,6 +90,11 @@ export const __bashLaunchForTest = bashLaunch;
 const BUSY_SECS = 4;
 // Re-rendering the grid to text on every chunk during a burst is wasteful.
 const SAMPLE_THROTTLE_MS = 250;
+// A resize makes a TUI repaint itself at the new size. That is presentation,
+// not work, so for this long after one the screen is re-baselined rather than
+// counted as changed. Short against BUSY_SECS: an agent that really is working
+// keeps changing its screen after the window and never drops out of working.
+const REPAINT_QUIET_MS = Number(process.env.AM_REPAINT_QUIET_MS || 1000);
 // A prompt sent while a resumed TUI is still replaying its screen can be
 // discarded, or accept the text but swallow the Enter. Wait for the canonical
 // startup repaint and a genuinely quiet screen instead of guessing a boot
@@ -191,18 +196,44 @@ export function startedAt(id) {
   return hosts.get(id)?.startedAt ?? null;
 }
 
-/** Sample the grid's rendered text and record when it last changed. */
+/**
+ * Sample the grid's rendered text and record when it last changed.
+ *
+ * Selecting an agent whose pane is a different size from its PTY resizes it,
+ * and the repaint that follows used to read as activity: the agent showed as
+ * working for BUSY_SECS although nothing had happened (#242). Inside a resize's
+ * quiet window every sample is taken (no throttle), so the repainted screen
+ * becomes the new baseline before the window closes.
+ */
 function sampleScreen(host) {
   const now = Date.now();
-  if (host.lastSampleAt && now - host.lastSampleAt < SAMPLE_THROTTLE_MS) return;
+  const repaint = now < (host.repaintQuietUntil || 0);
+  if (!repaint && host.lastSampleAt && now - host.lastSampleAt < SAMPLE_THROTTLE_MS) {
+    // Throttled, but never dropped: the end of a burst is the screen that stays,
+    // and a stale signature makes the next harmless chunk (a cursor blink, the
+    // reply to a focus report when a pane is clicked) look like a change.
+    if (!host.sampleTimer) {
+      host.sampleTimer = setTimeout(() => {
+        host.sampleTimer = null;
+        if (hosts.get(host.id) === host) sampleScreen(host);
+      }, SAMPLE_THROTTLE_MS - (now - host.lastSampleAt));
+      if (host.sampleTimer.unref) host.sampleTimer.unref();
+    }
+    return;
+  }
   host.lastSampleAt = now;
   let text = '';
   try { text = host.vt.getVisibleText(); } catch { return; }
   const sig = djb2(text);
   if (host.screenSig !== sig) {
     host.screenSig = sig;
-    host.screenChangedAt = now;
+    if (!repaint) host.screenChangedAt = now;
   }
+}
+
+/** The next REPAINT_QUIET_MS of screen changes are the resize's, not the agent's. */
+function quietRepaint(host) {
+  host.repaintQuietUntil = Date.now() + REPAINT_QUIET_MS;
 }
 
 /**
@@ -518,6 +549,7 @@ function finishCapturedGrid(host, txn) {
       host.cols = txn.cols;
       host.rows = txn.rows;
       host.repaintArchive = null;
+      quietRepaint(host);
       notifyGrid(host, false);
     } else {
       const previous = host.vt;
@@ -536,6 +568,7 @@ function finishCapturedGrid(host, txn) {
       const ansi = viewerRestoreAnsi(host, host.vt, committed);
       for (const sub of host.subs) sub.onData(ansi);
       try { previous.dispose(); } catch {}
+      quietRepaint(host);
       sampleScreen(host);
     }
   } finally {
@@ -644,6 +677,7 @@ function applyGrid(host) {
   host.cols = cols;
   host.rows = rows;
   try { host.vt.resize(cols, rows); } catch {}
+  quietRepaint(host);
   // Put the geometry frame on every viewer's ordered WebSocket stream before
   // SIGWINCH can make the foreground application repaint at the new size.
   // Otherwise those repaint bytes may be interpreted using the old grid and
@@ -2287,6 +2321,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     stopping.delete(session.id);
     if (host.gridTimer) { clearTimeout(host.gridTimer); host.gridTimer = null; }
     if (host.traceHistoryTimer) { clearTimeout(host.traceHistoryTimer); host.traceHistoryTimer = null; }
+    if (host.sampleTimer) { clearTimeout(host.sampleTimer); host.sampleTimer = null; }
     if (host.resizeCapture) {
       clearCaptureTimers(host.resizeCapture);
       try { host.resizeCapture.vt.dispose(); } catch {}
