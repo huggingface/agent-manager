@@ -533,24 +533,33 @@ export default function App() {
   // arrives, "your agent isn't in this tree" only means the tree is still empty.
   const [treeLoaded, setTreeLoaded] = useState(false);
   const treeRefresh = useRef<ReturnType<typeof createLatestRefresh<Tree>> | null>(null);
-  // When the newest tree and meta reads started (performance.now()), and when
-  // the ones last published did. Only the newest read is ever published, so the
-  // second is the first copied at publish. This is how the sidebar knows
-  // whether the meta in hand is at least as new as a tree that says an agent
-  // finished (see `settling` below).
+  // An agent the tree says has just finished, held on the spinner (rowMark's
+  // `settling`) until a fresh meta read has answered for it. Without it the
+  // frame drops to a bare logo until meta catches up: up to a poll (8s off the
+  // Overview), and a poll answers from the last digest build, which can predate
+  // the reply (#242). Keyed to a hold number, so a read releases only the holds
+  // made before it started.
+  const [settling, setSettling] = useState<Map<string, number>>(() => new Map());
+  const holdSeq = useRef(0);
+  const releaseSettled = useCallback((upTo: number) => setSettling((prev) => {
+    if (![...prev.values()].some((n) => n <= upTo)) return prev;
+    return new Map([...prev].filter(([, n]) => n > upTo));
+  }), []);
+  // Explicit refreshes (refreshMeta) ask for digests built after the request
+  // (?fresh=1); polls take the cached build. The newest read is the only one
+  // ever published, so which holds it covers is noted at its start (or by a
+  // hold that rides it) and read back at publish.
+  const metaFresh = useRef(false);
+  const metaReadCovers = useRef(0);
+  // When reads started (performance.now()): the newest tree read and the one
+  // last published, the newest fresh meta read (null when not one) and the
+  // fresh one last published. What a hold compares: whether a fresh read began
+  // no earlier than the tree that says an agent finished.
   const treeReadAt = useRef(0);
   const treeAnswerAt = useRef(0);
-  const metaReadAt = useRef(0);
-  const metaAnswerAt = useRef(0);
-  // An agent the tree says has just finished, mapped to when that tree was
-  // read, held on the spinner (rowMark's `settling`) until a meta read started
-  // no earlier has answered. Without it the frame drops to a bare logo for up
-  // to a meta poll (8s off the Overview) before turning done.
-  const [settling, setSettling] = useState<Map<string, number>>(() => new Map());
-  const releaseSettled = useCallback((upTo: number) => setSettling((prev) => {
-    if (![...prev.values()].some((t) => t <= upTo)) return prev;
-    return new Map([...prev].filter(([, t]) => t > upTo));
-  }), []);
+  const metaFreshAt = useRef<number | null>(null);
+  const metaFreshAnswerAt = useRef(0);
+  const metaFreshRead = useRef<Promise<unknown> | null>(null);
   // Mutations and foreground recovery replace any possibly frozen request.
   // Ordinary polls use the manager directly below and coalesce instead.
   const refresh = useCallback((): Promise<Tree | null> => {
@@ -613,15 +622,28 @@ export default function App() {
   const metaRefresh = useRef<ReturnType<typeof createLatestRefresh<Awaited<ReturnType<typeof api.getMeta>>>> | null>(null);
   const refreshMeta = useCallback(() => {
     if (lockedRef.current) return Promise.resolve(null); // protected reads pause while locked
+    metaFresh.current = true;
     return metaRefresh.current?.refresh('replace') ?? Promise.resolve(null);
   }, []);
   useEffect(() => {
     let lastPayload = '';
     const manager = createLatestRefresh(
-      (signal) => { metaReadAt.current = performance.now(); return api.getMeta(signal); },
+      (signal) => {
+        const fresh = metaFresh.current;
+        metaFresh.current = false;
+        metaReadCovers.current = fresh ? holdSeq.current : 0;
+        metaFreshAt.current = fresh ? performance.now() : null;
+        const read = api.getMeta(signal, fresh);
+        if (fresh) {
+          metaFreshRead.current = read;
+          const done = () => { if (metaFreshRead.current === read) metaFreshRead.current = null; };
+          read.then(done, done);
+        }
+        return read;
+      },
       (r) => {
-        metaAnswerAt.current = metaReadAt.current;
-        releaseSettled(metaAnswerAt.current);
+        if (metaFreshAt.current !== null) metaFreshAnswerAt.current = metaFreshAt.current;
+        if (metaReadCovers.current) releaseSettled(metaReadCovers.current);
         setMetaReady(true);
         const payload = JSON.stringify(r.sessions);
         if (payload === lastPayload) return;
@@ -716,23 +738,30 @@ export default function App() {
   // Cleared through the same read tracking as the Overview and the reader
   // (markSeen -> readLocal), and by selecting the row (openFromSidebar).
   const unread = useMemo(() => unreadIds(metaRead, metaReady), [metaRead, metaReady]);
-  // Hold agents that just left working (declared with treeReadAt above). A
-  // layout effect, so the held frame is what paints first. Meta is fetched only
-  // when no read already under way started after this tree's: a return burst
-  // that refreshes both must not cost a third read. The release rides the meta
-  // answer itself, so it lands in the same render.
+  // Hold agents that just left working (`settling` above). A layout effect, so
+  // the held frame is what paints first; the release rides the fresh answer
+  // itself, so the frame and the reply land in one render. A fresh read that
+  // began no earlier than this tree's read (a return burst refreshes both) has
+  // the reply already, or will: nothing is held, or the hold rides that read
+  // rather than costing another. A failed read still releases, and the 10s
+  // bound covers a read superseded by one that fails.
   const lastStates = useRef<Map<string, Session['state']>>(new Map());
   useLayoutEffect(() => {
     const left = leftWorking(lastStates.current, tree.sessions);
     lastStates.current = new Map(tree.sessions.map((s) => [s.id, s.state]));
     const at = treeAnswerAt.current;
-    if (!left.length || metaAnswerAt.current >= at) return;
-    setSettling((prev) => new Map([...prev, ...left.map((id): [string, number] => [id, at])]));
-    // A read already under way that then fails publishes nothing, so a bound
-    // keeps a held agent from spinning on indefinitely.
+    if (!left.length || metaFreshAnswerAt.current >= at) return;
+    const n = ++holdSeq.current;
+    setSettling((prev) => new Map([...prev, ...left.map((id): [string, number] => [id, n])]));
     // Not cleared on re-run: every tree poll re-runs this effect.
-    setTimeout(() => releaseSettled(at), 10_000);
-    if (metaReadAt.current < at) void refreshMeta().finally(() => releaseSettled(at));
+    setTimeout(() => releaseSettled(n), 10_000);
+    const pending = metaFreshRead.current;
+    if (pending && (metaFreshAt.current ?? -1) >= at) {
+      metaReadCovers.current = n;
+      pending.catch(() => releaseSettled(n));
+    } else {
+      void refreshMeta().finally(() => releaseSettled(n));
+    }
   }, [tree.sessions, refreshMeta, releaseSettled]);
   const settlingIds = useMemo(() => new Set(settling.keys()), [settling]);
   // Once the server's own copy has caught up, the local acknowledgement has

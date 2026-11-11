@@ -105,9 +105,16 @@ try {
     for (const s of tree.sessions) if (s.id === id) { s.state = treeState; s.inputRequired = null; }
     return route.fulfill({ json: tree });
   });
-  await page.route('**/api/meta', async (route) => {
+  // Like the server: a plain poll answers from the previous digest build (and
+  // rebuilds behind it), so it can predate the newest reply; ?fresh=1 waits for
+  // a build that has it.
+  let built = null;
+  await page.route(/\/api\/meta(\?fresh=1)?$/, async (route) => {
+    const fresh = new URL(route.request().url()).searchParams.get('fresh') === '1';
+    const version = fresh || !built ? current.version : built;
+    built = current.version;
     const body = await (await route.fetch()).json();
-    for (const s of body.sessions) if (s.id === id) { s.state = 'waiting'; s.output = current.version; s.read = readMark; }
+    for (const s of body.sessions) if (s.id === id) { s.state = 'waiting'; s.output = version; s.read = readMark; }
     return route.fulfill({ json: body });
   });
   await page.route(`**/api/meta/${id}`, (route) => route.fulfill({ json: { id, digest: null, output: current.version, read: readMark } }));
@@ -168,8 +175,9 @@ try {
   check('and the frame clears again', await waitFor(async () => / read/.test(await mark()), 5_000), await mark());
 
   // A new turn. The tree and meta are polled separately (2.5s and 8s off the
-  // Overview), so the tree reports the turn over before meta has seen the
-  // reply; every painted frame from then on is recorded. Back in the terminal
+  // Overview), and a meta poll can answer from before the reply, so the tree
+  // reports the turn over before meta has it; every painted frame from then
+  // on is recorded. Back in the terminal
   // view (the init script), where nothing else fetches meta for this session.
   await page.reload();
   await waitFor(async () => / read/.test(await mark()), 15_000);
