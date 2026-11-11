@@ -227,7 +227,12 @@ function sampleScreen(host) {
   const sig = djb2(text);
   if (host.screenSig !== sig) {
     host.screenSig = sig;
-    if (!repaint) host.screenChangedAt = now;
+    // Until this launch has been given something to do, a change is the CLI
+    // starting up, not work: a Claude opened with no prompt paints its banner,
+    // status line and notices in bursts that can sit more than BUSY_SECS apart,
+    // and each burst flipped it back to working. The launch itself still reads
+    // as working for BUSY_SECS (screenChangedAt starts there).
+    if (!repaint && host.inputSeen) host.screenChangedAt = now;
   }
 }
 
@@ -2238,6 +2243,8 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     lastOutputAt: Date.now(),
     outputSeq: 0,
     screenChangedAt: Date.now(),
+    // A prompt that rides the launch command is work from the first frame.
+    inputSeen: !session.everStarted && !!(session.pendingPrompt || session.pendingImagePaths?.length),
     bells: 0,
   };
   host.inputRequired = createInputRequiredTracker({
@@ -2695,6 +2702,7 @@ function notePaneInput(host, data) {
   const id = host.id;
   const text = String(data == null ? '' : data);
   if (!isTypedInput(text)) return;
+  host.inputSeen = true;
   if (!lineTouched.has(id)) {
     const shape = shapeNow(host);
     if (shape) lineEmpty.set(id, shape); else lineEmpty.delete(id);
@@ -2802,6 +2810,7 @@ async function typeAndSubmit(host, id, text, { confirmEcho = false } = {}) {
       `this session's terminal has unsent text on its input line (${JSON.stringify(shown)}), and sending now would submit both as one message. Send or clear that line in the terminal, then try again.`);
   }
   host.inputRequired.observeInput();
+  host.inputSeen = true;
   const confirm = cliById(host.cli)?.confirmSubmit;
   // OpenCode can paint a stable first screen before its input handler works
   // (below). Until one send to THIS launch has been echoed back, every send
