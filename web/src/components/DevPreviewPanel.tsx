@@ -1,8 +1,8 @@
 // The Dev preview section of Settings → General, on a dev-preview Space only. Pick an open PR (or several,
-// merged onto main in the order picked), switch, watch it build, roll back.
+// merged onto main in the order picked), switch, watch it build, pull newer commits into it, roll back.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from './DevPreviewBar';
-import { switchConfirmText } from './DevPreviewBar';
+import { canPullLatest, compareRunning, prList, switchConfirmText } from './DevPreviewBar';
 
 type Status = Awaited<ReturnType<typeof api.getDevPreviewStatus>>;
 type Prs = Awaited<ReturnType<typeof api.getDevPreviewPrs>>;
@@ -17,6 +17,7 @@ export default function DevPreviewPanel() {
   const [picked, setPicked] = useState<api.DevPreviewPr[]>([]);
   const [manual, setManual] = useState('');
   const [err, setErr] = useState<string | null>(null);
+  const [pullErr, setPullErr] = useState<string | null>(null);
   const [showLog, setShowLog] = useState(false);
   // Set when THIS tab started a switch: once the server comes back on the new
   // build, reload so the UI is the new build's too.
@@ -72,6 +73,20 @@ export default function DevPreviewPanel() {
       await loadStatus();
     } catch (e) { awaiting.current = null; setErr((e as Error).message); }
   };
+  // Pull latest: the running PRs again, in the same order, without SHAs, so the
+  // server binds each to its head and main as GitHub reports them now.
+  const doPull = async () => {
+    const r = status?.running;
+    if (!r || r.kind !== 'prs') return;
+    const named = r.prs.map((p) => prs?.prs?.find((q) => q.number === p.number) || p);
+    if (!window.confirm(switchConfirmText(named))) return;
+    setPullErr(null);
+    try {
+      awaiting.current = r.id;
+      await api.switchDevPreview(r.prs.map((p) => ({ number: p.number })));
+      await loadStatus();
+    } catch (e) { awaiting.current = null; setPullErr((e as Error).message); }
+  };
   const doRollback = async () => {
     if (!window.confirm(switchConfirmText([]))) return;
     setErr(null);
@@ -84,6 +99,29 @@ export default function DevPreviewPanel() {
 
   const run = status?.running;
   const job = status?.job;
+  const fresh = compareRunning(run, prs);
+  const listSha = (n: number) => short(prs?.prs?.find((p) => p.number === n)?.sha);
+  // What "Pull latest" would bring in, or why there is nothing to pull.
+  const freshness = run?.kind !== 'prs' ? null
+    : !prs ? <span className="devpv-dim">Checking for new commits…</span>
+    : !fresh ? <span className="devpv-dim">Could not check for new commits: the PR list did not load.</span>
+    : fresh.closed.length ? (
+      <span className="devpv-dim">
+        <b>{prList(fresh.closed)}</b> {fresh.closed.length > 1 ? 'are' : 'is'} merged or closed, so there is nothing to pull. Roll back to main to run the latest main.
+      </span>
+    ) : fresh.refused.length ? (
+      <span className="devpv-warn">
+        {fresh.refused.map((n) => <span key={n}><b>#{n}</b> can no longer be previewed: {prs.prs?.find((p) => p.number === n)?.refusal || 'refused'}. </span>)}
+      </span>
+    ) : canPullLatest(fresh) ? (
+      <span>
+        <span className="devpv-dot" aria-hidden="true" />
+        {[
+          ...fresh.newer.map((n) => <span key={n}><b>#{n}</b> has new commits (now <span className="mono">{listSha(n)}</span>)</span>),
+          ...(fresh.mainMoved ? [<span key="main">main moved to <span className="mono">{short(prs.main?.sha)}</span></span>] : []),
+        ].flatMap((part, i) => (i ? [' · ', part] : [part]))}
+      </span>
+    ) : <span className="devpv-dim">Up to date with {prList(run.prs.map((p) => p.number))} and main.</span>;
   return (
     <div className="devpv-panel">
       <section className="devpv-card">
@@ -106,7 +144,17 @@ export default function DevPreviewPanel() {
         {!status?.supervised && status ? (
           <div className="devpv-row devpv-warn">Not running under the entrypoint supervisor, so switching is off: the server could not restart into a new build.</div>
         ) : null}
+        {freshness ? (
+          <div className="devpv-row">
+            <span className="devpv-k" aria-hidden="true" />
+            <span className="devpv-v" data-testid="dev-preview-fresh">{freshness}</span>
+          </div>
+        ) : null}
+        {pullErr ? <div className="devpv-row devpv-err">{pullErr}</div> : null}
         <div className="devpv-actions">
+          {run?.kind === 'prs' ? (
+            <button className="btn-primary" disabled={busy || !canPullLatest(fresh)} onClick={doPull} data-testid="dev-preview-pull">Pull latest</button>
+          ) : null}
           <button className="btn-ghost" disabled={busy || run?.kind === 'main'} onClick={doRollback}>Roll back to main</button>
         </div>
       </section>

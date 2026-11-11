@@ -108,6 +108,11 @@ Listing open PRs works either way.
 **Roll back to main** repoints `/app/current` at `/app/.image/` and restarts:
 no fetch, no build.
 
+**Pull latest** (Settings → General's Running card, or the sidebar row's note
+when a running PR's head or main has moved) is a switch to the same PRs in the
+same order without SHAs, so each is bound to its current head and current main;
+it asks the same confirmation, and the Space never updates by itself.
+
 ## Restarts and crashes
 
 A container restart puts `/app` back to the image and wipes local disk. On boot
