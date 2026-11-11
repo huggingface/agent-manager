@@ -38,11 +38,6 @@ const POLLS = 10, KEYS = 40;
 
 // context, sync fs method, path relative to DATA_DIR. One line per offender.
 const KNOWN = [
-  // A1: codex-bindings.js read() from sessionsWithState, once per poll and
-  // again per Codex session (#235 step 4).
-  ['http GET /api/tree', 'openSync', 'codex-bindings.json'],
-  ['http GET /api/meta', 'openSync', 'codex-bindings.json'],
-  ['http GET /api/sessions', 'openSync', 'codex-bindings.json'],
   // A3: sessions.js persist() from touchInput, on the first keystroke of each
   // minute per session (#235 step 5).
   ['ws:i', 'writeFileSync', 'sessions.json.tmp'],

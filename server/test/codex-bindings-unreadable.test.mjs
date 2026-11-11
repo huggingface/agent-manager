@@ -39,14 +39,19 @@ const FILE = path.join(dir, 'codex-bindings.json');
 
 const { assertCodexLaunchAllowed, boundOrUnknown, unsafeWithoutBindings } = await import('../src/codex-launch-policy.js');
 const { CodexBindings, endpointIdentity } = await import('../src/codex-bindings.js');
+const { codexBindings } = await import('../src/codex-context.js');
 const { commandFor } = await import('../src/runner.js');
 const { SessionRuntime } = await import('../src/session-runtime.js');
 
 const THREAD = '11111111-1111-4111-8111-111111111111';
 const codex = (extra = {}) => ({ id: `s-${crypto.randomBytes(4).toString('hex')}`, cli: 'codex',
   sessionUuid: crypto.randomUUID(), path: 'w', everStarted: true, ...extra });
-const corrupt = () => fs.writeFileSync(FILE, '{"version":1,"bindings":[');
-const clear = () => { try { fs.unlinkSync(FILE); } catch {} };
+// The file is edited behind the server's back, as an operator repairing it
+// would. The launch gate reads the file every time; display and background
+// bookkeeping read a cache that re-reads the file within a few seconds, and
+// invalidate() stands in for that wait.
+const corrupt = () => { fs.writeFileSync(FILE, '{"version":1,"bindings":['); codexBindings.invalidate(); };
+const clear = () => { try { fs.unlinkSync(FILE); } catch {} codexBindings.invalidate(); };
 const refusal = (session) => {
   try { assertCodexLaunchAllowed(session); return null; } catch (error) { return error; }
 };

@@ -228,6 +228,16 @@ fails closed. Filesystems must support these durability operations. A leftover
 verify no AM writer is alive before an operator repairs it. No automatic lock
 removal is implemented.
 
+AM reads the file once and answers from memory after that, a missing file
+included: the roster (`/api/tree`, `/api/meta`, `/api/sessions`) consults the
+bindings on every poll of every tab, and on a bucket one synchronous open
+blocks the event loop for 40–115 ms (issue #235). AM's own writes replace the
+cache as they land. A file edited outside AM — an operator repairing or
+removing it, a bucket restore — is re-read off the main thread at most every
+5 s while something polls, so the sidebar can lag such an edit by that much.
+A terminal launch reads the file itself, every time: a repair is honoured on
+the very next retry, and no cached answer can start a second writer.
+
 For bound sessions, standalone launch fallbacks and rollout-based repinning
 are bypassed. AM boot does not revive their terminal clients. Closing a browser
 view only detaches that view. Stopping AM closes its clients; the Codex server
