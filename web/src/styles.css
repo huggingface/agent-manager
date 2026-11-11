@@ -13,8 +13,6 @@
   --accent-fg: #ffffff;
   --go: #1c8c57;
   --danger: #c2433a;
-  /* yellow: the sidebar's working spinner, setup warnings, deprecation tags */
-  --warn: #9a6b07;
 
   --bg: #eef1f3;
   --panel: #ffffff;
@@ -33,7 +31,6 @@
   --accent-fg: #04181a;
   --go: #43c98a;
   --danger: #e0726a;
-  --warn: #d2a03c;
 
   --bg: #0b0f13;
   --panel: #11181e;
@@ -708,58 +705,7 @@ body {
 .group:hover .g-add { opacity: 1; }
 .g-add:hover { color: var(--accent); }
 .g-add svg { width: 11px; height: 11px; display: block; }
-/* Nested rows sit 5px further in (the group's 1px margin, 1px border and 3px
-   padding), so they give that back here: their status marks, logos and names
-   then line up with the loose rows' in one straight column (#242). */
-.row.nested { margin-left: 0; padding-left: 3px; }
-
-/* ---- sidebar status column (#242) ----
-   One mark at the far left of every session row, before the logo. Nested rows
-   are not indented, so the marks form one straight column. The box is always
-   there (empty for stopped rows and panels) so the column never shifts.
-
-   It borrows the shared spinner cell (--mark-*, beside `ov-spin`): the
-   spinner is the same braille the cards and the reader run, and the dots are
-   centred on that spinner's measured ink rather than on the wider layout
-   cell, so a dot and a spinner occupy the same spot. The box itself is only as
-   wide as the ink plus its left bearing; the cell overflows it to the right
-   into the row's gap. Dots are boxes, not ●/○ glyphs, so both are one size. */
-.row-status {
-  --rs-cx: calc(var(--mark-ink-x) + var(--mark-ink-w) / 2);
-  --rs-cy: calc(var(--mark-ink-y) + var(--mark-ink-h) / 2);
-  position: relative; flex: none; display: inline-block;
-  width: calc(var(--mark-ink-x) * 2 + var(--mark-ink-w)); height: var(--mark-h);
-  font-family: var(--font-mono); font-size: var(--mark-size);
-  font-weight: var(--mark-weight); line-height: 1;
-  color: var(--muted);
-}
-.row-status.rs-working { color: var(--warn); }
-.row-status.rs-working::before {
-  content: '⠋'; position: absolute; left: 0; top: 0;
-  display: inline-flex; align-items: center;
-  width: var(--mark-w); height: var(--mark-h);
-  font-family: var(--font-mono); font-size: var(--mark-size);
-  font-weight: var(--mark-weight); line-height: 1;
-  transform: translateY(var(--mark-optical-y));
-  animation: ov-spin 0.9s steps(1) infinite;
-}
-.row-status.rs-blocked::before, .row-status.rs-done::before,
-.row-status.rs-idle::before, .row-status.rs-shell::before {
-  content: ''; position: absolute; left: var(--rs-cx); top: var(--rs-cy);
-  width: 7px; height: 7px; box-sizing: border-box;
-  border-radius: 50%; background: currentColor;
-  transform: translate(-50%, -50%);
-}
-.row-status.rs-blocked { color: var(--danger); }
-.row-status.rs-done { color: var(--accent); }
-.row-status.rs-idle { color: var(--go); }
-.row-status.rs-idle::before { background: none; border: 1.5px solid currentColor; }
-.row-status.rs-shell::before { width: 3px; height: 3px; }
-/* the two states asking for the operator lift the name out of the muted list */
-.row.row-attn .name { color: var(--text); }
-/* the legend explains the spinner; it does not spin */
-.legend .row-status.rs-working::before { animation: none; }
-.legend .lg-stopped { opacity: 0.55; }
+.row.nested { margin-left: 0; padding-left: 8px; }
 
 /* A bare `.status` is a plain colour dot and has to stay one: UsagePanel and
    SettingsView use it with an inline `background` to carry a provider's or a
@@ -828,9 +774,7 @@ body {
 .legend > span { display: inline-flex; align-items: center; gap: 5px; }
 /* archived toggle: a quiet custom checkbox speaking the app's language */
 /* archived rows/tiles: present but visibly parked */
-/* stopped rows get the same treatment: there is no mark to carry the state */
-.row.archived .name, .row.archived .state-logo, .row.archived > .cli-logo, .row.archived > .row-status,
-.row.row-stopped .name, .row.row-stopped > .cli-logo { opacity: 0.45; }
+.row.archived .name, .row.archived .state-logo, .row.archived > .cli-logo { opacity: 0.45; }
 .ovt-tile.archived .ovt-head { opacity: 0.55; }
 .arch-note { font-size: 10.5px; color: var(--muted); font-style: italic; text-align: center; padding: 14px 12px 4px; margin-top: auto; }
 /* It reads as a sentence until you point at it, then as the link it is. */
@@ -982,7 +926,7 @@ body {
 .welcome-foot .btn-primary { flex: none; padding: 8px 18px; }
 
 /* ---- first-run setup (the welcome card's first step) ---- */
-.setup-warn { display: flex; gap: 10px; padding: 10px 12px; border-radius: var(--r-md); border: 1px solid var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); font-size: 12.5px; line-height: 1.45; }
+.setup-warn { display: flex; gap: 10px; padding: 10px 12px; border-radius: var(--r-md); border: 1px solid var(--warn, #c9972f); background: color-mix(in srgb, var(--warn, #c9972f) 12%, transparent); font-size: 12.5px; line-height: 1.45; }
 .setup-warn-ico { flex: none; opacity: .9; display: flex; }
 .setup-warn-ico svg { width: 14px; height: 14px; flex: none; }
 .setup-how { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; line-height: 1.5; opacity: .85; }
@@ -2114,8 +2058,6 @@ a.btn-ghost { text-decoration: none; }
   .row { padding: 6px 10px; }
   .tree { padding-top: 6px; }
   .group { margin: 13px 0 5px; }
-  /* the group's border and padding (4px here) + 6px = a loose row's 10px */
-  .row.nested { padding-left: 6px; }
   .row .row-actions { opacity: 1; pointer-events: auto; position: static; transform: none; margin-left: 4px; background: transparent; }
   /* A group's actions were hover-only, which a touch device can never satisfy:
      on a phone they were simply unreachable. That was survivable while they were
@@ -2129,10 +2071,6 @@ a.btn-ghost { text-decoration: none; }
      something is hidden, so the extra row is never in the way otherwise. */
   .zbtn.ov-hidebtn { flex: 0 0 100%; justify-content: center; }
   .row .cli-logo, .row .count { opacity: 1 !important; }
-  /* …except where the dimming is the state itself: a stopped row has no mark
-     to say so (#242), and an archived one is parked. Higher specificity, so
-     it wins over the !important above without changing it for other rows. */
-  .row.archived > .cli-logo, .row.row-stopped > .cli-logo { opacity: 0.45 !important; }
   .row .age { display: none; } /* actions are always visible on touch — no room */
   .g-add { opacity: 1; }
   .caret { width: 22px; font-size: 15px; }
@@ -2483,8 +2421,8 @@ a.btn-ghost { text-decoration: none; }
 
 /* A deprecated CLI's existing session (DeprecatedNotice.tsx): a quiet tag on
    rows and cards, a slim line under the pane header. */
-.deprecated-tag { flex: none; font-size: 10px; line-height: 1; padding: 2px 5px; border-radius: 4px; color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border)); white-space: nowrap; transition: opacity 0.12s ease-out; }
+.deprecated-tag { flex: none; font-size: 10px; line-height: 1; padding: 2px 5px; border-radius: 4px; color: var(--warn, #c9972f); border: 1px solid color-mix(in srgb, var(--warn, #c9972f) 45%, var(--border)); white-space: nowrap; transition: opacity 0.12s ease-out; }
 /* the row's hover actions sit on top of it, as they do on .age */
 .row:hover .deprecated-tag { opacity: 0; }
 /* above the terminal's boot/exit overlays, which start right under the header */
-.deprecated-banner { display: block; position: relative; z-index: 6; flex: none; padding: 5px 11px; font-size: 12px; line-height: 1.4; background: color-mix(in srgb, var(--warn) 10%, var(--panel)); border-bottom: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border)); }
+.deprecated-banner { display: block; position: relative; z-index: 6; flex: none; padding: 5px 11px; font-size: 12px; line-height: 1.4; background: color-mix(in srgb, var(--warn, #c9972f) 10%, var(--panel)); border-bottom: 1px solid color-mix(in srgb, var(--warn, #c9972f) 35%, var(--border)); }

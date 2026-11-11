@@ -51,9 +51,8 @@ for (const state of STATES) {
     state === 'working' ? 'state-logo-run' : 'state-logo-static');
 }
 
-// The frame-only form (the Overview group header's peek strip) uses the same
-// SVG renderer at a true 12px outer size, but carries no fake CLI identity.
-// Regular tiles above still prove the default keeps Logo.
+// The legend uses the same SVG renderer at a true 12px outer size, but carries
+// no fake CLI identity. Regular rows above still prove the default keeps Logo.
 for (const state of STATES) {
   const frame = StateLogo({ frameOnly: true, state, size: 12 });
   assert.deepEqual(frame.props.style, { width: 12, height: 12 });
@@ -88,9 +87,7 @@ assert.equal(headerSvg.props.viewBox, '0 0 22 22');
 // Which surfaces have opted in. #92 shipped the frame to the sidebar, both pane
 // headers and the mock, and deliberately left Overview on the old standalone
 // mark; the operator has since asked for Overview too, so all three of its
-// state slots — card, tile and the group's peek strip — are frames now. #242
-// then took the sidebar (and the locked page's mock of it) back out: its rows
-// carry a status column at the far left and a plain logo, pinned below.
+// state slots — card, tile and the group's peek strip — are frames now.
 //
 // What that settled is about IDENTITY slots: wherever a session is named, its
 // state is drawn as a frame around its logo, never as a mark beside the name.
@@ -125,14 +122,4 @@ for (const file of ['components/Overview.tsx', 'components/Sidebar.tsx', 'compon
   assert.match(remote, /<StateLogo\b/, 'the pane header still needs its identity frame');
 }
 
-// The sidebar's rows and legend, and the locked page's mock of them, draw
-// the status column (RowStatus) and a plain Logo. A state frame there would be
-// a second, contradicting state mark on the same row.
-for (const file of ['components/Sidebar.tsx', 'components/Locked.tsx']) {
-  const text = fs.readFileSync(path.join(HERE, '../src', file), 'utf8');
-  assert.doesNotMatch(text, /<StateLogo\b/, `${file} draws a StateLogo again`);
-  assert.match(text, /<RowStatus\b/, `${file} lost its status column`);
-  assert.match(text, /<StatusLegend\b/, `${file} lost the shared legend`);
-}
-
-console.log('state-logo: real tiles keep logos, 12px strip frames are border-only, every Overview/header state slot is a frame, and the sidebar has none');
+console.log('state-logo: real tiles keep logos, 12px legend frames are border-only, and every state slot is a frame');

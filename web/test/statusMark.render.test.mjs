@@ -33,7 +33,7 @@ const embeddedFont = `@font-face {
 .parity-overview { display:flex; align-items:center; font-weight:700; }
 .mark-baseline { display:inline-block; width:0; height:0; padding:0; margin:0; }
 .status.working::before, .ov-busy::before,
-.cx-running::before, .row-status.rs-working::before { animation:none !important; }`;
+.cx-running::before { animation:none !important; }`;
 
 let failed = 0;
 const check = (what, fn) => {
@@ -76,12 +76,6 @@ await page.setContent(`<style>${css}\n${embeddedFont}</style>
       <span class="ph-name">claude-code-4<span class="mark-baseline" id="header-baseline"></span></span>
     </span>
     <span class="ph-right"></span>
-  </div>
-  <div class="row session" style="font-weight:400">
-    <span class="row-status rs-working" id="rowstatus-working"></span><span class="name">trl-review</span>
-  </div>
-  <div class="row session">
-    <span class="row-status rs-idle" id="rowstatus-idle"></span><span class="name">fix-bindings</span>
   </div>
   <div class="ov-busy" id="overview-busy">running</div>
   <div class="cx-running" id="reader-working">working</div>`);
@@ -178,7 +172,7 @@ const { marks, ink, optics } = await page.evaluate((ids) => {
   'working', 'waiting', 'idle', 'stopped', 'provider', 'ready',
   'sidebar-working', 'overview-working', 'overview-waiting',
   'header-working', 'header-waiting', 'overview-busy',
-  'reader-working', 'rowstatus-working', 'rowstatus-idle',
+  'reader-working',
 ]);
 await browser.close();
 
@@ -284,7 +278,7 @@ check('Overview and header static paths have identical geometry', () => {
   close(marks['overview-waiting'].left, marks['header-waiting'].left, 0.001);
 });
 for (const id of [
-  ...STATUS_WORKING, 'overview-busy', 'reader-working', 'rowstatus-working',
+  ...STATUS_WORKING, 'overview-busy', 'reader-working',
 ]) {
   check(`${id} uses the same normal-weight, optically corrected spinner`, () => {
     assert.match(marks[id].content, /[⠋⠙⠹⠸⠼⠴⠦⠧]/);
@@ -295,22 +289,6 @@ for (const id of [
     assert.match(marks[id].transform, /^matrix\(1, 0, 0, 1, 0, 1\.40625\)$/);
   });
 }
-console.log("\nthe sidebar's status column (#242) runs the same spinner");
-check('its spinner paints the same cell as the Overview and header spinners', () => {
-  assert.deepEqual(round(marks['rowstatus-working'].painted), round(marks['sidebar-working'].painted));
-  assert.deepEqual(round(marks['rowstatus-working'].painted), round(marks['header-working'].painted));
-});
-check('its spinner has the same transform as .status.working', () => {
-  assert.equal(marks['rowstatus-working'].transform, marks['sidebar-working'].transform);
-});
-check('its dot is centred on the spinner ink, as the static path is', () => {
-  // the static rectangle's centre, in cell coordinates
-  const cx = marks.waiting.left + marks.waiting.painted[0] / 2;
-  const cy = marks.waiting.top + marks.waiting.painted[1] / 2;
-  close(marks['rowstatus-idle'].left, cx, 0.01);
-  close(marks['rowstatus-idle'].top, cy, 0.01);
-});
-
 check('the static path centre meets the 600-weight title x-height centre', () => {
   close(optics.markCenter, optics.xHeightCenter, 0.2);
 });
