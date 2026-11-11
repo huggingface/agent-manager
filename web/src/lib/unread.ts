@@ -53,6 +53,24 @@ export function isUnread(s: Readable): boolean {
 }
 
 /**
+ * The ids of every session with a reply the operator has not read: what the
+ * sidebar's "unread" frame shows (#242).
+ *
+ * Fed with App's `metaRead` — the /api/meta poll already merged with the
+ * optimistic local acknowledgements — so reading a reply in the reader or on an
+ * Overview card clears the mark at once, without waiting for the next poll.
+ * Before the first poll has answered nothing is known, and an empty set says so
+ * rather than flashing every agent as unread. Whether a working agent masks it
+ * is the sidebar's call (lib/rowMark.ts), not this one's.
+ */
+export function unreadIds(rows: Record<string, Readable>, ready: boolean): Set<string> {
+  const out = new Set<string>();
+  if (!ready) return out;
+  for (const [id, row] of Object.entries(rows)) if (isUnread(row)) out.add(id);
+  return out;
+}
+
+/**
  * Which of the three Overview blocks a session belongs in.
  *
  * A running agent stays in Running even when it has unread output: what it is

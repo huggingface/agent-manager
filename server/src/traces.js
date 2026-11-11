@@ -1647,12 +1647,13 @@ async function buildImpl() {
 // kicked off a fresh overlapping build and pinned the event loop (the Overview
 // lag). The first-ever call (no cached value) awaits the build once.
 let building = null;
-function memoized() {
-  const fresh = resultMemo.val && Date.now() - resultMemo.ts < TTL;
+function memoized(force = false) {
+  const fresh = !force && resultMemo.val && Date.now() - resultMemo.ts < TTL;
   if (fresh) return resultMemo.val;
   if (!building) {
+    const startedAt = Date.now();
     building = build()
-      .then((v) => { resultMemo = { ts: Date.now(), val: Promise.resolve(v) }; return v; })
+      .then((v) => { v.startedAt = startedAt; resultMemo = { ts: Date.now(), val: Promise.resolve(v) }; return v; })
       .catch(() => resultMemo.val || Promise.resolve({ perSession: new Map(), digests: new Map(), other: emptyStats(), totals: emptyStats(), sessions: store.list() }))
       .finally(() => { building = null; });
   }
@@ -1682,11 +1683,22 @@ export async function buildTraces() {
   };
 }
 
-/** Per-session "since your last prompt" digests, keyed by session id. */
-export async function traceDigests({fresh = false} = {}) {
-  const cached = memoized();
-  const { digests } = await (fresh && building ? building : cached);
-  return digests;
+/**
+ * Per-session "since your last prompt" digests, keyed by session id.
+ *
+ * `since` (ms): only from a build that began at or after it, so whatever was on
+ * disk then is in it. The stale-while-revalidate answer is a build from before
+ * the reply an agent just wrote; the sidebar asks with this when an agent stops
+ * working, so its frame does not drop to a bare logo until the next poll
+ * (#242). At most the build under way and one more.
+ */
+export async function traceDigests({fresh = false, since = 0} = {}) {
+  let result = await (fresh && building ? building : memoized());
+  for (let i = 0; i < 2 && since && (result.startedAt || 0) < since; i++) {
+    memoized(true);
+    result = await (building || memoized());
+  }
+  return result.digests;
 }
 
 /** Targeted digest for ONE session — parses only its own transcript files so

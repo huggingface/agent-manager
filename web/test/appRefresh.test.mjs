@@ -311,7 +311,9 @@ try {
     const response = (body, ok = true) => new Response(JSON.stringify(body), {
       status: ok ? 200 : 503, headers: { 'content-type': 'application/json' },
     });
-    const resource = (url) => url === '/api/tree' ? 'tree' : url === '/api/meta' ? 'meta' : null;
+    // Explicit meta refreshes ask for a fresh build (/api/meta?fresh=1); the
+    // same resource either way.
+    const resource = (url) => { const p = url.split('?')[0]; return p === '/api/tree' ? 'tree' : p === '/api/meta' ? 'meta' : null; };
     window.fetch = (input, init = {}) => {
       const url = typeof input === 'string' ? input : input.url;
       const kind = resource(url);
@@ -347,8 +349,8 @@ try {
       return Promise.resolve(response({ ok: true, sessions: [], messages: [] }));
     };
     const counts = () => ({
-      tree: state.calls.filter((c) => c.url === '/api/tree').length,
-      meta: state.calls.filter((c) => c.url === '/api/meta').length,
+      tree: state.calls.filter((c) => resource(c.url) === 'tree').length,
+      meta: state.calls.filter((c) => resource(c.url) === 'meta').length,
     });
     window.__refreshHarness = {
       state,
@@ -514,7 +516,7 @@ try {
   assert.equal(await page.evaluate(() => window.__paneMounts), mounts, 'the open pane was not remounted');
   const recoveryCalls = await page.evaluate((from) => window.__refreshHarness.state.calls.slice(from),
     await page.evaluate(() => window.__refreshHarness.state.calls.length - 2));
-  assert.ok(recoveryCalls.every((call) => call.method === 'GET' && ['/api/tree', '/api/meta'].includes(call.url)),
+  assert.ok(recoveryCalls.every((call) => call.method === 'GET' && ['/api/tree', '/api/meta', '/api/meta?fresh=1'].includes(call.url)),
     'return performs only the two approved reads — no prompt, session, trace or PTY action');
 
   // Unlike visibility/bfcache, Chromium does expose a real offline transition

@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Cli, LaunchChoice, MoveTarget, Group, Session, Tree } from '../types';
-import { STATE_LABEL, REMOTE_STATE_LABEL, creatable, isPassive, isRemote } from '../types';
+import { creatable, isPassive, isRemote } from '../types';
 import * as api from '../api';
 import Logo from './Logo';
 import StateLogo from './StateLogo';
+import RowMarkLegend from './RowMarkLegend';
 import DeprecatedNotice, { deprecationNote } from './DeprecatedNotice';
 import NewSession from './NewSession';
 import FolderPicker from './FolderPicker';
@@ -16,6 +17,7 @@ import {
 } from '../lib/attachments';
 import type { PendingAttachment } from '../lib/attachments';
 import { canPin, partitionByPin, pinAfterDrop } from '../lib/pinned';
+import { rowMark } from '../lib/rowMark';
 import { PinGlyph, SlidersGlyph, SunGlyph, MoonGlyph, CloseGlyph, PencilGlyph, StopGlyph, PlayGlyph, UpGlyph, TrashGlyph, GridGlyph, PlusGlyph, AmMark, EyeGlyph, EyeOffGlyph } from './icons';
 
 import { dropZone, backgroundAnchor, isBackgroundTarget } from './sidebar-dnd';
@@ -40,7 +42,7 @@ const fmtAgo = (ts?: number) => {
 };
 
 export default function Sidebar({
-  clis, tree, activeRef, focusedId, defaultPath, ages,
+  clis, tree, activeRef, focusedId, defaultPath, ages, unread, settling,
   onActivate, onOpenSession, onNewSession, onNewGroup, onRenameGroup, onRenameSession, onDeleteGroup,
   onArchiveSession, onUnarchiveSession, onSetRemotePaused, onDeleteSession, onTraceHandover, handoverFor, onHandoverHandled, onMove, onDragState, onOpenSettings, previewBar, theme, onToggleTheme, onQuickStart,
   onPrepareQuickStart,
@@ -54,6 +56,10 @@ export default function Sidebar({
   focusedId: string | null;
   defaultPath: string;
   ages?: Record<string, number>; // session id -> last activity ts (ms)
+  /** Sessions with a reply not yet read; drives the accent frame (#242). */
+  unread?: Set<string>;
+  /** Just stopped working; meta not caught up yet (lib/rowMark.ts). */
+  settling?: Set<string>;
   onActivate: (ref: string) => void;
   onOpenSession: (sessionId: string, groupId?: string) => void;
   onOpenSettings: () => void;
@@ -580,23 +586,23 @@ export default function Sidebar({
     const editing = editRef === ref;
     // nested agents are highlighted as a whole group (see GroupBlock); loose ones individually
     const active = !nested && activeRef === ref;
+    const mark = rowMark(s, !!unread?.has(s.id), !!settling?.has(s.id));
+    const attention = mark === 'blocked' || mark === 'unread';
     return (
       <div
         key={s.id}
         data-ref={ref}
-        className={`row session${active ? ' active' : ''}${nested ? ' nested' : ''}${archived.has(s.id) ? ' archived' : ''}${dragRef === ref ? ' dragging' : ''}${dnd.className}`}
+        className={`row session${active ? ' active' : ''}${nested ? ' nested' : ''}${archived.has(s.id) ? ' archived' : ''}${mark === 'off' ? ' off' : ''}${attention ? ' attention' : ''}${dragRef === ref ? ' dragging' : ''}${dnd.className}`}
         draggable={dnd.draggable}
         onDragStart={dnd.onDragStart} onDragEnd={dnd.onDragEnd} onDragOver={dnd.onDragOver} onDrop={dnd.onDrop}
         onClick={() => onOpenSession(s.id, groupId)}
         onDoubleClick={(e) => { e.stopPropagation(); startEdit(ref, s.name); }}
         title={s.path ? `${s.name} · ${s.path}` : s.name}
       >
-        {/* State rides the CLI tile itself. For a remote agent it means
-            connection, not process: working / listening / not connected. */}
-        <StateLogo
-          cli={s.cli} state={s.state} size={12} tint={colorOf[s.cli]}
-          title={(isRemote(s.cli) ? REMOTE_STATE_LABEL : STATE_LABEL)[s.state]}
-        />
+        {/* State rides the CLI tile itself, and only draws when the agent is
+            busy or wants the operator (lib/rowMark.ts). For a remote agent
+            "not running" means not connected. */}
+        <StateLogo cli={s.cli} state={mark} size={12} tint={colorOf[s.cli]} />
         {editing ? (
           <input
             autoFocus className="rename" value={editName}
@@ -1029,12 +1035,7 @@ export default function Sidebar({
 
       {/* Quick-add utilities: created instantly with a default name (double-
           click to rename afterwards). Both open at the workspaces root. */}
-      <div className="legend">
-        <span><StateLogo frameOnly state="working" size={12} /> working</span>
-        <span><StateLogo frameOnly state="waiting" size={12} /> your turn</span>
-        <span><StateLogo frameOnly state="idle" size={12} /> idle</span>
-        <span><StateLogo frameOnly state="stopped" size={12} /> stopped</span>
-              </div>
+      <RowMarkLegend />
     </aside>
   );
 }

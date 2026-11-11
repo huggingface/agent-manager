@@ -741,8 +741,9 @@ api.get('/api/meta/:id', async (req, res) => {
   res.json({ id: s.id, digest: stripInternal(digest), output: outputOf(s, digest), read: readMarks.get(s.id) });
 });
 
-api.get('/api/meta', async (_req, res) => {
-  const digests = await traceDigests();
+api.get('/api/meta', async (req, res) => {
+  // ?fresh=1: digests built after this request arrived (see traceDigests).
+  const digests = await traceDigests({ since: req.query.fresh === '1' ? Date.now() : 0 });
   const hs = demo.active() ? demo.hiddenSessions() : null;
   const sessions = sessionsWithState()
     .filter((s) => s.cli !== 'shell' && !PASSIVE_CLIS.includes(s.cli))

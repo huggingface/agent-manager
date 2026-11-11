@@ -419,8 +419,9 @@ export interface MetaSession extends Session {
   output?: OutputVersion | null;
   read?: (OutputVersion & { at?: string }) | null;
 }
-export const getMeta = (signal?: AbortSignal): Promise<{ sessions: MetaSession[]; generatedAt: string }> =>
-  fetch('/api/meta', { signal }).then(json);
+/** `fresh`: wait for digests built after the request (an agent just finished). */
+export const getMeta = (signal?: AbortSignal, fresh = false): Promise<{ sessions: MetaSession[]; generatedAt: string }> =>
+  fetch(fresh ? '/api/meta?fresh=1' : '/api/meta', { signal }).then(json);
 
 /**
  * "These replies were shown to the operator." Used by both read paths — a

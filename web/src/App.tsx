@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import type { QuickStartAttachmentOptions } from './components/Sidebar';
 import TerminalPane from './components/TerminalPane';
@@ -25,7 +25,8 @@ import { configuredCount, keepOffering } from './components/WelcomeSetup';
 import * as api from './api';
 import { pinnedSessionIds } from './lib/pinned';
 import { quietSessionIds } from './lib/idleWindow';
-import { applyAck, furtherMark, retireLocal, type ReadMark } from './lib/unread';
+import { leftWorking } from './lib/rowMark';
+import { applyAck, furtherMark, isUnread, retireLocal, unreadIds, type ReadMark } from './lib/unread';
 // Matches the server's per-request cap; the client splits rather than being cut.
 const ACK_CHUNK = 100;
 import type { Cli, GridSpec, LaunchChoice, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
@@ -532,6 +533,33 @@ export default function App() {
   // arrives, "your agent isn't in this tree" only means the tree is still empty.
   const [treeLoaded, setTreeLoaded] = useState(false);
   const treeRefresh = useRef<ReturnType<typeof createLatestRefresh<Tree>> | null>(null);
+  // An agent the tree says has just finished, held on the spinner (rowMark's
+  // `settling`) until a fresh meta read has answered for it. Without it the
+  // frame drops to a bare logo until meta catches up: up to a poll (8s off the
+  // Overview), and a poll answers from the last digest build, which can predate
+  // the reply (#242). Keyed to a hold number, so a read releases only the holds
+  // made before it started.
+  const [settling, setSettling] = useState<Map<string, number>>(() => new Map());
+  const holdSeq = useRef(0);
+  const releaseSettled = useCallback((upTo: number) => setSettling((prev) => {
+    if (![...prev.values()].some((n) => n <= upTo)) return prev;
+    return new Map([...prev].filter(([, n]) => n > upTo));
+  }), []);
+  // Explicit refreshes (refreshMeta) ask for digests built after the request
+  // (?fresh=1); polls take the cached build. The newest read is the only one
+  // ever published, so which holds it covers is noted at its start (or by a
+  // hold that rides it) and read back at publish.
+  const metaFresh = useRef(false);
+  const metaReadCovers = useRef(0);
+  // When reads started (performance.now()): the newest tree read and the one
+  // last published, the newest fresh meta read (null when not one) and the
+  // fresh one last published. What a hold compares: whether a fresh read began
+  // no earlier than the tree that says an agent finished.
+  const treeReadAt = useRef(0);
+  const treeAnswerAt = useRef(0);
+  const metaFreshAt = useRef<number | null>(null);
+  const metaFreshAnswerAt = useRef(0);
+  const metaFreshRead = useRef<Promise<unknown> | null>(null);
   // Mutations and foreground recovery replace any possibly frozen request.
   // Ordinary polls use the manager directly below and coalesce instead.
   const refresh = useCallback((): Promise<Tree | null> => {
@@ -563,11 +591,11 @@ export default function App() {
       // The tree is polled on every view, so it is where an outage is noticed
       // when no terminal is open to notice it (serverReach then announces
       // its end to the reader's dispatch cards and everything else).
-      (signal) => api.getTree(signal).catch((error) => {
+      (signal) => { treeReadAt.current = performance.now(); return api.getTree(signal).catch((error) => {
         if (!signal.aborted) void serverReach.answers().then((up) => { if (!up) serverReach.reportOutage(); });
         throw error;
-      }),
-      (next) => { setTree(next); setTreeLoaded(true); },
+      }); },
+      (next) => { treeAnswerAt.current = treeReadAt.current; setTree(next); setTreeLoaded(true); },
     );
     treeRefresh.current = manager;
     if (!lockedRef.current) void manager.refresh('replace');
@@ -594,13 +622,28 @@ export default function App() {
   const metaRefresh = useRef<ReturnType<typeof createLatestRefresh<Awaited<ReturnType<typeof api.getMeta>>>> | null>(null);
   const refreshMeta = useCallback(() => {
     if (lockedRef.current) return Promise.resolve(null); // protected reads pause while locked
+    metaFresh.current = true;
     return metaRefresh.current?.refresh('replace') ?? Promise.resolve(null);
   }, []);
   useEffect(() => {
     let lastPayload = '';
     const manager = createLatestRefresh(
-      (signal) => api.getMeta(signal),
+      (signal) => {
+        const fresh = metaFresh.current;
+        metaFresh.current = false;
+        metaReadCovers.current = fresh ? holdSeq.current : 0;
+        metaFreshAt.current = fresh ? performance.now() : null;
+        const read = api.getMeta(signal, fresh);
+        if (fresh) {
+          metaFreshRead.current = read;
+          const done = () => { if (metaFreshRead.current === read) metaFreshRead.current = null; };
+          read.then(done, done);
+        }
+        return read;
+      },
       (r) => {
+        if (metaFreshAt.current !== null) metaFreshAnswerAt.current = metaFreshAt.current;
+        if (metaReadCovers.current) releaseSettled(metaReadCovers.current);
         setMetaReady(true);
         const payload = JSON.stringify(r.sessions);
         if (payload === lastPayload) return;
@@ -691,6 +734,36 @@ export default function App() {
     }
     return out;
   }, [meta, readLocal]);
+  // Sessions with a reply not yet read: the sidebar's "done" frame (#242).
+  // Cleared through the same read tracking as the Overview and the reader
+  // (markSeen -> readLocal), and by selecting the row (openFromSidebar).
+  const unread = useMemo(() => unreadIds(metaRead, metaReady), [metaRead, metaReady]);
+  // Hold agents that just left working (`settling` above). A layout effect, so
+  // the held frame is what paints first; the release rides the fresh answer
+  // itself, so the frame and the reply land in one render. A fresh read that
+  // began no earlier than this tree's read (a return burst refreshes both) has
+  // the reply already, or will: nothing is held, or the hold rides that read
+  // rather than costing another. A failed read still releases, and the 10s
+  // bound covers a read superseded by one that fails.
+  const lastStates = useRef<Map<string, Session['state']>>(new Map());
+  useLayoutEffect(() => {
+    const left = leftWorking(lastStates.current, tree.sessions);
+    lastStates.current = new Map(tree.sessions.map((s) => [s.id, s.state]));
+    const at = treeAnswerAt.current;
+    if (!left.length || metaFreshAnswerAt.current >= at) return;
+    const n = ++holdSeq.current;
+    setSettling((prev) => new Map([...prev, ...left.map((id): [string, number] => [id, n])]));
+    // Not cleared on re-run: every tree poll re-runs this effect.
+    setTimeout(() => releaseSettled(n), 10_000);
+    const pending = metaFreshRead.current;
+    if (pending && (metaFreshAt.current ?? -1) >= at) {
+      metaReadCovers.current = n;
+      pending.catch(() => releaseSettled(n));
+    } else {
+      void refreshMeta().finally(() => releaseSettled(n));
+    }
+  }, [tree.sessions, refreshMeta, releaseSettled]);
+  const settlingIds = useMemo(() => new Set(settling.keys()), [settling]);
   // Once the server's own copy has caught up, the local acknowledgement has
   // nothing left to add — and a local mark for a generation that is gone would
   // otherwise keep overriding the truth forever. Retiring them is what lets
@@ -1039,6 +1112,17 @@ export default function App() {
       setPage(0);
     }
     if (isMobile) setMobileStage(true);
+  };
+
+  // Picking a "done" agent in the sidebar is the operator going to look at its
+  // reply, so it counts as reading it (#242), the same acknowledgement the
+  // reader and Overview send. A working agent is left alone: what it is saying
+  // is not finished, and its finished reply should still show as done.
+  const openFromSidebar = (sid: string, groupId?: string) => {
+    openSession(sid, groupId);
+    const m = metaRead[sid];
+    const s = tree.sessions.find((x) => x.id === sid);
+    if (m?.output && isUnread(m) && s?.state !== 'working') void markSeen([{ id: sid, ...m.output }]);
   };
 
   // A dispatched session's icon in the reader asks for its session this way,
@@ -1391,8 +1475,10 @@ export default function App() {
         focusedId={focusedId}
         defaultPath={lastPath}
         ages={ages}
+        unread={unread}
+        settling={settlingIds}
         onActivate={activate}
-        onOpenSession={openSession}
+        onOpenSession={openFromSidebar}
         onNewSession={newSession}
         onTraceHandover={api.getTraceLocation}
         handoverFor={handoverFor}

@@ -13,7 +13,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test:ui": "node ../scripts/run-suites.mjs terminal-ui screenshot-input reader-info --manual",
+    "test:ui": "node ../scripts/run-suites.mjs terminal-ui screenshot-input reader-info sidebar-unread pane-switch-state --manual",
     "test:screenshots": "node ../scripts/run-suites.mjs screenshot-input --manual",
     "test:mobile": "node ../scripts/run-suites.mjs mobile.test --manual",
     "test": "node ../scripts/run-suites.mjs"
