@@ -152,7 +152,13 @@ try {
     // paint. Raised to 795.
     // iTerm2 Cmd/Option editing keys (2026-11-04): 814,078 -> 814,413 (+335),
     // and 814,078 was 2 bytes under 795. Raised to 796.
-    assert.ok(entry.length <= 796 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 796 kB budget`);
+    // Sidebar status column (#242, 2026-11-10): main 814,413 here, the status
+    // column commit 815,096 (+683: lib/rowStatus.ts, RowStatus/StatusLegend,
+    // the locked mock's rows), the "done" commit 815,282 (+186: unreadIds and
+    // its wiring), 178 over 796. None of it can be lazy: the sidebar is on
+    // screen from the first paint, and so is the locked page's mock of it.
+    // Raised to 797, ~0.8 kB of headroom.
+    assert.ok(entry.length <= 797 * 1024, `entry chunk is ${(entry.length / 1024).toFixed(0)} kB, over the 797 kB budget`);
     // One literal only that panel's module contains — a dynamic import that
     // merely wraps an unchanged graph would leave these in the entry.
     for (const [panel, marker] of [

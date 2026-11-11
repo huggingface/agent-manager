@@ -18,7 +18,7 @@ await build({
   entryPoints: [path.join(HERE, '../src/lib/unread.ts')],
   outfile: out, format: 'esm', bundle: true, logLevel: 'error',
 });
-const { isUnread, sectionOf, markFor, furtherMark, retireLocal, applyAck, outputHash, answerMatches } = await import(pathToFileURL(out).href);
+const { isUnread, unreadIds, sectionOf, markFor, furtherMark, retireLocal, applyAck, outputHash, answerMatches } = await import(pathToFileURL(out).href);
 const { outputHash: serverHash } = await import(pathToFileURL(path.join(HERE, '../../server/src/output-id.js')).href);
 
 let failed = 0;
@@ -65,6 +65,42 @@ check('a mark that has read FURTHER than the newest output is unread', () => {
   // Reading "seq 5 >= seq 1, so seen it" hides genuinely new output behind a
   // cursor from a transcript that no longer exists.
   assert.equal(isUnread(S(v(1, 'freshstart'), v(5))), true);
+});
+
+console.log('\nthe sidebar\'s "done" set (#242)');
+// App merges each /api/meta row with the optimistic local mark exactly so.
+const merge = (meta, local) => Object.fromEntries(Object.entries(meta).map(([id, m]) => {
+  const read = furtherMark(m.read, local[id], m.output);
+  return [id, read === m.read ? m : { ...m, read }];
+}));
+check('only sessions with an unread reply are in it', () => {
+  const meta = { a: { id: 'a', output: v(2), read: v(1) }, b: { id: 'b', output: v(2), read: v(2) } };
+  assert.deepEqual([...unreadIds(meta, true)], ['a']);
+});
+check('no output is not unread', () => {
+  const meta = { quiet: { id: 'quiet', output: null, read: null }, none: { id: 'none' }, zero: { id: 'zero', output: v(0) } };
+  assert.equal(unreadIds(meta, true).size, 0);
+});
+check('before the first poll answers, nothing is unread', () => {
+  const meta = { a: { id: 'a', output: v(2), read: null } };
+  assert.equal(unreadIds(meta, false).size, 0);
+  assert.equal(unreadIds({}, false).size, 0);
+});
+check('an optimistic local mark clears it before the server catches up', () => {
+  const meta = { a: { id: 'a', output: v(2), read: v(1) } };
+  assert.ok(unreadIds(merge(meta, {}), true).has('a'));
+  const local = applyAck({}, [{ id: 'a', ...v(2) }], { a: 'ok' });
+  assert.equal(unreadIds(merge(meta, local), true).has('a'), false);
+});
+check('a newer reply is unread again, local mark or not', () => {
+  const local = { a: v(2) };
+  const meta = { a: { id: 'a', output: v(3), read: v(2) } };
+  assert.ok(unreadIds(merge(meta, local), true).has('a'));
+});
+check('a rejected acknowledgement leaves it unread', () => {
+  const meta = { a: { id: 'a', output: v(2), read: v(1) } };
+  const local = applyAck({}, [{ id: 'a', ...v(2) }], { a: 'stale' });
+  assert.ok(unreadIds(merge(meta, local), true).has('a'));
 });
 
 console.log('\nwhich block a session belongs in');
