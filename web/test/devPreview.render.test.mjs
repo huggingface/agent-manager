@@ -1,7 +1,7 @@
 // Dev preview UI in a real browser: the header banner (absent without the
 // server's devPreview object, truthful about what runs), the Settings tab
-// (only on a preview Space), and the panel's ordered selection, conflict and
-// full-rebuild reporting.
+// (only on a preview Space), the panel's ordered selection, conflict and
+// full-rebuild reporting, and "Pull latest" in the panel and the sidebar row.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -24,7 +24,8 @@ const main = { kind: 'main', label: 'main', id: 'image', image: true, prs: [] };
 let status = { repo: 'huggingface/agent-manager', supervised: true, restartPending: false, next: null, running: main, selected: { prs: [] }, job: null, crashed: null, log: [] };
 window.__setStatus = (s) => { status = { ...status, ...s }; };
 export const getDevPreviewStatus = () => Promise.resolve(structuredClone(status));
-export const getDevPreviewPrs = () => Promise.resolve({ ok: true, repo: 'huggingface/agent-manager', main: { sha: '${M}' }, prs: [
+// The open-PR list, mutable from the page (window.__prs) so a test can move a head, main, or close a PR.
+const initialPrs = () => ({ ok: true, repo: 'huggingface/agent-manager', main: { sha: '${M}' }, prs: [
   { number: 182, title: 'Security: keep edge sign-in parameters out of the URL', author: 'ana', permission: 'admin', headRepo: 'huggingface/agent-manager', fork: false, allowed: true, sha: '${A}' },
   { number: 190, title: 'Cron tweaks', author: 'bo', permission: 'write', headRepo: 'huggingface/agent-manager', fork: false, allowed: true, sha: '${B}', draft: true },
   { number: 191, title: 'Totally harmless', author: 'outsider', permission: 'read', headRepo: 'outsider/agent-manager', fork: true, allowed: false,
@@ -32,6 +33,10 @@ export const getDevPreviewPrs = () => Promise.resolve({ ok: true, repo: 'hugging
   { number: 192, title: 'From my fork', author: 'cy', permission: 'maintain', headRepo: 'cy/agent-manager', fork: true, allowed: false,
     refusal: 'its branch is on a fork (cy/agent-manager); only branches on huggingface/agent-manager itself can be previewed', sha: '${'e'.repeat(40)}' },
 ] });
+window.__prs = initialPrs();
+window.__resetPrs = () => { window.__prs = initialPrs(); };
+window.__prsReads = 0;
+export const getDevPreviewPrs = () => { window.__prsReads++; return Promise.resolve(structuredClone(window.__prs)); };
 export const switchDevPreview = (prs) => {
   window.__calls.push(['switch', prs]);
   status = { ...status, job: { id: 'j', kind: 'switch', source: 'operator', state: 'failed', step: 'merge', steps: [{ name: 'fetch', ms: 1200 }, { name: 'merge', ms: 300 }],
@@ -60,15 +65,19 @@ await build({
       import SettingsView from './src/components/SettingsView.tsx';
       const main = { kind: 'main', label: 'main', id: 'image', prs: [] };
       const stack = { kind: 'prs', label: '#190 bbbbbbb + #182 aaaaaaa', id: 'rel-2', base: '${M}', prs: [{ number: 190, sha: '${B}' }, { number: 182, sha: '${A}' }] };
+      const one = { kind: 'prs', label: '#182 aaaaaaa', id: 'rel-1', base: '${M}', prs: [{ number: 182, sha: '${A}' }] };
       const sum = (running, job = null) => ({ repo: 'huggingface/agent-manager', supervised: true, restartPending: false, next: null, running, selected: { prs: [] }, job, crashed: null });
       window.__render = (which) => {
+        // One mounted tree at a time: an earlier row's timers must not keep polling.
+        window.__root?.unmount();
         const root = document.getElementById('root');
         root.innerHTML = '';
-        const r = createRoot(root);
+        const r = window.__root = createRoot(root);
         const bar = (summary) => <div className="sidebar" style={{ width: 260 }}><DevPreviewBar summary={summary} onOpenSettings={() => { window.__opened = (window.__opened || 0) + 1; }} /></div>;
         if (which === 'none') r.render(<div id="x">{bar(undefined)}</div>);
         if (which === 'main') r.render(bar(sum(main)));
         if (which === 'stack') r.render(bar(sum(stack, { kind: 'switch', state: 'running', step: 'build web' })));
+        if (which === 'one') r.render(bar(sum(one)));
         if (which === 'pending') r.render(bar({ ...sum(main), restartPending: true, next: { ...stack, label: '#190 bbbbbbb + #182 aaaaaaa' } }));
         const general = (info) => <SettingsShell page="general" onPage={() => {}} onClose={() => {}}>
           <SettingsView page="general" onClose={() => {}} theme="light" onToggleTheme={() => {}} clis={[]} info={info} />
@@ -217,11 +226,136 @@ try {
     assert.match(job, /Needs a full rebuild/);
     assert.match(job, /Dockerfile — changed by the selection/);
   });
+  // ---- Pull latest, in the panel ----
+  const A2 = '1'.repeat(40), M2 = '3'.repeat(40);
+  const one = { kind: 'prs', label: '#182 aaaaaaa', id: 'rel-1', base: M, prs: [{ number: 182, sha: A }] };
+  const stack = { kind: 'prs', label: '#190 bbbbbbb + #182 aaaaaaa', id: 'rel-2', base: M, prs: [{ number: 190, sha: B }, { number: 182, sha: A }] };
+  const pullBtn = () => page.getByTestId('dev-preview-pull');
+  const fresh = () => page.getByTestId('dev-preview-fresh').innerText();
+  const showPanel = async (running) => {
+    await page.evaluate((r) => { window.__calls.length = 0; window.__setStatus({ job: null, log: [], running: r }); }, running);
+    await render('shell-on');
+    await page.waitForSelector('.devpv-prs li');
+  };
+  await check('Pull latest is offered only for a PR build; on main there is no button', async () => {
+    await page.evaluate(() => window.__resetPrs());
+    await showPanel({ kind: 'main', label: 'main', id: 'image', image: true, prs: [] });
+    assert.equal(await pullBtn().count(), 0);
+    assert.equal(await page.getByTestId('dev-preview-fresh').count(), 0);
+  });
+  await check('nothing moved: Pull latest is disabled and says up to date', async () => {
+    await page.evaluate(() => window.__resetPrs());
+    await showPanel(one);
+    assert.equal(await pullBtn().isDisabled(), true);
+    assert.match(await fresh(), /^Up to date with #182 and main\.$/);
+    assert.equal(await page.getByRole('button', { name: 'Roll back to main' }).isDisabled(), false);
+  });
+  await check('a moved PR enables Pull latest; it asks first, then posts the running PRs in order without SHAs', async () => {
+    await page.evaluate((sha) => { window.__resetPrs(); window.__prs.prs.find((p) => p.number === 182).sha = sha; }, A2);
+    await showPanel(stack);
+    assert.equal(await pullBtn().isDisabled(), false);
+    assert.match(await fresh(), /#182 has new commits \(now 1111111\)/);
+    assert.doesNotMatch(await fresh(), /#190|main moved/);
+    page.once('dialog', (d) => d.dismiss());
+    await pullBtn().click();
+    assert.deepEqual(await page.evaluate(() => window.__calls), [], 'declined: nothing sent');
+    let said = '';
+    page.once('dialog', (d) => { said = d.message(); d.accept(); });
+    await pullBtn().click();
+    await page.waitForFunction(() => window.__calls.length > 0);
+    // the stack's order (#190 first), not the list's or the moved PR's; no sha key at all
+    assert.deepEqual(await page.evaluate(() => window.__calls), [['switch', [{ number: 190 }, { number: 182 }]]]);
+    assert.match(said, /Run these PRs on this Space\?/);
+    assert.match(said, /#190 by bo \(write permission\).*\n#182 by ana \(admin permission\)/s);
+    assert.match(said, /secrets, bucket and agents/);
+  });
+  await check('main moving alone is also something to pull', async () => {
+    await page.evaluate((sha) => { window.__resetPrs(); window.__prs.main.sha = sha; }, M2);
+    await showPanel(one);
+    assert.equal(await pullBtn().isDisabled(), false);
+    assert.match(await fresh(), /^main moved to 3333333$/);
+  });
+  await check('a running PR that is closed or merged: no pull, the hint is to roll back', async () => {
+    await page.evaluate((sha) => { window.__resetPrs(); window.__prs.prs = window.__prs.prs.filter((p) => p.number !== 182); window.__prs.main.sha = sha; }, M2);
+    await showPanel(one);
+    assert.equal(await pullBtn().isDisabled(), true);
+    assert.match(await fresh(), /#182 is merged or closed, so there is nothing to pull\. Roll back to main/);
+    assert.equal(await page.getByRole('button', { name: 'Roll back to main' }).isDisabled(), false);
+  });
+  await check('a running PR the server now refuses: no pull, and why', async () => {
+    await page.evaluate((sha) => { window.__resetPrs(); Object.assign(window.__prs.prs.find((p) => p.number === 182), { sha, allowed: false, permission: 'read', refusal: 'its author ana has read permission on huggingface/agent-manager, not write, maintain or admin' }); }, A2);
+    await showPanel(one);
+    assert.equal(await pullBtn().isDisabled(), true);
+    assert.match(await fresh(), /#182 can no longer be previewed: its author ana has read permission/);
+  });
   await check('phone width: no sideways page scroll', async () => {
+    // with the Pull latest line showing, and a stack's longest running label
+    await page.evaluate((sha) => { window.__resetPrs(); window.__prs.prs.find((p) => p.number === 182).sha = sha; window.__prs.prs.find((p) => p.number === 190).sha = sha; }, A2);
+    await page.evaluate(() => window.__setStatus({ job: null, log: [] }));
+    await showPanel(stack);
     await page.setViewportSize({ width: 390, height: 900 });
     const over = await page.evaluate(() => document.querySelector('.settings-main').scrollWidth - document.querySelector('.settings-main').clientWidth);
     assert.ok(over <= 0, `overflow ${over}px`);
   });
+
+  // ---- Pull latest, in the sidebar row: a page of its own with a fake clock,
+  // so the 60 s refresh runs on demand. A fresh bundle also makes the PR
+  // build the one this tab "loaded", so no reload hint shares the note.
+  const clocked = await browser.newPage({ viewport: { width: 1100, height: 900 } });
+  await clocked.clock.install();
+  await clocked.setContent(`<style>${css}</style><div id="root"></div>`);
+  await clocked.addScriptTag({ path: bundle });
+  await check('the sidebar row re-reads the PR list every minute and on focus, and offers "pull latest"', async () => {
+    const reads = () => clocked.evaluate(() => window.__prsReads);
+    await clocked.evaluate(() => window.__render('one'));
+    await clocked.waitForFunction(() => document.querySelectorAll('#devpv-pick option').length > 1);
+    // the one running PR is its own entry, and nothing is newer yet
+    assert.equal(await clocked.getByTestId('dev-preview-pick').inputValue(), 'pr:182');
+    assert.equal(await clocked.getByTestId('dev-preview-note').count(), 0);
+    const before = await reads();
+    await clocked.evaluate((sha) => { window.__prs.prs.find((p) => p.number === 182).sha = sha; }, A2);
+    await clocked.clock.runFor(30_000);
+    assert.equal(await reads(), before, 'not before the minute is up');
+    await clocked.clock.runFor(30_000);
+    await clocked.getByTestId('dev-preview-pull-link').waitFor();
+    assert.equal(await reads(), before + 1);
+    assert.equal(await clocked.getByTestId('dev-preview-note').innerText(), '#182 has new commits · pull latest');
+    // still recognised as the running PR although its head moved; picking it again does nothing
+    assert.equal(await clocked.getByTestId('dev-preview-pick').inputValue(), 'pr:182');
+    // focus re-reads too: now main has moved as well
+    await clocked.evaluate((sha) => { window.__prs.main.sha = sha; window.dispatchEvent(new Event('focus')); }, M2);
+    await clocked.waitForFunction(() => /and main have new commits/.test(document.querySelector('[data-testid="dev-preview-note"]')?.textContent || ''));
+    assert.equal(await reads(), before + 2);
+  });
+  await check('the sidebar row offers nothing when the running PR is closed, and keeps the list when a read fails', async () => {
+    await clocked.evaluate(() => { window.__resetPrs(); window.__render('one'); });
+    await clocked.waitForFunction(() => document.querySelectorAll('#devpv-pick option').length > 1);
+    await clocked.evaluate(() => { window.__prs.prs = window.__prs.prs.filter((p) => p.number !== 182); window.__prs.main.sha = '3'.repeat(40); });
+    await clocked.clock.runFor(60_000);
+    await clocked.waitForFunction(() => document.getElementById('devpv-pick')?.value === 'running');
+    assert.equal(await clocked.getByTestId('dev-preview-pull-link').count(), 0);
+    // GitHub down: the dropdown keeps what it had rather than emptying
+    const options = await clocked.locator('#devpv-pick option').allInnerTexts();
+    const n = await clocked.evaluate(() => { window.__prs = { ok: false, error: 'rate limited' }; return window.__prsReads; });
+    await clocked.clock.runFor(60_000);
+    await clocked.waitForFunction((k) => window.__prsReads > k, n);
+    assert.deepEqual(await clocked.locator('#devpv-pick option').allInnerTexts(), options);
+  });
+  await check('the sidebar row\'s "pull latest" sends the panel\'s request, behind the same confirmation', async () => {
+    await clocked.evaluate((sha) => { window.__resetPrs(); window.__prs.prs.find((p) => p.number === 182).sha = sha; window.__render('one'); }, A2);
+    await clocked.getByTestId('dev-preview-pull-link').waitFor();
+    await clocked.evaluate(() => { window.__calls.length = 0; });
+    clocked.once('dialog', (d) => d.dismiss());
+    await clocked.getByTestId('dev-preview-pull-link').click();
+    assert.deepEqual(await clocked.evaluate(() => window.__calls), [], 'declined: nothing sent');
+    let said = '';
+    clocked.once('dialog', (d) => { said = d.message(); d.accept(); });
+    await clocked.getByTestId('dev-preview-pull-link').click();
+    await clocked.waitForFunction(() => window.__calls.length > 0);
+    assert.deepEqual(await clocked.evaluate(() => window.__calls), [['switch', [{ number: 182 }]]]);
+    assert.match(said, /#182 by ana \(admin permission\), branch on huggingface\/agent-manager/);
+  });
+  await clocked.close();
 } finally {
   await browser.close();
   fs.rmSync(tmp, { recursive: true, force: true });

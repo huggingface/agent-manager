@@ -95,12 +95,15 @@ body {
 .devpv-dim { color: var(--muted); }
 .devpv-warn, .devpv-err { color: var(--danger); }
 .devpv-link { flex: none; display: inline; border: none; background: transparent; padding: 0; font: inherit; font-size: 12px; color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; cursor: pointer; }
+.devpv-pull { color: var(--accent); font-weight: 600; }
+.devpv-dot { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; }
 .devpv-section { margin: 4px 0 22px; padding-bottom: 18px; border-bottom: 1px solid var(--border); }
 .devpv-section h3 { margin: 0 0 6px; font-size: 14px; }
 .devpv-panel { display: flex; flex-direction: column; gap: 12px; max-width: 860px; }
 .devpv-card { border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
 .devpv-row { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
 .devpv-k { flex: none; width: 92px; color: var(--muted); }
+.devpv-v { flex: 1 1 0; min-width: 0; }
 .devpv-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .devpv-steps { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
 .devpv-state.done { color: var(--accent); } .devpv-state.failed, .devpv-state.refused { color: var(--danger); }
