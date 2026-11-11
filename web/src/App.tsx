@@ -25,7 +25,7 @@ import { configuredCount, keepOffering } from './components/WelcomeSetup';
 import * as api from './api';
 import { pinnedSessionIds } from './lib/pinned';
 import { quietSessionIds } from './lib/idleWindow';
-import { applyAck, furtherMark, retireLocal, unreadIds, type ReadMark } from './lib/unread';
+import { applyAck, furtherMark, retireLocal, type ReadMark } from './lib/unread';
 // Matches the server's per-request cap; the client splits rather than being cut.
 const ACK_CHUNK = 100;
 import type { Cli, GridSpec, LaunchChoice, MoveTarget, OverviewChip, OverviewSort, Session, Tree } from './types';
@@ -691,10 +691,6 @@ export default function App() {
     }
     return out;
   }, [meta, readLocal]);
-  // Sessions with a reply not yet read: the sidebar's "done" mark (#242).
-  // Cleared through the same read tracking as the Overview and the reader
-  // (markSeen -> readLocal), never by merely viewing a terminal.
-  const unread = useMemo(() => unreadIds(metaRead, metaReady), [metaRead, metaReady]);
   // Once the server's own copy has caught up, the local acknowledgement has
   // nothing left to add — and a local mark for a generation that is gone would
   // otherwise keep overriding the truth forever. Retiring them is what lets
@@ -1395,7 +1391,6 @@ export default function App() {
         focusedId={focusedId}
         defaultPath={lastPath}
         ages={ages}
-        unread={unread}
         onActivate={activate}
         onOpenSession={openSession}
         onNewSession={newSession}
