@@ -66,16 +66,18 @@ export class CodexBindings {
   forSession(sessionId) { return this.read().find((r) => r.amSessionId === sessionId) || null; }
   /**
    * One indexed view for a whole roster pass, from memory: the same shape as
-   * this store (file, read, forSession) so display helpers take either, but
-   * forSession() is a Map lookup and nothing here touches the file after the
-   * first read. An unreadable file throws from every call, as read() would.
+   * this store (file, read, forSession, resolve) so display helpers take
+   * either, but the lookups are Map hits and nothing here touches the file
+   * after the first read. An unreadable file throws from every call, as read() would.
    * Display only: never for a decision that sends, binds, launches or stops.
    */
   snapshot() {
     const entry = this.#cached();
     const byId = new Map(entry.records?.map((r) => [r.amSessionId, r]));
+    const byThread = new Map(entry.records?.map((r) => [`${r.endpointId}:${r.threadId}`, r]));
     const value = () => { if (entry.error) throw entry.error; return entry.records; };
-    return { file: this.file, read: value, forSession: (id) => (value(), byId.get(id) || null) };
+    return { file: this.file, read: value, forSession: (id) => (value(), byId.get(id) || null),
+      resolve: (endpointId, threadId) => { if (!validThreadId(threadId)) throw fail('thread-invalid'); return value(), byThread.get(`${endpointId}:${threadId}`) || null; } };
   }
   #cached() {
     if (!this.cache) this.#store(this.#readSync());

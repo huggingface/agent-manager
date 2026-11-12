@@ -15,14 +15,18 @@ export function configuredEndpoint(config = observationConfig()) {
   const socket = fs.realpathSync(config.socket);
   return { socket, home, id: endpointIdentity({ socket, home }) };
 }
-export function contextForThread(threadId, { sessions, bindings = codexBindings, endpoint = configuredEndpoint() }) {
+// `display`: the roster's status badge asks with the roster's memory snapshot
+// as `bindings` and takes the workspace as it was recorded when the thread was
+// bound, because resolving it is a round trip to the bucket on the main thread
+// (#235). Every decision asks without it, reads the file and resolves the path.
+export function contextForThread(threadId, { sessions, bindings = codexBindings, endpoint = configuredEndpoint(), display = false }) {
   if (!validThreadId(threadId)) throw new ApiError(400, 'invalid-input', 'An exact Codex thread UUID is required.');
   const binding = bindings.resolve(endpoint.id, threadId);
   if (!binding) throw new ApiError(404, 'codex-unmapped', 'This Codex thread is not associated with an AM session.');
   const session = sessions.find((s) => s.id === binding.amSessionId);
   if (!session || session.cli !== 'codex' || session.sessionUuid !== binding.amSessionUuid
       || session.codexSessionId !== threadId) throw new ApiError(409, 'codex-binding-stale', 'The AM session no longer matches this binding.');
-  const cwd = fs.realpathSync(path.join(WORKSPACES_DIR, session.path ?? session.id));
+  const cwd = display ? binding.cwd : fs.realpathSync(path.join(WORKSPACES_DIR, session.path ?? session.id));
   if (cwd !== binding.cwd) throw new ApiError(409, 'codex-workspace-changed', 'The workspace no longer matches this binding.');
   return { amSessionId: session.id, name: session.name, threadId, endpointId: binding.endpointId,
     revision: binding.revision, workdir: cwd, archivedAt: session.archivedAt || null,

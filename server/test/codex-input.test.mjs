@@ -319,3 +319,24 @@ test('a binding that changes revision on disk between verification and submissio
  await assert.rejects(f.hub.send('am',{text:'hello',requestId:randomUUID()}),{code:'codex-binding-stale'});
  assert.equal(f.calls.filter(c=>c.method==='turn/start').length,0);
 });
+
+// The roster's status badge (issue #235 step 4): a poll hands status() the
+// roster's memory snapshot as `display`, and the whole status is built from it,
+// binding and workspace included, so a poll never reads the bindings file or
+// resolves a workspace path. That badge can describe a binding the file lost
+// up to a few seconds ago; every decision keeps reading the file.
+test('display status is built from the roster snapshot and never reads the bindings file; decisions still do', async () => {
+ const f=fixture();const bindings=f.deps.bindings;
+ let reads=0;const read=bindings.read.bind(bindings);bindings.read=(...a)=>{reads++;return read(...a);};
+ const snapshot=bindings.snapshot();
+ const shown=await f.hub.status('am',{display:snapshot});
+ assert.equal(shown.status,'idle');assert.equal(reads,0,'the badge asked the snapshot');
+ const checked=await f.hub.status('am');
+ assert.equal(checked.status,'idle');assert.ok(reads>=2,'coordination asked the file, before and after its awaits');
+ unbindOnDisk(f);const before=reads;
+ assert.equal((await f.hub.status('am',{display:snapshot})).status,'idle','a stale snapshot still describes the badge');
+ assert.equal(reads,before);
+ await assert.rejects(f.hub.status('am'),{code:'codex-unmapped'});
+ await assert.rejects(f.hub.send('am',{text:'hello',requestId:randomUUID()}),{code:'codex-unmapped'});
+ await assert.rejects(f.hub.status('am',{display:bindings.snapshot()}),{code:'codex-unmapped'},'a snapshot taken after that file read knows too');
+});

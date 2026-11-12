@@ -13,13 +13,19 @@ export class SessionRuntime {
   // roster's snapshot (memory); every choice that sends, launches or stops
   // goes through the store or through codexInput, which read the file.
   shared(session,bindings=this.bindings) {return session.cli==='codex'&&!!(session.codexSharedOnly||bindingIfKnown(session,bindings));}
-  async refresh(session,bindings=this.bindings) {
-    if(!this.shared(session,bindings))return null;
-    if(this.checks.has(session.id))return this.checks.get(session.id);
-    const pending=this.codex.status(session.id).then(status=>{this.states.set(session.id,{...status,at:Date.now()});return status;})
+  // `snapshot`: the roster's memory snapshot when a poll asks. The status is
+  // then built from it (codexInput.status with `display`), so a poll never
+  // reads the bindings file; it can describe a binding the file lost up to a
+  // few seconds ago. Coordination asks without one and gets a status whose
+  // binding was read from the file; the two never share a pending check.
+  async refresh(session,snapshot=null) {
+    if(!this.shared(session,snapshot||this.bindings))return null;
+    const key=snapshot?`display:${session.id}`:session.id;
+    if(this.checks.has(key))return this.checks.get(key);
+    const pending=this.codex.status(session.id,{display:snapshot}).then(status=>{this.states.set(session.id,{...status,at:Date.now()});return status;})
       .catch(()=>{const status={status:'unknown',at:Date.now()};this.states.set(session.id,status);return status;})
-      .finally(()=>this.checks.delete(session.id));
-    this.checks.set(session.id,pending);return pending;
+      .finally(()=>this.checks.delete(key));
+    this.checks.set(key,pending);return pending;
   }
   // Coordination must await a fresh native observation. An absent TUI or an
   // unavailable daemon is not evidence that a shared task has finished.
@@ -40,7 +46,7 @@ export class SessionRuntime {
     if (block) return {codexMigrationRequired:block};
     if(!this.shared(session,bindings))return null;
     const current=this.states.get(session.id);
-    if(!current||Date.now()-current.at>3000)void this.refresh(session,bindings);
+    if(!current||Date.now()-current.at>3000)void this.refresh(session,bindings===this.bindings?null:bindings);
     const status=current?.status||'unknown';
     return {recoveryKey:session.archivedAt ? null : current?.recoveryKey || null, interruptTurnId:session.archivedAt ? null : current?.activeTurnId || null, state:status==='working'?'working':['idle','needs-input'].includes(status)?'waiting':'stopped',
       running:['idle','working','needs-input'].includes(status),
