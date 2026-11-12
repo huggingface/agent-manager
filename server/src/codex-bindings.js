@@ -31,45 +31,63 @@ function validate(records) {
   return records;
 }
 
-// Cached in memory, because read() is on the sidebar's hot path: /api/tree,
-// /api/meta and /api/sessions call it on every poll of every tab, and on the
-// Space DATA_DIR is a FUSE bucket where one openSync costs the event loop
-// 40-115 ms of wall time even when the file does not exist (issue #235, A1).
+// read() reads the file, every time, as it always did: it is what every
+// identity check and every write runs on, and a stale answer there could let a
+// message, approval or interrupt reach a thread whose binding an operator has
+// just removed by hand. The one reader that may be stale is the ROSTER:
+// /api/tree, /api/meta and /api/sessions consult the bindings on every poll of
+// every tab, once for the list and again per Codex row, and on the Space
+// DATA_DIR is a FUSE bucket where one openSync parks the event loop for
+// 40-115 ms even when the file does not exist (issue #235, A1). snapshot()
+// serves that caller from memory.
 //
-// Freshness has two parts. In-process writes (bind) replace the cache
-// themselves: this file is the only writer in AM and holds the lock, so what
-// it wrote is what the file holds. Outside writes - an operator repairing or
-// removing the file by hand, a bucket restore - are picked up by re-reading
-// the file OFF the main thread (fs.promises) at most once per STALE_MS while
-// something is still reading, so the hot path makes no sync call at all and a
-// hand edit is visible within STALE_MS. The launch gate asks for a fresh read
-// (read({ fresh: true })) because that is where a stale answer could start a
-// second writer and where "repair the file and retry" must work at once; it
-// runs once per launch, not per poll.
+// The snapshot's freshness has two parts. Writes from this process (bind)
+// replace the memory copy as they land: this class is the only writer in AM
+// and holds the lock. Writes from outside - an operator repairing or removing
+// the file, a bucket restore - are picked up by re-reading the file OFF the
+// main thread (fs.promises) at most once per STALE_MS while something still
+// polls, so the roster can show such an edit up to STALE_MS late and never
+// pays a sync round trip for it.
 const STALE_MS = 5000;
 
 export class CodexBindings {
   constructor(file, io = fs, { staleMs = STALE_MS } = {}) {
     this.file = file; this.io = io; this.staleMs = staleMs;
-    this.cache = null;       // { records } | { error }, plus `at`
+    this.cache = null;       // { records } | { error }, plus `at`: what snapshot() answers from
     this.generation = 0;     // bumped by every cache replacement; a refresh that started before one is discarded
     this.refreshing = null;
   }
-  /** Forget what is cached: the next read() goes to the file. Tests and in-process writers. */
-  invalidate() { this.cache = null; this.generation++; }
+  /** The bindings as the file holds them now. One sync round trip. The array is frozen. */
+  read() {
+    const entry = this.#store(this.#readSync());
+    if (entry.error) throw entry.error;
+    return entry.records;
+  }
+  forSession(sessionId) { return this.read().find((r) => r.amSessionId === sessionId) || null; }
   /**
-   * The bindings, from memory. `fresh` reads the file now (one sync round
-   * trip) and replaces the cache. The returned array is shared and frozen.
+   * One indexed view for a whole roster pass, from memory: the same shape as
+   * this store (file, read, forSession) so display helpers take either, but
+   * forSession() is a Map lookup and nothing here touches the file after the
+   * first read. An unreadable file throws from every call, as read() would.
+   * Display only: never for a decision that sends, binds, launches or stops.
    */
-  read({ fresh = false } = {}) {
-    if (fresh || !this.cache) this.#store(this.#readSync());
+  snapshot() {
+    const entry = this.#cached();
+    const byId = new Map(entry.records?.map((r) => [r.amSessionId, r]));
+    const value = () => { if (entry.error) throw entry.error; return entry.records; };
+    return { file: this.file, read: value, forSession: (id) => (value(), byId.get(id) || null) };
+  }
+  #cached() {
+    if (!this.cache) this.#store(this.#readSync());
     else if (Date.now() - this.cache.at >= this.staleMs && !this.refreshing) this.#refresh();
-    if (this.cache.error) throw this.cache.error;
-    return this.cache.records;
+    return this.cache;
   }
   #store(entry) { this.cache = { ...entry, at: Date.now() }; this.generation++; return entry; }
-  #parse(st, text) {
-    if (!st.isFile() || st.size > 4 * 1024 * 1024) throw fail('bindings-invalid');
+  #drop() { this.cache = null; this.generation++; }
+  // The stat is checked before any content is read: a file that is not a
+  // regular file, or is over 4 MiB, is refused without reading it.
+  #admit(st) { if (!st.isFile() || st.size > 4 * 1024 * 1024) throw fail('bindings-invalid'); }
+  #parse(text) {
     const data = JSON.parse(text);
     if (data?.version !== 1) throw fail('bindings-invalid');
     return Object.freeze(validate(data.bindings));
@@ -83,7 +101,8 @@ export class CodexBindings {
     let fd;
     try {
       fd = io.openSync(this.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-      return { records: this.#parse(io.fstatSync(fd), io.readFileSync(fd, 'utf8')) };
+      this.#admit(io.fstatSync(fd));
+      return { records: this.#parse(io.readFileSync(fd, 'utf8')) };
     } catch (error) {
       return this.#outcome(error);
     } finally { if (fd !== undefined) io.closeSync(fd); }
@@ -93,22 +112,22 @@ export class CodexBindings {
     let fh;
     try {
       fh = await io.open(this.file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-      return { records: this.#parse(await fh.stat(), await fh.readFile('utf8')) };
+      this.#admit(await fh.stat());
+      return { records: this.#parse(await fh.readFile('utf8')) };
     } catch (error) {
       return this.#outcome(error);
     } finally { await fh?.close().catch(() => {}); }
   }
-  // Stale-while-revalidate: callers keep getting the cached answer; the file is
-  // re-read in the thread pool and swapped in unless something (a bind, an
-  // invalidate, a fresh read) replaced the cache meanwhile - a late result
-  // must never put back what an in-process write already superseded.
+  // Stale-while-revalidate: snapshots keep getting the cached answer; the file
+  // is re-read in the thread pool and swapped in unless something (a bind, a
+  // read, a dropped cache) replaced the cache meanwhile - a late result must
+  // never put back what an in-process write already superseded.
   #refresh() {
     const generation = this.generation;
     this.refreshing = this.#readAsync()
       .then((entry) => { if (this.generation === generation) this.#store(entry); }, () => {})
       .finally(() => { this.refreshing = null; });
   }
-  forSession(sessionId, options) { return this.read(options).find((r) => r.amSessionId === sessionId) || null; }
   resolve(endpointId, threadId) {
     if (!validThreadId(threadId)) throw fail('thread-invalid');
     return this.read().find((r) => r.endpointId === endpointId && r.threadId === threadId) || null;
@@ -122,7 +141,7 @@ export class CodexBindings {
       // A leftover lock is intentionally NOT removed automatically after a crash.
       // The operator must verify that no AM writer is alive before repairing it.
       lockFd = io.openSync(lock, 'wx', 0o600);
-      const records = this.read({ fresh: true });
+      const records = this.read();
       const current = records.find((r) => r.amSessionId === session.id);
       if (current) {
         if (current.amSessionUuid === session.sessionUuid && current.threadId === threadId
@@ -150,8 +169,8 @@ export class CodexBindings {
       this.#store({ records: next });
       return record;
     } catch (error) {
-      // Whatever the file holds now, the cache may not: the next read looks.
-      this.invalidate();
+      // Whatever the file holds now, the memory copy may not: the next snapshot looks.
+      this.#drop();
       if (error instanceof CodexBindingError) throw error;
       if (error.code === 'EEXIST' && lockFd === undefined) throw fail('bindings-busy');
       throw fail('bindings-write-failed');

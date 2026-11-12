@@ -95,6 +95,21 @@ if (isMainThread && ROOT !== '/nonexistent') {
     };
     Object.assign(wrapped, orig);
     Object.defineProperty(wrapped, 'name', { value: name });
+    // fs.realpathSync.native is its own function on the original: copied
+    // above as is, it would be a sync bucket call the tally never sees.
+    for (const [sub, fn] of Object.entries(orig)) {
+      if (typeof fn !== 'function') continue;
+      wrapped[sub] = function (...args) {
+        if (depth || !under(args[0])) return fn.apply(this, args);
+        depth++;
+        const t0 = performance.now();
+        try {
+          const ms = cost(name, args[0]);
+          if (ms) Atomics.wait(sleeper, 0, 0, ms);
+          return fn.apply(this, args);
+        } finally { depth--; count(`${name}.${sub}`, args[0], performance.now() - t0); }
+      };
+    }
     fs[name] = wrapped;
   }
   // Async: delay, never block. Promise API and the callback API both.
@@ -106,7 +121,7 @@ if (isMainThread && ROOT !== '/nonexistent') {
       return orig.apply(this, args);
     };
   }
-  for (const name of ['readFile', 'writeFile', 'appendFile', 'stat', 'lstat', 'readdir', 'open', 'rename', 'unlink', 'mkdir', 'rm', 'access', 'copyFile']) {
+  for (const name of ['readFile', 'writeFile', 'appendFile', 'stat', 'lstat', 'readdir', 'open', 'rename', 'unlink', 'mkdir', 'rm', 'access', 'copyFile', 'realpath']) {
     const orig = fs[name];
     if (typeof orig !== 'function') continue;
     const wrapped = function (...args) {
@@ -116,6 +131,17 @@ if (isMainThread && ROOT !== '/nonexistent') {
       setTimeout(() => orig.apply(this, args), ms);
     };
     Object.assign(wrapped, orig);
+    // fs.realpath.native, like its sync twin above: copied as is it would
+    // bypass the delay.
+    for (const [sub, fn] of Object.entries(orig)) {
+      if (typeof fn !== 'function') continue;
+      wrapped[sub] = function (...args) {
+        if (!under(args[0])) return fn.apply(this, args);
+        const ms = cost(name, args[0]);
+        if (!ms) return fn.apply(this, args);
+        setTimeout(() => fn.apply(this, args), ms);
+      };
+    }
     fs[name] = wrapped;
   }
   syncBuiltinESMExports();

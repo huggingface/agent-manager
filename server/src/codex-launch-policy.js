@@ -38,7 +38,8 @@ export function unsafeWithoutBindings(session) {
 /**
  * The binding if one can be read, null if there is none OR the file cannot be
  * read. Never throws. Only for callers whose answer cannot start a writer:
- * display, and stopping a pane.
+ * display, and stopping a pane. `bindings` is the store, or the roster's
+ * memory snapshot (CodexBindings.snapshot()) for display.
  */
 export function bindingIfKnown(session, bindings = codexBindings) {
   try { return bindings.forSession(session?.id) || null; } catch { return null; }
@@ -73,8 +74,8 @@ function bindingsUnreadable(bindings, cause) {
  * bindings — and an ordinary unpinned Codex session still must not be held
  * hostage by it.
  */
-export function sharedBinding(session, bindings = codexBindings, options) {
-  try { return bindings.forSession(session.id, options); }
+export function sharedBinding(session, bindings = codexBindings) {
+  try { return bindings.forSession(session.id); }
   catch (error) {
     if (unsafeWithoutBindings(session)) throw bindingsUnreadable(bindings, error);
     return null;
@@ -93,9 +94,9 @@ export function boundOrUnknown(sessionOrId, bindings = codexBindings) {
   try { return !!bindings.forSession(id); } catch { return true; }
 }
 
-export function codexLaunchBlock(session, bindings = codexBindings, options) {
+export function codexLaunchBlock(session, bindings = codexBindings) {
   if (session.cli !== 'codex') return null;
-  const binding = sharedBinding(session, bindings, options);
+  const binding = sharedBinding(session, bindings);
   if (binding) return null;
   // `codexSharedOnly` is set by two different writers, and they need two
   // different answers. prepareCodexMigration sets it alongside `codexMigration`
@@ -124,12 +125,8 @@ export function codexLaunchBlock(session, bindings = codexBindings, options) {
   };
 }
 
-// The gate before a terminal starts reads the FILE, not the cache: display can
-// lag a hand edit by a few seconds, a launch must not, and "repair the file and
-// retry" has to work on the retry. Once per launch, so the bucket round trip is
-// affordable here where it is not on a poll.
 export function assertCodexLaunchAllowed(session, bindings = codexBindings) {
-  const block = codexLaunchBlock(session, bindings, { fresh: true });
+  const block = codexLaunchBlock(session, bindings);
   if (block) throw new ApiError(409, block.code, block.message, {
     reason: block.state,
     details: [{ field: 'codexSessionId', message: block.threadId || 'Existing thread identity required' },

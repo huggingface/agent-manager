@@ -3215,14 +3215,18 @@ api.get('/api/folders', (req, res) => {
 
 function sessionsWithState() {
   const info = agentInfo();
+  // One bindings lookup for the whole roster, from memory: this runs on every
+  // poll of every tab, and the file lives on the bucket (#235). The snapshot
+  // is display only; every decision that acts on a binding reads the file.
+  const bindings = codexBindings.snapshot();
   // The roster must render with a damaged bindings file: without this, one bad
   // byte makes /api/tree and /api/sessions 500 and the sidebar never loads.
   let bound = [];
-  try { bound = codexBindings.read(); } catch { bound = []; }
+  try { bound = bindings.read(); } catch { bound = []; }
   const shared = new Set(bound.map((binding) => binding.amSessionId));
   return store.list().map((s) => {
     const state = deriveState(s, info.get(s.id));
-    const runtime = sessionRuntime.presentation(s);
+    const runtime = sessionRuntime.presentation(s, bindings);
     return { ...s, terminalRunning: isRunning(s.id), codexShared: s.cli === 'codex' && (s.codexSharedOnly || shared.has(s.id)), state, running: state !== 'stopped', inputRequired: info.get(s.id)?.inputRequired || null, ...runtime };
   });
 }

@@ -64,6 +64,6 @@ test('rejects outside files, symlink escapes, unavailable daemon, invalid header
  f.write(); f.deps.connect = async () => { throw new Error('private detail'); };
  await assert.rejects(f.run(), e => e.code === 'codex-reader-unavailable' && !e.message.includes('private'));
  const g = fixture(); const connect = g.deps.connect;
- g.deps.connect = async () => { const client = await connect(); fs.writeFileSync(g.bindings.file, '{"version":1,"bindings":[]}'); g.bindings.invalidate(); return client; };
+ g.deps.connect = async () => { const client = await connect(); fs.writeFileSync(g.bindings.file, '{"version":1,"bindings":[]}'); return client; };
  await assert.rejects(g.run()); assert.ok(g.closed());
 });

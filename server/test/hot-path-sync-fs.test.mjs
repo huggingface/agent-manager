@@ -20,6 +20,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +47,19 @@ const KNOWN = [
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'am-hot-path-'));
 const DATA_DIR = path.join(root, 'data'); fs.mkdirSync(DATA_DIR);
+// Stopped Codex rows, seeded in sessions.json so no CLI is launched. Every
+// Codex row costs the roster two bindings lookups beyond the list itself
+// (codexLaunchBlock -> sharedBinding, and shared -> bindingIfKnown), on the
+// bucket until #235 step 4; one of the rows is bound, so both the hit and the
+// miss of those lookups run on each poll.
+const THREAD = '11111111-1111-4111-8111-111111111111';
+const codexRows = [0, 1, 2].map((i) => ({ id: `codex-${i}`, name: `codex-${i}`, cli: 'codex', path: 'w',
+  sessionUuid: crypto.randomUUID(), codexSessionId: i ? crypto.randomUUID() : THREAD, everStarted: true, createdAt: new Date().toISOString() }));
+fs.mkdirSync(path.join(DATA_DIR, 'workspaces', 'w'), { recursive: true });
+fs.writeFileSync(path.join(DATA_DIR, 'sessions.json'), JSON.stringify(codexRows, null, 2));
+fs.writeFileSync(path.join(DATA_DIR, 'codex-bindings.json'), JSON.stringify({ version: 1, bindings: [{
+  amSessionId: codexRows[0].id, amSessionUuid: codexRows[0].sessionUuid, threadId: THREAD, endpointId: 'a'.repeat(64),
+  cwd: fs.realpathSync(path.join(DATA_DIR, 'workspaces', 'w')), revision: 1, boundAt: new Date().toISOString() }] }, null, 2));
 const HOME = path.join(root, 'home'); fs.mkdirSync(HOME);
 const PUBLIC_DIR = path.join(root, 'public'); fs.mkdirSync(PUBLIC_DIR);
 fs.writeFileSync(path.join(PUBLIC_DIR, 'index.html'), '<html>fixture</html>');
@@ -81,6 +95,10 @@ try {
   const get = (p) => fetch(API + p, { headers: H }).then((r) => r.arrayBuffer());
   await post('/api/welcome/seen');
   for (let i = 0; i < 3; i++) await post('/api/sessions', { cli: 'shell', name: `bg${i}`, path: '.' });
+  const tree = await (await fetch(API + '/api/tree', { headers: H })).json();
+  const rows = tree.sessions.filter((s) => s.cli === 'codex');
+  if (rows.length !== codexRows.length || rows.filter((s) => s.codexShared).length !== 1) throw new Error('fixture: expected 3 stopped Codex rows, 1 bound: ' + JSON.stringify(rows.map((s) => [s.id, s.state, s.codexShared])));
+  if (rows.some((s) => s.terminalRunning)) throw new Error('fixture: a Codex row launched a terminal');
   const made = await (await post('/api/sessions', { cli: 'test-repaint', name: 'typing', path: '.' })).json();
   if (!made.id) throw new Error('no session: ' + JSON.stringify(made));
   const ws = new WebSocket(`${API.replace('http', 'ws')}/ws?session=${made.id}&cols=100&rows=30`, { headers: H });

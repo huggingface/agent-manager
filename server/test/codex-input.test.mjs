@@ -281,3 +281,41 @@ test('archived recipient is distinct from missing binding, remains observable, a
  await assert.rejects(f.hub.send('am',{requestId:randomUUID(),text:'must not arrive'}),{code:'codex-target-archived'});
  assert.equal(f.calls.length,0);delete f.session.archivedAt;assert.equal(f.hub.context('am').stamp,original.stamp);
 });
+
+// The bindings file is AM's authority for which thread a session may address.
+// An operator can remove a binding by editing the file (the refusal that names
+// the file tells them to), and nothing in this process is told. Every path that
+// sends, approves, interrupts or attributes must read the file, not a memory
+// copy (issue #235 added one for the sidebar): this edits the file behind the
+// hub's back, between steps and in the middle of a verification, and never
+// touches the CodexBindings instance.
+const unbindOnDisk = (f) => fs.writeFileSync(f.deps.bindings.file, JSON.stringify({ version: 1, bindings: [] }));
+test('a binding removed from the file by hand refuses send, approval, interrupt, status and attribution at once', async () => {
+ const f=fixture();await f.hub.attach('am');
+ f.client.requests.set('q',{method:'item/commandExecution/requestApproval',params:{threadId:f.thread.id,availableDecisions:['accept','decline']}});
+ unbindOnDisk(f);
+ await assert.rejects(f.hub.send('am',{text:'hello',requestId:randomUUID()}),{code:'codex-unmapped'});
+ await assert.rejects(f.hub.answer('am',{key:'q',decision:'accept'}),{code:'codex-unmapped'});
+ await assert.rejects(f.hub.interrupt('am',{turnId:'active-turn'}),{code:'codex-unmapped'});
+ await assert.rejects(f.hub.status('am'),{code:'codex-unmapped'});
+ assert.throws(()=>f.hub.agentSource('am'),{code:'codex-unmapped'});
+ assert.equal(f.calls.filter(c=>['turn/start','turn/interrupt'].includes(c.method)).length,0);
+ assert.deepEqual(f.replies,[]);
+});
+test('a binding removed from the file while the thread is being verified stops the send before turn/start', async () => {
+ const f=fixture();const call=f.client.call.bind(f.client);
+ f.client.call=async(method,params)=>{const r=await call(method,params);if(method==='thread/read')unbindOnDisk(f);return r;};
+ await assert.rejects(f.hub.send('am',{text:'hello',requestId:randomUUID()}),{code:'codex-unmapped'});
+ assert.equal(f.calls.filter(c=>c.method==='turn/start').length,0);
+ assert.equal(f.calls.filter(c=>c.method==='thread/resume').length,0,'and before thread/resume: attach revalidates after thread/read too');
+});
+test('a binding that changes revision on disk between verification and submission is a stale binding, not a send', async () => {
+ const f=fixture();const call=f.client.call.bind(f.client);
+ // The same session, rebound to the same thread with a new revision, as a
+ // repair by hand would leave it: the stamp changes, the send must not go.
+ f.client.call=async(method,params)=>{const r=await call(method,params);
+  if(method==='thread/read'){const file=JSON.parse(fs.readFileSync(f.deps.bindings.file,'utf8'));file.bindings[0].revision=2;fs.writeFileSync(f.deps.bindings.file,JSON.stringify(file));}
+  return r;};
+ await assert.rejects(f.hub.send('am',{text:'hello',requestId:randomUUID()}),{code:'codex-binding-stale'});
+ assert.equal(f.calls.filter(c=>c.method==='turn/start').length,0);
+});
