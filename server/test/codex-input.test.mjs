@@ -281,3 +281,62 @@ test('archived recipient is distinct from missing binding, remains observable, a
  await assert.rejects(f.hub.send('am',{requestId:randomUUID(),text:'must not arrive'}),{code:'codex-target-archived'});
  assert.equal(f.calls.length,0);delete f.session.archivedAt;assert.equal(f.hub.context('am').stamp,original.stamp);
 });
+
+// The bindings file is AM's authority for which thread a session may address.
+// An operator can remove a binding by editing the file (the refusal that names
+// the file tells them to), and nothing in this process is told. Every path that
+// sends, approves, interrupts or attributes must read the file, not a memory
+// copy (issue #235 added one for the sidebar): this edits the file behind the
+// hub's back, between steps and in the middle of a verification, and never
+// touches the CodexBindings instance.
+const unbindOnDisk = (f) => fs.writeFileSync(f.deps.bindings.file, JSON.stringify({ version: 1, bindings: [] }));
+test('a binding removed from the file by hand refuses send, approval, interrupt, status and attribution at once', async () => {
+ const f=fixture();await f.hub.attach('am');
+ f.client.requests.set('q',{method:'item/commandExecution/requestApproval',params:{threadId:f.thread.id,availableDecisions:['accept','decline']}});
+ unbindOnDisk(f);
+ await assert.rejects(f.hub.send('am',{text:'hello',requestId:randomUUID()}),{code:'codex-unmapped'});
+ await assert.rejects(f.hub.answer('am',{key:'q',decision:'accept'}),{code:'codex-unmapped'});
+ await assert.rejects(f.hub.interrupt('am',{turnId:'active-turn'}),{code:'codex-unmapped'});
+ await assert.rejects(f.hub.status('am'),{code:'codex-unmapped'});
+ assert.throws(()=>f.hub.agentSource('am'),{code:'codex-unmapped'});
+ assert.equal(f.calls.filter(c=>['turn/start','turn/interrupt'].includes(c.method)).length,0);
+ assert.deepEqual(f.replies,[]);
+});
+test('a binding removed from the file while the thread is being verified stops the send before turn/start', async () => {
+ const f=fixture();const call=f.client.call.bind(f.client);
+ f.client.call=async(method,params)=>{const r=await call(method,params);if(method==='thread/read')unbindOnDisk(f);return r;};
+ await assert.rejects(f.hub.send('am',{text:'hello',requestId:randomUUID()}),{code:'codex-unmapped'});
+ assert.equal(f.calls.filter(c=>c.method==='turn/start').length,0);
+ assert.equal(f.calls.filter(c=>c.method==='thread/resume').length,0,'and before thread/resume: attach revalidates after thread/read too');
+});
+test('a binding that changes revision on disk between verification and submission is a stale binding, not a send', async () => {
+ const f=fixture();const call=f.client.call.bind(f.client);
+ // The same session, rebound to the same thread with a new revision, as a
+ // repair by hand would leave it: the stamp changes, the send must not go.
+ f.client.call=async(method,params)=>{const r=await call(method,params);
+  if(method==='thread/read'){const file=JSON.parse(fs.readFileSync(f.deps.bindings.file,'utf8'));file.bindings[0].revision=2;fs.writeFileSync(f.deps.bindings.file,JSON.stringify(file));}
+  return r;};
+ await assert.rejects(f.hub.send('am',{text:'hello',requestId:randomUUID()}),{code:'codex-binding-stale'});
+ assert.equal(f.calls.filter(c=>c.method==='turn/start').length,0);
+});
+
+// The roster's status badge (issue #235 step 4): a poll hands status() the
+// roster's memory snapshot as `display`, and the whole status is built from it,
+// binding and workspace included, so a poll never reads the bindings file or
+// resolves a workspace path. That badge can describe a binding the file lost
+// up to a few seconds ago; every decision keeps reading the file.
+test('display status is built from the roster snapshot and never reads the bindings file; decisions still do', async () => {
+ const f=fixture();const bindings=f.deps.bindings;
+ let reads=0;const read=bindings.read.bind(bindings);bindings.read=(...a)=>{reads++;return read(...a);};
+ const snapshot=bindings.snapshot();
+ const shown=await f.hub.status('am',{display:snapshot});
+ assert.equal(shown.status,'idle');assert.equal(reads,0,'the badge asked the snapshot');
+ const checked=await f.hub.status('am');
+ assert.equal(checked.status,'idle');assert.ok(reads>=2,'coordination asked the file, before and after its awaits');
+ unbindOnDisk(f);const before=reads;
+ assert.equal((await f.hub.status('am',{display:snapshot})).status,'idle','a stale snapshot still describes the badge');
+ assert.equal(reads,before);
+ await assert.rejects(f.hub.status('am'),{code:'codex-unmapped'});
+ await assert.rejects(f.hub.send('am',{text:'hello',requestId:randomUUID()}),{code:'codex-unmapped'});
+ await assert.rejects(f.hub.status('am',{display:bindings.snapshot()}),{code:'codex-unmapped'},'a snapshot taken after that file read knows too');
+});

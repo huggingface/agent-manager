@@ -8,14 +8,24 @@ export class SessionRuntime {
   // of throwing: this is on the path of /api/tree and /api/sessions, and a
   // sidebar that cannot load is worse than a row missing a shared badge. The
   // launch path reads the file for itself and refuses there.
-  shared(session) {return session.cli==='codex'&&!!(session.codexSharedOnly||bindingIfKnown(session,this.bindings));}
-  async refresh(session) {
-    if(!this.shared(session))return null;
-    if(this.checks.has(session.id))return this.checks.get(session.id);
-    const pending=this.codex.status(session.id).then(status=>{this.states.set(session.id,{...status,at:Date.now()});return status;})
+  //
+  // `bindings` is the store (reads the file) unless the caller passes the
+  // roster's snapshot (memory); every choice that sends, launches or stops
+  // goes through the store or through codexInput, which read the file.
+  shared(session,bindings=this.bindings) {return session.cli==='codex'&&!!(session.codexSharedOnly||bindingIfKnown(session,bindings));}
+  // `snapshot`: the roster's memory snapshot when a poll asks. The status is
+  // then built from it (codexInput.status with `display`), so a poll never
+  // reads the bindings file; it can describe a binding the file lost up to a
+  // few seconds ago. Coordination asks without one and gets a status whose
+  // binding was read from the file; the two never share a pending check.
+  async refresh(session,snapshot=null) {
+    if(!this.shared(session,snapshot||this.bindings))return null;
+    const key=snapshot?`display:${session.id}`:session.id;
+    if(this.checks.has(key))return this.checks.get(key);
+    const pending=this.codex.status(session.id,{display:snapshot}).then(status=>{this.states.set(session.id,{...status,at:Date.now()});return status;})
       .catch(()=>{const status={status:'unknown',at:Date.now()};this.states.set(session.id,status);return status;})
-      .finally(()=>this.checks.delete(session.id));
-    this.checks.set(session.id,pending);return pending;
+      .finally(()=>this.checks.delete(key));
+    this.checks.set(key,pending);return pending;
   }
   // Coordination must await a fresh native observation. An absent TUI or an
   // unavailable daemon is not evidence that a shared task has finished.
@@ -24,16 +34,19 @@ export class SessionRuntime {
     const current = await this.refresh(session);
     return ({working:'working', idle:'waiting', 'needs-input':'waiting', unloaded:'stopped'})[current?.status] || 'unknown';
   }
-  presentation(session) {
+  // One row of the roster. The caller passes the snapshot it took for the
+  // whole pass (one bindings read per /api/tree, not one per Codex row);
+  // without one, this takes its own, still from memory.
+  presentation(session,bindings=this.bindings.snapshot?.()??this.bindings) {
     // Same reason: the roster is built from this. A file we cannot read leaves
     // the row undecorated; attempting to launch still produces the refusal that
     // names the file.
     let block;
-    try { block = codexLaunchBlock(session, this.bindings); } catch { return null; }
+    try { block = codexLaunchBlock(session, bindings); } catch { return null; }
     if (block) return {codexMigrationRequired:block};
-    if(!this.shared(session))return null;
+    if(!this.shared(session,bindings))return null;
     const current=this.states.get(session.id);
-    if(!current||Date.now()-current.at>3000)void this.refresh(session);
+    if(!current||Date.now()-current.at>3000)void this.refresh(session,bindings===this.bindings?null:bindings);
     const status=current?.status||'unknown';
     return {recoveryKey:session.archivedAt ? null : current?.recoveryKey || null, interruptTurnId:session.archivedAt ? null : current?.activeTurnId || null, state:status==='working'?'working':['idle','needs-input'].includes(status)?'waiting':'stopped',
       running:['idle','working','needs-input'].includes(status),
