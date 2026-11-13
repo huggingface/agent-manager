@@ -129,6 +129,126 @@ fi
 
 log() { echo "${AGENT_STATE_LOG_PREFIX:-}agent-state: $*"; }
 now() { date +%s; }
+
+# ---------- the durable log and the per-adapter status ----------
+#
+# On 2026-11-06 the Claude checkpoint started failing on every pass and went on
+# failing for a week; nobody saw it, because the only trace was a WARN line on
+# the container's stdout, which a restart throws away — and the restart then
+# brought back a week-old tree. So a failure is now also written down twice:
+#
+#   - $DATA_DIR/state/agent-state.log: which adapter, rsync's exit code, its
+#     last stderr lines, the paths that failed. It survives a restart. The
+#     bucket mount cannot append (see the top of this file), so the log is kept
+#     on local disk and the whole file is copied over, closed, at the end of a
+#     pass that wrote to it — under `timeout`, so a hung mount costs a pass a
+#     few seconds and never a checkpoint. A copy that failed is tried again by
+#     the next pass. At AGENT_STATE_LOG_MAX bytes it rotates to `.1`.
+#   - $AM_LOCAL/agent-state-status/<adapter>: last success, consecutive failed
+#     passes, the reason — `key=value` lines on local disk, which the server
+#     reads for /api/info (server/src/checkpoint-health.js) and the UI warns
+#     from. `_pass` there is the time the last pass ended: a pass that hangs
+#     updates nothing else.
+STATUS_DIR="$AM_LOCAL/agent-state-status"
+LOG_LOCAL="$AM_LOCAL/agent-state.log"
+LOG_DURABLE="${AGENT_STATE_LOG:-$DATA_DIR/state/agent-state.log}"
+LOG_MAX="${AGENT_STATE_LOG_MAX:-1048576}"
+# A failure that repeats unchanged is logged on its first pass and then once
+# every this many passes (5 minutes at the default 15 s interval).
+LOG_EVERY="${AGENT_STATE_LOG_EVERY:-20}"
+# One checkpoint copy may run this long (seconds; 0 = no limit). A copy stuck on
+# a hung mount would otherwise hold the lock, and every adapter after it, for
+# good. What it had already written stays in rsync's partial directory and is
+# reused by the next pass, so a copy that is merely big still gets there.
+STEP_TIMEOUT=""
+case "$MODE" in checkpoint|checkpoint-final) STEP_TIMEOUT="${AGENT_STATE_CHECKPOINT_TIMEOUT:-1800}" ;; esac
+[ "$STEP_TIMEOUT" = 0 ] && STEP_TIMEOUT=""
+guard() { if [ -n "$STEP_TIMEOUT" ]; then timeout -k 5 "$STEP_TIMEOUT" "$@"; else "$@"; fi; }
+# After one copy of a list failed, at most this many further rsyncs, and this
+# many seconds, are spent in one pass finding which paths it was.
+RETRY_MAX="${AGENT_STATE_RETRY_MAX:-24}"
+RETRY_SECONDS="${AGENT_STATE_RETRY_SECONDS:-120}"
+
+iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$1"; }
+# One line, no control characters, bounded: what goes into a status value.
+clean() { printf '%s' "$1" | tr '\n\r\t' '   ' | tr -d '\000-\037' | cut -c1-"${2:-400}"; }
+
+# The local log starts from the durable one, so the file stays one history
+# across restarts. When that cannot be read in time, the durable log is moved
+# to `.1` before the first copy over it rather than overwritten.
+log_seed() {
+  [ -e "$LOG_LOCAL" ] && return 0
+  if timeout 10 cp "$LOG_DURABLE" "$LOG_LOCAL.seed" 2>/dev/null && mv "$LOG_LOCAL.seed" "$LOG_LOCAL"; then return 0; fi
+  rm -f "$LOG_LOCAL.seed"
+  timeout 5 test ! -e "$LOG_DURABLE" 2>/dev/null || : > "$LOG_LOCAL.unseeded"
+  : > "$LOG_LOCAL"
+}
+# durable_log TEXT: to stderr, and into the log that survives a restart.
+durable_log() {
+  echo "${AGENT_STATE_LOG_PREFIX:-}agent-state: $*" >&2
+  log_seed 2>/dev/null
+  printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$MODE" "$(clean "$*" 4000)" >> "$LOG_LOCAL" 2>/dev/null
+  if [ "$(stat -c %s "$LOG_LOCAL" 2>/dev/null || echo 0)" -gt "$LOG_MAX" ]; then
+    mv -f "$LOG_LOCAL" "$LOG_LOCAL.1" 2>/dev/null && : > "$LOG_LOCAL.rotated"
+    : > "$LOG_LOCAL"
+  fi
+  : > "$LOG_LOCAL.dirty"
+}
+# Copy the log to $DATA_DIR if it changed. Never fails and never waits long.
+publish_log() {
+  [ -e "$LOG_LOCAL.dirty" ] || return 0
+  timeout 10 mkdir -p "$(dirname "$LOG_DURABLE")" 2>/dev/null
+  if [ -e "$LOG_LOCAL.unseeded" ]; then
+    timeout 10 mv -f "$LOG_DURABLE" "$LOG_DURABLE.1" 2>/dev/null
+    rm -f "$LOG_LOCAL.unseeded" "$LOG_LOCAL.rotated"
+  fi
+  if [ -e "$LOG_LOCAL.rotated" ]; then
+    timeout 20 rsync -a "$LOG_LOCAL.1" "$LOG_DURABLE.1" 2>/dev/null || return 0
+    rm -f "$LOG_LOCAL.rotated"
+  fi
+  timeout 20 rsync -a "$LOG_LOCAL" "$LOG_DURABLE" 2>/dev/null && rm -f "$LOG_LOCAL.dirty"
+  return 0
+}
+
+status_get() { sed -n "s/^$2=//p" "$STATUS_DIR/$1" 2>/dev/null | head -n 1; }
+# status_put NAME: the `key=value` lines on stdin, in place by rename.
+status_put() {
+  mkdir -p "$STATUS_DIR" && cat > "$STATUS_DIR/.$1.$$" && mv -f "$STATUS_DIR/.$1.$$" "$STATUS_DIR/$1"
+}
+pass_done() { printf 'finished=%s\nmode=%s\nfailures=%s\n' "$(now)" "$MODE" "${1:-0}" | status_put _pass; }
+
+# What the adapter that just failed has to say for itself; set by the
+# checkpoint functions, read by record_fail.
+FAIL_RC="" FAIL_REASON="" FAIL_STDERR="" FAIL_PATHS="" FAIL_PENDING=0 FAIL_COPIED=0
+record_ok() {
+  _was=$(status_get "$1" failures)
+  if [ "${_was:-0}" -gt 0 ]; then
+    durable_log "$1: checkpoint recovered after ${_was} failed pass(es), failing since $(iso "$(status_get "$1" failing_since)")"
+  fi
+  _t=$(now)
+  printf 'adapter=%s\nlast_attempt=%s\nlast_success=%s\nfailures=0\n' "$1" "$_t" "$_t" | status_put "$1"
+}
+record_fail() {
+  _n=$(( $(status_get "$1" failures) + 1 ))
+  _since=$(status_get "$1" failing_since); [ -n "$_since" ] || _since=$(now)
+  _sig=$(clean "$FAIL_RC|$FAIL_PENDING|$FAIL_PATHS|$FAIL_REASON")
+  _old=$(status_get "$1" sig)
+  {
+    printf 'adapter=%s\nlast_attempt=%s\nlast_success=%s\nfailures=%s\nfailing_since=%s\n' \
+      "$1" "$(now)" "$(status_get "$1" last_success)" "$_n" "$_since"
+    printf 'rc=%s\npending=%s\ncopied=%s\nreason=%s\npaths=%s\nsig=%s\n' \
+      "$FAIL_RC" "$FAIL_PENDING" "$FAIL_COPIED" "$(clean "$FAIL_REASON")" "$(clean "$FAIL_PATHS" 1000)" "$_sig"
+  } | status_put "$1"
+  if [ "$_n" -eq 1 ] || [ "$_sig" != "$_old" ] || [ $((_n % LOG_EVERY)) -eq 0 ]; then
+    durable_log "$1: checkpoint FAILED, pass $_n in a row (failing since $(iso "$_since")): ${FAIL_RC:+exit $FAIL_RC; }$FAIL_PENDING path(s) not copied, $FAIL_COPIED copied${FAIL_PATHS:+; paths: $FAIL_PATHS}${FAIL_STDERR:+; stderr: $FAIL_STDERR}${FAIL_REASON:+; reason: $FAIL_REASON}"
+  fi
+}
+# run_checkpoint ADAPTER FUNCTION ARGS…: one adapter, with its outcome recorded.
+run_checkpoint() {
+  _ad="$1"; shift
+  FAIL_RC="" FAIL_REASON="" FAIL_STDERR="" FAIL_PATHS="" FAIL_PENDING=0 FAIL_COPIED=0
+  if "$@"; then record_ok "$_ad"; else record_fail "$_ad"; failures=$((failures + 1)); fi
+}
 elapsed() {
   _s=$(( $(now) - $1 ))
   if [ "$_s" -ge 60 ]; then printf '%dm%02ds' $((_s / 60)) $((_s % 60)); else printf '%ds' "$_s"; fi
@@ -155,8 +275,12 @@ mark_checkpoint_floor() {
 # Treating it as a failure once refused to boot the Space at all.
 # Single-file copies below keep the strict test: there, a vanished source is
 # exactly the file we were asked for.
+#
+# `.~tmp~` is where --delay-updates keeps a file until its rename. An rsync
+# that died left some behind in the durable trees; they are never state, so no
+# restore brings one back and no checkpoint copies one out again.
 rsync_tree() {
-  bounded "rsync from ${SRC_DESC:-$DATA_DIR}" "" rsync "$@"; _rs_rc=$?
+  bounded "rsync from ${SRC_DESC:-$DATA_DIR}" "" rsync --exclude '.~tmp~/' --exclude '**/.~tmp~/***' "$@"; _rs_rc=$?
   [ "$_rs_rc" -eq 24 ] && _rs_rc=0
   return "$_rs_rc"
 }
@@ -185,7 +309,7 @@ step() { [ -n "$DEADLINE" ] && echo "$1" > "$WORK/step.$KEY"; }
 # when it was stopped.
 bounded() {
   _bs="$1" _be="${2:-$DEADLINE}"; shift 2
-  [ -n "$DEADLINE" ] || { "$@"; return; }
+  [ -n "$DEADLINE" ] || { guard "$@"; return; }
   [ "$_be" -gt "$DEADLINE" ] && _be="$DEADLINE"
   step "$_bs"
   _bl=$(( _be - $(now) ))
@@ -349,6 +473,23 @@ restore_tree() {
   fi
 }
 
+# One adapter's changed files to its durable tree.
+#
+# The files changed since the stamp go to rsync as ONE list. It used to be all
+# or nothing: a list that failed left the stamp where it was, so the next pass
+# sent the same list plus whatever had changed since, failed on the same file
+# again, and so on — one bad path held back every other file of the adapter for
+# as long as it existed. Now a list that fails is cut in half and each half
+# tried on its own, down to single paths (at most RETRY_MAX rsyncs and
+# RETRY_SECONDS per pass). Every half that copies is durable; the stamp moves
+# on; and only the paths that still fail are kept, in `<stamp>.retry`, and
+# tried again as a list of their own on every later pass until they copy or are
+# gone. The pass then reports failure, naming them.
+#
+# Unchanged: each rsync still writes temporaries and renames them at its end
+# (--delay-updates), so no partial file is ever visible; and `next` is still
+# taken before the tree is listed, so a file changed during the copy is listed
+# again by the next pass.
 checkpoint_tree() {
   key="$1" live="$2" durable="$3"
   [ -d "$live" ] || return 0
@@ -362,23 +503,96 @@ checkpoint_tree() {
   # Mark the START of this checkpoint. Any file changed during/after its copy
   # is newer than `next` and will therefore be selected again next time.
   next="$stamp.next.$$"
-  list="$stamp.files.$$"
+  retry="$stamp.retry"
+  ct_work="$stamp.work.$$"
+  rm -rf "$ct_work"
+  mkdir -p "$ct_work"
   mark_checkpoint_floor "$next"
-  (cd "$live" && find . -type f -newer "$stamp" -print0) > "$list"
+  # The paths that failed before and still exist, and the newly changed ones
+  # that are not among them: two lists, so a path that keeps failing costs a
+  # pass one small rsync instead of failing the list of new files with it.
+  : > "$ct_work/old"
+  [ -s "$retry" ] && (cd "$live" && xargs -0 -r sh -c 'for f; do [ -f "$f" ] && printf "%s\0" "$f"; done' sh) \
+    < "$retry" | LC_ALL=C sort -zu > "$ct_work/old"
+  (cd "$live" && find . -type f -newer "$stamp" -print0) | LC_ALL=C sort -zu > "$ct_work/found"
+  LC_ALL=C comm -z -23 "$ct_work/found" "$ct_work/old" > "$ct_work/new"
 
-  if [ -s "$list" ]; then
+  ct_head=1 ct_tail=0 ct_tries=0 ct_copied=0 ct_rc="" ct_t0=$(now)
+  : > "$ct_work/failed"; : > "$ct_work/single"
+  for ct_f in new old; do
+    [ -s "$ct_work/$ct_f" ] && { ct_tail=$((ct_tail + 1)); mv "$ct_work/$ct_f" "$ct_work/q.$ct_tail"; }
+  done
+  ct_first="$ct_tail"
+  while [ "$ct_head" -le "$ct_tail" ]; do
+    ct_chunk="$ct_work/q.$ct_head"; ct_this="$ct_head"; ct_head=$((ct_head + 1))
+    ct_count=$(tr -cd '\0' < "$ct_chunk" | wc -c | tr -d ' ')
+    # Out of tries or time for this pass: what is left waits for the next one.
+    if [ "$ct_this" -gt "$ct_first" ] \
+        && { [ "$ct_tries" -ge "$RETRY_MAX" ] || [ $(( $(now) - ct_t0 )) -ge "$RETRY_SECONDS" ]; }; then
+      cat "$ct_chunk" >> "$ct_work/failed"
+      continue
+    fi
+    [ "$ct_this" -gt "$ct_first" ] && ct_tries=$((ct_tries + 1))
     # --files-from means rsync walks only changed LOCAL paths. It does not scan
     # the remote tree every 15 seconds — a critical property on the bucket
     # mount. Destination temporaries close before rename, retaining the prior
     # object if this process dies during transfer.
-    if ! rsync_adapter checkpoint "$key" -a -r --from0 --files-from="$list" --delay-updates \
-      "$live/" "$durable/"; then
-      rm -f "$next" "$list"
-      return 1
+    rsync_adapter checkpoint "$key" -a -r --from0 --files-from="$ct_chunk" --delay-updates \
+      "$live/" "$durable/" 2> "$ct_work/err"; ct_one=$?
+    if [ "$ct_one" -eq 0 ]; then
+      cat "$ct_work/err" >&2
+      ct_copied=$((ct_copied + ct_count))
+      continue
     fi
+    # The first failure is the one reported, unless a single path is found to
+    # blame: that one's message names the real cause.
+    if [ -z "$ct_rc" ] || { [ "$ct_count" -le 1 ] && [ ! -s "$ct_work/single" ]; }; then
+      ct_rc="$ct_one"
+      cp "$ct_work/err" "$ct_work/err.report"
+      cat "$ct_work/err" >&2
+    fi
+    if [ "$ct_count" -le 1 ]; then
+      cat "$ct_chunk" >> "$ct_work/failed"; cat "$ct_chunk" >> "$ct_work/single"
+    elif [ "$ct_one" -eq 124 ] || [ "$ct_one" -eq 137 ]; then
+      # Stopped by the time limit: halving it would only wait twice.
+      cat "$ct_chunk" >> "$ct_work/failed"
+    else
+      split -t '\0' -l $(( (ct_count + 1) / 2 )) "$ct_chunk" "$ct_work/half.$ct_this."
+      for ct_f in "$ct_work/half.$ct_this."*; do
+        ct_tail=$((ct_tail + 1)); mv "$ct_f" "$ct_work/q.$ct_tail"
+      done
+    fi
+  done
+
+  ct_status=0
+  if [ -s "$ct_work/failed" ]; then
+    ct_status=1
+    LC_ALL=C sort -zu "$ct_work/failed" > "$retry.next.$$" && mv -f "$retry.next.$$" "$retry"
+    # A path that failed on its own may have left its temporary behind. This
+    # process holds the checkpoint lock, so no rsync is writing there now.
+    tr '\0' '\n' < "$ct_work/single" | sed 's|/[^/]*$||' | LC_ALL=C sort -u | head -n 200 | while IFS= read -r ct_d; do
+      ct_t="$durable/$ct_d/.~tmp~"
+      [ -d "$ct_t" ] && [ ! -L "$ct_t" ] && guard rm -rf -- "$ct_t"
+    done
+    FAIL_RC="$ct_rc"
+    FAIL_PENDING=$(( FAIL_PENDING + $(tr -cd '\0' < "$retry" | wc -c | tr -d ' ') ))
+    FAIL_PATHS="$FAIL_PATHS${FAIL_PATHS:+, }$(tr '\0' '\n' < "$retry" | head -n 5 | sed 's|^\./||' | paste -sd, - | sed 's/,/, /g')"
+    FAIL_STDERR=$(grep -v '^$' "$ct_work/err.report" 2>/dev/null | tail -n 5 | paste -sd'|' - | sed 's/|/ | /g')
+    FAIL_REASON=$(grep -v -e '^$' -e '^rsync error:' "$ct_work/err.report" 2>/dev/null | head -n 1)
+    [ -n "$FAIL_REASON" ] || FAIL_REASON=$(grep -v '^$' "$ct_work/err.report" 2>/dev/null | tail -n 1)
+    if [ "$ct_rc" = 124 ] || [ "$ct_rc" = 137 ]; then
+      FAIL_REASON="the copy to $durable did not finish within ${STEP_TIMEOUT}s (AGENT_STATE_CHECKPOINT_TIMEOUT)"
+    fi
+    [ -n "$FAIL_REASON" ] || FAIL_REASON="rsync exit $ct_rc"
+  else
+    rm -f "$retry"
   fi
+  FAIL_COPIED=$((FAIL_COPIED + ct_copied))
+  # The retry list is in place before the stamp moves: killed in between, the
+  # next pass lists everything again from the old stamp.
   mv "$next" "$stamp"
-  rm -f "$list"
+  rm -rf "$ct_work"
+  return "$ct_status"
 }
 
 # The newest few Claude config backups, by the millisecond stamp in their
@@ -476,10 +690,10 @@ checkpoint_sqlite_tree() {
   # A harness can write ordinary state before it creates its database (Hermes
   # setup files are a real example). Always publish that file tree first. The
   # database backup is optional until the database itself exists.
-  if ! checkpoint_tree "$checkpoint_name-files" "$live" "$durable"; then
-    return 1
-  fi
-  [ -s "$source" ] || return 0
+  # A file that could not be copied fails the adapter, but no longer keeps the
+  # database from being backed up.
+  checkpoint_tree "$checkpoint_name-files" "$live" "$durable"; tree_rc=$?
+  [ -s "$source" ] || return "$tree_rc"
 
   sqlite_stamp_dir="$AM_LOCAL/agent-state-stamps"
   sqlite_stamp="$sqlite_stamp_dir/$checkpoint_name-sqlite"
@@ -500,7 +714,7 @@ checkpoint_sqlite_tree() {
   } > "$sqlite_next"
   if cmp -s "$sqlite_next" "$sqlite_stamp"; then
     rm -f "$sqlite_next"
-    return 0
+    return "$tree_rc"
   fi
 
   stage_dir="$AM_LOCAL/agent-state-snapshots"
@@ -516,19 +730,27 @@ checkpoint_sqlite_tree() {
   # check would then skip it as unchanged.
   if ! sqlite3 "$source" ".timeout 5000" ".backup '$escaped'"; then
     rm -f "$staged" "$sqlite_next"
+    FAIL_REASON="SQLite could not back up $source"; FAIL_PATHS="$db_name"
     return 1
   fi
   if [ "$(sqlite3 "$staged" 'PRAGMA quick_check;' 2>/dev/null)" != ok ]; then
     echo "agent-state: refusing invalid SQLite checkpoint for $source" >&2
     rm -f "$staged" "$sqlite_next"
+    FAIL_REASON="the backup of $source is not a valid database; the previous checkpoint is kept"; FAIL_PATHS="$db_name"
     return 1
   fi
-  if ! rsync -a -I --delay-updates "$staged" "$durable/checkpoints/$checkpoint_name"; then
-    rm -f "$staged" "$sqlite_next"
+  guard rsync -a -I --delay-updates "$staged" "$durable/checkpoints/$checkpoint_name" 2> "$staged.err"; sqlite_rc=$?
+  cat "$staged.err" >&2
+  if [ "$sqlite_rc" -ne 0 ]; then
+    FAIL_RC="$sqlite_rc" FAIL_PATHS="checkpoints/$checkpoint_name"
+    FAIL_REASON=$(grep -v -e '^$' -e '^rsync error:' "$staged.err" | head -n 1)
+    [ -n "$FAIL_REASON" ] || FAIL_REASON="rsync exit $sqlite_rc copying the database checkpoint"
+    rm -f "$staged" "$staged.err" "$sqlite_next"
     return 1
   fi
-  rm -f "$staged"
+  rm -f "$staged" "$staged.err"
   mv "$sqlite_next" "$sqlite_stamp"
+  return "$tree_rc"
 }
 
 # Antigravity's databases, as `find` lists them under a tree with
@@ -585,7 +807,8 @@ agy_db_sig() { stat -c '%s|%.9Y|%.9Z|%i' "$1" "$1-wal" 2>/dev/null | paste -sd, 
 checkpoint_antigravity() {
   live="$1" durable="$2"
   [ -d "$live" ] || return 0
-  checkpoint_tree antigravity "$live" "$durable" || return 1
+  # As for opencode and Hermes: a file that fails does not skip the databases.
+  checkpoint_tree antigravity "$live" "$durable"; agy_tree_rc=$?
   db_stamp="$AM_LOCAL/agent-state-stamps/antigravity-db"
   db_retry="$db_stamp.retry"
   db_left="$db_stamp.left"
@@ -614,24 +837,26 @@ checkpoint_antigravity() {
     if agy_backup "$live/$rel" "$staged"; then
       mkdir -p "$(dirname "$durable/$rel")"
       # -I, as in checkpoint_sqlite_tree: same size and second is not "unchanged".
-      rsync -a -I --delay-updates "$staged" "$durable/$rel" && continue
+      guard rsync -a -I --delay-updates "$staged" "$durable/$rel" && continue
     fi
     tries=$(awk -v r="$rel" '{ n = $1; sub(/^[0-9]+ /, "") } $0 == r { print n; exit }' "$db_retry" 2>/dev/null)
     tries=$(( ${tries:-0} + 1 ))
     if [ "$tries" -ge "$AGY_DB_TRIES" ]; then
-      echo "agent-state: could not take a consistent copy of $live/$rel after $tries passes; leaving it until it changes" >&2
+      durable_log "antigravity: could not take a consistent copy of $live/$rel after $tries passes; leaving it until it changes"
       printf '%s %s\n' "$sig" "$rel" >> "$left_next"
     else
       echo "agent-state: could not take a consistent copy of $live/$rel; retrying next pass" >&2
       printf '%s %s\n' "$tries" "$rel" >> "$retry_next"
       db_failed=1
+      FAIL_PENDING=$((FAIL_PENDING + 1)); FAIL_PATHS="$FAIL_PATHS${FAIL_PATHS:+, }$rel"
+      [ -n "$FAIL_REASON" ] || FAIL_REASON="could not take a consistent copy of a database"
     fi
   done < "$db_list"
   rm -f "$staged" "$db_list"
   mv "$retry_next" "$db_retry"
   mv "$left_next" "$db_left"
   mv "$db_next" "$db_stamp"
-  [ "$db_failed" -eq 0 ]
+  [ "$db_failed" -eq 0 ] && [ "$agy_tree_rc" -eq 0 ]
 }
 
 # A live database that is valid is the restore authority on a hot restart: it
@@ -740,6 +965,8 @@ bucket_id() {
 # mirror is restored, so anything let through here is filtered there as before.
 # Fails (with the reason in $_why) when it cannot know what to fetch.
 mirror_filters() {
+  # rsync's leftover temporaries (see rsync_tree), for every adapter.
+  printf '%s\n' '- .~tmp~/*' '- */.~tmp~/*'
   case "$1" in
     codex)
       printf '%s\n' '- tmp/*' '- .tmp/*' '- */.tmp/*' '- cache/*' '- */cache/*' \
@@ -1062,14 +1289,16 @@ if [ "$MODE" = prune ]; then
   # at most one batch.
   PRUNE_BATCH="${AGENT_STATE_PRUNE_BATCH:-2000}"
   rm_locked() {
+    _rm_rc=0
     split -t '\0' -l "$PRUNE_BATCH" "$1" "$WORK/batch."
     for _b in "$WORK"/batch.*; do
       [ -e "$_b" ] || continue
       flock 9
-      xargs -0 -r -n 64 -P 16 rm -f -- < "$_b"
+      xargs -0 -r -n 64 -P 16 rm -f -- < "$_b" 2> "$WORK/rm.err" || _rm_rc=$?
       flock -u 9
       rm -f "$_b"
     done
+    return "$_rm_rc"
   }
   prune_subtree() {
     _root="$1"
@@ -1078,7 +1307,9 @@ if [ "$MODE" = prune ]; then
     [ -d "$_root" ] && [ "$budget" -gt 0 ] || return 0
     find "$_root" \( -type f -o -type l \) -print0 | head -z -n "$budget" > "$WORK/list"
     _n=$(tr -cd '\0' < "$WORK/list" | wc -c | tr -d ' ')
-    [ "$_n" -gt 0 ] && rm_locked "$WORK/list"
+    if [ "$_n" -gt 0 ] && ! rm_locked "$WORK/list"; then
+      durable_log "prune: ${_root#"$DATA_DIR"/}: could not remove some files (exit $_rm_rc): $(tail -n 3 "$WORK/rm.err" | paste -sd'|' -)"
+    fi
     find "$_root" -depth -type d -empty -delete 2>/dev/null
     budget=$((budget - _n)); total=$((total + _n))
     [ "$_n" -gt 0 ] && log "prune: ${_root#"$DATA_DIR"/}: removed $_n files"
@@ -1107,6 +1338,29 @@ if [ "$MODE" = prune ]; then
     [ "$n" -gt 0 ] && log "prune: ${CLAUDE_DURABLE#"$DATA_DIR"/}/backups: removed $n old config backups, kept the newest $KEEP_CLAUDE_BACKUPS"
     total=$((total + n)); budget=$((budget - n))
   fi
+  # `.~tmp~` directories an rsync that died left in the durable trees (see
+  # rsync_tree). Found without the lock, removed while holding it: a checkpoint
+  # is the only writer of these trees, so with the lock held nothing is in
+  # flight and whatever is still there is stale. Real directories only.
+  PRUNE_TMP_SECONDS="${AGENT_STATE_PRUNE_TMP_SECONDS:-300}"
+  for _a in $ADAPTERS; do
+    _root=$(durable_of "$_a")
+    [ -d "$_root" ] && [ ! -L "$_root" ] || continue
+    timeout "$PRUNE_TMP_SECONDS" find "$_root" -type d -name '.~tmp~' -prune -print > "$WORK/tmpdirs" 2>/dev/null \
+      || durable_log "prune: listing the stale .~tmp~ directories under ${_root#"$DATA_DIR"/} did not finish (exit $?)"
+    [ -s "$WORK/tmpdirs" ] || continue
+    n=0
+    flock 9
+    while IFS= read -r _d; do
+      case "$_d" in */.~tmp~) ;; *) continue ;; esac
+      [ -d "$_d" ] && [ ! -L "$_d" ] || continue
+      if rm -rf -- "$_d" 2> "$WORK/rm.err"; then n=$((n + 1))
+      else durable_log "prune: could not remove ${_d#"$DATA_DIR"/}: $(tail -n 1 "$WORK/rm.err")"; fi
+    done < "$WORK/tmpdirs"
+    flock -u 9
+    [ "$n" -gt 0 ] && log "prune: ${_root#"$DATA_DIR"/}: removed $n stale .~tmp~ directories"
+  done
+  publish_log
   if [ "$total" -gt 0 ]; then
     log "prune: removed $total junk files from the durable state in $(elapsed "$t0")"
     [ "$budget" -le 0 ] && log "prune: stopped at $PRUNE_MAX files; the rest goes on the next boot"
@@ -1238,16 +1492,20 @@ if [ "$MODE" = restore ]; then
     [ "$failures" -eq 0 ] && failures=1
   fi
   [ "$failures" -eq 0 ] && log "restore finished in $(elapsed "$t0")"
+  # From here on the server expects a checkpoint pass every few seconds.
+  [ -z "$DRY_RUN" ] && [ "$failures" -eq 0 ] && pass_done 0
   rm -rf "${MIRROR_ROOT:?}"
 else
-  checkpoint_tree codex "$CODEX_HOME" "$CODEX_DURABLE" || failures=$((failures + 1))
-  checkpoint_tree claude "$CLAUDE_CONFIG_DIR" "$CLAUDE_DURABLE" || failures=$((failures + 1))
-  checkpoint_tree gemini "$GEMINI_LIVE" "$GEMINI_DURABLE" || failures=$((failures + 1))
-  checkpoint_tree openclaw "$OPENCLAW_STATE_DIR" "$OPENCLAW_DURABLE" || failures=$((failures + 1))
-  checkpoint_sqlite_tree "$OPENCODE_LIVE" "$OPENCODE_DURABLE" opencode.db opencode.db || failures=$((failures + 1))
-  checkpoint_sqlite_tree "$HERMES_LIVE" "$HERMES_DURABLE" state.db state.db || failures=$((failures + 1))
-  checkpoint_tree fx "$FX_LIVE" "$FX_DURABLE" || failures=$((failures + 1))
-  checkpoint_antigravity "$ANTIGRAVITY_LIVE" "$ANTIGRAVITY_DURABLE" || failures=$((failures + 1))
+  run_checkpoint codex checkpoint_tree codex "$CODEX_HOME" "$CODEX_DURABLE"
+  run_checkpoint claude checkpoint_tree claude "$CLAUDE_CONFIG_DIR" "$CLAUDE_DURABLE"
+  run_checkpoint gemini checkpoint_tree gemini "$GEMINI_LIVE" "$GEMINI_DURABLE"
+  run_checkpoint openclaw checkpoint_tree openclaw "$OPENCLAW_STATE_DIR" "$OPENCLAW_DURABLE"
+  run_checkpoint opencode checkpoint_sqlite_tree "$OPENCODE_LIVE" "$OPENCODE_DURABLE" opencode.db opencode.db
+  run_checkpoint hermes checkpoint_sqlite_tree "$HERMES_LIVE" "$HERMES_DURABLE" state.db state.db
+  run_checkpoint fx checkpoint_tree fx "$FX_LIVE" "$FX_DURABLE"
+  run_checkpoint antigravity checkpoint_antigravity "$ANTIGRAVITY_LIVE" "$ANTIGRAVITY_DURABLE"
+  pass_done "$failures"
+  publish_log
 fi
 
 [ "$failures" -eq 0 ] || {

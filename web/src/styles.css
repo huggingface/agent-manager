@@ -77,6 +77,9 @@ body {
 .bkfail-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
 .bkfail-txt { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bkfail-why { color: var(--muted); }
+/* A checkpoint failure's reason is the whole point of the line: let it wrap. */
+.ckfail { align-items: baseline; }
+.ckfail .bkfail-txt { white-space: normal; overflow-wrap: anywhere; }
 .bkfail-link { flex: none; border: none; background: transparent; padding: 0; font: inherit; font-size: 12px; color: inherit; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; cursor: pointer; }
 /* Dev preview (only on a Space with AM_DEV_PREVIEW=1): one compact row under the sidebar logo. */
 /* No class toggle in the (size-budgeted) entry JS: the row's presence moves the divider. */

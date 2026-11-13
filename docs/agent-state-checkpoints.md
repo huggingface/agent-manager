@@ -136,6 +136,63 @@ When their database or WAL changed, opencode and Hermes run `.backup` to a
 local staging DB, validate that DB, then publish the closed result under
 `checkpoints/`; idle databases do not generate bucket writes.
 
+### When a checkpoint fails
+
+From 2026-11-06 01:28 UTC the Claude adapter failed on every pass, for a week,
+while Codex kept checkpointing. Nothing showed it: the only trace was a `WARN`
+line on the container's stdout, which the restart on 2026-11-13 threw away.
+That restart restored the Claude tree as of 11-06: 19 sessions created since
+came back empty and 11 were rolled back about seven days. Why the passes failed
+is not known — the file that caused it existed only in the old container. Three
+things follow from it.
+
+**One bad path does not hold back an adapter.** The changed files still go to
+rsync as one list. If that fails, the list is cut in half and each half is tried
+on its own, down to single paths (at most `AGENT_STATE_RETRY_MAX` = 24 further
+rsyncs and `AGENT_STATE_RETRY_SECONDS` = 120 s per adapter and pass). Every half
+that copies is durable, the stamp moves on, and only the paths that still fail
+are kept in `$AM_LOCAL/agent-state-stamps/<adapter>.retry`. Later passes try
+those as a small list of their own, until they copy or no longer exist. The
+adapter reports failure for as long as that list is not empty. Each rsync keeps
+`--delay-updates`, so no partial file is visible, and the stamp is still taken
+before the tree is listed, so a file changed during a copy is copied again. For
+opencode, Hermes and Antigravity a file that fails no longer skips the database
+backup.
+
+One copy may run for `AGENT_STATE_CHECKPOINT_TIMEOUT` seconds (default 1800,
+0 = no limit), so a copy stuck on a hung mount fails instead of holding the lock
+and every other adapter for good. A list stopped by the limit is not cut in
+half; what it had written stays in rsync's partial directory for the next pass.
+
+**It is written down where a restart cannot lose it.**
+`$DATA_DIR/state/agent-state.log` gets one line per failure: time, adapter,
+rsync's exit code, how many paths were copied and how many not, the first paths,
+rsync's last stderr lines. A failure that repeats unchanged is logged on its
+first pass and then every 20th (`AGENT_STATE_LOG_EVERY`); a recovery is logged
+too. The bucket mount cannot append, so the log is kept on local disk
+(`$AM_LOCAL/agent-state.log`, started from the durable one after a restart) and
+copied over as a whole, under a timeout, at the end of a pass that wrote to it.
+A copy that fails is retried by the next pass and never fails a checkpoint. At
+`AGENT_STATE_LOG_MAX` bytes (default 1 MB) it rotates to `agent-state.log.1`.
+
+**It is visible.** After every pass each adapter's outcome is in
+`$AM_LOCAL/agent-state-status/<adapter>` (`key=value`: `last_success`,
+`failures` in a row, `failing_since`, `rc`, `pending`, `copied`, `reason`,
+`paths`), and `_pass` holds the time the last pass ended. The server reads
+these for `/api/info` (`checkpoint`, see `server/src/checkpoint-health.js`):
+`null` normally; once an adapter has gone five minutes
+(`AM_CHECKPOINT_WARN_SECONDS`) without a clean pass — counted from its first
+failure if it has had none since boot — it is listed with its reason, and the
+app shows a line that cannot be dismissed, such as "Claude Code sessions are
+not being saved." The same happens when no pass at all has finished for five
+minutes (`stalled`).
+
+`.~tmp~` directories are where `--delay-updates` keeps files until their
+rename; an rsync that died left some in the durable trees. No restore or
+checkpoint copies them any more, a pass removes the one beside a path that
+failed on its own, and the boot-time prune removes the rest, each while holding
+the checkpoint lock (so no rsync is using them).
+
 The first version does not propagate deletions from live trees. A stale durable
 file is safer than deleting history based on a transient or partially restored
 local view, but it can reappear after a fresh-container restore. Retention and
@@ -198,3 +255,10 @@ touching `/data`:
 - validates opencode and Hermes checkpoint databases;
 - proves a corrupt live DB cannot replace the previous durable snapshot; and
 - restores SQLite without stale WAL/SHM companions.
+
+`server/test/state-checkpoint-failures.test.mjs` covers failing checkpoints: an
+unreadable file, a path the durable tree cannot take and an rsync that dies
+outright each leave the adapter's other files saved in the same pass, are
+logged and reported, and recover; other adapters are not affected; the warning
+appears only after its threshold. `web/test/checkpointWarning.test.mjs` shows
+the warning in the built app.

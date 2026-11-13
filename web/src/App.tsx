@@ -17,7 +17,6 @@ import Overview from './components/Overview';
 import Locked from './components/Locked';
 import { LOCKED_EVENT, createLockTracker, type LockAnnouncement } from './lib/lockStatus';
 import { EDGE_REFUSED, EDGE_STREAK } from './lib/edgeRefusal';
-import BackupBanner from './components/BackupBanner';
 import OverviewSearchBox from './components/OverviewSearchBox';
 import Welcome from './components/Welcome';
 import BucketPrompt, { NoBucketBanner } from './components/BucketPrompt';
@@ -47,6 +46,9 @@ const VV_DEBUG = new URLSearchParams(location.search).has('vvdebug');
 const ViewportDebug = lazy(() => import('./components/ViewportDebug'));
 // Only dev-preview Spaces render it (AM_DEV_PREVIEW=1), so it stays out of the entry chunk.
 const DevPreviewBar = lazy(() => import('./components/DevPreviewBar'));
+// Shown only while a backup or a checkpoint is failing. If the chunk cannot be
+// fetched the app carries on without the line rather than fail with it.
+const HealthBanners = lazy(() => import('./components/HealthBanners').catch(() => ({ default: () => null })));
 
 // Panels a visit may never open ship as their own chunks and are fetched when
 // first shown (LazyPanel). The terminal/reader pane is the app's reason to
@@ -1538,7 +1540,7 @@ export default function App() {
         {/* Visible where you already are, on every view. Rides on /api/info,
             which is polled every 15s, so no new request for the normal case. */}
         {noBucket && !showBucket && <NoBucketBanner onShow={() => { setSettingsOpen(false); setBucketAsked(true); }} />}
-        <BackupBanner health={info?.backup} onOpenSettings={() => { setSettingsPage('general'); setSettingsOpen(true); }} />
+        {(info?.backup || info?.checkpoint) && <Suspense><HealthBanners backup={info.backup} checkpoint={info.checkpoint} onOpenSettings={() => { setSettingsPage('general'); setSettingsOpen(true); }} /></Suspense>}
         <div className="stage">
           {renderTiles(
             isMobile && !mobileStage

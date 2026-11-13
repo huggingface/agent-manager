@@ -118,6 +118,16 @@ export interface BackupHealth {
   message: string | null; reason: string | null;
   lastSuccessAt: number | null; jobsUrl: string;
 }
+// Agent-state checkpoints that are not getting through; null when all are.
+// See server/src/checkpoint-health.js.
+export interface CheckpointHealth {
+  adapters: {
+    adapter: string; failures: number; since: number | null; lastSuccessAt: number | null;
+    rc: number | null; pending: number; copied: number; reason: string | null; paths: string | null;
+  }[];
+  stalled: { lastPassAt: number } | null;
+  log: string;
+}
 /** Will this survive a restart? See server/src/storage.js. */
 export interface StorageStatus { persistent: boolean; dataDir: string; reason: string }
 export interface Info {
@@ -136,6 +146,7 @@ export interface Info {
   secrets?: string[];
   bucketUnverified?: boolean;
   backup?: BackupHealth | null;
+  checkpoint?: CheckpointHealth | null;
   welcomeSeen?: boolean;
   demoMode?: boolean;
   /** Only on a dev-preview Space (AM_DEV_PREVIEW=1); absent everywhere else. */
