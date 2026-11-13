@@ -37,8 +37,9 @@ const ms = (seconds) => (Number(seconds) > 0 ? Number(seconds) * 1000 : null);
  * nothing. Otherwise the adapters that are not, each with its reason:
  *   - `adapters`: failing on every pass since `since`, with no clean pass for
  *     WARN_AFTER_MS. `lastSuccessAt` is null when it has not had one since boot
- *     — that counts from the first failure. `copied > 0` means the rest of the
- *     adapter's files still go through and only `pending` paths are stuck.
+ *     — that counts from the first failure. `pending` paths fail when copied
+ *     on their own (`paths` names the first few); `untested` ones are waiting
+ *     behind a failure. With `untested` 0, everything else is being saved.
  *   - `stalled`: no pass at all has finished for WARN_AFTER_MS (a hung copy, a
  *     dead loop). Only where the checkpoint loop runs: the status directory
  *     does not exist otherwise.
@@ -69,6 +70,7 @@ export function readCheckpointHealth({ dir = statusDir(), now = Date.now(), warn
       lastSuccessAt,
       rc: s.rc ? Number(s.rc) : null,
       pending: Number(s.pending) || 0,
+      untested: Number(s.untested) || 0,
       copied: Number(s.copied) || 0,
       reason: s.reason || null,
       paths: s.paths || null,

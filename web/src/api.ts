@@ -123,7 +123,7 @@ export interface BackupHealth {
 export interface CheckpointHealth {
   adapters: {
     adapter: string; failures: number; since: number | null; lastSuccessAt: number | null;
-    rc: number | null; pending: number; copied: number; reason: string | null; paths: string | null;
+    rc: number | null; pending: number; untested: number; copied: number; reason: string | null; paths: string | null;
   }[];
   stalled: { lastPassAt: number } | null;
   log: string;

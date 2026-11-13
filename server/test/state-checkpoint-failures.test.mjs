@@ -211,18 +211,162 @@ exec ${real} "$@"
   assert.equal(read(path.join(durable, 'projects/p1/new.jsonl')), 'new\n');
   assert.equal(w.status('claude').pending, '1');
 
-  // A pass has a bounded number of tries: with every path failing, what could
-  // not be told apart stays listed for the next pass instead of being dropped.
+  // A pass has a bounded number of tries. Paths it could not tell apart are
+  // not dropped and not called bad: they go back into the next pass.
   const w2 = world({ AGENT_STATE_RETRY_MAX: '4' });
   w2.env.PATH = `${bin}:${w2.env.PATH}`;
   for (let i = 0; i < 50; i++) put(path.join(w2.env.CLAUDE_CONFIG_DIR, `projects/poison/s${i}.jsonl`), 'x\n');
-  assert.equal(w2.run('checkpoint').status, 1);
-  assert.equal(w2.status('claude').pending, '50');
-  assert.equal(w2.status('claude').copied, '0');
+  for (let pass = 0; pass < 2; pass++) {
+    assert.equal(w2.run('checkpoint').status, 1);
+    assert.equal(w2.status('claude').pending, '0');
+    assert.equal(w2.status('claude').untested, '50');
+    assert.equal(w2.status('claude').copied, '0');
+  }
   // The path is gone (the session was deleted): nothing is left to retry.
   fs.rmSync(path.join(live, 'projects/p4/poison.jsonl'));
   assert.equal(w.run('checkpoint').status, 0);
   assert.equal(w.status('claude').failures, '0');
+});
+
+// An rsync in front of the real one, as a file in `dir` on PATH. `body` is sh
+// run for every --files-from list, with $list set to it.
+function fakeRsync(dir, body) {
+  const real = spawnSync('sh', ['-c', 'command -v rsync'], { encoding: 'utf8' }).stdout.trim();
+  put(path.join(dir, 'rsync'), `#!/bin/sh
+for a in "$@"; do
+  case "$a" in --files-from=*) list="\${a#--files-from=}"
+${body}
+  ;; esac
+done
+exec ${real} "$@"
+`);
+  fs.chmodSync(path.join(dir, 'rsync'), 0o755);
+}
+const lines = (file) => { try { return fs.readFileSync(file, 'utf8').split('\0').filter(Boolean); } catch { return []; } };
+
+test('20 bad paths spread over 1000: every pass saves files, only paths that failed alone are called bad', () => {
+  const w = world();
+  const bin = path.join(w.root, 'bin');
+  fakeRsync(bin, `    if tr '\\0' '\\n' < "$list" | grep -q poison; then
+      echo "rsync: connection unexpectedly closed (0 bytes received so far) [sender]" >&2
+      exit 12
+    fi`);
+  w.env.PATH = `${bin}:${w.env.PATH}`;
+  const live = w.env.CLAUDE_CONFIG_DIR, durable = w.env.CLAUDE_DURABLE;
+  const name = (i) => `projects/p${String(Math.floor(i / 25)).padStart(2, '0')}/s${String(i).padStart(4, '0')}${i % 50 === 7 ? '.poison' : ''}.jsonl`;
+  for (let i = 0; i < 1000; i++) put(path.join(live, name(i)), `s${i}\n`);
+  const good = [...Array(1000).keys()].filter((i) => i % 50 !== 7);
+  const saved = () => good.filter((i) => fs.existsSync(path.join(durable, name(i)))).length;
+  const retry = path.join(w.local, 'agent-state-stamps/claude.retry');
+  // One good file keeps changing, as a live transcript does.
+  const busy = path.join(live, name(999));
+
+  let before = 0, passes = 0;
+  while (passes < 40) {
+    passes++;
+    fs.appendFileSync(busy, `pass ${passes}\n`);
+    assert.equal(w.run('checkpoint').status, 1);
+    const st = w.status('claude');
+    for (const p of lines(retry)) assert.match(p, /poison/, `a good path was called bad: ${p}`);
+    assert.doesNotMatch(st.paths, /s\d{4}\.jsonl/, 'only proven-bad paths are reported');
+    const now = saved();
+    if (st.untested === '0') break;
+    assert.ok(now > before, `pass ${passes} saved nothing new (${now} of 980)`);
+    before = now;
+  }
+  assert.equal(saved(), 980, `after ${passes} passes`);
+  assert.equal(w.status('claude').pending, '20');
+  assert.equal(w.status('claude').untested, '0');
+  assert.equal(lines(retry).length, 20);
+  // The file that kept changing is current, and still is after another change.
+  assert.equal(read(path.join(durable, name(999))), read(busy));
+  fs.appendFileSync(busy, 'later\n');
+  assert.equal(w.run('checkpoint').status, 1);
+  assert.equal(read(path.join(durable, name(999))), read(busy));
+  // Proven-bad paths cost a pass a few small rsyncs, not the whole budget again.
+  assert.equal(w.status('claude').pending, '20');
+});
+
+test('a checkpoint bigger than the time limit is saved batch by batch', () => {
+  // This rsync takes 20 ms per listed path before it copies anything, and the
+  // limit for one rsync is 5 s: 300 paths in one list can never finish.
+  const slow = `    n=$(tr -cd '\\0' < "$list" | wc -c)
+    sleep "$(awk -v n="$n" 'BEGIN { printf "%.2f", n * 0.02 }')"`;
+  const files = (w) => { for (let i = 0; i < 300; i++) put(path.join(w.env.CLAUDE_CONFIG_DIR, `projects/p${i % 10}/s${i}.jsonl`), `s${i}\n`); };
+  const saved = (w) => [...Array(300).keys()].filter((i) => fs.existsSync(path.join(w.env.CLAUDE_DURABLE, `projects/p${i % 10}/s${i}.jsonl`))).length;
+
+  // In batches of 50 each rsync takes a second: one pass saves everything.
+  const w = world({ AGENT_STATE_CHECKPOINT_TIMEOUT: '5', AGENT_STATE_BATCH_FILES: '50' });
+  fakeRsync(path.join(w.root, 'bin'), slow);
+  w.env.PATH = `${path.join(w.root, 'bin')}:${w.env.PATH}`;
+  files(w);
+  const r = w.run('checkpoint');
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(saved(w), 300);
+
+  // The byte cap cuts batches too: 20 files of 1 kB under a 4 kB cap.
+  const wb = world({ AGENT_STATE_BATCH_BYTES: '4096' });
+  const counts = path.join(wb.root, 'counts');
+  fakeRsync(path.join(wb.root, 'bin'), `    tr -cd '\\0' < "$list" | wc -c >> ${counts}`);
+  wb.env.PATH = `${path.join(wb.root, 'bin')}:${wb.env.PATH}`;
+  for (let i = 0; i < 20; i++) put(path.join(wb.env.CLAUDE_CONFIG_DIR, `projects/a/s${i}.jsonl`), 'x'.repeat(1024));
+  put(path.join(wb.env.CLAUDE_CONFIG_DIR, 'projects/a/big.jsonl'), 'x'.repeat(10_000));
+  assert.equal(wb.run('checkpoint').status, 0);
+  const sizes = fs.readFileSync(counts, 'utf8').trim().split('\n').map(Number);
+  assert.ok(sizes.every((n) => n <= 4), `a batch went over the byte cap: ${sizes}`);
+  assert.equal(sizes.reduce((a, b) => a + b, 0), 21);
+  assert.equal(read(path.join(wb.env.CLAUDE_DURABLE, 'projects/a/big.jsonl')).length, 10_000);
+
+  // Even with one batch too big for the limit it gets there: the pass that
+  // timed out is followed by one with batches half the size.
+  const w2 = world({ AGENT_STATE_CHECKPOINT_TIMEOUT: '5', AGENT_STATE_BATCH_FILES: '1000' });
+  fakeRsync(path.join(w2.root, 'bin'), slow);
+  w2.env.PATH = `${path.join(w2.root, 'bin')}:${w2.env.PATH}`;
+  files(w2);
+  put(path.join(w2.env.FX_LIVE, 'sessions/1/events.jsonl'), 'fx\n');
+  const first = w2.run('checkpoint');
+  assert.equal(first.status, 1);
+  assert.equal(saved(w2), 0);
+  assert.equal(tmpDirs(w2.env.CLAUDE_DURABLE), '', 'nothing partial is visible');
+  assert.equal(w2.status('claude').rc, '124');
+  assert.equal(w2.status('claude').untested, '300');
+  assert.equal(w2.status('claude').pending, '0');
+  assert.match(w2.status('claude').reason, /did not finish within 5s/);
+  assert.match(w2.log(), /claude: checkpoint FAILED.*exit 124/);
+  assert.equal(read(path.join(w2.env.FX_DURABLE, 'sessions/1/events.jsonl')), 'fx\n', 'the adapters after it still ran');
+  const second = w2.run('checkpoint');
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(saved(w2), 300);
+  assert.equal(w2.status('claude').failures, '0');
+});
+
+test('one path that hangs the copy is isolated, then retried only once in a while', () => {
+  const w = world({ AGENT_STATE_CHECKPOINT_TIMEOUT: '2' });
+  fakeRsync(path.join(w.root, 'bin'), `    if tr '\\0' '\\n' < "$list" | grep -q hang; then sleep 30; fi`);
+  w.env.PATH = `${path.join(w.root, 'bin')}:${w.env.PATH}`;
+  const live = w.env.CLAUDE_CONFIG_DIR, durable = w.env.CLAUDE_DURABLE;
+  for (let i = 0; i < 6; i++) put(path.join(live, `projects/a/s${i}.jsonl`), `s${i}\n`);
+  put(path.join(live, 'projects/a/s3.hang.jsonl'), 'x\n');
+  let passes = 0;
+  do { assert.equal(w.run('checkpoint').status, 1); } while (++passes < 8 && w.status('claude').untested !== '0');
+  for (let i = 0; i < 6; i++) assert.equal(read(path.join(durable, `projects/a/s${i}.jsonl`)), `s${i}\n`);
+  assert.equal(w.status('claude').pending, '1');
+  assert.equal(w.status('claude').paths, 'projects/a/s3.hang.jsonl');
+
+  // The next passes do not wait out the limit again for it, and save new files.
+  put(path.join(live, 'projects/a/new.jsonl'), 'new\n');
+  const t0 = Date.now();
+  assert.equal(w.run('checkpoint').status, 1);
+  assert.ok(Date.now() - t0 < 1500, 'the hanging path was not tried again');
+  assert.equal(read(path.join(durable, 'projects/a/new.jsonl')), 'new\n');
+  assert.equal(w.status('claude').pending, '1');
+  assert.match(w.status('claude').reason, /tried again every 3600s/);
+
+  // It is tried again after the wait, and saved once it no longer hangs.
+  w.env.AGENT_STATE_RETRY_SLOW_SECONDS = '0';
+  fakeRsync(path.join(w.root, 'bin'), '    :');
+  assert.equal(w.run('checkpoint').status, 0);
+  assert.equal(read(path.join(durable, 'projects/a/s3.hang.jsonl')), 'x\n');
 });
 
 test('a failed file does not skip the SQLite backup of the same adapter', { skip: isRoot && 'root can read a chmod 000 file' }, () => {

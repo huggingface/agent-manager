@@ -29,7 +29,7 @@ const secondsAgo = (s) => Math.floor(Date.now() / 1000) - s;
 // What a failed pass leaves behind (record_fail in scripts/agent-state.sh).
 const failing = (adapter, sinceSeconds, extra = {}) => fs.writeFileSync(path.join(statusDir, adapter), Object.entries({
   adapter, last_attempt: secondsAgo(2), last_success: '', failures: Math.ceil(sinceSeconds / 15), failing_since: secondsAgo(sinceSeconds),
-  rc: 23, pending: 1, copied: 0,
+  rc: 23, pending: 0, untested: 12, copied: 0,
   reason: 'rsync: [sender] send_files failed to open "/home/node/local/agent-state/claude/projects/a/bad.jsonl": Permission denied (13)',
   paths: 'projects/a/bad.jsonl', ...extra,
 }).map(([k, v]) => `${k}=${v}\n`).join(''));
@@ -81,6 +81,15 @@ try {
     assert.match(text, /Permission denied \(13\)/);
     assert.equal(scripts.filter((u) => /HealthBanners/.test(u)).length, 1);
     if (process.env.AM_CKPT_SHOT) await page.screenshot({ path: process.env.AM_CKPT_SHOT });
+    await ctx.close();
+  });
+
+  await check('one stuck file while everything else is saved: the line says that instead', async () => {
+    failing('claude', 400, { pending: 1, untested: 0 });
+    await sleep(5500);
+    const { ctx, page } = await open();
+    await page.locator('.ckfail', { hasText: 'Claude Code: 1 file is not being backed up.' }).waitFor({ timeout: 10_000 });
+    assert.doesNotMatch(await page.locator('.ckfail').innerText(), /sessions are not being saved/);
     await ctx.close();
   });
 

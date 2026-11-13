@@ -31,7 +31,7 @@ await build({
 });
 const { render } = await import(pathToFileURL(out).href);
 const adapter = (o) => ({
-  adapter: 'claude', failures: 40, since: 1794578400000, lastSuccessAt: 1794578000000, rc: 23, pending: 1, copied: 0,
+  adapter: 'claude', failures: 40, since: 1794578400000, lastSuccessAt: 1794578000000, rc: 12, pending: 0, untested: 40, copied: 0,
   reason: 'rsync: [sender] send_files failed to open "/x/bad.jsonl": Permission denied (13)', paths: 'projects/a/bad.jsonl', ...o,
 });
 const log = '/data/state/agent-state.log';
@@ -57,9 +57,19 @@ test('no success since boot says so instead of a date', () => {
 });
 
 test('a few stuck files while the rest is saved reads as that', () => {
-  const html = render({ adapters: [adapter({ adapter: 'codex', pending: 2, copied: 31 })], stalled: null, log });
-  assert.match(html, /<b>Codex: 2 files are not being saved\.<\/b>/);
-  assert.doesNotMatch(html, /A restart now would lose/);
+  // Also on a pass that had nothing else to copy (copied 0).
+  for (const copied of [31, 0]) {
+    const html = render({ adapters: [adapter({ adapter: 'codex', pending: 2, untested: 0, copied })], stalled: null, log });
+    assert.match(html, /<b>Codex: 2 files are not being backed up\.<\/b>/);
+    assert.doesNotMatch(html, /sessions are not being saved|A restart now would lose/);
+  }
+  const one = render({ adapters: [adapter({ pending: 1, untested: 0 })], stalled: null, log });
+  assert.match(one, /<b>Claude Code: 1 file is not being backed up\.<\/b>/);
+});
+
+test('stuck files with others still waiting behind them is not "a few files"', () => {
+  const html = render({ adapters: [adapter({ pending: 2, untested: 300 })], stalled: null, log });
+  assert.match(html, /<b>Claude Code sessions are not being saved\.<\/b>/);
 });
 
 test('one line per adapter, and one for a loop that stopped', () => {

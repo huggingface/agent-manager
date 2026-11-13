@@ -31,7 +31,9 @@ export default function CheckpointBanner({ health }: { health: CheckpointHealth 
       )}
       {health.adapters.map((a) => {
         const name = NAMES[a.adapter] || a.adapter;
-        const some = a.copied > 0 && a.pending > 0;
+        // Every path that is not getting through is known and failed on its
+        // own: the rest of this harness's files are being saved.
+        const some = a.pending > 0 && !a.untested;
         const since = when(a.lastSuccessAt);
         return (
           <div
@@ -44,7 +46,7 @@ export default function CheckpointBanner({ health }: { health: CheckpointHealth 
             <span className="bkfail-txt">
               <b>
                 {some
-                  ? `${name}: ${a.pending} file${a.pending === 1 ? ' is' : 's are'} not being saved.`
+                  ? `${name}: ${a.pending} file${a.pending === 1 ? ' is' : 's are'} not being backed up.`
                   : `${name} sessions are not being saved.`}
               </b>{' '}
               {since ? `Last complete save ${since}. ` : 'No complete save since this Space started. '}

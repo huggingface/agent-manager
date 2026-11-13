@@ -156,18 +156,29 @@ LOG_MAX="${AGENT_STATE_LOG_MAX:-1048576}"
 # A failure that repeats unchanged is logged on its first pass and then once
 # every this many passes (5 minutes at the default 15 s interval).
 LOG_EVERY="${AGENT_STATE_LOG_EVERY:-20}"
-# One checkpoint copy may run this long (seconds; 0 = no limit). A copy stuck on
-# a hung mount would otherwise hold the lock, and every adapter after it, for
-# good. What it had already written stays in rsync's partial directory and is
-# reused by the next pass, so a copy that is merely big still gets there.
+# One checkpoint rsync may run this long (seconds; 0 = no limit). A copy stuck
+# on a hung mount would otherwise hold the lock, and every adapter after it,
+# for good. An rsync stopped here has renamed nothing into place and the next
+# one starts its files from zero (rsync 3.2.7 does not pick up what is left in
+# .~tmp~), which is why no rsync is given much to do: see BATCH_FILES.
 STEP_TIMEOUT=""
 case "$MODE" in checkpoint|checkpoint-final) STEP_TIMEOUT="${AGENT_STATE_CHECKPOINT_TIMEOUT:-1800}" ;; esac
 [ "$STEP_TIMEOUT" = 0 ] && STEP_TIMEOUT=""
 guard() { if [ -n "$STEP_TIMEOUT" ]; then timeout -k 5 "$STEP_TIMEOUT" "$@"; else "$@"; fi; }
-# After one copy of a list failed, at most this many further rsyncs, and this
-# many seconds, are spent in one pass finding which paths it was.
+# The changed files go to rsync in batches of at most this many paths and this
+# many bytes (a larger file is a batch of its own). Each batch is renamed into
+# place when its rsync ends, so a big checkpoint — a first one over a full
+# tree — becomes durable batch by batch and no rsync comes near the time limit.
+BATCH_FILES="${AGENT_STATE_BATCH_FILES:-500}"
+BATCH_BYTES="${AGENT_STATE_BATCH_BYTES:-268435456}"
+# After a batch failed, at most this many further rsyncs, and this many
+# seconds, are spent in one pass finding which paths it was.
 RETRY_MAX="${AGENT_STATE_RETRY_MAX:-24}"
 RETRY_SECONDS="${AGENT_STATE_RETRY_SECONDS:-120}"
+# After a path that fails on its own ran into the time limit, the failing
+# paths are next tried this many seconds later, not on every pass: each try
+# holds the checkpoint lock for the whole limit.
+RETRY_SLOW_SECONDS="${AGENT_STATE_RETRY_SLOW_SECONDS:-3600}"
 
 iso() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$1"; }
 # One line, no control characters, bounded: what goes into a status value.
@@ -178,9 +189,9 @@ clean() { printf '%s' "$1" | tr '\n\r\t' '   ' | tr -d '\000-\037' | cut -c1-"${
 # to `.1` before the first copy over it rather than overwritten.
 log_seed() {
   [ -e "$LOG_LOCAL" ] && return 0
-  if timeout 10 cp "$LOG_DURABLE" "$LOG_LOCAL.seed" 2>/dev/null && mv "$LOG_LOCAL.seed" "$LOG_LOCAL"; then return 0; fi
+  if timeout -k 2 10 cp "$LOG_DURABLE" "$LOG_LOCAL.seed" 2>/dev/null && mv "$LOG_LOCAL.seed" "$LOG_LOCAL"; then return 0; fi
   rm -f "$LOG_LOCAL.seed"
-  timeout 5 test ! -e "$LOG_DURABLE" 2>/dev/null || : > "$LOG_LOCAL.unseeded"
+  timeout -k 2 5 test ! -e "$LOG_DURABLE" 2>/dev/null || : > "$LOG_LOCAL.unseeded"
   : > "$LOG_LOCAL"
 }
 # durable_log TEXT: to stderr, and into the log that survives a restart.
@@ -194,19 +205,21 @@ durable_log() {
   fi
   : > "$LOG_LOCAL.dirty"
 }
-# Copy the log to $DATA_DIR if it changed. Never fails and never waits long.
+# Copy the log to $DATA_DIR if it changed. Never fails and never waits long:
+# -k, because a process stuck in a hung mount can ignore TERM, and this runs
+# while the checkpoint lock is held.
 publish_log() {
   [ -e "$LOG_LOCAL.dirty" ] || return 0
-  timeout 10 mkdir -p "$(dirname "$LOG_DURABLE")" 2>/dev/null
+  timeout -k 2 10 mkdir -p "$(dirname "$LOG_DURABLE")" 2>/dev/null
   if [ -e "$LOG_LOCAL.unseeded" ]; then
-    timeout 10 mv -f "$LOG_DURABLE" "$LOG_DURABLE.1" 2>/dev/null
+    timeout -k 2 10 mv -f "$LOG_DURABLE" "$LOG_DURABLE.1" 2>/dev/null
     rm -f "$LOG_LOCAL.unseeded" "$LOG_LOCAL.rotated"
   fi
   if [ -e "$LOG_LOCAL.rotated" ]; then
-    timeout 20 rsync -a "$LOG_LOCAL.1" "$LOG_DURABLE.1" 2>/dev/null || return 0
+    timeout -k 5 20 rsync -a "$LOG_LOCAL.1" "$LOG_DURABLE.1" 2>/dev/null || return 0
     rm -f "$LOG_LOCAL.rotated"
   fi
-  timeout 20 rsync -a "$LOG_LOCAL" "$LOG_DURABLE" 2>/dev/null && rm -f "$LOG_LOCAL.dirty"
+  timeout -k 5 20 rsync -a "$LOG_LOCAL" "$LOG_DURABLE" 2>/dev/null && rm -f "$LOG_LOCAL.dirty"
   return 0
 }
 
@@ -219,7 +232,9 @@ pass_done() { printf 'finished=%s\nmode=%s\nfailures=%s\n' "$(now)" "$MODE" "${1
 
 # What the adapter that just failed has to say for itself; set by the
 # checkpoint functions, read by record_fail.
-FAIL_RC="" FAIL_REASON="" FAIL_STDERR="" FAIL_PATHS="" FAIL_PENDING=0 FAIL_COPIED=0
+# FAIL_PENDING counts the paths that failed when tried on their own (the ones
+# FAIL_PATHS names); FAIL_UNTESTED those a failed pass did not get to.
+FAIL_RC="" FAIL_REASON="" FAIL_STDERR="" FAIL_PATHS="" FAIL_PENDING=0 FAIL_UNTESTED=0 FAIL_COPIED=0
 record_ok() {
   _was=$(status_get "$1" failures)
   if [ "${_was:-0}" -gt 0 ]; then
@@ -238,17 +253,17 @@ record_fail() {
   {
     printf 'adapter=%s\nlast_attempt=%s\nlast_success=%s\nfailures=%s\nfailing_since=%s\n' \
       "$1" "$(now)" "$(status_get "$1" last_success)" "$_n" "$_since"
-    printf 'rc=%s\npending=%s\ncopied=%s\nreason=%s\npaths=%s\nsig=%s\n' \
-      "$FAIL_RC" "$FAIL_PENDING" "$FAIL_COPIED" "$(clean "$FAIL_REASON")" "$(clean "$FAIL_PATHS" 1000)" "$_sig"
+    printf 'rc=%s\npending=%s\nuntested=%s\ncopied=%s\nreason=%s\npaths=%s\nsig=%s\n' \
+      "$FAIL_RC" "$FAIL_PENDING" "$FAIL_UNTESTED" "$FAIL_COPIED" "$(clean "$FAIL_REASON")" "$(clean "$FAIL_PATHS" 1000)" "$_sig"
   } | status_put "$1"
   if [ "$_n" -eq 1 ] || [ "$_sig" != "$_old" ] || [ $((_n % LOG_EVERY)) -eq 0 ]; then
-    durable_log "$1: checkpoint FAILED, pass $_n in a row (failing since $(iso "$_since")): ${FAIL_RC:+exit $FAIL_RC; }$FAIL_PENDING path(s) not copied, $FAIL_COPIED copied${FAIL_PATHS:+; paths: $FAIL_PATHS}${FAIL_STDERR:+; stderr: $FAIL_STDERR}${FAIL_REASON:+; reason: $FAIL_REASON}"
+    durable_log "$1: checkpoint FAILED, pass $_n in a row (failing since $(iso "$_since")): ${FAIL_RC:+exit $FAIL_RC; }$FAIL_PENDING path(s) cannot be copied, $FAIL_UNTESTED not tried yet, $FAIL_COPIED copied${FAIL_PATHS:+; paths: $FAIL_PATHS}${FAIL_STDERR:+; stderr: $FAIL_STDERR}${FAIL_REASON:+; reason: $FAIL_REASON}"
   fi
 }
 # run_checkpoint ADAPTER FUNCTION ARGS…: one adapter, with its outcome recorded.
 run_checkpoint() {
   _ad="$1"; shift
-  FAIL_RC="" FAIL_REASON="" FAIL_STDERR="" FAIL_PATHS="" FAIL_PENDING=0 FAIL_COPIED=0
+  FAIL_RC="" FAIL_REASON="" FAIL_STDERR="" FAIL_PATHS="" FAIL_PENDING=0 FAIL_UNTESTED=0 FAIL_COPIED=0
   if "$@"; then record_ok "$_ad"; else record_fail "$_ad"; failures=$((failures + 1)); fi
 }
 elapsed() {
@@ -475,23 +490,54 @@ restore_tree() {
   fi
 }
 
+count0() { tr -cd '\0' < "$1" | wc -c | tr -d ' '; }
+# The paths of a NUL-separated list on stdin that are still files, in order.
+existing0() { xargs -0 -r sh -c 'for f; do [ -f "$f" ] && printf "%s\0" "$f"; done' sh; }
+# batches0 LIST PREFIX MAX_PATHS: cut the NUL-separated LIST (paths under the
+# current directory) into PREFIX000001, PREFIX000002, … of at most MAX_PATHS
+# paths and BATCH_BYTES bytes each. awk reads lines, so newline and NUL trade
+# places on the way in and back on the way out.
+batches0() {
+  xargs -0 -r stat --printf '%s %n\0' 2>/dev/null < "$1" | tr '\n\000' '\001\n' \
+    | awk -v max_n="$3" -v max_b="$BATCH_BYTES" -v pfx="$2" '
+      { size = $1 + 0; path = substr($0, index($0, " ") + 1)
+        if (n > 0 && (n >= max_n || bytes + size > max_b)) { close(f); k++; n = 0; bytes = 0 }
+        f = sprintf("%s%06d", pfx, k + 1); print path > f; n++; bytes += size }'
+  for _bf in "$2"??????; do
+    [ -e "$_bf" ] || continue
+    tr '\n\001' '\000\n' < "$_bf" > "$_bf.z" && mv -f "$_bf.z" "$_bf"
+  done
+}
+
 # One adapter's changed files to its durable tree.
 #
-# The files changed since the stamp go to rsync as ONE list. It used to be all
-# or nothing: a list that failed left the stamp where it was, so the next pass
-# sent the same list plus whatever had changed since, failed on the same file
-# again, and so on — one bad path held back every other file of the adapter for
-# as long as it existed. Now a list that fails is cut in half and each half
-# tried on its own, down to single paths (at most RETRY_MAX rsyncs and
-# RETRY_SECONDS per pass). Every half that copies is durable; the stamp moves
-# on; and only the paths that still fail are kept, in `<stamp>.retry`, and
-# tried again as a list of their own on every later pass until they copy or are
-# gone. The pass then reports failure, naming them.
+# It used to be one rsync of one list, all or nothing: a list that failed left
+# the stamp where it was, so the next pass sent the same list plus whatever had
+# changed since, failed on the same file again, and so on — one bad path held
+# back every other file of the adapter for as long as it existed. Now:
 #
-# Unchanged: each rsync still writes temporaries and renames them at its end
-# (--delay-updates), so no partial file is ever visible; and `next` is still
-# taken before the tree is listed, so a file changed during the copy is listed
-# again by the next pass.
+#   - The changed files go in batches (BATCH_FILES, BATCH_BYTES), one rsync
+#     each. A batch that copied is durable whatever happens to the next.
+#   - A batch that fails is cut in half and the halves are tried, first half
+#     first and all the way down to single paths before the second, so every
+#     pass ends with paths that are known good (copied) and known bad. A pass
+#     spends at most RETRY_MAX rsyncs and RETRY_SECONDS on this.
+#   - A path that failed ON ITS OWN is proven bad and goes to `<stamp>.retry`.
+#     Those are kept out of the batches and tried as a list of their own, last,
+#     on every pass, until they copy or are gone. Only they are reported as the
+#     failing paths.
+#   - A path the pass did not get to (out of tries, or behind a timeout) is not
+#     proven anything: `<stamp>.untested` puts it back into the batches of the
+#     next pass, together with whatever changed since.
+#   - An rsync stopped by the time limit ends the adapter's pass (one limit per
+#     pass is all the lock is held for), and the next pass uses batches half
+#     its size (`<stamp>.batch`), down to single paths if it must.
+#
+# The stamp then moves on: every path it passes was copied, or is in one of
+# the two lists. Unchanged: each rsync still writes temporaries and renames
+# them at its end (--delay-updates), so no partial file is ever visible; and
+# `next` is still taken before the tree is listed, so a file changed during
+# the copy is listed again by the next pass.
 checkpoint_tree() {
   key="$1" live="$2" durable="$3"
   [ -d "$live" ] || return 0
@@ -506,35 +552,59 @@ checkpoint_tree() {
   # is newer than `next` and will therefore be selected again next time.
   next="$stamp.next.$$"
   retry="$stamp.retry"
+  untested="$stamp.untested"
+  hint="$stamp.batch"
   ct_work="$stamp.work.$$"
   rm -rf "$ct_work"
   mkdir -p "$ct_work"
   mark_checkpoint_floor "$next"
-  # The paths that failed before and still exist, and the newly changed ones
-  # that are not among them: two lists, so a path that keeps failing costs a
-  # pass one small rsync instead of failing the list of new files with it.
-  : > "$ct_work/old"
-  [ -s "$retry" ] && (cd "$live" && xargs -0 -r sh -c 'for f; do [ -f "$f" ] && printf "%s\0" "$f"; done' sh) \
-    < "$retry" | LC_ALL=C sort -zu > "$ct_work/old"
-  (cd "$live" && find . -type f -newer "$stamp" -print0) | LC_ALL=C sort -zu > "$ct_work/found"
-  LC_ALL=C comm -z -23 "$ct_work/found" "$ct_work/old" > "$ct_work/new"
+  : > "$ct_work/old"; : > "$ct_work/keep.first"; : > "$ct_work/keep.last"
+  : > "$ct_work/untested"; : > "$ct_work/single"
+  [ -s "$retry" ] && (cd "$live" && existing0) < "$retry" > "$ct_work/old"
+  LC_ALL=C sort -zu "$ct_work/old" > "$ct_work/old.sorted"
+  {
+    (cd "$live" && find . -type f -newer "$stamp" -print0)
+    [ -s "$untested" ] && (cd "$live" && existing0) < "$untested"
+  } | LC_ALL=C sort -zu > "$ct_work/found"
+  LC_ALL=C comm -z -23 "$ct_work/found" "$ct_work/old.sorted" > "$ct_work/new"
 
-  ct_head=1 ct_tail=0 ct_tries=0 ct_copied=0 ct_rc="" ct_t0=$(now)
-  : > "$ct_work/failed"; : > "$ct_work/single"
-  for ct_f in new old; do
-    [ -s "$ct_work/$ct_f" ] && { ct_tail=$((ct_tail + 1)); mv "$ct_work/$ct_f" "$ct_work/q.$ct_tail"; }
-  done
-  ct_first="$ct_tail"
-  while [ "$ct_head" -le "$ct_tail" ]; do
-    ct_chunk="$ct_work/q.$ct_head"; ct_this="$ct_head"; ct_head=$((ct_head + 1))
-    ct_count=$(tr -cd '\0' < "$ct_chunk" | wc -c | tr -d ' ')
-    # Out of tries or time for this pass: what is left waits for the next one.
-    if [ "$ct_this" -gt "$ct_first" ] \
-        && { [ "$ct_tries" -ge "$RETRY_MAX" ] || [ $(( $(now) - ct_t0 )) -ge "$RETRY_SECONDS" ]; }; then
-      cat "$ct_chunk" >> "$ct_work/failed"
+  ct_max="$BATCH_FILES"
+  case "$(cat "$hint" 2>/dev/null)" in ''|*[!0-9]*|0) ;; *) ct_max=$(cat "$hint") ;; esac
+  [ -s "$ct_work/new" ] && (cd "$live" && batches0 "$ct_work/new" "$ct_work/n." "$ct_max")
+  ct_stack=""
+  for ct_f in "$ct_work"/n.??????; do [ -e "$ct_f" ] && ct_stack="$ct_stack $ct_f"; done
+  # The proven-bad paths, last and in the order the last pass left them (the
+  # ones it did not get to first) — unless they are waiting out a timeout.
+  ct_waiting=""
+  if [ -s "$ct_work/old" ]; then
+    if [ -e "$retry.slow" ] && [ $(( $(now) - $(stat -c %Y "$retry.slow" 2>/dev/null || echo 0) )) -lt "$RETRY_SLOW_SECONDS" ]; then
+      ct_waiting=1
+      cat "$ct_work/old" >> "$ct_work/keep.first"
+    else
+      rm -f "$retry.slow"
+      mv "$ct_work/old" "$ct_work/o.000001"
+      ct_stack="$ct_stack $ct_work/o.000001"
+    fi
+  fi
+
+  ct_tries=0 ct_copied=0 ct_rc="" ct_t0="" ct_stop="" ct_hint=""
+  while [ -n "$ct_stack" ]; do
+    # shellcheck disable=SC2086  # generated names, no spaces
+    set -- $ct_stack
+    ct_chunk="$1"; shift; ct_stack="$*"
+    ct_base="${ct_chunk##*/}"
+    ct_count=$(count0 "$ct_chunk")
+    # Where a list goes that this pass does not settle: a piece of the
+    # proven-bad list stays proven bad, anything else is simply untested.
+    case "$ct_base" in o.*) ct_rest="$ct_work/keep.first" ;; *) ct_rest="$ct_work/untested" ;; esac
+    # A whole batch always gets its one rsync; the halves share the budget.
+    case "$ct_base" in *.*.*) ct_half=1 ;; *) ct_half=0 ;; esac
+    if [ -n "$ct_stop" ] || { [ "$ct_half" -eq 1 ] \
+        && { [ "$ct_tries" -ge "$RETRY_MAX" ] || [ $(( $(now) - ct_t0 )) -ge "$RETRY_SECONDS" ]; }; }; then
+      cat "$ct_chunk" >> "$ct_rest"
       continue
     fi
-    [ "$ct_this" -gt "$ct_first" ] && ct_tries=$((ct_tries + 1))
+    ct_tries=$((ct_tries + ct_half))
     # --files-from means rsync walks only changed LOCAL paths. It does not scan
     # the remote tree every 15 seconds — a critical property on the bucket
     # mount. Destination temporaries close before rename, retaining the prior
@@ -546,6 +616,7 @@ checkpoint_tree() {
       ct_copied=$((ct_copied + ct_count))
       continue
     fi
+    [ -n "$ct_t0" ] || ct_t0=$(now)
     # The first failure is the one reported, unless a single path is found to
     # blame: that one's message names the real cause.
     if [ -z "$ct_rc" ] || { [ "$ct_count" -le 1 ] && [ ! -s "$ct_work/single" ]; }; then
@@ -553,45 +624,63 @@ checkpoint_tree() {
       cp "$ct_work/err" "$ct_work/err.report"
       cat "$ct_work/err" >&2
     fi
-    if [ "$ct_count" -le 1 ]; then
-      cat "$ct_chunk" >> "$ct_work/failed"; cat "$ct_chunk" >> "$ct_work/single"
-    elif [ "$ct_one" -eq 124 ] || [ "$ct_one" -eq 137 ]; then
-      # Stopped by the time limit: halving it would only wait twice.
-      cat "$ct_chunk" >> "$ct_work/failed"
+    if [ "$ct_one" -eq 124 ] || [ "$ct_one" -eq 137 ]; then
+      # Stopped by the time limit. Nothing of this list is in place, and
+      # trying its halves now would hold the lock for another limit each.
+      ct_stop=1
+      if [ "$ct_count" -le 1 ]; then
+        cat "$ct_chunk" >> "$ct_work/keep.last"; cat "$ct_chunk" >> "$ct_work/single"
+        : > "$retry.slow"
+      else
+        cat "$ct_chunk" >> "$ct_rest"
+        case "$ct_base" in o.*) : > "$retry.slow" ;; *) ct_hint=$(( (ct_count + 1) / 2 )) ;; esac
+      fi
+    elif [ "$ct_count" -le 1 ]; then
+      cat "$ct_chunk" >> "$ct_work/keep.last"; cat "$ct_chunk" >> "$ct_work/single"
     else
-      split -t '\0' -l $(( (ct_count + 1) / 2 )) "$ct_chunk" "$ct_work/half.$ct_this."
-      for ct_f in "$ct_work/half.$ct_this."*; do
-        ct_tail=$((ct_tail + 1)); mv "$ct_f" "$ct_work/q.$ct_tail"
-      done
+      split -t '\0' -l $(( (ct_count + 1) / 2 )) "$ct_chunk" "$ct_chunk."
+      ct_stack="$(echo "$ct_chunk".??) $ct_stack"
     fi
   done
 
+  # The lists are in place before the stamp moves: killed in between, the next
+  # pass lists everything again from the old stamp.
+  if [ -n "$ct_hint" ]; then echo "$ct_hint" > "$hint"; else rm -f "$hint"; fi
   ct_status=0
-  if [ -s "$ct_work/failed" ]; then
+  if [ -s "$ct_work/untested" ]; then
     ct_status=1
-    LC_ALL=C sort -zu "$ct_work/failed" > "$retry.next.$$" && mv -f "$retry.next.$$" "$retry"
+    LC_ALL=C sort -zu "$ct_work/untested" > "$untested.next.$$" && mv -f "$untested.next.$$" "$untested"
+    FAIL_UNTESTED=$(( FAIL_UNTESTED + $(count0 "$untested") ))
+  else
+    rm -f "$untested"
+  fi
+  if [ -s "$ct_work/keep.first" ] || [ -s "$ct_work/keep.last" ]; then
+    ct_status=1
+    cat "$ct_work/keep.first" "$ct_work/keep.last" > "$retry.next.$$" && mv -f "$retry.next.$$" "$retry"
     # A path that failed on its own may have left its temporary behind. This
     # process holds the checkpoint lock, so no rsync is writing there now.
     tr '\0' '\n' < "$ct_work/single" | sed 's|/[^/]*$||' | LC_ALL=C sort -u | head -n 200 | while IFS= read -r ct_d; do
       ct_t="$durable/$ct_d/.~tmp~"
       [ -d "$ct_t" ] && [ ! -L "$ct_t" ] && guard rm -rf -- "$ct_t"
     done
+    FAIL_PENDING=$(( FAIL_PENDING + $(count0 "$retry") ))
+    FAIL_PATHS="$FAIL_PATHS${FAIL_PATHS:+, }$(cat "$ct_work/keep.last" "$ct_work/keep.first" | tr '\0' '\n' | head -n 5 | sed 's|^\./||' | paste -sd, - | sed 's/,/, /g')"
+  else
+    rm -f "$retry" "$retry.slow"
+  fi
+  if [ "$ct_status" -ne 0 ]; then
     FAIL_RC="$ct_rc"
-    FAIL_PENDING=$(( FAIL_PENDING + $(tr -cd '\0' < "$retry" | wc -c | tr -d ' ') ))
-    FAIL_PATHS="$FAIL_PATHS${FAIL_PATHS:+, }$(tr '\0' '\n' < "$retry" | head -n 5 | sed 's|^\./||' | paste -sd, - | sed 's/,/, /g')"
     FAIL_STDERR=$(grep -v '^$' "$ct_work/err.report" 2>/dev/null | tail -n 5 | paste -sd'|' - | sed 's/|/ | /g')
     FAIL_REASON=$(grep -v -e '^$' -e '^rsync error:' "$ct_work/err.report" 2>/dev/null | head -n 1)
     [ -n "$FAIL_REASON" ] || FAIL_REASON=$(grep -v '^$' "$ct_work/err.report" 2>/dev/null | tail -n 1)
     if [ "$ct_rc" = 124 ] || [ "$ct_rc" = 137 ]; then
-      FAIL_REASON="the copy to $durable did not finish within ${STEP_TIMEOUT}s (AGENT_STATE_CHECKPOINT_TIMEOUT)"
+      FAIL_REASON="a copy to $durable did not finish within ${STEP_TIMEOUT}s (AGENT_STATE_CHECKPOINT_TIMEOUT)"
+    elif [ -z "$ct_rc" ] && [ -n "$ct_waiting" ]; then
+      FAIL_REASON="a copy ran into the time limit earlier; these paths are tried again every ${RETRY_SLOW_SECONDS}s"
     fi
     [ -n "$FAIL_REASON" ] || FAIL_REASON="rsync exit $ct_rc"
-  else
-    rm -f "$retry"
   fi
   FAIL_COPIED=$((FAIL_COPIED + ct_copied))
-  # The retry list is in place before the stamp moves: killed in between, the
-  # next pass lists everything again from the old stamp.
   mv "$next" "$stamp"
   rm -rf "$ct_work"
   return "$ct_status"
@@ -1343,19 +1432,25 @@ if [ "$MODE" = prune ]; then
   # `.~tmp~` directories an rsync that died left in the durable trees (see
   # rsync_tree). Found without the lock, removed while holding it: a checkpoint
   # is the only writer of these trees, so with the lock held nothing is in
-  # flight and whatever is still there is stale. Real directories only.
+  # flight and whatever is still there is stale — which holds again each time
+  # the lock is retaken. Real directories only.
   PRUNE_TMP_SECONDS="${AGENT_STATE_PRUNE_TMP_SECONDS:-300}"
+  PRUNE_TMP_BATCH="${AGENT_STATE_PRUNE_TMP_BATCH:-20}"
   for _a in $ADAPTERS; do
     _root=$(durable_of "$_a")
     [ -d "$_root" ] && [ ! -L "$_root" ] || continue
     timeout "$PRUNE_TMP_SECONDS" find "$_root" -type d -name '.~tmp~' -prune -print > "$WORK/tmpdirs" 2>/dev/null \
       || durable_log "prune: listing the stale .~tmp~ directories under ${_root#"$DATA_DIR"/} did not finish (exit $?)"
     [ -s "$WORK/tmpdirs" ] || continue
-    n=0
+    # PRUNE_TMP_BATCH directories per hold of the lock, so a checkpoint waits
+    # for a few removals, not for an adapter's worth.
+    n=0 _held=0
     flock 9
     while IFS= read -r _d; do
       case "$_d" in */.~tmp~) ;; *) continue ;; esac
+      if [ "$_held" -ge "$PRUNE_TMP_BATCH" ]; then flock -u 9; _held=0; flock 9; fi
       [ -d "$_d" ] && [ ! -L "$_d" ] || continue
+      _held=$((_held + 1))
       if rm -rf -- "$_d" 2> "$WORK/rm.err"; then n=$((n + 1))
       else durable_log "prune: could not remove ${_d#"$DATA_DIR"/}: $(tail -n 1 "$WORK/rm.err")"; fi
     done < "$WORK/tmpdirs"
