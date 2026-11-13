@@ -55,6 +55,7 @@ import { startWatchdog, startStallProfiler } from './watchdog.js';
 import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revokeAccess,
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
+import { checkpointHealth } from './checkpoint-health.js';
 import {
   formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeAttachment,
   removeSessionAttachments,
@@ -1699,6 +1700,10 @@ api.get('/api/info', (_req, res) => res.json({
   // the Hub: every open tab polls this route every 15s. Withheld while locked
   // for the same reason as `secrets` — it names the operator's repos.
   backup: isLocked() ? null : backup.backupHealth(loadAmConfig()),
+  // Agent-state checkpoints (scripts/agent-state.sh): null while every harness
+  // is being saved, otherwise the adapters that are not and why. Read from
+  // local status files. Withheld while locked: the reason names file paths.
+  checkpoint: isLocked() ? null : checkpointHealth(),
   // First-run welcome: shown once per Space (flag persists on the bucket).
   welcomeSeen: welcomeSeen(),
   // Demo mode: current sessions hidden from view; forces the welcome to show.
