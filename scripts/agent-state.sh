@@ -231,7 +231,9 @@ record_ok() {
 record_fail() {
   _n=$(( $(status_get "$1" failures) + 1 ))
   _since=$(status_get "$1" failing_since); [ -n "$_since" ] || _since=$(now)
-  _sig=$(clean "$FAIL_RC|$FAIL_PENDING|$FAIL_PATHS|$FAIL_REASON")
+  # Not the path count: in an outage it grows every pass, and each pass would
+  # be a new line.
+  _sig=$(clean "$FAIL_RC|$FAIL_PATHS|$FAIL_REASON")
   _old=$(status_get "$1" sig)
   {
     printf 'adapter=%s\nlast_attempt=%s\nlast_success=%s\nfailures=%s\nfailing_since=%s\n' \
