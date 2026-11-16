@@ -41,7 +41,8 @@ test('direct, deferred and .native sync calls are all counted against their requ
     env: { ...process.env, FAKEFS_ROOT: ROOT, FAKEFS_MS: '0', PORT: String(port) },
   });
   try {
-    await once(child, 'message');
+    // A child that dies before it listens ends the test instead of hanging it.
+    await Promise.race([once(child, 'message'), once(child, 'exit').then(([code]) => { throw new Error(`probe exited ${code} before listening`); })]);
     for (let i = 0; i < 3; i++) assert.equal(await (await fetch(`http://127.0.0.1:${port}/probe`)).text(), 'ok');
     const report = await new Promise((resolve) => { child.on('message', (m) => { if (m?.fakefs === 'report') resolve(m); }); child.send('fakefs-report'); });
     const byMethod = Object.fromEntries(report.sync.filter((x) => x.ctx === 'http GET /probe').map((x) => [x.method, x.n]));

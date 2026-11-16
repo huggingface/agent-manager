@@ -153,3 +153,11 @@ test('id-only helper cannot silently present an archived mapping as a usable sen
  await assert.rejects(run(args,{env:{CODEX_THREAD_ID:threadId},fetchImpl,print:()=>printed=true}),/codex-sender-archived.*Restore/);
  assert.equal(printed,false);
 });
+
+test('contextForThread refuses a workspace that no longer resolves to the bound cwd, unless display is asked', async (t) => {
+  const f = fixture(t); await bindExistingThread(f.request, f.deps);
+  fs.mkdirSync(path.join(root, 'workspaces', 'b'), { recursive: true }); f.session.path = 'b';
+  assert.throws(() => contextForThread(threadId, { sessions: f.facts.sessions, bindings: f.bindings, endpoint }), { code: 'codex-workspace-changed' });
+  assert.equal(contextForThread(threadId, { sessions: f.facts.sessions, bindings: f.bindings.snapshot(), endpoint, display: true }).workdir, work,
+    'display: the workspace as it was recorded when the thread was bound');
+});

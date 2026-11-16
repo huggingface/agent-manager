@@ -290,18 +290,6 @@ test('archived recipient is distinct from missing binding, remains observable, a
 // hub's back, between steps and in the middle of a verification, and never
 // touches the CodexBindings instance.
 const unbindOnDisk = (f) => fs.writeFileSync(f.deps.bindings.file, JSON.stringify({ version: 1, bindings: [] }));
-test('a binding removed from the file by hand refuses send, approval, interrupt, status and attribution at once', async () => {
- const f=fixture();await f.hub.attach('am');
- f.client.requests.set('q',{method:'item/commandExecution/requestApproval',params:{threadId:f.thread.id,availableDecisions:['accept','decline']}});
- unbindOnDisk(f);
- await assert.rejects(f.hub.send('am',{text:'hello',requestId:randomUUID()}),{code:'codex-unmapped'});
- await assert.rejects(f.hub.answer('am',{key:'q',decision:'accept'}),{code:'codex-unmapped'});
- await assert.rejects(f.hub.interrupt('am',{turnId:'active-turn'}),{code:'codex-unmapped'});
- await assert.rejects(f.hub.status('am'),{code:'codex-unmapped'});
- assert.throws(()=>f.hub.agentSource('am'),{code:'codex-unmapped'});
- assert.equal(f.calls.filter(c=>['turn/start','turn/interrupt'].includes(c.method)).length,0);
- assert.deepEqual(f.replies,[]);
-});
 test('a binding removed from the file while the thread is being verified stops the send before turn/start', async () => {
  const f=fixture();const call=f.client.call.bind(f.client);
  f.client.call=async(method,params)=>{const r=await call(method,params);if(method==='thread/read')unbindOnDisk(f);return r;};
@@ -339,4 +327,126 @@ test('display status is built from the roster snapshot and never reads the bindi
  await assert.rejects(f.hub.status('am'),{code:'codex-unmapped'});
  await assert.rejects(f.hub.send('am',{text:'hello',requestId:randomUUID()}),{code:'codex-unmapped'});
  await assert.rejects(f.hub.status('am',{display:bindings.snapshot()}),{code:'codex-unmapped'},'a snapshot taken after that file read knows too');
+});
+
+// One fixture per operation. A refusal re-reads the file, and read() stores what
+// it saw in the memory copy, so a second call on the same fixture cannot tell a
+// file read from a memory read.
+const recoverable = (f) => { f.thread.status = { type: 'notLoaded' }; f.hub.recovery = async () => ({ key: 'a'.repeat(64), settings: { params: {}, expected: {} } }); };
+for (const [name, prepare, run] of [
+  ['send', () => {}, (f) => f.hub.send('am', { text: 'hello', requestId: randomUUID() })],
+  ['approval', () => {}, (f) => f.hub.answer('am', { key: 'q', decision: 'accept' })],
+  ['interrupt', (f) => { f.thread.status = { type: 'active', activeFlags: [] }; }, (f) => f.hub.interrupt('am', { turnId: f.turn.id })],
+  ['status', () => {}, (f) => f.hub.status('am')],
+  ['attribution', () => {}, async (f) => f.hub.agentSource('am')],
+  ['agent delivery', (f) => { withSender(f); }, (f) => f.hub.sendFromAgent('am', { text: 'hello', requestId: randomUUID() }, 'sender')],
+  ['reconnect', recoverable, (f) => f.hub.reconnect('am', { recoveryKey: 'a'.repeat(64) })],
+]) test(`a binding removed by hand refuses ${name} while the memory copy still holds it`, async () => {
+  const f = fixture(); await f.hub.attach('am');
+  f.client.requests.set('q', { method: 'item/commandExecution/requestApproval', params: { threadId: f.thread.id, availableDecisions: ['accept', 'decline'] } });
+  prepare(f);
+  unbindOnDisk(f);
+  assert.ok(f.deps.bindings.snapshot().forSession('am'), 'fixture: the memory copy still holds the binding');
+  const before = f.calls.length;
+  await assert.rejects(Promise.resolve().then(() => run(f)), { code: 'codex-unmapped' });
+  assert.deepEqual(f.calls.slice(before).filter((c) => ['turn/start', 'turn/interrupt', 'thread/queue/add', 'thread/resume'].includes(c.method)), []);
+  assert.deepEqual(f.replies, []);
+});
+// The Reader pane normally holds a client already. attach() then returns at
+// once, and the only revalidation after thread/read is the caller's own.
+const during = (f, method, edit) => { const call = f.client.call.bind(f.client);
+  f.client.call = async (m, params) => { const r = await call(m, params); if (m === method) edit(f); return r; }; };
+test('with a client already attached, a binding removed during the send\'s own thread/read stops the send', async () => {
+  const f = fixture(); await f.hub.attach('am'); during(f, 'thread/read', unbindOnDisk);
+  await assert.rejects(f.hub.send('am', { text: 'hello', requestId: randomUUID() }), { code: 'codex-unmapped' });
+  assert.equal(f.calls.filter((c) => c.method === 'turn/start').length, 0);
+});
+test('a binding removed while the active turn is being read stops the interrupt', async () => {
+  const f = fixture(); f.thread.status = { type: 'active', activeFlags: [] }; await f.hub.attach('am'); during(f, 'thread/turns/list', unbindOnDisk);
+  await assert.rejects(f.hub.interrupt('am', { turnId: f.turn.id }), { code: 'codex-unmapped' });
+  assert.equal(f.calls.filter((c) => c.method === 'turn/interrupt').length, 0);
+});
+test('a binding removed while thread/resume is in flight leaves no attached client', async () => {
+  const f = fixture(); during(f, 'thread/resume', unbindOnDisk);
+  await assert.rejects(f.hub.attach('am'), { code: 'codex-unmapped' });
+  assert.equal(f.hub.clients.has('am'), false); assert.equal(f.client.closed, true);
+});
+test('a binding removed while coordination status is being observed is refused, not reported', async () => {
+  const f = fixture(); during(f, 'thread/turns/list', unbindOnDisk);
+  await assert.rejects(f.hub.status('am'), { code: 'codex-unmapped' });
+});
+test('a binding removed while reconnect reads settings or the owner never reaches thread/resume', async () => {
+  for (const stage of ['settings', 'owner']) {
+    const f = fixture(); f.thread.status = { type: 'notLoaded' };
+    const plan = { key: 'a'.repeat(64), settings: { params: {}, expected: {} } };
+    f.hub.recovery = async () => { if (stage === 'settings') unbindOnDisk(f); return plan; };
+    f.hub.owner = async () => { if (stage === 'owner') unbindOnDisk(f); return { state: 'free', activeGoal: false, queuedInput: false }; };
+    await assert.rejects(f.hub.reconnect('am', { recoveryKey: plan.key }), { code: 'codex-unmapped' }, stage);
+    assert.equal(f.calls.some((c) => c.method === 'thread/resume'), false, stage);
+  }
+});
+// `display` switches the workspace check off. Nothing else may.
+test('a workspace that no longer resolves to the bound cwd refuses every decision; only the display badge takes the recorded cwd', async () => {
+  const f = fixture(); const snapshot = f.deps.bindings.snapshot();
+  f.session.path = path.basename(fs.mkdtempSync(path.join(root, 'moved-')));
+  assert.equal((await f.hub.status('am', { display: snapshot })).status, 'idle');
+  await assert.rejects(f.hub.status('am'), { code: 'codex-workspace-changed' });
+  await assert.rejects(f.hub.send('am', { text: 'hello', requestId: randomUUID() }), { code: 'codex-workspace-changed' });
+  assert.throws(() => f.hub.agentSource('am'), { code: 'codex-workspace-changed' });
+  assert.equal(f.calls.filter((c) => c.method === 'turn/start').length, 0);
+});
+test('a thread the server reports in another directory is a different conversation, for decisions and for the badge', async () => {
+  const f = fixture(); f.thread.cwd = fs.mkdtempSync(path.join(root, 'other-'));
+  await assert.rejects(f.hub.send('am', { text: 'hello', requestId: randomUUID() }), { code: 'codex-thread-mismatch' });
+  await assert.rejects(f.hub.status('am'), { code: 'codex-thread-mismatch' });
+  await assert.rejects(f.hub.status('am', { display: f.deps.bindings.snapshot() }), { code: 'codex-thread-mismatch' });
+  f.thread.cwd = path.join(root, 'does-not-exist');
+  await assert.rejects(f.hub.status('am'));
+  assert.equal(f.calls.filter((c) => c.method === 'turn/start').length, 0);
+});
+test('display status of an unloaded thread reads no bindings file, recovery lookup included', async () => {
+  const f = fixture(); f.thread.status = { type: 'notLoaded' }; f.turn.status = 'completed';
+  const bindings = f.deps.bindings; let reads = 0; const read = bindings.read.bind(bindings); bindings.read = (...a) => { reads++; return read(...a); };
+  const shown = await f.hub.status('am', { display: bindings.snapshot() });
+  assert.equal(shown.status, 'unloaded'); assert.equal(reads, 0, 'the recovery lookup asked the snapshot too');
+});
+test('a thread cwd that is a symlink to the workspace is the workspace', async () => {
+  const f = fixture(); const link = path.join(root, `link-${randomUUID()}`); fs.symlinkSync(root, link); f.thread.cwd = link;
+  assert.equal((await f.hub.status('am')).status, 'idle');
+  assert.equal((await f.hub.send('am', { text: 'hello', requestId: randomUUID() })).turnId, 'turn-fixture');
+});
+// The shared fixture uses ONE directory as DATA_DIR, workspace root, workspace,
+// Codex home and thread cwd, so a comparison against the wrong one of them passes.
+test('the thread cwd is compared with the bound workspace, not with another configured directory', async () => {
+  const f = fixture(); const ws = fs.mkdtempSync(path.join(root, 'ws-'));
+  f.session.path = path.basename(ws);
+  const bindings = new CodexBindings(path.join(root, `bindings-ws-${randomUUID()}`));
+  bindings.bind({ session: f.session, threadId: f.session.codexSessionId, endpointId: endpoint.id, cwd: ws, expectedRevision: 0 });
+  const hub = new CodexInput({ ...f.deps, bindings });
+  f.thread.cwd = ws;
+  assert.equal((await hub.status('am')).status, 'idle');
+  assert.equal((await hub.status('am', { display: bindings.snapshot() })).status, 'idle');
+  f.thread.cwd = root; // the Codex home and the workspace root, not this session's workspace
+  await assert.rejects(hub.status('am'), { code: 'codex-thread-mismatch' });
+  await assert.rejects(hub.status('am', { display: bindings.snapshot() }), { code: 'codex-thread-mismatch' });
+});
+// The generation counter in CodexBindings is what keeps the badge from acting
+// on an OLDER image than a decision already read: status() runs existing(),
+// which closes and forgets the live client when the stamps differ.
+test('a re-read that lands after a decision read never makes the badge close the live client', async () => {
+  const f = fixture(); let release; const gate = new Promise((r) => { release = r; });
+  const file = path.join(root, `bindings-gated-${randomUUID()}`);
+  const promises = { ...fs.promises, async open(target, flags) { const copy = `${target}.snapshot`; fs.copyFileSync(target, copy); await gate; return fs.promises.open(copy, flags); } };
+  const bindings = new CodexBindings(file, new Proxy(fs, { get: (t, key) => (key === 'promises' ? promises : t[key]) }));
+  bindings.bind({ session: f.session, threadId: f.session.codexSessionId, endpointId: endpoint.id, cwd: root, expectedRevision: 0 });
+  const hub = new CodexInput({ ...f.deps, bindings });
+  bindings.cache.at -= bindings.staleMs + 1; bindings.snapshot(); // a poll: the re-read starts, holding revision 1
+  assert.ok(bindings.refreshing);
+  const onDisk = JSON.parse(fs.readFileSync(file, 'utf8')); onDisk.bindings[0].revision = 2; fs.writeFileSync(file, JSON.stringify(onDisk)); // repaired by hand
+  await hub.attach('am'); // a decision reads the file: the client is attached under revision 2
+  f.client.requests.set('q', { method: 'item/commandExecution/requestApproval', params: { threadId: f.thread.id } });
+  const pending = bindings.refreshing; release(); await pending; // the late answer (revision 1) arrives
+  const shown = await hub.status('am', { display: bindings.snapshot() }); // the next poll
+  assert.equal(shown.connected, true, 'the badge used the live client');
+  assert.equal(f.client.closed, false, 'and did not close it'); assert.ok(hub.clients.has('am')); assert.equal(f.client.requests.size, 1);
 });
