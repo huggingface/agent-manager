@@ -19,10 +19,28 @@
 // else. So every poll runs both per-row bindings lookups (hit and miss) and
 // the bound row's status refresh, which is where the file was still read.
 //
-// KNOWN is the allowlist of offenders still on main, one line each. The suite
-// fails on a line that is not on it (a new offender) AND on a line that is on
-// it but no longer happens (a fixed one: delete the line in the same PR, so the
-// list stays what the code does). The fixes are the numbered plan in #235.
+// KNOWN is the allowlist of offenders still on main, one line each with the
+// number of calls it makes in the window. The suite fails on a line that is
+// not on it (a new offender), on a line that makes more calls than listed (an
+// offender that got worse), AND on a line that is on it but no longer happens
+// (a fixed one: delete the line in the same PR, so the list stays what the
+// code does). The fixes are the numbered plan in #235.
+//
+// A keystroke is more than its ws frame: the echo comes back as PTY output,
+// which runs in no request's context, and so does work handed to a timer that
+// was armed at boot. So every OTHER context is held to a list too, TIMERS: the
+// sync calls the server's own periodic timers may make during the window.
+// Those depend on when the window falls, so a TIMERS line may be absent, but
+// anything not on it, or above its count, fails like a hot-path line.
+//
+// The window stays open for TAIL_MS after the last key, because a debounced
+// call still carries the context that armed it. The tail covers the longest
+// debounces a keystroke and its echo arm: the history checkpoint
+// (HISTORY_SAVE_MS, 5 s) and the trace hydration (TRACE_HYDRATE_IDLE_MS, 5 s)
+// in runner.js, and with them the shorter ones (screen sample 250 ms, resize
+// settle 120 ms, the 3 s status cache). It is not taken on trust: the preload
+// tracks every timer armed inside a context, and a timer armed by a hot
+// context that is still pending when the tail ends fails the suite.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -44,13 +62,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // The contexts that run per poll or per keystroke. Anything else is reported.
 const HOT = ['http GET /api/tree', 'http GET /api/meta', 'http GET /api/sessions', 'ws:i'];
 const POLLS = 10, KEYS = 40;
+const TAIL_MS = 6000;
 
-// context, sync fs method, path relative to DATA_DIR. One line per offender.
+// context, sync fs method, path relative to DATA_DIR, calls in the window.
+// One line per offender.
 const KNOWN = [
   // A3: sessions.js persist() from touchInput, on the first keystroke of each
-  // minute per session (#235 step 5).
-  ['ws:i', 'writeFileSync', 'sessions.json.tmp'],
-  ['ws:i', 'renameSync', 'sessions.json.tmp'],
+  // minute per session (#235 step 5): once in 41 keystrokes.
+  ['ws:i', 'writeFileSync', 'sessions.json.tmp', 1],
+  ['ws:i', 'renameSync', 'sessions.json.tmp', 1],
+];
+// What the server's periodic timers may do during the window, with the most
+// calls each can make in it. Optional: whether a 30 s timer fires inside the
+// window depends on the machine.
+const TIMERS = [
+  // backup.js reads the config on its tick (#235 step 6).
+  ['background', 'readFileSync', 'am-config.json', 4],
+  // model-catalog.js saves the model lists once, 5 s after boot or later.
+  ['background', 'mkdirSync', 'state', 1],
+  ['background', 'writeFileSync', 'state/cli-models.json.tmp', 1],
+  ['background', 'renameSync', 'state/cli-models.json.tmp', 1],
+  // runstate.js snapshots what is running every 30 s (#235 step 6).
+  ['background', 'writeFileSync', 'runstate.json.tmp', 2],
+  ['background', 'renameSync', 'runstate.json.tmp', 2],
 ];
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'am-hot-path-'));
@@ -96,7 +130,8 @@ const port = await freePort();
 const API = `http://127.0.0.1:${port}`;
 // SPACE_* would make the server believe it is on a Space; the skills
 // distribution walks real folders. Neither belongs in a fixture.
-const { SPACE_ID, SPACE_HOST, AM_DISTRIBUTE_SKILLS, ...BASE } = process.env;
+// The debounces the tail is sized for must keep their defaults.
+const { SPACE_ID, SPACE_HOST, AM_DISTRIBUTE_SKILLS, AM_HISTORY_SAVE_MS, AM_TRACE_HYDRATE_IDLE_MS, ...BASE } = process.env;
 const child = spawn(process.execPath, ['--import', path.join(HERE, 'helpers', 'fakefs-preload.mjs'), 'src/index.js'], {
   cwd: SERVER,
   stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
@@ -122,7 +157,7 @@ try {
     await sleep(100);
   }
   const post = (p, b) => fetch(API + p, { method: 'POST', headers: { ...H, 'content-type': 'application/json' }, body: b && JSON.stringify(b) });
-  const get = (p) => fetch(API + p, { headers: H }).then((r) => r.arrayBuffer());
+  const get = async (p) => { const r = await fetch(API + p, { headers: H }); if (!r.ok) throw new Error(`GET ${p}: ${r.status}`); return r.arrayBuffer(); };
   await post('/api/welcome/seen');
   for (let i = 0; i < 3; i++) await post('/api/sessions', { cli: 'shell', name: `bg${i}`, path: '.' });
   const made = await (await post('/api/sessions', { cli: 'test-repaint', name: 'typing', path: '.' })).json();
@@ -151,8 +186,9 @@ try {
   for (let i = 0; i < POLLS; i++) { await Promise.all(['/api/tree', '/api/meta', '/api/sessions'].map(get)); await sleep(350); }
   for (let i = 0; i < KEYS; i++) { ws.send(JSON.stringify({ t: 'i', d: 'a' })); await sleep(20); }
   ws.send(JSON.stringify({ t: 'i', d: '\u0015' })); // ^U: clear the line again
-  await sleep(500);
-  const busy = (await ask('fakefs-report')).sync;
+  await sleep(TAIL_MS);
+  const report = await ask('fakefs-report');
+  const busy = report.sync;
   if (observed.reads === reads) fail('the polls never refreshed the bound row\'s status, so the status path was not measured');
   if (observed.refused.length) fail(`a poll asked the observer for more than a read: ${observed.refused.join(', ')}`);
 
@@ -160,24 +196,32 @@ try {
   const hot = busy.filter((x) => HOT.includes(x.ctx));
   for (const ctx of HOT) {
     const ctxRows = hot.filter((x) => x.ctx === ctx);
-    const per = ctx === 'ws:i' ? `${KEYS} keystrokes` : `${POLLS} requests`;
-    console.log(`${ctx}: ${ctxRows.reduce((a, x) => a + x.n, 0)} sync DATA_DIR calls over ${per}${ctxRows.length ? '\n' + show(ctxRows) : ''}`);
+    const ran = report.entries[ctx] || 0, want = ctx === 'ws:i' ? KEYS + 1 : POLLS;
+    console.log(`${ctx}: ${ctxRows.reduce((a, x) => a + x.n, 0)} sync DATA_DIR calls over ${ran} ${ctx === 'ws:i' ? 'frames' : 'requests'}${ctxRows.length ? '\n' + show(ctxRows) : ''}`);
+    if (ran < want) fail(`${ctx} ran ${ran} times in the window, expected ${want}: the context was not measured`);
   }
   const other = busy.filter((x) => !HOT.includes(x.ctx));
-  if (other.length) console.log(`other contexts during the busy window (report only):\n${show(other)}`);
+  if (other.length) console.log(`other contexts during the window:\n${show(other)}`);
 
-  const seen = new Set(hot.map(key));
-  const known = new Set(KNOWN.map((k) => k.join('\t')));
-  for (const row of hot) {
-    if (!known.has(key(row))) fail(`new sync DATA_DIR call on a hot path: ${row.n}x ${row.ctx} ${row.method} ${row.file}. Make it async or move it off the poll/keystroke path (issue #235).`);
+  const listed = new Map([...KNOWN, ...TIMERS].map(([ctx, method, file, n]) => [`${ctx}\t${method}\t${file}`, n]));
+  const seen = new Set(busy.map(key));
+  for (const row of busy) {
+    const where = HOT.includes(row.ctx) ? 'on a hot path' : 'while keys were being echoed';
+    const line = `${row.n}x ${row.ctx} ${row.method} ${row.file}`;
+    if (!listed.has(key(row))) fail(`new sync DATA_DIR call ${where}: ${line}. Make it async or move it off the poll/keystroke path (issue #235).`);
+    else if (row.n > listed.get(key(row))) fail(`sync DATA_DIR call ${where} got worse: ${line}, listed with ${listed.get(key(row))}.`);
   }
-  for (const k of known) {
-    if (!seen.has(k)) fail(`KNOWN lists ${k.replaceAll('\t', ' ')} but the hot path no longer makes that call. Delete its line.`);
+  for (const k of KNOWN) {
+    if (!seen.has(k.slice(0, 3).join('\t'))) fail(`KNOWN lists ${k.slice(0, 3).join(' ')} but the hot path no longer makes that call. Delete its line.`);
+  }
+  // A debounce longer than the tail would run after the count was taken.
+  for (const t of report.pending.filter((x) => HOT.includes(x.ctx))) {
+    fail(`a timer armed in ${t.ctx} is still pending ${TAIL_MS} ms after the last key (${Math.round(t.ms)} ms to go): what it does was not counted. Lengthen TAIL_MS to cover it.`);
   }
   // The ws attribution patches `ws` internals and falls back to 'background'
   // if they change; a fallback would hide every keystroke offender as a pass.
   if (logs.includes('[fakefs] ws attribution unavailable')) fail('fakefs-preload could not attribute ws frames; see helpers/fakefs-preload.mjs');
-  if (!failed) console.log(`ok: hot paths make no sync DATA_DIR call beyond the ${KNOWN.length} known offender line(s)`);
+  if (!failed) console.log(`ok: polls, keystrokes and their echo make no sync DATA_DIR call beyond the ${KNOWN.length} known offender line(s) and the listed timers`);
   ws.close();
 } finally {
   try { child.kill('SIGKILL'); } catch {}

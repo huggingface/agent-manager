@@ -20,6 +20,10 @@
 // It also COUNTS sync calls under the root, attributed with AsyncLocalStorage to the
 // HTTP request (method+path) or ws frame ('ws:i' etc.) that caused them, else to
 // 'background'. The parent asks for the tally over IPC: child.send('fakefs-report').
+// The report also says how many requests or frames ran in each context
+// (`entries`), so a caller can tell "no sync call" from "the context never ran",
+// and which setTimeout timers armed inside a context have neither fired nor been
+// cleared (`pending`), so a caller knows a debounce is still to come.
 //
 // Env:
 //   FAKEFS_ROOT       directory whose descendants are "on the bucket" (default DATA_DIR)
@@ -45,6 +49,9 @@ const sleeper = new Int32Array(new SharedArrayBuffer(4));
 const metaSeen = new Map(); // path -> last real lookup
 const fdsUnder = new Set(); // fds opened under ROOT, so writeSync(fd) etc. count too
 const tally = new Map();    // `${ctx}\t${method}\t${rel}` -> { n, ms }
+const entries = new Map();  // ctx -> requests or frames that ran in it
+const timers = new Map();   // pending Timeout armed inside a context -> { ctx, due }
+const enter = (ctx, fn) => { entries.set(ctx, (entries.get(ctx) || 0) + 1); return als.run(ctx, fn); };
 let depth = 0;              // writeFileSync -> openSync/writeSync/closeSync is ONE round trip here
 
 const under = (p) => {
@@ -149,7 +156,7 @@ if (isMainThread && ROOT !== '/nonexistent') {
   // Attribution: HTTP requests by route, ws frames by message type.
   const emit = http.Server.prototype.emit;
   http.Server.prototype.emit = function (ev, req, ...rest) {
-    if (ev === 'request') return als.run(`http ${req.method} ${String(req.url).split('?')[0].replace(/\/[0-9a-f-]{8,}/g, '/:id')}`, () => emit.call(this, ev, req, ...rest));
+    if (ev === 'request') return enter(`http ${req.method} ${String(req.url).split('?')[0].replace(/\/[0-9a-f-]{8,}/g, '/:id')}`, () => emit.call(this, ev, req, ...rest));
     return emit.call(this, ev, req, ...rest);
   };
   try {
@@ -159,9 +166,24 @@ if (isMainThread && ROOT !== '/nonexistent') {
     WS.prototype.emit = function (ev, data, ...rest) {
       if (ev !== 'message') return wemit.call(this, ev, data, ...rest);
       let t = '?'; try { t = JSON.parse(String(data)).t; } catch {}
-      return als.run(`ws:${t}`, () => wemit.call(this, ev, data, ...rest));
+      return enter(`ws:${t}`, () => wemit.call(this, ev, data, ...rest));
     };
   } catch (e) { console.error('[fakefs] ws attribution unavailable:', e.message); }
+
+  // Debounces: a timer armed while a request or frame is being handled runs in
+  // that context, possibly seconds later. Remember each until it fires or is
+  // cleared, so the report can say what is still to come.
+  const setT = globalThis.setTimeout, clearT = globalThis.clearTimeout;
+  const tracked = function (fn, ms, ...args) {
+    const ctx = als.getStore();
+    if (!ctx || typeof fn !== 'function') return setT(fn, ms, ...args);
+    const t = setT((...a) => { timers.delete(t); return fn(...a); }, ms, ...args);
+    timers.set(t, { ctx, due: Date.now() + (Number(ms) || 0) });
+    return t;
+  };
+  for (const k of Reflect.ownKeys(setT)) { try { Object.defineProperty(tracked, k, Object.getOwnPropertyDescriptor(setT, k)); } catch {} }
+  globalThis.setTimeout = tracked;
+  globalThis.clearTimeout = function (t) { timers.delete(t); return clearT(t); };
 
   // FAKEFS_PROFILE_MS=100: name the code behind every block over that many ms
   // (V8 sampling profiler, 1ms; the same attribution as watchdog.js summarize()).
@@ -210,11 +232,13 @@ if (isMainThread && ROOT !== '/nonexistent') {
 
   process.on('message', (m) => {
     if (typeof m === 'string' && m.startsWith('fakefs-set:')) { MS = Number(m.slice(11)); metaSeen.clear(); process.send?.({ fakefs: 'set', ms: MS }); }
-    if (m === 'fakefs-reset') { tally.clear(); blocks.length = 0; h.reset(); process.send?.({ fakefs: 'reset' }); }
+    if (m === 'fakefs-reset') { tally.clear(); entries.clear(); blocks.length = 0; h.reset(); process.send?.({ fakefs: 'reset' }); }
     if (m !== 'fakefs-report') return;
     const pct = (q) => Math.round(h.percentile(q) / 1e6 * 10) / 10;
     process.send?.({ fakefs: 'report', loop: { p50: pct(50), p99: pct(99), max: Math.round(h.max / 1e6), count: h.count },
-      blocks: blocks.slice(), sync: [...tally].map(([k, v]) => { const [ctx, method, file] = k.split('\t'); return { ctx, method, file, n: v.n, ms: Math.round(v.ms) }; }) });
+      blocks: blocks.slice(), entries: Object.fromEntries(entries),
+      pending: [...timers.values()].map((t) => ({ ctx: t.ctx, ms: Math.max(0, t.due - Date.now()) })),
+      sync: [...tally].map(([k, v]) => { const [ctx, method, file] = k.split('\t'); return { ctx, method, file, n: v.n, ms: Math.round(v.ms) }; }) });
   });
   console.error(`[fakefs] ${ROOT} costs ${MS}ms per round trip (meta cache ${CACHE_MS}ms)`);
 }
