@@ -38,7 +38,8 @@ export function unsafeWithoutBindings(session) {
 /**
  * The binding if one can be read, null if there is none OR the file cannot be
  * read. Never throws. Only for callers whose answer cannot start a writer:
- * display, and stopping a pane.
+ * display, and stopping a pane. `bindings` is the store, or the roster's
+ * memory snapshot (CodexBindings.snapshot()) for display.
  */
 export function bindingIfKnown(session, bindings = codexBindings) {
   try { return bindings.forSession(session?.id) || null; } catch { return null; }

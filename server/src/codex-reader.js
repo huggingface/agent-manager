@@ -11,7 +11,7 @@ const unavailable = () => new ApiError(503, 'codex-reader-unavailable',
   'The shared Codex transcript could not be verified. Retry when its server is available.');
 
 export async function sharedCodexRollout(session, {
-  bindings = codexBindings, config, connect = ObservationClient.connect,
+  bindings = codexBindings, config, connect = ObservationClient.connect, display = false,
 } = {}) {
   // Read-only, so it follows the same display policy as the roster and the
   // session runtime: a bindings file we cannot read answers "not shared"
@@ -28,7 +28,7 @@ export async function sharedCodexRollout(session, {
     config ??= observationConfig();
     const endpoint = configuredEndpoint(config);
     const check = () => {
-      const context = contextForThread(binding.threadId, { sessions: [session], bindings, endpoint });
+      const context = contextForThread(binding.threadId, { sessions: [session], bindings, endpoint, display });
       if (context.amSessionId !== session.id) throw unavailable();
       return context;
     };
