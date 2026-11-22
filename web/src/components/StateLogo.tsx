@@ -1,8 +1,10 @@
 import type { SessionState } from '../types';
+import type { RowMark } from '../lib/rowMark';
 import Logo, { logoTilePadding, logoTileRadius } from './Logo';
 
 type StateLogoProps = {
-  state: SessionState;
+  // The sidebar speaks RowMark; every other surface speaks SessionState.
+  state: SessionState | RowMark;
   size?: number;
   title?: string;
 } & (

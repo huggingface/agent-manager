@@ -98,10 +98,24 @@ try {
   const p2 = run(['checkpoint']);
   check('the next pass retries only the bad one', p2.status === 1 && /bbbbbbbb/.test(p2.stderr), p2.stderr);
   check('the good one is not published again', mtime(path.join(DUR, 'conversations/aaaaaaaa-0000-4000-8000-000000000001.db')) === published);
+  // A fixed whole second, ahead of every stamp, so the give-up below and the
+  // rewrite after it land in the same second however long the passes take.
+  const giveUpSecond = Math.floor(Date.now() / 1000) * 1000 + 30_000;
+  fs.utimesSync(junk, new Date(giveUpSecond), new Date(giveUpSecond));
   const p3 = run(['checkpoint']);
   check('after three passes it is logged once and left', p3.status === 0 && /after 3 passes; leaving it until it changes/.test(p3.stderr), p3.stderr);
   const p4 = run(['checkpoint']);
   check('and later passes are clean', p4.status === 0 && !/bbbbbbbb/.test(p4.stderr), p4.stderr);
+  // SQLite rewrites pages in place: same size, same inode, and the commit can
+  // land in the second the give-up was recorded. That is still a change.
+  const before = fs.statSync(junk);
+  fs.writeFileSync(junk, 'THIS IS NOT A DATABASE');
+  fs.utimesSync(junk, new Date(giveUpSecond), new Date(giveUpSecond + 500));
+  const after = fs.statSync(junk);
+  check('fixture: the rewrite keeps size, inode and whole-second mtime',
+    after.size === before.size && after.ino === before.ino && Math.floor(after.mtimeMs / 1000) === Math.floor(before.mtimeMs / 1000));
+  const p4b = run(['checkpoint']);
+  check('a same-second, same-size rewrite is tried again', p4b.status === 1 && /bbbbbbbb.*retrying next pass/.test(p4b.stderr), p4b.stderr);
   await pause(1100);
   fs.appendFileSync(junk, ' still not');
   const p5 = run(['checkpoint']);

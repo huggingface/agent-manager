@@ -20,6 +20,7 @@ const loadUsage = () => import('./UsagePanel');
 const loadApiLog = () => import('./ApiLog');
 const loadSkills = () => import('./SkillsEditor');
 const loadCron = () => import('./CronSettings');
+const loadPreview = () => import('./DevPreviewPanel');
 
 // 'already the latest' and 'updated' must not read the same: a run where
 // nothing moved looking like one where something did is the failure mode this
@@ -111,7 +112,7 @@ function ReadErrorNote({ kind }: { kind: Kind }) {
 }
 
 
-interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; engine?: string; ghostty?: boolean; canRelaunch?: boolean; secrets?: string[]; bucketUnverified?: boolean; }
+interface Info { dataDir?: string; home?: string; spaceId?: string | null; spaceHost?: string | null; engine?: string; ghostty?: boolean; canRelaunch?: boolean; secrets?: string[]; bucketUnverified?: boolean; devPreview?: api.DevPreviewSummary; }
 
 function urlBase64ToUint8Array(base64: string) {
   const padding = '='.repeat((4 - (base64.length % 4)) % 4);
@@ -431,6 +432,21 @@ export default function SettingsView({
         {page === 'general' && (
           <div className="settings-page">
             <h2>General</h2>
+
+            {/* Only on a dev-preview Space (/api/info.devPreview). Here rather than
+                in a tab of its own: this page is already a lazy chunk, and the
+                entry has no room for another tab. */}
+            {info?.devPreview && (
+              <section className="devpv-section" id="dev-preview" data-testid="dev-preview-section">
+                <h3>Dev preview</h3>
+                <p className="s-help">
+                  Run an open pull request of <span className="mono">{info.devPreview.repo}</span>, or a stack of them
+                  merged onto main in the order you pick, on this Space without a rebuild. Switching restarts the app
+                  server, which restarts every running agent. Only this dev Space has this section.
+                </p>
+                <LazyPanel load={loadPreview} what="the preview panel" render={(m) => <m.default />} />
+              </section>
+            )}
 
             <div className="setting-row">
               <div><div className="s-label">Theme</div><div className="s-help">Defaults to your system setting.</div></div>

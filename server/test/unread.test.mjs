@@ -311,6 +311,30 @@ try {
   await api(`/api/sessions/${b.id}`, { method: 'PUT', body: JSON.stringify({ name: 'beta-renamed' }) });
   const renamed = await metaFor(b.id);
   check('a renamed session keeps its mark', !!renamed.read && !unread(renamed));
+  // ---- ?fresh=1: a reply written just now ----
+  //
+  // /api/meta answers from the last digest build and rebuilds behind it, so
+  // a poll right after a reply lands can predate it. The sidebar asks with
+  // ?fresh=1 when an agent stops working, so its frame goes straight to done
+  // instead of a bare logo until the next poll (#242).
+  console.log('\n?fresh=1 includes a reply written just before the request');
+  {
+    const c = (await api('/api/sessions', { method: 'POST', body: JSON.stringify({ cli: 'claude', name: 'gamma', path: 'gamma' }) })).body;
+    const dir = path.join(CLAUDE_DIR, 'projects', '-gamma');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${c.sessionUuid}.jsonl`);
+    fs.writeFileSync(file, userMsg('go', '2026-01-01T00:00:00Z') + assistant('Reply one.', '2026-01-01T00:00:01Z', 'g1'));
+    let seq = 0;
+    for (let i = 0; i < 40 && seq !== 1; i++) { seq = (await metaFor(c.id))?.output?.seq || 0; await sleep(250); }
+    check('the transcript\'s reply shows up', seq === 1, `seq ${seq}`);
+    await sleep(600); // past the cache's 400ms: the next plain poll answers stale and rebuilds
+    fs.appendFileSync(file, userMsg('again', '2026-01-01T00:00:02Z') + assistant('Reply two.', '2026-01-01T00:00:03Z', 'g2'));
+    const plain = (await metaFor(c.id)).output.seq;
+    const fresh = (await api('/api/meta?fresh=1')).body.sessions.find((x) => x.id === c.id).output.seq;
+    check('a plain poll can answer from before it (why fresh exists)', plain === 1, `seq ${plain}`);
+    check('?fresh=1 has it', fresh === 2, `seq ${fresh}`);
+  }
+
   // ---- a fresh install whose fleet has not spoken yet ----
   //
   // Its own store, because the point is the FIRST pass ever taken. Waiting for

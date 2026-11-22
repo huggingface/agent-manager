@@ -118,6 +118,16 @@ export interface BackupHealth {
   message: string | null; reason: string | null;
   lastSuccessAt: number | null; jobsUrl: string;
 }
+// Agent-state checkpoints that are not getting through; null when all are.
+// See server/src/checkpoint-health.js.
+export interface CheckpointHealth {
+  adapters: {
+    adapter: string; failures: number; since: number | null; lastSuccessAt: number | null;
+    rc: number | null; pending: number; untested: number; copied: number; reason: string | null; paths: string | null;
+  }[];
+  stalled: { lastPassAt: number } | null;
+  log: string;
+}
 /** Will this survive a restart? See server/src/storage.js. */
 export interface StorageStatus { persistent: boolean; dataDir: string; reason: string }
 export interface Info {
@@ -136,8 +146,11 @@ export interface Info {
   secrets?: string[];
   bucketUnverified?: boolean;
   backup?: BackupHealth | null;
+  checkpoint?: CheckpointHealth | null;
   welcomeSeen?: boolean;
   demoMode?: boolean;
+  /** Only on a dev-preview Space (AM_DEV_PREVIEW=1); absent everywhere else. */
+  devPreview?: DevPreviewSummary;
 }
 // The lock status reads tell HF's edge refusing an unsigned request (the Space
 // was made private under an open tab) from AM's own answers: lib/edgeRefusal.ts.
@@ -156,6 +169,40 @@ export const dismissWelcome = () => fetch('/api/welcome/seen', { method: 'POST' 
 
 export const setDemo = (active: boolean): Promise<{ ok: boolean; active: boolean }> =>
   fetch('/api/demo', { method: 'POST', headers: HEADERS, body: JSON.stringify({ active }) }).then(json);
+
+// ---- dev preview (only exists when the Space sets AM_DEV_PREVIEW=1) ----
+export interface DevPreviewPr {
+  number: number; sha: string; title?: string; author?: string; draft?: boolean; url?: string;
+  /** The author's current permission on the repo (write, maintain, admin, read…), or null if it could not be read; and the repo the head branch is on. */
+  permission?: string | null; headRepo?: string | null; fork?: boolean;
+  /** The server's eligibility rule (dev-preview.js ineligible()); refusal says why not. */
+  allowed?: boolean; refusal?: string;
+}
+export interface DevPreviewRunning {
+  kind: 'main' | 'prs' | 'unknown'; label: string; id: string; image?: boolean;
+  base?: string; prs: DevPreviewPr[]; merged?: string; builtAt?: string;
+}
+export interface DevPreviewJob {
+  id: string; kind: 'switch' | 'rollback'; source: string;
+  state: 'running' | 'done' | 'failed' | 'refused'; step: string;
+  steps: { name: string; ms: number }[]; startedAt: number; finishedAt: number | null;
+  error: string | null; prs: DevPreviewPr[]; restarting: boolean;
+  rebuild: { file: string; why: string }[] | null;
+  conflict: { pr: number; onto: string; files: string[] } | null;
+}
+export interface DevPreviewSummary {
+  repo: string; supervised: boolean;
+  /** The build this server process loaded — the code answering right now. */
+  running: DevPreviewRunning;
+  /** True between a swap and the restart into it; `next` is that build. */
+  restartPending: boolean; next: DevPreviewRunning | null;
+  selected: { base?: string; prs: DevPreviewPr[] };
+  job: DevPreviewJob | null;
+  crashed: { at: string; detail: string } | null;
+}
+// The calls themselves live in lib/devPreviewApi.ts, a lazy chunk: only a
+// dev-preview Space ever makes them, and the entry has no room to spare.
+export { fetch as amFetch, json as amJson };
 
 export const relaunchSpace = (): Promise<{ ok: boolean; reason?: string }> =>
   fetch('/api/relaunch', { method: 'POST' }).then(json);
@@ -383,8 +430,9 @@ export interface MetaSession extends Session {
   output?: OutputVersion | null;
   read?: (OutputVersion & { at?: string }) | null;
 }
-export const getMeta = (signal?: AbortSignal): Promise<{ sessions: MetaSession[]; generatedAt: string }> =>
-  fetch('/api/meta', { signal }).then(json);
+/** `fresh`: wait for digests built after the request (an agent just finished). */
+export const getMeta = (signal?: AbortSignal, fresh = false): Promise<{ sessions: MetaSession[]; generatedAt: string }> =>
+  fetch(fresh ? '/api/meta?fresh=1' : '/api/meta', { signal }).then(json);
 
 /**
  * "These replies were shown to the operator." Used by both read paths — a

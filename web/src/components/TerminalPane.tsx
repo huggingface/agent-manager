@@ -9,6 +9,7 @@ import { installTerminalFileLinks, terminalLinkHandler, openTerminalLink } from 
 import '@xterm/xterm/css/xterm.css';
 import { touchDebug, installTouchDebug } from '../lib/touchDebug';
 import { PROGRAM_COPY_MS, clipboardPreview, clipboardSize } from '../lib/programCopy';
+import { isMacPlatform, terminalKeyAction } from '../lib/terminalKeys';
 import type { Cli, Session } from '../types';
 import { STATE_LABEL, isRemote } from '../types';
 import StateLogo from './StateLogo';
@@ -692,6 +693,7 @@ export default function TerminalPane({
       endBoot();
     };
 
+    const isMac = isMacPlatform();
     // ⌘/Ctrl+C copies a local selection. Without one, Ctrl+C remains SIGINT;
     // Cmd+C copies a program's OSC 52 text, but only while its notice is shown.
     term.attachCustomKeyEventHandler((e) => {
@@ -712,8 +714,14 @@ export default function TerminalPane({
         copyProgramText();
         return false;
       }
+      const action = terminalKeyAction(e, isMac);
+      if (action.preventDefault) e.preventDefault();
       claimControl();
-      return true;
+      // term.input goes through onData, the one path to the PTY.
+      if (action.send) { term.input(action.send, true); endBoot(); }
+      // Local only: the server's scrollback is untouched and comes back on reattach.
+      if (action.clear) term.clear();
+      return action.passToXterm;
     });
     // The only local fit: this terminal is still empty, so there is no buffer to
     // reflow, and it gives the initial size we open the socket with. Every later

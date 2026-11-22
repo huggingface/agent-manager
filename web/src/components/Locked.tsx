@@ -1,9 +1,10 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import type { SessionState } from '../types';
+import type { RowMark } from '../lib/rowMark';
 import { describeVerification, type LockStatus } from '../lib/lockStatus';
 import { reloadThroughHub } from '../lib/edgeRefusal';
 import { SlidersGlyph, SunGlyph, GridGlyph, PlusGlyph, AmMark } from './icons';
 import StateLogo from './StateLogo';
+import RowMarkLegend from './RowMarkLegend';
 import HfHeaderIcon from './HfHeaderIcon';
 
 export const REPO_URL = 'https://github.com/huggingface/agent-manager';
@@ -34,21 +35,21 @@ const Title = ({ children }: { children: ReactNode }) => (
 
 // A frozen, slightly dimmed replica of the real sidebar so the install page
 // looks like the product it unlocks. Pure decoration: no handlers, no state.
-type MockSession = { name: string; cli: string; tint: string; state: SessionState };
+type MockSession = { name: string; cli: string; tint: string; state: RowMark };
 type MockItem = MockSession | { group: string; members: MockSession[] };
 const MOCK: MockItem[] = [
   { group: 'research', members: [
     { name: 'writer', cli: 'claude', tint: '#d97757', state: 'working' },
-    { name: 'reviewer', cli: 'codex', tint: '#5eb6a6', state: 'waiting' },
+    { name: 'reviewer', cli: 'codex', tint: '#5eb6a6', state: 'unread' },
   ] },
-  { name: 'refactor-bot', cli: 'claude', tint: '#d97757', state: 'idle' },
-  { name: 'opencode-1', cli: 'opencode', tint: '#8a93a0', state: 'stopped' },
-  { name: 'shell-1', cli: 'shell', tint: '#8aa0ad', state: 'stopped' },
+  { name: 'refactor-bot', cli: 'claude', tint: '#d97757', state: 'read' },
+  { name: 'opencode-1', cli: 'opencode', tint: '#8a93a0', state: 'off' },
+  { name: 'shell-1', cli: 'shell', tint: '#8aa0ad', state: 'off' },
 ];
 
 function MockRow({ s, nested }: { s: MockSession; nested?: boolean }) {
   return (
-    <div className={`row session${nested ? ' nested' : ''}`}>
+    <div className={`row session${nested ? ' nested' : ''}${s.state === 'off' ? ' off' : ''}${s.state === 'unread' ? ' attention' : ''}`}>
       <StateLogo cli={s.cli} state={s.state} size={12} tint={s.tint} />
       <span className="name">{s.name}</span>
     </div>
@@ -86,12 +87,7 @@ function MockSidebar() {
           <MockRow key={item.name} s={item} />
         ))}
       </div>
-      <div className="legend">
-        <span><StateLogo frameOnly state="working" size={12} /> working</span>
-        <span><StateLogo frameOnly state="waiting" size={12} /> your turn</span>
-        <span><StateLogo frameOnly state="idle" size={12} /> idle</span>
-        <span><StateLogo frameOnly state="stopped" size={12} /> stopped</span>
-      </div>
+      <RowMarkLegend />
     </aside>
   );
 }
