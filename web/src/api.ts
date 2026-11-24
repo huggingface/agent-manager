@@ -128,6 +128,12 @@ export interface CheckpointHealth {
   stalled: { lastPassAt: number } | null;
   log: string;
 }
+/** A CLI state link under HOME that is not the link to local disk (server/src/state-links.js). */
+export interface StateLinkHealth {
+  broken: { cli: string; link: string; target: string; kind: 'dir' | 'missing' | 'other-link' | 'file'; onBucket: boolean }[];
+  repair: { outcome: 'deferred' | 'failed'; at: number; reason: string; detail: string } | null;
+  log: string;
+}
 /** Will this survive a restart? See server/src/storage.js. */
 export interface StorageStatus { persistent: boolean; dataDir: string; reason: string }
 export interface Info {
@@ -147,6 +153,7 @@ export interface Info {
   bucketUnverified?: boolean;
   backup?: BackupHealth | null;
   checkpoint?: CheckpointHealth | null;
+  stateLinks?: StateLinkHealth | null;
   welcomeSeen?: boolean;
   demoMode?: boolean;
   /** Only on a dev-preview Space (AM_DEV_PREVIEW=1); absent everywhere else. */

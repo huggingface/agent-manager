@@ -15,6 +15,7 @@ import { update, list } from './sessions.js';
 import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace,
   captureFxSession } from './traces.js';
 import { AGY_ID, agyConversationForPid, agyWaitingStep, captureAgyConversation } from './antigravity.js';
+import { ensureAntigravityLinks } from './state-links.js';
 import {
   buildPaletteIndex, snapshotToRestoreAnsi, styledSnapshotLines, textColumns,
 } from './snapshot.js';
@@ -2166,6 +2167,11 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     trustCodexWorkspace(realWork);
     dismissCodexUpdatePrompt(cliVersion('codex'));
   }
+  // agy keeps its SQLite databases under ~/.gemini, which must be links to
+  // local disk: HOME is on the bucket, and SQLite on hf-mount corrupts. Put
+  // them back before agy starts writing (state-links.js). While another agy
+  // runs, the repair is deferred and /api/info warns; the launch goes ahead.
+  if (session.cli === 'antigravity') ensureAntigravityLinks({ reason: `launch ${session.id}` });
   // The login shell knows its own PTY-root pid before any `exec`. Adapters use
   // this marker to discard nested agent lifecycle events BEFORE they can
   // overwrite the top-level pane's breadcrumb; runner validation repeats the

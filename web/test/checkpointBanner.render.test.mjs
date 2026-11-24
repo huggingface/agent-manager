@@ -87,5 +87,5 @@ test('App loads the banners on demand, not in the entry', () => {
   const app = fs.readFileSync(path.join(WEB, 'src/App.tsx'), 'utf8');
   assert.match(app, /lazy\(\(\) => import\('\.\/components\/HealthBanners'\)/);
   assert.doesNotMatch(app, /^import .*(BackupBanner|CheckpointBanner|HealthBanners)/m);
-  assert.match(app, /\(info\?\.backup \|\| info\?\.checkpoint\) && <Suspense>/);
+  assert.match(app, /\(info\?\.backup \|\| info\?\.checkpoint \|\| info\?\.stateLinks\) && <Suspense>/);
 });

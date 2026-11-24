@@ -56,6 +56,7 @@ import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revo
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
 import { checkpointHealth } from './checkpoint-health.js';
+import { ensureAntigravityLinks, stateLinkHealth, watchAntigravityLinks } from './state-links.js';
 import {
   formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeAttachment,
   removeSessionAttachments,
@@ -1704,6 +1705,10 @@ api.get('/api/info', (_req, res) => res.json({
   // is being saved, otherwise the adapters that are not and why. Read from
   // local status files. Withheld while locked: the reason names file paths.
   checkpoint: isLocked() ? null : checkpointHealth(),
+  // CLI state links (state-links.js): null while each is a link to local
+  // disk, otherwise the ones that are not — e.g. Antigravity's SQLite on the
+  // bucket. Withheld while locked: it names file paths.
+  stateLinks: isLocked() ? null : stateLinkHealth(),
   // First-run welcome: shown once per Space (flag persists on the bucket).
   welcomeSeen: welcomeSeen(),
   // Demo mode: current sessions hidden from view; forces the welcome to show.
@@ -4258,6 +4263,13 @@ setTimeout(() => {
     done.then(() => runstate.startRunstateWatch());
   });
 }, 8000);
+
+// Before any pane is revived: Antigravity's ~/.gemini links, which the
+// entrypoint makes at container boot, may have been replaced since (a server
+// restart inside a running container does not pass through it). The mount can
+// also drop a link on its own, so a missing one is put back every 30 s.
+try { ensureAntigravityLinks({ reason: 'server start' }); } catch (e) { console.error('[state-links]', e && e.message); }
+watchAntigravityLinks();
 
 server.listen(PORT, BIND_HOST, () => {
   console.log(`Agent Manager ${BIND_HOST}:${PORT}  engine=libghostty${ghosttyReady() ? '' : ' (UNAVAILABLE)'}  data=${DATA_DIR}`);

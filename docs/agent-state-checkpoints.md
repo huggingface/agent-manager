@@ -244,6 +244,42 @@ Restarting first would repeat the loss mode this change is intended to fix.
 Rollback is configuration-only: point each harness back at its retained
 durable/legacy path. No migration step deletes the previous state.
 
+### When a state link breaks at runtime
+
+The entrypoint makes the HOME links (`~/.gemini/antigravity-cli`,
+`~/.gemini/config`, `~/.hermes`, `~/.fx`, `~/.local/share/opencode`) once, at
+container boot. From 2026-11-20 both Antigravity links were real directories on
+the bucket again, in a Space up since 11-16: agy kept its SQLite databases on
+hf-mount (whose fsync is not durable), the checkpoint and the conversation
+lookup never saw them, and four conversations came back malformed.
+
+What replaces them: hf-mount itself can drop a link made where a directory
+was just moved away (reproduced in a workspace folder; the hand repair of
+11-24 lost `~/.gemini/config` minutes later), and agy's next start then
+`mkdir`s a real directory in its place. Not agy's self-update: the bucket
+directory starts at 11-20 14:22 (an `agy models` call), the 1.5.14 -> 1.5.16
+update ran on 11-22. agy 1.4.10 and 1.5.16, `agy install` and agy's update
+check, run against a linked temp HOME, all keep the links (and refuse to start
+on a dangling one rather than replace it).
+
+- `server/src/state-links.js` lstat's every expected link. `/api/info.stateLinks`
+  is null while all are links to local disk, otherwise lists the broken ones;
+  the UI shows "Antigravity state is on the bucket (link replaced)" (or the
+  same for any other CLI) in the checkpoint banner's chunk.
+- Before every agy launch and at server start, `agent-state.sh
+  relink-antigravity` repairs Antigravity's: a missing link is made; a real
+  directory is merged into `$ANTIGRAVITY_LIVE` (newer wins; a database and its
+  `-wal`/`-journal` move as a pair or not at all, and the live pair it replaces
+  is kept under `$AM_LOCAL/agent-state-replaced`; `-shm` is never copied),
+  moved aside to `<path>.bucket-<UTC time>` (never deleted) and linked again.
+  Each repair is a line in `agent-state.log`.
+- Never while agy runs with this HOME or any process has the directory open:
+  then nothing moves, the log says DEFERRED, the banner says to stop the
+  Antigravity sessions, and the next launch tries again.
+- Every 30 s the server puts back a *missing* Antigravity link (safe while agy
+  runs: no data moves), so the window for agy to create a real directory is
+  short.
+
 ## Guarantees and remaining work
 
 This proposal bounds ungraceful loss to the checkpoint interval. It does not

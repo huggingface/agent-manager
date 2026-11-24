@@ -19,8 +19,8 @@ set -u
 
 MODE="${1:-}"
 case "$MODE" in
-  restore|checkpoint|checkpoint-final|prune|stop-prune|migrate-antigravity|_part|_adapter) ;;
-  *) echo "usage: $0 restore|checkpoint|checkpoint-final|prune|stop-prune|migrate-antigravity <dir>" >&2; exit 2 ;;
+  restore|checkpoint|checkpoint-final|prune|stop-prune|migrate-antigravity|relink-antigravity|_part|_adapter) ;;
+  *) echo "usage: $0 restore|checkpoint|checkpoint-final|prune|stop-prune|migrate-antigravity <dir>|relink-antigravity" >&2; exit 2 ;;
 esac
 SELF="$0"
 START=$(date +%s)
@@ -98,6 +98,11 @@ if [ "$MODE" = stop-prune ]; then
   exit 0
 elif [ "$MODE" = _part ] || [ "$MODE" = _adapter ]; then
   # Part of a parallel restore, started by the restore holding the lock.
+  :
+elif [ "$MODE" = relink-antigravity ]; then
+  # Runs on the launch path, so it never waits behind a checkpoint. It needs no
+  # lock: every file it writes into the live tree is renamed into place, and a
+  # checkpoint reads the databases there through SQLite's backup.
   :
 elif [ "$MODE" = prune ]; then
   # One prune at a time. It also takes the CHECKPOINT lock, a batch at a time
@@ -1358,6 +1363,131 @@ if [ "$MODE" = migrate-antigravity ]; then
   rm -f "$staged" "$list"
   log "migrate: $legacy: $moved database(s) copied through SQLite's backup, $skipped left in the rollback copy"
   exit 0
+fi
+
+# ---------- relink-antigravity: ~/.gemini/{antigravity-cli,config} must be links ----------
+# The entrypoint links both into $ANTIGRAVITY_LIVE (local disk). On 2026-11-20
+# both were real directories on the bucket again, in a Space that had been up
+# since 11-16: agy then kept its SQLite databases on hf-mount, whose fsync is not
+# durable, the checkpoint never saw them, and four conversations came back
+# malformed. The server runs this at boot and before every agy launch when
+# either path is not the expected link (server/src/state-links.js):
+#
+#   - a link, wherever it points: left alone (the server reports a wrong one);
+#   - missing: the link is made. hf-mount has been seen to DROP a link made
+#     where a directory had just been moved away (the hand repair of 11-24
+#     lost ~/.gemini/config within minutes); agy then mkdirs a real one on
+#     the bucket at its next start. The server re-makes a missing link every
+#     30 s (AGENT_STATE_RELINK_MISSING_ONLY=1), besides before each launch;
+#   - a real directory: its files are merged into the live tree, newer wins,
+#     the directory is moved aside to <path>.bucket-<UTC time> (never deleted),
+#     and the link is made. A database travels with its -wal (and -journal):
+#     the pair is copied together or not at all, the newer pair wins, and the
+#     live pair it replaces is kept under $AM_LOCAL/agent-state-replaced. -shm
+#     files are never copied; SQLite rebuilds them.
+#
+# Never while a process has the directory open or agy runs at all: moving files
+# under a running agy is how the 4th database was lost. Then nothing is touched
+# and it exits 3; the next launch tries again, and the server warns meanwhile.
+# Exit 0 when both are links afterwards, 1 when something could not be done.
+if [ "$MODE" = relink-antigravity ]; then
+  # Processes that have $1 open (fd or cwd), and every agy process of this HOME:
+  # those keep writing under ~/.gemini through whatever the path is then.
+  agy_holders() {
+    _real=$(realpath -e "$1" 2>/dev/null) || _real="$1"
+    for _p in /proc/[0-9]*; do
+      _pid=${_p#/proc/}
+      [ "$_pid" = "$$" ] && continue
+      _exe=$(readlink "$_p/exe" 2>/dev/null) || continue
+      case "${_exe##*/}" in
+        agy|agy\ *|antigravity|language_server*)
+          # One with another HOME writes elsewhere; an unreadable one counts.
+          _h=$(tr '\0' '\n' < "$_p/environ" 2>/dev/null | sed -n 's/^HOME=//p' | head -n 1)
+          if [ -z "$_h" ] || [ "$_h" = "$HOME" ]; then echo "pid $_pid: ${_exe##*/}"; continue; fi ;;
+      esac
+      _hit=$(ls -l "$_p/cwd" "$_p/fd" 2>/dev/null | awk -v r="$_real" '/ -> / { t = $0; sub(/^.* -> /, "", t); if (t == r || index(t, r "/") == 1) { print t; exit } }')
+      [ -n "$_hit" ] && echo "pid $_pid: $_hit"
+    done | head -n 10
+  }
+  # mtime of the newer of a database and its WAL (0 when neither exists).
+  pair_mtime() { stat -c %Y "$1" "$1-wal" "$1-journal" 2>/dev/null | sort -n | tail -n 1 | grep . || echo 0; }
+  stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  replaced="$AM_LOCAL/agent-state-replaced/antigravity.$stamp.$$"
+  # merge_agy_dir SRC DST: SRC's files into DST, as described above.
+  merge_agy_dir() {
+    _src="$1" _dst="$2"
+    mkdir -p "$_dst" || return 1
+    rsync -a --update --exclude '*-wal' --exclude '*-shm' --exclude '*-journal' --exclude '*.db' \
+      "$_src/" "$_dst/" || return 1
+    _ok=0
+    (cd "$_src" && find . \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-journal' \) -type f -print) \
+      | sed 's/-wal$//; s/-journal$//; s|^\./||' | sort -u > "$replaced.list"
+    while IFS= read -r _rel; do
+      _s="$_src/$_rel" _d="$_dst/$_rel"
+      if [ ! -e "$_s" ]; then
+        durable_log "relink: $_s has a WAL or journal but no database; left in the moved-aside copy"; continue
+      fi
+      if [ -e "$_d" ] && [ "$(pair_mtime "$_d")" -ge "$(pair_mtime "$_s")" ]; then continue; fi
+      mkdir -p "$(dirname "$_d")" "$(dirname "$replaced/$_rel")" || { _ok=1; continue; }
+      # Stage the new pair first, so a failed copy leaves the live pair as it was.
+      rm -f "$_d.relink-tmp" "$_d.relink-tmp-wal" "$_d.relink-tmp-journal"
+      if ! cp -p "$_s" "$_d.relink-tmp" \
+        || { [ -e "$_s-wal" ] && ! cp -p "$_s-wal" "$_d.relink-tmp-wal"; } \
+        || { [ -e "$_s-journal" ] && ! cp -p "$_s-journal" "$_d.relink-tmp-journal"; }; then
+        rm -f "$_d.relink-tmp" "$_d.relink-tmp-wal" "$_d.relink-tmp-journal"
+        durable_log "relink: could not copy $_s with its WAL; it stays in the moved-aside copy"
+        _ok=1; continue
+      fi
+      for _x in "" -wal -journal -shm; do
+        [ -e "$_d$_x" ] && mv -f "$_d$_x" "$replaced/$_rel$_x"
+      done
+      [ -e "$_d.relink-tmp-wal" ] && mv -f "$_d.relink-tmp-wal" "$_d-wal"
+      [ -e "$_d.relink-tmp-journal" ] && mv -f "$_d.relink-tmp-journal" "$_d-journal"
+      mv -f "$_d.relink-tmp" "$_d" || _ok=1
+    done < "$replaced.list"
+    rm -f "$replaced.list"
+    return $_ok
+  }
+  mkdir -p "$AM_LOCAL/agent-state-replaced" "$HOME/.gemini"
+  rc=0
+  for name in antigravity-cli config; do
+    link="$HOME/.gemini/$name" target="$ANTIGRAVITY_LIVE/$name"
+    if [ -L "$link" ]; then continue; fi
+    if [ ! -e "$link" ]; then
+      mkdir -p "$target" && ln -s "$target" "$link" && durable_log "relink: $link was missing; linked it to $target" || rc=1
+      continue
+    fi
+    if [ ! -d "$link" ]; then
+      durable_log "relink: $link is neither a link nor a directory; left alone"; rc=1; continue
+    fi
+    # The watcher only puts back links the mount dropped; a directory waits
+    # for a launch (it may be deferred, and must not be logged every minute).
+    if [ -n "${AGENT_STATE_RELINK_MISSING_ONLY:-}" ]; then [ "$rc" = 0 ] && rc=3; continue; fi
+    held=$(agy_holders "$link")
+    if [ -n "$held" ]; then
+      durable_log "relink: DEFERRED: $link is a real directory (Antigravity state on the bucket), but agy is running or has files in it: $(echo "$held" | paste -sd ';' -)"
+      [ "$rc" = 0 ] && rc=3
+      continue
+    fi
+    if ! merge_agy_dir "$link" "$target"; then
+      durable_log "relink: could not merge $link into $target; it stays where it is"
+      rc=1; continue
+    fi
+    aside="$link.bucket-$stamp"
+    [ -e "$aside" ] && aside="$aside.$$"
+    if ! mv "$link" "$aside"; then
+      durable_log "relink: merged $link into $target but could not move it aside; it stays where it is"
+      rc=1; continue
+    fi
+    if ln -s "$target" "$link"; then
+      durable_log "relink: $link was a real directory (Antigravity state on the bucket); merged into $target, moved aside to $aside, linked again"
+    else
+      durable_log "relink: moved $link aside to $aside but could not link it to $target"; rc=1
+    fi
+  done
+  rmdir "$replaced" 2>/dev/null
+  publish_log
+  exit "$rc"
 fi
 
 if [ "$MODE" = prune ]; then

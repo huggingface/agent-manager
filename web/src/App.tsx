@@ -46,7 +46,7 @@ const VV_DEBUG = new URLSearchParams(location.search).has('vvdebug');
 const ViewportDebug = lazy(() => import('./components/ViewportDebug'));
 // Only dev-preview Spaces render it (AM_DEV_PREVIEW=1), so it stays out of the entry chunk.
 const DevPreviewBar = lazy(() => import('./components/DevPreviewBar'));
-// Shown only while a backup or a checkpoint is failing. If the chunk cannot be
+// Shown only while a backup or a checkpoint is failing, or a CLI's state link broke. If the chunk cannot be
 // fetched the app carries on without the line rather than fail with it.
 const HealthBanners = lazy(() => import('./components/HealthBanners').catch(() => ({ default: () => null })));
 
@@ -1540,7 +1540,7 @@ export default function App() {
         {/* Visible where you already are, on every view. Rides on /api/info,
             which is polled every 15s, so no new request for the normal case. */}
         {noBucket && !showBucket && <NoBucketBanner onShow={() => { setSettingsOpen(false); setBucketAsked(true); }} />}
-        {(info?.backup || info?.checkpoint) && <Suspense><HealthBanners backup={info.backup} checkpoint={info.checkpoint} onOpenSettings={() => { setSettingsPage('general'); setSettingsOpen(true); }} /></Suspense>}
+        {(info?.backup || info?.checkpoint || info?.stateLinks) && <Suspense><HealthBanners backup={info.backup} checkpoint={info.checkpoint} stateLinks={info.stateLinks} onOpenSettings={() => { setSettingsPage('general'); setSettingsOpen(true); }} /></Suspense>}
         <div className="stage">
           {renderTiles(
             isMobile && !mobileStage
