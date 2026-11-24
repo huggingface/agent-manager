@@ -328,7 +328,7 @@ export const CLIS = [
     resume: (id, f) => agyCommand(join(f, `--conversation ${id}`)), // id: a uuid, checked by runner.js
     launch: { model: true, efforts: AGY_EFFORTS,
       flags: ({ model, effort }) => join(model && `--model ${shq(model)}`, effort && `--effort ${shq(effort)}`) },
-    noUpdate: 'a pinned prebuilt binary from antigravity.google, not an npm package',
+    noUpdate: 'a prebuilt binary from Google, not an npm package. The image installs the newest release when it is built, so Update CLIs (a factory reboot) upgrades it',
     secrets: ['GEMINI_API_KEY'], setup: setupHint('GEMINI_API_KEY') },
   // Model only. `--variant` exists on `opencode run` but not on the TUI, and
   // the TUI ignores `agent.build.variant` from OPENCODE_CONFIG_CONTENT (checked
@@ -355,7 +355,7 @@ export const CLIS = [
           ? `--provider ${shq(model.slice(0, slash))} -m ${shq(model.slice(slash + 1))}` : `-m ${shq(model)}`;
         return join(m, effort && `--reasoning ${shq(effort)}`);
       } },
-    noUpdate: 'installed by the vendor script from hermes-agent.nousresearch.com, onto its own Python venv',
+    noUpdate: 'installed by the vendor script from hermes-agent.nousresearch.com, onto its own Python venv. Update it from a shell inside the Space',
     secrets: ['HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY'], setup: setupHint('HF_TOKEN', 'ANTHROPIC_API_KEY', 'OPENROUTER_API_KEY', 'NOUS_API_KEY') },
   // `chat` = TUI in --local mode: embedded agent, no gateway/daemon needed.
   // `chat` has no --model (the model is the agent default), only --thinking.
@@ -371,7 +371,7 @@ export const CLIS = [
   { id: 'fx',       label: 'fx',          bin: 'fx',       color: '#626262', resizeMode: 'repaint',
     run: () => 'fx',
     cont: () => 'fx --continue',
-    noUpdate: 'a prebuilt binary from releases.fx.sh, not an npm package',
+    noUpdate: 'a prebuilt binary from releases.fx.sh, not an npm package. The image installs the newest release when it is built, so Update CLIs (a factory reboot) upgrades it',
     resume: (id) => `fx --resume ${id}`,
     // fx has no "start interactive, seeded with this prompt" form: `fx ask` runs
     // one request and exits, which would end the pane instead of opening it. So
