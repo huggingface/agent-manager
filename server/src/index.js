@@ -56,8 +56,7 @@ import { shareSession, shareNamespace, findTrace, shareAccess, grantAccess, revo
          importBundle, listBundles, SHAREABLE_CLIS } from './share.js';
 import * as backup from './backup.js';
 import { checkpointHealth } from './checkpoint-health.js';
-import { migrateBucketAgyState, stateLinkHealth } from './state-links.js';
-import { prepareAgyHome } from './agy-home.js';
+import { layoutAgyHome, startAgyMigration, stateLinkHealth } from './state-links.js';
 import {
   formatAttachmentDelivery, formatAttachmentPrelude, pruneAttachmentDirs, receiveAttachment, removeAttachment,
   removeSessionAttachments,
@@ -4251,8 +4250,9 @@ runstate.init();
 // move a real ~/.gemini/antigravity-cli or config left on the bucket by an agy
 // started some other way into the live tree — once, in the background, and
 // before any pane is revived (it is deferred while any agy runs).
-try { prepareAgyHome(); } catch (e) { console.error('[agy-home]', e && e.message); }
-const agyMigrated = migrateBucketAgyState({ reason: 'server start' }).catch(() => 'failed');
+try { layoutAgyHome({ reason: 'server start' }); } catch (e) { console.error('[agy-home]', e && e.message); }
+// Retried every 5 minutes while deferred (an agy was running).
+const agyMigrated = startAgyMigration({ reason: 'server start' }).catch(() => 'failed');
 setTimeout(() => {
   // A locked Space serves no terminals, so it starts nothing — but it still
   // records what's running, so the snapshot stays true for the next boot. The

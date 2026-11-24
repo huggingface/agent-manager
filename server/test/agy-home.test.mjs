@@ -153,3 +153,98 @@ test('backup and restore round-trip through the local HOME', () => {
   assert.equal(prepareAgyHome().stateOk, true);
   assert.equal(execFileSync('sqlite3', [db, 'select x from t'], { encoding: 'utf8' }).trim(), 'kept', 'readable through the local HOME again');
 });
+
+// ---------- agy started outside a pane: the wrapper on PATH ----------
+// The /etc/profile.d snippet the image installs (Dockerfile), which every login
+// shell runs after /etc/profile has reset PATH.
+const dockerfile = fs.readFileSync(path.resolve(here, '../../Dockerfile'), 'utf8');
+const profileD = dockerfile.slice(dockerfile.indexOf('RUN printf \'%s\\n\' \\'), dockerfile.indexOf('> /etc/profile.d/agent-manager.sh'))
+  .split('\n').slice(1).map((l) => l.trim().replace(/^'|' \\$/g, '')).filter(Boolean).join('\n');
+
+test('a non-interactive `bash -lc agy …` (another agent\'s tool shell) gets the local HOME', () => {
+  assert.match(profileD, /PATH="\$AM_LOCAL\/agy-wrap:/, 'the image puts the wrapper first in login shells');
+  assert.match(fs.readFileSync(path.resolve(here, '../../entrypoint.sh'), 'utf8'), /export PATH="\$AM_LOCAL\/agy-wrap:/);
+  // The layout entrypoint.sh makes: the wrapper, and the real agy behind it.
+  fs.mkdirSync(path.join(local, 'agy-wrap'), { recursive: true });
+  fs.rmSync(path.join(local, 'agy-wrap/agy'), { force: true });
+  fs.symlinkSync(path.resolve(here, '../../scripts/agy-wrapper.sh'), path.join(local, 'agy-wrap/agy'));
+  put(path.join(local, 'bin/agy'), fs.readFileSync(path.join(bin, 'agy')));
+  fs.chmodSync(path.join(local, 'bin/agy'), 0o755);
+  // A login shell's profile: here ~/.profile stands in for /etc/profile.d.
+  const shellHome = path.join(root, 'shell-home');
+  put(path.join(shellHome, '.profile'), `${profileD}\n`);
+  prepareAgyHome();
+  fs.rmSync(liveNew, { force: true });
+  fs.rmSync(bucketAgy, { recursive: true, force: true });
+  const env = { PATH: '/usr/bin:/bin', HOME: shellHome, AM_LOCAL: local, AGY_HOME, LANG: 'C.UTF-8' };
+  const out = execFileSync('bash', ['-lc', 'agy models'], { env, encoding: 'utf8', cwd: root });
+  assert.match(out, new RegExp(`HOME=${AGY_HOME} ARGS=models`));
+  assert.ok(fs.existsSync(liveNew), 'its conversation went to the live tree');
+  assert.equal(fs.existsSync(bucketAgy), false, 'nothing under the bucket HOME');
+  // `sh -c` straight from a process the manager started (PATH inherited).
+  const inherited = { PATH: `${path.join(local, 'agy-wrap')}:${path.join(local, 'bin')}:/usr/bin:/bin`, HOME: bucketHome, AGY_HOME };
+  assert.match(execFileSync('sh', ['-c', 'agy -p hi'], { env: inherited, encoding: 'utf8' }), new RegExp(`HOME=${AGY_HOME} ARGS=-p hi`));
+});
+
+test('the wrapper refuses, rather than fall back to the bucket, when the local HOME is not set up', () => {
+  const env = { PATH: `${path.join(local, 'agy-wrap')}:${path.join(local, 'bin')}:/usr/bin:/bin`, HOME: bucketHome, AGY_HOME: path.join(root, 'no-such-home') };
+  const r = spawnSync('sh', ['-c', 'agy models'], { env, encoding: 'utf8' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /is not set up/);
+  assert.equal(fs.existsSync(bucketAgy), false);
+});
+
+// ---------- a linked dotfile replaced by a save by rename ----------
+const { layoutAgyHome, readStateLinkHealth } = await import('../src/state-links.js');
+const logFile = path.join(data, 'state/agent-state.log');
+const waitFor = async (fn) => { for (let i = 0; i < 100 && !fn(); i++) await new Promise((r) => setTimeout(r, 50)); return fn(); };
+
+test('a sed -i\'d dotfile is copied back to the bucket and linked again; nothing is dropped', async () => {
+  put(path.join(bucketHome, '.bashrc'), 'export A=1\n');
+  prepareAgyHome();
+  const link = path.join(AGY_HOME, '.bashrc');
+  assert.ok(isLinkTo(link, path.join(bucketHome, '.bashrc')));
+  execFileSync('sed', ['-i', 's/A=1/A=2/', link]); // rename-save: the link becomes a local file
+  assert.equal(fs.lstatSync(link).isSymbolicLink(), false);
+
+  const h = layoutAgyHome({ reason: 'test' });
+  assert.ok(isLinkTo(link, path.join(bucketHome, '.bashrc')), 'linked again');
+  assert.equal(fs.readFileSync(path.join(bucketHome, '.bashrc'), 'utf8'), 'export A=2\n', 'the edit reached the bucket');
+  assert.equal(h.restored.length, 1);
+  assert.match(h.restored[0].action, /copied back/);
+  assert.equal(fs.readFileSync(h.restored[0].aside, 'utf8'), 'export A=2\n', 'the local copy is kept');
+  const health = readStateLinkHealth();
+  assert.equal(health.homeRestored[0].path, link, 'surfaced in /api/info.stateLinks');
+  assert.ok(await waitFor(() => fs.existsSync(logFile) && /agy-home: .*\.bashrc had become a local file/.test(fs.readFileSync(logFile, 'utf8'))), 'logged durably');
+});
+
+test('when the bucket copy is the newer one it is kept, and the local copy is set aside', () => {
+  put(path.join(bucketHome, '.inputrc'), 'bucket v1\n');
+  prepareAgyHome();
+  const link = path.join(AGY_HOME, '.inputrc');
+  fs.unlinkSync(link);
+  put(link, 'local old\n');
+  const past = Date.now() / 1000 - 3600;
+  fs.utimesSync(link, past, past);
+  const h = layoutAgyHome({ reason: 'test' });
+  assert.ok(isLinkTo(link, path.join(bucketHome, '.inputrc')));
+  assert.equal(fs.readFileSync(path.join(bucketHome, '.inputrc'), 'utf8'), 'bucket v1\n');
+  const r = h.restored.find((x) => x.path === link);
+  assert.match(r.action, /bucket copy is newer/);
+  assert.equal(fs.readFileSync(r.aside, 'utf8'), 'local old\n');
+});
+
+test('a linked directory replaced by a local one: newer files go back, then it is linked again', () => {
+  put(path.join(bucketHome, '.vim/a.vim'), 'old a\n');
+  put(path.join(bucketHome, '.vim/b.vim'), 'bucket b\n');
+  prepareAgyHome();
+  const link = path.join(AGY_HOME, '.vim');
+  fs.unlinkSync(link);
+  put(path.join(link, 'a.vim'), 'new a\n');
+  put(path.join(link, 'c.vim'), 'new c\n');
+  layoutAgyHome({ reason: 'test' });
+  assert.ok(isLinkTo(link, path.join(bucketHome, '.vim')));
+  assert.equal(fs.readFileSync(path.join(bucketHome, '.vim/a.vim'), 'utf8'), 'new a\n');
+  assert.equal(fs.readFileSync(path.join(bucketHome, '.vim/b.vim'), 'utf8'), 'bucket b\n');
+  assert.equal(fs.readFileSync(path.join(bucketHome, '.vim/c.vim'), 'utf8'), 'new c\n');
+});

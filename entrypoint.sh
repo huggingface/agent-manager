@@ -168,6 +168,11 @@ ln -sfn "$HERMES_LIVE" "$HERMES_LINK"
 ln -sfn "$FX_LIVE" "$FX_LINK"
 ln -sfn "$ANTIGRAVITY_LIVE/antigravity-cli" "$AGY_LINK"
 ln -sfn "$ANTIGRAVITY_LIVE/config" "$AGY_CONFIG_LINK"
+# agy's own HOME on local disk: its two state links, so the agy wrapper works
+# before the server lays out the rest (server/src/agy-home.js).
+mkdir -p "$AGY_HOME/.gemini"
+ln -sfnT "$ANTIGRAVITY_LIVE/antigravity-cli" "$AGY_HOME/.gemini/antigravity-cli" || echo "WARN: $AGY_HOME/.gemini/antigravity-cli is not a link; agy will refuse to start" >&2
+ln -sfnT "$ANTIGRAVITY_LIVE/config" "$AGY_HOME/.gemini/config" || echo "WARN: $AGY_HOME/.gemini/config is not a link; agy will refuse to start" >&2
 
 boot "migrations done in $(boot_elapsed "$PHASE_T0")"
 
@@ -196,7 +201,10 @@ export PIP_CACHE_DIR="$AM_LOCAL/pip-cache"
 export PYTHONPYCACHEPREFIX="$AM_LOCAL/pycache"
 export PYTHONUSERBASE="$AM_LOCAL/py"          # pip install --user → local, fast
 export NPM_CONFIG_PREFIX="$AM_LOCAL/npm"       # npm install -g → local, no root needed
-export PATH="$AM_LOCAL/py/bin:$AM_LOCAL/npm/bin:$AM_LOCAL/bin:$HOME/.local/bin:$PATH"
+# agy for every process, children included (scripts/agy-wrapper.sh): HOME on
+# local disk. First on PATH, ahead of the real binary in $AM_LOCAL/bin.
+mkdir -p "$AM_LOCAL/agy-wrap" && ln -sfn /app/scripts/agy-wrapper.sh "$AM_LOCAL/agy-wrap/agy"
+export PATH="$AM_LOCAL/agy-wrap:$AM_LOCAL/py/bin:$AM_LOCAL/npm/bin:$AM_LOCAL/bin:$HOME/.local/bin:$PATH"
 
 # Durable, user-editable setup script. Runs on EVERY start (keep it idempotent);
 # seed a template on first boot.

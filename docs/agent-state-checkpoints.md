@@ -272,8 +272,16 @@ So AM's agy no longer resolves its state through the bucket:
   before every agy launch (an entry added to `/data/home` later shows up); an
   entry agy or a tool made in `$AGY_HOME` itself is never replaced. If the two
   state links are not right, the launch is refused rather than let agy write
-  somewhere unsaved. The `agy models` probe and an `agy` typed in a pane
-  (`session.bashrc`) use the same HOME.
+  somewhere unsaved. A linked entry that a save by rename (`sed -i`, an
+  editor) turned into a local file is put back: the newer side goes to the
+  bucket, the local copy is kept under `$AM_LOCAL/agy-home-replaced/`, the
+  link is made again, and it is logged and shown in the banner.
+- Every other `agy` uses the same HOME: `scripts/agy-wrapper.sh`, installed as
+  `$AM_LOCAL/agy-wrap/agy`, is first on PATH (entrypoint.sh for everything
+  the manager starts, `/etc/profile.d/agent-manager.sh` for login shells, which
+  reset PATH). It execs the next `agy` on PATH with `HOME=$AGY_HOME`, and
+  refuses if that HOME's state links are missing. Another agent's `bash -lc
+  agy …` is what first wrote agy's state to the bucket on 11-20.
 - `server/src/antigravity.js` (conversation lookup, trace reading, share,
   presence) reads `$ANTIGRAVITY_LIVE/antigravity-cli` directly. The checkpoint
   and restore already worked on `$ANTIGRAVITY_LIVE`.
@@ -284,8 +292,10 @@ So AM's agy no longer resolves its state through the bucket:
   pair or not at all, the live pair it replaces is kept under
   `$AM_LOCAL/agent-state-replaced`, a skipped bucket copy is logged, `-shm` is
   never copied), moves it aside to `<path>.bucket-<UTC time>` (never deleted)
-  and links it again with `ln -sT`. Never while any agy runs: then it is
-  DEFERRED to the next start. Each step is a line in `agent-state.log`.
+  and links it again with `ln -sT`. Never while an agy or language server
+  runs, or any process has a file open under that directory or under
+  `$ANTIGRAVITY_LIVE`: then it is DEFERRED and retried every 5 minutes. Each
+  step is a line in `agent-state.log`.
 - `/api/info.stateLinks` and the banner report any CLI state link that is not
   the link to local disk, including agy's own two under `$AGY_HOME`.
 

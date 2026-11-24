@@ -158,10 +158,11 @@ ENV MPLBACKEND=Agg
 
 # Login shells source /etc/profile, which RESETS PATH — dropping the build-time
 # ~/.local/bin and the user-install dirs under $AM_LOCAL (pip --user, npm
-# prefix). profile.d runs after that reset, so restore them here.
+# prefix). profile.d runs after that reset, so restore them here. agy-wrap
+# first: the agy wrapper that keeps Antigravity's HOME off the bucket.
 RUN printf '%s\n' \
       'PATH="/home/node/.local/bin:/opt/py/bin:$PATH"' \
-      '[ -n "$AM_LOCAL" ] && PATH="$AM_LOCAL/py/bin:$AM_LOCAL/npm/bin:$AM_LOCAL/bin:$PATH"' \
+      '[ -n "$AM_LOCAL" ] && PATH="$AM_LOCAL/agy-wrap:$AM_LOCAL/py/bin:$AM_LOCAL/npm/bin:$AM_LOCAL/bin:$PATH"' \
       'export PATH' \
       > /etc/profile.d/agent-manager.sh
 

@@ -19,7 +19,7 @@ set -u
 
 MODE="${1:-}"
 case "$MODE" in
-  restore|checkpoint|checkpoint-final|prune|stop-prune|migrate-antigravity|relink-antigravity|_part|_adapter) ;;
+  restore|checkpoint|checkpoint-final|prune|stop-prune|migrate-antigravity|relink-antigravity|note|_part|_adapter) ;;
   *) echo "usage: $0 restore|checkpoint|checkpoint-final|prune|stop-prune|migrate-antigravity <dir>|relink-antigravity" >&2; exit 2 ;;
 esac
 SELF="$0"
@@ -99,7 +99,7 @@ if [ "$MODE" = stop-prune ]; then
 elif [ "$MODE" = _part ] || [ "$MODE" = _adapter ]; then
   # Part of a parallel restore, started by the restore holding the lock.
   :
-elif [ "$MODE" = relink-antigravity ]; then
+elif [ "$MODE" = relink-antigravity ] || [ "$MODE" = note ]; then
   # Never waits behind a checkpoint. It needs no lock: every file it writes into
   # the live tree is renamed into place, and a checkpoint reads the databases
   # there through SQLite's backup.
@@ -1365,6 +1365,14 @@ if [ "$MODE" = migrate-antigravity ]; then
   exit 0
 fi
 
+# ---------- note: one line from the server into the durable log ----------
+if [ "$MODE" = note ]; then
+  [ -n "${2:-}" ] || exit 2
+  durable_log "$2"
+  publish_log
+  exit 0
+fi
+
 # ---------- relink-antigravity: a real ~/.gemini/{antigravity-cli,config} on the bucket ----------
 # AM's agy runs with HOME on local disk (server/src/agy-home.js), so it never
 # writes through ~/.gemini on the bucket. A real directory there was written by
@@ -1384,23 +1392,29 @@ fi
 #     bucket pair that loses is logged; it stays in the moved-aside copy.
 #     -shm files are never copied; SQLite rebuilds them.
 #
-# Never while ANY agy process runs (AM's write into the live tree this merges
-# into) or any process has the directory open: then nothing is touched and it
-# exits 3; the next server start tries again, and the banner warns meanwhile.
+# Never while ANY agy or language server runs, or any process has a file open
+# under the directory or the live tree (AM's agy writes there): then nothing is
+# touched and it exits 3; the server tries again every 5 minutes, and the
+# banner warns meanwhile.
 # Exit 0 when both are links afterwards, 1 when something could not be done.
 if [ "$MODE" = relink-antigravity ]; then
-  # Every agy process (whatever its HOME: AM's write into the live tree the
-  # merge writes into), and any process that has $1 open (fd or cwd).
-  # AGENT_STATE_AGY_EXE names the executable (tests use a unique one).
+  # What holds the merge back: any process with a file or its cwd under the
+  # bucket directory ($1) or under the live tree it merges into (AM's agy and
+  # its children, whatever their names), and any agy or language server by
+  # name (AGENT_STATE_AGY_EXE replaces "agy" in tests). One line per holder.
   agy_holders() {
     _real=$(realpath -e "$1" 2>/dev/null) || _real="$1"
+    _live=$(realpath -e "$ANTIGRAVITY_LIVE" 2>/dev/null) || _live="$ANTIGRAVITY_LIVE"
     for _p in /proc/[0-9]*; do
       _pid=${_p#/proc/}
       [ "$_pid" = "$$" ] && continue
       _exe=$(readlink "$_p/exe" 2>/dev/null) || continue
       _b="${_exe##*/}"; _b="${_b% (deleted)}"
-      if [ "$_b" = "${AGENT_STATE_AGY_EXE:-agy}" ]; then echo "pid $_pid: $_b"; continue; fi
-      _hit=$(ls -l "$_p/cwd" "$_p/fd" 2>/dev/null | awk -v r="$_real" '/ -> / { t = $0; sub(/^.* -> /, "", t); if (t == r || index(t, r "/") == 1) { print t; exit } }')
+      case "$_b" in
+        "${AGENT_STATE_AGY_EXE:-agy}"|language_server*) echo "pid $_pid: $_b"; continue ;;
+      esac
+      _hit=$(ls -l "$_p/cwd" "$_p/fd" 2>/dev/null | awk -v r="$_real" -v l="$_live" '/ -> / { t = $0; sub(/^.* -> /, "", t)
+        if (t == r || index(t, r "/") == 1 || t == l || index(t, l "/") == 1) { print t; exit } }')
       [ -n "$_hit" ] && echo "pid $_pid: $_hit"
     done | head -n 10
   }

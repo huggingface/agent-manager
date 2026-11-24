@@ -21,7 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { agyHomeDir } from './agy-home.js';
+import { agyHomeDir, prepareAgyHome } from './agy-home.js';
 import { fileURLToPath } from 'node:url';
 import { DATA_DIR } from './config.js';
 import { checkpointLogPath } from './checkpoint-health.js';
@@ -88,8 +88,10 @@ export function readStateLinkHealth({ env = process.env, dataDir = DATA_DIR } = 
     if (kind === 'ok' || (kind === 'missing' && !l.local)) continue;
     broken.push({ ...l, kind, onBucket: under(l.link, dataDir) });
   }
-  if (!broken.length) return null;
-  return { broken, repair: lastRepair, log: checkpointLogPath() };
+  const since = Date.now() - NOTICE_MS;
+  const homeRestored = homeNotices.filter((n) => n.at >= since);
+  if (!broken.length && !homeRestored.length) return null;
+  return { broken, repair: lastRepair, homeRestored, log: checkpointLogPath() };
 }
 
 let cache = { at: 0, value: null };
@@ -101,10 +103,40 @@ export function stateLinkHealth() {
 
 let lastRepair = null;
 let migrating = 0;
+// Dotfiles a save by rename had turned into local copies in $AGY_HOME, put back
+// (agy-home.js): shown for a day, logged for good.
+const NOTICE_MS = 24 * 3600_000;
+const homeNotices = [];
 /** True while a migration may be writing into the live tree: no agy may start then. */
 export function agyMigrationRunning() { return migrating > 0; }
 /** Test seam: forget the last repair outcome and the cached health. */
-export function _reset() { lastRepair = null; cache = { at: 0, value: null }; }
+export function _reset() { lastRepair = null; cache = { at: 0, value: null }; homeNotices.length = 0; clearTimeout(retryTimer); retryTimer = null; }
+
+const scriptOf = (env) => env.AGENT_STATE_SCRIPT || path.join(SCRIPTS_DIR, 'agent-state.sh');
+/** One line into the durable agent-state.log, in the background. */
+function durableNote(env, text) {
+  return new Promise((resolve) => {
+    execFile('sh', [scriptOf(env), 'note', text], { env, timeout: 60_000 }, () => resolve());
+  });
+}
+
+/**
+ * prepareAgyHome(), and say so when it had to put a linked dotfile back: a
+ * save by rename (sed -i, an editor) had made it a local file, which a restart
+ * would lose. Logged, kept in /api/info.stateLinks.homeRestored for a day.
+ */
+export function layoutAgyHome({ env = process.env, reason = 'launch' } = {}) {
+  const h = prepareAgyHome(env);
+  for (const r of h?.restored || []) {
+    const text = `agy-home: ${r.path} had become a local file (a save by rename); ${r.action}, local copy kept at ${r.aside}, linked to ${r.target} again`;
+    console.warn(`[agy-home] ${reason}: ${text}`);
+    homeNotices.push({ at: Date.now(), path: r.path, target: r.target, action: r.action, aside: r.aside });
+    if (homeNotices.length > 20) homeNotices.shift();
+    durableNote(env, text);
+  }
+  if (h?.restored?.length) cache = { at: 0, value: null };
+  return h;
+}
 
 /**
  * The one-time migration: if ~/.gemini/antigravity-cli or config on the bucket
@@ -138,4 +170,23 @@ export function migrateBucketAgyState({ env = process.env, reason = 'server star
         resolve(outcome);
       });
   });
+}
+
+// A deferred migration is tried again this often while it stays deferred.
+export const RETRY_MS = 5 * 60_000;
+let retryTimer = null;
+/**
+ * The migration at server start, and again every `everyMs` while it is
+ * deferred (an agy was running). Resolves with the first attempt's outcome.
+ */
+export function startAgyMigration({ env = process.env, everyMs = RETRY_MS, reason = 'server start' } = {}) {
+  const attempt = (why) => migrateBucketAgyState({ env, reason: why }).then((outcome) => {
+    clearTimeout(retryTimer); retryTimer = null;
+    if (outcome === 'deferred') {
+      retryTimer = setTimeout(() => { attempt('retry'); }, everyMs);
+      retryTimer.unref?.();
+    }
+    return outcome;
+  });
+  return attempt(reason);
 }

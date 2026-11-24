@@ -13,12 +13,15 @@ const NAMES: Record<string, string> = {
  * moved at the next server start. Not dismissible, like CheckpointBanner.
  */
 export default function StateLinkBanner({ health }: { health: StateLinkHealth | null | undefined }) {
-  if (!health?.broken?.length) return null;
-  const clis = [...new Set(health.broken.map((b) => b.cli))];
+  if (!health) return null;
+  const broken = health.broken || [];
+  const restored = health.homeRestored || [];
+  if (!broken.length && !restored.length) return null;
+  const clis = [...new Set(broken.map((b) => b.cli))];
   return (
     <>
       {clis.map((cli) => {
-        const rows = health.broken.filter((b) => b.cli === cli);
+        const rows = broken.filter((b) => b.cli === cli);
         const name = NAMES[cli] || cli;
         const own = rows.filter((b) => b.local);
         const onBucket = rows.some((b) => b.kind === 'dir' && b.onBucket);
@@ -50,6 +53,20 @@ export default function StateLinkBanner({ health }: { health: StateLinkHealth | 
           </div>
         );
       })}
+      {restored.length > 0 && (
+        <div
+          className="bkfail ckfail"
+          role="status"
+          title={[...restored.map((r) => `${r.path}: ${r.action}; local copy kept at ${r.aside}`), `Log: ${health.log}`].join('\n')}
+        >
+          <span className="bkfail-dot" aria-hidden="true" />
+          <span className="bkfail-txt">
+            <b>Antigravity: {restored.length === 1 ? 'a dotfile was' : `${restored.length} dotfiles were`} saved inside agy's local HOME.</b>{' '}
+            The newer version is back on /data/home and the link is restored; the local copy is kept.{' '}
+            <span className="mono bkfail-why">{restored.map((r) => r.path).join(', ')}</span>
+          </span>
+        </div>
+      )}
     </>
   );
 }

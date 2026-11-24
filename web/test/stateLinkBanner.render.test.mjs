@@ -71,3 +71,12 @@ test('another CLI whose link became a directory is warned about too', () => {
   assert.match(html, /<b>Hermes state is on the bucket \(link replaced\)\.<\/b>/);
   assert.match(html, /Restart the Space to relink it/);
 });
+
+test('a dotfile put back in agy\'s HOME is reported, alone or beside a broken link', () => {
+  const r = { at: 1, path: '/l/agy-home/.bashrc', target: '/data/home/.bashrc', action: 'copied back to the bucket (newer)', aside: '/l/agy-home-replaced/T/.bashrc' };
+  const html = render({ broken: [], repair: null, homeRestored: [r], log });
+  assert.match(html, /a dotfile was saved inside agy(?:'|&#x27;)s local HOME/);
+  assert.match(html, /newer version is back on \/data\/home/);
+  assert.match(html, /\/l\/agy-home\/\.bashrc/);
+  assert.equal(render({ broken: [agy], repair: null, homeRestored: [r, r], log }).match(/role="status"/g).length, 2);
+});

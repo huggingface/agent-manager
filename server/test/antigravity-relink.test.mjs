@@ -20,7 +20,7 @@ const script = path.resolve(here, '../../scripts/agent-state.sh');
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'am-agy-relink-'));
 process.env.DATA_DIR = path.join(base, 'server-data');
 const { prepareAgyHome } = await import('../src/agy-home.js');
-const { migrateBucketAgyState, agyMigrationRunning, readStateLinkHealth, expectedLinks, _reset } = await import('../src/state-links.js');
+const { migrateBucketAgyState, startAgyMigration, agyMigrationRunning, readStateLinkHealth, expectedLinks, _reset } = await import('../src/state-links.js');
 // A name no real process has: the check counts every agy on the machine.
 const AGY_EXE = `agy-test-${process.pid}`;
 
@@ -170,20 +170,20 @@ test('the config link is repaired too, and a missing link is made', async () => 
   assert.equal(asides(w, 'config').length, 1);
 });
 
-function startFakeAgy(w, cwd) {
-  // A process whose executable is named agy, with this world's HOME.
+function startFakeAgy(w, cwd, name = AGY_EXE) {
+  // A process whose executable has agy's name, with this world's HOME.
   const bin = path.join(w.root, 'bin');
   fs.mkdirSync(bin, { recursive: true });
-  const agy = path.join(bin, AGY_EXE);
+  const agy = path.join(bin, name);
   fs.copyFileSync(spawnSync('sh', ['-c', 'command -v sleep'], { encoding: 'utf8' }).stdout.trim(), agy);
   fs.chmodSync(agy, 0o755);
   const c = spawn(agy, ['60'], { env: { PATH: '/usr/bin:/bin', HOME: w.env.HOME }, cwd, stdio: 'ignore' });
   children.push(c);
   return c;
 }
-async function procUp(c) {
+async function procUp(c, name = AGY_EXE) {
   for (let i = 0; i < 50; i++) {
-    try { if (fs.readlinkSync(`/proc/${c.pid}/exe`).endsWith(`/${AGY_EXE}`)) return; } catch {}
+    try { if (fs.readlinkSync(`/proc/${c.pid}/exe`).endsWith(`/${name}`)) return; } catch {}
     await new Promise((r) => setTimeout(r, 20));
   }
   throw new Error('fake agy did not start');
@@ -305,4 +305,37 @@ test('while the migration runs, agy launches are held (runner.js refuses with ag
   assert.equal(await p, 'repaired');
   assert.equal(agyMigrationRunning(), false);
   assert.match(fs.readFileSync(path.resolve(here, '../src/runner.js'), 'utf8'), /if \(agyMigrationRunning\(\)\) \{\n\s+throw new ApiError\(409, 'agy-migrating'/);
+});
+
+test("agy's children hold it back too: a language server by name, or anything with files open in the live tree", async () => {
+  _reset();
+  const w = world(); fs.symlinkSync(w.liveCfg, w.cfg);
+  fs.mkdirSync(w.link);
+  const ls = startFakeAgy(w, w.root, `language_server_test_${process.pid}`);
+  await procUp(ls, `language_server_test_${process.pid}`);
+  assert.equal(await migrateBucketAgyState({ env: w.env }), 'deferred');
+  ls.kill('SIGKILL'); await new Promise((r) => ls.once('exit', r));
+  // Any name at all, with its cwd in the live tree AM's agy writes to.
+  const c = spawn('sleep', ['60'], { cwd: w.live, stdio: 'ignore' });
+  children.push(c);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(await migrateBucketAgyState({ env: w.env }), 'deferred');
+  assert.match(readStateLinkHealth({ env: w.env, dataDir: w.env.DATA_DIR }).repair.detail, new RegExp(w.live.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  c.kill('SIGKILL'); await new Promise((r) => c.once('exit', r));
+  assert.equal(await migrateBucketAgyState({ env: w.env }), 'repaired');
+});
+
+test('a deferred migration is retried on its own once agy has stopped', async () => {
+  _reset();
+  const w = world(); fs.symlinkSync(w.liveCfg, w.cfg);
+  fs.mkdirSync(w.link);
+  write(path.join(w.link, 'settings.json'), '{"retried":true}');
+  const c = startFakeAgy(w, w.root);
+  await procUp(c);
+  assert.equal(await startAgyMigration({ env: w.env, everyMs: 300 }), 'deferred');
+  c.kill('SIGKILL'); await new Promise((r) => c.once('exit', r));
+  for (let i = 0; i < 100 && !fs.lstatSync(w.link).isSymbolicLink(); i++) await new Promise((r) => setTimeout(r, 100));
+  assert.ok(fs.lstatSync(w.link).isSymbolicLink(), 'relinked by the retry');
+  assert.equal(fs.readFileSync(path.join(w.live, 'settings.json'), 'utf8'), '{"retried":true}');
+  _reset();
 });

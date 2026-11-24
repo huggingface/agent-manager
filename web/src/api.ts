@@ -132,6 +132,8 @@ export interface CheckpointHealth {
 export interface StateLinkHealth {
   broken: { cli: string; link: string; target: string; kind: 'dir' | 'missing' | 'other-link' | 'file'; onBucket: boolean; local?: boolean }[];
   repair: { outcome: 'deferred' | 'failed'; at: number; reason: string; detail: string } | null;
+  /** Dotfiles a save by rename had made local in agy's HOME, put back (last 24 h). */
+  homeRestored?: { at: number; path: string; target: string; action: string; aside: string }[];
   log: string;
 }
 /** Will this survive a restart? See server/src/storage.js. */

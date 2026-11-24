@@ -15,8 +15,7 @@ import { update, list } from './sessions.js';
 import { captureOpencodeSession, opencodeSessionExists, opencodeSessionInfo, readTrace,
   captureFxSession } from './traces.js';
 import { AGY_ID, agyConversationForPid, agyConversationPath, agyWaitingStep, captureAgyConversation } from './antigravity.js';
-import { prepareAgyHome } from './agy-home.js';
-import { agyMigrationRunning } from './state-links.js';
+import { agyMigrationRunning, layoutAgyHome } from './state-links.js';
 import {
   buildPaletteIndex, snapshotToRestoreAnsi, styledSnapshotLines, textColumns,
 } from './snapshot.js';
@@ -2178,7 +2177,7 @@ export function ensureRunning(session, cols = 120, rows = 34) {
     if (agyMigrationRunning()) {
       throw new ApiError(409, 'agy-migrating', 'Antigravity state found on the bucket is being moved to local disk. Try again in a moment.');
     }
-    const h = prepareAgyHome();
+    const h = layoutAgyHome({ reason: `launch ${session.id}` });
     if (h && !h.stateOk) {
       throw new ApiError(409, 'agy-home', `Antigravity's local HOME is not set up (${[...h.errors, ...h.kept.filter((k) => k.includes('/.gemini/'))].join('; ') || h.home}), `
         + 'so agy would keep its databases somewhere they are not saved. Not starting it.');
